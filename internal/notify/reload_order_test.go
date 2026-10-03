@@ -32,9 +32,8 @@ func cachedDestination(n *Notifier, id string) (managedDestination, bool) {
 
 // An alert raised after a destination's URL was replaced is never sent to
 // the replaced URL, even when a reload that read the destinations before
-// the replacement puts them in the cache after the delivery's own reload.
-// The delivery sees that the cache is older than the revision it was queued
-// for, reads the destinations again, and sends to the new URL.
+// the replacement puts them in the cache after the delivery's refresh. The
+// delivery sees that its selector is newer than the cache and reloads again.
 func TestAlertAfterAReplacementIsNeverSentToTheReplacedURL(t *testing.T) {
 	ctx := context.Background()
 	notifier, db, _, _ := twoTenantNotifier(t)
@@ -43,7 +42,8 @@ func TestAlertAfterAReplacementIsNeverSentToTheReplacedURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A reload reads the destinations before the replacement...
+	// Number and read a full snapshot before the replacement...
+	earlyReload := notifier.reloads.Add(1)
 	stale, err := db.System().ListManagedNotifications(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -61,21 +61,24 @@ func TestAlertAfterAReplacementIsNeverSentToTheReplacedURL(t *testing.T) {
 	if err != nil || len(claimed) != 1 || claimed[0].Destination != managedKey(created.ID, replaced.Revision) {
 		t.Fatalf("claimed deliveries = %+v, %v", claimed, err)
 	}
+	// Seed the pre-replacement cache. The delivery must refresh because the
+	// queued selector is newer than this destination revision.
+	oldEntries, oldKeyErr := notifier.openManaged(stale)
 	notifier.mu.Lock()
-	notifier.managed = map[string]managedDestination{}
+	notifier.managed, notifier.keyErr = oldEntries, oldKeyErr
 	notifier.mu.Unlock()
-	// The early reload finishes last: once the delivery's own reload has
-	// put the current destinations in the cache, it puts the ones it read
-	// before the replacement there.
+	// The early full reload finishes last: after the delivery refresh has put
+	// the current destination in the cache, it tries to install the
+	// pre-replacement snapshot. Generation ordering must reject it.
 	var fired atomic.Bool
+	var staleInstallAccepted atomic.Bool
 	hook := func() {
-		if _, installed := cachedDestination(notifier, created.ID); !installed || fired.Swap(true) {
+		entry, installed := cachedDestination(notifier, created.ID)
+		if !installed || entry.record.CredentialRevision != replaced.Revision || fired.Swap(true) {
 			return
 		}
 		managed, keyErr := notifier.openManaged(stale)
-		notifier.mu.Lock()
-		notifier.managed, notifier.keyErr = managed, keyErr
-		notifier.mu.Unlock()
+		staleInstallAccepted.Store(notifier.install(earlyReload, managed, keyErr))
 	}
 	if err := notifier.deliverOne(hookContext{Context: ctx, hook: hook}, claimed[0], notifier.destinationSnapshot()); err != nil {
 		t.Fatalf("delivery = %v", err)
@@ -83,11 +86,39 @@ func TestAlertAfterAReplacementIsNeverSentToTheReplacedURL(t *testing.T) {
 	if !fired.Load() {
 		t.Fatal("the early reload never finished during the delivery")
 	}
+	if staleInstallAccepted.Load() {
+		t.Fatal("the stale pre-replacement snapshot replaced the current cache")
+	}
 	if got := sent(); len(got) != 1 || got[0] != rotationNewURL {
 		t.Fatalf("the alert raised after the replacement was sent to %v; want only the new URL", got)
 	}
 	if entry, _ := cachedDestination(notifier, created.ID); entry.record.CredentialRevision != replaced.Revision {
 		t.Fatalf("cached credential revision = %d, want %d", entry.record.CredentialRevision, replaced.Revision)
+	}
+}
+
+func TestDrainRefreshesManagedDestinationsOnceForABatch(t *testing.T) {
+	ctx := context.Background()
+	notifier, db, _, _ := twoTenantNotifier(t)
+	sent := recordSends(t)
+	created, err := defaultNotifier(notifier).createManaged(ctx, "Webhook", rotationOldURL, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		if err := db.System().QueueEvent(ctx, managedKey(created.ID, created.Revision), model.Event{Type: "port-opened", Job: "batch", ScanID: fmt.Sprintf("scan-%d", i), TenantID: store.DefaultTenantID, CreatedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := notifier.reloads.Load()
+	if err := notifier.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := notifier.reloads.Load() - before; got != 1 {
+		t.Fatalf("destination reloads for one delivery batch = %d, want one", got)
+	}
+	if got := sent(); len(got) != 3 {
+		t.Fatalf("sent %d notifications, want all 3", len(got))
 	}
 }
 

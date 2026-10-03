@@ -114,6 +114,23 @@ func (ss *SystemStore) ListManagedNotifications(ctx context.Context) ([]ManagedN
 	return out, nil
 }
 
+// GetManagedNotification returns one managed destination, regardless of
+// whether it belongs to a tenant or the platform. It is intended for the
+// delivery worker, which must revalidate the exact destination before send
+// without loading and decrypting every tenant's credentials.
+func (ss *SystemStore) GetManagedNotification(ctx context.Context, id string) (ManagedNotification, error) {
+	var tenantID string
+	destination, err := scanManagedNotification(ss.store.reader().QueryRowContext(ctx, `SELECT `+managedNotificationColumns+`,COALESCE(tenant_id,'') FROM managed_notifications WHERE id=?`, id), &tenantID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ManagedNotification{}, fmt.Errorf("%w: notification %s", ErrNotFound, id)
+	}
+	if err != nil {
+		return ManagedNotification{}, err
+	}
+	destination.TenantID = tenantID
+	return destination, nil
+}
+
 // GetManagedNotification returns one of the tenant's destinations. A
 // destination of another tenant or of the platform is ErrNotFound, exactly as
 // an unknown ID.

@@ -100,6 +100,7 @@ type Notifier struct {
 	Store *store.Store
 
 	mu            sync.RWMutex
+	reloadMu      sync.Mutex
 	drainMu       sync.Mutex
 	fileURLs      map[string]string
 	fileLegacy    map[string]string // legacy digest -> opaque selector
@@ -107,8 +108,9 @@ type Notifier struct {
 	keyPath       string
 	keyErr        error
 	autoCreateKey bool
-	// reloads numbers each Reload before it reads the destinations, and
-	// installed is the number of the Reload whose snapshot managed holds.
+	// reloads numbers each full Reload before it reads the destinations, and
+	// installed is the newest full snapshot number. Targeted delivery refreshes
+	// are serialized with full snapshots by reloadMu and may update one row.
 	// installed is guarded by mu.
 	reloads   atomic.Uint64
 	installed uint64
@@ -224,6 +226,8 @@ func validateManagedURL(raw string) (string, error) {
 // to an older snapshot: see install. When Reload returns, the cache holds
 // every change that was committed before Reload was called.
 func (n *Notifier) Reload(ctx context.Context) error {
+	n.reloadMu.Lock()
+	defer n.reloadMu.Unlock()
 	if n.Store == nil {
 		// Library-only notifier instances have no managed destinations to
 		// reload. Keep the file-backed destinations initialized by the
@@ -240,6 +244,34 @@ func (n *Notifier) Reload(ctx context.Context) error {
 	}
 	managed, keyErr := n.openManaged(records)
 	n.install(generation, managed, keyErr)
+	return nil
+}
+
+// refreshManagedDestination reloads one destination immediately before a
+// claimed delivery is sent. It preserves the credential/key-change safety of
+// Reload while making the read and decryption cost independent of the number
+// of other destinations and tenants.
+func (n *Notifier) refreshManagedDestination(ctx context.Context, id string) error {
+	if n.Store == nil || id == "" {
+		return nil
+	}
+	n.reloadMu.Lock()
+	defer n.reloadMu.Unlock()
+	record, err := n.Store.System().GetManagedNotification(ctx, id)
+	if errors.Is(err, store.ErrNotFound) {
+		n.mu.Lock()
+		delete(n.managed, id)
+		n.mu.Unlock()
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	managed, keyErr := n.openManaged([]store.ManagedNotification{record})
+	n.mu.Lock()
+	n.managed[id] = managed[id]
+	n.keyErr = keyErr
+	n.mu.Unlock()
 	return nil
 }
 
@@ -710,11 +742,18 @@ func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, dest
 	if err := ctx.Err(); err != nil {
 		return errors.Join(err, n.releaseClaimWithoutBudget(ctx, delivery, 0))
 	}
-	// Refresh before each managed send so an update/delete after the batch was
-	// claimed cannot use the stale URL from the first snapshot.
+	// Drain loads a full managed-destination snapshot once per pass. Refresh
+	// this one destination immediately before the claim check so a change made
+	// during the pass is observed without reloading other tenants' credentials.
+	// The transactional claim check then prevents delivery if the destination
+	// was replaced or deleted between refresh and send.
 	managedDestination := strings.HasPrefix(delivery.Destination, "managed:")
 	if managedDestination {
-		if reloadErr := n.Reload(ctx); reloadErr != nil {
+		parts := strings.SplitN(delivery.Destination, ":", 3)
+		if len(parts) != 3 || parts[1] == "" {
+			return n.releaseClaim(ctx, delivery, store.ErrDeliveryDestinationMissing, time.Minute)
+		}
+		if reloadErr := n.refreshManagedDestination(ctx, parts[1]); reloadErr != nil {
 			deferErr := n.releaseClaim(ctx, delivery, store.ErrDeliveryDestinationLocked, time.Minute)
 			return errors.Join(reloadErr, deferErr)
 		}
@@ -745,7 +784,7 @@ func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, dest
 			// The cache is older than the alert. Read the destinations
 			// again instead of sending with a URL that may have been
 			// replaced since.
-			if reloadErr := n.Reload(ctx); reloadErr != nil {
+			if reloadErr := n.refreshManagedDestination(ctx, strings.SplitN(delivery.Destination, ":", 3)[1]); reloadErr != nil {
 				return errors.Join(reloadErr, n.releaseClaimWithoutBudget(ctx, delivery, 0))
 			}
 			raw, state = n.resolveManagedDelivery(delivery.Destination)

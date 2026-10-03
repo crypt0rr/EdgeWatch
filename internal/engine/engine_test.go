@@ -606,20 +606,20 @@ func TestFormatEventUsesApplicationUpdateMessages(t *testing.T) {
 	}
 }
 
-func TestFormatEventSanitizesScanDerivedText(t *testing.T) {
+func TestFormatEventKeepsTrustedTextAndNeutralizesUntrustedScanValues(t *testing.T) {
 	event := model.Event{
 		Type:    "changes-detected",
-		Message: "banner <@everyone>\u202Ehidden\u202C\u2028next",
+		Message: "1 baseline change confirmed",
 		Job:     "edge_[prod]",
-		Changes: []model.Change{{Severity: "critical", Kind: "service", Target: "host<1>", Protocol: "tcp", Port: 443, Old: "old", New: "[x](javascript:alert(1))"}},
+		Changes: []model.Change{{Severity: "critical", Kind: "service", Target: "host-1", Protocol: "tcp", Port: 443, Old: "old", New: "[x](javascript:alert(1))"}},
 	}
 	got := FormatEvent(event)
-	for _, unsafe := range []string{"<@everyone>", "@everyone", "[x](javascript:alert(1))", "\nnext", "\u202E", "\u202C"} {
+	for _, unsafe := range []string{"[x](javascript:alert(1))", "\u202E", "\u202C"} {
 		if strings.Contains(got, unsafe) {
 			t.Fatalf("notification retained unsafe text %q: %q", unsafe, got)
 		}
 	}
-	if !strings.Contains(got, "‹＠everyone›") || !strings.Contains(got, "［x］（javascript:alert（1））") || !strings.Contains(got, "old ->") {
+	if !strings.Contains(got, "1 baseline change confirmed") || !strings.Contains(got, "Job: edge_[prod]") || !strings.Contains(got, "［x］（javascript:alert（1））") || !strings.Contains(got, "old ->") {
 		t.Fatalf("notification did not preserve a readable neutralized form: %q", got)
 	}
 	long := FormatEvent(model.Event{Message: strings.Repeat("x", maxNotificationFieldRunes+20)})

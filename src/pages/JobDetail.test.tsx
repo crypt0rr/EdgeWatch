@@ -178,6 +178,16 @@ describe('job surface overview', () => {
     await vi.waitFor(() => expect(container.textContent).toContain('View host details'), { timeout: 1000 })
   })
 
+  it('uses a neutral tone for informational scan changes', async () => {
+    vi.mocked(scanDetail).mockResolvedValue({
+      ...detailResponse,
+      changes: [{ key: 'service|router.example|tcp|25', kind: 'service', target: 'router.example', protocol: 'tcp', port: 25, old: 'smtp', new: 'unknown', severity: 'info' }],
+    })
+    await renderPage('/jobs/job-1/scans/scan-1')
+    await vi.waitFor(() => expect(container.querySelector('.change-row .pill')).not.toBeNull(), { timeout: 1000 })
+    expect(container.querySelector('.change-row .pill')).toHaveClass('gray')
+  })
+
   it('uses a consistent paused tone and keeps incomplete scan activity neutral', async () => {
     vi.mocked(getJob).mockResolvedValue({ ...job, enabled: false })
     vi.mocked(jobScans).mockResolvedValue({ scans: [{ ...summary, status: 'incomplete' }, { ...summary, id: 'scan-2', status: 'failed' }], pagination: { ...pagination, total: 2 } })

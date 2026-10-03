@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { changeKindLabel, hostStatusLabel, jobStatePresentation, scanOutcomeTone, severityLabel } from './status'
+import { changeKindLabel, hostStatusLabel, jobStatePresentation, scanOutcomeTone, severityLabel, severityTone } from './status'
 
 describe('shared status presentation', () => {
   it('uses consistent job labels and tones', () => {
@@ -29,6 +29,9 @@ describe('shared status presentation', () => {
   it('uses explicit readable labels for lower-case severity and host states', () => {
     expect(severityLabel('critical')).toBe('Critical')
     expect(severityLabel('warning')).toBe('Warning')
+    expect(severityTone('critical')).toBe('red')
+    expect(severityTone('warning')).toBe('amber')
+    expect(severityTone('info')).toBe('gray')
     expect(hostStatusLabel('no-response')).toBe('No response')
     expect(hostStatusLabel('up')).toBe('Up')
   })

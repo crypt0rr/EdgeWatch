@@ -43,6 +43,16 @@ export function severityLabel(severity: string): string {
   return humanize(severity)
 }
 
+/** Give informational changes a neutral tone while retaining warning/critical emphasis. */
+export function severityTone(severity: string): 'red' | 'amber' | 'gray' {
+  switch (severity.trim().toLowerCase()) {
+    case 'critical': return 'red'
+    case 'info': return 'gray'
+    case 'warning':
+    default: return 'amber'
+  }
+}
+
 export function hostStatusLabel(status: string): string {
   const normalized = status.trim().toLowerCase().replace(/[_-]+/g, ' ')
   if (normalized === 'no response') return 'No response'

@@ -336,12 +336,12 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
       </div>
       <label className="switch-row notification-check">
         <input type="checkbox" checked={destinations.data?.incident_reminders_enabled ?? true} disabled={!canManage || destinations.isLoading || !!destinations.error || !!busy || passwordPrompt !== null} onChange={event => toggleIncidentReminders(event.currentTarget.checked)} aria-label="Send reminders for incidents that remain open" />
-        <span><strong>{destinations.data?.incident_reminders_enabled === false ? 'Reminders off' : 'Reminders on'}</strong><small>Incomplete, failed, cancelled, and timed-out scans do not send reminders.</small></span>
+        <span><strong>{destinations.data?.incident_reminders_enabled === false ? 'Reminders off' : 'Reminders on'}</strong><small>The first successful follow-up may remind immediately; cadence limits later reminders. Incomplete, failed, cancelled, and timed-out scans do not send reminders.</small></span>
       </label>
       <label className="notification-reminder-cadence">Reminder cadence
-        <select aria-label="Reminder cadence" value={destinations.data?.incident_reminder_cadence ?? 'every_scan'} disabled={!canManage || destinations.isLoading || !!destinations.error || !!busy || passwordPrompt !== null} onChange={event => changeIncidentReminderCadence(event.currentTarget.value as IncidentReminderCadence)}>
-          <option value="every_scan">Every successful scan (default)</option>
-          <option value="hourly">No more than once per hour</option>
+        <select aria-label="Reminder cadence" value={destinations.data?.incident_reminder_cadence ?? 'hourly'} disabled={!canManage || destinations.isLoading || !!destinations.error || !!busy || passwordPrompt !== null} onChange={event => changeIncidentReminderCadence(event.currentTarget.value as IncidentReminderCadence)}>
+          <option value="every_scan">Every successful scan</option>
+          <option value="hourly">No more than once per hour (default)</option>
           <option value="every_6_hours">No more than once every 6 hours</option>
           <option value="daily">No more than once per day</option>
         </select>

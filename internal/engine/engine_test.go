@@ -1763,6 +1763,12 @@ func TestAcceptedPortServiceIsNotLearnedAfterSuppressionOrRecovery(t *testing.T)
 				if err != nil {
 					t.Fatal(err)
 				}
+				// This test exercises fingerprint acceptance, not reminder cadence.
+				// Keep its reminder behavior explicit so scans can run back-to-back.
+				everyScan := store.IncidentReminderCadenceEveryScan
+				if _, err := tenant.SetIncidentReminderSettings(ctx, nil, &everyScan, store.AuditEntry{}); err != nil {
+					t.Fatal(err)
+				}
 				e := Engine{Store: db}
 				sequence := 0
 				run := func(ports ...model.PortState) []string {

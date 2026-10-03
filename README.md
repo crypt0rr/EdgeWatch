@@ -490,9 +490,15 @@ enabled by default. After a fully successful scan that still confirms an open
 incident, EdgeWatch sends a grouped reminder to that job's selected
 destinations. New incidents continue to get their initial alert; suppressed
 incidents and incomplete, failed, cancelled, or timed-out scans do not generate
-reminders. Administrators can turn reminders off or choose a minimum cadence
-per job: every successful scan (the default), hourly, every six hours, or daily.
-The cadence survives restarts and does not change incident detection or job
+reminders. The first successful follow-up may send a reminder immediately;
+the selected cadence limits later reminders. Administrators can turn reminders
+off or choose a minimum cadence per job: hourly (the default), every six hours,
+daily, or every successful scan. Existing saved cadence choices are retained
+during upgrades; legacy every-scan values with no reminder-setting audit
+history are treated as inherited defaults and changed to hourly. If an older
+version recorded any reminder-setting action, EdgeWatch keeps the stored
+cadence because that action may have saved an explicit every-scan choice. The
+cadence survives restarts and does not change incident detection or job
 routing.
 
 Deleting a destination removes it from every job and from the update-alert
@@ -949,7 +955,7 @@ needs one. Print a new platform setup token with `edgewatch admin
 platform-setup-token`; while no administrator exists, the daemon prints a new
 setup token when it starts.
 
-The current schema is version 60. Database migrations are forward-only. An
+The current schema is version 61. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. The daemon and the commands that write to the database (admin, scan,

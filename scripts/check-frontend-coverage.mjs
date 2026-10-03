@@ -60,7 +60,9 @@ async function listSourceFiles(directory, prefix = 'src') {
       files.push(...await listSourceFiles(join(directory, entry.name), relative))
       continue
     }
-    if (/\.(?:ts|tsx)$/.test(entry.name) && !/\.test\.(?:ts|tsx)$/.test(entry.name)) files.push(relative)
+    // Ambient declaration files describe types only and produce no executable
+    // statements for Vitest to measure.
+    if (/\.(?:ts|tsx)$/.test(entry.name) && !/\.d\.ts$/.test(entry.name) && !/\.test\.(?:ts|tsx)$/.test(entry.name)) files.push(relative)
   }
   return files
 }

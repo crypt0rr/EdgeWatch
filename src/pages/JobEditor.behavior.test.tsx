@@ -2,7 +2,7 @@
 
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { act } from 'react'
-import { Route, Routes } from 'react-router-dom'
+import { Link, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, BUILTIN_NAABU_PROFILE_ID, createJob, getJob, getSession, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
 import { renderWithProviders, defaultUnitScope } from '../test/test-utils'
@@ -210,6 +210,52 @@ describe('job editor workflow coverage', () => {
       await Promise.resolve()
     })
     expect(screen.getByLabelText(/^Five-field cron/)).toHaveValue('30 */6 * * *')
+  })
+
+  it('focuses the cron editor when Custom cron is selected', async () => {
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText('Preset'), { target: { value: 'custom' } })
+
+    expect(screen.getByLabelText(/^Five-field cron/)).toHaveFocus()
+  })
+
+  it('does not turn a cleared Naabu numeric field into zero', async () => {
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    const rate = screen.getByLabelText('Rate') as HTMLInputElement
+    fireEvent.change(rate, { target: { value: '' } })
+    expect(rate).toHaveValue(null)
+    fireEvent.change(screen.getByLabelText('Job name'), { target: { value: 'Unset rate' } })
+    fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: '198.51.100.10' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create job' }))
+
+    await waitFor(() => expect(createJob).toHaveBeenCalled())
+    expect(vi.mocked(createJob).mock.calls[0][0].tcp?.naabu?.rate).toBeUndefined()
+  })
+
+  it('asks before discarding a changed draft through app navigation', async () => {
+    renderWithProviders(<><nav><Link to="/jobs">Jobs</Link></nav><Routes><Route path="/jobs/new" element={<JobEditor />} /><Route path="/jobs" element={<p>Jobs list</p>} /></Routes></>, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('Job name'), { target: { value: 'Unsaved draft' } })
+
+    fireEvent.click(screen.getByRole('link', { name: 'Jobs' }))
+    const discardDialog = screen.getByRole('dialog', { name: 'Discard unsaved changes?' })
+    expect(discardDialog).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument()
+
+    fireEvent.click(within(discardDialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.getByRole('dialog', { name: 'Discard unsaved changes?' })).toBeInTheDocument()
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }))
+
+    fireEvent.click(screen.getByRole('link', { name: 'Jobs' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }))
+    await waitFor(() => expect(screen.getByText('Jobs list')).toBeInTheDocument())
   })
 
   it('shows the stagger time in the neighbouring job timezone it names', async () => {

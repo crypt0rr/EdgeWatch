@@ -1059,30 +1059,7 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 	}
 	events, err := ts.ApproveRuntimeWithExpectationAndAudit(r.Context(), id, record.Job.Name, scan, destinations, actorAudit(session, "baseline.approved", id), expected)
 	if err != nil {
-		if s.writeAuditUnavailable(w, err, "baseline.approved") {
-			return
-		}
-		if errors.Is(err, store.ErrJobScanActive) {
-			writeError(w, http.StatusConflict, "job_active", "baseline approval is unavailable while a scan is running; wait for it to finish and try again", nil)
-			return
-		}
-		if errors.Is(err, store.ErrConflict) {
-			s.writeBaselineConflict(w, r, ts, id)
-			return
-		}
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not_found", "job or scan was not found", nil)
-			return
-		}
-		if errors.Is(err, store.ErrBaselineNotReady) {
-			writeError(w, http.StatusConflict, "baseline_not_ready", "the job does not have an active baseline", nil)
-			return
-		}
-		if errors.Is(err, store.ErrValidation) {
-			writeValidationError(w, err)
-			return
-		}
-		s.writeInternalError(w, r, "baseline_approval", err)
+		s.writeBaselineApprovalError(w, r, ts, id, err)
 		return
 	}
 	s.App.WakeDelivery()
@@ -1090,6 +1067,24 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 		s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
 	}
 	writeJSON(w, 200, map[string]any{"events": events})
+}
+
+func (s *Server) writeBaselineApprovalError(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, jobID string, err error) {
+	if s.writeAuditUnavailable(w, err, "baseline.approved") {
+		return
+	}
+	switch {
+	case errors.Is(err, store.ErrJobScanActive):
+		writeError(w, http.StatusConflict, "job_active", "baseline approval is unavailable while a scan is running; wait for it to finish and try again", nil)
+	case errors.Is(err, store.ErrConflict):
+		s.writeBaselineConflict(w, r, ts, jobID)
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "job or scan was not found", nil)
+	case errors.Is(err, store.ErrValidation):
+		writeValidationError(w, err)
+	default:
+		s.writeInternalError(w, r, "baseline_approval", err)
+	}
 }
 
 func (s *Server) writeBaselineConflict(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string) {

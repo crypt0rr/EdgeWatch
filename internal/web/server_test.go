@@ -1539,6 +1539,30 @@ func TestHistoryEndpointsExposePaginationAndScopedResults(t *testing.T) {
 	if baseline.Snapshot == nil || len(baseline.Snapshot.Units) != 1 || baseline.Pagination["total"] != float64(2) {
 		t.Fatalf("unexpected paginated baseline: %#v", baseline)
 	}
+	invalidOffsetPaths := []string{
+		"/api/v1/jobs/" + record.ID + "/scans?offset=10000001",
+		"/api/v1/jobs/" + record.ID + "/scans/a?offset=10000001",
+		"/api/v1/jobs/" + record.ID + "/scans/a/results?offset=10000001",
+		"/api/v1/jobs/" + record.ID + "/scans/a/changes?offset=10000001",
+		"/api/v1/jobs/" + record.ID + "/events?offset=10000001",
+		"/api/v1/jobs/" + record.ID + "/incidents?offset=10000001",
+		"/api/v1/jobs/" + record.ID + "/baseline?offset=10000001",
+		"/api/v1/scans?offset=10000001",
+		"/api/v1/hosts?offset=10000001",
+		"/api/v1/incidents?offset=10000001",
+		"/api/v1/events?job_id=" + record.ID + "&offset=10000001",
+		"/api/v1/events?offset=10000001",
+	}
+	for _, path := range invalidOffsetPaths {
+		resp = setup(http.MethodGet, path, "", "")
+		if resp.StatusCode != http.StatusBadRequest {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			t.Errorf("GET %s status = %d, want %d: %s", path, resp.StatusCode, http.StatusBadRequest, body)
+			continue
+		}
+		resp.Body.Close()
+	}
 	_ = login
 }
 

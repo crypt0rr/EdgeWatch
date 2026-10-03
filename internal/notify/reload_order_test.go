@@ -30,6 +30,35 @@ func cachedDestination(n *Notifier, id string) (managedDestination, bool) {
 	return entry, ok
 }
 
+func TestRefreshManagedDestinationHandlesNoStoreMissingAndStoreError(t *testing.T) {
+	ctx := context.Background()
+	if err := (&Notifier{}).refreshManagedDestination(ctx, "destination"); err != nil {
+		t.Fatalf("refresh without a store = %v", err)
+	}
+
+	notifier, db, _, _ := twoTenantNotifier(t)
+	if err := notifier.refreshManagedDestination(ctx, ""); err != nil {
+		t.Fatalf("refresh with an empty ID = %v", err)
+	}
+
+	notifier.mu.Lock()
+	notifier.managed["deleted"] = managedDestination{}
+	notifier.mu.Unlock()
+	if err := notifier.refreshManagedDestination(ctx, "deleted"); err != nil {
+		t.Fatalf("refresh deleted destination = %v", err)
+	}
+	if _, ok := cachedDestination(notifier, "deleted"); ok {
+		t.Fatal("deleted destination remains in the cache")
+	}
+
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := notifier.refreshManagedDestination(ctx, "unavailable"); err == nil {
+		t.Fatal("refresh with an unavailable store succeeded")
+	}
+}
+
 // An alert raised after a destination's URL was replaced is never sent to
 // the replaced URL, even when a reload that read the destinations before
 // the replacement puts them in the cache after the delivery's refresh. The

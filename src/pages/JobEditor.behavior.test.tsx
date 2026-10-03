@@ -65,6 +65,7 @@ describe('job editor workflow coverage', () => {
     fireEvent.change(screen.getByLabelText('Job name'), { target: { value: 'Public edge' } })
     fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: '198.51.100.10' } })
     expect(screen.getByLabelText(/Run on startup/)).not.toBeChecked()
+    expect(screen.getByLabelText('DNS comparison')).toHaveValue('address_sensitive')
     expect(screen.getByLabelText(/^TCP engine/)).toHaveValue('naabu_nmap')
     expect(screen.getByLabelText(/^Ports/)).toHaveValue('1-65535')
     const notification = screen.getByRole('checkbox', { name: /Mattermost/ }) as HTMLInputElement
@@ -75,6 +76,22 @@ describe('job editor workflow coverage', () => {
     await waitFor(() => expect(createJob).toHaveBeenCalled())
     const payload = vi.mocked(createJob).mock.calls[0][0]
     expect(payload).toMatchObject({ name: 'Public edge', targets: ['198.51.100.10'], run_on_start: false, notification_destinations: [], tcp: { engine: 'naabu_nmap', ports: '1-65535' } })
+  })
+
+  it('submits aggregate DNS comparison explicitly and explains its reduced alert coverage', async () => {
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('Job name'), { target: { value: 'Rotating DNS service' } })
+    fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: 'edge.example' } })
+    fireEvent.change(screen.getByLabelText('DNS comparison'), { target: { value: 'aggregate' } })
+    expect(screen.getByText(/Address rotation and individual backend reachability will not alert/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Create job' }))
+
+    await waitFor(() => expect(createJob).toHaveBeenCalled())
+    expect(vi.mocked(createJob).mock.calls[0][0]).toMatchObject({
+      targets: ['edge.example'],
+      dns_comparison_mode: 'aggregate',
+    })
   })
 
   it('keeps the built-in Naabu profile selectable when profile listing is unavailable', async () => {

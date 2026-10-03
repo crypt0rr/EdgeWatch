@@ -253,6 +253,9 @@ func securityScopeChanges(old, next config.Job) []string {
 	if old.AssumesAlive() != next.AssumesAlive() {
 		changes = append(changes, fmt.Sprintf("assume alive: %t → %t", old.AssumesAlive(), next.AssumesAlive()))
 	}
+	if old.DNSComparisonMode != next.DNSComparisonMode {
+		changes = append(changes, fmt.Sprintf("DNS comparison: %s → %s", dnsComparisonSummary(old.DNSComparisonMode), dnsComparisonSummary(next.DNSComparisonMode)))
+	}
 	if (old.TCP == nil) != (next.TCP == nil) {
 		changes = append(changes, fmt.Sprintf("TCP scan: %s → %s", protocolSummary(old.TCP), protocolSummary(next.TCP)))
 	} else if old.TCP != nil && next.TCP != nil {
@@ -293,6 +296,17 @@ func securityScopeChanges(old, next config.Job) []string {
 		}
 	}
 	return changes
+}
+
+func dnsComparisonSummary(mode string) string {
+	switch mode {
+	case config.DNSComparisonAggregate:
+		return "aggregate port/service surface"
+	case config.DNSComparisonAddressSensitive:
+		return "address-sensitive"
+	default:
+		return "address-sensitive"
+	}
 }
 
 func sameStringMap(a, b map[string]string) bool {

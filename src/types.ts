@@ -3,6 +3,7 @@ export type Protocol = { ports: string; mode?: string; service_detection: boolea
 export type Pagination = { limit: number; offset: number; total: number; has_more: boolean; next_offset: number | null }
 export type JobForm = {
   name: string; schedule: string; timezone: string; run_on_start?: boolean; assume_alive?: boolean
+  dns_comparison_mode?: 'address_sensitive' | 'aggregate'
   targets: string[]; max_expanded_hosts: number; tcp?: Protocol; udp?: Protocol; timing: string
   timeout: string; baseline_samples: number; change_confirmations: number; enabled?: boolean; allow_high_cost?: boolean
   resume_window?: string; notification_destinations?: string[]

@@ -326,6 +326,19 @@ func TestServerScopeAndDurationHelpers(t *testing.T) {
 	}
 }
 
+func TestSecurityScopeChangesIncludesDNSComparisonMode(t *testing.T) {
+	old := config.Job{Targets: []string{"edge.example"}, TCP: &config.Protocol{Ports: "443"}}
+	next := old
+	next.DNSComparisonMode = config.DNSComparisonAggregate
+	changes := securityScopeChanges(old, next)
+	if len(changes) != 1 || changes[0] != "DNS comparison: address-sensitive → aggregate port/service surface" {
+		t.Fatalf("DNS comparison scope changes = %#v", changes)
+	}
+	if got := securityScopeChanges(old, config.Job{Targets: []string{"edge.example"}, TCP: &config.Protocol{Ports: "443"}, DNSComparisonMode: config.DNSComparisonAddressSensitive}); len(got) != 0 {
+		t.Fatalf("explicit default DNS mode changed the security scope: %#v", got)
+	}
+}
+
 func TestWriteStoreWriteErrorMapsValidationMissingAndStorageFailures(t *testing.T) {
 	server := &Server{}
 	request := httptest.NewRequest(http.MethodPut, "/api/v1/jobs/job-1", nil)

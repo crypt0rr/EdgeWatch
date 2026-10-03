@@ -18,6 +18,7 @@ const blank: Omit<JobForm, 'timezone'> = {
   schedule: '0 */6 * * *',
   run_on_start: false,
   assume_alive: true,
+  dns_comparison_mode: 'address_sensitive',
   targets: [''],
   max_expanded_hosts: 256,
   timing: 'balanced',
@@ -51,6 +52,7 @@ const jobFormSchema = z.object({
   timezone: z.string().trim().min(1, 'A timezone is required.'),
   run_on_start: z.boolean().optional(),
   assume_alive: z.boolean().optional(),
+  dns_comparison_mode: z.enum(['address_sensitive', 'aggregate']),
   max_expanded_hosts: z.number().int('Use a whole number of hosts.').min(1, 'Use at least one host.').max(1_000_000, 'The expansion limit is too high.'),
   timing: z.string().refine((value) => ['conservative', 'balanced', 'fast'].includes(value), 'Choose a valid timing profile.'),
   timeout: z.string().trim().min(1, 'A scan timeout is required.'),
@@ -96,6 +98,7 @@ export function JobEditor() {
   const timezone = watch('timezone')
   const timing = watch('timing')
   const allowHighCost = watch('allow_high_cost')
+  const dnsComparisonMode = watch('dns_comparison_mode')
   // Only administrators (users.manage) may turn high-cost approval on; the API
   // rejects it for every other role. Operators may still keep or clear an
   // approval that is already saved, which the API accepts.
@@ -122,7 +125,7 @@ export function JobEditor() {
 
   const hasDraftChanges = isDirty || draftDirty
   const applyServerJob = (data: NonNullable<typeof existing.data>) => {
-    reset(data.job)
+    reset({ ...data.job, dns_comparison_mode: data.job.dns_comparison_mode || 'address_sensitive' })
     setTargets(data.job.targets)
     setTCP(data.job.tcp)
     setUDP(data.job.udp)
@@ -297,6 +300,16 @@ export function JobEditor() {
               <button type="button" className="text-button add-target" onClick={() => { setDraftDirty(true); setTargets((items) => [...items, '']) }}><Plus size={15} /> Add target</button>
               {targets.some((target) => cidrWarning(target)) && <div className="notice warning"><TriangleAlert size={16} /><span>{targets.map(cidrWarning).find(Boolean)}</span></div>}
               {(fieldErrors.targets || fieldErrors.target) && <small className="field-error">{fieldErrors.targets || fieldErrors.target}</small>}
+            </div>
+            <div className="field-section">
+              <label htmlFor="dns-comparison-mode">DNS comparison</label>
+              <select id="dns-comparison-mode" aria-describedby="dns-comparison-help" {...register('dns_comparison_mode')}>
+                <option value="address_sensitive">Address-sensitive (default)</option>
+                <option value="aggregate">Aggregate port and service surface</option>
+              </select>
+              <small id="dns-comparison-help" className="helper">{dnsComparisonMode === 'aggregate'
+                ? 'For DNS names, compare the logical port and service surface only. Address rotation and individual backend reachability will not alert; per-IP scan evidence remains available. IP and CIDR targets stay individually monitored. Changing this requires confirming a new baseline.'
+                : 'Compare DNS answer membership, individual host reachability, and ports/services. Choose aggregate mode only when DNS answers rotate routinely; it will not alert on address membership or per-backend reachability. Changing this requires confirming a new baseline.'}</small>
             </div>
             <label className="inline-field">Maximum expanded hosts <span className="input-suffix"><input type="number" min={1} max={1000000} {...register('max_expanded_hosts', { valueAsNumber: true })} /><em>hosts</em></span>{(formErrors.max_expanded_hosts?.message || fieldErrors.max_expanded_hosts) && <small className="field-error">{formErrors.max_expanded_hosts?.message || fieldErrors.max_expanded_hosts}</small>}</label>
             <label className="switch-row"><input type="checkbox" disabled={highCostLocked} {...register('allow_high_cost')} /><span><strong>Allow high-cost scans</strong><small>Override the deployment probe budget for deliberately broad scopes. The estimated cost is shown after saving.{session.data && !canApproveHighCost ? ' Only an administrator can approve high-cost scans.' : ''}</small></span></label>

@@ -90,6 +90,37 @@ func TestJobPayloadPreservesExplicitEmptyNotificationSelection(t *testing.T) {
 	}
 }
 
+func TestJobPayloadRoundTripsDNSComparisonMode(t *testing.T) {
+	payload := jobPayload{DNSComparisonMode: config.DNSComparisonAggregate}
+	job, err := payload.config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.DNSComparisonMode != config.DNSComparisonAggregate {
+		t.Fatalf("configured DNS comparison mode = %q, want %q", job.DNSComparisonMode, config.DNSComparisonAggregate)
+	}
+
+	response, err := json.Marshal(fromConfig(job))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTripped jobPayload
+	if err := json.Unmarshal(response, &roundTripped); err != nil {
+		t.Fatal(err)
+	}
+	if roundTripped.DNSComparisonMode != config.DNSComparisonAggregate {
+		t.Fatalf("response DNS comparison mode = %q, want %q", roundTripped.DNSComparisonMode, config.DNSComparisonAggregate)
+	}
+
+	legacy, err := (jobPayload{}).config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.DNSComparisonMode != config.DNSComparisonAddressSensitive {
+		t.Fatalf("omitted DNS comparison mode = %q, want legacy default %q", legacy.DNSComparisonMode, config.DNSComparisonAddressSensitive)
+	}
+}
+
 func TestConsoleSetupLoginCreateAndRun(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

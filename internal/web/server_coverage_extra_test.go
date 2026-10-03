@@ -348,13 +348,26 @@ func TestRunJobGuardsMissingArchivedAndActive(t *testing.T) {
 }
 
 func TestServerPaginationAndSSEBoundaryHelpers(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/?limit=bad&offset=-1", nil)
-	if queryLimit(request) != 50 || queryOffset(request) != 0 {
+	request := httptest.NewRequest(http.MethodGet, "/?limit=bad", nil)
+	if offset, err := queryOffset(request); queryLimit(request) != 50 || offset != 0 || err != nil {
 		t.Fatal("invalid query values did not default")
 	}
-	request = httptest.NewRequest(http.MethodGet, "/?limit=2001&offset=99999999", nil)
-	if queryLimit(request) != 1000 || queryOffset(request) != 10000000 {
-		t.Fatal("query values were not capped")
+	request = httptest.NewRequest(http.MethodGet, "/?limit=2001&offset=10000000", nil)
+	if offset, err := queryOffset(request); queryLimit(request) != 1000 || offset != 10000000 || err != nil {
+		t.Fatal("query values at the pagination limit were not accepted")
+	}
+	request = httptest.NewRequest(http.MethodGet, "/?offset=10000001", nil)
+	if _, err := queryOffset(request); !errors.Is(err, errPaginationOffsetTooLarge) {
+		t.Fatal("oversized query offset was not rejected")
+	}
+	invalidOffset := httptest.NewRecorder()
+	if _, ok := requestOffset(invalidOffset, request); ok || invalidOffset.Code != http.StatusBadRequest {
+		t.Fatalf("oversized query offset response = %d, accepted=%t", invalidOffset.Code, ok)
+	}
+	for _, raw := range []string{"-1", "not-a-number", "999999999999999999999999999999999999"} {
+		if _, err := queryOffset(httptest.NewRequest(http.MethodGet, "/?offset="+raw, nil)); !errors.Is(err, errPaginationOffsetInvalid) {
+			t.Errorf("invalid offset %q was not rejected", raw)
+		}
 	}
 	if paginationJSON(0, 10, 5)["has_more"] != false || paginationJSON(0, 10, 15)["next_offset"] != 10 {
 		t.Fatal("pagination metadata is incorrect")

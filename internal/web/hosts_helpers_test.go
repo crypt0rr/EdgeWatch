@@ -17,9 +17,13 @@ func TestHostParsingAndPaginationHelpers(t *testing.T) {
 		t.Fatalf("pagination = %d,%d,%v", limit, offset, err)
 	}
 	request = httptest.NewRequest(http.MethodGet, "/?offset=99999999999", nil)
+	if _, _, err = parseHostPagination(request); err == nil {
+		t.Fatal("large host offset was not rejected")
+	}
+	request = httptest.NewRequest(http.MethodGet, "/?offset=10000000", nil)
 	_, offset, err = parseHostPagination(request)
 	if err != nil || offset != maxPaginationOffset {
-		t.Fatalf("large host offset was not capped: %d,%v", offset, err)
+		t.Fatalf("maximum host offset was not accepted: %d,%v", offset, err)
 	}
 	for _, raw := range []string{"limit=0", "limit=101", "limit=bad", "offset=-1", "offset=bad"} {
 		request := httptest.NewRequest(http.MethodGet, "/?"+raw, nil)

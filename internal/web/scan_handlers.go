@@ -550,7 +550,11 @@ func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, ts *store.Ten
 	// The plan contains the immutable job and target expansion needed to
 	// explain progress, but it is intentionally returned without raw scanner
 	// arguments or completed snapshot fragments.
-	limit, offset := queryLimit(r), queryOffset(r)
+	limit := queryLimit(r)
+	offset, ok := requestOffset(w, r)
+	if !ok {
+		return
+	}
 	unitsPage, unitsErr := ts.ListScanCycleUnitSummariesPage(r.Context(), cycle.ID, limit, offset)
 	if unitsErr != nil {
 		s.writeInternalError(w, r, "store", unitsErr)
@@ -586,7 +590,10 @@ func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, sessio
 
 func (s *Server) jobScans(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job store.JobRecord) {
 	limit := queryLimit(r)
-	offset := queryOffset(r)
+	offset, ok := requestOffset(w, r)
+	if !ok {
+		return
+	}
 	page, err := ts.ListJobScanSummariesPage(r.Context(), job.ID, limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
@@ -600,7 +607,11 @@ func (s *Server) jobScans(w http.ResponseWriter, r *http.Request, ts *store.Tena
 
 func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord, summary model.ScanSummary) {
 	id, scanID := record.ID, summary.ID
-	offset, limit := queryOffset(r), queryLimit(r)
+	offset, ok := requestOffset(w, r)
+	if !ok {
+		return
+	}
+	limit := queryLimit(r)
 	comparisonState := "not_compared"
 	value := map[string]any{"scan": summary, "changes": []model.Change{}, "changes_pagination": paginationJSON(offset, limit, 0), "comparison_source": "none", "comparison_state": comparisonState}
 	var state model.JobState
@@ -646,7 +657,11 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, ts *store.Tenan
 }
 
 func (s *Server) jobScanResults(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, summary model.ScanSummary) {
-	offset, limit := queryOffset(r), queryLimit(r)
+	offset, ok := requestOffset(w, r)
+	if !ok {
+		return
+	}
+	limit := queryLimit(r)
 	resultPage, err := ts.ListScanResultsPage(r.Context(), summary.ID, limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
@@ -661,7 +676,11 @@ func (s *Server) jobScanResults(w http.ResponseWriter, r *http.Request, ts *stor
 
 func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job store.JobRecord, summary model.ScanSummary) {
 	id, scanID := job.ID, summary.ID
-	offset, limit := queryOffset(r), queryLimit(r)
+	offset, ok := requestOffset(w, r)
+	if !ok {
+		return
+	}
+	limit := queryLimit(r)
 	changes := []model.Change{}
 	var total int
 	comparisonSource := "none"
@@ -701,7 +720,10 @@ func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, ts *stor
 }
 func (s *Server) listScans(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	limit := queryLimit(r)
-	offset := queryOffset(r)
+	offset, ok := requestOffset(w, r)
+	if !ok {
+		return
+	}
 	page, err := ts.ListScanSummariesPage(r.Context(), r.URL.Query().Get("job"), limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
@@ -729,7 +751,11 @@ func (s *Server) getScanSummary(w http.ResponseWriter, r *http.Request, ts *stor
 }
 
 func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
-	offset, limit := queryOffset(r), queryLimit(r)
+	offset, ok := requestOffset(w, r)
+	if !ok {
+		return
+	}
+	limit := queryLimit(r)
 	incidentPage, err := ts.ListIncidentsPage(r.Context(), limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
@@ -744,7 +770,11 @@ func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request, ts *store
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job string) {
 	if jobID := r.URL.Query().Get("job_id"); jobID != "" {
-		offset, limit := queryOffset(r), queryLimit(r)
+		offset, ok := requestOffset(w, r)
+		if !ok {
+			return
+		}
+		limit := queryLimit(r)
 		page, err := ts.ListJobEventsPage(r.Context(), jobID, limit, offset)
 		if err != nil {
 			s.writeInternalError(w, r, "store", err)
@@ -761,7 +791,11 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, ts *store.Te
 			job = record.Job.Name
 		}
 	}
-	offset, limit := queryOffset(r), queryLimit(r)
+	offset, ok := requestOffset(w, r)
+	if !ok {
+		return
+	}
+	limit := queryLimit(r)
 	page, err := ts.ListEventsPage(r.Context(), job, limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
@@ -774,7 +808,11 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, ts *store.Te
 }
 
 func (s *Server) jobEvents(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job store.JobRecord) {
-	offset, limit := queryOffset(r), queryLimit(r)
+	offset, ok := requestOffset(w, r)
+	if !ok {
+		return
+	}
+	limit := queryLimit(r)
 	page, err := ts.ListJobEventsPage(r.Context(), job.ID, limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
@@ -787,7 +825,11 @@ func (s *Server) jobEvents(w http.ResponseWriter, r *http.Request, ts *store.Ten
 }
 func (s *Server) jobIncidents(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord) {
 	id := record.ID
-	offset, limit := queryOffset(r), queryLimit(r)
+	offset, ok := requestOffset(w, r)
+	if !ok {
+		return
+	}
+	limit := queryLimit(r)
 	incidentPage, err := ts.ListJobIncidentsPage(r.Context(), id, limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
@@ -918,6 +960,11 @@ func (s *Server) broadcastIncidentEvents(ctx context.Context, audience sseAudien
 // every page.
 func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord) {
 	id := record.ID
+	offset, ok := requestOffset(w, r)
+	if !ok {
+		return
+	}
+	limit := queryLimit(r)
 	state, err := ts.RuntimeState(r.Context(), id)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
@@ -932,11 +979,10 @@ func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, ts *store.T
 	}
 	if state.Baseline == nil {
 		value["snapshot"] = nil
-		value["pagination"] = paginationJSON(queryOffset(r), queryLimit(r), 0)
+		value["pagination"] = paginationJSON(offset, limit, 0)
 		writeJSON(w, http.StatusOK, value)
 		return
 	}
-	offset, limit := queryOffset(r), queryLimit(r)
 	units, page := pageSlice(state.Baseline.Units, offset, limit)
 	snapshot := *state.Baseline
 	snapshot.Units = units

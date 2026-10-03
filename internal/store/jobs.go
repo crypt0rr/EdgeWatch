@@ -608,20 +608,30 @@ func appendJobRevisionTx(ctx context.Context, tx *sql.Tx, jobID string, revision
 	return err
 }
 
-// DeleteJob permanently removes the tenant's archived job. A job of another
-// tenant is ErrNotFound.
+// DeleteJob permanently removes the tenant's archived job and its associated
+// retained scan, event, and resumable-cycle history. A job of another tenant
+// is ErrNotFound.
 func (ts *TenantStore) DeleteJob(ctx context.Context, id string) error {
-	return ts.deleteJobWithAudits(ctx, id, nil)
+	return ts.deleteJobWithAudits(ctx, id, nil, nil)
 }
 
-// DeleteJobWithAudit permanently removes an archived job only when the audit
-// row can be committed in the same transaction. The audit row intentionally
-// survives the job deletion as part of the append-only security history.
+// DeleteJobWithAudit permanently removes an archived job and its associated
+// retained history only when the audit row can be committed in the same
+// transaction. The audit row intentionally survives the job deletion as part
+// of the append-only security history.
 func (ts *TenantStore) DeleteJobWithAudit(ctx context.Context, id string, audit AuditEntry) error {
-	return ts.deleteJobWithAudits(ctx, id, []AuditEntry{audit})
+	return ts.deleteJobWithAudits(ctx, id, nil, []AuditEntry{audit})
 }
 
-func (ts *TenantStore) deleteJobWithAudits(ctx context.Context, id string, audits []AuditEntry) error {
+// DeleteJobWithAuditAtRevision removes a job only if its revision still
+// matches the one the administrator confirmed in the UI. This prevents a
+// concurrent rename or lifecycle edit from turning an old confirmation into
+// approval to delete a different current definition.
+func (ts *TenantStore) DeleteJobWithAuditAtRevision(ctx context.Context, id string, expectedRevision int64, audit AuditEntry) error {
+	return ts.deleteJobWithAudits(ctx, id, &expectedRevision, []AuditEntry{audit})
+}
+
+func (ts *TenantStore) deleteJobWithAudits(ctx context.Context, id string, expectedRevision *int64, audits []AuditEntry) error {
 	if err := ts.ready(); err != nil {
 		return err
 	}
@@ -634,8 +644,11 @@ func (ts *TenantStore) deleteJobWithAudits(ctx context.Context, id string, audit
 	if err != nil {
 		return err
 	}
+	if expectedRevision != nil && record.Revision != *expectedRevision {
+		return ErrConflict
+	}
 	if !record.Archived {
-		return errors.New("job must be archived before permanent deletion")
+		return ErrJobNotArchived
 	}
 	active, err := jobActiveTx(ctx, tx, id, time.Now().UTC())
 	if err != nil {
@@ -644,28 +657,8 @@ func (ts *TenantStore) deleteJobWithAudits(ctx context.Context, id string, audit
 	if active {
 		return ErrJobScanActive
 	}
-	// The history checks join the job instead of filtering on each row's own
-	// tenant, so any row that names the job blocks the delete.
-	var scans int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans AS s JOIN jobs AS j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=?`, ts.scope.id, id).Scan(&scans); err != nil {
+	if err := removeJobHistoryTx(ctx, tx, ts.scope.id, id); err != nil {
 		return err
-	}
-	if scans > 0 {
-		return errors.New("job has retained scan history; archive it instead")
-	}
-	var events int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM events AS e JOIN jobs AS j ON j.id=e.job_id AND j.tenant_id=? WHERE e.job_id=?`, ts.scope.id, id).Scan(&events); err != nil {
-		return err
-	}
-	if events > 0 {
-		return errors.New("job has retained event history; archive it instead")
-	}
-	var cycles int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycles AS c JOIN jobs AS j ON j.id=c.job_id AND j.tenant_id=? WHERE c.job_id=?`, ts.scope.id, id).Scan(&cycles); err != nil {
-		return err
-	}
-	if cycles > 0 {
-		return errors.New("job has retained scan-cycle history; archive it instead")
 	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE id=? AND tenant_id=?`, id, ts.scope.id)
 	if err != nil {
@@ -678,6 +671,70 @@ func (ts *TenantStore) deleteJobWithAudits(ctx context.Context, id string, audit
 		return err
 	}
 	return tx.Commit()
+}
+
+// removeJobHistoryTx removes the history that is owned by a managed job as
+// part of the same transaction as its permanent deletion. The security audit
+// row is intentionally inserted after this helper and survives the deletion.
+//
+// scans and events intentionally do not have cascading job foreign keys: both
+// tables also hold legacy and platform history. Keep the explicit deletes
+// tenant-scoped and use the stable job ID, never the mutable job name.
+func removeJobHistoryTx(ctx context.Context, tx *sql.Tx, tenantID, jobID string) error {
+	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE IF NOT EXISTS edgewatch_job_delete_host_keys (
+		tenant_id TEXT NOT NULL,
+		address TEXT NOT NULL,
+		PRIMARY KEY(tenant_id,address)
+	) WITHOUT ROWID`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM edgewatch_job_delete_host_keys`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO edgewatch_job_delete_host_keys(tenant_id,address)
+		SELECT tenant_id,address FROM latest_scan_hosts WHERE tenant_id=? AND job_id=?`, tenantID, jobID); err != nil {
+		return err
+	}
+	// Outbox payloads retain JobID even after delivery. Delete only deliveries
+	// that can be attributed to this stable job ID; tenant-level notifications
+	// and deliveries for another job remain untouched.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM outbox
+		WHERE tenant_id=? AND CASE WHEN json_valid(CAST(payload_json AS TEXT))
+			THEN COALESCE(json_extract(CAST(payload_json AS TEXT),'$.job_id'),'')=?
+			ELSE 0 END`, tenantID, jobID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE tenant_id=? AND job_id=?`, tenantID, jobID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM scans WHERE tenant_id=? AND job_id=?`, tenantID, jobID); err != nil {
+		return err
+	}
+
+	// latest_scan_hosts is a shared per-address projection, not a child of the
+	// job. If this job owned the latest observation, rebuild only those affected
+	// addresses from the remaining successful scan history in this transaction.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM latest_scan_hosts WHERE EXISTS (
+		SELECT 1 FROM edgewatch_job_delete_host_keys AS affected
+		WHERE affected.tenant_id=latest_scan_hosts.tenant_id AND affected.address=latest_scan_hosts.address
+	)`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO latest_scan_hosts(tenant_id,address,scan_id,job_id,job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,search_text,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports)
+		SELECT tenant_id,address,scan_id,COALESCE(job_id,''),job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,search_text,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports
+		FROM (
+			SELECT scan.tenant_id,host.address,host.scan_id,scan.job_id,scan.job,scan.finished_at,host.data_quality,host.address_family,host.source_targets_json,host.dns_names_json,host.host_json,host.search_text,host.open_ports,host.open_filtered_ports,host.tcp_present,host.udp_present,host.tcp_open_ports,host.tcp_open_filtered_ports,host.udp_open_ports,host.udp_open_filtered_ports,
+				ROW_NUMBER() OVER (PARTITION BY scan.tenant_id,host.address ORDER BY scan.finished_at DESC,scan.id DESC) AS rank
+			FROM edgewatch_job_delete_host_keys AS affected
+			CROSS JOIN scan_hosts AS host ON host.address=affected.address
+			CROSS JOIN scans AS scan ON scan.id=host.scan_id
+			WHERE scan.tenant_id=affected.tenant_id AND scan.status='success'
+				AND scan.tenant_id IN (SELECT id FROM tenants WHERE state IN ('active','disabled'))
+		) AS ranked WHERE rank=1`); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM edgewatch_job_delete_host_keys`)
+	return err
 }
 
 // JobActive reports whether the tenant's job holds an unexpired scan lease.

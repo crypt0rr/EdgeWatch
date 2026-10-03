@@ -147,6 +147,13 @@ describe('job detail actions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Restore' }))
     await waitFor(() => expect(restoreJob).toHaveBeenCalledWith('job-1', 7))
     fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }))
+    expect(screen.getByRole('dialog')).toHaveTextContent('scan results, incidents, saved scan progress, and notification delivery records')
+    expect(screen.getByRole('dialog')).toHaveTextContent('security audit record is kept')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(deleteJob).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }))
     const input = screen.getByRole('dialog').querySelector('input')!
     fireEvent.change(input, { target: { value: 'Production' } })
     fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)

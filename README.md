@@ -434,6 +434,13 @@ and execution-tuning changes do not reset the baseline. A run that waits for a
 free scan slot uses the job's settings when it starts; if the job is paused or
 archived while a scheduled run waits, that run is skipped.
 
+Archiving stops a job while keeping its results and incidents available. An
+administrator can permanently delete an archived job by typing its exact name;
+this also removes that job's scan results, incidents, saved scan progress, and
+notification delivery records. The security audit record is retained. This
+action is irreversible and does not delete history belonging to other jobs,
+even when they monitor the same IP address.
+
 From **Incidents**, administrators and operators can:
 
 - **Accept change** to make the current observation expected while preserving

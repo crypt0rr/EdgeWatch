@@ -385,6 +385,15 @@ var jobLeakCases = map[string]tenantLeakCase{
 			return ts.DeleteJobWithAudit(context.Background(), id, jobAudit)
 		})
 	}},
+	"DeleteJobWithAuditAtRevision": {writes: true, run: func(t *testing.T, f tenantFixture) {
+		assertTenantDeletesOnlyItsJobs(t, f, func(ts *TenantStore, id string) error {
+			record, err := ts.GetJob(context.Background(), id)
+			if err != nil {
+				return err
+			}
+			return ts.DeleteJobWithAuditAtRevision(context.Background(), id, record.Revision, jobAudit)
+		})
+	}},
 	// A tenant sees the scan lease of its own jobs only. A lease key without
 	// a jobs row is a config.yaml job's name, which belongs to the default
 	// tenant.

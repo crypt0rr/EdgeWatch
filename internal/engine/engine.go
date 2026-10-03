@@ -1755,7 +1755,10 @@ func changeWithinScopeWithDNSAddresses(snapshot model.Snapshot, change model.Cha
 }
 
 func dnsTargetsInSnapshot(snapshot model.Snapshot) map[string]struct{} {
-	targets := make(map[string]struct{}, len(snapshot.Scopes)+len(snapshot.DNS))
+	// Use one input for the capacity hint rather than summing both lengths,
+	// which could overflow before map allocation for an extremely large
+	// untrusted snapshot.
+	targets := make(map[string]struct{}, len(snapshot.Scopes))
 	for _, scope := range snapshot.Scopes {
 		if isDNSComparisonTarget(scope.Target) {
 			targets[strings.TrimSpace(scope.Target)] = struct{}{}

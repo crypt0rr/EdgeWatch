@@ -1,4 +1,4 @@
-import type { ActiveScan, BaselineHostsResponse, Change, GlobalHostsResponse, HostDetailResponse, Incident, Job, JobForm, Pagination, RdapResult, Scan, ScanSummary, Unit, NaabuOptions } from './types'
+import type { ActiveScan, ActivityEvent, BaselineHostsResponse, Change, GlobalHostsResponse, HostDetailResponse, Incident, Job, JobForm, Pagination, PendingChange, RdapResult, Scan, ScanSummary, Unit, NaabuOptions } from './types'
 import { setDisplayTimeZone } from './format'
 
 export type NotificationDestination = {
@@ -260,7 +260,8 @@ export const activeScans = () => api<{ scans: ActiveScan[] }>('/scans/active')
 export const listIncidents = (offset = 0, limit = 20) => api<{ incidents: Incident[]; pagination: Pagination }>(`/incidents?limit=${limit}&offset=${offset}`)
 export const acceptIncident = (jobId: string, key: string, expectedChange: Change) => api<void>(`/jobs/${encodeURIComponent(jobId)}/incidents/accept`, { method: 'POST', body: JSON.stringify({ key, expected_change: expectedChange }) })
 export const suppressIncident = (jobId: string, key: string, expectedChange: Change) => api<void>(`/jobs/${encodeURIComponent(jobId)}/incidents/suppress`, { method: 'POST', body: JSON.stringify({ key, expected_change: expectedChange }) })
-export const listEvents = (offset = 0, limit = 20, jobId?: string) => api<{ events: unknown[]; pagination: Pagination }>(`/events?limit=${limit}&offset=${offset}${jobId ? `&job_id=${encodeURIComponent(jobId)}` : ''}`)
+export const listEvents = (offset = 0, limit = 20, jobId?: string) => api<{ events: ActivityEvent[]; pagination: Pagination }>(`/events?limit=${limit}&offset=${offset}${jobId ? `&job_id=${encodeURIComponent(jobId)}` : ''}`)
+export const jobPendingChanges = (jobId: string, offset = 0, limit = 10) => api<{ job_id: string; job: string; pending_changes: PendingChange[]; pagination: Pagination }>(`/jobs/${encodeURIComponent(jobId)}/pending-changes?limit=${limit}&offset=${offset}`)
 export const notificationTest = () => api<{ sent: number }>('/notifications/test', { method: 'POST' })
 export const listNotificationDestinations = () => api<NotificationDestinationsResponse>('/notifications/destinations')
 export const updateNotificationRouting = (destinations: string[], password: string) => api<NotificationUpdateRouting>('/notifications/update-routing', { method: 'PUT', body: JSON.stringify({ destinations, password }) })

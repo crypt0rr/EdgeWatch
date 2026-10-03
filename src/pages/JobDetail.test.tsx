@@ -10,6 +10,7 @@ import {
   getJob,
   getSession,
   jobBaseline,
+  jobPendingChanges,
   jobScans,
   latestSuccessfulScan,
   scanDetail,
@@ -29,6 +30,7 @@ vi.mock('../api', () => ({
   getJob: vi.fn(),
   getSession: vi.fn(),
   jobBaseline: vi.fn(),
+  jobPendingChanges: vi.fn(),
   jobScans: vi.fn(),
   latestSuccessfulScan: vi.fn(),
   resetBaseline: vi.fn(),
@@ -114,6 +116,7 @@ describe('job surface overview', () => {
     vi.mocked(getJob).mockResolvedValue(job)
     vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'user-1', username: 'admin', permissions: ['jobs.write', 'scans.read', 'baselines.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
     vi.mocked(jobBaseline).mockResolvedValue(baselineResponse)
+    vi.mocked(jobPendingChanges).mockResolvedValue({ job_id: 'job-1', job: 'production', pending_changes: [], pagination })
     vi.mocked(latestSuccessfulScan).mockResolvedValue(latestResponse)
     vi.mocked(scanResults).mockResolvedValue(latestResultsResponse)
     vi.mocked(scanHosts).mockResolvedValue({ hosts: [], pagination } as never)
@@ -214,6 +217,25 @@ describe('job surface overview', () => {
     expect(container.textContent).toContain('https')
     expect(vi.mocked(jobBaseline)).toHaveBeenCalledWith('job-1', 0, 10)
     expect(vi.mocked(scanResults)).toHaveBeenCalledWith('job-1', 'scan-1', 0, 10)
+  })
+
+  it('shows pending baseline confirmations only to scan readers', async () => {
+    vi.mocked(getJob).mockResolvedValue({ ...job, baseline: { ...job.baseline, pending: 1 } })
+    vi.mocked(jobPendingChanges).mockResolvedValue({ job_id: 'job-1', job: 'production', pending_changes: [{ key: 'port|router.example|tcp|443', count: 1, change: { key: 'port|router.example|tcp|443', kind: 'port', target: 'router.example', protocol: 'tcp', port: 443, old: 'not-open', new: 'open', severity: 'critical' } }], pagination })
+    await renderPage()
+    await vi.waitFor(() => expect(container.textContent).toContain('1 / 1 scans'), { timeout: 1000 })
+    expect(container.textContent).toContain('Port opened · router.example · TCP:443 · not-open → open')
+    expect(container.querySelector('#pending-changes')).toBeTruthy()
+    expect(jobPendingChanges).toHaveBeenCalledWith('job-1', 0, 10)
+
+    act(() => root.unmount())
+    queryClient.clear()
+    root = createRoot(container)
+    queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: ['jobs.read', 'baselines.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
+    await renderPage()
+    expect(container.querySelector('#pending-changes')).toBeNull()
+    expect(jobPendingChanges).toHaveBeenCalledOnce()
   })
 
   it('limits viewers to expected baseline information', async () => {

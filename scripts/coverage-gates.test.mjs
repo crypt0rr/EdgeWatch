@@ -36,6 +36,7 @@ const frontendReport = (overrides = {}) => {
     'src/format.ts',
     'src/hostSearch.ts',
     'src/main.tsx',
+    'src/pages/Activity.tsx',
     'src/pages/Audit.tsx',
     'src/pages/Auth.tsx',
     'src/pages/BaselineHosts.tsx',

@@ -20,6 +20,7 @@ import {
   cancelScan,
   deleteJob,
   getJob,
+  jobPendingChanges,
   jobScans,
   latestSuccessfulScan,
   jobBaseline,
@@ -54,6 +55,7 @@ export function JobDetail() {
   const [scanOffset, setScanOffset] = useState(0)
   const [baselineOffset, setBaselineOffset] = useState(0)
   const [latestResultsOffset, setLatestResultsOffset] = useState(0)
+  const [pendingChangesOffset, setPendingChangesOffset] = useState(0)
   const [changeOffset, setChangeOffset] = useState(0)
   const [resultsOffset, setResultsOffset] = useState(0)
   const [showResults, setShowResults] = useState(false)
@@ -105,6 +107,12 @@ export function JobDetail() {
     queryFn: () => scanResults(id, latestScanID, latestResultsOffset, 10),
     enabled: !!id && !!latestScanID && canReadScans,
   })
+  const pendingChanges = useQuery({
+    queryKey: ['job-pending-changes', id, pendingChangesOffset],
+    queryFn: () => jobPendingChanges(id, pendingChangesOffset, 10),
+    enabled: !!id && canReadScans && (job.data?.baseline.pending ?? 0) > 0,
+    refetchInterval: 10000,
+  })
   const cycle = useQuery({ queryKey: ['scan-cycle', id], queryFn: () => scanCycle(id), enabled: !!id && canOperate, refetchInterval: 5000 })
   const detail = useQuery({
     queryKey: ['scan-detail', id, selectedScan, changeOffset],
@@ -127,6 +135,12 @@ export function JobDetail() {
   useEffect(() => {
     setLatestResultsOffset(0)
   }, [latestScanID])
+
+  useEffect(() => {
+    if (window.location.hash === '#pending-changes' && (job.data?.baseline.pending ?? 0) > 0) {
+      document.getElementById('pending-changes')?.scrollIntoView({ block: 'center' })
+    }
+  }, [job.data?.baseline.pending])
 
   useEffect(() => {
     if (!pendingScanRequest) return
@@ -513,6 +527,10 @@ export function JobDetail() {
               <Pagination page={baseline.data?.pagination} onChange={setBaselineOffset} />
             </div>
           )}
+          {canReadScans && (value.baseline.pending ?? 0) > 0 && <section className="pending-detail" id="pending-changes" aria-labelledby="job-pending-title">
+            <div className="pending-detail-heading"><div><h3 id="job-pending-title">Pending confirmations</h3><p className="muted">These differences have not reached the {value.job.change_confirmations}-scan confirmation threshold yet.</p></div><Link to={`/activity?job_id=${encodeURIComponent(id)}`}>Activity history →</Link></div>
+            {pendingChanges.isLoading ? <div className="skeleton-list pending-skeleton" aria-label="Loading pending changes" /> : pendingChanges.error ? <ErrorNotice message="Could not load pending baseline changes." onRetry={() => pendingChanges.refetch()} /> : pendingChanges.data?.pending_changes.length ? <><ul className="pending-change-list">{pendingChanges.data.pending_changes.map(item => <li key={item.key}><span>{changeKindLabel(item.change.kind, item.change.old, item.change.new)} · {item.change.target}{item.change.protocol && item.change.port ? ` · ${item.change.protocol.toUpperCase()}:${item.change.port}` : ''}{item.change.old || item.change.new ? ` · ${item.change.old || '—'} → ${item.change.new || '—'}` : ''}</span><span className="pending-count">{item.count} / {value.job.change_confirmations} scans</span></li>)}</ul><Pagination page={pendingChanges.data.pagination} onChange={setPendingChangesOffset} label="Pending changes pagination" /></> : <p className="inline-empty">No changes are awaiting confirmation.</p>}
+          </section>}
         </div>
 
         {canReadScans && <div className="panel overview-panel">

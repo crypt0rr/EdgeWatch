@@ -321,6 +321,10 @@ func requiredJobPermission(path, method string) string {
 			if method == http.MethodGet {
 				return auth.PermissionScansRead
 			}
+		case "pending-changes":
+			if method == http.MethodGet {
+				return auth.PermissionScansRead
+			}
 		case "incidents":
 			if method == http.MethodGet {
 				return auth.PermissionIncidentsRead
@@ -563,6 +567,7 @@ var apiRoutes = []apiRoute{
 	{Method: http.MethodGet, Template: "/jobs/{id}/scan-cycle", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scan-cycle"},
 	{Method: http.MethodDelete, Template: "/jobs/{id}/scan-cycle/{cycle}", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/jobs/job-1/scan-cycle/cycle-1"},
 	{Method: http.MethodGet, Template: "/jobs/{id}/scans", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans"},
+	{Method: http.MethodGet, Template: "/jobs/{id}/pending-changes", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/pending-changes"},
 	{Method: http.MethodGet, Template: "/jobs/{id}/scans/latest-successful", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans/latest-successful"},
 	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans/scan-1"},
 	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}/results", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans/scan-1/results"},

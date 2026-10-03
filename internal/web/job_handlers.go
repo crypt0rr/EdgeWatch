@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -170,6 +171,58 @@ func jobJSONFromStateSummary(record store.JobRecord, summary store.RuntimeStateS
 func (s *Server) jobJSONWithCycle(ctx context.Context, ts *store.TenantStore, record store.JobRecord, state model.JobState) map[string]any {
 	value := s.addNotificationRouting(ctx, s.tenantNotifier(ts), jobJSON(record, state))
 	return s.addJobCycleAndProfile(ctx, ts, record, value)
+}
+
+type pendingChangeView struct {
+	Key    string       `json:"key"`
+	Change model.Change `json:"change"`
+	Count  int          `json:"count"`
+}
+
+func pendingChangeViews(pending map[string]model.Pending) []pendingChangeView {
+	items := make([]pendingChangeView, 0, len(pending))
+	for key, item := range pending {
+		items = append(items, pendingChangeView{Key: key, Change: item.Change, Count: item.Count})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		if a.Change.Target != b.Change.Target {
+			return a.Change.Target < b.Change.Target
+		}
+		if a.Change.Protocol != b.Change.Protocol {
+			return a.Change.Protocol < b.Change.Protocol
+		}
+		if a.Change.Port != b.Change.Port {
+			return a.Change.Port < b.Change.Port
+		}
+		if a.Change.Kind != b.Change.Kind {
+			return a.Change.Kind < b.Change.Kind
+		}
+		return a.Key < b.Key
+	})
+	return items
+}
+
+func (s *Server) jobPendingChanges(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord) {
+	offset, ok := requestOffset(w, r)
+	if !ok {
+		return
+	}
+	limit := queryLimit(r)
+	state, err := ts.RuntimeState(r.Context(), record.ID)
+	if err != nil {
+		s.writeInternalError(w, r, "store", err)
+		return
+	}
+	items := pendingChangeViews(state.Pending)
+	start := min(offset, len(items))
+	end := min(start+limit, len(items))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"job_id":          record.ID,
+		"job":             record.Job.Name,
+		"pending_changes": items[start:end],
+		"pagination":      paginationJSON(offset, limit, len(items)),
+	})
 }
 
 // tenantNotifier returns the notifier of the tenant of ts, or nil when the
@@ -558,6 +611,12 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 	if len(parts) == 2 && parts[1] == "scans" && r.Method == http.MethodGet {
 		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
 			s.jobScans(w, r, ts, job)
+		}
+		return
+	}
+	if len(parts) == 2 && parts[1] == "pending-changes" && r.Method == http.MethodGet {
+		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
+			s.jobPendingChanges(w, r, ts, job)
 		}
 		return
 	}

@@ -21,6 +21,11 @@ const response: GlobalHostsResponse = {
   pagination: { limit: 1, offset: 0, total: 2, has_more: true, next_offset: 1 },
 }
 
+const emptyResponse: GlobalHostsResponse = {
+  hosts: [],
+  pagination: { limit: 25, offset: 0, total: 0, has_more: false, next_offset: null },
+}
+
 describe('global hosts explorer', () => {
   let root: Root
   let container: HTMLDivElement
@@ -116,6 +121,41 @@ describe('global hosts explorer', () => {
     await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
     expect(listHosts).toHaveBeenCalledTimes(1)
     expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: '198', offset: 0 }))
+  })
+
+  it('distinguishes an empty inventory from no hosts matching active filters', async () => {
+    vi.mocked(listHosts).mockResolvedValue(emptyResponse)
+    await renderPage()
+    expect(container.querySelector('[role="status"]')?.textContent).toContain('No completed scans have produced effective hosts yet.')
+
+    const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement
+    await act(async () => {
+      setInputValue(search, 'missing')
+      await new Promise(resolve => setTimeout(resolve, 300))
+    })
+    await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('No hosts match the current search and filters.'), { timeout: 1000 })
+    expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: 'missing', offset: 0 }))
+
+    await act(async () => {
+      setInputValue(search, '')
+      await new Promise(resolve => setTimeout(resolve, 300))
+    })
+    const selects = Array.from(container.querySelectorAll('select')) as HTMLSelectElement[]
+    await act(async () => {
+      selects[0]!.value = 'tcp'
+      selects[0]!.dispatchEvent(new Event('change', { bubbles: true }))
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('No hosts match the current search and filters.'), { timeout: 1000 })
+    expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ protocol: 'tcp', offset: 0 }))
+
+    await act(async () => {
+      selects[1]!.value = 'false'
+      selects[1]!.dispatchEvent(new Event('change', { bubbles: true }))
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ protocol: 'tcp', has_open_ports: false, offset: 0 })), { timeout: 1000 })
+    expect(container.querySelector('[role="status"]')?.textContent).toContain('No hosts match the current search and filters.')
   })
 
   it('shows an actionable error when the host index cannot be queried', async () => {

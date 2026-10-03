@@ -30,7 +30,7 @@ import { compactPortExpression } from './components/PortScopeDetails'
 import type { Incident } from './types'
 import { baselinePresentation } from './baseline'
 import { formatDateTime } from './format'
-import { changeKindLabel, jobStatePresentation, severityLabel } from './status'
+import { changeKindLabel, jobStatePresentation, severityLabel, severityTone } from './status'
 import './tailwind.css'
 import './styles.css'
 
@@ -300,13 +300,16 @@ export function Incidents() {
       }
       setPendingAction(null)
     } catch (error) {
-      if (error instanceof APIError && error.code === 'incident_conflict') {
+      if (error instanceof APIError && (error.code === 'incident_conflict' || error.code === 'incident_not_found')) {
         // The reviewed evidence is no longer current. Close the stale dialog
         // and reload the list so the administrator sees the new observation
         // before deciding again.
         setPendingAction(null)
         await client.invalidateQueries({ queryKey: ['incidents'] })
-        setActionError('This incident changed while it was open. The incident list was refreshed; review the new evidence before retrying.')
+        await client.invalidateQueries({ queryKey: ['job', row.job_id] })
+        setActionError(error.code === 'incident_not_found'
+          ? 'This incident is no longer active. The incident list was refreshed.'
+          : 'This incident changed while it was open. The incident list was refreshed; review the new evidence before retrying.')
       } else {
         setActionError(error instanceof Error ? error.message : 'The incident action could not be completed.')
       }
@@ -325,14 +328,14 @@ function IncidentTableRow({ row, busy, onAction }: { row: Incident; busy: string
   const key = row.incident.change.key
   const acceptID = `accept:${row.job_id}:${key ?? ''}`
   const suppressID = `suppress:${row.job_id}:${key ?? ''}`
-  return <tr><td><strong>{row.job}</strong></td><td>{row.incident.change.target}</td><td><strong>{formatIncidentChange(row.incident.change)}</strong><br /><span className="muted">{changeValues(row.incident.change)}</span></td><td><span className={`pill ${row.incident.change.severity === 'critical' ? 'red' : 'amber'}`}>{severityLabel(row.incident.change.severity)}</span></td><td>{formatDateTime(row.incident.last_seen_at)}</td><td><IncidentActions row={row} busy={busy} acceptID={acceptID} suppressID={suppressID} onAction={onAction} /></td></tr>
+  return <tr><td><strong>{row.job}</strong></td><td>{row.incident.change.target}</td><td><strong>{formatIncidentChange(row.incident.change)}</strong><br /><span className="muted">{changeValues(row.incident.change)}</span></td><td><span className={`pill ${severityTone(row.incident.change.severity)}`}>{severityLabel(row.incident.change.severity)}</span></td><td>{formatDateTime(row.incident.last_seen_at)}</td><td><IncidentActions row={row} busy={busy} acceptID={acceptID} suppressID={suppressID} onAction={onAction} /></td></tr>
 }
 
 function IncidentCard({ row, busy, onAction }: { row: Incident; busy: string; onAction: (row: Incident, action: 'accept' | 'suppress') => void }) {
   const key = row.incident.change.key
   const acceptID = `accept:${row.job_id}:${key ?? ''}`
   const suppressID = `suppress:${row.job_id}:${key ?? ''}`
-  return <article className="incident-card" aria-label={`Incident for ${row.job}`}><div className="incident-card-heading"><strong>{row.job}</strong><span className={`pill ${row.incident.change.severity === 'critical' ? 'red' : 'amber'}`}>{severityLabel(row.incident.change.severity)}</span></div><dl className="incident-facts"><div><dt>Target</dt><dd>{row.incident.change.target}</dd></div><div><dt>Change</dt><dd><strong>{formatIncidentChange(row.incident.change)}</strong><br /><span className="muted">{changeValues(row.incident.change)}</span></dd></div><div><dt>Last seen</dt><dd>{formatDateTime(row.incident.last_seen_at)}</dd></div></dl><IncidentActions row={row} busy={busy} acceptID={acceptID} suppressID={suppressID} onAction={onAction} /></article>
+  return <article className="incident-card" aria-label={`Incident for ${row.job}`}><div className="incident-card-heading"><strong>{row.job}</strong><span className={`pill ${severityTone(row.incident.change.severity)}`}>{severityLabel(row.incident.change.severity)}</span></div><dl className="incident-facts"><div><dt>Target</dt><dd>{row.incident.change.target}</dd></div><div><dt>Change</dt><dd><strong>{formatIncidentChange(row.incident.change)}</strong><br /><span className="muted">{changeValues(row.incident.change)}</span></dd></div><div><dt>Last seen</dt><dd>{formatDateTime(row.incident.last_seen_at)}</dd></div></dl><IncidentActions row={row} busy={busy} acceptID={acceptID} suppressID={suppressID} onAction={onAction} /></article>
 }
 
 function formatIncidentChange(change: Incident['incident']['change']) {

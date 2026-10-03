@@ -307,6 +307,25 @@ describe('application shell', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('changed while it was open'))
   })
 
+  it('shows informational incidents neutrally and closes and refreshes a missing incident action', async () => {
+    const row = { job_id: 'job-1', job: 'Mail monitor', incident: { change: { key: 'service|198.51.100.10|tcp|25', kind: 'service', target: '198.51.100.10', protocol: 'tcp', port: 25, old: 'smtp', new: 'unknown', severity: 'info' }, opened_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:01:00Z' } }
+    const page = { limit: 50, offset: 0, total: 1, has_more: false, next_offset: null }
+    vi.mocked(listIncidents).mockResolvedValue({ incidents: [row], pagination: page } as never)
+    renderWithProviders(<Incidents />)
+    await waitFor(() => expect(screen.getAllByText('Info').length).toBeGreaterThan(0))
+    expect(screen.getAllByText('Info')[0].closest('.pill')).toHaveClass('gray')
+
+    vi.mocked(acceptIncident).mockRejectedValueOnce(new APIError('incident is no longer active', 'incident_not_found'))
+    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination: { ...page, total: 0 } } as never)
+    fireEvent.click(screen.getAllByRole('button', { name: 'Accept change' })[0])
+    fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('This incident is no longer active'))
+    await waitFor(() => expect(screen.getByText('No active incidents')).toBeInTheDocument())
+    expect(listIncidents).toHaveBeenCalledTimes(2)
+  })
+
   it('returns to the last non-empty incident page after resolving the only row on a later page', async () => {
     const incidentRow = (index: number) => ({ job_id: 'job-1', job: 'TCP monitor', incident: { change: { key: `tcp:198.51.100.10:${1000 + index}`, kind: 'port', target: '198.51.100.10', protocol: 'tcp', port: 1000 + index, old: 'closed', new: 'open', severity: 'critical' }, opened_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:01:00Z' } })
     let active = Array.from({ length: 21 }, (_, index) => incidentRow(index))

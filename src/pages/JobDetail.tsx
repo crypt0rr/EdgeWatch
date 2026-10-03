@@ -41,7 +41,7 @@ import { SurfaceUnitList } from '../components/SurfaceUnitList'
 import type { ActiveScan, WorkEstimate } from '../types'
 import { baselinePresentation } from '../baseline'
 import { formatDateTime } from '../format'
-import { changeKindLabel, jobStatePresentation, scanOutcomeTone } from '../status'
+import { changeKindLabel, jobStatePresentation, scanOutcomeTone, severityTone } from '../status'
 
 type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
 type PendingScanRequest = { requestedAt: number; previousScanIDs: string[] | null; observedActive: boolean }
@@ -372,7 +372,7 @@ export function JobDetail() {
             <div className="change-list">
               {detail.data.changes.map((change, index) => (
                 <div className="change-row" key={`${change.kind}-${index}`}>
-                  <span className={`pill ${change.severity === 'critical' ? 'red' : 'amber'}`}>{changeKindLabel(change.kind, change.old, change.new)}</span>
+                  <span className={`pill ${severityTone(change.severity)}`}>{changeKindLabel(change.kind, change.old, change.new)}</span>
                   <strong>{change.target}{change.port ? ` · ${change.protocol}:${change.port}` : ''}</strong>
                   <span className="muted">{change.old ?? '—'} → {change.new ?? '—'}</span>
                 </div>

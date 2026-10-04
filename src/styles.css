@@ -43,6 +43,41 @@
   opacity: 0.55;
 }
 
+/* Constrain long service fingerprints and hostnames to the available table
+   columns. At tablet and compact desktop widths the card layout below is more
+   usable than squeezing a six-column table. */
+.desktop-incident-table {
+  min-width: 0;
+}
+
+.desktop-incident-table table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.desktop-incident-table th,
+.desktop-incident-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.desktop-incident-table th:nth-child(1),
+.desktop-incident-table td:nth-child(1) { width: 13%; }
+.desktop-incident-table th:nth-child(2),
+.desktop-incident-table td:nth-child(2) { width: 18%; }
+.desktop-incident-table th:nth-child(3),
+.desktop-incident-table td:nth-child(3) { width: 31%; }
+.desktop-incident-table th:nth-child(4),
+.desktop-incident-table td:nth-child(4) { width: 10%; }
+.desktop-incident-table th:nth-child(5),
+.desktop-incident-table td:nth-child(5) { width: 13%; }
+.desktop-incident-table th:nth-child(6),
+.desktop-incident-table td:nth-child(6) { width: 15%; }
+
+.desktop-incident-table .incident-actions {
+  gap: 0.25rem;
+}
+
 /* Shown over the console while EdgeWatch does not answer; the console stays
    usable underneath. */
 .connection-notice {
@@ -1375,6 +1410,42 @@ body:has(.connection-notice) .auth-side { padding-bottom: 110px; }
   .audit-row time { grid-column: 1 / -1; }
   .desktop-incident-table { display: none; }
   .mobile-incident-list { display: grid; gap: 10px; }
+}
+
+@media (max-width: 1400px) {
+  .desktop-incident-table { display: none; }
+  .mobile-incident-list { display: grid; gap: 10px; }
+  .incident-table-card { overflow: visible; }
+  .incident-card {
+    min-width: 0;
+    padding: 15px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: #0d1b2d;
+  }
+  .incident-card-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .incident-card-heading strong {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .incident-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    width: 100%;
+    gap: 8px;
+    margin-top: 14px;
+  }
+  .incident-actions .button {
+    width: 100%;
+    min-height: 44px;
+    padding: 10px 12px;
+    font-size: 13px;
+  }
 }
 
 @media (max-width: 760px) {

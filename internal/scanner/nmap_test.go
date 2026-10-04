@@ -517,6 +517,100 @@ func TestNmapArgsHostDiscovery(t *testing.T) {
 	if slices.Contains(withDiscovery, "-Pn") {
 		t.Fatalf("assume_alive=false args: %v", withDiscovery)
 	}
+	if countNmapVerbosity(withDiscovery) != 1 {
+		t.Fatalf("assume_alive=false args must request explicit down hosts with one -v: %v", withDiscovery)
+	}
+	if countNmapVerbosity(withAssumption) != 0 {
+		t.Fatalf("assume_alive=true must preserve the default command without -v: %v", withAssumption)
+	}
+}
+
+func countNmapVerbosity(args []string) int {
+	count := 0
+	for _, argument := range args {
+		if argument == "-v" || argument == "-vv" || argument == "-vvv" || argument == "--verbose" {
+			count++
+		}
+	}
+	return count
+}
+
+func TestNmapDiscoveryVerbosityAcrossProtocolsAndProfiles(t *testing.T) {
+	for _, protocol := range []string{"tcp", "udp"} {
+		t.Run(protocol, func(t *testing.T) {
+			pc := config.Protocol{Ports: "22,53", Mode: "connect"}
+			for _, assumeAlive := range []bool{false, true} {
+				args := nmapArgs(4, protocol, pc, "balanced", assumeAlive, []string{"192.0.2.9"})
+				if got := countNmapVerbosity(args); got != map[bool]int{false: 1, true: 0}[assumeAlive] {
+					t.Fatalf("assume_alive=%t verbosity count = %d, args=%v", assumeAlive, got, args)
+				}
+				if assumeAlive != slices.Contains(args, "-Pn") {
+					t.Fatalf("assume_alive=%t -Pn mismatch: %v", assumeAlive, args)
+				}
+			}
+
+			for _, explicit := range []string{"-v", "-vv", "-vvv", "--verbose"} {
+				pc.NmapArgs = []string{explicit, config.PlaceholderPorts, config.PlaceholderStructuredOutput, config.PlaceholderAddresses}
+				args := nmapArgs(4, protocol, pc, "balanced", false, []string{"192.0.2.9"})
+				if got := countNmapVerbosity(args); got != 1 {
+					t.Fatalf("custom %s template duplicated verbosity: %v", explicit, args)
+				}
+			}
+
+			pc.NmapArgs = nil
+			args := nmapEnrichmentArgs(4, protocol, pc, "balanced", false, []string{"192.0.2.9"})
+			if countNmapVerbosity(args) != 0 {
+				t.Fatalf("Naabu enrichment must not infer host reachability from Nmap verbosity: %v", args)
+			}
+		})
+	}
+}
+
+func TestVerboseOutputForFullPortUnitFitsProgressBound(t *testing.T) {
+	writer := &progressOutputWriter{limit: maxProgressOutput}
+	// A maximum-length IPv6 address gives a conservative status-line size for
+	// the largest supported Nmap work unit, including a fully open port range.
+	line := []byte("Discovered open port 65535/tcp on 2001:db8:ffff:ffff:ffff:ffff:ffff:ffff\n")
+	for probe := 0; probe < 65536; probe++ {
+		if _, err := writer.Write(line); err != nil {
+			t.Fatalf("verbose line %d write error: %v", probe, err)
+		}
+	}
+	if writer.exceeded {
+		t.Fatalf("verbosity diagnostics for a 65,536-probe unit exceeded the %d-byte bound (%d bytes)", maxProgressOutput, len(writer.String()))
+	}
+}
+
+func TestScanUsesVerboseNmapXMLToRecordCompletedDownHostDiscovery(t *testing.T) {
+	dir := t.TempDir()
+	nmapPath := filepath.Join(dir, "nmap")
+	quietFixture := filepath.Join("testdata", "nmap-7.95-host-down-quiet.xml")
+	verboseFixture := filepath.Join("testdata", "nmap-7.95-host-down-verbose.xml")
+	script := "#!/bin/sh\nxml_output=''\nverbose=0\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -oX) xml_output=\"$2\"; shift 2; continue ;;\n    -v|-vv|-vvv|--verbose) verbose=1 ;;\n  esac\n  shift\ndone\nif [ \"$verbose\" -eq 1 ]; then cp '" + verboseFixture + "' \"$xml_output\"; else cp '" + quietFixture + "' \"$xml_output\"; fi\n"
+	if err := os.WriteFile(nmapPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	assumeAlive := false
+	job := config.NormalizeJob(config.Job{
+		Name: "host-discovery-down", Targets: []string{"192.0.2.9"}, MaxExpandedHosts: 1,
+		AssumeAlive: &assumeAlive, TCP: &config.Protocol{Ports: "22,80", Mode: "connect"}, UDP: &config.Protocol{Ports: "53"},
+	})
+	snapshot, err := New(nmapPath).Scan(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Hosts) != 1 {
+		t.Fatalf("host observations = %#v", snapshot.Hosts)
+	}
+	if len(snapshot.Hosts[0].Protocols) != 2 {
+		t.Fatalf("TCP+UDP protocol evidence = %#v", snapshot.Hosts[0].Protocols)
+	}
+	for _, protocol := range snapshot.Hosts[0].Protocols {
+		if protocol.Status != "unreachable" || protocol.StatusReason != "no-response" || protocol.DiscoveryState != "down" {
+			t.Errorf("Nmap verbose down evidence for %s = %#v", protocol.Protocol, protocol)
+		}
+	}
 }
 
 func TestNmapProfilePlaceholdersRenderManagedArguments(t *testing.T) {
@@ -793,7 +887,7 @@ func TestScanMarksOnlyCompletedNmapHostDiscovery(t *testing.T) {
 	}{
 		{name: "explicit host discovery down", xml: downXML, wantState: "down", wantReason: "no-response"},
 		{name: "timed out host", xml: timeoutXML, wantReason: "nmap-host-timeout"},
-		{name: "assumed alive skips host discovery", xml: downXML, assumeAlive: true, wantReason: "no-response"},
+		{name: "assumed alive skips host discovery", xml: upXML, assumeAlive: true, wantReason: "syn-ack"},
 		{name: "up host", xml: upXML, wantState: "up", wantReason: "syn-ack"},
 		{name: "omitted host", xml: `<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/></runstats></nmaprun>`, wantReason: "nmap-omitted"},
 	}
@@ -802,6 +896,10 @@ func TestScanMarksOnlyCompletedNmapHostDiscovery(t *testing.T) {
 			dir := t.TempDir()
 			nmapPath := filepath.Join(dir, "nmap")
 			script := "#!/bin/sh\nprintf '%s' '" + test.xml + "'\n"
+			if test.name == "explicit host discovery down" {
+				omittedXML := `<?xml version="1.0"?><nmaprun><verbose level="0"/><runstats><finished exit="success"/><hosts up="0" down="1" total="1"/></runstats></nmaprun>`
+				script = "#!/bin/sh\nverbose=0\nfor arg in \"$@\"; do case \"$arg\" in -v|-vv|-vvv|--verbose) verbose=1 ;; esac; done\nif [ \"$verbose\" -eq 1 ]; then printf '%s' '" + test.xml + "'; else printf '%s' '" + omittedXML + "'; fi\n"
+			}
 			if err := os.WriteFile(nmapPath, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}

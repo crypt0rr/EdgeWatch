@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<nmaprun>
+  <verbose level="0"/>
+  <debugging level="0"/>
+  <runstats>
+    <finished summary="Nmap done; 1 IP address (0 hosts up) scanned in 1.50 seconds" elapsed="1.50" exit="success"/>
+    <hosts up="0" down="1" total="1"/>
+  </runstats>
+</nmaprun>

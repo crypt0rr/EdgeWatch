@@ -327,6 +327,73 @@ func TestTotalLossScanRequiresConfirmationBeforeOpeningIncidents(t *testing.T) {
 	}
 }
 
+func TestTotalLossHostTransitionDoesNotAdvancePortIncidentState(t *testing.T) {
+	const upAddress = "192.0.2.31"
+	const downAddress = "192.0.2.32"
+	const incidentKey = "port|192.0.2.31|tcp|8080"
+	const pendingKey = "port|192.0.2.31|tcp|80"
+	const suppressedKey = "port|192.0.2.31|tcp|25"
+	job := config.Job{Name: "guard-host-transition", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	baseline := model.Snapshot{
+		Scopes: []model.Scope{{Target: upAddress, Protocol: "tcp", Ports: "22,443,8080"}, {Target: downAddress, Protocol: "tcp", Ports: "22,443,8080"}},
+		Units: []model.Unit{
+			{Target: upAddress, Protocol: "tcp", Addresses: []string{upAddress}, Ports: []model.PortState{{Port: 443, State: "open"}}},
+			{Target: downAddress, Protocol: "tcp", Addresses: []string{downAddress}, Ports: []model.PortState{{Port: 22, State: "open"}}},
+		},
+		HostStates: []model.HostState{{Address: upAddress, State: "up"}, {Address: downAddress, State: "up"}},
+	}
+	state := model.JobState{
+		Baseline: &baseline, BaselineScanID: "baseline", BaselineConfigHash: "hash",
+		Incidents:             map[string]model.Incident{incidentKey: {Change: model.Change{Key: incidentKey, Kind: "port", Target: upAddress, Protocol: "tcp", Port: 8080, Old: "not-open", New: "open"}}},
+		Pending:               map[string]model.Pending{pendingKey: {Change: model.Change{Key: pendingKey, Kind: "port", Target: upAddress, Protocol: "tcp", Port: 80, Old: "not-open", New: "open"}, Count: 1}},
+		Suppressed:            map[string]int{suppressedKey: 1},
+		SuppressedChanges:     map[string]model.Change{suppressedKey: {Key: suppressedKey, Kind: "port", Target: upAddress, Protocol: "tcp", Port: 25, Old: "not-open", New: "open"}},
+		FingerprintCandidates: map[string]model.ValueCount{},
+	}
+	zeroWithHostDown := model.Snapshot{
+		Scopes: []model.Scope{{Target: upAddress, Protocol: "tcp", Ports: "22,443,8080"}, {Target: downAddress, Protocol: "tcp", Ports: "22,443,8080"}},
+		Units:  []model.Unit{{Target: upAddress, Protocol: "tcp", Addresses: []string{upAddress}}},
+		Hosts: []model.HostObservation{
+			{Address: upAddress, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}},
+			{Address: downAddress, Status: "unreachable", StatusReason: "no-response", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down"}}},
+		},
+	}
+	events, changes, err := processSuccessWithChanges(&state, job, scan("zero-with-host-down-1", zeroWithHostDown))
+	if err != nil || len(events) != 2 || events[0].Type != "scan-anomaly" || events[1].Type != "changes-detected" || len(changes) != 1 || changes[0].Key != "host|"+downAddress {
+		t.Fatalf("first zero scan with host transition: events=%#v changes=%#v err=%v", events, changes, err)
+	}
+	if _, ok := state.Incidents[incidentKey]; !ok {
+		t.Fatalf("existing port incident recovered during guarded scan: %#v", state.Incidents)
+	}
+	if pending, ok := state.Pending[pendingKey]; !ok || pending.Count != 1 {
+		t.Fatalf("pending port change advanced during guarded scan: %#v", state.Pending)
+	}
+	if state.Suppressed[suppressedKey] != 1 {
+		t.Fatalf("port suppression advanced during guarded scan: %#v", state.Suppressed)
+	}
+
+	events, changes, err = processSuccessWithChanges(&state, job, scan("zero-with-host-down-2", zeroWithHostDown))
+	if err != nil {
+		t.Fatal(err)
+	}
+	types := map[string]bool{}
+	for _, event := range events {
+		types[event.Type] = true
+	}
+	if types["scan-anomaly"] || !types["changes-detected"] || !types["changes-recovered"] {
+		t.Fatalf("confirmed zero scan did not return to normal comparison: events=%#v changes=%#v", events, changes)
+	}
+	if _, ok := state.Incidents[incidentKey]; ok {
+		t.Fatalf("existing port incident was not recovered after confirmation: %#v", state.Incidents)
+	}
+	if _, ok := state.Pending[pendingKey]; ok {
+		t.Fatalf("pending port change was not evaluated after confirmation: %#v", state.Pending)
+	}
+	if state.Suppressed[suppressedKey] != 0 {
+		t.Fatalf("port suppression did not resume after confirmation: %#v", state.Suppressed)
+	}
+}
+
 func TestTotalLossConfirmsOncePerOutage(t *testing.T) {
 	dnsBaseline := func() model.Snapshot {
 		s := model.Snapshot{
@@ -746,12 +813,13 @@ func TestUnknownNoResponseEvidenceCannotLearnOrRemoveBaselinePorts(t *testing.T)
 func TestCompletedNmapHostDiscoveryDownDoesNotMarkScanIncomplete(t *testing.T) {
 	address := "192.0.2.44"
 	scanResult := scan("explicit-down", model.Snapshot{
-		Scopes: []model.Scope{{Target: address, Protocol: "tcp", Ports: "22,443"}},
+		Scopes: []model.Scope{{Target: address, Protocol: "tcp", Ports: "22,443"}, {Target: address, Protocol: "udp", Ports: "53"}},
 		Hosts: []model.HostObservation{{
 			Address: address, Status: "unreachable", StatusReason: "no-response",
-			Protocols: []model.ProtocolObservation{{
-				Protocol: "tcp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down",
-			}},
+			Protocols: []model.ProtocolObservation{
+				{Protocol: "tcp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down"},
+				{Protocol: "udp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down"},
+			},
 		}},
 	})
 	if MarkIncompleteScan(&scanResult) {
@@ -784,6 +852,39 @@ func TestCompletedNmapHostDiscoveryDownDoesNotMarkScanIncomplete(t *testing.T) {
 				t.Fatalf("ambiguous host result was treated as complete: %#v", partial)
 			}
 		})
+	}
+}
+
+func TestNaabuOpenAddressReportedDownByNmapEnrichmentRemainsIncomplete(t *testing.T) {
+	const address = "192.0.2.51"
+	job := config.Job{Name: "naabu-enrichment-down", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	baseline := model.Snapshot{
+		Scopes:     []model.Scope{{Target: address, Protocol: "tcp", Ports: "22,8443"}},
+		Units:      []model.Unit{{Target: address, Protocol: "tcp", Addresses: []string{address}, Ports: []model.PortState{{Port: 22, State: "open"}, {Port: 8443, State: "open"}}}},
+		HostStates: []model.HostState{{Address: address, State: "up"}},
+	}
+	state := model.JobState{Baseline: &baseline, BaselineScanID: "baseline", BaselineConfigHash: "hash", Pending: map[string]model.Pending{}, Incidents: map[string]model.Incident{}, Suppressed: map[string]int{}, SuppressedChanges: map[string]model.Change{}, FingerprintCandidates: map[string]model.ValueCount{}}
+	current := model.Snapshot{
+		Scopes: []model.Scope{{Target: address, Protocol: "tcp", Ports: "1-65535"}},
+		DNS:    map[string][]string{},
+		Hosts: []model.HostObservation{{
+			Address: address, Status: "unreachable", StatusReason: "no-response",
+			Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down", DiscoveryEngine: "naabu", ScannedPorts: "1-65535"}},
+		}},
+	}
+	scanResult := scan("naabu-open-nmap-down", current)
+	if !MarkIncompleteScan(&scanResult) || scanResult.Status != "incomplete" || !strings.Contains(scanResult.Error, address) {
+		t.Fatalf("contradictory Naabu/Nmap result was not marked incomplete: %#v", scanResult)
+	}
+	if len(scanResult.Snapshot.HostStates) != 0 {
+		t.Fatalf("Nmap enrichment changed Naabu reachability state: %#v", scanResult.Snapshot.HostStates)
+	}
+	events, changes, err := processSuccessWithChanges(&state, job, scanResult)
+	if err != nil || len(changes) != 0 || len(events) != 1 || events[0].Type != "scan-incomplete" {
+		t.Fatalf("contradictory discovery comparison = events %#v changes %#v err %v", events, changes, err)
+	}
+	if state.Baseline == nil || len(state.Baseline.Units) != 1 || len(state.Baseline.Units[0].Ports) != 2 || len(state.Incidents) != 0 {
+		t.Fatalf("contradictory evidence changed expected ports or incidents: %#v", state)
 	}
 }
 
@@ -887,6 +988,72 @@ func TestSingleHostDownBypassesTotalLossPortClosureGuard(t *testing.T) {
 	events, err := e.Success(ctx, job, scan("single-down", down))
 	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 1 || events[0].Changes[0].Kind != "host" {
 		t.Fatalf("explicit single-host down was hidden by total-loss guard: %#v, %v", events, err)
+	}
+}
+
+func TestAcceptDNSHostDownDoesNotRewriteSurvivingServiceFingerprint(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	job := config.NormalizeJob(config.Job{
+		Name: "accept-dns-host-down", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"edge.example"}, DNSComparisonMode: config.DNSComparisonAggregate,
+		TCP:      &config.Protocol{Ports: "22", Mode: "connect", ServiceDetection: true},
+		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
+	})
+	record, err := defaultTenant(db).CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const downAddress = "192.0.2.21"
+	const liveAddress = "192.0.2.22"
+	const fingerprint = "ssh | OpenSSH | 9.6 |"
+	key := "host|" + downAddress
+	baseline := model.Snapshot{
+		Scopes: []model.Scope{{Target: "edge.example", Protocol: "tcp", Ports: "22", ServiceDetection: true}},
+		DNS:    map[string][]string{"edge.example": {downAddress, liveAddress}},
+		Units: []model.Unit{{Target: "edge.example", Protocol: "tcp", Addresses: []string{downAddress, liveAddress}, Ports: []model.PortState{{
+			Port: 22, State: "open", Service: fingerprint, Evidence: []string{downAddress, liveAddress},
+		}}}},
+		HostStates: []model.HostState{{Address: downAddress, State: "up"}, {Address: liveAddress, State: "up"}},
+		Hosts: []model.HostObservation{
+			{Address: downAddress, SourceTargets: []string{"edge.example"}, Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 22, State: "open", Service: &model.ServiceObservation{Name: "ssh", Product: "Removed", Version: "8.0", Method: "probed"}}}}}},
+			{Address: liveAddress, SourceTargets: []string{"edge.example"}, Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 22, State: "open", Service: &model.ServiceObservation{Name: "ssh", Product: "OpenSSH", Version: "9.6", Method: "probed"}}}}}},
+		},
+	}
+	if _, err := db.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &baseline
+		state.BaselineScanID = "baseline"
+		state.BaselineConfigHash = record.Job.SecurityHash()
+		state.Incidents[key] = model.Incident{Change: model.Change{Key: key, Kind: "host", Target: downAddress, Old: "up", New: "down", Severity: "warning"}, ScanID: "host-down"}
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := defaultTenant(db).AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, key, store.AuditEntry{Action: "incident.accepted", Detail: key}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := defaultTenant(db).RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := baselineService(*state.Baseline, "edge.example", "tcp", 22); got != fingerprint {
+		t.Fatalf("accepted host-down baseline fingerprint = %q, want %q", got, fingerprint)
+	}
+
+	current := baseline
+	current.HostStates = []model.HostState{{Address: downAddress, State: "down"}, {Address: liveAddress, State: "up"}}
+	current.Hosts = []model.HostObservation{
+		{Address: downAddress, SourceTargets: []string{"edge.example"}, Status: "unreachable", StatusReason: "no-response", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down"}}},
+		{Address: liveAddress, SourceTargets: []string{"edge.example"}, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up", Ports: []model.PortObservation{{Port: 22, State: "open", Service: &model.ServiceObservation{Name: "ssh", Product: "OpenSSH", Version: "9.6", Method: "probed"}}}}}},
+	}
+	current.Units[0].Ports[0].Evidence = []string{liveAddress}
+	scanResult := model.Scan{ID: "unchanged-after-accept", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: current, FinishedAt: time.Now().UTC()}
+	events, err := (&Engine{Store: db}).FinalizeManagedScan(ctx, record.ID, record.Job, &scanResult, nil)
+	if err != nil || len(events) != 0 {
+		t.Fatalf("unchanged evidence after host-down acceptance = %#v, %v", events, err)
 	}
 }
 

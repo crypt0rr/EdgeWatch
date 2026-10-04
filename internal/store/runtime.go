@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // RuntimeState returns the runtime state of one of the tenant's jobs. A job
@@ -635,6 +637,23 @@ func (ss *SystemStore) FinalizeManagedScanWithReminderSetting(ctx context.Contex
 // FinalizeManagedScanWithReminderSettings reads the unit's current reminder
 // preferences inside the same transaction that records the scan and outbox.
 func (ss *SystemStore) FinalizeManagedScanWithReminderSettings(ctx context.Context, scan *model.Scan, jobID, securityHash string, destinations []string, fn func(*model.JobState, *model.Scan, IncidentReminderSettings) ([]model.Event, error)) ([]model.Event, error) {
+	return ss.FinalizeManagedScanWithOptions(ctx, scan, jobID, securityHash, destinations, ManagedScanFinalizationOptions{}, fn)
+}
+
+// ManagedScanFinalizationOptions separates time spent waiting for SQLite's
+// single writer from the bounded work performed after the writer is acquired.
+// Lease renewal and release are committed with the scan when LeaseOwner is set.
+type ManagedScanFinalizationOptions struct {
+	WriterWaitTimeout time.Duration
+	WorkTimeout       time.Duration
+	LeaseOwner        string
+	LeaseUntil        time.Time
+}
+
+// FinalizeManagedScanWithOptions finalizes a managed scan using a bounded
+// writer wait and an independent transaction-work budget. The wait is not
+// charged against WorkTimeout, which starts only after a write lock is held.
+func (ss *SystemStore) FinalizeManagedScanWithOptions(ctx context.Context, scan *model.Scan, jobID, securityHash string, destinations []string, options ManagedScanFinalizationOptions, fn func(*model.JobState, *model.Scan, IncidentReminderSettings) ([]model.Event, error)) ([]model.Event, error) {
 	if scan == nil {
 		return nil, errors.New("scan is required")
 	}
@@ -644,11 +663,13 @@ func (ss *SystemStore) FinalizeManagedScanWithReminderSettings(ctx context.Conte
 	if fn == nil {
 		return nil, errors.New("scan finalizer is required")
 	}
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	tx, workCtx, cleanup, err := ss.beginManagedScanFinalization(ctx, jobID, options)
 	if err != nil {
 		return nil, err
 	}
+	defer cleanup()
 	defer func() { _ = tx.Rollback() }()
+	ctx = workCtx
 
 	var raw []byte
 	var tenantState string
@@ -661,6 +682,9 @@ func (ss *SystemStore) FinalizeManagedScanWithReminderSettings(ctx context.Conte
 	}
 	if tenantState != TenantStateActive {
 		if err := recordScanOfPausedTenantTx(ctx, tx, scan, tenantState); err != nil {
+			return nil, err
+		}
+		if err := releaseManagedScanLeaseTx(ctx, tx, jobID, options.LeaseOwner); err != nil {
 			return nil, err
 		}
 		if err := tx.Commit(); err != nil {
@@ -677,6 +701,9 @@ func (ss *SystemStore) FinalizeManagedScanWithReminderSettings(ctx context.Conte
 			return nil, err
 		}
 		if err := clearCompletedScanCycleCheckpointsTx(ctx, tx, scan.CycleID); err != nil {
+			return nil, err
+		}
+		if err := releaseManagedScanLeaseTx(ctx, tx, jobID, options.LeaseOwner); err != nil {
 			return nil, err
 		}
 		if err := tx.Commit(); err != nil {
@@ -699,6 +726,9 @@ func (ss *SystemStore) FinalizeManagedScanWithReminderSettings(ctx context.Conte
 					return nil, err
 				}
 				if err := clearCompletedScanCycleCheckpointsTx(ctx, tx, scan.CycleID); err != nil {
+					return nil, err
+				}
+				if err := releaseManagedScanLeaseTx(ctx, tx, jobID, options.LeaseOwner); err != nil {
 					return nil, err
 				}
 				if err := tx.Commit(); err != nil {
@@ -759,10 +789,136 @@ func (ss *SystemStore) FinalizeManagedScanWithReminderSettings(ctx context.Conte
 	if err := clearCompletedScanCycleCheckpointsTx(ctx, tx, scan.CycleID); err != nil {
 		return nil, err
 	}
+	if err := releaseManagedScanLeaseTx(ctx, tx, jobID, options.LeaseOwner); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return events, nil
+}
+
+// beginManagedScanFinalization reserves the single SQLite writer before
+// starting the size-based transaction budget. The no-op job update is the
+// write-lock acquisition point; when a lease owner is provided it also renews
+// the lease before any potentially lengthy serialization work.
+func (ss *SystemStore) beginManagedScanFinalization(ctx context.Context, jobID string, options ManagedScanFinalizationOptions) (*sql.Tx, context.Context, func(), error) {
+	if options.WriterWaitTimeout <= 0 && options.WorkTimeout <= 0 {
+		tx, err := ss.store.DB.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return tx, ctx, func() {}, nil
+	}
+	if options.WriterWaitTimeout <= 0 {
+		options.WriterWaitTimeout = 5 * time.Minute
+	}
+	if options.WorkTimeout <= 0 {
+		options.WorkTimeout = 5 * time.Minute
+	}
+	baseCtx := context.WithoutCancel(ctx)
+	waitCtx, cancelWait := context.WithTimeout(baseCtx, options.WriterWaitTimeout)
+	txLifetimeCtx, cancelTxLifetime := context.WithTimeout(baseCtx, options.WriterWaitTimeout+options.WorkTimeout+time.Second)
+	var retryDelay = 25 * time.Millisecond
+	for {
+		conn, err := ss.store.DB.Conn(waitCtx)
+		if err != nil {
+			cancelWait()
+			cancelTxLifetime()
+			return nil, nil, nil, err
+		}
+		tx, err := conn.BeginTx(txLifetimeCtx, nil)
+		if err != nil {
+			_ = conn.Close()
+			if isSQLiteWriterBusy(err) && waitCtx.Err() == nil {
+				if waitErr := waitForWriterRetry(waitCtx, retryDelay); waitErr == nil {
+					retryDelay = nextWriterRetryDelay(retryDelay)
+					continue
+				}
+			}
+			cancelWait()
+			cancelTxLifetime()
+			return nil, nil, nil, err
+		}
+		// Acquiring the connection does not reserve a SQLite writer in WAL
+		// mode. This first write does so before the scan-size work deadline is
+		// started. Retrying BUSY here lets another process finish a long write
+		// even when its lock duration exceeds SQLite's per-attempt busy timeout.
+		if options.LeaseOwner != "" {
+			leaseUntil := options.LeaseUntil
+			if !leaseUntil.After(time.Now().UTC()) {
+				leaseUntil = time.Now().UTC().Add(options.WriterWaitTimeout + options.WorkTimeout + time.Minute)
+			}
+			var result sql.Result
+			result, err = tx.ExecContext(waitCtx, `UPDATE job_leases SET expires_at=? WHERE job=? AND owner=?`, leaseUntil.UTC().Format(time.RFC3339Nano), jobID, options.LeaseOwner)
+			if err == nil {
+				if changed, rowsErr := result.RowsAffected(); rowsErr != nil {
+					err = rowsErr
+				} else if changed == 0 {
+					_, err = tx.ExecContext(waitCtx, `UPDATE jobs SET id=id WHERE id=?`, jobID)
+				}
+			}
+		} else {
+			_, err = tx.ExecContext(waitCtx, `UPDATE jobs SET id=id WHERE id=?`, jobID)
+		}
+		if err != nil {
+			_ = tx.Rollback()
+			_ = conn.Close()
+			if isSQLiteWriterBusy(err) && waitCtx.Err() == nil {
+				if waitErr := waitForWriterRetry(waitCtx, retryDelay); waitErr == nil {
+					retryDelay = nextWriterRetryDelay(retryDelay)
+					continue
+				}
+			}
+			cancelWait()
+			cancelTxLifetime()
+			return nil, nil, nil, err
+		}
+		cancelWait()
+		workCtx, cancelWork := context.WithTimeout(baseCtx, options.WorkTimeout)
+		cleanup := func() {
+			cancelWork()
+			cancelTxLifetime()
+			_ = conn.Close()
+		}
+		return tx, workCtx, cleanup, nil
+	}
+}
+
+func isSQLiteWriterBusy(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	code := sqliteErr.Code() & 0xff
+	return code == sqlite3.SQLITE_BUSY || code == sqlite3.SQLITE_LOCKED
+}
+
+func waitForWriterRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func nextWriterRetryDelay(delay time.Duration) time.Duration {
+	delay *= 2
+	if delay > 250*time.Millisecond {
+		return 250 * time.Millisecond
+	}
+	return delay
+}
+
+func releaseManagedScanLeaseTx(ctx context.Context, tx *sql.Tx, jobID, owner string) error {
+	if strings.TrimSpace(owner) == "" {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM job_leases WHERE job=? AND owner=?`, jobID, owner)
+	return err
 }
 
 // ScanCanceledByPauseMessage is the error of a scan whose result arrived

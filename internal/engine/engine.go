@@ -45,10 +45,18 @@ func (e *Engine) SuccessForJobWithDestinations(ctx context.Context, jobID string
 // resulting runtime transition in the store's single transaction. This keeps
 // baseline reset/approval from changing the state between those two steps.
 func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job config.Job, scan *model.Scan, destinations []string) ([]model.Event, error) {
+	return e.FinalizeManagedScanWithOptions(ctx, jobID, job, scan, destinations, store.ManagedScanFinalizationOptions{})
+}
+
+// FinalizeManagedScanWithOptions is FinalizeManagedScan with explicit
+// separate writer-wait and transaction-work budgets. The application uses it
+// for managed runs so queued SQLite writer contention does not discard a
+// completed scan.
+func (e *Engine) FinalizeManagedScanWithOptions(ctx context.Context, jobID string, job config.Job, scan *model.Scan, destinations []string, options store.ManagedScanFinalizationOptions) ([]model.Event, error) {
 	if scan == nil {
 		return nil, fmt.Errorf("scan is required")
 	}
-	return e.Store.System().FinalizeManagedScanWithReminderSettings(ctx, scan, jobID, scan.ConfigHash, destinations, func(state *model.JobState, current *model.Scan, reminderSettings store.IncidentReminderSettings) ([]model.Event, error) {
+	return e.Store.System().FinalizeManagedScanWithOptions(ctx, scan, jobID, scan.ConfigHash, destinations, options, func(state *model.JobState, current *model.Scan, reminderSettings store.IncidentReminderSettings) ([]model.Event, error) {
 		if current.Status == "success" {
 			MarkIncompleteScan(current)
 		}

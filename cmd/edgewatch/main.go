@@ -57,10 +57,6 @@ func run(args []string) error {
 		}
 		action, rest = rest[0], rest[1:]
 	}
-	if cmd == "version" {
-		fmt.Println("EdgeWatch", version)
-		return nil
-	}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	configPath := fs.String("config", "/etc/edgewatch/config.yaml", "configuration file")
 	output := fs.String("output", "text", "text or json")
@@ -88,6 +84,13 @@ func run(args []string) error {
 	tenantSlug, err := checkTenantFlag(fs, cmd, action, *tenantFlag)
 	if err != nil {
 		return err
+	}
+	if err := validateCommandFlags(fs, cmd, action); err != nil {
+		return err
+	}
+	if cmd == "version" {
+		fmt.Println("EdgeWatch", version)
+		return nil
 	}
 	if cmd == "help" {
 		return usage()

@@ -199,6 +199,152 @@ test.describe('responsive issue regressions', () => {
     await expectNoHorizontalScroll(page)
   })
 
+  test('audit actors cannot squeeze the event column at tablet widths (#1123)', async ({ page }) => {
+    await mockConsole(page, 'administrator')
+    const actor = 'alexandra.konstantinopoulou.security-operations@international-services.example.com'
+    await page.route('**/api/v1/audit**', async route => {
+      if (route.request().method() !== 'GET' || new URL(route.request().url()).pathname !== '/api/v1/audit') return route.fallback()
+      await route.fulfill({ json: { entries: [{
+        id: 9001,
+        created_at: timestamp,
+        action: 'user.login',
+        category: 'account',
+        actor: { kind: 'user', user_id: 'user-long', username: actor },
+        detail: 'signed in successfully',
+        source_ip: '192.0.2.30',
+      }], next_before: null } })
+    })
+
+    await page.goto('/audit')
+    await expect(page.getByText(actor, { exact: true })).toBeVisible()
+    for (const width of [761, 768, 844, 900, 1024, 1100]) {
+      await page.setViewportSize({ width, height: 900 })
+      const row = page.locator('.audit-row')
+      const widths = await row.evaluate(element => ({
+        main: element.querySelector('.audit-main')!.getBoundingClientRect().width,
+        height: element.getBoundingClientRect().height,
+        actor: element.querySelector('.audit-actor')!.getBoundingClientRect().width,
+      }))
+      expect(widths.main, `audit event column at ${width}px`).toBeGreaterThanOrEqual(200)
+      expect(widths.actor, `actor column at ${width}px`).toBeLessThanOrEqual(240)
+      expect(widths.height, `audit row at ${width}px`).toBeLessThanOrEqual(250)
+      await expectNoHorizontalScroll(page, `audit at ${width}px`)
+    }
+
+    const platformPage = await page.context().newPage()
+    await mockConsole(platformPage, 'platform_admin')
+    await platformPage.route('**/api/v1/platform/audit**', async route => {
+      if (route.request().method() !== 'GET' || new URL(route.request().url()).pathname !== '/api/v1/platform/audit') return route.fallback()
+      await route.fulfill({ json: { entries: [{
+        id: 9002,
+        created_at: timestamp,
+        action: 'unit.admin_invited',
+        category: 'account',
+        actor: { kind: 'user', user_id: 'user-long', username: actor },
+        unit: { id: 'unit-retail', name: 'Retail' },
+        detail: 'invited an administrator',
+        source_ip: '192.0.2.30',
+      }], next_before: null } })
+    })
+    await platformPage.goto('/platform/audit')
+    await expect(platformPage.getByText(actor, { exact: true })).toBeVisible()
+    for (const width of [761, 768, 844, 900, 1024, 1100]) {
+      await platformPage.setViewportSize({ width, height: 900 })
+      const row = platformPage.locator('.audit-row')
+      const layout = await row.evaluate(element => ({
+        main: element.querySelector('.audit-main')!.getBoundingClientRect().width,
+        height: element.getBoundingClientRect().height,
+      }))
+      expect(layout.main, `platform audit event column at ${width}px`).toBeGreaterThanOrEqual(200)
+      expect(layout.height, `platform audit row at ${width}px`).toBeLessThanOrEqual(250)
+      await expectNoHorizontalScroll(platformPage, `platform audit at ${width}px`)
+    }
+    await platformPage.close()
+  })
+
+  test('activity panels stack and keep their own height across tablet widths (#1123)', async ({ page }) => {
+    await mockConsole(page, 'administrator')
+    await page.route('**/api/v1/jobs**', async route => {
+      if (route.request().method() !== 'GET' || new URL(route.request().url()).pathname !== '/api/v1/jobs') return route.fallback()
+      await route.fulfill({ json: { jobs: [{
+        id: 'job-1', revision: 1, enabled: true, archived: false, security_hash: 'fixture-security-hash', created_at: timestamp, updated_at: timestamp,
+        job: { name: 'Long-running edge scanning maintenance job', schedule: '0 * * * *', timezone: 'UTC', targets: ['192.0.2.10'], max_expanded_hosts: 16, tcp: { ports: '22,443', mode: 'connect', service_detection: false }, timing: 'balanced', timeout: '1h', baseline_samples: 1, change_confirmations: 3 },
+        baseline: { status: 'complete', samples: 1, attempts: 1, host_count: 1, pending: 8 },
+      }] } })
+    })
+    await page.route('**/api/v1/jobs/job-1/pending-changes**', async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      const changes = Array.from({ length: 8 }, (_, index) => ({ key: `port-${index + 1}`, change: { kind: 'port', target: '192.0.2.10', protocol: 'tcp', port: 4000 + index, severity: 'info' }, count: 1 }))
+      await route.fulfill({ json: { job_id: 'job-1', job: 'Long-running edge scanning maintenance job', pending_changes: changes, pagination: { limit: 10, offset: 0, total: changes.length, has_more: false, next_offset: null } } })
+    })
+
+    await page.goto('/activity')
+    await page.getByRole('button', { name: 'Show 8 pending changes' }).click()
+    await expect(page.getByText('TCP:4000', { exact: false })).toBeVisible()
+    for (const width of [768, 844, 900, 1024, 1100]) {
+      await page.setViewportSize({ width, height: 900 })
+      const grid = page.locator('.activity-state-grid')
+      const layout = await grid.evaluate(element => ({
+        columns: getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).length,
+        alignItems: getComputedStyle(element).alignItems,
+        incidentHeight: element.children[0].getBoundingClientRect().height,
+        pendingHeight: element.children[1].getBoundingClientRect().height,
+      }))
+      expect(layout.columns, `activity panel columns at ${width}px`).toBe(1)
+      expect(layout.alignItems).toBe('start')
+      expect(layout.pendingHeight - layout.incidentHeight, `independent panel heights at ${width}px`).toBeGreaterThan(80)
+      expect(await page.locator('.pending-job-heading strong').evaluate(element => getComputedStyle(element).overflowWrap)).not.toBe('anywhere')
+      await expectNoHorizontalScroll(page, `activity at ${width}px`)
+    }
+  })
+
+  test('platform unit facts stay wide on tablets and compact on a 320px phone (#1123)', async ({ page }) => {
+    await mockConsole(page, 'platform_admin')
+    await page.goto('/platform/units')
+    for (const width of [768, 900]) {
+      await page.setViewportSize({ width, height: 900 })
+      const facts = page.locator('.unit-facts').first()
+      await expect(facts).toBeVisible()
+      expect(await facts.evaluate(element => element.getBoundingClientRect().width), `unit facts at ${width}px`).toBeGreaterThanOrEqual(300)
+      await expectNoHorizontalScroll(page, `units at ${width}px`)
+    }
+
+    await page.setViewportSize({ width: 320, height: 760 })
+    const row = page.locator('.unit-row').first()
+    const rowHeight = await row.evaluate(element => element.getBoundingClientRect().height)
+    expect(rowHeight, 'compact business-unit row at 320px').toBeLessThanOrEqual(140)
+    await expectNoHorizontalScroll(page, 'units at 320px')
+
+  })
+
+  test('decorative heading icons stay with tablet layouts on all affected pages (#1123)', async ({ page }) => {
+    const unitPages = ['/activity', '/notifications', '/users', '/audit', '/public-dashboard']
+    const platformPages = ['/platform/admins', '/platform/status', '/platform/notifications', '/platform/audit']
+    await mockConsole(page, 'administrator')
+    for (const width of [768, 1024, 1100]) {
+      await page.setViewportSize({ width, height: 900 })
+      for (const path of unitPages) {
+        await page.goto(path)
+        const icon = page.locator('.page-heading > svg.muted-icon')
+        await expect(icon, `${path} has its heading icon`).toHaveCount(1)
+        await expect(icon, `${path} hides its orphaned heading icon at ${width}px`).toHaveCSS('display', 'none')
+      }
+    }
+
+    const platformPage = await page.context().newPage()
+    await mockConsole(platformPage, 'platform_admin')
+    for (const width of [768, 1024, 1100]) {
+      await platformPage.setViewportSize({ width, height: 900 })
+      for (const path of platformPages) {
+        await platformPage.goto(path)
+        const icon = platformPage.locator('.page-heading > svg.muted-icon')
+        await expect(icon, `${path} has its heading icon`).toHaveCount(1)
+        await expect(icon, `${path} hides its orphaned heading icon at ${width}px`).toHaveCSS('display', 'none')
+      }
+    }
+    await platformPage.close()
+  })
+
   test('status labels stay readable and archived host badges stay compact (#994)', async ({ page }) => {
     await mockConsole(page, 'administrator')
     await page.route('**/api/v1/hosts**', async route => {

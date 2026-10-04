@@ -97,6 +97,7 @@ describe('public dashboard pages', () => {
 
   it('renders public host summaries, services, registration data, and private badges', async () => {
     await renderPage(<PublicDashboardView />)
+    expect(container.querySelector('a[href="/source"]')?.textContent).toBe('Source code')
     expect(container.querySelector('h1')?.textContent).toBe('Edge status')
     expect(container.textContent).toContain('Monitored services')
     expect(container.textContent).toContain('198.51.100.10')
@@ -122,6 +123,7 @@ describe('public dashboard pages', () => {
     vi.mocked(getPublicDashboard).mockRejectedValue(new APIError('public status is not enabled', 'public_disabled'))
     await renderPage(<PublicDashboardView slug="nobody" />)
     expect(container.querySelector('h1')?.textContent).toBe('Public status unavailable')
+    expect(container.querySelector('a[href="/source"]')?.textContent).toBe('Source code')
     expect(container.textContent).toContain('This status page is not enabled by the administrator.')
   })
 

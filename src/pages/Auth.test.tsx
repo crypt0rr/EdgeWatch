@@ -108,6 +108,7 @@ describe('authentication pages', () => {
 
   it('logs in and routes administrators to the dashboard', async () => {
     await renderPage(<Login />, '/login')
+    expect(container.querySelector('a[href="/source"]')?.textContent).toBe('Source code')
     const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
     setInputValue(inputs[0], 'admin')
     setInputValue(inputs[1], 'correct horse battery staple')
@@ -208,6 +209,7 @@ describe('authentication pages', () => {
 
   it('validates setup locally, toggles password visibility, and creates the administrator', async () => {
     await renderFirstRunSetup()
+    expect(container.querySelector('a[href="/source"]')?.textContent).toBe('Source code')
     const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
     setInputValue(inputs[0], '  setup-token  ')
     setInputValue(inputs[1], 'short')
@@ -241,6 +243,7 @@ describe('authentication pages', () => {
 
   it('prefills a fragment activation token, removes it from browser history, and activates the account', async () => {
     await renderBrowserPage(<Activate />, '/activate?source=invite#token=%20invite-token%20')
+    expect(container.querySelector('a[href="/source"]')?.textContent).toBe('Source code')
     const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
     expect(inputs[0].value).toBe(' invite-token ')
     expect(window.location.pathname).toBe('/activate')

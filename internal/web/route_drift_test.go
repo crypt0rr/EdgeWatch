@@ -62,6 +62,7 @@ var routeDriftAllowlist = map[string]map[string]string{
 	},
 	"Handler": {
 		"/assets/": "embedded console assets served by asset, not an API route",
+		"/source":  "public source redirect served outside the versioned APIs",
 	},
 }
 

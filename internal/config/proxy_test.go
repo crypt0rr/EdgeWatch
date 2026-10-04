@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTrustedProxyConfigurationDefaultsToIgnoreHeaders(t *testing.T) {
@@ -99,6 +100,22 @@ func TestAllowedHostConfigurationValidatesNamesAndPorts(t *testing.T) {
 	base.Web.AllowedHosts = []string{tooLong}
 	if err := base.ValidateDeployment(); err == nil {
 		t.Fatal("overlong allowed host was accepted")
+	}
+}
+
+func TestSourceURLConfiguration(t *testing.T) {
+	base := Config{Version: 1, Database: "db", Retention: Duration(24 * time.Hour), Scheduler: Scheduler{MaxConcurrent: 1}, Web: Web{Listen: "127.0.0.1:8080"}}
+	for _, source := range []string{"", "https://github.com/example/EdgeWatch/tree/custom-tag", "https://source.example.test/edgewatch.tar.gz"} {
+		base.Web.SourceURL = source
+		if err := base.ValidateDeployment(); err != nil {
+			t.Errorf("source URL %q rejected: %v", source, err)
+		}
+	}
+	for _, source := range []string{"http://example.test/source", "//example.test/source", "https://", "https://user:password@example.test/source", "https://example.test/source?token=secret", "https://example.test/source#fragment", " https://example.test/source", "javascript:alert(1)", "https://example.test/" + strings.Repeat("a", 2048)} {
+		base.Web.SourceURL = source
+		if err := base.ValidateDeployment(); err == nil {
+			t.Errorf("source URL %q accepted", source)
+		}
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -127,6 +128,7 @@ const defaultForwardedHeader = "x-forwarded-for"
 type Web struct {
 	Listen          string   `yaml:"listen"`
 	AuthKeyFile     string   `yaml:"auth_key_file"`
+	SourceURL       string   `yaml:"source_url"`
 	TrustedProxies  []string `yaml:"trusted_proxies"`
 	ForwardedHeader string   `yaml:"forwarded_header"`
 	// AllowedHosts contains the host names (without a scheme) that may be used
@@ -964,6 +966,12 @@ func (c Config) ValidateDeployment() error {
 	}
 	if err := validateWebListen(c.Web.Listen); err != nil {
 		return err
+	}
+	if c.Web.SourceURL != "" {
+		source, err := url.Parse(c.Web.SourceURL)
+		if err != nil || len(c.Web.SourceURL) > 2048 || source.Scheme != "https" || source.Hostname() == "" || source.User != nil || source.RawQuery != "" || source.Fragment != "" || source.Opaque != "" || strings.TrimSpace(c.Web.SourceURL) != c.Web.SourceURL {
+			return fmt.Errorf("web.source_url must be an absolute HTTPS URL without credentials, a query, or a fragment (maximum 2048 bytes)")
+		}
 	}
 	if _, err := ParseTargetExclusions(c.Scanner.TargetExclusions); err != nil {
 		return fmt.Errorf("scanner.target_exclusions: %w", err)

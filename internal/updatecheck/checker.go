@@ -123,6 +123,16 @@ func BuildReleasePageURL(version string) string {
 	return ReleasePageBase + url.PathEscape(normalized)
 }
 
+// BuildSourceTreeURL identifies the exact source tree for a published build.
+// Development builds do not have a corresponding published tag.
+func BuildSourceTreeURL(version string) string {
+	releasePage := BuildReleasePageURL(version)
+	if releasePage == "" {
+		return ""
+	}
+	return "https://github.com/crypt0rr/EdgeWatch/tree/" + strings.TrimPrefix(releasePage, ReleasePageBase)
+}
+
 type githubRelease struct {
 	TagName     string `json:"tag_name"`
 	HTMLURL     string `json:"html_url"`

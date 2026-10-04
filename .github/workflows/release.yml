@@ -323,7 +323,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=EdgeWatch
             org.opencontainers.image.description=Scheduled Nmap port monitoring with baseline change notifications
-            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.licenses=AGPL-3.0-only
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.ref_name }}
@@ -446,6 +446,8 @@ jobs:
           grep -q 'linux/arm64' image-manifest.txt
           test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
           test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$GITHUB_REF_NAME"
+          test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}')" = "AGPL-3.0-only"
+          docker run --rm --entrypoint /bin/sh "$image" -c 'test -s /usr/share/licenses/edgewatch/LICENSE && test -s /usr/share/licenses/edgewatch/THIRD_PARTY_LICENSES.md && test -s /usr/share/licenses/naabu/LICENSE.md'
       - name: Verify container runtime capability matrix
         run: ./scripts/verify-container-runtime.sh "$IMAGE"
       - name: Verify binary version and configuration

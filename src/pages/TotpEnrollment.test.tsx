@@ -35,6 +35,7 @@ describe('forced TOTP enrolment', () => {
     const onLogout = vi.fn()
     renderWithProviders(<><TotpEnrollmentShell displayName="Riley Novak" onLogout={onLogout} /><Location /></>, { route: ['/jobs/job-1'] })
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/security'))
+    expect(await screen.findByRole('link', { name: 'Source code' })).toHaveAttribute('href', '/source')
     expect(screen.getByRole('heading', { name: 'Set up an authenticator' })).toBeInTheDocument()
     expect(screen.getByText('Set up TOTP to continue.')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Password' })).toBeInTheDocument()

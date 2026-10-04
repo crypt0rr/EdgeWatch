@@ -12,6 +12,7 @@ printf 'fixture frontend\n' > "$root/frontend-dist/index.html"
 
 for arch in x86_64 arm64; do
   printf '#!/bin/sh\nexit 0\n' > "$root/dist/edgewatch_0.0.0_Linux_$arch/edgewatch"
+  cp LICENSE README.md THIRD_PARTY_LICENSES.md "$root/dist/edgewatch_0.0.0_Linux_$arch/"
   chmod 0755 "$root/dist/edgewatch_0.0.0_Linux_$arch/edgewatch"
   tar -czf "$root/dist/edgewatch_0.0.0_Linux_$arch.tar.gz" -C "$root/dist" "edgewatch_0.0.0_Linux_$arch"
 done

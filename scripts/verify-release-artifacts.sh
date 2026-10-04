@@ -58,6 +58,19 @@ done
 
 (cd "$artifact_dir" && sha256sum --strict --quiet -c checksums.txt)
 
+for archive in "${archives[@]}"; do
+  members="$(tar -tzf "$artifact_dir/$archive" | sed 's#^\./##')" || {
+    echo "release archive $archive could not be read" >&2
+    exit 1
+  }
+  for notice in LICENSE THIRD_PARTY_LICENSES.md README.md; do
+    if ! grep -Eq "^([^/]+/)?${notice//./\\.}$" <<<"$members"; then
+      echo "release archive $archive is missing $notice" >&2
+      exit 1
+    fi
+  done
+done
+
 if ! jq -e --arg tag "$tag" --arg commit "$expected_commit" '
   .schema_version == 1 and .tag == $tag and ($commit == "" or .source_commit == $commit) and
   (.artifacts | length > 0) and (.frontend_sha256 | type == "string" and length == 64)

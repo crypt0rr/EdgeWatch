@@ -24,6 +24,7 @@ export function TotpEnrollmentShell({ displayName, onLogout }: { displayName: st
         <Route path="/security" element={<Security enrollment />} />
         <Route path="*" element={<Navigate to="/security" replace />} />
       </Routes>
+      <p className="enrollment-source"><a href="/source" target="_blank" rel="noopener noreferrer">Source code</a></p>
     </main>
   </div>
 }

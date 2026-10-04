@@ -21,6 +21,10 @@ builds:
 
 archives:
   - formats: [tar.gz]
+    files:
+      - LICENSE
+      - THIRD_PARTY_LICENSES.md
+      - README.md
 
 checksum:
   name_template: checksums.txt

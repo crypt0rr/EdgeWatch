@@ -15,6 +15,11 @@ web:
   # Optional host names accepted when the UI is reached through a reverse
   # proxy or tunnel. Loopback addresses and localhost are always accepted.
   # allowed_hosts: [edgewatch.example.com]
+  # Optional source for a modified or forked build. The Source code links in
+  # the console redirect here; official builds link to their exact Git tag.
+  # Use an HTTPS URL containing the complete corresponding source and build
+  # instructions for the running version.
+  # source_url: https://github.com/your-org/EdgeWatch/tree/your-build-tag
   # Trust only proxy addresses or networks that directly connect to EdgeWatch.
   # Only this one client-IP header is read; other forwarding headers are ignored.
   # The default is x-forwarded-for. Use forwarded only if your proxy controls it,

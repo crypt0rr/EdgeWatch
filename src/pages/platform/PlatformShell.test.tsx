@@ -96,6 +96,7 @@ describe('platform console shell', () => {
     expect(update).toHaveAttribute('href', 'https://example.test/releases/v0.20.0')
     expect(update).toHaveAttribute('target', '_blank')
     expect(update).toHaveAttribute('rel', 'noopener noreferrer')
+    expect(screen.getByRole('link', { name: 'Source code' })).toHaveAttribute('href', '/source')
   })
 
   it('opens and closes the mobile navigation drawer', async () => {

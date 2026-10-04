@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<nmaprun>
+  <verbose level="1"/>
+  <debugging level="0"/>
+  <host>
+    <status state="down" reason="no-response" reason_ttl="0"/>
+    <address addr="192.0.2.9" addrtype="ipv4"/>
+  </host>
+  <runstats>
+    <finished summary="Nmap done; 1 IP address (0 hosts up) scanned in 1.50 seconds" elapsed="1.50" exit="success"/>
+    <hosts up="0" down="1" total="1"/>
+  </runstats>
+</nmaprun>

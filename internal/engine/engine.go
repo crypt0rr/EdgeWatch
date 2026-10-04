@@ -149,7 +149,7 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 	// proceed. An explicit security-scope change is exempt because it already
 	// requires a deliberate rebaseline and may legitimately narrow the scope to
 	// zero positive ports.
-	if baselineSurfaceIsExplicitlyDown(*state.Baseline, scan.Snapshot) {
+	if baselineSurfaceIsExplicitlyDownForJob(*state.Baseline, scan.Snapshot, job) {
 		// When completed Nmap host discovery accounts for every address that
 		// supplied the old positive ports, the absence is a host-state change,
 		// not an ambiguous scan-wide port loss. Let Diff report the host
@@ -161,7 +161,8 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		// does not confirm individual ports as closed.
 		hostChanges := filterDNSAggregateChanges(*state.Baseline, scan.Snapshot, hostStateChanges(*state.Baseline, scan.Snapshot, scopeChanged), job)
 		if len(hostChanges) > 0 {
-			events := append(event, applyChanges(state, job.Name, scan.ID, hostChanges, job.Change.Confirmations, now)...)
+			protected := protectedNonHostChangeKeys(state)
+			events := append(event, applyChangesWithIncomplete(state, job.Name, scan.ID, hostChanges, job.Change.Confirmations, now, protected)...)
 			return events, hostChanges, nil
 		}
 		return event, nil, nil
@@ -243,7 +244,11 @@ func incidentReminderDue(last *time.Time, cadence string, now time.Time) bool {
 // the current complete scan. It intentionally returns false for legacy or
 // aggregated evidence whose contributing addresses cannot be determined.
 func baselineSurfaceIsExplicitlyDown(baseline, current model.Snapshot) bool {
-	downByProtocol := completedDownAddressesByProtocol(current)
+	return baselineSurfaceIsExplicitlyDownForJob(baseline, current, config.Job{})
+}
+
+func baselineSurfaceIsExplicitlyDownForJob(baseline, current model.Snapshot, job config.Job) bool {
+	downByProtocol := completedDownAddressesByProtocolForJob(baseline, current, job)
 	if len(downByProtocol) == 0 {
 		return false
 	}
@@ -275,6 +280,31 @@ func baselineSurfaceIsExplicitlyDown(baseline, current model.Snapshot) bool {
 		}
 	}
 	return positivePorts > 0
+}
+
+// protectedNonHostChangeKeys prevents a total-loss anomaly from advancing
+// recovery, pending confirmation, or one-scan suppression for port and
+// service changes while the guard evaluates only an explicit host transition.
+func protectedNonHostChangeKeys(state *model.JobState) map[string]bool {
+	protected := map[string]bool{}
+	protect := func(key string) {
+		if !strings.HasPrefix(key, "host|") {
+			protected[key] = true
+		}
+	}
+	for key := range state.Pending {
+		protect(key)
+	}
+	for key := range state.Incidents {
+		protect(key)
+	}
+	for key := range state.Suppressed {
+		protect(key)
+	}
+	for key := range state.SuppressedChanges {
+		protect(key)
+	}
+	return protected
 }
 
 // processIncompleteSuccess compares only evidence that is complete for this
@@ -517,9 +547,10 @@ type incompleteCoverage map[string]map[string]struct{}
 const scanCompleteCoverageReason = "scan-complete"
 
 type protocolCoverageStatus struct {
-	status         string
-	reason         string
-	discoveryState string
+	status          string
+	reason          string
+	discoveryState  string
+	discoveryEngine string
 }
 
 func incompleteProtocolCoverage(snapshot model.Snapshot) incompleteCoverage {
@@ -579,8 +610,9 @@ func incompleteProtocolCoverage(snapshot model.Snapshot) incompleteCoverage {
 				continue
 			}
 			discoveryState := strings.ToLower(strings.TrimSpace(protocol.DiscoveryState))
-			observed := protocolCoverageStatus{status: status, reason: reason, discoveryState: discoveryState}
-			incomplete := isIncompleteCoverageObservation(status, reason) && !isCompletedHostDiscoveryDown(status, reason, discoveryState)
+			discoveryEngine := strings.ToLower(strings.TrimSpace(protocol.DiscoveryEngine))
+			observed := protocolCoverageStatus{status: status, reason: reason, discoveryState: discoveryState, discoveryEngine: discoveryEngine}
+			incomplete := isIncompleteCoverageObservation(status, reason) && !isCompletedProtocolHostDiscoveryDown(protocol)
 			// Protocol failures are sticky even if a duplicate fragment reports
 			// the address as healthy later. A blank status is retained only until
 			// explicit evidence for the same protocol is available.
@@ -608,7 +640,7 @@ func incompleteProtocolCoverage(snapshot model.Snapshot) incompleteCoverage {
 		}
 		for protocol := range protocols {
 			status, observed := statuses[protocol]
-			completeDown := observed && isCompletedHostDiscoveryDown(status.status, status.reason, status.discoveryState)
+			completeDown := observed && status.discoveryEngine != "naabu" && isCompletedHostDiscoveryDown(status.status, status.reason, status.discoveryState)
 			if !observed || (status.status != "up" && !completeDown) {
 				mark(host.Address, protocol)
 			}
@@ -647,6 +679,16 @@ func isCompletedHostDiscoveryDown(status, reason, discoveryState string) bool {
 	default:
 		return false
 	}
+}
+
+func isCompletedProtocolHostDiscoveryDown(protocol model.ProtocolObservation) bool {
+	// A Naabu TCP discovery result cannot be overridden by contradictory Nmap
+	// enrichment evidence. Keep the protocol incomplete so its ports cannot be
+	// treated as closed or used to seed a baseline.
+	if strings.EqualFold(strings.TrimSpace(protocol.DiscoveryEngine), "naabu") {
+		return false
+	}
+	return isCompletedHostDiscoveryDown(protocol.Status, protocol.StatusReason, protocol.DiscoveryState)
 }
 
 func incompleteCoverageHas(coverage incompleteCoverage, address, protocol string) bool {
@@ -722,7 +764,7 @@ func completeHostDiscoveryStates(snapshot *model.Snapshot) {
 			if name == "" || (state != "up" && state != "down") || protocol.DiscoveryEngine == "naabu" {
 				continue
 			}
-			if state == "down" && !isCompletedHostDiscoveryDown(protocol.Status, protocol.StatusReason, state) {
+			if state == "down" && !isCompletedProtocolHostDiscoveryDown(protocol) {
 				continue
 			}
 			if state == "up" && strings.ToLower(strings.TrimSpace(protocol.Status)) != "up" {
@@ -1315,6 +1357,10 @@ func items(s model.Snapshot) map[string]item {
 }
 
 func Diff(old, new model.Snapshot, intersectionOnly bool) []model.Change {
+	return diffWithDownAddresses(old, new, intersectionOnly, completedDownAddressesByProtocol(new))
+}
+
+func diffWithDownAddresses(old, new model.Snapshot, intersectionOnly bool, downByProtocol map[string]map[string]struct{}) []model.Change {
 	a, b := items(old), items(new)
 	newPositivePorts := make(map[string]struct{})
 	for _, unit := range new.Units {
@@ -1324,7 +1370,6 @@ func Diff(old, new model.Snapshot, intersectionOnly bool) []model.Change {
 			}
 		}
 	}
-	downByProtocol := completedDownAddressesByProtocol(new)
 	keys := map[string]bool{}
 	for k := range a {
 		keys[k] = true
@@ -1451,6 +1496,10 @@ func missingPositivePortExplainedByDown(old model.Snapshot, value item, downByPr
 // protocol to be down). Protocol-specific evidence prevents one transport's
 // host-discovery result from hiding a meaningful port change in another.
 func completedDownAddressesByProtocol(snapshot model.Snapshot) map[string]map[string]struct{} {
+	return completedDownAddressesByProtocolForJob(model.Snapshot{}, snapshot, config.Job{})
+}
+
+func completedDownAddressesByProtocolForJob(old, snapshot model.Snapshot, job config.Job) map[string]map[string]struct{} {
 	down := map[string]map[string]struct{}{}
 	add := func(protocol, address string) {
 		protocol = strings.ToLower(strings.TrimSpace(protocol))
@@ -1470,8 +1519,24 @@ func completedDownAddressesByProtocol(snapshot model.Snapshot) map[string]map[st
 	}
 	for _, host := range snapshot.Hosts {
 		for _, observation := range host.Protocols {
-			if isCompletedHostDiscoveryDown(observation.Status, observation.StatusReason, observation.DiscoveryState) {
+			if isCompletedProtocolHostDiscoveryDown(observation) {
 				add(observation.Protocol, host.Address)
+			}
+		}
+	}
+	if job.DNSComparisonMode == config.DNSComparisonAggregate {
+		dnsAddresses := dnsAddressesInSnapshot(old)
+		for address := range dnsAddressesInSnapshot(snapshot) {
+			dnsAddresses[address] = struct{}{}
+		}
+		for protocol, addresses := range down {
+			for address := range addresses {
+				if dnsOnlyAddressInSnapshot(address, dnsAddresses, old) && dnsOnlyAddressInSnapshot(address, dnsAddresses, snapshot) {
+					delete(addresses, address)
+				}
+			}
+			if len(addresses) == 0 {
+				delete(down, protocol)
 			}
 		}
 	}
@@ -1875,7 +1940,8 @@ func filterDNSAggregateChanges(old, current model.Snapshot, changes []model.Chan
 }
 
 func diffForJob(old, current model.Snapshot, intersectionOnly bool, job config.Job) []model.Change {
-	return filterDNSAggregateChanges(old, current, Diff(old, current, intersectionOnly), job)
+	downByProtocol := completedDownAddressesByProtocolForJob(old, current, job)
+	return filterDNSAggregateChanges(old, current, diffWithDownAddresses(old, current, intersectionOnly, downByProtocol), job)
 }
 
 func scopeAllowsProtocol(snapshot model.Snapshot, target, protocol string) bool {

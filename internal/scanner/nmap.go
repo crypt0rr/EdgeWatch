@@ -47,7 +47,7 @@ type Nmap struct {
 // XML remains on stdout and has its own command-specific handling; stderr is
 // only a live status hint and must never be allowed to grow with a verbose or
 // compromised child process.
-const maxProgressOutput = 4 << 20
+const maxProgressOutput = 8 << 20
 
 // maxNmapOutput bounds one XML result before it can exhaust daemon memory.
 // Nmap output is normally compact even for a 65,535-port scope because only
@@ -988,10 +988,17 @@ func nmapEnrichmentArgs(family int, protocol string, pc config.Protocol, timing 
 	if len(template) == 0 {
 		template = pc.NmapArgs
 	}
-	return nmapArgsWithTemplate(family, protocol, pc, timing, assumeAlive, addresses, template)
+	// Naabu enrichment confirms discovered ports; its Nmap host status does not
+	// define target reachability. In particular, verbose Nmap output would turn
+	// an enrichment "down" response into explicit host-discovery evidence.
+	return nmapArgsWithTemplateAndDiscovery(family, protocol, pc, timing, assumeAlive, addresses, template, false)
 }
 
 func nmapArgsWithTemplate(family int, protocol string, pc config.Protocol, timing string, assumeAlive bool, addresses, template []string) []string {
+	return nmapArgsWithTemplateAndDiscovery(family, protocol, pc, timing, assumeAlive, addresses, template, !assumeAlive)
+}
+
+func nmapArgsWithTemplateAndDiscovery(family int, protocol string, pc config.Protocol, timing string, assumeAlive bool, addresses, template []string, includeDownHosts bool) []string {
 	// Nmap keeps XML on stdout and emits periodic timing lines on its status
 	// channel. These flags are internal observability/safety settings and are
 	// never replaceable by a profile. When a profile supplies placeholders, the
@@ -1003,6 +1010,11 @@ func nmapArgsWithTemplate(family int, protocol string, pc config.Protocol, timin
 		args = append(args, "-oX", "-", "-p", pc.Ports, timingArg(timing), "--reason", "--stats-every", "1s")
 		if assumeAlive {
 			args = append(args, "-Pn")
+		} else if includeDownHosts {
+			// Nmap only includes explicitly down hosts in XML at verbosity 1+.
+			// Without this, the parser cannot distinguish discovery-down from an
+			// omitted (incomplete) address.
+			args = append(args, "-v")
 		}
 		if family == 6 {
 			args = append(args, "-6")
@@ -1031,6 +1043,9 @@ func nmapArgsWithTemplate(family int, protocol string, pc config.Protocol, timin
 	if !templateContains(template, config.PlaceholderHostDiscovery) && assumeAlive {
 		args = append(args, "-Pn")
 	}
+	if includeDownHosts && !templateHasNmapVerbosity(template) {
+		args = append(args, "-v")
+	}
 	if !templateContains(template, config.PlaceholderAddressFamily) && family == 6 {
 		args = append(args, "-6")
 	}
@@ -1045,6 +1060,16 @@ func nmapArgsWithTemplate(family int, protocol string, pc config.Protocol, timin
 		args = appendNSEArgs(args, pc)
 	}
 	return args
+}
+
+func templateHasNmapVerbosity(template []string) bool {
+	for _, argument := range template {
+		switch argument {
+		case "-v", "-vv", "-vvv", "--verbose":
+			return true
+		}
+	}
+	return false
 }
 
 func nmapScanTypeArgs(protocol string, pc config.Protocol) []string {
@@ -1902,10 +1927,10 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 			observation.ScannedPortCount = len(ports)
 		}
 		if status != "up" {
-			// Nmap emits a host element with state=down when discovery is
-			// enabled. Keep that evidence as an explicit unreachable host
-			// rather than dropping it and making the caller guess whether the
-			// address was omitted. The compact Unit is intentionally absent.
+			// Preserve an explicit Nmap down element as unreachable evidence
+			// instead of making the caller guess whether the address was omitted.
+			// Only the managed -v host-discovery path makes Nmap emit these for
+			// silent addresses; the compact Unit is intentionally absent.
 			hostObservation.Status = "unreachable"
 			if strings.TrimSpace(hostObservation.StatusReason) == "" {
 				hostObservation.StatusReason = "nmap-host-down"

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -71,6 +72,79 @@ func TestAggregateDNSComparisonDoesNotHideDirectAddressReachability(t *testing.T
 	changes := diffForJob(baseline, current, false, config.Job{DNSComparisonMode: config.DNSComparisonAggregate})
 	if !hasChange(changes, "host|192.0.2.1", "down") {
 		t.Fatalf("aggregate mode hid reachability for an explicitly monitored address: %#v", changes)
+	}
+}
+
+func TestAggregateDNSHostDownConfirmsLogicalPortLoss(t *testing.T) {
+	const target = "edge.example"
+	addresses := []string{"192.0.2.1", "192.0.2.2"}
+	job := config.Job{Name: "aggregate-down", DNSComparisonMode: config.DNSComparisonAggregate, Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	baseline := model.Snapshot{
+		Scopes: []model.Scope{{Target: target, Protocol: "tcp", Ports: "443"}},
+		DNS:    map[string][]string{target: addresses},
+		Units: []model.Unit{{Target: target, Protocol: "tcp", Addresses: addresses, Ports: []model.PortState{{
+			Port: 443, State: "open", Evidence: addresses,
+		}}}},
+		HostStates: []model.HostState{{Address: addresses[0], State: "up"}, {Address: addresses[1], State: "up"}},
+	}
+	state := model.JobState{Baseline: &baseline, BaselineScanID: "baseline", BaselineConfigHash: "hash", Pending: map[string]model.Pending{}, Incidents: map[string]model.Incident{}, Suppressed: map[string]int{}, SuppressedChanges: map[string]model.Change{}, FingerprintCandidates: map[string]model.ValueCount{}}
+	down := model.Snapshot{
+		Scopes: []model.Scope{{Target: target, Protocol: "tcp", Ports: "443"}},
+		DNS:    map[string][]string{target: addresses},
+		Hosts: []model.HostObservation{
+			{Address: addresses[0], Status: "unreachable", StatusReason: "no-response", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down"}}},
+			{Address: addresses[1], Status: "unreachable", StatusReason: "no-response", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down"}}},
+		},
+	}
+	for i, want := range []string{"scan-anomaly", "changes-detected"} {
+		events, changes, err := processSuccessWithChanges(&state, job, scan(fmt.Sprintf("down-%d", i+1), down))
+		if err != nil || len(events) != 1 || events[0].Type != want {
+			t.Fatalf("aggregate explicit-down scan %d: events=%#v changes=%#v err=%v, want %s", i+1, events, changes, err, want)
+		}
+		if i == 0 && len(changes) != 0 {
+			t.Fatalf("first total-loss candidate reported changes: %#v", changes)
+		}
+		if i == 1 && (len(changes) != 1 || changes[0].Key != "port|"+target+"|tcp|443" || changes[0].New != "not-open") {
+			t.Fatalf("confirmed aggregate port loss changes = %#v", changes)
+		}
+	}
+
+	// If just the address that supplied a port is down and another configured
+	// DNS backend remains up, the logical port still closes after confirmation;
+	// the backend's individual host transition stays hidden in aggregate mode.
+	baseline = model.Snapshot{
+		Scopes:     []model.Scope{{Target: target, Protocol: "tcp", Ports: "443"}},
+		DNS:        map[string][]string{target: addresses},
+		Units:      []model.Unit{{Target: target, Protocol: "tcp", Addresses: addresses, Ports: []model.PortState{{Port: 443, State: "open", Evidence: []string{addresses[0]}}}}},
+		HostStates: []model.HostState{{Address: addresses[0], State: "up"}, {Address: addresses[1], State: "up"}},
+	}
+	state = model.JobState{Baseline: &baseline, BaselineScanID: "baseline", BaselineConfigHash: "hash", Pending: map[string]model.Pending{}, Incidents: map[string]model.Incident{}, Suppressed: map[string]int{}, SuppressedChanges: map[string]model.Change{}, FingerprintCandidates: map[string]model.ValueCount{}}
+	partialDown := model.Snapshot{
+		Scopes: []model.Scope{{Target: target, Protocol: "tcp", Ports: "443"}},
+		DNS:    map[string][]string{target: addresses},
+		Hosts: []model.HostObservation{
+			{Address: addresses[0], Status: "unreachable", StatusReason: "no-response", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down"}}},
+			{Address: addresses[1], Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}},
+		},
+	}
+	if events, _, err := processSuccessWithChanges(&state, job, scan("backend-down-1", partialDown)); err != nil || len(events) != 1 || events[0].Type != "scan-anomaly" {
+		t.Fatalf("first single-backend loss = %#v, %v", events, err)
+	}
+	events, changes, err := processSuccessWithChanges(&state, job, scan("backend-down-2", partialDown))
+	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" || len(changes) != 1 || changes[0].Key != "port|"+target+"|tcp|443" {
+		t.Fatalf("confirmed single-backend logical port loss = events %#v changes %#v err %v", events, changes, err)
+	}
+
+	// Aggregate mode must not reinterpret explicitly configured IP targets as
+	// logical DNS-only reachability.
+	directBaseline := dnsComparisonSnapshot(addresses[0], "open", "https | edge", "up")
+	directCurrent := dnsComparisonSnapshot(addresses[0], "", "", "down")
+	for _, snapshot := range []*model.Snapshot{&directBaseline, &directCurrent} {
+		snapshot.Scopes = append(snapshot.Scopes, model.Scope{Target: addresses[0], Protocol: "tcp", Ports: "443"})
+		snapshot.Normalize()
+	}
+	if changes := diffForJob(directBaseline, directCurrent, false, job); !hasChange(changes, "host|"+addresses[0], "down") || hasChange(changes, "port|edge.example|tcp|443", "not-open") {
+		t.Fatalf("aggregate mode changed direct-address host-down semantics: %#v", changes)
 	}
 }
 

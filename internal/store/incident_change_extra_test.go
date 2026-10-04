@@ -61,8 +61,8 @@ func TestAcceptHostDownUpdatesExpectedDNSHostAndRetainsSiblingEvidence(t *testin
 		}},
 		HostStates: []model.HostState{{Address: downAddress, State: "up"}, {Address: liveAddress, State: "up"}},
 		Hosts: []model.HostObservation{
-			{Address: downAddress, Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open", Service: &model.ServiceObservation{Name: "https", Product: "Down"}}}}}},
-			{Address: liveAddress, Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open", Service: &model.ServiceObservation{Name: "https", Product: "Live"}}}}}},
+			{Address: downAddress, Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open", Service: &model.ServiceObservation{Name: "https", Product: "Down", Method: "probed"}}}}}},
+			{Address: liveAddress, Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open", Service: &model.ServiceObservation{Name: "https", Product: "Live", Method: "probed"}}}}}},
 		},
 	}
 	change := model.Change{Key: "host|" + downAddress, Kind: "host", Target: downAddress, Old: "up", New: "down"}
@@ -76,7 +76,7 @@ func TestAcceptHostDownUpdatesExpectedDNSHostAndRetainsSiblingEvidence(t *testin
 		t.Fatalf("accepted baseline ports = %#v", snapshot.Units)
 	}
 	port := snapshot.Units[0].Ports[0]
-	if port.Port != 443 || port.Service != model.Fingerprint("https", "Live", "", "", nil) || len(port.Evidence) != 1 || port.Evidence[0] != liveAddress {
+	if port.Port != 443 || port.Service != "https | Live |  |" || len(port.Evidence) != 1 || port.Evidence[0] != liveAddress {
 		t.Fatalf("accepted sibling port evidence = %#v", port)
 	}
 	if snapshot.Hosts[0].Status != "unreachable" || len(snapshot.Hosts[0].Protocols[0].Ports) != 0 {
@@ -101,6 +101,74 @@ func TestAcceptHostDownPreservesLegacyAggregateServiceWithoutSiblingFingerprintE
 	}
 	if len(snapshot.Units) != 1 || len(snapshot.Units[0].Ports) != 1 || snapshot.Units[0].Ports[0].Service != "https" {
 		t.Fatalf("legacy aggregate service was lost while accepting one DNS host: %#v", snapshot.Units)
+	}
+}
+
+func TestAcceptHostDownRecomputesServiceWithScannerFingerprintRules(t *testing.T) {
+	const downAddress = "192.0.2.30"
+	const liveAddress = "192.0.2.31"
+	tests := []struct {
+		name        string
+		service     model.ServiceObservation
+		wantService string
+	}{
+		{
+			name: "probed fingerprint trims the serialized value",
+			service: model.ServiceObservation{
+				Name: " ssh ", Product: " OpenSSH ", Version: " 9.6 ", Method: "probed",
+			},
+			wantService: "ssh | OpenSSH | 9.6 |",
+		},
+		{
+			name: "probed fingerprint retains extra info and CPEs",
+			service: model.ServiceObservation{
+				Name: "ssh", Product: "OpenSSH", Version: "9.6", ExtraInfo: "Debian",
+				Method: "probed", CPEs: []string{"cpe:/a:vendor:sshd:9.6"},
+			},
+			wantService: model.Fingerprint("ssh", "OpenSSH", "9.6", "Debian", []string{"cpe:/a:vendor:sshd:9.6"}),
+		},
+		{
+			name:        "table guess is not a baseline fingerprint",
+			service:     model.ServiceObservation{Name: "ssh", Method: "table"},
+			wantService: "",
+		},
+		{
+			name: "accepted fingerprint is retained as-is",
+			service: model.ServiceObservation{
+				Product: "ssh | OpenSSH | 9.6 |", Method: "accepted",
+			},
+			wantService: "ssh | OpenSSH | 9.6 |",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := model.Snapshot{
+				Scopes: []model.Scope{{Target: "edge.example", Protocol: "tcp", Ports: "22", ServiceDetection: true}},
+				DNS:    map[string][]string{"edge.example": {downAddress, liveAddress}},
+				Units: []model.Unit{{Target: "edge.example", Protocol: "tcp", Addresses: []string{downAddress, liveAddress}, Ports: []model.PortState{{
+					Port: 22, State: "open", Service: "old union", Evidence: []string{downAddress, liveAddress},
+				}}}},
+				Hosts: []model.HostObservation{
+					{Address: downAddress, Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 22, State: "open", Service: &model.ServiceObservation{Name: "ssh", Product: "Removed", Method: "probed"}}}}}},
+					{Address: liveAddress, Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 22, State: "open", Service: &test.service}}}}},
+				},
+				HostStates: []model.HostState{{Address: downAddress, State: "up"}, {Address: liveAddress, State: "up"}},
+			}
+			change := model.Change{Key: "host|" + downAddress, Kind: "host", Target: downAddress, Old: "up", New: "down"}
+			if err := applyAcceptedChange(&snapshot, change); err != nil {
+				t.Fatalf("accept host-down change: %v", err)
+			}
+			if len(snapshot.Units) != 1 || len(snapshot.Units[0].Ports) != 1 {
+				t.Fatalf("accepted baseline units = %#v", snapshot.Units)
+			}
+			port := snapshot.Units[0].Ports[0]
+			if port.Service != test.wantService {
+				t.Fatalf("remaining scanner fingerprint = %q, want %q", port.Service, test.wantService)
+			}
+			if len(port.Evidence) != 1 || port.Evidence[0] != liveAddress {
+				t.Fatalf("remaining positive-port evidence = %#v", port.Evidence)
+			}
+		})
 	}
 }
 

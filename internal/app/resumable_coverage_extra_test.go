@@ -675,9 +675,10 @@ func canceledContext() context.Context {
 // reports only 443, followed by Nmap enrichment that reports the requested
 // ports in open as open and every other requested port as closed.
 type naabuConfirmationScanner struct {
-	mu       sync.Mutex
-	open     map[int]bool
-	enriched []string
+	mu             sync.Mutex
+	open           map[int]bool
+	enriched       []string
+	enrichmentDown bool
 }
 
 func (s *naabuConfirmationScanner) Version(context.Context) string { return "naabu-confirmation" }
@@ -705,6 +706,12 @@ func (s *naabuConfirmationScanner) ScanWorkUnit(_ context.Context, _ config.Job,
 				DiscoveredPorts: []model.PortObservation{{Port: 443, State: "open", Verification: "discovered"}},
 			}}}},
 		}, nil
+	}
+	if s.enrichmentDown {
+		return model.Snapshot{Hosts: []model.HostObservation{{
+			Address: "192.0.2.1", Status: "unreachable", StatusReason: "no-response",
+			Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down"}},
+		}}}, nil
 	}
 	ports, err := config.ParsePorts(unit.Ports)
 	if err != nil {
@@ -793,6 +800,61 @@ func TestNaabuMissDoesNotRecoverIncidentWithoutNmapConfirmation(t *testing.T) {
 				t.Fatalf("Nmap enrichment ports = %#v, want the discovered and the incident port", fake.enriched)
 			}
 		})
+	}
+}
+
+func TestResumableNaabuOpenThenNmapDownKeepsScanIncomplete(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Scanner = &naabuConfirmationScanner{open: map[int]bool{}, enrichmentDown: true}
+	job := config.NormalizeJob(config.Job{
+		Name: "naabu-open-nmap-down", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
+		TCP:     &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Mode: "connect", Naabu: &config.NaabuOptions{ScanType: "connect"}},
+		Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour), Baseline: config.Baseline{Samples: 1},
+	})
+	record, err := defaultTenant(db).CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := model.Snapshot{
+		Scopes:     []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}},
+		Units:      []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: []model.PortState{{Port: 22, State: "open"}, {Port: 8443, State: "open"}}}},
+		HostStates: []model.HostState{{Address: "192.0.2.1", State: "up"}},
+	}
+	if _, err := db.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &baseline
+		state.BaselineScanID = "baseline"
+		state.BaselineConfigHash = record.Job.SecurityHash()
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	scan, events, err := a.RunJobRecord(ctx, record)
+	if err != nil || scan.Status != "incomplete" || !strings.Contains(scan.Error, "192.0.2.1") {
+		t.Fatalf("resumable Naabu/Nmap contradiction = %#v events=%#v err=%v", scan, events, err)
+	}
+	if len(events) != 1 || events[0].Type != "scan-incomplete" {
+		t.Fatalf("resumable Naabu/Nmap contradiction events = %#v", events)
+	}
+	state, err := defaultTenant(db).RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Baseline == nil || len(state.Baseline.Units) != 1 || len(state.Baseline.Units[0].Ports) != 2 || len(state.Incidents) != 0 {
+		t.Fatalf("incomplete enrichment changed baseline or incidents: %#v", state)
+	}
+	if len(scan.Snapshot.Hosts) != 1 || len(scan.Snapshot.Hosts[0].Protocols) != 1 || scan.Snapshot.Hosts[0].Protocols[0].DiscoveryEngine != "naabu" {
+		t.Fatalf("resumable Naabu/Nmap provenance was not merged: %#v", scan.Snapshot.Hosts)
 	}
 }
 

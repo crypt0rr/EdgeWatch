@@ -417,6 +417,121 @@ test.describe('responsive issue regressions', () => {
     await expectNoHorizontalScroll(page)
   })
 
+  test('incident table keeps every column and action inside the card on desktop widths (#1122)', async ({ page }) => {
+    await mockConsole(page, 'administrator')
+    const rows = Array.from({ length: 8 }, (_, i) => ({
+      job_id: 'job-1',
+      job: 'Customer-facing API gateway perimeter monitoring for the EU West production estate (weekly)',
+      incident: {
+        change: {
+          key: `svc-${i}`,
+          kind: 'service',
+          target: i % 2 ? 'api-gateway.eu-west-1.example.com' : '2001:0db8:85a3:0000:0000:8a2e:0370:7334',
+          protocol: 'tcp',
+          port: 443 + i,
+          old: 'nginx 1.18.0 (Ubuntu)',
+          new: 'Apache httpd 2.4.62 ((Debian) OpenSSL/3.0.15)',
+          severity: 'warning',
+        },
+        opened_at: timestamp,
+        last_seen_at: timestamp,
+      },
+    }))
+    await page.route(url => new URL(url).pathname === '/api/v1/incidents', async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      await route.fulfill({ json: { incidents: rows, pagination: { limit: 50, offset: 0, total: rows.length, has_more: false, next_offset: null } } })
+    })
+
+    for (const width of [1101, 1180, 1280, 1920]) {
+      await page.setViewportSize({ width, height: 900 })
+      await page.goto('/incidents')
+      const card = page.locator('.incident-table-card')
+      const cardBox = (await card.boundingBox())!
+      if (width <= 1400) {
+        await expect(page.locator('.desktop-incident-table')).toBeHidden()
+        const cards = page.locator('.mobile-incident-list .incident-card')
+        await expect(cards).toHaveCount(rows.length)
+        for (const incidentCard of await cards.all()) {
+          await expect(incidentCard.locator('.pill')).toBeVisible()
+          await expect(incidentCard.locator('.incident-facts')).toContainText('Last seen')
+          const incidentBox = (await incidentCard.boundingBox())!
+          for (const button of await incidentCard.locator('.incident-actions button').all()) {
+            const buttonBox = await button.boundingBox()
+            expect(buttonBox, `incident action is missing at ${width}px`).not.toBeNull()
+            expect(buttonBox!.x).toBeGreaterThanOrEqual(incidentBox.x)
+            expect(buttonBox!.x + buttonBox!.width).toBeLessThanOrEqual(incidentBox.x + incidentBox.width)
+          }
+        }
+      } else {
+        await expect(page.locator('.desktop-incident-table')).toBeVisible()
+        const dimensions = await card.evaluate(element => ({ client: element.clientWidth, scroll: element.scrollWidth }))
+        expect(dimensions.scroll, `incident table overflows its card at ${width}px`).toBeLessThanOrEqual(dimensions.client)
+
+        const importantCells = page.locator('.desktop-incident-table tbody tr td:nth-child(4), .desktop-incident-table tbody tr td:nth-child(5), .desktop-incident-table .incident-actions button')
+        for (const element of await importantCells.all()) {
+          const box = await element.boundingBox()
+          expect(box, `incident action or detail is missing at ${width}px`).not.toBeNull()
+          expect(box!.x, `incident content starts outside the card at ${width}px`).toBeGreaterThanOrEqual(cardBox.x)
+          expect(box!.x + box!.width, `incident content ends outside the card at ${width}px`).toBeLessThanOrEqual(cardBox.x + cardBox.width)
+        }
+      }
+      await expectNoHorizontalScroll(page, `/incidents at ${width}px`)
+    }
+  })
+
+  test('stale incident actions focus their explanation where the user can see it (#1122)', async ({ page }) => {
+    await mockConsole(page, 'administrator')
+    const rows = Array.from({ length: 12 }, (_, i) => ({
+      job_id: 'job-1',
+      job: 'Public web',
+      incident: {
+        change: {
+          key: `port|192.0.2.${i + 1}|tcp|443`,
+          kind: 'port',
+          target: `192.0.2.${i + 1}`,
+          protocol: 'tcp',
+          port: 443,
+          old: 'closed',
+          new: 'open',
+          severity: 'warning',
+        },
+        opened_at: timestamp,
+        last_seen_at: timestamp,
+      },
+    }))
+    const staleScenarios = [
+      { viewport: { width: 375, height: 812 }, status: 409, code: 'incident_conflict', message: 'This incident changed while it was open. The incident list was refreshed; review the new evidence before retrying.' },
+      { viewport: { width: 1280, height: 800 }, status: 409, code: 'incident_conflict', message: 'This incident changed while it was open. The incident list was refreshed; review the new evidence before retrying.' },
+      { viewport: { width: 375, height: 812 }, status: 404, code: 'incident_not_found', message: 'This incident is no longer active. The incident list was refreshed.' },
+      { viewport: { width: 1280, height: 800 }, status: 404, code: 'incident_not_found', message: 'This incident is no longer active. The incident list was refreshed.' },
+    ] as const
+    let activeScenario: typeof staleScenarios[number] = staleScenarios[0]
+    await page.route(url => new URL(url).pathname === '/api/v1/incidents', async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      await route.fulfill({ json: { incidents: rows, pagination: { limit: 50, offset: 0, total: rows.length, has_more: false, next_offset: null } } })
+    })
+    await page.route('**/api/v1/jobs/job-1/incidents/accept', async route => {
+      await route.fulfill({ status: activeScenario.status, json: { error: { code: activeScenario.code, message: 'incident changed' } } })
+    })
+
+    for (const scenario of staleScenarios) {
+      activeScenario = scenario
+      await page.setViewportSize(scenario.viewport)
+      await page.goto('/incidents')
+      await expect(page.locator('.mobile-incident-list .incident-card')).toHaveCount(rows.length)
+      const accept = page.getByRole('button', { name: 'Accept change' }).last()
+      await accept.scrollIntoViewIfNeeded()
+      await accept.click()
+      const dialog = page.getByRole('dialog', { name: 'Accept this change?' })
+      await dialog.getByRole('button', { name: 'Accept change' }).click()
+
+      const alert = page.getByRole('alert')
+      await expect(alert).toHaveText(scenario.message)
+      await expect(alert).toBeInViewport()
+      await expect(alert).toBeFocused()
+    }
+  })
+
   test('scan diff wraps changes and shows the complete failure reason (#974)', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 900 })
     await mockConsole(page, 'administrator')

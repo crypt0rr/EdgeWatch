@@ -329,7 +329,11 @@ describe('application shell', () => {
     vi.mocked(acceptIncident).mockRejectedValueOnce(new APIError('stale incident', 'incident_conflict'))
     fireEvent.click(screen.getAllByRole('button', { name: 'Accept change' })[0])
     fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('changed while it was open'))
+    await waitFor(() => {
+      const alert = screen.getByRole('alert')
+      expect(alert).toHaveTextContent('changed while it was open')
+      expect(alert).toHaveFocus()
+    })
   })
 
   it('shows informational incidents neutrally and closes and refreshes a missing incident action', async () => {
@@ -346,7 +350,11 @@ describe('application shell', () => {
     fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
 
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('This incident is no longer active'))
+    await waitFor(() => {
+      const alert = screen.getByRole('alert')
+      expect(alert).toHaveTextContent('This incident is no longer active')
+      expect(alert).toHaveFocus()
+    })
     await waitFor(() => expect(screen.getByText('No active incidents')).toBeInTheDocument())
     expect(listIncidents).toHaveBeenCalledTimes(2)
   })

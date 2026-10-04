@@ -2119,3 +2119,6 @@ label small,
   .pending-change-list li { align-items: flex-start; flex-direction: column; }
   .pending-count { white-space: normal; }
 }
+
+.enrollment-source { margin-top: 1rem; text-align: center; }
+.enrollment-source a { color: var(--blue); text-decoration: underline; }

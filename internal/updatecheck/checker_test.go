@@ -48,6 +48,19 @@ func TestBuildReleasePageURLLinksOnlyPublishedVersions(t *testing.T) {
 	}
 }
 
+func TestBuildSourceTreeURLLinksExactTag(t *testing.T) {
+	for raw, want := range map[string]string{
+		"v0.25.0":           "https://github.com/crypt0rr/EdgeWatch/tree/v0.25.0",
+		"0.25.0-rc.1":       "https://github.com/crypt0rr/EdgeWatch/tree/v0.25.0-rc.1",
+		"dev":               "",
+		"0.25.0-3-gabc1234": "",
+	} {
+		if got := BuildSourceTreeURL(raw); got != want {
+			t.Errorf("BuildSourceTreeURL(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
 func TestNewClientDefaultsAndURLValidation(t *testing.T) {
 	client := NewClient()
 	if client.Endpoint != LatestReleaseEndpoint || client.HTTPClient == nil || client.UserAgent == "" || client.MaxResponseBytes != MaxResponseBytes {

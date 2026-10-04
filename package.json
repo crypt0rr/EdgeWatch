@@ -1,6 +1,7 @@
 {
   "name": "edgewatch-console",
   "private": true,
+  "license": "AGPL-3.0-only",
   "type": "module",
   "engines": {
     "node": ">=24.16.0 <25",

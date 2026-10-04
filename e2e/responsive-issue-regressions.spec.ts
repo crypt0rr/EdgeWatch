@@ -22,6 +22,10 @@ test.describe('responsive issue regressions', () => {
     const sidebar = page.locator('#primary-navigation')
     expect(await sidebar.evaluate(element => getComputedStyle(element).overflowY)).toBe('auto')
     const signOut = page.getByRole('button', { name: 'Sign out' })
+    const sourceLink = sidebar.getByRole('link', { name: 'Source code' })
+    await sourceLink.scrollIntoViewIfNeeded()
+    await expect(sourceLink).toBeVisible()
+    await expect(sourceLink).toHaveAttribute('href', '/source')
     await signOut.scrollIntoViewIfNeeded()
     let box = (await signOut.boundingBox())!
     expect(box.y).toBeGreaterThanOrEqual(0)
@@ -56,6 +60,7 @@ test.describe('responsive issue regressions', () => {
     })
 
     await page.goto('/login')
+    await expect(page.getByRole('link', { name: 'Source code' })).toHaveAttribute('href', '/source')
     const setupLink = page.getByRole('link', { name: 'Create the platform administrator' })
     const setupLinkAppearance = await setupLink.evaluate(element => ({
       decoration: getComputedStyle(element).textDecorationLine,

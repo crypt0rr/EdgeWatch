@@ -16,15 +16,17 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/rdap"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/updatecheck"
 )
 
 type Server struct {
-	App     *app.App
-	Store   *store.Store
-	Auth    *auth.Manager
-	RDAP    *rdap.Client
-	Log     *slog.Logger
-	Version string
+	App       *app.App
+	Store     *store.Store
+	Auth      *auth.Manager
+	RDAP      *rdap.Client
+	Log       *slog.Logger
+	Version   string
+	sourceURL string
 
 	mu sync.Mutex
 	// sseReservationMu serializes durable cursor reservations and ID allocation
@@ -171,7 +173,14 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	rdapClient.OnCacheWriteError = func(err error) {
 		logger.Warn("rdap cache write failed", "error", err)
 	}
-	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, now: time.Now, subscribers: map[chan sseMessage]struct{}{}, shutdown: make(chan struct{}), sseCancels: map[chan sseMessage]context.CancelFunc{}, sseSessionKey: map[chan sseMessage]string{}, sseUserKey: map[chan sseMessage]string{}, sseAuthCache: map[string]sseAuthCacheEntry{}, sseAuthTTL: defaultSSEAuthCacheTTL, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}, publicHits: map[string][]time.Time{}}
+	sourceURL := updatecheck.BuildSourceTreeURL(buildVersion)
+	if sourceURL == "" {
+		sourceURL = "https://github.com/crypt0rr/EdgeWatch"
+	}
+	if a != nil && a.Config != nil && a.Config.Web.SourceURL != "" {
+		sourceURL = a.Config.Web.SourceURL
+	}
+	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, sourceURL: sourceURL, now: time.Now, subscribers: map[chan sseMessage]struct{}{}, shutdown: make(chan struct{}), sseCancels: map[chan sseMessage]context.CancelFunc{}, sseSessionKey: map[chan sseMessage]string{}, sseUserKey: map[chan sseMessage]string{}, sseAuthCache: map[string]sseAuthCacheEntry{}, sseAuthTTL: defaultSSEAuthCacheTTL, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}, publicHits: map[string][]time.Time{}}
 	if s != nil {
 		if start, end, err := s.SSECursor().Reserve(context.Background(), sseEventIDBlockSize); err != nil {
 			logger.Warn("SSE event cursor could not be reserved", "error", err)
@@ -237,6 +246,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/public/v1/", s.publicAPI)
 	mux.HandleFunc("/api/v1/", s.api)
 	mux.HandleFunc("/assets/", s.asset)
+	mux.HandleFunc("/source", s.source)
 	mux.HandleFunc("/", s.spa)
 	// Apply Host validation at the HTTP boundary, before API routing and
 	// authentication. Direct handler calls used by package tests intentionally
@@ -250,6 +260,18 @@ func (s *Server) Handler() http.Handler {
 		mux.ServeHTTP(w, r)
 	})
 	return s.requestLogging(securityHeaders(hostGuard))
+}
+
+// source offers a public, stable link to the running build's corresponding
+// source without adding release metadata to the setup or public-status APIs.
+func (s *Server) source(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, s.sourceURL, http.StatusFound)
 }
 
 // noteUntrustedProxy logs a warning, at most once an hour, when requests

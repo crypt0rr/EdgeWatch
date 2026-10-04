@@ -95,6 +95,7 @@ test('a business unit public page loads by its slug without signing in', async (
 
   await page.goto('/public')
   await expect(page.getByRole('heading', { name: 'Default unit status' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Source code' })).toHaveAttribute('href', '/source')
 
   expect(publicRequests).toEqual(['/api/public/v1/dashboard/other', '/api/public/v1/dashboard/nobody', '/api/public/v1/dashboard'])
   expect(consoleRequests).toEqual([])

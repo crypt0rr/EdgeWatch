@@ -100,7 +100,8 @@ async function enrolAuthenticator(page: Page, accountPassword: string, { forced 
     await expect(page.getByRole('heading', { name: 'Set up an authenticator' })).toBeVisible()
     await expect(page.getByRole('status').filter({ hasText: 'Set up TOTP to continue.' })).toBeVisible()
     // The enrolment screen mounts no page with unit or platform data.
-    await expect(page.getByRole('link')).toHaveCount(0)
+    await expect(page.getByRole('link')).toHaveCount(1)
+    await expect(page.getByRole('link', { name: 'Source code' })).toHaveAttribute('href', '/source')
     await page.getByLabel('Account password').fill(accountPassword)
   } else {
     await expect(page.getByRole('heading', { name: 'Security', exact: true })).toBeVisible()

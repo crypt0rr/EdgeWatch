@@ -65,6 +65,10 @@ type App struct {
 	ReleaseChecker      ReleaseChecker
 	UpdateInterval      time.Duration
 	clock               func() time.Time
+	// persistenceBudget overrides the size-based scan-finalization work budget
+	// in deterministic tests. Production leaves it nil and uses
+	// scanPersistenceTimeout.
+	persistenceBudget func(hostCount int) time.Duration
 	// units tracks the business units that this process paused, and wakes
 	// the purge of deleted ones; see units.go.
 	units unitLifecycle
@@ -118,16 +122,17 @@ var ErrScanCycleStalled = errors.New("scan cycle is stalled; manual retry requir
 var ErrQueuedRunSkipped = errors.New("queued run skipped")
 
 const (
-	scanPersistenceTimeoutFloor   = 10 * time.Second
-	scanPersistenceTimeoutPerHost = 25 * time.Millisecond
-	scanPersistenceTimeoutMax     = 5 * time.Minute
+	scanPersistenceTimeoutFloor      = 10 * time.Second
+	scanPersistenceTimeoutPerHost    = 25 * time.Millisecond
+	scanPersistenceTimeoutMax        = 5 * time.Minute
+	scanPersistenceWriterWaitTimeout = 5 * time.Minute
 )
 
-// scanPersistenceTimeout gives the final database transaction enough time to
-// serialize detailed host evidence without allowing a pathological result to
-// block shutdown forever. The previous fixed ten-second budget was adequate
-// for small jobs but could cancel a large successful scan midway through its
-// SaveScan transaction.
+// scanPersistenceTimeout gives the finalization transaction enough work time
+// to serialize detailed host evidence after it obtains SQLite's writer. The
+// separate writer-wait bound ensures that contention does not consume this
+// size-based budget. The previous fixed ten-second budget could cancel a
+// large successful scan midway through its SaveScan transaction.
 func scanPersistenceTimeout(hostCount int) time.Duration {
 	if hostCount <= 0 {
 		return scanPersistenceTimeoutFloor
@@ -749,6 +754,7 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 		}
 		return model.Scan{}, nil, err
 	}
+	leaseReleased := false
 	scanCtx, cancel := context.WithTimeout(ctx, job.Timeout.Value())
 	run := &activeRun{scan: model.ActiveScan{ID: scan.ID, JobID: jobID, Job: job.Name, JobRevision: revision, StartedAt: started, EstimatedProbes: estimate.Probes, NmapInvocations: estimate.NmapInvocations, EstimatedSeconds: estimate.EstimatedSeconds, TotalProbes: estimate.Probes, TotalInvocations: estimate.NmapInvocations, Phase: "starting", Scanner: engineName, ScannerProfileID: profileID, ScannerProfileRevision: profileRevision}, cancel: cancel}
 	a.registerRun(scope.ID(), scan.ID, run)
@@ -810,9 +816,14 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 		publishCompletion(lifecycleExitMessage)
 	}()
 	defer func() {
-		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if leaseReleased {
+			return
+		}
+		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), scanPersistenceWriterWaitTimeout)
 		defer releaseCancel()
-		_ = system.ReleaseJobLease(releaseCtx, leaseKey, leaseOwner)
+		if err := system.ReleaseJobLease(releaseCtx, leaseKey, leaseOwner); err != nil && a.Logger != nil {
+			a.Logger.Warn("scan lease fallback release failed", "job", job.Name, "scan_id", scan.ID, "error", err)
+		}
 	}()
 	var snapshot model.Snapshot
 	resumableRun := false
@@ -888,62 +899,105 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 	}
 	a.updateActivePhase(scan.ID, "finalizing")
 	persistTimeout := scanPersistenceTimeout(len(scan.Snapshot.Hosts))
+	if a.persistenceBudget != nil {
+		persistTimeout = a.persistenceBudget(len(scan.Snapshot.Hosts))
+	}
 	if a.Logger != nil {
 		a.Logger.Debug("persisting scan result", "scan_id", scan.ID, "hosts", len(scan.Snapshot.Hosts), "timeout", persistTimeout)
 	}
 	// The result is persisted even when the run was canceled, so the
 	// persistence context keeps ctx's values but not its cancellation.
-	persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
-	defer persistCancel()
+	persistCtx := context.WithoutCancel(ctx)
+	destinationCtx, destinationCancel := context.WithTimeout(persistCtx, scanPersistenceWriterWaitTimeout)
 	var destinations []string
 	var destinationErr error
 	notifier := a.Notifier.Tenant(ts)
 	if legacySelectionCaptured {
-		destinations, destinationErr = notifier.QueueDestinationsForSelection(persistCtx, legacyNotificationSelection)
+		destinations, destinationErr = notifier.QueueDestinationsForSelection(destinationCtx, legacyNotificationSelection)
 	} else {
-		destinations, destinationErr = notifier.QueueDestinationsForJob(persistCtx, job)
+		destinations, destinationErr = notifier.QueueDestinationsForJob(destinationCtx, job)
 	}
+	destinationCancel()
 	if destinationErr != nil {
 		// Preserve the completed scan even when notification configuration
 		// cannot be read. Runtime state is deliberately left unchanged,
 		// matching the pre-transaction behavior.
-		if saveErr := system.SaveScan(persistCtx, scan); saveErr != nil {
+		saveCtx, saveCancel := context.WithTimeout(persistCtx, scanPersistenceWriterWaitTimeout+persistTimeout)
+		defer saveCancel()
+		if saveErr := system.SaveScan(saveCtx, scan); saveErr != nil {
 			lifecycleExitMessage = "Scan attempt could not be finalized because its result could not be saved"
 			return scan, nil, saveErr
 		}
 		lifecycleExitMessage = "Scan attempt could not be finalized because notification destinations were unavailable"
 		return scan, nil, destinationErr
 	}
-	// Keep the scan lease live while the immutable result and runtime state are
-	// committed. This prevents cycle expiry housekeeping from racing the final
-	// promotion of a broad resumable scan.
-	leaseUntil := time.Now().UTC().Add(persistTimeout + time.Minute)
-	leaseCtx, leaseCancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
-	defer leaseCancel()
-	if err := system.RenewJobLease(leaseCtx, leaseKey, leaseOwner, leaseUntil); err != nil && a.Logger != nil {
-		a.Logger.Warn("scan lease renewal before finalization failed", "job", job.Name, "scan_id", scan.ID, "error", err)
+	// Renew and release the lease inside the finalization transaction. Its
+	// writer wait has a separate bound; the size-based work deadline begins only
+	// after SQLite grants this transaction the writer lock.
+	finalizeOptions := store.ManagedScanFinalizationOptions{
+		WriterWaitTimeout: scanPersistenceWriterWaitTimeout,
+		WorkTimeout:       persistTimeout,
+		LeaseOwner:        leaseOwner,
+		LeaseUntil:        time.Now().UTC().Add(scanPersistenceWriterWaitTimeout + persistTimeout + time.Minute),
 	}
-	events, finalizeErr := a.Engine.FinalizeManagedScan(persistCtx, jobID, job, &scan, destinations)
+	events, finalizeErr := a.Engine.FinalizeManagedScanWithOptions(persistCtx, jobID, job, &scan, destinations, finalizeOptions)
 	if errors.Is(finalizeErr, store.ErrJobRevisionChanged) {
 		// Keep the scan in immutable history, but do not let a result from a
 		// superseded security scope seed or mutate the current baseline. A
 		// lifecycle-only revision retains the same hash and is still accepted.
 		a.Logger.Info("scan completed for superseded security scope; runtime state unchanged", "job", job.Name, "scan_id", scan.ID)
 		events, finalizeErr = nil, nil
+		leaseReleased = true
 	}
 	if errors.Is(finalizeErr, store.ErrTenantNotActive) {
 		// The job's business unit was paused while the scan ran, whether this
 		// process cancelled the scan or another one, such as a host command,
 		// ran it. The store recorded the scan as the pause cancelled it and
 		// changed no baseline, incident or alert, so there are no events.
+		leaseReleased = true
 		a.Logger.Info("scan finished after its business unit was paused; runtime state unchanged", "job", job.Name, "scan_id", scan.ID, "status", scan.Status)
 		publishCompletion("Scan " + scan.Status)
 		return scan, nil, errors.Join(finalizeErr, scanErr)
 	}
-	if finalizeErr != nil {
+	if errors.Is(finalizeErr, store.ErrCycleNotResumable) {
+		// The store retained this result as immutable history but deliberately
+		// skipped runtime comparison because the cycle was discarded or expired.
+		leaseReleased = true
 		publishCompletion("Scan " + scan.Status)
 		return scan, nil, finalizeErr
 	}
+	if finalizeErr != nil {
+		if a.Logger != nil {
+			a.Logger.Error("scan result finalization failed", "job", job.Name, "scan_id", scan.ID, "error", finalizeErr)
+		}
+		failureScan := scan
+		failureScan.Status = "failed"
+		failureScan.Error = "scan result could not be finalized; inspect the EdgeWatch server log"
+		failureScan.Snapshot = model.Snapshot{
+			Scopes:         append([]model.Scope(nil), scan.Snapshot.Scopes...),
+			TargetFailures: append([]model.TargetCoverageFailure(nil), scan.Snapshot.TargetFailures...),
+		}
+		failureScan.Changes = nil
+		failureOptions := finalizeOptions
+		if failureOptions.WorkTimeout < scanPersistenceTimeoutFloor {
+			failureOptions.WorkTimeout = scanPersistenceTimeoutFloor
+		}
+		failureOptions.LeaseUntil = time.Now().UTC().Add(scanPersistenceWriterWaitTimeout + persistTimeout + time.Minute)
+		failureEvents, failureErr := a.Engine.FinalizeManagedScanWithOptions(persistCtx, jobID, job, &failureScan, destinations, failureOptions)
+		scan = failureScan
+		if failureErr == nil {
+			leaseReleased = true
+			events = failureEvents
+			a.emitTenantEvents(scope, events)
+			a.wakeDelivery()
+		} else if a.Logger != nil {
+			a.Logger.Error("failed to persist scan finalization failure", "job", job.Name, "scan_id", scan.ID, "error", failureErr)
+		}
+		lifecycleExitMessage = "Scan failed because its result could not be finalized"
+		publishCompletion(lifecycleExitMessage)
+		return scan, events, errors.Join(finalizeErr, failureErr)
+	}
+	leaseReleased = true
 	a.emitTenantEvents(scope, events)
 	publishCompletion("Scan " + scan.Status)
 	a.wakeDelivery()

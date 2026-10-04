@@ -63,7 +63,7 @@ for archive in "${archives[@]}"; do
     echo "release archive $archive could not be read" >&2
     exit 1
   }
-  for notice in LICENSE THIRD_PARTY_LICENSES.md README.md; do
+  for notice in LICENSE LICENSE.md THIRD_PARTY_LICENSES.md README.md; do
     if ! grep -Eq "^([^/]+/)?${notice//./\\.}$" <<<"$members"; then
       echo "release archive $archive is missing $notice" >&2
       exit 1

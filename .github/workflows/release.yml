@@ -447,7 +447,7 @@ jobs:
           test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
           test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$GITHUB_REF_NAME"
           test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}')" = "AGPL-3.0-only"
-          docker run --rm --entrypoint /bin/sh "$image" -c 'test -s /usr/share/licenses/edgewatch/LICENSE && test -s /usr/share/licenses/edgewatch/THIRD_PARTY_LICENSES.md && test -s /usr/share/licenses/naabu/LICENSE.md'
+          docker run --rm --entrypoint /bin/sh "$image" -c 'test -s /usr/share/licenses/edgewatch/LICENSE && test -s /usr/share/licenses/edgewatch/LICENSE.md && test -s /usr/share/licenses/edgewatch/THIRD_PARTY_LICENSES.md && test -s /usr/share/licenses/naabu/LICENSE.md'
       - name: Verify container runtime capability matrix
         run: ./scripts/verify-container-runtime.sh "$IMAGE"
       - name: Verify binary version and configuration

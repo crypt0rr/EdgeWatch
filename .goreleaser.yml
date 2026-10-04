@@ -23,6 +23,7 @@ archives:
   - formats: [tar.gz]
     files:
       - LICENSE
+      - LICENSE.md
       - THIRD_PARTY_LICENSES.md
       - README.md
 

@@ -59,7 +59,7 @@ RUN apk add --no-cache ca-certificates=20260909-r0 gcompat=1.1.0-r4 nmap=7.99-r0
     && chmod 0750 /etc/edgewatch /var/lib/edgewatch /run/secrets
 COPY --from=build /out/edgewatch /usr/local/bin/edgewatch
 COPY --from=naabu /out/naabu /usr/local/bin/naabu
-COPY LICENSE THIRD_PARTY_LICENSES.md /usr/share/licenses/edgewatch/
+COPY LICENSE LICENSE.md THIRD_PARTY_LICENSES.md /usr/share/licenses/edgewatch/
 COPY --from=naabu /naabu/LICENSE.md /usr/share/licenses/naabu/LICENSE.md
 ENTRYPOINT ["edgewatch"]
 CMD ["daemon", "--config", "/etc/edgewatch/config.yaml"]

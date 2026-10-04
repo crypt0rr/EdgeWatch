@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
@@ -94,6 +95,9 @@ func TestDeploymentTimezoneControlsCLIStatusTimes(t *testing.T) {
 func TestRunVersionHelpAndConfigValidation(t *testing.T) {
 	if err := run([]string{"version"}); err != nil {
 		t.Fatalf("version: %v", err)
+	}
+	if err := run([]string{"version", "--dry-run"}); err == nil || !strings.Contains(err.Error(), "--dry-run does not apply to version") {
+		t.Fatalf("version --dry-run error = %v, want command-specific flag rejection", err)
 	}
 	if err := run([]string{"help"}); err == nil {
 		t.Fatal("help unexpectedly succeeded")
@@ -196,7 +200,161 @@ func TestRunRejectsUnexpectedOperandsBeforeDestructiveActions(t *testing.T) {
 	}
 }
 
-func TestHealthDoesNotConstructScannerApplication(t *testing.T) {
+func TestRunRejectsUnsupportedFlagsBeforeMutatingCommands(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		command         string
+		unsupportedFlag string
+		args            func(configPath, passwordPath, backupPath, nmapPath string) []string
+	}{
+		{
+			name:            "admin reset password",
+			command:         "admin reset-password",
+			unsupportedFlag: "dry-run",
+			args: func(configPath, passwordPath, _, _ string) []string {
+				return []string{"admin", "reset-password", "--config", configPath, "--password-file", passwordPath, "--dry-run"}
+			},
+		},
+		{
+			name:            "admin disable TOTP",
+			command:         "admin disable-totp",
+			unsupportedFlag: "dry-run",
+			args: func(configPath, _, _, _ string) []string {
+				return []string{"admin", "disable-totp", "--config", configPath, "--dry-run"}
+			},
+		},
+		{
+			name:            "baseline approve",
+			command:         "baseline approve",
+			unsupportedFlag: "dry-run",
+			args: func(configPath, _, _, nmapPath string) []string {
+				return []string{"baseline", "approve", "--config", configPath, "--job", "managed", "--scan-id", "managed-scan", "--nmap", nmapPath, "--dry-run"}
+			},
+		},
+		{
+			name:            "baseline reset",
+			command:         "baseline reset",
+			unsupportedFlag: "dry-run",
+			args: func(configPath, _, _, nmapPath string) []string {
+				return []string{"baseline", "reset", "--config", configPath, "--job", "managed", "--nmap", nmapPath, "--dry-run"}
+			},
+		},
+		{
+			name:            "scan",
+			command:         "scan",
+			unsupportedFlag: "dry-run",
+			args: func(configPath, _, _, nmapPath string) []string {
+				return []string{"scan", "--config", configPath, "--job", "managed", "--nmap", nmapPath, "--dry-run"}
+			},
+		},
+		{
+			name:            "notification test",
+			command:         "notify test",
+			unsupportedFlag: "dry-run",
+			args: func(configPath, _, _, nmapPath string) []string {
+				return []string{"notify", "test", "--config", configPath, "--nmap", nmapPath, "--dry-run"}
+			},
+		},
+		{
+			name:            "backup",
+			command:         "backup",
+			unsupportedFlag: "allow-active-daemon",
+			args: func(configPath, _, backupPath, _ string) []string {
+				return []string{"backup", "--config", configPath, "--out", backupPath, "--allow-active-daemon"}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			databasePath := storetest.FreshPath(t)
+			dir := filepath.Dir(databasePath)
+			configPath := filepath.Join(dir, "config.yaml")
+			passwordPath := filepath.Join(dir, "new-password")
+			backupPath := filepath.Join(dir, "backup.db")
+			authKeyPath := filepath.Join(dir, "auth.key")
+			writeAuthKeyFile(t, authKeyPath)
+			if err := os.WriteFile(passwordPath, []byte("replacement password\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			seed, err := store.Open(databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed.SetAuthKeyPath(authKeyPath)
+			manager := auth.NewManager(seed)
+			token, err := manager.EnsureSetupToken(ctx)
+			if err != nil {
+				seed.Close()
+				t.Fatal(err)
+			}
+			if err := manager.Setup(ctx, token, "original administrator password"); err != nil {
+				seed.Close()
+				t.Fatal(err)
+			}
+			admin, err := seed.GetAdmin(ctx)
+			if err != nil {
+				seed.Close()
+				t.Fatal(err)
+			}
+			admin.TOTPSecret, admin.TOTPEnabled = "JBSWY3DPEHPK3PXP", true
+			if err := seed.SaveAdminSecurityWithAudit(ctx, admin, []string{"v2$original-recovery"}, true, false, store.AuditEntry{}); err != nil {
+				seed.Close()
+				t.Fatal(err)
+			}
+			job := managedCLIJob("managed")
+			record, err := seed.Tenant(store.DefaultTenantScope()).CreateJob(ctx, job)
+			if err != nil {
+				seed.Close()
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			scan := model.Scan{
+				ID: "managed-scan", JobID: record.ID, JobRevision: record.Revision, Job: job.Name,
+				StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: job.SecurityHash(),
+				Snapshot: model.Snapshot{Units: []model.Unit{{Target: "192.0.2.10", Protocol: "tcp", Ports: []model.PortState{{Port: 1, State: "open"}}}}},
+			}
+			if err := seed.System().SaveScan(ctx, scan); err != nil {
+				seed.Close()
+				t.Fatal(err)
+			}
+			if err := seed.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, []byte("database: "+databasePath+"\nweb:\n  auth_key_file: "+authKeyPath+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			nmapPath := writeFakeNmap(t, dir, false)
+			before := snapshotCLIFile(t, databasePath)
+
+			if err := run(tc.args(configPath, passwordPath, backupPath, nmapPath)); err == nil || !strings.Contains(err.Error(), "--"+tc.unsupportedFlag) || !strings.Contains(err.Error(), tc.command) {
+				t.Errorf("unsupported flag error = %v, want it to name --%s and %s", err, tc.unsupportedFlag, tc.command)
+			} else if !strings.Contains(err.Error(), "accepted by restore") {
+				t.Errorf("unsupported flag error = %v, want it to identify the valid restore command", err)
+			}
+			assertCLIFileUnchanged(t, databasePath, before)
+			if backup := snapshotCLIFile(t, backupPath); backup.exists {
+				t.Errorf("refused command wrote backup file %s", backupPath)
+			}
+
+			check, err := store.Open(databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer check.Close()
+			check.SetAuthKeyPath(authKeyPath)
+			admin, err = check.GetAdmin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !auth.VerifyPassword(admin.PasswordHash, "original administrator password") || !admin.TOTPEnabled || admin.TOTPSecret != "JBSWY3DPEHPK3PXP" {
+				t.Errorf("admin security state changed despite the rejected flag: password valid=%t, TOTP enabled=%t, secret=%q", auth.VerifyPassword(admin.PasswordHash, "original administrator password"), admin.TOTPEnabled, admin.TOTPSecret)
+			}
+		})
+	}
+}
+
+func TestHealthRejectsScannerFlagWithoutConstructingApplication(t *testing.T) {
 	database := storetest.FreshPath(t)
 	dir := filepath.Dir(database)
 	s, err := store.Open(database)
@@ -220,8 +378,8 @@ func TestHealthDoesNotConstructScannerApplication(t *testing.T) {
 	if err := os.WriteFile(script, []byte(contents), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{"health", "--config", configPath, "--nmap", script}); err != nil {
-		t.Fatalf("health: %v", err)
+	if err := run([]string{"health", "--config", configPath, "--nmap", script}); err == nil || !strings.Contains(err.Error(), "--nmap does not apply to health") {
+		t.Fatalf("health --nmap error = %v, want command-specific flag rejection", err)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("health invoked scanner constructor: stat=%v", err)
@@ -428,7 +586,7 @@ func assertCLIFileUnchanged(t *testing.T, path string, before cliFileSnapshot) {
 	t.Helper()
 	after := snapshotCLIFile(t, path)
 	if before.exists != after.exists || !bytes.Equal(before.data, after.data) || before.mode != after.mode || !before.modTime.Equal(after.modTime) {
-		t.Fatalf("read-only command changed %s: before=%#v after=%#v", path, before, after)
+		t.Fatalf("read-only command changed %s (exists %t -> %t, bytes %d -> %d, mode %v -> %v, modified %v -> %v)", path, before.exists, after.exists, len(before.data), len(after.data), before.mode, after.mode, before.modTime, after.modTime)
 	}
 }
 

@@ -88,6 +88,9 @@ func run(args []string) error {
 	if err := validateCommandFlags(fs, cmd, action); err != nil {
 		return err
 	}
+	if cmd == "history" && (*limit < 1 || *limit > 1000) {
+		return errors.New("--limit must be between 1 and 1000")
+	}
 	if cmd == "version" {
 		fmt.Println("EdgeWatch", version)
 		return nil

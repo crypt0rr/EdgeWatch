@@ -18,6 +18,7 @@ import (
 )
 
 func TestLogoutHandlerClearsCookieAndRevokesSession(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	now := time.Now().UTC()
@@ -41,6 +42,7 @@ func TestLogoutHandlerClearsCookieAndRevokesSession(t *testing.T) {
 }
 
 func TestAuthenticationCookiesAreSecureForProxyHosts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, _ := newUsersTestServer(t)
 	loginRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"username":"admin","password":"administrator password"}`))
@@ -75,6 +77,7 @@ func TestAuthenticationCookiesAreSecureForProxyHosts(t *testing.T) {
 }
 
 func TestLoopbackLoginCooldownExposesRetryAfterAndRecovers(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	fakeNow := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
 	server.Auth.Now = func() time.Time { return fakeNow }
@@ -108,6 +111,7 @@ func TestLoopbackLoginCooldownExposesRetryAfterAndRecovers(t *testing.T) {
 }
 
 func TestAuthenticationCookiesAreSecureWhenTrustedProxyRewritesLoopbackHost(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, _ := newUsersTestServer(t)
 	if err := server.Auth.SetTrustedProxies([]string{"127.0.0.1/32"}); err != nil {
@@ -148,6 +152,7 @@ func TestAuthenticationCookiesAreSecureWhenTrustedProxyRewritesLoopbackHost(t *t
 }
 
 func TestPasswordAndTOTPHandlersValidateCredentialsAndSessionCookie(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	invalid := httptest.NewRequest(http.MethodPut, "/api/v1/auth/password", strings.NewReader(`{"current_password":"wrong password","new_password":"new administrator password"}`))
@@ -222,6 +227,7 @@ func TestPasswordAndTOTPHandlersValidateCredentialsAndSessionCookie(t *testing.T
 }
 
 func TestTOTPEnablePreservesActingSessionForRecoveryCodes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	now := time.Now().UTC()
@@ -266,6 +272,7 @@ func TestTOTPEnablePreservesActingSessionForRecoveryCodes(t *testing.T) {
 }
 
 func TestTOTPRecoveryCodeRotationRequiresCurrentFactorAndPreservesSession(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, session := newUsersTestServer(t)
 	now := time.Now().UTC()
@@ -306,6 +313,7 @@ func TestTOTPRecoveryCodeRotationRequiresCurrentFactorAndPreservesSession(t *tes
 }
 
 func TestTOTPRecoveryCodeRotationValidationBranches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, session := newUsersTestServer(t)
 	invalid := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/recovery-codes", strings.NewReader("{"))
@@ -341,6 +349,7 @@ func TestTOTPRecoveryCodeRotationValidationBranches(t *testing.T) {
 }
 
 func TestPendingTOTPEnrolmentsExpireAndRemainBounded(t *testing.T) {
+	t.Parallel()
 	server, _, admin := newUsersTestServer(t)
 	base := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 	server.now = func() time.Time { return base }
@@ -458,6 +467,7 @@ func assertTOTPEnableError(t *testing.T, response *httptest.ResponseRecorder, co
 }
 
 func TestTOTPEnableAllowsRetryAfterMistypedCode(t *testing.T) {
+	t.Parallel()
 	server, db, admin := newUsersTestServer(t)
 	secret := startTOTPEnrolment(t, server, db, admin, "totp-retry-session")
 
@@ -478,6 +488,7 @@ func TestTOTPEnableAllowsRetryAfterMistypedCode(t *testing.T) {
 }
 
 func TestTOTPEnableDiscardsEnrolmentAfterTooManyWrongCodes(t *testing.T) {
+	t.Parallel()
 	server, db, admin := newUsersTestServer(t)
 	secret := startTOTPEnrolment(t, server, db, admin, "totp-limit-session")
 	wrong := wrongTOTPCode(secret)
@@ -496,6 +507,7 @@ func TestTOTPEnableDiscardsEnrolmentAfterTooManyWrongCodes(t *testing.T) {
 }
 
 func TestTOTPEnableAttemptBudgetHoldsUnderConcurrentGuesses(t *testing.T) {
+	t.Parallel()
 	server, db, admin := newUsersTestServer(t)
 	secret := startTOTPEnrolment(t, server, db, admin, "totp-parallel-session")
 	wrong := wrongTOTPCode(secret)
@@ -529,6 +541,7 @@ func TestTOTPEnableAttemptBudgetHoldsUnderConcurrentGuesses(t *testing.T) {
 }
 
 func TestTOTPEnableReportsMissingAndExpiredEnrolments(t *testing.T) {
+	t.Parallel()
 	server, _, admin := newUsersTestServer(t)
 	assertTOTPEnableError(t, submitTOTPEnable(server, admin, "never-started-session", "123456"), "totp_setup_expired")
 
@@ -538,6 +551,7 @@ func TestTOTPEnableReportsMissingAndExpiredEnrolments(t *testing.T) {
 }
 
 func TestPasswordConfirmationIsRateLimited(t *testing.T) {
+	t.Parallel()
 	server, _, admin := newUsersTestServer(t)
 	for attempt := 0; attempt < 5; attempt++ {
 		request := httptest.NewRequest(http.MethodPut, "/api/v1/auth/password", strings.NewReader(`{"current_password":"wrong password","new_password":"replacement password"}`))
@@ -637,6 +651,7 @@ func (f *totpReplayFixture) login(otp string) error {
 // sign-in or for a TOTP confirmation is. The code of the next time step is
 // accepted.
 func TestTOTPConfirmationRefusesTheEnrolmentCode(t *testing.T) {
+	t.Parallel()
 	for _, account := range totpReplayAccounts {
 		t.Run(account.name, func(t *testing.T) {
 			f := newTOTPReplayFixture(t, account)
@@ -663,6 +678,7 @@ func TestTOTPConfirmationRefusesTheEnrolmentCode(t *testing.T) {
 // confirms the old factor and enrols the new one in the same time step,
 // which still succeeds; the replacement's enrolment code is refused in turn.
 func TestSignInRefusesTheEnrolmentCode(t *testing.T) {
+	t.Parallel()
 	for _, account := range totpReplayAccounts {
 		t.Run(account.name, func(t *testing.T) {
 			f := newTOTPReplayFixture(t, account)

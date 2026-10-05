@@ -17,6 +17,7 @@ import (
 )
 
 func TestJobPendingChangesAreSortedAndBoundToTheJob(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	record, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{
@@ -91,6 +92,7 @@ func TestJobPendingChangesAreSortedAndBoundToTheJob(t *testing.T) {
 }
 
 func TestJobPendingChangesWithoutRuntimeStateReturnsAnEmptyArray(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	record, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{
@@ -130,6 +132,7 @@ func TestJobPendingChangesWithoutRuntimeStateReturnsAnEmptyArray(t *testing.T) {
 }
 
 func TestPendingChangeViewsSortTiesByProtocolPortKindAndKey(t *testing.T) {
+	t.Parallel()
 	items := pendingChangeViews(map[string]model.Pending{
 		"z":       {Change: model.Change{Target: "192.0.2.30", Protocol: "tcp", Port: 80, Kind: "port"}},
 		"a":       {Change: model.Change{Target: "192.0.2.30", Protocol: "tcp", Port: 80, Kind: "port"}},
@@ -149,6 +152,7 @@ func TestPendingChangeViewsSortTiesByProtocolPortKindAndKey(t *testing.T) {
 }
 
 func TestJobPendingChangesReturnsSanitizedStoreFailure(t *testing.T) {
+	t.Parallel()
 	server, db, _ := newUsersTestServer(t)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -162,6 +166,7 @@ func TestJobPendingChangesReturnsSanitizedStoreFailure(t *testing.T) {
 }
 
 func TestJobPendingChangesRejectsInvalidOffsets(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	for _, offset := range []string{"-1", "10000001"} {
 		t.Run(offset, func(t *testing.T) {

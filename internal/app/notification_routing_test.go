@@ -37,6 +37,7 @@ func routingTestConfig(database string, urls ...string) *config.Config {
 }
 
 func TestNewFreezesPausedManagedDestinationsWithoutDroppingThem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -98,6 +99,7 @@ func TestNewFreezesPausedManagedDestinationsWithoutDroppingThem(t *testing.T) {
 }
 
 func TestNewReportsJobsRoutedToRotatedDeploymentDestination(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -168,6 +170,7 @@ func TestNewReportsJobsRoutedToRotatedDeploymentDestination(t *testing.T) {
 }
 
 func TestMissingNotificationDestinationCheckDoesNotBlockStartup(t *testing.T) {
+	t.Parallel()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -187,6 +190,7 @@ func TestMissingNotificationDestinationCheckDoesNotBlockStartup(t *testing.T) {
 }
 
 func TestNewDoesNotReportCurrentNotificationRouting(t *testing.T) {
+	t.Parallel()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)

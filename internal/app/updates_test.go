@@ -47,6 +47,7 @@ func routedDestinations(routes []store.UpdateAlertRoute) []string {
 }
 
 func TestRunUpdateCheckTracksAndDeduplicatesReleases(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -93,6 +94,7 @@ func TestRunUpdateCheckTracksAndDeduplicatesReleases(t *testing.T) {
 }
 
 func TestRunUpdateCheckPreservesReleaseOnFailureAndHonorsDisable(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -115,6 +117,7 @@ func TestRunUpdateCheckPreservesReleaseOnFailureAndHonorsDisable(t *testing.T) {
 }
 
 func TestRunUpdateCheckCoversFailureNotModifiedRollbackAndRouting(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -202,6 +205,7 @@ func TestRunUpdateCheckCoversFailureNotModifiedRollbackAndRouting(t *testing.T) 
 }
 
 func TestRunUpdateCheckCoversPersistenceFailureBranches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	newApp := func(t *testing.T) (*App, *store.Store) {
 		t.Helper()

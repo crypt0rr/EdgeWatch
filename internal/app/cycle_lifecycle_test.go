@@ -102,6 +102,7 @@ func hasEventType(events []model.Event, eventType string) bool {
 }
 
 func TestAcceptedIncidentDuringPausedCycleStartsFreshCycle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	a, db := newLifecycleTestApp(t, &lifecycleScanner{}, nil)
 	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("accept-paused"))
@@ -158,6 +159,7 @@ func TestAcceptedIncidentDuringPausedCycleStartsFreshCycle(t *testing.T) {
 }
 
 func TestResumedCycleRecordsPinnedScannerProfileRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	probe := &lifecycleScanner{}
 	a, db := newLifecycleTestApp(t, probe, nil)
@@ -211,6 +213,7 @@ func TestResumedCycleRecordsPinnedScannerProfileRevision(t *testing.T) {
 }
 
 func TestStalledCyclePastResumeWindowExpiresOnScheduledTrigger(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	probe := &lifecycleScanner{}
 	a, db := newLifecycleTestApp(t, probe, nil)
@@ -281,6 +284,7 @@ func waitForQueuedRun(t *testing.T, a *App, key string) {
 }
 
 func TestQueuedRunsUseJobEditedWhileWaitingForSlot(t *testing.T) {
+	t.Parallel()
 	for _, manual := range []bool{false, true} {
 		name := "scheduled"
 		if manual {
@@ -336,6 +340,7 @@ func TestQueuedRunsUseJobEditedWhileWaitingForSlot(t *testing.T) {
 }
 
 func TestQueuedScheduledRunSkipsJobArchivedOrPausedWhileWaiting(t *testing.T) {
+	t.Parallel()
 	for _, archive := range []bool{false, true} {
 		name := "paused"
 		if archive {
@@ -422,6 +427,7 @@ func (s gatedScanner) Scan(ctx context.Context, job config.Job) (model.Snapshot,
 }
 
 func TestQueuedRunsStartInArrivalOrderWithOneSlot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	sc := gatedScanner{started: make(chan string, 2), finish: make(chan struct{})}
 	a, db := newLifecycleTestApp(t, sc, nil)
@@ -482,6 +488,7 @@ func TestQueuedRunsStartInArrivalOrderWithOneSlot(t *testing.T) {
 }
 
 func TestCanceledQueuedManualRunReleasesNoSlot(t *testing.T) {
+	t.Parallel()
 	a, db := newLifecycleTestApp(t, schedulerFake{}, nil)
 	ctx, _ := a.BeginRun(context.Background())
 	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("slot-canceled"))
@@ -529,6 +536,7 @@ func TestCanceledQueuedManualRunReleasesNoSlot(t *testing.T) {
 }
 
 func TestQueuedManagedJobKeepsUnchangedRevisionAndManualRunsOfPausedJobs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	a, db := newLifecycleTestApp(t, schedulerFake{}, nil)
 	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("queued-helper"))

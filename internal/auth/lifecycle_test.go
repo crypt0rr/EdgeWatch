@@ -14,6 +14,7 @@ import (
 )
 
 func TestCookieHelpersLogoutAndPasswordRequirements(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -83,6 +84,7 @@ func TestCookieHelpersLogoutAndPasswordRequirements(t *testing.T) {
 }
 
 func TestActivateRequestConsumesInviteOnceAndEnforcesPasswordLength(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -142,6 +144,7 @@ func tokenRequest() *http.Request {
 // setup already normalizes its token once for both steps and still accepts
 // it the same way.
 func TestSetupRedeemsTheTokenItChecks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -186,6 +189,7 @@ func TestSetupRedeemsTheTokenItChecks(t *testing.T) {
 // has, and redeems the token it checked: the token without the white
 // space. It is redeemed once, and a wrong token still fails.
 func TestActivationRedeemsTheTokenItChecks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {

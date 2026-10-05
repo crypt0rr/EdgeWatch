@@ -36,6 +36,7 @@ func (s *blockingWebScanner) Scan(ctx context.Context, _ config.Job) (model.Snap
 // exactly as for a scan that is no longer active, while the scan keeps
 // running until its own tenant cancels it.
 func TestActiveScanEndpointsStayInTheRequestTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -134,6 +135,7 @@ func TestActiveScanEndpointsStayInTheRequestTenant(t *testing.T) {
 }
 
 func TestActiveScanEndpointAndCancellationLifecycle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {

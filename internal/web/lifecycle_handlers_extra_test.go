@@ -17,6 +17,7 @@ import (
 )
 
 func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "lifecycle", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"}, Baseline: config.Baseline{Samples: 1}})
@@ -178,6 +179,7 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 }
 
 func TestLifecycleActionsRejectActiveScans(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "active-lifecycle", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"}})
@@ -216,6 +218,7 @@ func TestLifecycleActionsRejectActiveScans(t *testing.T) {
 }
 
 func TestNotificationRoutesAndRateLimit(t *testing.T) {
+	t.Parallel()
 	server, _, admin := newUsersTestServer(t)
 	missingRequest := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations", strings.NewReader(`{"name":"Ops","url":"generic://localhost/ops"}`))
 	missingRequest.Header.Set("Content-Type", "application/json")
@@ -297,6 +300,7 @@ func TestNotificationRoutesAndRateLimit(t *testing.T) {
 }
 
 func TestBaselineMutationsRejectActiveJobs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "active-baseline", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.20"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"}, Baseline: config.Baseline{Samples: 1}})

@@ -34,6 +34,7 @@ const platformDestinationID = "00000000-0000-0000-0000-0000000000f1"
 // its owner, so the web console sends each unit only its own copy and the
 // platform only the platform's.
 func TestUpdateAlertsFanOutToEachBusinessUnit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	a := f.app
@@ -120,6 +121,7 @@ func TestUpdateAlertsFanOutToEachBusinessUnit(t *testing.T) {
 // Once the new unit's administrators select a destination, its copy of the
 // next update alert goes there.
 func TestNewBusinessUnitGetsNoUpdateAlertsUntilItSelectsDestinations(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	a := f.app
@@ -224,6 +226,7 @@ func withoutUnitList(t *testing.T, db *store.Store) func() {
 // records the platform's copy and each active unit's copy once. An upgrade
 // of the installed build waits for the next check the same way.
 func TestUpdateAlertWaitsUntilTheBusinessUnitsCanBeListed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	a := f.app
@@ -321,6 +324,7 @@ func queryColumn(t *testing.T, db *store.Store, query string) []string {
 // be read, the alert still has the platform's copy and each active unit's,
 // only without those destinations.
 func TestUpdateAlertRoutesWithoutDestinations(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	if _, err := f.db.DB.ExecContext(ctx, `UPDATE tenants SET update_destinations_json='not json' WHERE id=?`, secondTenantID); err != nil {

@@ -15,6 +15,7 @@ import (
 )
 
 func TestNewServerWarnsWhenApprovedProxyHostsShareLoopbackIdentity(t *testing.T) {
+	t.Parallel()
 	var logs bytes.Buffer
 	application := &app.App{Config: &config.Config{Web: config.Web{AllowedHosts: []string{"console.example.test"}}}}
 	NewServer(application, nil, slog.New(slog.NewTextHandler(&logs, nil)))
@@ -32,6 +33,7 @@ func TestNewServerWarnsWhenApprovedProxyHostsShareLoopbackIdentity(t *testing.T)
 }
 
 func TestValidateRequestHostAllowsLoopbackAndConfiguredProxyNames(t *testing.T) {
+	t.Parallel()
 	server := &Server{App: &app.App{Config: &config.Config{Web: config.Web{
 		Listen:       "127.0.0.1:8080",
 		AllowedHosts: []string{"console.example.test:8443", "2001:db8::10"},
@@ -61,6 +63,7 @@ func TestValidateRequestHostAllowsLoopbackAndConfiguredProxyNames(t *testing.T) 
 }
 
 func TestHandlerRejectsForeignAPIHostBeforeAuthentication(t *testing.T) {
+	t.Parallel()
 	server := &Server{App: &app.App{Config: &config.Config{Web: config.Web{Listen: "127.0.0.1:8080"}}}}
 	req := httptest.NewRequest(http.MethodGet, "http://evil.example.test/api/v1/setup/status", nil)
 	req.Host = "evil.example.test"
@@ -72,6 +75,7 @@ func TestHandlerRejectsForeignAPIHostBeforeAuthentication(t *testing.T) {
 }
 
 func TestValidateBrowserOriginRequiresExactRequestOrigin(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		origin string
@@ -108,6 +112,7 @@ func TestValidateBrowserOriginRequiresExactRequestOrigin(t *testing.T) {
 }
 
 func TestUnauthenticatedMutationRoutesRejectForeignOrigins(t *testing.T) {
+	t.Parallel()
 	server := &Server{}
 	for _, path := range []string{"/api/v1/setup", "/api/v1/auth/login", "/api/v1/auth/activate"} {
 		req := httptest.NewRequest(http.MethodPost, "http://localhost"+path, strings.NewReader(`{}`))
@@ -121,6 +126,7 @@ func TestUnauthenticatedMutationRoutesRejectForeignOrigins(t *testing.T) {
 }
 
 func TestHostHelpersHandleURLFallbackAndEmptyValues(t *testing.T) {
+	t.Parallel()
 	if requestHostName("[2001:db8::1]") != "2001:db8::1" || requestHostName("Example.TEST.") != "example.test" || requestHostName("") != "" {
 		t.Fatal("request host normalization failed")
 	}
@@ -142,6 +148,7 @@ func TestHostHelpersHandleURLFallbackAndEmptyValues(t *testing.T) {
 }
 
 func TestSessionCookieSecureKeepsOnlyLoopbackHTTPUnsecured(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		url  string
@@ -173,6 +180,7 @@ func TestSessionCookieSecureKeepsOnlyLoopbackHTTPUnsecured(t *testing.T) {
 }
 
 func TestServerSessionCookieSecureHonorsTrustedProxyProtocol(t *testing.T) {
+	t.Parallel()
 	server := &Server{Auth: auth.NewManager(nil)}
 	if err := server.Auth.SetTrustedProxies([]string{"127.0.0.1/32"}); err != nil {
 		t.Fatal(err)

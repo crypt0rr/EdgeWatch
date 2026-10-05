@@ -876,6 +876,7 @@ func parseWebPackageSource(t *testing.T) (*token.FileSet, []*ast.File) {
 }
 
 func TestRouteInventoryCoversRoutingSource(t *testing.T) {
+	t.Parallel()
 	fset, files := parseWebPackageSource(t)
 	for _, finding := range analyzeRouteDrift(fset, files, apiRoutes) {
 		t.Errorf("%s: %s", finding.kind, finding.message)
@@ -908,6 +909,7 @@ func TestRouteInventoryCoversRoutingSource(t *testing.T) {
 }
 
 func TestRouteInventoryDriftDetectsUnlistedRoutes(t *testing.T) {
+	t.Parallel()
 	// A synthetic router with one route that is in the inventory and several
 	// that are not. The analyzer must report each unlisted one.
 	const source = `package web
@@ -1013,6 +1015,7 @@ func (s *Server) exportRoute(w http.ResponseWriter, r *http.Request, rest string
 }
 
 func TestRouteInventoryDriftDetectsRemovedEntries(t *testing.T) {
+	t.Parallel()
 	fset, files := parseWebPackageSource(t)
 	for _, removed := range []string{
 		"GET /setup/status (unauthenticated)",

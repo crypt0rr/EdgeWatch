@@ -16,6 +16,7 @@ import (
 )
 
 func TestNewRejectsUnsafeConfiguredSecretFiles(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		set  func(*config.Config, string)
@@ -61,6 +62,7 @@ func TestNewRejectsUnsafeConfiguredSecretFiles(t *testing.T) {
 }
 
 func TestNewRejectsMissingExplicitNotificationKey(t *testing.T) {
+	t.Parallel()
 	database, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)

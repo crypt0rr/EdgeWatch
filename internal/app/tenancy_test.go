@@ -216,6 +216,7 @@ func queryStrings(t *testing.T, db *store.Store, query string, args ...any) []st
 // tenant's own destination, never to the default tenant's. The default
 // tenant's job with the same name is scheduled and alerts as before.
 func TestDaemonRunsASecondTenantsJobInThatTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, &twoUnitScanner{}, lifecycleJob)
 	// Only tenant B's job runs on start.
@@ -306,6 +307,7 @@ func TestDaemonRunsASecondTenantsJobInThatTenant(t *testing.T) {
 // the scan lease, so no scan starts. Once the tenant is active again, the
 // next reconciliation schedules its jobs and they run.
 func TestDaemonPausesADisabledTenantsJobs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, runOnStartJob)
 	setState := func(state string) {
@@ -387,6 +389,7 @@ func TestDaemonPausesADisabledTenantsJobs(t *testing.T) {
 // A run takes its scan slot under its job's tenant's ID, so tenants queue
 // separately for the deployment's slots.
 func TestScanSlotsAreKeyedByTheJobsTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	sc := gatedScanner{started: make(chan string, 2), finish: make(chan struct{})}
 	f := newTwoTenants(t, sc, lifecycleJob)
@@ -432,6 +435,7 @@ func TestScanSlotsAreKeyedByTheJobsTenant(t *testing.T) {
 // A run takes its tenant from the job record, so a record that names no
 // tenant, or a deleted one, runs nothing.
 func TestRunRefusesAJobRecordWithoutATenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	orphan := f.jobB

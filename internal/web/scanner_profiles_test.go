@@ -14,6 +14,7 @@ import (
 )
 
 func TestOperatorCannotSelectSupersededScannerProfileRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	profile, err := defaultTenant(db).CreateScannerProfile(ctx, "Revision guard", "", config.ScannerProfile{Engine: config.EngineNmap}, admin.Username)
@@ -48,6 +49,7 @@ func TestOperatorCannotSelectSupersededScannerProfileRevision(t *testing.T) {
 }
 
 func TestScannerProfileMutationsMapAuditUnavailableToServiceUnavailable(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	profile, err := defaultTenant(db).CreateScannerProfile(ctx, "Audit guarded", "", config.ScannerProfile{Engine: config.EngineNmap}, admin.Username)

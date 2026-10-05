@@ -10,6 +10,7 @@ import (
 )
 
 func TestPublicSourceLink(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name, version, override, want string
 	}{
@@ -34,6 +35,7 @@ func TestPublicSourceLink(t *testing.T) {
 }
 
 func TestSourceLinkRejectsMutations(t *testing.T) {
+	t.Parallel()
 	server := NewServer(nil, nil, nil)
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/source", nil))

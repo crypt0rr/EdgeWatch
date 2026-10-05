@@ -17,6 +17,7 @@ import (
 )
 
 func TestScanPersistenceTimeoutScalesWithResultSize(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		hosts int
 		want  time.Duration
@@ -34,6 +35,7 @@ func TestScanPersistenceTimeoutScalesWithResultSize(t *testing.T) {
 }
 
 func TestProgressPercentAndActiveRunUpdates(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		in   scanner.Progress
@@ -78,6 +80,7 @@ func TestProgressPercentAndActiveRunUpdates(t *testing.T) {
 }
 
 func TestActiveProgressDoesNotRegressWhenPhasesExpandWork(t *testing.T) {
+	t.Parallel()
 	a := &App{}
 	run := &activeRun{scan: model.ActiveScan{StartedAt: time.Now().UTC()}}
 	a.running.Store("phased", run)
@@ -100,6 +103,7 @@ func TestActiveProgressDoesNotRegressWhenPhasesExpandWork(t *testing.T) {
 }
 
 func TestCheckScanWorkBudgetAndBeginRunFallback(t *testing.T) {
+	t.Parallel()
 	a := &App{Store: storetest.OpenFresh(t), Config: &config.Config{Scheduler: config.Scheduler{MaxProbeCount: 1}}}
 	job := config.Job{Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}}
 	if _, err := a.CheckScanWorkBudget(context.Background(), defaultTenant(a.Store), job); !errors.Is(err, ErrScanWorkBudget) {
@@ -123,6 +127,7 @@ func TestCheckScanWorkBudgetAndBeginRunFallback(t *testing.T) {
 }
 
 func TestNaabuUsesDedicatedBudgetAndHardCeiling(t *testing.T) {
+	t.Parallel()
 	a := &App{Store: storetest.OpenFresh(t), Config: &config.Config{Scheduler: config.Scheduler{
 		MaxProbeCount:      config.DefaultMaxProbeCount,
 		MaxNaabuProbeCount: config.DefaultNaabuMaxProbeCount,
@@ -154,6 +159,7 @@ func TestNaabuUsesDedicatedBudgetAndHardCeiling(t *testing.T) {
 }
 
 func TestNaabuAndUDPUseSeparateProbeBudgets(t *testing.T) {
+	t.Parallel()
 	a := &App{Store: storetest.OpenFresh(t), Config: &config.Config{Scheduler: config.Scheduler{
 		MaxProbeCount:      5,
 		MaxNaabuProbeCount: config.DefaultNaabuMaxProbeCount,
@@ -173,6 +179,7 @@ func TestNaabuAndUDPUseSeparateProbeBudgets(t *testing.T) {
 }
 
 func TestStartManagedRunReportsLookupAndArchivedErrors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -217,6 +224,7 @@ func TestStartManagedRunReportsLookupAndArchivedErrors(t *testing.T) {
 }
 
 func TestManagedRunReservationsRejectDuplicateAndScheduledStarts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 // although both jobs have the same name. No job event goes out without a
 // unit.
 func TestLiveUpdatesNameTheJobsBusinessUnit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	var mu sync.Mutex
@@ -58,6 +59,7 @@ func TestLiveUpdatesNameTheJobsBusinessUnit(t *testing.T) {
 // the web console can end the unit's live-update streams. A refused request
 // tells it nothing, and the application works without a handler.
 func TestPausingAUnitTellsTheUnitPausedHandler(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	var mu sync.Mutex

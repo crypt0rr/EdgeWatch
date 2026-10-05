@@ -22,6 +22,7 @@ import (
 // stream never receives a unit's message, a unit's stream never another
 // unit's or the platform's, and no stream a message without an audience.
 func TestSSEAudiencesSeparateUnitsAndThePlatform(t *testing.T) {
+	t.Parallel()
 	const unitA, unitB = store.DefaultTenantID, tenantAccountsOtherID
 	subscribers := map[string]sseSubscriber{
 		"unit A":   {tenantID: unitA},
@@ -71,6 +72,7 @@ func TestSSEAudiencesSeparateUnitsAndThePlatform(t *testing.T) {
 // event without a job or a unit, such as the platform's copy of an update
 // alert, goes to the platform.
 func TestAppEventAudience(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		event model.Event
@@ -123,6 +125,7 @@ func registerSSEChannel(server *Server, subscriber sseSubscriber) (chan sseMessa
 // platform's stream the platform's copy; the update status reaches all of
 // them. A job's event that names no unit reaches none of them.
 func TestUpdateAlertCopiesReachOnlyTheirOwners(t *testing.T) {
+	t.Parallel()
 	f := newTenantAccountsFixture(t)
 	var logs bytes.Buffer
 	f.server.Log = slog.New(slog.NewTextHandler(&logs, nil))
@@ -172,6 +175,7 @@ func TestUpdateAlertCopiesReachOnlyTheirOwners(t *testing.T) {
 // platform message without writing it. A session with neither a unit nor
 // the platform role is refused before it registers.
 func TestPlatformAdministratorsStayOffTheLiveUpdateStream(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	if auth.HasPermission(store.Session{Role: store.RolePlatformAdmin}, auth.PermissionStreamRead) {
 		t.Fatal("platform administrators hold the stream permission")
@@ -231,6 +235,7 @@ func TestPlatformAdministratorsStayOffTheLiveUpdateStream(t *testing.T) {
 // limit backoff, while unit A still opens streams up to its own share. A
 // closed stream frees its place in the share.
 func TestEachBusinessUnitHasItsOwnLiveStreamLimit(t *testing.T) {
+	t.Parallel()
 	f := newTenantAccountsFixture(t)
 	f.server.sseMaxSubscribersPerUnit = 2
 	f.server.sseMaxSubscribersPerUser = 10
@@ -261,6 +266,7 @@ func TestEachBusinessUnitHasItsOwnLiveStreamLimit(t *testing.T) {
 // before business units existed. The unit share applies whenever the units
 // cannot be counted.
 func TestASingleUnitHasNoLiveStreamShareOfItsOwn(t *testing.T) {
+	t.Parallel()
 	server, db, _ := newUsersTestServer(t)
 	server.sseMaxSubscribersPerUnit = 1
 	server.sseMaxSubscribersPerUser = 10
@@ -298,6 +304,7 @@ func TestASingleUnitHasNoLiveStreamShareOfItsOwn(t *testing.T) {
 // platform's, and their cached authorization are kept; an empty unit
 // revokes nothing.
 func TestRevokeSSETenantCancelsOnlyThatUnitsStreams(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	_, cancelledA := registerSSEChannel(server, sseSubscriber{tenantID: store.DefaultTenantID})
 	_, cancelledB := registerSSEChannel(server, sseSubscriber{tenantID: tenantAccountsOtherID})
@@ -325,6 +332,7 @@ func TestRevokeSSETenantCancelsOnlyThatUnitsStreams(t *testing.T) {
 // its writes, the application's scan events, the unit's copy of an update
 // alert (the platform's copy goes to the platform), and the update status.
 func TestASingleUnitsStreamReceivesEveryLiveUpdate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, _, _ := newUsersTestServer(t)
 	raw, _, err := server.Auth.LoginAs(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "admin", "administrator password", "", "")

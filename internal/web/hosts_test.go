@@ -21,6 +21,7 @@ import (
 )
 
 func TestBaselineHostExplorerReturnsDetailedAndFilteredHosts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -95,6 +96,7 @@ func TestBaselineHostExplorerReturnsDetailedAndFilteredHosts(t *testing.T) {
 }
 
 func TestAcceptedIncidentUsesMutatedRuntimeBaselineForHostListAndDetail(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -213,6 +215,7 @@ func TestAcceptedIncidentUsesMutatedRuntimeBaselineForHostListAndDetail(t *testi
 }
 
 func TestHostSearchRejectsShortAndOversizedQueriesAtAPI(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -241,6 +244,7 @@ func TestHostSearchRejectsShortAndOversizedQueriesAtAPI(t *testing.T) {
 }
 
 func TestHistoricalHostUsesAcceptedPortAndServiceRemovals(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -324,6 +328,7 @@ func TestHistoricalHostUsesAcceptedPortAndServiceRemovals(t *testing.T) {
 }
 
 func TestAllHostsReturnsLatestSuccessfulResultPerAddress(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -382,6 +387,7 @@ func TestAllHostsReturnsLatestSuccessfulResultPerAddress(t *testing.T) {
 }
 
 func TestAllHostsSeparatesArchivedJobsAfterActiveHosts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -436,6 +442,7 @@ func TestAllHostsSeparatesArchivedJobsAfterActiveHosts(t *testing.T) {
 }
 
 func TestAllHostsMergesIndexedAndLegacySuccessfulScans(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -507,6 +514,7 @@ func TestAllHostsMergesIndexedAndLegacySuccessfulScans(t *testing.T) {
 }
 
 func TestSummaryForHostCollapsesChunkedProtocolObservations(t *testing.T) {
+	t.Parallel()
 	host := model.HostObservation{
 		Address: "198.51.100.10",
 		Protocols: []model.ProtocolObservation{
@@ -530,6 +538,7 @@ func TestSummaryForHostCollapsesChunkedProtocolObservations(t *testing.T) {
 }
 
 func TestSummaryForHostUsesRDAPSpecialUseVisibilityPolicy(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		address string
 		want    string

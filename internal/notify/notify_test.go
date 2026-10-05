@@ -25,6 +25,7 @@ import (
 )
 
 func TestQueueAndDeliverGenericWebhook(t *testing.T) {
+	t.Parallel()
 	var calls atomic.Int32
 	payloads := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +85,7 @@ func TestQueueAndDeliverGenericWebhook(t *testing.T) {
 }
 
 func TestDrainProcessesMultipleBoundedBatches(t *testing.T) {
+	t.Parallel()
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -124,6 +126,7 @@ func TestDrainProcessesMultipleBoundedBatches(t *testing.T) {
 }
 
 func TestQueueDestinationsForJobUsesStableSelection(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -189,6 +192,7 @@ func TestQueueDestinationsForJobUsesStableSelection(t *testing.T) {
 }
 
 func TestCreateManagedDoesNotOptInExistingLegacyJobs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -259,6 +263,7 @@ func TestCreateManagedDoesNotOptInExistingLegacyJobs(t *testing.T) {
 }
 
 func TestQueueDestinationsForJobTracksManagedRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -287,6 +292,7 @@ func TestQueueDestinationsForJobTracksManagedRevision(t *testing.T) {
 }
 
 func TestConcurrentDrainsDoNotDuplicateDelivery(t *testing.T) {
+	t.Parallel()
 	var calls atomic.Int32
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -342,6 +348,7 @@ func TestConcurrentDrainsDoNotDuplicateDelivery(t *testing.T) {
 }
 
 func TestLockedManagedDeliveryIsDeferredWithoutAttempts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "edgewatch.db"))
@@ -381,6 +388,7 @@ func TestLockedManagedDeliveryIsDeferredWithoutAttempts(t *testing.T) {
 }
 
 func TestLockedDestinationDoesNotStarveHealthyDelivery(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "edgewatch.db"))
@@ -453,6 +461,7 @@ func TestLockedDestinationDoesNotStarveHealthyDelivery(t *testing.T) {
 }
 
 func TestCanceledBatchReleasesUnsentClaims(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -491,6 +500,7 @@ func TestCanceledBatchReleasesUnsentClaims(t *testing.T) {
 }
 
 func TestCanceledDeliveryReleasesClaimWithoutBudget(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -523,6 +533,7 @@ func TestCanceledDeliveryReleasesClaimWithoutBudget(t *testing.T) {
 }
 
 func TestInvalidURLDoesNotLeakSecret(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -538,6 +549,7 @@ func TestInvalidURLDoesNotLeakSecret(t *testing.T) {
 }
 
 func TestSafeSendRedactsProviderErrors(t *testing.T) {
+	t.Parallel()
 	rawURL := "unknown://secret-token@example.invalid/path"
 	err := safeSend(rawURL, "test")
 	if err == nil {
@@ -567,6 +579,7 @@ func TestSafeSendRedactsProviderPanics(t *testing.T) {
 }
 
 func TestSafeSendContextWaitsForInFlightSendAfterCancellation(t *testing.T) {
+	t.Parallel()
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -638,6 +651,7 @@ func TestSafeSendContextBoundsProviderThatIgnoresCancellation(t *testing.T) {
 }
 
 func TestManagedNotificationCRUDEncryptsAndCancelsOldDeliveries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "edgewatch.db"))
@@ -713,6 +727,7 @@ func TestManagedNotificationCRUDEncryptsAndCancelsOldDeliveries(t *testing.T) {
 }
 
 func TestManagedNotificationLocksWhenKeyIsUnavailable(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -799,6 +814,7 @@ func TestManagedNotificationLocksWhenKeyIsUnavailable(t *testing.T) {
 func boolPtr(value bool) *bool { return &value }
 
 func TestManagedNotificationWrongKeyIsReportedAsDecryptFailure(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -834,6 +850,7 @@ func TestManagedNotificationWrongKeyIsReportedAsDecryptFailure(t *testing.T) {
 }
 
 func TestNotifierDoesNotReplaceInvalidKeyWhenManagedDestinationsExist(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -882,6 +899,7 @@ func TestNotifierDoesNotReplaceInvalidKeyWhenManagedDestinationsExist(t *testing
 }
 
 func TestExplicitKeyPathIsNotGenerated(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -902,6 +920,7 @@ func TestExplicitKeyPathIsNotGenerated(t *testing.T) {
 }
 
 func TestNotificationKeyRejectsUnsafePermissions(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "notification.key")
 	if err := os.WriteFile(path, make([]byte, notificationKeySize), 0o640); err != nil {
 		t.Fatal(err)

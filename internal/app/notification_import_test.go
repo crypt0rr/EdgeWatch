@@ -170,6 +170,7 @@ func downgradeToSchema49(t *testing.T, database string) {
 // destinations moves to the imported ones, queued alerts are still delivered,
 // and a second start imports nothing.
 func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "data", "edgewatch.db")
@@ -402,6 +403,7 @@ func sortedIDs(values ...string) []string {
 // delivers through the configured URLs. The failure is logged without the
 // URL, and the health command and the console report it.
 func TestDaemonImportFailureKeepsDeliveringFromConfig(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "data", "edgewatch.db")
@@ -467,6 +469,7 @@ func TestDaemonImportFailureKeepsDeliveringFromConfig(t *testing.T) {
 // Host commands build the application without the import. Before the daemon
 // imports, they keep the configured URLs as deployment destinations.
 func TestHostCommandsDoNotImportNotificationURLs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "data", "edgewatch.db")
@@ -496,6 +499,7 @@ func TestHostCommandsDoNotImportNotificationURLs(t *testing.T) {
 
 // Invalid configuration still stops the daemon before anything is imported.
 func TestDaemonImportRejectsInvalidConfiguration(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")
 	s, err := store.Open(database)
@@ -522,6 +526,7 @@ func TestDaemonImportRejectsInvalidConfiguration(t *testing.T) {
 // Without configured URLs the daemon records that nothing is configured and
 // reports no warning.
 func TestDaemonImportWithoutConfiguredURLs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "edgewatch.db")
 	s, err := store.Open(database)

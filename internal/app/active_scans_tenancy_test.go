@@ -14,6 +14,7 @@ import (
 // unit's scan is not found, exactly as an unknown one, and keeps running to
 // its end; a scope without a unit reaches no scan at all.
 func TestActiveScansAndCancelStayInTheirUnit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	sc := gatedScanner{started: make(chan string, 1), finish: make(chan struct{})}
 	f := newTwoTenants(t, sc, lifecycleJob)

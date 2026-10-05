@@ -214,6 +214,7 @@ func TestWholeDatabaseCommandsAcceptAnOlderSchema(t *testing.T) {
 // Account recovery says that a user is not configured only when the account
 // does not exist, and reports any other failure as it is.
 func TestAdminRecoveryReportsLookupFailuresAsTheyAre(t *testing.T) {
+	t.Parallel()
 	database := storetest.FreshPath(t)
 	s, err := store.OpenExisting(database)
 	if err != nil {

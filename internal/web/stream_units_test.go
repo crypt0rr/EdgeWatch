@@ -139,6 +139,7 @@ const unitJobBody = `{"name":"edge","schedule":"0 * * * *","timezone":"UTC","tar
 // stream. A stream that replays from before them leaves them out for A and
 // has them for B. A's own event reaches A and not B.
 func TestLiveUpdatesReachOnlyTheirBusinessUnit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantAccountsFixture(t)
 	// The replays below start after this message, which the live streams,
@@ -233,6 +234,7 @@ func TestLiveUpdatesReachOnlyTheirBusinessUnit(t *testing.T) {
 // at their next heartbeat, and leaves the other unit's streams open and
 // receiving.
 func TestDisablingABusinessUnitEndsOnlyItsLiveUpdateStreams(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantAccountsFixture(t)
 	streamA := f.openLiveStream(t, "own", 0)

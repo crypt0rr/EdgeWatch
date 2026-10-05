@@ -124,6 +124,7 @@ func assertOnlySelfService(t *testing.T, server *Server, account *routeMatrixSes
 // its own account's self-service routes and its platform console's routes
 // are open to it, and its session lists exactly those permissions.
 func TestRouteInventoryDeniesPlatformAdministratorsUnitData(t *testing.T) {
+	t.Parallel()
 	server, accounts := newRouteMatrixSessions(t)
 	platform := &accounts[len(accounts)-1]
 	if platform.role != store.RolePlatformAdmin || platform.session.TenantID != "" {
@@ -142,6 +143,7 @@ func TestRouteInventoryDeniesPlatformAdministratorsUnitData(t *testing.T) {
 // same routes as a unit's account. Each change is recorded in platform
 // scope.
 func TestPlatformAdministratorSelfService(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, _ := newUsersTestServer(t)
 	const password, replacement = "platform administrator password", "replacement platform password"
@@ -207,6 +209,7 @@ func TestPlatformAdministratorSelfService(t *testing.T) {
 // routes restores its permissions. With a single unit, the session is
 // described exactly as before.
 func TestTOTPEnrollmentRestrictsAdministratorSessions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, _ := newUsersTestServer(t)
 	const password = "administrator password"

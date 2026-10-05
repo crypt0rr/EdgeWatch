@@ -73,6 +73,7 @@ func (s *persistenceContentionScanner) Scan(ctx context.Context, job config.Job)
 }
 
 func TestRunJobPersistsFinishedScanAfterWriterWait(t *testing.T) {
+	t.Parallel()
 	for _, secondStore := range []bool{false, true} {
 		name := "in-process writer queue"
 		if secondStore {
@@ -145,6 +146,7 @@ func TestRunJobPersistsFinishedScanAfterWriterWait(t *testing.T) {
 }
 
 func TestRunJobDowngradesUnfinalizableScanAndPersistsFailure(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	a, db := newLifecycleTestApp(t, immediateSnapshotScanner{}, io.Discard)
 	// Force the first finalization transaction to expire before it can save.

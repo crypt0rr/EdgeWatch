@@ -45,6 +45,7 @@ func newUsersTestServer(t *testing.T) (*Server, *store.Store, store.Session) {
 }
 
 func TestUsersRouteLifecycleAndSecretFreeResponses(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	request := func(method, rest, body string) *httptest.ResponseRecorder {
@@ -157,6 +158,7 @@ func TestUsersRouteLifecycleAndSecretFreeResponses(t *testing.T) {
 }
 
 func TestUsersRouteValidationAndSessionRevocation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	call := func(method, rest, body string) *httptest.ResponseRecorder {
@@ -216,6 +218,7 @@ func TestUsersRouteValidationAndSessionRevocation(t *testing.T) {
 }
 
 func TestUsersAPIEnforcesAuthenticationCSRFAndRolePermissions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	now := time.Now().UTC()

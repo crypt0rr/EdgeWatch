@@ -23,6 +23,7 @@ import (
 // response for an unknown cycle when it discards the first tenant's cycle
 // under its own job, which leaves that cycle unchanged.
 func TestScanCycleRoutesUseTheSessionTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "edge", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "443", Mode: "connect", Engine: config.EngineNmap}})

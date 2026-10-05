@@ -18,6 +18,7 @@ import (
 )
 
 func TestApplicationUpdateStatusIsAuthenticatedAndRedactsSetupState(t *testing.T) {
+	t.Parallel()
 	server, db, admin := newUsersTestServer(t)
 	server.Version = "v1.0.0"
 	ctx := context.Background()
@@ -53,6 +54,7 @@ func TestApplicationUpdateStatusIsAuthenticatedAndRedactsSetupState(t *testing.T
 // its failed update delivery in /status, now as the default unit's own
 // copy. The platform's copy of the alert is not the unit's.
 func TestEventsShowTheDefaultUnitsUpdateAlert(t *testing.T) {
+	t.Parallel()
 	server, db, admin := newUsersTestServer(t)
 	ctx := context.Background()
 	if _, err := db.Platform().RecordInstalledVersion(ctx, "v1.0.0", "", false, nil); err != nil {
@@ -96,6 +98,7 @@ func TestEventsShowTheDefaultUnitsUpdateAlert(t *testing.T) {
 }
 
 func TestSetupStatusHidesVersionBeforeSetupAndIsRateLimited(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -132,6 +135,7 @@ func TestSetupStatusHidesVersionBeforeSetupAndIsRateLimited(t *testing.T) {
 }
 
 func TestApplicationUpdateStatusCoversVersionStateMatrix(t *testing.T) {
+	t.Parallel()
 	server, db, _ := newUsersTestServer(t)
 	ctx := context.Background()
 	server.Version = "v1.2.0"
@@ -167,6 +171,7 @@ func TestApplicationUpdateStatusCoversVersionStateMatrix(t *testing.T) {
 }
 
 func TestWithAuthRejectsMissingSessionWithoutCallingHandler(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	called := false
 	recorder := httptest.NewRecorder()

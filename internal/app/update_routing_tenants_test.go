@@ -21,6 +21,7 @@ import (
 // not change that: its own copy of the alert goes to its own destination
 // only, and its routing is left as it is.
 func TestUpdateAlertsFollowTheDefaultTenantRouting(t *testing.T) {
+	t.Parallel()
 	const otherTenantID = "00000000-0000-0000-0000-000000000200"
 	for _, tc := range []struct {
 		name string

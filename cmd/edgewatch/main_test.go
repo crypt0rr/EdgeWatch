@@ -15,6 +15,7 @@ import (
 )
 
 func TestAdminRecoverySkipsMonitorInitialization(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")
 	s, err := store.Open(database)
@@ -90,6 +91,7 @@ jobs:
 // host recovery commands reset its password and disable its TOTP there, keep
 // it in the default tenant, and never write the retired admins table.
 func TestAdminRecoveryAfterAdminsRetirement(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")

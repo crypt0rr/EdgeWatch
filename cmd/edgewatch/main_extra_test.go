@@ -19,6 +19,7 @@ import (
 )
 
 func TestUsageAndPrintValue(t *testing.T) {
+	t.Parallel()
 	if err := usage(); err == nil || !strings.Contains(err.Error(), "invalid or missing command") {
 		t.Fatalf("usage error = %v", err)
 	}
@@ -43,6 +44,7 @@ func TestUsageAndPrintValue(t *testing.T) {
 }
 
 func TestNormalizedConfigIncludesDeploymentAndLegacyJobMetadata(t *testing.T) {
+	t.Parallel()
 	cfg := &config.Config{
 		Version:       1,
 		Database:      "/var/lib/edgewatch/edgewatch.db",
@@ -66,6 +68,7 @@ func TestNormalizedConfigIncludesDeploymentAndLegacyJobMetadata(t *testing.T) {
 }
 
 func TestDeploymentTimezoneControlsCLIStatusTimes(t *testing.T) {
+	t.Parallel()
 	cfg := &config.Config{Timezone: "Europe/Amsterdam"}
 	if value := normalizedConfig(cfg); value["timezone"] != "Europe/Amsterdam" {
 		t.Fatalf("normalized timezone = %#v", value["timezone"])
@@ -93,6 +96,7 @@ func TestDeploymentTimezoneControlsCLIStatusTimes(t *testing.T) {
 }
 
 func TestRunVersionHelpAndConfigValidation(t *testing.T) {
+	t.Parallel()
 	if err := run([]string{"version"}); err != nil {
 		t.Fatalf("version: %v", err)
 	}
@@ -137,6 +141,7 @@ func TestRunVersionHelpAndConfigValidation(t *testing.T) {
 }
 
 func TestDaemonSurfacesAdministratorCompatibilityMigrationFailure(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	databasePath := filepath.Join(dir, "edgewatch.db")
 	configPath := filepath.Join(dir, "config.yaml")
@@ -165,6 +170,7 @@ func TestDaemonSurfacesAdministratorCompatibilityMigrationFailure(t *testing.T) 
 }
 
 func TestRunRejectsUnexpectedOperandsBeforeDestructiveActions(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, "source.db")
 	destinationPath := filepath.Join(dir, "destination.db")
@@ -201,6 +207,7 @@ func TestRunRejectsUnexpectedOperandsBeforeDestructiveActions(t *testing.T) {
 }
 
 func TestRunRejectsUnsupportedFlagsBeforeMutatingCommands(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name            string
 		command         string
@@ -355,6 +362,7 @@ func TestRunRejectsUnsupportedFlagsBeforeMutatingCommands(t *testing.T) {
 }
 
 func TestHealthRejectsScannerFlagWithoutConstructingApplication(t *testing.T) {
+	t.Parallel()
 	database := storetest.FreshPath(t)
 	dir := filepath.Dir(database)
 	s, err := store.Open(database)
@@ -387,6 +395,7 @@ func TestHealthRejectsScannerFlagWithoutConstructingApplication(t *testing.T) {
 }
 
 func TestRunStatusReportsUnknownManagedJob(t *testing.T) {
+	t.Parallel()
 	database := storetest.FreshPath(t)
 	dir := filepath.Dir(database)
 	s, err := store.Open(database)
@@ -408,6 +417,7 @@ func TestRunStatusReportsUnknownManagedJob(t *testing.T) {
 }
 
 func TestStatusFallsBackToUTCForInvalidTimezone(t *testing.T) {
+	t.Parallel()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -425,6 +435,7 @@ func TestStatusFallsBackToUTCForInvalidTimezone(t *testing.T) {
 }
 
 func TestRunStatusHistoryAndBaselineForManagedJob(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.FreshPath(t)
 	dir := filepath.Dir(database)
@@ -485,6 +496,7 @@ func TestRunStatusHistoryAndBaselineForManagedJob(t *testing.T) {
 }
 
 func TestRunBackupVerifyAndBaselineExport(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")
 	configPath := filepath.Join(dir, "config.yaml")
@@ -591,6 +603,7 @@ func assertCLIFileUnchanged(t *testing.T, path string, before cliFileSnapshot) {
 }
 
 func TestReadOnlyCommandsDoNotModifySQLiteArtifacts(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")
 	configPath := filepath.Join(dir, "config.yaml")
@@ -654,6 +667,7 @@ func TestReadOnlyCommandsDoNotModifySQLiteArtifacts(t *testing.T) {
 }
 
 func TestRunVerifyPreservesResultWhenAuditStoreIsReadOnly(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")
 	configPath := filepath.Join(dir, "config.yaml")
@@ -747,6 +761,7 @@ func TestHealthAndVerifyReportThePendingCleanupAfterDeletedUnits(t *testing.T) {
 }
 
 func TestRunRestoreDryRunAndReplacement(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")
 	source := filepath.Join(dir, "source.db")
@@ -801,6 +816,7 @@ func createCLIStoreFixture(t *testing.T, path, value string) {
 }
 
 func TestAdminActionRequiresExplicitSetupTokenConfirmation(t *testing.T) {
+	t.Parallel()
 	err := adminActionForUser(context.Background(), "setup-token", nil, "", "admin", false)
 	if err == nil || !strings.Contains(err.Error(), "--force") {
 		t.Fatalf("setup-token confirmation error = %v", err)

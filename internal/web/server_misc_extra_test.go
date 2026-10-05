@@ -139,6 +139,7 @@ func (w *blockingSSEWriter) SetWriteDeadline(deadline time.Time) error {
 }
 
 func TestServeListenerWriteDeadlineReleasesStalledReader(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	server.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	server.writeTimeout = 30 * time.Millisecond
@@ -193,6 +194,7 @@ func TestServeListenerWriteDeadlineReleasesStalledReader(t *testing.T) {
 }
 
 func TestStreamAppliesBoundedWriteDeadline(t *testing.T) {
+	t.Parallel()
 	server, _, session := newUsersTestServer(t)
 	writer := &deadlineTrackingWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -232,6 +234,7 @@ func TestStreamAppliesBoundedWriteDeadline(t *testing.T) {
 }
 
 func TestSSEWriteDeadlineReleasesStalledReader(t *testing.T) {
+	t.Parallel()
 	server, _, session := newUsersTestServer(t)
 	server.sseWriteTimeout = 25 * time.Millisecond
 	writer := newBlockingSSEWriter()
@@ -255,6 +258,7 @@ func TestSSEWriteDeadlineReleasesStalledReader(t *testing.T) {
 }
 
 func TestSSEShutdownInterruptsStalledWrite(t *testing.T) {
+	t.Parallel()
 	server, _, session := newUsersTestServer(t)
 	server.sseWriteTimeout = time.Minute
 	writer := newBlockingSSEWriter()
@@ -279,6 +283,7 @@ func TestSSEShutdownInterruptsStalledWrite(t *testing.T) {
 }
 
 func TestSSEWriteHelpersRejectCanceledContext(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -325,6 +330,7 @@ func startTestSSEStream(server *Server, session store.Session) (context.CancelFu
 }
 
 func TestSSESubscriberLimits(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	server.sseMaxSubscribers = 2
 	server.sseMaxSubscribersPerUser = 10
@@ -400,6 +406,7 @@ func TestSSESubscriberLimits(t *testing.T) {
 }
 
 func TestSSEAnonymousSubscriberUsesStableFallbackKeys(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	cancel, done := startTestSSEStream(server, store.Session{})
 	waitForSSESubscribers(t, server, 1)
@@ -412,6 +419,7 @@ func TestSSEAnonymousSubscriberUsesStableFallbackKeys(t *testing.T) {
 }
 
 func TestSSEStreamsCloseOnShutdownSignal(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	cancel, done := startTestSSEStream(server, store.Session{IDHash: "shutdown-session", UserID: "user"})
 	defer cancel()
@@ -431,6 +439,7 @@ func TestSSEStreamsCloseOnShutdownSignal(t *testing.T) {
 }
 
 func TestServeListenerWaitsForGracefulShutdown(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	server.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -491,6 +500,7 @@ func TestServeListenerWaitsForGracefulShutdown(t *testing.T) {
 }
 
 func TestServerStaticSSEAndAuditHelpers(t *testing.T) {
+	t.Parallel()
 	server, _, session := newUsersTestServer(t)
 	server.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	if err := server.ListenAndServe(context.Background(), "not-a-listener"); err == nil {

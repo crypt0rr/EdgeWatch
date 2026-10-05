@@ -14,6 +14,7 @@ import (
 )
 
 func TestAuthValidationBranchesAndSetupRequest(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
@@ -60,6 +61,7 @@ func TestAuthValidationBranchesAndSetupRequest(t *testing.T) {
 }
 
 func TestEnsureSetupTokenReusesAndReplacesExpiredTokens(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
@@ -86,6 +88,7 @@ func TestEnsureSetupTokenReusesAndReplacesExpiredTokens(t *testing.T) {
 }
 
 func TestVerifyPasswordRejectsMalformedEncodings(t *testing.T) {
+	t.Parallel()
 	cases := []string{
 		"",
 		"not-an-edgewatch-hash",
@@ -125,6 +128,7 @@ func replaceAdministratorWithAdminsRow(t *testing.T, db *store.Store) {
 }
 
 func TestLoginAfterAdminsRetirementAndAuthenticationFailureModes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
@@ -216,6 +220,7 @@ func TestLoginAfterAdminsRetirementAndAuthenticationFailureModes(t *testing.T) {
 // fails even for the original administrator's ID, whatever the admins row
 // holds.
 func TestConfirmationRequiresTheUsersRow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -248,6 +253,7 @@ func TestConfirmationRequiresTheUsersRow(t *testing.T) {
 }
 
 func TestLogoutSessionEmptyCookieNoop(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {

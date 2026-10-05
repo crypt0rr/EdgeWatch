@@ -25,6 +25,7 @@ func (w *hijackableResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error)
 }
 
 func TestRequestLoggingRecordsCorrelationAndResponseMetrics(t *testing.T) {
+	t.Parallel()
 	var output bytes.Buffer
 	server := &Server{Log: slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))}
 	handler := server.requestLogging(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +63,7 @@ func TestRequestLoggingRecordsCorrelationAndResponseMetrics(t *testing.T) {
 }
 
 func TestRequestLoggingAddsCorrelationToErrorResponses(t *testing.T) {
+	t.Parallel()
 	server := &Server{Log: slog.Default()}
 	handler := server.requestLogging(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid", "invalid request", nil)
@@ -76,6 +78,7 @@ func TestRequestLoggingAddsCorrelationToErrorResponses(t *testing.T) {
 }
 
 func TestRequestLoggingLevelControlsRoutineLines(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name       string
 		level      slog.Level
@@ -105,6 +108,7 @@ func TestRequestLoggingLevelControlsRoutineLines(t *testing.T) {
 }
 
 func TestRequestLoggingKeepsFailuresVisibleAtInfo(t *testing.T) {
+	t.Parallel()
 	var output bytes.Buffer
 	server := &Server{Log: slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelInfo}))}
 	handler := server.requestLogging(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -121,6 +125,7 @@ func TestRequestLoggingKeepsFailuresVisibleAtInfo(t *testing.T) {
 }
 
 func TestRequestLoggingKeepsSlowSuccessVisibleAtInfo(t *testing.T) {
+	t.Parallel()
 	var output bytes.Buffer
 	server := &Server{Log: slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelInfo}))}
 	handler := server.requestLogging(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -138,6 +143,7 @@ func TestRequestLoggingKeepsSlowSuccessVisibleAtInfo(t *testing.T) {
 }
 
 func TestRequestLoggingSuppressesFastSuccessAtInfo(t *testing.T) {
+	t.Parallel()
 	var output bytes.Buffer
 	server := &Server{Log: slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelInfo}))}
 	handler := server.requestLogging(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -150,6 +156,7 @@ func TestRequestLoggingSuppressesFastSuccessAtInfo(t *testing.T) {
 }
 
 func TestRequestLoggingRecoversPanicIntoStructuredError(t *testing.T) {
+	t.Parallel()
 	var output bytes.Buffer
 	server := &Server{Log: slog.New(slog.NewJSONHandler(&output, nil))}
 	handler := server.requestLogging(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic(errors.New("boom")) }))
@@ -168,6 +175,7 @@ func TestRequestLoggingRecoversPanicIntoStructuredError(t *testing.T) {
 }
 
 func TestRequestLoggingClosesConnectionAfterHeadersOnPanic(t *testing.T) {
+	t.Parallel()
 	var output bytes.Buffer
 	server := &Server{Log: slog.New(slog.NewJSONHandler(&output, nil))}
 	connection, peer := net.Pipe()

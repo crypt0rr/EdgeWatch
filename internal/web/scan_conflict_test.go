@@ -13,6 +13,7 @@ import (
 )
 
 func TestWriteBaselineConflictReturnsSafeCurrentMarker(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -40,5 +41,6 @@ func TestWriteBaselineConflictReturnsSafeCurrentMarker(t *testing.T) {
 }
 
 func TestRetrySSEReservationWithoutStoreIsSafe(t *testing.T) {
+	t.Parallel()
 	(&Server{}).retrySSEReservation()
 }

@@ -49,6 +49,7 @@ func downgradeToSchema50(t *testing.T, database string) {
 // once each: every enabled destination while the routing was never
 // configured, the selection when it was, and none when it was silenced.
 func TestUpdateAlertsReachTheSameDestinationsAfterSchema51(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		// selection picks the update routing; nil leaves it unconfigured.

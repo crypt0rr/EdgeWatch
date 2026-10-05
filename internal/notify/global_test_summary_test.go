@@ -37,6 +37,7 @@ func countingWebhook(t *testing.T, path string) (string, *atomic.Int32) {
 }
 
 func TestStoreBackedNotificationTestSendsOncePerDeploymentDestination(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -73,6 +74,7 @@ func TestStoreBackedNotificationTestSendsOncePerDeploymentDestination(t *testing
 }
 
 func TestNotificationTestKeepsManagedDestinationSharingDeploymentURL(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -127,6 +129,7 @@ func lockManagedDestination(t *testing.T, db *store.Store, keyPath string, remov
 }
 
 func TestNotificationTestFailsForLockedManagedDestination(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name      string
 		removeKey bool
@@ -171,6 +174,7 @@ func TestNotificationTestFailsForLockedManagedDestination(t *testing.T) {
 }
 
 func TestNotificationTestFailsWhenWorkingDeploymentAndLockedManagedDestinationMix(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "edgewatch.db"))
@@ -197,6 +201,7 @@ func TestNotificationTestFailsWhenWorkingDeploymentAndLockedManagedDestinationMi
 }
 
 func TestCanceledNotificationTestCountsEveryDestinationAsFailed(t *testing.T) {
+	t.Parallel()
 	var urls []string
 	var counters []*atomic.Int32
 	for i := 0; i < notificationWorkers+2; i++ {
@@ -227,6 +232,7 @@ func TestCanceledNotificationTestCountsEveryDestinationAsFailed(t *testing.T) {
 }
 
 func TestNotificationTestIgnoresPausedLockedManagedDestination(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "edgewatch.db"))
@@ -259,6 +265,7 @@ func TestNotificationTestIgnoresPausedLockedManagedDestination(t *testing.T) {
 // tenant that receives the test messages. Paused destinations are not
 // counted, and the result is a count, never a URL.
 func TestLockedDestinationsCoversEveryOwner(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	notifier, db, own, other := twoTenantNotifier(t)
 	audit := addPlatformAdmin(t, db)

@@ -67,6 +67,7 @@ func waitForSSEBody(t *testing.T, writer *deadlineTrackingWriter, want string) {
 }
 
 func TestSSEAuthorizationCacheLifecycleThroughStreams(t *testing.T) {
+	t.Parallel()
 	server, db, _ := newUsersTestServer(t)
 	ctx := context.Background()
 	raw, _, err := server.Auth.LoginAs(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "admin", "administrator password", "", "")
@@ -135,6 +136,7 @@ func TestSSEAuthorizationCacheLifecycleThroughStreams(t *testing.T) {
 }
 
 func TestSSEAnonymousStreamDoesNotSeedAuthorizationCache(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(ctx)

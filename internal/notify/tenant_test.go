@@ -118,6 +118,7 @@ func defaultDelete(ctx context.Context, n *Notifier, id string, expectedRevision
 // as an unknown one, and nothing about it changes. No error or view names a
 // URL.
 func TestTenantNotifierKeepsEachTenantToItsDestinations(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	notifier, db, own, other := twoTenantNotifier(t)
 	secrets := map[string]string{"own": "generic://127.0.0.1:9/own-secret?disabletls=yes&template=json", "other": "generic://127.0.0.1:9/other-secret?disabletls=yes&template=json"}
@@ -274,6 +275,7 @@ func TestTenantNotifierKeepsEachTenantToItsDestinations(t *testing.T) {
 // never selected, and neither is a paused platform destination. A nil
 // selection, like an empty one, selects nothing.
 func TestPlatformUpdateDestinationsAreThePlatforms(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	notifier, db, own, other := twoTenantNotifier(t)
 	audit := store.AuditEntry{Action: "notifications.created"}
@@ -316,6 +318,7 @@ const unknownDestinationID = "00000000-0000-0000-0000-00000000dead"
 // A tenant store without a valid tenant fails every read and changes
 // nothing.
 func TestTenantNotifierRefusesAStoreWithoutATenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	notifier, db, _, _ := twoTenantNotifier(t)
 	tenant := notifier.Tenant(db.Tenant(store.TenantScope{}))

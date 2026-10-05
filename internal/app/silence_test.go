@@ -16,6 +16,7 @@ import (
 )
 
 func TestJobSilenceWatchdogAlertsOncePerScheduleWindow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -59,6 +60,7 @@ func TestJobSilenceWatchdogAlertsOncePerScheduleWindow(t *testing.T) {
 }
 
 func TestJobSilenceWatchdogRetriesWhenDestinationsCannotBeResolved(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -123,6 +125,7 @@ func TestJobSilenceWatchdogRetriesWhenDestinationsCannotBeResolved(t *testing.T)
 }
 
 func TestJobSilenceWatchdogSkipsActiveJob(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -160,6 +163,7 @@ func TestJobSilenceWatchdogSkipsActiveJob(t *testing.T) {
 }
 
 func TestCheckJobSilenceBoundedUsesHeartbeatBudget(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, time.January, 1, 4, 30, 0, 0, time.UTC)
 	a := &App{}
 
@@ -181,6 +185,7 @@ func TestCheckJobSilenceBoundedUsesHeartbeatBudget(t *testing.T) {
 }
 
 func TestCronIntervalHandlesSlowSchedules(t *testing.T) {
+	t.Parallel()
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	parsed, err := parser.Parse("CRON_TZ=UTC 0 3 * * 0")
 	if err != nil {
@@ -193,6 +198,7 @@ func TestCronIntervalHandlesSlowSchedules(t *testing.T) {
 }
 
 func TestJobSilenceThresholdUsesNextExpectedFiring(t *testing.T) {
+	t.Parallel()
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	tests := []struct {
 		name      string
@@ -257,6 +263,7 @@ func TestJobSilenceThresholdUsesNextExpectedFiring(t *testing.T) {
 }
 
 func TestJobSilenceThresholdPreservesDSTWallClock(t *testing.T) {
+	t.Parallel()
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	location, err := time.LoadLocation("Europe/Amsterdam")
 	if err != nil {
@@ -292,6 +299,7 @@ func TestJobSilenceThresholdPreservesDSTWallClock(t *testing.T) {
 }
 
 func TestJobSilenceThresholdAfterRepeatedFallBackOccurrence(t *testing.T) {
+	t.Parallel()
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	location, err := time.LoadLocation("Europe/Amsterdam")
 	if err != nil {
@@ -343,6 +351,7 @@ func TestJobSilenceThresholdAfterRepeatedFallBackOccurrence(t *testing.T) {
 }
 
 func TestJobSilenceWatchdogUsesReferenceSpecificDeadline(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -391,6 +400,7 @@ func TestJobSilenceWatchdogUsesReferenceSpecificDeadline(t *testing.T) {
 }
 
 func TestJobSilenceWatchdogHonorsFutureEligibility(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -453,6 +463,7 @@ func TestJobSilenceWatchdogHonorsFutureEligibility(t *testing.T) {
 }
 
 func TestJobSilenceAlertTextFollowsDeploymentTimezone(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -495,6 +506,7 @@ func TestJobSilenceAlertTextFollowsDeploymentTimezone(t *testing.T) {
 }
 
 func TestDisplayLocationDefaultsToUTC(t *testing.T) {
+	t.Parallel()
 	for name, a := range map[string]*App{
 		"no config":        {},
 		"omitted timezone": {Config: &config.Config{}},

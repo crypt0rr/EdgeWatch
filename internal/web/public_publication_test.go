@@ -64,6 +64,7 @@ func awaitPublicResponse(t *testing.T, responses <-chan *httptest.ResponseRecord
 }
 
 func TestInFlightPublicBuildCannotRepublishAWithdrawnPage(t *testing.T) {
+	t.Parallel()
 	server, db, _ := newUsersTestServer(t)
 	if err := defaultTenant(db).SavePublicDashboard(context.Background(), store.PublicDashboard{Enabled: true, Title: "published-v1"}, nil, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
@@ -95,6 +96,7 @@ func TestInFlightPublicBuildCannotRepublishAWithdrawnPage(t *testing.T) {
 }
 
 func TestInFlightPublicBuildCannotServeAReplacedPublication(t *testing.T) {
+	t.Parallel()
 	server, db, _ := newUsersTestServer(t)
 	if err := defaultTenant(db).SavePublicDashboard(context.Background(), store.PublicDashboard{Enabled: true, Title: "published-v1", Introduction: "old introduction"}, nil, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
@@ -145,6 +147,7 @@ type publicDashboardConfigResponse struct {
 }
 
 func TestPublicDashboardEditorRejectsStaleSaves(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	get := func() publicDashboardConfigResponse {
@@ -229,6 +232,7 @@ func TestPublicDashboardEditorRejectsStaleSaves(t *testing.T) {
 }
 
 func TestPublicDashboardSaveStaysAdministratorOnly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, _ := newUsersTestServer(t)
 	httpServer := httptest.NewServer(server.Handler())

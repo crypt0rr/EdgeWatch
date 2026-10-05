@@ -7,6 +7,7 @@ import (
 )
 
 func TestScannerDiscoveryStatsCountsUniqueTCPEvidence(t *testing.T) {
+	t.Parallel()
 	snapshot := model.Snapshot{Hosts: []model.HostObservation{
 		{Address: "192.0.2.1", Protocols: []model.ProtocolObservation{
 			{Protocol: "udp", DiscoveredPorts: []model.PortObservation{{Port: 53}}, Ports: []model.PortObservation{{Port: 53, State: "open"}}},

@@ -141,16 +141,18 @@ jobs:
   go-test:
     name: go-test (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    # The race-enabled store suite is the longest package and runs its tests
-    # in parallel on a runner of its own; the other packages share a second
-    # runner. Each shard takes about 5-8 minutes on a typical runner. Leave
+    # The race-enabled store suite is the longest package, so its tests are
+    # split round-robin across three shards; the other packages share a fourth
+    # runner. Each shard takes about 4-6 minutes on a typical runner. Leave
     # room for runners that are twice as slow instead of failing on Go's
     # per-package timeout.
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        shard: [store, other]
+        shard: [store-1, store-2, store-3, other]
+    env:
+      STORE_SHARDS: 3
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -166,26 +168,41 @@ jobs:
           cache: npm
       - name: Build embedded frontend assets
         run: npm ci && npm run build
-      - name: Select packages
-        id: packages
+      - name: Select tests
+        id: tests
         env:
           SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
           store="github.com/crypt0rr/edgewatch/internal/store"
           case "$SHARD" in
-            store) packages="$store" ;;
-            other) packages="$(go list ./... | grep -vxF "$store" | tr '\n' ' ')" ;;
+            store-*)
+              index="${SHARD#store-}"
+              # Listing with the flags of the test run reuses its build.
+              names="$(go test -race -coverprofile=coverage.out -list . "$store" | grep -E '^(Test|Example|Fuzz)' | sort |
+                awk -v shards="$STORE_SHARDS" -v shard="$index" '(NR - 1) % shards == shard - 1')"
+              if [ -z "$names" ]; then
+                echo "shard $SHARD selected no tests" >&2
+                exit 1
+              fi
+              echo "Running $(printf '%s\n' "$names" | wc -l) store tests"
+              echo "packages=$store" >> "$GITHUB_OUTPUT"
+              echo "run=^($(printf '%s\n' "$names" | paste -sd '|'))\$" >> "$GITHUB_OUTPUT"
+              ;;
+            other)
+              echo "packages=$(go list ./... | grep -vxF "$store" | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+              echo "run=" >> "$GITHUB_OUTPUT"
+              ;;
             *) echo "unknown shard: $SHARD" >&2; exit 1 ;;
           esac
-          echo "packages=$packages" >> "$GITHUB_OUTPUT"
       - name: Test
         env:
-          PACKAGES: ${{ steps.packages.outputs.packages }}
+          PACKAGES: ${{ steps.tests.outputs.packages }}
+          RUN: ${{ steps.tests.outputs.run }}
         run: |
           set -o pipefail
           # shellcheck disable=SC2086 # PACKAGES is a space-separated list.
-          go test -race -timeout=20m -coverprofile=coverage.out $PACKAGES | tee go-coverage-summary.txt
+          go test -race -timeout=20m -coverprofile=coverage.out -run "${RUN:-.}" $PACKAGES | tee go-coverage-summary.txt
       - name: Upload shard coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -235,17 +252,10 @@ jobs:
       - name: Merge shard coverage
         run: |
           set -euo pipefail
-          for shard in store other; do
-            test -s "shards/go-coverage-$shard/coverage.out"
-            test -s "shards/go-coverage-$shard/go-coverage-summary.txt"
+          for shard in store-1 store-2 store-3 other; do
+            test -d "shards/go-coverage-$shard"
           done
-          modes="$(head -qn1 shards/*/coverage.out | sort -u)"
-          if [ "$(printf '%s\n' "$modes" | wc -l)" -ne 1 ]; then
-            echo "shard coverage modes differ: $modes" >&2
-            exit 1
-          fi
-          { printf '%s\n' "$modes"; for f in shards/*/coverage.out; do tail -n +2 "$f"; done; } > coverage.out
-          cat shards/*/go-coverage-summary.txt > go-coverage-summary.txt
+          ./scripts/merge-go-coverage.sh coverage.out go-coverage-summary.txt shards/go-coverage-*
       - name: Check Go coverage
         run: ./scripts/check-go-coverage.sh coverage.out go-coverage-summary.txt
       - name: Resolve diff coverage base

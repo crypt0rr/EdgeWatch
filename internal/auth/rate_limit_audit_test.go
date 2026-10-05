@@ -16,6 +16,7 @@ import (
 )
 
 func TestRateLimitAuditCoalescesRotatingLoginIdentities(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -59,6 +60,7 @@ func TestRateLimitAuditCoalescesRotatingLoginIdentities(t *testing.T) {
 // account and stay in the default unit. Each case throttles its own client,
 // whose address the record carries.
 func TestRateLimitRecordsBelongToTheAccountsScope(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, defaultAdmin, _ := platformTestStore(t)
 	addSecondUnit(t, s)
@@ -158,6 +160,7 @@ func TestRateLimitRecordsBelongToTheAccountsScope(t *testing.T) {
 // usernames all belong to platform scope, so a client that rotates through
 // them still gets one platform record for sign-in.
 func TestRateLimitRecordsFromOneClientReachEveryScope(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, defaultAdmin, _ := platformTestStore(t)
 	addSecondUnit(t, s)
@@ -286,6 +289,7 @@ func rateLimitRecords(t *testing.T, s *store.Store, address string) []string {
 }
 
 func TestRateAuditEndpointGroupsLoginSubjectsOnly(t *testing.T) {
+	t.Parallel()
 	for subject, want := range map[string]string{
 		"setup":                    "setup",
 		"activation":               "activation",

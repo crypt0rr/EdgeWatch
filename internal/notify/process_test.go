@@ -16,6 +16,7 @@ import (
 )
 
 func TestRunSendChildRejectsMalformedRequest(t *testing.T) {
+	t.Parallel()
 	if err := RunSendChild(nil); err == nil {
 		t.Fatal("nil child input was accepted")
 	}
@@ -146,6 +147,7 @@ func TestNotificationProcessTimeoutTerminatesAndReapsChild(t *testing.T) {
 }
 
 func TestRunSendChildDeliversWithoutPuttingCredentialsInArguments(t *testing.T) {
+	t.Parallel()
 	received := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()

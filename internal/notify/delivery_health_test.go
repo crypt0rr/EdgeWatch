@@ -48,6 +48,7 @@ func failTerminally(t *testing.T, db *store.Store, created DestinationView, even
 // destination with terminal failures, the default unit's totals do not
 // change, and the destination's delivery health is removed with it.
 func TestDeletedDestinationsOfOtherOwnersLeaveTheDefaultTotals(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	notifier, db, _, other := twoTenantNotifier(t)
 	audit := addPlatformAdmin(t, db)
@@ -101,6 +102,7 @@ func TestDeletedDestinationsOfOtherOwnersLeaveTheDefaultTotals(t *testing.T) {
 // never count in a unit's, the default unit's included. No view carries a
 // URL or a provider error.
 func TestPlatformDestinationsReportTheirDeliveryHealth(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	notifier, db, own, other := twoTenantNotifier(t)
 	audit := addPlatformAdmin(t, db)

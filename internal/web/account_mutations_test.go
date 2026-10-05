@@ -13,6 +13,7 @@ import (
 )
 
 func TestCreateUserRejectsUsernamesTheStoreRejectsAsFieldErrors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	create := func(username string) *httptest.ResponseRecorder {
@@ -57,6 +58,7 @@ func TestCreateUserRejectsUsernamesTheStoreRejectsAsFieldErrors(t *testing.T) {
 }
 
 func TestPasswordResetActivationClosesTheAccountsStreams(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	hash, err := auth.PasswordHash("operator account password")
@@ -125,6 +127,7 @@ func TestPasswordResetActivationClosesTheAccountsStreams(t *testing.T) {
 }
 
 func TestFirstActivationOfAnInviteeStillSucceeds(t *testing.T) {
+	t.Parallel()
 	server, _, admin := newUsersTestServer(t)
 	adminRaw, adminSession := loginSSETestSession(t, server)
 	_, adminCancel, adminDone := startCookieSSEStream(server, adminRaw, adminSession)
@@ -164,6 +167,7 @@ func countAuditRows(t *testing.T, db *store.Store, action, actorUserID string) i
 }
 
 func TestDisplayNameChangesAreAuditedForEveryAccount(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	selfRename := func(session store.Session, name string) {

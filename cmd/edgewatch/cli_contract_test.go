@@ -220,6 +220,7 @@ func TestRunJSONOutputKeepsApplicationLogsOnStderr(t *testing.T) {
 // Container runtimes collect the daemon's structured log from stdout. One-shot
 // commands print their result there, so their diagnostics use stderr.
 func TestOnlyDaemonLogsToStdout(t *testing.T) {
+	t.Parallel()
 	if commandLogWriter("daemon") != io.Writer(os.Stdout) {
 		t.Fatal("daemon log output moved away from stdout")
 	}

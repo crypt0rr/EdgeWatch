@@ -19,6 +19,7 @@ import (
 )
 
 func TestHostHelpersCoverLegacyAndFilterEdges(t *testing.T) {
+	t.Parallel()
 	if canonicalHostAddress("  192.0.2.1 ") != "192.0.2.1" || canonicalHostAddress("logical.example") != "logical.example" {
 		t.Fatal("host address canonicalization failed")
 	}
@@ -112,6 +113,7 @@ func newHostHandlerServer(t *testing.T) (*Server, *store.Store, store.JobRecord)
 }
 
 func TestHostHandlersRejectInvalidOwnershipAndPagination(t *testing.T) {
+	t.Parallel()
 	server, db, record := newHostHandlerServer(t)
 	ctx := context.Background()
 	call := func(fn func(http.ResponseWriter, *http.Request), path string) *httptest.ResponseRecorder {
@@ -180,6 +182,7 @@ func TestHostHandlersRejectInvalidOwnershipAndPagination(t *testing.T) {
 }
 
 func TestHistoricalHostWrapperRoutesHandleMissingAndInvalidEvidence(t *testing.T) {
+	t.Parallel()
 	server, db, record := newHostHandlerServer(t)
 	ctx := context.Background()
 	route := func(rest string) func(http.ResponseWriter, *http.Request) {
@@ -228,6 +231,7 @@ func TestHistoricalHostWrapperRoutesHandleMissingAndInvalidEvidence(t *testing.T
 }
 
 func TestHostRoutesClassifyStoreFailuresWithoutLeakingDetails(t *testing.T) {
+	t.Parallel()
 	server, db, record := newHostHandlerServer(t)
 	// Closing the database makes every lookup return a real store error rather
 	// than sql.ErrNoRows, exercising the internal-error branches of both the
@@ -280,6 +284,7 @@ func TestHostRoutesClassifyStoreFailuresWithoutLeakingDetails(t *testing.T) {
 }
 
 func TestHostRoutesCoverNestedStoreFailureBranches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	newCase := func(t *testing.T) (*Server, *store.Store, store.JobRecord) {
 		t.Helper()
@@ -405,6 +410,7 @@ func TestHostRoutesCoverNestedStoreFailureBranches(t *testing.T) {
 }
 
 func TestHistoricalHostHandlersUseLegacyFallback(t *testing.T) {
+	t.Parallel()
 	server, db, record := newHostHandlerServer(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -435,6 +441,7 @@ func TestHistoricalHostHandlersUseLegacyFallback(t *testing.T) {
 }
 
 func TestHostRDAPUnavailableForKnownHistoricalHost(t *testing.T) {
+	t.Parallel()
 	server, db, record := newHostHandlerServer(t)
 	ctx := context.Background()
 	now := time.Now().UTC()

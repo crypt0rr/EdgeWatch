@@ -19,6 +19,7 @@ import (
 )
 
 func TestHistoryAndIncidentHandlersExposeScopedPages(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {

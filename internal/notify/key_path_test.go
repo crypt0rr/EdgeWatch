@@ -77,6 +77,7 @@ func TestDefaultNotificationKeyFollowsNormalizedDatabasePath(t *testing.T) {
 }
 
 func TestDefaultNotificationKeyPathIgnoresMemoryDatabases(t *testing.T) {
+	t.Parallel()
 	for _, dsn := range []string{"", ":memory:", ":memory:?cache=shared", "file::memory:?cache=shared", "file:shared?mode=memory&cache=shared"} {
 		if got := DefaultKeyPath(dsn); got != "" {
 			t.Fatalf("memory database %q selected notification key path %q", dsn, got)

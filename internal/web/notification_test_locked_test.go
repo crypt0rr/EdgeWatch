@@ -15,6 +15,7 @@ import (
 // The aggregate notification test must fail, not report {"sent":0}, while an
 // enabled web-managed destination is locked by a missing or wrong key.
 func TestNotificationTestReportsLockedManagedDestination(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	// The destination is locked before the test and is never contacted.

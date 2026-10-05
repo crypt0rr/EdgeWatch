@@ -29,6 +29,7 @@ func addPlatformAdmin(t *testing.T, db *store.Store) store.AuditEntry {
 // and a deployment destination are not found, exactly as unknown ones, and
 // no view carries a URL.
 func TestPlatformNotifierManagesOnlyPlatformDestinations(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	notifier, db, ownTenant, otherTenant := twoTenantNotifier(t)
 	audit := addPlatformAdmin(t, db)
@@ -118,6 +119,7 @@ func TestPlatformNotifierManagesOnlyPlatformDestinations(t *testing.T) {
 // A locked platform destination can be renamed and paused, but enabling it
 // again needs a key that opens it.
 func TestPlatformNotifierLockedDestination(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	notifier, db, _, _ := twoTenantNotifier(t)
 	audit := addPlatformAdmin(t, db)

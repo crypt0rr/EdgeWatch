@@ -46,6 +46,7 @@ func occupiedLoopbackAddress(t *testing.T) string {
 // beside the database is either absent (the daemon refused to start) or would
 // be created as a stray key that the configured key cannot open.
 func TestDaemonCompatibilityMigrationUsesConfiguredAuthKey(t *testing.T) {
+	t.Parallel()
 	const seedSecret = "JBSWY3DPEHPK3PXP"
 	for _, tc := range []struct {
 		name      string
@@ -124,6 +125,7 @@ func TestDaemonCompatibilityMigrationUsesConfiguredAuthKey(t *testing.T) {
 // An unusable configured key is reported as such before the migration runs,
 // instead of surfacing as a TOTP decryption failure.
 func TestDaemonValidatesConfiguredAuthKeyBeforeMigration(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")
 	keyPath := filepath.Join(dir, "secrets", "auth.key")
@@ -151,6 +153,7 @@ func TestDaemonValidatesConfiguredAuthKeyBeforeMigration(t *testing.T) {
 // Host recovery commands also seal TOTP secrets before app.New would run, so
 // they must use web.auth_key_file too.
 func TestAdminRecoveryUsesConfiguredAuthKey(t *testing.T) {
+	t.Parallel()
 	const seedSecret = "JBSWY3DPEHPK3PXP"
 	ctx := context.Background()
 	dir := t.TempDir()

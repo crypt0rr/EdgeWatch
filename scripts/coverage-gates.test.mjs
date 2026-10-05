@@ -183,6 +183,50 @@ test('Go coverage gates reject aggregate, package, and missing-package regressio
   })
 })
 
+test('Go coverage merge sums blocks that several shards ran', async () => {
+  await withTempDirectory(async (directory) => {
+    const shard = async (name, profile, summary) => {
+      await mkdir(join(directory, name))
+      await writeFile(join(directory, name, 'coverage.out'), ['mode: atomic', ...profile, ''].join('\n'))
+      await writeFile(join(directory, name, 'go-coverage-summary.txt'), summary.join('\n') + '\n')
+      return join(directory, name)
+    }
+    const store = 'example.com/fixture/internal/store'
+    const web = 'example.com/fixture/internal/web'
+    const first = await shard('store-0', [`${store}/a.go:1.1,2.1 3 4`, `${store}/a.go:3.1,4.1 1 0`], [`ok  \t${store}\t1.0s\tcoverage: 75.0% of statements`])
+    const second = await shard('store-1', [`${store}/a.go:1.1,2.1 3 0`, `${store}/a.go:3.1,4.1 1 2`], [`ok  \t${store}\t1.0s\tcoverage: 25.0% of statements`])
+    const other = await shard('other', [`${web}/b.go:1.1,2.1 2 0`, `${web}/b.go:3.1,4.1 2 1`], [`ok  \t${web}\t1.0s\tcoverage: 50.0% of statements`, `\t${web}/none\t\tcoverage: 0.0% of statements`])
+    const profilePath = join(directory, 'coverage.out')
+    const summaryPath = join(directory, 'summary.txt')
+
+    const merged = runScript('merge-go-coverage.sh', [profilePath, summaryPath, first, second, other])
+    assert.equal(merged.status, 0, merged.stderr)
+    assert.equal(await readFile(profilePath, 'utf8'), [
+      'mode: atomic',
+      `${store}/a.go:1.1,2.1 3 4`,
+      `${store}/a.go:3.1,4.1 1 2`,
+      `${web}/b.go:1.1,2.1 2 0`,
+      `${web}/b.go:3.1,4.1 2 1`,
+      '',
+    ].join('\n'))
+    assert.equal(await readFile(summaryPath, 'utf8'), [
+      `ok  \t${store}\tcoverage: 100.0% of statements`,
+      `ok  \t${web}\tcoverage: 50.0% of statements`,
+      `\t${web}/none\t\tcoverage: 0.0% of statements`,
+      '',
+    ].join('\n'))
+
+    await writeFile(join(second, 'coverage.out'), `mode: set\n${store}/a.go:1.1,2.1 3 1\n`)
+    assert.notEqual(runScript('merge-go-coverage.sh', [profilePath, summaryPath, first, second]).status, 0)
+
+    await writeFile(join(second, 'coverage.out'), `mode: atomic\n${store}/a.go:1.1,2.1 2 1\n`)
+    assert.notEqual(runScript('merge-go-coverage.sh', [profilePath, summaryPath, first, second]).status, 0)
+
+    await writeFile(join(second, 'go-coverage-summary.txt'), '')
+    assert.notEqual(runScript('merge-go-coverage.sh', [profilePath, summaryPath, first, second]).status, 0)
+  })
+})
+
 // The Go fixture is a real module so the gate can ask `go list` which package
 // compiles each changed file. Its changed line holds three executable blocks.
 const exampleGoSource = (value) => `package example\n\nfunc Value(ok bool) int { if ok { return 1 }; return ${value} }\n`

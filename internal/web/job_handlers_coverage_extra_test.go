@@ -18,6 +18,7 @@ import (
 )
 
 func TestJobUpdateRebaselineAndLifecycleErrors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{
@@ -154,6 +155,7 @@ func TestJobUpdateRebaselineAndLifecycleErrors(t *testing.T) {
 }
 
 func TestJobListAndAPIDispatchCoverage(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "dispatch", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
@@ -215,6 +217,7 @@ func TestJobListAndAPIDispatchCoverage(t *testing.T) {
 }
 
 func TestJobPayloadConfigCopiesProfilesAndDurationFields(t *testing.T) {
+	t.Parallel()
 	payload := jobPayload{
 		Name: " payload ", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
 		Timeout: "2h", ResumeWindow: "1.5d", NotificationDestinations: &[]string{"dest"},
@@ -236,6 +239,7 @@ func TestJobPayloadConfigCopiesProfilesAndDurationFields(t *testing.T) {
 }
 
 func TestHighCostOverrideRequiresAdministrator(t *testing.T) {
+	t.Parallel()
 	server, _, admin := newUsersTestServer(t)
 	operator := admin
 	operator.Role = store.RoleOperator
@@ -257,6 +261,7 @@ func TestHighCostOverrideRequiresAdministrator(t *testing.T) {
 }
 
 func TestJobResponsesRedactActiveScanCycleStoreFailures(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{
@@ -323,6 +328,7 @@ func TestJobResponsesRedactActiveScanCycleStoreFailures(t *testing.T) {
 }
 
 func TestBaselineJSONReportsStalledLearning(t *testing.T) {
+	t.Parallel()
 	result := baselineJSONFromSummary(store.RuntimeStateSummary{IncompleteCandidateAttempts: 3}, "")
 	if result["status"] != "stalled" || result["incomplete_attempts"] != 3 {
 		t.Fatalf("stalled baseline response = %#v", result)
@@ -330,6 +336,7 @@ func TestBaselineJSONReportsStalledLearning(t *testing.T) {
 }
 
 func TestBaselineJSONReportsUpdatingForLegacyScopeHash(t *testing.T) {
+	t.Parallel()
 	// A baseline keyed to a legacy spelling of the job's scope is still the
 	// active baseline; it is re-keyed by the next finalized scan or save.
 	summary := store.RuntimeStateSummary{HasBaseline: true, BaselineScanID: "scan-legacy", BaselineConfigHash: "legacy-hash", BaselineHostCount: 1}
@@ -343,6 +350,7 @@ func TestBaselineJSONReportsUpdatingForLegacyScopeHash(t *testing.T) {
 }
 
 func TestJobListBatchesProfileAndActiveCycleSummaries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	profile, err := defaultTenant(db).CreateScannerProfile(ctx, "List revision", "", config.ScannerProfile{Engine: config.EngineNmap}, admin.Username)
@@ -407,6 +415,7 @@ func TestJobListBatchesProfileAndActiveCycleSummaries(t *testing.T) {
 }
 
 func TestJobListKeepsReadableResponseWhenCycleAndProfileReadsFail(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, _ := newUsersTestServer(t)
 	server.Log = nil

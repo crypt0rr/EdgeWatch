@@ -342,6 +342,15 @@ func (ts *TenantStore) UpdateJobWithEventsWithOutboxAndAudit(ctx context.Context
 	if n, _ := result.RowsAffected(); n != 1 {
 		return JobRecord{}, false, nil, ErrConflict
 	}
+	if current.Job.Name != job.Name {
+		// The latest-host projection is the source for inventory labels and
+		// search. Keep renamed jobs visible there in the same transaction as
+		// the job revision; the projection's update trigger refreshes its FTS
+		// entry. Historical scan records retain their original scan-time name.
+		if _, err = tx.ExecContext(ctx, `UPDATE latest_scan_hosts SET job=? WHERE tenant_id=? AND job_id=?`, job.Name, ts.scope.id, id); err != nil {
+			return JobRecord{}, false, nil, err
+		}
+	}
 	if err = appendJobRevisionTx(ctx, tx, id, next, raw, job.SecurityHash(), now); err != nil {
 		return JobRecord{}, false, nil, err
 	}

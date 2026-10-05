@@ -88,6 +88,9 @@ func run(args []string) error {
 	if err := validateCommandFlags(fs, cmd, action); err != nil {
 		return err
 	}
+	if cmd == "history" && (*limit < 1 || *limit > 1000) {
+		return errors.New("--limit must be between 1 and 1000")
+	}
 	if cmd == "version" {
 		fmt.Println("EdgeWatch", version)
 		return nil
@@ -285,11 +288,7 @@ func run(args []string) error {
 	case "status":
 		return status(ctx, tenant, unit.State, cfg, *jobName, *output)
 	case "history":
-		scans, err := tenant.ListScans(ctx, *jobName, *limit)
-		if err != nil {
-			return err
-		}
-		events, err := tenant.ListEvents(ctx, *jobName, *limit)
+		scans, events, err := listHistory(ctx, tenant, *jobName, *limit)
 		if err != nil {
 			return err
 		}

@@ -160,6 +160,20 @@ func TestPermanentJobDeletionRemovesHistoryAtomicallyAndRepairsLatestHosts(t *te
 	}); err != nil {
 		t.Fatal(err)
 	}
+	otherTenantID := "00000000-0000-0000-0000-000000000999"
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO tenants(id,name,slug,created_at,updated_at) VALUES(?,?,?,?,?)`, otherTenantID, "Other quarantine unit", "other-quarantine-unit", sqliteTimestamp(baseTime), sqliteTimestamp(baseTime)); err != nil {
+		t.Fatal(err)
+	}
+	insertQuarantined := func(epoch, tenantID, jobID string) {
+		t.Helper()
+		payload := []byte(`{"job_id":"` + jobID + `"}`)
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO restore_quarantined_deliveries(restore_epoch,destination,payload_json,quarantined_at,tenant_id) VALUES(?,?,?,?,?)`, epoch, "test-destination", payload, sqliteTimestamp(baseTime), tenantID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertQuarantined("deleted-job", tenant.scope.id, job.ID)
+	insertQuarantined("other-job", tenant.scope.id, other.ID)
+	insertQuarantined("other-tenant", otherTenantID, job.ID)
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
 		ID: "delete-history-cycle", JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
 		ConfigHash: job.Job.SecurityHash(),
@@ -204,17 +218,18 @@ func TestPermanentJobDeletionRemovesHistoryAtomicallyAndRepairsLatestHosts(t *te
 	}
 	var count int
 	for name, statement := range map[string]string{
-		"job":    `SELECT COUNT(*) FROM jobs WHERE id=?`,
-		"scan":   `SELECT COUNT(*) FROM scans WHERE job_id=? AND tenant_id=?`,
-		"event":  `SELECT COUNT(*) FROM events WHERE job_id=? AND tenant_id=?`,
-		"cycle":  `SELECT COUNT(*) FROM scan_cycles WHERE job_id=?`,
-		"outbox": `SELECT COUNT(*) FROM outbox WHERE tenant_id=? AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?`,
+		"job":                  `SELECT COUNT(*) FROM jobs WHERE id=?`,
+		"scan":                 `SELECT COUNT(*) FROM scans WHERE job_id=? AND tenant_id=?`,
+		"event":                `SELECT COUNT(*) FROM events WHERE job_id=? AND tenant_id=?`,
+		"cycle":                `SELECT COUNT(*) FROM scan_cycles WHERE job_id=?`,
+		"outbox":               `SELECT COUNT(*) FROM outbox WHERE tenant_id=? AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?`,
+		"quarantined delivery": `SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE tenant_id=? AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?`,
 	} {
 		var args []any
 		switch name {
 		case "job", "cycle":
 			args = []any{job.ID}
-		case "outbox":
+		case "outbox", "quarantined delivery":
 			args = []any{tenant.scope.id, job.ID}
 		default:
 			args = []any{job.ID, tenant.scope.id}
@@ -227,7 +242,45 @@ func TestPermanentJobDeletionRemovesHistoryAtomicallyAndRepairsLatestHosts(t *te
 	if latestJobID != job.ID || latestScanID != jobScan.ID {
 		t.Fatalf("latest host after rollback = %s/%s, want deleted job scan", latestJobID, latestScanID)
 	}
+	for label, tenantJob := range map[string][2]string{
+		"deleted job":        {tenant.scope.id, job.ID},
+		"another job":        {tenant.scope.id, other.ID},
+		"another tenant job": {otherTenantID, job.ID},
+	} {
+		if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE tenant_id=? AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?`, tenantJob[0], tenantJob[1]).Scan(&count); err != nil || count != 1 {
+			t.Errorf("quarantined deliveries for %s after rolled-back delete = %d, %v; want 1", label, count, err)
+		}
+	}
 	if _, err := s.DB.ExecContext(ctx, `DROP TRIGGER reject_job_delete_audit`); err != nil {
+		t.Fatal(err)
+	}
+	// Failure while deleting quarantined delivery copies must roll back the
+	// preceding history deletes and the job row as one transaction.
+	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER reject_job_quarantine_delete BEFORE DELETE ON restore_quarantined_deliveries
+		BEGIN SELECT RAISE(ABORT,'quarantine unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tenant.DeleteJobWithAudit(ctx, job.ID, audit); err == nil || !strings.Contains(err.Error(), "quarantine unavailable") {
+		t.Fatalf("delete with rejected quarantine cleanup = %v", err)
+	}
+	if _, err := tenant.GetJob(ctx, job.ID); err != nil {
+		t.Fatalf("job lookup after rejected quarantine cleanup = %v, want job retained", err)
+	}
+	for name, statement := range map[string]string{
+		"scan":                 `SELECT COUNT(*) FROM scans WHERE job_id=? AND tenant_id=?`,
+		"quarantined delivery": `SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE tenant_id=? AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?`,
+	} {
+		var args []any
+		if name == "quarantined delivery" {
+			args = []any{tenant.scope.id, job.ID}
+		} else {
+			args = []any{job.ID, tenant.scope.id}
+		}
+		if err := s.DB.QueryRowContext(ctx, statement, args...).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("%s count after rejected quarantine cleanup = %d, %v; want 1", name, count, err)
+		}
+	}
+	if _, err := s.DB.ExecContext(ctx, `DROP TRIGGER reject_job_quarantine_delete`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -238,12 +291,13 @@ func TestPermanentJobDeletionRemovesHistoryAtomicallyAndRepairsLatestHosts(t *te
 		t.Fatalf("deleted managed job lookup = %v", err)
 	}
 	for name, statement := range map[string]string{
-		"scan":       `SELECT COUNT(*) FROM scans WHERE job_id=? AND tenant_id=?`,
-		"host rows":  `SELECT COUNT(*) FROM scan_hosts WHERE scan_id=?`,
-		"event":      `SELECT COUNT(*) FROM events WHERE job_id=? AND tenant_id=?`,
-		"cycle":      `SELECT COUNT(*) FROM scan_cycles WHERE job_id=?`,
-		"cycle work": `SELECT COUNT(*) FROM scan_cycle_units WHERE cycle_id=?`,
-		"outbox":     `SELECT COUNT(*) FROM outbox WHERE tenant_id=? AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?`,
+		"scan":                 `SELECT COUNT(*) FROM scans WHERE job_id=? AND tenant_id=?`,
+		"host rows":            `SELECT COUNT(*) FROM scan_hosts WHERE scan_id=?`,
+		"event":                `SELECT COUNT(*) FROM events WHERE job_id=? AND tenant_id=?`,
+		"cycle":                `SELECT COUNT(*) FROM scan_cycles WHERE job_id=?`,
+		"cycle work":           `SELECT COUNT(*) FROM scan_cycle_units WHERE cycle_id=?`,
+		"outbox":               `SELECT COUNT(*) FROM outbox WHERE tenant_id=? AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?`,
+		"quarantined delivery": `SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE tenant_id=? AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?`,
 	} {
 		var args []any
 		switch name {
@@ -251,7 +305,7 @@ func TestPermanentJobDeletionRemovesHistoryAtomicallyAndRepairsLatestHosts(t *te
 			args = []any{jobScan.ID}
 		case "cycle work":
 			args = []any{cycle.ID}
-		case "outbox":
+		case "outbox", "quarantined delivery":
 			args = []any{tenant.scope.id, job.ID}
 		case "cycle":
 			args = []any{job.ID}
@@ -260,6 +314,14 @@ func TestPermanentJobDeletionRemovesHistoryAtomicallyAndRepairsLatestHosts(t *te
 		}
 		if err := s.DB.QueryRowContext(ctx, statement, args...).Scan(&count); err != nil || count != 0 {
 			t.Errorf("%s count after delete = %d, %v; want 0", name, count, err)
+		}
+	}
+	for label, tenantJob := range map[string][2]string{
+		"another job":        {tenant.scope.id, other.ID},
+		"another tenant job": {otherTenantID, job.ID},
+	} {
+		if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE tenant_id=? AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?`, tenantJob[0], tenantJob[1]).Scan(&count); err != nil || count != 1 {
+			t.Errorf("quarantined deliveries for %s after delete = %d, %v; want 1", label, count, err)
 		}
 	}
 	queryLatest()

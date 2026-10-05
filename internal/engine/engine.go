@@ -196,6 +196,11 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		}
 		changes = filtered
 	}
+	// A service fingerprint is meaningful only while its port is positively
+	// observed. Diff intentionally reports a port closure without also emitting
+	// a service removal; retire any existing service finding for that port here
+	// so applyChanges cannot mislabel the missing service key as a recovery.
+	retireClosedPortServiceChanges(state, scan.Snapshot)
 	previous := make(map[string]model.Incident, len(state.Incidents))
 	sendRemindersNow := remindersEnabled && incidentReminderDue(state.LastIncidentReminderAt, reminderSettings.Cadence, now)
 	if sendRemindersNow {
@@ -1580,6 +1585,57 @@ func scopeAllows(s model.Snapshot, target, protocol string, port int, service bo
 
 func applyChanges(state *model.JobState, job, scanID string, current []model.Change, required int, now time.Time) []model.Event {
 	return applyChangesWithIncomplete(state, job, scanID, current, required, now, nil)
+}
+
+// retireClosedPortServiceChanges removes service findings whose port is no
+// longer positive in this complete snapshot. Such a service has not been
+// observed returning to its baseline fingerprint, so it is not a recovery.
+// Incomplete scans return earlier in processSuccessWithReminderSettings and
+// must not use absence as evidence to retire findings.
+func retireClosedPortServiceChanges(state *model.JobState, snapshot model.Snapshot) {
+	positivePorts := make(map[string]struct{})
+	for _, unit := range snapshot.Units {
+		for _, port := range unit.Ports {
+			if isPositivePortState(port.State) {
+				positivePorts[fmt.Sprintf("port|%s|%s|%d", unit.Target, unit.Protocol, port.Port)] = struct{}{}
+			}
+		}
+	}
+	retire := func(key string, change model.Change) {
+		if change.Kind != "service" {
+			return
+		}
+		portKey := fmt.Sprintf("port|%s|%s|%d", change.Target, change.Protocol, change.Port)
+		if _, positive := positivePorts[portKey]; positive {
+			return
+		}
+		delete(state.Pending, key)
+		delete(state.Incidents, key)
+		delete(state.Suppressed, key)
+		delete(state.SuppressedChanges, key)
+	}
+	for key, pending := range state.Pending {
+		retire(key, pending.Change)
+	}
+	for key, incident := range state.Incidents {
+		retire(key, incident.Change)
+	}
+	for key, change := range state.SuppressedChanges {
+		retire(key, change)
+	}
+	// State can contain a service suppression without its payload. The stable
+	// change-key format still lets us expire that stale suppression when the
+	// port is gone.
+	for key := range state.Suppressed {
+		if !strings.HasPrefix(key, "service|") {
+			continue
+		}
+		portKey := "port|" + strings.TrimPrefix(key, "service|")
+		if _, positive := positivePorts[portKey]; !positive {
+			delete(state.Suppressed, key)
+			delete(state.SuppressedChanges, key)
+		}
+	}
 }
 
 func applyChangesWithIncomplete(state *model.JobState, job, scanID string, current []model.Change, required int, now time.Time, protected map[string]bool) []model.Event {

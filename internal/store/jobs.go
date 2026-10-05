@@ -164,7 +164,7 @@ func (ts *TenantStore) GetJob(ctx context.Context, id string) (JobRecord, error)
 	if err := ts.ready(); err != nil {
 		return JobRecord{}, err
 	}
-	return scanJobRecord(ts.store.reader().QueryRowContext(ctx, `SELECT `+jobRecordColumns+` FROM jobs WHERE id=? AND tenant_id=?`, id, ts.scope.id), id)
+	return scanJobRecord(ts.store.reader().QueryRowContext(ctx, `SELECT `+jobRecordColumns+` FROM jobs WHERE id=? AND tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=jobs.tenant_id AND purge.job_id=jobs.id)`, id, ts.scope.id), id)
 }
 
 // jobRecordColumns are the jobs columns that scanJobRecord reads, in order.
@@ -202,7 +202,7 @@ func scanJobRecord(row interface{ Scan(...any) error }, id string) (JobRecord, e
 // a write has found the job here, it may change the job's child rows by job
 // ID in the same transaction.
 func getTenantJobTx(ctx context.Context, tx *sql.Tx, scope TenantScope, id string) (JobRecord, error) {
-	return scanJobRecord(tx.QueryRowContext(ctx, `SELECT `+jobRecordColumns+` FROM jobs WHERE id=? AND tenant_id=?`, id, scope.id), id)
+	return scanJobRecord(tx.QueryRowContext(ctx, `SELECT `+jobRecordColumns+` FROM jobs WHERE id=? AND tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=jobs.tenant_id AND purge.job_id=jobs.id)`, id, scope.id), id)
 }
 
 // GetJobByName returns the tenant's job with the given name. Job names are
@@ -213,7 +213,7 @@ func (ts *TenantStore) GetJobByName(ctx context.Context, name string) (JobRecord
 		return JobRecord{}, err
 	}
 	var id string
-	err := ts.store.reader().QueryRowContext(ctx, `SELECT id FROM jobs WHERE tenant_id=? AND name=?`, ts.scope.id, name).Scan(&id)
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT id FROM jobs WHERE tenant_id=? AND name=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=jobs.tenant_id AND purge.job_id=jobs.id)`, ts.scope.id, name).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return JobRecord{}, fmt.Errorf("%w: job %s", ErrNotFound, name)
 	}
@@ -229,7 +229,7 @@ func (ts *TenantStore) ListJobs(ctx context.Context, includeArchived bool) ([]Jo
 	if err := ts.ready(); err != nil {
 		return nil, err
 	}
-	query := `SELECT ` + jobRecordColumns + ` FROM jobs WHERE tenant_id=?`
+	query := `SELECT ` + jobRecordColumns + ` FROM jobs WHERE tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=jobs.tenant_id AND purge.job_id=jobs.id)`
 	if !includeArchived {
 		query += ` AND archived=0`
 	}
@@ -657,93 +657,20 @@ func (ts *TenantStore) deleteJobWithAudits(ctx context.Context, id string, expec
 	if active {
 		return ErrJobScanActive
 	}
-	if err := removeJobHistoryTx(ctx, tx, ts.scope.id, id); err != nil {
+	if err := startJobHistoryPurgeTx(ctx, tx, ts.scope.id, id, time.Now().UTC()); err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE id=? AND tenant_id=?`, id, ts.scope.id)
+	result, err := tx.ExecContext(ctx, `UPDATE jobs SET enabled=0,archived=1,updated_at=? WHERE id=? AND tenant_id=?`, sqliteTimestamp(time.Now().UTC()), id, ts.scope.id)
 	if err != nil {
 		return err
 	}
-	if n, _ := result.RowsAffected(); n == 0 {
+	if n, _ := result.RowsAffected(); n != 1 {
 		return fmt.Errorf("%w: job %s", ErrNotFound, id)
 	}
 	if err := ts.insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
 		return err
 	}
 	return tx.Commit()
-}
-
-// removeJobHistoryTx removes the history that is owned by a managed job as
-// part of the same transaction as its permanent deletion. The security audit
-// row is intentionally inserted after this helper and survives the deletion.
-//
-// scans and events intentionally do not have cascading job foreign keys: both
-// tables also hold legacy and platform history. Keep the explicit deletes
-// tenant-scoped and use the stable job ID, never the mutable job name.
-func removeJobHistoryTx(ctx context.Context, tx *sql.Tx, tenantID, jobID string) error {
-	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE IF NOT EXISTS edgewatch_job_delete_host_keys (
-		tenant_id TEXT NOT NULL,
-		address TEXT NOT NULL,
-		PRIMARY KEY(tenant_id,address)
-	) WITHOUT ROWID`); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM edgewatch_job_delete_host_keys`); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO edgewatch_job_delete_host_keys(tenant_id,address)
-		SELECT tenant_id,address FROM latest_scan_hosts WHERE tenant_id=? AND job_id=?`, tenantID, jobID); err != nil {
-		return err
-	}
-	// Outbox payloads retain JobID even after delivery. Delete only deliveries
-	// that can be attributed to this stable job ID; tenant-level notifications
-	// and deliveries for another job remain untouched.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM outbox
-		WHERE tenant_id=? AND CASE WHEN json_valid(CAST(payload_json AS TEXT))
-			THEN COALESCE(json_extract(CAST(payload_json AS TEXT),'$.job_id'),'')=?
-			ELSE 0 END`, tenantID, jobID); err != nil {
-		return err
-	}
-	// A restore can preserve pending deliveries outside the live outbox. Keep
-	// permanent job deletion consistent by removing only this tenant's
-	// quarantined copies that can be attributed to the stable job ID.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM restore_quarantined_deliveries
-		WHERE tenant_id=? AND CASE WHEN json_valid(CAST(payload_json AS TEXT))
-			THEN COALESCE(json_extract(CAST(payload_json AS TEXT),'$.job_id'),'')=?
-			ELSE 0 END`, tenantID, jobID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE tenant_id=? AND job_id=?`, tenantID, jobID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM scans WHERE tenant_id=? AND job_id=?`, tenantID, jobID); err != nil {
-		return err
-	}
-
-	// latest_scan_hosts is a shared per-address projection, not a child of the
-	// job. If this job owned the latest observation, rebuild only those affected
-	// addresses from the remaining successful scan history in this transaction.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM latest_scan_hosts WHERE EXISTS (
-		SELECT 1 FROM edgewatch_job_delete_host_keys AS affected
-		WHERE affected.tenant_id=latest_scan_hosts.tenant_id AND affected.address=latest_scan_hosts.address
-	)`); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO latest_scan_hosts(tenant_id,address,scan_id,job_id,job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,search_text,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports)
-		SELECT tenant_id,address,scan_id,COALESCE(job_id,''),job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,search_text,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports
-		FROM (
-			SELECT scan.tenant_id,host.address,host.scan_id,scan.job_id,scan.job,scan.finished_at,host.data_quality,host.address_family,host.source_targets_json,host.dns_names_json,host.host_json,host.search_text,host.open_ports,host.open_filtered_ports,host.tcp_present,host.udp_present,host.tcp_open_ports,host.tcp_open_filtered_ports,host.udp_open_ports,host.udp_open_filtered_ports,
-				ROW_NUMBER() OVER (PARTITION BY scan.tenant_id,host.address ORDER BY scan.finished_at DESC,scan.id DESC) AS rank
-			FROM edgewatch_job_delete_host_keys AS affected
-			CROSS JOIN scan_hosts AS host ON host.address=affected.address
-			CROSS JOIN scans AS scan ON scan.id=host.scan_id
-			WHERE scan.tenant_id=affected.tenant_id AND scan.status='success'
-				AND scan.tenant_id IN (SELECT id FROM tenants WHERE state IN ('active','disabled'))
-		) AS ranked WHERE rank=1`); err != nil {
-		return err
-	}
-	_, err := tx.ExecContext(ctx, `DELETE FROM edgewatch_job_delete_host_keys`)
-	return err
 }
 
 // JobActive reports whether the tenant's job holds an unexpired scan lease.
@@ -754,10 +681,12 @@ func (ts *TenantStore) JobActive(ctx context.Context, id string) (bool, error) {
 	if err := ts.ready(); err != nil {
 		return false, err
 	}
-	// The statement returns no row unless the tenant owns the job, or the ID
-	// names no job and the tenant is the default one.
+	// The statement returns no row unless the tenant owns a visible job, or the
+	// ID names no job and the tenant is the default one. A job with a pending
+	// permanent-history purge is already logically deleted, even while its small
+	// tombstone row remains for the batch worker.
 	var active int
-	err := ts.store.reader().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM job_leases WHERE job=? AND expires_at>?) WHERE EXISTS(SELECT 1 FROM jobs WHERE id=? AND tenant_id=?) OR ?='`+DefaultTenantID+`' AND NOT EXISTS(SELECT 1 FROM jobs WHERE id=?)`, id, time.Now().UTC().Format(time.RFC3339Nano), id, ts.scope.id, ts.scope.id, id).Scan(&active)
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM job_leases WHERE job=? AND expires_at>?) WHERE EXISTS(SELECT 1 FROM jobs WHERE id=? AND tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=jobs.tenant_id AND purge.job_id=jobs.id)) OR ?='`+DefaultTenantID+`' AND NOT EXISTS(SELECT 1 FROM jobs WHERE id=?)`, id, time.Now().UTC().Format(time.RFC3339Nano), id, ts.scope.id, ts.scope.id, id).Scan(&active)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("%w: job %s", ErrNotFound, id)
 	}

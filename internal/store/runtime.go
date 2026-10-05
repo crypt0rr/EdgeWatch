@@ -44,7 +44,7 @@ func (ts *TenantStore) RuntimeState(ctx context.Context, jobID string) (model.Jo
 // runtime row.
 func (ts *TenantStore) runtimeStateJSON(ctx context.Context, jobID string) ([]byte, error) {
 	var raw []byte
-	err := ts.store.reader().QueryRowContext(ctx, `SELECT r.state_json FROM job_runtime r JOIN jobs j ON j.id=r.job_id AND j.tenant_id=? WHERE r.job_id=?`, ts.scope.id, jobID).Scan(&raw)
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT r.state_json FROM job_runtime r JOIN jobs j ON j.id=r.job_id AND j.tenant_id=? WHERE r.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, ts.scope.id, jobID).Scan(&raw)
 	return raw, err
 }
 
@@ -90,7 +90,7 @@ func (ts *TenantStore) RuntimeBaselineInfo(ctx context.Context, jobID string) (R
 	var metadataVersion int
 	var scanID, configHash sql.NullString
 	var modified, projectionVersion, baselineEpoch sql.NullInt64
-	err := ts.store.reader().QueryRowContext(ctx, `SELECT m.metadata_version,m.baseline_scan_id,m.baseline_config_hash,m.baseline_modified,m.projection_version,m.baseline_epoch FROM job_runtime_meta m JOIN jobs j ON j.id=m.job_id AND j.tenant_id=? WHERE m.job_id=?`, ts.scope.id, jobID).Scan(&metadataVersion, &scanID, &configHash, &modified, &projectionVersion, &baselineEpoch)
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT m.metadata_version,m.baseline_scan_id,m.baseline_config_hash,m.baseline_modified,m.projection_version,m.baseline_epoch FROM job_runtime_meta m JOIN jobs j ON j.id=m.job_id AND j.tenant_id=? WHERE m.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, ts.scope.id, jobID).Scan(&metadataVersion, &scanID, &configHash, &modified, &projectionVersion, &baselineEpoch)
 	if err == nil && metadataVersion > 0 {
 		info.BaselineScanID = scanID.String
 		info.BaselineConfigHash = configHash.String
@@ -148,7 +148,7 @@ func (ts *TenantStore) RuntimeBaselineEpoch(ctx context.Context, jobID string) (
 		return 0, err
 	}
 	var epoch sql.NullInt64
-	err := ts.store.reader().QueryRowContext(ctx, `SELECT m.baseline_epoch FROM job_runtime_meta m JOIN jobs j ON j.id=m.job_id AND j.tenant_id=? WHERE m.job_id=?`, ts.scope.id, jobID).Scan(&epoch)
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT m.baseline_epoch FROM job_runtime_meta m JOIN jobs j ON j.id=m.job_id AND j.tenant_id=? WHERE m.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, ts.scope.id, jobID).Scan(&epoch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -189,7 +189,7 @@ func (ts *TenantStore) RuntimeStateSummary(ctx context.Context, jobID string) (R
 	var modified, candidateCount, candidateAttempts, incompleteCandidateAttempts, pendingCount sql.NullInt64
 	var metaUpdated, runtimeUpdated string
 	reader := ts.store.reader()
-	err := reader.QueryRowContext(ctx, `SELECT m.metadata_version,m.projection_version,m.baseline_scan_id,m.baseline_config_hash,m.baseline_modified,m.candidate_count,m.candidate_attempts,m.incomplete_candidate_attempts,m.pending_count,m.updated_at,COALESCE(r.updated_at,'') FROM job_runtime_meta m JOIN jobs j ON j.id=m.job_id AND j.tenant_id=? LEFT JOIN job_runtime r ON r.job_id=m.job_id WHERE m.job_id=?`, ts.scope.id, jobID).
+	err := reader.QueryRowContext(ctx, `SELECT m.metadata_version,m.projection_version,m.baseline_scan_id,m.baseline_config_hash,m.baseline_modified,m.candidate_count,m.candidate_attempts,m.incomplete_candidate_attempts,m.pending_count,m.updated_at,COALESCE(r.updated_at,'') FROM job_runtime_meta m JOIN jobs j ON j.id=m.job_id AND j.tenant_id=? LEFT JOIN job_runtime r ON r.job_id=m.job_id WHERE m.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, ts.scope.id, jobID).
 		Scan(&metadataVersion, &projectionVersion, &scanID, &configHash, &modified, &candidateCount, &candidateAttempts, &incompleteCandidateAttempts, &pendingCount, &metaUpdated, &runtimeUpdated)
 	if err == nil && metadataVersion > 0 && (runtimeUpdated == "" || metaUpdated >= runtimeUpdated) {
 		summary.HasBaseline = projectionVersion.Int64 > 0 || (scanID.Valid && scanID.String != "")
@@ -199,7 +199,7 @@ func (ts *TenantStore) RuntimeStateSummary(ctx context.Context, jobID string) (R
 		summary.CandidateAttempts = int(candidateAttempts.Int64)
 		summary.IncompleteCandidateAttempts = int(incompleteCandidateAttempts.Int64)
 		summary.PendingCount = int(pendingCount.Int64)
-		if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_incidents i JOIN jobs j ON j.id=i.job_id AND j.tenant_id=? WHERE i.job_id=?`, ts.scope.id, jobID).Scan(&summary.IncidentCount); err != nil {
+		if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_incidents i JOIN jobs j ON j.id=i.job_id AND j.tenant_id=? WHERE i.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, ts.scope.id, jobID).Scan(&summary.IncidentCount); err != nil {
 			return summary, err
 		}
 		return ts.completeRuntimeSummary(ctx, jobID, summary)
@@ -226,7 +226,7 @@ func (ts *TenantStore) RuntimeStateSummary(ctx context.Context, jobID string) (R
  COALESCE((SELECT COUNT(DISTINCT addresses.value)
    FROM json_each(r.state_json,'$.baseline.units') AS units
    JOIN json_each(units.value,'$.addresses') AS addresses),0)
-	 FROM job_runtime r JOIN jobs j ON j.id=r.job_id AND j.tenant_id=? WHERE r.job_id=?`, ts.scope.id, jobID).Scan(&baselineType, &scanID, &configHash, &modified, &candidateCount, &candidateAttempts, &incompleteCandidateAttempts, &incidentCount, &pendingCount, &hostArrayCount, &unitAddressCount)
+		 FROM job_runtime r JOIN jobs j ON j.id=r.job_id AND j.tenant_id=? WHERE r.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, ts.scope.id, jobID).Scan(&baselineType, &scanID, &configHash, &modified, &candidateCount, &candidateAttempts, &incompleteCandidateAttempts, &incidentCount, &pendingCount, &hostArrayCount, &unitAddressCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return summary, nil
 	}
@@ -309,7 +309,8 @@ func (ts *TenantStore) RuntimeStateSummaries(ctx context.Context, includeArchive
  FROM jobs j
  LEFT JOIN job_runtime_meta m ON m.job_id=j.id
  LEFT JOIN job_runtime r ON r.job_id=j.id
- WHERE j.tenant_id=? AND (?=1 OR j.archived=0)`
+	 WHERE j.tenant_id=? AND (?=1 OR j.archived=0)
+   AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`
 	rows, err := ts.store.reader().QueryContext(ctx, query, ts.scope.id, boolInt(includeArchived))
 	if err != nil {
 		return nil, err
@@ -674,7 +675,7 @@ func (ss *SystemStore) FinalizeManagedScanWithOptions(ctx context.Context, scan 
 	var raw []byte
 	var tenantState string
 	var reminderSettings IncidentReminderSettings
-	if err := tx.QueryRowContext(ctx, `SELECT j.definition_json,t.state,t.incident_reminders_enabled,t.incident_reminder_cadence FROM jobs AS j JOIN tenants AS t ON t.id=j.tenant_id WHERE j.id=?`, jobID).Scan(&raw, &tenantState, &reminderSettings.Enabled, &reminderSettings.Cadence); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT j.definition_json,t.state,t.incident_reminders_enabled,t.incident_reminder_cadence FROM jobs AS j JOIN tenants AS t ON t.id=j.tenant_id WHERE j.id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, jobID).Scan(&raw, &tenantState, &reminderSettings.Enabled, &reminderSettings.Cadence); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("%w: job %s", ErrNotFound, jobID)
 		}
@@ -1164,6 +1165,13 @@ func (d managedIntentDiscards) audit(ctx context.Context, tx *sql.Tx) error {
 // caller-provided validation in one transaction prevents stale approvals from
 // crossing a job-scope change.
 func updateRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	var purging int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM job_history_purges WHERE job_id=?)`, jobID).Scan(&purging); err != nil {
+		return nil, err
+	}
+	if purging != 0 {
+		return nil, fmt.Errorf("%w: job %s", ErrNotFound, jobID)
+	}
 	var raw []byte
 	state := emptyState()
 	err := tx.QueryRowContext(ctx, `SELECT state_json FROM job_runtime WHERE job_id=?`, jobID).Scan(&raw)

@@ -79,17 +79,17 @@ func (l *resourceLookups) observe(query string, args []driver.NamedValue) error 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	switch {
-	case strings.HasSuffix(query, "FROM jobs WHERE id=? AND tenant_id=?"):
+	case strings.Contains(query, "SELECT "+storeJobRecordColumns+" FROM jobs WHERE id=? AND tenant_id=?"):
 		l.jobs[id]++
 		if l.failJobs {
 			return errInjectedLookup
 		}
-	case strings.HasSuffix(query, "baseline_config_hash FROM scans WHERE id=? AND tenant_id=?"):
+	case strings.Contains(query, "baseline_config_hash FROM scans WHERE id=? AND tenant_id=?") && strings.HasPrefix(query, "SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,"):
 		l.scanSummaries[id]++
 		if l.failSummaries {
 			return errInjectedLookup
 		}
-	case strings.HasSuffix(query, "snapshot_json FROM scans WHERE id=? AND tenant_id=?"):
+	case strings.Contains(query, "snapshot_json FROM scans WHERE id=? AND tenant_id=?") && strings.HasPrefix(query, "SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,"):
 		l.scans[id]++
 		if l.failScans {
 			return errInjectedLookup
@@ -97,6 +97,8 @@ func (l *resourceLookups) observe(query string, args []driver.NamedValue) error 
 	}
 	return nil
 }
+
+const storeJobRecordColumns = "id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at"
 
 type lookupCountingConnector struct {
 	driver.Connector

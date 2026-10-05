@@ -38,7 +38,7 @@ func (ts *TenantStore) ListLegacySuccessfulScanSnapshotsPage(ctx context.Context
 	// A completed backfill checkpoint also excludes snapshots that were
 	// malformed or empty. Retrying those on every request would recreate the
 	// history-wide decode cost the migration is designed to remove.
-	const legacyPredicate = `status='success' AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=scans.id) AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=scans.id)`
+	const legacyPredicate = `status='success' AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=scans.id) AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=scans.id) AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`
 	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE tenant_id=? AND `+legacyPredicate, ts.scope.id).Scan(&page.Total); err != nil {
 		return Page[LegacyScanSnapshot]{}, err
 	}
@@ -77,7 +77,7 @@ func getScanTx(ctx context.Context, tx *sql.Tx, id string) (model.Scan, error) {
 	var jobID sql.NullString
 	var revision sql.NullInt64
 	var resumable int
-	err := tx.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE id=?`, id).
+	err := tx.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`, id).
 		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &baselineScanID, &baselineConfigHash, &changesJSON, &snapshot)
 	if err != nil {
 		return v, err
@@ -121,8 +121,8 @@ func (ts *TenantStore) ListScansPage(ctx context.Context, job string, limit, off
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Scan]
 	readDB := ts.store.reader()
-	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE tenant_id=?`
-	countQuery := `SELECT COUNT(*) FROM scans WHERE tenant_id=?`
+	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`
+	countQuery := `SELECT COUNT(*) FROM scans WHERE tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`
 	args := []any{ts.scope.id}
 	countArgs := []any{ts.scope.id}
 	if job != "" {
@@ -186,8 +186,8 @@ func (ts *TenantStore) ListScanSummariesPage(ctx context.Context, job string, li
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.ScanSummary]
 	readDB := ts.store.reader()
-	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans WHERE tenant_id=?`
-	countQuery := `SELECT COUNT(*) FROM scans WHERE tenant_id=?`
+	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans WHERE tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`
+	countQuery := `SELECT COUNT(*) FROM scans WHERE tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`
 	args := []any{ts.scope.id}
 	countArgs := []any{ts.scope.id}
 	if job != "" {
@@ -239,7 +239,7 @@ const historyTenantSQL = `tenant_id=?`
 
 // eventsFromSQL is the FROM clause that selects the tenant's events, in
 // order from the tenant index. It takes one argument, the tenant ID.
-const eventsFromSQL = `FROM events WHERE ` + historyTenantSQL
+const eventsFromSQL = `FROM events WHERE ` + historyTenantSQL + ` AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=events.tenant_id AND purge.job_id=events.job_id)`
 
 // ListEvents returns the tenant's most recent events, of every job or of the
 // job with the given name. Another tenant's job of the same name is never

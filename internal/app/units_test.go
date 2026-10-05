@@ -345,6 +345,61 @@ func TestPurgeDeletedUnitsLogsEachPass(t *testing.T) {
 	}
 }
 
+func TestPurgeDeletedUnitsCompletesQueuedJobHistoryDeletion(t *testing.T) {
+	ctx := context.Background()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
+	tenant := f.db.Tenant(f.a)
+	job, err := tenant.CreateJob(ctx, lifecycleJob("history-purge"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := time.Now().UTC()
+	scan := model.Scan{
+		ID: "history-purge-scan", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name,
+		StartedAt: finished, FinishedAt: finished, Status: "success",
+		Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "192.0.2.44"}}},
+	}
+	if err := f.db.System().SaveScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+	if err := tenant.SetJobArchived(ctx, job.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := tenant.DeleteJobWithAudit(ctx, job.ID, store.AuditEntry{Action: "job.deleted", Detail: job.ID}); err != nil {
+		t.Fatal(err)
+	}
+	f.app.WakePurgeWorker()
+	if queued := len(f.app.units.purgeWakeChannel()); queued != 1 {
+		t.Fatalf("queued deletion wakeups = %d, want one coalesced wake", queued)
+	}
+	f.app.purgeDeletedUnits(ctx)
+	for name, statement := range map[string]string{
+		"job":         `SELECT COUNT(*) FROM jobs WHERE id=?`,
+		"scan":        `SELECT COUNT(*) FROM scans WHERE job_id=?`,
+		"marker":      `SELECT COUNT(*) FROM job_history_purges WHERE tenant_id=? AND job_id=?`,
+		"latest host": `SELECT COUNT(*) FROM latest_scan_hosts WHERE tenant_id=? AND job_id=?`,
+	} {
+		var count int
+		args := []any{job.ID}
+		if name == "marker" || name == "latest host" {
+			args = []any{store.DefaultTenantID, job.ID}
+		}
+		want := 0
+		if name == "marker" {
+			want = 1 // A completed marker prevents late workers from restoring history.
+		}
+		if err := f.db.DB.QueryRowContext(ctx, statement, args...).Scan(&count); err != nil || count != want {
+			t.Errorf("%s rows after purge worker pass = %d, %v; want %d", name, count, err, want)
+		}
+		if name == "marker" {
+			var phase string
+			if err := f.db.DB.QueryRowContext(ctx, `SELECT phase FROM job_history_purges WHERE tenant_id=? AND job_id=?`, store.DefaultTenantID, job.ID).Scan(&phase); err != nil || phase != "complete" {
+				t.Errorf("purge marker phase after worker pass = %q, %v; want complete", phase, err)
+			}
+		}
+	}
+}
+
 // storeWithLegacyDeletion returns a store upgraded from schema 54 with a
 // unit that an earlier release deleted, so the cleanup after it is pending,
 // and an active second unit.

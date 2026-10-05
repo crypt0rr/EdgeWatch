@@ -180,6 +180,13 @@ func (a *App) wakeUnitPurge() {
 	}
 }
 
+// WakePurgeWorker asks background cleanup to resume promptly after a user
+// requests permanent deletion. The worker handles both deleting units and
+// their deleted jobs' retained history.
+func (a *App) WakePurgeWorker() {
+	a.wakeUnitPurge()
+}
+
 // startUnitPurgeWorker erases the data of deleted business units from the
 // daemon, at startup, when a deletion is requested, and every
 // unitPurgeInterval. The purge takes SQLite's writer for one bounded batch
@@ -231,6 +238,13 @@ func (a *App) purgeDeletedUnits(ctx context.Context) {
 	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		logger.Warn("business unit purge stopped; the next pass resumes it", "error", err)
+	}
+	rows, jobErr := a.Store.System().PurgeDeletedJobHistories(ctx)
+	if rows > 0 {
+		logger.Info("permanently deleted job history purge pass", "rows", rows)
+	}
+	if jobErr != nil && !errors.Is(jobErr, context.Canceled) {
+		logger.Warn("permanently deleted job history purge stopped; the next pass resumes it", "error", jobErr)
 	}
 	a.cleanUpAfterLegacyDeletions(ctx, logger)
 }

@@ -471,11 +471,14 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 62 must not be opened by an older EdgeWatch
+database upgraded to schema 63 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
 refuse a schema newer than the binary supports before they write anything.
+Schema 63 also marks legacy unsent deliveries with at least eight attempts
+and a retry scheduled before v0.22.1 as terminal; deliveries still retrying
+under the newer fifteen-attempt policy remain eligible.
 Only the daemon migrates. The host commands that act on business units or
 accounts (`admin`, `scan`, `status`, `history`, `baseline`, and `notify
 test`) refuse a schema that the daemon has not upgraded yet, such as a

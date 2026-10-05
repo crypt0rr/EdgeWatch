@@ -136,7 +136,7 @@ describe('host detail', () => {
     expect(serviceSort.textContent).toContain('↑')
   })
 
-  it('renders bounded NSE script identity and output as safe text', async () => {
+  it('renders every stored NSE script summary as safe text without truncating it again', async () => {
     const tcpProtocol = host.protocols?.[0]
     if (!tcpProtocol) throw new Error('test host is missing TCP evidence')
     const untrusted = '<img src=x onerror=alert(1)>'
@@ -156,16 +156,38 @@ describe('host detail', () => {
 
     const panel = container.querySelector('[aria-label="TCP Nmap script results"]')
     expect(panel).toBeTruthy()
-    expect(panel?.querySelectorAll('.nse-output-item')).toHaveLength(32)
+    expect(panel?.querySelectorAll('.nse-output-item')).toHaveLength(34)
     expect(panel?.textContent).toContain('http-title')
     expect(panel?.querySelector('img')).toBeNull()
     expect(panel?.querySelector('.nse-output-item pre')?.textContent).toBe(untrusted)
     expect(panel?.textContent).toContain('ssl-cert')
     expect(panel?.querySelectorAll('.nse-output-item')[1]?.querySelector('pre')?.textContent).toBe('Subject: CN=host.example\nIssuer: Example CA')
-    expect(panel?.textContent).toContain('Output truncated for display.')
-    expect(panel?.textContent).toContain('Showing the first 32 of 34 script results.')
-    expect(panel?.textContent).toContain('script-28')
-    expect(panel?.textContent).not.toContain('script-29')
+    expect(panel?.querySelectorAll('.nse-output-item')[2]?.querySelector('pre')?.textContent).toBe('x'.repeat(600))
+    expect(panel?.textContent).not.toContain('Output truncated for display.')
+    expect(panel?.textContent).not.toContain('Showing the first 32 of 34 script results.')
+    expect(panel?.textContent).toContain('script-30')
+
+    const portEvidence = container.querySelector('.port-table-wrap')
+    expect(portEvidence).toBeTruthy()
+    expect(portEvidence!.compareDocumentPosition(panel!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('explains Nmap output shortened during capture and preserves the stored summary', async () => {
+    const tcpProtocol = host.protocols?.[0]
+    if (!tcpProtocol) throw new Error('test host is missing TCP evidence')
+    const capturedOutput = `Subject: CN=${'x'.repeat(487)}…`
+    const storedSummary = `ssl-cert: ${capturedOutput}`
+    expect(new TextEncoder().encode(storedSummary)).toHaveLength(512)
+    vi.mocked(baselineHost).mockResolvedValue({
+      ...detail,
+      host: { ...host, protocols: [{ ...tcpProtocol, nse_output: [storedSummary] }] },
+    })
+
+    await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address')
+
+    const panel = container.querySelector('[aria-label="TCP Nmap script results"]')
+    expect(panel?.querySelector('.nse-output-text')?.textContent).toBe(capturedOutput)
+    expect(panel?.textContent).toContain('Nmap shortened this output when it was captured.')
   })
 
   it('omits the NSE evidence panel when no script output was recorded', async () => {

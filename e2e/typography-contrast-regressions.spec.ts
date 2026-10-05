@@ -6,8 +6,10 @@ const operatorPages = [
   '/jobs/new',
   '/jobs/job-1',
   '/incidents',
+  '/activity',
   '/notifications',
   '/hosts',
+  '/scans/scan-1/hosts/192.0.2.10',
   '/security',
 ]
 
@@ -23,17 +25,144 @@ async function expectNoTinyVisibleText(page: import('@playwright/test').Page, pa
   expect(tiny, `visible text smaller than 11px on ${path}`).toEqual([])
 }
 
+async function installIssue1128Fixtures(page: import('@playwright/test').Page) {
+  await mockConsole(page)
+  const job = {
+    id: 'job-1', revision: 1, enabled: true, archived: false, security_hash: 'fixture-security-hash',
+    created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    job: { name: 'fixture-job', schedule: '0 * * * *', timezone: 'UTC', targets: ['192.0.2.10'], tcp: { ports: '1-65535', mode: 'connect', service_detection: true, engine: 'nmap' }, baseline_samples: 1, change_confirmations: 3, run_on_start: false, assume_alive: true, timeout: '1h', resume_window: '8d' },
+    baseline: { status: 'complete', samples: 1, attempts: 1, host_count: 1, scan_id: 'scan-1', pending: 3 },
+  }
+  const address = '192.0.2.10'
+  const truncatedSummary = `ssl-cert: Subject: CN=${'x'.repeat(487)}…`
+  const host = {
+    address, address_family: 'IPv4', status: 'up', status_reason: 'syn-ack', source_targets: [address],
+    protocols: [{
+      protocol: 'tcp', scanned_ports: '1-65535', scanned_port_count: 65535, service_detection: true,
+      ports: [{ port: 443, state: 'open', reason: 'syn-ack', service: { name: 'https', product: 'nginx' } }],
+      state_summaries: [{ state: 'open', count: 1 }, { state: 'closed', count: 65534 }],
+      nse_output: [truncatedSummary, ...Array.from({ length: 31 }, (_, index) => `http-title-${index}: ${'Example result and captured metadata '.repeat(12)}\nIssuer: Example test CA`) ],
+    }],
+  }
+  const timestamp = (second: number) => `2026-09-29T10:00:${String(second).padStart(2, '0')}Z`
+  const incidents = Array.from({ length: 5 }, (_, index) => ({
+    job_id: 'job-1', job: 'fixture-job',
+    incident: { change: { key: `port-${index}`, kind: 'port', target: address, protocol: 'tcp', port: 443 + index, severity: 'critical' }, opened_at: timestamp(index), last_seen_at: timestamp(index) },
+  }))
+  const events = Array.from({ length: 20 }, (_, index) => ({
+    type: 'scan-failure', job_id: 'job-1', job: 'fixture-job', scan_id: 'scan-1',
+    message: `Scan failure history entry ${index + 1}.`, created_at: timestamp(index),
+  }))
+
+  await page.route(url => {
+    const path = new URL(url).pathname
+    return path === '/api/v1/jobs' || path === '/api/v1/jobs/job-1' || path === '/api/v1/jobs/job-1/pending-changes' ||
+      path === '/api/v1/events' || path === '/api/v1/incidents' || path === `/api/v1/scans/scan-1/hosts/${address}` || path === `/api/v1/scans/scan-1/hosts/${address}/rdap`
+  }, async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/api/v1/jobs' || path === '/api/v1/jobs/job-1') {
+      await route.fulfill({ json: path === '/api/v1/jobs' ? { jobs: [job] } : job })
+      return
+    }
+    if (path === '/api/v1/jobs/job-1/pending-changes') {
+      await route.fulfill({ json: { job_id: 'job-1', job: 'fixture-job', pending_changes: [{ key: 'port|192.0.2.10|tcp|443', count: 1, change: { key: 'port|192.0.2.10|tcp|443', kind: 'port', target: address, protocol: 'tcp', port: 443, severity: 'critical' } }], pagination: { limit: 10, offset: 0, total: 1, has_more: false, next_offset: null } } })
+      return
+    }
+    if (path === '/api/v1/events') {
+      await route.fulfill({ json: { events, pagination: { limit: 20, offset: 0, total: events.length, has_more: false, next_offset: null } } })
+      return
+    }
+    if (path === '/api/v1/incidents') {
+      await route.fulfill({ json: { incidents, pagination: { limit: 5, offset: 0, total: incidents.length, has_more: false, next_offset: null } } })
+      return
+    }
+    if (path.endsWith('/rdap')) {
+      await route.fulfill({ json: { rdap: { status: 'private', address } } })
+      return
+    }
+    await route.fulfill({ json: { job_id: 'job-1', job: 'fixture-job', data_quality: 'detailed', scan: { id: 'scan-1', job_id: 'job-1', job: 'fixture-job', status: 'success', started_at: timestamp(0), finished_at: timestamp(1), config_hash: 'fixture-security-hash' }, host } })
+  })
+}
+
 test('operational text stays at least 11px on narrow screens', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'mobile-narrow', 'The mobile typography floor is checked once at 375px.')
-  await mockConsole(page)
+  await installIssue1128Fixtures(page)
   await page.setViewportSize({ width: 375, height: 812 })
 
   for (const path of operatorPages) {
     await page.goto(path)
-    await expect(page.locator('h1').first()).toBeVisible()
+    const pageTitle = path.startsWith('/scans/') ? page.locator('.host-identity h2') : page.locator('h1').first()
+    await expect(pageTitle).toBeVisible()
+    if (path === '/activity') await expect(page.locator('.activity-event-heading time').first()).toBeVisible()
+    if (path === '/jobs/job-1') await expect(page.locator('.pending-detail-heading')).toBeVisible()
+    if (path.startsWith('/scans/')) await expect(page.locator('.nse-output-panel')).toBeVisible()
     await expectNoTinyVisibleText(page, path)
     const width = await page.evaluate(() => ({ document: document.documentElement.scrollWidth, viewport: window.innerWidth }))
     expect(width.document, `horizontal overflow on ${path}`).toBeLessThanOrEqual(width.viewport)
+  }
+})
+
+test('Activity, pending confirmations, and host evidence stay readable on desktop', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'The desktop typography floor is checked once at 1280px.')
+  await installIssue1128Fixtures(page)
+  await page.setViewportSize({ width: 1280, height: 900 })
+
+  for (const path of ['/activity', '/jobs/job-1', '/scans/scan-1/hosts/192.0.2.10']) {
+    await page.goto(path)
+    const pageTitle = path.startsWith('/scans/') ? page.locator('.host-identity h2') : page.locator('h1').first()
+    await expect(pageTitle).toBeVisible()
+    if (path === '/activity') await expect(page.locator('.activity-event-heading time').first()).toBeVisible()
+    if (path === '/jobs/job-1') await expect(page.locator('.pending-detail-heading')).toBeVisible()
+    if (path.startsWith('/scans/')) await expect(page.locator('.nse-output-panel')).toBeVisible()
+    await expectNoTinyVisibleText(page, path)
+  }
+})
+
+test('primary port evidence stays ahead of a long NSE list on phones and desktop', async ({ page }, testInfo) => {
+  test.skip(!['desktop', 'mobile-narrow'].includes(testInfo.project.name), 'The long NSE layout is checked once per coarse and fine pointer layout.')
+  const mobile = testInfo.project.name === 'mobile-narrow'
+  await installIssue1128Fixtures(page)
+  await page.setViewportSize(mobile ? { width: 375, height: 812 } : { width: 1280, height: 900 })
+  await page.goto('/scans/scan-1/hosts/192.0.2.10')
+  const primaryPorts = mobile ? page.locator('.mobile-port-list') : page.locator('.port-table-wrap')
+  const nsePanel = page.locator('.nse-output-panel')
+  await expect(primaryPorts).toBeVisible()
+  await expect(nsePanel).toBeVisible()
+  const position = await page.evaluate(({ portsSelector, panelSelector }) => {
+    const host = document.querySelector('.host-identity')
+    const ports = document.querySelector(portsSelector)
+    const panel = document.querySelector(panelSelector)
+    if (!host || !ports || !panel) throw new Error('Expected host summary, port evidence, and NSE results')
+    return {
+      distance: ports.getBoundingClientRect().top - host.getBoundingClientRect().top,
+      height: window.innerHeight,
+      portsBeforeNSE: !!(ports.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING),
+    }
+  }, { portsSelector: mobile ? '.mobile-port-list' : '.port-table-wrap', panelSelector: '.nse-output-panel' })
+  expect(position.portsBeforeNSE).toBe(true)
+  expect(position.distance).toBeLessThan(position.height)
+})
+
+test('Activity and pending-confirmation controls meet the touch target floor (#1128)', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'mobile-narrow', 'Touch target checks use a single coarse-pointer browser at issue-specific viewports.')
+  await installIssue1128Fixtures(page)
+
+  for (const viewport of [{ width: 375, height: 812 }, { width: 768, height: 1024 }, { width: 844, height: 390 }]) {
+    await page.setViewportSize(viewport)
+    for (const path of ['/activity', '/jobs/job-1']) {
+      await page.goto(path)
+      const region = path === '/activity' ? page.locator('.activity-page') : page.locator('.pending-detail')
+      if (path === '/activity') await expect(region.locator('.activity-event-heading time').first()).toBeVisible()
+      else await expect(region.locator('a')).toBeVisible()
+      const undersized = await region.locator('a, button').evaluateAll(elements => elements
+        .filter(element => {
+          const style = getComputedStyle(element)
+          const rect = element.getBoundingClientRect()
+          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0 && (rect.width < 24 || rect.height < 24)
+        })
+        .map(element => `${element.tagName.toLowerCase()}.${(element as HTMLElement).className} ${Math.round(element.getBoundingClientRect().width)}×${Math.round(element.getBoundingClientRect().height)}`))
+      expect(undersized, `undersized controls on ${path} at ${viewport.width}×${viewport.height}`).toEqual([])
+    }
   }
 })
 

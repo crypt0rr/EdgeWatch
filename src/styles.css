@@ -925,11 +925,10 @@
 .nse-output-panel .evidence-heading { margin-bottom: 0; }
 .nse-output-list { display: grid; gap: 8px; min-width: 0; }
 .nse-output-item { min-width: 0; padding: 9px 10px; border: 1px solid #1d3047; border-radius: 6px; background: #071321; }
-.nse-output-item h5 { margin: 0 0 6px; font-size: 10px; }
+.nse-output-item h5 { margin: 0 0 6px; font-size: 11px; }
 .nse-output-item h5 code { color: #82c4ff; overflow-wrap: anywhere; }
-.nse-output-text { margin: 0; color: #c1d4e8; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-.nse-output-item small, .nse-output-note { margin: 5px 0 0; color: #829bb5; font-size: 9px; line-height: 1.5; }
-.nse-output-note { margin-top: 0; }
+.nse-output-text { margin: 0; color: #c1d4e8; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.nse-output-item small { margin: 5px 0 0; color: #829bb5; font-size: 11px; line-height: 1.5; }
 .evidence-port-list { display: grid; gap: 0; }
 .evidence-port-row { display: grid; grid-template-columns: 70px auto minmax(0, 1fr) minmax(180px, 1.4fr); align-items: center; gap: 9px; border-top: 1px solid #1d3047; padding: 8px 0; font-size: 10px; }
 .evidence-port-row:first-child { border-top: 0; }
@@ -1255,10 +1254,10 @@
 .activity-state-list li strong,
 .activity-state-list li small { display: block; }
 .activity-state-list li strong { font-size: 12px; }
-.activity-state-list li small { color: var(--muted); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; margin-top: 3px; }
+.activity-state-list li small { color: var(--muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; margin-top: 3px; }
 .activity-state-list a,
 .pending-job-heading a,
-.pending-detail-heading a { color: #79b8f6; font-size: 11px; white-space: nowrap; }
+.pending-detail-heading a { display: inline-flex; align-items: center; min-width: 24px; min-height: 24px; color: #79b8f6; font-size: 11px; white-space: nowrap; }
 .activity-filter { width: min(250px, 100%); }
 .activity-history > .panel-heading { align-items: end; }
 .activity-event-list { display: grid; }
@@ -1273,12 +1272,13 @@
 .activity-event-heading > div { display: flex; align-items: center; gap: 9px; min-width: 0; flex-wrap: wrap; }
 .activity-event-heading strong { font-size: 13px; }
 .activity-event-job { color: #8ba7c5; font-size: 11px; }
-.activity-event-heading time { color: #718aa7; font-size: 10px; white-space: nowrap; }
+.activity-event-heading time { color: #718aa7; font-size: 11px; white-space: nowrap; }
 .activity-event-body > p { color: #a5b9d0; font-size: 12px; line-height: 1.55; margin: 5px 0 0; overflow-wrap: anywhere; }
 .activity-event-changes { display: grid; gap: 6px; list-style: none; padding: 0; margin: 9px 0 0; }
 .activity-change { display: flex; justify-content: space-between; align-items: center; gap: 10px; color: #aebed1; font-size: 11px; min-width: 0; }
 .activity-change > span:first-child { overflow-wrap: anywhere; }
-.activity-event-link { display: inline-flex; align-items: center; gap: 5px; color: #79b8f6; font-size: 11px; margin: 8px 12px 0 0; }
+.activity-event-link { display: inline-flex; align-items: center; min-width: 24px; min-height: 24px; gap: 5px; color: #79b8f6; font-size: 11px; margin: 8px 12px 0 0; }
+.activity-state-list a { display: inline-flex; align-items: center; min-width: 24px; min-height: 24px; }
 .activity-empty { margin-top: 10px; }
 .pending-job-list { display: grid; }
 .pending-job { border-top: 1px solid #1c3047; padding: 12px 0; }
@@ -1295,8 +1295,9 @@
 .pending-skeleton { height: 58px; margin-top: 10px; }
 .pending-detail { border-top: 1px solid #1c3047; margin-top: 15px; padding-top: 15px; }
 .pending-detail-heading { align-items: flex-start; }
+.pending-detail-heading > div { flex: 1; min-width: 0; }
 .pending-detail-heading h3 { margin: 0 0 4px; font-size: 12px; }
-.pending-detail-heading .muted { font-size: 10px; }
+.pending-detail-heading .muted { font-size: 11px; overflow-wrap: anywhere; }
 
 .dashboard-job > *,
 .activity-row > *,
@@ -1903,6 +1904,9 @@ button[aria-disabled="true"] {
   .password-dialog-actions .button,
   .action-dialog-actions .button,
   .scope-details summary,
+  .activity-state-list a,
+  .activity-event-link,
+  .pending-detail-heading a,
   .user-chip .app-version .version-link,
   .user-chip .app-version .version-update,
   .public-page footer a {
@@ -1919,6 +1923,9 @@ button[aria-disabled="true"] {
   .text-button,
   .link-button,
   .back-link,
+  .activity-state-list a,
+  .activity-event-link,
+  .pending-detail-heading a,
   .tab,
   .user-chip .app-version .version-link,
   .public-page footer a {

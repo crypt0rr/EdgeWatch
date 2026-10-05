@@ -39,7 +39,7 @@ function userActions(user: UserSummary, sessionUserID: string | undefined) {
 
 export function Users() {
   type Prompt = { action: 'toggle' | 'renew' | 'revoke' | 'edit'; userID: string; username: string; label: string; targetEnabled?: boolean; revision?: number }
-  const client = useQueryClient(); const users = useQuery({ queryKey: ['users'], queryFn: listUsers }); const session = useQuery({ queryKey: ['session'], queryFn: getSession }); const [username, setUsername] = useState(''); const [displayName, setDisplayName] = useState(''); const [role, setRole] = useState<Role>('viewer'); const [password, setPassword] = useState(''); const [message, setMessage] = useState(''); const [error, setError] = useState(''); const [issued, setIssued] = useState<{ path: string; username: string; userID: string } | null>(null); const [prompt, setPrompt] = useState<Prompt | null>(null); const [editDraft, setEditDraft] = useState<{ userID: string; username: string; displayName: string; originalDisplayName: string; role: Role; originalRole: Role; revision: number } | null>(null)
+  const client = useQueryClient(); const users = useQuery({ queryKey: ['users'], queryFn: listUsers }); const session = useQuery({ queryKey: ['session'], queryFn: getSession }); const [username, setUsername] = useState(''); const [displayName, setDisplayName] = useState(''); const [role, setRole] = useState<Role>('viewer'); const [password, setPassword] = useState(''); const [message, setMessage] = useState(''); const [error, setError] = useState(''); const [issued, setIssued] = useState<{ path: string; username: string; userID: string } | null>(null); const [prompt, setPrompt] = useState<Prompt | null>(null); const [editDraft, setEditDraft] = useState<{ userID: string; username: string; displayName: string; originalDisplayName: string; role: Role; originalRole: Role; pending: boolean; revision: number } | null>(null)
   const create = useMutation({ mutationFn: () => createUser(username, displayName, role, password), onSuccess: value => { setUsername(''); setDisplayName(''); setPassword(''); setIssued({ path: value.activation_path, username: value.user.username, userID: value.user.id }); setMessage(`Created ${value.user.username}. Share the one-time activation link before leaving this page.`); void client.invalidateQueries({ queryKey: ['users'] }) }, onError: err => setError(err instanceof Error ? err.message : 'Could not create user') })
   async function submit(event: FormEvent) { event.preventDefault(); setMessage(''); setError(''); const problem = usernameProblem(username); if (problem) { setError(problem); return } create.mutate() }
   type Account = Awaited<ReturnType<typeof listUsers>>['users'][number]
@@ -54,11 +54,11 @@ export function Users() {
   function edit(user: Account) {
     setError('')
     setMessage('')
-    setEditDraft({ userID: user.id, username: user.username, displayName: user.display_name, originalDisplayName: user.display_name, role: user.role, originalRole: user.role, revision: user.revision })
+    setEditDraft({ userID: user.id, username: user.username, displayName: user.display_name, originalDisplayName: user.display_name, role: user.role, originalRole: user.role, pending: user.pending, revision: user.revision })
     openPrompt('edit', user, `Edit account for ${user.username}`)
   }
-  // A revoked link, and every link of a disabled account, stops working, so
-  // the page stops offering that account's activation link for copying.
+  // Revocation, disablement, and role changes invalidate outstanding
+  // one-time links, so the page stops offering the affected link for copying.
   function dropToken(userID: string) { setIssued(current => current?.userID === userID ? null : current) }
   async function confirmAction(secret: string) {
     if (!prompt) return
@@ -98,7 +98,13 @@ export function Users() {
           setMessage(`${draft.username} has no changes.`)
         } else {
           await updateUser(draft.userID, { display_name: draft.displayName, role: draft.role, revision: draft.revision, password: secret })
-          setMessage(`Updated ${draft.username}.`)
+          if (draft.role !== draft.originalRole) {
+            dropToken(draft.userID)
+            const linkType = draft.pending ? 'activation' : 'password reset'
+            setMessage(`Updated ${draft.username}. Any outstanding ${linkType} link is now invalid${draft.pending ? '; renew it to issue another' : ''}.`)
+          } else {
+            setMessage(`Updated ${draft.username}.`)
+          }
         }
         setEditDraft(null)
       }
@@ -140,7 +146,7 @@ export function Users() {
   }
   const roleChangeNeedsPassword = prompt?.action === 'edit' && editDraft?.role !== editDraft?.originalRole
   const promptDescription = prompt?.action === 'edit'
-    ? `Review the display name and role for ${prompt.username}. Changing this account’s role requires your administrator password.`
+    ? `Review the display name and role for ${prompt.username}. Changing this account’s role requires your administrator password.${roleChangeNeedsPassword ? ` It also revokes any outstanding ${editDraft?.pending ? 'activation' : 'password reset'} link.` : ''}`
     : prompt?.action === 'toggle'
       ? `Confirm the account change for ${prompt.username}. Enter your administrator password to authorize it.`
       : prompt?.action === 'renew'

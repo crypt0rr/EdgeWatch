@@ -99,4 +99,13 @@ describe('activity history', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Previous' }))
     expect(await screen.findByText(/TCP:440/)).toBeInTheDocument()
   })
+
+  it('shows the no-pending state only when the API total is zero', async () => {
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [{ ...job, baseline: { ...job.baseline, pending: 1 } }] })
+    vi.mocked(jobPendingChanges).mockResolvedValue({ job_id: 'job-1', job: 'Production', pending_changes: [], pagination: { limit: 10, offset: 0, total: 0, has_more: false, next_offset: null } })
+    renderWithProviders(<Activity />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Show 1 pending change' }))
+    expect(await screen.findByText('There are no pending changes for this job.')).toBeInTheDocument()
+  })
 })

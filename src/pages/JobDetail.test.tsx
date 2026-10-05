@@ -268,6 +268,27 @@ describe('job surface overview', () => {
     await vi.waitFor(() => expect(container.textContent).toContain('TCP:1000'), { timeout: 1000 })
   })
 
+  it('shows the no-pending state only when the API total is zero', async () => {
+    vi.mocked(getJob).mockResolvedValue({ ...job, baseline: { ...job.baseline, pending: 1 } })
+    vi.mocked(jobPendingChanges).mockResolvedValue({ job_id: 'job-1', job: 'production', pending_changes: [], pagination: { limit: 10, offset: 0, total: 0, has_more: false, next_offset: null } })
+    await renderPage()
+
+    await vi.waitFor(() => expect(container.textContent).toContain('No changes are awaiting confirmation.'), { timeout: 1000 })
+  })
+
+  it('retries pending confirmation loading errors', async () => {
+    vi.mocked(getJob).mockResolvedValue({ ...job, baseline: { ...job.baseline, pending: 1 } })
+    vi.mocked(jobPendingChanges).mockRejectedValueOnce(new Error('temporary failure'))
+    await renderPage()
+
+    await vi.waitFor(() => expect(container.textContent).toContain('Could not load pending baseline changes.'), { timeout: 1000 })
+    const retry = Array.from(container.querySelectorAll('.error-card')).find(notice => notice.textContent?.includes('Could not load pending baseline changes.'))?.querySelector('button') as HTMLButtonElement
+    expect(retry).toBeTruthy()
+    await act(async () => retry.click())
+
+    await vi.waitFor(() => expect(jobPendingChanges).toHaveBeenCalledTimes(2), { timeout: 1000 })
+  })
+
   it('limits viewers to expected baseline information', async () => {
     vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'user-2', username: 'viewer', permissions: [], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
     await renderPage()

@@ -229,6 +229,24 @@ describe('dashboard', () => {
     const activityTime = container.querySelector('.activity-row time')
     expect(activityTime?.getAttribute('dateTime')).toBe(scan.finished_at)
     expect(activityTime?.textContent).toContain('2026')
+    expect(container.querySelector('.latest-activity-list')).toBeTruthy()
+  })
+
+  it('retries loading latest activity and renders it in its dashboard-specific list', async () => {
+    vi.mocked(listScans).mockRejectedValueOnce(new Error('scan history unavailable'))
+    await renderDashboard()
+    await vi.waitFor(() => expect(container.textContent).toContain('Could not load recent scans.'), { timeout: 1000 })
+
+    const retry = Array.from(container.querySelectorAll('.query-error')).find(alert => alert.textContent?.includes('Could not load recent scans.'))?.querySelector('button') as HTMLButtonElement
+    expect(retry).toBeTruthy()
+    await act(async () => {
+      retry.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    await vi.waitFor(() => expect(container.querySelector('.latest-activity-list .activity-row')).toBeTruthy(), { timeout: 1000 })
+    expect(listScans).toHaveBeenCalledTimes(2)
   })
 
   it('warns about a proxy that web.trusted_proxies does not list, only when the status reports one', async () => {

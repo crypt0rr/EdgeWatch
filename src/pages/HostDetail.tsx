@@ -37,9 +37,6 @@ function EvidencePorts({ title, description, ports, tone = 'muted' }: { title: s
   return <section className={`evidence-section ${tone === 'warning' ? 'warning' : ''}`} aria-label={title}><div className="evidence-heading"><div><h4>{title}</h4><p className="muted">{description}</p></div><span className="pill gray">{ports.length} {ports.length === 1 ? 'port' : 'ports'}</span></div><div className="evidence-port-list">{ports.map(port => <div className="evidence-port-row" key={`${port.port}-${port.state}-${port.verification ?? ''}`}><code>{port.port}</code><span className={port.state === 'open' ? 'pill green' : 'pill amber'}>{port.state}</span><span className="muted">{port.reason || 'No reason reported'}{port.reason_ttl ? ` · TTL ${port.reason_ttl}` : ''}</span><ServiceText port={port} /></div>)}</div></section>
 }
 
-const maxNSEOutputCount = 32
-const maxNSEOutputLength = 512
-
 function parseNSESummary(summary: string) {
   const separator = summary.indexOf(': ')
   if (separator <= 0) return { script: 'Nmap script output', output: summary }
@@ -48,8 +45,7 @@ function parseNSESummary(summary: string) {
 
 function NSEOutputPanel({ protocol, outputs }: { protocol: string; outputs?: string[] }) {
   const allEntries = (outputs ?? []).filter(output => output.trim())
-  const entries = allEntries.slice(0, maxNSEOutputCount)
-  if (!entries.length) return null
+  if (!allEntries.length) return null
 
   const label = `${protocol.toUpperCase()} Nmap script results`
   return <section className="nse-output-panel" aria-label={label}>
@@ -58,21 +54,19 @@ function NSEOutputPanel({ protocol, outputs }: { protocol: string; outputs?: str
         <h4>Nmap script results</h4>
         <p className="muted">Script names and captured output for this {protocol.toUpperCase()} scan.</p>
       </div>
-      <span className="pill gray">{entries.length}{allEntries.length > entries.length ? ` of ${allEntries.length}` : ''}</span>
+      <span className="pill gray">{allEntries.length}</span>
     </div>
     <div className="nse-output-list">
-      {entries.map((summary, index) => {
+      {allEntries.map((summary, index) => {
         const parsed = parseNSESummary(summary)
-        const truncated = parsed.output.length > maxNSEOutputLength
-        const output = parsed.output.slice(0, maxNSEOutputLength)
+        const captureWasShortened = parsed.output.endsWith('…')
         return <article className="nse-output-item" key={`${protocol}-${index}`}>
           <h5><code>{parsed.script}</code></h5>
-          <pre className="nse-output-text">{output || 'No output reported'}{truncated ? '…' : ''}</pre>
-          {truncated && <small>Output truncated for display.</small>}
+          <pre className="nse-output-text">{parsed.output || 'No output reported'}</pre>
+          {captureWasShortened && <small role="note">Nmap shortened this output when it was captured.</small>}
         </article>
       })}
     </div>
-    {allEntries.length > maxNSEOutputCount && <p className="nse-output-note" role="note">Showing the first {maxNSEOutputCount} of {allEntries.length} script results.</p>}
   </section>
 }
 
@@ -128,7 +122,6 @@ function ProtocolCard({ protocol }: { protocol: ProtocolObservation }) {
         {summary.reasons?.map(reason => <small key={reason.reason}>{reason.reason} · {reason.count}</small>)}
       </div>)}
     </div>
-    <NSEOutputPanel protocol={protocol.protocol} outputs={protocol.nse_output} />
     {ports.length ? <>
       <div className="port-table-wrap" role="region" aria-label={evidenceLabel} tabIndex={0}>
         <table className="port-table">
@@ -162,6 +155,7 @@ function ProtocolCard({ protocol }: { protocol: ProtocolObservation }) {
         </article>)}
       </div>
     </> : <div className="inline-empty">No open or open|filtered ports were recorded.</div>}
+    <NSEOutputPanel protocol={protocol.protocol} outputs={protocol.nse_output} />
     <EvidencePorts title="Naabu discoveries" description="Ports found by fast TCP discovery. These are retained for diagnostics and are not baseline evidence until Nmap confirms them." ports={discovered} />
     <EvidencePorts title="Nmap disagreements" description="Naabu found these ports but Nmap did not confirm an open state; they are excluded from change detection." ports={unconfirmed} tone="warning" />
     <p className="nonopen-note"><Info size={14} /> Closed, filtered, and other non-open ports are summarized above rather than stored individually, even for a 65,535-port scope.</p>
@@ -201,5 +195,20 @@ export function HostDetail() {
   const host = value.host
   const sourceScan = value.source_scan ?? value.scan
   const protocols = host.protocols ?? []
-  return <section className="page host-detail-page"><div className="page-heading"><div><Link className="back-link" to={back}>← {backLabel}</Link><p className="eyebrow">{scanID ? 'Historical scan host' : 'Baseline host'}</p><HostIdentity host={host} /></div></div>{value.data_quality === 'legacy' && <div className="legacy-banner" role="status"><Info size={17} /><span><strong>Legacy detail</strong> This host was derived from an older snapshot. Detailed Nmap evidence appears after a newer successful scan is approved.</span></div>}<div className="host-detail-grid"><div className="panel"><div className="panel-heading"><div><h2>Identity and coverage</h2><p className="muted">Configured target relationships and immutable scan context.</p></div></div><dl className="fact-grid">{[['Configured targets', host.source_targets?.join(', ') || '—'], ['Configured DNS', host.dns_names?.join(', ') || '—'], ['Hostnames', host.hostnames?.map(name => name.name).join(', ') || '—'], ['Latency', host.latency_ms ? `${host.latency_ms.toFixed(2)} ms` : 'Not reported'], ['Link address', host.link_addresses?.map(link => [link.address, link.vendor].filter(Boolean).join(' · ')).join(', ') || 'Not reported'], ['Source scan', sourceScan?.id || 'Legacy snapshot'], ['Completed', sourceScan?.finished_at ? formatDateTime(sourceScan.finished_at) : '—'], ['Job revision', String(sourceScan?.job_revision ?? '—')], ['Nmap', sourceScan?.nmap_version || '—'], ['Scanner', sourceScan?.scanner_engine || 'Nmap'], ['Profile revision', sourceScan?.scanner_profile_id ? `${sourceScan.scanner_profile_id} · ${sourceScan.scanner_profile_revision ?? 'current'}` : 'Built-in'], ['Naabu', sourceScan?.naabu_version || (sourceScan?.scanner_engine === 'naabu_nmap' ? 'Not reported' : 'Not used')], ['Discovery', sourceScan?.discovery_ports != null ? `${sourceScan.discovery_ports.toLocaleString()} ports · ${formatDuration(sourceScan.discovery_duration_ms)}` : '—'], ['Enrichment', sourceScan?.confirmed_ports != null ? `${sourceScan.confirmed_ports.toLocaleString()} confirmed · ${formatDuration(sourceScan.enrichment_duration_ms)}` : '—']].map(([label, item]) => <div key={label}><dt>{label}</dt><dd>{item}</dd></div>)}</dl></div><div className="panel"><div className="panel-heading"><div><h2>Network registration (RDAP/WHOIS)</h2><p className="muted">Loaded only when a single host is opened.</p></div></div><RdapPanel result={rdap.data?.rdap} loading={rdap.isLoading} error={rdap.error as Error | null} /></div></div>{scanID && value.expected && <div className="panel expected-panel"><div className="panel-heading"><div><h2>Baseline expectation</h2><p className="muted">Positive ports retained by the active baseline for this address.</p></div></div><div className="expected-protocols">{value.expected.protocols?.map(protocol => <span className="coverage-chip" key={protocol.protocol}><b>{protocol.protocol.toUpperCase()}</b> {protocol.ports?.map(port => port.port).join(', ') || 'No positive ports'}</span>)}</div></div>}<div className="protocol-stack">{protocols.length ? protocols.map(protocol => <ProtocolCard key={protocol.protocol} protocol={protocol} />) : <div className="panel inline-empty">No protocol evidence was recorded for this host.</div>}</div></section>
+  const protocolEvidence = <div className="protocol-stack">{protocols.length ? protocols.map(protocol => <ProtocolCard key={protocol.protocol} protocol={protocol} />) : <div className="panel inline-empty">No protocol evidence was recorded for this host.</div>}</div>
+  const baselineExpectation = scanID && value.expected && <div className="panel expected-panel"><div className="panel-heading"><div><h2>Baseline expectation</h2><p className="muted">Positive ports retained by the active baseline for this address.</p></div></div><div className="expected-protocols">{value.expected.protocols?.map(protocol => <span className="coverage-chip" key={protocol.protocol}><b>{protocol.protocol.toUpperCase()}</b> {protocol.ports?.map(port => port.port).join(', ') || 'No positive ports'}</span>)}</div></div>
+  const hostDetails = <div className="host-detail-grid">
+    <div className="panel">
+      <div className="panel-heading"><div><h2>Identity and coverage</h2><p className="muted">Configured target relationships and immutable scan context.</p></div></div>
+      <dl className="fact-grid">{[['Configured targets', host.source_targets?.join(', ') || '—'], ['Configured DNS', host.dns_names?.join(', ') || '—'], ['Hostnames', host.hostnames?.map(name => name.name).join(', ') || '—'], ['Latency', host.latency_ms ? `${host.latency_ms.toFixed(2)} ms` : 'Not reported'], ['Link address', host.link_addresses?.map(link => [link.address, link.vendor].filter(Boolean).join(' · ')).join(', ') || 'Not reported'], ['Source scan', sourceScan?.id || 'Legacy snapshot'], ['Completed', sourceScan?.finished_at ? formatDateTime(sourceScan.finished_at) : '—'], ['Job revision', String(sourceScan?.job_revision ?? '—')], ['Nmap', sourceScan?.nmap_version || '—'], ['Scanner', sourceScan?.scanner_engine || 'Nmap'], ['Profile revision', sourceScan?.scanner_profile_id ? `${sourceScan.scanner_profile_id} · ${sourceScan.scanner_profile_revision ?? 'current'}` : 'Built-in'], ['Naabu', sourceScan?.naabu_version || (sourceScan?.scanner_engine === 'naabu_nmap' ? 'Not reported' : 'Not used')], ['Discovery', sourceScan?.discovery_ports != null ? `${sourceScan.discovery_ports.toLocaleString()} ports · ${formatDuration(sourceScan.discovery_duration_ms)}` : '—'], ['Enrichment', sourceScan?.confirmed_ports != null ? `${sourceScan.confirmed_ports.toLocaleString()} confirmed · ${formatDuration(sourceScan.enrichment_duration_ms)}` : '—']].map(([label, item]) => <div key={label}><dt>{label}</dt><dd>{item}</dd></div>)}</dl>
+    </div>
+    <div className="panel"><div className="panel-heading"><div><h2>Network registration (RDAP/WHOIS)</h2><p className="muted">Loaded only when a single host is opened.</p></div></div><RdapPanel result={rdap.data?.rdap} loading={rdap.isLoading} error={rdap.error as Error | null} /></div>
+  </div>
+  return <section className="page host-detail-page">
+    <div className="page-heading"><div><Link className="back-link" to={back}>← {backLabel}</Link><p className="eyebrow">{scanID ? 'Historical scan host' : 'Baseline host'}</p><HostIdentity host={host} /></div></div>
+    {value.data_quality === 'legacy' && <div className="legacy-banner" role="status"><Info size={17} /><span><strong>Legacy detail</strong> This host was derived from an older snapshot. Detailed Nmap evidence appears after a newer successful scan is approved.</span></div>}
+    {protocolEvidence}
+    {baselineExpectation}
+    {hostDetails}
+  </section>
 }

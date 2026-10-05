@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -151,8 +150,8 @@ func TestStoreDaemonLeaseHealthTransitions(t *testing.T) {
 	if err := s.System().ReleaseLease(ctx, "owner"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.System().Healthy(ctx); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("released lease health error = %v", err)
+	if err := s.System().Healthy(ctx); err == nil || !strings.Contains(err.Error(), "no daemon heartbeat recorded; the daemon is not running") {
+		t.Fatalf("released lease health error = %v, want a named missing-daemon-heartbeat error", err)
 	}
 }
 

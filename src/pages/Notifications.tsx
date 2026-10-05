@@ -50,8 +50,8 @@ export type NotificationScope = {
   /** Sends a test message; the platform's destinations have none. */
   test?: (id: string) => Promise<unknown>
   toggleRouting: (destinationID: string, enabled: boolean, password: string) => Promise<NotificationUpdateRouting>
-  /** Whether routing that was never saved sends update alerts to every enabled destination. */
-  routingDefaultsToEnabled: boolean
+  /** Whether unsaved legacy routing selects all existing destinations. */
+  routingDefaultsToAllDestinations: boolean
   /** Whether the page reports the import of config.yaml notification URLs. */
   configImport: boolean
   eyebrow: string
@@ -71,7 +71,7 @@ const unitNotifications: NotificationScope = {
   remove: (id, revision, password) => deleteNotificationDestination(id, revision, password),
   test: id => testNotificationDestination(id),
   toggleRouting: (destinationID, enabled, password) => toggleNotificationUpdateAlert(destinationID, enabled, password),
-  routingDefaultsToEnabled: true,
+  routingDefaultsToAllDestinations: true,
   configImport: true,
   eyebrow: 'Delivery',
   description: 'Manage named Shoutrrr destinations without exposing their credentials.',
@@ -318,7 +318,7 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
   }
 
   const status = destinations.data?.status
-  const selectedUpdateDestinations = selectedUpdateDestinationIds(destinations.data, scope.routingDefaultsToEnabled)
+  const selectedUpdateDestinations = selectedUpdateDestinationIds(destinations.data, scope.routingDefaultsToAllDestinations)
   const updateRoutingBusy = busy.startsWith('update-routing:') || passwordPrompt !== null
   return <section className="page narrow notifications-page">
     <div className="page-heading"><div><p className="eyebrow">{scope.eyebrow}</p><h1>Notifications</h1><p className="muted">{scope.description}</p></div><Bell className="muted-icon" size={24} /></div>
@@ -384,12 +384,13 @@ function incidentReminderCadenceLabel(cadence: IncidentReminderCadence) {
 
 // The update-alert checkboxes always follow the latest fetched routing, so a
 // change saved in another session appears after the next refetch. A unit's
-// routing that was never saved selects its enabled destinations; the
+// routing that was never saved selects every existing destination; paused
+// destinations remain selected and resume delivery if enabled later. The
 // platform's selects none.
-function selectedUpdateDestinationIds(data: NotificationDestinationsResponse | undefined, defaultsToEnabled: boolean) {
+function selectedUpdateDestinationIds(data: NotificationDestinationsResponse | undefined, defaultsToAllDestinations: boolean) {
   if (!data) return []
   const routing = data.update_routing
-  if (!routing?.configured) return defaultsToEnabled ? data.destinations.filter(destination => destination.enabled).map(destination => destination.id) : []
+  if (!routing?.configured) return defaultsToAllDestinations ? data.destinations.map(destination => destination.id) : []
   const available = new Set(data.destinations.map(destination => destination.id))
   return routing.destinations.filter(id => available.has(id))
 }

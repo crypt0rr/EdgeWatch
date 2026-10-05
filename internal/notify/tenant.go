@@ -145,17 +145,17 @@ func finishViews(views []DestinationView, health map[string]store.DeliveryHealth
 	return views
 }
 
-// legacySelection returns the stable selectors of the destinations that
-// take part in the legacy nil selection. It is never nil.
+// legacySelection returns the stable selectors for materializing the legacy
+// nil selection. Include paused managed destinations too: pausing suppresses
+// delivery temporarily, but must not permanently remove that destination
+// when the legacy routing is frozen. It is never nil.
 func (set destinationSet) legacySelection() []string {
 	selection := make([]string, 0, len(set.fileURLs)+len(set.managed))
 	for id := range set.fileURLs {
 		selection = append(selection, "file:"+id)
 	}
-	for id, entry := range set.managed {
-		if entry.record.Enabled {
-			selection = append(selection, id)
-		}
+	for id := range set.managed {
+		selection = append(selection, id)
 	}
 	sort.Strings(selection)
 	return selection
@@ -484,8 +484,10 @@ func (tn *TenantNotifier) Status(ctx context.Context) (map[string]any, error) {
 	return tn.n.completeStatus(ctx, set, tn.ts), nil
 }
 
-// LegacySelection returns the selectors of the tenant's destinations that
-// the legacy nil selection follows. It is never nil without an error.
+// LegacySelection returns all stable selectors that should be retained when
+// the tenant's legacy nil selection is frozen. Paused destinations remain
+// selected so they can resume delivery if enabled later. It is never nil
+// without an error.
 func (tn *TenantNotifier) LegacySelection(ctx context.Context) ([]string, error) {
 	set, err := tn.destinations(ctx)
 	if err != nil {

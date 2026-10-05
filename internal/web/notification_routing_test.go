@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +115,53 @@ func TestDeletingManagedDestinationUnblocksJobEdits(t *testing.T) {
 	}
 	if !broadcastJobUpdate {
 		t.Fatal("destination delete did not announce the job routing change to open consoles")
+	}
+}
+
+func TestCreatingDestinationFreezesPausedLegacyJobDestination(t *testing.T) {
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	defer db.Close()
+	ts := defaultTenantStore(server)
+	first := createUpdateRoutingTestDestination(t, server, admin, "First", "first")
+	second := createUpdateRoutingTestDestination(t, server, admin, "Second", "second")
+	record, err := ts.CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name: "legacy-paused-routing", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"},
+		TCP: &config.Protocol{Ports: "1", Mode: "connect", Engine: "nmap"}, Timeout: config.Duration(time.Minute), Timing: "balanced",
+		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
+	}))
+	if err != nil || record.Job.NotificationDestinations != nil {
+		t.Fatalf("create nil-routed job = %#v, %v; want legacy nil routing", record, err)
+	}
+	paused := false
+	pausedDestination, err := server.App.Notifier.Tenant(ts).UpdateManagedWithAudit(ctx, first, 1, "First", nil, &paused, store.AuditEntry{Action: "notifications.updated", ActorUserID: admin.UserID, ActorUsername: admin.Username})
+	if err != nil || pausedDestination.Enabled {
+		t.Fatalf("pause First = %+v, %v", pausedDestination, err)
+	}
+
+	createUpdateRoutingTestDestination(t, server, admin, "Third", "third")
+	job, err := ts.GetJob(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSelection := []string{first, second}
+	slices.Sort(wantSelection)
+	if job.Job.NotificationDestinations == nil || !slices.Equal(job.Job.NotificationDestinations, wantSelection) {
+		t.Fatalf("job routing after a new destination was added = %v; want paused First retained in %v", job.Job.NotificationDestinations, wantSelection)
+	}
+	keys, err := server.App.Notifier.Tenant(ts).QueueDestinationsForJob(ctx, job.Job)
+	if err != nil || !slices.Equal(keys, []string{"managed:" + second + ":1"}) {
+		t.Fatalf("queue while First is paused = %v, %v; want only Second", keys, err)
+	}
+	enabled := true
+	if _, err := server.App.Notifier.Tenant(ts).UpdateManagedWithAudit(ctx, first, pausedDestination.Revision, "First", nil, &enabled, store.AuditEntry{Action: "notifications.updated", ActorUserID: admin.UserID, ActorUsername: admin.Username}); err != nil {
+		t.Fatalf("resume First: %v", err)
+	}
+	keys, err = server.App.Notifier.Tenant(ts).QueueDestinationsForJob(ctx, job.Job)
+	wantKeys := []string{"managed:" + first + ":3", "managed:" + second + ":1"}
+	slices.Sort(wantKeys)
+	if err != nil || !slices.Equal(keys, wantKeys) {
+		t.Fatalf("queue after First resumes = %v, %v; want %v", keys, err, wantKeys)
 	}
 }
 

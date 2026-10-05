@@ -9,6 +9,7 @@ import (
 )
 
 func TestMigration63KeepsLegacyExhaustedDeliveriesTerminal(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	oldRetry := time.Now().UTC().Add(-21 * 24 * time.Hour)

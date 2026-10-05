@@ -12,6 +12,7 @@ import (
 )
 
 func TestJobListingLifecycleIdempotenceAndPermanentDeletionGuards(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	alpha, err := defaultTenant(s).CreateJobWithEnabledAndAudit(ctx, testJob("alpha"), true, AuditEntry{Action: "job.created", Detail: "alpha"})
@@ -117,6 +118,7 @@ func TestJobListingLifecycleIdempotenceAndPermanentDeletionGuards(t *testing.T) 
 }
 
 func TestPermanentJobDeletionPurgesHistoryAndRepairsLatestHosts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	tenant := defaultTenant(s)
@@ -382,6 +384,7 @@ func TestPermanentJobDeletionPurgesHistoryAndRepairsLatestHosts(t *testing.T) {
 }
 
 func TestPermanentJobHistoryPurgeResumesWhenCleanupFails(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	tenant := defaultTenant(s)
@@ -459,6 +462,7 @@ func TestPermanentJobHistoryPurgeResumesWhenCleanupFails(t *testing.T) {
 }
 
 func TestListJobsPlacesArchivedJobsAfterActiveJobs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 
@@ -498,6 +502,7 @@ func TestListJobsPlacesArchivedJobsAfterActiveJobs(t *testing.T) {
 }
 
 func TestJobActiveAndLeaseExpiry(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("lease"))

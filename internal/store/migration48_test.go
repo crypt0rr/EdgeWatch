@@ -72,6 +72,7 @@ func assertBaselineSearchTotal(t *testing.T, s *Store, jobID, query string, want
 }
 
 func TestMigration48RebuildsBaselineHostSearchByRowid(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name       string
 		fromSchema int
@@ -196,6 +197,7 @@ func TestMigration48RebuildsBaselineHostSearchByRowid(t *testing.T) {
 }
 
 func TestBaselineHostSearchBackfillResumesAfterCancellation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertBaselineSearchJob(t, s, "resume-web", "resume-web")
@@ -269,6 +271,7 @@ func TestBaselineHostSearchBackfillResumesAfterCancellation(t *testing.T) {
 }
 
 func TestBaselineHostSearchRebuildReportsStoreErrors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertBaselineSearchJob(t, s, "error-web", "error-web")

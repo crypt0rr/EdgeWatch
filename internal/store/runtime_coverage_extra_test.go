@@ -12,6 +12,7 @@ import (
 )
 
 func TestRuntimeMetadataFallbackAndSummaryBranches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("runtime-coverage"))
@@ -76,6 +77,7 @@ func TestRuntimeMetadataFallbackAndSummaryBranches(t *testing.T) {
 }
 
 func TestRuntimeBaselineEpochAdvancesOnlyForBaselineChanges(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()
@@ -119,6 +121,7 @@ func TestRuntimeBaselineEpochAdvancesOnlyForBaselineChanges(t *testing.T) {
 }
 
 func TestFinalizeManagedScanRejectsStaleCycleAfterSavingHistory(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()
@@ -149,6 +152,7 @@ func TestFinalizeManagedScanRejectsStaleCycleAfterSavingHistory(t *testing.T) {
 }
 
 func TestFinalizeManagedScanValidationAndRollback(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("finalize-validation"))

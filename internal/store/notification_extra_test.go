@@ -12,6 +12,7 @@ import (
 )
 
 func TestManagedNotificationStoreCRUDAndLegacySelectionMaterialization(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if destinations, err := defaultTenant(s).ListManagedNotifications(ctx); err != nil || len(destinations) != 0 {
@@ -97,6 +98,7 @@ func TestManagedNotificationStoreCRUDAndLegacySelectionMaterialization(t *testin
 }
 
 func TestManagedNotificationMetadataEditPreservesPendingDelivery(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	created, err := defaultTenant(s).CreateManagedNotification(ctx, "destination-metadata", "Operations", "generic", []byte{1}, []byte{2}, true)
@@ -129,6 +131,7 @@ func TestManagedNotificationMetadataEditPreservesPendingDelivery(t *testing.T) {
 }
 
 func TestManagedNotificationCredentialEditDiscardsAndAuditsPendingDelivery(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	created, err := defaultTenant(s).CreateManagedNotification(ctx, "destination-credentials", "Operations", "generic", []byte{1}, []byte{2}, true)
@@ -167,6 +170,7 @@ func containsAll(value string, parts ...string) bool {
 }
 
 func TestDeleteManagedNotificationRemovesDeletedDestinationFromRouting(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	destination, err := defaultTenant(s).CreateManagedNotification(ctx, "destination-deleted", "Operations", "generic", []byte{1}, []byte{2}, true)
@@ -279,6 +283,7 @@ func TestDeleteManagedNotificationRemovesDeletedDestinationFromRouting(t *testin
 }
 
 func TestDeleteManagedNotificationRollsBackWhenRoutingCannotBeUpdated(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		fault string
@@ -323,6 +328,7 @@ func TestDeleteManagedNotificationRollsBackWhenRoutingCannotBeUpdated(t *testing
 }
 
 func TestDeleteManagedNotificationReportsUnknownDestination(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	if _, err := defaultTenant(s).DeleteManagedNotificationWithAudit(context.Background(), "missing-destination", 1, AuditEntry{Action: "notifications.deleted"}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete of unknown destination error = %v, want not found", err)
@@ -330,6 +336,7 @@ func TestDeleteManagedNotificationReportsUnknownDestination(t *testing.T) {
 }
 
 func TestDeleteManagedNotificationRoutingScrubRollsBackWithDelete(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	destination, err := defaultTenant(s).CreateManagedNotification(ctx, "destination-rollback", "Operations", "generic", []byte{1}, []byte{2}, true)

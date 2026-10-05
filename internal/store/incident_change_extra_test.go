@@ -8,6 +8,7 @@ import (
 )
 
 func TestApplyAcceptedServiceAndDNSChanges(t *testing.T) {
+	t.Parallel()
 	snapshot := model.Snapshot{
 		Units: []model.Unit{{Target: "edge.example", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open", Service: "old"}}}},
 		DNS:   map[string][]string{"edge.example": {"192.0.2.1"}},
@@ -47,6 +48,7 @@ func TestApplyAcceptedServiceAndDNSChanges(t *testing.T) {
 }
 
 func TestAcceptHostDownUpdatesExpectedDNSHostAndRetainsSiblingEvidence(t *testing.T) {
+	t.Parallel()
 	const downAddress = "192.0.2.10"
 	const liveAddress = "192.0.2.11"
 	snapshot := model.Snapshot{
@@ -85,6 +87,7 @@ func TestAcceptHostDownUpdatesExpectedDNSHostAndRetainsSiblingEvidence(t *testin
 }
 
 func TestAcceptHostDownPreservesLegacyAggregateServiceWithoutSiblingFingerprintEvidence(t *testing.T) {
+	t.Parallel()
 	const downAddress = "192.0.2.20"
 	const liveAddress = "192.0.2.21"
 	snapshot := model.Snapshot{
@@ -105,6 +108,7 @@ func TestAcceptHostDownPreservesLegacyAggregateServiceWithoutSiblingFingerprintE
 }
 
 func TestAcceptHostDownRecomputesServiceWithScannerFingerprintRules(t *testing.T) {
+	t.Parallel()
 	const downAddress = "192.0.2.30"
 	const liveAddress = "192.0.2.31"
 	tests := []struct {
@@ -173,6 +177,7 @@ func TestAcceptHostDownRecomputesServiceWithScannerFingerprintRules(t *testing.T
 }
 
 func TestAcceptServiceRemovalAfterPortRemoval(t *testing.T) {
+	t.Parallel()
 	snapshot := &model.Snapshot{
 		Units: []model.Unit{{
 			Target:   "192.0.2.10",

@@ -48,6 +48,7 @@ func journalMode(t *testing.T, s *Store) string {
 // storage problem: the open keeps the writer connection for reads and does
 // not warn that WAL is unavailable.
 func TestOpeningABackupWithoutWALLogsNoWarning(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := writeRollbackJournalBackup(t)
 	logs := captureDefaultLog(t)
@@ -84,6 +85,7 @@ func TestOpeningABackupWithoutWALLogsNoWarning(t *testing.T) {
 // SQLite cannot switch to WAL on it, as on a filesystem without the shared
 // memory that WAL needs.
 func TestOpenWarnsWhenRequestedWALIsRefused(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := writeRollbackJournalBackup(t)
 	var logs bytes.Buffer

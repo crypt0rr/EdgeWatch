@@ -173,6 +173,7 @@ func assertNothingOfTheMarkerLeft(t *testing.T, s *Store) {
 // in the checkpoint phase, with the log still holding the erased rows. The
 // next pass, without the reader, truncates the log and makes the tombstone.
 func TestTenantPurgeRetriesABusyCheckpoint(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantPurgeFixture(t)
 	seedTenantPurgeMarker(t, f)
@@ -213,6 +214,7 @@ func TestTenantPurgeRetriesABusyCheckpoint(t *testing.T) {
 // tombstone: then no search index and no backup holds a term of the erased
 // rows.
 func TestTenantPurgeContinuesTheCompactionAfterASpentBudget(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantPurgeFixture(t)
 	seedTenantPurgeMarker(t, f)
@@ -264,6 +266,7 @@ func TestTenantPurgeContinuesTheCompactionAfterASpentBudget(t *testing.T) {
 // reports it, and the tenant stays deleting in the phase it reached, for
 // the next pass to resume.
 func TestTenantPurgeMaintenanceStopsWhenCancelled(t *testing.T) {
+	t.Parallel()
 	f := newTenantPurgeFixture(t)
 	requestSecondTenantDeletion(t, f)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -289,6 +292,7 @@ func TestTenantPurgeMaintenanceStopsWhenCancelled(t *testing.T) {
 // over. A tenant that leaves the deleting state stops it, and a failed
 // database is reported.
 func TestTenantPurgeMaintenanceResumesAtItsPhase(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for phase, want := range map[string][]string{
 		tenantPurgePhaseFreePages:                 nil,
@@ -349,6 +353,7 @@ func TestTenantPurgeMaintenanceResumesAtItsPhase(t *testing.T) {
 // compaction does not end while the merge's inputs still hold the erased
 // rows' terms.
 func TestSearchIndexCompactionFinishesAStalledMerge(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	const index = "baseline_host_search"
@@ -417,6 +422,7 @@ func TestSearchIndexCompactionFinishesAStalledMerge(t *testing.T) {
 // The structure record reads as SQLite writes it, in both formats, and a
 // record that does not read as one is an error.
 func TestFTSStructureMerging(t *testing.T) {
+	t.Parallel()
 	cookie := []byte{0, 0, 0, 7}
 	record := func(parts ...[]byte) []byte { return bytes.Join(append([][]byte{cookie}, parts...), nil) }
 	for _, tc := range []struct {
@@ -489,6 +495,7 @@ func TestFTSStructureMerging(t *testing.T) {
 // an older snapshot keeps it busy, and the log keeps its frames; without
 // one it truncates the log to zero bytes.
 func TestCheckpointTruncateReportsABusyCheckpoint(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	shortenBusyTimeout(t, s)

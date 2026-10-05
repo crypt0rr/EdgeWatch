@@ -9,6 +9,7 @@ import (
 )
 
 func TestAuthKeyHexDecodeRejectsMalformedInput(t *testing.T) {
+	t.Parallel()
 	decoded, err := hexDecode([]byte("00aF10"))
 	if err != nil || string(decoded) != string([]byte{0, 0xaf, 0x10}) {
 		t.Fatalf("hex decode = %x, %v", decoded, err)
@@ -33,6 +34,7 @@ func TestAuthKeyHexDecodeRejectsMalformedInput(t *testing.T) {
 }
 
 func TestLoadAuthKeyFormatsAndPermissions(t *testing.T) {
+	t.Parallel()
 	if _, err := loadAuthKey(""); !errors.Is(err, ErrAuthKeyUnavailable) {
 		t.Fatalf("empty auth key error = %v", err)
 	}
@@ -78,6 +80,7 @@ func TestLoadAuthKeyFormatsAndPermissions(t *testing.T) {
 }
 
 func TestExplicitAuthKeyPathDisablesAutomaticGeneration(t *testing.T) {
+	t.Parallel()
 	s := &Store{authKeyPath: "default", authAutoKey: true}
 	s.SetAuthKeyPath("  /tmp/operator-auth.key  ")
 	if s.authKeyPath != "/tmp/operator-auth.key" || s.authAutoKey {
@@ -90,6 +93,7 @@ func TestExplicitAuthKeyPathDisablesAutomaticGeneration(t *testing.T) {
 }
 
 func TestAuthKeyAutoCreationRecoversInterruptedEmptyFile(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	path := s.authKeyPath
 	if path == "" || !s.authAutoKey {
@@ -109,6 +113,7 @@ func TestAuthKeyAutoCreationRecoversInterruptedEmptyFile(t *testing.T) {
 }
 
 func TestTOTPSecretOpenCompatibilityAndMalformedCiphertext(t *testing.T) {
+	t.Parallel()
 	s := &Store{}
 	if got, err := s.openTOTPSecret("legacy-seed"); err != nil || got != "legacy-seed" {
 		t.Fatalf("plaintext TOTP compatibility = %q, %v", got, err)

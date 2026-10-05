@@ -18,6 +18,7 @@ func defaultUpdateRoutes(destinations ...string) []UpdateAlertRoute {
 // Each alert is recorded once, as the platform's copy and the default
 // tenant's, and is delivered once.
 func TestApplicationUpdateStateAndNotificationDeduplication(t *testing.T) {
+	t.Parallel()
 	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -69,6 +70,7 @@ func TestApplicationUpdateStateAndNotificationDeduplication(t *testing.T) {
 }
 
 func TestApplicationUpdateNotificationDestinationsAreExplicitAndNormalized(t *testing.T) {
+	t.Parallel()
 	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -139,6 +141,7 @@ func assertSelectionRefused(t *testing.T, err error, selector string) {
 // destination deleted since the caller's check are refused alike, and the
 // stored routing and the audit stay as they were.
 func TestTenantUpdateRoutingSelectsOnlyOwnDestinations(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	ids := tenantFixtureNotifications

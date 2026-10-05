@@ -8,6 +8,7 @@ import (
 )
 
 func TestConsumeTOTPStepRejectsReplayAndOlderStep(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -30,6 +31,7 @@ func TestConsumeTOTPStepRejectsReplayAndOlderStep(t *testing.T) {
 }
 
 func TestConsumeTOTPStepRejectsInvalidAndCancelledRequests(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -57,6 +59,7 @@ func TestConsumeTOTPStepRejectsInvalidAndCancelledRequests(t *testing.T) {
 // still succeeds, and an older step leaves the guard as it is. NoTOTPStep
 // records nothing, and neither does a save that fails.
 func TestTOTPEnrolmentRecordsTheConfirmingStep(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()

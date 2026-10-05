@@ -592,6 +592,7 @@ func parseStoreSources(t *testing.T) (*token.FileSet, []*ast.File) {
 // design, the daemon's cross-tenant statements, and the helper functions
 // that the scoped methods call after they checked the tenant.
 func TestTenantSQLLint(t *testing.T) {
+	t.Parallel()
 	fset, files := parseStoreSources(t)
 	result := lintTenantSQL(collectSQLStatements(fset, files), tenancyTables)
 	for _, violation := range result.violations {
@@ -629,6 +630,7 @@ func TestTenantSQLLint(t *testing.T) {
 // A method that works on one tenant's data belongs to TenantStore or
 // PublicStore instead, where the leak suite covers it.
 func TestStoreKeepsOnlyGlobalMethods(t *testing.T) {
+	t.Parallel()
 	_, files := parseStoreSources(t)
 	methods := map[string]bool{}
 	for _, file := range files {
@@ -754,6 +756,7 @@ func withoutPositions(findings []string) string {
 // ColumnOnly's statements all name tenant_id without restricting their rows
 // by it, so each is a violation; ScopedJob's all carry the predicate.
 func TestTenantSQLLintFindsViolations(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "fixture.go", tenantSQLLintFixture, parser.SkipObjectResolution)
 	if err != nil {
@@ -799,6 +802,7 @@ func TestTenantSQLLintFindsViolations(t *testing.T) {
 // The predicate rule finds tenant_id where it restricts the rows, at any
 // depth, and nowhere else.
 func TestSQLTenantPredicate(t *testing.T) {
+	t.Parallel()
 	for statement, want := range map[string]bool{
 		"SELECT name FROM jobs WHERE id=? AND tenant_id=?":                                    true,
 		"SELECT h.address FROM scan_hosts h JOIN scans s ON s.id=h.scan_id AND s.tenant_id=?": true,
@@ -832,6 +836,7 @@ func TestSQLTenantPredicate(t *testing.T) {
 // The table scanner finds every table a statement names, including the
 // tables of a FROM list and the targets of writes.
 func TestSQLTablesFindsEveryTable(t *testing.T) {
+	t.Parallel()
 	for statement, want := range map[string]string{
 		"SELECT a FROM jobs AS j, json_each(j.x) AS e JOIN scans s ON s.job_id=j.id": "jobs,json_each,scans",
 		"SELECT a FROM jobs j, scans WHERE j.id=scans.job_id":                        "jobs,scans",

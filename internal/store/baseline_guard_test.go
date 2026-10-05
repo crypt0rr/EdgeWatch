@@ -10,6 +10,7 @@ import (
 )
 
 func TestBaselineReplacementActionsRejectActiveScan(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("baseline-guard"))

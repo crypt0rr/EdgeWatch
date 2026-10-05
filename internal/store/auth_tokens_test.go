@@ -7,6 +7,7 @@ import (
 )
 
 func TestCheapAuthenticationTokenChecks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -59,6 +60,7 @@ func TestCheapAuthenticationTokenChecks(t *testing.T) {
 }
 
 func TestCheapAuthenticationTokenChecksReturnDatabaseErrors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if err := s.Close(); err != nil {

@@ -8,6 +8,7 @@ import (
 )
 
 func TestMigration62CreatesJobHistoryPurgeQueue(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	for _, object := range []struct{ kind, name string }{
 		{kind: "index", name: "outbox_job_purge"},

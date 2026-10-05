@@ -11,6 +11,7 @@ import (
 )
 
 func TestTOTPSecretIsEncryptedAndReloadable(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")
@@ -56,6 +57,7 @@ func TestTOTPSecretIsEncryptedAndReloadable(t *testing.T) {
 }
 
 func TestDefaultAuthKeyPathRecognizesSQLiteMemoryURIs(t *testing.T) {
+	t.Parallel()
 	for _, database := range []string{":memory:", "file::memory:?cache=shared", "file:shared?mode=memory&cache=shared"} {
 		if path := defaultAuthKeyPath(database); path != "" {
 			t.Fatalf("memory database %q unexpectedly selected an auth key path %q", database, path)
@@ -64,6 +66,7 @@ func TestDefaultAuthKeyPathRecognizesSQLiteMemoryURIs(t *testing.T) {
 }
 
 func TestTOTPSecretKeyLossFailsClosedAndPreservesCiphertext(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")
@@ -106,6 +109,7 @@ func TestTOTPSecretKeyLossFailsClosedAndPreservesCiphertext(t *testing.T) {
 }
 
 func TestTOTPSecretLegacyValuesMigrateToOwnerBoundCiphertext(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	s, err := Open(filepath.Join(dir, "edgewatch.db"))
@@ -142,6 +146,7 @@ func TestTOTPSecretLegacyValuesMigrateToOwnerBoundCiphertext(t *testing.T) {
 }
 
 func TestTOTPSecretCiphertextIsBoundToUserIdentity(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	secret := "JBSWY3DPEHPK3PXP"

@@ -55,6 +55,7 @@ func purgePhaseOf(t *testing.T, s *Store, id string) string {
 // database with incremental auto-vacuum is left as it was, and so is the
 // cleanup when the migration runs again after it has finished.
 func TestMigration56RecordsTheOverwriteWhereFreePagesStay(t *testing.T) {
+	t.Parallel()
 	freePages := legacyPurgeMaintenancePosition(tenantPurgePhaseFreePages)
 	last := legacyPurgeMaintenancePosition(tenantPurgePhaseCheckpoint)
 	if freePages != 4 || last != 5 {
@@ -139,6 +140,7 @@ func TestMigration56RecordsTheOverwriteWhereFreePagesStay(t *testing.T) {
 // that retention freed while the unit existed hold its rows, and after the
 // cleanup no free page does.
 func TestLegacyPurgeMaintenanceOverwritesFreePages(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantPurgeFixture(t)
 	useAutoVacuum(t, f.store, "NONE")
@@ -191,6 +193,7 @@ func TestLegacyPurgeMaintenanceOverwritesFreePages(t *testing.T) {
 // compacting the indexes again. edgewatch health reports it at its
 // free-pages phase until it has finished.
 func TestLegacyPurgeMaintenanceAfterSchema56OverwritesOnlyFreePages(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantPurgeFixture(t)
 	useAutoVacuum(t, f.store, "NONE")
@@ -233,6 +236,7 @@ func TestLegacyPurgeMaintenanceAfterSchema56OverwritesOnlyFreePages(t *testing.T
 // overwritten the free pages. After the upgrade it overwrites them before
 // its tombstone.
 func TestMigration56SendsACheckpointingPurgeBackToTheOverwrite(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantPurgeFixture(t)
 	useAutoVacuum(t, f.store, "NONE")

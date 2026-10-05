@@ -66,6 +66,7 @@ func assertOneLinkRevocation(t *testing.T, s *Store, action string, want linkRev
 // recorded with the change's actor and names the account. Another
 // account's link stays usable, and a link issued after the change works.
 func TestPasswordChangeRevokesTheAccountsOtherLinks(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	t.Run("the account's own change", func(t *testing.T) {
 		ctx := context.Background()
@@ -192,6 +193,7 @@ func TestPasswordChangeRevokesTheAccountsOtherLinks(t *testing.T) {
 // the revocation fails, the change fails and writes nothing, so a password
 // or role never changes while an older link still works.
 func TestFailedLinkRevocationStopsTheChange(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Now().UTC()
 	f := newTenantFixture(t)
@@ -266,6 +268,7 @@ func TestFailedLinkRevocationStopsTheChange(t *testing.T) {
 // account's links: a display name edit, a recovery code rotation, and a
 // save of the same password. Nothing records a revocation.
 func TestAccountWritesWithoutPasswordOrRoleChangeKeepTheLinks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	ts := f.store.Tenant(f.b)
@@ -297,6 +300,7 @@ func TestAccountWritesWithoutPasswordOrRoleChangeKeepTheLinks(t *testing.T) {
 // the unit administrator who changed the role and names the account.
 // Another account's link stays usable.
 func TestRoleChangeRevokesTheAccountsLinks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Now().UTC()
 	f := newTenantFixture(t)

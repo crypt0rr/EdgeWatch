@@ -214,6 +214,7 @@ var tenantStoreLeakCases = map[string]tenantLeakCase{
 // PublicStore, has a leak case, and every leak case names such a method, so
 // a method cannot reach tenant data without one.
 func TestEveryScopedStoreMethodHasALeakCase(t *testing.T) {
+	t.Parallel()
 	publicCases := make(map[string]bool, len(publicStoreCases))
 	for name, run := range publicStoreCases {
 		publicCases[name] = run != nil
@@ -251,6 +252,7 @@ func TestEveryScopedStoreMethodHasALeakCase(t *testing.T) {
 // TenantStore method refuses a store without a valid scope. The read-only
 // checks share one copy of the fixture.
 func TestTenantStoreIsolation(t *testing.T) {
+	t.Parallel()
 	shared := newTenantFixture(t)
 	names := make([]string, 0, len(tenantStoreLeakCases))
 	for name := range tenantStoreLeakCases {
@@ -315,6 +317,7 @@ func assertTenantStoreRefusesInvalidScopes(t *testing.T, f tenantFixture) {
 }
 
 func TestTenantScopeValues(t *testing.T) {
+	t.Parallel()
 	if (TenantScope{}).Valid() || (TenantScope{}).ID() != "" {
 		t.Fatal("the zero scope must name no tenant")
 	}
@@ -347,6 +350,7 @@ func insertTenantUser(t *testing.T, s *Store, id string, tenant any, role string
 //   - The system and platform stores list every tenant that is not deleted.
 //   - A failed read is an error, never a scope.
 func TestTenantScopeLookups(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	const (

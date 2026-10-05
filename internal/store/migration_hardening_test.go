@@ -12,6 +12,7 @@ import (
 )
 
 func TestMigrationDDLChecksExistingColumnsStructurally(t *testing.T) {
+	t.Parallel()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -42,6 +43,7 @@ func TestMigrationDDLChecksExistingColumnsStructurally(t *testing.T) {
 }
 
 func TestMigrateRefusesNewerSchema(t *testing.T) {
+	t.Parallel()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -59,6 +61,7 @@ func TestMigrateRefusesNewerSchema(t *testing.T) {
 // refuse a schema from a newer release just as the daemon does, before they
 // write anything, instead of changing tables they do not understand.
 func TestOpenExistingRefusesNewerSchemaWithoutWriting(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "edgewatch.db")
 	fixture, err := Open(path)
@@ -136,6 +139,7 @@ func TestOpenExistingRefusesNewerSchemaWithoutWriting(t *testing.T) {
 }
 
 func TestMigrateRejectsRecoveryFixtureMissingRequiredSourceTable(t *testing.T) {
+	t.Parallel()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatal(err)

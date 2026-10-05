@@ -83,6 +83,7 @@ var testCapacityLimits = CapacityLimits{MaxConcurrentScans: 4, MaxProbeCount: 1_
 // and the ceiling up to MaxProbeCountLimit. Anything else is a validation
 // error that names the setting and changes nothing.
 func TestSetTenantCapacityValidatesBounds(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertTenantUser(t, s, platformRoot, nil, RolePlatformAdmin)
@@ -134,6 +135,7 @@ func TestSetTenantCapacityValidatesBounds(t *testing.T) {
 // A capacity change updates only its tenant's row and records a platform
 // action in that tenant's audit, with the actor the caller names.
 func TestSetTenantCapacityRecordsAPlatformActionInTheTenantsAudit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	const admin = "00000000-0000-0000-0000-00000000f001"
@@ -221,6 +223,7 @@ func TestSetTenantCapacityRecordsAPlatformActionInTheTenantsAudit(t *testing.T) 
 // revision, or audit record is written. An enabled platform administrator's
 // change is saved.
 func TestSetTenantCapacityRequiresAnEnabledPlatformAdministrator(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
@@ -269,6 +272,7 @@ func TestSetTenantCapacityRequiresAnEnabledPlatformAdministrator(t *testing.T) {
 // the capacity with its revision; a tenant that is gone or being deleted is
 // not found whatever the revision.
 func TestSetTenantCapacityAtRefusesAStaleRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
@@ -354,6 +358,7 @@ func TestSetTenantCapacityAtRefusesAStaleRevision(t *testing.T) {
 
 // The scheduler's view holds the capacity of the active tenants only.
 func TestTenantCapacitiesListsTheActiveTenants(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	setCapacityColumns(t, f.store, secondTenantID, 1, nil, 20, nil)
@@ -380,6 +385,7 @@ func TestTenantCapacitiesListsTheActiveTenants(t *testing.T) {
 // into a number, so high-cost work raises neither budget until a platform
 // administrator grants a ceiling.
 func TestInitialTenantCapacityKeepsHighCostOff(t *testing.T) {
+	t.Parallel()
 	capacity := InitialTenantCapacity()
 	want := TenantCapacity{HighCostCeiling: ptrTo(HighCostNotGranted)}
 	if !reflect.DeepEqual(capacity, want) {
@@ -403,6 +409,7 @@ func TestInitialTenantCapacityKeepsHighCostOff(t *testing.T) {
 // set. The row cannot hold a ceiling beside high_cost_granted=0, so no
 // number stays behind that a later release could read as a grant.
 func TestHighCostGrantIsStoredApartFromTheCeiling(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertTenantUser(t, s, platformRoot, nil, RolePlatformAdmin)

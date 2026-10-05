@@ -7,6 +7,7 @@ import (
 )
 
 func TestScanHistoryIndexesSupportManagedQueries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 

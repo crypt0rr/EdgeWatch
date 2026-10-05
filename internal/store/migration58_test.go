@@ -12,6 +12,7 @@ import (
 )
 
 func TestMigration58RebuildsPrioritizedHostSearchIndexes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('search-migration-job',?,'search-migration-job','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {

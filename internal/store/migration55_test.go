@@ -73,6 +73,7 @@ func insertTenantInState(t *testing.T, s *Store, id, state, phase string) {
 // database with one records the cleanup as pending, and sends a purge that
 // was already compacting the search indexes back to its verify phase.
 func TestMigration55RecordsTheCleanupOnlyWhenATenantWasDeleted(t *testing.T) {
+	t.Parallel()
 	if _, ok := legacyPurgeMaintenanceRow(t, openTestStore(t)); ok {
 		t.Fatal("a fresh install records a cleanup after deleted tenants")
 	}
@@ -125,6 +126,7 @@ func TestMigration55RecordsTheCleanupOnlyWhenATenantWasDeleted(t *testing.T) {
 // The migration can run again: a cleanup that is pending, with its
 // progress, or complete stays as it is.
 func TestMigration55IsANoOpWhenRepeated(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	insertTenantInState(t, s, "deleted", TenantStateDeleted, tenantPurgePhaseComplete)
 	s = reopenAtSchema54(t, s)
@@ -203,6 +205,7 @@ func backupCopies(t *testing.T, s *Store) int {
 // of the erased rows any more, and the cleanup is complete and does not run
 // again. A backup taken before it still holds them.
 func TestLegacyPurgeMaintenanceErasesWhatAnEarlierReleaseLeft(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f, reader := legacyTombstoneWithResidue(t)
 	if err := reader.Rollback(); err != nil {
@@ -235,6 +238,7 @@ func TestLegacyPurgeMaintenanceErasesWhatAnEarlierReleaseLeft(t *testing.T) {
 // in its checkpoint phase, with the log still holding the erased rows. The
 // next pass, without the reader, truncates the log and merges nothing.
 func TestLegacyPurgeMaintenanceRetriesABusyCheckpoint(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f, reader := legacyTombstoneWithResidue(t)
 	result, err := f.store.System().RunLegacyPurgeMaintenance(ctx)
@@ -275,6 +279,7 @@ func TestLegacyPurgeMaintenanceRetriesABusyCheckpoint(t *testing.T) {
 // the cleanup and its progress while it is pending, and edgewatch verify
 // lists its checkpoint.
 func TestLegacyPurgeMaintenanceResumesAfterASpentBudgetAndARestart(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f, reader := legacyTombstoneWithResidue(t)
 	if err := reader.Rollback(); err != nil {
@@ -387,6 +392,7 @@ func assertLegacyPurgeMaintenanceReported(t *testing.T, s *Store, want *Maintena
 // the transaction of its tombstone completes the cleanup too: nothing of
 // the tenant that an earlier release deleted is left either.
 func TestLegacyPurgeMaintenanceWaitsForAUnitPurgeThatCompletesIt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f, reader := legacyTombstoneWithResidue(t)
 	if err := reader.Rollback(); err != nil {
@@ -443,6 +449,7 @@ func TestLegacyPurgeMaintenanceWaitsForAUnitPurgeThatCompletesIt(t *testing.T) {
 // stops the pass, a database error is returned, and a phase that the
 // cleanup does not know starts it over.
 func TestLegacyPurgeMaintenanceStopsWhenItIsNoLongerPending(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertTenantInState(t, s, "deleted", TenantStateDeleted, tenantPurgePhaseComplete)

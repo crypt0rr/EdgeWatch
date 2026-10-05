@@ -76,6 +76,7 @@ func testImportEvent(label string) model.Event {
 // covers a URL with an opaque ID and a URL known only by its legacy digest,
 // which is how a database upgraded from before opaque IDs still names it.
 func TestImportDeploymentNotificationsRewritesEveryReference(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	digestA, digestB := testURLDigest("a"), testURLDigest("b")
@@ -339,6 +340,7 @@ func sortedSelection(values ...string) []string {
 // recorded, so a later start neither recreates the destination nor treats the
 // URL as a deployment destination again.
 func TestImportedDeploymentNotificationsIncludeDeletedDestinations(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	digest, other := testURLDigest("deleted"), testURLDigest("never-imported")
@@ -370,6 +372,7 @@ func TestImportedDeploymentNotificationsIncludeDeletedDestinations(t *testing.T)
 // Imported names follow the console label and never collide with an existing
 // web-managed destination's unique name.
 func TestImportDeploymentNotificationsChoosesUniqueNames(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	for _, name := range []string{"Deployment destination", "Deployment destination 2"} {
@@ -389,6 +392,7 @@ func TestImportDeploymentNotificationsChoosesUniqueNames(t *testing.T) {
 // A failure anywhere in the transaction leaves no destination, no mapping,
 // and no rewritten reference behind.
 func TestImportDeploymentNotificationsRollsBackCompletely(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		fault string
@@ -455,6 +459,7 @@ func TestImportDeploymentNotificationsRollsBackCompletely(t *testing.T) {
 }
 
 func TestImportDeploymentNotificationsRejectsIncompleteItems(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	valid := testImport(testURLDigest("valid"), "valid")
 	for name, mutate := range map[string]func(*DeploymentNotificationImport){
@@ -476,6 +481,7 @@ func TestImportDeploymentNotificationsRejectsIncompleteItems(t *testing.T) {
 // Schema 50 records the import on the deployment ID rows of a populated
 // schema-49 database without changing the rows it already has.
 func TestMigration50AddsNotificationImportState(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "schema49.db")
 	s, err := Open(path)
@@ -554,6 +560,7 @@ func TestMigration50AddsNotificationImportState(t *testing.T) {
 // The health command reports the import outcome as a warning. A failed
 // import keeps delivering from config.yaml, so the daemon stays healthy.
 func TestHealthStatusReportsNotificationImportWarnings(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.System().AcquireDaemonLease(ctx, "daemon"); err != nil {

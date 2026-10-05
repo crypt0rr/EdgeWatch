@@ -288,6 +288,7 @@ func queryPlan(t *testing.T, db *sql.DB, query string, args ...any) string {
 }
 
 func TestMigration53AttributesHistoryToTheDefaultTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSchema52Fixture(t)
 	tables := append(slices.Clone(schema53Tables), "public_dashboard_hosts")
@@ -435,6 +436,7 @@ func TestMigration53AttributesHistoryToTheDefaultTenant(t *testing.T) {
 // migration creates the tables it changes and the tables its triggers read,
 // and the writers work on the result.
 func TestMigration53UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
+	t.Parallel()
 	all := []string{"scans", "events", "outbox", "restore_quarantined_deliveries", "public_dashboard_hosts", "public_dashboards", "jobs", "tenants"}
 	cases := []struct {
 		name    string
@@ -510,6 +512,7 @@ func TestMigration53UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
 // Running the migration again, after the schema marker was reset, changes
 // no row and no schema object.
 func TestMigration53IsANoOpWhenRepeated(t *testing.T) {
+	t.Parallel()
 	fixture := newSchema52Fixture(t)
 	s, err := Open(fixture.path)
 	if err != nil {
@@ -584,6 +587,7 @@ func setTenantState(t *testing.T, s *Store, tenant, state string) {
 // The guard triggers refuse a row whose tenant does not follow its job or
 // dashboard, a tenant that is being deleted, and a changed tenant.
 func TestSchema53GuardTriggers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertSecondTenant(t, s)
@@ -774,6 +778,7 @@ func tenantOf(t *testing.T, db *sql.DB, query string, args ...any) string {
 // Every writer of scans, events and outbox names the tenant, derived from
 // the job, or none for a platform event, in the write transaction.
 func TestSchema53WritersAttributeTheirTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertSecondTenant(t, s)
@@ -930,6 +935,7 @@ func excludeAllBut(t *testing.T, s *Store, keep string) []string {
 // before schema 53 has no tenant yet; the migration after the restore gives
 // its rows the default tenant.
 func TestRestoreQuarantineKeepsTheDeliveryTenant(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		// staged turns the source into the staged schema.

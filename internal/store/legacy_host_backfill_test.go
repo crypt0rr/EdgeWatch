@@ -17,6 +17,7 @@ import (
 )
 
 func TestLegacyHostBackfillBuildsIndexedHostsOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "legacy-hosts.db")
 	initial, err := Open(path)
@@ -122,6 +123,7 @@ func TestLegacyHostBackfillBuildsIndexedHostsOnce(t *testing.T) {
 }
 
 func TestLegacyHostObservationsNormalizeAndMergeLegacyUnits(t *testing.T) {
+	t.Parallel()
 	// Already-indexed host evidence still goes through the same deterministic
 	// normalization path when a partially upgraded database is backfilled.
 	detailed := legacyHostObservations(model.Snapshot{Hosts: []model.HostObservation{{
@@ -245,6 +247,7 @@ func TestLegacyHostObservationsNormalizeAndMergeLegacyUnits(t *testing.T) {
 }
 
 func TestIndexLegacyScanRejectsOversizedSnapshot(t *testing.T) {
+	t.Parallel()
 	err := indexLegacyScanTx(context.Background(), nil, legacyHostBackfillScan{snapshot: make([]byte, maxLegacyHostBackfillSnapshotBytes+1)})
 	var dataErr *legacyHostBackfillDataError
 	if !errors.As(err, &dataErr) || !strings.Contains(dataErr.Error(), "conversion limit") {
@@ -253,6 +256,7 @@ func TestIndexLegacyScanRejectsOversizedSnapshot(t *testing.T) {
 }
 
 func TestLegacyHostStatusMerge(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name, currentStatus, currentReason, additionStatus, additionReason string
 		wantStatus, wantReason                                             string
@@ -283,6 +287,7 @@ func TestLegacyHostStatusMerge(t *testing.T) {
 }
 
 func TestLegacyHostBackfillNilLogger(t *testing.T) {
+	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "nil-logger.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -294,6 +299,7 @@ func TestLegacyHostBackfillNilLogger(t *testing.T) {
 }
 
 func TestLegacyHostBackfillStorageFailureIsFatal(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "storage-error.db"))
 	if err != nil {
@@ -331,6 +337,7 @@ func TestLegacyHostBackfillStorageFailureIsFatal(t *testing.T) {
 }
 
 func TestLegacyHostBackfillFailureBoundaries(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	path := filepath.Join(t.TempDir(), "canceled.db")
@@ -370,6 +377,7 @@ func TestLegacyHostBackfillFailureBoundaries(t *testing.T) {
 }
 
 func TestLegacyHostBackfillDeduplicatesCanonicalAddresses(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "legacy-duplicate-hosts.db")
 	initial, err := Open(path)
@@ -462,6 +470,7 @@ func TestLegacyHostBackfillDeduplicatesCanonicalAddresses(t *testing.T) {
 }
 
 func TestLegacyHostBackfillSkipsMalformedScanAndContinues(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "legacy-malformed-hosts.db")
 	initial, err := Open(path)
@@ -536,6 +545,7 @@ func TestLegacyHostBackfillSkipsMalformedScanAndContinues(t *testing.T) {
 }
 
 func TestLegacyHostBackfillSplitsBySnapshotBytesAndHostRows(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	for _, test := range []struct {
@@ -593,6 +603,7 @@ func TestLegacyHostBackfillSplitsBySnapshotBytesAndHostRows(t *testing.T) {
 }
 
 func TestLegacyHostBackfillCheckpointsOversizedWithoutDecoding(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, scans := seedLegacyHostBackfillScans(ctx, t, 1)
 	defer store.Close()
@@ -636,6 +647,7 @@ func TestLegacyHostBackfillCheckpointsOversizedWithoutDecoding(t *testing.T) {
 }
 
 func TestLegacyHostBackfillDistinguishesValidEmptySnapshots(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, scans := seedLegacyHostBackfillScans(ctx, t, 1)
 	defer store.Close()
@@ -655,6 +667,7 @@ func TestLegacyHostBackfillDistinguishesValidEmptySnapshots(t *testing.T) {
 }
 
 func TestLegacyHostBackfillSchemaIncludesQuarantineMetadata(t *testing.T) {
+	t.Parallel()
 	store := openTestStore(t)
 	defer store.Close()
 	rows, err := store.DB.Query(`PRAGMA table_info(legacy_scan_host_backfill)`)

@@ -31,6 +31,7 @@ func openTestStore(t *testing.T) *Store {
 }
 
 func TestOpenEnforcesPrivateSQLiteModes(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "edgewatch.db")
 	if err := os.WriteFile(path, []byte{}, 0o666); err != nil {
@@ -76,6 +77,7 @@ func TestOpenEnforcesPrivateSQLiteModes(t *testing.T) {
 }
 
 func TestOpenReportsDatabaseDirectoryContext(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	parent := filepath.Join(dir, "not-a-directory")
 	if err := os.WriteFile(parent, []byte("fixture"), 0o600); err != nil {
@@ -88,6 +90,7 @@ func TestOpenReportsDatabaseDirectoryContext(t *testing.T) {
 }
 
 func TestOpenEnforcesPrivateModeForSQLiteURI(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "uri.db")
 	dsn := "file:" + path + "?mode=rwc"
@@ -108,6 +111,7 @@ func TestOpenEnforcesPrivateModeForSQLiteURI(t *testing.T) {
 }
 
 func TestSQLiteArtifactPathNormalizesPlainAndURIForms(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	plain := filepath.Join(dir, "plain.db")
 	encoded := filepath.Join(dir, "literal%2F.db")
@@ -136,6 +140,7 @@ func TestSQLiteArtifactPathNormalizesPlainAndURIForms(t *testing.T) {
 }
 
 func TestOpenPlainSQLiteDSNQueryEnforcesRealArtifacts(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plain-query.db")
 	dsn := path + "?mode=rwc&_busy_timeout=5000"
@@ -161,12 +166,14 @@ func TestOpenPlainSQLiteDSNQueryEnforcesRealArtifacts(t *testing.T) {
 }
 
 func TestSQLiteMemoryPathDetectionSupportsPlainQuery(t *testing.T) {
+	t.Parallel()
 	if !isSQLiteMemoryPath(":memory:?cache=shared") {
 		t.Fatal("plain in-memory SQLite DSN with query was not recognized")
 	}
 }
 
 func TestOpenSupportsLocalhostSQLiteURI(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "localhost.db")
 	s, err := Open("file://localhost" + path + "?mode=rwc")
@@ -180,6 +187,7 @@ func TestOpenSupportsLocalhostSQLiteURI(t *testing.T) {
 }
 
 func TestOpenSupportsSQLiteMemoryURI(t *testing.T) {
+	t.Parallel()
 	s, err := Open("file::memory:?cache=shared")
 	if err != nil {
 		t.Fatal(err)
@@ -191,6 +199,7 @@ func TestOpenSupportsSQLiteMemoryURI(t *testing.T) {
 }
 
 func TestScanHostIndexSupportsFilteringPaginationAndLatestRows(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job := model.Scan{
@@ -239,6 +248,7 @@ func TestScanHostIndexSupportsFilteringPaginationAndLatestRows(t *testing.T) {
 }
 
 func TestHostSearchPunctuationUsesLiteralFTSPhrases(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertJobRows(t, s, "job-underscore", "job-underscore-x", "job-wildcard")
@@ -266,6 +276,7 @@ func TestHostSearchPunctuationUsesLiteralFTSPhrases(t *testing.T) {
 }
 
 func TestHostSearchQueryBoundsApplyToAllIndexedPages(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	for _, query := range []string{"1", "ab"} {
@@ -289,6 +300,7 @@ func TestHostSearchQueryBoundsApplyToAllIndexedPages(t *testing.T) {
 }
 
 func TestLatestScanHostProjectionPreservesSuccessfulOrdering(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertJobRows(t, s, "job")
@@ -318,6 +330,7 @@ func TestLatestScanHostProjectionPreservesSuccessfulOrdering(t *testing.T) {
 }
 
 func TestLatestScanHostProjectionRebuildsAfterSourceRemoval(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertJobRows(t, s, "job")
@@ -353,6 +366,7 @@ func TestLatestScanHostProjectionRebuildsAfterSourceRemoval(t *testing.T) {
 }
 
 func TestHostSearchIndexCoversServiceFieldsAndProjectionUpdates(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertJobRows(t, s, "search-job")
@@ -474,6 +488,7 @@ func TestHostSearchIndexCoversServiceFieldsAndProjectionUpdates(t *testing.T) {
 }
 
 func TestHostSearchContentIsBoundedForLargeEvidence(t *testing.T) {
+	t.Parallel()
 	ports := make([]model.PortObservation, 10000)
 	for i := range ports {
 		ports[i] = model.PortObservation{Port: i + 1, State: "open", Service: &model.ServiceObservation{Product: fmt.Sprintf("product-%d", i), Version: strings.Repeat("v", 16)}}
@@ -495,6 +510,7 @@ func TestHostSearchContentIsBoundedForLargeEvidence(t *testing.T) {
 }
 
 func TestOpenRejectsSQLiteSidecarSymlink(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "symlink.db")
 	if err := os.WriteFile(path+"-wal", []byte("sentinel"), 0o600); err != nil {
@@ -516,6 +532,7 @@ func TestOpenRejectsSQLiteSidecarSymlink(t *testing.T) {
 }
 
 func TestSQLiteMemoryPathDetectionDoesNotSkipFilesystemNames(t *testing.T) {
+	t.Parallel()
 	if !isSQLiteMemoryPath(":memory:") || !isSQLiteMemoryPath("file:shared?mode=memory&cache=shared") {
 		t.Fatal("memory SQLite paths were not recognized")
 	}
@@ -527,6 +544,7 @@ func TestSQLiteMemoryPathDetectionDoesNotSkipFilesystemNames(t *testing.T) {
 }
 
 func TestSQLiteConnectionScopedPragmasReapplyAfterConnectionRecycle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	// Force database/sql to close an idle physical connection. The next query
@@ -566,6 +584,7 @@ func assertPrivateMode(path string) error {
 }
 
 func TestScanStateAndEventPersistence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	scan := model.Scan{ID: "scan-1", Job: "job", StartedAt: time.Now(), FinishedAt: time.Now(), Status: "success", ConfigHash: "hash", Snapshot: model.Snapshot{}}
@@ -590,6 +609,7 @@ func TestScanStateAndEventPersistence(t *testing.T) {
 }
 
 func TestScanComparisonMetadataRoundTrips(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -608,6 +628,7 @@ func TestScanComparisonMetadataRoundTrips(t *testing.T) {
 }
 
 func TestScanComparisonQueryDoesNotLoadSnapshot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertJobRows(t, s, "job")
@@ -630,6 +651,7 @@ func TestScanComparisonQueryDoesNotLoadSnapshot(t *testing.T) {
 }
 
 func TestScanChangesPagePaginatesWithoutLoadingSnapshot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertJobRows(t, s, "job")
@@ -653,6 +675,7 @@ func TestScanChangesPagePaginatesWithoutLoadingSnapshot(t *testing.T) {
 }
 
 func TestScanResultsPagePaginatesSnapshotUnits(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertJobRows(t, s, "job")
@@ -671,6 +694,7 @@ func TestScanResultsPagePaginatesSnapshotUnits(t *testing.T) {
 }
 
 func TestScanResultsPageTreatsNullOrMissingUnitsAsEmpty(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -695,6 +719,7 @@ func TestScanResultsPageTreatsNullOrMissingUnitsAsEmpty(t *testing.T) {
 }
 
 func TestRuntimeAndNotificationIntentCommitTogether(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("job"))
@@ -726,6 +751,7 @@ func TestRuntimeAndNotificationIntentCommitTogether(t *testing.T) {
 }
 
 func TestEventPayloadsAreBoundedWithOverflowSummary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("bounded-event"))
@@ -765,6 +791,7 @@ func TestEventPayloadsAreBoundedWithOverflowSummary(t *testing.T) {
 }
 
 func TestDeleteExpiredSessionsKeepsActiveSessions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)
@@ -787,6 +814,7 @@ func TestDeleteExpiredSessionsKeepsActiveSessions(t *testing.T) {
 }
 
 func TestIncidentPagesUseSQLiteJSONPagination(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	first, err := defaultTenant(s).CreateJob(ctx, testJob("incident-a"))
@@ -822,6 +850,7 @@ func TestIncidentPagesUseSQLiteJSONPagination(t *testing.T) {
 }
 
 func TestSessionAuditFailureRollsBackAuthenticationMutation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.Exec(`CREATE TRIGGER fail_session_audit BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
@@ -837,6 +866,7 @@ func TestSessionAuditFailureRollsBackAuthenticationMutation(t *testing.T) {
 }
 
 func TestFinalizeManagedScanCommitsScanAndRuntimeTogether(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("finalize"))
@@ -873,6 +903,7 @@ func TestFinalizeManagedScanCommitsScanAndRuntimeTogether(t *testing.T) {
 }
 
 func TestFinalizeManagedScanRetainsSupersededScan(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("superseded-finalize"))
@@ -910,6 +941,7 @@ func TestFinalizeManagedScanRetainsSupersededScan(t *testing.T) {
 }
 
 func TestFinalizeManagedScanSerializesWithBaselineReset(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("finalize-reset"))
@@ -968,6 +1000,7 @@ func TestFinalizeManagedScanSerializesWithBaselineReset(t *testing.T) {
 }
 
 func TestSaveAdminSecurityRollsBackCredentialAndSessionsTogether(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -1004,6 +1037,7 @@ func TestSaveAdminSecurityRollsBackCredentialAndSessionsTogether(t *testing.T) {
 }
 
 func TestSaveAdminSecurityRollsBackTOTPWhenRecoveryCodesFail(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -1036,6 +1070,7 @@ func TestSaveAdminSecurityRollsBackTOTPWhenRecoveryCodesFail(t *testing.T) {
 }
 
 func TestSaveAdminSecurityRevokesSessionsOnSuccessfulTOTPChange(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -1074,6 +1109,7 @@ func TestSaveAdminSecurityRevokesSessionsOnSuccessfulTOTPChange(t *testing.T) {
 }
 
 func TestStaleManagedDestinationIntentIsSkipped(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, testJob("stale-destination"))
@@ -1101,6 +1137,7 @@ func TestStaleManagedDestinationIntentIsSkipped(t *testing.T) {
 }
 
 func TestBaselineActionsPersistNotificationIntent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, testJob("baseline-actions"))
@@ -1136,6 +1173,7 @@ func TestBaselineActionsPersistNotificationIntent(t *testing.T) {
 }
 
 func TestLeaseCanBeReleased(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if err := s.System().AcquireLease(ctx, "one"); err != nil {
@@ -1153,6 +1191,7 @@ func TestLeaseCanBeReleased(t *testing.T) {
 }
 
 func TestReclaimExpiredJobLeasesRecoversStaleScanLease(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -1171,6 +1210,7 @@ func TestReclaimExpiredJobLeasesRecoversStaleScanLease(t *testing.T) {
 }
 
 func TestReclaimExpiredJobLeasesLeavesLiveOwner(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -1189,6 +1229,7 @@ func TestReclaimExpiredJobLeasesLeavesLiveOwner(t *testing.T) {
 }
 
 func TestAcquireDaemonLeaseReclaimsOnlyPreviousDaemonJobs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -1229,6 +1270,7 @@ func TestAcquireDaemonLeaseReclaimsOnlyPreviousDaemonJobs(t *testing.T) {
 }
 
 func TestAcquireDaemonLeaseDoesNotStealLiveDaemon(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -1251,6 +1293,7 @@ func TestAcquireDaemonLeaseDoesNotStealLiveDaemon(t *testing.T) {
 }
 
 func TestCheckDaemonLeaseBeforeStartup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	withLease := func(name string, heartbeat string) string {
@@ -1319,6 +1362,7 @@ func TestCheckDaemonLeaseBeforeStartup(t *testing.T) {
 }
 
 func TestJobLeasePreventsConcurrentRunsAndExpires(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if err := s.System().AcquireJobLease(ctx, "job", "one", time.Now().Add(time.Hour)); err != nil {
@@ -1336,6 +1380,7 @@ func TestJobLeasePreventsConcurrentRunsAndExpires(t *testing.T) {
 }
 
 func TestOutboxRetriesAndCompletes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	event := model.Event{Type: "test", Job: "job", CreatedAt: time.Now()}
@@ -1366,6 +1411,7 @@ func TestOutboxRetriesAndCompletes(t *testing.T) {
 }
 
 func TestOutboxClaimsAreExclusiveAndRequireOwner(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if err := s.System().QueueEvent(ctx, "destination", model.Event{Type: "claim", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
@@ -1398,6 +1444,7 @@ func TestOutboxClaimsAreExclusiveAndRequireOwner(t *testing.T) {
 }
 
 func TestReleaseDeliveryClaimsMakesRowsImmediatelyClaimable(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if err := s.System().QueueEvent(ctx, "destination", model.Event{Type: "claim-recovery", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
@@ -1421,6 +1468,7 @@ func TestReleaseDeliveryClaimsMakesRowsImmediatelyClaimable(t *testing.T) {
 }
 
 func TestReleaseDeliveryClaimPreservesRetryBudgets(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if err := s.System().QueueEvent(ctx, "destination", model.Event{Type: "claim-release", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
@@ -1478,6 +1526,7 @@ func TestReleaseDeliveryClaimPreservesRetryBudgets(t *testing.T) {
 }
 
 func TestDeferredDeliveryDoesNotConsumeAttempts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := defaultTenant(s).CreateManagedNotification(ctx, "destination", "Test destination", "generic", []byte{1}, []byte{2}, true); err != nil {
@@ -1509,6 +1558,7 @@ func TestDeferredDeliveryDoesNotConsumeAttempts(t *testing.T) {
 }
 
 func TestPrunePreservesLegacyAndManagedBaselines(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	old := time.Now().UTC().Add(-48 * time.Hour)
@@ -1547,6 +1597,7 @@ func TestPrunePreservesLegacyAndManagedBaselines(t *testing.T) {
 }
 
 func TestPrunePreservesLatestSuccessfulScanForArchivedJob(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, testJob("archived-history"))
@@ -1586,6 +1637,7 @@ func TestPrunePreservesLatestSuccessfulScanForArchivedJob(t *testing.T) {
 }
 
 func TestPruneSkipsProtectedBatchEntriesAndContinuesToEligibleHistory(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	old := time.Now().UTC().Add(-48 * time.Hour)
@@ -1623,6 +1675,7 @@ func TestPruneSkipsProtectedBatchEntriesAndContinuesToEligibleHistory(t *testing
 }
 
 func TestPrunePreservesScansReferencedByOpenIncidents(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, testJob("incident-retention"))
@@ -1680,6 +1733,7 @@ func TestPrunePreservesScansReferencedByOpenIncidents(t *testing.T) {
 }
 
 func TestPrunePreservesLatestSuccessfulHostProjection(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, testJob("projection-repair"))
@@ -1717,6 +1771,7 @@ func TestPrunePreservesLatestSuccessfulHostProjection(t *testing.T) {
 }
 
 func TestPruneRepairsDanglingLatestHostProjectionWithoutScanDeletions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()
@@ -1752,6 +1807,7 @@ func TestPruneRepairsDanglingLatestHostProjectionWithoutScanDeletions(t *testing
 }
 
 func TestPruneRetentionClassesAndAuditPolicy(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	old := time.Now().UTC().Add(-48 * time.Hour)
@@ -1823,6 +1879,7 @@ func TestPruneRetentionClassesAndAuditPolicy(t *testing.T) {
 }
 
 func TestPruneRemovesRDAPEntriesOutsideStaleWindow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()
@@ -1850,6 +1907,7 @@ func TestPruneRemovesRDAPEntriesOutsideStaleWindow(t *testing.T) {
 }
 
 func TestPruneRetainsRevisionsReferencedByScans(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, testJob("revision-reference"))
@@ -1884,6 +1942,7 @@ func TestPruneRetainsRevisionsReferencedByScans(t *testing.T) {
 }
 
 func TestHistoryPagesHaveStableMetadataAndOrdering(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("paged"))
@@ -1932,6 +1991,7 @@ func TestHistoryPagesHaveStableMetadataAndOrdering(t *testing.T) {
 }
 
 func TestRDAPCacheNormalizesAddresses(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)

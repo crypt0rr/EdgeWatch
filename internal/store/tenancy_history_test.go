@@ -419,6 +419,7 @@ func checkTenantIncidentRefused(t *testing.T, f tenantFixture, action func(ts *T
 // The history checks outside the leak suite share one copy of the fixture,
 // because opening a database is the slow part of these tests.
 func TestTenantHistory(t *testing.T) {
+	t.Parallel()
 	f := newTenantFixture(t)
 	t.Run("event lists read in order", func(t *testing.T) { assertTenantEventListsReadInOrder(t, f) })
 	t.Run("max event ID is global", func(t *testing.T) { assertMaxEventIDCoversEveryTenant(t, f) })

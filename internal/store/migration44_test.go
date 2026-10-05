@@ -12,6 +12,7 @@ import (
 )
 
 func TestMigration44PreservesPausedCycleBaselineEpoch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "baseline-epoch.db")
 	store, err := Open(path)

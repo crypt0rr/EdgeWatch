@@ -85,6 +85,56 @@ func TestScopeHashChangeAcceptsStableServiceReplacement(t *testing.T) {
 	}
 }
 
+func TestScopeHashChangeLearnsFirstFingerprintWithoutIncidentOrRecovery(t *testing.T) {
+	baseline := model.Snapshot{
+		Scopes: []model.Scope{{Target: "192.0.2.41", Protocol: "tcp", Ports: "22", ServiceDetection: true}},
+		Units:  []model.Unit{{Target: "192.0.2.41", Protocol: "tcp", Ports: []model.PortState{{Port: 22, State: "open"}}}},
+	}
+	baseline.Normalize()
+	state := model.JobState{
+		Baseline:              &baseline,
+		BaselineConfigHash:    "previous-scope-hash",
+		FingerprintCandidates: map[string]model.ValueCount{},
+		Incidents:             map[string]model.Incident{},
+		Pending:               map[string]model.Pending{},
+		Suppressed:            map[string]int{},
+		SuppressedChanges:     map[string]model.Change{},
+	}
+	job := config.Job{Name: "scope-fingerprint", Baseline: config.Baseline{Samples: 2}, Change: config.Change{Confirmations: 1}}
+	current := model.Snapshot{
+		Scopes: []model.Scope{{Target: "192.0.2.41", Protocol: "tcp", Ports: "22", ServiceDetection: true}},
+		Units:  []model.Unit{{Target: "192.0.2.41", Protocol: "tcp", Ports: []model.PortState{{Port: 22, State: "open", Service: "ssh | OpenSSH | 9.6"}}}},
+	}
+	current.Normalize()
+
+	for i, id := range []string{"scope-fingerprint-1", "scope-fingerprint-2"} {
+		scan := model.Scan{ID: id, Job: job.Name, ConfigHash: "current-scope-hash", Snapshot: current, FinishedAt: time.Unix(int64(i+1), 0).UTC()}
+		events, err := processSuccess(&state, job, scan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range events {
+			if event.Type == "changes-detected" || event.Type == "changes-recovered" {
+				t.Fatalf("scan %d reported a learnable first fingerprint: %#v", i+1, events)
+			}
+		}
+		if i == 1 && (len(events) != 1 || events[0].Type != "baseline-updated") {
+			t.Fatalf("second stable scan events = %#v, want baseline-updated only", events)
+		}
+	}
+
+	events, err := processSuccess(&state, job, model.Scan{ID: "scope-fingerprint-after-migration", Job: job.Name, ConfigHash: "current-scope-hash", Snapshot: current, FinishedAt: time.Unix(3, 0).UTC()})
+	if err != nil || len(events) != 0 {
+		t.Fatalf("post-migration scan announced an already-learned fingerprint: %#v, %v", events, err)
+	}
+	if got := baselineService(*state.Baseline, "192.0.2.41", "tcp", 22); got != "ssh | OpenSSH | 9.6" {
+		t.Fatalf("baseline service after migration = %q, want stable fingerprint", got)
+	}
+	if len(state.Incidents) != 0 || len(state.Pending) != 0 {
+		t.Fatalf("fingerprint learning left incident state: incidents=%#v pending=%#v", state.Incidents, state.Pending)
+	}
+}
+
 func TestScopeHashChangeRetiresOutOfScopeIncidentWithoutRecovery(t *testing.T) {
 	baseline := model.Snapshot{
 		Scopes: []model.Scope{{Target: "edge", Protocol: "tcp", Ports: "25,80"}},

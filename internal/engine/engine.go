@@ -184,6 +184,18 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		learningServices = learnMissingFingerprints(state, scan.Snapshot, job.Baseline.Samples)
 	}
 	changes := diffForJob(*state.Baseline, scan.Snapshot, scopeChanged, job)
+	if scopeChanged {
+		// Do not run the stateful fingerprint learner while a scope candidate is
+		// converging: that would mutate the active baseline before the candidate
+		// is accepted. Still defer a first fingerprint on an expected port; the
+		// scope candidate merge will adopt it after its normal stability check.
+		learningServices = map[string]struct{}{}
+		for _, change := range changes {
+			if change.Kind == "service" && fingerprintLearnable(state, change.Target, change.Protocol, change.Port) {
+				learningServices[change.Key] = struct{}{}
+			}
+		}
+	}
 	if len(learningServices) > 0 {
 		filtered := changes[:0]
 		for _, change := range changes {

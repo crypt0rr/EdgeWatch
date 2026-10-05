@@ -2025,6 +2025,142 @@ func TestClosedFingerprintedPortProducesSingleIncidentAndAction(t *testing.T) {
 	}
 }
 
+func TestClosingPortRetiresOpenServiceIncidentWithoutRecovery(t *testing.T) {
+	scopes := []model.Scope{{Target: "192.0.2.9", Protocol: "tcp", Ports: "22,443", ServiceDetection: true}}
+	baseline := model.Snapshot{
+		Scopes: scopes,
+		Units: []model.Unit{{Target: "192.0.2.9", Protocol: "tcp", Ports: []model.PortState{
+			{Port: 22, State: "open", Service: "ssh | OpenSSH"},
+			{Port: 443, State: "open", Service: "https | nginx"},
+		}}},
+	}
+	changed := model.Snapshot{
+		Scopes: scopes,
+		Units: []model.Unit{{Target: "192.0.2.9", Protocol: "tcp", Ports: []model.PortState{
+			{Port: 22, State: "open", Service: "ssh | OpenSSH"},
+			{Port: 443, State: "open", Service: "https | apache"},
+		}}},
+	}
+	closed := model.Snapshot{
+		Scopes: scopes,
+		Units: []model.Unit{{Target: "192.0.2.9", Protocol: "tcp", Ports: []model.PortState{
+			{Port: 22, State: "open", Service: "ssh | OpenSSH"},
+		}}},
+	}
+	baseline.Normalize()
+	changed.Normalize()
+	closed.Normalize()
+	state := model.JobState{
+		Baseline: &baseline, BaselineConfigHash: "hash",
+		Pending: map[string]model.Pending{}, Incidents: map[string]model.Incident{},
+		Suppressed: map[string]int{}, SuppressedChanges: map[string]model.Change{},
+		FingerprintCandidates: map[string]model.ValueCount{},
+	}
+	job := config.Job{Name: "closing-port", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	serviceKey := "service|192.0.2.9|tcp|443"
+	portKey := "port|192.0.2.9|tcp|443"
+
+	events, _, err := processSuccessWithChanges(&state, job, scan("service-change", changed))
+	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 1 || events[0].Changes[0].Key != serviceKey {
+		t.Fatalf("service change = %#v, %v", events, err)
+	}
+	if _, ok := state.Incidents[serviceKey]; !ok {
+		t.Fatalf("service incident was not opened: %#v", state.Incidents)
+	}
+	partialClosed := closed
+	partialClosed.TargetFailures = []model.TargetCoverageFailure{{Target: "192.0.2.9", Reason: "test timeout"}}
+	events, _, err = processSuccessWithChanges(&state, job, scan("partial-close", partialClosed))
+	if err != nil || len(events) != 1 || events[0].Type != "scan-incomplete" {
+		t.Fatalf("incomplete scan should defer service retirement, events=%#v err=%v", events, err)
+	}
+	if _, ok := state.Incidents[serviceKey]; !ok {
+		t.Fatalf("incomplete scan retired a service incident without complete evidence: %#v", state.Incidents)
+	}
+
+	events, changes, err := processSuccessWithChanges(&state, job, scan("port-closed", closed))
+	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 1 || events[0].Changes[0].Key != portKey {
+		t.Fatalf("closing the port should report only its closure, events=%#v changes=%#v err=%v", events, changes, err)
+	}
+	if _, ok := state.Incidents[serviceKey]; ok {
+		t.Fatalf("closed-port service incident was not retired: %#v", state.Incidents)
+	}
+
+	// Reopening the port with the original fingerprint matches the baseline;
+	// the retired apache finding must not be reported as a service recovery.
+	events, _, err = processSuccessWithChanges(&state, job, scan("port-reopened", baseline))
+	if err != nil || len(events) != 1 || events[0].Type != "changes-recovered" || len(events[0].Changes) != 1 || events[0].Changes[0].Key != portKey {
+		t.Fatalf("reopening the closed port should recover only its port incident, events=%#v err=%v", events, err)
+	}
+}
+
+func TestOpenServiceIncidentRecoversWhenBaselineFingerprintReturns(t *testing.T) {
+	scopes := []model.Scope{{Target: "192.0.2.9", Protocol: "tcp", Ports: "443", ServiceDetection: true}}
+	baseline := model.Snapshot{Scopes: scopes, Units: []model.Unit{{Target: "192.0.2.9", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open", Service: "https | nginx"}}}}}
+	changed := model.Snapshot{Scopes: scopes, Units: []model.Unit{{Target: "192.0.2.9", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open", Service: "https | apache"}}}}}
+	baseline.Normalize()
+	changed.Normalize()
+	state := model.JobState{
+		Baseline: &baseline, BaselineConfigHash: "hash",
+		Pending: map[string]model.Pending{}, Incidents: map[string]model.Incident{},
+		Suppressed: map[string]int{}, SuppressedChanges: map[string]model.Change{},
+		FingerprintCandidates: map[string]model.ValueCount{},
+	}
+	job := config.Job{Name: "service-return", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	key := "service|192.0.2.9|tcp|443"
+
+	if events, _, err := processSuccessWithChanges(&state, job, scan("service-change", changed)); err != nil || len(events) != 1 || events[0].Type != "changes-detected" {
+		t.Fatalf("service change = %#v, %v", events, err)
+	}
+	events, _, err := processSuccessWithChanges(&state, job, scan("service-return", baseline))
+	if err != nil || len(events) != 1 || events[0].Type != "changes-recovered" || len(events[0].Changes) != 1 || events[0].Changes[0].Key != key {
+		t.Fatalf("return to baseline fingerprint should recover the service incident: %#v, %v", events, err)
+	}
+}
+
+func TestClosedPortRetiresPendingAndSuppressedServiceFindings(t *testing.T) {
+	serviceKey := "service|192.0.2.9|tcp|443"
+	orphanSuppressionKey := "service|192.0.2.9|tcp|444"
+	serviceChange := model.Change{Key: serviceKey, Kind: "service", Target: "192.0.2.9", Protocol: "tcp", Port: 443, Old: "https | nginx", New: "https | apache"}
+	state := model.JobState{
+		Pending:           map[string]model.Pending{serviceKey: {Change: serviceChange, Count: 1}},
+		Incidents:         map[string]model.Incident{serviceKey: {Change: serviceChange}},
+		Suppressed:        map[string]int{serviceKey: 1, orphanSuppressionKey: 1},
+		SuppressedChanges: map[string]model.Change{serviceKey: serviceChange},
+	}
+	closed := model.Snapshot{
+		Scopes: []model.Scope{{Target: "192.0.2.9", Protocol: "tcp", Ports: "443", ServiceDetection: true}},
+		Units:  []model.Unit{{Target: "192.0.2.9", Protocol: "tcp"}},
+	}
+	positive := model.Snapshot{
+		Scopes: []model.Scope{{Target: "192.0.2.9", Protocol: "tcp", Ports: "443", ServiceDetection: true}},
+		Units:  []model.Unit{{Target: "192.0.2.9", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open|filtered"}}}},
+	}
+	closed.Normalize()
+	positive.Normalize()
+
+	retireClosedPortServiceChanges(&state, positive)
+	if _, ok := state.Incidents[serviceKey]; !ok {
+		t.Fatal("open|filtered port incorrectly retired its service incident")
+	}
+
+	retireClosedPortServiceChanges(&state, closed)
+	if _, ok := state.Pending[serviceKey]; ok {
+		t.Fatalf("closed-port service confirmation remained pending: %#v", state.Pending)
+	}
+	if _, ok := state.Incidents[serviceKey]; ok {
+		t.Fatalf("closed-port service incident remained open: %#v", state.Incidents)
+	}
+	if _, ok := state.Suppressed[serviceKey]; ok {
+		t.Fatalf("closed-port service suppression remained: %#v", state.Suppressed)
+	}
+	if _, ok := state.SuppressedChanges[serviceKey]; ok {
+		t.Fatalf("closed-port suppressed service change remained: %#v", state.SuppressedChanges)
+	}
+	if _, ok := state.Suppressed[orphanSuppressionKey]; ok {
+		t.Fatalf("orphaned closed-port service suppression remained: %#v", state.Suppressed)
+	}
+}
+
 // Accepting a new port alone leaves its service for a separate decision.
 // Suppressing the service incident, or one scan that recovers it because
 // service detection returned no fingerprint, must not let fingerprint

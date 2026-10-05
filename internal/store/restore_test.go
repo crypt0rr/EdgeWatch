@@ -116,12 +116,191 @@ func TestDryRunRestorePreservesUnrecognizedPrefixedDirectory(t *testing.T) {
 	if err := os.WriteFile(marker, []byte("user data"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	wrongMode, err := os.MkdirTemp(dir, restoreStagingDirPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(wrongMode, 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := DryRunRestore(context.Background(), source, destination, RestoreOptions{}); err != nil {
 		t.Fatalf("dry-run restore: %v", err)
 	}
 	if content, err := os.ReadFile(marker); err != nil || string(content) != "user data" {
 		t.Fatalf("unrelated prefixed data = %q, error %v; want it preserved", content, err)
+	}
+	if _, err := os.Stat(wrongMode); err != nil {
+		t.Fatalf("prefixed directory with non-private permissions was removed: %v", err)
+	}
+}
+
+func TestStageRestorePropagatesStagingGuardFailure(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	destination := filepath.Join(dir, "destination.db")
+	createRestoreFixture(t, source, "source")
+	createRestoreFixture(t, destination, "destination")
+
+	previous := acquireRestoreStagingGuard
+	acquireRestoreStagingGuard = func(context.Context, string) (func(), bool, error) {
+		return nil, true, errors.New("guard unavailable")
+	}
+	t.Cleanup(func() { acquireRestoreStagingGuard = previous })
+
+	staged, err := stageRestore(context.Background(), source, destination, RestoreOptions{})
+	staged.discard()
+	if err == nil || !strings.Contains(err.Error(), "guard unavailable") {
+		t.Fatalf("stage restore error = %v, want guard failure", err)
+	}
+}
+
+func TestStageRestoreRepeatsPreflightAfterAcquiringGuard(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	destination := filepath.Join(dir, "destination.db")
+	createRestoreFixture(t, source, "source")
+	createRestoreFixture(t, destination, "destination")
+
+	previous := acquireRestoreStagingGuard
+	acquireRestoreStagingGuard = func(context.Context, string) (func(), bool, error) {
+		if err := os.WriteFile(destination+"-wal", []byte("appeared while waiting"), 0o600); err != nil {
+			return nil, false, err
+		}
+		return func() {}, false, nil
+	}
+	t.Cleanup(func() { acquireRestoreStagingGuard = previous })
+
+	staged, err := stageRestore(context.Background(), source, destination, RestoreOptions{})
+	staged.discard()
+	if !errors.Is(err, ErrRestoreSidecars) {
+		t.Fatalf("stage restore error = %v, want sidecar refusal after the repeated preflight", err)
+	}
+}
+
+func TestCleanupStaleRestoreStagingDirectoriesReportsReadFailure(t *testing.T) {
+	err := cleanupStaleRestoreStagingDirs(filepath.Join(t.TempDir(), "missing"))
+	if err == nil || !strings.Contains(err.Error(), "list restore staging directories") {
+		t.Fatalf("cleanup error = %v, want directory read failure", err)
+	}
+}
+
+func TestCleanupStaleRestoreStagingDirectoriesReportsSidecarRecoveryFailure(t *testing.T) {
+	dir := t.TempDir()
+	staging, err := os.MkdirTemp(dir, restoreStagingDirPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "previous--wal"), []byte("unexpected"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = cleanupStaleRestoreStagingDirs(dir)
+	if err == nil || !strings.Contains(err.Error(), "recover interrupted restore sidecars") {
+		t.Fatalf("cleanup error = %v, want sidecar recovery failure", err)
+	}
+}
+
+func TestRecoverMovedRestoreSidecarsRejectsUnsafeArtifacts(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(t *testing.T, root, staging string) (parent, stagingDir string)
+		wantError bool
+	}{
+		{
+			name: "staging directory is missing",
+			setup: func(t *testing.T, root, _ string) (string, string) {
+				return root, filepath.Join(root, "missing")
+			},
+			wantError: true,
+		},
+		{
+			name: "malformed previous sidecar",
+			setup: func(t *testing.T, root, staging string) (string, string) {
+				writeRestoreTestFile(t, filepath.Join(staging, "previous--wal"), "sidecar")
+				return root, staging
+			},
+			wantError: true,
+		},
+		{
+			name: "different database names",
+			setup: func(t *testing.T, root, staging string) (string, string) {
+				writeRestoreTestFile(t, filepath.Join(staging, "previous-a.db-wal"), "wal")
+				writeRestoreTestFile(t, filepath.Join(staging, "previous-b.db-shm"), "shm")
+				return root, staging
+			},
+			wantError: true,
+		},
+		{
+			name: "staged database already renamed",
+			setup: func(t *testing.T, root, staging string) (string, string) {
+				writeRestoreTestFile(t, filepath.Join(staging, "previous-destination.db-wal"), "wal")
+				return root, staging
+			},
+		},
+		{
+			name: "staged database is not a regular file",
+			setup: func(t *testing.T, root, staging string) (string, string) {
+				if err := os.Mkdir(filepath.Join(staging, "destination.db"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				writeRestoreTestFile(t, filepath.Join(staging, "previous-destination.db-wal"), "wal")
+				return root, staging
+			},
+			wantError: true,
+		},
+		{
+			name: "sidecar is not a regular file",
+			setup: func(t *testing.T, root, staging string) (string, string) {
+				writeRestoreTestFile(t, filepath.Join(staging, "destination.db"), "database")
+				target := filepath.Join(root, "sidecar-target")
+				writeRestoreTestFile(t, target, "wal")
+				if err := os.Symlink(target, filepath.Join(staging, "previous-destination.db-wal")); err != nil {
+					t.Fatal(err)
+				}
+				return root, staging
+			},
+			wantError: true,
+		},
+		{
+			name: "sidecar destination already exists",
+			setup: func(t *testing.T, root, staging string) (string, string) {
+				writeRestoreTestFile(t, filepath.Join(staging, "destination.db"), "database")
+				writeRestoreTestFile(t, filepath.Join(staging, "previous-destination.db-wal"), "old wal")
+				writeRestoreTestFile(t, filepath.Join(root, "destination.db-wal"), "new wal")
+				return root, staging
+			},
+			wantError: true,
+		},
+		{
+			name: "rename fails when destination parent is unavailable",
+			setup: func(t *testing.T, root, staging string) (string, string) {
+				writeRestoreTestFile(t, filepath.Join(staging, "destination.db"), "database")
+				writeRestoreTestFile(t, filepath.Join(staging, "previous-destination.db-wal"), "wal")
+				return filepath.Join(root, strings.Repeat("p", 300)), staging
+			},
+			wantError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			staging := filepath.Join(root, "staging")
+			if err := os.Mkdir(staging, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			parent, stagingDir := test.setup(t, root, staging)
+			err := recoverMovedRestoreSidecars(parent, stagingDir)
+			if (err != nil) != test.wantError {
+				t.Fatalf("recover sidecars error = %v, wantError %v", err, test.wantError)
+			}
+		})
+	}
+}
+
+func writeRestoreTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

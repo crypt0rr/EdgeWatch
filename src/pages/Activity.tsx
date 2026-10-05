@@ -98,7 +98,7 @@ function PendingJobChanges({ job }: { job: Job }) {
       </li>)}</ul>
       <Pagination page={pending.data.pagination} onChange={setOffset} label={`Pending changes for ${job.job.name}`} />
       </>
-    ) : <p className="inline-empty">There are no pending changes for this job.</p>)}
+    ) : pending.data?.pagination.total ? <Pagination page={pending.data.pagination} onChange={setOffset} label={`Pending changes for ${job.job.name}`} /> : <p className="inline-empty">There are no pending changes for this job.</p>)}
   </div>
 }
 

@@ -345,6 +345,117 @@ test.describe('responsive issue regressions', () => {
     await platformPage.close()
   })
 
+  test('dashboard baseline pills never cover job names at phone widths (#1124)', async ({ page }) => {
+    await mockConsole(page, 'operator')
+    await page.route('**/api/v1/jobs**', async route => {
+      if (route.request().method() !== 'GET' || new URL(route.request().url()).pathname !== '/api/v1/jobs') return route.fallback()
+      const jobs = [
+        { id: 'vpn', name: 'VPN gateways', status: 'complete' },
+        { id: 'office', name: 'Office perimeter', status: 'updating' },
+        { id: 'mail', name: 'Mail relays', status: 'complete' },
+        { id: 'web', name: 'Public web', status: 'complete' },
+      ].map(({ id, name, status }) => ({
+        id, revision: 1, enabled: true, archived: false, security_hash: 'hash', created_at: timestamp, updated_at: timestamp,
+        job: { name, schedule: '0 * * * *', timezone: 'UTC', targets: ['192.0.2.10'], max_expanded_hosts: 16, tcp: { ports: '22,443', mode: 'connect', service_detection: false }, timing: 'balanced', timeout: '1h', baseline_samples: 1, change_confirmations: 1 },
+        baseline: { status, samples: 1, attempts: 1, host_count: 1 },
+      }))
+      await route.fulfill({ json: { jobs } })
+    })
+
+    for (const width of [320, 375, 414]) {
+      await page.setViewportSize({ width, height: 900 })
+      await page.goto('/')
+      const row = page.locator('.dashboard-job').filter({ hasText: 'Office perimeter' })
+      await expect(row).toBeVisible()
+      const layout = await row.evaluate(element => {
+        const name = element.querySelector('.dashboard-job-info strong')!
+        const pill = element.querySelector('.pill')!
+        const range = document.createRange()
+        range.selectNodeContents(name)
+        const textRects = [...range.getClientRects()].map(rect => ({ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom }))
+        const pillRect = pill.getBoundingClientRect()
+        const overlaps = textRects.some(rect => rect.left < pillRect.right && rect.right > pillRect.left && rect.top < pillRect.bottom && rect.bottom > pillRect.top)
+        return { nameWidth: name.getBoundingClientRect().width, nameBottom: Math.max(...textRects.map(rect => rect.bottom)), pillTop: pillRect.top, overlaps }
+      })
+      expect(layout.overlaps, `baseline pill overlap at ${width}px`).toBe(false)
+      expect(layout.nameWidth >= 128 || layout.pillTop >= layout.nameBottom, `job name has room or wraps away from its pill at ${width}px`).toBe(true)
+      await expectNoHorizontalScroll(page, `dashboard at ${width}px`)
+    }
+  })
+
+  test('latest activity stacks its timestamp and keeps outcome copy readable (#1124)', async ({ page }) => {
+    await mockConsole(page, 'operator')
+    await page.route('**/api/v1/scans**', async route => {
+      if (route.request().method() !== 'GET' || new URL(route.request().url()).pathname !== '/api/v1/scans') return route.fallback()
+      await route.fulfill({ json: { scans: [
+        { id: 'failed-scan', job_id: 'job-1', job: 'Public web', status: 'failed', error: 'nmap exited with status 1: Failed to resolve "customer-facing-api-gateway-perimeter-monitoring.eu-west-1.production.example.com"; QUITTING! The scan could not complete because the target list contained an unresolvable hostname and the scanner refused to continue.', started_at: '2026-09-29T09:00:00Z', finished_at: '2026-09-29T10:00:00Z', config_hash: 'hash' },
+        { id: 'successful-scan', job_id: 'job-2', job: 'VPN gateways', status: 'success', started_at: '2026-09-29T08:00:00Z', finished_at: '2026-09-29T08:30:00Z', config_hash: 'hash' },
+      ], pagination: { limit: 20, offset: 0, total: 2, has_more: false, next_offset: null } } })
+    })
+
+    for (const width of [375, 1280]) {
+      await page.setViewportSize({ width, height: 900 })
+      await page.goto('/')
+      const failedRow = page.locator('.activity-row').filter({ hasText: 'Public web' })
+      const outcome = failedRow.locator(':scope > div')
+      await expect(outcome).toBeVisible()
+      expect(await outcome.boundingBox().then(box => box!.width), `activity outcome at ${width}px`).toBeGreaterThanOrEqual(200)
+      const successfulRow = page.getByRole('link', { name: 'Open scan details for VPN gateways' })
+      await expect(successfulRow).toBeVisible()
+      await expect(successfulRow).toHaveAttribute('href', '/jobs/job-2/scans/successful-scan')
+      await expectNoHorizontalScroll(page, `dashboard at ${width}px`)
+    }
+  })
+
+  test('stagger suggestion copy stays readable and its button follows it (#1124)', async ({ page }) => {
+    await mockConsole(page, 'operator')
+    await page.route('**/api/v1/jobs/schedule-suggestion**', async route => {
+      if (route.request().method() !== 'GET' || new URL(route.request().url()).pathname !== '/api/v1/jobs/schedule-suggestion') return route.fallback()
+      await route.fulfill({ json: { suggested: true, suggested_schedule: '30 */6 * * *', offset_minutes: 30, gap_minutes: 0, nearest: { id: 'job-2', name: 'Customer-facing API gateway perimeter monitoring for the EU West production estate weekly', schedule: '0 */6 * * *', timezone: 'America/Argentina/ComodRivadavia', next_run: '2026-09-29T18:00:00Z' } } })
+    })
+
+    for (const width of [320, 1280]) {
+      await page.setViewportSize({ width, height: 900 })
+      await page.goto('/jobs/new')
+      const suggestion = page.locator('.schedule-suggestion')
+      await expect(suggestion).toBeVisible({ timeout: 5_000 })
+      const copy = suggestion.locator('.schedule-suggestion-copy')
+      const button = suggestion.getByRole('button', { name: 'Use later time' })
+      await expect(copy).toBeVisible()
+      const [copyBox, buttonBox] = await Promise.all([copy.boundingBox(), button.boundingBox()])
+      expect(copyBox!.width, `stagger copy at ${width}px`).toBeGreaterThanOrEqual(180)
+      expect(buttonBox!.y, `stagger button below copy at ${width}px`).toBeGreaterThanOrEqual(copyBox!.y + copyBox!.height - 1)
+      expect(await copy.evaluate(element => getComputedStyle(element).overflowWrap)).toBe('break-word')
+      await expectNoHorizontalScroll(page, `job editor at ${width}px`)
+    }
+
+    await expect(page.locator('.editor-side .panel-heading .muted-icon')).toHaveCount(0)
+  })
+
+  test('scan work estimate lead-in remains part of the sentence at narrow and wide widths (#1124)', async ({ page }) => {
+    await mockConsole(page, 'operator')
+    await page.route('**/api/v1/jobs/job-1**', async route => {
+      if (route.request().method() !== 'GET' || new URL(route.request().url()).pathname !== '/api/v1/jobs/job-1') return route.fallback()
+      await route.fulfill({ json: {
+        id: 'job-1', revision: 1, enabled: true, archived: false, security_hash: 'hash', created_at: timestamp, updated_at: timestamp,
+        job: { name: 'fixture-job', schedule: '0 * * * *', timezone: 'UTC', targets: ['192.0.2.10'], max_expanded_hosts: 16, tcp: { ports: '1-65535', mode: 'connect', service_detection: false }, timing: 'balanced', timeout: '1h', resume_window: '8d', baseline_samples: 1, change_confirmations: 1, run_on_start: false, assume_alive: true, allow_high_cost: false },
+        baseline: { status: 'complete', samples: 1, attempts: 1, host_count: 1 },
+        scan_estimate: { hosts: 4096, tcp_ports: 65535, udp_ports: 0, probes: 268505088, nmap_invocations: 4096, unknown_dns: 0 },
+      } })
+    })
+
+    for (const width of [320, 1280]) {
+      await page.setViewportSize({ width, height: 900 })
+      await page.goto('/jobs/job-1')
+      const notice = page.locator('.notice').filter({ hasText: 'Scan work per run:' })
+      await expect(notice).toBeVisible()
+      await expect(notice.locator(':scope > span')).toHaveCount(1)
+      await expect(notice.locator(':scope > strong')).toHaveCount(0)
+      expect((await notice.locator('strong').boundingBox())!.height, `estimate lead-in at ${width}px`).toBeLessThan(25)
+      await expectNoHorizontalScroll(page, `job detail at ${width}px`)
+    }
+  })
+
   test('status labels stay readable and archived host badges stay compact (#994)', async ({ page }) => {
     await mockConsole(page, 'administrator')
     await page.route('**/api/v1/hosts**', async route => {

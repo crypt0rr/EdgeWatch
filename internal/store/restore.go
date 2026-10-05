@@ -223,6 +223,7 @@ type stagedRestore struct {
 	policy        PendingDeliveryPolicy
 	dir           string
 	path          string
+	unlock        func()
 	bytes         int64
 	schemaVersion int
 	epoch         string
@@ -234,6 +235,9 @@ type stagedRestore struct {
 func (s stagedRestore) discard() {
 	if s.dir != "" {
 		_ = os.RemoveAll(s.dir)
+	}
+	if s.unlock != nil {
+		s.unlock()
 	}
 }
 
@@ -309,6 +313,27 @@ func stageRestore(ctx context.Context, source, destination string, options Resto
 	if err != nil {
 		return staged, err
 	}
+	// Serialize restore operations for this database directory. Besides
+	// preventing two restores from replacing the destination concurrently,
+	// this makes it safe to remove staging directories left by a process that
+	// was killed before its deferred cleanup could run.
+	parent := filepath.Dir(staged.preflight.DestinationPath)
+	unlock, lockSupported, err := acquireRestoreStagingGuard(ctx, parent)
+	if err != nil {
+		return staged, fmt.Errorf("acquire restore staging guard: %w", err)
+	}
+	staged.unlock = unlock
+	if lockSupported {
+		if err := cleanupStaleRestoreStagingDirs(parent); err != nil {
+			return staged, err
+		}
+	}
+	// Preflight was intentionally repeated after the lock: another restore
+	// may have changed the destination while this invocation waited for it.
+	staged.preflight, err = PreflightRestore(ctx, source, destination)
+	if err != nil {
+		return staged, err
+	}
 	preflight := staged.preflight
 	// Surface an invalid source schema before reporting an unrelated sidecar
 	// refusal. This is intentionally limited to sources that already have
@@ -338,7 +363,6 @@ func stageRestore(ctx context.Context, source, destination string, options Resto
 		return staged, err
 	}
 
-	parent := filepath.Dir(preflight.DestinationPath)
 	parentInfo, err := os.Stat(parent)
 	if err != nil {
 		return staged, fmt.Errorf("restore destination directory: %w", err)
@@ -391,6 +415,109 @@ func stageRestore(ctx context.Context, source, destination string, options Resto
 		return staged, err
 	}
 	return staged, nil
+}
+
+// cleanupStaleRestoreStagingDirs removes only private staging directories
+// created by prior restore commands. Callers must hold the destination's
+// restore staging guard so a concurrent restore cannot have its work removed.
+func cleanupStaleRestoreStagingDirs(parent string) error {
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return fmt.Errorf("list restore staging directories: %w", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), ".edgewatch-restore-") {
+			continue
+		}
+		path := filepath.Join(parent, entry.Name())
+		if err := recoverMovedRestoreSidecars(parent, path); err != nil {
+			return fmt.Errorf("recover interrupted restore sidecars: %w", err)
+		}
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("remove stale restore staging directory: %w", err)
+		}
+	}
+	return nil
+}
+
+// recoverMovedRestoreSidecars puts destination sidecars back when a process
+// died after moving them into staging but before replacing the database. The
+// staged database is still present in that case. Once it has been renamed to
+// the destination, the old sidecars belong to the replaced database and may
+// be discarded with the rest of the staging directory.
+func recoverMovedRestoreSidecars(parent, stagingDir string) error {
+	entries, err := os.ReadDir(stagingDir)
+	if err != nil {
+		return err
+	}
+	var moved []os.DirEntry
+	databaseName := ""
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "previous-") {
+			name := strings.TrimPrefix(entry.Name(), "previous-")
+			foundSuffix := false
+			for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+				if strings.HasSuffix(name, suffix) {
+					name = strings.TrimSuffix(name, suffix)
+					foundSuffix = true
+					break
+				}
+			}
+			// A database itself may start with "previous-". Only the
+			// known SQLite sidecar suffixes identify a moved sidecar.
+			if !foundSuffix {
+				continue
+			}
+			if name == "" {
+				return fmt.Errorf("unrecognized staged previous sidecar %q", entry.Name())
+			}
+			moved = append(moved, entry)
+			if databaseName != "" && databaseName != name {
+				return errors.New("staged previous sidecars refer to different databases")
+			}
+			databaseName = name
+			continue
+		}
+	}
+	if len(moved) == 0 {
+		return nil
+	}
+	stagedDatabase := filepath.Join(stagingDir, databaseName)
+	info, err := os.Lstat(stagedDatabase)
+	if errors.Is(err, os.ErrNotExist) {
+		// The staged database was already renamed into place; the old
+		// destination sidecars can be discarded with this stale directory.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("staged database %q is not a regular file", databaseName)
+	}
+	for _, entry := range moved {
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("staged previous sidecar %q is not a regular file", entry.Name())
+		}
+		destination := filepath.Join(parent, strings.TrimPrefix(entry.Name(), "previous-"))
+		if _, err := os.Lstat(destination); err == nil {
+			return fmt.Errorf("cannot restore previous sidecar because %q already exists", filepath.Base(destination))
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	for _, entry := range moved {
+		from := filepath.Join(stagingDir, entry.Name())
+		to := filepath.Join(parent, strings.TrimPrefix(entry.Name(), "previous-"))
+		if err := os.Rename(from, to); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkRestoreDestinationDaemon refuses a restore over a destination whose

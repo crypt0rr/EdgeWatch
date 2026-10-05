@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -54,6 +55,140 @@ func TestPreflightRestoreReportsEverySQLiteSidecarWithoutMutation(t *testing.T) 
 	}
 	if before != after {
 		t.Fatalf("preflight changed destination digest from %s to %s", before, after)
+	}
+}
+
+func TestDryRunRestoreRemovesAbandonedStagingCopies(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("orphan cleanup requires the Linux advisory restore guard")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	destination := filepath.Join(dir, "destination.db")
+	createRestoreFixture(t, source, "source")
+	createRestoreFixture(t, destination, "destination")
+
+	orphan, err := os.MkdirTemp(dir, ".edgewatch-restore-orphan-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	partialCopy := filepath.Join(orphan, filepath.Base(destination))
+	if err := os.WriteFile(partialCopy, []byte("partial backup copy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := DryRunRestore(context.Background(), source, destination, RestoreOptions{})
+	if err != nil {
+		t.Fatalf("dry-run restore: %v", err)
+	}
+	if !result.Safe {
+		t.Fatalf("dry-run restore = %#v, want safe", result)
+	}
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned staging directory still exists (stat error %v)", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), ".edgewatch-restore-") {
+			t.Errorf("dry run left staging directory %q", entry.Name())
+		}
+	}
+}
+
+func TestDryRunRestoreRecoversSidecarsMovedBeforeInterruptedReplacement(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("orphan cleanup requires the Linux advisory restore guard")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	destination := filepath.Join(dir, "previous-destination.db")
+	createRestoreFixture(t, source, "source")
+	createRestoreFixture(t, destination, "destination")
+
+	orphan, err := os.MkdirTemp(dir, ".edgewatch-restore-orphan-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphan, filepath.Base(destination)), []byte("staged database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousSidecar := []byte("sidecar moved before the restore was interrupted")
+	if err := os.WriteFile(filepath.Join(orphan, "previous-"+filepath.Base(destination)+"-wal"), previousSidecar, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = DryRunRestore(context.Background(), source, destination, RestoreOptions{})
+	if !errors.Is(err, ErrRestoreSidecars) {
+		t.Fatalf("dry-run restore error = %v, want destination sidecar refusal", err)
+	}
+	got, err := os.ReadFile(destination + "-wal")
+	if err != nil {
+		t.Fatalf("restore previous destination WAL: %v", err)
+	}
+	if !bytes.Equal(got, previousSidecar) {
+		t.Fatalf("restored destination WAL = %q, want %q", got, previousSidecar)
+	}
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned staging directory still exists (stat error %v)", err)
+	}
+}
+
+func TestRestoreStagingCleanupWaitsForActiveRestore(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("cross-process restore coordination uses Linux advisory locks")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	destination := filepath.Join(dir, "destination.db")
+	createRestoreFixture(t, source, "source")
+	createRestoreFixture(t, destination, "destination")
+
+	unlock, supported, err := acquireRestoreStagingGuard(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !supported {
+		t.Skip("restore staging guard is unavailable")
+	}
+	defer unlock()
+
+	activeDir, err := os.MkdirTemp(dir, ".edgewatch-restore-active-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(activeDir, filepath.Base(destination)), []byte("active restore copy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := DryRunRestore(context.Background(), source, destination, RestoreOptions{})
+		result <- err
+	}()
+
+	select {
+	case err := <-result:
+		t.Fatalf("concurrent dry run completed while another restore held the guard: %v", err)
+	case <-time.After(120 * time.Millisecond):
+	}
+	if _, err := os.Stat(activeDir); err != nil {
+		t.Fatalf("active restore staging directory was removed: %v", err)
+	}
+
+	unlock()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("dry run after active restore released guard: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dry run did not proceed after active restore released guard")
+	}
+	if _, err := os.Stat(activeDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned staging directory was not removed after guard release (stat error %v)", err)
 	}
 }
 

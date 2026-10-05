@@ -944,6 +944,14 @@ pending deliveries the chosen `--pending-deliveries` policy would affect. The
 command exits non-zero when the restore would be refused, so scripts can act on
 its exit status.
 
+Restore and dry-run commands stop their staging work on `SIGINT` or `SIGTERM`
+and remove the temporary copy. If a process is killed outright or the host
+crashes, the next restore or dry run removes abandoned `.edgewatch-restore-*`
+copies before starting. Concurrent restore commands are serialized with an
+advisory lock on Linux using the database directory itself, so no extra lock
+file is created. Other platforms retain signal cleanup but skip automatic
+orphan removal when cross-process locking is unavailable.
+
 A backup taken while the daemon runs contains that daemon's lease and the
 leases of its running scans. No process runs on a restored copy, so restore
 clears these copied leases, and the dry run does the same in its private copy.

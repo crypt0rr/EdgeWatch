@@ -541,6 +541,14 @@ backup, because no process runs on the restored copy. It still refuses to
 replace a database whose own daemon heartbeat is recent, unless the operator
 passes the emergency `--allow-active-daemon` override.
 
+Restore and dry-run commands cancel staging on `SIGINT` or `SIGTERM` and
+remove the temporary copy. The next restore or dry run removes abandoned
+`.edgewatch-restore-*` staging directories left by a process killed outright
+or by a host crash. On Linux, concurrent restore commands are serialized with
+an advisory lock on the database directory, without leaving a lock file
+behind. Other platforms skip automatic orphan removal when cross-process
+locking is unavailable.
+
 A backup can hold sessions, activation and password-reset links, and a setup
 or platform setup token that were revoked, redeemed, or replaced after it was
 taken. In the same transaction that clears the leases, a restore therefore

@@ -219,6 +219,14 @@ func (s *Server) toggleNotificationUpdateRouting(w http.ResponseWriter, r *http.
 			return
 		}
 	}
+	selection, _, err = notifier.CanonicalSelection(r.Context(), selection)
+	if err != nil {
+		if s.Log != nil {
+			s.Log.Warn("application update routing destinations unavailable", "error", err)
+		}
+		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
+		return
+	}
 	selection = toggleUpdateDestination(selection, input.DestinationID, *input.Enabled)
 	if err := ts.SetApplicationUpdateDestinations(r.Context(), selection, store.AuditEntry{Action: "notifications.update_routing", Detail: "application update notification routing changed", ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
 		if writeDestinationSelectionError(w, err) || s.writeAuditUnavailable(w, err, "notifications.update_routing") {

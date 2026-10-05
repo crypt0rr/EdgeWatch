@@ -360,19 +360,20 @@ type JobState struct {
 }
 
 type Event struct {
-	Type             string    `json:"type"`
-	JobID            string    `json:"job_id,omitempty"`
-	Job              string    `json:"job"`
-	ScanID           string    `json:"scan_id,omitempty"`
-	Message          string    `json:"message"`
-	PreviousVersion  string    `json:"previous_version,omitempty"`
-	CurrentVersion   string    `json:"current_version,omitempty"`
-	LatestVersion    string    `json:"latest_version,omitempty"`
-	ReleaseURL       string    `json:"release_url,omitempty"`
-	Changes          []Change  `json:"changes,omitempty"`
-	ChangesCount     int       `json:"changes_count,omitempty"`
-	ChangesTruncated bool      `json:"changes_truncated,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
+	Type               string    `json:"type"`
+	JobID              string    `json:"job_id,omitempty"`
+	Job                string    `json:"job"`
+	ScanID             string    `json:"scan_id,omitempty"`
+	Message            string    `json:"message"`
+	PreviousVersion    string    `json:"previous_version,omitempty"`
+	CurrentVersion     string    `json:"current_version,omitempty"`
+	LatestVersion      string    `json:"latest_version,omitempty"`
+	ReleaseURL         string    `json:"release_url,omitempty"`
+	Changes            []Change  `json:"changes,omitempty"`
+	ChangesCount       int       `json:"changes_count,omitempty"`
+	ChangesTruncated   bool      `json:"changes_truncated,omitempty"`
+	HasCriticalChanges bool      `json:"has_critical_changes,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
 	// TenantID names the tenant of an event without a job, such as a
 	// tenant's copy of an update alert. An event without a job or a tenant
 	// belongs to the platform, and a job's event always belongs to the job's
@@ -402,6 +403,12 @@ func MarshalBoundedEvent(event Event, max int) (Event, []byte, error) {
 	}
 	if len(event.Changes) > 0 {
 		event.ChangesCount = len(event.Changes)
+		for _, change := range event.Changes {
+			if strings.EqualFold(strings.TrimSpace(change.Severity), "critical") {
+				event.HasCriticalChanges = true
+				break
+			}
+		}
 		event.Changes = nil
 		event.ChangesTruncated = true
 	}

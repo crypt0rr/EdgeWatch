@@ -652,4 +652,11 @@ func TestAuditEntryOnSchema50DatabaseIsCategorizedByTheMigration(t *testing.T) {
 			t.Fatalf("%s audit category = %q, want %q", action, category, want)
 		}
 	}
+	var tenantID sql.NullString
+	if err := s.DB.QueryRow(`SELECT tenant_id FROM security_audit WHERE action='database.restore.pending_deliveries' ORDER BY id DESC LIMIT 1`).Scan(&tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if tenantID.Valid {
+		t.Fatalf("current-schema deployment-wide restore audit tenant_id = %q, want platform scope (NULL)", tenantID.String)
+	}
 }

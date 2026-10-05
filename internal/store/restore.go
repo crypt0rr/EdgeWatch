@@ -892,7 +892,9 @@ func insertRestoreAuditTx(ctx context.Context, tx *sql.Tx, policy PendingDeliver
 		names, values = append(names, "category"), append(values, auditCategory(action))
 	}
 	if columns["tenant_id"] {
-		names, values = append(names, "tenant_id"), append(values, DefaultTenantID)
+		// This entry contains the deployment-wide pending-delivery count, so
+		// keep it in platform scope rather than attributing it to one tenant.
+		names, values = append(names, "tenant_id"), append(values, nil)
 	}
 	if columns["actor_kind"] {
 		// The restore runs from the host CLI.

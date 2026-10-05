@@ -642,6 +642,63 @@ func TestRestoreQuarantinesPendingDeliveriesByDefault(t *testing.T) {
 	}
 }
 
+func TestRestorePendingDeliveryAuditIsPlatformScoped(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newTenantFixture(t)
+	dir := t.TempDir()
+	backup := filepath.Join(dir, "backup.db")
+	destination := filepath.Join(dir, "destination.db")
+	if _, err := fixture.store.DB.ExecContext(ctx, `INSERT INTO outbox(destination,payload_json,attempts,next_at,tenant_id) VALUES(?,?,0,?,?)`,
+		"restore-default", []byte(`{}`), time.Now().UTC().Format(time.RFC3339Nano), DefaultTenantID); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := fixture.store.DB.ExecContext(ctx, `INSERT INTO outbox(destination,payload_json,attempts,next_at,tenant_id) VALUES(?,?,0,?,?)`,
+			fmt.Sprintf("restore-second-%d", i), []byte(`{}`), time.Now().UTC().Format(time.RFC3339Nano), secondTenantID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := fixture.store.DB.ExecContext(ctx, `INSERT INTO outbox(destination,payload_json,attempts,next_at,tenant_id) VALUES(?,?,0,?,NULL)`,
+		"restore-platform", []byte(`{}`), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	var pending int
+	if err := fixture.store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL`).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.Backup(ctx, backup); err != nil {
+		t.Fatalf("backup tenant fixture: %v", err)
+	}
+	createRestoreFixture(t, destination, "destination")
+	if _, err := Restore(ctx, backup, destination, RestoreOptions{PendingDeliveries: PendingDeliveriesQuarantine}); err != nil {
+		t.Fatalf("restore multi-tenant backup: %v", err)
+	}
+
+	store, err := OpenReadOnlyExisting(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	filter := AuditFilter{ActionPrefix: "database.restore.pending_deliveries"}
+	for name, tenant := range map[string]TenantScope{"default": DefaultTenantScope(), "second": {id: secondTenantID}} {
+		page, err := store.Tenant(tenant).AuditPage(ctx, filter, 0, 50)
+		if err != nil {
+			t.Fatalf("read %s tenant audit: %v", name, err)
+		}
+		if len(page.Entries) != 0 {
+			t.Fatalf("%s tenant sees deployment-wide restore audit: %#v", name, page.Entries)
+		}
+	}
+	platformPage, err := store.Platform().AuditPage(ctx, PlatformAuditFilter{AuditFilter: filter}, 0, 50)
+	if err != nil {
+		t.Fatalf("read platform audit: %v", err)
+	}
+	if len(platformPage.Entries) != 1 || !strings.Contains(platformPage.Entries[0].Detail, fmt.Sprintf("count=%d", pending)) || platformPage.Entries[0].TenantID != "" {
+		t.Fatalf("platform restore audit = %#v, want one deployment-wide count=%d entry in platform scope", platformPage.Entries, pending)
+	}
+}
+
 func TestRestoreInvalidatesSessionsCopiedFromBackup(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

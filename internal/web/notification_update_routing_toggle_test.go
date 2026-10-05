@@ -205,6 +205,22 @@ func TestNotificationRoutingToggleCanonicalizesLegacyDeploymentSelector(t *testi
 	}
 }
 
+func TestNotificationRoutingToggleFailsClosedWhenDestinationsCannotBeCanonicalized(t *testing.T) {
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	defer db.Close()
+	if err := defaultTenantStore(server).SetApplicationUpdateDestinations(ctx, []string{}, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.Exec(`DROP TABLE managed_notifications`); err != nil {
+		t.Fatal(err)
+	}
+	result := toggleUpdateRoutingRequest(t, server, admin, "unknown-destination", true)
+	if result.Code != http.StatusInternalServerError || !strings.Contains(result.Body.String(), `"code":"notification_failed"`) {
+		t.Fatalf("toggle with unreadable destination set = %d: %s; want fail-closed notification error", result.Code, result.Body.String())
+	}
+}
+
 func TestNotificationDestinationListFailsClosedWhenRoutingCannotBeRead(t *testing.T) {
 	server, db, _ := newUsersTestServer(t)
 	defer db.Close()

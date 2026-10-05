@@ -194,12 +194,6 @@ func (s *Server) toggleNotificationUpdateRouting(w http.ResponseWriter, r *http.
 	s.updateRoutingMu.Lock()
 	defer s.updateRoutingMu.Unlock()
 	notifier := s.App.Notifier.Tenant(ts)
-	if err := notifier.ValidateDestinationSelection(r.Context(), []string{input.DestinationID}); err != nil {
-		if !writeDestinationSelectionError(w, err) {
-			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
-		}
-		return
-	}
 	current, err := ts.ApplicationUpdateRouting(r.Context())
 	if err != nil {
 		if s.Log != nil {
@@ -225,6 +219,12 @@ func (s *Server) toggleNotificationUpdateRouting(w http.ResponseWriter, r *http.
 			s.Log.Warn("application update routing destinations unavailable", "error", err)
 		}
 		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
+		return
+	}
+	if err := notifier.ValidateDestinationSelection(r.Context(), []string{input.DestinationID}); err != nil {
+		if !writeDestinationSelectionError(w, err) {
+			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
+		}
 		return
 	}
 	selection = toggleUpdateDestination(selection, input.DestinationID, *input.Enabled)

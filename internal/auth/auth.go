@@ -2038,7 +2038,7 @@ func VerifyTOTPAt(secret, code string, at time.Time) bool {
 // the code that confirmed the pending secret when it saves the secret. The
 // pure VerifyTOTP and VerifyTOTPAt helpers record nothing.
 func VerifyTOTPAtStep(secret, code string, at time.Time) (int64, bool) {
-	code = strings.TrimSpace(code)
+	code = strings.Join(strings.Fields(code), "")
 	if len(code) != 6 {
 		return 0, false
 	}

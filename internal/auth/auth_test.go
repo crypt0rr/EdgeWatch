@@ -419,6 +419,11 @@ func TestTOTPUsesInjectedTime(t *testing.T) {
 	if !VerifyTOTPAt(secret, code, at) {
 		t.Fatalf("valid code rejected at %s", at)
 	}
+	spaced := code[:3] + " \t" + code[3:]
+	step, ok := VerifyTOTPAtStep(secret, spaced, at)
+	if !ok || step != at.Unix()/30 {
+		t.Fatalf("grouped TOTP code %q accepted at step %d, %t; want step %d", spaced, step, ok, at.Unix()/30)
+	}
 }
 
 func TestTOTPRejectsMissingOrTooShortSecrets(t *testing.T) {
@@ -465,7 +470,8 @@ func TestRecoveryCodeIsCaseInsensitiveAndSingleUse(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
 	request.RemoteAddr = "127.0.0.1:1234"
-	if _, _, err := m.LoginAs(ctx, request, "admin", "correct horse battery staple", "", strings.ToLower(plain[0])); err != nil {
+	grouped := strings.ToLower(plain[0][:8] + " " + plain[0][8:])
+	if _, _, err := m.LoginAs(ctx, request, "admin", "correct horse battery staple", "", grouped); err != nil {
 		t.Fatalf("lowercase recovery code rejected: %v", err)
 	}
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)

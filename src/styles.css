@@ -2239,3 +2239,32 @@ label small,
   .unit-facts dt { font-size: 11px; line-height: 1.05; }
   .unit-facts dd { margin: 0; font-size: 11px; line-height: 1.05; }
 }
+
+.page-error-panel {
+  display: grid;
+  gap: 20px;
+  max-width: 900px;
+  margin: 12px auto;
+  padding: 24px;
+  border: 1px solid #71353f;
+  border-radius: 12px;
+  background: linear-gradient(145deg, #241c27, #101b2b);
+}
+
+.page-error-panel h1 {
+  margin: 6px 0 8px;
+  font-size: 22px;
+  letter-spacing: -.035em;
+}
+
+.page-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+@media (max-width: 480px) {
+  .page-error-panel { padding: 18px; }
+  .page-error-actions { flex-direction: column; }
+  .page-error-actions .button { width: 100%; }
+}

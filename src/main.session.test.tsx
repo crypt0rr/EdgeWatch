@@ -175,6 +175,25 @@ describe('the console session', { timeout: 20_000 }, () => {
       })
     }
 
+    it('recovers a valid session after the first startup session request fails', async () => {
+      vi.mocked(getSession)
+        .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+        .mockResolvedValue(riley)
+      const client = createQueryClient()
+      const view = renderWithProviders(<><AppContent /><CurrentPath /></>, { route: ['/jobs'], client })
+
+      // The configured setup-status response lets the application reach its
+      // login route, but the session cookie is still valid. A session retry
+      // must take the browser back to the originally requested page.
+      expect(await screen.findByRole('heading', { name: /Sign in to EdgeWatch/ }, loaded)).toBeInTheDocument()
+      expect(await screen.findByRole('heading', { name: 'Retail POS network' }, { timeout: 8000 })).toBeInTheDocument()
+      expect(getSession).toHaveBeenCalledTimes(2)
+      expect(screen.getByTestId('current-path')).toHaveTextContent('/jobs')
+
+      view.unmount()
+      client.clear()
+    })
+
     it('still signs out when the session read finds the session ended', async () => {
       vi.mocked(getSession).mockResolvedValue(riley)
       const client = createQueryClient()

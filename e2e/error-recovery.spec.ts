@@ -96,4 +96,41 @@ test.describe('load and save error recovery (#982)', () => {
     await expect(page.getByRole('heading', { name: 'Good day, administrator' })).toBeVisible({ timeout: 10_000 })
     expect(statusRequests).toBeGreaterThanOrEqual(2)
   })
+
+  test('a transient first session request recovers to the requested page', async ({ page }) => {
+    await mockConsole(page)
+    let sessionRequests = 0
+    await page.route('**/api/v1/auth/session', async route => {
+      sessionRequests += 1
+      if (sessionRequests === 1) {
+        await route.fulfill({ status: 503, json: { error: { code: 'unavailable', message: 'temporarily unavailable' } } })
+        return
+      }
+      await route.fallback()
+    })
+
+    await page.goto('/jobs')
+    await expect(page.getByRole('heading', { name: 'Jobs', level: 1 })).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('#primary-navigation')).toBeVisible()
+    expect(sessionRequests).toBeGreaterThanOrEqual(2)
+    await expect(page).toHaveURL(/\/jobs$/)
+  })
+
+  test('a page render failure leaves navigation available and offers recovery', async ({ page }) => {
+    await mockConsole(page)
+    await page.goto('/scans/scan-1/hosts/192.0.2.10')
+
+    // This route intentionally returns the host-list envelope where the
+    // single-host page expects a host detail. It reproduces a malformed or
+    // incompatible response that previously blanked the entire console.
+    const alert = page.getByRole('alert').filter({ hasText: 'This page could not be displayed.' })
+    await expect(alert).toBeVisible()
+    await expect(alert.getByRole('button', { name: 'Reload page' })).toBeVisible()
+    await expect(alert.getByRole('link', { name: 'Go to Overview' })).toBeVisible()
+    await expect(page.locator('#primary-navigation')).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Jobs' })).toBeVisible()
+
+    await page.getByRole('link', { name: 'Jobs' }).click()
+    await expect(page.getByRole('heading', { name: 'Jobs', level: 1 })).toBeVisible()
+  })
 })

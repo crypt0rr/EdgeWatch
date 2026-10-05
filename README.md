@@ -482,6 +482,9 @@ Each job can select its own destinations. On the **Notifications** page,
 **Update alerts** is an independent toggle on each configured destination:
 
 - pausing a destination does not erase its update-alert selection;
+- when legacy routing is first frozen, existing paused destinations remain
+  selected and resume delivery if they are enabled again; destinations added
+  afterward remain opt-in for existing jobs;
 - saving an empty selection keeps update alerts silent while checks and the
   in-console indicator continue to work;
 - password confirmation is required for every routing or credential change.

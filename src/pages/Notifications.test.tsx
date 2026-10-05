@@ -88,10 +88,10 @@ describe('notification update-alert routing', () => {
     await vi.waitFor(() => expect(container.querySelectorAll('.notification-update-toggle input')).toHaveLength(2), { timeout: 1000 })
   }
 
-  it('uses globally enabled destinations when update routing has never been configured', async () => {
+  it('keeps every existing destination selected when legacy update routing has never been configured', async () => {
     await renderPage()
     expect(container.querySelector('input[aria-label="Disable update alerts for Operations"]')).toBeTruthy()
-    expect(container.querySelector('input[aria-label="Enable update alerts for Backup"]')).toBeTruthy()
+    expect(container.querySelector('input[aria-label="Disable update alerts for Backup"]')).toBeTruthy()
   })
 
   it('keeps the default-on reminder switch unchanged until password confirmation succeeds', async () => {

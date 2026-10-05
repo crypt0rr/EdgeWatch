@@ -94,27 +94,54 @@ func TestNotificationRoutingToggleMaterializesLegacySelection(t *testing.T) {
 	ts := defaultTenantStore(server)
 	a := createUpdateRoutingTestDestination(t, server, admin, "First", "first")
 	b := createUpdateRoutingTestDestination(t, server, admin, "Second", "second")
+	c := createUpdateRoutingTestDestination(t, server, admin, "Third", "third")
 	state, err := ts.ApplicationUpdateRouting(ctx)
 	if err != nil || state.Configured {
 		t.Fatalf("initial routing = %#v, %v; want legacy routing", state, err)
 	}
+	paused := false
+	pausedDestination, err := server.App.Notifier.Tenant(ts).UpdateManagedWithAudit(ctx, a, 1, "First", nil, &paused, store.AuditEntry{Action: "notifications.updated", ActorUserID: admin.UserID, ActorUsername: admin.Username})
+	if err != nil || pausedDestination.Enabled {
+		t.Fatalf("pause first destination = %+v, %v", pausedDestination, err)
+	}
 	legacy, err := server.App.Notifier.Tenant(ts).LegacySelection(ctx)
-	wantLegacy := []string{a, b}
+	wantLegacy := []string{a, b, c}
 	slices.Sort(wantLegacy)
 	if err != nil || !slices.Equal(legacy, wantLegacy) {
 		t.Fatalf("legacy selection = %v, %v", legacy, err)
 	}
-	result := toggleUpdateRoutingRequest(t, server, admin, a, false)
+	result := toggleUpdateRoutingRequest(t, server, admin, c, false)
 	if result.Code != http.StatusOK {
 		t.Fatalf("toggle = %d: %s", result.Code, result.Body.String())
 	}
 	state, err = ts.ApplicationUpdateRouting(ctx)
-	if err != nil || !state.Configured || !slices.Equal(state.Destinations, []string{b}) {
-		t.Fatalf("routing after first toggle = %#v, %v; want explicit [%s]", state, err, b)
+	want := []string{a, b}
+	slices.Sort(want)
+	if err != nil || !state.Configured || !slices.Equal(state.Destinations, want) {
+		t.Fatalf("routing after first toggle = %#v, %v; want explicit %v", state, err, want)
+	}
+	keys, err := server.App.Notifier.Tenant(ts).QueueDestinationsForSelection(ctx, state.Destinations)
+	if err != nil || !slices.Equal(keys, []string{"managed:" + b + ":1"}) {
+		t.Fatalf("update routing while First is paused queues %v, %v; want only Second", keys, err)
+	}
+	enabled := true
+	resumedDestination, err := server.App.Notifier.Tenant(ts).UpdateManagedWithAudit(ctx, a, pausedDestination.Revision, "First", nil, &enabled, store.AuditEntry{Action: "notifications.updated", ActorUserID: admin.UserID, ActorUsername: admin.Username})
+	if err != nil || !resumedDestination.Enabled {
+		t.Fatalf("resume first destination = %+v, %v", resumedDestination, err)
+	}
+	keys, err = server.App.Notifier.Tenant(ts).QueueDestinationsForSelection(ctx, state.Destinations)
+	wantKeys := []string{"managed:" + a + ":" + fmt.Sprint(resumedDestination.Revision), "managed:" + b + ":1"}
+	slices.Sort(wantKeys)
+	if err != nil || !slices.Equal(keys, wantKeys) {
+		t.Fatalf("update routing after First resumes queues %v, %v; want %v", keys, err, wantKeys)
 	}
 	result = toggleUpdateRoutingRequest(t, server, admin, b, false)
 	if result.Code != http.StatusOK {
-		t.Fatalf("disable final destination = %d: %s", result.Code, result.Body.String())
+		t.Fatalf("disable Second = %d: %s", result.Code, result.Body.String())
+	}
+	result = toggleUpdateRoutingRequest(t, server, admin, a, false)
+	if result.Code != http.StatusOK {
+		t.Fatalf("disable remaining destination = %d: %s", result.Code, result.Body.String())
 	}
 	state, err = ts.ApplicationUpdateRouting(ctx)
 	if err != nil || !state.Configured || len(state.Destinations) != 0 {

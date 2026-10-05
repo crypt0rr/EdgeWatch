@@ -11,7 +11,7 @@ const platformNotifications: NotificationScope = {
   update: (id, revision, name, password, options) => updatePlatformNotification(id, revision, name, password, options),
   remove: (id, revision, password) => deletePlatformNotification(id, revision, password),
   toggleRouting: (destinationID, enabled, password) => togglePlatformNotificationUpdateAlert(destinationID, enabled, password),
-  routingDefaultsToEnabled: false,
+  routingDefaultsToAllDestinations: false,
   configImport: false,
   eyebrow: 'Platform',
   description: 'The platform’s own Shoutrrr destinations. Each business unit manages its own destinations, which are not shown here.',

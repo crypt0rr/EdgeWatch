@@ -3,6 +3,8 @@ package store
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -83,6 +85,70 @@ func TestHealthStatusFallsBackToDaemonLeaseWhenReady(t *testing.T) {
 	if err := s.System().Healthy(context.Background()); err != nil {
 		t.Fatalf("ready health unexpectedly failed: %v", err)
 	}
+}
+
+func TestHealthStatusNamesMissingDaemonLeaseAfterReleaseAndRestore(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	checkMissingHeartbeat := func(t *testing.T, s *Store) {
+		t.Helper()
+		_, err := s.System().HealthStatus(ctx)
+		if err == nil || errors.Is(err, sql.ErrNoRows) || !strings.Contains(err.Error(), "no daemon heartbeat recorded; the daemon is not running") {
+			t.Fatalf("health error = %v, want a named missing-daemon-heartbeat error", err)
+		}
+	}
+
+	t.Run("after graceful lease release", func(t *testing.T) {
+		t.Parallel()
+		s, err := openWithOptionsContext(ctx, filepath.Join(t.TempDir(), "edgewatch.db"), openOptions{create: true, migrate: true, configureWAL: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		if err := s.System().AcquireLease(ctx, "health-test"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.System().ReleaseLease(ctx, "health-test"); err != nil {
+			t.Fatal(err)
+		}
+		checkMissingHeartbeat(t, s)
+	})
+
+	t.Run("after restore clears copied lease", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		source := filepath.Join(dir, "source.db")
+		live, err := openWithOptionsContext(ctx, source, openOptions{create: true, migrate: true, configureWAL: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := live.DB.ExecContext(ctx, `CREATE TABLE restore_fixture (value TEXT NOT NULL); INSERT INTO restore_fixture(value) VALUES ('source')`); err != nil {
+			live.Close()
+			t.Fatal(err)
+		}
+		if _, err := live.System().AcquireDaemonLease(ctx, "backup-daemon"); err != nil {
+			live.Close()
+			t.Fatal(err)
+		}
+		backup, err := live.Backup(ctx, filepath.Join(dir, "backup.db"))
+		if closeErr := live.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		destination := filepath.Join(dir, "restored.db")
+		if _, err := Restore(ctx, backup, destination, RestoreOptions{}); err != nil {
+			t.Fatalf("restore: %v", err)
+		}
+		restored, err := openWithOptionsContext(ctx, destination, openOptions{create: true, migrate: true, configureWAL: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer restored.Close()
+		checkMissingHeartbeat(t, restored)
+	})
 }
 
 func TestOpenWithLoggerRoutesMigrationProgress(t *testing.T) {

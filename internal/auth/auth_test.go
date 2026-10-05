@@ -284,14 +284,102 @@ func TestArgon2WorkQueueBoundsConcurrentAdmission(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if err := m.withArgon2(ctx, func() error { return nil }); !errors.Is(err, ErrRateLimited) {
-		t.Fatalf("bounded admission error = %v, want ErrRateLimited", err)
+	if err := m.withArgon2(ctx, func() error { return nil }); !errors.Is(err, ErrRateLimited) || RetryAfterHeaderValue(err) != "2" {
+		t.Fatalf("bounded admission error = %v (Retry-After %s), want short ErrRateLimited", err, RetryAfterHeaderValue(err))
 	}
 
 	close(release)
 	workers.Wait()
 	if err := m.withArgon2(context.Background(), func() error { return nil }); err != nil {
 		t.Fatalf("released authentication slot remained unavailable: %v", err)
+	}
+}
+
+func TestArgon2QueuePressureUsesShortRetryAfterAcrossAuthFlows(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	manager := NewManager(s)
+	setupToken, err := manager.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const password = "correct horse battery staple"
+	if err := manager.Setup(ctx, setupToken, password); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := s.Tenant(store.DefaultTenantScope()).GetUser(ctx, store.LegacyAdminUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationToken, activationHash, err := NewOpaqueToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := s.Tenant(store.DefaultTenantScope()).CreateUserWithInvite(ctx, store.User{Username: "invitee", DisplayName: "Invitee", Role: store.RoleViewer, PasswordHash: "!pending", Enabled: false}, activationHash, now, now.Add(time.Hour), store.AuditEntry{ActorUserID: admin.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	request := func(path, address string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, path, nil)
+		r.RemoteAddr = address + ":1234"
+		return r
+	}
+	for i := 0; i < authArgon2MaxConcurrent; i++ {
+		manager.argon2Sem <- struct{}{}
+	}
+	queueFull := []struct {
+		name string
+		err  error
+	}{
+		{name: "login", err: func() error {
+			_, _, e := manager.LoginAs(ctx, request("/api/v1/auth/login", "198.51.100.41"), "admin", password, "", "")
+			return e
+		}()},
+		{name: "password confirmation", err: manager.ConfirmPasswordForUser(ctx, request("/api/v1/admin/confirm", "198.51.100.42"), admin.ID, password)},
+	}
+	for _, result := range queueFull {
+		if !errors.Is(result.err, ErrRateLimited) || RetryAfterHeaderValue(result.err) != "2" {
+			t.Errorf("%s queue refusal = %v (Retry-After %s), want short ErrRateLimited", result.name, result.err, RetryAfterHeaderValue(result.err))
+		}
+	}
+	if _, err := manager.ActivateRequest(ctx, request("/api/v1/auth/activate", "198.51.100.43"), activationToken, "invitee account password"); !errors.Is(err, ErrRateLimited) || RetryAfterHeaderValue(err) != "2" {
+		t.Errorf("activation queue refusal = %v (Retry-After %s), want short ErrRateLimited", err, RetryAfterHeaderValue(err))
+	}
+	for i := 0; i < authArgon2MaxConcurrent; i++ {
+		<-manager.argon2Sem
+	}
+
+	// A queue refusal does not consume the caller's authentication budget.
+	if _, _, err := manager.LoginAs(ctx, request("/api/v1/auth/login", "198.51.100.41"), "admin", password, "", ""); err != nil {
+		t.Fatalf("same client could not sign in after the queue drained: %v", err)
+	}
+
+	setupStore, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer setupStore.Close()
+	setupManager := NewManager(setupStore)
+	token, err := setupManager.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < authArgon2MaxConcurrent; i++ {
+		setupManager.argon2Sem <- struct{}{}
+	}
+	setupErr := setupManager.SetupRequest(ctx, request("/api/v1/setup", "198.51.100.44"), token, password)
+	for i := 0; i < authArgon2MaxConcurrent; i++ {
+		<-setupManager.argon2Sem
+	}
+	if !errors.Is(setupErr, ErrRateLimited) || RetryAfterHeaderValue(setupErr) != "2" {
+		t.Fatalf("setup queue refusal = %v (Retry-After %s), want short ErrRateLimited", setupErr, RetryAfterHeaderValue(setupErr))
 	}
 }
 

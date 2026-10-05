@@ -362,7 +362,7 @@ func (s *Server) confirmProfilePassword(w http.ResponseWriter, r *http.Request, 
 	}
 	if err := s.Auth.ConfirmPasswordForUser(r.Context(), r, session.UserID, password); err != nil {
 		if errors.Is(err, auth.ErrRateLimited) {
-			w.Header().Set("Retry-After", "300")
+			w.Header().Set("Retry-After", auth.RetryAfterHeaderValue(err))
 			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many password confirmations; try again later", nil)
 		} else {
 			writeError(w, http.StatusBadRequest, "invalid_password", "password confirmation failed", nil)

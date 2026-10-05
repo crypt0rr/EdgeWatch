@@ -421,7 +421,7 @@ func (s *Server) deleteNotificationDestination(w http.ResponseWriter, r *http.Re
 
 func (s *Server) writeNotificationAuthError(w http.ResponseWriter, err error) {
 	if errors.Is(err, auth.ErrRateLimited) {
-		w.Header().Set("Retry-After", "300")
+		w.Header().Set("Retry-After", auth.RetryAfterHeaderValue(err))
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many password confirmation attempts; try again later", nil)
 		return
 	}
@@ -430,7 +430,7 @@ func (s *Server) writeNotificationAuthError(w http.ResponseWriter, err error) {
 
 func (s *Server) writePasswordConfirmationError(w http.ResponseWriter, err error, message string) {
 	if errors.Is(err, auth.ErrRateLimited) {
-		w.Header().Set("Retry-After", "300")
+		w.Header().Set("Retry-After", auth.RetryAfterHeaderValue(err))
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many password confirmation attempts; try again later", nil)
 		return
 	}

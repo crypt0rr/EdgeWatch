@@ -67,8 +67,9 @@ const (
 	// credentials cannot exhaust the daemon's memory or CPU. A short queue
 	// timeout gives callers a deterministic 429 instead of admitting unbounded
 	// work while still allowing normal bursts to drain.
-	authArgon2MaxConcurrent = 4
-	authArgon2QueueTimeout  = 250 * time.Millisecond
+	authArgon2MaxConcurrent   = 4
+	authArgon2QueueTimeout    = 250 * time.Millisecond
+	authArgon2QueueRetryDelay = 2 * time.Second
 	// A refused sign-in hands its rate-limit record to a background write, so
 	// the refusal never waits for the audit writer. Each scope's record is
 	// written at most once per window, and this bounds the records waiting
@@ -256,8 +257,8 @@ func NewManager(s *store.Store) *Manager {
 // withArgon2 admits one password hash/verification operation to the bounded
 // authentication work pool. The callback runs while holding the slot and the
 // slot is always released before returning. A caller that cannot enter within
-// the short queue window receives the same typed rate-limit error used by the
-// request limiter, allowing HTTP handlers to return a bounded 429 response.
+// the short queue window receives a short-lived typed rate-limit error, so it
+// is not mistaken for an authentication-budget lockout by HTTP handlers.
 func (m *Manager) withArgon2(ctx context.Context, fn func() error) error {
 	m.mu.Lock()
 	if m.argon2Sem == nil {
@@ -273,9 +274,9 @@ func (m *Manager) withArgon2(ctx context.Context, fn func() error) error {
 		defer func() { <-sem }()
 		return fn()
 	case <-ctx.Done():
-		return ErrRateLimited
+		return &retryAfterRateLimit{delay: authArgon2QueueRetryDelay}
 	case <-timer.C:
-		return ErrRateLimited
+		return &retryAfterRateLimit{delay: authArgon2QueueRetryDelay}
 	}
 }
 

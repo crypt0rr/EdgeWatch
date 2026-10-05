@@ -64,6 +64,14 @@ func TestServerErrorMappingHelpers(t *testing.T) {
 		if recorder.Code != test.code || !strings.Contains(recorder.Body.String(), `"code":"`+test.want+`"`) {
 			t.Fatalf("notification auth error = %d %s", recorder.Code, recorder.Body.String())
 		}
+		if errors.Is(test.err, auth.ErrRateLimited) && recorder.Header().Get("Retry-After") != "300" {
+			t.Fatalf("notification auth Retry-After = %q, want actual budget cooldown 300", recorder.Header().Get("Retry-After"))
+		}
+	}
+	confirmationRecorder := httptest.NewRecorder()
+	server.writePasswordConfirmationError(confirmationRecorder, auth.ErrRateLimited, "confirmation failed")
+	if confirmationRecorder.Code != http.StatusTooManyRequests || confirmationRecorder.Header().Get("Retry-After") != "300" {
+		t.Fatalf("password confirmation rate-limit response = %d Retry-After %q", confirmationRecorder.Code, confirmationRecorder.Header().Get("Retry-After"))
 	}
 	for _, test := range []struct {
 		err  error

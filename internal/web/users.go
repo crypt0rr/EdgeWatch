@@ -46,7 +46,7 @@ func (s *Server) confirmUserMutation(w http.ResponseWriter, r *http.Request, act
 	}
 	if err := s.Auth.ConfirmPasswordForUser(r.Context(), r, actor.UserID, password); err != nil {
 		if errors.Is(err, auth.ErrRateLimited) {
-			w.Header().Set("Retry-After", "300")
+			w.Header().Set("Retry-After", auth.RetryAfterHeaderValue(err))
 			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many password confirmation attempts; try again later", nil)
 		} else {
 			writeError(w, http.StatusUnauthorized, "invalid_password", "password confirmation failed", nil)

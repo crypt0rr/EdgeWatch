@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 62
+const schemaVersion = 63
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -836,34 +836,7 @@ END;`,
 );`,
 			"INSERT OR IGNORE INTO sse_event_cursor(id,next_id) VALUES(1,0)",
 		},
-		31: {
-			// Delivery deferrals (for example an unavailable managed key or an
-			// indeterminate provider outcome) must be bounded just like ordinary
-			// retry attempts. Keeping a separate counter preserves the useful
-			// property that a deferral does not pretend a provider request failed,
-			// while terminal_at makes the row visible to health and retention
-			// accounting instead of leaving it pending forever.
-			// Some supported recovery fixtures carry a schema marker without the
-			// legacy outbox table. Create the complete current shape first so the
-			// additive columns below remain safe for those databases.
-			`CREATE TABLE IF NOT EXISTS outbox (
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- destination TEXT NOT NULL,
- payload_json BLOB NOT NULL,
- attempts INTEGER NOT NULL DEFAULT 0,
- next_at TEXT NOT NULL,
- sent_at TEXT,
- last_error TEXT NOT NULL DEFAULT '',
- claim_token TEXT NOT NULL DEFAULT '',
- claim_until TEXT NOT NULL DEFAULT '',
- deferrals INTEGER NOT NULL DEFAULT 0,
- terminal_at TEXT NOT NULL DEFAULT '',
- UNIQUE(destination, payload_json)
-);`,
-			"ALTER TABLE outbox ADD COLUMN deferrals INTEGER NOT NULL DEFAULT 0",
-			"ALTER TABLE outbox ADD COLUMN terminal_at TEXT NOT NULL DEFAULT ''",
-			"CREATE INDEX IF NOT EXISTS outbox_terminal_due ON outbox(sent_at,terminal_at,next_at)",
-		},
+		31: migration31Statements(),
 		32: {
 			// Dynamic Naabu enrichment is reconciled after every discovery
 			// checkpoint. Persist the deterministic work-unit identity as a scalar
@@ -1295,6 +1268,9 @@ ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=
 		// settings audit record indicates an administrator may have saved it.
 		61: {},
 		62: migration62Statements(),
+		// Terminalize delivery rows that exhausted the former eight-attempt
+		// policy before schema 31 could record terminal state.
+		63: migration63Statements(),
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL
 	// steps. FTS and other resumable backfills can be the longest part of an

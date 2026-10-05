@@ -961,7 +961,13 @@ needs one. Print a new platform setup token with `edgewatch admin
 platform-setup-token`; while no administrator exists, the daemon prints a new
 setup token when it starts.
 
-The current schema is version 62. Database migrations are forward-only. An
+The current schema is version 63. Schema 31 records terminal notification
+deliveries and marks rows that had already exhausted the original eight
+attempts. Schema 63 repairs databases that had already passed schema 31 by
+marking still-unsent rows with at least eight attempts and a scheduled retry
+before v0.22.1, when the retry budget increased to fifteen. Retries scheduled
+on or after that release remain eligible, so upgrading does not replay
+deliveries that were still retrying. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. The daemon and the commands that write to the database (admin, scan,

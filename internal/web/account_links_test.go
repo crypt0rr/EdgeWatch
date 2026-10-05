@@ -43,6 +43,7 @@ func onlyLinkRevocation(t *testing.T, db *store.Store, tenantID string) linkRevo
 // revocation with the account as its actor. Another account's link still
 // works, and so does a link issued for the account after the change.
 func TestOwnPasswordChangeRevokesTheAccountsResetLink(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	operator, viewer := f.users[actorOperatorA], f.users[actorViewerA]
 	issue := func(id, step string) string {
@@ -77,6 +78,7 @@ func TestOwnPasswordChangeRevokesTheAccountsResetLink(t *testing.T) {
 // it. The platform administrator's link for another administrator of the
 // unit still works.
 func TestUnitRoleChangeRevokesThePlatformAdministratorsResetLink(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newPlatformFixture(t)
 	second, err := f.b.CreateUser(ctx, store.User{Username: "bravo-admin-two", DisplayName: "bravo-admin-two", Role: store.RoleAdministrator, PasswordHash: cheapPasswordHash(platformFixturePassword), Enabled: true}, store.AuditEntry{})

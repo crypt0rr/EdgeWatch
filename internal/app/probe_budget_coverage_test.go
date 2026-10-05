@@ -45,6 +45,7 @@ func (s *budgetedProgressTestScanner) ScanWithProgressBudget(_ context.Context, 
 }
 
 func TestRunJobUsesBudgetedScannerForDirectNaabuPipeline(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -80,6 +81,7 @@ func TestRunJobUsesBudgetedScannerForDirectNaabuPipeline(t *testing.T) {
 }
 
 func TestCheckScanCycleProbeBudgetCoversSplitAndHardLimits(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -152,6 +154,7 @@ func TestCheckScanCycleProbeBudgetCoversSplitAndHardLimits(t *testing.T) {
 }
 
 func TestResolvedPlanProbeTotalsPreferConcreteUnits(t *testing.T) {
+	t.Parallel()
 	plan := scanner.WorkPlan{
 		TotalProbes: 8, // lower than the concrete unit sum; never undercount.
 		Units: []scanner.WorkUnit{
@@ -177,6 +180,7 @@ func TestResolvedPlanProbeTotalsPreferConcreteUnits(t *testing.T) {
 }
 
 func TestResolvedPlanBudgetRejectsExpandedWorkBeforeCycleCreation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -242,6 +246,7 @@ func (r *growingResolver) LookupIP(context.Context, string, string) ([]net.IP, e
 // again. The work that path executes must be the work checked against
 // scheduler.max_probe_count: a grown DNS answer is rejected before Nmap starts.
 func TestDirectScanRechecksProbeBudgetAfterResolvingAgain(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {

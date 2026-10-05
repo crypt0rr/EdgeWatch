@@ -12,6 +12,7 @@ import (
 )
 
 func TestAcquireRestoreStagingGuardLinuxFailureAndCancellation(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if _, supported, err := acquireRestoreStagingGuardLinux(context.Background(), filepath.Join(dir, "missing")); err == nil || !supported {
 		t.Fatalf("guard for missing directory = supported %v, error %v; want supported error", supported, err)
@@ -46,6 +47,7 @@ func TestAcquireRestoreStagingGuardLinuxFailureAndCancellation(t *testing.T) {
 }
 
 func TestAcquireUnsupportedRestoreStagingGuard(t *testing.T) {
+	t.Parallel()
 	unlock, supported, err := acquireUnsupportedRestoreStagingGuard(context.Background(), t.TempDir())
 	if unlock != nil || supported || err != nil {
 		t.Fatalf("unsupported guard = unlock %v, supported %v, error %v; want nil, false, nil", unlock != nil, supported, err)

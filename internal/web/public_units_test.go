@@ -33,6 +33,7 @@ func (f publicTenantFixture) getPublicPath(path, remote string) *httptest.Respon
 // The legacy URL keeps serving the default tenant's page byte for byte, and
 // the default tenant's own slug serves the same page.
 func TestPublicSlugPageServesOnlyItsUnit(t *testing.T) {
+	t.Parallel()
 	f := newPublicTenantFixture(t)
 	for i, check := range []struct{ path, want string }{
 		{"/api/public/v1/dashboard", publicTenantAPage},
@@ -92,6 +93,7 @@ func observePublicAnswer(rec *httptest.ResponseRecorder) publicAnswer {
 // being deleted, and a deleted unit. Nothing tells whether a unit has the
 // slug.
 func TestPublicSlugPagesThatAreNotPublishedAreIndistinguishable(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newPublicTenantFixture(t)
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
@@ -146,6 +148,7 @@ func TestPublicSlugPagesThatAreNotPublishedAreIndistinguishable(t *testing.T) {
 // exhausted one page's budget still reaches every other page, and a slug
 // without a page is limited as a published one is.
 func TestPublicSlugPagesHaveTheirOwnRateLimit(t *testing.T) {
+	t.Parallel()
 	f := newPublicTenantFixture(t)
 	const client = "198.51.100.85:1000"
 	exhaust := func(path string, status int) {
@@ -217,6 +220,7 @@ func publicUnitAdministrators(t *testing.T, f publicTenantFixture) func(account,
 // pages keep serving their cached payload, and a build of another page in
 // flight during the save is neither discarded nor rebuilt.
 func TestPublicPageSaveKeepsOtherUnitsCache(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newPublicTenantFixture(t)
 	editor := publicUnitAdministrators(t, f)
@@ -339,6 +343,7 @@ func (f publicTenantFixture) setUnitPaused(t *testing.T, id string, paused bool)
 // unit, answer as a page that is not enabled on the next request, although
 // each page was cached just before. Enabling the unit serves its page again.
 func TestDisabledUnitPublicPageIsNotServedFromCache(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newPublicTenantFixture(t)
 	scopeB, err := f.db.PublicScopeBySlug(ctx, "other")
@@ -391,6 +396,7 @@ func TestDisabledUnitPublicPageIsNotServedFromCache(t *testing.T) {
 // the build and every later request, on either URL, answer as a page that is
 // not enabled. Enabling the unit serves its page again.
 func TestPublicBuildInFlightWhenTheUnitIsDisabledIsDiscarded(t *testing.T) {
+	t.Parallel()
 	f := newPublicTenantFixture(t)
 	started, release, calls := blockFirstPublicBuild(f.server)
 	inFlight := make(chan *httptest.ResponseRecorder, 1)

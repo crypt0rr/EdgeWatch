@@ -19,6 +19,7 @@ import (
 )
 
 func TestPasswordHashAndVerification(t *testing.T) {
+	t.Parallel()
 	hash, err := PasswordHash("correct horse battery staple")
 	if err != nil {
 		t.Fatal(err)
@@ -35,6 +36,7 @@ func TestPasswordHashAndVerification(t *testing.T) {
 }
 
 func TestLoginRehashesWeakerArgon2Parameters(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -72,6 +74,7 @@ func TestLoginRehashesWeakerArgon2Parameters(t *testing.T) {
 }
 
 func TestLoginDoesNotRewriteCurrentArgon2Hash(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -103,6 +106,7 @@ func TestLoginDoesNotRewriteCurrentArgon2Hash(t *testing.T) {
 }
 
 func TestSetupTokenIsSingleUse(t *testing.T) {
+	t.Parallel()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -122,6 +126,7 @@ func TestSetupTokenIsSingleUse(t *testing.T) {
 }
 
 func TestReissueSetupTokenReplacesPreviousTokenAndIsRateLimited(t *testing.T) {
+	t.Parallel()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -154,6 +159,7 @@ func TestReissueSetupTokenReplacesPreviousTokenAndIsRateLimited(t *testing.T) {
 }
 
 func TestSessionAuthenticationAndCSRF(t *testing.T) {
+	t.Parallel()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -188,6 +194,7 @@ func TestSessionAuthenticationAndCSRF(t *testing.T) {
 }
 
 func TestConfirmPasswordUsesGenericErrorsAndRateLimit(t *testing.T) {
+	t.Parallel()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -219,6 +226,7 @@ func TestConfirmPasswordUsesGenericErrorsAndRateLimit(t *testing.T) {
 }
 
 func TestSetupAndLoginRateLimitsReturnTypedError(t *testing.T) {
+	t.Parallel()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -248,6 +256,7 @@ func TestSetupAndLoginRateLimitsReturnTypedError(t *testing.T) {
 }
 
 func TestArgon2WorkQueueBoundsConcurrentAdmission(t *testing.T) {
+	t.Parallel()
 	m := NewManager(nil)
 	started := make(chan struct{}, authArgon2MaxConcurrent)
 	release := make(chan struct{})
@@ -287,6 +296,7 @@ func TestArgon2WorkQueueBoundsConcurrentAdmission(t *testing.T) {
 }
 
 func TestUnknownUserAttemptsConsumeLoginBudget(t *testing.T) {
+	t.Parallel()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -306,6 +316,7 @@ func TestUnknownUserAttemptsConsumeLoginBudget(t *testing.T) {
 }
 
 func TestAuthLimiterBoundsRotatingSourcesAndExpiresEntries(t *testing.T) {
+	t.Parallel()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -339,6 +350,7 @@ func TestAuthLimiterBoundsRotatingSourcesAndExpiresEntries(t *testing.T) {
 }
 
 func TestSessionLifetimeRemainsAbsoluteWhenTouched(t *testing.T) {
+	t.Parallel()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -387,6 +399,7 @@ func TestSessionLifetimeRemainsAbsoluteWhenTouched(t *testing.T) {
 }
 
 func TestTOTPCodeWindow(t *testing.T) {
+	t.Parallel()
 	// RFC 6238 test secret; the implementation accepts the current 30-second
 	// window, so exercise the generated secret path without depending on time.
 	secret, err := NewTOTPSecret()
@@ -399,6 +412,7 @@ func TestTOTPCodeWindow(t *testing.T) {
 }
 
 func TestTOTPUsesInjectedTime(t *testing.T) {
+	t.Parallel()
 	secret := "JBSWY3DPEHPK3PXP"
 	at := time.Unix(59, 0).UTC()
 	code := totpCode(secret, at.Unix()/30)
@@ -408,6 +422,7 @@ func TestTOTPUsesInjectedTime(t *testing.T) {
 }
 
 func TestTOTPRejectsMissingOrTooShortSecrets(t *testing.T) {
+	t.Parallel()
 	at := time.Unix(1_700_000_000, 0).UTC()
 	for _, secret := range []string{"", "   ", "AAAAAAA"} {
 		if VerifyTOTPAt(secret, "000000", at) {
@@ -417,6 +432,7 @@ func TestTOTPRejectsMissingOrTooShortSecrets(t *testing.T) {
 }
 
 func TestRecoveryCodeIsCaseInsensitiveAndSingleUse(t *testing.T) {
+	t.Parallel()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -460,6 +476,7 @@ func TestRecoveryCodeIsCaseInsensitiveAndSingleUse(t *testing.T) {
 }
 
 func TestRecoveryCodesHaveSufficientEntropyAndSaltedStorage(t *testing.T) {
+	t.Parallel()
 	plain, hashes, err := RecoveryCodes()
 	if err != nil {
 		t.Fatal(err)
@@ -478,6 +495,7 @@ func TestRecoveryCodesHaveSufficientEntropyAndSaltedStorage(t *testing.T) {
 }
 
 func TestFailedLoginIsAuditedWithoutCredentials(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -507,6 +525,7 @@ func TestFailedLoginIsAuditedWithoutCredentials(t *testing.T) {
 }
 
 func TestLoginAsUserAndPasswordConfirmationAreScoped(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -563,6 +582,7 @@ func TestLoginAsUserAndPasswordConfirmationAreScoped(t *testing.T) {
 // any account, but not another client that reaches EdgeWatch through the
 // same trusted proxy.
 func TestLoginFailuresDoNotLockOutAnotherClientBehindTheSameProxy(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -616,6 +636,7 @@ func TestLoginFailuresDoNotLockOutAnotherClientBehindTheSameProxy(t *testing.T) 
 }
 
 func TestLoginFailuresDoNotLockOutSameAccountFromAnotherSource(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -651,6 +672,7 @@ func TestLoginFailuresDoNotLockOutSameAccountFromAnotherSource(t *testing.T) {
 }
 
 func TestSharedLoopbackLoginRecoversAfterCooldownAndIgnoresLegacyLockout(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -692,6 +714,7 @@ func TestSharedLoopbackLoginRecoversAfterCooldownAndIgnoresLegacyLockout(t *test
 }
 
 func TestLegacySourceScopePreservesScopedIPv6Addresses(t *testing.T) {
+	t.Parallel()
 	tests := map[string]string{
 		"source:login:2001:db8::10":   "2001:db8::10",
 		"source:confirm:2001:db8::20": "2001:db8::20",
@@ -705,6 +728,7 @@ func TestLegacySourceScopePreservesScopedIPv6Addresses(t *testing.T) {
 }
 
 func TestEnsureSetupTokenHonorsAuthoritativeAdministratorUser(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {

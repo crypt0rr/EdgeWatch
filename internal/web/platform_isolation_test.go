@@ -188,6 +188,7 @@ func (f *platformFixture) isolationRequest(t *testing.T, actor string, route api
 // with unit B's IDs, name no unit's data. Unit B's data is unchanged
 // afterwards.
 func TestIsolationMatrix(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	before := f.unitBSnapshot(t)
 	var checked, foreignChecked int
@@ -294,6 +295,7 @@ func (f *platformFixture) unitBSnapshot(t *testing.T) map[string]string {
 // unit's accounts read their unit's resources, and the platform
 // administrator reads unit B through its console.
 func TestPositiveMatrix(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	owned := []string{"/jobs/{id}", "/jobs/{id}/scans", "/jobs/{id}/scans/{scan}", "/scans/{id}", "/scans/{id}/summary", "/scans/{id}/hosts", "/scans/{id}/hosts/{address}", "/users/{id}", "/notifications/destinations/{id}", "/scanner-profiles/{id}", "/scanner/profiles/{id}", "/jobs/{id}/baseline", "/audit"}
 	platformOwned := []string{"/platform/units", "/platform/units/{id}", "/platform/units/{id}/capacity", "/platform/units/{id}/accounts", "/platform/admins", "/platform/audit", "/platform/notifications", "/platform/status"}
@@ -348,6 +350,7 @@ func TestPositiveMatrix(t *testing.T) {
 // not a platform administrator's is refused like an unknown route, even if
 // it reached the handler, and an unknown platform path is not found.
 func TestPlatformRouteRefusesUnitSessions(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	for _, actor := range []string{actorAdminA, actorOperatorA, actorViewerA, actorAdminB} {
 		recorder := httptest.NewRecorder()
@@ -381,6 +384,7 @@ func sessionKeys(t *testing.T, body []byte) (map[string]any, []string) {
 // The session names its console and its unit, and whether more than one
 // unit exists; an administrator's permissions include the unit audit.
 func TestSessionDescribesTheBusinessUnit(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	for actor, want := range map[string]struct {
 		scope string
@@ -422,6 +426,7 @@ func TestSessionDescribesTheBusinessUnit(t *testing.T) {
 // as the CLI status lists them for the default unit only. Another unit's
 // status leaves the key out, and a viewer's never has it.
 func TestLegacyYAMLJobsAreOnlyInTheDefaultUnitStatus(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	f.server.App.Config.Jobs = []config.Job{{Name: "alpha-legacy-perimeter"}, {Name: "alpha-legacy-office"}}
 	// The fixture's unit B has an administrator and a viewer; add an
@@ -464,6 +469,7 @@ func TestLegacyYAMLJobsAreOnlyInTheDefaultUnitStatus(t *testing.T) {
 // in the session, the status and the sign-in responses alike, and the
 // sign-in response keeps its keys.
 func TestSingleUnitSessionResponses(t *testing.T) {
+	t.Parallel()
 	server, accounts := newRouteMatrixSessions(t)
 	admin := accounts[0]
 	full := auth.PermissionsForRole(store.RoleAdministrator)
@@ -502,6 +508,7 @@ func TestSingleUnitSessionResponses(t *testing.T) {
 // permissions and name the platform console. The unit status is refused to
 // it, and its own account's routes work.
 func TestPlatformAdministratorSessionListsThePlatformPermissions(t *testing.T) {
+	t.Parallel()
 	server, accounts := newRouteMatrixSessions(t)
 	platform := accounts[3]
 	if platform.role != store.RolePlatformAdmin {

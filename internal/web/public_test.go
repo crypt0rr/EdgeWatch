@@ -24,6 +24,7 @@ import (
 )
 
 func TestIsPrivateAddressClassifiesSpecialAndPublicRanges(t *testing.T) {
+	t.Parallel()
 	for _, address := range []string{"127.0.0.1", "::1", "0.0.0.0", "169.254.1.1", "224.0.0.1", "ff02::1", "10.1.2.3", "172.16.1.1", "192.168.1.1", "100.64.1.1", "fd00::1"} {
 		if !isPrivateAddress(net.ParseIP(address)) {
 			t.Errorf("%s was classified as public", address)
@@ -37,6 +38,7 @@ func TestIsPrivateAddressClassifiesSpecialAndPublicRanges(t *testing.T) {
 }
 
 func TestPublicHostProjectionRedactsAndSortsPositivePorts(t *testing.T) {
+	t.Parallel()
 	s := &Server{}
 	host := model.HostObservation{Address: " 8.8.8.8 ", Protocols: []model.ProtocolObservation{
 		{Protocol: "udp", Ports: []model.PortObservation{{Port: 53, State: "open|filtered", Reason: "response", Service: &model.ServiceObservation{Name: "domain", Product: "BIND", Version: "9"}}, {Port: 54, State: "closed", Service: &model.ServiceObservation{Name: "hidden"}}}},
@@ -72,6 +74,7 @@ func TestPublicHostProjectionRedactsAndSortsPositivePorts(t *testing.T) {
 }
 
 func TestPublicRdapProjectionAndCachedPayloadValidation(t *testing.T) {
+	t.Parallel()
 	result := rdap.Result{Status: "success", Address: "8.8.8.8", NetworkName: "Example", Country: "NL", Registry: "ripe", Organizations: []string{"Example Org"}, SourceURL: "https://registry.example/rdap/ip/8.8.8.8"}
 	projected := publicRdapFromResult(result)
 	if projected.Status != "success" || projected.NetworkName != "Example" || len(projected.Organization) != 1 {
@@ -91,6 +94,7 @@ func TestPublicRdapProjectionAndCachedPayloadValidation(t *testing.T) {
 }
 
 func TestPublicHostProjectionDoesNotServeRDAPBeyondStaleWindow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -124,6 +128,7 @@ func TestPublicHostProjectionDoesNotServeRDAPBeyondStaleWindow(t *testing.T) {
 }
 
 func TestPublicAPIDisabledEnabledAndRateLimited(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -196,6 +201,7 @@ func TestPublicAPIDisabledEnabledAndRateLimited(t *testing.T) {
 }
 
 func TestPublicDashboardFailureCacheAndFreshBucketEviction(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	failure := errors.New("dashboard builder failed")
 	now := time.Now().UTC()
@@ -228,6 +234,7 @@ func TestPublicDashboardFailureCacheAndFreshBucketEviction(t *testing.T) {
 }
 
 func TestPublicHTMLCarriesNoIndexHeader(t *testing.T) {
+	t.Parallel()
 	server := &Server{}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/public", nil)
@@ -238,6 +245,7 @@ func TestPublicHTMLCarriesNoIndexHeader(t *testing.T) {
 }
 
 func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -314,6 +322,7 @@ func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testin
 }
 
 func TestPublicDashboardSaveFailureDoesNotExposeStoreDetails(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -355,6 +364,7 @@ func TestPublicDashboardSaveFailureDoesNotExposeStoreDetails(t *testing.T) {
 }
 
 func TestLatestLegacyPublicHostsLimitsEachJobIndependently(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -419,6 +429,7 @@ func TestLatestLegacyPublicHostsLimitsEachJobIndependently(t *testing.T) {
 }
 
 func TestLatestLegacyPublicHostsHonorsCanceledContext(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -434,6 +445,7 @@ func TestLatestLegacyPublicHostsHonorsCanceledContext(t *testing.T) {
 }
 
 func TestCachedPublicDashboardPayloadReusesShortLivedProjection(t *testing.T) {
+	t.Parallel()
 	server := &Server{}
 	dashboard := store.PublicDashboard{Enabled: true, Title: "Status", Introduction: "hello"}
 	first, err := server.cachedPublicDashboardPayload(context.Background(), server.publicDashboardGeneration(), dashboard)
@@ -463,6 +475,7 @@ func TestCachedPublicDashboardPayloadReusesShortLivedProjection(t *testing.T) {
 }
 
 func TestCachedPublicDashboardBuildOutlivesCanceledRequester(t *testing.T) {
+	t.Parallel()
 	started := make(chan struct{})
 	release := make(chan struct{})
 	server := &Server{publicDashboardBuildFunc: func(ctx context.Context, _ store.PublicDashboard) (publicDashboardResponse, error) {
@@ -506,6 +519,7 @@ func TestCachedPublicDashboardBuildOutlivesCanceledRequester(t *testing.T) {
 }
 
 func TestPublicCacheFastPathIgnoresEntriesFromAnOlderGeneration(t *testing.T) {
+	t.Parallel()
 	server := &Server{}
 	server.publicCache = &publicDashboardCache{key: "stale", generation: 0, expiresAt: time.Now().UTC().Add(time.Minute), payload: []byte(`{"title":"published-v1"}`)}
 	if _, ok := server.cachedPublicDashboardResponse(); !ok {
@@ -523,6 +537,7 @@ func TestPublicCacheFastPathIgnoresEntriesFromAnOlderGeneration(t *testing.T) {
 }
 
 func TestPublicAPIStopsRereadingAPublicationThatKeepsChanging(t *testing.T) {
+	t.Parallel()
 	server, db, _ := newUsersTestServer(t)
 	if err := defaultTenant(db).SavePublicDashboard(context.Background(), store.PublicDashboard{Enabled: true, Title: "Status"}, nil, store.AuditEntry{}); err != nil {
 		t.Fatal(err)

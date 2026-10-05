@@ -55,6 +55,7 @@ func requireScanCanceledByPause(t *testing.T, f twoTenants, scan model.Scan, eve
 // host scan runs as before while the unit is paused, and so does the
 // unit's next one once the unit is enabled again.
 func TestHostScanFinishingAfterDisableUnitChangesNothing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	// A second application on its own connection to the database stands in
@@ -140,6 +141,7 @@ func (s disablingScanner) Scan(context.Context, config.Job) (model.Snapshot, err
 // scan is recorded as canceled and changes neither the paused unit's
 // baseline nor its alerts.
 func TestDaemonScanFinishingDuringDisableUnitChangesNothing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	alertsBefore := unitAlerts(t, f.db, secondTenantID)

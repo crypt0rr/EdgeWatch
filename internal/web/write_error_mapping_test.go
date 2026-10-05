@@ -78,6 +78,7 @@ func jobWriteRequest(method, path, body, requestID string) *http.Request {
 }
 
 func TestJobWritesReportStorageFailuresAsInternalErrors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	var logs bytes.Buffer
@@ -146,6 +147,7 @@ func TestJobWritesReportStorageFailuresAsInternalErrors(t *testing.T) {
 }
 
 func TestJobProfileRevisionLookupFailureIsAnInternalError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	var logs bytes.Buffer
@@ -167,6 +169,7 @@ func TestJobProfileRevisionLookupFailureIsAnInternalError(t *testing.T) {
 }
 
 func TestJobProfileSelectionErrorsRemainFieldValidation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	operator := admin
@@ -234,6 +237,7 @@ func TestJobProfileSelectionErrorsRemainFieldValidation(t *testing.T) {
 }
 
 func TestJobValidationUsesTypedFieldsInsteadOfSearchingJobName(t *testing.T) {
+	t.Parallel()
 	server, _, admin := newUsersTestServer(t)
 	cases := []struct {
 		name  string
@@ -289,6 +293,7 @@ func TestJobValidationUsesTypedFieldsInsteadOfSearchingJobName(t *testing.T) {
 }
 
 func TestScannerProfileWritesMapStorageFailuresAndMissingProfiles(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	var logs bytes.Buffer
@@ -342,6 +347,7 @@ func TestScannerProfileWritesMapStorageFailuresAndMissingProfiles(t *testing.T) 
 }
 
 func TestCreateJobRejectsMalformedDottedNumericTarget(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	request := jobWriteRequest(http.MethodPost, "/api/v1/jobs", `{"name":"invalid-target","schedule":"0 * * * *","timezone":"UTC","targets":["192.168.1.300"],"tcp":{"ports":"22","mode":"connect","engine":"nmap"}}`, "invalid-target")
@@ -361,6 +367,7 @@ func TestCreateJobRejectsMalformedDottedNumericTarget(t *testing.T) {
 }
 
 func TestJobNamesAreBoundedAndRejectControlCharacters(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	operator := admin
@@ -425,6 +432,7 @@ func TestJobNamesAreBoundedAndRejectControlCharacters(t *testing.T) {
 }
 
 func TestMaximumLengthJobNameKeepsEventWritesWorking(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	name := strings.Repeat("🙂", maxJobNameCharacters)

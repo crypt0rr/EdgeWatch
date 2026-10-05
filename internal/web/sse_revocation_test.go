@@ -46,6 +46,7 @@ func assertSSEStreamStillOpen(t *testing.T, done <-chan struct{}, name string) {
 }
 
 func TestSSESessionRevocationCancelsOnlyMatchingStream(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	rawA, sessionA := loginSSETestSession(t, server)
 	rawB, sessionB := loginSSETestSession(t, server)
@@ -72,6 +73,7 @@ func TestSSESessionRevocationCancelsOnlyMatchingStream(t *testing.T) {
 }
 
 func TestSSEUserRevocationCanPreserveCurrentSession(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	rawA, sessionA := loginSSETestSession(t, server)
 	rawB, sessionB := loginSSETestSession(t, server)
@@ -92,6 +94,7 @@ func TestSSEUserRevocationCanPreserveCurrentSession(t *testing.T) {
 }
 
 func TestLogoutCancelsOriginatingSSEStream(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	raw, session := loginSSETestSession(t, server)
 	_, cancel, done := startCookieSSEStream(server, raw, session)

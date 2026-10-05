@@ -48,7 +48,6 @@ func journalMode(t *testing.T, s *Store) string {
 // storage problem: the open keeps the writer connection for reads and does
 // not warn that WAL is unavailable.
 func TestOpeningABackupWithoutWALLogsNoWarning(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	path := writeRollbackJournalBackup(t)
 	logs := captureDefaultLog(t)

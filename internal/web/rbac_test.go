@@ -19,6 +19,7 @@ import (
 )
 
 func TestRBACSeparatesViewerReadsAndOperatorNotificationManagement(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {

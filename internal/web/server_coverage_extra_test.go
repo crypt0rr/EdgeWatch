@@ -23,6 +23,7 @@ import (
 )
 
 func TestServerErrorMappingHelpers(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	for _, test := range []struct {
 		name string
@@ -112,6 +113,7 @@ func TestServerErrorMappingHelpers(t *testing.T) {
 }
 
 func TestWriteInternalErrorRedactsDetailsAndIncludesRequestID(t *testing.T) {
+	t.Parallel()
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	request = request.WithContext(context.WithValue(request.Context(), requestIDContextKey{}, "req-123"))
 	for _, test := range []struct {
@@ -137,6 +139,7 @@ func TestWriteInternalErrorRedactsDetailsAndIncludesRequestID(t *testing.T) {
 }
 
 func TestNotificationDestinationRouteGuardsAndTestDelivery(t *testing.T) {
+	t.Parallel()
 	server, _, admin := newUsersTestServer(t)
 	for _, test := range []struct {
 		name, method, rest string
@@ -203,6 +206,7 @@ func TestNotificationDestinationRouteGuardsAndTestDelivery(t *testing.T) {
 }
 
 func TestNotificationDestinationDeliveryFailureUsesGatewayStatus(t *testing.T) {
+	t.Parallel()
 	server, _, admin := newUsersTestServer(t)
 	destination, err := server.App.Notifier.Tenant(defaultTenantStore(server)).CreateManagedWithAudit(context.Background(), "Unreachable", "generic://127.0.0.1:1/edgewatch?disabletls=yes&template=json", true, store.AuditEntry{})
 	if err != nil {
@@ -218,6 +222,7 @@ func TestNotificationDestinationDeliveryFailureUsesGatewayStatus(t *testing.T) {
 }
 
 func TestNotificationTestRateLimitIsScopedPerDestination(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/one/test", nil)
 	request.RemoteAddr = "127.0.0.8:4008"
@@ -233,6 +238,7 @@ func TestNotificationTestRateLimitIsScopedPerDestination(t *testing.T) {
 }
 
 func TestServerSetupStatusAndRouteGuards(t *testing.T) {
+	t.Parallel()
 	server, db, admin := newUsersTestServer(t)
 	ctx := context.Background()
 	status := httptest.NewRecorder()
@@ -268,6 +274,7 @@ func TestServerSetupStatusAndRouteGuards(t *testing.T) {
 }
 
 func TestServerAuthenticationAndAuditFailureResponses(t *testing.T) {
+	t.Parallel()
 	server, db, admin := newUsersTestServer(t)
 	badSetup := httptest.NewRecorder()
 	setupRequest := httptest.NewRequest(http.MethodPost, "/api/v1/setup", strings.NewReader(`{"token":"bad","password":"short"}`))
@@ -313,6 +320,7 @@ func TestServerAuthenticationAndAuditFailureResponses(t *testing.T) {
 }
 
 func TestRunJobGuardsMissingArchivedAndActive(t *testing.T) {
+	t.Parallel()
 	server, db, admin := newUsersTestServer(t)
 	ctx := context.Background()
 	missing := httptest.NewRecorder()
@@ -348,6 +356,7 @@ func TestRunJobGuardsMissingArchivedAndActive(t *testing.T) {
 }
 
 func TestServerPaginationAndSSEBoundaryHelpers(t *testing.T) {
+	t.Parallel()
 	request := httptest.NewRequest(http.MethodGet, "/?limit=bad", nil)
 	if offset, err := queryOffset(request); queryLimit(request) != 50 || offset != 0 || err != nil {
 		t.Fatal("invalid query values did not default")
@@ -438,6 +447,7 @@ func TestServerPaginationAndSSEBoundaryHelpers(t *testing.T) {
 }
 
 func TestSSECursorReservationRecoversAfterStartupFailure(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -477,6 +487,7 @@ func TestSSECursorReservationRecoversAfterStartupFailure(t *testing.T) {
 }
 
 func TestSSEReservationFailureBackoffCapsAndRecoversMonotonically(t *testing.T) {
+	t.Parallel()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -537,6 +548,7 @@ func TestSSEReservationFailureBackoffCapsAndRecoversMonotonically(t *testing.T) 
 }
 
 func TestListenAndServeEnforcesLoopbackAndJoinsOnShutdown(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	for _, address := range []string{"0.0.0.0:8080", "example.com:8080", "127.0.0.1:0", "not-a-listener"} {
 		if err := server.ListenAndServe(context.Background(), address); err == nil {

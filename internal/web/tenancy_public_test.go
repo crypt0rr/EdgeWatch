@@ -166,6 +166,7 @@ const publicTenantAPage = `{"title":"Tenant A status","introduction":"A","update
 // with the same name. The other tenant's page, read through its own scope,
 // shows only its own observations.
 func TestPublicAPIServesTheDefaultTenantUnchanged(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newPublicTenantFixture(t)
 	for i, path := range []string{"/api/public/v1/dashboard", "/api/public/v1/dashboard/"} {
@@ -212,6 +213,7 @@ func TestPublicAPIServesTheDefaultTenantUnchanged(t *testing.T) {
 // as a host of an unknown job does. Their saves leave the default tenant's
 // page, and the public API that serves it, unchanged.
 func TestPublicDashboardRouteUsesTheSessionTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newPublicTenantFixture(t)
 	other, err := defaultTenant(f.db).CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
@@ -286,6 +288,7 @@ func TestPublicDashboardRouteUsesTheSessionTenant(t *testing.T) {
 // cache in place. With one tenant, the default page keeps the server's single
 // cache.
 func TestPublicPageCacheIsKeyedPerScope(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newPublicTenantFixture(t)
 	scopeB, err := f.db.PublicScopeBySlug(ctx, "other")

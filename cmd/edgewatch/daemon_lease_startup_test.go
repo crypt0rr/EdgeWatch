@@ -79,6 +79,7 @@ func writeDaemonLeaseConfig(t *testing.T, dir, database string) string {
 // before it migrates the schema or rewrites startup_state. Migrations are
 // forward-only, so the running daemon could not restart on the upgraded file.
 func TestDaemonRefusesLiveLeaseBeforeMigrating(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")
 	supported := seedDaemonLeaseDatabase(t, database, 0)
@@ -112,6 +113,7 @@ func TestDaemonRefusesLiveLeaseBeforeMigrating(t *testing.T) {
 // time (no database yet) still migrates and starts. The occupied listener makes
 // startup fail only after the database work is done.
 func TestDaemonStartsWithoutLiveLease(t *testing.T) {
+	t.Parallel()
 	t.Run("stale lease", func(t *testing.T) {
 		dir := t.TempDir()
 		database := filepath.Join(dir, "edgewatch.db")

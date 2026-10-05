@@ -17,6 +17,7 @@ import (
 )
 
 func TestAppRiskHelpersAndSchedulerBranches(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.FixedZone("test", 3600))
 	a := &App{clock: func() time.Time { return now }}
 	if got := a.nowUTC(); !got.Equal(now.UTC()) {
@@ -81,6 +82,7 @@ func TestAppRiskHelpersAndSchedulerBranches(t *testing.T) {
 }
 
 func TestAppStartTrackedAndManagedSchedulerSkips(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {

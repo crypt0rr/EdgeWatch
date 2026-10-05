@@ -50,6 +50,7 @@ func readSetupStatus(t *testing.T, server *Server) map[string]any {
 // administrator that can sign in, once. Each failed attempt is recorded in
 // platform scope, outside every unit's audit.
 func TestPlatformSetupRouteRedeemsTheHostToken(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, _ := newUsersTestServer(t)
 	if got, ok := readSetupStatus(t, server)["platform_setup_available"]; !ok || got != false {
@@ -134,6 +135,7 @@ func TestPlatformSetupRouteRedeemsTheHostToken(t *testing.T) {
 // status leaves them out once several units exist. With a single unit they
 // are reported as before.
 func TestAdminStatusLeavesOutLiveUpdateCountersWithSeveralUnits(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	liveUpdates := func(actor string) (any, bool) {
 		t.Helper()

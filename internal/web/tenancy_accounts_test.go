@@ -123,6 +123,7 @@ func (f tenantAccountsFixture) call(account, method, path, body string) *httptes
 // tenant. The second tenant's own account routes, self-service, and job
 // writes work, and their audit records belong to it.
 func TestUserRoutesUseTheSessionTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantAccountsFixture(t)
 	db, own, call := f.db, f.own, f.call
@@ -294,6 +295,7 @@ func jsonValue(t *testing.T, value any) any {
 // status of the default tenant's destinations. Another tenant's view counts
 // its own jobs and destinations and leaves out the database size.
 func TestStatusUsesTheSessionTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantAccountsFixture(t)
 	job := config.Job{Name: "edge", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "22", Mode: "connect"}}
@@ -362,6 +364,7 @@ func TestStatusUsesTheSessionTenant(t *testing.T) {
 // request's refresh stops when its context ends or takes the refreshed
 // value.
 func TestTenantTelemetryCache(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantAccountsFixture(t)
 	first, err := f.server.cachedTenantTelemetry(ctx, f.own)
@@ -408,6 +411,7 @@ func TestTenantTelemetryCache(t *testing.T) {
 // until the default tenant enables its page, whatever another tenant does
 // with its own page.
 func TestSetupStatusReportsTheDefaultPublicPage(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantAccountsFixture(t)
 	flag := func() any {

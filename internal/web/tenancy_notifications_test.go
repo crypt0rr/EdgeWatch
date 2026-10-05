@@ -22,6 +22,7 @@ import (
 // does selecting it for a job or for the update routing. The first tenant's
 // destination and routing stay as they are, and no response names a URL.
 func TestNotificationRoutesUseTheSessionTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "routed", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
@@ -193,6 +194,7 @@ func TestNotificationRoutesUseTheSessionTenant(t *testing.T) {
 // A tenant store without a tenant, which the router never passes, fails the
 // notification routes closed instead of reading any tenant's destinations.
 func TestNotificationRoutesFailClosedWithoutATenant(t *testing.T) {
+	t.Parallel()
 	server, _, admin := newUsersTestServer(t)
 	none := server.Store.Tenant(store.TenantScope{})
 	rec := httptest.NewRecorder()

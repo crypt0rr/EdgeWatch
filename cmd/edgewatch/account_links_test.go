@@ -18,6 +18,7 @@ import (
 // the original administrator, and records each revocation as a host action
 // that names the account. Another account's link still works.
 func TestHostPasswordResetRevokesTheAccountsLinks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := storetest.OpenFresh(t)
 	now := time.Now().UTC()

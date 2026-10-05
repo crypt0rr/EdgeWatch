@@ -20,6 +20,7 @@ import (
 )
 
 func TestNotificationValidationAndSecretCryptoBranches(t *testing.T) {
+	t.Parallel()
 	if providerForURL("GENERIC://localhost/path") != "generic" {
 		t.Fatal("provider scheme was not normalized")
 	}
@@ -127,6 +128,7 @@ func TestNotificationValidationAndSecretCryptoBranches(t *testing.T) {
 }
 
 func TestRemoveInterruptedKeyOnlyRemovesExpectedEmptyFiles(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "missing")
 	if err := removeInterruptedKey(missing, 0); !errors.Is(err, os.ErrNotExist) {
@@ -155,6 +157,7 @@ func TestRemoveInterruptedKeyOnlyRemovesExpectedEmptyFiles(t *testing.T) {
 }
 
 func TestNotifierRecoversInterruptedKeyAndResolvesManagedSelectors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -211,6 +214,7 @@ func TestNotifierRecoversInterruptedKeyAndResolvesManagedSelectors(t *testing.T)
 }
 
 func TestNotifierDeploymentSelectorCompatibilityBranches(t *testing.T) {
+	t.Parallel()
 	url := "generic://localhost/fallback?disabletls=yes&template=json"
 	withoutStore, err := newWithKeyFile(nil, []string{url}, filepath.Join(t.TempDir(), "notification.key"), true)
 	if err != nil {
@@ -246,6 +250,7 @@ func TestNotifierDeploymentSelectorCompatibilityBranches(t *testing.T) {
 }
 
 func TestNotifierLockedAndErrorBranches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -317,6 +322,7 @@ func TestNotifierLockedAndErrorBranches(t *testing.T) {
 }
 
 func TestNotifierDeliveryFailureAndCancellationBranches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {

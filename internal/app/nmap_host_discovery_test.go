@@ -18,6 +18,7 @@ import (
 )
 
 func TestManagedNmapHostDiscoveryLearnsMixedTCPAndUDPAndReportsDown(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "host-state")

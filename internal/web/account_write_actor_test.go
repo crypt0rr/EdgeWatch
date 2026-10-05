@@ -143,6 +143,7 @@ func expectGateRefusal(t *testing.T, response *httptest.ResponseRecorder) {
 // session or audit record is written. Without the demotion the same request
 // succeeds.
 func TestAccountWritesStopWhenTheAdministratorIsDemoted(t *testing.T) {
+	t.Parallel()
 	for _, route := range []struct {
 		name, method, path, body string
 		ok                       int
@@ -248,6 +249,7 @@ func TestAccountWritesStopWhenTheAdministratorIsDemoted(t *testing.T) {
 // no usable link: the disable revoked the older ones, and none was written
 // after it. Without the disable the same request succeeds.
 func TestLinksStopWhenTheUnitIsDisabled(t *testing.T) {
+	t.Parallel()
 	for _, route := range []struct {
 		name, path, body string
 		ok               int

@@ -17,6 +17,7 @@ import (
 // not found; a failed read is an internal error that keeps its storage
 // detail out of the response. Neither run starts.
 func TestRunRefusesAJobWhoseProbeBudgetCannotBeRead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	newJob := func(ts *store.TenantStore, name string) store.JobRecord {

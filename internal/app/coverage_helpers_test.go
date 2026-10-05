@@ -10,6 +10,7 @@ import (
 )
 
 func TestResumableMetadataAndProgressAreMonotonic(t *testing.T) {
+	t.Parallel()
 	run := &activeRun{scan: model.ActiveScan{ProgressPercent: 40, CycleCompletedProbes: 8, CycleTotalProbes: 10, CycleCompletedUnits: 2, CycleTotalUnits: 3}}
 	cycle := store.ScanCycleRecord{ID: "cycle-1", AttemptCount: 2, Status: "running", CompletedProbes: 6, TotalProbes: 12, CompletedUnits: 1, TotalUnits: 2, NoProgressAttempts: 1}
 	setActiveCycle(run, cycle, "scanning", 3)
@@ -29,6 +30,7 @@ func TestResumableMetadataAndProgressAreMonotonic(t *testing.T) {
 }
 
 func TestExpiredCycleAttemptCopiesDurableFailureMetadata(t *testing.T) {
+	t.Parallel()
 	var scan model.Scan
 	cycle := store.ScanCycleRecord{ID: "expired", Status: "expired", AttemptCount: 4, CompletedProbes: 12, TotalProbes: 20, CompletedUnits: 2, TotalUnits: 5, NoProgressAttempts: 3}
 	handled, snapshot, err := expiredCycleAttempt(&scan, cycle)
@@ -41,6 +43,7 @@ func TestExpiredCycleAttemptCopiesDurableFailureMetadata(t *testing.T) {
 }
 
 func TestRetryableResumableErrorClassifiesNilAndConfigurationMarkers(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		err  error

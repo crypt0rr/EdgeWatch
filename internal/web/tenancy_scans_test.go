@@ -22,6 +22,7 @@ import (
 // route and under its own job, and its host inventory and search show only
 // its own scan's host.
 func TestScanRoutesUseTheSessionTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "tenant-scan-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"}})

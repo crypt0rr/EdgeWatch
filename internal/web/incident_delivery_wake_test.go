@@ -16,6 +16,7 @@ import (
 )
 
 func TestIncidentActionsWakeDeliveryWorker(t *testing.T) {
+	t.Parallel()
 	deliveries := make(chan string, 4)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)

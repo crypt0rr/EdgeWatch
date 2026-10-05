@@ -30,6 +30,7 @@ func tenantRecord(t *testing.T, db *store.Store, id string) store.TenantRecord {
 // startup warns that experimental.business_units is obsolete, whatever its
 // value. Without the setting there is no such warning.
 func TestStartupWarnsAboutTheObsoleteBusinessUnitsSetting(t *testing.T) {
+	t.Parallel()
 	s := storetest.OpenFresh(t)
 	for name, value := range map[string]*bool{"omitted": nil, "true": ptrTo(true), "false": ptrTo(false)} {
 		cfg := routingTestConfig(s.Path)
@@ -53,6 +54,7 @@ func TestStartupWarnsAboutTheObsoleteBusinessUnitsSetting(t *testing.T) {
 // A new unit is active and starts with the initial capacity of the
 // deployment's limits, and it can be renamed.
 func TestCreateAndRenameUnit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	third, err := f.app.CreateUnit(ctx, "Third", "third", store.AuditEntry{ActorKind: store.AuditActorHost})
@@ -79,6 +81,7 @@ func TestCreateAndRenameUnit(t *testing.T) {
 // jobs from the schedule. The default unit's queued run takes the freed
 // slot and completes, and its accounts and schedule are untouched.
 func TestDisableUnitPausesTheUnitsWork(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	sc := gatedScanner{started: make(chan string, 2), finish: make(chan struct{})}
 	f := newTwoTenants(t, sc, lifecycleJob)
@@ -194,6 +197,7 @@ func TestDisableUnitPausesTheUnitsWork(t *testing.T) {
 // the pause could not see the run, so the run is cancelled as it registers;
 // a run of another unit is not.
 func TestRegisterRunCancelsARunOfAPausedUnit(t *testing.T) {
+	t.Parallel()
 	a := &App{}
 	a.pauseUnit(secondTenantID)
 	paused, cancelPaused := context.WithCancel(context.Background())
@@ -219,6 +223,7 @@ func TestRegisterRunCancelsARunOfAPausedUnit(t *testing.T) {
 // watchdog judges them from the moment the unit was enabled. The default
 // unit's job, silent for as long, alerts; the re-enabled unit's does not.
 func TestEnableUnitResumesTheUnitWithoutASilenceAlert(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	old := time.Now().Add(-30 * 24 * time.Hour).UTC().Format(time.RFC3339Nano)
@@ -346,6 +351,7 @@ func TestPurgeDeletedUnitsLogsEachPass(t *testing.T) {
 }
 
 func TestPurgeDeletedUnitsCompletesQueuedJobHistoryDeletion(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	tenant := f.db.Tenant(f.a)
@@ -458,6 +464,7 @@ func holdSnapshot(t *testing.T, s *store.Store) *sql.Tx {
 // a reader keeps its checkpoint from truncating the log, logs when it has
 // finished, and then leaves it alone.
 func TestPurgeDeletedUnitsCleansUpAfterUnitsDeletedByEarlierReleases(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := storeWithLegacyDeletion(t)
 	var logs bytes.Buffer
@@ -492,6 +499,7 @@ func TestPurgeDeletedUnitsCleansUpAfterUnitsDeletedByEarlierReleases(t *testing.
 // While a unit is being deleted, the cleanup waits for its purge, and the
 // purge that finishes the unit finishes the cleanup too.
 func TestPurgeDeletedUnitsLetsAUnitPurgeFinishTheCleanup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := storeWithLegacyDeletion(t)
 	var logs bytes.Buffer
@@ -524,6 +532,7 @@ func TestPurgeDeletedUnitsLetsAUnitPurgeFinishTheCleanup(t *testing.T) {
 // pending and warns about the reader, and the unit stays deleting. The next
 // pass without the reader finishes the purge.
 func TestPurgeDeletedUnitsWarnsWhileAReaderKeepsTheLog(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	var logs bytes.Buffer
@@ -567,6 +576,7 @@ func TestPurgeDeletedUnitsWarnsWhileAReaderKeepsTheLog(t *testing.T) {
 // Deleting a disabled unit wakes the daemon's purge worker, which erases the
 // unit and leaves a tombstone, while the default unit keeps its job.
 func TestRequestUnitDeletionPurgesTheUnit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	workerCtx, stop := context.WithCancel(ctx)

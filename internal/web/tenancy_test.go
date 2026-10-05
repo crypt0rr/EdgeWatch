@@ -70,6 +70,7 @@ func crossTenantScopeUses(fset *token.FileSet, file *ast.File) []string {
 // The daemon's cross-tenant store and the host scope lookup would let a
 // request choose another tenant's data, so no web code may use them.
 func TestWebCodeUsesOnlyTheSessionTenant(t *testing.T) {
+	t.Parallel()
 	paths, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
@@ -100,6 +101,7 @@ func TestWebCodeUsesOnlyTheSessionTenant(t *testing.T) {
 // The check finds both kinds of use, so a clean result above means
 // something.
 func TestCrossTenantScopeCheckFindsUses(t *testing.T) {
+	t.Parallel()
 	const source = `package web
 
 func leak(s *Server) {
@@ -124,6 +126,7 @@ func leak(s *Server) {
 // working. A failed lookup is an internal error rather than an empty tenant.
 // The cases share one server, because opening a database is the slow part.
 func TestRequestTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "tenant-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
@@ -195,6 +198,7 @@ func TestRequestTenant(t *testing.T) {
 // not see the job in the list and cannot reach it, or its scans and
 // baseline, by ID.
 func TestJobRoutesUseTheSessionTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "tenant-a-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})

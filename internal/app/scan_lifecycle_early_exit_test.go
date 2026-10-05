@@ -11,6 +11,7 @@ import (
 )
 
 func TestScanLifecycleCompletesWhenCycleStallsAfterStart(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	a, db := newLifecycleTestApp(t, &lifecycleScanner{}, nil)
 	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("stalled-lifecycle-event"))
@@ -54,6 +55,7 @@ func TestScanLifecycleCompletesWhenCycleStallsAfterStart(t *testing.T) {
 }
 
 func TestScanLifecycleCompletesWhenNotificationDestinationsCannotLoad(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	a, db := newLifecycleTestApp(t, schedulerFake{}, nil)
 	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("notification-config-lifecycle-event"))

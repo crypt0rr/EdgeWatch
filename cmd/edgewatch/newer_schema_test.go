@@ -60,6 +60,7 @@ func countCLIRows(t *testing.T, database, table string) int {
 // newer release upgraded. The write-capable host commands must refuse it too,
 // instead of committing rows into a schema they do not understand.
 func TestWriteCommandsRefuseNewerSchema(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name      string
 		withAdmin bool

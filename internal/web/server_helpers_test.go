@@ -16,6 +16,7 @@ import (
 )
 
 func TestRequiredPermissionAndMutationMatrix(t *testing.T) {
+	t.Parallel()
 	// The route inventory is the complete list of served routes. Every entry
 	// must resolve to its listed capability, and its mutation flag must agree
 	// with the CSRF classification that Server.api applies.
@@ -191,6 +192,7 @@ func TestRequiredPermissionAndMutationMatrix(t *testing.T) {
 }
 
 func TestServerHelpersValidateJSONPaginationAndHeaders(t *testing.T) {
+	t.Parallel()
 	items := []int{1, 2, 3}
 	if page, metadata := pageSlice(items, 10, 20); len(page) != 0 || metadata["total"] != 3 {
 		t.Fatalf("out-of-range page = %#v %#v", page, metadata)
@@ -283,6 +285,7 @@ func TestServerHelpersValidateJSONPaginationAndHeaders(t *testing.T) {
 }
 
 func TestServerScopeAndDurationHelpers(t *testing.T) {
+	t.Parallel()
 	old := config.Job{
 		Targets: []string{"edge.example"}, MaxExpandedHosts: 4, AssumeAlive: boolPtr(true),
 		TCP: &config.Protocol{Ports: "22", Mode: "syn", ServiceDetection: true},
@@ -327,6 +330,7 @@ func TestServerScopeAndDurationHelpers(t *testing.T) {
 }
 
 func TestSecurityScopeChangesIncludesDNSComparisonMode(t *testing.T) {
+	t.Parallel()
 	old := config.Job{Targets: []string{"edge.example"}, TCP: &config.Protocol{Ports: "443"}}
 	next := old
 	next.DNSComparisonMode = config.DNSComparisonAggregate
@@ -340,6 +344,7 @@ func TestSecurityScopeChangesIncludesDNSComparisonMode(t *testing.T) {
 }
 
 func TestWriteStoreWriteErrorMapsValidationMissingAndStorageFailures(t *testing.T) {
+	t.Parallel()
 	server := &Server{}
 	request := httptest.NewRequest(http.MethodPut, "/api/v1/jobs/job-1", nil)
 	for name, tc := range map[string]struct {

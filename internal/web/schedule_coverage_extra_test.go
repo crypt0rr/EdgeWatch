@@ -19,6 +19,7 @@ import (
 )
 
 func TestScheduleSuggestionValidationAndFiltering(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -96,6 +97,7 @@ func TestScheduleSuggestionValidationAndFiltering(t *testing.T) {
 }
 
 func TestParseNextRunAndShiftCronMinuteBoundaries(t *testing.T) {
+	t.Parallel()
 	parser := cronParserForCoverage()
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
 	for _, test := range []struct {

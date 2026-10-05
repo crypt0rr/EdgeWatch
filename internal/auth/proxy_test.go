@@ -16,6 +16,7 @@ import (
 )
 
 func TestClientIPIgnoresUntrustedForwardingHeaders(t *testing.T) {
+	t.Parallel()
 	m := NewManager(nil)
 	request := httptest.NewRequest("GET", "/", nil)
 	request.RemoteAddr = "127.0.0.1:8080"
@@ -26,6 +27,7 @@ func TestClientIPIgnoresUntrustedForwardingHeaders(t *testing.T) {
 }
 
 func TestIsTrustedProxyOnlyConsidersDirectPeer(t *testing.T) {
+	t.Parallel()
 	m := NewManager(nil)
 	if err := m.SetTrustedProxies([]string{"127.0.0.1/32"}); err != nil {
 		t.Fatal(err)
@@ -45,6 +47,7 @@ func TestIsTrustedProxyOnlyConsidersDirectPeer(t *testing.T) {
 }
 
 func TestClientIPResolvesConfiguredProxyChain(t *testing.T) {
+	t.Parallel()
 	m := NewManager(nil)
 	if err := m.SetTrustedProxies([]string{"127.0.0.1/32", "10.0.0.0/8"}); err != nil {
 		t.Fatal(err)
@@ -66,6 +69,7 @@ func TestClientIPResolvesConfiguredProxyChain(t *testing.T) {
 }
 
 func TestClientIPUsesXForwardedForWhenBothHeadersArePresent(t *testing.T) {
+	t.Parallel()
 	m := NewManager(nil)
 	if err := m.SetTrustedProxies([]string{"10.0.0.5/32"}); err != nil {
 		t.Fatal(err)
@@ -81,6 +85,7 @@ func TestClientIPUsesXForwardedForWhenBothHeadersArePresent(t *testing.T) {
 }
 
 func TestClientIPUsesConfiguredForwardedHeaderOnly(t *testing.T) {
+	t.Parallel()
 	m := NewManager(nil)
 	if err := m.SetTrustedProxies([]string{"10.0.0.5/32"}); err != nil {
 		t.Fatal(err)
@@ -111,6 +116,7 @@ func TestClientIPUsesConfiguredForwardedHeaderOnly(t *testing.T) {
 }
 
 func TestClientIPUsesXForwardedForWhenForwardedHasNoForParameter(t *testing.T) {
+	t.Parallel()
 	m := NewManager(nil)
 	if err := m.SetTrustedProxies([]string{"10.0.0.5/32"}); err != nil {
 		t.Fatal(err)
@@ -126,6 +132,7 @@ func TestClientIPUsesXForwardedForWhenForwardedHasNoForParameter(t *testing.T) {
 }
 
 func TestLoginRateLimitCannotBeBypassedByRotatingForwardedHeader(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -161,6 +168,7 @@ func TestLoginRateLimitCannotBeBypassedByRotatingForwardedHeader(t *testing.T) {
 }
 
 func TestSharedLoopbackLoginAttemptsAreCooledDownAndCanRecover(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -205,6 +213,7 @@ func TestSharedLoopbackLoginAttemptsAreCooledDownAndCanRecover(t *testing.T) {
 }
 
 func TestRetryAfterHeaderValueUsesSharedLoopbackCooldown(t *testing.T) {
+	t.Parallel()
 	if got := RetryAfterHeaderValue(ErrRateLimited); got != "300" {
 		t.Fatalf("default rate-limit Retry-After = %q, want 300", got)
 	}
@@ -220,6 +229,7 @@ func TestRetryAfterHeaderValueUsesSharedLoopbackCooldown(t *testing.T) {
 }
 
 func TestRotatingUnknownUsernamesRemainThrottledForRemotePeers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -249,6 +259,7 @@ func TestRotatingUnknownUsernamesRemainThrottledForRemotePeers(t *testing.T) {
 // answer nor its cost tells which names exist. Another client still gets
 // the ordinary answer, and the client signs in again once the block ends.
 func TestThrottledSignInAnswerDoesNotDependOnTheUsername(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, admin, _ := platformTestStore(t)
 	addSecondUnit(t, s)
@@ -391,6 +402,7 @@ func clientBudgetStore(t *testing.T, now time.Time) (*store.Store, string) {
 // client signs in again once the block ends, and the client's own bucket
 // for an account still records that account's failures.
 func TestEveryFailedSignInCountsAgainstTheClientBudget(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
 	s, wrongCode := clientBudgetStore(t, now)
@@ -474,6 +486,7 @@ func TestEveryFailedSignInCountsAgainstTheClientBudget(t *testing.T) {
 // on other names to get more attempts. The success clears the failures in
 // the client's bucket for the account it signed in to.
 func TestSuccessfulSignInsDoNotExtendTheClientBudget(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
 	s, _ := clientBudgetStore(t, now)
@@ -535,6 +548,7 @@ func TestSuccessfulSignInsDoNotExtendTheClientBudget(t *testing.T) {
 // it costs the client's budget nothing, whether or not the username
 // exists: afterwards each client still has its whole budget.
 func TestSignInRefusedByThePasswordCheckQueueCostsNoBudget(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
 	s, _ := clientBudgetStore(t, now)
@@ -576,6 +590,7 @@ func TestSignInRefusedByThePasswordCheckQueueCostsNoBudget(t *testing.T) {
 // A shared loopback peer keeps its short cooldown for every kind of failed
 // sign-in, and has no five-minute block from the per-client budget.
 func TestSharedLoopbackPeerKeepsItsCooldownForEveryFailure(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
 	s, wrongCode := clientBudgetStore(t, now)
@@ -606,6 +621,7 @@ func TestSharedLoopbackPeerKeepsItsCooldownForEveryFailure(t *testing.T) {
 }
 
 func TestSharedLoopbackTOTPFailuresAreCooledDown(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -649,6 +665,7 @@ func TestSharedLoopbackTOTPFailuresAreCooledDown(t *testing.T) {
 }
 
 func TestClientIPResolvesBracketedIPv6ProxyChain(t *testing.T) {
+	t.Parallel()
 	m := NewManager(nil)
 	if err := m.SetTrustedProxies([]string{"2001:db8::1/128"}); err != nil {
 		t.Fatal(err)
@@ -662,6 +679,7 @@ func TestClientIPResolvesBracketedIPv6ProxyChain(t *testing.T) {
 }
 
 func TestClientIPPreservesBareIPv6Address(t *testing.T) {
+	t.Parallel()
 	m := NewManager(nil)
 	request := httptest.NewRequest("GET", "/", nil)
 	request.RemoteAddr = "2001:db8::10"
@@ -675,6 +693,7 @@ func TestClientIPPreservesBareIPv6Address(t *testing.T) {
 }
 
 func TestLimiterKeyUsesStandardHostPortParsing(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		"192.0.2.10:443":        "192.0.2.10",
 		"[2001:db8::10]:443":    "2001:db8::10",
@@ -690,6 +709,7 @@ func TestLimiterKeyUsesStandardHostPortParsing(t *testing.T) {
 }
 
 func TestClientIPRejectsInvalidTrustedProxy(t *testing.T) {
+	t.Parallel()
 	m := NewManager(nil)
 	if err := m.SetTrustedProxies([]string{"not-an-ip"}); err == nil {
 		t.Fatal("invalid trusted proxy was accepted")
@@ -697,6 +717,7 @@ func TestClientIPRejectsInvalidTrustedProxy(t *testing.T) {
 }
 
 func TestLoginAuditRecordsResolvedClientIP(t *testing.T) {
+	t.Parallel()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -739,6 +760,7 @@ func TestLoginAuditRecordsResolvedClientIP(t *testing.T) {
 // through the peer succeeds once the cooldown ends. A client with its own
 // address keeps its budget.
 func TestSignInsThroughASharedLoopbackPeerKeepItsCooldown(t *testing.T) {
+	t.Parallel()
 	type attempt struct{ username, password, otp string }
 	wrongPassword := func(round, guess int) attempt {
 		return attempt{"unit-admin", fmt.Sprintf("wrong password %d-%d", round, guess), ""}
@@ -826,6 +848,7 @@ func TestSignInsThroughASharedLoopbackPeerKeepItsCooldown(t *testing.T) {
 // failed confirmations in five minutes. A client with its own address keeps
 // the backstop that blocks it for five minutes after a hundred failures.
 func TestLoopbackConfirmationFailuresCountAgainstTheirAccountOnly(t *testing.T) {
+	t.Parallel()
 	const secret = "JBSWY3DPEHPK3PXP"
 	for _, kind := range []string{"password", "totp"} {
 		for _, peer := range []string{"127.0.0.1:443", "[::1]:443", "198.51.100.90:443"} {

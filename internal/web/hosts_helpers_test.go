@@ -11,6 +11,7 @@ import (
 )
 
 func TestHostParsingAndPaginationHelpers(t *testing.T) {
+	t.Parallel()
 	request := httptest.NewRequest(http.MethodGet, "/?limit=7&offset=14", nil)
 	limit, offset, err := parseHostPagination(request)
 	if err != nil || limit != 7 || offset != 14 {
@@ -63,6 +64,7 @@ func TestHostParsingAndPaginationHelpers(t *testing.T) {
 }
 
 func TestLegacyHostDerivationMergesEvidenceAndScopes(t *testing.T) {
+	t.Parallel()
 	snapshot := model.Snapshot{
 		Scopes: []model.Scope{{Target: "DNS.Example", Protocol: "tcp", Ports: "22,80", ServiceDetection: true}},
 		Units: []model.Unit{
@@ -97,6 +99,7 @@ func TestLegacyHostDerivationMergesEvidenceAndScopes(t *testing.T) {
 }
 
 func TestHostDeduplicationMergesServicesAndSummaries(t *testing.T) {
+	t.Parallel()
 	host := model.HostObservation{
 		Address:       "198.51.100.3",
 		SourceTargets: []string{"target", "target"},
@@ -137,6 +140,7 @@ func TestHostDeduplicationMergesServicesAndSummaries(t *testing.T) {
 }
 
 func TestHostFilteringAndSnapshotFallback(t *testing.T) {
+	t.Parallel()
 	hosts := []model.HostObservation{
 		{
 			Address:       "198.51.100.10",

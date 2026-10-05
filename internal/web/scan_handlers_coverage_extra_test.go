@@ -36,6 +36,7 @@ func breakReadProjection(t *testing.T, db *store.Store, table string) {
 }
 
 func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "scan-error-handlers", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
@@ -170,6 +171,7 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 }
 
 func TestScanHandlersRedactJobLookupFailures(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "scan-job-lookup-failure", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.20"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
@@ -213,6 +215,7 @@ func TestScanHandlersRedactJobLookupFailures(t *testing.T) {
 }
 
 func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{
@@ -389,6 +392,7 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 }
 
 func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	newFixture := func(t *testing.T) (*Server, *store.Store, store.Session, store.JobRecord) {
 		t.Helper()
@@ -538,6 +542,7 @@ func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
 }
 
 func TestScanRunAndCancellationGuards(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "run-handler-coverage", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
@@ -568,6 +573,7 @@ func TestScanRunAndCancellationGuards(t *testing.T) {
 }
 
 func TestSecurityScopeChangesReportsAllSecurityInputs(t *testing.T) {
+	t.Parallel()
 	old := config.NormalizeJob(config.Job{Name: "scope", Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1, AssumeAlive: boolPtr(true), TCP: &config.Protocol{Ports: "22", Mode: "connect", ServiceDetection: false, Engine: config.EngineNmap}, UDP: &config.Protocol{Ports: "53", ServiceDetection: false}})
 	next := config.NormalizeJob(config.Job{Name: "scope", Targets: []string{"192.0.2.2"}, MaxExpandedHosts: 2, AssumeAlive: boolPtr(false), TCP: &config.Protocol{Ports: "443", Mode: "syn", ServiceDetection: true, Engine: config.EngineNaabuNmap, NSEProfile: "safe", Naabu: &config.NaabuOptions{ScanType: "syn", Verify: true}}, UDP: &config.Protocol{Ports: "5353", ServiceDetection: true}})
 	changes := securityScopeChanges(old, next)

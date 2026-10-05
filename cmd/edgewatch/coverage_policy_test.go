@@ -12,6 +12,7 @@ import (
 // check ensures a typo in deployment configuration cannot silently select an
 // unexpected logger threshold.
 func TestNewLoggerHonorsConfiguredLevels(t *testing.T) {
+	t.Parallel()
 	for _, level := range []string{"debug", "warn", "error", "info", "", " unknown "} {
 		logger := newLogger(level, nil)
 		if logger == nil {
@@ -29,6 +30,7 @@ func TestNewLoggerHonorsConfiguredLevels(t *testing.T) {
 // A configured deployment timezone must control daemon log timestamps, while an
 // omitted setting keeps the process timezone used before the option existed.
 func TestNewLoggerFormatsTimestampsInDeploymentTimezone(t *testing.T) {
+	t.Parallel()
 	// Kathmandu has a fixed +05:45 offset, so this cannot pass by accident on a
 	// host whose process timezone already matches the configured zone.
 	kathmandu, err := time.LoadLocation("Asia/Kathmandu")

@@ -19,6 +19,7 @@ import (
 // unit's account, the platform administrator, or no account. Another client
 // still gets the ordinary answer for an existing name.
 func TestThrottledSignInAnswerIsTheSameForEveryUsername(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	if _, err := f.a.CreateUser(context.Background(), store.User{Username: "alpha-disabled", Role: store.RoleViewer, PasswordHash: cheapPasswordHash(platformFixturePassword), Enabled: false}, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
@@ -62,6 +63,7 @@ func TestThrottledSignInAnswerIsTheSameForEveryUsername(t *testing.T) {
 // failures as a client that fails with unknown usernames, and from then on
 // both get the same answer for every username, including a right password.
 func TestSignInBudgetDoesNotDependOnWhichUsernamesExist(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	if _, err := f.a.CreateUser(context.Background(), store.User{Username: "alpha-disabled", Role: store.RoleViewer, PasswordHash: cheapPasswordHash(platformFixturePassword), Enabled: false}, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
@@ -116,6 +118,7 @@ func TestSignInBudgetDoesNotDependOnWhichUsernamesExist(t *testing.T) {
 // audit shows another unit's usernames, an unknown username, or a platform
 // administrator's source address.
 func TestRateLimitRecordsFollowTheAccount(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	send := func(remote, method, path, body string, account *routeMatrixSession) int {
 		t.Helper()

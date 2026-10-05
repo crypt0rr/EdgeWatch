@@ -21,6 +21,7 @@ import (
 // stays the break-glass path for a platform administrator, whose password
 // and TOTP it resets in platform scope.
 func TestAdminPlatformSetupToken(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	database := storetest.FreshPath(t)

@@ -15,6 +15,7 @@ import (
 )
 
 func TestDaemonRetentionMaintenanceKeepsHeartbeatAndScheduleResponsive(t *testing.T) {
+	t.Parallel()
 	a, db := newLifecycleTestApp(t, schedulerFake{}, io.Discard)
 	a.ReleaseChecker = nil
 	a.heartbeatInterval = 20 * time.Millisecond
@@ -102,6 +103,7 @@ func TestDaemonRetentionMaintenanceKeepsHeartbeatAndScheduleResponsive(t *testin
 }
 
 func TestRunMaintenancePassLogsSuccessfulCleanup(t *testing.T) {
+	t.Parallel()
 	a, db := newLifecycleTestApp(t, schedulerFake{}, io.Discard)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -138,6 +140,7 @@ func TestRunMaintenancePassLogsSuccessfulCleanup(t *testing.T) {
 }
 
 func TestRunMaintenancePassContinuesAfterFailures(t *testing.T) {
+	t.Parallel()
 	a, db := newLifecycleTestApp(t, schedulerFake{}, io.Discard)
 	ctx := context.Background()
 	for _, table := range []string{"sessions", "scan_cycles"} {

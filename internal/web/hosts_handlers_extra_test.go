@@ -20,6 +20,7 @@ import (
 )
 
 func TestHistoricalHostRoutesAndLegacyFallback(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -182,6 +183,7 @@ func TestHistoricalHostRoutesAndLegacyFallback(t *testing.T) {
 }
 
 func TestLatestScannedHostsWalksAllLegacyPagesAndSkipsMalformedRows(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {

@@ -88,9 +88,9 @@ type scanPageQueries struct {
 func jobScansPageQueries(tenantID, jobID string, limit, offset int) scanPageQueries {
 	limit, offset = normalizePage(limit, offset)
 	return scanPageQueries{
-		countSQL: `SELECT COUNT(*) FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=?`,
+		countSQL: `SELECT COUNT(*) FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)`,
 		countArg: []any{tenantID, jobID},
-		pageSQL:  `SELECT s.id,s.job_id,s.job_revision,s.job,s.started_at,s.finished_at,s.status,s.error,s.nmap_version,s.scanner_engine,s.scanner_profile_id,s.scanner_profile_revision,s.naabu_version,s.discovery_ports,s.confirmed_ports,s.discovery_duration_ms,s.enrichment_duration_ms,s.config_hash,s.cycle_id,s.cycle_attempt,s.cycle_status,s.resumable,s.completed_probes,s.total_probes,s.completed_units,s.total_units,s.no_progress_attempts,s.baseline_scan_id,s.baseline_config_hash,s.changes_json,s.snapshot_json FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? ORDER BY s.finished_at DESC,s.id DESC LIMIT ? OFFSET ?`,
+		pageSQL:  `SELECT s.id,s.job_id,s.job_revision,s.job,s.started_at,s.finished_at,s.status,s.error,s.nmap_version,s.scanner_engine,s.scanner_profile_id,s.scanner_profile_revision,s.naabu_version,s.discovery_ports,s.confirmed_ports,s.discovery_duration_ms,s.enrichment_duration_ms,s.config_hash,s.cycle_id,s.cycle_attempt,s.cycle_status,s.resumable,s.completed_probes,s.total_probes,s.completed_units,s.total_units,s.no_progress_attempts,s.baseline_scan_id,s.baseline_config_hash,s.changes_json,s.snapshot_json FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id) ORDER BY s.finished_at DESC,s.id DESC LIMIT ? OFFSET ?`,
 		pageArg:  []any{tenantID, jobID, limit, offset},
 	}
 }
@@ -204,7 +204,7 @@ func normalizePage(limit, offset int) (int, int) {
 func scanHostsPageQueries(tenantID, scanID, query, protocol string, hasOpen *bool, limit, offset int) scanPageQueries {
 	limit, offset = normalizePage(limit, offset)
 	filter := buildHostFilter(query, protocol, hasOpen)
-	where := append([]string{"h.scan_id=?"}, filter.where...)
+	where := append([]string{"h.scan_id=?", `NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)`}, filter.where...)
 	args := append([]any{tenantID, scanID}, filter.args...)
 	// The FTS projection deliberately mirrors scan_hosts.rowid. Joining on
 	// that stable row identifier lets SQLite constrain the host lookup to the
@@ -229,7 +229,7 @@ func scanHostsPageQueries(tenantID, scanID, query, protocol string, hasOpen *boo
 func latestScanHostsPageQueries(tenantID, query, protocol string, hasOpen *bool, limit, offset int) scanPageQueries {
 	limit, offset = normalizePage(limit, offset)
 	filter := buildHostFilter(query, protocol, hasOpen)
-	where := filter.where
+	where := append([]string{`NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=h.tenant_id AND purge.job_id=h.job_id)`}, filter.where...)
 	args := append([]any{tenantID}, filter.args...)
 	// latest_host_search mirrors latest_scan_hosts.rowid for the same bounded
 	// rowid-scoped lookup used by the per-scan history query.
@@ -318,10 +318,10 @@ func (ts *TenantStore) ListJobScanSummariesPage(ctx context.Context, jobID strin
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.ScanSummary]
 	readDB := ts.store.reader()
-	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=?`, ts.scope.id, jobID).Scan(&page.Total); err != nil {
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)`, ts.scope.id, jobID).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := readDB.QueryContext(ctx, `SELECT s.id,s.job_id,s.job_revision,s.job,s.started_at,s.finished_at,s.status,s.error,s.nmap_version,s.scanner_engine,s.scanner_profile_id,s.scanner_profile_revision,s.naabu_version,s.discovery_ports,s.confirmed_ports,s.discovery_duration_ms,s.enrichment_duration_ms,s.config_hash,s.cycle_id,s.cycle_attempt,s.cycle_status,s.resumable,s.completed_probes,s.total_probes,s.completed_units,s.total_units,s.no_progress_attempts,s.baseline_scan_id,s.baseline_config_hash FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? ORDER BY s.finished_at DESC,s.id DESC LIMIT ? OFFSET ?`, ts.scope.id, jobID, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT s.id,s.job_id,s.job_revision,s.job,s.started_at,s.finished_at,s.status,s.error,s.nmap_version,s.scanner_engine,s.scanner_profile_id,s.scanner_profile_revision,s.naabu_version,s.discovery_ports,s.confirmed_ports,s.discovery_duration_ms,s.enrichment_duration_ms,s.config_hash,s.cycle_id,s.cycle_attempt,s.cycle_status,s.resumable,s.completed_probes,s.total_probes,s.completed_units,s.total_units,s.no_progress_attempts,s.baseline_scan_id,s.baseline_config_hash FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id) ORDER BY s.finished_at DESC,s.id DESC LIMIT ? OFFSET ?`, ts.scope.id, jobID, limit, offset)
 	if err != nil {
 		return page, err
 	}

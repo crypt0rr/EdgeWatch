@@ -285,7 +285,13 @@ func schema52RowSnapshot(t *testing.T, db *sql.DB) string {
 // triggers. migration53_test.go and migration54_test.go check those.
 func schemaObjectsSnapshot(t *testing.T, db *sql.DB) string {
 	t.Helper()
-	schema53Objects := slices.Concat(schema53Tables, schema53Triggers, []string{"scans_tenant_id_time", "events_tenant_id_time"})
+	// These payload indexes are added by schema 62. The schema-52 fixture
+	// drops them before removing the tenant_id columns they depend on, and the
+	// later schema-62 step recreates them when the fixture is upgraded.
+	schema53Objects := slices.Concat(schema53Tables, schema53Triggers, []string{
+		"scans_tenant_id_time", "events_tenant_id_time",
+		"outbox_job_purge", "restore_quarantined_job_purge",
+	})
 	var out strings.Builder
 	if err := snapshotRows(db, `SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_master WHERE tbl_name NOT IN ('users','jobs','scanner_profiles','managed_notifications','latest_scan_hosts') AND name NOT IN ('`+strings.Join(schema53Objects, "','")+`') ORDER BY type,name`, &out); err != nil {
 		t.Fatal(err)

@@ -111,6 +111,7 @@ FROM scans s
 WHERE s.status='success'
   AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
   AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=s.id)
+  AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)
 ORDER BY s.finished_at,s.id LIMIT ?`, limits.maxScans)
 		if err != nil {
 			_ = tx.Rollback()
@@ -278,7 +279,8 @@ func countLegacyHostBackfillCandidates(ctx context.Context, db *sql.DB) (int64, 
 FROM scans s
 WHERE s.status='success'
   AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
-  AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=s.id)`).Scan(&total)
+  AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=s.id)
+  AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)`).Scan(&total)
 	return total, err
 }
 

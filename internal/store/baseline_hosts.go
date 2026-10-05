@@ -92,7 +92,7 @@ func (ts *TenantStore) BaselineHostProjectionExists(ctx context.Context, jobID s
 		return false, err
 	}
 	var exists bool
-	err := ts.store.reader().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM baseline_hosts b JOIN jobs j ON j.id=b.job_id AND j.tenant_id=? WHERE b.job_id=?)`, ts.scope.id, jobID).Scan(&exists)
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM baseline_hosts b JOIN jobs j ON j.id=b.job_id AND j.tenant_id=? WHERE b.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id))`, ts.scope.id, jobID).Scan(&exists)
 	return exists, err
 }
 
@@ -142,7 +142,7 @@ func (ts *TenantStore) ListBaselineHostsPage(ctx context.Context, jobID, query, 
 func baselineHostsPageQueries(tenantID, jobID, query, protocol string, hasOpen *bool, limit, offset int) scanPageQueries {
 	limit, offset = normalizePage(limit, offset)
 	filter := buildHostFilter(query, protocol, hasOpen)
-	where := append([]string{"h.job_id=?"}, filter.where...)
+	where := append([]string{"h.job_id=?", `NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`}, filter.where...)
 	args := append([]any{tenantID, jobID}, filter.args...)
 	if filter.searchText != "" {
 		// Use the same bounded FTS document as scan and latest-host queries.
@@ -176,7 +176,7 @@ func (ts *TenantStore) GetBaselineHost(ctx context.Context, jobID, address strin
 	}
 	var quality string
 	var raw []byte
-	err = ts.store.reader().QueryRowContext(ctx, `SELECT h.data_quality,h.host_json FROM baseline_hosts h JOIN jobs j ON j.id=h.job_id AND j.tenant_id=? WHERE h.job_id=? AND h.address=?`, ts.scope.id, jobID, normalized).Scan(&quality, &raw)
+	err = ts.store.reader().QueryRowContext(ctx, `SELECT h.data_quality,h.host_json FROM baseline_hosts h JOIN jobs j ON j.id=h.job_id AND j.tenant_id=? WHERE h.job_id=? AND h.address=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, ts.scope.id, jobID, normalized).Scan(&quality, &raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ScanHost{}, fmt.Errorf("%w: host %s", ErrNotFound, normalized)
 	}

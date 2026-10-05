@@ -419,6 +419,7 @@ FROM (
  CROSS JOIN scan_hosts h ON h.address=affected.address
  CROSS JOIN scans s ON s.id=h.scan_id
  WHERE s.tenant_id=affected.tenant_id AND s.status='success' AND s.tenant_id IN (SELECT id FROM tenants WHERE state IN ('active','disabled'))
+   AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)
 ) ranked WHERE rn=1`
 	return deleteSQL, insertSQL, args
 }
@@ -463,6 +464,7 @@ FROM (
         ROW_NUMBER() OVER (PARTITION BY s.tenant_id,h.address ORDER BY s.finished_at DESC,s.id DESC) AS rn
  FROM scan_hosts h JOIN scans s ON s.id=h.scan_id
  WHERE s.status='success' AND s.tenant_id IN (SELECT id FROM tenants WHERE state IN ('active','disabled'))
+   AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)
 ) ranked WHERE rn=1`)
 	return err
 }
@@ -690,7 +692,9 @@ func (ss *SystemStore) AcquireJobLease(ctx context.Context, job, owner string, e
 		return errors.New("job lease expiry must be in the future")
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := ss.store.DB.ExecContext(ctx, `INSERT INTO job_leases(job,owner,expires_at) VALUES(?,?,?) ON CONFLICT(job) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at WHERE job_leases.expires_at < ?`, job, owner, expires.UTC().Format(time.RFC3339Nano), now)
+	result, err := ss.store.DB.ExecContext(ctx, `INSERT INTO job_leases(job,owner,expires_at)
+SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM job_history_purges WHERE job_id=?)
+ON CONFLICT(job) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at WHERE job_leases.expires_at < ?`, job, owner, expires.UTC().Format(time.RFC3339Nano), job, now)
 	if err != nil {
 		return err
 	}
@@ -727,7 +731,7 @@ func (ss *SystemStore) AcquireJobLeaseForRevision(ctx context.Context, job, owne
 	var current int64
 	var archived int
 	var tenantState string
-	err = tx.QueryRowContext(ctx, `SELECT j.revision,j.archived,t.state FROM jobs AS j JOIN tenants AS t ON t.id=j.tenant_id WHERE j.id=?`, job).Scan(&current, &archived, &tenantState)
+	err = tx.QueryRowContext(ctx, `SELECT j.revision,j.archived,t.state FROM jobs AS j JOIN tenants AS t ON t.id=j.tenant_id WHERE j.id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, job).Scan(&current, &archived, &tenantState)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: job %s", ErrNotFound, job)
 	}

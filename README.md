@@ -446,9 +446,11 @@ archived while a scheduled run waits, that run is skipped.
 Archiving stops a job while keeping its results and incidents available. An
 administrator can permanently delete an archived job by typing its exact name;
 this also removes that job's scan results, incidents, saved scan progress, and
-notification delivery records. The security audit record is retained. This
-action is irreversible and does not delete history belonging to other jobs,
-even when they monitor the same IP address.
+notification delivery records. The job and its evidence disappear from the
+interface immediately; retained data is erased in bounded, restart-safe
+background batches. The security audit record is retained. This action is
+irreversible and does not delete history belonging to other jobs, even when
+they monitor the same IP address.
 
 From **Incidents**, administrators and operators can:
 
@@ -959,7 +961,7 @@ needs one. Print a new platform setup token with `edgewatch admin
 platform-setup-token`; while no administrator exists, the daemon prints a new
 setup token when it starts.
 
-The current schema is version 61. Database migrations are forward-only. An
+The current schema is version 62. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. The daemon and the commands that write to the database (admin, scan,

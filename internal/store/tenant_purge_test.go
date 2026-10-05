@@ -18,6 +18,8 @@ import (
 var tenantPurgeOracle = map[string]string{
 	"events":                           `SELECT rowid FROM events WHERE tenant_id=?1`,
 	"jobs":                             `SELECT rowid FROM jobs WHERE tenant_id=?1`,
+	"job_history_purge_host_keys":      `SELECT rowid FROM job_history_purge_host_keys WHERE tenant_id=?1`,
+	"job_history_purges":               `SELECT rowid FROM job_history_purges WHERE tenant_id=?1`,
 	"latest_scan_hosts":                `SELECT rowid FROM latest_scan_hosts WHERE tenant_id=?1`,
 	"managed_notifications":            `SELECT rowid FROM managed_notifications WHERE tenant_id=?1`,
 	"outbox":                           `SELECT rowid FROM outbox WHERE tenant_id=?1`,
@@ -140,6 +142,8 @@ func addTenantPurgeRows(t *testing.T, f tenantFixture) {
 			{`INSERT INTO scan_cycle_discovery_checkpoints(cycle_id,sequence,processed_at) VALUES(?,0,?)`, []any{cyclesOf(f, owner.scope).active, stamp}},
 			{`INSERT INTO notification_delivery_health(destination_identity,updated_at) VALUES(?,?)`, []any{"managed:" + owner.destination, stamp}},
 			{`INSERT INTO totp_replay(user_id,last_step,updated_at) VALUES(?,1,?)`, []any{owner.account, stamp}},
+			{`INSERT INTO job_history_purges(tenant_id,job_id,phase,created_at,updated_at) VALUES(?,?,?,?,?)`, []any{tenant, owner.job, jobPurgePhaseCycleCheckpoints, stamp, stamp}},
+			{`INSERT INTO job_history_purge_host_keys(tenant_id,job_id,address) VALUES(?,?,?)`, []any{tenant, owner.job, "192.0.2.10"}},
 		} {
 			if _, err := f.store.DB.ExecContext(ctx, statement.query, statement.args...); err != nil {
 				t.Fatalf("%s: %v", statement.query, err)

@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -140,40 +141,39 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 		BEGIN SELECT RAISE(ABORT,'event cleanup unavailable'); END`); err != nil {
 		t.Fatal(err)
 	}
-	failedDeleteRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+second.ID+"?permanent=true", strings.NewReader(`{"confirm_name":"delete-me"}`))
-	failedDeleteRequest.Header.Set("Content-Type", "application/json")
-	failedDelete := httptest.NewRecorder()
-	server.jobRoute(failedDelete, failedDeleteRequest, admin, defaultTenantStore(server), second.ID)
-	if failedDelete.Code != http.StatusInternalServerError || !strings.Contains(failedDelete.Body.String(), `"code":"job_delete"`) {
-		t.Fatalf("permanent delete when history cleanup fails = %d: %s", failedDelete.Code, failedDelete.Body.String())
-	}
-	if strings.Contains(failedDelete.Body.String(), "event cleanup unavailable") {
-		t.Fatalf("permanent delete response disclosed storage error: %s", failedDelete.Body.String())
-	}
-	if _, err := defaultTenant(db).GetJob(ctx, second.ID); err != nil {
-		t.Fatalf("job after rolled-back delete = %v", err)
-	}
-	var retainedAfterFailure int
-	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE job_id=?`, second.ID).Scan(&retainedAfterFailure); err != nil || retainedAfterFailure != 1 {
-		t.Fatalf("scan count after rolled-back delete = %d, %v; want 1", retainedAfterFailure, err)
-	}
-	var retainedEvents int
-	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE job_id=?`, second.ID).Scan(&retainedEvents); err != nil || retainedEvents != 1 {
-		t.Fatalf("event count after rolled-back delete = %d, %v; want 1", retainedEvents, err)
-	}
-	if _, err := db.DB.ExecContext(ctx, `DROP TRIGGER reject_job_delete_events`); err != nil {
-		t.Fatal(err)
-	}
 	deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+second.ID+"?permanent=true", strings.NewReader(`{"confirm_name":"delete-me"}`))
 	deleteRequest.Header.Set("Content-Type", "application/json")
 	deleted := httptest.NewRecorder()
 	server.jobRoute(deleted, deleteRequest, admin, defaultTenantStore(server), second.ID)
 	if deleted.Code != http.StatusNoContent {
-		t.Fatalf("permanent delete = %d: %s", deleted.Code, deleted.Body.String())
+		t.Fatalf("permanent delete acceptance = %d: %s", deleted.Code, deleted.Body.String())
+	}
+	if strings.Contains(deleted.Body.String(), "event cleanup unavailable") {
+		t.Fatalf("permanent delete response disclosed storage error: %s", deleted.Body.String())
+	}
+	if _, err := defaultTenant(db).GetJob(ctx, second.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("job during pending purge = %v; want hidden", err)
+	}
+	var retainedAfterFailure int
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE job_id=?`, second.ID).Scan(&retainedAfterFailure); err != nil || retainedAfterFailure != 1 {
+		t.Fatalf("scan count before purge retry = %d, %v; want 1", retainedAfterFailure, err)
+	}
+	var retainedEvents int
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE job_id=?`, second.ID).Scan(&retainedEvents); err != nil || retainedEvents != 1 {
+		t.Fatalf("event count before purge retry = %d, %v; want 1", retainedEvents, err)
+	}
+	if _, err := db.System().PurgeDeletedJobHistories(ctx); err == nil || !strings.Contains(err.Error(), "event cleanup unavailable") {
+		t.Fatalf("purge while cleanup is unavailable = %v", err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `DROP TRIGGER reject_job_delete_events`); err != nil {
+		t.Fatal(err)
+	}
+	if purged, err := db.System().PurgeDeletedJobHistories(ctx); err != nil || purged == 0 {
+		t.Fatalf("resumed purge = %d, %v", purged, err)
 	}
 	var retainedScans int
 	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE job_id=?`, second.ID).Scan(&retainedScans); err != nil || retainedScans != 0 {
-		t.Fatalf("retained scans after permanent delete = %d, %v; want 0", retainedScans, err)
+		t.Fatalf("retained scans after completed purge = %d, %v; want 0", retainedScans, err)
 	}
 }
 

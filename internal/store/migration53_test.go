@@ -41,7 +41,14 @@ var schema52FixtureStatements = func() []string {
 	for _, trigger := range schema53Triggers {
 		statements = append(statements, "DROP TRIGGER "+trigger)
 	}
-	statements = append(statements, "DROP INDEX scans_tenant_id_time", "DROP INDEX events_tenant_id_time")
+	statements = append(statements,
+		"DROP INDEX scans_tenant_id_time",
+		"DROP INDEX events_tenant_id_time",
+		// Schema 62 adds payload expression indexes that depend on these tenant
+		// columns. Remove them before rewinding the fixture to schema 52.
+		"DROP INDEX outbox_job_purge",
+		"DROP INDEX restore_quarantined_job_purge",
+	)
 	for _, table := range schema53Tables {
 		statements = append(statements, "ALTER TABLE "+table+" DROP COLUMN tenant_id")
 	}

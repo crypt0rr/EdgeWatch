@@ -79,6 +79,8 @@ var tenancyTables = map[string]tableTenancy{
 	// platform event, delivery, or audit record, or a built-in profile.
 	"events":                         directTable,
 	"jobs":                           directTable,
+	"job_history_purges":             directTable,
+	"job_history_purge_host_keys":    directTable,
 	"latest_scan_hosts":              directTable,
 	"managed_notifications":          directTable,
 	"outbox":                         directTable,

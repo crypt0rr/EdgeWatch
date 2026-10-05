@@ -429,6 +429,7 @@ func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, session
 		}
 		return
 	}
+	s.App.WakePurgeWorker()
 	s.App.RefreshSchedules()
 	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "job.deleted", "job_id": id})
 	writeJSON(w, http.StatusNoContent, nil)

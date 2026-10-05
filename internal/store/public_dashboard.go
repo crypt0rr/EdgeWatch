@@ -148,6 +148,7 @@ func (ps *PublicStore) ListLegacyPublicScans(ctx context.Context, jobID string, 
 FROM scans AS s
 JOIN jobs AS j ON j.id=s.job_id AND j.tenant_id=?
 WHERE s.status='success' AND s.job_id=?
+  AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)
   AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
 ORDER BY s.finished_at DESC,s.id DESC LIMIT ?`, ps.scope.tenant.id, jobID, limit)
 	if err != nil {
@@ -224,7 +225,7 @@ func readPublicDashboard(ctx context.Context, reader *sql.DB, tenantID string, p
 	}
 	d.Enabled = enabled != 0
 	d.UpdatedAt = scanTime(updated)
-	rows, err := reader.QueryContext(ctx, `SELECT h.job_id,h.address,h.created_at FROM public_dashboard_hosts AS h JOIN public_dashboards AS d ON d.id=h.dashboard_id AND d.tenant_id=? WHERE h.dashboard_id=? ORDER BY h.job_id,h.address`, tenantID, id)
+	rows, err := reader.QueryContext(ctx, `SELECT h.job_id,h.address,h.created_at FROM public_dashboard_hosts AS h JOIN public_dashboards AS d ON d.id=h.dashboard_id AND d.tenant_id=? WHERE h.dashboard_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=d.tenant_id AND purge.job_id=h.job_id) ORDER BY h.job_id,h.address`, tenantID, id)
 	if err != nil {
 		return d, err
 	}
@@ -336,7 +337,7 @@ func (ts *TenantStore) savePublicDashboard(ctx context.Context, expectedUpdatedA
 		// would refuse another tenant's job too, but with a storage error;
 		// this statement inserts nothing instead, and the save reports the
 		// job as unknown.
-		result, err := tx.ExecContext(ctx, `INSERT INTO public_dashboard_hosts(dashboard_id,job_id,address,created_at) SELECT ?,j.id,?,? FROM jobs AS j WHERE j.id=? AND j.tenant_id=?`, dashboardID, address, updatedAt, host.JobID, ts.scope.id)
+		result, err := tx.ExecContext(ctx, `INSERT INTO public_dashboard_hosts(dashboard_id,job_id,address,created_at) SELECT ?,j.id,?,? FROM jobs AS j WHERE j.id=? AND j.tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, dashboardID, address, updatedAt, host.JobID, ts.scope.id)
 		if err != nil {
 			return err
 		}
@@ -407,7 +408,7 @@ SELECT selected.job_id,selected.address,h.scan_id,h.data_quality,h.host_json,
        sc.cycle_id,sc.cycle_attempt,sc.cycle_status,sc.resumable,sc.completed_probes,sc.total_probes,sc.completed_units,sc.total_units,sc.no_progress_attempts,
        sc.baseline_scan_id,sc.baseline_config_hash,sc.scanner_engine,sc.scanner_profile_id,sc.scanner_profile_revision,sc.naabu_version,sc.discovery_ports,sc.confirmed_ports,sc.discovery_duration_ms,sc.enrichment_duration_ms
 FROM selected
-JOIN jobs j ON j.id=selected.job_id AND j.tenant_id=?
+JOIN jobs j ON j.id=selected.job_id AND j.tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)
 JOIN latest_scan_hosts h ON h.tenant_id=j.tenant_id AND h.address=selected.address AND h.job_id=selected.job_id
 JOIN scans sc ON sc.id=h.scan_id AND sc.tenant_id=h.tenant_id AND sc.job_id=selected.job_id AND sc.status='success'
 ORDER BY selected.address,selected.job_id`
@@ -559,7 +560,7 @@ SELECT selected.job_id,selected.address,h.scan_id,h.data_quality,h.host_json,
        sc.cycle_id,sc.cycle_attempt,sc.cycle_status,sc.resumable,sc.completed_probes,sc.total_probes,sc.completed_units,sc.total_units,sc.no_progress_attempts,
        sc.baseline_scan_id,sc.baseline_config_hash,sc.scanner_engine,sc.scanner_profile_id,sc.scanner_profile_revision,sc.naabu_version,sc.discovery_ports,sc.confirmed_ports,sc.discovery_duration_ms,sc.enrichment_duration_ms
 FROM selected
-JOIN jobs j ON j.id=selected.job_id AND j.tenant_id=?
+JOIN jobs j ON j.id=selected.job_id AND j.tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)
 JOIN scan_hosts h ON h.address=selected.address
  AND h.scan_id=(
    SELECT h2.scan_id

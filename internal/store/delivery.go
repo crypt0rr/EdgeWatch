@@ -96,6 +96,15 @@ func (ss *SystemStore) QueueEvent(ctx context.Context, destination string, event
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if event.JobID != "" {
+		var purging int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM job_history_purges WHERE job_id=?)`, event.JobID).Scan(&purging); err != nil {
+			return err
+		}
+		if purging != 0 {
+			return fmt.Errorf("%w: job %s", ErrNotFound, event.JobID)
+		}
+	}
 	if strings.HasPrefix(destination, "managed:") {
 		key, reason, resolveErr := resolveManagedIntentTx(ctx, tx, destination, event)
 		if resolveErr != nil {
@@ -181,7 +190,8 @@ const (
 // with their retry and deferral budgets untouched, until the tenant is
 // enabled again. A platform delivery, such as an update alert, has no tenant
 // and is never held.
-const heldDeliverySQL = `(due.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants WHERE tenants.id=due.tenant_id AND tenants.state='` + TenantStateActive + `'))`
+const heldDeliverySQL = `(due.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants WHERE tenants.id=due.tenant_id AND tenants.state='` + TenantStateActive + `'))
+AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=due.tenant_id AND purge.job_id=CASE WHEN json_valid(CAST(due.payload_json AS TEXT)) THEN COALESCE(json_extract(CAST(due.payload_json AS TEXT),'$.job_id'),'') ELSE '' END)`
 
 // ClaimDueDeliveries atomically leases due outbox rows to one drain owner.
 // Expired claims can be recovered by a later process, while active claims are

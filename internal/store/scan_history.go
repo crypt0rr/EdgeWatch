@@ -29,6 +29,15 @@ func (ss *SystemStore) SaveScan(ctx context.Context, scan model.Scan) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if scan.JobID != "" {
+		var purging int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM job_history_purges WHERE job_id=?)`, scan.JobID).Scan(&purging); err != nil {
+			return err
+		}
+		if purging != 0 {
+			return fmt.Errorf("%w: job %s", ErrNotFound, scan.JobID)
+		}
+	}
 	if err := saveScanExec(ctx, tx, scan); err != nil {
 		return err
 	}
@@ -298,7 +307,7 @@ func (ts *TenantStore) ScanHostIndexExists(ctx context.Context, scanID string) (
 		return false, err
 	}
 	var exists bool
-	err := ts.store.reader().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scan_hosts h JOIN scans s ON s.id=h.scan_id AND s.tenant_id=? WHERE h.scan_id=?)`, ts.scope.id, scanID).Scan(&exists)
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scan_hosts h JOIN scans s ON s.id=h.scan_id AND s.tenant_id=? WHERE h.scan_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id))`, ts.scope.id, scanID).Scan(&exists)
 	return exists, err
 }
 
@@ -310,7 +319,7 @@ func (ts *TenantStore) SuccessfulScanHostIndexExists(ctx context.Context) (bool,
 		return false, err
 	}
 	var exists bool
-	err := ts.store.reader().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scan_hosts h JOIN scans s ON s.id=h.scan_id WHERE s.tenant_id=? AND s.status='success')`, ts.scope.id).Scan(&exists)
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scan_hosts h JOIN scans s ON s.id=h.scan_id WHERE s.tenant_id=? AND s.status='success' AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id))`, ts.scope.id).Scan(&exists)
 	return exists, err
 }
 
@@ -327,7 +336,7 @@ func (ts *TenantStore) GetScanHost(ctx context.Context, scanID, address string) 
 	}
 	var dataQuality string
 	var raw []byte
-	err = ts.store.reader().QueryRowContext(ctx, `SELECT h.data_quality,h.host_json FROM scan_hosts h JOIN scans s ON s.id=h.scan_id AND s.tenant_id=? WHERE h.scan_id=? AND h.address=?`, ts.scope.id, scanID, normalized).Scan(&dataQuality, &raw)
+	err = ts.store.reader().QueryRowContext(ctx, `SELECT h.data_quality,h.host_json FROM scan_hosts h JOIN scans s ON s.id=h.scan_id AND s.tenant_id=? WHERE h.scan_id=? AND h.address=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)`, ts.scope.id, scanID, normalized).Scan(&dataQuality, &raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ScanHost{}, fmt.Errorf("%w: host %s", ErrNotFound, normalized)
 	}
@@ -420,6 +429,7 @@ func (ts *TenantStore) LegacySuccessfulScanExists(ctx context.Context) (bool, er
 	SELECT 1 FROM scans s
 	WHERE s.tenant_id=? AND s.status='success'
 	  AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
+	  AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)
 	  AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=s.id)
 )`, ts.scope.id).Scan(&exists)
 	return exists, err
@@ -439,7 +449,7 @@ func (ts *TenantStore) GetScan(ctx context.Context, id string) (model.Scan, erro
 	var revision sql.NullInt64
 	var resumable int
 	readDB := ts.store.reader()
-	err := readDB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE id=? AND tenant_id=?`, id, ts.scope.id).
+	err := readDB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE id=? AND tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`, id, ts.scope.id).
 		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &baselineScanID, &baselineConfigHash, &changesJSON, &snapshot)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Scan{}, scanNotFound(id)
@@ -482,7 +492,7 @@ func (ts *TenantStore) GetScanSummary(ctx context.Context, id string) (model.Sca
 	var revision sql.NullInt64
 	var resumable int
 	readDB := ts.store.reader()
-	err := readDB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans WHERE id=? AND tenant_id=?`, id, ts.scope.id).
+	err := readDB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans WHERE id=? AND tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`, id, ts.scope.id).
 		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.ScanSummary{}, scanNotFound(id)
@@ -517,7 +527,7 @@ func (ts *TenantStore) GetLatestSuccessfulJobScanSummary(ctx context.Context, jo
 	var jid sql.NullString
 	var revision sql.NullInt64
 	var resumable int
-	err := ts.store.reader().QueryRowContext(ctx, `SELECT s.id,s.job_id,s.job_revision,s.job,s.started_at,s.finished_at,s.status,s.error,s.nmap_version,s.scanner_engine,s.scanner_profile_id,s.scanner_profile_revision,s.naabu_version,s.discovery_ports,s.confirmed_ports,s.discovery_duration_ms,s.enrichment_duration_ms,s.config_hash,s.cycle_id,s.cycle_attempt,s.cycle_status,s.resumable,s.completed_probes,s.total_probes,s.completed_units,s.total_units,s.no_progress_attempts,s.baseline_scan_id,s.baseline_config_hash FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND s.status='success' ORDER BY s.finished_at DESC,s.id DESC LIMIT 1`, ts.scope.id, jobID).
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT s.id,s.job_id,s.job_revision,s.job,s.started_at,s.finished_at,s.status,s.error,s.nmap_version,s.scanner_engine,s.scanner_profile_id,s.scanner_profile_revision,s.naabu_version,s.discovery_ports,s.confirmed_ports,s.discovery_duration_ms,s.enrichment_duration_ms,s.config_hash,s.cycle_id,s.cycle_attempt,s.cycle_status,s.resumable,s.completed_probes,s.total_probes,s.completed_units,s.total_units,s.no_progress_attempts,s.baseline_scan_id,s.baseline_config_hash FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND s.status='success' AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id) ORDER BY s.finished_at DESC,s.id DESC LIMIT 1`, ts.scope.id, jobID).
 		Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -554,7 +564,7 @@ func (ts *TenantStore) GetScanComparison(ctx context.Context, id string) (model.
 	var revision sql.NullInt64
 	var resumable int
 	readDB := ts.store.reader()
-	err := readDB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json FROM scans WHERE id=? AND tenant_id=?`, id, ts.scope.id).
+	err := readDB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json FROM scans WHERE id=? AND tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`, id, ts.scope.id).
 		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash, &changesJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.ScanSummary{}, nil, scanNotFound(id)
@@ -594,10 +604,10 @@ func (ts *TenantStore) ListScanChangesPage(ctx context.Context, id string, limit
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Change]
 	readDB := ts.store.reader()
-	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans, json_each(scans.changes_json) WHERE scans.id=? AND scans.tenant_id=?`, id, ts.scope.id).Scan(&page.Total); err != nil {
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans, json_each(scans.changes_json) WHERE scans.id=? AND scans.tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`, id, ts.scope.id).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := readDB.QueryContext(ctx, `SELECT json_each.value FROM scans, json_each(scans.changes_json) WHERE scans.id=? AND scans.tenant_id=? ORDER BY json_each.key LIMIT ? OFFSET ?`, id, ts.scope.id, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT json_each.value FROM scans, json_each(scans.changes_json) WHERE scans.id=? AND scans.tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id) ORDER BY json_each.key LIMIT ? OFFSET ?`, id, ts.scope.id, limit, offset)
 	if err != nil {
 		return page, err
 	}
@@ -631,10 +641,10 @@ func (ts *TenantStore) ListScanResultsPage(ctx context.Context, id string, limit
 	// json_each emits a single SQL NULL row for a JSON null value. Treat a
 	// missing/null units member as an empty array so failed or legacy scans do
 	// not produce a row that cannot be decoded as model.Unit.
-	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans, json_each(scans.snapshot_json, '$.units') WHERE scans.id=? AND scans.tenant_id=? AND json_type(scans.snapshot_json, '$.units')='array'`, id, ts.scope.id).Scan(&page.Total); err != nil {
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans, json_each(scans.snapshot_json, '$.units') WHERE scans.id=? AND scans.tenant_id=? AND json_type(scans.snapshot_json, '$.units')='array' AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`, id, ts.scope.id).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := readDB.QueryContext(ctx, `SELECT json_each.value FROM scans, json_each(scans.snapshot_json, '$.units') WHERE scans.id=? AND scans.tenant_id=? AND json_type(scans.snapshot_json, '$.units')='array' ORDER BY json_each.key LIMIT ? OFFSET ?`, id, ts.scope.id, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT json_each.value FROM scans, json_each(scans.snapshot_json, '$.units') WHERE scans.id=? AND scans.tenant_id=? AND json_type(scans.snapshot_json, '$.units')='array' AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id) ORDER BY json_each.key LIMIT ? OFFSET ?`, id, ts.scope.id, limit, offset)
 	if err != nil {
 		return page, err
 	}

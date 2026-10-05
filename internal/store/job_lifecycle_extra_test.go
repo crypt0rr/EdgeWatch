@@ -116,7 +116,7 @@ func TestJobListingLifecycleIdempotenceAndPermanentDeletionGuards(t *testing.T) 
 	}
 }
 
-func TestPermanentJobDeletionRemovesHistoryAtomicallyAndRepairsLatestHosts(t *testing.T) {
+func TestPermanentJobDeletionPurgesHistoryAndRepairsLatestHosts(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	tenant := defaultTenant(s)
@@ -254,41 +254,71 @@ func TestPermanentJobDeletionRemovesHistoryAtomicallyAndRepairsLatestHosts(t *te
 	if _, err := s.DB.ExecContext(ctx, `DROP TRIGGER reject_job_delete_audit`); err != nil {
 		t.Fatal(err)
 	}
-	// Failure while deleting quarantined delivery copies must roll back the
-	// preceding history deletes and the job row as one transaction.
+	// A failure in a later purge batch must leave the logical deletion committed,
+	// with a resumable marker and no visible job/history.
 	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER reject_job_quarantine_delete BEFORE DELETE ON restore_quarantined_deliveries
 		BEGIN SELECT RAISE(ABORT,'quarantine unavailable'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if err := tenant.DeleteJobWithAudit(ctx, job.ID, audit); err == nil || !strings.Contains(err.Error(), "quarantine unavailable") {
-		t.Fatalf("delete with rejected quarantine cleanup = %v", err)
+	if err := tenant.DeleteJobWithAudit(ctx, job.ID, audit); err != nil {
+		t.Fatalf("queue deletion with deferred quarantine cleanup = %v", err)
 	}
-	if _, err := tenant.GetJob(ctx, job.ID); err != nil {
-		t.Fatalf("job lookup after rejected quarantine cleanup = %v, want job retained", err)
+	if _, err := tenant.GetJob(ctx, job.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("job lookup while purge is pending = %v, want hidden", err)
 	}
-	for name, statement := range map[string]string{
-		"scan":                 `SELECT COUNT(*) FROM scans WHERE job_id=? AND tenant_id=?`,
-		"quarantined delivery": `SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE tenant_id=? AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?`,
+	if purgedRows, purgeErr := s.System().PurgeDeletedJobHistories(ctx); purgedRows == 0 || purgeErr == nil || !strings.Contains(purgeErr.Error(), "quarantine unavailable") {
+		t.Fatalf("purge with rejected quarantine cleanup = %d rows, %v; want a resumable failure", purgedRows, purgeErr)
+	}
+	var pendingPhase string
+	if err := s.DB.QueryRowContext(ctx, `SELECT phase FROM job_history_purges WHERE tenant_id=? AND job_id=?`, tenant.scope.id, job.ID).Scan(&pendingPhase); err != nil || pendingPhase != jobPurgePhaseQuarantine {
+		t.Fatalf("pending phase after quarantine failure = %q, %v; want %q", pendingPhase, err, jobPurgePhaseQuarantine)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE job_id=? AND tenant_id=?`, job.ID, tenant.scope.id).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("scan count after quarantine failure = %d, %v; want already erased", count, err)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE tenant_id=? AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?`, tenant.scope.id, job.ID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("quarantined delivery count after purge failure = %d, %v; want 1 pending row", count, err)
+	}
+	for label, tenantJob := range map[string][2]string{
+		"another job":        {tenant.scope.id, other.ID},
+		"another tenant job": {otherTenantID, job.ID},
 	} {
-		var args []any
-		if name == "quarantined delivery" {
-			args = []any{tenant.scope.id, job.ID}
-		} else {
-			args = []any{job.ID, tenant.scope.id}
+		if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE tenant_id=? AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?`, tenantJob[0], tenantJob[1]).Scan(&count); err != nil || count != 1 {
+			t.Errorf("quarantined deliveries for %s after interrupted purge = %d, %v; want 1", label, count, err)
 		}
-		if err := s.DB.QueryRowContext(ctx, statement, args...).Scan(&count); err != nil || count != 1 {
-			t.Fatalf("%s count after rejected quarantine cleanup = %d, %v; want 1", name, count, err)
-		}
+	}
+	if _, err := tenant.GetJob(ctx, job.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted managed job lookup = %v", err)
+	}
+	var pending int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_history_purges WHERE tenant_id=? AND job_id=?`, tenant.scope.id, job.ID).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("pending history purge marker count = %d, %v; want 1", pending, err)
+	}
+	latestPage, err := tenant.ListLatestScanHostsPage(ctx, "", "", nil, 50, 0)
+	if err != nil || latestPage.Total != 0 {
+		t.Fatalf("latest hosts exposed while purge is pending = total %d, %v; want hidden", latestPage.Total, err)
+	}
+	if _, err := tenant.GetScan(ctx, jobScan.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("scan detail visible while purge is pending = %v; want hidden", err)
+	}
+	if scans, err := tenant.ListJobScans(ctx, job.ID, 50); err != nil || len(scans) != 0 {
+		t.Fatalf("job scans visible while purge is pending = %d, %v; want hidden", len(scans), err)
+	}
+	if events, err := tenant.ListJobEvents(ctx, job.ID, 50); err != nil || len(events) != 0 {
+		t.Fatalf("job events visible while purge is pending = %d, %v; want hidden", len(events), err)
+	}
+	if events, err := tenant.ListEvents(ctx, job.Job.Name, 50); err != nil || len(events) != 0 {
+		t.Fatalf("activity entries visible while purge is pending = %d, %v; want hidden", len(events), err)
+	}
+	historicalHosts, err := tenant.ListScanHostsPage(ctx, jobScan.ID, "", "", nil, 50, 0)
+	if err != nil || historicalHosts.Total != 0 {
+		t.Fatalf("scan hosts visible while purge is pending = %d, %v; want hidden", historicalHosts.Total, err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `DROP TRIGGER reject_job_quarantine_delete`); err != nil {
 		t.Fatal(err)
 	}
-
-	if err := tenant.DeleteJobWithAudit(ctx, job.ID, audit); err != nil {
-		t.Fatalf("delete job with retained history = %v", err)
-	}
-	if _, err := tenant.GetJob(ctx, job.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("deleted managed job lookup = %v", err)
+	if purgedRows, err := s.System().PurgeDeletedJobHistories(ctx); err != nil || purgedRows == 0 {
+		t.Fatalf("resume purge after quarantine cleanup recovers = %d rows, %v", purgedRows, err)
 	}
 	for name, statement := range map[string]string{
 		"scan":                 `SELECT COUNT(*) FROM scans WHERE job_id=? AND tenant_id=?`,
@@ -331,9 +361,27 @@ func TestPermanentJobDeletionRemovesHistoryAtomicallyAndRepairsLatestHosts(t *te
 	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE action='job.deleted' AND detail=?`, job.ID).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("deletion audit count = %d, %v; want 1", count, err)
 	}
+	if _, err := tenant.RuntimeState(ctx, job.ID); err != nil {
+		t.Fatalf("deleted job runtime state remains readable: %v", err)
+	}
+	if _, err := s.System().UpdateRuntime(ctx, job.ID, func(*model.JobState) ([]model.Event, error) {
+		return []model.Event{{Type: "late-event", JobID: job.ID, Job: job.Job.Name, CreatedAt: time.Now().UTC()}}, nil
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("late runtime mutation after deletion = %v; want not found", err)
+	}
+	lateScan := model.Scan{ID: "late-deleted-job-scan", JobID: job.ID, Job: job.Job.Name, StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Status: "failed"}
+	if err := s.System().SaveScan(ctx, lateScan); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("late scan write after deletion = %v; want not found", err)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE id=?`, lateScan.ID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("late scan row count = %d, %v; want 0", count, err)
+	}
+	if err := s.System().QueueEvent(ctx, "late-deleted-job-destination", model.Event{Type: "late-event", JobID: job.ID, Job: job.Job.Name, CreatedAt: time.Now().UTC()}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("late delivery write after deletion = %v; want not found", err)
+	}
 }
 
-func TestPermanentJobDeletionRollsBackWhenHistoryCleanupFails(t *testing.T) {
+func TestPermanentJobHistoryPurgeResumesWhenCleanupFails(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	tenant := defaultTenant(s)
@@ -359,11 +407,22 @@ func TestPermanentJobDeletionRollsBackWhenHistoryCleanupFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = tenant.DeleteJobWithAudit(ctx, job.ID, AuditEntry{Action: "job.deleted", Detail: job.ID})
-	if err == nil || !strings.Contains(err.Error(), "event cleanup unavailable") {
-		t.Fatalf("delete when history cleanup fails = %v", err)
+	if err != nil {
+		t.Fatalf("request permanent deletion = %v", err)
 	}
-	if _, err := tenant.GetJob(ctx, job.ID); err != nil {
-		t.Fatalf("job after rolled-back delete = %v", err)
+	_, err = s.System().PurgeDeletedJobHistories(ctx)
+	if err == nil || !strings.Contains(err.Error(), "event cleanup unavailable") {
+		t.Fatalf("purge when history cleanup fails = %v", err)
+	}
+	if _, err := tenant.GetJob(ctx, job.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("job lookup during pending purge = %v; want hidden", err)
+	}
+	if active, err := tenant.JobActive(ctx, job.ID); active || !errors.Is(err, ErrNotFound) {
+		t.Fatalf("job active check during pending purge = %t, %v; want not found", active, err)
+	}
+	var pendingPhase string
+	if err := s.DB.QueryRowContext(ctx, `SELECT phase FROM job_history_purges WHERE tenant_id=? AND job_id=?`, tenant.scope.id, job.ID).Scan(&pendingPhase); err != nil || pendingPhase != jobPurgePhaseEvents {
+		t.Fatalf("pending purge phase = %q, %v; want %q", pendingPhase, err, jobPurgePhaseEvents)
 	}
 	for name, statement := range map[string]string{
 		"event":  `SELECT COUNT(*) FROM events WHERE job_id=?`,
@@ -375,7 +434,26 @@ func TestPermanentJobDeletionRollsBackWhenHistoryCleanupFails(t *testing.T) {
 			args = []any{tenant.scope.id, job.ID}
 		}
 		if err := s.DB.QueryRowContext(ctx, statement, args...).Scan(&count); err != nil || count != 1 {
-			t.Errorf("%s count after rolled-back delete = %d, %v; want 1", name, count, err)
+			t.Errorf("%s count after interrupted purge = %d, %v; want 1", name, count, err)
+		}
+	}
+	if _, err := s.DB.ExecContext(ctx, `DROP TRIGGER reject_job_delete_events`); err != nil {
+		t.Fatal(err)
+	}
+	if purgedRows, err := s.System().PurgeDeletedJobHistories(ctx); err != nil || purgedRows == 0 {
+		t.Fatalf("resume job history purge = %d rows, %v", purgedRows, err)
+	}
+	for name, statement := range map[string]string{
+		"event":  `SELECT COUNT(*) FROM events WHERE job_id=?`,
+		"outbox": `SELECT COUNT(*) FROM outbox WHERE tenant_id=? AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?`,
+	} {
+		var count int
+		args := []any{job.ID}
+		if name == "outbox" {
+			args = []any{tenant.scope.id, job.ID}
+		}
+		if err := s.DB.QueryRowContext(ctx, statement, args...).Scan(&count); err != nil || count != 0 {
+			t.Errorf("%s count after resumed purge = %d, %v; want 0", name, count, err)
 		}
 	}
 }

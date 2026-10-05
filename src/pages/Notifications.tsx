@@ -25,6 +25,7 @@ type EditState = {
   name: string
   url: string
   enabled: boolean
+  revision?: number
 }
 
 type PasswordPromptState = {
@@ -162,7 +163,7 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
   function beginEdit(destination: NotificationDestination) {
     resetFeedback()
     clearRowFeedback(destination.id)
-    setEdit({ id: destination.id, name: destination.name, url: '', enabled: destination.enabled })
+    setEdit({ id: destination.id, name: destination.name, url: '', enabled: destination.enabled, revision: destination.revision })
   }
 
   function askPassword(title: string, description: string, confirmLabel: string) {
@@ -181,8 +182,7 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
     event.preventDefault()
     if (!edit) return
     clearRowFeedback(edit.id)
-    const destination = destinations.data?.destinations.find(value => value.id === edit.id)
-    if (!destination?.revision) {
+    if (edit.revision === undefined) {
       reportRowError(edit.id, new Error('This destination changed. Refresh the page and try again.'), 'This destination changed. Refresh the page and try again.')
       return
     }
@@ -192,14 +192,34 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
     try {
       const options: { url?: string; enabled?: boolean } = { enabled: edit.enabled }
       if (edit.url.trim()) options.url = edit.url.trim()
-      await scope.update(edit.id, destination.revision, edit.name.trim(), confirmation, options)
+      await scope.update(edit.id, edit.revision, edit.name.trim(), confirmation, options)
       setEdit(null)
       // Only a new URL discards the queued alerts; a rename or a pause keeps
       // them for delivery.
       reportRowMessage(edit.id, options.url ? 'Notification destination updated. Alerts queued for the previous URL were discarded.' : 'Notification destination updated.')
       await client.invalidateQueries({ queryKey: scope.queryKey })
     } catch (err) {
-      reportRowError(edit.id, err, 'Could not update notification destination.')
+      if (err instanceof APIError && err.code === 'conflict') {
+        try {
+          const latestData = await scope.list()
+          client.setQueryData<NotificationDestinationsResponse>(scope.queryKey, latestData)
+          const latest = latestData.destinations.find(value => value.id === edit.id)
+          if (!latest || latest.locked || latest.read_only || latest.source === 'deployment') {
+            setEdit(null)
+            const conflictMessage = latest ? 'This destination is no longer available for editing.' : 'This destination was removed in another session.'
+            reportRowError(edit.id, new Error(conflictMessage), conflictMessage)
+          } else {
+            setEdit({ id: latest.id, name: latest.name, url: '', enabled: latest.enabled, revision: latest.revision })
+            const conflictMessage = 'This destination changed in another session. The latest values are loaded; review them and save again.'
+            reportRowError(edit.id, new Error(conflictMessage), conflictMessage)
+          }
+        } catch {
+          const conflictMessage = 'This destination changed in another session. The latest values could not be loaded; refresh before trying again.'
+          reportRowError(edit.id, new Error(conflictMessage), conflictMessage)
+        }
+      } else {
+        reportRowError(edit.id, err, 'Could not update notification destination.')
+      }
     } finally {
       setBusy('')
     }

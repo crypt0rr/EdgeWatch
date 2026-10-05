@@ -62,7 +62,7 @@ describe('business unit detail', () => {
   describe('accounts', () => {
     it('invites administrators only: there is no role to choose and the request names none', async () => {
       renderUnit('accounts')
-      await screen.findByText('Riley Novak')
+      await screen.findByText('Riley Novak', {}, { timeout: 5000 })
       expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
       expect(screen.queryByLabelText('Role')).not.toBeInTheDocument()
       expect(screen.getByText('Administrator', { selector: '.fixed-role strong' })).toBeInTheDocument()

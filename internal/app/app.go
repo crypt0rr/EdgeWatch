@@ -512,6 +512,10 @@ func (a *App) RunJobRecord(ctx context.Context, record store.JobRecord) (model.S
 // the saved progress. The run takes its tenant from the record once and
 // reads the job's data, cycles and destinations in that tenant only.
 func (a *App) runJobRecord(ctx context.Context, record store.JobRecord, manual bool) (model.Scan, []model.Event, error) {
+	return a.runJobRecordWithCompletion(ctx, record, manual, true)
+}
+
+func (a *App) runJobRecordWithCompletion(ctx context.Context, record store.JobRecord, manual, publishLifecycleCompletion bool) (model.Scan, []model.Event, error) {
 	if record.Archived {
 		return model.Scan{}, nil, errors.New("archived jobs cannot run")
 	}
@@ -519,7 +523,7 @@ func (a *App) runJobRecord(ctx context.Context, record store.JobRecord, manual b
 	if err != nil {
 		return model.Scan{}, nil, err
 	}
-	return a.runJob(ctx, scope, record.Job, record.ID, record.Revision, manual)
+	return a.runJob(ctx, scope, record.Job, record.ID, record.Revision, manual, publishLifecycleCompletion)
 }
 
 // queuedManagedJob returns the job definition a managed run starts with once
@@ -681,7 +685,11 @@ func (a *App) StartManagedRun(ts *store.TenantStore, id string, done func(model.
 			finish(model.Scan{}, nil, errors.New("archived jobs cannot run"))
 			return
 		}
-		finish(a.RunJobRecord(ctx, latest))
+		// The web callback publishes the terminal event after the run's active
+		// entry and reservation have both been released. Suppress runJob's
+		// lifecycle completion for this path so subscribers receive one event
+		// and can immediately start another run.
+		finish(a.runJobRecordWithCompletion(ctx, latest, true, false))
 	}()
 	return nil
 }
@@ -690,7 +698,7 @@ func (a *App) StartManagedRun(ts *store.TenantStore, id string, done func(model.
 // its cycles and its notification destinations through that tenant's store,
 // and writes leases, cycles and results through the system store. The
 // tenant's ID keys its scan slot.
-func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Job, jobID string, revision int64, manual bool) (model.Scan, []model.Event, error) {
+func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Job, jobID string, revision int64, manual, publishLifecycleCompletion bool) (model.Scan, []model.Event, error) {
 	key := jobID
 	if !manual {
 		if _, reserved := a.managedReservations.Load(key); reserved {
@@ -790,6 +798,9 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 			return
 		}
 		completionPublished = true
+		if !publishLifecycleCompletion {
+			return
+		}
 		completionEvent.Message = message
 		completionEvent.CreatedAt = scan.FinishedAt
 		if completionEvent.CreatedAt.IsZero() {

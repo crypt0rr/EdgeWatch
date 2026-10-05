@@ -261,3 +261,91 @@ func TestDisablingABusinessUnitEndsOnlyItsLiveUpdateStreams(t *testing.T) {
 	waitForSSEBody(t, streamA.writer, jobA)
 	waitForSSEBody(t, operatorA.writer, jobA)
 }
+
+func TestManualScanPublishesOneCompletionAfterReleasingRunReservation(t *testing.T) {
+	t.Parallel()
+	f := newTenantAccountsFixture(t)
+	jobID := createdID(t, "manual scan job", f.call("own", http.MethodPost, "/api/v1/jobs", unitJobBody))
+	stream := f.openLiveStream(t, "own", 0)
+	scope := []model.Scope{{Target: "127.0.0.1", Protocol: "tcp", Ports: "1-2"}}
+	f.server.App.Scanner = &sequenceScanner{snapshots: []model.Snapshot{{
+		Scopes: scope,
+		Units:  []model.Unit{{Target: "127.0.0.1", Protocol: "tcp", Ports: []model.PortState{{Port: 1, State: "open"}}}},
+	}}}
+
+	run := func() *httptest.ResponseRecorder {
+		t.Helper()
+		return f.call("own", http.MethodPost, "/api/v1/jobs/"+jobID+"/run", `{}`)
+	}
+	if response := run(); response.Code != http.StatusAccepted {
+		t.Fatalf("first manual run = %d: %s", response.Code, response.Body.String())
+	}
+
+	completedEvents := func() []map[string]any {
+		t.Helper()
+		var completed []map[string]any
+		for _, event := range stream.events(t) {
+			if event["type"] == "scan.completed" && event["job_id"] == jobID {
+				completed = append(completed, event)
+			}
+		}
+		return completed
+	}
+	waitForDistinctCompletions := func(want int) []map[string]any {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			completed := completedEvents()
+			ids := make(map[string]struct{}, len(completed))
+			for _, event := range completed {
+				if id, ok := event["scan_id"].(string); ok && id != "" {
+					ids[id] = struct{}{}
+				}
+			}
+			if len(ids) >= want {
+				return completed
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("did not receive completion events for %d distinct scans; got %#v", want, completedEvents())
+		return nil
+	}
+
+	firstCompletions := waitForDistinctCompletions(1)
+	firstID, ok := firstCompletions[0]["scan_id"].(string)
+	if !ok || firstID == "" {
+		t.Fatalf("first completion has no scan ID: %#v", firstCompletions[0])
+	}
+	// The completion is the signal the UI uses to enable an immediate retry.
+	// It must arrive only after StartManagedRun has released the reservation.
+	if response := run(); response.Code != http.StatusAccepted {
+		t.Fatalf("immediate second manual run = %d: %s", response.Code, response.Body.String())
+	}
+
+	completions := waitForDistinctCompletions(2)
+	counts := make(map[string]int)
+	for _, event := range completions {
+		id, _ := event["scan_id"].(string)
+		counts[id]++
+		if event["job"] != "edge" || event["job_id"] != jobID || event["status"] != "success" || event["message"] != "Scan success" {
+			t.Errorf("scan.completed event = %#v, want unified success details", event)
+		}
+	}
+	if len(completions) != 2 || counts[firstID] != 1 {
+		t.Fatalf("manual runs emitted duplicate completions: events=%#v counts=%v", completions, counts)
+	}
+	for id, count := range counts {
+		if id == "" || count != 1 {
+			t.Errorf("completion count for scan %q = %d, want one", id, count)
+		}
+	}
+	started := 0
+	for _, event := range stream.events(t) {
+		if event["type"] == "scan.started" && event["job_id"] == jobID {
+			started++
+		}
+	}
+	if started != 2 {
+		t.Fatalf("manual runs emitted %d scan.started events, want 2", started)
+	}
+}

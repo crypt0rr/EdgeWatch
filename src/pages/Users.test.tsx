@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, createUser, getSession, issueUserActivation, listUsers, revokeUserActivation, updateUser } from '../api'
 import type { SessionUser } from '../api'
@@ -13,7 +14,7 @@ vi.mock('../api', async () => {
 })
 
 const user = { id: 'user-2', username: 'operator', display_name: 'Operator', role: 'operator' as const, enabled: true, pending: false, totp_enabled: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', revision: 4 }
-const pending = { ...user, id: 'user-3', username: 'new-user', display_name: 'New User', pending: true, enabled: false, revision: 1 }
+const pending = { ...user, id: 'user-3', username: 'new-user', display_name: 'New User', role: 'viewer' as const, pending: true, enabled: false, revision: 1 }
 // The signed-in administrator, and an account an administrator disabled.
 const self = { ...user, id: 'user-1', username: 'site-admin', display_name: 'Site Admin', role: 'administrator' as const, revision: 2 }
 const disabled = { ...user, id: 'user-4', username: 'former', display_name: 'Former Viewer', role: 'viewer' as const, enabled: false, revision: 6 }
@@ -105,7 +106,46 @@ describe('user administration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Disable' }))
     fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
-    await waitFor(() => expect(within(screen.getByRole('dialog')).getByRole('alert')).toHaveTextContent('changed in another session'))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(screen.getByRole('alert')).toHaveTextContent('changed in another session')
+    expect(screen.getByRole('alert')).toHaveTextContent('reopen Disable operator')
+  })
+
+  const toggleIntentCases = [
+    { action: 'Disable', initial: user, latest: { ...user, enabled: false, revision: 5 }, targetEnabled: false },
+    { action: 'Enable', initial: disabled, latest: { ...disabled, enabled: true, revision: 7 }, targetEnabled: true },
+  ] as const
+
+  it.each(toggleIntentCases)('does not repeat a $action already completed by another administrator before confirmation', async ({ action, initial, latest, targetEnabled }) => {
+    vi.mocked(listUsers).mockResolvedValueOnce({ users: [initial, pending] }).mockResolvedValue({ users: [latest, pending] })
+    const { client } = renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText(initial.display_name)).toBeInTheDocument())
+    fireEvent.click(within(row(initial.display_name)).getByRole('button', { name: action }))
+    await act(async () => { await client.invalidateQueries({ queryKey: ['users'] }) })
+    await waitFor(() => expect(within(row(latest.display_name)).getByRole('button', { name: targetEnabled ? 'Disable' : 'Enable' })).toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    expect(updateUser).not.toHaveBeenCalled()
+    expect(screen.getByRole('status')).toHaveTextContent(`was already ${targetEnabled ? 'enabled' : 'disabled'} elsewhere`)
+  })
+
+  it.each(toggleIntentCases)('closes a $action dialog after a conflict when the intended state is already current', async ({ action, initial, latest, targetEnabled }) => {
+    vi.mocked(listUsers).mockResolvedValueOnce({ users: [initial, pending] }).mockResolvedValue({ users: [latest, pending] })
+    vi.mocked(updateUser).mockRejectedValueOnce(new APIError('stale', 'conflict'))
+    const { client } = renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText(initial.display_name)).toBeInTheDocument())
+    fireEvent.click(within(row(initial.display_name)).getByRole('button', { name: action }))
+    fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(updateUser).toHaveBeenCalledWith(initial.id, { enabled: targetEnabled, revision: initial.revision, password: 'administrator-password' }))
+    await waitFor(() => expect(client.getQueryData<{ users: typeof latest[] }>(['users'])?.users.find(value => value.id === initial.id)?.revision).toBe(latest.revision))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    expect(screen.getByRole('status')).toHaveTextContent(`was already ${targetEnabled ? 'enabled' : 'disabled'} elsewhere`)
+    expect(updateUser).not.toHaveBeenCalledWith(initial.id, { enabled: !targetEnabled, revision: latest.revision, password: 'administrator-password' })
   })
 
   it('renews and revokes pending activation links', async () => {
@@ -228,6 +268,11 @@ describe('user administration', () => {
     renderWithProviders(<Users />)
     await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
 
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Create password reset link' }))
+    fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    expect(await screen.findByLabelText('Activation link for operator')).toHaveTextContent('/activate#token=renewed-token')
+
     fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Edit account' }))
     const dialog = screen.getByRole('dialog')
     expect(dialog).toHaveTextContent('Edit account for operator')
@@ -238,6 +283,7 @@ describe('user administration', () => {
 
     await waitFor(() => expect(updateUser).toHaveBeenCalledWith('user-2', { display_name: 'Operations Lead', role: 'operator', revision: 4, password: '' }))
     expect(await screen.findByText('Updated operator.')).toBeInTheDocument()
+    expect(screen.getByLabelText('Activation link for operator')).toHaveTextContent('/activate#token=renewed-token')
   })
 
   it('requires administrator confirmation when changing a role', async () => {
@@ -254,7 +300,68 @@ describe('user administration', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
 
     await waitFor(() => expect(updateUser).toHaveBeenCalledWith('user-2', { display_name: 'Operator', role: 'viewer', revision: 4, password: 'administrator-password' }))
-    expect(await screen.findByText('Updated operator.')).toBeInTheDocument()
+    expect(await screen.findByText('Updated operator. Any outstanding password reset link is now invalid.')).toBeInTheDocument()
+  })
+
+  it('removes a pending account activation link when its role changes', async () => {
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('New User')).toBeInTheDocument())
+
+    fireEvent.click(within(row('New User')).getByRole('button', { name: 'Renew activation link' }))
+    fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    expect(await screen.findByLabelText('Activation link for new-user')).toHaveTextContent('/activate#token=renewed-token')
+
+    fireEvent.click(within(row('New User')).getByRole('button', { name: 'Edit account' }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Role'), { target: { value: 'operator' } })
+    fireEvent.change(within(dialog).getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(updateUser).toHaveBeenCalledWith('user-3', { display_name: 'New User', role: 'operator', revision: 1, password: 'administrator-password' }))
+    expect(await screen.findByText('Updated new-user. Any outstanding activation link is now invalid; renew it to issue another.')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Activation link for new-user')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument()
+  })
+
+  it('removes an enabled account password-reset link when its role changes', async () => {
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
+
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Create password reset link' }))
+    fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    expect(await screen.findByLabelText('Activation link for operator')).toHaveTextContent('/activate#token=renewed-token')
+
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Edit account' }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Role'), { target: { value: 'viewer' } })
+    fireEvent.change(within(dialog).getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('Updated operator. Any outstanding password reset link is now invalid.')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Activation link for operator')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument()
+  })
+
+  it('keeps a different account link when another account changes role', async () => {
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
+
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Create password reset link' }))
+    fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    expect(await screen.findByLabelText('Activation link for operator')).toHaveTextContent('/activate#token=renewed-token')
+
+    fireEvent.click(within(row('New User')).getByRole('button', { name: 'Edit account' }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Role'), { target: { value: 'operator' } })
+    fireEvent.change(within(dialog).getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('Updated new-user. Any outstanding activation link is now invalid; renew it to issue another.')).toBeInTheDocument()
+    expect(screen.getByLabelText('Activation link for operator')).toHaveTextContent('/activate#token=renewed-token')
+    expect(screen.getByRole('button', { name: 'Copy link' })).toBeInTheDocument()
   })
 
   it('closes a stale role editor and requires review of the refreshed account', async () => {

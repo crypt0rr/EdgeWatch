@@ -140,6 +140,31 @@ describe('returning to the requested page after signing in', () => {
     view.unmount()
     client.clear()
   })
+
+  it('removes grouping whitespace from authenticator codes before sign-in', async () => {
+    const { client, view } = openConsole('/login')
+    await screen.findByRole('heading', { name: /Sign in to EdgeWatch/ })
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'correct horse battery staple' } })
+    fireEvent.change(screen.getByLabelText('Authenticator code'), { target: { value: '123 456' } })
+    fireEvent.submit(screen.getByRole('button', { name: 'Sign in' }).closest('form')!)
+
+    await waitFor(() => expect(login).toHaveBeenCalledWith('correct horse battery staple', '123456', undefined, 'admin'))
+    view.unmount()
+    client.clear()
+  })
+
+  it('removes grouping whitespace and normalizes case for recovery-code sign-in', async () => {
+    const { client, view } = openConsole('/login')
+    await screen.findByRole('heading', { name: /Sign in to EdgeWatch/ })
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'correct horse battery staple' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Use a recovery code' }))
+    fireEvent.change(screen.getByLabelText('Recovery code'), { target: { value: 'abcd efgh ijkl' } })
+    fireEvent.submit(screen.getByRole('button', { name: 'Sign in' }).closest('form')!)
+
+    await waitFor(() => expect(login).toHaveBeenCalledWith('correct horse battery staple', '', 'ABCDEFGHIJKL', 'admin'))
+    view.unmount()
+    client.clear()
+  })
 })
 
 describe('the page that the sign-in page returns to', () => {

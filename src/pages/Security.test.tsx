@@ -95,9 +95,10 @@ describe('security settings', () => {
     expect(screen.getByLabelText('Authenticator secret')).toHaveTextContent('BASE 32SE CRET')
     expect(screen.getByRole('link', { name: 'Open authenticator app' })).toHaveAttribute('href', 'otpauth://totp/EdgeWatch')
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-    fireEvent.change(screen.getByLabelText('Verification code'), { target: { value: '123456' } })
+    fireEvent.change(screen.getByLabelText('Verification code'), { target: { value: '123 456' } })
     fireEvent.click(screen.getByRole('button', { name: 'Enable TOTP' }))
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Save your recovery codes' })).toBeInTheDocument())
+    expect(api).toHaveBeenCalledWith('/auth/totp/enable', expect.objectContaining({ body: JSON.stringify({ code: '123456' }) }))
     const acknowledgement = screen.getByRole('checkbox', { name: /I saved these recovery codes/ })
     expect(acknowledgement.closest('label')).toHaveClass('checkbox-label', 'recovery-ack')
     expect(acknowledgement.closest('label')?.querySelector('span')).toHaveTextContent('I saved these recovery codes in a secure place.')
@@ -251,5 +252,30 @@ describe('security settings', () => {
     await waitFor(() => expect(screen.queryByRole('heading', { name: 'Save your recovery codes' })).not.toBeInTheDocument())
     expect(screen.getByRole('status')).toHaveTextContent('Recovery codes saved. Your session remains active.')
     expect(logout).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['Regenerate recovery codes', '/auth/totp/recovery-codes', 'POST', 'Regenerate codes'],
+    ['Replace authenticator', '/auth/totp/setup', 'POST', 'Start replacement'],
+    ['Disable TOTP', '/auth/totp', 'DELETE', 'Disable TOTP'],
+  ] as const)('%s removes recovery-code grouping before sending the factor', async (openLabel, path, method, confirmLabel) => {
+    vi.mocked(getSession).mockResolvedValue({ ...administrator, totp_enabled: true })
+    vi.mocked(api).mockImplementation(async requestPath => {
+      if (requestPath === '/auth/totp/setup') return { secret: 'REPLACEMENTSECRET', otpauth: 'otpauth://totp/EdgeWatch' } as never
+      if (requestPath === '/auth/totp/recovery-codes') return { recovery_codes: ['new-recovery-code'] } as never
+      return {} as never
+    })
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('button', { name: openLabel })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: openLabel }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Account password'), { target: { value: 'correct-password' } })
+    fireEvent.change(within(dialog).getByLabelText('Current authenticator code or recovery code'), { target: { value: 'ABCD EFGH IJKL MNOP QRST UVWX YZ' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: confirmLabel }))
+
+    await waitFor(() => expect(api).toHaveBeenCalledWith(path, expect.objectContaining({
+      method,
+      body: JSON.stringify({ password: 'correct-password', code: '', recovery_code: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' }),
+    })))
   })
 })

@@ -310,15 +310,63 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 		})
 	}
 
-	// A malformed runtime row exercises the explicit store-failure response
-	// rather than allowing the legacy compatibility path to hide corruption.
+	// Scans with immutable comparison columns and failed scans do not need the
+	// current runtime state. Legacy successful or incomplete scans do, so a
+	// failed runtime read must not be presented as a normal "not compared" scan.
+	immutable := model.Scan{
+		ID: "immutable-handler-comparison", JobID: record.ID, JobRevision: record.Revision, Job: job.Name,
+		StartedAt: now.Add(2 * time.Minute), FinishedAt: now.Add(2 * time.Minute), Status: "success", ConfigHash: job.SecurityHash(),
+		BaselineScanID: baseline.ID, BaselineConfigHash: job.SecurityHash(), Snapshot: model.Snapshot{},
+	}
+	if err := db.System().SaveScan(ctx, immutable); err != nil {
+		t.Fatal(err)
+	}
+	incomplete := model.Scan{
+		ID: "legacy-handler-incomplete", JobID: record.ID, JobRevision: record.Revision, Job: job.Name,
+		StartedAt: now.Add(3 * time.Minute), FinishedAt: now.Add(3 * time.Minute), Status: "incomplete", ConfigHash: job.SecurityHash(),
+		Snapshot: model.Snapshot{},
+	}
+	if err := db.System().SaveScan(ctx, incomplete); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.DB.ExecContext(ctx, `UPDATE job_runtime SET state_json=? WHERE job_id=?`, []byte(`{"broken"`), record.ID); err != nil {
 		t.Fatal(err)
 	}
-	corrupt := httptest.NewRecorder()
-	server.jobRoute(corrupt, scanHandlerRequest(http.MethodGet, "/", ""), admin, defaultTenantStore(server), record.ID+"/scans/"+legacy.ID+"/changes")
-	if corrupt.Code != http.StatusInternalServerError {
-		t.Fatalf("corrupt runtime status = %d: %s", corrupt.Code, corrupt.Body.String())
+	for _, check := range []struct {
+		name        string
+		scanID      string
+		wantFailure bool
+	}{
+		{name: "legacy success", scanID: legacy.ID, wantFailure: true},
+		{name: "legacy incomplete", scanID: incomplete.ID, wantFailure: true},
+		{name: "immutable comparison", scanID: immutable.ID},
+		{name: "failed scan", scanID: failed.ID},
+	} {
+		for _, endpoint := range []struct {
+			name   string
+			suffix string
+		}{
+			{name: "detail", suffix: ""},
+			{name: "changes", suffix: "/changes"},
+		} {
+			t.Run(check.name+" "+endpoint.name, func(t *testing.T) {
+				requestID := "legacy-scan-state-" + check.name + "-" + endpoint.name
+				request := scanHandlerRequest(http.MethodGet, "/", "")
+				request = request.WithContext(context.WithValue(request.Context(), requestIDContextKey{}, requestID))
+				response := httptest.NewRecorder()
+				server.jobRoute(response, request, admin, defaultTenantStore(server), record.ID+"/scans/"+check.scanID+endpoint.suffix)
+				if check.wantFailure {
+					body := decodeAPIError(t, response)
+					if response.Code != http.StatusInternalServerError || body.Error.Code != "store" || body.Error.Details["request_id"] != requestID {
+						t.Fatalf("corrupt runtime response = %d %#v, want correlated store error", response.Code, body.Error)
+					}
+					return
+				}
+				if response.Code != http.StatusOK {
+					t.Fatalf("scan unaffected by corrupt runtime = %d: %s", response.Code, response.Body.String())
+				}
+			})
+		}
 	}
 	if _, err := db.DB.ExecContext(ctx, `UPDATE job_runtime SET state_json=? WHERE job_id=?`, []byte(`{}`), record.ID); err != nil {
 		t.Fatal(err)

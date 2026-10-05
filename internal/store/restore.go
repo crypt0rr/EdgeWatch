@@ -426,10 +426,22 @@ func cleanupStaleRestoreStagingDirs(parent string) error {
 		return fmt.Errorf("list restore staging directories: %w", err)
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), ".edgewatch-restore-") {
+		name := entry.Name()
+		randomSuffix := strings.TrimPrefix(name, restoreStagingDirPrefix)
+		if !entry.IsDir() || !strings.HasPrefix(name, restoreStagingDirPrefix) || len(randomSuffix) < 1 || len(randomSuffix) > 10 || !isRestoreStagingSuffix(randomSuffix) {
 			continue
 		}
-		path := filepath.Join(parent, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("inspect restore staging directory %q: %w", name, err)
+		}
+		// os.MkdirTemp creates these private directories with 0700
+		// permissions. Requiring that exact mode avoids deleting an
+		// unrelated directory that happens to use the reserved prefix.
+		if info.Mode().Perm() != 0o700 {
+			continue
+		}
+		path := filepath.Join(parent, name)
 		if err := recoverMovedRestoreSidecars(parent, path); err != nil {
 			return fmt.Errorf("recover interrupted restore sidecars: %w", err)
 		}
@@ -438,6 +450,17 @@ func cleanupStaleRestoreStagingDirs(parent string) error {
 		}
 	}
 	return nil
+}
+
+const restoreStagingDirPrefix = ".edgewatch-restore-"
+
+func isRestoreStagingSuffix(suffix string) bool {
+	for _, character := range suffix {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // recoverMovedRestoreSidecars puts destination sidecars back when a process

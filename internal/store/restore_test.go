@@ -68,7 +68,7 @@ func TestDryRunRestoreRemovesAbandonedStagingCopies(t *testing.T) {
 	createRestoreFixture(t, source, "source")
 	createRestoreFixture(t, destination, "destination")
 
-	orphan, err := os.MkdirTemp(dir, ".edgewatch-restore-orphan-")
+	orphan, err := os.MkdirTemp(dir, restoreStagingDirPrefix)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,9 +92,36 @@ func TestDryRunRestoreRemovesAbandonedStagingCopies(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
-		if entry.IsDir() && strings.HasPrefix(entry.Name(), ".edgewatch-restore-") {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), restoreStagingDirPrefix) {
 			t.Errorf("dry run left staging directory %q", entry.Name())
 		}
+	}
+}
+
+func TestDryRunRestorePreservesUnrecognizedPrefixedDirectory(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("orphan cleanup requires the Linux advisory restore guard")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	destination := filepath.Join(dir, "destination.db")
+	createRestoreFixture(t, source, "source")
+	createRestoreFixture(t, destination, "destination")
+
+	unrelated := filepath.Join(dir, ".edgewatch-restore-user-data")
+	if err := os.Mkdir(unrelated, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(unrelated, "keep.txt")
+	if err := os.WriteFile(marker, []byte("user data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := DryRunRestore(context.Background(), source, destination, RestoreOptions{}); err != nil {
+		t.Fatalf("dry-run restore: %v", err)
+	}
+	if content, err := os.ReadFile(marker); err != nil || string(content) != "user data" {
+		t.Fatalf("unrelated prefixed data = %q, error %v; want it preserved", content, err)
 	}
 }
 
@@ -108,7 +135,7 @@ func TestDryRunRestoreRecoversSidecarsMovedBeforeInterruptedReplacement(t *testi
 	createRestoreFixture(t, source, "source")
 	createRestoreFixture(t, destination, "destination")
 
-	orphan, err := os.MkdirTemp(dir, ".edgewatch-restore-orphan-")
+	orphan, err := os.MkdirTemp(dir, restoreStagingDirPrefix)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +182,7 @@ func TestRestoreStagingCleanupWaitsForActiveRestore(t *testing.T) {
 	}
 	defer unlock()
 
-	activeDir, err := os.MkdirTemp(dir, ".edgewatch-restore-active-")
+	activeDir, err := os.MkdirTemp(dir, restoreStagingDirPrefix)
 	if err != nil {
 		t.Fatal(err)
 	}

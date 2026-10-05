@@ -125,6 +125,8 @@ func run(args []string) error {
 			return err
 		}
 	}
+	ctx, stop := contextWithSignals(context.Background())
+	defer stop()
 	if cmd == "restore" {
 		if *fromPath == "" {
 			return errors.New("--from is required")
@@ -141,7 +143,7 @@ func run(args []string) error {
 			// The dry run goes through the same refusal checks as the restore
 			// below. It prints its report either way and exits non-zero when the
 			// restore would be refused, so scripts can rely on the exit status.
-			report, refusal := store.DryRunRestore(context.Background(), *fromPath, cfg.Database, options)
+			report, refusal := store.DryRunRestore(ctx, *fromPath, cfg.Database, options)
 			if err := printValue(*output, report); err != nil {
 				return err
 			}
@@ -150,7 +152,7 @@ func run(args []string) error {
 			}
 			return nil
 		}
-		result, err := store.Restore(context.Background(), *fromPath, cfg.Database, options)
+		result, err := store.Restore(ctx, *fromPath, cfg.Database, options)
 		if err != nil {
 			// Do not open the destination to audit a refused restore: doing so
 			// could itself cause SQLite to inspect, checkpoint, or remove the
@@ -263,8 +265,6 @@ func run(args []string) error {
 		}
 		application.Version = version
 	}
-	ctx, stop := contextWithSignals(context.Background())
-	defer stop()
 	switch cmd {
 	case "daemon":
 		return runDaemon(ctx, application, cfg.Web.Listen, s, logger)

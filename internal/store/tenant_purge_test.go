@@ -70,6 +70,7 @@ func tenantDataTables() []string {
 // predicate, except for an FTS5 table, whose rows its parent's AFTER DELETE
 // trigger removes; that trigger must exist and delete from the table.
 func TestTenantPurgeCoversTheRegistry(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	position := map[string]int{}
 	for i, step := range tenantPurgeSteps {
@@ -254,6 +255,7 @@ func without(ids, removed []int64) []int64 {
 // and B's row in tenants, now a deleted tombstone whose name and slug are
 // free again. The purge is recorded in the platform audit.
 func TestTenantPurgeErasesOnlyTheDeletedTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantPurgeFixture(t)
 	before := takeTenantPurgeSnapshot(t, f.store)
@@ -364,6 +366,7 @@ func int64sAsAny(values []int64) []any {
 // A purge that is interrupted resumes at the step it reached, and counts
 // each erased row once.
 func TestTenantPurgeResumesAfterInterruption(t *testing.T) {
+	t.Parallel()
 	f := newTenantPurgeFixture(t)
 	requestSecondTenantDeletion(t, f)
 	erasable := tenantPurgeErasable(t, f.store)
@@ -410,6 +413,7 @@ func TestTenantPurgeResumesAfterInterruption(t *testing.T) {
 // yet: the count holds until the purge reaches the scans, falls with each
 // batch there, and is zero on the tombstone. Tenant A's count is unchanged.
 func TestTenantPurgeLowersTheStoredScanCount(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantPurgeFixture(t)
 	a, err := f.store.Platform().GetTenant(ctx, DefaultTenantID)
@@ -471,6 +475,7 @@ func TestTenantPurgeLowersTheStoredScanCount(t *testing.T) {
 // While a job of the tenant holds a live scan lease the purge leaves the
 // tenant alone, and it proceeds once the lease has expired.
 func TestTenantPurgeWaitsForLiveLeases(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantPurgeFixture(t)
 	requestSecondTenantDeletion(t, f)
@@ -499,6 +504,7 @@ func TestTenantPurgeWaitsForLiveLeases(t *testing.T) {
 // The default tenant is never purged, even in the deleting state, which no
 // product path can give it.
 func TestTenantPurgeNeverErasesTheDefaultTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantPurgeFixture(t)
 	before := takeTenantPurgeSnapshot(t, f.store)
@@ -517,6 +523,7 @@ func TestTenantPurgeNeverErasesTheDefaultTenant(t *testing.T) {
 // that names no step, such as a step that a later release removed, gets the
 // same check.
 func TestTenantPurgeStartsOverWhenRowsRemain(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantPurgeFixture(t)
 	requestSecondTenantDeletion(t, f)
@@ -545,6 +552,7 @@ func TestTenantPurgeStartsOverWhenRowsRemain(t *testing.T) {
 // which no product path does, and a pass over a tenant that is not being
 // deleted, such as one another pass just finished, does nothing.
 func TestTenantPurgeStopsWhenTheTenantIsNoLongerBeingDeleted(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantPurgeFixture(t)
 	requestSecondTenantDeletion(t, f)

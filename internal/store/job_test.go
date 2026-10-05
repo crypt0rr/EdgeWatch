@@ -25,6 +25,7 @@ func testJob(name string) config.Job {
 }
 
 func TestCreateJobWithEnabledPersistsPausedStateAtomically(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJobWithEnabled(ctx, testJob("paused"), false)
@@ -51,6 +52,7 @@ func TestCreateJobWithEnabledPersistsPausedStateAtomically(t *testing.T) {
 }
 
 func TestManagedJobsHonorConfiguredTargetExclusions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if err := s.SetTargetExclusions(config.DefaultTargetExclusions()); err != nil {
@@ -68,6 +70,7 @@ func TestManagedJobsHonorConfiguredTargetExclusions(t *testing.T) {
 }
 
 func TestJobAndProfileWritesClassifyOnlyInputErrorsAsValidation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	invalid := testJob("invalid-schedule")
@@ -106,6 +109,7 @@ func TestJobAndProfileWritesClassifyOnlyInputErrorsAsValidation(t *testing.T) {
 }
 
 func TestAuditedMutationsRollBackWhenAuditInsertFails(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	base, err := defaultTenant(s).CreateJob(ctx, testJob("audited-base"))
@@ -154,6 +158,7 @@ func TestAuditedMutationsRollBackWhenAuditInsertFails(t *testing.T) {
 }
 
 func TestManagedJobRevisionAndScopeConfirmation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("one"))
@@ -235,6 +240,7 @@ func createJobWithOpenIncident(ctx context.Context, t *testing.T, s *Store, name
 }
 
 func TestConfirmedRebaselineClearsIncidentProjection(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record := createJobWithOpenIncident(ctx, t, s, "rebaseline-incidents")
@@ -280,6 +286,7 @@ func TestConfirmedRebaselineClearsIncidentProjection(t *testing.T) {
 }
 
 func TestConfirmedRebaselineRollsBackWhenRuntimeResetFails(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		trigger string
@@ -315,6 +322,7 @@ func TestConfirmedRebaselineRollsBackWhenRuntimeResetFails(t *testing.T) {
 }
 
 func TestEquivalentPortEditPreservesLegacyBaselineWithoutConfirmation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("legacy-port-scope"))
@@ -429,6 +437,7 @@ func createLegacyNotificationJob(ctx context.Context, t *testing.T, s *Store, na
 }
 
 func TestLegacyNotificationMaterializationMigratesLegacyScopeHash(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	current, legacyHash := createLegacyNotificationJob(ctx, t, s, "legacy-notification-scope")
@@ -477,6 +486,7 @@ func TestLegacyNotificationMaterializationMigratesLegacyScopeHash(t *testing.T) 
 }
 
 func TestLegacyNotificationMaterializationRollsBackWhenHashMigrationFails(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	current, legacyHash := createLegacyNotificationJob(ctx, t, s, "legacy-notification-rollback")
@@ -500,6 +510,7 @@ func TestLegacyNotificationMaterializationRollsBackWhenHashMigrationFails(t *tes
 }
 
 func TestManagedScopeEditIsBlockedWhileScanning(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("busy"))
@@ -524,6 +535,7 @@ func TestManagedScopeEditIsBlockedWhileScanning(t *testing.T) {
 }
 
 func TestJobLifecycleChangesInvalidateStaleEditors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("lifecycle"))
@@ -568,6 +580,7 @@ func TestJobLifecycleChangesInvalidateStaleEditors(t *testing.T) {
 }
 
 func TestLifecycleActionsRequireCurrentRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("lifecycle-actions"))
@@ -609,6 +622,7 @@ func TestLifecycleActionsRequireCurrentRevision(t *testing.T) {
 }
 
 func TestManagedRuntimeIsolatedFromLegacyState(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("legacy-name"))
@@ -628,6 +642,7 @@ func TestManagedRuntimeIsolatedFromLegacyState(t *testing.T) {
 }
 
 func TestManagedRuntimeRejectsSupersededSecurityScope(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("superseded"))
@@ -656,6 +671,7 @@ func TestManagedRuntimeRejectsSupersededSecurityScope(t *testing.T) {
 }
 
 func TestManagedRuntimeAcceptsLifecycleRevisionWithSameScope(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("lifecycle-runtime"))
@@ -681,6 +697,7 @@ func TestManagedRuntimeAcceptsLifecycleRevisionWithSameScope(t *testing.T) {
 }
 
 func TestManagedEventsAreIsolatedFromLegacyName(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("same-name"))
@@ -708,6 +725,7 @@ func TestManagedEventsAreIsolatedFromLegacyName(t *testing.T) {
 }
 
 func TestExistingSchemaMigratesWithWebTables(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	// Open creates the v1-compatible tables and upgrades them in one call. The
 	// assertion below also protects future migrations from silently skipping the
@@ -766,6 +784,7 @@ func TestExistingSchemaMigratesWithWebTables(t *testing.T) {
 }
 
 func TestV1DatabaseAddsManagedColumns(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "v1.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -798,6 +817,7 @@ func TestV1DatabaseAddsManagedColumns(t *testing.T) {
 }
 
 func TestV9DatabaseAddsSetupTokenIssueTimestamp(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "v9.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -824,6 +844,7 @@ func TestV9DatabaseAddsSetupTokenIssueTimestamp(t *testing.T) {
 }
 
 func TestV10DatabaseAddsAdministratorDisplayName(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "v10.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -865,6 +886,7 @@ func TestV10DatabaseAddsAdministratorDisplayName(t *testing.T) {
 }
 
 func TestV11DatabaseMigratesAdministratorIdentityAndLegacySessions(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "v11.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {

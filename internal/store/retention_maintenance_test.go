@@ -13,6 +13,7 @@ import (
 )
 
 func TestNewStoreEnablesIncrementalAutoVacuum(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	var mode int
 	if err := s.DB.QueryRowContext(context.Background(), "PRAGMA auto_vacuum").Scan(&mode); err != nil {
@@ -24,6 +25,7 @@ func TestNewStoreEnablesIncrementalAutoVacuum(t *testing.T) {
 }
 
 func TestPruneOptimizesFTSAndReclaimsPages(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "retention.db")
 	s, err := Open(database)
@@ -83,6 +85,7 @@ func TestPruneOptimizesFTSAndReclaimsPages(t *testing.T) {
 }
 
 func TestSearchMaintenanceHonorsCancellation(t *testing.T) {
+	t.Parallel()
 	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +99,7 @@ func TestSearchMaintenanceHonorsCancellation(t *testing.T) {
 }
 
 func TestSearchMaintenanceReportsErrorsAndDefersBudgetExpiry(t *testing.T) {
+	t.Parallel()
 	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -125,6 +129,7 @@ func TestSearchMaintenanceReportsErrorsAndDefersBudgetExpiry(t *testing.T) {
 }
 
 func TestRetentionProtectionPreparationReportsClosedDatabase(t *testing.T) {
+	t.Parallel()
 	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -138,6 +143,7 @@ func TestRetentionProtectionPreparationReportsClosedDatabase(t *testing.T) {
 }
 
 func TestExistingDatabaseAutoVacuumModeIsPreserved(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	raw, err := sql.Open("sqlite", path)
 	if err != nil {

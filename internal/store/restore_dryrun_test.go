@@ -16,6 +16,7 @@ import (
 // destination directories exactly as it found them. Each case then runs the
 // real restore on the same inputs to prove the two paths agree.
 func TestDryRunRestorePredictsRestoreOutcome(t *testing.T) {
+	t.Parallel()
 	// Migrate each fixture once and copy it per case; the cases only differ in
 	// what they change afterwards.
 	templates := t.TempDir()

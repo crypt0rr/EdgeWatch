@@ -398,6 +398,7 @@ func newPublicStatusFixture(t *testing.T) tenantFixture {
 // refuses a store without a valid scope. TestEveryScopedStoreMethodHasALeakCase
 // checks that every method has a case.
 func TestPublicStoreIsolation(t *testing.T) {
+	t.Parallel()
 	names := make([]string, 0, len(publicStoreCases))
 	for name := range publicStoreCases {
 		names = append(names, name)
@@ -460,6 +461,7 @@ func assertPublicStoreRefusesInvalidScopes(t *testing.T, f tenantFixture) {
 // not active all have no public scope, and a failed read is an error, never
 // a scope.
 func TestPublicScopeBySlug(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	notFound := func(label, slug string) {

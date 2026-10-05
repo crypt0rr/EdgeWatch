@@ -53,6 +53,7 @@ func seedLatestHostsForPerformance(t *testing.T, s *Store, count int) {
 }
 
 func TestSeededPerformanceRegressionInvariants(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()

@@ -6,6 +6,7 @@ import (
 )
 
 func TestDeploymentTelemetryReportsBoundedCounts(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, _ := cycleFixture(t)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scans(id,job_id,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?,?)`, "telemetry-scan", job.ID, job.Job.Name, now, now, "success", "", "Nmap 7.99", job.Job.SecurityHash(), []byte(`{}`)); err != nil {

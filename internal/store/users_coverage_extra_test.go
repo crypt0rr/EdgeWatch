@@ -11,6 +11,7 @@ import (
 )
 
 func TestUserStoreValidationAndInviteBoundaries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()

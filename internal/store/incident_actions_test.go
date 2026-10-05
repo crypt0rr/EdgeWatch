@@ -11,6 +11,7 @@ import (
 )
 
 func TestAcceptIncidentUpdatesBaselineAndRecordsAudit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("accept-incident"))
@@ -54,6 +55,7 @@ func TestAcceptIncidentUpdatesBaselineAndRecordsAudit(t *testing.T) {
 }
 
 func TestAcceptHostDownIncidentUpdatesExpectedBaselineState(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("accept-host-down"))
@@ -95,6 +97,7 @@ func TestAcceptHostDownIncidentUpdatesExpectedBaselineState(t *testing.T) {
 }
 
 func TestIncidentActionsQueueNotificationOutboxAtomically(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("incident-outbox"))
@@ -126,6 +129,7 @@ func TestIncidentActionsQueueNotificationOutboxAtomically(t *testing.T) {
 }
 
 func TestAcceptIncidentDiscardsPausedScanCycle(t *testing.T) {
+	t.Parallel()
 	ctx, s, record, plan := cycleFixture(t)
 	acceptKey := "port|192.0.2.1|tcp|1"
 	suppressKey := "port|192.0.2.1|tcp|2"
@@ -184,6 +188,7 @@ func TestAcceptIncidentDiscardsPausedScanCycle(t *testing.T) {
 }
 
 func TestSuppressIncidentStoresOneScanWindow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("suppress-incident"))
@@ -219,6 +224,7 @@ func TestSuppressIncidentStoresOneScanWindow(t *testing.T) {
 }
 
 func TestIncidentActionsRejectStaleExpectedChange(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("stale-incident-action"))
@@ -268,6 +274,7 @@ func TestIncidentActionsRejectStaleExpectedChange(t *testing.T) {
 }
 
 func TestAcceptRelatedPortAndServiceRemovalsInEitherOrder(t *testing.T) {
+	t.Parallel()
 	for _, first := range []string{"port", "service"} {
 		t.Run(first+"-first", func(t *testing.T) {
 			ctx := context.Background()
@@ -316,6 +323,7 @@ func TestAcceptRelatedPortAndServiceRemovalsInEitherOrder(t *testing.T) {
 }
 
 func TestAcceptIncidentDoesNotFoldUnrelatedScanOrServiceChanges(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("accept-related-guard"))
@@ -351,6 +359,7 @@ func TestAcceptIncidentDoesNotFoldUnrelatedScanOrServiceChanges(t *testing.T) {
 }
 
 func TestAcceptServiceChangeOnOpenPortRemainsIndependent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("accept-service-independent"))
@@ -387,6 +396,7 @@ func TestAcceptServiceChangeOnOpenPortRemainsIndependent(t *testing.T) {
 }
 
 func TestAcceptServiceOnNewPortIncludesOpenPortIncident(t *testing.T) {
+	t.Parallel()
 	for _, portScanID := range []string{"scan-3", "scan-2"} {
 		t.Run("port-from-"+portScanID, func(t *testing.T) {
 			ctx := context.Background()
@@ -439,6 +449,7 @@ func TestAcceptServiceOnNewPortIncludesOpenPortIncident(t *testing.T) {
 // or the port's removal ends that decision, and a state change of a port that
 // is already expected does not start one.
 func TestAcceptIncidentRecordsServiceDecisionForPortAcceptedAlone(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("accept-port-service-decision"))
@@ -511,6 +522,7 @@ func TestAcceptIncidentRecordsServiceDecisionForPortAcceptedAlone(t *testing.T) 
 }
 
 func TestAcceptServiceOnMissingPortWithoutPortIncidentIsRejected(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("accept-service-missing-port"))

@@ -13,6 +13,7 @@ import (
 )
 
 func TestScanCycleDefaultsAndMalformedPayloads(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, Plan: plan})
 	if err != nil {
@@ -36,6 +37,7 @@ func TestScanCycleDefaultsAndMalformedPayloads(t *testing.T) {
 }
 
 func TestScanCycleStateAndUnitErrorBranches(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, Plan: plan})
 	if err != nil {
@@ -77,6 +79,7 @@ func TestScanCycleStateAndUnitErrorBranches(t *testing.T) {
 }
 
 func TestScanCycleMalformedUnitAndTerminalBranches(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, Plan: plan})
 	if err != nil {
@@ -130,6 +133,7 @@ func TestScanCycleMalformedUnitAndTerminalBranches(t *testing.T) {
 }
 
 func TestScanCyclePauseStallAndRetryStatuses(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, Plan: plan})
 	if err != nil {
@@ -156,6 +160,7 @@ func TestScanCyclePauseStallAndRetryStatuses(t *testing.T) {
 }
 
 func TestLeaseAndDeliveryHelpersCoverBoundaries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, testJob("lease-boundary"))
@@ -186,6 +191,7 @@ func TestLeaseAndDeliveryHelpersCoverBoundaries(t *testing.T) {
 }
 
 func TestRenewJobLeaseValidatesAndRefreshesOwnership(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, testJob("renew-lease"))
@@ -232,6 +238,7 @@ func TestRenewJobLeaseValidatesAndRefreshesOwnership(t *testing.T) {
 }
 
 func TestIncidentChangeApplicationBranches(t *testing.T) {
+	t.Parallel()
 	if err := applyAcceptedChange(nil, model.Change{Kind: "port"}); !errors.Is(err, ErrBaselineNotReady) {
 		t.Fatalf("nil baseline error = %v", err)
 	}

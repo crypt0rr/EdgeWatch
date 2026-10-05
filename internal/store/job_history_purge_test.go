@@ -12,6 +12,7 @@ import (
 )
 
 func TestJobHistoryPurgeBatchesYieldsWriterAndResumesAfterRestart(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := freshTestDatabasePath(t)
 	s, err := Open(database)
@@ -120,6 +121,7 @@ func TestJobHistoryPurgeBatchesYieldsWriterAndResumesAfterRestart(t *testing.T) 
 }
 
 func TestLatestHostProjectionRebuildExcludesPendingJobPurges(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	tenant := defaultTenant(s)
@@ -187,6 +189,7 @@ func TestLatestHostProjectionRebuildExcludesPendingJobPurges(t *testing.T) {
 }
 
 func TestJobHistoryPurgeDoesNotAttributeMalformedDeliveryPayloads(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	tenant := defaultTenant(s)
@@ -222,6 +225,7 @@ func TestJobHistoryPurgeDoesNotAttributeMalformedDeliveryPayloads(t *testing.T) 
 }
 
 func TestJobHistoryPurgeResumesBetweenHostProjectionPhases(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	tenant := defaultTenant(s)
@@ -273,6 +277,7 @@ func TestJobHistoryPurgeResumesBetweenHostProjectionPhases(t *testing.T) {
 }
 
 func TestJobHistoryPurgeCancellationAndEmptyQueue(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if purged, err := s.System().purgeDeletedJobHistories(ctx, jobHistoryPurgeOptions{}); err != nil || purged != 0 {
@@ -314,6 +319,7 @@ func TestJobHistoryPurgeCancellationAndEmptyQueue(t *testing.T) {
 }
 
 func TestJobHistoryPurgeRejectsUnknownPhaseAndReportsClosedStore(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.System().purgeJobHistory(ctx, jobHistoryPurgeRecord{tenantID: DefaultTenantID, jobID: "unknown-phase", phase: "unsupported"}, jobHistoryPurgeOptions{}); err == nil || !strings.Contains(err.Error(), "unknown job history purge phase") {

@@ -9,6 +9,7 @@ import (
 )
 
 func TestMigration31TerminalizesLegacyExhaustedDeliveries(t *testing.T) {
+	t.Parallel()
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "schema30.db"))
 	if err != nil {
 		t.Fatal(err)

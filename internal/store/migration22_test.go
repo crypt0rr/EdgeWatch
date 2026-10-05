@@ -52,6 +52,7 @@ func assertHostSearchSchemaContract(t *testing.T, s *Store) {
 }
 
 func TestMigration22RepairsScanHostsCascade(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	for _, trigger := range scanHostSearchTriggerNames {
@@ -130,6 +131,7 @@ PRAGMA user_version = 21;`); err != nil {
 }
 
 func TestMigration22BackfillsFTSWithProgress(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.ExecContext(ctx, `
@@ -173,6 +175,7 @@ PRAGMA user_version = 21;`); err != nil {
 }
 
 func TestMigration28AddsFTSProgressToLegacyState(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	defer s.Close()
 	ctx := context.Background()
@@ -202,6 +205,7 @@ PRAGMA user_version = 24;`); err != nil {
 }
 
 func TestFTSBackfillCancellationResumesFromCheckpoint(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	defer s.Close()
 	ctx := context.Background()
@@ -298,6 +302,7 @@ INSERT INTO scans(id,job,started_at,finished_at,status,error,nmap_version,config
 }
 
 func TestFTSBackfillBookkeepingWaitsForConcurrentWriter(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "fts-lock.db")
 	writer, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -357,6 +362,7 @@ func TestFTSBackfillBookkeepingWaitsForConcurrentWriter(t *testing.T) {
 }
 
 func TestMigration29AddsBaselineHostProjection(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	ctx := context.Background()
 	if _, err := s.DB.ExecContext(ctx, `DROP TABLE baseline_hosts; PRAGMA user_version = 28;`); err != nil {

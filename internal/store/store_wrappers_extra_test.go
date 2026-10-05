@@ -13,6 +13,7 @@ import (
 )
 
 func TestStoreHistoryRuntimeAndLeaseWrappers(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, _ := cycleFixture(t)
 	now := time.Now().UTC()
 	scan := model.Scan{
@@ -126,6 +127,7 @@ func TestStoreHistoryRuntimeAndLeaseWrappers(t *testing.T) {
 }
 
 func TestStoreDaemonLeaseHealthTransitions(t *testing.T) {
+	t.Parallel()
 	ctx, s, _, _ := cycleFixture(t)
 	if err := s.System().AcquireLease(ctx, "owner"); err != nil {
 		t.Fatal(err)
@@ -155,6 +157,7 @@ func TestStoreDaemonLeaseHealthTransitions(t *testing.T) {
 }
 
 func TestDeliveryRetryPolicyIsDurableAndBounded(t *testing.T) {
+	t.Parallel()
 	if got := deliveryRetryDelay(1); got != 2*time.Minute {
 		t.Fatalf("first delivery retry delay = %s, want 2m", got)
 	}
@@ -204,6 +207,7 @@ func TestDeliveryRetryPolicyIsDurableAndBounded(t *testing.T) {
 }
 
 func TestDeliveryRetryScheduleSurvivesRestart(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	databasePath := s.FilePath()
@@ -270,6 +274,7 @@ func TestDeliveryRetryScheduleSurvivesRestart(t *testing.T) {
 }
 
 func TestIndeterminateDeliveryConsumesDeferralNotAttempt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if err := s.System().QueueEvent(ctx, "indeterminate", model.Event{Type: "indeterminate", CreatedAt: time.Now().UTC()}); err != nil {
@@ -300,6 +305,7 @@ func TestIndeterminateDeliveryConsumesDeferralNotAttempt(t *testing.T) {
 }
 
 func TestDeliveryHealthTracksRedactedOutcomesAndTerminalEvent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	secret := "provider password=super-secret"
@@ -364,6 +370,7 @@ func TestDeliveryHealthTracksRedactedOutcomesAndTerminalEvent(t *testing.T) {
 }
 
 func TestDeliveryDeferralsAreBoundedAndVisible(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if err := s.System().QueueEvent(ctx, "deferred", model.Event{Type: "deferred", Message: "locked", TenantID: DefaultTenantID, CreatedAt: time.Now().UTC()}); err != nil {
@@ -410,6 +417,7 @@ func TestDeliveryDeferralsAreBoundedAndVisible(t *testing.T) {
 }
 
 func TestLockedDeliveryAgingIsBoundedAndWakesOnRecovery(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	locked := "locked-recovery"

@@ -15,6 +15,7 @@ import (
 )
 
 func TestAtomicWriteJSONAndOpenExistingGuards(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "payload.json")
 	got, err := AtomicWriteJSON(path, ".edgewatch-json-", func(w io.Writer) error {
@@ -52,6 +53,7 @@ func TestAtomicWriteJSONAndOpenExistingGuards(t *testing.T) {
 }
 
 func TestRecoveryCodeTextConsumptionRejectsLegacyAndAcceptsSaltedForms(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	userID := LegacyAdminUserID
@@ -88,6 +90,7 @@ func TestRecoveryCodeTextConsumptionRejectsLegacyAndAcceptsSaltedForms(t *testin
 }
 
 func TestBaselineRuntimeAndCycleProjectionWrappers(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	if exists, err := defaultTenant(s).BaselineHostProjectionExists(ctx, job.ID); err != nil || exists {
 		t.Fatalf("empty baseline projection = %t, %v", exists, err)
@@ -130,6 +133,7 @@ func TestBaselineRuntimeAndCycleProjectionWrappers(t *testing.T) {
 }
 
 func TestLatestHostLegacyAndLeaseWrappers(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, _ := cycleFixture(t)
 	now := time.Now().UTC()
 	scan := model.Scan{ID: "legacy-wrapper-scan", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", NmapVersion: "7.99", Snapshot: model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: []model.PortState{{Port: 22, State: "open"}}}}}}
@@ -162,6 +166,7 @@ func TestLatestHostLegacyAndLeaseWrappers(t *testing.T) {
 }
 
 func TestDeliveryExclusionAndReleaseNotModified(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	for _, destination := range []string{"healthy", "skip"} {

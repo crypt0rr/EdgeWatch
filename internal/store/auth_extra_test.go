@@ -8,6 +8,7 @@ import (
 )
 
 func TestSetupTokenAndAdministratorCompatibilityLifecycle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
@@ -54,6 +55,7 @@ func TestSetupTokenAndAdministratorCompatibilityLifecycle(t *testing.T) {
 }
 
 func TestTouchSessionIfStaleCoalescesActivity(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	created := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
@@ -86,6 +88,7 @@ func TestTouchSessionIfStaleCoalescesActivity(t *testing.T) {
 }
 
 func TestSaveAdminFailsWhenUsersRowCannotBeWritten(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -108,6 +111,7 @@ func TestSaveAdminFailsWhenUsersRowCannotBeWritten(t *testing.T) {
 }
 
 func TestSetupTokenReissueAndCompleteSetup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	reissue := openTestStore(t)
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
@@ -144,6 +148,7 @@ func TestSetupTokenReissueAndCompleteSetup(t *testing.T) {
 }
 
 func TestSessionAndRecoveryCodeStoreLifecycle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Second)
@@ -229,6 +234,7 @@ func TestSessionAndRecoveryCodeStoreLifecycle(t *testing.T) {
 }
 
 func TestSessionRevocationRemainsEffectiveWhenAuditInsertFails(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()

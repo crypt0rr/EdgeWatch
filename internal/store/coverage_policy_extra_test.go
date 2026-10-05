@@ -10,6 +10,7 @@ import (
 )
 
 func TestCoveragePolicyErrorAndIdentityHelpers(t *testing.T) {
+	t.Parallel()
 	var nilVerification *VerificationError
 	if got := nilVerification.Error(); got != "database verification failed" {
 		t.Fatalf("nil verification error = %q", got)
@@ -74,6 +75,7 @@ func TestCoveragePolicyErrorAndIdentityHelpers(t *testing.T) {
 }
 
 func TestCoveragePolicySSEAndUpdateEdgeCases(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	if _, _, err := (*Store)(nil).System().ReserveSSEEventIDs(ctx, 1); err == nil {
 		t.Fatal("nil store reserved SSE IDs")

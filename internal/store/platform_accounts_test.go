@@ -36,6 +36,7 @@ func platformAudit(action string) AuditEntry {
 //     token, or an enabled platform administrator that already exists,
 //     writes nothing.
 func TestPlatformSetupTokenLifecycle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	ps := f.store.Platform()
@@ -196,6 +197,7 @@ func TestPlatformSetupTokenLifecycle(t *testing.T) {
 // Before the first setup there is no platform setup token: the initial
 // token comes first, and it stays as it is.
 func TestPlatformSetupTokenNeedsTheFirstSetup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -217,6 +219,7 @@ func TestPlatformSetupTokenNeedsTheFirstSetup(t *testing.T) {
 // before one is issued, never an initial token, and a token that is used or
 // replaced by an initial one.
 func TestGetPlatformSetupTokenReportsOnlyThePlatformToken(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	ps := f.store.Platform()
@@ -250,6 +253,7 @@ func TestGetPlatformSetupTokenReportsOnlyThePlatformToken(t *testing.T) {
 // invitation is recorded in the unit's audit with the platform actor kind,
 // and the other unit is untouched.
 func TestPlatformInvitesOnlyUnitAdministrators(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
@@ -344,6 +348,7 @@ func TestPlatformInvitesOnlyUnitAdministrators(t *testing.T) {
 // The reset link is recorded in the account's unit with the platform actor
 // kind.
 func TestPlatformResetsOnlyUnitAdministrators(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
@@ -409,6 +414,7 @@ func TestPlatformResetsOnlyUnitAdministrators(t *testing.T) {
 // each unit's store finds neither the other unit's administrator nor a
 // platform administrator, and writes nothing for them.
 func TestUnitAdministratorsCannotTouchOtherAccounts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
@@ -453,6 +459,7 @@ func TestUnitAdministratorsCannotTouchOtherAccounts(t *testing.T) {
 // enabled platform administrator stays enabled, and every change is
 // recorded in platform scope.
 func TestPlatformAccountStoreAndLastPlatformAdmin(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
@@ -636,6 +643,7 @@ func TestPlatformAccountStoreAndLastPlatformAdmin(t *testing.T) {
 // entry or its actor names, and more than one tenant is counted only while
 // the second is not deleted.
 func TestPlatformAuditAndTenantCount(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	if err := f.store.Platform().AuditEntry(ctx, AuditEntry{Action: "auth.login_failed", TenantID: secondTenantID, ActorUserID: accountAdminB, ActorKind: AuditActorUnit}); err != nil {

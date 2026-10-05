@@ -16,6 +16,7 @@ import (
 )
 
 func TestScanCycleUnitIdentityBackfillIsBoundedAndDeterministic(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
@@ -52,6 +53,7 @@ func TestScanCycleUnitIdentityBackfillIsBoundedAndDeterministic(t *testing.T) {
 }
 
 func TestScanCycleExpiryAndDiscardRespectLiveJobLease(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
@@ -92,6 +94,7 @@ func TestScanCycleExpiryAndDiscardRespectLiveJobLease(t *testing.T) {
 	}
 }
 func TestExpireScanCycleEndsLeaseOwnersCycleAfterItsWindow(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	now := time.Now().UTC()
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
@@ -154,6 +157,7 @@ func TestExpireScanCycleEndsLeaseOwnersCycleAfterItsWindow(t *testing.T) {
 }
 
 func TestDiscardRunningScanCycleAtomicallyClearsProgress(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name           string
 		completedUnits int
@@ -211,6 +215,7 @@ func TestDiscardRunningScanCycleAtomicallyClearsProgress(t *testing.T) {
 }
 
 func TestDiscardScanCycleRollsBackWhenTransitionOrCleanupFails(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name        string
 		trigger     string
@@ -268,6 +273,7 @@ func TestDiscardScanCycleRollsBackWhenTransitionOrCleanupFails(t *testing.T) {
 }
 
 func TestScanCyclePhaseAndProbeMetadataUsesIndexedColumns(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
@@ -309,6 +315,7 @@ func TestScanCyclePhaseAndProbeMetadataUsesIndexedColumns(t *testing.T) {
 }
 
 func TestScanCycleHasScanRequiresPromotedFinalRecord(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name, status, cycleStatus string
 	}{
@@ -343,6 +350,7 @@ func TestScanCycleHasScanRequiresPromotedFinalRecord(t *testing.T) {
 }
 
 func TestScanCycleAuxiliaryLifecycleAndFragments(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
 		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
@@ -428,6 +436,7 @@ func TestScanCycleAuxiliaryLifecycleAndFragments(t *testing.T) {
 }
 
 func TestReconcileNaabuDiscoveryAddsDeterministicEnrichmentAndUDP(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()
@@ -486,6 +495,7 @@ func TestReconcileNaabuDiscoveryAddsDeterministicEnrichmentAndUDP(t *testing.T) 
 }
 
 func TestReconcileNaabuDiscoveryIncludesBaselineExpectedPorts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()
@@ -555,6 +565,7 @@ func TestReconcileNaabuDiscoveryIncludesBaselineExpectedPorts(t *testing.T) {
 // ports. Changes name logical targets, so a DNS target maps to every
 // address its plan resolved to.
 func TestReconcileNaabuDiscoveryIncludesTrackedChangePorts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()
@@ -686,6 +697,7 @@ func TestReconcileNaabuDiscoveryIncludesTrackedChangePorts(t *testing.T) {
 // to the logical target, so Nmap must confirm them on every address the cycle
 // plan pinned for that target after the name moves.
 func TestReconcileNaabuDiscoveryMapsBaselinePortsToPlannedDNSAddresses(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name      string
 		addresses []string
@@ -785,6 +797,7 @@ func TestReconcileNaabuDiscoveryMapsBaselinePortsToPlannedDNSAddresses(t *testin
 }
 
 func TestReconcileNaabuDiscoveryChunksLargePortSets(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()
@@ -859,6 +872,7 @@ func TestReconcileNaabuDiscoveryChunksLargePortSets(t *testing.T) {
 }
 
 func TestReconcileNaabuDiscoveryIsIncremental(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()
@@ -955,6 +969,7 @@ func TestReconcileNaabuDiscoveryIsIncremental(t *testing.T) {
 }
 
 func TestReconcileNaabuDiscoveryRepairsSplitPlanCounters(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()
@@ -1041,6 +1056,7 @@ func TestReconcileNaabuDiscoveryRepairsSplitPlanCounters(t *testing.T) {
 }
 
 func TestScanCycleRetrySplitStallAndDiscard(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
@@ -1132,6 +1148,7 @@ func TestScanCycleRetrySplitStallAndDiscard(t *testing.T) {
 }
 
 func TestScanCycleValidationAndMissingOperations(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	if _, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{Plan: plan}); err == nil {
 		t.Fatal("cycle without job was accepted")

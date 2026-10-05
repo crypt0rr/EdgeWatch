@@ -9,6 +9,7 @@ import (
 // derived from FilePath. It must be the normalized database file for every
 // open mode, never the DSN in Path.
 func TestStoreFilePathIsNormalizedDatabaseFile(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "uri.db")
 	writable, err := Open("file://localhost" + path + "?mode=rwc")
@@ -48,6 +49,7 @@ func TestStoreFilePathIsNormalizedDatabaseFile(t *testing.T) {
 }
 
 func TestDatabaseFilePathNormalizesAcceptedDSNs(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "edgewatch.db")
 	for _, dsn := range []string{path, path + "?mode=rwc", "file:" + path + "?mode=rwc", "file://localhost" + path} {
 		got, err := DatabaseFilePath(dsn)

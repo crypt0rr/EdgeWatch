@@ -9,6 +9,7 @@ import (
 )
 
 func TestRecordJobSilenceAlertPersistsEventAndOutboxAtomically(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
@@ -55,6 +56,7 @@ func TestRecordJobSilenceAlertPersistsEventAndOutboxAtomically(t *testing.T) {
 }
 
 func TestRecordJobSilenceAlertSkipsRecentSuccess(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
@@ -85,6 +87,7 @@ func TestRecordJobSilenceAlertSkipsRecentSuccess(t *testing.T) {
 }
 
 func TestJobSilenceReferenceUsesNewestEligibleEvidence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{
@@ -125,6 +128,7 @@ func TestJobSilenceReferenceUsesNewestEligibleEvidence(t *testing.T) {
 }
 
 func TestJobSilenceReferenceHonorsFutureEligibility(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{

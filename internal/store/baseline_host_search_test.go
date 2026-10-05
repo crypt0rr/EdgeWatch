@@ -124,6 +124,7 @@ func insertBaselineSearchJob(t *testing.T, s *Store, id, name string) {
 }
 
 func TestBaselineHostSearchTriggersDeleteByRowid(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	// A job/address delete cannot use the FTS index, so every removed baseline
 	// host scanned the search rows of every job.
@@ -131,6 +132,7 @@ func TestBaselineHostSearchTriggersDeleteByRowid(t *testing.T) {
 }
 
 func TestBaselineHostSearchQueriesUseRowidLookups(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertBaselineSearchJob(t, s, "plan-job", "plan-job")
@@ -192,6 +194,7 @@ func TestBaselineHostSearchQueriesUseRowidLookups(t *testing.T) {
 }
 
 func TestBaselineHostProjectionReplaceIsIndependentOfOtherJobs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	const ownHosts, otherHosts = 128, 3072
 	alone := openTestStore(t)

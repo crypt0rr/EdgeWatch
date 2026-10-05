@@ -397,6 +397,7 @@ func assertLatestHostsRekeyed(t *testing.T, s *Store, before latestHostsBefore) 
 }
 
 func TestMigration54KeysLatestHostsByTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := newSchema53Fixture(t)
 	before := readLatestHostsBefore(t, path)
@@ -482,6 +483,7 @@ func openRekeyPending(t *testing.T, path string) *Store {
 }
 
 func TestMigration54ResumesAfterCancellation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := newSchema53Fixture(t)
 	before := readLatestHostsBefore(t, path)
@@ -586,6 +588,7 @@ func TestMigration54ResumesAfterCancellation(t *testing.T) {
 // triggers missing and rebuild both search projections, and its search text
 // and legacy updates would be refused.
 func TestMigration54StartupPhasesWaitForTheCopy(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		phase func(*sql.DB) error
@@ -632,6 +635,7 @@ func TestMigration54StartupPhasesWaitForTheCopy(t *testing.T) {
 // the retention repair and the full rebuild keep the tenants apart, and the
 // guard triggers refuse a row outside its scan's tenant.
 func TestSchema54KeepsTheLatestHostOfEachTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertSecondTenant(t, s)
@@ -851,6 +855,7 @@ func TestSchema54KeepsTheLatestHostOfEachTenant(t *testing.T) {
 // migration creates the tables that the swap and the copy read, and the
 // writers work on the result.
 func TestMigration54UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
+	t.Parallel()
 	all := []string{"latest_scan_hosts", "latest_host_search", "fts_backfill_state", "scans", "tenants"}
 	cases := []struct {
 		name    string
@@ -915,6 +920,7 @@ func TestMigration54UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
 
 // Reopening a current-schema database changes no row and no schema object.
 func TestCurrentSchemaOpenIsANoOpWhenRepeated(t *testing.T) {
+	t.Parallel()
 	path := newSchema53Fixture(t)
 	s, err := Open(path)
 	if err != nil {
@@ -953,6 +959,7 @@ func TestCurrentSchemaOpenIsANoOpWhenRepeated(t *testing.T) {
 // address through scan_hosts_address, not by reading every scan of the
 // tenant, and deletes the affected rows by their primary key.
 func TestLatestScanHostRepairFollowsTheAddressIndex(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	stamp := sqliteTimestamp(time.Now())
 	tx, err := s.DB.Begin()

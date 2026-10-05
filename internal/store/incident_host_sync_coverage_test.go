@@ -7,6 +7,7 @@ import (
 )
 
 func TestAcceptedChangesSynchronizeDetailedHostObservations(t *testing.T) {
+	t.Parallel()
 	snapshot := &model.Snapshot{
 		Units: []model.Unit{{
 			Target:    "router.example",
@@ -82,6 +83,7 @@ func TestAcceptedChangesSynchronizeDetailedHostObservations(t *testing.T) {
 }
 
 func TestAcceptedHostSyncUsesPrecomputedAddressIndex(t *testing.T) {
+	t.Parallel()
 	snapshot := &model.Snapshot{
 		Units: []model.Unit{{
 			Target:    "router.example",

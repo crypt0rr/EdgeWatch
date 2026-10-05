@@ -8,6 +8,7 @@ import (
 )
 
 func TestUsersValidateAndInviteLifecycle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
@@ -48,6 +49,7 @@ func TestUsersValidateAndInviteLifecycle(t *testing.T) {
 }
 
 func TestRevokeUserInviteAndDisablePreventActivation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -88,6 +90,7 @@ func TestRevokeUserInviteAndDisablePreventActivation(t *testing.T) {
 // edited, but a change of its role revokes the link, as for any account:
 // the invitee then needs a new link, which works.
 func TestUpdatePendingUserKeepsActivationInviteUntilItsRoleChanges(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -129,6 +132,7 @@ func TestUpdatePendingUserKeepsActivationInviteUntilItsRoleChanges(t *testing.T)
 }
 
 func TestUserInviteAuditFailureRollsBackAndOlderInviteIsInvalidated(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -169,6 +173,7 @@ func TestUserInviteAuditFailureRollsBackAndOlderInviteIsInvalidated(t *testing.T
 }
 
 func TestUserValidationRejectsPathAndControlCharacters(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	ctx := context.Background()
 	for _, username := range []string{"a/b", "a\\b", "a:b", "a\n b"} {
@@ -185,6 +190,7 @@ func TestUserValidationRejectsPathAndControlCharacters(t *testing.T) {
 }
 
 func TestUpdateUserKeepsLastEnabledAdministrator(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -207,6 +213,7 @@ func TestUpdateUserKeepsLastEnabledAdministrator(t *testing.T) {
 }
 
 func TestSaveUserSecurityKeepsRoleValidationAndLastAdministratorInvariant(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -230,6 +237,7 @@ func TestSaveUserSecurityKeepsRoleValidationAndLastAdministratorInvariant(t *tes
 }
 
 func TestUserMutationsRejectStaleRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()

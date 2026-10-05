@@ -11,6 +11,7 @@ import (
 )
 
 func TestBuiltinScannerProfilesForwardUpgrade(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()
@@ -73,6 +74,7 @@ func TestBuiltinScannerProfilesForwardUpgrade(t *testing.T) {
 // and it refuses to seed over a tenant's profile that holds a built-in ID
 // instead of taking that profile over.
 func TestBuiltinScannerProfileSeedingTouchesOnlyBuiltinRows(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM scanner_profile_revisions WHERE profile_id=?`, BuiltinNmapProfileID); err != nil {
@@ -118,6 +120,7 @@ func TestBuiltinScannerProfileSeedingTouchesOnlyBuiltinRows(t *testing.T) {
 }
 
 func TestCurrentScannerProfileRevisionsReturnsCurrentRowsAndReportsFailures(t *testing.T) {
+	t.Parallel()
 	t.Run("current revisions", func(t *testing.T) {
 		s := openTestStore(t)
 		ctx := context.Background()
@@ -157,6 +160,7 @@ func TestCurrentScannerProfileRevisionsReturnsCurrentRowsAndReportsFailures(t *t
 }
 
 func TestScannerProfilesSeedAndRevisionLifecycle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	profiles, err := defaultTenant(s).ListScannerProfiles(ctx, true)
@@ -217,6 +221,7 @@ func TestScannerProfilesSeedAndRevisionLifecycle(t *testing.T) {
 }
 
 func TestListScannerProfilesReportIsolatesInvalidDefinitions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()

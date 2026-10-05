@@ -13,6 +13,7 @@ import (
 )
 
 func TestExportBaselinesRoundTripsManagedAndLegacyEntries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
@@ -125,6 +126,7 @@ func TestExportBaselinesRoundTripsManagedAndLegacyEntries(t *testing.T) {
 }
 
 func TestExportBaselinesIncludesJobsWithoutReadyBaseline(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	job := config.NormalizeJob(config.Job{
 		Name: "not-ready-export", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.22"},
@@ -143,6 +145,7 @@ func TestExportBaselinesIncludesJobsWithoutReadyBaseline(t *testing.T) {
 }
 
 func TestBaselineExportEntriesOfTheDefaultTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("wrapper-export"))

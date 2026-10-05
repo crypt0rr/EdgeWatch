@@ -652,6 +652,7 @@ var runtimeTenantLeakCases = map[string]tenantLeakCase{
 // The daemon's runtime writers reach every tenant's jobs through the system
 // store.
 func TestRuntimeWritersFollowTheirScope(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	if err := f.store.System().ReplaceBaselineHostProjection(ctx, f.archivedB, model.Snapshot{Hosts: fixtureHosts(0, 5)}); err != nil {

@@ -5,6 +5,7 @@ import (
 )
 
 func TestScanCycleFailureBudgetIgnoresClaimsAndResetsSplitChildren(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
 
@@ -94,6 +95,7 @@ func TestScanCycleFailureBudgetIgnoresClaimsAndResetsSplitChildren(t *testing.T)
 }
 
 func TestScanCycleFailureColumnExistsAfterSchemaMigration(t *testing.T) {
+	t.Parallel()
 	ctx, s, _, _ := cycleFixture(t)
 	defer s.Close()
 

@@ -10,6 +10,7 @@ import (
 )
 
 func TestRecoverableCycleSelectionAndDeadlineGuards(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
 
@@ -71,6 +72,7 @@ func TestRecoverableCycleSelectionAndDeadlineGuards(t *testing.T) {
 }
 
 func TestDiscardCompletedCycleRequiresUnpromotedState(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
 	// Exercise deployments where WAL is unavailable: reads then share the
@@ -130,6 +132,7 @@ func TestDiscardCompletedCycleRequiresUnpromotedState(t *testing.T) {
 }
 
 func TestDiscardCompletedCycleReturnsScanLookupError(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
 	readDB := s.ReadDB
@@ -169,6 +172,7 @@ func TestDiscardCompletedCycleReturnsScanLookupError(t *testing.T) {
 }
 
 func TestIndeterminateDeliveryTerminalDeferralsAreDurable(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()

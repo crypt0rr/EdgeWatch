@@ -9,6 +9,7 @@ import (
 )
 
 func TestSaveScanRollsBackScanAndHostIndexesOnHostFailure(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER fail_scan_host BEFORE INSERT ON scan_hosts

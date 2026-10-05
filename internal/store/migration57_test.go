@@ -46,6 +46,7 @@ type schema56Tenant struct {
 // grant, and so does the default unit's ceiling. Another action in the
 // unit's audit, or a capacity change of another unit, is not a grant.
 func TestMigration57TakesTheAutomaticCeilingAway(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	notGranted := TenantCapacity{HighCostCeiling: ptrTo(HighCostNotGranted)}
 	tenants := []schema56Tenant{
@@ -125,6 +126,7 @@ func TestMigration57TakesTheAutomaticCeilingAway(t *testing.T) {
 // A fresh install has the column with its check, and its default unit
 // inherits the deployment's high-cost behavior as before business units.
 func TestMigration57FreshInstallKeepsTheDefaultUnitsBehavior(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	if got := countRows(t, s.DB, `SELECT COUNT(*) FROM pragma_table_info('tenants') WHERE name='high_cost_granted' AND "notnull"=1 AND dflt_value='1'`); got != 1 {
 		t.Fatal("tenants has no high_cost_granted column that defaults to a grant")

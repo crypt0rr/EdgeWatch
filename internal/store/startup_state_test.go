@@ -11,6 +11,7 @@ import (
 )
 
 func TestHealthStatusReportsMigrationProgressAsHealthyStarting(t *testing.T) {
+	t.Parallel()
 	s, err := Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -35,6 +36,7 @@ func TestHealthStatusReportsMigrationProgressAsHealthyStarting(t *testing.T) {
 }
 
 func TestHealthStatusRejectsStaleOrFailedMigration(t *testing.T) {
+	t.Parallel()
 	s, err := Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -58,6 +60,7 @@ func TestHealthStatusRejectsStaleOrFailedMigration(t *testing.T) {
 }
 
 func TestHealthStatusFallsBackToDaemonLeaseWhenReady(t *testing.T) {
+	t.Parallel()
 	s, err := Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -83,6 +86,7 @@ func TestHealthStatusFallsBackToDaemonLeaseWhenReady(t *testing.T) {
 }
 
 func TestOpenWithLoggerRoutesMigrationProgress(t *testing.T) {
+	t.Parallel()
 	var output bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	s, err := OpenWithLogger(filepath.Join(t.TempDir(), "edgewatch.db"), logger)

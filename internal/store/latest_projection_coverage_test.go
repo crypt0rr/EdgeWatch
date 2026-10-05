@@ -10,6 +10,7 @@ import (
 )
 
 func TestRebuildLatestScanHostsWrapperRecreatesProjection(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertJobRows(t, s, "job-wrapper")
@@ -42,6 +43,7 @@ func TestRebuildLatestScanHostsWrapperRecreatesProjection(t *testing.T) {
 }
 
 func TestRepairLatestScanHostsCancellationAndRollback(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 

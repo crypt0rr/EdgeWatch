@@ -71,6 +71,7 @@ func freshTestDatabasePath(t testing.TB) string {
 }
 
 func TestMigratedTemplateMatchesFreshMigration(t *testing.T) {
+	t.Parallel()
 	fresh, err := Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -130,6 +131,7 @@ func TestMigratedTemplateMatchesFreshMigration(t *testing.T) {
 }
 
 func TestBuildMigratedTemplateReportsOpenFailure(t *testing.T) {
+	t.Parallel()
 	blocker := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
 		t.Fatal(err)

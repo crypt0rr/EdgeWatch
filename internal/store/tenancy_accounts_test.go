@@ -466,6 +466,7 @@ func checkTenantSecurityWrite(t *testing.T, f tenantFixture, save func(ts *Tenan
 // redemption of its links, and nothing else. The checks share one copy of
 // the fixture, because opening a database is the slow part of these tests.
 func TestAccountGlobalPathsCarryTheTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	now := time.Now().UTC()
@@ -620,6 +621,7 @@ func TestAccountGlobalPathsCarryTheTenant(t *testing.T) {
 // is tenant A's administrator are all recorded in B. The actor kind is the
 // actor's.
 func TestTenantActionsAuditInTheActingTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	b := f.store.Tenant(f.b)
@@ -743,6 +745,7 @@ func TestTenantActionsAuditInTheActingTenant(t *testing.T) {
 // default tenant, or the tenant the entry names, with the entry's actor kind,
 // or unit for an entry with an actor and system without one.
 func TestAuditEntryBeforeSchema52UsesTheDefaultTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "schema51.db"))
 	if err != nil {
@@ -794,6 +797,7 @@ func TestAuditEntryBeforeSchema52UsesTheDefaultTenant(t *testing.T) {
 //
 // An unknown actor kind is refused, and every new record has a kind.
 func TestAuditRecordsTheActingTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	const platformAdmin = "00000000-0000-0000-0000-00000000fc01"

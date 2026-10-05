@@ -120,6 +120,45 @@ func TestUpdateJobRefreshesLatestHostProjectionName(t *testing.T) {
 	}
 }
 
+func TestUpdateJobNameProjectionFailureRollsBackJobRevision(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	tenant := defaultTenant(s)
+	record, err := tenant.CreateJob(ctx, testJob("before-rename"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	scan := model.Scan{
+		ID: "scan-rename-trigger", JobID: record.ID, Job: record.Job.Name,
+		StartedAt: finished.Add(-time.Minute), FinishedAt: finished, Status: "success",
+		Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.11", AddressFamily: "IPv4"}}},
+	}
+	if err := s.System().SaveScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER fail_latest_host_job_rename BEFORE UPDATE OF job ON latest_scan_hosts BEGIN SELECT RAISE(ABORT, 'simulated latest-host projection failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	record.Job.Name = "after-rename"
+	if _, _, err := tenant.UpdateJob(ctx, record.ID, record.Revision, record.Job, record.Enabled, record.Archived, false); err == nil || !strings.Contains(err.Error(), "simulated latest-host projection failure") {
+		t.Fatalf("rename error = %v, want latest-host projection failure", err)
+	}
+	stored, err := tenant.GetJob(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Job.Name != "before-rename" || stored.Revision != record.Revision {
+		t.Fatalf("failed rename persisted job = %q at revision %d; want %q at revision %d", stored.Job.Name, stored.Revision, "before-rename", record.Revision)
+	}
+	page, err := tenant.ListLatestScanHostsPage(ctx, "before-rename", "", nil, 10, 0)
+	if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].Job != "before-rename" {
+		t.Fatalf("failed rename changed latest-host projection: page=%#v err=%v", page, err)
+	}
+}
+
 func TestManagedJobsHonorConfiguredTargetExclusions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

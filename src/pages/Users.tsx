@@ -85,7 +85,15 @@ export function Users() {
           setMessage(`${draft.username} has no changes.`)
         } else {
           await updateUser(draft.userID, { display_name: draft.displayName, role: draft.role, revision: draft.revision, password: secret })
-          setMessage(`Updated ${draft.username}.`)
+          const roleChanged = draft.role !== draft.originalRole
+          const account = users.data?.users.find(value => value.id === draft.userID)
+          const issuedLink = issued?.userID === draft.userID
+          if (roleChanged) dropToken(draft.userID)
+          if (roleChanged && issuedLink) {
+            const linkName = account?.pending ? 'activation' : 'password reset'
+            const nextAction = account?.pending ? 'issue' : 'create'
+            setMessage(`Updated ${draft.username}. Its ${linkName} link stopped working; ${nextAction} a new one.`)
+          } else setMessage(`Updated ${draft.username}.`)
         }
         setEditDraft(null)
       }

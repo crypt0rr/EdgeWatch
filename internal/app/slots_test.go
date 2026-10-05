@@ -77,6 +77,40 @@ func assertIdleSlotPool(t *testing.T, p *slotPool, capacity int) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("idle snapshot = %#v, want %#v", got, want)
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.idleGrants) != 0 {
+		t.Fatalf("idle grant history was retained with no active keys: %#v", p.idleGrants)
+	}
+}
+
+func assertIdleGrantHistoryBound(t *testing.T, p *slotPool) {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.keys) == 0 {
+		if len(p.idleGrants) != 0 {
+			t.Fatalf("idle grant history with no active keys = %#v", p.idleGrants)
+		}
+		return
+	}
+	oldestActive := ^uint64(0)
+	for _, k := range p.keys {
+		if k.lastGrant < oldestActive {
+			oldestActive = k.lastGrant
+		}
+	}
+	if oldestActive == 0 {
+		return
+	}
+	for key, lastGrant := range p.idleGrants {
+		if _, active := p.keys[key]; active {
+			t.Fatalf("key %q has both active and idle grant state", key)
+		}
+		if lastGrant <= oldestActive {
+			t.Fatalf("obsolete idle grant for %q = %d, oldest active grant = %d", key, lastGrant, oldestActive)
+		}
+	}
 }
 
 // queueOrdered queues one waiter per label, each after the previous one is
@@ -203,6 +237,106 @@ func TestSlotPoolKeysTakeTurns(t *testing.T) {
 		t.Fatalf("grant order = %v, want %v", order, want)
 	}
 	assertIdleSlotPool(t, p, 1)
+}
+
+func TestSlotPoolIdleKeyDoesNotLoseItsTurn(t *testing.T) {
+	p := newSlotPool(1, nil)
+	holdC := mustAcquireSlot(t, p, "C")
+	defer holdC()
+	pending := make(map[<-chan slotResult]context.CancelFunc)
+	var cancels []context.CancelFunc
+	queue := func(key string) <-chan slotResult {
+		ctx, cancel := context.WithCancel(context.Background())
+		result := startSlotAcquire(ctx, p, key)
+		pending[result] = cancel
+		cancels = append(cancels, cancel)
+		return result
+	}
+	defer func() {
+		for _, cancel := range cancels {
+			cancel()
+		}
+		for result := range pending {
+			select {
+			case got := <-result:
+				if got.release != nil {
+					got.release()
+				}
+			case <-time.After(10 * time.Second):
+				t.Errorf("waiter did not stop during test cleanup")
+			}
+		}
+	}()
+
+	c := queue("C")
+	waitForSlotWaiters(t, p, "C", 1)
+	l1 := queue("L1")
+	waitForSlotWaiters(t, p, "L1", 1)
+	l2 := queue("L2")
+	waitForSlotWaiters(t, p, "L2", 1)
+	byKey := map[string]<-chan slotResult{"L1": l1, "L2": l2}
+	holdC()
+
+	// Keep L1 and L2 backlogged by re-queuing each key immediately after its
+	// grant is released. C already has a waiter and must not lose its turn just
+	// because L1 and L2 briefly became idle between runs.
+	currentKey := "L1"
+	for releaseCount := 1; releaseCount <= 3; releaseCount++ {
+		current := byKey[currentKey]
+		got := receiveSlot(t, current)
+		delete(pending, current)
+		if got.err != nil {
+			t.Fatalf("acquire %s: %v", currentKey, got.err)
+		}
+		got.release()
+		byKey[currentKey] = queue(currentKey)
+		waitForSlotWaiters(t, p, currentKey, 1)
+
+		select {
+		case gotC := <-c:
+			delete(pending, c)
+			if gotC.err != nil {
+				t.Fatalf("acquire C: %v", gotC.err)
+			}
+			gotC.release()
+			t.Logf("C was granted after %d competing releases", releaseCount)
+			return
+		default:
+		}
+
+		if currentKey == "L1" {
+			currentKey = "L2"
+		} else {
+			currentKey = "L1"
+		}
+	}
+	t.Fatalf("C was not granted within the first three competing releases; snapshot = %#v", p.CapacitySnapshot())
+}
+
+func TestSlotPoolPrunesIdleGrantHistoryThatCannotAffectOrder(t *testing.T) {
+	p := newSlotPool(3, nil)
+	a := mustAcquireSlot(t, p, "A")      // grant age 1
+	afterA := mustAcquireSlot(t, p, "B") // grant age 2
+	c := mustAcquireSlot(t, p, "C")      // grant age 3
+
+	c() // age 3 is newer than active A and B, so retain it.
+	assertIdleGrantHistoryBound(t, p)
+	if got := p.idleGrants["C"]; got != 3 {
+		t.Fatalf("retained C grant age = %d, want 3", got)
+	}
+
+	a() // A's age 1 is now older than every active key; discard it.
+	assertIdleGrantHistoryBound(t, p)
+	if _, ok := p.idleGrants["A"]; ok {
+		t.Fatalf("obsolete A grant age was retained: %#v", p.idleGrants)
+	}
+	if got := p.idleGrants["C"]; got != 3 {
+		t.Fatalf("relevant C grant age = %d, want 3", got)
+	}
+
+	afterA() // With no active keys, all remembered ages can be discarded.
+	assertIdleGrantHistoryBound(t, p)
+	assertIdleSlotPool(t, p, 3)
 }
 
 func TestSlotPoolRespectsPerKeyCaps(t *testing.T) {

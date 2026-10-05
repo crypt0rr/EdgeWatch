@@ -21,8 +21,10 @@ var errSlotWaitFailed = errors.New("scan slot wait failed")
 // Each key has a FIFO queue of waiters. When a slot is free, it goes to the
 // head waiter of the eligible key that was granted a slot least recently, so
 // keys with waiters take turns and a key with many queued scans cannot starve
-// one with a single scan. A key is eligible while it has waiters and uses
-// fewer slots than its cap. With one key the pool is a FIFO semaphore.
+// one with a single scan. The pool retains relevant grant ages for idle keys,
+// so a key that queues again does not jump ahead of keys that have waited
+// longer. A key is eligible while it has waiters and uses fewer slots than
+// its cap. With one key the pool is a FIFO semaphore.
 //
 // A free slot and an eligible waiter never coexist once a call returns: every
 // change that can free a slot or make a waiter eligible dispatches before it
@@ -37,14 +39,19 @@ type slotPool struct {
 	grants   uint64
 	arrivals uint64
 	keys     map[string]*slotKey
+	// idleGrants keeps the last grant age of idle keys while that age affects
+	// ordering against active keys. Older ages sort before every active key and
+	// can be forgotten without changing which active key wins next.
+	idleGrants map[string]uint64
 }
 
 // slotKey holds one key's state. It exists only while the key uses a slot or
-// has waiters, so the map stays bounded by the keys that are active.
+// has waiters, so the keys map stays bounded by active keys.
 type slotKey struct {
 	inUse int
-	// lastGrant orders keys for round-robin grants; 0 means the key has not
-	// been granted a slot since it last became idle.
+	// lastGrant orders keys for round-robin grants; 0 means the key has no
+	// retained grant age, either because it has never been granted or because
+	// its idle age was older than every active key.
 	lastGrant uint64
 	waiters   list.List
 }
@@ -86,7 +93,12 @@ type slotSnapshot struct {
 }
 
 func newSlotPool(capacity int, capFor func(key string) int) *slotPool {
-	return &slotPool{capacity: max(capacity, 0), capFor: capFor, keys: map[string]*slotKey{}}
+	return &slotPool{
+		capacity:   max(capacity, 0),
+		capFor:     capFor,
+		keys:       map[string]*slotKey{},
+		idleGrants: map[string]uint64{},
+	}
 }
 
 // Acquire waits for a slot for key. The returned release function gives the
@@ -102,7 +114,8 @@ func (p *slotPool) Acquire(ctx context.Context, key string) (func(), error) {
 	p.mu.Lock()
 	k := p.keys[key]
 	if k == nil {
-		k = &slotKey{}
+		k = &slotKey{lastGrant: p.idleGrants[key]}
+		delete(p.idleGrants, key)
 		p.keys[key] = k
 	}
 	p.arrivals++
@@ -233,7 +246,7 @@ func (p *slotPool) dispatchLocked() {
 			}
 		}
 		if next == nil {
-			return
+			break
 		}
 		next.waiters.Remove(nextHead.elem)
 		nextHead.elem = nil
@@ -245,6 +258,7 @@ func (p *slotPool) dispatchLocked() {
 		nextHead.state = slotGranted
 		close(nextHead.ready)
 	}
+	p.pruneIdleGrantsLocked()
 }
 
 func (p *slotPool) releaseLocked(key string) {
@@ -266,5 +280,39 @@ func (p *slotPool) removeWaiterLocked(w *slotWaiter) {
 func (p *slotPool) forgetIdleLocked(key string, k *slotKey) {
 	if k.inUse == 0 && k.waiters.Len() == 0 {
 		delete(p.keys, key)
+		if k.lastGrant != 0 {
+			p.idleGrants[key] = k.lastGrant
+		}
+		p.pruneIdleGrantsLocked()
+	}
+}
+
+// pruneIdleGrantsLocked drops idle grant ages that are older than every
+// active key. Such keys already sort ahead of all active keys; treating their
+// age as zero preserves that ordering. With no active keys there is no turn
+// order to preserve until a key queues again.
+func (p *slotPool) pruneIdleGrantsLocked() {
+	if len(p.idleGrants) == 0 {
+		return
+	}
+	if len(p.keys) == 0 {
+		clear(p.idleGrants)
+		return
+	}
+
+	oldestActive := ^uint64(0)
+	for _, k := range p.keys {
+		if k.lastGrant < oldestActive {
+			oldestActive = k.lastGrant
+		}
+	}
+	if oldestActive == 0 {
+		// Grant ages are positive, so none can be older than zero.
+		return
+	}
+	for key, lastGrant := range p.idleGrants {
+		if lastGrant < oldestActive {
+			delete(p.idleGrants, key)
+		}
 	}
 }

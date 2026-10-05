@@ -1487,13 +1487,13 @@ body:has(.connection-notice) .auth-side { padding-bottom: 110px; }
 
 /* Keep compact dashboard rows from letting a fixed status pill paint over
    the job title, and reserve a full text column beside each activity marker. */
-.activity-list .activity-row {
+.latest-activity-list .activity-row {
   display: grid;
   grid-template-columns: 8px minmax(0, 1fr);
   align-items: center;
   row-gap: 3px;
 }
-.activity-list .activity-row time {
+.latest-activity-list .activity-row time {
   grid-column: 2;
   justify-self: start;
   white-space: normal;

@@ -21,7 +21,7 @@ class EventSourceStub {
   onmessage: ((event: MessageEvent) => void) | null = null
   close = vi.fn()
   constructor() { EventSourceStub.instances.push(this) }
-  emit(type: string, job_id?: string) { this.onmessage?.({ data: JSON.stringify({ type, job_id }) } as MessageEvent) }
+  emit(type: string, job_id?: string, details: Record<string, unknown> = {}) { this.onmessage?.({ data: JSON.stringify({ ...details, type, ...(job_id ? { job_id } : {}) }) } as MessageEvent) }
 }
 
 function CurrentPath() {
@@ -43,7 +43,7 @@ describe('application shell', () => {
     vi.stubGlobal('EventSource', EventSourceStub)
   })
 
-  afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks() })
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks() })
 
   it('renders permission-aware navigation, update indicator, and incident count', async () => {
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination: { limit: 1, offset: 0, total: 3, has_more: true, next_offset: 1 } })
@@ -194,7 +194,7 @@ describe('application shell', () => {
     await waitFor(() => expect(EventSourceStub.instances).toHaveLength(1))
     const stream = EventSourceStub.instances[0]
 
-    act(() => stream.emit('stream_limit'))
+    act(() => stream.emit('stream_limit', undefined, { reason: 'too many live streams for this session', retry_after: 5 }))
 
     const status = screen.getByRole('status', { name: 'Live updates limited' })
     expect(stream.close).toHaveBeenCalledOnce()
@@ -206,6 +206,69 @@ describe('application shell', () => {
       stream.onopen?.()
     })
     expect(screen.getByRole('status', { name: 'Live updates limited' })).toBeInTheDocument()
+    expect(EventSourceStub.instances).toHaveLength(1)
+  })
+
+  it.each([
+    { reason: 'too many live streams for this business unit', description: 'this business unit has reached its live-stream capacity' },
+    { reason: 'too many live streams', description: 'EdgeWatch has reached its live-stream capacity' },
+  ])('retries automatically after a shared stream limit: $reason', async ({ reason, description }) => {
+    vi.useFakeTimers()
+    renderWithProviders(<Shell displayName="Viewer" role="viewer" permissions={['stream.read']} onLogout={vi.fn()} />)
+    expect(EventSourceStub.instances).toHaveLength(1)
+    const firstStream = EventSourceStub.instances[0]
+
+    act(() => firstStream.emit('stream_limit', undefined, { reason, retry_after: 5 }))
+
+    const status = screen.getByRole('status', { name: 'Live updates limited' })
+    expect(firstStream.close).toHaveBeenCalledOnce()
+    expect(status.getAttribute('title')).toContain(description)
+    expect(status.getAttribute('title')).toContain('Retrying automatically.')
+    await act(async () => { vi.advanceTimersByTime(4_999) })
+    expect(EventSourceStub.instances).toHaveLength(1)
+    await act(async () => { vi.advanceTimersByTime(1) })
+    expect(EventSourceStub.instances).toHaveLength(2)
+
+    act(() => EventSourceStub.instances[1].onopen?.())
+    expect(screen.getByRole('status', { name: 'Live updates' })).toBeInTheDocument()
+  })
+
+  it('backs off exponentially after repeated shared capacity refusals', async () => {
+    vi.useFakeTimers()
+    renderWithProviders(<Shell displayName="Viewer" role="viewer" permissions={['stream.read']} onLogout={vi.fn()} />)
+    const reason = 'too many live streams for this business unit'
+    act(() => EventSourceStub.instances[0].emit('stream_limit', undefined, { reason, retry_after: 5 }))
+    await act(async () => { vi.advanceTimersByTime(5_000) })
+    expect(EventSourceStub.instances).toHaveLength(2)
+
+    act(() => EventSourceStub.instances[1].emit('stream_limit', undefined, { reason, retry_after: 5 }))
+    await act(async () => { vi.advanceTimersByTime(9_999) })
+    expect(EventSourceStub.instances).toHaveLength(2)
+    await act(async () => { vi.advanceTimersByTime(1) })
+    expect(EventSourceStub.instances).toHaveLength(3)
+
+    act(() => EventSourceStub.instances[2].emit('stream_limit', undefined, { reason, retry_after: 5 }))
+    await act(async () => { vi.advanceTimersByTime(19_999) })
+    expect(EventSourceStub.instances).toHaveLength(3)
+    await act(async () => { vi.advanceTimersByTime(1) })
+    expect(EventSourceStub.instances).toHaveLength(4)
+
+    for (const delaySeconds of [40, 80, 160, 300, 300]) {
+      const currentCount = EventSourceStub.instances.length
+      act(() => EventSourceStub.instances[currentCount - 1].emit('stream_limit', undefined, { reason, retry_after: 5 }))
+      await act(async () => { vi.advanceTimersByTime(delaySeconds * 1_000 - 1) })
+      expect(EventSourceStub.instances).toHaveLength(currentCount)
+      await act(async () => { vi.advanceTimersByTime(1) })
+      expect(EventSourceStub.instances).toHaveLength(currentCount + 1)
+    }
+  })
+
+  it('cancels a pending capacity retry when the shell unmounts', async () => {
+    vi.useFakeTimers()
+    const { unmount } = renderWithProviders(<Shell displayName="Viewer" role="viewer" permissions={['stream.read']} onLogout={vi.fn()} />)
+    act(() => EventSourceStub.instances[0].emit('stream_limit', undefined, { reason: 'too many live streams', retry_after: 5 }))
+    unmount()
+    await act(async () => { vi.advanceTimersByTime(5_000) })
     expect(EventSourceStub.instances).toHaveLength(1)
   })
 

@@ -29,6 +29,7 @@ const frontendReport = (overrides = {}) => {
     'src/components/ErrorNotice.tsx',
     'src/components/navigation.ts',
     'src/components/OneTimeLink.tsx',
+    'src/components/PageErrorBoundary.tsx',
     'src/components/Pagination.tsx',
     'src/components/PortScopeDetails.tsx',
     'src/components/SurfaceUnitList.tsx',

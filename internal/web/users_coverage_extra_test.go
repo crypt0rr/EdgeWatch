@@ -169,7 +169,7 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 		func(w *httptest.ResponseRecorder) {
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"password":"administrator password"}`))
 			req.Header.Set("Content-Type", "application/json")
-			closedServer.issueActivation(w, req, closedAdmin, defaultTenantStore(closedServer), closedAdmin.UserID, "user.activation_issued")
+			closedServer.issueAccountLink(w, req, closedAdmin, defaultTenantStore(closedServer), closedAdmin.UserID)
 		},
 	} {
 		rec := httptest.NewRecorder()

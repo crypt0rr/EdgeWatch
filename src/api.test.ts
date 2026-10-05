@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createUser, getPublicDashboard, getScan, getScanSummary, historicalScanHost, issueUserActivation, listHosts, listScans, listUsers, login, recordActivity, revokeUserSessions, scheduleSuggestion, setCSRF, setForbiddenHandler, setup, setupStatus, suppressIncident, updateNotificationDestination, updateUser } from './api'
+import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createUser, getPublicDashboard, getScan, getScanSummary, historicalScanHost, issueUserActivation, issueUserPasswordReset, listHosts, listScans, listUsers, login, recordActivity, revokeUserSessions, scheduleSuggestion, setCSRF, setForbiddenHandler, setup, setupStatus, suppressIncident, updateNotificationDestination, updateUser } from './api'
 import * as apiRoutes from './api'
 import { getDisplayTimeZone, setDisplayTimeZone } from './format'
 
@@ -300,6 +300,7 @@ describe('authentication and public API contracts', () => {
     await createUser('operator', 'Operator', 'operator')
     await updateUser('user/1', { enabled: false })
     await issueUserActivation('user/1')
+    await issueUserPasswordReset('user/1')
     await revokeUserSessions('user/1')
     const urls = fetchMock.mock.calls.map(call => String(call[0]))
     expect(urls).toEqual([
@@ -310,9 +311,10 @@ describe('authentication and public API contracts', () => {
       '/api/v1/users',
       '/api/v1/users/user%2F1',
       '/api/v1/users/user%2F1/activation',
+      '/api/v1/users/user%2F1/password-reset',
       '/api/v1/users/user%2F1/sessions',
     ])
-    expect(new Headers(fetchMock.mock.calls[7][1]?.headers).get('X-CSRF-Token')).toBe('csrf-token')
+    expect(new Headers(fetchMock.mock.calls[8][1]?.headers).get('X-CSRF-Token')).toBe('csrf-token')
   })
 
   it('keeps public requests credential-free and exposes structured errors', async () => {

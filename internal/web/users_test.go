@@ -81,6 +81,30 @@ func TestUsersRouteLifecycleAndSecretFreeResponses(t *testing.T) {
 		t.Fatalf("secret material leaked from create response: %s", created.Body.String())
 	}
 	operatorID := createResponse.User.ID
+	assertLatestLinkAudit := func(wantAction, wantDetail string) {
+		t.Helper()
+		var action, detail string
+		if err := db.DB.QueryRowContext(ctx, `SELECT action,detail FROM security_audit WHERE tenant_id=? ORDER BY id DESC LIMIT 1`, store.DefaultTenantID).Scan(&action, &detail); err != nil {
+			t.Fatal(err)
+		}
+		if action != wantAction || detail != wantDetail {
+			t.Fatalf("latest link audit = %q / %q, want %q / %q", action, detail, wantAction, wantDetail)
+		}
+	}
+
+	// A still-pending account receives an activation link, regardless of
+	// which compatibility route is used to renew it.
+	pendingRenewal := request(http.MethodPost, "/"+operatorID+"/activation", `{"password":"administrator password"}`)
+	if pendingRenewal.Code != http.StatusOK {
+		t.Fatalf("pending activation renewal = %d: %s", pendingRenewal.Code, pendingRenewal.Body.String())
+	}
+	var pendingLink struct {
+		Token string `json:"activation_token"`
+	}
+	if err := json.Unmarshal(pendingRenewal.Body.Bytes(), &pendingLink); err != nil || pendingLink.Token == "" {
+		t.Fatalf("pending activation renewal response = %s (%v)", pendingRenewal.Body.String(), err)
+	}
+	assertLatestLinkAudit("user.activation_issued", "activation issued for operator")
 
 	listed := request(http.MethodGet, "", "")
 	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"username":"operator"`) {
@@ -95,7 +119,7 @@ func TestUsersRouteLifecycleAndSecretFreeResponses(t *testing.T) {
 		t.Fatalf("missing user status = %d", missing.Code)
 	}
 
-	activatedReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/activate", strings.NewReader(`{"token":"`+createResponse.ActivationToken+`","password":"operator account password"}`))
+	activatedReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/activate", strings.NewReader(`{"token":"`+pendingLink.Token+`","password":"operator account password"}`))
 	activatedReq.Header.Set("Content-Type", "application/json")
 	activatedReq.RemoteAddr = "127.0.0.1:9001"
 	activated := httptest.NewRecorder()
@@ -123,6 +147,7 @@ func TestUsersRouteLifecycleAndSecretFreeResponses(t *testing.T) {
 	if reset.Code != http.StatusOK {
 		t.Fatalf("password reset issue status = %d: %s", reset.Code, reset.Body.String())
 	}
+	assertLatestLinkAudit("user.password_reset_issued", "password reset issued for operator")
 	var resetResponse struct {
 		Token          string `json:"activation_token"`
 		ActivationPath string `json:"activation_path"`
@@ -145,6 +170,7 @@ func TestUsersRouteLifecycleAndSecretFreeResponses(t *testing.T) {
 	if renewed.Code != http.StatusOK {
 		t.Fatalf("activation renewal status = %d: %s", renewed.Code, renewed.Body.String())
 	}
+	assertLatestLinkAudit("user.password_reset_issued", "password reset issued for operator")
 	var renewalResponse struct {
 		Token          string `json:"activation_token"`
 		ActivationPath string `json:"activation_path"`

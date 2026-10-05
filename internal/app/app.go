@@ -65,6 +65,8 @@ type App struct {
 	ReleaseChecker      ReleaseChecker
 	UpdateInterval      time.Duration
 	clock               func() time.Time
+	// pruneHistory overrides the system retention pass in deterministic tests.
+	pruneHistory func(context.Context, time.Time) (store.PruneStats, error)
 	// persistenceBudget overrides the size-based scan-finalization work budget
 	// in deterministic tests. Production leaves it nil and uses
 	// scanPersistenceTimeout.
@@ -1269,7 +1271,6 @@ func (a *App) Daemon(ctx context.Context) error {
 		heartbeatEvery = 30 * time.Second
 	}
 	heartbeat := time.NewTicker(heartbeatEvery)
-	prune := time.NewTicker(24 * time.Hour)
 	scheduleRetry := time.NewTicker(30 * time.Second)
 	updateInterval := a.UpdateInterval
 	if updateInterval <= 0 {
@@ -1277,12 +1278,12 @@ func (a *App) Daemon(ctx context.Context) error {
 	}
 	updates := time.NewTicker(updateInterval)
 	defer heartbeat.Stop()
-	defer prune.Stop()
 	defer scheduleRetry.Stop()
 	defer updates.Stop()
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	deliveryDone := a.startDeliveryWorker(workerCtx)
 	purgeDone := a.startUnitPurgeWorker(workerCtx)
+	maintenanceDone := a.startMaintenanceWorker(workerCtx, system)
 	defer func() {
 		// Cancel before joining. This ordering is required on heartbeat/lease
 		// errors, where the parent context may still be live. Cancelling the
@@ -1298,6 +1299,7 @@ func (a *App) Daemon(ctx context.Context) error {
 		<-stopped.Done()
 		<-deliveryDone
 		<-purgeDone
+		<-maintenanceDone
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if released, err := system.ReleaseDeliveryClaims(releaseCtx); err != nil {
@@ -1307,21 +1309,6 @@ func (a *App) Daemon(ctx context.Context) error {
 		}
 	}()
 	a.wakeDelivery()
-	if removed, err := a.Store.DeleteExpiredSessions(ctx, time.Now().UTC()); err != nil {
-		a.Logger.Error("startup expired-session cleanup failed", "error", err)
-	} else if removed > 0 {
-		a.Logger.Info("startup expired sessions pruned", "sessions", removed)
-	}
-	if stats, err := system.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
-		a.Logger.Error("startup history pruning failed", "error", err)
-	} else if stats.Total() > 0 || stats.FTSOptimized {
-		a.Logger.Info("startup history pruned", "rows", stats.Total(), "scans", stats.Scans, "events", stats.Events, "sent_outbox", stats.SentOutbox, "failed_outbox", stats.FailedOutbox, "revisions", stats.Revisions, "cycles", stats.Cycles, "fts_optimized", stats.FTSOptimized, "reclaimed_pages", stats.ReclaimedPages)
-	}
-	if expired, err := system.ExpireScanCycles(ctx, time.Now().UTC()); err != nil {
-		a.Logger.Error("startup scan-cycle expiry failed", "error", err)
-	} else if expired > 0 {
-		a.Logger.Info("expired scan cycles", "cycles", expired)
-	}
 	// Check managed jobs once during startup as well as on each heartbeat. This
 	// surfaces a daemon that came back after a missed schedule without waiting
 	// for the next cron tick.
@@ -1349,22 +1336,6 @@ func (a *App) Daemon(ctx context.Context) error {
 			}
 			missedHeartbeats = 0
 			a.checkJobSilenceBounded(ctx, a.nowUTC())
-		case <-prune.C:
-			if removed, err := a.Store.DeleteExpiredSessions(ctx, time.Now().UTC()); err != nil {
-				a.Logger.Error("expired-session cleanup failed", "error", err)
-			} else if removed > 0 {
-				a.Logger.Info("expired sessions pruned", "sessions", removed)
-			}
-			if stats, err := system.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
-				a.Logger.Error("history pruning failed", "error", err)
-			} else {
-				a.Logger.Info("history pruned", "rows", stats.Total(), "scans", stats.Scans, "events", stats.Events, "sent_outbox", stats.SentOutbox, "failed_outbox", stats.FailedOutbox, "revisions", stats.Revisions, "cycles", stats.Cycles, "fts_optimized", stats.FTSOptimized, "reclaimed_pages", stats.ReclaimedPages)
-			}
-			if expired, err := system.ExpireScanCycles(ctx, time.Now().UTC()); err != nil {
-				a.Logger.Error("scan-cycle expiry failed", "error", err)
-			} else if expired > 0 {
-				a.Logger.Info("expired scan cycles", "cycles", expired)
-			}
 		case <-a.scheduleWake:
 			if err := a.reconcileSchedules(ctx, false); err != nil {
 				a.Logger.Error("job schedule reconciliation failed", "error", err)

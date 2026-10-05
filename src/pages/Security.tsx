@@ -4,6 +4,7 @@ import { Check, Copy, KeyRound, LogOut, ShieldCheck, UserRound } from 'lucide-re
 import { useNavigate } from 'react-router-dom'
 import { api, APIError, getSession, logout, logoutAllSessions, setCSRF, updateDisplayName } from '../api'
 import { ActionDialog } from '../components/ActionDialog'
+import { compactFactor, factorPayload } from '../one-time-factor'
 
 /**
  * The account's security settings. With `enrollment` it is the forced
@@ -132,7 +133,7 @@ export function Security({ enrollment = false }: { enrollment?: boolean } = {}) 
   async function enableTotp() {
     setError('')
     try {
-      const value = await api<{ recovery_codes: string[] }>('/auth/totp/enable', { method: 'POST', body: JSON.stringify({ code }) })
+      const value = await api<{ recovery_codes: string[] }>('/auth/totp/enable', { method: 'POST', body: JSON.stringify({ code: compactFactor(code) }) })
       setRecovery(value.recovery_codes)
       setRecoveryAcknowledged(false)
       setRecoveryRequiresSignIn(true)
@@ -182,12 +183,6 @@ export function Security({ enrollment = false }: { enrollment?: boolean } = {}) 
     } finally {
       setRecoveryBusy(false)
     }
-  }
-
-  function factorPayload(factor: string) {
-    const value = factor.trim()
-    const code = value.replace(/\s+/g, '')
-    return /^\d{6}$/.test(code) ? { code, recovery_code: '' } : { code: '', recovery_code: value }
   }
 
   async function disableTotp(password: string, factor = '') {

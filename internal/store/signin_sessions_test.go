@@ -26,7 +26,7 @@ func TestSignInSessionSpendsItsFactorWithTheSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	salt := []byte("0123456789abcdef")
-	sum := sha256.Sum256(append(append([]byte{}, salt...), "RECOVERY-CODE"...))
+	sum := sha256.Sum256(append(append([]byte{}, salt...), "RECOVERYCODE"...))
 	code := "v2$" + base64.RawStdEncoding.EncodeToString(salt) + "$" + hex.EncodeToString(sum[:])
 	if err := s.SaveRecoveryCodesForUser(ctx, user.ID, []string{code}); err != nil {
 		t.Fatal(err)
@@ -59,7 +59,7 @@ func TestSignInSessionSpendsItsFactorWithTheSession(t *testing.T) {
 			t.Fatalf("recovery code %q matched %q, %v", presented, match, err)
 		}
 	}
-	match, err := s.MatchRecoveryCodeForUser(ctx, user.ID, " recovery-code ")
+	match, err := s.MatchRecoveryCodeForUser(ctx, user.ID, " recovery code ")
 	if err != nil || match != code {
 		t.Fatalf("recovery code match = %q, %v; want the stored hash", match, err)
 	}
@@ -81,7 +81,7 @@ func TestSignInSessionSpendsItsFactorWithTheSession(t *testing.T) {
 	if available, err := s.TOTPStepAvailable(ctx, user.ID, 100); err != nil || !available {
 		t.Fatalf("step 100 after the failed sign-ins = %t, %v; want it unspent", available, err)
 	}
-	if again, err := s.MatchRecoveryCodeForUser(ctx, user.ID, "RECOVERY-CODE"); err != nil || again != code {
+	if again, err := s.MatchRecoveryCodeForUser(ctx, user.ID, "RECOVERYCODE"); err != nil || again != code {
 		t.Fatalf("recovery code after the failed sign-ins = %q, %v; want it unused", again, err)
 	}
 	if got := sessionCount(); got != 0 {

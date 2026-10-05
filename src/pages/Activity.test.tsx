@@ -69,4 +69,34 @@ describe('activity history', () => {
     expect(screen.getByText('No open incidents.')).toBeInTheDocument()
     expect(screen.getByText('No changes are awaiting confirmation.')).toBeInTheDocument()
   })
+
+  it('keeps a working Previous control when pending changes shrink below the selected page', async () => {
+    let remaining = Array.from({ length: 12 }, (_, index) => ({
+      key: `port|192.0.2.1|tcp|${440 + index}`,
+      change: { kind: 'port' as const, target: '192.0.2.1', protocol: 'tcp' as const, port: 440 + index, old: 'not-open', new: 'open', severity: 'info' as const },
+      count: 1,
+    }))
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [{ ...job, baseline: { ...job.baseline, pending: 12 } }] })
+    vi.mocked(jobPendingChanges).mockImplementation(async (_jobID, offset = 0, limit = 10) => {
+      const total = remaining.length
+      return {
+        job_id: 'job-1', job: 'Production', pending_changes: remaining.slice(offset, offset + limit),
+        pagination: { limit, offset, total, has_more: offset + limit < total, next_offset: offset + limit < total ? offset + limit : null },
+      }
+    })
+    const { client } = renderWithProviders(<Activity />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Show 12 pending changes' }))
+    await screen.findByRole('navigation', { name: 'Pending changes for Production' })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await waitFor(() => expect(jobPendingChanges).toHaveBeenCalledWith('job-1', 10, 10))
+    expect(await screen.findByText(/TCP:451/)).toBeInTheDocument()
+
+    remaining = remaining.slice(0, 3)
+    await client.invalidateQueries({ queryKey: ['job-pending-changes', 'job-1', 10] })
+    await waitFor(() => expect(screen.getByRole('navigation', { name: 'Pending changes for Production' })).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Previous' }))
+    expect(await screen.findByText(/TCP:440/)).toBeInTheDocument()
+  })
 })

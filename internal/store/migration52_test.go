@@ -375,6 +375,7 @@ var schema52Indexes = map[string][]string{
 }
 
 func TestMigration52GivesRootTablesTheDefaultTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSchema51Fixture(t)
 	raw, err := sql.Open("sqlite", fixture.path)
@@ -517,6 +518,7 @@ func TestMigration52GivesRootTablesTheDefaultTenant(t *testing.T) {
 // The admins row is copied into users only when the users row is missing,
 // and deleted once the users row exists.
 func TestMigration52RetiresTheAdminsRow(t *testing.T) {
+	t.Parallel()
 	base := newSchema51Fixture(t)
 	for _, tc := range []struct {
 		name  string
@@ -581,6 +583,7 @@ func TestMigration52RetiresTheAdminsRow(t *testing.T) {
 // Some recovery databases carry a schema marker without every table. The
 // migration creates the tables it reads, and the store works on the result.
 func TestMigration52UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
+	t.Parallel()
 	base := newSchema51Fixture(t)
 	for _, tc := range []struct {
 		name    string
@@ -662,6 +665,7 @@ func TestMigration52UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
 // Running the migration again, after the schema marker was reset, changes
 // no row and no schema object.
 func TestMigration52IsANoOpWhenRepeated(t *testing.T) {
+	t.Parallel()
 	fixture := newSchema51Fixture(t)
 	s, err := Open(fixture.path)
 	if err != nil {
@@ -712,6 +716,7 @@ func insertSecondTenant(t *testing.T, s *Store) {
 
 // The rebuilt tables enforce tenant ownership and per-tenant names.
 func TestSchema52TenantConstraints(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	insertSecondTenant(t, s)
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
@@ -796,6 +801,7 @@ func TestSchema52TenantConstraints(t *testing.T) {
 // Every store writer of a rebuilt table names the default tenant: none of
 // them relies on a column default, which the tenant_id columns do not have.
 func TestRootTableWritersNameTheDefaultTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -855,6 +861,7 @@ func TestRootTableWritersNameTheDefaultTenant(t *testing.T) {
 // A first setup creates the original administrator in users, in the default
 // tenant, and nothing in the retired admins table.
 func TestCompleteSetupOnAFreshInstallCreatesOnlyTheUsersRow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -902,6 +909,7 @@ func TestCompleteSetupOnAFreshInstallCreatesOnlyTheUsersRow(t *testing.T) {
 // The setup token writers fail closed when the administrator check cannot
 // run, instead of treating a missing users table as an unconfigured install.
 func TestSetupTokenWritersRequireTheUsersTable(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -928,6 +936,7 @@ func TestSetupTokenWritersRequireTheUsersTable(t *testing.T) {
 // Built-in profiles keep their names reserved: a custom profile cannot take
 // one, as under the global unique name before schema 52.
 func TestCustomScannerProfileCannotUseABuiltinName(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := defaultTenant(s).CreateScannerProfile(ctx, "  nmap STANDARD ", "", config.ScannerProfile{Engine: config.EngineNmap}, "admin"); !errors.Is(err, ErrScannerProfileNameInUse) {

@@ -84,6 +84,7 @@ func defaultAdministratorAudit(action string) AuditEntry {
 // unit's enabled administrator of an active unit succeeds, with its record
 // in the unit's audit.
 func TestUnitAdministratorAccountWritesRecheckTheActor(t *testing.T) {
+	t.Parallel()
 	for _, write := range unitAdministratorWrites {
 		t.Run(write.name, func(t *testing.T) {
 			f := newTenantFixture(t)
@@ -163,6 +164,7 @@ func TestUnitAdministratorAccountWritesRecheckTheActor(t *testing.T) {
 // demotes it, and a link that it tries to issue after the demotion is
 // refused, so neither order leaves the demoted administrator's link usable.
 func TestDemotedAdministratorLeavesNoUsableLink(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	insertTenantUser(t, f.store, actorSecondAdminB, secondTenantID, RoleAdministrator)
@@ -191,6 +193,7 @@ func TestDemotedAdministratorLeavesNoUsableLink(t *testing.T) {
 // administrator actor: UpdateUser and DeleteUserSessionsWithAudit do not
 // check one.
 func TestSelfServiceAccountWritesNeedNoAdministrator(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	ts := f.store.Tenant(f.b)

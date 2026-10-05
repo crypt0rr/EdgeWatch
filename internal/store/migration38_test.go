@@ -7,6 +7,7 @@ import (
 )
 
 func TestMigration38RetiresUnsaltedRecoveryCodes(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "recovery-migration.db")
 	s, err := Open(path)
 	if err != nil {

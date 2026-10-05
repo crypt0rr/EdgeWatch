@@ -11,6 +11,7 @@ import (
 )
 
 func TestUserStoreProfilesSecurityAndSessions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -110,6 +111,7 @@ func TestUserStoreProfilesSecurityAndSessions(t *testing.T) {
 }
 
 func TestSecuritySaveCanPreserveActingSessionWhileRevokingOthers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -137,6 +139,7 @@ func TestSecuritySaveCanPreserveActingSessionWhileRevokingOthers(t *testing.T) {
 }
 
 func TestSecuritySaveAppliesDisableTransitionsAtomically(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -167,6 +170,7 @@ func TestSecuritySaveAppliesDisableTransitionsAtomically(t *testing.T) {
 }
 
 func TestSecuritySaveRoleTransitionRevokesSessionsWithoutHint(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -188,6 +192,7 @@ func TestSecuritySaveRoleTransitionRevokesSessionsWithoutHint(t *testing.T) {
 }
 
 func TestRevokeUserInvitesIgnoresExpiredLinks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -213,6 +218,7 @@ func TestRevokeUserInvitesIgnoresExpiredLinks(t *testing.T) {
 }
 
 func TestGetAdminUsesAuthoritativeUserCredentials(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -247,6 +253,7 @@ func insertLegacyAdminsRow(t *testing.T, s *Store, username, passwordHash string
 // GetAdmin reads the users row only, so a leftover admins row never supplies
 // credentials or makes an administrator configured.
 func TestGetAdminReadsOnlyTheUsersRow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -270,6 +277,7 @@ func TestGetAdminReadsOnlyTheUsersRow(t *testing.T) {
 }
 
 func TestGetAdminWorksWithReadOnlyDatabase(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "readonly-admin.db")
 	writer, err := Open(path)
@@ -308,6 +316,7 @@ func TestGetAdminWorksWithReadOnlyDatabase(t *testing.T) {
 }
 
 func TestMigrateAdminCompatibilityUpgradesSecretWithoutRecreatingAdminsRow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -341,6 +350,7 @@ func TestMigrateAdminCompatibilityUpgradesSecretWithoutRecreatingAdminsRow(t *te
 }
 
 func TestMigrateAdminCompatibilityRollsBackOnSecretWriteFailure(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -368,6 +378,7 @@ func TestMigrateAdminCompatibilityRollsBackOnSecretWriteFailure(t *testing.T) {
 // An admins row without a users row is not an administrator any more. The
 // startup migration neither restores the users row from it nor rewrites it.
 func TestMigrateAdminCompatibilityLeavesLegacyAdminsRowAlone(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertLegacyAdminsRow(t, s, "legacy-admin", "legacy-hash")
@@ -390,6 +401,7 @@ func TestMigrateAdminCompatibilityLeavesLegacyAdminsRowAlone(t *testing.T) {
 }
 
 func TestMigrateAdminCompatibilityAllowsMissingLegacyAdmin(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM users WHERE id=?`, LegacyAdminUserID); err != nil {
@@ -405,6 +417,7 @@ func TestMigrateAdminCompatibilityAllowsMissingLegacyAdmin(t *testing.T) {
 
 // The startup migration neither reads nor writes the retired admins table.
 func TestMigrateAdminCompatibilityDoesNotUseAdminsTable(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name       string
 		statements []string
@@ -442,6 +455,7 @@ func TestMigrateAdminCompatibilityDoesNotUseAdminsTable(t *testing.T) {
 }
 
 func TestMigrateAdminCompatibilityReportsAuthoritativeReadFailure(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE users RENAME TO unavailable_users`); err != nil {
@@ -453,6 +467,7 @@ func TestMigrateAdminCompatibilityReportsAuthoritativeReadFailure(t *testing.T) 
 }
 
 func TestMigrateAdminCompatibilityReturnsBeginError(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -462,6 +477,7 @@ func TestMigrateAdminCompatibilityReturnsBeginError(t *testing.T) {
 }
 
 func TestMigrateAdminCompatibilityIsANoOpWithoutLegacySecret(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -474,6 +490,7 @@ func TestMigrateAdminCompatibilityIsANoOpWithoutLegacySecret(t *testing.T) {
 }
 
 func TestMigrateAdminCompatibilityRejectsUnreadableSecret(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -489,6 +506,7 @@ func TestMigrateAdminCompatibilityRejectsUnreadableSecret(t *testing.T) {
 }
 
 func TestMigrateAdminCompatibilityReportsSecretSealFailure(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -510,6 +528,7 @@ func TestMigrateAdminCompatibilityReportsSecretSealFailure(t *testing.T) {
 }
 
 func TestPasswordUpgradeRaceReturnsTypedConflict(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -527,6 +546,7 @@ func TestPasswordUpgradeRaceReturnsTypedConflict(t *testing.T) {
 }
 
 func TestConditionalSessionPrimitivesCoverCredentialGuardsWithoutLegacyFallback(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -615,6 +635,7 @@ func TestConditionalSessionPrimitivesCoverCredentialGuardsWithoutLegacyFallback(
 }
 
 func TestConditionalPasswordUpgradeCoversRevisionWithoutLegacyFallback(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Date(2026, 9, 17, 13, 0, 0, 0, time.UTC)
@@ -669,6 +690,7 @@ func TestConditionalPasswordUpgradeCoversRevisionWithoutLegacyFallback(t *testin
 }
 
 func TestConditionalPasswordUpgradeFailurePaths(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, 9, 17, 14, 0, 0, 0, time.UTC)
 

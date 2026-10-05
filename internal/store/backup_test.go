@@ -18,6 +18,7 @@ import (
 )
 
 func TestBackupCreatesVerifiableSnapshotsWithIndependentConnections(t *testing.T) {
+	t.Parallel()
 	// Start from a migrated copy, so a full migration under -race does not
 	// use up the deadline, and start the deadline only after setup. It still
 	// bounds a hung backup or verify, with room for a loaded machine.
@@ -119,6 +120,7 @@ func TestBackupCreatesVerifiableSnapshotsWithIndependentConnections(t *testing.T
 }
 
 func TestBackupRejectsUnsafeDestinations(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")
 	s, err := Open(database)
@@ -141,6 +143,7 @@ func TestBackupRejectsUnsafeDestinations(t *testing.T) {
 }
 
 func TestBackupSupportsMemoryStore(t *testing.T) {
+	t.Parallel()
 	s, err := Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -157,6 +160,7 @@ func TestBackupSupportsMemoryStore(t *testing.T) {
 }
 
 func TestVerifyReturnsHealthyResult(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	defer s.Close()
 	result, err := s.Verify(context.Background())
@@ -181,6 +185,7 @@ func TestVerifyReturnsHealthyResult(t *testing.T) {
 // Verify names the database's auto-vacuum mode: a database created before
 // v0.18.31 has none.
 func TestVerifyReportsTheAutoVacuumMode(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	useAutoVacuum(t, s, "NONE")
 	result, err := s.Verify(context.Background())
@@ -199,6 +204,7 @@ func TestVerifyReportsTheAutoVacuumMode(t *testing.T) {
 }
 
 func TestVerifyReportsForeignKeyViolations(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	ctx := context.Background()
 	if _, err := s.DB.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
@@ -221,6 +227,7 @@ func TestVerifyReportsForeignKeyViolations(t *testing.T) {
 }
 
 func TestVerifyRejectsForeignSQLiteDatabase(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "foreign.db")
 	db, err := sql.Open("sqlite", path)
@@ -250,6 +257,7 @@ func TestVerifyRejectsForeignSQLiteDatabase(t *testing.T) {
 }
 
 func TestVerifyRejectsUnsupportedNewerSchema(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "newer.db")
 	fixture, err := Open(path)
@@ -286,6 +294,7 @@ func TestVerifyRejectsUnsupportedNewerSchema(t *testing.T) {
 }
 
 func TestVerifyRejectsCanceledSchemaChecks(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	defer s.Close()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -299,6 +308,7 @@ func TestVerifyRejectsCanceledSchemaChecks(t *testing.T) {
 }
 
 func TestVerifyRejectsSQLiteWithIncompleteEdgeWatchSchema(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "incomplete.db")
 	db, err := sql.Open("sqlite", path)

@@ -16,6 +16,7 @@ import (
 )
 
 func TestPreflightRestoreReportsEverySQLiteSidecarWithoutMutation(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")
 	destination := filepath.Join(dir, "destination.db")
@@ -399,6 +400,7 @@ func TestRestoreStagingCleanupWaitsForActiveRestore(t *testing.T) {
 }
 
 func TestRestoreRejectsAmbiguousSidecarsAndCopiesExactSnapshot(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")
 	destination := filepath.Join(dir, "destination.db")
@@ -446,6 +448,7 @@ func TestRestoreRejectsAmbiguousSidecarsAndCopiesExactSnapshot(t *testing.T) {
 }
 
 func TestPreflightRestoreDetectsDanglingSidecarsWhenDatabaseWasMoved(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")
 	destination := filepath.Join(dir, "destination.db")
@@ -466,6 +469,7 @@ func TestPreflightRestoreDetectsDanglingSidecarsWhenDatabaseWasMoved(t *testing.
 }
 
 func TestRestoreAllowsExplicitCrashRecoverySidecarReplay(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")
 	destination := filepath.Join(dir, "destination.db")
@@ -487,6 +491,7 @@ func TestRestoreAllowsExplicitCrashRecoverySidecarReplay(t *testing.T) {
 }
 
 func TestRestoreSidecarReplayIncludesSourceWALAndRemovesDestinationSidecars(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")
 	destination := filepath.Join(dir, "destination.db")
@@ -530,6 +535,7 @@ func TestRestoreSidecarReplayIncludesSourceWALAndRemovesDestinationSidecars(t *t
 }
 
 func TestRestoreRejectsForeignAndNewerSchemaBeforeReplacement(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "destination.db")
 	createRestoreFixture(t, destination, "destination")
@@ -587,6 +593,7 @@ func TestRestoreRejectsForeignAndNewerSchemaBeforeReplacement(t *testing.T) {
 }
 
 func TestRestoreQuarantinesPendingDeliveriesByDefault(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")
 	destination := filepath.Join(dir, "destination.db")
@@ -629,6 +636,7 @@ func TestRestoreQuarantinesPendingDeliveriesByDefault(t *testing.T) {
 }
 
 func TestRestoreInvalidatesSessionsCopiedFromBackup(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")
 	destination := filepath.Join(dir, "destination.db")
@@ -667,6 +675,7 @@ func TestRestoreInvalidatesSessionsCopiedFromBackup(t *testing.T) {
 // token can be issued again without replacing an outstanding one, and a
 // new link for a pending account works.
 func TestRestoreRevokesLinksAndSetupTokenCopiedFromBackup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")
@@ -776,6 +785,7 @@ func TestRestoreRevokesLinksAndSetupTokenCopiedFromBackup(t *testing.T) {
 // A restore of a backup without the link and setup token tables revokes
 // nothing, and a failed revocation stops the restore.
 func TestRevokeRestoredLinksSkipsMissingTablesAndReportsErrors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "no-links.db"))
 	if err != nil {
@@ -804,6 +814,7 @@ func TestRevokeRestoredLinksSkipsMissingTablesAndReportsErrors(t *testing.T) {
 }
 
 func TestRestorePendingDeliveryPoliciesAreExplicit(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name   string
 		policy PendingDeliveryPolicy
@@ -847,6 +858,7 @@ func TestRestorePendingDeliveryPoliciesAreExplicit(t *testing.T) {
 }
 
 func TestParsePendingDeliveryPolicy(t *testing.T) {
+	t.Parallel()
 	if policy, err := ParsePendingDeliveryPolicy(""); err != nil || policy != PendingDeliveriesQuarantine {
 		t.Fatalf("empty policy = %q, %v", policy, err)
 	}
@@ -859,6 +871,7 @@ func TestParsePendingDeliveryPolicy(t *testing.T) {
 }
 
 func TestRestoreRefusesLiveDaemonLeaseUnlessExplicitlyOverridden(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")
 	destination := filepath.Join(dir, "destination.db")
@@ -909,6 +922,7 @@ func TestRestoreRefusesLiveDaemonLeaseUnlessExplicitlyOverridden(t *testing.T) {
 // scan leases must not block scans. The destination's own live lease is still
 // refused.
 func TestRestoreClearsLeasesCopiedFromLiveDaemonBackup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	live := filepath.Join(dir, "live.db")
@@ -1008,6 +1022,7 @@ func TestRestoreClearsLeasesCopiedFromLiveDaemonBackup(t *testing.T) {
 // fails, both the dry run and the restore refuse, and the destination is not
 // replaced.
 func TestRestoreLeaseCleanupFailureLeavesDestinationUnchanged(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")
@@ -1042,6 +1057,7 @@ CREATE TRIGGER keep_daemon_lease BEFORE DELETE ON daemon_lease BEGIN SELECT RAIS
 }
 
 func TestClearRestoredLeasesSkipsMissingTablesAndReportsErrors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "no-leases.db"))
 	if err != nil {
@@ -1064,6 +1080,7 @@ func TestClearRestoredLeasesSkipsMissingTablesAndReportsErrors(t *testing.T) {
 }
 
 func TestRestoreCanReplaceUnreadableDestinationAfterExplicitConfirmation(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")
 	destination := filepath.Join(dir, "damaged.db")
@@ -1090,6 +1107,7 @@ func TestRestoreCanReplaceUnreadableDestinationAfterExplicitConfirmation(t *test
 }
 
 func TestVerifyDoesNotChangeReadOnlyDatabaseBytesOrMode(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "readonly.db")
 	createRestoreFixture(t, path, "read-only")
@@ -1132,6 +1150,7 @@ func TestVerifyDoesNotChangeReadOnlyDatabaseBytesOrMode(t *testing.T) {
 }
 
 func TestReadOnlyVerificationCleansProbeSidecarsForSafeRestore(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("probe sidecar cleanup needs Linux open file description locks; other systems keep the sidecars")
 	}
@@ -1171,6 +1190,7 @@ func TestReadOnlyVerificationCleansProbeSidecarsForSafeRestore(t *testing.T) {
 }
 
 func TestPreflightRestoreAcceptsReadOnlySource(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "readonly-source.db")
 	destination := filepath.Join(dir, "restored.db")
@@ -1188,6 +1208,7 @@ func TestPreflightRestoreAcceptsReadOnlySource(t *testing.T) {
 }
 
 func TestPreflightRestoreRejectsNonSQLiteSource(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "not-a-database.db")
 	destination := filepath.Join(dir, "destination.db")
@@ -1200,6 +1221,7 @@ func TestPreflightRestoreRejectsNonSQLiteSource(t *testing.T) {
 }
 
 func TestRestoreSidecarErrorPathsAreRecoverable(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "missing-wal")
 	if _, err := moveDestinationSidecars([]RestoreSidecar{{Kind: "wal", Path: missing}}, dir); err == nil {

@@ -17,6 +17,7 @@ import (
 // refused without a session. The checks before the session read the same
 // state without changing it.
 func TestSignInSessionSpendsItsFactorWithTheSession(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)
@@ -120,6 +121,7 @@ func TestSignInSessionSpendsItsFactorWithTheSession(t *testing.T) {
 // storage that cannot be read. The unconditional password-upgrade login
 // primitive creates its session through the capped insert.
 func TestSignInSessionStorageFailuresKeepTheFactor(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)
@@ -183,6 +185,7 @@ func TestSignInSessionStorageFailuresKeepTheFactor(t *testing.T) {
 // well as one past its absolute expiry. A session used within the idle
 // timeout stays, whatever its age.
 func TestDeleteExpiredSessionsRemovesIdleSessions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)
@@ -223,6 +226,7 @@ func TestDeleteExpiredSessionsRemovesIdleSessions(t *testing.T) {
 // removes the account's least recently used sessions beyond the cap, so the
 // new session and the sessions in use stay; other accounts keep theirs.
 func TestSessionsPerAccountAreCapped(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	unit := defaultTenant(s)

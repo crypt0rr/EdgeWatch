@@ -82,6 +82,7 @@ func storedScanOutcome(s *Store, id string) (string, error) {
 // stay as they were. Enabling the tenant again lets the next scan finalize
 // as before, and tenant A's scans are not affected by the pause.
 func TestFinalizeManagedScanRecordsAScanOfADisabledTenantAsCanceled(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	platform := f.store.Platform()
@@ -145,6 +146,7 @@ func TestFinalizeManagedScanRecordsAScanOfADisabledTenantAsCanceled(t *testing.T
 // scan-failure alert and counts no failure. A tenant that is being deleted
 // records nothing: its data is being erased.
 func TestFinalizeManagedScanOfAPausedTenantKeepsFailuresAndRecordsNothingWhileDeleting(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	platform := f.store.Platform()
@@ -194,6 +196,7 @@ func TestFinalizeManagedScanOfAPausedTenantKeepsFailuresAndRecordsNothingWhileDe
 // cycle and checkpoints, as the cancel of a running scan does, so the cycle
 // resumes once the tenant is enabled.
 func TestFinalizeManagedScanOfAPausedTenantDiscardsACompletedCycleAndKeepsAPausedOne(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, status, cycleStatus string
 		wantScan, wantCycle       string

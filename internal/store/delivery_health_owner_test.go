@@ -35,6 +35,7 @@ func healthIdentities(t *testing.T, s *Store) []string {
 // transaction, for a unit's destination and for a platform destination, and
 // leaves the health of every other destination.
 func TestDeletingADestinationRemovesItsDeliveryHealth(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
@@ -69,6 +70,7 @@ func TestDeletingADestinationRemovesItsDeliveryHealth(t *testing.T) {
 // destination deleted before deletes removed it, belongs to no tenant: the
 // default tenant counts neither its health nor its deliveries.
 func TestDefaultTenantHealthLeavesOutDeletedDestinations(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
@@ -111,6 +113,7 @@ func TestDefaultTenantHealthLeavesOutDeletedDestinations(t *testing.T) {
 // owner cannot be told apart; the purge removes every such row. The health
 // of another unit's destinations and of the deployment destinations stays.
 func TestTenantPurgeErasesDeliveryHealthOfDeletedDestinations(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantPurgeFixture(t)
 	ids := tenantFixtureNotifications
@@ -151,6 +154,7 @@ func TestTenantPurgeErasesDeliveryHealthOfDeletedDestinations(t *testing.T) {
 // unit, and a managed identity that names no destination are never in it,
 // and a paused platform destination's pending deliveries are not counted.
 func TestPlatformDeliveryHealthCoversOnlyPlatformDestinations(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	ids := tenantFixtureNotifications

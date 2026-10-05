@@ -57,6 +57,7 @@ func managedIntentDiscardAudits(t *testing.T, s *Store) []string {
 // A rename that commits in between keeps the credentials, so the alert must
 // be queued under the destination's current revision rather than dropped.
 func TestManagedIntentCapturedBeforeRenameIsQueuedUnderCurrentRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, testJob("rename-window"))
@@ -95,6 +96,7 @@ func TestManagedIntentCapturedBeforeRenameIsQueuedUnderCurrentRevision(t *testin
 }
 
 func TestManagedIntentCapturedBeforeCredentialRotationIsDiscardedAndAudited(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, testJob("rotation-window"))
@@ -135,6 +137,7 @@ func TestManagedIntentCapturedBeforeCredentialRotationIsDiscardedAndAudited(t *t
 }
 
 func TestManagedIntentCapturedBeforeDeletionIsDiscardedAndAudited(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, testJob("delete-window"))
@@ -166,6 +169,7 @@ func TestManagedIntentCapturedBeforeDeletionIsDiscardedAndAudited(t *testing.T) 
 }
 
 func TestManagedIntentCapturedBeforePauseIsSkippedWithoutDiscardAudit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, testJob("pause-window"))
@@ -190,6 +194,7 @@ func TestManagedIntentCapturedBeforePauseIsSkippedWithoutDiscardAudit(t *testing
 }
 
 func TestManagedIntentResolutionSkipsMalformedAndUnknownKeys(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := defaultTenant(s).CreateManagedNotification(ctx, "ops", "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
@@ -228,6 +233,7 @@ func TestManagedIntentResolutionSkipsMalformedAndUnknownKeys(t *testing.T) {
 // history, so the migration conservatively treats their current revision as
 // the one that set the credentials.
 func TestMigration49RecordsCurrentRevisionAsCredentialRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "credential-revision.db")
 	s, err := Open(path)

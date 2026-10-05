@@ -209,6 +209,7 @@ func auditEntry(t *testing.T, page AuditLogPage, id int64) AuditLogEntry {
 //     action and shows only its own accounts' display names, while the
 //     platform view shows both.
 func TestAuditViewsShowTheirOwnRecords(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	seed := seedAuditViews(t, f)
@@ -355,6 +356,7 @@ func walkAuditPages(t *testing.T, name string, limit int, read func(before int64
 // out of it. The page size defaults to 50 and is clamped to 200, and a
 // position that is not a record of the view is not found.
 func TestAuditViewPagination(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	if _, err := f.store.DB.Exec(`DELETE FROM security_audit`); err != nil {
@@ -524,6 +526,7 @@ func containsID(rows []auditRow, id int64) bool {
 // characters, is a validation error. The platform view keeps a unit's data
 // records out whatever the filter asks for.
 func TestAuditViewFilters(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	seed := seedAuditViews(t, f)
@@ -600,6 +603,7 @@ func TestAuditViewFilters(t *testing.T) {
 // record with a fraction falls in its own second. A bound with a fraction
 // counts from the whole second before it.
 func TestAuditViewTimeBoundsMatchStoredTimes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	if _, err := f.store.DB.Exec(`DELETE FROM security_audit`); err != nil {
@@ -653,6 +657,7 @@ func TestAuditViewTimeBoundsMatchStoredTimes(t *testing.T) {
 // and session tokens, CSRF tokens, and password hashes. The writers keep
 // them out of the details, and the views read no column that holds them.
 func TestAuditViewsShowNoSecretMaterial(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	if _, err := f.store.DB.Exec(`DELETE FROM security_audit`); err != nil {
@@ -780,6 +785,7 @@ func TestAuditViewsShowNoSecretMaterial(t *testing.T) {
 //
 // The plans hold with and without every filter and a position.
 func TestAuditViewQueryPlansUseIndexes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	seed := seedAuditViews(t, f)

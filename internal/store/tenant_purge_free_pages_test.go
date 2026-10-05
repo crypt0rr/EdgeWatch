@@ -174,6 +174,7 @@ func (l *freePagesLog) afterFreePages(_ context.Context, step freePagesStep) err
 // go back to the file system as before, and the purge never overwrites
 // them. The rows of the other unit stay as they were.
 func TestPurgeLeavesNoFreePageCopies(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"NONE", "INCREMENTAL"} {
 		for _, route := range []string{"before the deletion", "between passes"} {
 			t.Run(mode+"/"+route, func(t *testing.T) {
@@ -229,6 +230,7 @@ func TestPurgeLeavesNoFreePageCopies(t *testing.T) {
 // allocation in the same scratch table and starts to return the pages; the
 // pass after that only returns the rest, and then the tombstone follows.
 func TestPurgeResumesTheOverwriteOfFreePages(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantPurgeFixture(t)
 	useAutoVacuum(t, f.store, "NONE")
@@ -317,6 +319,7 @@ func TestPurgeResumesTheOverwriteOfFreePages(t *testing.T) {
 // free-pages phase in a database with incremental auto-vacuum goes to the
 // checkpoint, unless a scratch table is left, which it then finishes.
 func TestFreePagesOverwriteStops(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantPurgeFixture(t)
 	useAutoVacuum(t, f.store, "NONE")
@@ -385,6 +388,7 @@ func TestFreePagesOverwriteStops(t *testing.T) {
 // nothing, so the freelist is as it was and the next pass repeats the step.
 // Recording the phase that the overwrite enters fails the phase too.
 func TestFreePagesOverwriteStepReportsFailures(t *testing.T) {
+	t.Parallel()
 	const refuse = ` BEGIN SELECT RAISE(ABORT,'refused'); END`
 	table := `CREATE TABLE ` + freePagesTable + `(zeros BLOB)`
 	for _, tc := range []struct {

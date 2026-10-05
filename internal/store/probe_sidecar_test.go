@@ -30,6 +30,7 @@ const (
 // TestSQLiteSidecarHelperProcess is not a test on its own. It only runs work
 // when a parent test starts the test binary with the helper environment.
 func TestSQLiteSidecarHelperProcess(t *testing.T) {
+	t.Parallel()
 	mode := os.Getenv(sqliteSidecarHelperModeEnv)
 	if mode == "" {
 		return
@@ -272,6 +273,7 @@ func requireSidecarProbeIntegrity(t *testing.T, path string) {
 // writer is using: its commits would go to deleted inodes, stay invisible to
 // every other process, and vanish when the writer is killed.
 func TestReadOnlyProbeCloseKeepsSidecarsOfWriterInAnotherProcess(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "edgewatch.db")
 	createSidecarProbeFixture(t, path, 0)
 
@@ -303,6 +305,7 @@ func TestReadOnlyProbeCloseKeepsSidecarsOfWriterInAnotherProcess(t *testing.T) {
 // has spilled uncommitted pages into the database makes a partial transaction
 // permanent once the writer dies.
 func TestReadOnlyProbeCloseNeverRemovesRollbackJournal(t *testing.T) {
+	t.Parallel()
 	const rows = 400
 	path := filepath.Join(t.TempDir(), "edgewatch.db")
 	createSidecarProbeFixture(t, path, rows)
@@ -347,6 +350,7 @@ func TestReadOnlyProbeCloseNeverRemovesRollbackJournal(t *testing.T) {
 // probe must neither unlink that store's WAL/SHM pair nor release its locks,
 // which closing any extra descriptor for the database file would do.
 func TestReadOnlyProbeCloseKeepsSidecarsAndLocksOfSameProcessStore(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "edgewatch.db")
 	createSidecarProbeFixture(t, path, 0)
 
@@ -382,6 +386,7 @@ func TestReadOnlyProbeCloseKeepsSidecarsAndLocksOfSameProcessStore(t *testing.T)
 // open without visible sidecars, the state an earlier unlink left behind, so
 // the preflight passes and only the lease probe can notice the connection.
 func TestRestoreRefusesDestinationOpenedByAnotherConnection(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")
 	destination := filepath.Join(dir, "destination.db")

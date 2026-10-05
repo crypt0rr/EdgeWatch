@@ -11,6 +11,7 @@ import (
 )
 
 func TestTimestampNormalizationPreservesChronologicalScanOrdering(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("timestamp-ordering"))
@@ -64,6 +65,7 @@ func TestTimestampNormalizationPreservesChronologicalScanOrdering(t *testing.T) 
 }
 
 func TestOpenReportsTemporaryDirectoryFailure(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "tmp"), []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
@@ -74,6 +76,7 @@ func TestOpenReportsTemporaryDirectoryFailure(t *testing.T) {
 }
 
 func TestTimestampNormalizationHandlesMarkerStatesAndInvalidValues(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM timestamp_normalization_state`); err != nil {
@@ -100,6 +103,7 @@ func TestTimestampNormalizationHandlesMarkerStatesAndInvalidValues(t *testing.T)
 }
 
 func TestSQLiteTimestampUsesFixedWidthUTC(t *testing.T) {
+	t.Parallel()
 	value := sqliteTimestamp(time.Date(2026, 9, 19, 12, 0, 0, 123456789, time.FixedZone("offset", 2*60*60)))
 	if value != "2026-09-19T10:00:00.123456789Z" {
 		t.Fatalf("sqlite timestamp = %q", value)

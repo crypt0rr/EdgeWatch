@@ -97,6 +97,7 @@ var daemonTenantLeakCases = map[string]tenantLeakCase{
 // of the active tenant and of the platform are claimed as before, and each
 // claimed delivery names its tenant.
 func TestDeliveryClaimsHoldADisabledTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	system := f.store.System()
@@ -158,6 +159,7 @@ func TestDeliveryClaimsHoldADisabledTenant(t *testing.T) {
 // The silence watchdog does not alert about a disabled tenant's jobs, whose
 // scans are paused, and judges them again once the tenant is enabled.
 func TestSilenceWatchdogSkipsADisabledTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	system := f.store.System()
@@ -244,6 +246,7 @@ func retentionRows(t *testing.T, s *Store, scope TenantScope) map[string][]strin
 // purge, and keeps pruning the history of a disabled tenant, of the active
 // tenant and of the platform.
 func TestRetentionLeavesATenantBeingDeletedToThePurge(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCycleTenantFixture(t)
 	system := f.store.System()
@@ -325,6 +328,7 @@ func TestRetentionLeavesATenantBeingDeletedToThePurge(t *testing.T) {
 // which it imports into: another tenant's destination with the same name
 // takes no name from it.
 func TestImportDeploymentNotificationsNamesWithinTheDefaultTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertSecondTenant(t, s)
@@ -362,6 +366,7 @@ func TestImportDeploymentNotificationsNamesWithinTheDefaultTenant(t *testing.T) 
 // tenant's jobs lease as before, and the job leases again once its tenant
 // is active.
 func TestJobLeaseRefusesATenantThatIsNotActive(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	system := f.store.System()
@@ -407,6 +412,7 @@ func TestJobLeaseRefusesATenantThatIsNotActive(t *testing.T) {
 // The scheduler and the silence watchdog go through the active tenants
 // only: a paused tenant, one being deleted, and a deleted one are left out.
 func TestActiveTenantScopesLeaveOutTenantsThatAreNotActive(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	active := func() []string {

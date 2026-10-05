@@ -503,6 +503,7 @@ func assertDeleteStaysInTenant(t *testing.T, f tenantFixture, remove func(ts *Te
 // alert: a tenant's copy reaches only that tenant's destinations, and the
 // platform's copy only the platform's.
 func TestQueuedAlertsStayWithTheirTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	ids := tenantFixtureNotifications

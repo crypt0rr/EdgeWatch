@@ -19,6 +19,7 @@ func managedFinalizationScan(record JobRecord, id string) model.Scan {
 }
 
 func TestFinalizeManagedScanWithOptionsUsesDefaultBudgetsAndMissingLeaseFallback(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("managed-options-defaults"))
@@ -57,6 +58,7 @@ func TestFinalizeManagedScanWithOptionsUsesDefaultBudgetsAndMissingLeaseFallback
 }
 
 func TestFinalizeManagedScanWithOptionsRetriesExternalSQLiteWriterAndReleasesLease(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("managed-options-retry"))
@@ -113,6 +115,7 @@ func TestFinalizeManagedScanWithOptionsRetriesExternalSQLiteWriterAndReleasesLea
 }
 
 func TestFinalizeManagedScanWithOptionsEnforcesWorkBudgetAfterWriterGrant(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("managed-options-work-budget"))
@@ -136,6 +139,7 @@ func TestFinalizeManagedScanWithOptionsEnforcesWorkBudgetAfterWriterGrant(t *tes
 }
 
 func TestFinalizeManagedScanWithOptionsReturnsWriterWaitAndWorkErrors(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	s := openTestStore(t)
 	record, err := defaultTenant(s).CreateJob(ctx, testJob("managed-options-errors"))
@@ -187,6 +191,7 @@ func TestFinalizeManagedScanWithOptionsReturnsWriterWaitAndWorkErrors(t *testing
 }
 
 func TestManagedFinalizationRetryHelpers(t *testing.T) {
+	t.Parallel()
 	if isSQLiteWriterBusy(errors.New("not a SQLite error")) {
 		t.Fatal("ordinary error was treated as SQLite writer contention")
 	}

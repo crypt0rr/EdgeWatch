@@ -24,6 +24,7 @@ func cycleFixture(t *testing.T) (context.Context, *Store, JobRecord, scanner.Wor
 }
 
 func TestListActiveScanCycleSummariesFiltersArchiveAndOmitsPlan(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	active, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
@@ -81,6 +82,7 @@ func TestListActiveScanCycleSummariesFiltersArchiveAndOmitsPlan(t *testing.T) {
 }
 
 func TestListActiveScanCycleSummariesReportsQueryAndScanErrors(t *testing.T) {
+	t.Parallel()
 	t.Run("query failure", func(t *testing.T) {
 		ctx := context.Background()
 		s := openTestStore(t)
@@ -110,6 +112,7 @@ func TestListActiveScanCycleSummariesReportsQueryAndScanErrors(t *testing.T) {
 }
 
 func TestScanCycleCheckpointsAndCompletes(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
@@ -169,6 +172,7 @@ func TestScanCycleCheckpointsAndCompletes(t *testing.T) {
 }
 
 func TestRetentionDoesNotClearCycleCheckpointForAttemptOnly(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
@@ -221,6 +225,7 @@ func TestRetentionDoesNotClearCycleCheckpointForAttemptOnly(t *testing.T) {
 }
 
 func TestLoadScanCycleFragmentsRejectsReclaimedCheckpoint(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
@@ -236,6 +241,7 @@ func TestLoadScanCycleFragmentsRejectsReclaimedCheckpoint(t *testing.T) {
 }
 
 func TestScanCycleCompletionRequiresAllUnits(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
@@ -250,6 +256,7 @@ func TestScanCycleCompletionRequiresAllUnits(t *testing.T) {
 }
 
 func TestScanCyclePauseAndExpiryClearCheckpoints(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), Plan: plan, ExpiresAt: time.Now().UTC().Add(time.Hour)})
 	if err != nil {
@@ -271,6 +278,7 @@ func TestScanCyclePauseAndExpiryClearCheckpoints(t *testing.T) {
 }
 
 func TestScanCycleStartExpiresAtomically(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
 		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
@@ -300,6 +308,7 @@ func TestScanCycleStartExpiresAtomically(t *testing.T) {
 }
 
 func TestExpiredScanCycleRejectsLateCheckpoint(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan, ExpiresAt: time.Now().UTC().Add(time.Hour)})
 	if err != nil {
@@ -327,6 +336,7 @@ func TestExpiredScanCycleRejectsLateCheckpoint(t *testing.T) {
 }
 
 func TestScanCycleUnitCompletionRequiresClaim(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {

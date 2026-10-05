@@ -13,6 +13,7 @@ import (
 )
 
 func TestBaselineHostProjectionPaginatesAcceptedOverlay(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	snapshot := model.Snapshot{Hosts: []model.HostObservation{
@@ -54,6 +55,7 @@ func TestBaselineHostProjectionPaginatesAcceptedOverlay(t *testing.T) {
 }
 
 func TestBaselineHostProjectionBoundsSearchQueries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	snapshot := model.Snapshot{Hosts: []model.HostObservation{
@@ -81,6 +83,7 @@ func TestBaselineHostProjectionBoundsSearchQueries(t *testing.T) {
 }
 
 func TestRuntimeStateSummaryUsesProjectionCounts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('summary-job',?,'summary','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
@@ -112,6 +115,7 @@ func TestRuntimeStateSummaryUsesProjectionCounts(t *testing.T) {
 }
 
 func TestRuntimeStateSummaryUsesBaselineProjectionCounts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('projected-summary',?,'projected-summary','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
@@ -138,6 +142,7 @@ func TestRuntimeStateSummaryUsesBaselineProjectionCounts(t *testing.T) {
 }
 
 func TestRuntimeStateSummaryFallsBackToLegacyUnitsWithMetadata(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('unit-metadata-summary',?,'unit-metadata-summary','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
@@ -161,6 +166,7 @@ func TestRuntimeStateSummaryFallsBackToLegacyUnitsWithMetadata(t *testing.T) {
 }
 
 func TestRuntimeStateSummaryHandlesMetadataWithoutLegacyBaseline(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	for _, jobID := range []string{"metadata-no-runtime", "metadata-no-baseline"} {
@@ -187,6 +193,7 @@ func TestRuntimeStateSummaryHandlesMetadataWithoutLegacyBaseline(t *testing.T) {
 }
 
 func TestRuntimeStateSummaryPreservesLegacyHostsOnMetadataFastPath(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('legacy-metadata-summary',?,'legacy-metadata-summary','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
@@ -210,6 +217,7 @@ func TestRuntimeStateSummaryPreservesLegacyHostsOnMetadataFastPath(t *testing.T)
 }
 
 func TestRuntimeStateSummaryCountsLegacyUnitAddresses(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('legacy-summary-job',?,'legacy-summary','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
@@ -229,6 +237,7 @@ func TestRuntimeStateSummaryCountsLegacyUnitAddresses(t *testing.T) {
 }
 
 func TestRuntimeStateSummariesMatchSingleJobSummariesAndArchiveScope(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertScan := func(id string, addresses ...string) {
@@ -344,6 +353,7 @@ func TestRuntimeStateSummariesMatchSingleJobSummariesAndArchiveScope(t *testing.
 }
 
 func TestRuntimeStateSummariesReportsInvalidLegacyRuntimeJSON(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('invalid-json',?,'invalid-json','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
@@ -361,6 +371,7 @@ func TestRuntimeStateSummariesReportsInvalidLegacyRuntimeJSON(t *testing.T) {
 }
 
 func TestRuntimeStateSummariesReportsQueryAndScanErrors(t *testing.T) {
+	t.Parallel()
 	t.Run("query", func(t *testing.T) {
 		s := openTestStore(t)
 		ctx := context.Background()
@@ -387,6 +398,7 @@ func TestRuntimeStateSummariesReportsQueryAndScanErrors(t *testing.T) {
 }
 
 func TestLegacyRuntimeHostCountFallsBackToZero(t *testing.T) {
+	t.Parallel()
 	if got := legacyRuntimeHostCount(sql.NullInt64{}, sql.NullInt64{}); got != 0 {
 		t.Fatalf("empty legacy host counts = %d, want 0", got)
 	}

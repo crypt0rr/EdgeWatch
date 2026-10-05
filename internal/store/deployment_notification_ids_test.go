@@ -6,6 +6,7 @@ import (
 )
 
 func TestEnsureDeploymentNotificationIDsIsStableAndSkipsBlankHashes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 
@@ -45,6 +46,7 @@ func TestEnsureDeploymentNotificationIDsIsStableAndSkipsBlankHashes(t *testing.T
 }
 
 func TestEnsureDeploymentNotificationIDsReturnsProjectionErrors(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()

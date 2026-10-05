@@ -12,6 +12,7 @@ import (
 )
 
 func TestCyclePlanningHelpersNormalizeAndGroupDeterministically(t *testing.T) {
+	t.Parallel()
 	if normalizeCycleAddress(" 192.0.2.1 ") != "192.0.2.1" || normalizeCycleAddress("2001:0db8::1") != "2001:db8::1" || normalizeCycleAddress("not-an-address") != "" {
 		t.Fatal("cycle address normalization failed")
 	}
@@ -48,6 +49,7 @@ func TestCyclePlanningHelpersNormalizeAndGroupDeterministically(t *testing.T) {
 }
 
 func TestBuildCycleUDPUnitsCoversFamiliesChunksAndInvalidPlans(t *testing.T) {
+	t.Parallel()
 	base := scanner.WorkPlan{Targets: []scanner.ResolvedTarget{
 		{Name: "mixed", Addresses: []string{"192.0.2.1", "192.0.2.1", "2001:db8::1", "bad"}},
 	}}

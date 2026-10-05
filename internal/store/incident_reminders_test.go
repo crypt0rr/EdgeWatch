@@ -66,6 +66,7 @@ func init() {
 }
 
 func TestIncidentRemindersDefaultEnabledAndAudited(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	ctx := context.Background()
 	ts := defaultTenant(s)
@@ -109,6 +110,7 @@ func TestIncidentRemindersDefaultEnabledAndAudited(t *testing.T) {
 }
 
 func TestIncidentRemindersMissingTenantReturnsNotFound(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	ctx := context.Background()
 	ts := s.Tenant(TenantScope{id: "00000000-0000-4000-8000-000000000099"})
@@ -124,6 +126,7 @@ func TestIncidentRemindersMissingTenantReturnsNotFound(t *testing.T) {
 }
 
 func TestMigration61UsesHourlyForInheritedDefaultAndPreservesSavedCadence(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name              string
 		storedCadence     string
@@ -196,6 +199,7 @@ func TestMigration61UsesHourlyForInheritedDefaultAndPreservesSavedCadence(t *tes
 }
 
 func TestMigration59EnablesReminders(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	ctx := context.Background()
 	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE tenants DROP COLUMN incident_reminders_enabled`); err != nil {

@@ -12,6 +12,7 @@ import (
 )
 
 func TestPublicDashboardRoundTripNormalizesAndDeduplicatesHosts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	jobIDs := map[string]string{}
@@ -83,6 +84,7 @@ func TestPublicDashboardRoundTripNormalizesAndDeduplicatesHosts(t *testing.T) {
 }
 
 func TestPublicDashboardNotFoundAndLatestSuccessfulHostScope(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM public_dashboards WHERE id=1`); err != nil {
@@ -125,6 +127,7 @@ func TestPublicDashboardNotFoundAndLatestSuccessfulHostScope(t *testing.T) {
 }
 
 func TestLatestSuccessfulJobHostsResolvesSelectionsInOneSet(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	jobA, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "batch-a", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.1"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}}))
@@ -154,6 +157,7 @@ func TestLatestSuccessfulJobHostsResolvesSelectionsInOneSet(t *testing.T) {
 }
 
 func TestLatestSuccessfulJobHostsUsesProjectionBeforeHistoryFallback(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	jobA, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "same-address-a", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.44"}, TCP: &config.Protocol{Ports: "22", Mode: "connect"}}))
@@ -203,6 +207,7 @@ func TestLatestSuccessfulJobHostsUsesProjectionBeforeHistoryFallback(t *testing.
 }
 
 func TestLatestSuccessfulJobHostsHistoryQueryScopesSelectionBeforeLookup(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	query, args := latestSuccessfulJobHostsHistoryQuery(DefaultTenantID, []PublicDashboardHost{{JobID: "job", Address: "198.51.100.10"}})
 	rows, err := s.DB.QueryContext(context.Background(), `EXPLAIN QUERY PLAN `+query, args...)
@@ -232,6 +237,7 @@ func TestLatestSuccessfulJobHostsHistoryQueryScopesSelectionBeforeLookup(t *test
 }
 
 func TestPublicDashboardDefaultsBlankTitle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Title: "   "}, nil, AuditEntry{}); err != nil {
@@ -247,6 +253,7 @@ func TestPublicDashboardDefaultsBlankTitle(t *testing.T) {
 }
 
 func TestSavePublicDashboardIfCurrentRejectsAStaleToken(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	loaded, err := defaultTenant(s).GetPublicDashboard(ctx)
@@ -301,6 +308,7 @@ func TestSavePublicDashboardIfCurrentRejectsAStaleToken(t *testing.T) {
 }
 
 func TestListLegacyPublicScansExcludesIndexedSnapshots(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{

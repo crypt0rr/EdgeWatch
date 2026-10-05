@@ -8,6 +8,7 @@ import (
 )
 
 func TestSilenceDecisionHelpersAndEventCursorMinimum(t *testing.T) {
+	t.Parallel()
 	if !isMissingSilenceState(errors.New("no such table: job_silence_state")) || isMissingSilenceState(errors.New("other failure")) || isMissingSilenceState(nil) {
 		t.Fatal("silence-state error classification is incorrect")
 	}

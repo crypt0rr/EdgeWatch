@@ -6,6 +6,7 @@ import (
 )
 
 func TestAuditContextPersistsRequestAndResolvedClient(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	defer s.Close()
 
@@ -23,6 +24,7 @@ func TestAuditContextPersistsRequestAndResolvedClient(t *testing.T) {
 }
 
 func TestAuditEntryValuesOverrideContext(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	defer s.Close()
 
@@ -40,6 +42,7 @@ func TestAuditEntryValuesOverrideContext(t *testing.T) {
 }
 
 func TestStandaloneAuditPersistsAfterContextCancellation(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	defer s.Close()
 

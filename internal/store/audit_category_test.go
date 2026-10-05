@@ -65,6 +65,7 @@ var knownAuditActions = map[string][]string{
 // Every known action has an explicit entry, including the data actions that
 // would get the same category by default, and the table has no other entries.
 func TestAuditCategoryCoversEveryKnownAction(t *testing.T) {
+	t.Parallel()
 	known := 0
 	for category, actions := range knownAuditActions {
 		for _, action := range actions {
@@ -100,6 +101,7 @@ func TestAuditCategoryCoversEveryKnownAction(t *testing.T) {
 // The migration backfill and auditCategory agree for every known action and
 // for an unknown one.
 func TestAuditCategoryBackfillMatchesAuditCategory(t *testing.T) {
+	t.Parallel()
 	s := openTestStore(t)
 	actions := []string{"future.action", "test"}
 	for _, list := range knownAuditActions {
@@ -152,6 +154,7 @@ var notAuditActions = map[string]bool{
 // either categorized explicitly or known not to be an audit action, so a new
 // audit action cannot fall back to the data category by accident.
 func TestAuditActionLiteralsHaveExplicitCategories(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join("..", "..")
 	fileSet := token.NewFileSet()
 	found := map[string]string{}

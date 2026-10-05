@@ -9,6 +9,7 @@ import (
 )
 
 func TestListLegacySuccessfulScanSnapshotsPageFiltersIndexedRows(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertJobRows(t, s, "job-indexed", "job-legacy")

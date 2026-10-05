@@ -25,6 +25,7 @@ func setUserVersion(t *testing.T, path string, version int) {
 // reads or writes it, and leave no SQLite sidecar behind. The other host
 // opens, which backup, restore, verify, and health use, still accept it.
 func TestUpgradedOpenersRefuseAnOlderSchema(t *testing.T) {
+	t.Parallel()
 	path := freshTestDatabasePath(t)
 	upgraded := map[string]func(string) (*Store, error){
 		"OpenExistingUpgraded":         OpenExistingUpgraded,
@@ -86,6 +87,7 @@ func TestUpgradedOpenersRefuseAnOlderSchema(t *testing.T) {
 // A newer schema is refused by the write-capable opener as before, and the
 // read-only opener leaves it to the command, as OpenReadOnlyExisting does.
 func TestUpgradedOpenersOnANewerSchema(t *testing.T) {
+	t.Parallel()
 	path := freshTestDatabasePath(t)
 	setUserVersion(t, path, schemaVersion+1)
 	if s, err := OpenExistingUpgraded(path); err == nil || errors.Is(err, ErrSchemaUpgradePending) || err.Error() != newerSchemaError(schemaVersion+1).Error() {

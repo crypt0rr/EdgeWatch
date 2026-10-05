@@ -81,6 +81,7 @@ func countUpdateAlerts(types []string) int {
 // copy and its audit record are in the platform's views, not in the default
 // tenant's.
 func TestUpdateAlertFansOutToThePlatformAndEachActiveTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	ids := tenantFixtureNotifications

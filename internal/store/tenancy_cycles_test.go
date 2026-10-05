@@ -401,6 +401,7 @@ var cycleTenantLeakCases = map[string]tenantLeakCase{
 // fixture, because opening a database is the slow part of these tests. The
 // last one writes.
 func TestTenantCycles(t *testing.T) {
+	t.Parallel()
 	f := newCycleTenantFixture(t)
 	t.Run("unit reads use the unit index", func(t *testing.T) { assertTenantCycleUnitReadsUseTheIndex(t, f) })
 	t.Run("system writers", func(t *testing.T) { assertSystemCycleWritersReachEveryTenant(t, f) })

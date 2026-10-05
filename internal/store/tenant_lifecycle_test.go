@@ -70,6 +70,7 @@ func tenantNames(records []TenantRecord) []string {
 // rules, and the list shows each tenant with counts of its accounts,
 // administrators and jobs.
 func TestCreateRenameAndListTenants(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	platform := f.store.Platform()
@@ -247,6 +248,7 @@ func TestCreateRenameAndListTenants(t *testing.T) {
 // one both refuse a name that differs from a live tenant's only in case,
 // and a deleted tenant's name stays free.
 func TestTenantNamesAreUniqueWithoutRegardToCaseBeyondASCII(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	platform := s.Platform()
@@ -285,6 +287,7 @@ func TestTenantNamesAreUniqueWithoutRegardToCaseBeyondASCII(t *testing.T) {
 // A-Z, which the name check once let through, stay usable: each keeps its
 // name through a change of its slug, and each can take a new name.
 func TestTenantsWhoseNamesDifferOnlyInCaseCanBeRenamed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	platform := s.Platform()
@@ -326,6 +329,7 @@ func TestTenantsWhoseNamesDifferOnlyInCaseCanBeRenamed(t *testing.T) {
 // sends update alerts to every enabled destination, as before business
 // units.
 func TestCreateTenantStartsWithUpdateAlertsOff(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	storedRouting := func(id string) string {
@@ -376,6 +380,7 @@ func TestCreateTenantStartsWithUpdateAlertsOff(t *testing.T) {
 // two tenants' jobs and scans look alike. A new tenant has none. The count
 // reads the tenant's entries of the scans_tenant_id_time index.
 func TestTenantRecordsCountStoredScans(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	platform := f.store.Platform()
@@ -449,6 +454,7 @@ func TestTenantRecordsCountStoredScans(t *testing.T) {
 // Every lifecycle method reports a database that fails, and changes
 // nothing.
 func TestTenantLifecycleReportsDatabaseErrors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	_ = s.Close()
@@ -484,6 +490,7 @@ func TestTenantLifecycleReportsDatabaseErrors(t *testing.T) {
 // A write that races the name check hits the unique indexes, whose errors
 // map to the same errors as the check.
 func TestTenantUniqueError(t *testing.T) {
+	t.Parallel()
 	for message, want := range map[string]error{
 		"constraint failed: UNIQUE constraint failed: tenants.name (2067)": ErrTenantNameInUse,
 		"constraint failed: UNIQUE constraint failed: tenants.slug (2067)": ErrTenantSlugInUse,
@@ -503,6 +510,7 @@ func TestTenantUniqueError(t *testing.T) {
 // they are. Enabling it again restarts the silence reference of its jobs,
 // so the pause does not count as silence.
 func TestDisableAndEnableTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	platform := f.store.Platform()
@@ -602,6 +610,7 @@ func TestDisableAndEnableTenant(t *testing.T) {
 // and discards its scan cycles that were not promoted, and leaves tenant A
 // alone.
 func TestRequestTenantDeletion(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCycleTenantFixture(t)
 	platform := f.store.Platform()

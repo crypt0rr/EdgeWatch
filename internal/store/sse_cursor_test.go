@@ -6,6 +6,7 @@ import (
 )
 
 func TestReserveSSEEventIDsSurvivesRestartAndFollowsDurableEvents(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := freshTestDatabasePath(t)
 	db, err := Open(path)
@@ -51,6 +52,7 @@ func TestReserveSSEEventIDsSurvivesRestartAndFollowsDurableEvents(t *testing.T) 
 }
 
 func TestStoreSSECursorReservesGlobalRanges(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := openTestStore(t)
 	cursor := db.SSECursor()

@@ -26,6 +26,7 @@ func insertRawEvent(t *testing.T, db *sql.DB, jobID, createdAt string) int64 {
 }
 
 func TestEventTimestampNormalizationPreservesOrderingRetentionAndSilence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, testJob("event-timestamp-ordering"))
@@ -84,6 +85,7 @@ func TestEventTimestampNormalizationPreservesOrderingRetentionAndSilence(t *test
 }
 
 func TestEventTimestampMigrationRepairsSchema45Rows(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	base := time.Date(2026, time.September, 22, 13, 14, 15, 500000000, time.UTC)
@@ -112,6 +114,7 @@ func TestEventTimestampMigrationRepairsSchema45Rows(t *testing.T) {
 }
 
 func TestEventTimestampWritersUseCanonicalRepresentation(t *testing.T) {
+	t.Parallel()
 	_, sourceFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")

@@ -15,6 +15,7 @@ import (
 // ends only that account's, and is recorded in its unit's audit as a
 // platform action. The unit's capacity is read as its numbers.
 func TestPlatformConsoleUnitAccounts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
@@ -97,6 +98,7 @@ func TestPlatformConsoleUnitAccounts(t *testing.T) {
 // disabling ends the account's sessions and revokes its links. Each change
 // is recorded in platform scope.
 func TestPlatformConsoleAdmins(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
@@ -196,6 +198,7 @@ func TestPlatformConsoleAdmins(t *testing.T) {
 // invitation link stays usable until it is revoked, which is the way to stop
 // it.
 func TestPlatformConsoleRefusesToDisableAPendingAdmin(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
@@ -231,6 +234,7 @@ func TestPlatformConsoleRefusesToDisableAPendingAdmin(t *testing.T) {
 // and a unit's account is not found. A second revocation finds no link and
 // records nothing.
 func TestPlatformConsoleRevokesAPendingAdminInvitation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
@@ -324,6 +328,7 @@ func TestPlatformConsoleRevokesAPendingAdminInvitation(t *testing.T) {
 // is refused, and a unit's account is not found, as an unknown ID is. A
 // renewal without its record stores no link.
 func TestPlatformConsoleRenewsAPendingAdminInvitation(t *testing.T) {
+	t.Parallel()
 	for _, stranded := range []string{"expired", "revoked"} {
 		t.Run(stranded, func(t *testing.T) {
 			ctx := context.Background()
@@ -472,6 +477,7 @@ func TestPlatformConsoleRenewsAPendingAdminInvitation(t *testing.T) {
 // account is not found, as an unknown ID is. A removal without its record
 // removes nothing.
 func TestPlatformConsoleDeletesAPendingAdmin(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
@@ -586,6 +592,7 @@ func TestPlatformConsoleDeletesAPendingAdmin(t *testing.T) {
 // deliveries to the new revision, and a credential change discards them.
 // Deleting a destination drops it from the platform's update routing.
 func TestPlatformConsoleNotifications(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
@@ -729,6 +736,7 @@ func TestPlatformConsoleNotifications(t *testing.T) {
 // destination deleted since the caller's check are refused alike, and the
 // routing, the units' routing, and the platform audit stay as they were.
 func TestPlatformUpdateRoutingSelectsOnlyPlatformDestinations(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)

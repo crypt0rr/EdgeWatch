@@ -11,6 +11,7 @@ import (
 )
 
 func TestFileStoreUsesReadOnlyPoolForHistoryQueries(t *testing.T) {
+	t.Parallel()
 	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -32,6 +33,7 @@ func TestFileStoreUsesReadOnlyPoolForHistoryQueries(t *testing.T) {
 }
 
 func TestMemoryStoreKeepsSharedWriterConnection(t *testing.T) {
+	t.Parallel()
 	s, err := Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -43,6 +45,7 @@ func TestMemoryStoreKeepsSharedWriterConnection(t *testing.T) {
 }
 
 func TestStoreFallsBackToWriterWhenWALIsUnavailable(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "edgewatch.db")
 	s, err := openWithOptions(path, openOptions{create: true, migrate: true})
 	if err != nil {
@@ -65,6 +68,7 @@ func TestStoreFallsBackToWriterWhenWALIsUnavailable(t *testing.T) {
 }
 
 func TestOpenReadOnlyExistingUsesSQLiteReadOnlyMode(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "edgewatch.db")
 	writer, err := Open(path)
 	if err != nil {
@@ -96,6 +100,7 @@ func TestOpenReadOnlyExistingUsesSQLiteReadOnlyMode(t *testing.T) {
 }
 
 func TestReadOnlyExistingSeesWALCommitsAfterOpen(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "edgewatch.db")
 	writer, err := Open(path)
 	if err != nil {
@@ -130,6 +135,7 @@ func TestReadOnlyExistingSeesWALCommitsAfterOpen(t *testing.T) {
 }
 
 func TestHistoryReadsRemainAvailableWhileWriterTransactionIsHeld(t *testing.T) {
+	t.Parallel()
 	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)

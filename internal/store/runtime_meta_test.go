@@ -9,6 +9,7 @@ import (
 )
 
 func TestRuntimeBaselineInfoUsesCompactMetadata(t *testing.T) {
+	t.Parallel()
 	ctx, s, job, _ := cycleFixture(t)
 	_, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.BaselineScanID = "baseline-scan"
@@ -43,6 +44,7 @@ func TestRuntimeBaselineInfoUsesCompactMetadata(t *testing.T) {
 }
 
 func TestRuntimeMetadataMigrationBackfillsLegacyRows(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.ExecContext(ctx, `DROP TABLE job_runtime_meta; PRAGMA user_version = 36`); err != nil {

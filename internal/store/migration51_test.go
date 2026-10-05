@@ -257,6 +257,7 @@ func snapshotRows(db *sql.DB, query string, out *strings.Builder) error {
 }
 
 func TestMigration51MovesSingletonsToTheDefaultTenant(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		routing func([]ManagedNotification) []string
@@ -426,6 +427,7 @@ func readMigratedAudits(db *sql.DB) ([]migratedAudit, error) {
 // A second run of the migration, both on an already current database and
 // after the schema marker was reset, leaves every relocated value unchanged.
 func TestMigration51IsANoOpWhenRepeated(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSchema50Fixture(t, func(destinations []ManagedNotification) []string { return []string{destinations[0].ID} })
 	s, err := Open(fixture.path)
@@ -467,6 +469,7 @@ func TestMigration51IsANoOpWhenRepeated(t *testing.T) {
 // Some recovery databases carry a schema marker without every table. The
 // migration creates the tables it reads, and the store works on the result.
 func TestMigration51UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
+	t.Parallel()
 	base := newSchema50Fixture(t, nil)
 	for _, tc := range []struct {
 		name    string
@@ -542,6 +545,7 @@ func TestMigration51UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
 // routing write fails and changes nothing, instead of reporting success for
 // a routing that is not stored.
 func TestUpdateRoutingWritesRequireTheDefaultTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	destination, err := defaultTenant(s).CreateManagedNotification(ctx, "destination-routing", "Routing", "generic", []byte{1}, []byte{2}, true)
@@ -571,6 +575,7 @@ func TestUpdateRoutingWritesRequireTheDefaultTenant(t *testing.T) {
 // on a schema-50 database, such as the audit of a restore of an older backup,
 // still records its audit entry, and the migration categorizes it later.
 func TestAuditEntryOnSchema50DatabaseIsCategorizedByTheMigration(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fixture := newSchema50Fixture(t, nil)
 	existing, err := OpenExisting(fixture.path)

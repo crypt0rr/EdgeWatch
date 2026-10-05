@@ -12,6 +12,7 @@ import (
 // whose claim is not the worker's, has lost its claim; a delivery of a
 // disabled tenant is held; a platform delivery is never held.
 func TestCheckDeliveryClaim(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)

@@ -10,6 +10,7 @@ import (
 // migrated database. The tenant fixture is one, with rows added, and its
 // copy is shared because opening a database is the slow part of the test.
 func TestTenancyRegistry(t *testing.T) {
+	t.Parallel()
 	s := newTenantFixture(t).store
 	t.Run("covers the schema", func(t *testing.T) { assertTenancyRegistryCoversTheSchema(t, s) })
 	t.Run("is consistent", func(t *testing.T) { assertTenancyRegistryIsConsistent(t, s) })
@@ -121,6 +122,7 @@ func assertTenancyRegistryIsConsistent(t *testing.T, s *Store) {
 }
 
 func TestTenancyClassNames(t *testing.T) {
+	t.Parallel()
 	for tenancy, want := range map[tableTenancy]string{
 		directTable:         "direct",
 		viaTable("jobs"):    "via(jobs)",

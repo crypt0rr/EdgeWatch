@@ -9,6 +9,7 @@ import (
 )
 
 func TestAtomicWriteFileIsPrivateCrashSafeAndNonReplacing(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "export.json")
 	got, err := AtomicWriteFile(path, ".edgewatch-test-", func(tempPath string) error {
@@ -71,6 +72,7 @@ func TestAtomicWriteFileIsPrivateCrashSafeAndNonReplacing(t *testing.T) {
 }
 
 func TestAtomicWriteFileDoesNotRemoveAReplacementAfterValidationFailure(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "export.json")
 	_, err := AtomicWriteFile(path, ".edgewatch-test-", func(tempPath string) error {
@@ -98,6 +100,7 @@ func TestAtomicWriteFileDoesNotRemoveAReplacementAfterValidationFailure(t *testi
 }
 
 func TestAtomicWriteFileRejectsAConcurrentCreator(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "export.json")
 	_, err := AtomicWriteFile(path, ".edgewatch-test-", func(tempPath string) error {

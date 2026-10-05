@@ -36,6 +36,7 @@ const frontendReport = (overrides = {}) => {
     'src/components/UntrustedProxyBanner.tsx',
     'src/format.ts',
     'src/hostSearch.ts',
+    'src/one-time-factor.ts',
     'src/main.tsx',
     'src/pages/Activity.tsx',
     'src/pages/Audit.tsx',

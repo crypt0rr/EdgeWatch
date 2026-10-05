@@ -986,7 +986,7 @@ func (s *Store) ConsumeRecoveryCodeTextForUser(ctx context.Context, userID, code
 // records nothing: sign-in passes the hash to CreateSignInSession, which
 // marks the code used in the transaction that creates the session.
 func (s *Store) MatchRecoveryCodeForUser(ctx context.Context, userID, code string) (string, error) {
-	code = strings.ToUpper(strings.TrimSpace(code))
+	code = strings.ToUpper(strings.Join(strings.Fields(code), ""))
 	if code == "" {
 		return "", nil
 	}

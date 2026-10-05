@@ -155,7 +155,7 @@ describe('global hosts explorer', () => {
       await Promise.resolve()
     })
     await vi.waitFor(() => expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ protocol: 'tcp', has_open_ports: false, offset: 0 })), { timeout: 1000 })
-    expect(container.querySelector('[role="status"]')?.textContent).toContain('No hosts match the current search and filters.')
+    await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('No hosts match the current search and filters.'), { timeout: 1000 })
   })
 
   it('shows an actionable error when the host index cannot be queried', async () => {

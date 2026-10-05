@@ -1,11 +1,12 @@
 /** @vitest-environment jsdom */
 
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { act } from 'react'
-import { Link, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Link, Route, Routes } from 'react-router-dom'
+import { QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, BUILTIN_NAABU_PROFILE_ID, createJob, getJob, getSession, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
-import { renderWithProviders, defaultUnitScope } from '../test/test-utils'
+import { createTestClient, renderWithProviders, defaultUnitScope } from '../test/test-utils'
 import { setDisplayTimeZone } from '../format'
 import { JobEditor } from './JobEditor'
 
@@ -34,7 +35,10 @@ describe('job editor workflow coverage', () => {
     vi.mocked(scheduleSuggestion).mockResolvedValue({ suggested: false, gap_minutes: 60 })
     vi.mocked(getSession).mockResolvedValue(administrator)
   })
-  afterEach(() => vi.clearAllMocks())
+  afterEach(() => {
+    vi.clearAllMocks()
+    window.history.replaceState(null, '', '/')
+  })
 
   it('retries notification-destination loading without changing the new-job form', async () => {
     vi.mocked(listNotificationDestinations).mockRejectedValueOnce(new Error('notification store unavailable'))
@@ -298,6 +302,30 @@ describe('job editor workflow coverage', () => {
     fireEvent.click(screen.getByRole('link', { name: 'Jobs' }))
     fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }))
     await waitFor(() => expect(screen.getByText('Jobs list')).toBeInTheDocument())
+  })
+
+  it('guards browser Back, keeps the draft on cancel, and completes Back on discard', async () => {
+    window.history.replaceState({ usr: null, key: 'jobs', idx: 0 }, '', '/jobs')
+    window.history.pushState({ usr: null, key: 'job-new', idx: 1 }, '', '/jobs/new')
+    const client = createTestClient()
+    render(<QueryClientProvider client={client}><BrowserRouter><Routes>
+      <Route path="/jobs/new" element={<JobEditor />} />
+      <Route path="/jobs" element={<p>Jobs list</p>} />
+    </Routes></BrowserRouter></QueryClientProvider>)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('Job name'), { target: { value: 'Keep this draft' } })
+
+    window.history.back()
+    let discardDialog = await screen.findByRole('dialog', { name: 'Discard unsaved changes?' })
+    expect(window.location.pathname).toBe('/jobs/new')
+    fireEvent.click(within(discardDialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.getByLabelText('Job name')).toHaveValue('Keep this draft')
+
+    window.history.back()
+    discardDialog = await screen.findByRole('dialog', { name: 'Discard unsaved changes?' })
+    fireEvent.click(within(discardDialog).getByRole('button', { name: 'Discard changes' }))
+    await waitFor(() => expect(screen.getByText('Jobs list')).toBeInTheDocument())
+    expect(window.location.pathname).toBe('/jobs')
   })
 
   it('keeps the native unload prompt active for a changed draft', async () => {

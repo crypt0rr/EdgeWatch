@@ -238,6 +238,57 @@ describe('job surface overview', () => {
     expect(jobPendingChanges).toHaveBeenCalledOnce()
   })
 
+  it('keeps a Previous control when pending changes shrink below the selected page', async () => {
+    vi.mocked(getJob).mockResolvedValue({ ...job, baseline: { ...job.baseline, pending: 12 } })
+    let remaining = Array.from({ length: 12 }, (_, index) => ({
+      key: `port|router.example|tcp|${1000 + index}`,
+      change: { kind: 'port' as const, target: 'router.example', protocol: 'tcp' as const, port: 1000 + index, old: 'not-open', new: 'open', severity: 'critical' as const },
+      count: 1,
+    }))
+    vi.mocked(jobPendingChanges).mockImplementation(async (_jobID, offset = 0, limit = 10) => {
+      const total = remaining.length
+      return {
+        job_id: 'job-1', job: 'production', pending_changes: remaining.slice(offset, offset + limit),
+        pagination: { limit, offset, total, has_more: offset + limit < total, next_offset: offset + limit < total ? offset + limit : null },
+      }
+    })
+    await renderPage()
+    await vi.waitFor(() => expect(container.textContent).toContain('TCP:1000'), { timeout: 1000 })
+    const pager = container.querySelector('nav[aria-label="Pending changes pagination"]') as HTMLElement
+    act(() => (Array.from(pager.querySelectorAll('button')).find(button => button.textContent === 'Next') as HTMLButtonElement).click())
+    await vi.waitFor(() => expect(vi.mocked(jobPendingChanges)).toHaveBeenCalledWith('job-1', 10, 10), { timeout: 1000 })
+    await vi.waitFor(() => expect(container.textContent).toContain('TCP:1010'), { timeout: 1000 })
+
+    remaining = remaining.slice(0, 3)
+    await act(async () => { await queryClient.invalidateQueries({ queryKey: ['job-pending-changes', 'job-1', 10] }) })
+    await vi.waitFor(() => expect(container.querySelector('nav[aria-label="Pending changes pagination"] button')?.textContent).toBe('Previous'), { timeout: 1000 })
+    const previous = container.querySelector('nav[aria-label="Pending changes pagination"] button') as HTMLButtonElement
+    expect(previous).toBeEnabled()
+    act(() => previous.click())
+    await vi.waitFor(() => expect(container.textContent).toContain('TCP:1000'), { timeout: 1000 })
+  })
+
+  it('shows the no-pending state only when the API total is zero', async () => {
+    vi.mocked(getJob).mockResolvedValue({ ...job, baseline: { ...job.baseline, pending: 1 } })
+    vi.mocked(jobPendingChanges).mockResolvedValue({ job_id: 'job-1', job: 'production', pending_changes: [], pagination: { limit: 10, offset: 0, total: 0, has_more: false, next_offset: null } })
+    await renderPage()
+
+    await vi.waitFor(() => expect(container.textContent).toContain('No changes are awaiting confirmation.'), { timeout: 1000 })
+  })
+
+  it('retries pending confirmation loading errors', async () => {
+    vi.mocked(getJob).mockResolvedValue({ ...job, baseline: { ...job.baseline, pending: 1 } })
+    vi.mocked(jobPendingChanges).mockRejectedValueOnce(new Error('temporary failure'))
+    await renderPage()
+
+    await vi.waitFor(() => expect(container.textContent).toContain('Could not load pending baseline changes.'), { timeout: 1000 })
+    const retry = Array.from(container.querySelectorAll('.error-card')).find(notice => notice.textContent?.includes('Could not load pending baseline changes.'))?.querySelector('button') as HTMLButtonElement
+    expect(retry).toBeTruthy()
+    await act(async () => retry.click())
+
+    await vi.waitFor(() => expect(jobPendingChanges).toHaveBeenCalledTimes(2), { timeout: 1000 })
+  })
+
   it('limits viewers to expected baseline information', async () => {
     vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'user-2', username: 'viewer', permissions: [], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
     await renderPage()

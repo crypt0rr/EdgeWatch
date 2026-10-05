@@ -90,9 +90,11 @@ export function JobEditor() {
   const [dismissedSuggestion, setDismissedSuggestion] = useState('')
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
   const [rebaselinePrompt, setRebaselinePrompt] = useState<{ values: JobFormFields; changes: string[] } | null>(null)
-  const [discardNavigation, setDiscardNavigation] = useState<string | null>(null)
+  const [discardNavigation, setDiscardNavigation] = useState<{ destination: string; historyPop: boolean } | null>(null)
   const loadedRevision = useRef<{ id?: string; revision: number } | null>(null)
   const cronInputRef = useRef<HTMLInputElement | null>(null)
+  const currentHistoryEntry = useRef<{ path: string; state: unknown } | null>(null)
+  const allowHistoryPop = useRef(false)
   const { register, handleSubmit, reset, watch, setValue, formState: { errors: formErrors, isDirty } } = useForm<JobFormFields>({
     defaultValues: defaults,
     resolver: zodResolver(jobFormSchema),
@@ -131,11 +133,15 @@ export function JobEditor() {
   const requestNavigation = (destination: string) => {
     if (saving) return
     if (hasDraftChanges) {
-      setDiscardNavigation(destination)
+      setDiscardNavigation({ destination, historyPop: false })
       return
     }
     navigate(destination)
   }
+
+  useEffect(() => {
+    currentHistoryEntry.current = { path: `${location.pathname}${location.search}${location.hash}`, state: window.history.state }
+  }, [location.hash, location.key, location.pathname, location.search])
 
   useEffect(() => {
     if (!hasDraftChanges || saving) return
@@ -152,16 +158,34 @@ export function JobEditor() {
       if (nextPath === currentPath) return
       event.preventDefault()
       event.stopPropagation()
-      setDiscardNavigation(nextPath)
+      setDiscardNavigation({ destination: nextPath, historyPop: false })
+    }
+    const onPopState = (event: PopStateEvent) => {
+      if (allowHistoryPop.current) {
+        allowHistoryPop.current = false
+        return
+      }
+      const nextPath = `${window.location.pathname}${window.location.search}${window.location.hash}`
+      if (nextPath === currentPath) return
+
+      // Browser history has already moved by the time popstate fires. Stop
+      // BrowserRouter from applying that location, then restore the exact
+      // current router entry and let the user either cancel or repeat the pop.
+      event.stopImmediatePropagation()
+      const current = currentHistoryEntry.current
+      setDiscardNavigation({ destination: nextPath, historyPop: true })
+      if (current) window.history.pushState(current.state, '', current.path)
     }
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       event.preventDefault()
       event.returnValue = ''
     }
     document.addEventListener('click', onInternalLinkClick, true)
+    window.addEventListener('popstate', onPopState, true)
     window.addEventListener('beforeunload', onBeforeUnload)
     return () => {
       document.removeEventListener('click', onInternalLinkClick, true)
+      window.removeEventListener('popstate', onPopState, true)
       window.removeEventListener('beforeunload', onBeforeUnload)
     }
   }, [hasDraftChanges, location.hash, location.pathname, location.search, saving])
@@ -429,7 +453,7 @@ export function JobEditor() {
         </div>
       </form>
       {rebaselinePrompt && <ActionDialog title="Confirm scan-scope change" description="This changes the scan scope. The current baseline and active incidents will be cleared, and a new baseline will be learned." confirmLabel="Reset baseline and save" destructive onConfirm={async () => { await save(rebaselinePrompt.values, true) }} onCancel={() => { setRebaselinePrompt(null); setError('Scope change cancelled.') }} error={error}>{rebaselinePrompt.changes.length > 0 && <ul className="scope-change-list">{rebaselinePrompt.changes.map(change => <li key={change}>{change}</li>)}</ul>}</ActionDialog>}
-      {discardNavigation && <ActionDialog title="Discard unsaved changes?" description="Your job configuration changes have not been saved. Leave this page and discard the draft?" confirmLabel="Discard changes" destructive onConfirm={() => { const destination = discardNavigation; setDiscardNavigation(null); navigate(destination) }} onCancel={() => setDiscardNavigation(null)} />}
+      {discardNavigation && <ActionDialog title="Discard unsaved changes?" description="Your job configuration changes have not been saved. Leave this page and discard the draft?" confirmLabel="Discard changes" destructive onConfirm={() => { const navigation = discardNavigation; setDiscardNavigation(null); if (navigation.historyPop) { allowHistoryPop.current = true; window.history.back() } else navigate(navigation.destination) }} onCancel={() => setDiscardNavigation(null)} />}
     </section>
   )
 }

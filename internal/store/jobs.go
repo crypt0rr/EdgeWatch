@@ -704,6 +704,15 @@ func removeJobHistoryTx(ctx context.Context, tx *sql.Tx, tenantID, jobID string)
 			ELSE 0 END`, tenantID, jobID); err != nil {
 		return err
 	}
+	// A restore can preserve pending deliveries outside the live outbox. Keep
+	// permanent job deletion consistent by removing only this tenant's
+	// quarantined copies that can be attributed to the stable job ID.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM restore_quarantined_deliveries
+		WHERE tenant_id=? AND CASE WHEN json_valid(CAST(payload_json AS TEXT))
+			THEN COALESCE(json_extract(CAST(payload_json AS TEXT),'$.job_id'),'')=?
+			ELSE 0 END`, tenantID, jobID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE tenant_id=? AND job_id=?`, tenantID, jobID); err != nil {
 		return err
 	}

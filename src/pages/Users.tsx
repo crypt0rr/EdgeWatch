@@ -38,22 +38,31 @@ function userActions(user: UserSummary, sessionUserID: string | undefined) {
 }
 
 export function Users() {
-  const client = useQueryClient(); const users = useQuery({ queryKey: ['users'], queryFn: listUsers }); const session = useQuery({ queryKey: ['session'], queryFn: getSession }); const [username, setUsername] = useState(''); const [displayName, setDisplayName] = useState(''); const [role, setRole] = useState<Role>('viewer'); const [password, setPassword] = useState(''); const [message, setMessage] = useState(''); const [error, setError] = useState(''); const [issued, setIssued] = useState<{ path: string; username: string; userID: string; kind: 'activation' | 'password-reset' } | null>(null); const [prompt, setPrompt] = useState<{ action: 'toggle' | 'renew' | 'revoke' | 'edit'; userID: string; username: string; label: string } | null>(null); const [editDraft, setEditDraft] = useState<{ userID: string; username: string; displayName: string; originalDisplayName: string; role: Role; originalRole: Role; revision: number } | null>(null)
+  type Prompt = { action: 'toggle' | 'renew' | 'revoke' | 'edit'; userID: string; username: string; label: string; targetEnabled?: boolean; revision?: number; linkKind?: 'activation' | 'password-reset' }
+  const client = useQueryClient(); const users = useQuery({ queryKey: ['users'], queryFn: listUsers }); const session = useQuery({ queryKey: ['session'], queryFn: getSession }); const [username, setUsername] = useState(''); const [displayName, setDisplayName] = useState(''); const [role, setRole] = useState<Role>('viewer'); const [password, setPassword] = useState(''); const [message, setMessage] = useState(''); const [error, setError] = useState(''); const [issued, setIssued] = useState<{ path: string; username: string; userID: string; kind: 'activation' | 'password-reset' } | null>(null); const [prompt, setPrompt] = useState<Prompt | null>(null); const [editDraft, setEditDraft] = useState<{ userID: string; username: string; displayName: string; originalDisplayName: string; role: Role; originalRole: Role; pending: boolean; revision: number } | null>(null)
   const create = useMutation({ mutationFn: () => createUser(username, displayName, role, password), onSuccess: value => { setUsername(''); setDisplayName(''); setPassword(''); setIssued({ path: value.activation_path, username: value.user.username, userID: value.user.id, kind: 'activation' }); setMessage(`Created ${value.user.username}. Share the one-time activation link before leaving this page.`); void client.invalidateQueries({ queryKey: ['users'] }) }, onError: err => setError(err instanceof Error ? err.message : 'Could not create user') })
   async function submit(event: FormEvent) { event.preventDefault(); setMessage(''); setError(''); const problem = usernameProblem(username); if (problem) { setError(problem); return } create.mutate() }
   type Account = Awaited<ReturnType<typeof listUsers>>['users'][number]
   function openPrompt(action: 'toggle' | 'renew' | 'revoke' | 'edit', user: Account, label: string) { setError(''); setMessage(''); setPrompt({ action, userID: user.id, username: user.username, label }) }
-  function toggle(user: Account) { openPrompt('toggle', user, `${user.enabled ? 'Disable' : 'Enable'} ${user.username}`) }
-  function renew(user: Account) { openPrompt('renew', user, user.pending ? `Renew activation link for ${user.username}` : `Create password reset link for ${user.username}`) }
+  function toggle(user: Account) {
+    setError('')
+    setMessage('')
+    setPrompt({ action: 'toggle', userID: user.id, username: user.username, label: `${user.enabled ? 'Disable' : 'Enable'} ${user.username}`, targetEnabled: !user.enabled, revision: user.revision })
+  }
+  function renew(user: Account) {
+    setError('')
+    setMessage('')
+    setPrompt({ action: 'renew', userID: user.id, username: user.username, label: user.pending ? `Renew activation link for ${user.username}` : `Create password reset link for ${user.username}`, linkKind: user.pending ? 'activation' : 'password-reset' })
+  }
   function revoke(user: Account) { openPrompt('revoke', user, `Revoke ${user.pending ? 'activation' : 'password reset'} link for ${user.username}`) }
   function edit(user: Account) {
     setError('')
     setMessage('')
-    setEditDraft({ userID: user.id, username: user.username, displayName: user.display_name, originalDisplayName: user.display_name, role: user.role, originalRole: user.role, revision: user.revision })
+    setEditDraft({ userID: user.id, username: user.username, displayName: user.display_name, originalDisplayName: user.display_name, role: user.role, originalRole: user.role, pending: user.pending, revision: user.revision })
     openPrompt('edit', user, `Edit account for ${user.username}`)
   }
-  // A revoked link, and every link of a disabled account, stops working, so
-  // the page stops offering that account's activation link for copying.
+  // Revocation, disablement, and role changes invalidate outstanding
+  // one-time links, so the page stops offering the affected link for copying.
   function dropToken(userID: string) { setIssued(current => current?.userID === userID ? null : current) }
   async function confirmAction(secret: string) {
     if (!prompt) return
@@ -61,18 +70,28 @@ export function Users() {
     setError('')
     try {
       if (prompt.action === 'toggle') {
+        const targetEnabled = prompt.targetEnabled
         const user = users.data?.users.find(value => value.id === prompt.userID)
-        if (!user) return
-        await updateUser(user.id, { enabled: !user.enabled, revision: user.revision, password: secret })
-        if (user.enabled) dropToken(user.id)
-        setMessage(`${user.username} ${user.enabled ? 'disabled' : 'enabled'}.`)
+        if (targetEnabled === undefined || prompt.revision === undefined) return
+        if (!user) {
+          setPrompt(null)
+          setMessage(`${prompt.username} was removed elsewhere. The latest account list is loaded.`)
+          return
+        }
+        if (user.enabled === targetEnabled) {
+          if (!targetEnabled) dropToken(user.id)
+          setPrompt(null)
+          setMessage(`${prompt.username} was already ${targetEnabled ? 'enabled' : 'disabled'} elsewhere. The latest state is loaded.`)
+          return
+        }
+        await updateUser(user.id, { enabled: targetEnabled, revision: prompt.revision, password: secret })
+        if (!targetEnabled) dropToken(user.id)
+        setMessage(`${prompt.username} ${targetEnabled ? 'enabled' : 'disabled'}.`)
       } else if (prompt.action === 'renew') {
-        const user = users.data?.users.find(value => value.id === prompt.userID)
-        if (!user) return
-        const value = user.pending
-          ? await issueUserActivation(user.id, secret)
-          : await issueUserPasswordReset(user.id, secret)
-        setIssued({ path: value.activation_path, username: prompt.username, userID: prompt.userID, kind: user.pending ? 'activation' : 'password-reset' })
+        const value = prompt.linkKind === 'password-reset'
+          ? await issueUserPasswordReset(prompt.userID, secret)
+          : await issueUserActivation(prompt.userID, secret)
+        setIssued({ path: value.activation_path, username: prompt.username, userID: prompt.userID, kind: prompt.linkKind ?? 'activation' })
         setMessage(`New link generated for ${prompt.username}. It expires in 30 minutes.`)
       } else if (prompt.action === 'revoke') {
         await revokeUserActivation(prompt.userID, secret)
@@ -85,15 +104,13 @@ export function Users() {
           setMessage(`${draft.username} has no changes.`)
         } else {
           await updateUser(draft.userID, { display_name: draft.displayName, role: draft.role, revision: draft.revision, password: secret })
-          const roleChanged = draft.role !== draft.originalRole
-          const account = users.data?.users.find(value => value.id === draft.userID)
-          const issuedLink = issued?.userID === draft.userID
-          if (roleChanged) dropToken(draft.userID)
-          if (roleChanged && issuedLink) {
-            const linkName = account?.pending ? 'activation' : 'password reset'
-            const nextAction = account?.pending ? 'issue' : 'create'
-            setMessage(`Updated ${draft.username}. Its ${linkName} link stopped working; ${nextAction} a new one.`)
-          } else setMessage(`Updated ${draft.username}.`)
+          if (draft.role !== draft.originalRole) {
+            dropToken(draft.userID)
+            const linkType = draft.pending ? 'activation' : 'password reset'
+            setMessage(`Updated ${draft.username}. Any outstanding ${linkType} link is now invalid${draft.pending ? '; renew it to issue another' : ''}.`)
+          } else {
+            setMessage(`Updated ${draft.username}.`)
+          }
         }
         setEditDraft(null)
       }
@@ -101,18 +118,41 @@ export function Users() {
       setPrompt(null)
     } catch (err) {
       if (err instanceof APIError && err.code === 'conflict') {
-        await client.invalidateQueries({ queryKey: ['users'] })
         if (prompt.action === 'edit') {
+          await client.invalidateQueries({ queryKey: ['users'] })
           setPrompt(null)
           setEditDraft(null)
           setError('This account changed in another session. The latest details are loaded; review them and reopen Edit account.')
-        } else setError('This account changed in another session. The latest revision is loaded; try again if needed.')
-      } else setError(err instanceof Error ? err.message : 'The user action could not be completed.')
+        } else if (prompt.action === 'toggle') {
+          try {
+            const refreshed = await listUsers()
+            client.setQueryData(['users'], refreshed)
+            const latest = refreshed.users.find(value => value.id === prompt.userID)
+            setPrompt(null)
+            if (!latest) {
+              setMessage(`${prompt.username} was removed elsewhere. The latest account list is loaded.`)
+            } else if (latest.enabled === prompt.targetEnabled) {
+              if (!latest.enabled) dropToken(latest.id)
+              setMessage(`${prompt.username} was already ${latest.enabled ? 'enabled' : 'disabled'} elsewhere. The latest state is loaded.`)
+            } else {
+              setError(`This account changed in another session. The latest state is loaded; review it and reopen ${prompt.targetEnabled ? 'Enable' : 'Disable'} ${prompt.username}.`)
+            }
+          } catch {
+            setPrompt(null)
+            setError(`This account changed in another session, and its latest state could not be loaded. Refresh before reopening ${prompt.targetEnabled ? 'Enable' : 'Disable'} ${prompt.username}.`)
+          }
+        } else {
+          await client.invalidateQueries({ queryKey: ['users'] })
+          setError('This account changed in another session. The latest revision is loaded; try again if needed.')
+        }
+      } else {
+        setError(err instanceof Error ? err.message : 'The user action could not be completed.')
+      }
     }
   }
   const roleChangeNeedsPassword = prompt?.action === 'edit' && editDraft?.role !== editDraft?.originalRole
   const promptDescription = prompt?.action === 'edit'
-    ? `Review the display name and role for ${prompt.username}. Changing this account’s role requires your administrator password.`
+    ? `Review the display name and role for ${prompt.username}. Changing this account’s role requires your administrator password.${roleChangeNeedsPassword ? ` It also revokes any outstanding ${editDraft?.pending ? 'activation' : 'password reset'} link.` : ''}`
     : prompt?.action === 'toggle'
       ? `Confirm the account change for ${prompt.username}. Enter your administrator password to authorize it.`
       : prompt?.action === 'renew'

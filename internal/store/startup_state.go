@@ -169,6 +169,9 @@ func (ss *SystemStore) HealthStatus(ctx context.Context) (HealthStatus, error) {
 
 	var raw string
 	if err := reader.QueryRowContext(ctx, `SELECT heartbeat FROM daemon_lease WHERE id=1`).Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return status, errors.New("no daemon heartbeat recorded; the daemon is not running")
+		}
 		return status, err
 	}
 	heartbeat, err := time.Parse(time.RFC3339Nano, raw)

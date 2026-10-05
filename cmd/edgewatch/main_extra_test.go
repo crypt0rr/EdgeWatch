@@ -653,6 +653,32 @@ func TestReadOnlyCommandsDoNotModifySQLiteArtifacts(t *testing.T) {
 	}
 }
 
+func TestHealthCommandNamesMissingDaemonHeartbeat(t *testing.T) {
+	dir := t.TempDir()
+	database := filepath.Join(dir, "edgewatch.db")
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("database: "+database+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := captureCLIOutput(t, func() error {
+		return run([]string{"health", "--config", configPath, "--output", "json"})
+	})
+	if err == nil || !strings.Contains(err.Error(), "no daemon heartbeat recorded; the daemon is not running") {
+		t.Fatalf("health error = %v, want a named missing-daemon-heartbeat error", err)
+	}
+	if stdout != "" {
+		t.Fatalf("unhealthy health command printed a success document: %q", stdout)
+	}
+}
+
 func TestRunVerifyPreservesResultWhenAuditStoreIsReadOnly(t *testing.T) {
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")

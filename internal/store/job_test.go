@@ -51,6 +51,75 @@ func TestCreateJobWithEnabledPersistsPausedStateAtomically(t *testing.T) {
 	}
 }
 
+func TestUpdateJobRefreshesLatestHostProjectionName(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	insertSecondTenant(t, s)
+	secondTenant := s.Tenant(TenantScope{id: secondTenantID})
+
+	active, err := defaultTenant(s).CreateJob(ctx, testJob("alpha-old"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherTenant, err := secondTenant.CreateJob(ctx, testJob("alpha-old"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	paused, err := defaultTenant(s).CreateJobWithEnabled(ctx, testJob("paused-old"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	saveHostScan := func(id string, job JobRecord, address string, finished time.Time) {
+		t.Helper()
+		scan := model.Scan{
+			ID: id, JobID: job.ID, Job: job.Job.Name, StartedAt: finished.Add(-time.Minute), FinishedAt: finished, Status: "success",
+			Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: address, AddressFamily: "IPv4"}}},
+		}
+		if err := s.System().SaveScan(ctx, scan); err != nil {
+			t.Fatalf("save scan %s: %v", id, err)
+		}
+	}
+	saveHostScan("scan-alpha-default", active, "198.51.100.9", time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC))
+	saveHostScan("scan-alpha-other-tenant", otherTenant, "198.51.100.9", time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC))
+	saveHostScan("scan-paused-default", paused, "198.51.100.10", time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC))
+
+	active.Job.Name = "alpha-new"
+	if _, _, err := defaultTenant(s).UpdateJob(ctx, active.ID, active.Revision, active.Job, active.Enabled, active.Archived, false); err != nil {
+		t.Fatalf("rename enabled job: %v", err)
+	}
+	paused.Job.Name = "paused-new"
+	if _, _, err := defaultTenant(s).UpdateJob(ctx, paused.ID, paused.Revision, paused.Job, paused.Enabled, paused.Archived, false); err != nil {
+		t.Fatalf("rename paused job: %v", err)
+	}
+
+	for _, tc := range []struct {
+		query, job, address string
+		wantTotal           int
+	}{
+		{query: "alpha-new", job: "alpha-new", address: "198.51.100.9", wantTotal: 1},
+		{query: "paused-new", job: "paused-new", address: "198.51.100.10", wantTotal: 1},
+		{query: "alpha-old", wantTotal: 0},
+		{query: "paused-old", wantTotal: 0},
+	} {
+		page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, tc.query, "", nil, 50, 0)
+		if err != nil {
+			t.Fatalf("search default tenant for %q: %v", tc.query, err)
+		}
+		if page.Total != tc.wantTotal || len(page.Items) != tc.wantTotal {
+			t.Fatalf("default search %q returned total %d, %d items; want %d", tc.query, page.Total, len(page.Items), tc.wantTotal)
+		}
+		if tc.wantTotal > 0 && (page.Items[0].Job != tc.job || page.Items[0].Host.Address != tc.address) {
+			t.Errorf("default search %q returned job/address %q/%q; want %q/%q", tc.query, page.Items[0].Job, page.Items[0].Host.Address, tc.job, tc.address)
+		}
+	}
+	otherPage, err := secondTenant.ListLatestScanHostsPage(ctx, "alpha-old", "", nil, 50, 0)
+	if err != nil || otherPage.Total != 1 || len(otherPage.Items) != 1 || otherPage.Items[0].Job != "alpha-old" || otherPage.Items[0].Host.Address != "198.51.100.9" {
+		t.Fatalf("other tenant's unchanged host projection = %#v, %v", otherPage, err)
+	}
+}
+
 func TestManagedJobsHonorConfiguredTargetExclusions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

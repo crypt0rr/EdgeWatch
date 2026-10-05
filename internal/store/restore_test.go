@@ -60,6 +60,7 @@ func TestPreflightRestoreReportsEverySQLiteSidecarWithoutMutation(t *testing.T) 
 }
 
 func TestDryRunRestoreRemovesAbandonedStagingCopies(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("orphan cleanup requires the Linux advisory restore guard")
 	}
@@ -100,6 +101,7 @@ func TestDryRunRestoreRemovesAbandonedStagingCopies(t *testing.T) {
 }
 
 func TestDryRunRestorePreservesUnrecognizedPrefixedDirectory(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("orphan cleanup requires the Linux advisory restore guard")
 	}
@@ -180,6 +182,7 @@ func TestStageRestoreRepeatsPreflightAfterAcquiringGuard(t *testing.T) {
 }
 
 func TestCleanupStaleRestoreStagingDirectoriesReportsReadFailure(t *testing.T) {
+	t.Parallel()
 	err := cleanupStaleRestoreStagingDirs(filepath.Join(t.TempDir(), "missing"))
 	if err == nil || !strings.Contains(err.Error(), "list restore staging directories") {
 		t.Fatalf("cleanup error = %v, want directory read failure", err)
@@ -187,6 +190,7 @@ func TestCleanupStaleRestoreStagingDirectoriesReportsReadFailure(t *testing.T) {
 }
 
 func TestCleanupStaleRestoreStagingDirectoriesReportsSidecarRecoveryFailure(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	staging, err := os.MkdirTemp(dir, restoreStagingDirPrefix)
 	if err != nil {
@@ -202,6 +206,7 @@ func TestCleanupStaleRestoreStagingDirectoriesReportsSidecarRecoveryFailure(t *t
 }
 
 func TestRecoverMovedRestoreSidecarsRejectsUnsafeArtifacts(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		setup     func(t *testing.T, root, staging string) (parent, stagingDir string)
@@ -306,6 +311,7 @@ func writeRestoreTestFile(t *testing.T, path, content string) {
 }
 
 func TestDryRunRestoreRecoversSidecarsMovedBeforeInterruptedReplacement(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("orphan cleanup requires the Linux advisory restore guard")
 	}
@@ -344,6 +350,7 @@ func TestDryRunRestoreRecoversSidecarsMovedBeforeInterruptedReplacement(t *testi
 }
 
 func TestRestoreStagingCleanupWaitsForActiveRestore(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("cross-process restore coordination uses Linux advisory locks")
 	}

@@ -21,6 +21,7 @@ const restoreSignalChildEnv = "EDGEWATCH_RESTORE_SIGNAL_TEST_CHILD"
 // TestRestoreSignalChild is run in a subprocess so the regression test can
 // send SIGINT without risking termination of the main test process.
 func TestRestoreSignalChild(t *testing.T) {
+	t.Parallel()
 	if os.Getenv(restoreSignalChildEnv) != "1" {
 		return
 	}
@@ -33,6 +34,7 @@ func TestRestoreSignalChild(t *testing.T) {
 }
 
 func TestRestoreCommandTerminationSignalsRemoveStagingCopy(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("restore command signal handling is exercised on Unix")
 	}

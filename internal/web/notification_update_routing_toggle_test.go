@@ -2,6 +2,8 @@ package web
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -146,6 +148,76 @@ func TestNotificationRoutingToggleMaterializesLegacySelection(t *testing.T) {
 	state, err = ts.ApplicationUpdateRouting(ctx)
 	if err != nil || !state.Configured || len(state.Destinations) != 0 {
 		t.Fatalf("routing after disabling final destination = %#v, %v; want configured empty", state, err)
+	}
+}
+
+func TestNotificationRoutingToggleCanonicalizesLegacyDeploymentSelector(t *testing.T) {
+	ctx := context.Background()
+	_, db, admin := newUsersTestServer(t)
+	defer db.Close()
+	const url = "generic://localhost/hook?token=legacy-token&disabletls=yes&template=json"
+	digest := sha256.Sum256([]byte(url))
+	legacySelector := "file:" + hex.EncodeToString(digest[:])
+	if err := defaultTenant(db).SetApplicationUpdateDestinations(ctx, []string{legacySelector}, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	server := newRoutingTestServer(t, db, url)
+	canonicalSelector := legacySelection(t, server)[0]
+	if canonicalSelector == legacySelector {
+		t.Fatalf("deployment selector was not opaque: %q", canonicalSelector)
+	}
+
+	result := toggleUpdateRoutingRequest(t, server, admin, canonicalSelector, false)
+	if result.Code != http.StatusOK {
+		t.Fatalf("disable update routing = %d: %s", result.Code, result.Body.String())
+	}
+	state, err := defaultTenantStore(server).ApplicationUpdateRouting(ctx)
+	if err != nil || !state.Configured || len(state.Destinations) != 0 {
+		t.Fatalf("routing after disabling legacy destination = %#v, %v; want explicit empty selection", state, err)
+	}
+	keys, err := server.App.Notifier.Tenant(defaultTenantStore(server)).QueueDestinationsForSelection(ctx, state.Destinations)
+	if err != nil || len(keys) != 0 {
+		t.Fatalf("disabled update routing queues %v, %v; want no destinations", keys, err)
+	}
+	listed := httptest.NewRecorder()
+	server.listNotificationDestinations(listed, routingRequest(t, http.MethodGet, "/api/v1/notifications/destinations", ""), defaultTenantStore(server))
+	var listedRouting struct {
+		UpdateRouting struct {
+			Configured   bool     `json:"configured"`
+			Destinations []string `json:"destinations"`
+		} `json:"update_routing"`
+	}
+	if err := json.Unmarshal(listed.Body.Bytes(), &listedRouting); err != nil || listed.Code != http.StatusOK || !listedRouting.UpdateRouting.Configured || len(listedRouting.UpdateRouting.Destinations) != 0 {
+		t.Fatalf("destination list after disabling legacy selector = %d %s (%v); want an explicit empty selection", listed.Code, listed.Body.String(), err)
+	}
+
+	result = toggleUpdateRoutingRequest(t, server, admin, canonicalSelector, true)
+	if result.Code != http.StatusOK {
+		t.Fatalf("enable update routing = %d: %s", result.Code, result.Body.String())
+	}
+	state, err = defaultTenantStore(server).ApplicationUpdateRouting(ctx)
+	if err != nil || !state.Configured || !slices.Equal(state.Destinations, []string{canonicalSelector}) {
+		t.Fatalf("routing after enabling deployment destination = %#v, %v; want only canonical selector %q", state, err, canonicalSelector)
+	}
+	keys, err = server.App.Notifier.Tenant(defaultTenantStore(server)).QueueDestinationsForSelection(ctx, state.Destinations)
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("enabled update routing queues %v, %v; want the deployment destination", keys, err)
+	}
+}
+
+func TestNotificationRoutingToggleFailsClosedWhenDestinationsCannotBeCanonicalized(t *testing.T) {
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	defer db.Close()
+	if err := defaultTenantStore(server).SetApplicationUpdateDestinations(ctx, []string{}, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.Exec(`DROP TABLE managed_notifications`); err != nil {
+		t.Fatal(err)
+	}
+	result := toggleUpdateRoutingRequest(t, server, admin, "unknown-destination", true)
+	if result.Code != http.StatusInternalServerError || !strings.Contains(result.Body.String(), `"code":"notification_failed"`) {
+		t.Fatalf("toggle with unreadable destination set = %d: %s; want fail-closed notification error", result.Code, result.Body.String())
 	}
 }
 

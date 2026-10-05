@@ -3,7 +3,7 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Bell, ChevronDown, Info, Plus, Save, Trash2, TriangleAlert } from 'lucide-react'
+import { ArrowLeft, Bell, Info, Plus, Save, Trash2, TriangleAlert } from 'lucide-react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { APIError, BUILTIN_NAABU_PROFILE_ID, createJob, getJob, getSession, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
 import type { JobForm, Protocol } from '../types'
@@ -400,7 +400,7 @@ export function JobEditor() {
 
         <aside className="editor-side">
           <div className="panel form-panel sticky">
-            <div className="panel-heading"><div><h2>Schedule</h2><p className="muted">When should this job run?</p></div><ChevronDown size={17} className="muted-icon" /></div>
+            <div className="panel-heading"><div><h2>Schedule</h2><p className="muted">When should this job run?</p></div></div>
             <label>Preset<select value={presetFor(schedule)} onChange={(event) => {
               if (event.target.value === 'custom') {
                 cronInputRef.current?.focus()

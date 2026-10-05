@@ -1394,7 +1394,7 @@ body:has(.connection-notice) .auth-side { padding-bottom: 110px; }
 .editor-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; }
 .editor-actions .form-error { flex: 1 0 100%; }
 .editor-actions .button { min-width: 120px; }
-.schedule-suggestion-copy { grid-template-columns: minmax(0, 1fr); overflow-wrap: anywhere; }
+  .schedule-suggestion-copy { grid-template-columns: minmax(0, 1fr); overflow-wrap: break-word; }
 .action-dialog > p { white-space: pre-line; }
 .scope-change-list { display: grid; gap: 6px; margin: 0; padding-left: 20px; color: #d4e5f6; font-size: 12px; overflow-wrap: anywhere; }
 
@@ -1467,7 +1467,6 @@ body:has(.connection-notice) .auth-side { padding-bottom: 110px; }
   .change-row { grid-template-columns: auto minmax(0, 1fr); }
   .change-row > .muted { grid-column: 2; }
   .schedule-suggestion { flex-wrap: wrap; }
-  .schedule-suggestion > .button { margin-left: 25px; }
 }
 
 @media (max-width: 480px) {
@@ -1476,11 +1475,44 @@ body:has(.connection-notice) .auth-side { padding-bottom: 110px; }
   .user-row > .pill,
   .account-badges { grid-column: 1; grid-row: auto; justify-self: start; }
   .user-row-actions { grid-column: 1; }
+  .dashboard-job { flex-wrap: wrap; }
+  .dashboard-job-info { flex: 1 1 calc(100% - 41px); }
+  .dashboard-job .pill { margin-left: 41px; }
 }
 
 @media (max-width: 420px) {
   .tab-bar { flex-wrap: wrap; overflow-x: visible; }
   .tab { flex: 1 1 calc(50% - 4px); text-align: center; padding-inline: 8px; white-space: normal; }
+}
+
+/* Keep compact dashboard rows from letting a fixed status pill paint over
+   the job title, and reserve a full text column beside each activity marker. */
+.activity-list .activity-row {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  align-items: center;
+  row-gap: 3px;
+}
+.activity-list .activity-row time {
+  grid-column: 2;
+  justify-self: start;
+  white-space: normal;
+}
+
+/* The stagger copy, not the accept button, owns the space beside the icon. */
+.schedule-suggestion {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: start;
+}
+.schedule-suggestion-copy {
+  grid-column: 2;
+  overflow-wrap: break-word;
+}
+.schedule-suggestion > .button {
+  grid-column: 2;
+  justify-self: start;
+  margin-left: 0;
 }
 
 @media (max-width: 760px) {

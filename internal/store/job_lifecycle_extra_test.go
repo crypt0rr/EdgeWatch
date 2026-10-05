@@ -254,6 +254,35 @@ func TestPermanentJobDeletionRemovesHistoryAtomicallyAndRepairsLatestHosts(t *te
 	if _, err := s.DB.ExecContext(ctx, `DROP TRIGGER reject_job_delete_audit`); err != nil {
 		t.Fatal(err)
 	}
+	// Failure while deleting quarantined delivery copies must roll back the
+	// preceding history deletes and the job row as one transaction.
+	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER reject_job_quarantine_delete BEFORE DELETE ON restore_quarantined_deliveries
+		BEGIN SELECT RAISE(ABORT,'quarantine unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tenant.DeleteJobWithAudit(ctx, job.ID, audit); err == nil || !strings.Contains(err.Error(), "quarantine unavailable") {
+		t.Fatalf("delete with rejected quarantine cleanup = %v", err)
+	}
+	if _, err := tenant.GetJob(ctx, job.ID); err != nil {
+		t.Fatalf("job lookup after rejected quarantine cleanup = %v, want job retained", err)
+	}
+	for name, statement := range map[string]string{
+		"scan":                 `SELECT COUNT(*) FROM scans WHERE job_id=? AND tenant_id=?`,
+		"quarantined delivery": `SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE tenant_id=? AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?`,
+	} {
+		var args []any
+		if name == "quarantined delivery" {
+			args = []any{tenant.scope.id, job.ID}
+		} else {
+			args = []any{job.ID, tenant.scope.id}
+		}
+		if err := s.DB.QueryRowContext(ctx, statement, args...).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("%s count after rejected quarantine cleanup = %d, %v; want 1", name, count, err)
+		}
+	}
+	if _, err := s.DB.ExecContext(ctx, `DROP TRIGGER reject_job_quarantine_delete`); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := tenant.DeleteJobWithAudit(ctx, job.ID, audit); err != nil {
 		t.Fatalf("delete job with retained history = %v", err)

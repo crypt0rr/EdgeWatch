@@ -8,6 +8,7 @@ import (
 )
 
 func TestPermissionsForRoleIsDeterministicAndComplete(t *testing.T) {
+	t.Parallel()
 	admin := PermissionsForRole(store.RoleAdministrator)
 	if len(admin) != 20 || !sortStrings(admin) {
 		t.Fatalf("administrator permissions = %#v", admin)
@@ -40,6 +41,7 @@ func TestPermissionsForRoleIsDeterministicAndComplete(t *testing.T) {
 }
 
 func TestHasPermissionHandlesLegacyAndRoleScopedSessions(t *testing.T) {
+	t.Parallel()
 	roleless := store.Session{}
 	if HasPermission(roleless, PermissionPublicManage) || HasPermission(roleless, PermissionJobsRead) {
 		t.Fatal("role-less session must not receive permissions")
@@ -62,6 +64,7 @@ func TestHasPermissionHandlesLegacyAndRoleScopedSessions(t *testing.T) {
 }
 
 func TestPermissionListsAreTheSingleAuthorizationSource(t *testing.T) {
+	t.Parallel()
 	permissions := map[string][]string{
 		store.RoleAdministrator: PermissionsForRole(store.RoleAdministrator),
 		store.RoleOperator:      PermissionsForRole(store.RoleOperator),

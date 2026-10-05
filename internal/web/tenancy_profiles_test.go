@@ -23,6 +23,7 @@ import (
 // as an unknown profile does, and the job list does not reveal its newer
 // revision. The built-in profiles stay selectable in every tenant.
 func TestScannerProfileRoutesUseTheSessionTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	own := defaultTenantStore(server)

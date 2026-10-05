@@ -21,6 +21,7 @@ import (
 // administrator creates belongs to their tenant, even with a name the first
 // tenant already uses.
 func TestJobWritesUseTheSessionTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	newJob := func(name string) config.Job {
@@ -155,6 +156,7 @@ func TestJobWritesUseTheSessionTenant(t *testing.T) {
 // default tenant an ID without a job is a config.yaml job's lease key, which
 // is simply not leased.)
 func TestJobWritesReportAJobDeletedSinceLookupAsNotFound(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	const otherTenantID = "00000000-0000-0000-0000-000000000200"

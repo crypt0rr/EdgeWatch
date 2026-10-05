@@ -140,6 +140,7 @@ func queueOrdered(t *testing.T, p *slotPool, labels, keys []string, order *[]str
 }
 
 func TestSlotPoolSingleKeyIsFIFO(t *testing.T) {
+	t.Parallel()
 	p := newSlotPool(1, nil)
 	hold := mustAcquireSlot(t, p, defaultSlotKey)
 	var order []string
@@ -160,6 +161,7 @@ func TestSlotPoolSingleKeyIsFIFO(t *testing.T) {
 }
 
 func TestSlotPoolSingleKeyUsesFullCapacity(t *testing.T) {
+	t.Parallel()
 	p := newSlotPool(2, nil)
 	first := mustAcquireSlot(t, p, "a")
 	second := mustAcquireSlot(t, p, "a")
@@ -186,6 +188,7 @@ func TestSlotPoolSingleKeyUsesFullCapacity(t *testing.T) {
 }
 
 func TestSlotPoolRoundRobinDoesNotStarveSmallKey(t *testing.T) {
+	t.Parallel()
 	p := newSlotPool(2, nil)
 	a1 := mustAcquireSlot(t, p, "a")
 	a2 := mustAcquireSlot(t, p, "a")
@@ -222,6 +225,7 @@ func TestSlotPoolRoundRobinDoesNotStarveSmallKey(t *testing.T) {
 }
 
 func TestSlotPoolKeysTakeTurns(t *testing.T) {
+	t.Parallel()
 	p := newSlotPool(1, nil)
 	hold := mustAcquireSlot(t, p, "hold")
 	var order []string
@@ -240,6 +244,7 @@ func TestSlotPoolKeysTakeTurns(t *testing.T) {
 }
 
 func TestSlotPoolIdleKeyDoesNotLoseItsTurn(t *testing.T) {
+	t.Parallel()
 	p := newSlotPool(1, nil)
 	holdC := mustAcquireSlot(t, p, "C")
 	defer holdC()
@@ -314,6 +319,7 @@ func TestSlotPoolIdleKeyDoesNotLoseItsTurn(t *testing.T) {
 }
 
 func TestSlotPoolPrunesIdleGrantHistoryThatCannotAffectOrder(t *testing.T) {
+	t.Parallel()
 	p := newSlotPool(3, nil)
 	a := mustAcquireSlot(t, p, "A")      // grant age 1
 	afterA := mustAcquireSlot(t, p, "B") // grant age 2
@@ -340,6 +346,7 @@ func TestSlotPoolPrunesIdleGrantHistoryThatCannotAffectOrder(t *testing.T) {
 }
 
 func TestSlotPoolRespectsPerKeyCaps(t *testing.T) {
+	t.Parallel()
 	caps := map[string]int{"a": 1, "big": 10}
 	p := newSlotPool(4, func(key string) int { return caps[key] })
 	a1 := mustAcquireSlot(t, p, "a")
@@ -373,6 +380,7 @@ func TestSlotPoolRespectsPerKeyCaps(t *testing.T) {
 }
 
 func TestSlotPoolCancelRemovesWaiter(t *testing.T) {
+	t.Parallel()
 	p := newSlotPool(1, nil)
 	hold := mustAcquireSlot(t, p, "a")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -407,6 +415,7 @@ func TestSlotPoolCancelRemovesWaiter(t *testing.T) {
 // A release and a cancellation that race must leave the pool without a
 // leaked slot, whichever of them wins.
 func TestSlotPoolGrantRacingCancelDoesNotLeak(t *testing.T) {
+	t.Parallel()
 	p := newSlotPool(1, nil)
 	for i := 0; i < 2000; i++ {
 		hold := mustAcquireSlot(t, p, "hold")
@@ -437,6 +446,7 @@ func TestSlotPoolGrantRacingCancelDoesNotLeak(t *testing.T) {
 // instead of keeping it. The test grants the slot while the waiter is blocked
 // on the pool lock in its cancellation path.
 func TestSlotPoolReleasesGrantThatLostToCancel(t *testing.T) {
+	t.Parallel()
 	deadline := time.Now().Add(20 * time.Second)
 	for hits := 0; hits < 3; {
 		if time.Now().After(deadline) {
@@ -476,6 +486,7 @@ func TestSlotPoolReleasesGrantThatLostToCancel(t *testing.T) {
 }
 
 func TestSlotPoolFailWaiters(t *testing.T) {
+	t.Parallel()
 	p := newSlotPool(1, nil)
 	held := mustAcquireSlot(t, p, "a")
 	failA1 := startSlotAcquire(context.Background(), p, "a")
@@ -523,6 +534,7 @@ func TestSlotPoolFailWaiters(t *testing.T) {
 // error and never holds a slot. The test cancels while holding the pool lock,
 // so the waiter usually reaches its cancellation path after the failure.
 func TestSlotPoolFailedWaiterWithEndedContext(t *testing.T) {
+	t.Parallel()
 	unitDisabled := errors.New("unit disabled")
 	deadline := time.Now().Add(20 * time.Second)
 	for hits := 0; hits < 3; {
@@ -555,6 +567,7 @@ func TestSlotPoolFailedWaiterWithEndedContext(t *testing.T) {
 }
 
 func TestSlotPoolResize(t *testing.T) {
+	t.Parallel()
 	p := newSlotPool(1, nil)
 	first := mustAcquireSlot(t, p, "a")
 	second := startSlotAcquire(context.Background(), p, "a")
@@ -623,6 +636,7 @@ func TestSlotPoolResize(t *testing.T) {
 }
 
 func TestSlotPoolSnapshotCounts(t *testing.T) {
+	t.Parallel()
 	p := newSlotPool(3, func(key string) int {
 		if key == "capped" {
 			return 1

@@ -221,7 +221,6 @@ var registerCancelMigrationFunction = sync.OnceValue(func() error {
 })
 
 func TestForeignKeysOffMigrationRebuildKeepsCascadeChildren(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	db := openRebuildTestDB(t)
 	before := rebuildFixtureRows(t, db)
@@ -294,7 +293,6 @@ func TestPlainMigrationRebuildDeletesCascadeChildren(t *testing.T) {
 }
 
 func TestForeignKeysOffMigrationRollsBackNewViolation(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	db := openRebuildTestDB(t)
 	before := rebuildFixtureRows(t, db)
@@ -316,7 +314,6 @@ func TestForeignKeysOffMigrationRollsBackNewViolation(t *testing.T) {
 }
 
 func TestForeignKeysOffMigrationToleratesExistingViolations(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	db := openRebuildTestDB(t)
 	// Old databases and recovery fixtures can already hold orphans.
@@ -371,7 +368,6 @@ func TestForeignKeysOffMigrationToleratesExistingViolations(t *testing.T) {
 }
 
 func TestForeignKeysOffMigrationRollsBackFailedStatement(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	db := openRebuildTestDB(t)
 	before := rebuildFixtureRows(t, db)
@@ -388,7 +384,6 @@ func TestForeignKeysOffMigrationRollsBackFailedStatement(t *testing.T) {
 // The runner must not start when it cannot confirm that enforcement is off.
 // A pooled connection left inside a transaction ignores the PRAGMA.
 func TestForeignKeysOffMigrationRefusesWhenForeignKeysStayOn(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	db := openRebuildTestDB(t)
 	before := rebuildFixtureRows(t, db)
@@ -468,7 +463,6 @@ func TestForeignKeysOffMigrationHandlesCancellation(t *testing.T) {
 // A connection whose enforcement cannot be confirmed must never return to
 // the pool. Here it is inside a transaction, where SQLite ignores the PRAGMA.
 func TestReleaseForeignKeysOffConnClosesConnectionItCannotRestore(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	db := openRebuildTestDB(t)
 	conn, err := db.Conn(ctx)

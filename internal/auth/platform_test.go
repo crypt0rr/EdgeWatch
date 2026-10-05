@@ -98,6 +98,7 @@ func authenticateAs(t *testing.T, m *Manager, user store.User, raw string) store
 // account's self-service: no permission that any unit role holds on the
 // unit's data.
 func TestPlatformAdministratorHoldsNoUnitPermission(t *testing.T) {
+	t.Parallel()
 	want := []string{PermissionAccountSelf, PermissionPlatformAuditRead, PermissionPlatformNotificationsManage, PermissionPlatformStatusRead, PermissionUnitAccountsManage, PermissionUnitsManage}
 	slices.Sort(want)
 	if got := PermissionsForRole(store.RolePlatformAdmin); !reflect.DeepEqual(got, want) {
@@ -130,6 +131,7 @@ func TestPlatformAdministratorHoldsNoUnitPermission(t *testing.T) {
 // platform administrator; a wrong token costs no password hash and creates
 // nothing.
 func TestPlatformSetupCreatesThePlatformAdministrator(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, _, _ := platformTestStore(t)
 	m := NewManager(s)
@@ -163,6 +165,7 @@ func TestPlatformSetupCreatesThePlatformAdministrator(t *testing.T) {
 // recorded once in platform scope too. Another client still redeems the
 // token.
 func TestPlatformSetupRequestRateLimitsInPlatformScope(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, _, _ := platformTestStore(t)
 	m := NewManager(s)
@@ -212,6 +215,7 @@ func TestPlatformSetupRequestRateLimitsInPlatformScope(t *testing.T) {
 // unit nothing changes, and the rule fails closed when the units cannot be
 // counted.
 func TestTOTPEnrollmentRequiredOnceUnitsMultiply(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, admin, operator := platformTestStore(t)
 	m := NewManager(s)
@@ -288,6 +292,7 @@ func TestTOTPEnrollmentRequiredOnceUnitsMultiply(t *testing.T) {
 // account's record belongs to its unit with the unit actor kind, and a
 // platform administrator's to the platform with the platform actor kind.
 func TestConfirmationFailureRecordsNameTheAccount(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, admin, _ := platformTestStore(t)
 	m := NewManager(s)
@@ -342,6 +347,7 @@ func TestConfirmationFailureRecordsNameTheAccount(t *testing.T) {
 // that no account has, are recorded in platform scope instead of the
 // default unit, while a unit account's stay in its unit.
 func TestPlatformAndUnknownSignInFailuresBelongToThePlatform(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, admin, _ := platformTestStore(t)
 	m := NewManager(s)
@@ -398,6 +404,7 @@ func TestPlatformAndUnknownSignInFailuresBelongToThePlatform(t *testing.T) {
 // that no link has names no account, and its records stay in the default
 // unit, whose console serves activation.
 func TestFailedLinkRedemptionsBelongToTheLinksAccount(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, defaultAdmin, _ := platformTestStore(t)
 	addSecondUnit(t, s)

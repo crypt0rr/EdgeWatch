@@ -10,6 +10,7 @@ import (
 )
 
 func TestRunComponentReturnsFunctionError(t *testing.T) {
+	t.Parallel()
 	errCh := make(chan error, 1)
 	want := errors.New("component stopped")
 	runComponent(errCh, slog.New(slog.NewTextHandler(io.Discard, nil)), "test", func() error {
@@ -21,6 +22,7 @@ func TestRunComponentReturnsFunctionError(t *testing.T) {
 }
 
 func TestRunComponentConvertsPanicsToErrors(t *testing.T) {
+	t.Parallel()
 	errCh := make(chan error, 1)
 	runComponent(errCh, nil, "test", func() error {
 		panic("boom")
@@ -31,6 +33,7 @@ func TestRunComponentConvertsPanicsToErrors(t *testing.T) {
 }
 
 func TestContextWithSignalsCleanupStopsWatcher(t *testing.T) {
+	t.Parallel()
 	parent, cancel := context.WithCancel(context.Background())
 	ctx, cleanup := contextWithSignals(parent)
 	cancel()

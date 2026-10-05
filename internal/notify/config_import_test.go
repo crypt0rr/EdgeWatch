@@ -64,6 +64,7 @@ func writeTestKey(t *testing.T, path string, mode os.FileMode) {
 // first destination created in the console does, and stores each distinct
 // URL once, encrypted and named after its console label.
 func TestImportConfiguredURLsCreatesMissingDefaultKey(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, dir := openImportStore(t)
 	first := "generic://127.0.0.1:9/first?disabletls=yes&template=json"
@@ -123,6 +124,7 @@ func TestImportConfiguredURLsCreatesMissingDefaultKey(t *testing.T) {
 
 // An explicitly configured key is used as-is; no default key is generated.
 func TestImportConfiguredURLsUsesConfiguredKeyFile(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, dir := openImportStore(t)
 	keyFile := filepath.Join(t.TempDir(), "operator.key")
@@ -147,6 +149,7 @@ func TestImportConfiguredURLsUsesConfiguredKeyFile(t *testing.T) {
 // A failed import imports nothing, returns a bounded reason without the URL,
 // and leaves the URL a deployment destination that keeps delivering.
 func TestImportConfiguredURLsFailureImportsNothing(t *testing.T) {
+	t.Parallel()
 	raw := "generic://127.0.0.1:9/secret-token-value?disabletls=yes"
 	for _, test := range []struct {
 		name  string
@@ -221,6 +224,7 @@ func createExistingDestination(t *testing.T, db *store.Store) {
 // rows still addressed through the legacy digest alias, are delivered by the
 // imported destination.
 func TestImportConfiguredURLsDeliversQueuedAlerts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, _ := openImportStore(t)
 	raw, calls := countingWebhook(t, "queued")
@@ -263,6 +267,7 @@ func TestImportConfiguredURLsDeliversQueuedAlerts(t *testing.T) {
 // A restart imports nothing and needs no key; a destination deleted after its
 // import is not recreated; a new or changed URL becomes an extra destination.
 func TestImportConfiguredURLsIsIdempotentAndImportsNewURLs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, dir := openImportStore(t)
 	original := "generic://127.0.0.1:9/original?disabletls=yes"
@@ -314,6 +319,7 @@ func TestImportConfiguredURLsIsIdempotentAndImportsNewURLs(t *testing.T) {
 }
 
 func TestImportConfiguredURLsRejectsInvalidURLWithoutLeakingIt(t *testing.T) {
+	t.Parallel()
 	db, _ := openImportStore(t)
 	_, err := ImportConfiguredURLs(context.Background(), db, []string{"unknown-service://secret-token@example.invalid/path"}, "")
 	var importErr *ConfigImportError
@@ -331,6 +337,7 @@ func TestImportConfiguredURLsRejectsInvalidURLWithoutLeakingIt(t *testing.T) {
 // ValidateConfiguredURLs refuses, without a database, exactly the URLs that
 // the import refuses at startup, and names them by digest only.
 func TestValidateConfiguredURLsMatchesTheImport(t *testing.T) {
+	t.Parallel()
 	valid := []string{"generic://127.0.0.1:9/x", "generic://127.0.0.1:9/x"}
 	if err := ValidateConfiguredURLs(valid); err != nil {
 		t.Fatalf("valid URLs: %v", err)
@@ -350,6 +357,7 @@ func TestValidateConfiguredURLsMatchesTheImport(t *testing.T) {
 }
 
 func TestImportConfiguredURLsWithoutURLsDoesNothing(t *testing.T) {
+	t.Parallel()
 	db, dir := openImportStore(t)
 	result, err := ImportConfiguredURLs(context.Background(), db, nil, "")
 	if err != nil || result.Configured != 0 || result.ImportedURLs() != 0 {
@@ -366,6 +374,7 @@ func TestImportConfiguredURLsWithoutURLsDoesNothing(t *testing.T) {
 // The console learns from the notifier status that config.yaml still lists
 // imported URLs, or that their import failed.
 func TestNotifierStatusReportsConfigImport(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, _ := openImportStore(t)
 	notifier, err := New(db, nil)
@@ -393,6 +402,7 @@ func TestNotifierStatusReportsConfigImport(t *testing.T) {
 }
 
 func TestConfigImportErrorUnwraps(t *testing.T) {
+	t.Parallel()
 	err := configImportError(configImportKeyUnavailable, ErrKeyUnavailable)
 	if !errors.Is(err, ErrKeyUnavailable) || !strings.Contains(err.Error(), "key_unavailable") {
 		t.Fatalf("config import error = %v", err)

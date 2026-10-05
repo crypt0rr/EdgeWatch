@@ -31,6 +31,7 @@ func messageIDs(messages []sseMessage) []uint64 {
 }
 
 func TestBroadcastToDropsAMessageWithoutAnAudience(t *testing.T) {
+	t.Parallel()
 	var logs bytes.Buffer
 	server := &Server{subscribers: map[chan sseMessage]struct{}{}, Log: slog.New(slog.NewTextHandler(&logs, nil))}
 	bare := make(chan sseMessage, 4)
@@ -73,6 +74,7 @@ func TestBroadcastToDropsAMessageWithoutAnAudience(t *testing.T) {
 }
 
 func TestSSEAudienceMatching(t *testing.T) {
+	t.Parallel()
 	if (sseAudience{}).valid() || !audienceEveryone().valid() {
 		t.Fatal("only a non-empty audience is valid")
 	}
@@ -82,6 +84,7 @@ func TestSSEAudienceMatching(t *testing.T) {
 }
 
 func TestReplayForSubscriberFiltersByAudience(t *testing.T) {
+	t.Parallel()
 	everyone := func(id uint64, token string) sseMessage {
 		return sseMessage{id: id, payload: []byte(`{"type":"test","token":"` + token + `"}`), audience: audienceEveryone()}
 	}
@@ -130,6 +133,7 @@ func TestReplayForSubscriberFiltersByAudience(t *testing.T) {
 }
 
 func TestSSEStreamReplaysAndDeliversOnlyItsAudience(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
 	ctx := context.Background()
 	raw, _, err := server.Auth.LoginAs(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "admin", "administrator password", "", "")

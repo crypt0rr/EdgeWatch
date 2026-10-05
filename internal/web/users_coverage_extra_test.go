@@ -19,6 +19,7 @@ import (
 )
 
 func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
+	t.Parallel()
 	server, db, admin := newUsersTestServer(t)
 	call := func(method, rest, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, "/api/v1/users"+rest, strings.NewReader(body))
@@ -184,6 +185,7 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 }
 
 func TestUserSecurityHandlersCoverOperatorAndTOTPSuccess(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, _ := newUsersTestServer(t)
 	hash, err := auth.PasswordHash("operator account password")
@@ -258,6 +260,7 @@ func TestUserSecurityHandlersCoverOperatorAndTOTPSuccess(t *testing.T) {
 }
 
 func TestUserMutationConfirmationGuards(t *testing.T) {
+	t.Parallel()
 	server, _, admin := newUsersTestServer(t)
 	call := func(method, rest, body, remote string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, "/api/v1/users"+rest, strings.NewReader(body))

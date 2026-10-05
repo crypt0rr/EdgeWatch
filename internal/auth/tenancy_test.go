@@ -20,6 +20,7 @@ import (
 // account's tenant. A tenant that is not active stops sign-in with the
 // answer a wrong password gets, and records the attempt in that tenant.
 func TestSignInCarriesTheAccountTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -115,6 +116,7 @@ func TestSignInCarriesTheAccountTenant(t *testing.T) {
 // no auth.recovery_code_used record is written. Once the unit is enabled
 // again, the same recovery code and TOTP code sign in.
 func TestSignInToAnInactiveUnitSpendsNoOneTimeFactor(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, _, _ := platformTestStore(t)
 	addSecondUnit(t, s)

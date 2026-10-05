@@ -43,6 +43,7 @@ func (s *historyReaderStub) ListEvents(context.Context, string, int) ([]model.Ev
 }
 
 func TestListHistoryUsesStableIdentityAndLegacyFallback(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name       string
 		jobName    string
@@ -72,6 +73,7 @@ func TestListHistoryUsesStableIdentityAndLegacyFallback(t *testing.T) {
 }
 
 func TestListHistoryPropagatesLookupAndReadFailures(t *testing.T) {
+	t.Parallel()
 	readFailure := errors.New("history read failed")
 	lookupFailure := errors.New("job lookup failed")
 	for _, tc := range []struct {

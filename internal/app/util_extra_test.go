@@ -17,6 +17,7 @@ import (
 )
 
 func TestAppUtilityMethodsAndLifecycleBinding(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -81,6 +82,7 @@ func TestAppUtilityMethodsAndLifecycleBinding(t *testing.T) {
 }
 
 func TestDaemonProcessOwnerUsesUniqueInstanceToken(t *testing.T) {
+	t.Parallel()
 	first := daemonProcessOwner()
 	second := daemonProcessOwner()
 	if first == "" || second == "" || first == second {
@@ -92,6 +94,7 @@ func TestDaemonProcessOwnerUsesUniqueInstanceToken(t *testing.T) {
 }
 
 func TestAppManagedJobAndScheduledWrappers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -128,6 +131,7 @@ func TestAppManagedJobAndScheduledWrappers(t *testing.T) {
 }
 
 func TestResumableProgressAndFailureMetadataHelpers(t *testing.T) {
+	t.Parallel()
 	cycle := store.ScanCycleRecord{ID: "cycle", AttemptCount: 2, Status: "running", CompletedProbes: 3, TotalProbes: 10, CompletedUnits: 1, TotalUnits: 4, NoProgressAttempts: 1}
 	run := &activeRun{}
 	setActiveCycle(run, cycle, "starting", 2)

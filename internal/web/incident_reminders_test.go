@@ -13,6 +13,7 @@ import (
 )
 
 func TestIncidentReminderSettingRequiresAdministratorPassword(t *testing.T) {
+	t.Parallel()
 	server, db, admin := newUsersTestServer(t)
 	ts := defaultTenantStore(server)
 	if got := requiredPermission("/notifications/incident-reminders", http.MethodPut); got != auth.PermissionNotificationsManage {
@@ -90,6 +91,7 @@ func TestIncidentReminderSettingRequiresAdministratorPassword(t *testing.T) {
 }
 
 func TestIncidentReminderSettingAPIIsRouted(t *testing.T) {
+	t.Parallel()
 	server, db, admin := newUsersTestServer(t)
 	ctx := context.Background()
 	const raw, csrf = "incident-reminder-route-session", "incident-reminder-route-csrf"

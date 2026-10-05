@@ -48,6 +48,7 @@ const untrustedProxyWarning = "requests from a proxy that is not in web.trusted_
 // it out, as it leaves out the other deployment-wide signals. Requests
 // without forwarding headers and trusted proxies are not reported.
 func TestUntrustedProxyForwardingIsReported(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	logs := &lockedBuffer{}
 	f.server.Log = slog.New(slog.NewTextHandler(logs, nil))
@@ -156,6 +157,7 @@ func TestUntrustedProxyForwardingIsReported(t *testing.T) {
 // with its address and the platform status reports it. A client of the
 // trusted proxy, whose chain ends at its own address, is not reported.
 func TestUntrustedProxyBehindATrustedProxyIsReported(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	logs := &lockedBuffer{}
 	f.server.Log = slog.New(slog.NewTextHandler(logs, nil))
@@ -208,6 +210,7 @@ func TestUntrustedProxyBehindATrustedProxyIsReported(t *testing.T) {
 // With one unit, its administrators see the untrusted proxy in the status
 // that the console shows them; operators and viewers do not.
 func TestUntrustedProxyForwardingInTheSingleUnitStatus(t *testing.T) {
+	t.Parallel()
 	server, _, admin := newUsersTestServer(t)
 	server.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	status := func(role string) string {
@@ -245,6 +248,7 @@ func TestUntrustedProxyForwardingInTheSingleUnitStatus(t *testing.T) {
 // activation carries the two-second cooldown in Retry-After, as a refused
 // sign-in does.
 func TestSharedLoopbackTokenRefusalsCarryTheCooldown(t *testing.T) {
+	t.Parallel()
 	for path, fields := range map[string]string{
 		"/setup":          `"password":"a long enough password"`,
 		"/setup/platform": `"username":"root","password":"a long enough password"`,

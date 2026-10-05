@@ -48,6 +48,7 @@ func toggleUpdateRoutingBody(t *testing.T, server *Server, admin store.Session, 
 }
 
 func TestNotificationRoutingTogglePreservesConcurrentDestinations(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	defer db.Close()
@@ -90,6 +91,7 @@ func TestNotificationRoutingTogglePreservesConcurrentDestinations(t *testing.T) 
 }
 
 func TestNotificationRoutingToggleMaterializesLegacySelection(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	defer db.Close()
@@ -152,6 +154,7 @@ func TestNotificationRoutingToggleMaterializesLegacySelection(t *testing.T) {
 }
 
 func TestNotificationRoutingToggleCanonicalizesLegacyDeploymentSelector(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, db, admin := newUsersTestServer(t)
 	defer db.Close()
@@ -206,6 +209,7 @@ func TestNotificationRoutingToggleCanonicalizesLegacyDeploymentSelector(t *testi
 }
 
 func TestNotificationRoutingToggleFailsClosedWhenDestinationsCannotBeCanonicalized(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	defer db.Close()
@@ -222,6 +226,7 @@ func TestNotificationRoutingToggleFailsClosedWhenDestinationsCannotBeCanonicaliz
 }
 
 func TestNotificationDestinationListFailsClosedWhenRoutingCannotBeRead(t *testing.T) {
+	t.Parallel()
 	server, db, _ := newUsersTestServer(t)
 	defer db.Close()
 	if _, err := db.DB.Exec(`UPDATE tenants SET update_destinations_json='{' WHERE id=?`, store.DefaultTenantID); err != nil {
@@ -238,6 +243,7 @@ func TestNotificationDestinationListFailsClosedWhenRoutingCannotBeRead(t *testin
 }
 
 func TestNotificationDestinationListFailsClosedWhenCanonicalSelectionCannotBeRead(t *testing.T) {
+	t.Parallel()
 	server, db, _ := newUsersTestServer(t)
 	defer db.Close()
 	// The update-routing row remains readable, but loading the tenant-owned
@@ -256,6 +262,7 @@ func TestNotificationDestinationListFailsClosedWhenCanonicalSelectionCannotBeRea
 }
 
 func TestNotificationRoutingToggleRejectsInvalidInputAndStorageFailures(t *testing.T) {
+	t.Parallel()
 	server, db, admin := newUsersTestServer(t)
 	defer db.Close()
 	ts := defaultTenantStore(server)
@@ -302,6 +309,7 @@ func TestNotificationRoutingToggleRejectsInvalidInputAndStorageFailures(t *testi
 }
 
 func TestPlatformNotificationListFailsClosedWhenRoutingCannotBeRead(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	if _, err := f.db.DB.Exec(`UPDATE application_update_state SET notification_destinations_json='{' WHERE id=1`); err != nil {
 		t.Fatal(err)
@@ -316,6 +324,7 @@ func TestPlatformNotificationListFailsClosedWhenRoutingCannotBeRead(t *testing.T
 }
 
 func TestPlatformNotificationRoutingToggleValidationAndRecovery(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	if recorder := f.call(t, actorPlatform, http.MethodGet, "/platform/notifications", ""); recorder.Code != http.StatusOK {
 		t.Fatalf("initial platform notification list = %d: %s", recorder.Code, recorder.Body.String())
@@ -372,6 +381,7 @@ func TestPlatformNotificationRoutingToggleValidationAndRecovery(t *testing.T) {
 }
 
 func TestPlatformNotificationRoutingTogglePreservesConcurrentDestinations(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	create := func(name string) string {
 		t.Helper()

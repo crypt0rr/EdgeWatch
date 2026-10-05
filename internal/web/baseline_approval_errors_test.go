@@ -15,6 +15,7 @@ import (
 )
 
 func TestApproveBaselineMapsStorageFailuresToInternalErrors(t *testing.T) {
+	t.Parallel()
 	t.Run("approval transaction", func(t *testing.T) {
 		server, db, admin, record, scan := baselineApprovalFixture(t)
 		if _, err := db.DB.ExecContext(context.Background(), `CREATE TRIGGER reject_baseline_runtime_insert
@@ -46,6 +47,7 @@ func TestApproveBaselineMapsStorageFailuresToInternalErrors(t *testing.T) {
 }
 
 func TestApproveBaselineMapsEarlyStorageFailuresToInternalErrors(t *testing.T) {
+	t.Parallel()
 	t.Run("runtime state", func(t *testing.T) {
 		server, db, admin, record, scan := baselineApprovalFixture(t)
 		if _, err := db.DB.ExecContext(context.Background(), `DROP TABLE job_runtime`); err != nil {
@@ -80,6 +82,7 @@ func TestApproveBaselineMapsEarlyStorageFailuresToInternalErrors(t *testing.T) {
 }
 
 func TestWriteBaselineApprovalErrorMapsMutationFailures(t *testing.T) {
+	t.Parallel()
 	server, _, _, record, _ := baselineApprovalFixture(t)
 	ts := defaultTenantStore(server)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/approve", nil)
@@ -111,6 +114,7 @@ func TestWriteBaselineApprovalErrorMapsMutationFailures(t *testing.T) {
 }
 
 func TestApproveBaselineRejectsUnsuccessfulScanAsInvalidInput(t *testing.T) {
+	t.Parallel()
 	server, _, admin, record, scan := baselineApprovalFixture(t)
 	scan.ID = "baseline-storage-test-failed-scan"
 	scan.Status = "failed"

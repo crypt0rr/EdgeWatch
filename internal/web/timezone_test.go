@@ -12,6 +12,7 @@ import (
 )
 
 func TestSessionExposesConfiguredDeploymentTimezone(t *testing.T) {
+	t.Parallel()
 	server, _, admin := newUsersTestServer(t)
 	readSession := func() map[string]any {
 		t.Helper()
@@ -39,6 +40,7 @@ func TestSessionExposesConfiguredDeploymentTimezone(t *testing.T) {
 }
 
 func TestNewJobsDefaultToConfiguredDeploymentTimezone(t *testing.T) {
+	t.Parallel()
 	server, db, admin := newUsersTestServer(t)
 	create := func(name, timezone string) store.JobRecord {
 		t.Helper()
@@ -76,6 +78,7 @@ func TestNewJobsDefaultToConfiguredDeploymentTimezone(t *testing.T) {
 }
 
 func TestDeploymentTimezoneStaysOutOfUnauthenticatedResponses(t *testing.T) {
+	t.Parallel()
 	server, db, _ := newUsersTestServer(t)
 	server.App.Config.Timezone = "Asia/Kathmandu"
 	if err := defaultTenant(db).SavePublicDashboard(context.Background(), store.PublicDashboard{Enabled: true, Title: "Public"}, nil, store.AuditEntry{}); err != nil {

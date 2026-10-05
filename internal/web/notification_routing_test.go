@@ -54,6 +54,7 @@ func routingJobUpdateBody(schedule string, revision int64, selection []string) s
 }
 
 func TestDeletingManagedDestinationUnblocksJobEdits(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	created := httptest.NewRecorder()
@@ -119,6 +120,7 @@ func TestDeletingManagedDestinationUnblocksJobEdits(t *testing.T) {
 }
 
 func TestCreatingDestinationFreezesPausedLegacyJobDestination(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	defer db.Close()
@@ -189,6 +191,7 @@ func newRoutingTestServer(t *testing.T, db *store.Store, urls ...string) *Server
 }
 
 func TestJobAPIReportsRoutingToRotatedDeploymentDestination(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, db, admin := newUsersTestServer(t)
 	record, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "routed", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect", Engine: "nmap"}, Timeout: config.Duration(time.Minute), Timing: "balanced", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}))
@@ -243,6 +246,7 @@ func TestJobAPIReportsRoutingToRotatedDeploymentDestination(t *testing.T) {
 }
 
 func TestJobAPIShowsLegacyDeploymentDigestAsCurrentSelector(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, db, admin := newUsersTestServer(t)
 	url := "generic://localhost/hook?token=legacy&disabletls=yes&template=json"

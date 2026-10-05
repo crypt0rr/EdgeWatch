@@ -13,6 +13,7 @@ import (
 // application without a pool reports none. The deployment limits resolve
 // omitted probe budgets to their defaults.
 func TestSlotUsageAndDeploymentLimits(t *testing.T) {
+	t.Parallel()
 	var missing *App
 	if usage := missing.SlotUsage(); usage.Capacity != 0 || len(usage.Units) != 0 {
 		t.Fatalf("usage without an application = %+v", usage)

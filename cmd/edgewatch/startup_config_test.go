@@ -130,6 +130,7 @@ func TestConfigValidateReportsLoadErrors(t *testing.T) {
 // so a refused start never migrates it: the previous release can still open
 // the database after a failed upgrade.
 func TestDaemonRefusesStartupConfigBeforeMigrating(t *testing.T) {
+	t.Parallel()
 	for _, tc := range startupConfigCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			database := storetest.FreshPath(t)

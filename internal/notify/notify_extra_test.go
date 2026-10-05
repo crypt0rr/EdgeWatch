@@ -21,6 +21,7 @@ import (
 )
 
 func TestManagedDeliverySurvivesMetadataEditAndPause(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -102,6 +103,7 @@ func TestManagedDeliverySurvivesMetadataEditAndPause(t *testing.T) {
 }
 
 func TestAuditedNotificationWrappersAndReadViews(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -171,6 +173,7 @@ func TestAuditedNotificationWrappersAndReadViews(t *testing.T) {
 }
 
 func TestQueueDestinationsResolvesLegacyAndJobSelections(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -200,6 +203,7 @@ func TestQueueDestinationsResolvesLegacyAndJobSelections(t *testing.T) {
 }
 
 func TestDeleteManagedRejectsStaleRevisionWithoutChangingRouting(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -239,6 +243,7 @@ func TestDeleteManagedRejectsStaleRevisionWithoutChangingRouting(t *testing.T) {
 }
 
 func TestCanonicalSelectionReportsMissingDestinations(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -277,6 +282,7 @@ func TestCanonicalSelectionReportsMissingDestinations(t *testing.T) {
 // leaves created_at and updated_at out instead of sending the zero time; a
 // managed destination's view carries both.
 func TestDestinationViewsLeaveOutTimesTheyDoNotHave(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := storetest.OpenFresh(t)
 	notifier, err := New(db, []string{"generic://localhost/deployment?disabletls=yes&template=json"})

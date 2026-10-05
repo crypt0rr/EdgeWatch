@@ -73,6 +73,7 @@ func inventoryRoutesFor(routes []apiRoute, method, path string) []apiRoute {
 }
 
 func TestRouteInventoryEntriesAreWellFormed(t *testing.T) {
+	t.Parallel()
 	seen := map[string]bool{}
 	for _, route := range apiRoutes {
 		name := routeInventoryName(route)
@@ -263,6 +264,7 @@ func routeMatrixTarget(route apiRoute) string {
 // unit audit admits a unit's administrators, and the platform routes admit
 // only platform administrators.
 func TestRouteInventoryGateMatrix(t *testing.T) {
+	t.Parallel()
 	server, accounts := newRouteMatrixSessions(t)
 	for _, route := range apiRoutes {
 		t.Run(routeInventoryName(route), func(t *testing.T) {
@@ -363,6 +365,7 @@ var routeSweepMethods = []string{http.MethodGet, http.MethodHead, http.MethodPos
 // and path outside the route inventory is denied, including unlisted methods
 // and extra segments on every listed path.
 func TestRequiredPermissionFailsClosedOutsideInventory(t *testing.T) {
+	t.Parallel()
 	unknown := []struct{ method, path string }{
 		{http.MethodGet, ""},
 		{http.MethodGet, "/"},

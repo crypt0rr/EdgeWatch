@@ -22,6 +22,7 @@ import (
 // answered as for an unknown job and changes nothing. The cases share one
 // server, because opening a database is the slow part.
 func TestHistoryRoutesUseTheSessionTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "edge", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"}})

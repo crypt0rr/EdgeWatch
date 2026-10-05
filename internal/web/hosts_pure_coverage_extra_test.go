@@ -10,6 +10,7 @@ import (
 )
 
 func TestHostNormalizationAndMergeBranches(t *testing.T) {
+	t.Parallel()
 	for value, want := range map[string]int{
 		"confirmed":   3,
 		"discovered":  2,
@@ -86,6 +87,7 @@ func TestHostNormalizationAndMergeBranches(t *testing.T) {
 }
 
 func TestHostFiltersAndScopeFallbackBranches(t *testing.T) {
+	t.Parallel()
 	for _, raw := range []string{"", "true", "false"} {
 		_, err := parseHasOpen(raw)
 		if err != nil {

@@ -7,6 +7,7 @@ import (
 )
 
 func TestScanChangeFormattingHelpers(t *testing.T) {
+	t.Parallel()
 	if !sameStringMap(map[string]string{"a": "1"}, map[string]string{"a": "1"}) {
 		t.Fatal("equal string maps were not recognized")
 	}

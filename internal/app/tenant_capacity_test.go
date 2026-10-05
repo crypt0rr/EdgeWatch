@@ -145,6 +145,7 @@ func assertSlots(t *testing.T, a *App, want slotSnapshot) {
 // while a slot is free, and tenant A's job takes that slot. Raising B's cap
 // grants B's waiting job at once.
 func TestTenantSlotCapHoldsBackOnlyThatTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	sc := newNamedGateScanner()
 	f := newCapacityTenants(t, sc, 2)
@@ -194,6 +195,7 @@ func TestTenantSlotCapHoldsBackOnlyThatTenant(t *testing.T) {
 // only while it is at its cap, and gets the next slot once it is below it
 // and its turn has come.
 func TestTenantSlotCapsKeepRoundRobinGrants(t *testing.T) {
+	t.Parallel()
 	const a, b = "tenant-a", "tenant-b"
 	ctx := context.Background()
 	p := newSlotPool(2, nil)
@@ -240,6 +242,7 @@ func TestTenantSlotCapsKeepRoundRobinGrants(t *testing.T) {
 // slots and the budgets are the deployment's, and allow_high_cost reaches
 // MaxProbeCountLimit as before tenants had capacity.
 func TestInheritedTenantCapacityKeepsTheDeploymentsSlotsAndBudgets(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	capacities, err := f.db.System().TenantCapacities(ctx)
@@ -292,6 +295,7 @@ func (s resolvedWorkScanner) ScanWithProgressBudget(_ context.Context, _ config.
 // the estimate, the resolved plan, the scanner's own check, and a scan
 // cycle's totals.
 func TestTenantProbeBudgetRefusesWhatAnotherTenantMayRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCapacityTenants(t, schedulerFake{}, 1)
 	a, b := f.db.Tenant(f.a), f.db.Tenant(f.b)
@@ -376,6 +380,7 @@ func TestTenantProbeBudgetRefusesWhatAnotherTenantMayRun(t *testing.T) {
 // ceiling below the budget raises nothing and lowers nothing; and the
 // ceiling never exceeds MaxProbeCountLimit, whatever the row holds.
 func TestHighCostIsLimitedByTheTenantsCeiling(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCapacityTenants(t, schedulerFake{}, 1)
 	f.app.Config.Scheduler.MaxProbeCount = 100
@@ -432,6 +437,7 @@ func TestHighCostIsLimitedByTheTenantsCeiling(t *testing.T) {
 
 // A deployment budget tightened below a tenant's own budget wins.
 func TestTighterDeploymentBudgetWinsOverTheTenants(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCapacityTenants(t, schedulerFake{}, 1)
 	f.app.Config.Scheduler.MaxProbeCount, f.app.Config.Scheduler.MaxNaabuProbeCount = 100, 1_000
@@ -455,6 +461,7 @@ func TestTighterDeploymentBudgetWinsOverTheTenants(t *testing.T) {
 // then grants applies above the lowered budgets, and the default unit keeps
 // the behavior from before business units.
 func TestInitialCeilingAfterTightenedConfig(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCapacityTenants(t, schedulerFake{}, 1)
 	unit, err := f.app.CreateUnit(ctx, "Early", "early", store.AuditEntry{ActorKind: store.AuditActorHost})
@@ -516,6 +523,7 @@ func TestInitialCeilingAfterTightenedConfig(t *testing.T) {
 // config.yaml is tightened below them. A
 // tenant whose settings cannot be read gets no limits.
 func TestTenantCapacityLimitsAreWhatTheSchedulerEnforces(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCapacityTenants(t, schedulerFake{}, 4)
 	f.app.Config.Scheduler.MaxProbeCount, f.app.Config.Scheduler.MaxNaabuProbeCount = 5_000, 20_000
@@ -557,6 +565,7 @@ func TestTenantCapacityLimitsAreWhatTheSchedulerEnforces(t *testing.T) {
 // A tenant's capacity change is checked against the deployment's settings,
 // and the stored budget is what the tenant's runs are held to.
 func TestSetTenantCapacityIsCheckedAndApplies(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	capacity := store.TenantCapacity{MaxConcurrentScans: ptrTo(1), MaxProbeCount: ptrTo[int64](1)}
@@ -576,6 +585,7 @@ func TestSetTenantCapacityIsCheckedAndApplies(t *testing.T) {
 // with ErrConflict and changes neither the stored capacity nor the slot
 // pool; at the current revision it is saved and its slot cap applies at once.
 func TestSetTenantCapacityAtAppliesOnlyAtTheCurrentRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCapacityTenants(t, schedulerFake{}, 2)
 	limitOfB := func() int { return f.app.slots.CapacitySnapshot().Keys[secondTenantID].Limit }
@@ -605,6 +615,7 @@ func TestSetTenantCapacityAtAppliesOnlyAtTheCurrentRevision(t *testing.T) {
 // The schedule reconciliation reloads the slot caps, so a change that did
 // not go through SetTenantCapacity applies too.
 func TestScheduleReconciliationReloadsSlotCaps(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCapacityTenants(t, schedulerFake{}, 2)
 	setSlots := func(slots any) {
@@ -636,6 +647,7 @@ func TestScheduleReconciliationReloadsSlotCaps(t *testing.T) {
 // A budget that cannot be read stops the run or request instead of falling
 // back to the deployment's, at every check.
 func TestUnreadableProbeBudgetStopsTheRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCapacityTenants(t, schedulerFake{}, 1)
 	b := f.db.Tenant(f.b)

@@ -12,6 +12,7 @@ import (
 )
 
 func TestNaabuOptionHelpersRoundTripEveryField(t *testing.T) {
+	t.Parallel()
 	values := config.NaabuOptions{Rate: 10, Workers: 11, Retries: 2, TimeoutMS: 500, WarmUpSeconds: 3, AddressBatchSize: 4}
 	for _, tc := range []struct {
 		field string
@@ -34,6 +35,7 @@ func TestNaabuOptionHelpersRoundTripEveryField(t *testing.T) {
 }
 
 func TestScannerProfileJSONShapesAndCapabilities(t *testing.T) {
+	t.Parallel()
 	profile := store.ScannerProfileRecord{ID: "profile-1", Name: "Ops", Description: "desc", BuiltIn: true, Revision: 2, Definition: config.BuiltinNmapProfile()}
 	without := scannerProfileJSON(profile, false)
 	if _, ok := without["definition"]; ok {

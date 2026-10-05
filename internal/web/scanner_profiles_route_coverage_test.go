@@ -24,6 +24,7 @@ func scannerProfileRequest(server *Server, session store.Session, method, rest, 
 }
 
 func TestScannerProfilesRouteLifecycleAndValidationBranches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 
@@ -142,6 +143,7 @@ func TestScannerProfilesRouteLifecycleAndValidationBranches(t *testing.T) {
 // Profile names stay unique among the custom profiles and cannot take a
 // built-in profile's name, which schema 52 keeps in a namespace of its own.
 func TestScannerProfileNameConflictsReturnConflict(t *testing.T) {
+	t.Parallel()
 	server, _, admin := newUsersTestServer(t)
 	created := scannerProfileRequest(server, admin, http.MethodPost, "", `{"name":"Route A","engine":"nmap","password":"administrator password"}`)
 	if created.Code != http.StatusCreated {

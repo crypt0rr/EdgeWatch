@@ -72,6 +72,7 @@ func (s *resumableTestScanner) ScanWorkUnit(ctx context.Context, _ config.Job, u
 }
 
 func TestNewFreezesLegacyNotificationSelections(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -164,6 +165,7 @@ type releaseOnlyScanner struct {
 }
 
 func TestScanWorkBudgetIsCheckedBeforeLease(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -197,6 +199,7 @@ func TestScanWorkBudgetIsCheckedBeforeLease(t *testing.T) {
 }
 
 func TestResumableScanCheckpointsTimeoutAndRecovers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -251,6 +254,7 @@ func TestResumableScanCheckpointsTimeoutAndRecovers(t *testing.T) {
 }
 
 func TestExpiredResumableCycleProducesFailureBeforeFreshCycle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -301,6 +305,7 @@ func TestExpiredResumableCycleProducesFailureBeforeFreshCycle(t *testing.T) {
 }
 
 func TestCompletedCycleWithoutScanIsRecovered(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -363,6 +368,7 @@ func (s *releaseOnlyScanner) Scan(context.Context, config.Job) (model.Snapshot, 
 }
 
 func TestStopRunWaitsForManualManagedRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -457,6 +463,7 @@ func newManagedRunTestApp(t *testing.T, scan Scanner) (*App, *store.Store, store
 // scan.completed, so the finished run must release its reservation before
 // that callback runs. Otherwise the next manual run is refused as busy.
 func TestStartManagedRunAcceptsNextRunFromCompletionCallback(t *testing.T) {
+	t.Parallel()
 	a, s, record := newManagedRunTestApp(t, schedulerFake{})
 	firstErr := make(chan error, 1)
 	restartErr := make(chan error, 1)
@@ -494,6 +501,7 @@ func TestStartManagedRunAcceptsNextRunFromCompletionCallback(t *testing.T) {
 // earlier run's goroutine must never remove that newer reservation, neither
 // before its completion callback nor when it returns.
 func TestManagedRunReleaseKeepsNewerReservation(t *testing.T) {
+	t.Parallel()
 	blocking := &releaseOnlyScanner{started: make(chan struct{}), release: make(chan struct{})}
 	a, _, record := newManagedRunTestApp(t, blocking)
 	seen := make(chan any, 1)
@@ -528,6 +536,7 @@ func TestManagedRunReleaseKeepsNewerReservation(t *testing.T) {
 // A defect that panics before the run returns must still release the
 // reservation, so the job does not stay busy until the process restarts.
 func TestManagedRunReleasesReservationAfterPanic(t *testing.T) {
+	t.Parallel()
 	panicking := panicScanner{started: make(chan struct{})}
 	a, _, record := newManagedRunTestApp(t, panicking)
 	if err := a.StartManagedRun(defaultTenant(a.Store), record.ID, func(model.Scan, []model.Event, error) {
@@ -547,6 +556,7 @@ func TestManagedRunReleasesReservationAfterPanic(t *testing.T) {
 }
 
 func TestDaemonReturnsWhenLeaseIsLost(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -586,6 +596,7 @@ func TestDaemonReturnsWhenLeaseIsLost(t *testing.T) {
 }
 
 func TestDaemonStopsSharedManagedRunWhenLeaseIsLost(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -660,6 +671,7 @@ func TestDaemonStopsSharedManagedRunWhenLeaseIsLost(t *testing.T) {
 }
 
 func TestDaemonStartupPreservesLiveJobLease(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s, err := store.Open(storetest.FreshPath(t))
@@ -713,6 +725,7 @@ func TestDaemonStartupPreservesLiveJobLease(t *testing.T) {
 }
 
 func TestManagedScanLeaseBlocksScopeEditUntilScanCompletes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -757,6 +770,7 @@ func TestManagedScanLeaseBlocksScopeEditUntilScanCompletes(t *testing.T) {
 }
 
 func TestActiveScansReportsInFlightManagedScan(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -803,6 +817,7 @@ func TestActiveScansReportsInFlightManagedScan(t *testing.T) {
 }
 
 func TestHighCostManagedScanReportsProgressAndCanBeCanceled(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -859,6 +874,7 @@ func TestHighCostManagedScanReportsProgressAndCanBeCanceled(t *testing.T) {
 }
 
 func TestManagedTerminalOutcomesQueueNotifications(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -952,6 +968,7 @@ func TestManagedTerminalOutcomesQueueNotifications(t *testing.T) {
 }
 
 func TestManagedRunQueuesOnlyJobSelectedNotifications(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -1007,6 +1024,7 @@ func TestManagedRunQueuesOnlyJobSelectedNotifications(t *testing.T) {
 }
 
 func TestManagedTimeoutIsPersistedAsDistinctTerminalStatus(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -1045,6 +1063,7 @@ func TestManagedTimeoutIsPersistedAsDistinctTerminalStatus(t *testing.T) {
 }
 
 func TestManagedSchedulerReconcilesCreateUpdateAndArchive(t *testing.T) {
+	t.Parallel()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -1099,6 +1118,7 @@ func TestManagedSchedulerReconcilesCreateUpdateAndArchive(t *testing.T) {
 }
 
 func TestManagedSchedulerRejectsInvalidDesiredSetWithoutUnscheduling(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -1170,6 +1190,7 @@ func TestManagedSchedulerRejectsInvalidDesiredSetWithoutUnscheduling(t *testing.
 }
 
 func TestManagedScanPublishesLifecycleEvents(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {

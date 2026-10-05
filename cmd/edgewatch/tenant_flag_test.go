@@ -602,6 +602,7 @@ func TestAdminRecoveryWithTenant(t *testing.T) {
 // record in the account's unit, or in platform scope for a platform
 // administrator, and holds no password or TOTP secret.
 func TestHostRecoveryRecordsNameTheAccount(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := storetest.OpenFresh(t)
 	now := time.Now().UTC()
@@ -851,6 +852,7 @@ func TestHostScanReportsAUnitDisabledWhileItRan(t *testing.T) {
 // A host scan that its unit's pause stopped names the unit, and says
 // whether the scan had started.
 func TestHostScanPausedError(t *testing.T) {
+	t.Parallel()
 	unit := store.Tenant{Slug: "other"}
 	cause := store.ErrTenantNotActive
 	if err := hostScanPausedError(unit, model.Scan{}, cause); !errors.Is(err, cause) || err.Error() != `business unit "other" was disabled before the scan started: the tenant is not active` {

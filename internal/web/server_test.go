@@ -28,6 +28,7 @@ import (
 )
 
 func TestDefaultNewScannerProfileUsesNaabuOnlyWhenTCPScannerIsUnspecified(t *testing.T) {
+	t.Parallel()
 	naabu := &jobPayload{TCP: &protocolPayload{Ports: "1-1024"}}
 	defaultNewScannerProfile(naabu)
 	if naabu.TCP.Engine != config.EngineNaabuNmap || naabu.TCP.ProfileID != store.BuiltinNaabuProfileID || naabu.TCP.ProfileRevision != 0 {
@@ -73,6 +74,7 @@ func (s *sequenceScanner) Scan(context.Context, config.Job) (model.Snapshot, err
 }
 
 func TestJobPayloadPreservesExplicitEmptyNotificationSelection(t *testing.T) {
+	t.Parallel()
 	selection := []string{}
 	job, err := (jobPayload{NotificationDestinations: &selection}).config()
 	if err != nil {
@@ -91,6 +93,7 @@ func TestJobPayloadPreservesExplicitEmptyNotificationSelection(t *testing.T) {
 }
 
 func TestJobPayloadRoundTripsDNSComparisonMode(t *testing.T) {
+	t.Parallel()
 	payload := jobPayload{DNSComparisonMode: config.DNSComparisonAggregate}
 	job, err := payload.config()
 	if err != nil {
@@ -122,6 +125,7 @@ func TestJobPayloadRoundTripsDNSComparisonMode(t *testing.T) {
 }
 
 func TestConsoleSetupLoginCreateAndRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
@@ -230,6 +234,7 @@ func TestConsoleSetupLoginCreateAndRun(t *testing.T) {
 }
 
 func TestDisplayNameAPIUpdatesSessionAndAudit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -358,6 +363,7 @@ func TestDisplayNameAPIUpdatesSessionAndAudit(t *testing.T) {
 }
 
 func TestListenAddressIsLoopbackOnly(t *testing.T) {
+	t.Parallel()
 	if err := validateListenAddress("127.0.0.1:8080"); err != nil {
 		t.Fatal(err)
 	}
@@ -369,6 +375,7 @@ func TestListenAddressIsLoopbackOnly(t *testing.T) {
 }
 
 func TestSetupStatusDoesNotExposeOperationalDetails(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
@@ -466,6 +473,7 @@ func TestSetupStatusDoesNotExposeOperationalDetails(t *testing.T) {
 }
 
 func TestSSEHistoryAssignsIDsAndSupportsReplay(t *testing.T) {
+	t.Parallel()
 	s := &Server{subscribers: map[chan sseMessage]struct{}{}}
 	ch := make(chan sseMessage, 4)
 	s.mu.Lock()
@@ -509,6 +517,7 @@ func TestSSEHistoryAssignsIDsAndSupportsReplay(t *testing.T) {
 }
 
 func TestSSEPayloadAndHistoryAreByteBounded(t *testing.T) {
+	t.Parallel()
 	s := &Server{subscribers: map[chan sseMessage]struct{}{}}
 	large := strings.Repeat("x", maxSSEPayloadBytes+1024)
 	s.broadcast(map[string]any{"type": "scan.completed", "message": large})
@@ -523,6 +532,7 @@ func TestSSEPayloadAndHistoryAreByteBounded(t *testing.T) {
 }
 
 func TestSSEStopsDeliveringAfterSessionRevocation(t *testing.T) {
+	t.Parallel()
 	server, db, _ := newUsersTestServer(t)
 	ctx := context.Background()
 	raw, _, err := auth.NewManager(db).LoginAs(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "admin", "administrator password", "", "admin")
@@ -579,6 +589,7 @@ func TestSSEStopsDeliveringAfterSessionRevocation(t *testing.T) {
 }
 
 func TestSSEConnectionsAndLimitResponsesDoNotRefreshIdleSession(t *testing.T) {
+	t.Parallel()
 	server, db, _ := newUsersTestServer(t)
 	ctx := context.Background()
 	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
@@ -665,6 +676,7 @@ func TestSSEConnectionsAndLimitResponsesDoNotRefreshIdleSession(t *testing.T) {
 }
 
 func TestBackgroundStatusPollingDoesNotRefreshIdleSession(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, _ := newUsersTestServer(t)
 	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
@@ -803,6 +815,7 @@ func TestBackgroundStatusPollingDoesNotRefreshIdleSession(t *testing.T) {
 }
 
 func TestIdleActivityWriteDoesNotBlockAuthenticatedReads(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	server, db, _ := newUsersTestServer(t)
 	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
@@ -874,6 +887,7 @@ func TestIdleActivityWriteDoesNotBlockAuthenticatedReads(t *testing.T) {
 }
 
 func TestSSESessionRevocationIsIsolatedBetweenBrowserSessions(t *testing.T) {
+	t.Parallel()
 	server, db, _ := newUsersTestServer(t)
 	ctx := context.Background()
 
@@ -999,6 +1013,7 @@ func TestSSESessionRevocationIsIsolatedBetweenBrowserSessions(t *testing.T) {
 }
 
 func TestSSEAuthorizationCacheDoesNotCrossSessionsOrMissingCookie(t *testing.T) {
+	t.Parallel()
 	server, db, _ := newUsersTestServer(t)
 	ctx := context.Background()
 	login := func() (string, store.Session) {
@@ -1039,6 +1054,7 @@ func TestSSEAuthorizationCacheDoesNotCrossSessionsOrMissingCookie(t *testing.T) 
 }
 
 func TestAPIRequiresSessionCSRFAndRejectsUnvalidatedOptions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -1117,6 +1133,7 @@ func TestAPIRequiresSessionCSRFAndRejectsUnvalidatedOptions(t *testing.T) {
 }
 
 func TestSensitiveJobMutationFailsClosedWhenAuditUnavailable(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -1172,6 +1189,7 @@ func TestSensitiveJobMutationFailsClosedWhenAuditUnavailable(t *testing.T) {
 }
 
 func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -1418,6 +1436,7 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 }
 
 func TestHistoryEndpointsExposePaginationAndScopedResults(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -1567,6 +1586,7 @@ func TestHistoryEndpointsExposePaginationAndScopedResults(t *testing.T) {
 }
 
 func TestLifecycleEndpointsRequireCurrentRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -1651,6 +1671,7 @@ func TestLifecycleEndpointsRequireCurrentRevision(t *testing.T) {
 }
 
 func TestNotificationAPIIsWriteOnlyAndUsesOptimisticConcurrency(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")

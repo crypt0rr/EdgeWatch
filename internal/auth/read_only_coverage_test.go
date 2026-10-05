@@ -12,6 +12,7 @@ import (
 )
 
 func TestAuthenticateReadOnlyDoesNotTouchIdleTimestamp(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -62,6 +63,7 @@ func TestAuthenticateReadOnlyDoesNotTouchIdleTimestamp(t *testing.T) {
 }
 
 func TestAuthenticateReadOnlyRejectsDisabledAccount(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -93,6 +95,7 @@ func TestAuthenticateReadOnlyRejectsDisabledAccount(t *testing.T) {
 }
 
 func TestRecordActivityCoalescesAndBoundsSessionRefresh(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {

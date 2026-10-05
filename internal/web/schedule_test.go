@@ -17,6 +17,7 @@ import (
 )
 
 func TestScheduleSuggestionUsesNearestActiveJobAndSafeMinuteShift(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -48,6 +49,7 @@ func TestScheduleSuggestionUsesNearestActiveJobAndSafeMinuteShift(t *testing.T) 
 }
 
 func TestShiftCronMinuteLeavesCompositeMinuteExpressionsUntouched(t *testing.T) {
+	t.Parallel()
 	if shifted, ok := shiftCronMinute("*/15 * * * *", 30); ok || shifted != "" {
 		t.Fatalf("step expression should not be rewritten: %q, %v", shifted, ok)
 	}
@@ -57,6 +59,7 @@ func TestShiftCronMinuteLeavesCompositeMinuteExpressionsUntouched(t *testing.T) 
 }
 
 func TestParseNextRunFollowsDaylightSavingCronSemantics(t *testing.T) {
+	t.Parallel()
 	parser := cronParserForCoverage()
 	// 02:30 does not exist on the 2027 spring-forward date in New York. The
 	// cron scheduler advances to the following day rather than inventing a run

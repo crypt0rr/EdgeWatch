@@ -14,6 +14,7 @@ import (
 )
 
 func TestConfirmTOTPForUserConsumesCurrentFactor(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -64,6 +65,7 @@ func TestConfirmTOTPForUserConsumesCurrentFactor(t *testing.T) {
 }
 
 func TestScopedAdmissionReservationsAndTOTPLogin(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	m := &Manager{Now: func() time.Time { return now }}
@@ -159,6 +161,7 @@ func TestScopedAdmissionReservationsAndTOTPLogin(t *testing.T) {
 }
 
 func TestRequestWrappersMapTokenStoreErrorsAndDisabledAccounts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -205,6 +208,7 @@ func TestRequestWrappersMapTokenStoreErrorsAndDisabledAccounts(t *testing.T) {
 }
 
 func TestForwardedAddressAndLimiterHelpers(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		raw  string
@@ -268,6 +272,7 @@ func TestForwardedAddressAndLimiterHelpers(t *testing.T) {
 }
 
 func TestConfirmTOTPForUserLegacyFallbackRateLimitAndMissingUser(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -319,6 +324,7 @@ func TestConfirmTOTPForUserLegacyFallbackRateLimitAndMissingUser(t *testing.T) {
 }
 
 func TestLimiterMapInitializationEvictionAndCleanup(t *testing.T) {
+	t.Parallel()
 	m := &Manager{}
 	m.mu.Lock()
 	m.ensureScopedLimiterMapsLocked()

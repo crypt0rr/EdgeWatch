@@ -27,6 +27,7 @@ const throttledAnswerBound = 2 * time.Second
 // the answer takes. The records are still written once the writer is free,
 // one per scope.
 func TestThrottledSignInDoesNotWaitForTheAuditWriter(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, admin, _ := platformTestStore(t)
 	addSecondUnit(t, s)
@@ -94,6 +95,7 @@ func TestThrottledSignInDoesNotWaitForTheAuditWriter(t *testing.T) {
 // A refused sign-in whose rate-limit record finds no free background write
 // answers at once and writes no record; the scope's next refusal writes it.
 func TestRateLimitRecordWithoutRoomIsWrittenByTheNextRefusal(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, admin, _ := platformTestStore(t)
 	m := NewManager(s)
@@ -263,6 +265,7 @@ func (f *factorFixture) count(t *testing.T, query string, args ...any) int {
 // upgrade of an older password hash, or the password changes during the
 // sign-in. Once the cause is gone, the same factor signs in, once.
 func TestFailedSignInSpendsNoOneTimeFactor(t *testing.T) {
+	t.Parallel()
 	const password = factorFixturePassword
 	for _, cause := range []struct {
 		name string
@@ -362,6 +365,7 @@ func (f *factorFixture) checkSpentOnce(t *testing.T, factor string, step int64) 
 // edit, spends its factor once, with the retried session; one retried after
 // a TOTP re-enrolment needs a code of the new secret and spends nothing.
 func TestSignInFactorRacesAreResolvedInTheSessionTransaction(t *testing.T) {
+	t.Parallel()
 	for _, factor := range []string{"TOTP code", "recovery code"} {
 		present := func(f *factorFixture) (string, string, int64) {
 			step := f.now.Unix() / 30
@@ -457,6 +461,7 @@ func TestSignInFactorRacesAreResolvedInTheSessionTransaction(t *testing.T) {
 // session; a session that was used again stays, and so do the other
 // sessions and the new one.
 func TestSignInEndsTheLeastRecentlyUsedSessionOverTheCap(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, _, operator := platformTestStore(t)
 	m := NewManager(s)
@@ -566,6 +571,7 @@ func tokenRedemptions() []tokenRedemption {
 // the peer for five minutes. The valid token is redeemed once the cooldown
 // ends.
 func TestSharedLoopbackPeerCoolsDownTokenRedemptions(t *testing.T) {
+	t.Parallel()
 	for _, operation := range tokenRedemptions() {
 		for _, peer := range []string{"127.0.0.1:443", "[::1]:443"} {
 			t.Run(operation.name+" from "+peer, func(t *testing.T) {
@@ -613,6 +619,7 @@ func TestSharedLoopbackPeerCoolsDownTokenRedemptions(t *testing.T) {
 // activation: after a hundred wrong tokens every redemption from it is
 // refused for five minutes, with a five-minute Retry-After.
 func TestDirectClientKeepsTheTokenBackstop(t *testing.T) {
+	t.Parallel()
 	for _, operation := range tokenRedemptions() {
 		t.Run(operation.name, func(t *testing.T) {
 			s, err := store.Open(storetest.FreshPath(t))
@@ -654,6 +661,7 @@ func TestDirectClientKeepsTheTokenBackstop(t *testing.T) {
 // step with the session; without a valid code it is refused and records
 // nothing.
 func TestSignInRetryChecksTheCodeOfNewlyEnabledTOTP(t *testing.T) {
+	t.Parallel()
 	const secret = "JBSWY3DPEHPK3PXP"
 	for _, valid := range []bool{true, false} {
 		ctx := context.Background()
@@ -704,6 +712,7 @@ func TestSignInRetryChecksTheCodeOfNewlyEnabledTOTP(t *testing.T) {
 // A retried sign-in whose factor another sign-in spent between the two
 // attempts gets the answer of a wrong code, without a session.
 func TestSignInRetryWhoseFactorWasSpentIsRefused(t *testing.T) {
+	t.Parallel()
 	for _, factor := range []string{"TOTP code", "recovery code"} {
 		t.Run(factor, func(t *testing.T) {
 			f := newFactorFixture(t)
@@ -741,6 +750,7 @@ func TestSignInRetryWhoseFactorWasSpentIsRefused(t *testing.T) {
 // A sign-in whose TOTP check cannot read the replay guard fails without a
 // session and records nothing.
 func TestSignInFailsWhenTheReplayGuardCannotBeRead(t *testing.T) {
+	t.Parallel()
 	f := newFactorFixture(t)
 	f.exec(t, `ALTER TABLE totp_replay RENAME TO totp_replay_hidden`)
 	raw, err := f.signIn(factorFixturePassword, totpCode(f.user.TOTPSecret, f.now.Unix()/30), "")
@@ -759,6 +769,7 @@ func TestSignInFailsWhenTheReplayGuardCannotBeRead(t *testing.T) {
 // warning at most once per interval. UntrustedProxy reports the latest such
 // proxy for a day after its last request.
 func TestNoteForwardingRecordsUntrustedProxies(t *testing.T) {
+	t.Parallel()
 	var none *Manager
 	if _, logNow := none.NoteForwarding(httptest.NewRequest(http.MethodGet, "/", nil)); logNow {
 		t.Fatal("a nil manager asked for a warning")
@@ -839,6 +850,7 @@ func TestNoteForwardingRecordsUntrustedProxies(t *testing.T) {
 // a chain of trusted proxies, a hop that cannot be read, and a header that
 // EdgeWatch does not read are not recorded.
 func TestNoteForwardingRecordsTheUntrustedProxyBehindATrustedOne(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, time.September, 30, 9, 0, 0, 0, time.UTC)
 	for _, check := range []struct {
 		name, forwarded, remote, header, value, client, proxy string
@@ -890,6 +902,7 @@ func TestNoteForwardingRecordsTheUntrustedProxyBehindATrustedOne(t *testing.T) {
 // nothing and leaves the refusal as it was. Stale suppression windows are
 // dropped once the windows reach the limiter's ceiling.
 func TestRateLimitRecordsInTheBackground(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, _, _ := platformTestStore(t)
 	from := func(address string) *http.Request {

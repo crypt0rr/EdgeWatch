@@ -118,6 +118,7 @@ type unitPayload struct {
 // creates, renames, disables, enables and deletes a unit, and each change
 // is recorded in the platform audit. A unit's data never appears.
 func TestPlatformUnitLifecycle(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	var list struct {
 		Units  []unitPayload      `json:"units"`
@@ -221,6 +222,7 @@ func TestPlatformUnitLifecycle(t *testing.T) {
 // administrators, and an account of another unit is not found, with the
 // same response as an unknown ID.
 func TestPlatformUnitAccounts(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	accountsPath := "/platform/units/" + f.unitB + "/accounts"
 	var list struct {
@@ -308,6 +310,7 @@ func TestPlatformUnitAccounts(t *testing.T) {
 // platform administrator's in the account's unit, with the platform actor
 // kind. Neither holds the confirming password.
 func TestSessionRevocationRecordsNameTheAccount(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	type record struct{ kind, actorID, actorName, detail string }
 	last := func(tenantID string) record {
@@ -347,6 +350,7 @@ func TestSessionRevocationRecordsNameTheAccount(t *testing.T) {
 // high-cost ceiling is 0, not granted, which a change that leaves the
 // ceiling out keeps, and which 0 restores after a grant.
 func TestPlatformUnitCapacity(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	capacityPath := "/platform/units/" + f.unitB + "/capacity"
 	var view platformCapacityView
@@ -402,6 +406,7 @@ func TestPlatformUnitCapacity(t *testing.T) {
 // capacity nor the unit's audit changes. A change without a revision is
 // still applied to the current settings.
 func TestPlatformUnitCapacityRefusesAStaleRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newPlatformFixture(t)
 	capacityPath := "/platform/units/" + f.unitB + "/capacity"
@@ -466,6 +471,7 @@ func TestPlatformUnitCapacityRefusesAStaleRevision(t *testing.T) {
 // and neither the unit's capacity nor its audit changes. Without the
 // disable the same request succeeds.
 func TestCapacityChangeStopsWhenThePlatformAdministratorIsDisabled(t *testing.T) {
+	t.Parallel()
 	for _, disable := range []bool{true, false} {
 		name := "after the actor is disabled"
 		if !disable {
@@ -506,6 +512,7 @@ func TestCapacityChangeStopsWhenThePlatformAdministratorIsDisabled(t *testing.T)
 // otherwise. A unit without caps reports exactly the deployment's settings,
 // with one unit or several. A viewer's status still has no capacity.
 func TestUnitStatusReportsTheUnitsCapacity(t *testing.T) {
+	t.Parallel()
 	statusCapacity := func(t *testing.T, server *Server, account routeMatrixSession) store.CapacityLimits {
 		t.Helper()
 		var status struct {
@@ -557,6 +564,7 @@ func TestUnitStatusReportsTheUnitsCapacity(t *testing.T) {
 // disables another one. It cannot change its own account there, a pending
 // account cannot be enabled, and a unit's account is not found.
 func TestPlatformAdmins(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	var list struct {
 		Admins []store.UserSummary `json:"admins"`
@@ -636,6 +644,7 @@ func TestPlatformAdmins(t *testing.T) {
 // administrator and the caller's own account are refused, a unit's account
 // is not found like an unknown ID, and a second revocation finds no link.
 func TestPlatformAdminInvitationIsRevoked(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	var invitation struct {
 		User            store.UserSummary `json:"user"`
@@ -704,6 +713,7 @@ func TestPlatformAdminInvitationIsRevoked(t *testing.T) {
 // an enabled platform administrator and the caller's own account are
 // refused, and a unit's account is not found, like an unknown ID.
 func TestPendingPlatformAdminIsRenewedOrRemoved(t *testing.T) {
+	t.Parallel()
 	for _, stranded := range []string{"expired", "revoked"} {
 		t.Run(stranded, func(t *testing.T) {
 			f := newPlatformFixture(t)
@@ -827,6 +837,7 @@ func TestPendingPlatformAdminIsRenewedOrRemoved(t *testing.T) {
 // last_login_at out instead of sending the zero time, and an account that
 // signed in carries the time of its sign-in.
 func TestAccountSummariesLeaveOutAMissingSignIn(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	ctx := context.Background()
 	signedIn := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
@@ -902,6 +913,7 @@ type destinationsPayload struct {
 // write-only, a unit's destination is not found, exactly as an unknown one,
 // and neither a unit's destinations nor the platform's cross over.
 func TestPlatformNotifications(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	var list destinationsPayload
 	expectResponse(t, f.call(t, actorPlatform, http.MethodGet, "/platform/notifications", ""), http.StatusOK, "empty list", &list)
@@ -1010,6 +1022,7 @@ func TestPlatformNotifications(t *testing.T) {
 // A unit's destinations never count in it, the platform's never count in a
 // unit's, and neither a URL nor a provider error is returned.
 func TestPlatformNotificationsReportDeliveryHealth(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newPlatformFixture(t)
 	const secretURL = "generic://localhost/platform-health-secret?disabletls=yes"
@@ -1113,6 +1126,7 @@ func TestPlatformNotificationsReportDeliveryHealth(t *testing.T) {
 // neither which check refused a selection nor another owner's destination
 // from an unknown one.
 func TestUpdateRoutingStoreRefusalAnswersAsTheNotifierCheck(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newPlatformFixture(t)
 	platformActor := store.AuditEntry{ActorUserID: f.users[actorPlatform].ID, ActorUsername: f.users[actorPlatform].Username}
@@ -1159,6 +1173,7 @@ func TestUpdateRoutingStoreRefusalAnswersAsTheNotifierCheck(t *testing.T) {
 // never saved is still reported as not configured, which the console shows
 // as each enabled destination selected, as before business units.
 func TestNewUnitStartsWithUpdateAlertsOff(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	var unit destinationsPayload
 	expectResponse(t, f.call(t, actorAdminB, http.MethodGet, "/notifications/destinations", ""), http.StatusOK, "the new unit's destinations", &unit)
@@ -1182,6 +1197,7 @@ func TestNewUnitStartsWithUpdateAlertsOff(t *testing.T) {
 
 // The platform status reports the deployment as numbers only.
 func TestPlatformStatus(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	response := f.call(t, actorPlatform, http.MethodGet, "/platform/status", "")
 	var status struct {
@@ -1209,6 +1225,7 @@ func TestPlatformStatus(t *testing.T) {
 // that a unit's account may read carries the count, and the platform routes
 // stay refused to them.
 func TestPlatformUnitsReportStoredScans(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	ctx := context.Background()
 	// Unit B's "shared-job" is archived with a failed scan it keeps.
@@ -1296,6 +1313,7 @@ func TestPlatformUnitsReportStoredScans(t *testing.T) {
 // with a keyset, and a cursor that names another view's entry is not found,
 // exactly as an unknown one.
 func TestPlatformAndUnitAuditViews(t *testing.T) {
+	t.Parallel()
 	f := newPlatformFixture(t)
 	expectResponse(t, f.call(t, actorPlatform, http.MethodPatch, "/platform/units/"+f.unitB+"/capacity", `{"max_concurrent_scans":1}`), http.StatusOK, "cap unit B", nil)
 
@@ -1421,6 +1439,7 @@ func TestPlatformAndUnitAuditViews(t *testing.T) {
 // disabled unit, and a wrong password. A store that cannot be read is an
 // internal error, never a partial answer.
 func TestPlatformHandlersReportRefusalsAndFailures(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newPlatformFixture(t)
 	accountsPath := "/platform/units/" + f.unitB + "/accounts"

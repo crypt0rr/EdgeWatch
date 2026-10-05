@@ -83,6 +83,7 @@ func (s *transientResumableScanner) ScanWorkUnit(_ context.Context, _ config.Job
 }
 
 func TestRetryableResumableErrorsAreBoundedAndConfigurationErrorsStall(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name      string
 		err       error
@@ -103,6 +104,7 @@ func TestRetryableResumableErrorsAreBoundedAndConfigurationErrorsStall(t *testin
 }
 
 func TestResumableScanRetriesTransientUnitFailure(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -161,6 +163,7 @@ func TestResumableScanRetriesTransientUnitFailure(t *testing.T) {
 }
 
 func TestResumableAttemptDiscardsLateSuccessfulResultAfterCancellation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -211,6 +214,7 @@ func TestResumableAttemptDiscardsLateSuccessfulResultAfterCancellation(t *testin
 }
 
 func TestResumableScanStallsAfterRetryBudget(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -281,6 +285,7 @@ func (s coverageResumableScanner) ScanWorkUnit(context.Context, config.Job, scan
 }
 
 func TestResumableAttemptPlanningAndTerminalGuards(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -460,6 +465,7 @@ func TestResumableAttemptPlanningAndTerminalGuards(t *testing.T) {
 }
 
 func TestResumableRecoveryAndFinishPersistenceFailures(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -490,6 +496,7 @@ func TestResumableRecoveryAndFinishPersistenceFailures(t *testing.T) {
 }
 
 func TestFinishResumableCycleStallsWhenCheckpointRowsAreMissing(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name          string
 		rowsToDelete  int
@@ -580,6 +587,7 @@ func TestFinishResumableCycleStallsWhenCheckpointRowsAreMissing(t *testing.T) {
 }
 
 func TestResumableAttemptHandlesUnitFailuresAndNoProgressStalls(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	newApp := func(t *testing.T, name string) (*App, *store.Store, config.Job, store.JobRecord) {
 		t.Helper()
@@ -635,6 +643,7 @@ func TestResumableAttemptHandlesUnitFailuresAndNoProgressStalls(t *testing.T) {
 }
 
 func TestManagedFinalizationContinuesWhenLeaseRenewalIsLost(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -733,6 +742,7 @@ func (s *naabuConfirmationScanner) ScanWorkUnit(_ context.Context, _ config.Job,
 // misses it once, Nmap must still check it: the incident stays open while
 // Nmap reports the port open and recovers only when Nmap reports it closed.
 func TestNaabuMissDoesNotRecoverIncidentWithoutNmapConfirmation(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name      string
 		open      map[int]bool
@@ -804,6 +814,7 @@ func TestNaabuMissDoesNotRecoverIncidentWithoutNmapConfirmation(t *testing.T) {
 }
 
 func TestResumableNaabuOpenThenNmapDownKeepsScanIncomplete(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -919,6 +930,7 @@ func (s *movedDNSConfirmationScanner) ScanWorkUnit(_ context.Context, _ config.J
 // must still be checked by Nmap: the port stays expected while Nmap reports
 // it open, and its closure is reported when Nmap reports it closed.
 func TestNaabuMissOnMovedDNSTargetKeepsBaselinePortUnderNmapConfirmation(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name      string
 		addresses []string

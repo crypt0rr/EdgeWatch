@@ -364,6 +364,7 @@ func jobRouteCases(t *testing.T, f *resourceRouteFixture) []jobRouteCase {
 }
 
 func TestJobRoutesResolveTheJobOnceAndKeepTheirResponses(t *testing.T) {
+	t.Parallel()
 	f := newResourceRouteFixture(t)
 	for _, tc := range jobRouteCases(t, f) {
 		t.Run(tc.name, func(t *testing.T) {
@@ -421,6 +422,7 @@ func TestJobRoutesResolveTheJobOnceAndKeepTheirResponses(t *testing.T) {
 // a malformed request for a missing job is rejected as malformed, and the
 // in-handler administrator check still answers before the lookup.
 func TestJobRoutesValidateRequestsBeforeResolvingTheJob(t *testing.T) {
+	t.Parallel()
 	f := newResourceRouteFixture(t)
 	for _, tc := range []struct {
 		name, user, method, path, body string
@@ -509,6 +511,7 @@ type scanRouteCase struct {
 }
 
 func TestScanRoutesResolveTheScanOnceAndKeepTheirResponses(t *testing.T) {
+	t.Parallel()
 	f := newResourceRouteFixture(t)
 	scanNotFound := wantErrorBody(t, "not_found", "scan not found", nil)
 	internal := wantErrorBody(t, "store", "internal server error", nil)

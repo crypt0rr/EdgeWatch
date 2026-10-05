@@ -31,6 +31,7 @@ func cachedDestination(n *Notifier, id string) (managedDestination, bool) {
 }
 
 func TestRefreshManagedDestinationHandlesNoStoreMissingAndStoreError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	if err := (&Notifier{}).refreshManagedDestination(ctx, "destination"); err != nil {
 		t.Fatalf("refresh without a store = %v", err)
@@ -155,6 +156,7 @@ func TestDrainRefreshesManagedDestinationsOnceForABatch(t *testing.T) {
 // reload's snapshot, so the cache never goes back to destinations older
 // than those it already holds.
 func TestReloadNeverInstallsAnOlderSnapshot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	notifier, db, _, _ := twoTenantNotifier(t)
 	created, err := defaultNotifier(notifier).createManaged(ctx, "Webhook", rotationOldURL, true, nil)
@@ -203,6 +205,7 @@ func TestReloadNeverInstallsAnOlderSnapshot(t *testing.T) {
 // Reloads that run concurrently with URL replacements never leave the cache
 // older than a replacement that has returned.
 func TestConcurrentReloadsKeepTheCacheAtTheLatestReplacement(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	notifier, _, _, _ := twoTenantNotifier(t)
 	current, err := defaultNotifier(notifier).createManaged(ctx, "Webhook", rotationOldURL, true, nil)

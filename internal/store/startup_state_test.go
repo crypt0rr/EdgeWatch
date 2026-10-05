@@ -100,7 +100,7 @@ func TestHealthStatusNamesMissingDaemonLeaseAfterReleaseAndRestore(t *testing.T)
 
 	t.Run("after graceful lease release", func(t *testing.T) {
 		t.Parallel()
-		s, err := Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+		s, err := openWithOptionsContext(ctx, filepath.Join(t.TempDir(), "edgewatch.db"), openOptions{create: true, migrate: true, configureWAL: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -118,9 +118,12 @@ func TestHealthStatusNamesMissingDaemonLeaseAfterReleaseAndRestore(t *testing.T)
 		t.Parallel()
 		dir := t.TempDir()
 		source := filepath.Join(dir, "source.db")
-		createRestoreFixture(t, source, "source")
-		live, err := Open(source)
+		live, err := openWithOptionsContext(ctx, source, openOptions{create: true, migrate: true, configureWAL: true})
 		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := live.DB.ExecContext(ctx, `CREATE TABLE restore_fixture (value TEXT NOT NULL); INSERT INTO restore_fixture(value) VALUES ('source')`); err != nil {
+			live.Close()
 			t.Fatal(err)
 		}
 		if _, err := live.System().AcquireDaemonLease(ctx, "backup-daemon"); err != nil {
@@ -139,7 +142,7 @@ func TestHealthStatusNamesMissingDaemonLeaseAfterReleaseAndRestore(t *testing.T)
 		if _, err := Restore(ctx, backup, destination, RestoreOptions{}); err != nil {
 			t.Fatalf("restore: %v", err)
 		}
-		restored, err := Open(destination)
+		restored, err := openWithOptionsContext(ctx, destination, openOptions{create: true, migrate: true, configureWAL: true})
 		if err != nil {
 			t.Fatal(err)
 		}

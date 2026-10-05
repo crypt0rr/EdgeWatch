@@ -5,13 +5,13 @@ import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQuery } from '@tanstack/react-query'
 import { useLocation } from 'react-router-dom'
-import { APIError, adminStatus, acceptIncident, getSession, listIncidents, listJobs, login, logout, recordActivity, setupStatus, suppressIncident } from './api'
+import { APIError, adminStatus, acceptIncident, getSession, listEvents, listIncidents, listJobs, login, logout, recordActivity, setupStatus, suppressIncident } from './api'
 import { AppContent, AuthRoutes, createQueryClient, Incidents, Jobs, ProtectedApp, retryQuery, Shell, unitBreadcrumb } from './main'
 import { renderWithProviders } from './test/test-utils'
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api')
-  return { ...actual, acceptIncident: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), login: vi.fn(), logout: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), suppressIncident: vi.fn() }
+  return { ...actual, acceptIncident: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), listEvents: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), login: vi.fn(), logout: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), suppressIncident: vi.fn() }
 })
 
 class EventSourceStub {
@@ -31,6 +31,7 @@ function CurrentPath() {
 describe('application shell', () => {
   beforeEach(() => {
     vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.18.70', version_release_url: 'https://github.com/crypt0rr/EdgeWatch/releases/tag/v0.18.70', updates: { available: true, status: 'update_available', latest_version: 'v0.19.0', release_url: 'https://github.com/crypt0rr/EdgeWatch/releases/tag/v0.19.0' } } as never)
+    vi.mocked(listEvents).mockResolvedValue({ events: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] } as never)
     vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'incidents.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
@@ -142,6 +143,7 @@ describe('application shell', () => {
     const stream = EventSourceStub.instances[0]
     act(() => stream.emit('scan.completed', 'job-9'))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['active-scans'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['jobs'] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['job', 'job-9'] })
     act(() => stream.onmessage?.({ data: '{not-json' } as MessageEvent))
     expect(invalidate).toHaveBeenCalledWith()
@@ -156,10 +158,35 @@ describe('application shell', () => {
       stream.onopen?.()
     })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['activity-events'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['jobs'] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['job-pending-changes', 'job-9'] })
     await waitFor(() => expect(screen.getByRole('status', { name: 'Live updates' })).toHaveClass('live'))
     act(() => stream.onerror?.())
     await waitFor(() => expect(screen.getByRole('status', { name: 'Reconnecting…' })).toHaveClass('reconnecting'))
+  })
+
+  it('refreshes pending-confirmation counts after scan and incident events', async () => {
+    const jobList = (pending: number) => ({ jobs: [{
+      id: 'job-1', revision: 1, enabled: true, archived: false, security_hash: 'hash', created_at: '', updated_at: '',
+      job: { name: 'Live pending job' }, baseline: { status: 'ready', pending },
+    }] })
+    const snapshots = [jobList(0), jobList(1), jobList(2)]
+    vi.mocked(listJobs).mockImplementation(async () => (snapshots.shift() ?? jobList(2)) as never)
+    const { client } = renderWithProviders(<Shell displayName="Admin" role="administrator" permissions={['jobs.read', 'scans.read', 'stream.read']} onLogout={vi.fn()} />, { route: ['/activity'] })
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    await waitFor(() => expect(listJobs).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(screen.getByText('No changes are awaiting confirmation.')).toBeInTheDocument())
+    await waitFor(() => expect(EventSourceStub.instances).toHaveLength(1))
+    const stream = EventSourceStub.instances[0]
+
+    act(() => stream.emit('scan.completed', 'job-1'))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Show 1 pending change' })).toBeInTheDocument())
+    expect(listJobs).toHaveBeenCalledTimes(2)
+
+    act(() => stream.emit('changes-detected', 'job-1'))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Show 2 pending changes' })).toBeInTheDocument())
+    expect(listJobs).toHaveBeenCalledTimes(3)
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['jobs'] })
   })
 
   it('stops reconnecting and explains when the account stream limit is reached', async () => {

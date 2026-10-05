@@ -112,6 +112,7 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
           case 'scan-incomplete':
           case 'scan-canceled':
           case 'scan-anomaly':
+            void client.invalidateQueries({ queryKey: ['jobs'] })
             void client.invalidateQueries({ queryKey: ['active-scans'] })
             void client.invalidateQueries({ queryKey: ['scans'] })
             void client.invalidateQueries({ queryKey: ['hosts'] })
@@ -133,6 +134,7 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
           case 'incident-closed':
           case 'incident-accepted':
           case 'incident-suppressed':
+            void client.invalidateQueries({ queryKey: ['jobs'] })
             void client.invalidateQueries({ queryKey: ['incidents'] })
             void client.invalidateQueries({ queryKey: ['activity-events'] })
             if (event.job_id) {

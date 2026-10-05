@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -217,5 +218,111 @@ func TestJobHistoryPurgeDoesNotAttributeMalformedDeliveryPayloads(t *testing.T) 
 		if err := s.DB.QueryRowContext(ctx, statement).Scan(&count); err != nil || count != 1 {
 			t.Errorf("unattributed %s rows after deletion = %d, %v; want preserved", name, count, err)
 		}
+	}
+}
+
+func TestJobHistoryPurgeResumesBetweenHostProjectionPhases(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	tenant := defaultTenant(s)
+	job, err := tenant.CreateJob(ctx, testJob("host-projection-phase-purge"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tenant.SetJobArchived(ctx, job.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := tenant.DeleteJobWithAudit(ctx, job.ID, AuditEntry{Action: "job.deleted", Detail: job.ID}); err != nil {
+		t.Fatal(err)
+	}
+	stopLatestHosts := errors.New("pause after latest-host removal")
+	if _, err := s.System().purgeDeletedJobHistories(ctx, jobHistoryPurgeOptions{
+		batchSize: 1,
+		afterBatch: func(_ context.Context, _, _, phase string) error {
+			if phase == jobPurgePhaseLatestHosts {
+				return stopLatestHosts
+			}
+			return nil
+		},
+	}); !errors.Is(err, stopLatestHosts) {
+		t.Fatalf("latest-host phase interruption = %v; want %v", err, stopLatestHosts)
+	}
+	var phase string
+	if err := s.DB.QueryRowContext(ctx, `SELECT phase FROM job_history_purges WHERE job_id=?`, job.ID).Scan(&phase); err != nil || phase != jobPurgePhaseRepairHosts {
+		t.Fatalf("phase after latest-host interruption = %q, %v; want %q", phase, err, jobPurgePhaseRepairHosts)
+	}
+
+	stopRepairHosts := errors.New("pause after latest-host repair")
+	if _, err := s.System().purgeDeletedJobHistories(ctx, jobHistoryPurgeOptions{
+		batchSize: 1,
+		afterBatch: func(_ context.Context, _, _, phase string) error {
+			if phase == jobPurgePhaseRepairHosts {
+				return stopRepairHosts
+			}
+			return nil
+		},
+	}); !errors.Is(err, stopRepairHosts) {
+		t.Fatalf("latest-host repair interruption = %v; want %v", err, stopRepairHosts)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT phase FROM job_history_purges WHERE job_id=?`, job.ID).Scan(&phase); err != nil || phase != jobPurgePhaseDeleteJob {
+		t.Fatalf("phase after repair interruption = %q, %v; want %q", phase, err, jobPurgePhaseDeleteJob)
+	}
+	if _, err := s.System().PurgeDeletedJobHistories(ctx); err != nil {
+		t.Fatalf("resume after host-projection interruptions: %v", err)
+	}
+}
+
+func TestJobHistoryPurgeCancellationAndEmptyQueue(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if purged, err := s.System().purgeDeletedJobHistories(ctx, jobHistoryPurgeOptions{}); err != nil || purged != 0 {
+		t.Fatalf("empty purge queue with default batch size = %d, %v; want 0, nil", purged, err)
+	}
+
+	tenant := defaultTenant(s)
+	job, err := tenant.CreateJob(ctx, testJob("cancelled-history-purge"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tenant.SetJobArchived(ctx, job.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := tenant.DeleteJobWithAudit(ctx, job.ID, AuditEntry{Action: "job.deleted", Detail: job.ID}); err != nil {
+		t.Fatal(err)
+	}
+	workerCtx, cancel := context.WithCancel(ctx)
+	_, err = s.System().purgeDeletedJobHistories(workerCtx, jobHistoryPurgeOptions{
+		batchSize: 1,
+		afterBatch: func(_ context.Context, _, _, _ string) error {
+			cancel()
+			return nil
+		},
+	})
+	cancel()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("purge cancellation between batches = %v; want context.Canceled", err)
+	}
+	if _, err := s.System().PurgeDeletedJobHistories(ctx); err != nil {
+		t.Fatalf("resume after cancellation: %v", err)
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if purged, err := s.System().PurgeDeletedJobHistories(cancelled); purged != 0 || !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-cancelled purge = %d, %v; want 0, context.Canceled", purged, err)
+	}
+}
+
+func TestJobHistoryPurgeRejectsUnknownPhaseAndReportsClosedStore(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if _, err := s.System().purgeJobHistory(ctx, jobHistoryPurgeRecord{tenantID: DefaultTenantID, jobID: "unknown-phase", phase: "unsupported"}, jobHistoryPurgeOptions{}); err == nil || !strings.Contains(err.Error(), "unknown job history purge phase") {
+		t.Fatalf("unknown purge phase error = %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.System().PurgeDeletedJobHistories(ctx); err == nil {
+		t.Fatal("purge on a closed store succeeded; want the database error")
 	}
 }

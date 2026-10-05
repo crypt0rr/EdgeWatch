@@ -150,6 +150,15 @@ func TestLiveUpdatesReachOnlyTheirBusinessUnit(t *testing.T) {
 	streamB := f.openLiveStream(t, "other", 0)
 
 	jobB := createdID(t, "unit B's job", f.call("other", http.MethodPost, "/api/v1/jobs", unitJobBody))
+	f.server.publishAppEvent(model.Event{Type: "scan.skipped", JobID: jobB, Job: "edge", Message: "Accepted scan did not start", Reason: "busy", TenantID: tenantAccountsOtherID})
+	waitForSSEBody(t, streamB.writer, `"type":"scan.skipped"`)
+	if !strings.Contains(streamB.body(), `"job_id":"`+jobB+`"`) {
+		t.Errorf("unit B's skipped scan event is missing its job ID: %s", streamB.body())
+	}
+	waitForSSEBody(t, streamB.writer, `"reason":"busy"`)
+	if strings.Contains(streamA.body(), `"type":"scan.skipped"`) {
+		t.Errorf("unit A's stream received unit B's skipped scan event: %s", streamA.body())
+	}
 	profileB := createdID(t, "unit B's profile", f.call("other", http.MethodPost, "/api/v1/scanner-profiles", `{"name":"Unit profile","engine":"nmap","password":"administrator password"}`))
 	destinationB := createdID(t, "unit B's destination", f.call("other", http.MethodPost, "/api/v1/notifications/destinations", `{"name":"Unit destination","url":"generic://127.0.0.1:9/unit-b?disabletls=yes&template=json","password":"administrator password"}`))
 	if rec := f.call("other", http.MethodPatch, "/api/v1/users/"+f.viewerB.ID, `{"display_name":"Viewer B"}`); rec.Code != http.StatusOK {
@@ -222,7 +231,7 @@ func TestLiveUpdatesReachOnlyTheirBusinessUnit(t *testing.T) {
 	waitForSSEBody(t, replayA.writer, jobA)
 	assertOnlyEvent("unit A's replay", replayA, "job.created", jobA)
 	replayB := f.openLiveStream(t, "other", before)
-	for _, marker := range []string{jobB, profileB, destinationB, `"type":"incident-accepted"`} {
+	for _, marker := range []string{jobB, profileB, destinationB, `"type":"incident-accepted"`, `"reason":"busy"`} {
 		waitForSSEBody(t, replayB.writer, marker)
 	}
 	if strings.Contains(replayB.body(), jobA) {

@@ -184,6 +184,14 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
               void client.invalidateQueries({ queryKey: ['admin-status'] })
               if (event.type !== 'application.update_status') void client.invalidateQueries({ queryKey: ['activity-events'] })
               break
+            case 'scan.skipped':
+              void client.invalidateQueries({ queryKey: ['jobs'] })
+              void client.invalidateQueries({ queryKey: ['active-scans'] })
+              if (event.job_id) {
+                void client.invalidateQueries({ queryKey: ['job', event.job_id] })
+                window.dispatchEvent(new CustomEvent('edgewatch:scan-skipped', { detail: { job_id: event.job_id, reason: event.reason } }))
+              }
+              break
             case 'stream_limit': {
               // EventSource otherwise reconnects after the server closes a
               // limited stream, repeatedly consuming connection slots. Stop

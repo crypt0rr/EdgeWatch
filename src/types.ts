@@ -24,6 +24,7 @@ export type ActiveScan = {
   current_unit_ports?: string; current_unit_addresses?: number
   scanner?: string; scanner_profile_id?: string; scanner_profile_revision?: number; discovery_ports_found?: number; discovery_addresses?: number; discovery_duration_ms?: number; enrichment_duration_ms?: number
 }
+export type QueuedRun = { job_id: string; job: string; queued_at: string; trigger: 'manual' | 'scheduled' | string }
 export type ScanCycleUnit = { cycle_id: string; sequence: number; engine?: string; phase?: string; protocol: string; family: number; ports: string; port_count: number; addresses: number; probes: number; status: string; attempts: number; started_at?: string; finished_at?: string; last_error?: string }
 export type ScanCycle = { id: string; job_id: string; job_revision: number; status: string; attempt_count: number; no_progress_attempts: number; total_units: number; completed_units: number; total_probes: number; completed_probes: number; started_at: string; updated_at: string; expires_at: string; finished_at?: string; last_error?: string; units?: ScanCycleUnit[] }
 // Port evidence is serialized as `addresses` by the Go model. These are the

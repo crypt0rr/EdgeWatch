@@ -24,11 +24,26 @@ func (s *Server) activeScans(w http.ResponseWriter, r *http.Request, ts *store.T
 		s.writeInternalError(w, r, "store", err)
 		return
 	}
+	queuedRuns := s.App.QueuedRuns(scope)
 	scans := s.App.ActiveScans(scope)
 	if scans == nil {
 		scans = []model.ActiveScan{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"scans": scans})
+	activeJobs := make(map[string]struct{}, len(scans))
+	for _, scan := range scans {
+		activeJobs[scan.JobID] = struct{}{}
+	}
+	filteredQueued := queuedRuns[:0]
+	for _, run := range queuedRuns {
+		if _, started := activeJobs[run.JobID]; !started {
+			filteredQueued = append(filteredQueued, run)
+		}
+	}
+	queuedRuns = filteredQueued
+	if queuedRuns == nil {
+		queuedRuns = []model.QueuedRun{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"scans": scans, "queued_runs": queuedRuns})
 }
 
 // cancelScan cancels a running scan of the request's tenant. Another tenant's

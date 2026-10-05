@@ -73,6 +73,26 @@ describe('job detail actions', () => {
     expect(runJob).toHaveBeenCalledTimes(1)
   })
 
+  it('derives the queued state from the server after reload and explains a skipped run', async () => {
+    const { client } = renderPage()
+    await screen.findByRole('button', { name: 'Scan now' })
+    client.setQueryData(['active-scans'], {
+      scans: [],
+      queued_runs: [{ job_id: 'job-1', job: 'Production', queued_at: '2026-10-06T10:00:00Z', trigger: 'scheduled' }],
+    })
+
+    expect(await screen.findByRole('heading', { name: 'Scan queued' })).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Scheduled scan accepted at')
+    expect(screen.getByRole('button', { name: 'Queued…' })).toBeDisabled()
+
+    client.setQueryData(['active-scans'], { scans: [], queued_runs: [] })
+    window.dispatchEvent(new CustomEvent('edgewatch:scan-skipped', { detail: { job_id: 'job-1', reason: 'archived' } }))
+
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Scan queued' })).not.toBeInTheDocument())
+    expect(screen.getByRole('alert')).toHaveTextContent('The job was archived before the queued scan could start.')
+    expect(screen.getByRole('button', { name: 'Scan now' })).toBeEnabled()
+  })
+
   it('shows the active phase and progress and allows cancellation from the job page', async () => {
     vi.mocked(activeScans).mockResolvedValueOnce({ scans: [] }).mockResolvedValue({ scans: [activeScan] } as never)
     vi.mocked(cancelScan).mockImplementation(async (id) => {

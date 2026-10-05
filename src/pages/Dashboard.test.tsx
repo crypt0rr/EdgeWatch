@@ -190,6 +190,16 @@ describe('dashboard', () => {
     expect(container.textContent).toContain('1 destination tested')
   })
 
+  it('shows queued runs reported by the server without offering a cancel action', async () => {
+    vi.mocked(activeScans).mockResolvedValue({ scans: [], queued_runs: [{ job_id: 'job-1', job: 'demo', queued_at: '2026-10-06T08:00:00Z', trigger: 'manual' }] })
+    await renderDashboard()
+
+    expect(container.textContent).toContain('Scans in progress or queued')
+    expect(container.textContent).toContain('Manual scan · waiting for an available scan slot')
+    expect(container.querySelector('.queued-scan-row .pill')?.textContent).toBe('Queued')
+    expect(Array.from(container.querySelectorAll('button')).some(button => button.textContent?.includes('Cancel scan'))).toBe(false)
+  })
+
   it('navigates to job setup from the dashboard action', async () => {
     await renderDashboard()
     const configure = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Configure job')) as HTMLButtonElement

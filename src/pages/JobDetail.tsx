@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   Archive,
@@ -39,13 +39,13 @@ import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { PortScopeDetails } from '../components/PortScopeDetails'
 import { SurfaceUnitList } from '../components/SurfaceUnitList'
-import type { ActiveScan, WorkEstimate } from '../types'
+import type { ActiveScan, QueuedRun, WorkEstimate } from '../types'
 import { baselinePresentation } from '../baseline'
 import { formatDateTime } from '../format'
 import { changeKindLabel, jobStatePresentation, scanOutcomeTone, severityTone } from '../status'
 
 type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
-type PendingScanRequest = { requestedAt: number; previousScanIDs: string[] | null; observedActive: boolean }
+type PendingScanRequest = { requestedAt: number; previousScanIDs: string[] | null; observedActive: boolean; observedQueued: boolean }
 
 export function JobDetail() {
   const { id = '', scanId: routeScanID } = useParams()
@@ -63,6 +63,8 @@ export function JobDetail() {
   const [actionBusy, setActionBusy] = useState('')
   const [cancelBusyScan, setCancelBusyScan] = useState('')
   const [pendingScanRequest, setPendingScanRequest] = useState<PendingScanRequest | null>(null)
+  const pendingScanRequestRef = useRef<PendingScanRequest | null>(null)
+  pendingScanRequestRef.current = pendingScanRequest
   const [dialog, setDialog] = useState<JobDialog | null>(null)
   const job = useQuery({ queryKey: ['job', id], queryFn: () => getJob(id) })
   const session = useQuery({ queryKey: ['session'], queryFn: getSession })
@@ -81,6 +83,7 @@ export function JobDetail() {
     refetchInterval: 2000,
   })
   const activeJobScan = active.data?.scans.find((scan) => scan.job_id === id)
+  const activeJobQueuedRun = active.data?.queued_runs?.find((run) => run.job_id === id)
   // "updating" is an active baseline whose stored scope hash is being
   // re-keyed; its expected results remain available.
   const baselineActive = !!job.data && baselinePresentation(job.data.baseline).status === 'complete'
@@ -150,6 +153,18 @@ export function JobDetail() {
       }
       return
     }
+    if (activeJobQueuedRun) {
+      if (!pendingScanRequest.observedQueued) setPendingScanRequest({ ...pendingScanRequest, observedQueued: true })
+      return
+    }
+    if (pendingScanRequest.observedQueued) {
+      const previous = pendingScanRequest.previousScanIDs
+      const newScanRecorded = previous !== null && scans.data?.scans.some((scan) => !previous.includes(scan.id))
+      if (newScanRecorded) {
+        setPendingScanRequest(null)
+        return
+      }
+    }
     const previousScanIDs = pendingScanRequest.previousScanIDs
     if (previousScanIDs === null) {
       if (!scans.data) return
@@ -160,7 +175,39 @@ export function JobDetail() {
     }
     const scanStarted = scans.data?.scans.some((scan) => !previousScanIDs.includes(scan.id))
     if (pendingScanRequest.observedActive || scanStarted) setPendingScanRequest(null)
-  }, [activeJobScan?.id, pendingScanRequest, scans.data?.scans])
+  }, [activeJobQueuedRun?.queued_at, activeJobScan?.id, pendingScanRequest, scans.data?.scans])
+
+  useEffect(() => {
+    if (!pendingScanRequest?.observedQueued || activeJobQueuedRun || activeJobScan) return
+    const request = pendingScanRequest
+    // Give the history query a few seconds to catch a scan that started and
+    // completed between active-status polls. This timer intentionally does
+    // not depend on each history refresh, so polling cannot postpone it.
+    const timeout = window.setTimeout(() => {
+      const current = pendingScanRequestRef.current
+      if (current?.requestedAt !== request.requestedAt || !current.observedQueued) return
+      const activeState = client.getQueryData<{ scans: ActiveScan[]; queued_runs?: QueuedRun[] }>(['active-scans'])
+      if (activeState?.scans.some((scan) => scan.job_id === id) || activeState?.queued_runs?.some((run) => run.job_id === id)) return
+      const scanState = client.getQueryData<{ scans: { id: string; started_at: string }[] }>(['job-scans', id, scanOffset])
+      const started = scanState?.scans.some((scan) => current.previousScanIDs
+        ? !current.previousScanIDs.includes(scan.id)
+        : Date.parse(scan.started_at) >= current.requestedAt)
+      setPendingScanRequest(null)
+      if (!started) setActionError('The queued scan did not start. Try running it again.')
+    }, 5000)
+    return () => window.clearTimeout(timeout)
+  }, [activeJobQueuedRun?.queued_at, activeJobScan?.id, client, id, pendingScanRequest?.observedQueued, pendingScanRequest?.requestedAt, scanOffset])
+
+  useEffect(() => {
+    const onSkipped = (event: Event) => {
+      const detail = (event as CustomEvent<{ job_id?: string; reason?: string }>).detail
+      if (!detail || detail.job_id !== id) return
+      setPendingScanRequest(null)
+      setActionError(scanSkippedMessage(detail.reason))
+    }
+    window.addEventListener('edgewatch:scan-skipped', onSkipped)
+    return () => window.removeEventListener('edgewatch:scan-skipped', onSkipped)
+  }, [id])
 
   useEffect(() => {
     // A reset or a newly converged baseline can change the number of result
@@ -210,7 +257,7 @@ export function JobDetail() {
     const previousScanIDs = scans.data?.scans.map((scan) => scan.id) ?? null
     try {
       await runJob(id)
-      setPendingScanRequest({ requestedAt, previousScanIDs, observedActive: false })
+      setPendingScanRequest({ requestedAt, previousScanIDs, observedActive: false, observedQueued: false })
       await Promise.all([
         client.invalidateQueries({ queryKey: ['active-scans'] }),
         client.invalidateQueries({ queryKey: ['job-scans', id] }),
@@ -419,8 +466,8 @@ export function JobDetail() {
           <p className="muted">Revision {value.revision} · Updated {formatDateTime(value.updated_at)}</p>
         </div>
         {canOperate && <div className="heading-actions">
-          <button className="button secondary" onClick={run} disabled={value.archived || !!actionBusy || !!pendingScanRequest || !!activeJobScan}>
-            <Play size={16} /> {actionBusy === 'run' ? 'Starting…' : activeJobScan ? (activeJobScan.phase === 'cancelling' ? 'Cancelling…' : 'Scanning…') : pendingScanRequest ? 'Queued…' : 'Scan now'}
+          <button className="button secondary" onClick={run} disabled={value.archived || !!actionBusy || !!pendingScanRequest || !!activeJobQueuedRun || !!activeJobScan}>
+            <Play size={16} /> {actionBusy === 'run' ? 'Starting…' : activeJobScan ? (activeJobScan.phase === 'cancelling' ? 'Cancelling…' : 'Scanning…') : pendingScanRequest || activeJobQueuedRun ? 'Queued…' : 'Scan now'}
           </button>
           <button className="button secondary" onClick={() => navigate(`/jobs/${id}/edit`)} disabled={!!actionBusy}>
             <Edit3 size={16} /> Edit
@@ -430,8 +477,9 @@ export function JobDetail() {
       </div>
       {actionError && <div className="form-error banner" role="alert">{actionError}</div>}
       {canOperate && canReadScans && active.error && <ErrorNotice message="Could not load live scan status." onRetry={() => active.refetch()} />}
-      {canOperate && canReadScans && (activeJobScan || pendingScanRequest) && <JobScanStatus
+      {canOperate && canReadScans && (activeJobScan || pendingScanRequest || activeJobQueuedRun) && <JobScanStatus
         scan={activeJobScan}
+        queuedRun={activeJobQueuedRun}
         cancelBusy={cancelBusyScan}
         onCancel={cancelActiveScan}
       />}
@@ -610,15 +658,18 @@ export function JobDetail() {
   )
 }
 
-function JobScanStatus({ scan, cancelBusy, onCancel }: {
+function JobScanStatus({ scan, queuedRun, cancelBusy, onCancel }: {
   scan?: ActiveScan
+  queuedRun?: QueuedRun
   cancelBusy: string
   onCancel: (scanID: string) => void
 }) {
   if (!scan) return <section className="panel job-scan-status" aria-labelledby="job-scan-status-title">
     <div>
       <h2 id="job-scan-status-title">Scan queued</h2>
-      <p className="muted" role="status">Your scan request was accepted and is waiting for an available scan slot.</p>
+      <p className="muted" role="status">{queuedRun
+        ? `${queuedRun.trigger === 'scheduled' ? 'Scheduled scan' : 'Scan request'} accepted ${queuedRun.queued_at ? `at ${formatDateTime(queuedRun.queued_at)}` : ''} and waiting for an available scan slot.`
+        : 'Your scan request was accepted and is waiting for an available scan slot.'}</p>
     </div>
     <span className="pill amber">Queued</span>
   </section>
@@ -651,6 +702,20 @@ function JobScanStatus({ scan, cancelBusy, onCancel }: {
         {cancelBusy === scan.id ? 'Cancelling…' : 'Cancel scan'}
       </button>}
   </section>
+}
+
+function scanSkippedMessage(reason?: string) {
+  switch (reason) {
+    case 'busy': return 'The scan could not start because another scan already owns this job.'
+    case 'archived': return 'The job was archived before the queued scan could start.'
+    case 'paused': return 'The job was paused before the scheduled scan could start.'
+    case 'budget': return 'The scan could not start because it exceeds the configured work budget.'
+    case 'unit_paused': return 'The business unit was paused before the queued scan could start.'
+    case 'shutting_down': return 'EdgeWatch stopped before the queued scan could start.'
+    case 'cycle_stalled': return 'The scan could not start because its saved cycle is stalled; retry it manually.'
+    case 'job_unavailable': return 'The job was removed before the queued scan could start.'
+    default: return 'The queued scan did not start. Try running it again.'
+  }
 }
 
 function formatElapsedSeconds(seconds: number) {

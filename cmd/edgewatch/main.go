@@ -288,46 +288,9 @@ func run(args []string) error {
 	case "status":
 		return status(ctx, tenant, unit.State, cfg, *jobName, *output)
 	case "history":
-		var scans []model.Scan
-		var events []model.Event
-		if *jobName != "" {
-			record, lookupErr := tenant.GetJobByName(ctx, *jobName)
-			switch {
-			case lookupErr == nil:
-				// Managed history belongs to the immutable job ID, not the name
-				// captured when each scan or event was written. A rename must not
-				// mix a later job that reuses the old name into this history.
-				scans, err = tenant.ListJobScans(ctx, record.ID, *limit)
-				if err != nil {
-					return err
-				}
-				events, err = tenant.ListJobEvents(ctx, record.ID, *limit)
-				if err != nil {
-					return err
-				}
-			case errors.Is(lookupErr, store.ErrNotFound):
-				// Legacy YAML jobs have no persisted ID, so retain their
-				// name-based history behavior.
-				scans, err = tenant.ListScans(ctx, *jobName, *limit)
-				if err != nil {
-					return err
-				}
-				events, err = tenant.ListEvents(ctx, *jobName, *limit)
-				if err != nil {
-					return err
-				}
-			default:
-				return lookupErr
-			}
-		} else {
-			scans, err = tenant.ListScans(ctx, "", *limit)
-			if err != nil {
-				return err
-			}
-			events, err = tenant.ListEvents(ctx, "", *limit)
-			if err != nil {
-				return err
-			}
+		scans, events, err := listHistory(ctx, tenant, *jobName, *limit)
+		if err != nil {
+			return err
 		}
 		// Print empty lists, not null, for a unit without history, as the
 		// web API does.

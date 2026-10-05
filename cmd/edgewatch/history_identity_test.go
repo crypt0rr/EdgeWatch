@@ -92,6 +92,22 @@ func TestHistoryByNameUsesManagedJobIdentityAcrossRename(t *testing.T) {
 			}
 		})
 	}
+	stdout, _, err := captureCLIOutput(t, func() error {
+		return run([]string{"history", "--config", configPath, "--output", "json"})
+	})
+	if err != nil {
+		t.Fatalf("history without a job filter: %v", err)
+	}
+	var allHistory struct {
+		Scans  []model.Scan  `json:"scans"`
+		Events []model.Event `json:"events"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &allHistory); err != nil {
+		t.Fatalf("decode unfiltered history output: %v", err)
+	}
+	if len(allHistory.Scans) != 2 || len(allHistory.Events) != 2 {
+		t.Fatalf("unfiltered history returned %d scans and %d events, want 2 each", len(allHistory.Scans), len(allHistory.Events))
+	}
 
 	// An unpersisted YAML job has no managed ID; name-based filtering remains
 	// available for its legacy history rows.
@@ -106,7 +122,7 @@ func TestHistoryByNameUsesManagedJobIdentityAcrossRename(t *testing.T) {
 	if err := legacyStore.Close(); err != nil {
 		t.Fatal(err)
 	}
-	stdout, _, err := captureCLIOutput(t, func() error {
+	stdout, _, err = captureCLIOutput(t, func() error {
 		return run([]string{"history", "--config", configPath, "--job", "legacy-yaml", "--output", "json"})
 	})
 	if err != nil {

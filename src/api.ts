@@ -294,6 +294,7 @@ export const listUsers = () => api<{ users: UserSummary[] }>('/users')
 export const createUser = (username: string, display_name: string, role: Role, password = '') => api<{ user: UserSummary; activation_token: string; activation_path: string }>('/users', { method: 'POST', body: JSON.stringify({ username, display_name, role, password }) })
 export const updateUser = (id: string, value: { display_name?: string; role?: Role; enabled?: boolean; revision?: number; password?: string }) => api<UserSummary>(`/users/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(value) })
 export const issueUserActivation = (id: string, password = '') => api<{ activation_token: string; activation_path: string; expires_at: string }>(`/users/${encodeURIComponent(id)}/activation`, { method: 'POST', body: JSON.stringify({ password }) })
+export const issueUserPasswordReset = (id: string, password = '') => api<{ activation_token: string; activation_path: string; expires_at: string }>(`/users/${encodeURIComponent(id)}/password-reset`, { method: 'POST', body: JSON.stringify({ password }) })
 export const revokeUserActivation = (id: string, password = '') => api<void>(`/users/${encodeURIComponent(id)}/activation`, { method: 'DELETE', body: JSON.stringify({ password }) })
 export const revokeUserSessions = (id: string, password = '') => api<void>(`/users/${encodeURIComponent(id)}/sessions`, { method: 'DELETE', body: JSON.stringify({ password }) })
 

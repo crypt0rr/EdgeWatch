@@ -99,7 +99,7 @@ func (s *Server) usersRoute(w http.ResponseWriter, r *http.Request, session stor
 		return
 	}
 	if len(parts) == 2 && parts[1] == "activation" && r.Method == http.MethodPost {
-		s.issueActivation(w, r, session, ts, id, "user.activation_issued")
+		s.issueAccountLink(w, r, session, ts, id)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "activation" && r.Method == http.MethodDelete {
@@ -107,7 +107,7 @@ func (s *Server) usersRoute(w http.ResponseWriter, r *http.Request, session stor
 		return
 	}
 	if len(parts) == 2 && parts[1] == "password-reset" && r.Method == http.MethodPost {
-		s.issueActivation(w, r, session, ts, id, "user.password_reset_issued")
+		s.issueAccountLink(w, r, session, ts, id)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "sessions" && r.Method == http.MethodDelete {
@@ -348,7 +348,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 	writeJSON(w, http.StatusOK, user.Summary())
 }
 
-func (s *Server) issueActivation(w http.ResponseWriter, r *http.Request, actor store.Session, ts *store.TenantStore, id, action string) {
+func (s *Server) issueAccountLink(w http.ResponseWriter, r *http.Request, actor store.Session, ts *store.TenantStore, id string) {
 	w.Header().Set("Cache-Control", "no-store")
 	password, ok := decodeUserPassword(w, r)
 	if !ok || !s.confirmUserMutation(w, r, actor, password) {
@@ -377,10 +377,13 @@ func (s *Server) issueActivation(w http.ResponseWriter, r *http.Request, actor s
 		return
 	}
 	createdAt := time.Now().UTC()
-	if strings.TrimSpace(action) == "" {
+	action := "user.password_reset_issued"
+	detail := fmt.Sprintf("password reset issued for %s", user.Username)
+	if strings.HasPrefix(user.PasswordHash, "!pending") {
 		action = "user.activation_issued"
+		detail = fmt.Sprintf("activation issued for %s", user.Username)
 	}
-	if err := ts.CreateUserInviteWithAudit(r.Context(), digest, user.ID, createdAt, createdAt.Add(30*time.Minute), store.AuditEntry{Action: action, Detail: fmt.Sprintf("activation issued for %s", user.Username), ActorUserID: actor.UserID, ActorUsername: actor.Username}); err != nil {
+	if err := ts.CreateUserInviteWithAudit(r.Context(), digest, user.ID, createdAt, createdAt.Add(30*time.Minute), store.AuditEntry{Action: action, Detail: detail, ActorUserID: actor.UserID, ActorUsername: actor.Username}); err != nil {
 		if writeAdministratorRefused(w, err) {
 			return
 		}

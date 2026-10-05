@@ -503,7 +503,7 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Se
 			}
 		}
 		if scan.ID != "" {
-			s.broadcastTo(context.Background(), audienceTenant(ts), map[string]any{"type": "scan.completed", "job_id": id, "scan_id": scan.ID, "status": scan.Status, "events": len(events)})
+			s.broadcastTo(context.Background(), audienceTenant(ts), map[string]any{"type": "scan.completed", "job": scan.Job, "job_id": id, "scan_id": scan.ID, "status": scan.Status, "message": "Scan " + scan.Status, "events": len(events)})
 		}
 	}); runErr != nil {
 		if errors.Is(runErr, scanner.ErrBusy) {

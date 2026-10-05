@@ -170,7 +170,7 @@ func TestLatestHostProjectionRebuildExcludesPendingJobPurges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, deleteSQL, args...); err != nil {
 		t.Fatal(err)
 	}

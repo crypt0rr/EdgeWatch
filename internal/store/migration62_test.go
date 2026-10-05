@@ -29,17 +29,17 @@ func TestMigration62CreatesJobHistoryPurgeQueue(t *testing.T) {
 		if err != nil {
 			t.Fatalf("explain %s job purge lookup: %v", query.table, err)
 		}
+		defer rows.Close()
 		var details []string
 		for rows.Next() {
 			var id, parent, unused int
 			var detail string
 			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
-				rows.Close()
 				t.Fatal(err)
 			}
 			details = append(details, detail)
 		}
-		if err := rows.Close(); err != nil {
+		if err := rows.Err(); err != nil {
 			t.Fatal(err)
 		}
 		if !strings.Contains(strings.Join(details, " "), query.index) {
@@ -50,17 +50,17 @@ func TestMigration62CreatesJobHistoryPurgeQueue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("explain pending purge queue query: %v", err)
 	}
+	defer rows.Close()
 	var queuePlan []string
 	for rows.Next() {
 		var id, parent, unused int
 		var detail string
 		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
-			rows.Close()
 			t.Fatal(err)
 		}
 		queuePlan = append(queuePlan, detail)
 	}
-	if err := rows.Close(); err != nil {
+	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(strings.Join(queuePlan, " "), "job_history_purges_order") {

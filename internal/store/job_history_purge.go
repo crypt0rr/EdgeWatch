@@ -273,21 +273,20 @@ func (ss *SystemStore) repairJobLatestHostsBatch(ctx context.Context, record job
 	}
 	keys := make([]latestScanHostKey, 0, batchSize)
 	addresses := make([]string, 0, batchSize)
-	for rows.Next() {
-		var key latestScanHostKey
-		if err := rows.Scan(&key.tenantID, &key.address); err != nil {
-			_ = rows.Close()
-			return 0, record.phase, err
+	readRowsErr := func() error {
+		defer rows.Close()
+		for rows.Next() {
+			var key latestScanHostKey
+			if err := rows.Scan(&key.tenantID, &key.address); err != nil {
+				return err
+			}
+			keys = append(keys, key)
+			addresses = append(addresses, key.address)
 		}
-		keys = append(keys, key)
-		addresses = append(addresses, key.address)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return 0, record.phase, err
-	}
-	if err := rows.Close(); err != nil {
-		return 0, record.phase, err
+		return rows.Err()
+	}()
+	if readRowsErr != nil {
+		return 0, record.phase, readRowsErr
 	}
 	if len(keys) > 0 {
 		deleteSQL, insertSQL, args := latestScanHostRepairQueries(keys)

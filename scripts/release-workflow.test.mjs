@@ -50,6 +50,23 @@ test('release images are staged under unique candidate tags', () => {
   assert.doesNotMatch(image, /REGISTRY_IMAGE\}:/)
 })
 
+test('release image reads CI prebuilt caches without writing tag-scoped caches', () => {
+  const image = jobBlock('image')
+  const build = stepBlock(image, 'Build and push image')
+  assert.match(build, /cache-from:\s*\|\n\s+type=gha,scope=container-prebuilt-amd64\n\s+type=gha,scope=container-prebuilt-arm64/)
+  assert.doesNotMatch(build, /^\s+cache-to:/m)
+})
+
+test('release verification keeps schema, scanner, build, and race gates current', () => {
+  const verify = jobBlock('verify')
+  assert.match(verify, /Runs the complete race-enabled Go suite/)
+  assert.doesNotMatch(verify, /see the CI test job for its budget/)
+  assert.match(stepBlock(verify, 'Verify schema documentation'), /\.\/scripts\/check-schema-docs\.sh/)
+  assert.match(stepBlock(verify, 'Verify pinned Naabu release'), /\.\/scripts\/verify-naabu-pin\.sh/)
+  assert.match(stepBlock(verify, 'Build'), /go build -trimpath \.\/cmd\/edgewatch/)
+  assert.match(stepBlock(verify, 'Test'), /go test -race -timeout=25m -coverprofile=coverage\.out \.\/\.\.\./)
+})
+
 // A partial re-run ("Re-run failed jobs") does not repeat the image job, and
 // github.run_attempt grows with every re-run. A candidate reference recomputed
 // in a later job would name a tag that was never pushed, so the reference must

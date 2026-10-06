@@ -12,15 +12,26 @@ function loadConfig(overrides) {
   const env = { ...process.env }
   for (const name of ['CI', 'PLAYWRIGHT_PORT', 'PLAYWRIGHT_REUSE_SERVER']) delete env[name]
   Object.assign(env, overrides)
-  const script = `const { default: config } = await import(${JSON.stringify(configURL)}); console.log(JSON.stringify({ reuse: config.webServer.reuseExistingServer, url: config.webServer.url }))`
+  const script = `const { default: config } = await import(${JSON.stringify(configURL)}); console.log(JSON.stringify({ globalSetup: config.globalSetup, reuse: config.webServer.reuseExistingServer, url: config.webServer.url }))`
   return spawnSync(process.execPath, ['--input-type=module', '--no-warnings', '-e', script], { cwd: repositoryRoot, env, encoding: 'utf8' })
 }
 
 function webServer(overrides) {
   const result = loadConfig(overrides)
   assert.equal(result.status, 0, result.stderr)
-  return JSON.parse(result.stdout)
+  const { reuse, url } = JSON.parse(result.stdout)
+  return { reuse, url }
 }
+
+function globalSetup() {
+  const result = loadConfig({})
+  assert.equal(result.status, 0, result.stderr)
+  return JSON.parse(result.stdout).globalSetup
+}
+
+test('real-stack browser tests use one daemon build for the whole run', () => {
+  assert.equal(globalSetup(), './e2e/global-setup.ts')
+})
 
 test('local runs start a fresh server unless reuse is requested', () => {
   assert.deepEqual(webServer({}), { reuse: false, url: 'http://127.0.0.1:4173' })

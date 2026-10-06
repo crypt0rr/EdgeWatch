@@ -18,7 +18,7 @@ build: frontend
 	go build -trimpath -ldflags "$(GO_LDFLAGS)" -o edgewatch ./cmd/edgewatch
 
 test:
-	go test -race -cover ./...
+	go test -race -timeout=25m -cover ./...
 
 lint-go:
 	@base="$(GOLANGCI_LINT_BASE)"; \
@@ -38,6 +38,6 @@ security: lint-go vulncheck frontend-audit
 check:
 	@test -z "$$(gofmt -l $$(git ls-files '*.go'))"
 	go vet ./...
-	go test -race ./...
+	go test -race -timeout=25m ./...
 	npm run lint
 	$(MAKE) security

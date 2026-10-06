@@ -51,7 +51,7 @@ jobs:
   verify:
     name: Verify release candidate
     runs-on: ubuntu-latest
-    # Includes the race-enabled Go suite; see the CI test job for its budget.
+    # Runs the complete race-enabled Go suite; CI splits store tests across shards.
     timeout-minutes: 40
     permissions:
       contents: read
@@ -78,6 +78,10 @@ jobs:
           cache: true
       - name: Verify dependencies
         run: go mod verify
+      - name: Verify schema documentation
+        run: ./scripts/check-schema-docs.sh
+      - name: Verify pinned Naabu release
+        run: ./scripts/verify-naabu-pin.sh
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
@@ -146,6 +150,8 @@ jobs:
         run: test -z "$(gofmt -l cmd internal)"
       - name: Vet
         run: go vet ./...
+      - name: Build
+        run: go build -trimpath ./cmd/edgewatch
       - name: Test
         run: |
           set -o pipefail
@@ -340,8 +346,9 @@ jobs:
             VERSION=${{ steps.meta.outputs.version }}
             PREBUILT_FRONTEND=1
             PREBUILT_EDGEWATCH=1
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: |
+            type=gha,scope=container-prebuilt-amd64
+            type=gha,scope=container-prebuilt-arm64
           provenance: mode=max
           sbom: true
       - name: Record the pushed candidate

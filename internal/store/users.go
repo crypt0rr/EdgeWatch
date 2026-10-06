@@ -73,17 +73,18 @@ func (u User) Summary() UserSummary {
 // it. LastLoginAt is the zero time for an account that never signed in, and
 // the JSON then leaves last_login_at out.
 type UserSummary struct {
-	ID          string    `json:"id"`
-	Username    string    `json:"username"`
-	DisplayName string    `json:"display_name"`
-	Role        string    `json:"role"`
-	Enabled     bool      `json:"enabled"`
-	Pending     bool      `json:"pending"`
-	TOTPEnabled bool      `json:"totp_enabled"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	LastLoginAt time.Time `json:"last_login_at,omitzero"`
-	Revision    int64     `json:"revision"`
+	ID            string    `json:"id"`
+	Username      string    `json:"username"`
+	DisplayName   string    `json:"display_name"`
+	Role          string    `json:"role"`
+	Enabled       bool      `json:"enabled"`
+	Pending       bool      `json:"pending"`
+	HasActiveLink bool      `json:"has_active_link"`
+	TOTPEnabled   bool      `json:"totp_enabled"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	LastLoginAt   time.Time `json:"last_login_at,omitzero"`
+	Revision      int64     `json:"revision"`
 }
 
 func ValidateUserRole(role string) error {
@@ -205,7 +206,9 @@ func (ts *TenantStore) ListUsers(ctx context.Context) ([]UserSummary, error) {
 	if err := ts.ready(); err != nil {
 		return nil, err
 	}
-	rows, err := ts.store.reader().QueryContext(ctx, `SELECT id,username,display_name,role,password_hash,enabled,totp_enabled,created_at,updated_at,last_login_at,revision FROM users WHERE tenant_id=? ORDER BY username COLLATE NOCASE`, ts.scope.id)
+	rows, err := ts.store.reader().QueryContext(ctx, `SELECT users.id,users.username,users.display_name,users.role,users.password_hash,users.enabled,users.totp_enabled,users.created_at,users.updated_at,users.last_login_at,users.revision,
+EXISTS(SELECT 1 FROM user_invites WHERE user_id=users.id AND used_at IS NULL AND expires_at>?)
+FROM users WHERE users.tenant_id=? ORDER BY users.username COLLATE NOCASE`, sqliteTimestamp(time.Now().UTC()), ts.scope.id)
 	if err != nil {
 		return nil, err
 	}
@@ -214,12 +217,12 @@ func (ts *TenantStore) ListUsers(ctx context.Context) ([]UserSummary, error) {
 	for rows.Next() {
 		var u UserSummary
 		var passwordHash string
-		var enabled, totp int
+		var enabled, totp, activeLink int
 		var created, updated, lastLogin string
-		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &passwordHash, &enabled, &totp, &created, &updated, &lastLogin, &u.Revision); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &passwordHash, &enabled, &totp, &created, &updated, &lastLogin, &u.Revision, &activeLink); err != nil {
 			return nil, err
 		}
-		u.Enabled, u.Pending, u.TOTPEnabled = enabled != 0, strings.HasPrefix(passwordHash, "!pending"), totp != 0
+		u.Enabled, u.Pending, u.HasActiveLink, u.TOTPEnabled = enabled != 0, strings.HasPrefix(passwordHash, "!pending"), activeLink != 0, totp != 0
 		u.CreatedAt, u.UpdatedAt, u.LastLoginAt = scanTime(created), scanTime(updated), scanTime(lastLogin)
 		result = append(result, u)
 	}

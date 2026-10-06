@@ -19,7 +19,7 @@ const eventLabels: Record<string, string> = {
   'incident-suppressed': 'Incident suppressed',
   'scan-incomplete': 'Scan incomplete',
   'scan-failure': 'Scan failed',
-  'scan-canceled': 'Scan cancelled',
+  'scan-canceled': 'Scan canceled',
   'scan-anomaly': 'Scan anomaly',
   'application-update-available': 'Update available',
   'application-updated': 'Application updated',
@@ -29,7 +29,8 @@ const eventLabels: Record<string, string> = {
 function eventTone(type: string) {
   if (type === 'changes-recovered' || type === 'incident-accepted') return 'recovered'
   if (type === 'changes-detected' || type === 'changes-reminder') return 'incident'
-  if (type === 'scan-failure' || type === 'scan-anomaly') return 'failure'
+  if (type === 'scan-failure') return 'failure'
+  if (type === 'scan-anomaly') return 'warning'
   return 'neutral'
 }
 

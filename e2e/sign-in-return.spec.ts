@@ -57,9 +57,10 @@ test('signing in again after the session ends returns to the page that was open'
   await page.getByRole('link', { name: 'Hosts', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Hosts', level: 1 })).toBeVisible()
 
-  // The session ends while Hosts is open; the next request is refused.
+  // The session ends while Hosts is open. Open a protected route while the
+  // expired session is active and verify that signing in returns to it.
   endSession()
-  await page.getByRole('link', { name: 'Incidents', exact: true }).click()
+  await page.goto('/incidents')
   await signIn(page)
 
   await expect(page.getByRole('heading', { name: 'Incidents', level: 1 })).toBeVisible()

@@ -108,7 +108,7 @@ describe('authentication pages', () => {
 
   it('logs in and routes administrators to the dashboard', async () => {
     await renderPage(<Login />, '/login')
-    expect(container.querySelector('a[href="/source"]')?.textContent).toBe('Source code')
+    expect(container.querySelector('a[href="/source"]')).toBeNull()
     const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
     setInputValue(inputs[0], 'admin')
     setInputValue(inputs[1], 'correct horse battery staple')

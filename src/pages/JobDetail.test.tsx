@@ -203,6 +203,13 @@ describe('job surface overview', () => {
     expect(dots[1]).toHaveClass('fail')
   })
 
+  it('provides the full success description as a title when scan rows are constrained', async () => {
+    await renderPage()
+    await vi.waitFor(() => expect(container.querySelector('.scan-row span')).not.toBeNull(), { timeout: 1000 })
+    const success = Array.from(container.querySelectorAll('.scan-row span')).find(span => span.textContent?.includes('Completed successfully'))
+    expect(success).toHaveAttribute('title', 'Completed successfully · Open results to inspect the snapshot')
+  })
+
   it('orders expected baseline, latest successful scan, and history vertically', async () => {
     await renderPage()
     await vi.waitFor(() => expect(container.textContent).toContain('Latest successful scan'), { timeout: 1000 })

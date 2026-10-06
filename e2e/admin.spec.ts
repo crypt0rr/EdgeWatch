@@ -200,7 +200,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   await navigateFromShell(page, 'Hosts')
   await expect(page.getByRole('heading', { name: 'Hosts', exact: true })).toBeVisible()
   await expect(page.getByText('192.0.2.1')).toBeVisible()
-  const hostSearch = page.getByRole('textbox', { name: 'Search hosts' })
+  const hostSearch = page.getByRole('searchbox', { name: 'Search hosts' })
   await hostSearch.focus()
   await page.keyboard.type('222')
   await expect(hostSearch).toHaveValue('222')

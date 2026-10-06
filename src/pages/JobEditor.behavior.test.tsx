@@ -431,7 +431,7 @@ describe('job editor workflow coverage', () => {
     expect(screen.getByRole('dialog')).toHaveTextContent('TCP port scope')
     expect(screen.getByRole('list')).toHaveTextContent('TCP port scope')
     fireEvent.click(screen.getByRole('dialog').querySelector('button[type="button"]')!)
-    expect(screen.getByText('Scope change cancelled.')).toBeInTheDocument()
+    expect(screen.getByText('Scope change canceled.')).toBeInTheDocument()
   })
 
   it('saves a scope change only after the administrator confirms the rebaseline', async () => {

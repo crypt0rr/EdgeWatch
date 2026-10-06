@@ -103,6 +103,40 @@ describe('baseline host explorer', () => {
     expect(baselineHosts).toHaveBeenCalledWith('job-1', expect.objectContaining({ q: '443' }))
   })
 
+  it('names an empty baseline search and offers clear and filter reset actions', async () => {
+    vi.mocked(baselineHosts).mockImplementation(async (_job, filters) => filters?.q || filters?.protocol
+      ? { ...detailed, hosts: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } }
+      : detailed)
+    await renderPage()
+
+    const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    await act(async () => {
+      setter?.call(search, 'no-such-host.example.com')
+      search.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+      await new Promise(resolve => setTimeout(resolve, 300))
+    })
+    await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('No hosts match “no-such-host.example.com”.'), { timeout: 1000 })
+    expect(Array.from(container.querySelectorAll('button')).some(button => button.textContent === 'Clear search')).toBe(true)
+
+    await act(async () => fireEvent.click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Clear search')!))
+    expect(search.value).toBe('')
+    // The search value is debounced; keep its timer-driven state update inside act.
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    await vi.waitFor(() => expect(container.textContent).toContain('router.example'), { timeout: 1000 })
+
+    const protocol = container.querySelectorAll('select')[0] as HTMLSelectElement
+    await act(async () => fireEvent.change(protocol, { target: { value: 'tcp' } }))
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('No hosts match TCP.'), { timeout: 1000 })
+    const resetFilters = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Reset filters')
+    expect(resetFilters).toBeTruthy()
+    await act(async () => fireEvent.click(resetFilters!))
+    expect(protocol.value).toBe('')
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    await vi.waitFor(() => expect(container.textContent).toContain('router.example'), { timeout: 1000 })
+  })
+
   it('explains when a job has no active baseline', async () => {
     vi.mocked(baselineHosts).mockResolvedValue({ ...detailed, data_quality: 'none', hosts: [], pagination: { limit: 50, offset: 0, total: 0, has_more: false, next_offset: null } })
     await act(async () => {

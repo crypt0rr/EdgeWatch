@@ -60,7 +60,7 @@ test.describe('responsive issue regressions', () => {
     })
 
     await page.goto('/login')
-    await expect(page.getByRole('link', { name: 'Source code' })).toHaveAttribute('href', '/source')
+    await expect(page.getByRole('link', { name: 'Source code' })).toHaveCount(0)
     const setupLink = page.getByRole('link', { name: 'Create the platform administrator' })
     const setupLinkAppearance = await setupLink.evaluate(element => ({
       decoration: getComputedStyle(element).textDecorationLine,
@@ -502,6 +502,9 @@ test.describe('responsive issue regressions', () => {
   })
 
   test('long values stay inside notification, profile, picker and host result rows (#971)', async ({ page }) => {
+    // This intentionally visits six pages at seven viewport widths; allow the
+    // full matrix to complete on slower CI workers instead of failing halfway.
+    test.setTimeout(90_000)
     await mockConsole(page, 'administrator')
     const longIPv6 = '2a01:4f8:c17:b8f2:9c2b:4bff:fe12:3456'
     const longProfile = 'perimeter_naabu_full_tcp_nmap_confirmed_v2_customer_edge'
@@ -565,6 +568,10 @@ test.describe('responsive issue regressions', () => {
     for (const width of [320, 768, 1280]) {
       await page.setViewportSize({ width, height: 1024 })
       await page.goto('/notifications')
+      const updateAlertState = page.locator('.notification-update-toggle small').first()
+      await expect(updateAlertState).toHaveAttribute('title', /^Release and upgrade alerts (on|off)$/)
+      const updateAlertDimensions = await updateAlertState.evaluate(element => ({ client: element.clientWidth, scroll: element.scrollWidth }))
+      expect(updateAlertDimensions.scroll).toBeLessThanOrEqual(updateAlertDimensions.client)
       const notificationPanel = page.locator('.notification-list-panel')
       const notificationEdit = notificationPanel.getByRole('button', { name: 'Edit' })
       await expect(notificationEdit).toBeVisible()
@@ -593,11 +600,30 @@ test.describe('responsive issue regressions', () => {
 
       await page.goto('/public-dashboard')
       await expect(page.locator('.public-picker-row strong')).toContainText(longIPv6)
+      const pickerRow = page.locator('.public-picker-row').filter({ hasText: longIPv6 }).first()
+      const pickerAddressLayout = await pickerRow.locator('strong').evaluate(element => {
+        const range = document.createRange()
+        range.selectNodeContents(element)
+        const textRects = [...range.getClientRects()].map(rect => ({ left: rect.left, right: rect.right }))
+        const picker = element.closest('.public-picker')!.getBoundingClientRect()
+        return { textRects, left: picker.left, right: picker.right }
+      })
+      expect(pickerAddressLayout.textRects.length).toBeGreaterThan(0)
+      expect(pickerAddressLayout.textRects.every(rect => rect.left >= pickerAddressLayout.left && rect.right <= pickerAddressLayout.right)).toBe(true)
       await page.goto('/scans/scan-1')
       await expect(page.locator('.result-row strong')).toContainText(longIPv6)
       await page.goto('/jobs/job-1')
       await expect(page.locator('.detail-summary')).toContainText(longValue)
+      await expect(page.locator('.scan-row-copy > span').first()).toHaveAttribute('title', 'Completed successfully · Open results to inspect the snapshot')
       await expectNoHorizontalScroll(page)
+    }
+
+    for (const width of [320, 375, 414, 1280]) {
+      await page.setViewportSize({ width, height: 1024 })
+      await page.goto('/')
+      const latestOutcome = page.locator('.activity-row').first().locator('div > span').first()
+      await expect(latestOutcome).toHaveAttribute('title', 'Completed successfully · Open scan details')
+      await expectNoHorizontalScroll(page, `latest activity at ${width}px`)
     }
   })
 
@@ -917,7 +943,7 @@ test.describe('responsive issue regressions', () => {
     })
     await page.goto('/security')
 
-    const passwordPanel = page.getByLabel('Current password')
+    const passwordPanel = page.getByLabel('Current password', { exact: true })
     await passwordPanel.fill('password-from-password-panel')
     await page.getByRole('button', { name: 'Set up authenticator' }).click()
     const setupDialog = page.getByRole('dialog', { name: 'Set up authenticator?' })

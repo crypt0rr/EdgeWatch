@@ -176,6 +176,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     ],
   }
   const platformAdmins: any[] = [platformAccount({ id: 'user-platform_admin', username: 'platform', display_name: 'platform_admin', role: 'platform_admin', totp_enabled: true })]
+  let createdUnitUser: Record<string, unknown> | null = null
   let platformRouting = { configured: false, destinations: [] as string[] }
   const failures = new Set<string>()
   const calls: Record<string, number> = {}
@@ -360,7 +361,8 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/scans/active' && method === 'GET') { await json({ scans: [] }); return }
     if (path === '/notifications/destinations' && method === 'GET') { await json({ destinations: [destination], status: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' }, update_routing: updateRouting, incident_reminders_enabled: incidentRemindersEnabled, incident_reminder_cadence: incidentReminderCadence }); return }
     if (path === '/users' && method === 'GET') {
-      await json({ users: [{ id: 'user-2', username: 'operator', display_name: 'Operator', role: 'operator', enabled: true, pending: false, totp_enabled: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', revision: 1 }] }); return
+      const users = [{ id: 'user-2', username: 'operator', display_name: 'Operator', role: 'operator', enabled: true, pending: false, totp_enabled: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', revision: 1 }]
+      await json({ users: createdUnitUser ? [...users, createdUnitUser] : users }); return
     }
     if (path === '/public-dashboard' && method === 'GET') { await json(publicDashboard); return }
     if (path === '/public-dashboard' && method === 'PUT') {
@@ -413,7 +415,11 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/scanner-profiles' && method === 'POST') { await mutate('profile-create', profile, 201); return }
     if (path === '/scanner-profiles/profile-1' && method === 'PUT') { await mutate('profile-update', profile); return }
     if (path === '/users' && method === 'POST') {
-      await mutate('user-create', { user: { id: 'user-created', username: 'new-user', display_name: 'New User', role: 'viewer', enabled: false, pending: true, totp_enabled: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', revision: 1 }, activation_token: 'FIXTURE-TOKEN', activation_path: '/activate#token=FIXTURE-TOKEN' }, 201); return
+      const value = body()
+      record('user-create', value)
+      if (failures.delete('user-create')) { await json(jsonError('user-create'), 422); return }
+      createdUnitUser = { id: 'user-created', username: 'new-user', display_name: 'New User', role: 'viewer', enabled: false, pending: true, totp_enabled: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', revision: 1 }
+      await json({ user: createdUnitUser, activation_token: 'FIXTURE-TOKEN', activation_path: '/activate#token=FIXTURE-TOKEN' }, 201); return
     }
     if (path === '/users/user-2' && method === 'PATCH') { await mutate('user-update', { ...job, id: 'user-2' }); return }
     if (path === '/auth/display-name' && method === 'PUT') { await mutate('display-name', { display_name: 'Renamed admin' }); return }

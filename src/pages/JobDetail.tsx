@@ -631,7 +631,7 @@ export function JobDetail() {
                     <span className={`activity-dot${scanOutcomeTone(scan.status) === 'neutral' ? '' : ` ${scanOutcomeTone(scan.status)}`}`} />
                     <div className="scan-row-copy">
                       <strong>{formatDateTime(scan.finished_at)}</strong>
-                      <span className={scan.error ? 'scan-row-error' : undefined} title={scan.error ?? undefined}>
+                      <span className={scan.error ? 'scan-row-error' : undefined} title={scan.status === 'success' ? 'Completed successfully · Open results to inspect the snapshot' : scan.error ?? undefined}>
                         {scan.status === 'success'
                           ? 'Completed successfully · Open results to inspect the snapshot'
                           : scan.status === 'incomplete'

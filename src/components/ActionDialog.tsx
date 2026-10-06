@@ -9,6 +9,7 @@ type ActionDialogProps = {
   onConfirm: (value: string, secondaryValue?: string) => void | Promise<void>
   onCancel: () => void
   destructive?: boolean
+  restoreFocus?: boolean
   valueLabel?: string
   valueType?: 'password' | 'text'
   valueRequired?: boolean
@@ -46,6 +47,7 @@ export function ActionDialog({
   onConfirm,
   onCancel,
   destructive = false,
+  restoreFocus = true,
   valueLabel,
   valueType = 'text',
   valueRequired = false,
@@ -141,9 +143,9 @@ export function ActionDialog({
         else appShell.setAttribute('aria-hidden', previousAriaHidden)
       }
       const previous = previousFocusRef.current
-      if (previous && document.contains(previous)) previous.focus({ preventScroll: true })
+      if (restoreFocus && previous && document.contains(previous)) previous.focus({ preventScroll: true })
     }
-  }, [])
+  }, [restoreFocus])
 
   async function submit() {
     if (valueRequired && !value.trim()) {

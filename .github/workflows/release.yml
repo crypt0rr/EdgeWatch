@@ -333,6 +333,28 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.ref_name }}
+      # The release candidate contains versioned Go binaries and generated
+      # frontend assets. Refresh the release-only registry cache with these
+      # exact inputs, then let the publishing build reuse this builder's cache.
+      # Keep tag writes separate from main's cache and never write GHA caches.
+      - name: Warm registry cache for the release candidate
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ env.CANDIDATE_IMAGE }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=v0.0.0-ci
+            PREBUILT_FRONTEND=1
+            PREBUILT_EDGEWATCH=1
+          cache-from: |
+            type=registry,ref=ghcr.io/crypt0rr/edgewatch:buildcache
+            type=registry,ref=ghcr.io/crypt0rr/edgewatch:releasecache
+          cache-to: type=registry,ref=ghcr.io/crypt0rr/edgewatch:releasecache,mode=max
+          provenance: mode=max
+          sbom: true
       - name: Build and push image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         id: push
@@ -348,9 +370,11 @@ jobs:
             VERSION=v0.0.0-ci
             PREBUILT_FRONTEND=1
             PREBUILT_EDGEWATCH=1
-          # GitHub Actions caches are ref-isolated, so release tags cannot
-          # restore main's cache. CI publishes this rolling cache to GHCR.
-          cache-from: type=registry,ref=ghcr.io/crypt0rr/edgewatch:buildcache
+          # GitHub Actions caches are ref-isolated, so release tags restore
+          # the main and release caches from GHCR instead of tag-scoped GHA.
+          cache-from: |
+            type=registry,ref=ghcr.io/crypt0rr/edgewatch:buildcache
+            type=registry,ref=ghcr.io/crypt0rr/edgewatch:releasecache
           provenance: mode=max
           sbom: true
       - name: Record the pushed candidate

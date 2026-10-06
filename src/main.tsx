@@ -79,6 +79,7 @@ export function unitBreadcrumb(pathname: string, links: { to: string; label: str
  */
 export function Shell({ displayName, role, permissions, onLogout, unit }: { displayName: string; role: Role; permissions: string[]; onLogout: () => void; unit?: UnitRef | null }) {
   const [liveState, setLiveState] = useState<'connecting' | 'live' | 'reconnecting' | 'limited'>('connecting')
+  const [streamLimitScope, setStreamLimitScope] = useState<'account' | 'unit' | 'deployment' | null>(null)
   const { open, setOpen, isMobile, menuButtonRef, drawerRef } = useNavigationDrawer()
   useActivityHeartbeat()
   const location = useLocation()
@@ -96,95 +97,144 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
   const incidentCountUnavailable = incidentSummary.isError
   useEffect(() => {
     if (!hasPermission('stream.read')) return
-    const stream = new EventSource('/api/v1/stream')
-    let streamLimited = false
-    stream.onopen = () => { if (!streamLimited) setLiveState('live') }
-    stream.onerror = () => { if (!streamLimited) setLiveState('reconnecting') }
-    stream.onmessage = (message) => {
-      try {
-        const event = JSON.parse(message.data) as { type?: string; job_id?: string }
-        switch (event.type) {
-          case 'scan.started':
-          case 'scan.completed':
-          case 'scan-paused':
-          case 'scan-recovered':
-          case 'scan-failure':
-          case 'scan-incomplete':
-          case 'scan-canceled':
-          case 'scan-anomaly':
-            void client.invalidateQueries({ queryKey: ['jobs'] })
-            void client.invalidateQueries({ queryKey: ['active-scans'] })
-            void client.invalidateQueries({ queryKey: ['scans'] })
-            void client.invalidateQueries({ queryKey: ['hosts'] })
-            void client.invalidateQueries({ queryKey: ['activity-events'] })
-            if (event.job_id) {
-              void client.invalidateQueries({ queryKey: ['job-scans', event.job_id] })
-              void client.invalidateQueries({ queryKey: ['job-baseline-overview', event.job_id] })
-              void client.invalidateQueries({ queryKey: ['latest-successful-scan', event.job_id] })
-              void client.invalidateQueries({ queryKey: ['latest-successful-results', event.job_id] })
-              void client.invalidateQueries({ queryKey: ['scan-cycle', event.job_id] })
-              void client.invalidateQueries({ queryKey: ['job', event.job_id] })
-              void client.invalidateQueries({ queryKey: ['job-pending-changes', event.job_id] })
+    let stream: EventSource | undefined
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+    let stableTimer: ReturnType<typeof setTimeout> | undefined
+    let retryCount = 0
+    let disposed = false
+    const connect = () => {
+      if (disposed) return
+      let streamLimited = false
+      const source = new EventSource('/api/v1/stream')
+      stream = source
+      source.onopen = () => {
+        if (streamLimited || disposed) return
+        setStreamLimitScope(null)
+        setLiveState('live')
+        if (stableTimer !== undefined) clearTimeout(stableTimer)
+        stableTimer = setTimeout(() => {
+          retryCount = 0
+          stableTimer = undefined
+        }, 30_000)
+      }
+      source.onerror = () => { if (!streamLimited && !disposed) setLiveState('reconnecting') }
+      source.onmessage = (message) => {
+        try {
+          const event = JSON.parse(message.data) as { type?: string; job_id?: string; reason?: string; retry_after?: number }
+          switch (event.type) {
+            case 'scan.started':
+            case 'scan.completed':
+            case 'scan-paused':
+            case 'scan-recovered':
+            case 'scan-failure':
+            case 'scan-incomplete':
+            case 'scan-canceled':
+            case 'scan-anomaly':
+              void client.invalidateQueries({ queryKey: ['jobs'] })
+              void client.invalidateQueries({ queryKey: ['active-scans'] })
+              void client.invalidateQueries({ queryKey: ['scans'] })
+              void client.invalidateQueries({ queryKey: ['hosts'] })
+              void client.invalidateQueries({ queryKey: ['activity-events'] })
+              if (event.job_id) {
+                void client.invalidateQueries({ queryKey: ['job-scans', event.job_id] })
+                void client.invalidateQueries({ queryKey: ['job-baseline-overview', event.job_id] })
+                void client.invalidateQueries({ queryKey: ['latest-successful-scan', event.job_id] })
+                void client.invalidateQueries({ queryKey: ['latest-successful-results', event.job_id] })
+                void client.invalidateQueries({ queryKey: ['scan-cycle', event.job_id] })
+                void client.invalidateQueries({ queryKey: ['job', event.job_id] })
+                void client.invalidateQueries({ queryKey: ['job-pending-changes', event.job_id] })
+              }
+              break
+            case 'changes-detected':
+            case 'changes-reminder':
+            case 'changes-recovered':
+            case 'incident-opened':
+            case 'incident-closed':
+            case 'incident-accepted':
+            case 'incident-suppressed':
+              void client.invalidateQueries({ queryKey: ['jobs'] })
+              void client.invalidateQueries({ queryKey: ['incidents'] })
+              void client.invalidateQueries({ queryKey: ['activity-events'] })
+              if (event.job_id) {
+                void client.invalidateQueries({ queryKey: ['job', event.job_id] })
+                void client.invalidateQueries({ queryKey: ['job-pending-changes', event.job_id] })
+              }
+              if (event.type === 'incident-accepted') {
+                void client.invalidateQueries({ queryKey: ['job-baseline-overview', event.job_id] })
+                void client.invalidateQueries({ queryKey: ['baseline-hosts', event.job_id] })
+                void client.invalidateQueries({ queryKey: ['host-detail'] })
+              }
+              break
+            case 'job.created':
+            case 'job.updated':
+            case 'job.archived':
+            case 'job.restored':
+            case 'job.deleted':
+              void client.invalidateQueries({ queryKey: ['jobs'] })
+              void client.invalidateQueries({ queryKey: ['activity-events'] })
+              if (event.job_id) void client.invalidateQueries({ queryKey: ['job', event.job_id] })
+              break
+            case 'notification.changed':
+              void client.invalidateQueries({ queryKey: ['notifications'] })
+              void client.invalidateQueries({ queryKey: ['admin-status'] })
+              break
+            case 'application.update_status':
+            case 'application-updated':
+            case 'application-update-available':
+              void client.invalidateQueries({ queryKey: ['admin-status'] })
+              if (event.type !== 'application.update_status') void client.invalidateQueries({ queryKey: ['activity-events'] })
+              break
+            case 'stream_limit': {
+              // EventSource otherwise reconnects after the server closes a
+              // limited stream, repeatedly consuming connection slots. Stop
+              // this source; shared limits retry with bounded backoff, while
+              // an account limit still requires the user to close another tab.
+              streamLimited = true
+              source.close()
+              if (stableTimer !== undefined) {
+                clearTimeout(stableTimer)
+                stableTimer = undefined
+              }
+              const scope = event.reason === 'too many live streams for this business unit'
+                ? 'unit'
+                : event.reason === 'too many live streams'
+                  ? 'deployment'
+                  : 'account'
+              setStreamLimitScope(scope)
+              setLiveState('limited')
+              if (scope !== 'account') {
+                const reportedSeconds = typeof event.retry_after === 'number' && Number.isFinite(event.retry_after) ? event.retry_after : 5
+                const retrySeconds = Math.min(Math.max(reportedSeconds, 1), 300)
+                const delay = Math.min(retrySeconds * 1000 * (2 ** retryCount), 5 * 60 * 1000)
+                retryCount++
+                retryTimer = setTimeout(() => {
+                  retryTimer = undefined
+                  if (!disposed) {
+                    setLiveState('reconnecting')
+                    connect()
+                  }
+                }, delay)
+              }
+              break
             }
-            break
-          case 'changes-detected':
-          case 'changes-reminder':
-          case 'changes-recovered':
-          case 'incident-opened':
-          case 'incident-closed':
-          case 'incident-accepted':
-          case 'incident-suppressed':
-            void client.invalidateQueries({ queryKey: ['jobs'] })
-            void client.invalidateQueries({ queryKey: ['incidents'] })
-            void client.invalidateQueries({ queryKey: ['activity-events'] })
-            if (event.job_id) {
-              void client.invalidateQueries({ queryKey: ['job', event.job_id] })
-              void client.invalidateQueries({ queryKey: ['job-pending-changes', event.job_id] })
-            }
-            if (event.type === 'incident-accepted') {
-              void client.invalidateQueries({ queryKey: ['job-baseline-overview', event.job_id] })
-              void client.invalidateQueries({ queryKey: ['baseline-hosts', event.job_id] })
-              void client.invalidateQueries({ queryKey: ['host-detail'] })
-            }
-            break
-          case 'job.created':
-          case 'job.updated':
-          case 'job.archived':
-          case 'job.restored':
-          case 'job.deleted':
-            void client.invalidateQueries({ queryKey: ['jobs'] })
-            void client.invalidateQueries({ queryKey: ['activity-events'] })
-            if (event.job_id) void client.invalidateQueries({ queryKey: ['job', event.job_id] })
-            break
-          case 'notification.changed':
-            void client.invalidateQueries({ queryKey: ['notifications'] })
-            void client.invalidateQueries({ queryKey: ['admin-status'] })
-            break
-          case 'application.update_status':
-          case 'application-updated':
-          case 'application-update-available':
-            void client.invalidateQueries({ queryKey: ['admin-status'] })
-            if (event.type !== 'application.update_status') void client.invalidateQueries({ queryKey: ['activity-events'] })
-            break
-          case 'stream_limit':
-            // EventSource otherwise reconnects after the server closes a
-            // limited stream, repeatedly consuming connection slots. Stop
-            // this source and require an explicit reload after capacity frees.
-            streamLimited = true
-            stream.close()
-            setLiveState('limited')
-            break
-          case 'refresh_required':
-          default:
-            // Unknown events and a replay gap deliberately trigger a full
-            // refresh so a newly deployed server cannot leave stale UI state.
-            void client.invalidateQueries()
+            case 'refresh_required':
+            default:
+              // Unknown events and a replay gap deliberately trigger a full
+              // refresh so a newly deployed server cannot leave stale UI state.
+              void client.invalidateQueries()
+          }
+        } catch {
+          void client.invalidateQueries()
         }
-      } catch {
-        void client.invalidateQueries()
       }
     }
-    return () => stream.close()
+    connect()
+    return () => {
+      disposed = true
+      if (retryTimer !== undefined) clearTimeout(retryTimer)
+      if (stableTimer !== undefined) clearTimeout(stableTimer)
+      stream?.close()
+    }
   }, [client, permissions])
   const links = [
     ...(hasPermission('overview.read') ? [{ to: '/', label: 'Overview', icon: Gauge }] : []),
@@ -208,7 +258,13 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
   const streamAvailable = hasPermission('stream.read')
   const visibleLiveState = streamAvailable ? liveState : 'unavailable'
   const liveLabel = visibleLiveState === 'live' ? 'Live updates' : visibleLiveState === 'reconnecting' ? 'Reconnecting…' : visibleLiveState === 'connecting' ? 'Connecting…' : visibleLiveState === 'limited' ? 'Live updates limited' : 'Live updates unavailable'
-  const liveDescription = visibleLiveState === 'limited' ? 'Live updates are limited for this account. Close another EdgeWatch tab, then reload this page to reconnect.' : liveLabel
+  const liveDescription = visibleLiveState === 'limited'
+    ? streamLimitScope === 'unit'
+      ? 'Live updates are paused because this business unit has reached its live-stream capacity. Retrying automatically.'
+      : streamLimitScope === 'deployment'
+        ? 'Live updates are paused because EdgeWatch has reached its live-stream capacity. Retrying automatically.'
+        : 'Live updates are limited for this account. Close another EdgeWatch tab, then reload this page to reconnect.'
+    : liveLabel
   useEffect(() => {
     document.title = `${breadcrumb} · EdgeWatch`
     if (previousPath.current !== location.pathname) {

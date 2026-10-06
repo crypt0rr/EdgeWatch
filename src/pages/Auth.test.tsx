@@ -167,7 +167,9 @@ describe('authentication pages', () => {
   it.each([
     [undefined, 'a short while'],
     [1, '1 second'],
+    [2, '2 seconds'],
     [61, '2 minutes'],
+    [300, '5 minutes'],
     [3600, '1 hour'],
     [7200, '2 hours'],
     [86400, '1 day'],

@@ -387,6 +387,7 @@ func (ss *SystemStore) claimDueDeliveries(ctx context.Context, limit int, owner 
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	type claimedPayload struct {
 		delivery Delivery
 		payload  []byte
@@ -395,7 +396,6 @@ func (ss *SystemStore) claimDueDeliveries(ctx context.Context, limit int, owner 
 	for rows.Next() {
 		var item claimedPayload
 		if err := rows.Scan(&item.delivery.ID, &item.delivery.Destination, &item.payload, &item.delivery.Attempts, &item.delivery.Deferrals, &item.delivery.ClaimToken, &item.delivery.TenantID); err != nil {
-			_ = rows.Close()
 			return nil, err
 		}
 		claimed = append(claimed, item)

@@ -64,16 +64,16 @@ them up together.
 
 ## Documentation
 
-The full documentation lives in [`docs/`](docs/README.md) and is being prepared
-for [edgewatch.offsec.nl](https://edgewatch.offsec.nl). Until the website is
-published, the source guides below are available in this branch.
+The full user, operator, and maintainer documentation is available at
+[edgewatch.offsec.nl](https://edgewatch.offsec.nl). The website source lives in
+[`docs/`](docs/README.md).
 
-- [Installation](docs/src/content/docs/getting-started/installation.md) and [first scan](docs/src/content/docs/getting-started/first-scan.md)
-- [Updates](docs/src/content/docs/deployment/updates.md), [reverse proxies](docs/src/content/docs/deployment/reverse-proxies.md), and [container hardening](docs/src/content/docs/deployment/container-hardening.md)
-- [Jobs and incidents](docs/src/content/docs/user-guide/jobs-baselines-incidents.md), [scanning](docs/src/content/docs/user-guide/scanning.md), and [notifications](docs/src/content/docs/user-guide/notifications.md)
-- [Accounts and public status](docs/src/content/docs/administration/accounts-public-status.md) and [business units](docs/src/content/docs/administration/business-units.md)
-- [Configuration](docs/src/content/docs/reference/configuration.md), [CLI](docs/src/content/docs/reference/cli.md), [database compatibility](docs/src/content/docs/reference/database-compatibility.md), and [API compatibility](docs/src/content/docs/reference/api-compatibility.md)
-- [Backup and recovery](docs/src/content/docs/operations/backup-recovery.md) and [local development](docs/src/content/docs/maintainers/development.md)
+- [Installation](https://edgewatch.offsec.nl/getting-started/installation/) and [first scan](https://edgewatch.offsec.nl/getting-started/first-scan/)
+- [Updates](https://edgewatch.offsec.nl/deployment/updates/), [reverse proxies](https://edgewatch.offsec.nl/deployment/reverse-proxies/), and [container hardening](https://edgewatch.offsec.nl/deployment/container-hardening/)
+- [Jobs and incidents](https://edgewatch.offsec.nl/user-guide/jobs-baselines-incidents/), [scanning](https://edgewatch.offsec.nl/user-guide/scanning/), and [notifications](https://edgewatch.offsec.nl/user-guide/notifications/)
+- [Accounts and public status](https://edgewatch.offsec.nl/administration/accounts-public-status/) and [business units](https://edgewatch.offsec.nl/administration/business-units/)
+- [Configuration](https://edgewatch.offsec.nl/reference/configuration/), [CLI](https://edgewatch.offsec.nl/reference/cli/), [database compatibility](https://edgewatch.offsec.nl/reference/database-compatibility/), and [API compatibility](https://edgewatch.offsec.nl/reference/api-compatibility/)
+- [Backup and recovery](https://edgewatch.offsec.nl/operations/backup-recovery/) and [local development](https://edgewatch.offsec.nl/maintainers/development/)
 
 Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
@@ -82,5 +82,5 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 Copyright (c) 2026 Bart. Released under [AGPL-3.0-only](LICENSE); bundled
 components retain their separate licenses in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 Releases before v0.25.0 retain their published MIT terms. See the
-[license and source-code guide](docs/src/content/docs/reference/license.md)
+[license and source-code guide](https://edgewatch.offsec.nl/reference/license/)
 for the source link requirements when deploying a modified build.

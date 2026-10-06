@@ -5,7 +5,7 @@ description: Protect scanner access, accounts, encryption keys, and shared deplo
 
 Only scan systems you own or are authorized to assess. Keep access to the
 Docker host, database, backups, and encryption keys restricted to trusted
-operators. The repository's [security policy](https://github.com/crypt0rr/EdgeWatch/blob/docs/website-preview/SECURITY.md)
+operators. The repository's [security policy](https://github.com/crypt0rr/EdgeWatch/blob/main/SECURITY.md)
 is the canonical reference for security guarantees and vulnerability reporting.
 Report vulnerabilities privately through GitHub's security advisory feature;
 do not put exploit details, target information, or credentials in public issues.

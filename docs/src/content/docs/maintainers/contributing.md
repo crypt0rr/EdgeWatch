@@ -5,7 +5,7 @@ description: Find the code responsible for a change and preserve scanner, storag
 
 EdgeWatch combines a Go daemon, SQLite storage, and an embedded React/TypeScript
 console. Start with [Local development](/maintainers/development/) for builds
-and checks. The repository's [AGENTS.md](https://github.com/crypt0rr/EdgeWatch/blob/docs/website-preview/AGENTS.md)
+and checks. The repository's [AGENTS.md](https://github.com/crypt0rr/EdgeWatch/blob/main/AGENTS.md)
 contains the detailed change rules and validation matrix.
 
 ## Code map
@@ -43,7 +43,7 @@ contains the detailed change rules and validation matrix.
 - Preserve migration compatibility, transaction boundaries, and safe restore
   behavior. Use temporary databases in tests.
 
-The [security policy](https://github.com/crypt0rr/EdgeWatch/blob/docs/website-preview/SECURITY.md)
+The [security policy](https://github.com/crypt0rr/EdgeWatch/blob/main/SECURITY.md)
 contains the exact security and session-revocation guarantees.
 
 ## Submit a focused change
@@ -59,9 +59,24 @@ or `feat:`. Describe the resulting behavior and validation in the pull request,
 including compatibility changes and any unresolved failures. Review the diff
 for secrets, unrelated edits, and generated assets before committing.
 
+## Required documentation updates
+
+Documentation updates are mandatory when a change introduces a feature or
+changes documented behavior. This includes configuration, commands, APIs,
+permissions, deployment, scanning, notifications, and backup or recovery.
+
+Update the affected guides in `docs/src/content/docs/` in the same pull request
+as the implementation. The website is the canonical detailed documentation;
+update the README quick start and `SECURITY.md` too when their content changes.
+Run `npm --prefix docs run build` and review the branch preview before merging.
+After merging, verify that the Pages production deployment contains the updated
+guides. A change requiring documentation is not complete until the guides and
+website are updated. Describe the documentation changes and validation in the
+pull request.
+
 ## Release automation
 
-The [release workflow](https://github.com/crypt0rr/EdgeWatch/blob/docs/website-preview/.github/workflows/release.yml)
+The [release workflow](https://github.com/crypt0rr/EdgeWatch/blob/main/.github/workflows/release.yml)
 is the authority for release validation and publication. It builds one immutable
 candidate, which downstream publication and smoke jobs consume. Preserve this
 contract when changing release automation; normal pull-request checks do not

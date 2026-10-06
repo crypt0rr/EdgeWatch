@@ -1,7 +1,7 @@
 # EdgeWatch documentation website
 
-An Astro Starlight prototype for `https://edgewatch.offsec.nl`, developed on
-`docs/website-preview`. Dark mode is the default, with a persistent light/dark
+The Astro Starlight documentation website for `https://edgewatch.offsec.nl`.
+Production is deployed from `main`; pull requests use branch previews. Dark mode is the default, with a persistent light/dark
 toggle. The site uses the console's palette, brand mark, and Inter typography.
 
 From the repository root, using the Node version in `.node-version`:
@@ -26,7 +26,7 @@ the static site and Pagefind search index, and verifies local links and anchors.
 ## Source layout
 
 - `src/content/docs/`: published Markdown and MDX guides.
-- `src/components/`: homepage, preview notice, and dark-default theme controls.
+- `src/components/`: homepage and dark-default theme controls.
 - `src/styles/edgewatch.css`: documentation theme.
 - `public/`: favicon and Cloudflare Pages response headers.
 - `scripts/check-links.mjs`: validation of generated local links and anchors.
@@ -79,8 +79,7 @@ built preview serves the verified custom page for unknown URLs.
 
 Use root directory `docs`, build command `npm run build`, output directory
 `dist`, and `NODE_VERSION` matching the root `.node-version`.
-Use `docs/website-preview` as the initial trial project's production branch;
-`main` does not contain the site until this branch is merged.
+Use `main` as the production branch and branch deployments to review changes.
 
 The full local preview, Pages, DNS, and promotion instructions are in
 [Documentation and hosting](src/content/docs/maintainers/documentation.md).
@@ -98,7 +97,11 @@ published under `deployment/container-hardening` and `reference/api-compatibilit
 The schema check reads `reference/database-compatibility.md` and the root
 security policy. Update those sources together when migrations change.
 
-The site remains marked as a preview and emits `noindex, nofollow`. Before
-production, switch edit links and repository source links from
-`docs/website-preview` to `main`, remove the preview banner and `noindex` meta
-tag, and change the Pages production branch to `main` after merging.
+Documentation updates are mandatory when new features or other changes affect
+user, operator, or maintainer guidance. Update the guides in the same pull
+request as the implementation, run `npm --prefix docs run build`, review the
+branch preview, and verify the updated website after merging. Update the
+README quick start and security policy when affected.
+
+Production is indexable. Cloudflare marks branch previews with a `noindex`
+response header; verify production indexing separately on the custom domain.

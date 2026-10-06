@@ -12,11 +12,8 @@ export default defineConfig({
       description: 'Deploy, operate, and develop the EdgeWatch network-surface monitor.',
       logo: { src: './public/favicon.svg', replacesTitle: false },
       favicon: '/favicon.svg',
-      // This branch is a prototype, including when used as a trial Pages
-      // project's production branch. Remove alongside the preview banner.
-      head: [{ tag: 'meta', attrs: { name: 'robots', content: 'noindex, nofollow' } }],
       social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/crypt0rr/EdgeWatch' }],
-      editLink: { baseUrl: 'https://github.com/crypt0rr/EdgeWatch/edit/docs/website-preview/docs/' },
+      editLink: { baseUrl: 'https://github.com/crypt0rr/EdgeWatch/edit/main/docs/' },
       customCss: [
         '@fontsource/inter/400.css',
         '@fontsource/inter/600.css',
@@ -27,7 +24,6 @@ export default defineConfig({
         Header: './src/components/HomeHeader.astro',
         ThemeProvider: './src/components/ThemeProvider.astro',
         ThemeSelect: './src/components/ThemeToggle.astro',
-        Banner: './src/components/PreviewBanner.astro',
         Hero: './src/components/HomeHero.astro',
       },
       sidebar: [

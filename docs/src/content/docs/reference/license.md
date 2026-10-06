@@ -4,8 +4,8 @@ description: Understand EdgeWatch licensing, bundled notices, and the source lin
 ---
 
 Copyright (c) 2026 Bart. EdgeWatch is released under
-[AGPL-3.0-only](https://github.com/crypt0rr/EdgeWatch/blob/docs/website-preview/LICENSE). Bundled components keep their separate licenses;
-see [third-party notices](https://github.com/crypt0rr/EdgeWatch/blob/docs/website-preview/THIRD_PARTY_LICENSES.md).
+[AGPL-3.0-only](https://github.com/crypt0rr/EdgeWatch/blob/main/LICENSE). Bundled components keep their separate licenses;
+see [third-party notices](https://github.com/crypt0rr/EdgeWatch/blob/main/THIRD_PARTY_LICENSES.md).
 Releases before v0.25.0 retain their previously published MIT terms.
 
 The console's **Source code** link is public, including on sign-in and public

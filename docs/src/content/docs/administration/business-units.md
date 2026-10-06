@@ -218,6 +218,6 @@ the container, the host commands, the database, or a backup can read and
 change every unit's data. A backup and a restore always cover every unit
 together. Use business units for teams that trust the deployment's operators,
 and separate deployments for parties that must not share them.
-[SECURITY.md](https://github.com/crypt0rr/EdgeWatch/blob/docs/website-preview/SECURITY.md) describes the trust boundary, the platform
+[SECURITY.md](https://github.com/crypt0rr/EdgeWatch/blob/main/SECURITY.md) describes the trust boundary, the platform
 administrator's reach, and the signals that units can still observe about
 each other.

@@ -122,7 +122,10 @@ For release changes, preserve the immutable candidate build implemented in
 
 Follow the conventions in nearby code and keep each change focused on the requested behavior.
 Update API types and consumers together when response shapes change.
-Update operator documentation when configuration, commands, or visible behavior changes.
+Documentation updates are mandatory whenever a change affects documented behavior, including new features, configuration, commands, APIs, permissions, deployment, or recovery.
+Update the affected guides in `docs/src/content/docs/` in the same change; the website is the canonical detailed documentation.
+Update the README quick start and `SECURITY.md` when their content is affected, and run `npm --prefix docs run build`.
+A change requiring documentation is not complete until its guides are updated and the corresponding website deployment is verified.
 
 Use a concise commit subject consistent with recent history, such as `docs:`, `fix:`, or `feat:`.
 Describe the resulting behavior and relevant validation in the pull request.

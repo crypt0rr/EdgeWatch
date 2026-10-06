@@ -11,11 +11,11 @@ and builds, but is not included in the production image.
 
 The project uses Go 1.27.1 or newer and Node.js 24.16.0 or newer within the
 Node 24 release line. CI and the container build are pinned to 24.21.0; local
-version managers can use [.node-version](https://github.com/crypt0rr/EdgeWatch/blob/docs/website-preview/.node-version).
+version managers can use [.node-version](https://github.com/crypt0rr/EdgeWatch/blob/main/.node-version).
 
 Use the commands in the repository’s Makefile, package.json, and CI. Read the
-[agent guide](https://github.com/crypt0rr/EdgeWatch/blob/docs/website-preview/AGENTS.md) for repository conventions and the
-[security policy](https://github.com/crypt0rr/EdgeWatch/blob/docs/website-preview/SECURITY.md) before security-sensitive changes.
+[agent guide](https://github.com/crypt0rr/EdgeWatch/blob/main/AGENTS.md) for repository conventions and the
+[security policy](https://github.com/crypt0rr/EdgeWatch/blob/main/SECURITY.md) before security-sensitive changes.
 
 ## Build the application
 

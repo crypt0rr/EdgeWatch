@@ -2,7 +2,7 @@ name: Documentation
 
 on:
   push:
-    branches: [main, docs/website-preview]
+    branches: [main]
     paths:
       - 'docs/**'
       - '.node-version'

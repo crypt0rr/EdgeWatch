@@ -5,7 +5,7 @@ description: Understand deployment settings, defaults, rate limits, and legacy c
 
 config.yaml contains deployment settings. Create monitoring jobs and manage
 users, destinations, scanner profiles, baselines, and public status in the web
-console. See [config.example.yaml](https://github.com/crypt0rr/EdgeWatch/blob/docs/website-preview/config.example.yaml) for the complete
+console. See [config.example.yaml](https://github.com/crypt0rr/EdgeWatch/blob/main/config.example.yaml) for the complete
 validated schema.
 
 | Configuration | Managed in | Purpose |

@@ -342,16 +342,16 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ env.CANDIDATE_IMAGE }}
           labels: ${{ steps.meta.outputs.labels }}
+          # The prebuilt binary and image labels carry the release version.
+          # Keep the unused Dockerfile fallback arg aligned with CI's cache.
           build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
+            VERSION=v0.0.0-ci
             PREBUILT_FRONTEND=1
             PREBUILT_EDGEWATCH=1
-          # CI writes this cache with the same multi-platform solve and
-          # prebuilt build arguments used here, including both Naabu targets.
-          cache-from: |
-            type=gha,scope=container-release-multiarch
-            type=gha,scope=container-prebuilt-amd64
-            type=gha,scope=container-prebuilt-arm64
+          # Use the single multi-platform cache exported from main. The
+          # isolated release-style CI build verifies that both Naabu targets
+          # are available from this scope.
+          cache-from: type=gha,scope=container-release-multiarch
           provenance: mode=max
           sbom: true
       - name: Record the pushed candidate

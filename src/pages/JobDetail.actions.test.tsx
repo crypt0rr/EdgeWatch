@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Route, Routes } from 'react-router-dom'
 import { APIError, activeScans, approveBaseline, archiveJob, cancelScan, deleteJob, discardScanCycle, getJob, getSession, jobBaseline, jobScans, latestSuccessfulScan, resetBaseline, restoreJob, runJob, scanCycle, scanDetail, scanHosts, scanResults } from '../api'
@@ -86,7 +87,7 @@ describe('job detail actions', () => {
     expect(screen.getByRole('button', { name: 'Queued…' })).toBeDisabled()
 
     client.setQueryData(['active-scans'], { scans: [], queued_runs: [] })
-    window.dispatchEvent(new CustomEvent('edgewatch:scan-skipped', { detail: { job_id: 'job-1', reason: 'archived' } }))
+    act(() => window.dispatchEvent(new CustomEvent('edgewatch:scan-skipped', { detail: { job_id: 'job-1', reason: 'archived' } })))
 
     await waitFor(() => expect(screen.queryByRole('heading', { name: 'Scan queued' })).not.toBeInTheDocument())
     expect(screen.getByRole('alert')).toHaveTextContent('The job was archived before the queued scan could start.')

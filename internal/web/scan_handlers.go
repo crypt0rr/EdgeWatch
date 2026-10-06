@@ -621,6 +621,10 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, ts *store.Tenan
 	needsCurrentBaseline := comparable && summary.BaselineScanID == "" && summary.BaselineConfigHash == ""
 	if needsCurrentBaseline {
 		state, stateErr = ts.RuntimeState(r.Context(), id)
+		if stateErr != nil {
+			s.writeInternalError(w, r, "store", stateErr)
+			return
+		}
 	}
 	if comparable {
 		if summary.BaselineScanID != "" || summary.BaselineConfigHash != "" {
@@ -637,7 +641,7 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, ts *store.Tenan
 			value["comparison_source"] = "scan_time"
 			value["comparison_state"] = "compared"
 			value["baseline_scan_id"] = summary.BaselineScanID
-		} else if stateErr == nil && state.Baseline != nil {
+		} else if state.Baseline != nil {
 			// Legacy scans from before the immutable comparison columns were
 			// introduced retain the previous current-baseline behavior.
 			// Only this compatibility path needs the full snapshot. Managed scans

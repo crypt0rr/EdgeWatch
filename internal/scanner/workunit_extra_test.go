@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -50,6 +51,42 @@ func TestNmapVersionAndScanWorkUnit(t *testing.T) {
 	enrichmentUnit.Phase = "enrichment"
 	if _, err := n.ScanWorkUnit(context.Background(), enrichmentJob, enrichmentUnit, nil); err != nil {
 		t.Fatalf("legacy enrichment fallback failed: %v", err)
+	}
+}
+
+func TestScanWorkUnitEnrichmentSkipsNmapHostDiscoveryAndVerbosity(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "nmap-args")
+	nmapPath := filepath.Join(dir, "nmap")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsPath + "\nout=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"-oX\" ]; then out=\"$2\"; shift 2; else shift; fi\ndone\nprintf '%s' '" + sampleXML + "' > \"$out\"\n"
+	if err := os.WriteFile(nmapPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	assumeAlive := false
+	job := config.NormalizeJob(config.Job{
+		Name: "naabu-enrichment-args", Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1,
+		AssumeAlive: &assumeAlive,
+		TCP: &config.Protocol{
+			Engine: config.EngineNaabuNmap, Ports: "22", Mode: "connect",
+			EnrichmentArgs: []string{config.PlaceholderAddress, config.PlaceholderPorts, config.PlaceholderStructuredOutput, config.PlaceholderHostDiscovery},
+		},
+	})
+	unit := WorkUnit{
+		Engine: config.EngineNmap, Phase: "enrichment", Protocol: "tcp", Family: 4,
+		Targets:   []ResolvedTarget{{Name: "192.0.2.1", ConfiguredTarget: "192.0.2.1", Addresses: []string{"192.0.2.1"}}},
+		Addresses: []string{"192.0.2.1"}, Ports: "22", PortCount: 1, Probes: 1,
+	}
+	if _, err := New(nmapPath).ScanWorkUnit(context.Background(), job, unit, nil); err != nil {
+		t.Fatalf("scan enrichment work unit: %v", err)
+	}
+	argsBytes, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Fields(string(argsBytes))
+	if !slices.Contains(args, "-Pn") || slices.Contains(args, "-v") {
+		t.Fatalf("enrichment arguments = %v, want -Pn and no -v", args)
 	}
 }
 

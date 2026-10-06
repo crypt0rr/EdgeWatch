@@ -558,9 +558,12 @@ func TestNmapDiscoveryVerbosityAcrossProtocolsAndProfiles(t *testing.T) {
 			}
 
 			pc.NmapArgs = nil
-			args := nmapEnrichmentArgs(4, protocol, pc, "balanced", false, []string{"192.0.2.9"})
+			args := nmapArgsWithTemplateAndDiscovery(4, protocol, pc, "balanced", true, []string{"192.0.2.9"}, nil, false)
 			if countNmapVerbosity(args) != 0 {
 				t.Fatalf("Naabu enrichment must not infer host reachability from Nmap verbosity: %v", args)
+			}
+			if !slices.Contains(args, "-Pn") {
+				t.Fatalf("Naabu enrichment must skip redundant Nmap host discovery: %v", args)
 			}
 		})
 	}

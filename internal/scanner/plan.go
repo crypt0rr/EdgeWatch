@@ -376,7 +376,16 @@ func (n *Nmap) ScanWorkUnit(ctx context.Context, job config.Job, unit WorkUnit, 
 			template = pc.NmapArgs
 		}
 	}
-	result, err := n.scanProtocolBatchDetailedProgressWithTemplate(ctx, importResolvedTargets(unit.Targets), unit.Protocol, pc, job.Timing, job.AssumesAlive(), template, nil, func(update invocationProgress) {
+	assumeAlive := job.AssumesAlive()
+	includeDownHosts := !assumeAlive
+	if unit.Phase == "enrichment" {
+		// Naabu has already discovered each address while finding open ports.
+		// Skip redundant Nmap host discovery and do not treat its output as
+		// authoritative host-state evidence.
+		assumeAlive = true
+		includeDownHosts = false
+	}
+	result, err := n.scanProtocolBatchDetailedProgressWithTemplate(ctx, importResolvedTargets(unit.Targets), unit.Protocol, pc, job.Timing, assumeAlive, includeDownHosts, template, nil, func(update invocationProgress) {
 		lastOutput = update.Output
 		if update.Fraction > lastFraction {
 			lastFraction = update.Fraction

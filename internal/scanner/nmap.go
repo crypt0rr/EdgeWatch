@@ -757,10 +757,10 @@ type invocationProgress struct {
 // observations for the host explorer. The two representations intentionally
 // have separate lifecycles: descriptive host evidence never affects hashes.
 func (n *Nmap) scanProtocolBatchDetailedProgress(ctx context.Context, targets []resolvedTarget, protocol string, pc config.Protocol, timing string, assumeAlive bool, report func(int64, int64), statusReports ...func(invocationProgress)) (protocolScanResult, error) {
-	return n.scanProtocolBatchDetailedProgressWithTemplate(ctx, targets, protocol, pc, timing, assumeAlive, pc.NmapArgs, report, statusReports...)
+	return n.scanProtocolBatchDetailedProgressWithTemplate(ctx, targets, protocol, pc, timing, assumeAlive, !assumeAlive, pc.NmapArgs, report, statusReports...)
 }
 
-func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context, targets []resolvedTarget, protocol string, pc config.Protocol, timing string, assumeAlive bool, template []string, report func(int64, int64), statusReports ...func(invocationProgress)) (protocolScanResult, error) {
+func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context, targets []resolvedTarget, protocol string, pc config.Protocol, timing string, assumeAlive, includeDownHosts bool, template []string, report func(int64, int64), statusReports ...func(invocationProgress)) (protocolScanResult, error) {
 	if err := config.ValidateScannerProfile(config.ScannerProfile{Engine: config.EngineNmap, NmapArgs: pc.NmapArgs, EnrichmentArgs: pc.EnrichmentArgs, NSEProfile: pc.NSEProfile, NSEArgs: pc.NSEArgs}); err != nil {
 		return protocolScanResult{}, ConfigurationError(fmt.Errorf("scanner profile arguments: %w", err))
 	}
@@ -805,7 +805,7 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 		for start := 0; start < len(addresses); start += batchLimit {
 			end := min(start+batchLimit, len(addresses))
 			batch := addresses[start:end]
-			args := nmapArgsWithTemplate(family, protocol, pc, timing, assumeAlive, batch, template)
+			args := nmapArgsWithTemplateAndDiscovery(family, protocol, pc, timing, assumeAlive, batch, template, includeDownHosts)
 			cmd := exec.CommandContext(ctx, n.Path, args...)
 			// Keep profile execution deterministic and prevent host-local Nmap
 			// configuration, script directories, or credential-bearing environment
@@ -976,22 +976,6 @@ func unitsFromMap(units map[string]model.Unit) []model.Unit {
 
 func nmapArgs(family int, protocol string, pc config.Protocol, timing string, assumeAlive bool, addresses []string) []string {
 	return nmapArgsWithTemplate(family, protocol, pc, timing, assumeAlive, addresses, pc.NmapArgs)
-}
-
-// nmapEnrichmentArgs renders the Naabu→Nmap confirmation invocation. New
-// profiles use enrichment_args; nmap_args remains a compatibility fallback
-// for older persisted Naabu revisions that predate the separate field. The
-// preview uses the same precedence so administrators see the command that
-// will actually run.
-func nmapEnrichmentArgs(family int, protocol string, pc config.Protocol, timing string, assumeAlive bool, addresses []string) []string {
-	template := pc.EnrichmentArgs
-	if len(template) == 0 {
-		template = pc.NmapArgs
-	}
-	// Naabu enrichment confirms discovered ports; its Nmap host status does not
-	// define target reachability. In particular, verbose Nmap output would turn
-	// an enrichment "down" response into explicit host-discovery evidence.
-	return nmapArgsWithTemplateAndDiscovery(family, protocol, pc, timing, assumeAlive, addresses, template, false)
 }
 
 func nmapArgsWithTemplate(family int, protocol string, pc config.Protocol, timing string, assumeAlive bool, addresses, template []string) []string {

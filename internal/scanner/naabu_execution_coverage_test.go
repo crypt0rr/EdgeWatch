@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,6 +57,29 @@ func TestRunNaabuSuccessParsesJSONAndReportsLiveness(t *testing.T) {
 	}
 	if !foundOutput {
 		t.Fatalf("diagnostic output was not reported: %#v", reports)
+	}
+}
+
+func TestRunNaabuSerializesStatusCallbacksAcrossOutputAndHeartbeat(t *testing.T) {
+	script := "printf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":22,\"protocol\":\"tcp\"}'\ni=0\nwhile [ \"$i\" -lt 500 ]; do\n  printf 'progress %s\\n' \"$i\" >&2\n  i=$((i + 1))\ndone\n"
+	n := NewWithNaabu("missing-nmap", writeNaabuFixture(t, script))
+	var active atomic.Int32
+	var reentrant atomic.Bool
+	var delayed atomic.Bool
+	_, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true, func(invocationProgress) {
+		if active.Add(1) != 1 {
+			reentrant.Store(true)
+		}
+		defer active.Add(-1)
+		if delayed.CompareAndSwap(false, true) {
+			time.Sleep(1100 * time.Millisecond)
+		}
+	})
+	if err != nil {
+		t.Fatalf("runNaabu = %v (stderr %q)", err, stderr)
+	}
+	if reentrant.Load() {
+		t.Fatal("Naabu status callback was entered concurrently")
 	}
 }
 

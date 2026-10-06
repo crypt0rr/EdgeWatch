@@ -89,12 +89,42 @@ func TestNaabuConfirmationUsesResolvedConnectMode(t *testing.T) {
 	if job.TCP == nil {
 		t.Fatal("missing TCP configuration")
 	}
-	args := nmapEnrichmentArgs(4, "tcp", *job.TCP, "balanced", true, []string{"192.0.2.1"})
+	args := nmapArgsWithTemplateAndDiscovery(4, "tcp", *job.TCP, "balanced", true, []string{"192.0.2.1"}, job.TCP.EnrichmentArgs, false)
 	if !slices.Contains(args, "-sT") || slices.Contains(args, "-sS") {
 		t.Fatalf("Naabu confirmation did not use connect mode: %v", args)
 	}
 	if naabu := naabuArgs(*job.TCP.Naabu, "/tmp/targets", true); !slices.Contains(naabu, "c") {
 		t.Fatalf("Naabu discovery did not use connect scan type: %v", naabu)
+	}
+}
+
+func TestNaabuPipelineEnrichmentSkipsNmapHostDiscoveryAndVerbosity(t *testing.T) {
+	allowNaabuSYNForTest(t)
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "nmap-args")
+	nmapPath := filepath.Join(dir, "nmap")
+	nmapScript := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsPath + "\nprintf '%s' '" + sampleXML + "'\n"
+	if err := os.WriteFile(nmapPath, []byte(nmapScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	naabuPath := writeNaabuFixture(t, "printf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":22,\"protocol\":\"tcp\"}'\n")
+	assumeAlive := false
+	job := config.NormalizeJob(config.Job{
+		Name: "naabu-enrichment-discovery", Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1,
+		AssumeAlive: &assumeAlive,
+		TCP:         &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "22", Naabu: &config.NaabuOptions{ScanType: "syn"}},
+	})
+	targets := []resolvedTarget{{Name: "192.0.2.1", Addresses: []string{"192.0.2.1"}}}
+	if _, err := NewWithNaabu(nmapPath, naabuPath).scanNaabuPipelineResolved(context.Background(), job, targets, nil); err != nil {
+		t.Fatalf("scan Naabu pipeline: %v", err)
+	}
+	argsBytes, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Fields(string(argsBytes))
+	if !slices.Contains(args, "-Pn") || slices.Contains(args, "-v") {
+		t.Fatalf("Naabu enrichment arguments = %v, want -Pn and no -v", args)
 	}
 }
 

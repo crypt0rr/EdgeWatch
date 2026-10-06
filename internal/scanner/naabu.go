@@ -457,7 +457,10 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 			}
 		}
 		enrichmentProbes += groupProbes
-		result, err := n.scanProtocolBatchDetailedProgressWithTemplate(ctx, groupTargets, "tcp", pc, job.Timing, job.AssumesAlive(), enrichmentArgs, nil, func(update invocationProgress) {
+		// Naabu has already discovered each address in this group. Ask Nmap to
+		// confirm ports directly, without repeating host discovery or reporting
+		// a down state as authoritative evidence.
+		result, err := n.scanProtocolBatchDetailedProgressWithTemplate(ctx, groupTargets, "tcp", pc, job.Timing, true, false, enrichmentArgs, nil, func(update invocationProgress) {
 			if report == nil {
 				return
 			}
@@ -778,7 +781,7 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	if len(statusReports) > 0 {
 		status = statusReports[0]
 	}
-	var statusMu sync.Mutex
+	var callbackMu sync.Mutex
 	lastOutput := ""
 	emitStatus := func(update invocationProgress) {
 		if status == nil {
@@ -787,12 +790,12 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 		if update.Output != "" {
 			update.Output = trimProgressOutput(update.Output)
 		}
-		statusMu.Lock()
+		callbackMu.Lock()
+		defer callbackMu.Unlock()
 		if update.Output != "" {
 			lastOutput = update.Output
 		}
 		update.Output = lastOutput
-		statusMu.Unlock()
 		status(update)
 	}
 	stderr := &progressOutputWriter{limit: maxProgressOutput, onExceeded: killOnOutputLimit, emit: func(line string) {

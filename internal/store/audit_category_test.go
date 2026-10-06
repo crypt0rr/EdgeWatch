@@ -141,6 +141,7 @@ var notAuditActions = map[string]bool{
 	"notification.changed":        true,
 	"scan.cancellation_requested": true,
 	"scan.completed":              true,
+	"scan.skipped":                true,
 	"scan.started":                true,
 	"auth.key":                    true,
 	"notification.key":            true,

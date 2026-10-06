@@ -8,12 +8,17 @@ const scriptDirectory = dirname(fileURLToPath(import.meta.url))
 const repositoryRoot = resolve(scriptDirectory, '..')
 const workflowPath = resolve(repositoryRoot, '.github', 'workflows', 'release.yml')
 const workflow = await readFile(workflowPath, 'utf8')
+const ciWorkflowPath = resolve(repositoryRoot, '.github', 'workflows', 'ci.yml')
+const ciWorkflow = await readFile(ciWorkflowPath, 'utf8')
 
 const jobsStart = workflow.indexOf('\njobs:\n')
 assert.notEqual(jobsStart, -1, 'release workflow is missing its jobs')
 const workflowHeader = workflow.slice(0, jobsStart)
 const jobsSection = workflow.slice(jobsStart)
 const jobNames = [...jobsSection.matchAll(/^ {2}([A-Za-z0-9_-]+):\n/gm)].map((match) => match[1])
+const ciJobsStart = ciWorkflow.indexOf('\njobs:\n')
+assert.notEqual(ciJobsStart, -1, 'CI workflow is missing its jobs')
+const ciJobsSection = ciWorkflow.slice(ciJobsStart)
 
 function jobBlock(name) {
   const marker = `\n  ${name}:\n`
@@ -24,6 +29,17 @@ function jobBlock(name) {
   nextJob.lastIndex = bodyStart
   const next = nextJob.exec(jobsSection)
   return jobsSection.slice(bodyStart, next?.index ?? jobsSection.length)
+}
+
+function ciJobBlock(name) {
+  const marker = `\n  ${name}:\n`
+  const start = ciJobsSection.indexOf(marker)
+  assert.notEqual(start, -1, `CI workflow is missing the ${name} job`)
+  const bodyStart = start + marker.length
+  const nextJob = /^ {2}[A-Za-z0-9_-]+:/gm
+  nextJob.lastIndex = bodyStart
+  const next = nextJob.exec(ciJobsSection)
+  return ciJobsSection.slice(bodyStart, next?.index ?? ciJobsSection.length)
 }
 
 function stepBlock(job, name) {
@@ -53,8 +69,17 @@ test('release images are staged under unique candidate tags', () => {
 test('release image reads platform-matched CI caches without writing tag-scoped caches', () => {
   const image = jobBlock('image')
   const build = stepBlock(image, 'Build and push image')
-  assert.match(build, /cache-from:\s*\|\n\s+type=gha,scope=container-multiarch\n\s+type=gha,scope=container-prebuilt-amd64\n\s+type=gha,scope=container-prebuilt-arm64/)
+  assert.match(build, /cache-from:\s*\|\n\s+type=gha,scope=container-release-multiarch\n\s+type=gha,scope=container-prebuilt-amd64\n\s+type=gha,scope=container-prebuilt-arm64/)
   assert.doesNotMatch(build, /^\s+cache-to:/m)
+})
+
+test('CI exports the release-style multi-platform cache with matching inputs', () => {
+  const container = ciJobBlock('container')
+  const cacheBuild = stepBlock(container, 'Build release-style multi-platform cache')
+  assert.match(cacheBuild, /platforms: linux\/amd64,linux\/arm64/)
+  assert.match(cacheBuild, /build-args:\s*\|\n\s+VERSION=v0\.0\.0-ci\n\s+PREBUILT_FRONTEND=1\n\s+PREBUILT_EDGEWATCH=1/)
+  assert.match(cacheBuild, /cache-from: type=gha,scope=container-release-multiarch/)
+  assert.match(cacheBuild, /cache-to: \$\{\{ github\.event_name == 'push' && 'type=gha,mode=max,scope=container-release-multiarch' \|\| '' \}\}/)
 })
 
 test('release verification keeps schema, scanner, build, and race gates current', () => {

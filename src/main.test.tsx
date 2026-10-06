@@ -16,6 +16,8 @@ vi.mock('./api', async () => {
 
 class EventSourceStub {
   static instances: EventSourceStub[] = []
+  static CLOSED = 2
+  readyState = 0
   onopen: (() => void) | null = null
   onerror: (() => void) | null = null
   onmessage: ((event: MessageEvent) => void) | null = null
@@ -29,6 +31,10 @@ class EventSourceStub {
 
 function CurrentPath() {
   return <output data-testid="current-path">{useLocation().pathname}</output>
+}
+
+function CurrentSearch() {
+  return <output data-testid="current-search">{useLocation().search}</output>
 }
 
 describe('application shell', () => {
@@ -106,6 +112,19 @@ describe('application shell', () => {
     expect(document.title).toBe('Hosts · EdgeWatch')
   })
 
+  it('preserves focus in the Activity job filter when the query string changes', async () => {
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [{ id: 'job-1', revision: 1, enabled: true, archived: false, job: { name: 'Production' }, baseline: { pending: 0 } }] } as never)
+    renderWithProviders(<><Shell displayName="Admin" role="administrator" permissions={['jobs.read', 'scans.read']} onLogout={vi.fn()} /><CurrentSearch /></>, { route: ['/activity'] })
+
+    const filter = await screen.findByRole('combobox', { name: 'Filter activity by job' })
+    await screen.findByRole('option', { name: 'Production' })
+    filter.focus()
+    expect(document.activeElement).toBe(filter)
+    fireEvent.change(filter, { target: { value: 'job-1' } })
+    await waitFor(() => expect(screen.getByTestId('current-search')).toHaveTextContent('job_id=job-1'))
+    expect(document.activeElement).toBe(filter)
+  })
+
   it('keeps the protected shell loading while the authenticated session is still pending', async () => {
     vi.mocked(setupStatus).mockResolvedValueOnce({ configured: true } as never)
     let resolveSession!: (session: unknown) => void
@@ -146,6 +165,8 @@ describe('application shell', () => {
     window.addEventListener('edgewatch:scan-skipped', skipped)
     await waitFor(() => expect(EventSourceStub.instances).toHaveLength(1))
     const stream = EventSourceStub.instances[0]
+    const liveStatus = screen.getByRole('status', { name: 'Connecting…' })
+    expect(liveStatus.querySelector('.status-dot-label')).not.toHaveAttribute('aria-hidden')
     act(() => stream.emit('scan.completed', 'job-9'))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['active-scans'] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['jobs'] })
@@ -169,9 +190,35 @@ describe('application shell', () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['jobs'] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['job-pending-changes', 'job-9'] })
     await waitFor(() => expect(screen.getByRole('status', { name: 'Live updates' })).toHaveClass('live'))
+    expect(liveStatus.querySelector('.status-dot-label')).toHaveTextContent('Live updates')
     act(() => stream.onerror?.())
     await waitFor(() => expect(screen.getByRole('status', { name: 'Reconnecting…' })).toHaveClass('reconnecting'))
+    expect(liveStatus.querySelector('.status-dot-label')).toHaveTextContent('Reconnecting…')
     window.removeEventListener('edgewatch:scan-skipped', skipped)
+  })
+
+  it('recreates a stream the browser closed and refreshes queries when it reopens', async () => {
+    vi.useFakeTimers()
+    const { client } = renderWithProviders(<Shell displayName="Viewer" role="viewer" permissions={['stream.read']} onLogout={vi.fn()} />, { route: ['/security'] })
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    expect(EventSourceStub.instances).toHaveLength(1)
+    const first = EventSourceStub.instances[0]
+    act(() => first.onopen?.())
+    invalidate.mockClear()
+
+    first.readyState = EventSourceStub.CLOSED
+    act(() => first.onerror?.())
+    expect(screen.getByRole('status', { name: 'Reconnecting…' })).toBeInTheDocument()
+    await act(async () => { await vi.advanceTimersByTimeAsync(999) })
+    expect(EventSourceStub.instances).toHaveLength(1)
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    expect(EventSourceStub.instances).toHaveLength(2)
+
+    invalidate.mockClear()
+    act(() => EventSourceStub.instances[1].onopen?.())
+    expect(invalidate).toHaveBeenCalledOnce()
+    expect(invalidate).toHaveBeenCalledWith()
+    expect(screen.getByRole('status', { name: 'Live updates' })).toHaveClass('live')
   })
 
   it('refreshes pending-confirmation counts after scan and incident events', async () => {

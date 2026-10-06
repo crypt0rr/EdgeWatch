@@ -65,7 +65,7 @@ export function PlatformShell({ displayName, permissions, onLogout }: { displayN
     {open && isMobile && <button type="button" aria-label="Close navigation" tabIndex={-1} className="backdrop" onClick={() => setOpen(false)} />}
     <main ref={mainRef} id="main-content" tabIndex={-1} className="main" inert={isMobile && open ? true : undefined} aria-hidden={isMobile && open ? true : undefined}>
       <header className="topbar"><button ref={menuButtonRef} type="button" aria-label={open ? 'Close navigation' : 'Open navigation'} aria-controls="primary-navigation" aria-expanded={isMobile ? open : false} className="menu-button" onClick={() => setOpen(true)}><Menu size={21} /></button><nav className="breadcrumb" title={breadcrumb} aria-label={`Breadcrumb: ${breadcrumb}`}><span className="platform-breadcrumb-prefix">Platform / </span><span>{currentLabel}</span></nav><div className="topbar-actions"><span className="pill amber" title="The platform console never shows a unit's jobs, scans, hosts, or incidents">Platform console</span></div></header>
-      <div className="content"><PageErrorBoundary key={location.key} homePath={home} homeLabel={links[0].label}><Routes>
+      <div className="content"><PageErrorBoundary resetKey={location.key} homePath={home} homeLabel={links[0].label}><Routes>
         <Route path="/platform/units" element={guard('units.manage', <Units />)} />
         <Route path="/platform/units/:id" element={guard('units.manage', <UnitDetail permissions={permissions} />)} />
         <Route path="/platform/units/:id/:tab" element={guard('units.manage', <UnitDetail permissions={permissions} />)} />

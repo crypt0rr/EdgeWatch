@@ -44,6 +44,7 @@ describe('global hosts explorer', () => {
     queryClient.clear()
     container.remove()
     vi.clearAllMocks()
+    vi.useRealTimers()
   })
 
   async function renderPage() {
@@ -59,6 +60,10 @@ describe('global hosts explorer', () => {
       setter?.call(input, value)
       input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
     })
+  }
+
+  function hostEmptyState() {
+    return container.querySelector('.host-empty-results')
   }
 
   it('renders active and archived hosts with searchable filter controls', async () => {
@@ -126,31 +131,29 @@ describe('global hosts explorer', () => {
   it('distinguishes an empty inventory from no hosts matching active filters', async () => {
     vi.mocked(listHosts).mockResolvedValue(emptyResponse)
     await renderPage()
-    expect(container.querySelector('[role="status"]')?.textContent).toContain('No completed scans have produced effective hosts yet.')
+    expect(hostEmptyState()).toHaveTextContent('No completed scans have produced effective hosts yet.')
 
     const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement
-    await act(async () => {
-      setInputValue(search, 'missing')
-      await new Promise(resolve => setTimeout(resolve, 300))
-    })
-    await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('No hosts match “missing”.'), { timeout: 1000 })
+    setInputValue(search, 'missing')
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: 'missing', offset: 0 }))
+    await vi.waitFor(() => expect(container.textContent).toContain('No hosts match “missing”.'), { timeout: 1000 })
+    expect(hostEmptyState()).toHaveTextContent('No hosts match “missing”.')
     expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: 'missing', offset: 0 }))
     expect(Array.from(container.querySelectorAll('button')).some(button => button.textContent === 'Clear search')).toBe(true)
 
-    await act(async () => {
-      const clearSearch = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Clear search') as HTMLButtonElement
-      clearSearch.click()
-      await new Promise(resolve => setTimeout(resolve, 300))
-    })
+    const clearSearch = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Clear search') as HTMLButtonElement
+    act(() => clearSearch.click())
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
     expect(search.value).toBe('')
-    await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('No completed scans have produced effective hosts yet.'), { timeout: 1000 })
+    await vi.waitFor(() => expect(hostEmptyState()).toHaveTextContent('No completed scans have produced effective hosts yet.'), { timeout: 1000 })
     const selects = Array.from(container.querySelectorAll('select')) as HTMLSelectElement[]
     await act(async () => {
       selects[0]!.value = 'tcp'
       selects[0]!.dispatchEvent(new Event('change', { bubbles: true }))
       await Promise.resolve()
     })
-    await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('No hosts match TCP.'), { timeout: 1000 })
+    await vi.waitFor(() => expect(hostEmptyState()).toHaveTextContent('No hosts match TCP.'), { timeout: 1000 })
     expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ protocol: 'tcp', offset: 0 }))
 
     await act(async () => {
@@ -159,7 +162,7 @@ describe('global hosts explorer', () => {
       await Promise.resolve()
     })
     await vi.waitFor(() => expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ protocol: 'tcp', has_open_ports: false, offset: 0 })), { timeout: 1000 })
-    await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('No hosts match TCP and hosts with no positive ports.'), { timeout: 1000 })
+    await vi.waitFor(() => expect(hostEmptyState()).toHaveTextContent('No hosts match TCP and hosts with no positive ports.'), { timeout: 1000 })
     expect(Array.from(container.querySelectorAll('button')).some(button => button.textContent === 'Reset filters')).toBe(true)
     await act(async () => {
       const resetFilters = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Reset filters') as HTMLButtonElement
@@ -168,7 +171,7 @@ describe('global hosts explorer', () => {
     })
     expect(selects[0]?.value).toBe('')
     expect(selects[1]?.value).toBe('')
-    await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('No completed scans have produced effective hosts yet.'), { timeout: 1000 })
+    await vi.waitFor(() => expect(hostEmptyState()).toHaveTextContent('No completed scans have produced effective hosts yet.'), { timeout: 1000 })
   })
 
   it('shows an actionable error when the host index cannot be queried', async () => {

@@ -5,6 +5,7 @@ type PageErrorBoundaryProps = {
   children: ReactNode
   homePath: string
   homeLabel: string
+  resetKey: string
 }
 
 type PageErrorBoundaryState = {
@@ -17,6 +18,12 @@ export class PageErrorBoundary extends Component<PageErrorBoundaryProps, PageErr
 
   static getDerivedStateFromError(): PageErrorBoundaryState {
     return { failed: true }
+  }
+
+  componentDidUpdate(previousProps: Readonly<PageErrorBoundaryProps>) {
+    if (this.state.failed && previousProps.resetKey !== this.props.resetKey) {
+      this.setState({ failed: false })
+    }
   }
 
   render() {

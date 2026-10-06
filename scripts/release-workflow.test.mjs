@@ -75,7 +75,11 @@ test('release image reads platform-matched CI caches without writing tag-scoped 
 
 test('CI exports the release-style multi-platform cache with matching inputs', () => {
   const container = ciJobBlock('container')
+  const isolatedBuilder = stepBlock(container, 'Set up isolated Buildx for release cache')
+  assert.match(isolatedBuilder, /id: release-cache-builder/)
+  assert.match(isolatedBuilder, /docker\/setup-buildx-action@/)
   const cacheBuild = stepBlock(container, 'Build release-style multi-platform cache')
+  assert.match(cacheBuild, /builder: \$\{\{ steps\.release-cache-builder\.outputs\.name \}\}/)
   assert.match(cacheBuild, /platforms: linux\/amd64,linux\/arm64/)
   assert.match(cacheBuild, /build-args:\s*\|\n\s+VERSION=v0\.0\.0-ci\n\s+PREBUILT_FRONTEND=1\n\s+PREBUILT_EDGEWATCH=1/)
   assert.match(cacheBuild, /cache-from: type=gha,scope=container-release-multiarch/)

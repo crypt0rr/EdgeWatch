@@ -78,15 +78,25 @@ test('release image reads the shared multi-platform registry cache without tag-s
 test('CI exports the release-style registry cache only from main builds with matching inputs', () => {
   const cacheJob = ciJobBlock('release-cache')
   assert.match(cacheJob, /^ {4}if: \(github\.event_name == 'push' \|\| github\.event_name == 'workflow_dispatch'\) && github\.ref == 'refs\/heads\/main'$/m)
+  assert.match(cacheJob, /^ {4}needs: container$/m)
   assert.match(cacheJob, /^ {4}permissions:\n {6}contents: read\n {6}packages: write$/m)
   const login = stepBlock(cacheJob, 'Log in to GHCR for the release cache')
   assert.match(login, /docker\/login-action@/)
   assert.match(login, /password: \$\{\{ secrets\.GITHUB_TOKEN \}\}/)
   const cacheBuild = stepBlock(cacheJob, 'Export release-style multi-platform cache')
   assert.match(cacheBuild, /build-args:\s*\|\n\s+VERSION=v0\.0\.0-ci\n\s+PREBUILT_FRONTEND=1\n\s+PREBUILT_EDGEWATCH=1/)
-  assert.match(cacheBuild, /cache-from: type=registry,ref=ghcr\.io\/crypt0rr\/edgewatch:buildcache/)
+  assert.match(cacheBuild, /cache-from:\s*\|\n\s+type=registry,ref=ghcr\.io\/crypt0rr\/edgewatch:buildcache\n\s+type=gha,scope=container-prebuilt-amd64\n\s+type=gha,scope=container-prebuilt-arm64/)
   assert.match(cacheBuild, /cache-to: type=registry,ref=ghcr\.io\/crypt0rr\/edgewatch:buildcache,mode=max/)
   assert.ok(cacheJob.indexOf(login) < cacheJob.indexOf(cacheBuild), 'CI must authenticate before exporting the GHCR cache')
+  const container = ciJobBlock('container')
+  for (const [stepName, scope] of [
+    ['Build prebuilt AMD64 image', 'container-prebuilt-amd64'],
+    ['Build prebuilt ARM64 image', 'container-prebuilt-arm64'],
+  ]) {
+    const prebuiltBuild = stepBlock(container, stepName)
+    assert.ok(prebuiltBuild.includes(`cache-from: type=gha,scope=${scope}`), `${stepName} must read ${scope}`)
+    assert.ok(prebuiltBuild.includes(`type=gha,mode=max,scope=${scope}`), `${stepName} must refresh ${scope}`)
+  }
   const isolatedBuilder = stepBlock(cacheJob, 'Set up isolated Buildx for cache verification')
   assert.match(isolatedBuilder, /id: release-cache-builder/)
   assert.match(isolatedBuilder, /docker\/setup-buildx-action@/)

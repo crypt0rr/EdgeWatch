@@ -383,6 +383,7 @@ jobs:
   # write access only to trusted pushes or deliberate dispatches on main.
   release-cache:
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    needs: container
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -433,7 +434,12 @@ jobs:
             VERSION=v0.0.0-ci
             PREBUILT_FRONTEND=1
             PREBUILT_EDGEWATCH=1
-          cache-from: type=registry,ref=ghcr.io/crypt0rr/edgewatch:buildcache
+          # Seed the registry cache from the main-only per-architecture GHA
+          # caches when the registry ref is new or needs invalidated layers.
+          cache-from: |
+            type=registry,ref=ghcr.io/crypt0rr/edgewatch:buildcache
+            type=gha,scope=container-prebuilt-amd64
+            type=gha,scope=container-prebuilt-arm64
           cache-to: type=registry,ref=ghcr.io/crypt0rr/edgewatch:buildcache,mode=max
       # Read the just-exported ref on a clean worker to prove that both
       # architecture-specific Naabu compile results are in the registry cache.

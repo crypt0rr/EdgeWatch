@@ -635,7 +635,7 @@ func TestPlatformConsoleNotifications(t *testing.T) {
 	queue("managed:"+created.ID+":1", nil)
 	queue("managed:"+ids.b+":1", secondTenantID)
 	terminalAt := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := f.store.DB.ExecContext(ctx, `INSERT INTO outbox(destination,payload_json,attempts,next_at,last_error,terminal_at,tenant_id) VALUES(?,?,15,?,'delivery_failed',?,NULL)`, "managed:"+created.ID+":1", []byte(`{}`), terminalAt, terminalAt); err != nil {
+	if _, err := f.store.DB.ExecContext(ctx, `INSERT INTO outbox(destination,payload_json,attempts,next_at,last_error,terminal_at,tenant_id) VALUES(?,?,15,?,'delivery_failed',?,NULL)`, "managed:"+created.ID+":1", []byte(`{"terminal":true}`), terminalAt, terminalAt); err != nil {
 		t.Fatal(err)
 	}
 	pending := func(destination string) int {

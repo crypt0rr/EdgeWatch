@@ -134,7 +134,16 @@ func TestNotificationRoutesUseTheSessionTenant(t *testing.T) {
 	const unknown = "00000000-0000-0000-0000-00000000dead"
 	sameAsUnknown := func(method, path, body string, status int) {
 		t.Helper()
+		resetTestLimiter := func() {
+			server.testMu.Lock()
+			server.testLast = make(map[string]time.Time)
+			server.testMu.Unlock()
+		}
+		// Compare tenant isolation with each request starting outside the rate
+		// limit window so this assertion tests destination lookup, not throttling.
+		resetTestLimiter()
 		leaked := call("other", method, strings.ReplaceAll(path, "{id}", ids["own"]), strings.ReplaceAll(body, "{id}", ids["own"]))
+		resetTestLimiter()
 		missing := call("other", method, strings.ReplaceAll(path, "{id}", unknown), strings.ReplaceAll(body, "{id}", unknown))
 		if leaked.Code != status || leaked.Code != missing.Code || strings.ReplaceAll(leaked.Body.String(), ids["own"], "ID") != strings.ReplaceAll(missing.Body.String(), unknown, "ID") {
 			t.Errorf("other tenant: %s %s = %d %s; unknown destination = %d %s; want %d for both", method, path, leaked.Code, leaked.Body.String(), missing.Code, missing.Body.String(), status)

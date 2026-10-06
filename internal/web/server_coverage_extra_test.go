@@ -148,7 +148,7 @@ func TestWriteInternalErrorRedactsDetailsAndIncludesRequestID(t *testing.T) {
 
 func TestNotificationDestinationRouteGuardsAndTestDelivery(t *testing.T) {
 	t.Parallel()
-	server, _, admin := newUsersTestServer(t)
+	server, db, admin := newUsersTestServer(t)
 	for _, test := range []struct {
 		name, method, rest string
 	}{
@@ -172,12 +172,25 @@ func TestNotificationDestinationRouteGuardsAndTestDelivery(t *testing.T) {
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("missing destination test status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	limited := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/missing/test", nil)
+	var failedAudits int
+	if err := db.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM security_audit WHERE action='notifications.test_failed'`).Scan(&failedAudits); err != nil {
+		t.Fatal(err)
+	}
+	if failedAudits != 0 {
+		t.Fatalf("unknown destination test wrote %d failure audit rows", failedAudits)
+	}
+	limited := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/missing-again/test", nil)
 	limited.RemoteAddr = missing.RemoteAddr
 	recorder = httptest.NewRecorder()
-	server.notificationDestinationRoute(recorder, limited, admin, defaultTenantStore(server), "missing/test")
+	server.notificationDestinationRoute(recorder, limited, admin, defaultTenantStore(server), "missing-again/test")
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("rate-limited destination test status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if err := db.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM security_audit WHERE action='notifications.test_failed'`).Scan(&failedAudits); err != nil {
+		t.Fatal(err)
+	}
+	if failedAudits != 0 {
+		t.Fatalf("rate-limited unknown destination test wrote %d failure audit rows", failedAudits)
 	}
 
 	var calls atomic.Int32
@@ -229,19 +242,26 @@ func TestNotificationDestinationDeliveryFailureUsesGatewayStatus(t *testing.T) {
 	}
 }
 
-func TestNotificationTestRateLimitIsScopedPerDestination(t *testing.T) {
+func TestNotificationTestRateLimitIsScopedPerSession(t *testing.T) {
 	t.Parallel()
 	server, _, _ := newUsersTestServer(t)
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/one/test", nil)
-	request.RemoteAddr = "127.0.0.8:4008"
-	if !server.allowNotificationTest(request, "one") {
-		t.Fatal("first destination test was unexpectedly limited")
+	first := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/one/test", nil)
+	first.RemoteAddr = "127.0.0.8:4008"
+	first.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "shared-session"})
+	if !server.allowNotificationTest(first) {
+		t.Fatal("first session notification test was unexpectedly limited")
 	}
-	if server.allowNotificationTest(request, "one") {
-		t.Fatal("repeated test for one destination was not limited")
+	second := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/two/test", nil)
+	second.RemoteAddr = "127.0.0.8:4010"
+	second.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "shared-session"})
+	if server.allowNotificationTest(second) {
+		t.Fatal("different destination test bypassed the session limit")
 	}
-	if !server.allowNotificationTest(request, "two") {
-		t.Fatal("a different destination test was incorrectly limited")
+	differentSession := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/two/test", nil)
+	differentSession.RemoteAddr = second.RemoteAddr
+	differentSession.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "different-session"})
+	if !server.allowNotificationTest(differentSession) {
+		t.Fatal("a different session was unexpectedly limited")
 	}
 }
 

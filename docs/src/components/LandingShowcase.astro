@@ -1,0 +1,213 @@
+<edgewatch-landing>
+  <section class="landing-preview" aria-labelledby="_top">
+    <div class="hero-atmosphere" aria-hidden="true"><div class="radar-ring" /><div class="radar-ring outer" /></div>
+    <div class="hero-copy">
+      <p class="hero-kicker"><span class="signal" /> Your network. No surprises.</p>
+      <h1 id="_top" data-page-title>Know your surface.<br /><span>Notice what changes.</span></h1>
+      <p class="hero-description">Scan your network. Learn what belongs. Get notified when something changes.</p>
+      <div class="hero-actions">
+        <a class="hero-button primary" href="/getting-started/installation/">Start monitoring <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6" /></svg></a>
+        <a class="hero-button secondary" href="/user-guide/scanning/">Explore the docs <span aria-hidden="true">↗</span></a>
+      </div>
+      <ul class="hero-details" aria-label="EdgeWatch capabilities">
+        <li>Self-hosted</li><li>TCP + UDP</li><li>Nmap-confirmed</li>
+      </ul>
+    </div>
+
+    <figure class="demo-frame" aria-labelledby="demo-caption">
+      <div class="demo-toolbar">
+        <div class="window-dots" aria-hidden="true"><i /><i /><i /></div>
+        <span class="demo-title">EdgeWatch</span>
+        <span class="demo-badge"><i /> Walkthrough</span>
+        <button type="button" class="playback-toggle" aria-label="Play walkthrough" hidden><span class="playback-icon" aria-hidden="true">▶</span> <span class="playback-label">Play</span></button>
+      </div>
+      <div class="demo-screen">
+        <video muted loop playsinline preload="none" poster="/media/edgewatch-demo-poster.jpg" aria-label="EdgeWatch product walkthrough" aria-describedby="demo-caption">
+          <source src="/media/edgewatch-demo.mp4" type="video/mp4" />
+          <p><a href="/media/edgewatch-demo.mp4">Watch the EdgeWatch product tour</a>.</p>
+        </video>
+      </div>
+      <figcaption id="demo-caption">
+        <span><strong>Scan. Baseline. Detect.</strong></span>
+      </figcaption>
+      <p class="video-fallback" hidden role="status">The video could not load. <a href="https://github.com/user-attachments/assets/ddff32e8-617a-477f-b9b7-8681dbc25b82">Watch it on GitHub</a>.</p>
+    </figure>
+  </section>
+
+  <div class="workflow" aria-label="How EdgeWatch works">
+    <div><span class="workflow-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="4" /><path d="M12 12l5-5" /></svg></span><div><span class="workflow-number">01 / OBSERVE</span><strong>Scan every edge.</strong><p>IPs, CIDRs, and DNS names.<br />On your schedule.</p></div></div>
+    <div><span class="workflow-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 8l8-4 8 4-8 4-8-4Zm0 5 8 4 8-4M4 18l8 4 8-4" /></svg></span><div><span class="workflow-number">02 / LEARN</span><strong>Define what belongs.</strong><p>Build an expected surface<br />from complete observations.</p></div></div>
+    <div><span class="workflow-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 12h4l3-7 3 14 3-7h3" /></svg></span><div><span class="workflow-number">03 / RESPOND</span><strong>Catch the change.</strong><p>Review confirmed incidents.<br />Keep the original history.</p></div></div>
+  </div>
+</edgewatch-landing>
+
+<script>
+  class EdgeWatchLanding extends HTMLElement {
+    video!: HTMLVideoElement
+    motion = matchMedia('(prefers-reduced-motion: reduce)')
+    observer?: IntersectionObserver
+    videoVisible = true
+    userPaused = false
+
+    connectedCallback() {
+      this.video = this.querySelector('video')!
+      this.playbackButton.hidden = false
+      this.playbackButton.addEventListener('click', this.togglePlayback)
+      this.video.addEventListener('play', this.onVideoPlay)
+      this.video.addEventListener('pause', this.onVideoPause)
+      this.video.addEventListener('error', this.showVideoError)
+      this.video.querySelector('source')!.addEventListener('error', this.showVideoError)
+      this.motion.addEventListener('change', this.onMotionChange)
+      document.addEventListener('visibilitychange', this.onVisibilityChange)
+      this.updatePlayback()
+
+      // Start muted and inline. Reduced-motion visitors keep the poster and
+      // can opt into playback with the frame's play button.
+      if (!this.motion.matches) {
+        this.video.autoplay = true
+        this.video.preload = 'auto'
+        this.playIfAllowed()
+      }
+      this.observer = new IntersectionObserver(([entry]) => {
+        this.videoVisible = entry.isIntersecting
+        if (entry.isIntersecting) this.playIfAllowed()
+        else this.video.pause()
+      }, { threshold: 0 })
+      this.observer.observe(this.video)
+    }
+
+    disconnectedCallback() {
+      this.video.pause()
+      this.observer?.disconnect()
+      this.motion.removeEventListener('change', this.onMotionChange)
+      document.removeEventListener('visibilitychange', this.onVisibilityChange)
+      this.playbackButton.removeEventListener('click', this.togglePlayback)
+      this.video.removeEventListener('play', this.onVideoPlay)
+      this.video.removeEventListener('pause', this.onVideoPause)
+      this.video.removeEventListener('error', this.showVideoError)
+      this.video.querySelector('source')!.removeEventListener('error', this.showVideoError)
+    }
+
+    get playbackButton() { return this.querySelector<HTMLButtonElement>('.playback-toggle')! }
+
+    togglePlayback = () => {
+      this.userPaused = !this.video.paused
+      if (this.video.paused) void this.video.play().catch(() => this.updatePlayback())
+      else this.video.pause()
+    }
+
+    playIfAllowed = () => {
+      if (!this.motion.matches && !this.userPaused && this.videoVisible && !document.hidden) {
+        void this.video.play().catch(() => this.updatePlayback())
+      }
+    }
+
+    onVideoPlay = () => { this.userPaused = false; this.updatePlayback() }
+    onVideoPause = () => {
+      // Preserve explicit pauses; scrolling away, hiding the tab, or enabling
+      // reduced motion may pause automatically.
+      if (this.videoVisible && !document.hidden && !this.motion.matches) this.userPaused = true
+      this.updatePlayback()
+    }
+
+    updatePlayback = () => {
+      const paused = this.video.paused
+      this.playbackButton.setAttribute('aria-label', paused ? 'Play walkthrough' : 'Pause walkthrough')
+      this.playbackButton.querySelector('.playback-icon')!.textContent = paused ? '▶' : 'Ⅱ'
+      this.playbackButton.querySelector('.playback-label')!.textContent = paused ? 'Play' : 'Pause'
+    }
+
+    onMotionChange = () => {
+      this.video.autoplay = !this.motion.matches
+      if (this.motion.matches) this.video.pause()
+      else this.playIfAllowed()
+    }
+    onVisibilityChange = () => { if (document.hidden) this.video.pause(); else this.playIfAllowed() }
+    showVideoError = () => {
+      this.querySelector<HTMLParagraphElement>('.video-fallback')!.hidden = false
+      this.playbackButton.hidden = true
+    }
+  }
+
+  if (!customElements.get('edgewatch-landing')) customElements.define('edgewatch-landing', EdgeWatchLanding)
+</script>
+
+<style>
+  edgewatch-landing { display: block; position: relative; }
+  .landing-preview { position: relative; isolation: isolate; display: grid; grid-template-columns: 0.95fr 1.1fr; gap: 2rem; align-items: center; padding-block: 4.5rem; }
+  .hero-atmosphere { position: absolute; z-index: -1; pointer-events: none; inset: -1rem 0 auto; height: 42rem; overflow: hidden; background: radial-gradient(ellipse at 75% 45%, #2877d526, transparent 65%); mask-image: linear-gradient(#000 30%, transparent); }
+  .hero-atmosphere::before { content: ''; position: absolute; inset: 0; background-image: radial-gradient(var(--sl-color-gray-4) 0.7px, transparent 0.7px); background-size: 26px 26px; opacity: 0.22; }
+  .radar-ring { position: absolute; top: -8rem; left: 50%; width: 40rem; height: 40rem; border: 1px solid #65a9ff13; border-radius: 50%; transform: translateX(-50%); }
+  .radar-ring.outer { top: -15rem; width: 54rem; height: 54rem; border-color: #65a9ff0c; }
+  .hero-copy { position: relative; text-align: left; padding-bottom: 0; }
+  .hero-kicker { display: flex; align-items: center; justify-content: flex-start; gap: 0.6rem; color: var(--sl-color-gray-2); font-size: 0.7rem; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; }
+  .signal { width: 0.45rem; height: 0.45rem; flex-shrink: 0; border-radius: 50%; background: var(--ew-green); box-shadow: 0 0 0 4px var(--ew-green-subtle); }
+  h1 { margin: 1.25rem 0 1.2rem; font-size: clamp(2.5rem, 4vw, 3.75rem); font-weight: 700; line-height: 1.08; letter-spacing: -0.065em; color: var(--sl-color-white); }
+  h1 > span { color: var(--sl-color-text-accent); }
+  @supports (background-clip: text) {
+    h1 > span { background: linear-gradient(110deg, var(--sl-color-text-accent) 30%, var(--ew-green) 130%); background-clip: text; color: transparent; }
+  }
+  .hero-description { max-width: 26rem; color: var(--sl-color-gray-2); font-size: 1.05rem; line-height: 1.8; }
+  .hero-actions { display: flex; justify-content: flex-start; flex-wrap: wrap; gap: 0.75rem; margin-top: 1.5rem; }
+  .hero-button { display: inline-flex; align-items: center; justify-content: center; gap: 1.1rem; padding: 0.85rem 1.2rem; border: 1px solid var(--sl-color-hairline); border-radius: 0.6rem; text-decoration: none; font-size: 0.85rem; font-weight: 600; transition: transform 180ms, border-color 180ms; }
+  .hero-button svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.8; }
+  .primary { background: #2877d5; border-color: #3987e7; color: #fff; box-shadow: 0 6px 24px #2877d52b; }
+  .secondary { background: var(--ew-panel); color: var(--sl-color-text); }
+  .hero-button:hover { transform: translateY(-2px); border-color: var(--sl-color-text-accent); }
+  .hero-details { display: flex; justify-content: flex-start; flex-wrap: wrap; gap: 1.2rem; padding: 0; margin-top: 1.25rem; list-style: none; color: var(--sl-color-gray-3); font-size: 0.7rem; }
+  .hero-details li { display: flex; gap: 0.4rem; align-items: center; }
+  .hero-details li::before { content: '✓'; color: var(--ew-green); }
+  .demo-frame { transform: perspective(1500px) rotateY(-5deg) rotateX(2deg); position: relative; width: min(100%, 62rem); margin-inline: auto; overflow: hidden; border: 1px solid #355374; border-radius: 0.85rem; background: #091523; box-shadow: 0 0 0 6px #65a9ff06, 0 24px 90px #0003, 0 0 100px #2877d515; color: #c9d7e8; }
+  .demo-toolbar { display: flex; align-items: center; gap: 1rem; height: 2.7rem; padding: 0 1rem; border-bottom: 1px solid #20344e; background: #0d1a2c; font-size: 0.65rem; }
+  .window-dots { display: flex; gap: 0.3rem; }
+  .window-dots i { display: block; width: 0.45rem; height: 0.45rem; border-radius: 50%; background: #355374; }
+  .window-dots i:first-child { background: #f37d8380; }
+  .window-dots i:nth-child(2) { background: #f1bd6a80; }
+  .window-dots i:nth-child(3) { background: #5bd4a080; }
+  .demo-title { font-weight: 600; }
+  .demo-badge { display: flex; align-items: center; gap: 0.4rem; margin-left: auto; color: #8ca0b9; font-size: 0.6rem; }
+  .demo-badge i { width: 0.3rem; height: 0.3rem; border-radius: 50%; background: #5bd4a0; }
+  .demo-screen { position: relative; aspect-ratio: 16 / 9; background: #07111f; }
+  video { display: block; width: 100%; height: 100%; object-fit: contain; }
+  figcaption { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 3.25rem; padding: 0.5rem 1rem; border-top: 1px solid #20344e; background: #0d1a2c; font-size: 0.65rem; color: #8ca0b9; }
+  figcaption strong { font-weight: 600; color: #c9d7e8; }
+  .playback-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 0.45rem; min-width: 4.7rem; min-height: 2.2rem; padding: 0.3rem 0.6rem; border: 1px solid #28415e; border-radius: 0.45rem; background: #11233a; font: inherit; color: #c9d7e8; cursor: pointer; }
+  .playback-toggle:hover { border-color: #65a9ff; }
+  .video-fallback { margin: 0; padding: 0.75rem 1rem; color: #f1bd6a; font-size: 0.75rem; }
+  .video-fallback a { color: #b9d9ff; }
+  [hidden] { display: none !important; }
+  .workflow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2rem; margin-top: 3rem; padding: 2rem 0; border-top: 1px solid var(--sl-color-hairline); border-bottom: 1px solid var(--sl-color-hairline); }
+  .workflow > div { display: flex; gap: 1rem; }
+  .workflow-icon { display: grid; place-items: center; width: 2.6rem; height: 2.6rem; flex-shrink: 0; border: 1px solid var(--sl-color-hairline); border-radius: 0.65rem; background: var(--ew-panel); color: var(--sl-color-text-accent); }
+  .workflow-icon svg { width: 1.3rem; height: 1.3rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  .workflow-number { display: block; margin-bottom: 0.4rem; color: var(--sl-color-gray-3); font-size: 0.6rem; letter-spacing: 0.12em; }
+  .workflow strong { font-size: 0.9rem; color: var(--sl-color-white); }
+  .workflow p { margin-top: 0.4rem; color: var(--sl-color-gray-2); font-size: 0.8rem; line-height: 1.7; }
+  @media (max-width: 60rem) {
+    .landing-preview { grid-template-columns: 1fr; padding-block: 2rem 0; gap: 0; }
+    .hero-copy { text-align: center; padding-bottom: 2.5rem; }
+    :is(.hero-kicker, .hero-actions, .hero-details) { justify-content: center; }
+    .hero-description { max-width: none; }
+    .demo-frame { transform: none; }
+    .workflow { gap: 1.2rem; }
+    .workflow > div { gap: 0.7rem; }
+  }
+  @media (max-width: 40rem) {
+    .landing-preview { padding-top: 1.4rem; }
+    .hero-kicker { font-size: 0.6rem; letter-spacing: 0.08em; }
+    h1 { font-size: clamp(2rem, 7.7vw, 3rem); }
+    .hero-description { font-size: 0.9rem; }
+    .hero-copy { padding-bottom: 2rem; }
+    .hero-button { padding: 0.8rem 0.9rem; font-size: 0.75rem; gap: 0.7rem; }
+    .hero-details { gap: 0.8rem; font-size: 0.6rem; }
+    .demo-toolbar { gap: 0.6rem; padding-inline: 0.7rem; }
+    .demo-badge { font-size: 0.55rem; }
+    figcaption { padding-inline: 0.7rem; }
+    .workflow { grid-template-columns: 1fr; margin-top: 2rem; gap: 1.5rem; }
+    .workflow p br { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .hero-button { transition: none; }
+    .demo-frame { transform: none; }
+  }
+</style>

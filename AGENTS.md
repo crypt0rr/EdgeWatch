@@ -5,7 +5,7 @@ It uses a Go backend, SQLite storage, and a React/TypeScript web console.
 
 ## Start here
 
-- Read [README.md](README.md) for product behavior, deployment, and development requirements.
+- Read [README.md](README.md) for the overview and quick start. Full guides live in [docs/src/content/docs/](docs/src/content/docs/), including [deployment configuration](docs/src/content/docs/reference/configuration.md) and [local development](docs/src/content/docs/maintainers/development.md).
 - Read [SECURITY.md](SECURITY.md) before changes to authentication, scanning, secrets, or storage.
 - Check [config.example.yaml](config.example.yaml) for deployment settings.
 - Use [Makefile](Makefile), [package.json](package.json), and [CI](.github/workflows/ci.yml) as the sources for build and validation commands.
@@ -48,7 +48,7 @@ The tracked `internal/webui/dist/.gitkeep` permits Go compilation before the fro
 
 For frontend development, run `npm run dev`.
 Vite serves the console on port 5173 and proxies `/api` to a backend on `127.0.0.1:8080`.
-Follow the README to configure the backend.
+Follow [the development guide](docs/src/content/docs/maintainers/development.md) to configure the backend.
 
 Edit frontend source in `src/`.
 Do not edit generated files in `internal/webui/dist/` or commit build output.
@@ -65,8 +65,9 @@ Documentation-only changes need a diff review and checks of referenced paths and
 | Go code | Format changed Go files with `gofmt`; run `go vet ./...` and `go test -race -timeout=25m ./...` |
 | Frontend code | `npm run lint`, `npm run build`, and `npm run test:coverage` |
 | Browser behavior | `npm run test:e2e` |
+| Documentation website | `npm --prefix docs ci`, `npm --prefix docs run build`, and browser review for visible changes |
 | Database schema | Store migration tests and `./scripts/check-schema-docs.sh` |
-| Compose configuration | Run `docker compose config --quiet` and `docker compose -f compose.yaml -f compose.syn.yaml config --quiet`, then verify the rendered capability, hardening, image, and storage policies described in `docs/container-hardening.md` and the CI `Validate Compose deployment` step |
+| Compose configuration | Run `docker compose config --quiet` and `docker compose -f compose.yaml -f compose.syn.yaml config --quiet`, then verify the rendered capability, hardening, image, and storage policies described in `docs/src/content/docs/deployment/container-hardening.md` and the CI `Validate Compose deployment` step |
 | Scanner dependency pin | `./scripts/verify-naabu-pin.sh` |
 | Release helper scripts | `./scripts/test-release-artifacts.sh`; this uses fixture binaries and does not build a release candidate |
 | Release workflow or GoReleaser configuration | Follow the exact GoReleaser check and immutable-candidate gates in `.github/workflows/release.yml`; the candidate, publication, image, and runtime smoke gates run only for tags |
@@ -109,10 +110,10 @@ Report the checks you ran and any failures or checks you could not run.
 - Use temporary databases in tests and preserve migration compatibility, transaction boundaries, and restore checks.
   For a fresh database, use `openTestStore` in `internal/store` and `storetest.OpenFresh` or `storetest.FreshPath` elsewhere; these copy a migrated template.
   Migrate from scratch only in tests that need it, such as migration, setup, and restore tests, because a full migration takes seconds under `-race`.
-- When the schema changes, update compatibility guidance in both `README.md` and `SECURITY.md`.
+- When the schema changes, update [database compatibility](docs/src/content/docs/reference/database-compatibility.md) and `SECURITY.md`.
 - Keep runtime configuration, databases, keys, and generated assets out of source control.
 
-For container changes, read [docs/container-hardening.md](docs/container-hardening.md).
+For container changes, read [docs/src/content/docs/deployment/container-hardening.md](docs/src/content/docs/deployment/container-hardening.md).
 Preserve the default capability limits and the explicit SYN override.
 For release changes, preserve the immutable candidate build implemented in
 `.github/workflows/release.yml`.
@@ -121,7 +122,10 @@ For release changes, preserve the immutable candidate build implemented in
 
 Follow the conventions in nearby code and keep each change focused on the requested behavior.
 Update API types and consumers together when response shapes change.
-Update operator documentation when configuration, commands, or visible behavior changes.
+Documentation updates are mandatory whenever a change affects documented behavior, including new features, configuration, commands, APIs, permissions, deployment, or recovery.
+Update the affected guides in `docs/src/content/docs/` in the same change; the website is the canonical detailed documentation.
+Update the README quick start and `SECURITY.md` when their content is affected, and run `npm --prefix docs run build`.
+A change requiring documentation is not complete until its guides are updated and the corresponding website deployment is verified.
 
 Use a concise commit subject consistent with recent history, such as `docs:`, `fix:`, or `feat:`.
 Describe the resulting behavior and relevant validation in the pull request.

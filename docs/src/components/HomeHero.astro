@@ -1,0 +1,7 @@
+---
+import Default from '@astrojs/starlight/components/Hero.astro'
+import LandingShowcase from './LandingShowcase.astro'
+const isHomepage = Astro.locals.starlightRoute.id === ''
+---
+
+{isHomepage ? <LandingShowcase /> : <Default><slot /></Default>}

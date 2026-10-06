@@ -22,7 +22,7 @@ capability model does not reliably expose raw packet privileges to an
 unprivileged process. Nmap UDP/SYN and Naabu SYN fail closed without those
 privileges. The compatibility matrix, bind-mount ownership guidance, and
 reconsideration criteria are maintained in
-[`docs/container-hardening.md`](docs/container-hardening.md).
+[`docs/src/content/docs/deployment/container-hardening.md`](docs/src/content/docs/deployment/container-hardening.md).
 
 The administration console is bound to a loopback address by default and uses
 server-side sessions, CSRF protection, and Argon2id password storage. Keep the

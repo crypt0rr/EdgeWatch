@@ -1,0 +1,24 @@
+<script is:inline>
+  // Apply before the body paints. A visitor's explicit choice takes precedence
+  // over EdgeWatch's dark default; system appearance is deliberately ignored.
+  (() => {
+    let theme = 'dark'
+    try {
+      const saved = localStorage.getItem('starlight-theme')
+      if (saved === 'light' || saved === 'dark') theme = saved
+    } catch {}
+
+    const applyTheme = (value) => {
+      document.documentElement.dataset.theme = value
+      document.documentElement.style.colorScheme = value
+      document.dispatchEvent(new CustomEvent('edgewatch:theme', { detail: value }))
+    }
+
+    window.StarlightThemeProvider = {
+      updatePickers(value) {
+        applyTheme(value === 'light' ? 'light' : 'dark')
+      },
+    }
+    applyTheme(theme)
+  })()
+</script>

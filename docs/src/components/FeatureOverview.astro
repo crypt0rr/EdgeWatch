@@ -1,0 +1,117 @@
+---
+const features = [
+  {
+    icon: 'clock',
+    title: 'Monitoring on your schedule',
+    description: 'Watch IPs, CIDRs, and DNS names with recurring jobs. Keep each network on its own schedule.',
+    href: '/user-guide/jobs-baselines-incidents/',
+    link: 'Monitoring jobs',
+  },
+  {
+    icon: 'radar',
+    title: 'Coverage you can trust',
+    description: 'Scan TCP and UDP with Nmap, or discover TCP ports with Naabu and confirm them with Nmap.',
+    href: '/user-guide/scanning/',
+    link: 'Scanners and profiles',
+  },
+  {
+    icon: 'layers',
+    title: 'Changes with their context',
+    description: 'Compare ports, services, and DNS against your baseline. Review host evidence and keep the original history.',
+    href: '/user-guide/jobs-baselines-incidents/',
+    link: 'Baselines and incidents',
+  },
+  {
+    icon: 'bell',
+    title: 'Alerts that reach your team',
+    description: 'Route incidents and optional release alerts to named Shoutrrr destinations, with credentials encrypted at rest.',
+    href: '/user-guide/notifications/',
+    link: 'Notification routing',
+  },
+  {
+    icon: 'shield',
+    title: 'Access under your control',
+    description: 'Give each person the right role, protect accounts with TOTP, and publish only the status you choose.',
+    href: '/administration/accounts-public-status/',
+    link: 'Accounts and public status',
+  },
+  {
+    icon: 'resume',
+    title: 'Broad scans that pick up again',
+    description: 'Resume completed work after a timeout or restart. Incomplete observations never rewrite your expected surface.',
+    href: '/user-guide/scanning/',
+    link: 'Resumable scanning',
+  },
+]
+const paths: Record<string, string> = {
+  clock: 'M12 8v4l3 2',
+  radar: 'M12 12l6-6M12 8a4 4 0 1 0 4 4',
+  layers: 'M3 7l9-4 9 4-9 4-9-4Zm0 5 9 4 9-4M3 17l9 4 9-4',
+  bell: 'M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4',
+  shield: 'M12 3l8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Zm-4 9 3 3 5-6',
+  resume: 'M20 11a8 8 0 1 0-2 6M20 4v7h-7M10 8l5 4-5 4V8Z',
+}
+---
+
+<section class="feature-overview not-content" aria-labelledby="feature-heading">
+  <div class="feature-intro">
+    <p class="eyebrow">Built for the long watch</p>
+    <h2 id="feature-heading">Confidence in<br />every change.</h2>
+    <p class="intro-copy">Know what belongs on your network. When something changes, have the evidence to understand it.</p>
+    <div class="deployment-note">
+      <span class="deployment-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4V6Zm3 3h2m2 0h6M7 13h10" /></svg></span>
+      <div><strong>Your deployment. Your data.</strong><p>One Docker image. An embedded console.<br />SQLite storage on your host.</p></div>
+    </div>
+    <p class="scope-note">Only monitor systems you own or are authorized to assess.</p>
+  </div>
+  <div class="feature-grid">
+    {features.map((feature) => (
+      <article class="feature">
+        <span class="feature-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            {(feature.icon === 'clock' || feature.icon === 'radar') && <circle cx="12" cy="12" r="9" />}
+            <path d={paths[feature.icon]} />
+          </svg>
+        </span>
+        <div class="feature-body">
+          <h3>{feature.title}</h3>
+          <p>{feature.description}</p>
+          <a href={feature.href}>{feature.link}<span aria-hidden="true">↗</span></a>
+        </div>
+      </article>
+    ))}
+  </div>
+</section>
+
+<style>
+  .feature-overview { display: grid; grid-template-columns: 0.8fr 1.7fr; gap: 3.5rem; margin-top: 4rem; padding-top: 3.5rem; border-top: 1px solid var(--sl-color-hairline); }
+  .eyebrow { margin: 0 0 1rem; font-size: 0.65rem; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--sl-color-text-accent); }
+  h2 { margin: 0; font-size: clamp(1.9rem, 2.8vw, 2.5rem); line-height: 1.15; letter-spacing: -0.045em; color: var(--sl-color-white); }
+  .intro-copy { max-width: 22rem; margin: 1.25rem 0 0; font-size: 0.95rem; line-height: 1.8; color: var(--sl-color-gray-2); }
+  .deployment-note { display: flex; gap: 0.8rem; align-items: flex-start; margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid var(--sl-color-hairline); }
+  .deployment-mark { display: grid; place-items: center; flex-shrink: 0; width: 2.2rem; height: 2.2rem; border-radius: 0.6rem; background: var(--ew-green-subtle); color: var(--ew-green); }
+  .deployment-mark svg { width: 1.15rem; height: 1.15rem; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .deployment-note strong { display: block; font-size: 0.8rem; font-weight: 600; color: var(--sl-color-white); }
+  .deployment-note p { margin: 0.4rem 0 0; font-size: 0.75rem; line-height: 1.7; color: var(--sl-color-gray-3); }
+  .scope-note { max-width: 22rem; margin: 1.4rem 0 0; font-size: 0.7rem; line-height: 1.7; color: var(--sl-color-gray-3); }
+  .feature-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 2rem; row-gap: 2rem; }
+  .feature { display: flex; align-items: flex-start; gap: 0.85rem; padding-bottom: 1.5rem; border-bottom: 1px solid var(--sl-color-hairline); }
+  .feature-icon { display: grid; place-items: center; flex-shrink: 0; width: 2rem; height: 2rem; border: 1px solid var(--sl-color-hairline); border-radius: 0.55rem; background: var(--ew-panel); color: var(--sl-color-text-accent); }
+  .feature-icon svg { width: 1.1rem; height: 1.1rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  .feature-body { display: flex; flex-direction: column; align-self: stretch; min-width: 0; }
+  h3 { margin: 0; font-size: 1rem; line-height: 1.5; font-weight: 600; letter-spacing: -0.02em; color: var(--sl-color-white); }
+  .feature-body p { margin: 0.65rem 0 1rem; font-size: 0.875rem; line-height: 1.75; color: var(--sl-color-gray-2); }
+  .feature-body a { display: flex; align-items: center; gap: 0.5rem; align-self: flex-start; margin-top: auto; font-size: 0.8rem; line-height: 1.6; font-weight: 600; color: var(--sl-color-text-accent); text-decoration: none; }
+  .feature-body a:hover { text-decoration: underline; text-underline-offset: 0.2em; }
+  @media (max-width: 60rem) {
+    .feature-overview { grid-template-columns: 1fr; gap: 2rem; }
+    .feature-intro { max-width: 38rem; }
+    h2 br { display: none; }
+    .intro-copy, .scope-note { max-width: none; }
+  }
+  @media (max-width: 40rem) {
+    .feature-overview { margin-top: 2.5rem; padding-top: 2rem; }
+    .feature-grid { grid-template-columns: 1fr; row-gap: 1.5rem; }
+    .feature { padding-bottom: 1.25rem; }
+  }
+</style>

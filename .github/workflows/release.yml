@@ -342,8 +342,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ env.CANDIDATE_IMAGE }}
           labels: ${{ steps.meta.outputs.labels }}
+          # The prebuilt binary and image labels carry the release version.
+          # Keep the unused Dockerfile fallback arg aligned with CI's cache.
           build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
+            VERSION=v0.0.0-ci
             PREBUILT_FRONTEND=1
             PREBUILT_EDGEWATCH=1
           # Use the single multi-platform cache exported from main. The

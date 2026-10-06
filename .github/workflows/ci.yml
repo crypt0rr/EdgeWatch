@@ -383,7 +383,7 @@ jobs:
       - name: Set up isolated Buildx for release cache
         id: release-cache-builder
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      # Mirror the release image job's cache sources and candidate build args.
+      # Mirror the release image job's cache sources and build args.
       # This isolated solve checks that the exact release cache is usable.
       - name: Build release-style multi-platform cache
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -394,7 +394,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: edgewatch:release-prebuilt-multiarch
           build-args: |
-            VERSION=candidate-${{ github.run_id }}-${{ github.run_attempt }}
+            VERSION=v0.0.0-ci
             PREBUILT_FRONTEND=1
             PREBUILT_EDGEWATCH=1
           cache-from: type=gha,scope=container-release-multiarch

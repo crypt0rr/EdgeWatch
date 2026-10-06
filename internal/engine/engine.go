@@ -2090,7 +2090,7 @@ func FormatEvent(e model.Event) string {
 		b.WriteString("🟢 ")
 	case e.Type == "scan-anomaly" || e.Type == "scan-incomplete":
 		b.WriteString("⚠️ ")
-	case (e.Type == "changes-detected" || e.Type == "changes-reminder") && hasCriticalChange(e.Changes):
+	case (e.Type == "changes-detected" || e.Type == "changes-reminder") && (e.HasCriticalChanges || hasCriticalChange(e.Changes)):
 		b.WriteString("🔴 ")
 	}
 	b.WriteString("EdgeWatch: ")
@@ -2120,19 +2120,21 @@ func notificationEventMessage(event model.Event) string {
 	if count <= 0 {
 		count = len(event.Changes)
 	}
-	if count <= 0 {
-		return event.Message
+	message := event.Message
+	if count > 0 {
+		switch event.Type {
+		case "changes-detected":
+			message = baselineChangeMessage(count, "confirmed")
+		case "changes-recovered":
+			message = baselineChangeMessage(count, "recovered")
+		case "changes-reminder":
+			message = persistentIncidentReminderMessage(count)
+		}
 	}
-	switch event.Type {
-	case "changes-detected":
-		return baselineChangeMessage(count, "confirmed")
-	case "changes-recovered":
-		return baselineChangeMessage(count, "recovered")
-	case "changes-reminder":
-		return persistentIncidentReminderMessage(count)
-	default:
-		return event.Message
+	if event.ChangesTruncated && !strings.HasSuffix(message, " (details truncated)") {
+		message += " (details truncated)"
 	}
+	return message
 }
 
 const maxNotificationFieldRunes = 512

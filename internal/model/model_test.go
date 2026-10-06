@@ -56,12 +56,13 @@ func TestMarshalBoundedEventKeepsPayloadWithinLimit(t *testing.T) {
 
 func TestMarshalBoundedEventDefaultLimitAndMessageTruncation(t *testing.T) {
 	changes := make([]Change, 100)
+	changes[0].Severity = " Critical "
 	event := Event{Type: "change", Job: "job", Changes: changes}
 	bounded, payload, err := MarshalBoundedEvent(event, 512)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(payload) > 512 || !bounded.ChangesTruncated || bounded.ChangesCount != len(changes) || bounded.Message == "" {
+	if len(payload) > 512 || !bounded.ChangesTruncated || bounded.ChangesCount != len(changes) || !bounded.HasCriticalChanges || bounded.Message == "" {
 		t.Fatalf("default bounded event = %d bytes %#v", len(payload), bounded)
 	}
 	if _, payload, err := MarshalBoundedEvent(Event{Type: "small", Job: "job"}, 0); err != nil || len(payload) > EventPayloadLimit {

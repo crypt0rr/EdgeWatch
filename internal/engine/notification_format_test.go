@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -87,6 +89,55 @@ func TestFormatEventSanitizesOnlyScanDerivedServiceText(t *testing.T) {
 		if strings.Contains(got, unsafe) {
 			t.Errorf("notification retained unsafe scan-derived text %q: %q", unsafe, got)
 		}
+	}
+}
+
+func TestFormatEventPreservesTruncationAndCriticalIndicators(t *testing.T) {
+	changes := make([]model.Change, 500)
+	for i := range changes {
+		target := fmt.Sprintf("192.0.2.%d", i%250)
+		port := 1000 + i
+		changes[i] = model.Change{
+			Key:      fmt.Sprintf("port|%s|tcp|%d", target, port),
+			Kind:     "port",
+			Target:   target,
+			Protocol: "tcp",
+			Port:     port,
+			New:      "open",
+			Severity: "critical",
+		}
+	}
+	cases := []struct {
+		typeName string
+		message  string
+		prefix   string
+	}{
+		{typeName: "changes-detected", message: baselineChangeMessage(len(changes), "confirmed"), prefix: "🔴 EdgeWatch:"},
+		{typeName: "changes-reminder", message: persistentIncidentReminderMessage(len(changes)), prefix: "🔴 EdgeWatch:"},
+		{typeName: "changes-recovered", message: baselineChangeMessage(len(changes), "recovered"), prefix: "🟢 EdgeWatch:"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.typeName, func(t *testing.T) {
+			event := model.Event{Type: tc.typeName, Job: "edge", ScanID: "scan-1", Message: tc.message, Changes: changes}
+			bounded, payload, err := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
+			if err != nil {
+				t.Fatalf("bound oversized event: %v", err)
+			}
+			if !bounded.ChangesTruncated || len(bounded.Changes) != 0 {
+				t.Fatalf("event was not truncated: %#v", bounded)
+			}
+			var queued model.Event
+			if err := json.Unmarshal(payload, &queued); err != nil {
+				t.Fatalf("decode queued event: %v", err)
+			}
+			got := FormatEvent(queued)
+			if !strings.HasPrefix(got, tc.prefix) {
+				t.Errorf("FormatEvent() = %q, want prefix %q", got, tc.prefix)
+			}
+			if !strings.Contains(got, "(details truncated)") {
+				t.Errorf("FormatEvent() = %q, want truncation notice", got)
+			}
+		})
 	}
 }
 

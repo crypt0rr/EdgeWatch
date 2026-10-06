@@ -2,7 +2,7 @@
 
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { Route, Routes, useLocation } from 'react-router-dom'
 import { api, APIError, getSession, logout, logoutAllSessions, setCSRF, updateDisplayName } from '../api'
 import { Security } from './Security'
 import { renderWithProviders, defaultUnitScope } from '../test/test-utils'
@@ -29,8 +29,14 @@ describe('security settings', () => {
     else Reflect.deleteProperty(navigator, 'clipboard')
   })
 
-  function renderPage() {
-    return renderWithProviders(<Routes><Route path="*" element={<><Security /><p data-testid="route"><span /></p></>} /></Routes>, { route: ['/security'] })
+function renderPage() {
+    return renderWithProviders(<Routes><Route path="/security" element={<Security />} /><Route path="/login" element={<LoginNotice />} /></Routes>, { route: ['/security'] })
+  }
+
+  function LoginNotice() {
+    const location = useLocation()
+    const message = (location.state as { message?: string } | null)?.message
+    return <main><h1>Sign in</h1>{message && <p role="status">{message}</p>}</main>
   }
 
   async function startAuthenticatorSetup(password = 'correct-password') {
@@ -52,11 +58,11 @@ describe('security settings', () => {
     expect(client.getQueryData(['session'])).toMatchObject({ display_name: 'Admin' })
   })
 
-  it('changes the password and routes to login on success', async () => {
-    const { container } = renderPage()
+  it('changes the password, signs out, and explains the next login', async () => {
+    renderPage()
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Security' })).toBeInTheDocument())
     const currentPassword = screen.getByLabelText('Current password')
-    const newPassword = screen.getByLabelText(/New password/)
+    const newPassword = screen.getByLabelText('New password')
     const confirmation = screen.getByLabelText('Confirm new password')
     fireEvent.change(currentPassword, { target: { value: 'old-password' } })
     fireEvent.change(newPassword, { target: { value: 'new-password-123' } })
@@ -69,19 +75,49 @@ describe('security settings', () => {
     await act(async () => finishRequest?.())
     await waitFor(() => expect(api).toHaveBeenCalledWith('/auth/password', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ current_password: 'old-password', new_password: 'new-password-123' }) })))
     expect(setCSRF).toHaveBeenCalledWith('')
-    expect(container.textContent).toContain('Security')
+    expect(await screen.findByRole('status')).toHaveTextContent('Your password was changed. Sign in with the new password.')
+    expect(screen.getByRole('heading', { name: 'Sign in' })).toBeInTheDocument()
   })
 
   it('rejects mismatched new-password confirmation without contacting the server', async () => {
     renderPage()
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Security' })).toBeInTheDocument())
     fireEvent.change(screen.getByLabelText('Current password'), { target: { value: 'old-password' } })
-    fireEvent.change(screen.getByLabelText(/New password/), { target: { value: 'new-password-123' } })
+    fireEvent.change(screen.getByLabelText('New password'), { target: { value: 'new-password-123' } })
     fireEvent.change(screen.getByLabelText('Confirm new password'), { target: { value: 'different-password-123' } })
     fireEvent.click(screen.getByRole('button', { name: 'Update password' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('The new passwords do not match.')
+    expect(screen.getByLabelText('Confirm new password')).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByLabelText('Confirm new password')).toHaveAccessibleDescription('The new passwords do not match.')
     expect(api).not.toHaveBeenCalled()
+  })
+
+  it('marks the current-password field when the server rejects it', async () => {
+    vi.mocked(api).mockRejectedValueOnce(new APIError('password incorrect', 'invalid_password'))
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Security' })).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('Current password'), { target: { value: 'incorrect-password' } })
+    fireEvent.change(screen.getByLabelText('New password'), { target: { value: 'new-password-123' } })
+    fireEvent.change(screen.getByLabelText('Confirm new password'), { target: { value: 'new-password-123' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Update password' }))
+    await waitFor(() => expect(screen.getByLabelText('Current password')).toHaveAttribute('aria-invalid', 'true'))
+    expect(screen.getByLabelText('Current password')).toHaveAccessibleDescription('Current password is incorrect.')
+    expect(screen.getByRole('alert')).toHaveTextContent('password incorrect')
+  })
+
+  it('lets keyboard users reveal and hide each password field', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Security' })).toBeInTheDocument())
+    const newPassword = screen.getByLabelText('New password')
+    expect(newPassword).toHaveAttribute('type', 'password')
+    fireEvent.click(screen.getByRole('button', { name: 'Show new password' }))
+    expect(newPassword).toHaveAttribute('type', 'text')
+    fireEvent.click(screen.getByRole('button', { name: 'Hide new password' }))
+    expect(newPassword).toHaveAttribute('type', 'password')
+    const confirmation = screen.getByLabelText('Confirm new password')
+    fireEvent.click(screen.getByRole('button', { name: 'Show confirmation password' }))
+    expect(confirmation).toHaveAttribute('type', 'text')
   })
 
   it('covers TOTP enrollment, recovery acknowledgement, and logout', async () => {
@@ -106,6 +142,24 @@ describe('security settings', () => {
     expect(screen.getByRole('button', { name: 'Continue to sign in' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Continue to sign in' }))
     await waitFor(() => expect(logout).toHaveBeenCalledOnce())
+  })
+
+  it('copies recovery codes and announces success or failure', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    vi.mocked(api).mockImplementation(async (path: string) => path === '/auth/totp/setup' ? { secret: 'BASE32SECRET', otpauth: 'otpauth://totp/EdgeWatch' } as never : { recovery_codes: ['one', 'two'] } as never)
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Set up authenticator' })).toBeInTheDocument())
+    await startAuthenticatorSetup()
+    fireEvent.change(screen.getByLabelText('Verification code'), { target: { value: '123456' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Enable TOTP' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Save your recovery codes' })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Copy codes' }))
+    await waitFor(() => expect(screen.getByText('Recovery codes copied.')).toBeInTheDocument())
+    expect(writeText).toHaveBeenCalledWith('one\ntwo')
+    writeText.mockRejectedValueOnce(new Error('clipboard denied'))
+    fireEvent.click(screen.getByRole('button', { name: 'Copy codes' }))
+    await waitFor(() => expect(screen.getByText('The recovery codes could not be copied. Select the codes and copy them manually.')).toBeInTheDocument())
   })
 
   it('shows authenticator setup errors inside the password confirmation dialog', async () => {
@@ -191,6 +245,16 @@ describe('security settings', () => {
     expect(screen.getByRole('dialog')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
     await waitFor(() => expect(screen.getAllByRole('alert').some(element => element.textContent?.includes('sessions unavailable'))).toBe(true))
+  })
+
+  it('confirms session revocation and explains that the administrator must sign in again', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('button', { name: /Log out all sessions/ })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /Log out all sessions/ }))
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Log out all sessions' }))
+    await waitFor(() => expect(logoutAllSessions).toHaveBeenCalledOnce())
+    expect(setCSRF).toHaveBeenCalledWith('')
+    expect(await screen.findByRole('status')).toHaveTextContent('All sessions were signed out. Sign in again.')
   })
 
   it('disables an enabled authenticator after password confirmation', async () => {

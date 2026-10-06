@@ -88,14 +88,16 @@ test('a business unit public page loads by its slug without signing in', async (
   await expect(page.getByRole('heading', { name: 'Other unit status' })).toBeVisible()
   await expect(page.getByText('Services of the other unit')).toBeVisible()
   await expect(page.getByText('198.51.100.10')).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Source code' })).toHaveCount(0)
 
   await page.goto('/public/nobody')
   await expect(page.getByRole('heading', { name: 'Public status unavailable' })).toBeVisible()
   await expect(page.getByText('This status page is not enabled by the administrator.')).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Source code' })).toHaveCount(0)
 
   await page.goto('/public')
   await expect(page.getByRole('heading', { name: 'Default unit status' })).toBeVisible()
-  await expect(page.getByRole('link', { name: 'Source code' })).toHaveAttribute('href', '/source')
+  await expect(page.getByRole('link', { name: 'Source code' })).toHaveCount(0)
 
   expect(publicRequests).toEqual(['/api/public/v1/dashboard/other', '/api/public/v1/dashboard/nobody', '/api/public/v1/dashboard'])
   expect(consoleRequests).toEqual([])

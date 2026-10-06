@@ -60,6 +60,22 @@ describe('activity history', () => {
     await waitFor(() => expect(listEvents).toHaveBeenCalledWith(0, 20, undefined))
   })
 
+  it('uses the failure tone for failed scans and the API spelling for canceled scans', async () => {
+    vi.mocked(listEvents).mockResolvedValue({ events: [
+      { type: 'scan-failure', job_id: 'job-1', job: 'Production', message: 'Scan failed', created_at: '2026-09-20T12:00:00Z' },
+      { type: 'scan-anomaly', job_id: 'job-1', job: 'Production', message: 'Coverage was incomplete', created_at: '2026-09-20T11:00:00Z' },
+      { type: 'scan-canceled', job_id: 'job-1', job: 'Production', message: 'Scan canceled', created_at: '2026-09-20T10:00:00Z' },
+    ], pagination: { ...page, total: 3 } })
+    renderWithProviders(<Activity />)
+
+    await waitFor(() => expect(document.querySelectorAll('.activity-event')).toHaveLength(3))
+    const events = Array.from(document.querySelectorAll('.activity-event'))
+    expect(events[0]).toHaveClass('failure')
+    expect(events[1]).toHaveClass('warning')
+    expect(events[2].querySelector('.activity-event-heading strong')).toHaveTextContent('Scan canceled')
+    expect(screen.queryByText('Scan cancelled', { exact: true })).not.toBeInTheDocument()
+  })
+
   it('shows useful empty states and reports event loading errors with retry', async () => {
     vi.mocked(listEvents).mockRejectedValueOnce(new Error('offline'))
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination: { ...page, total: 0 } })

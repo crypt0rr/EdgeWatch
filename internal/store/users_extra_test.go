@@ -110,6 +110,48 @@ func TestUserStoreProfilesSecurityAndSessions(t *testing.T) {
 	}
 }
 
+func TestListUsersReportsOnlyUnexpiredUnusedLinks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	now := time.Now().UTC()
+	accounts := map[string]string{}
+	for _, name := range []string{"active-link", "expired-link", "used-link"} {
+		user, err := ts.CreateUser(ctx, User{Username: name, DisplayName: name, Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		accounts[name] = user.ID
+	}
+	for name, expiry := range map[string]time.Time{
+		"active-link":  now.Add(time.Hour),
+		"expired-link": now.Add(-time.Minute),
+		"used-link":    now.Add(time.Hour),
+	} {
+		if err := ts.CreateUserInvite(ctx, "token-"+name, accounts[name], now, expiry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.ConsumeUserInvite(ctx, "token-used-link", now.Add(time.Minute)); err != nil {
+		t.Fatalf("consume used link: %v", err)
+	}
+	users, err := ts.ListUsers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := make(map[string]bool, len(users))
+	for _, user := range users {
+		active[user.Username] = user.HasActiveLink
+	}
+	want := map[string]bool{"active-link": true, "expired-link": false, "used-link": false}
+	for name, expected := range want {
+		if active[name] != expected {
+			t.Errorf("user %q has active link = %t, want %t", name, active[name], expected)
+		}
+	}
+}
+
 func TestSecuritySaveCanPreserveActingSessionWhileRevokingOthers(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

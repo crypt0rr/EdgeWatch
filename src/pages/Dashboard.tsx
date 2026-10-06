@@ -100,7 +100,7 @@ function LatestActivityRow({ scan }: { scan: Awaited<ReturnType<typeof listScans
   const timeLabel = today === scanDate
     ? formatTime(scan.finished_at, { hour: '2-digit', minute: '2-digit' })
     : formatDateTime(scan.finished_at, { ...dateParts, hour: '2-digit', minute: '2-digit' })
-  const content = <><span className={`activity-dot${outcome === 'neutral' ? '' : ` ${outcome}`}`} /><div><strong>{scan.job}</strong><span className={scan.error ? 'activity-error' : undefined} title={scan.error ?? undefined}>{scan.status === 'success' ? 'Completed successfully · Open scan details' : scan.error ?? scan.status}</span></div><time dateTime={scan.finished_at}>{timeLabel}</time></>
+  const content = <><span className={`activity-dot${outcome === 'neutral' ? '' : ` ${outcome}`}`} /><div><strong>{scan.job}</strong><span className={scan.error ? 'activity-error' : undefined} title={scan.status === 'success' ? 'Completed successfully · Open scan details' : scan.error ?? undefined}>{scan.status === 'success' ? 'Completed successfully · Open scan details' : scan.error ?? scan.status}</span></div><time dateTime={scan.finished_at}>{timeLabel}</time></>
   if (scan.job_id) return <Link className="activity-row" to={`/jobs/${encodeURIComponent(scan.job_id)}/scans/${encodeURIComponent(scan.id)}`} aria-label={`Open scan details for ${scan.job}`}>{content}</Link>
   return <Link className="activity-row" to={`/scans/${encodeURIComponent(scan.id)}`} aria-label={`Open scan details for ${scan.job}`}>{content}</Link>
 }

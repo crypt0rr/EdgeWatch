@@ -92,6 +92,8 @@ describe('notification update-alert routing', () => {
     await renderPage()
     expect(container.querySelector('input[aria-label="Disable update alerts for Operations"]')).toBeTruthy()
     expect(container.querySelector('input[aria-label="Disable update alerts for Backup"]')).toBeTruthy()
+    expect(container.querySelector('.notification-update-toggle small')?.textContent).toBe('Alerts on')
+    expect(container.querySelector('.notification-update-toggle small')?.getAttribute('title')).toBe('Release and upgrade alerts on')
   })
 
   it('keeps the default-on reminder switch unchanged until password confirmation succeeds', async () => {

@@ -2273,5 +2273,58 @@ label small,
 @media (max-width: 480px) {
   .page-error-panel { padding: 18px; }
   .page-error-actions { flex-direction: column; }
-  .page-error-actions .button { width: 100%; }
+.page-error-actions .button { width: 100%; }
+}
+
+/* Keep narrow-column copy readable and keep full addresses available in the
+   public-host picker instead of clipping their distinguishing suffixes. */
+.public-picker-row > span strong,
+.public-picker-row > span small {
+  overflow-wrap: anywhere;
+}
+.scan-row-copy > span,
+.activity-row > div > span {
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+}
+.activity-event.failure .activity-event-marker { background: var(--red); box-shadow: 0 0 0 4px #f37d8314; }
+.activity-event.warning .activity-event-marker { background: var(--amber); box-shadow: 0 0 0 4px #f6c46f14; }
+.job-scan-status > .pill { align-self: flex-start; }
+.user-row-actions .button { border-color: var(--line); white-space: nowrap; }
+.user-row-actions .button.danger-text { border-color: #5d3942; background: #211f2b; }
+.user-row > .one-time-link { grid-column: 1 / -1; width: 100%; margin: 0; padding: 16px; }
+.user-link-status { grid-column: 1 / -1; color: var(--muted); font-size: 10px; }
+.password-field { display: grid; gap: 6px; }
+
+/* Keep action labels intact; action groups can wrap as a whole instead. */
+.button { white-space: nowrap; }
+.page-heading > div:first-child { min-width: 0; }
+.heading-actions { flex-wrap: wrap; }
+.activity-page .activity-state-grid > section:first-child > .button.ghost { margin-left: -14px; }
+.activity-page .pending-job-heading > .button.ghost { margin-right: -14px; }
+
+/* Filter labels are bold, but their controls should read like ordinary input. */
+.host-toolbar input,
+.host-toolbar select { font-weight: 400; }
+
+/* The reminder copy is multi-line, so keep its checkbox beside the label. */
+.notification-reminder-settings .notification-check { align-items: flex-start !important; }
+.notification-reminder-settings .notification-check input { flex: 0 0 15px; width: 15px; height: 15px; margin-top: 2px !important; }
+.notification-reminder-settings .save-feedback { flex-wrap: nowrap; margin: 10px 0 0; }
+.notification-reminder-settings .save-feedback > svg { flex: 0 0 auto; }
+
+/* Match the scanner-profile legend to the other editor field labels. */
+.form-panel > fieldset { display: grid; gap: 10px; min-width: 0; margin: 0; padding: 12px 0 0; border: 0; border-top: 1px solid #1c3047; }
+.form-panel > fieldset > legend { padding: 0; color: #d4e5f6; font-size: 13px; font-weight: 600; }
+.form-panel > fieldset > .helper { margin-top: 8px; }
+
+.host-empty-results { display: grid; justify-items: start; gap: 12px; }
+.host-empty-results > p { margin: 0; }
+.host-empty-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+@media (max-width: 359px) {
+  .page-heading .heading-actions .button,
+  .editor-actions .button { flex: 1 1 100%; }
 }

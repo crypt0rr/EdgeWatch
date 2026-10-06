@@ -13,7 +13,7 @@ vi.mock('../api', async () => {
   return { ...actual, createUser: vi.fn(), getSession: vi.fn(), issueUserActivation: vi.fn(), issueUserPasswordReset: vi.fn(), listUsers: vi.fn(), revokeUserActivation: vi.fn(), updateUser: vi.fn() }
 })
 
-const user = { id: 'user-2', username: 'operator', display_name: 'Operator', role: 'operator' as const, enabled: true, pending: false, totp_enabled: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', revision: 4 }
+const user = { id: 'user-2', username: 'operator', display_name: 'Operator', role: 'operator' as const, enabled: true, pending: false, has_active_link: true, totp_enabled: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', revision: 4 }
 const pending = { ...user, id: 'user-3', username: 'new-user', display_name: 'New User', role: 'viewer' as const, pending: true, enabled: false, revision: 1 }
 // The signed-in administrator, and an account an administrator disabled.
 const self = { ...user, id: 'user-1', username: 'site-admin', display_name: 'Site Admin', role: 'administrator' as const, revision: 2 }
@@ -53,7 +53,9 @@ describe('user administration', () => {
     fireEvent.change(screen.getByLabelText(/^Administrator password/), { target: { value: 'administrator-password' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create activation link' }))
     await waitFor(() => expect(createUser).toHaveBeenCalledWith('operator', 'Operator', 'operator', 'administrator-password'))
-    expect(screen.getByLabelText('Activation link for operator')).toHaveTextContent('/activate#token=token-123')
+    const linkRegion = screen.getByRole('region', { name: 'One-time link details' })
+    await waitFor(() => expect(linkRegion).toHaveFocus())
+    expect(within(row('Operator')).getByLabelText('Activation link for operator')).toHaveTextContent('/activate#token=token-123')
     expect(screen.getByText(/Created operator/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Copy link' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Copied' })).toBeInTheDocument())
@@ -177,6 +179,15 @@ describe('user administration', () => {
     expect(actions('New User')).toEqual(['Renew activation link', 'Revoke activation link', 'Edit account'])
   })
 
+  it('offers revoke only when the server reports an active link', async () => {
+    vi.mocked(listUsers).mockResolvedValue({ users: [{ ...user, has_active_link: false }, pending] })
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
+    expect(within(row('Operator')).queryByRole('button', { name: 'Revoke password reset link' })).not.toBeInTheDocument()
+    expect(within(row('Operator')).getByText('No outstanding activation or password reset link.')).toBeInTheDocument()
+    expect(within(row('New User')).getByRole('button', { name: 'Revoke activation link' })).toBeInTheDocument()
+  })
+
   it('does not offer to disable an account before it knows which account is signed in', async () => {
     vi.mocked(getSession).mockReturnValue(new Promise(() => {}))
     vi.mocked(listUsers).mockResolvedValue({ users: [self, disabled] })
@@ -193,13 +204,23 @@ describe('user administration', () => {
     fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
     await waitFor(() => expect(issueUserPasswordReset).toHaveBeenCalledWith('user-2', 'administrator-password'))
-    expect(screen.getByLabelText('Password reset link for operator')).toHaveTextContent('/activate#token=reset-token')
-    expect(screen.getByText(/You can revoke it from this account row/)).toBeInTheDocument()
+    expect(within(row('Operator')).getByLabelText('Password reset link for operator')).toHaveTextContent('/activate#token=reset-token')
     fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Revoke password reset link' }))
     fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
     await waitFor(() => expect(revokeUserActivation).toHaveBeenCalledWith('user-2', 'administrator-password'))
     expect(screen.getByText('The link for operator was revoked.')).toBeInTheDocument()
+  })
+
+  it('treats a link revoked elsewhere as a neutral account-row update', async () => {
+    vi.mocked(revokeUserActivation).mockRejectedValueOnce(new APIError('no active activation link exists for this user', 'no_active_activation'))
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Revoke password reset link' }))
+    fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('There was no outstanding link for operator.'))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it('stops showing a token once its link is revoked or its account is disabled, and keeps it for another account', async () => {

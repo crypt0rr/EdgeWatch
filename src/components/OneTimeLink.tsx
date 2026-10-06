@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AlertTriangle, Check, Copy } from 'lucide-react'
 import './OneTimeLink.css'
 
@@ -7,14 +7,29 @@ type OneTimeLinkProps = {
   path: string
   note: string
   warning?: string
+  focusOnMount?: boolean
   onDismiss: () => void
 }
 
 /** A one-time account link, shown only after the server issues it. */
-export function OneTimeLink({ title, path, note, warning, onDismiss }: OneTimeLinkProps) {
+export function OneTimeLink({ title, path, note, warning, focusOnMount = false, onDismiss }: OneTimeLinkProps) {
   const [copied, setCopied] = useState(false)
   const [copyError, setCopyError] = useState('')
+  const sectionRef = useRef<HTMLElement>(null)
   const url = `${window.location.origin}${path}`
+
+  useEffect(() => {
+    if (!focusOnMount) return
+    // A confirmation dialog may still mark the app shell inert in this effect
+    // pass. Focus after its cleanup restores the shell, and scroll the newly
+    // issued link into view for the account row that triggered it.
+    const frame = window.requestAnimationFrame(() => {
+      const section = sectionRef.current
+      section?.focus()
+      section?.scrollIntoView?.({ block: 'center' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [focusOnMount])
 
   async function copy() {
     setCopyError('')
@@ -31,7 +46,7 @@ export function OneTimeLink({ title, path, note, warning, onDismiss }: OneTimeLi
     }
   }
 
-  return <section className="panel activation-token one-time-link">
+  return <section ref={sectionRef} className="panel activation-token one-time-link" aria-label="One-time link details" tabIndex={focusOnMount ? -1 : undefined}>
     <div className="one-time-link-copy">
       <strong>{title}</strong>
       <p className="muted">{note}</p>

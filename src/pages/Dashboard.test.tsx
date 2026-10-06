@@ -240,6 +240,7 @@ describe('dashboard', () => {
     expect(activityTime?.getAttribute('dateTime')).toBe(scan.finished_at)
     expect(activityTime?.textContent).toContain('2026')
     expect(container.querySelector('.latest-activity-list')).toBeTruthy()
+    expect(container.querySelector('.activity-row > div > span')).toHaveAttribute('title', 'Completed successfully · Open scan details')
   })
 
   it('retries loading latest activity and renders it in its dashboard-specific list', async () => {

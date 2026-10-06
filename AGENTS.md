@@ -62,7 +62,7 @@ Documentation-only changes need a diff review and checks of referenced paths and
 
 | Change | Checks |
 | --- | --- |
-| Go code | Format changed Go files with `gofmt`; run `go vet ./...` and `go test -race ./...` |
+| Go code | Format changed Go files with `gofmt`; run `go vet ./...` and `go test -race -timeout=25m ./...` |
 | Frontend code | `npm run lint`, `npm run build`, and `npm run test:coverage` |
 | Browser behavior | `npm run test:e2e` |
 | Database schema | Store migration tests and `./scripts/check-schema-docs.sh` |

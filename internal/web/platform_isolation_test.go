@@ -191,6 +191,13 @@ func TestIsolationMatrix(t *testing.T) {
 	t.Parallel()
 	f := newPlatformFixture(t)
 	before := f.unitBSnapshot(t)
+	resetNotificationTestLimiter := func() {
+		f.server.testMu.Lock()
+		for key := range f.server.testLast {
+			delete(f.server.testLast, key)
+		}
+		f.server.testMu.Unlock()
+	}
 	var checked, foreignChecked int
 	excepted := map[string]bool{}
 	// The first pass sends the requests without another unit's IDs, so the
@@ -238,7 +245,15 @@ func TestIsolationMatrix(t *testing.T) {
 					checked++
 					continue
 				}
+				if route.Method == http.MethodPost && route.Template == "/notifications/destinations/{id}/test" {
+					// Keep this response comparison outside the rate-limit window;
+					// throttling has a separate regression test.
+					resetNotificationTestLimiter()
+				}
 				foreign := f.isolationRequest(t, actor, route, f.unitIDs(other).path(t, route.Template))
+				if route.Method == http.MethodPost && route.Template == "/notifications/destinations/{id}/test" {
+					resetNotificationTestLimiter()
+				}
 				unknown := f.isolationRequest(t, actor, route, unknownIsolationIDs.path(t, route.Template))
 				if foreign.status != unknown.status || foreign.body != unknown.body {
 					t.Errorf("%s with unit %s's IDs = %d %s; with unknown IDs = %d %s", name, other, foreign.status, foreign.body, unknown.status, unknown.body)

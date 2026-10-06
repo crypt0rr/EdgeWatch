@@ -346,7 +346,10 @@ jobs:
             VERSION=${{ steps.meta.outputs.version }}
             PREBUILT_FRONTEND=1
             PREBUILT_EDGEWATCH=1
+          # The release solve is multi-platform, so also import the matching
+          # CI solve's Naabu compile layers alongside the prebuilt image caches.
           cache-from: |
+            type=gha,scope=container-multiarch
             type=gha,scope=container-prebuilt-amd64
             type=gha,scope=container-prebuilt-arm64
           provenance: mode=max

@@ -379,8 +379,9 @@ jobs:
         run: bash ./scripts/test-prebuilt-image.sh edgewatch:prebuilt-arm64 linux/arm64 v0.0.0-ci
 
   # GitHub Actions caches are ref-isolated, so release tags cannot restore a
-  # cache written by main. Keep the cross-ref cache in GHCR, and grant package
-  # write access only to trusted pushes or deliberate dispatches on main.
+  # cache written by main. Seed separate main and release GHCR caches here;
+  # tags refresh only the release cache. Grant package writes only to trusted
+  # pushes or deliberate dispatches on main.
   release-cache:
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     needs: container
@@ -440,7 +441,9 @@ jobs:
             type=registry,ref=ghcr.io/crypt0rr/edgewatch:buildcache
             type=gha,scope=container-prebuilt-amd64
             type=gha,scope=container-prebuilt-arm64
-          cache-to: type=registry,ref=ghcr.io/crypt0rr/edgewatch:buildcache,mode=max
+          cache-to: |
+            type=registry,ref=ghcr.io/crypt0rr/edgewatch:buildcache,mode=max
+            type=registry,ref=ghcr.io/crypt0rr/edgewatch:releasecache,mode=max
       # Read the just-exported ref on a clean worker to prove that both
       # architecture-specific Naabu compile results are in the registry cache.
       - name: Set up isolated Buildx for cache verification
@@ -458,4 +461,4 @@ jobs:
             VERSION=v0.0.0-ci
             PREBUILT_FRONTEND=1
             PREBUILT_EDGEWATCH=1
-          cache-from: type=registry,ref=ghcr.io/crypt0rr/edgewatch:buildcache
+          cache-from: type=registry,ref=ghcr.io/crypt0rr/edgewatch:releasecache

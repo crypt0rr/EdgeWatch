@@ -66,16 +66,32 @@ test('release images are staged under unique candidate tags', () => {
   assert.doesNotMatch(image, /REGISTRY_IMAGE\}:/)
 })
 
-test('release image reads the shared multi-platform registry cache without tag-scoped writes', () => {
+test('release image refreshes the shared cache with candidate inputs without tag-scoped GHA writes', () => {
   const image = jobBlock('image')
+  const warmup = stepBlock(image, 'Warm registry cache for the release candidate')
   const build = stepBlock(image, 'Build and push image')
-  assert.match(build, /build-args:\s*\|\n\s+VERSION=v0\.0\.0-ci\n\s+PREBUILT_FRONTEND=1\n\s+PREBUILT_EDGEWATCH=1/)
-  assert.match(build, /cache-from: type=registry,ref=ghcr\.io\/crypt0rr\/edgewatch:buildcache/)
+  const candidateArgs = /build-args:\s*\|\n\s+VERSION=v0\.0\.0-ci\n\s+PREBUILT_FRONTEND=1\n\s+PREBUILT_EDGEWATCH=1/
+  assert.match(image, /^ {4}permissions:\n {6}contents: read\n {6}actions: read\n {6}packages: write$/m)
+  assert.match(warmup, /push: false/)
+  assert.match(warmup, /platforms: linux\/amd64,linux\/arm64/)
+  assert.match(warmup, /tags: \$\{\{ env\.CANDIDATE_IMAGE \}\}/)
+  assert.match(warmup, /labels: \$\{\{ steps\.meta\.outputs\.labels \}\}/)
+  assert.match(warmup, candidateArgs)
+  assert.match(warmup, /cache-from:\s*\|\n\s+type=registry,ref=ghcr\.io\/crypt0rr\/edgewatch:buildcache\n\s+type=registry,ref=ghcr\.io\/crypt0rr\/edgewatch:releasecache/)
+  assert.match(warmup, /cache-to: type=registry,ref=ghcr\.io\/crypt0rr\/edgewatch:releasecache,mode=max/)
+  assert.match(warmup, /provenance: mode=max/)
+  assert.match(warmup, /sbom: true/)
+  assert.doesNotMatch(warmup, /type=gha|container-prebuilt-(?:amd64|arm64)/)
+
+  assert.match(build, candidateArgs)
+  assert.match(build, /cache-from:\s*\|\n\s+type=registry,ref=ghcr\.io\/crypt0rr\/edgewatch:buildcache\n\s+type=registry,ref=ghcr\.io\/crypt0rr\/edgewatch:releasecache/)
   assert.doesNotMatch(build, /type=gha|container-prebuilt-(?:amd64|arm64)/)
   assert.doesNotMatch(build, /^\s+cache-to:/m)
+  assert.doesNotMatch(image, /type=gha|container-prebuilt-(?:amd64|arm64)/)
+  assert.ok(image.indexOf(warmup) < image.indexOf(build), 'the exact-input cache refresh must finish before image publication')
 })
 
-test('CI exports the release-style registry cache only from main builds with matching inputs', () => {
+test('CI seeds both release registry caches only from main builds with matching inputs', () => {
   const cacheJob = ciJobBlock('release-cache')
   assert.match(cacheJob, /^ {4}if: \(github\.event_name == 'push' \|\| github\.event_name == 'workflow_dispatch'\) && github\.ref == 'refs\/heads\/main'$/m)
   assert.match(cacheJob, /^ {4}needs: container$/m)
@@ -86,7 +102,7 @@ test('CI exports the release-style registry cache only from main builds with mat
   const cacheBuild = stepBlock(cacheJob, 'Export release-style multi-platform cache')
   assert.match(cacheBuild, /build-args:\s*\|\n\s+VERSION=v0\.0\.0-ci\n\s+PREBUILT_FRONTEND=1\n\s+PREBUILT_EDGEWATCH=1/)
   assert.match(cacheBuild, /cache-from:\s*\|\n\s+type=registry,ref=ghcr\.io\/crypt0rr\/edgewatch:buildcache\n\s+type=gha,scope=container-prebuilt-amd64\n\s+type=gha,scope=container-prebuilt-arm64/)
-  assert.match(cacheBuild, /cache-to: type=registry,ref=ghcr\.io\/crypt0rr\/edgewatch:buildcache,mode=max/)
+  assert.match(cacheBuild, /cache-to:\s*\|\n\s+type=registry,ref=ghcr\.io\/crypt0rr\/edgewatch:buildcache,mode=max\n\s+type=registry,ref=ghcr\.io\/crypt0rr\/edgewatch:releasecache,mode=max/)
   assert.ok(cacheJob.indexOf(login) < cacheJob.indexOf(cacheBuild), 'CI must authenticate before exporting the GHCR cache')
   const container = ciJobBlock('container')
   for (const [stepName, scope] of [
@@ -103,7 +119,7 @@ test('CI exports the release-style registry cache only from main builds with mat
   const cacheVerification = stepBlock(cacheJob, 'Verify release-style multi-platform cache')
   assert.match(cacheVerification, /builder: \$\{\{ steps\.release-cache-builder\.outputs\.name \}\}/)
   assert.match(cacheVerification, /platforms: linux\/amd64,linux\/arm64/)
-  assert.match(cacheVerification, /cache-from: type=registry,ref=ghcr\.io\/crypt0rr\/edgewatch:buildcache/)
+  assert.match(cacheVerification, /cache-from: type=registry,ref=ghcr\.io\/crypt0rr\/edgewatch:releasecache/)
   assert.doesNotMatch(cacheVerification, /^\s+cache-to:/m)
 })
 

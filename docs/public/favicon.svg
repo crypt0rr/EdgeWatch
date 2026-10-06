@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-labelledby="title">
+  <title id="title">EdgeWatch</title>
+  <rect width="32" height="32" rx="9" fill="#2d75d7"/>
+  <g fill="none" stroke="#f6f9fd" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
+    <path d="M16 24h.01"/>
+    <path d="M6 12.82a15 15 0 0 1 20 0"/>
+    <path d="M9 16.86a10 10 0 0 1 14 0"/>
+    <path d="M12.5 20.43a5 5 0 0 1 7 0"/>
+  </g>
+</svg>

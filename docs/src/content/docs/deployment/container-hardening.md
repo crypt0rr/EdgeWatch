@@ -1,4 +1,7 @@
-# Container runtime hardening
+---
+title: Container runtime hardening
+description: Review scanner capability requirements, runtime controls, and data ownership.
+---
 
 EdgeWatch deliberately keeps the final container process as UID 0 in the
 current release. This is a compatibility decision, not a requirement for the

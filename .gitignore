@@ -1,5 +1,7 @@
 /edgewatch
 /dist/
+/docs/dist/
+/docs/.astro/
 /release-binaries/
 /data/
 /config.yaml

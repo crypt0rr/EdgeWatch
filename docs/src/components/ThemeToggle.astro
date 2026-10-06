@@ -1,0 +1,74 @@
+<edgewatch-theme-toggle>
+  <button type="button" aria-label="Switch to light theme" title="Switch to light theme">
+    <svg class="sun" aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5" />
+    </svg>
+    <svg class="moon" aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z" />
+    </svg>
+  </button>
+</edgewatch-theme-toggle>
+
+<script>
+  class ThemeToggle extends HTMLElement {
+    connectedCallback() {
+      this.button.addEventListener('click', this.toggle)
+      document.addEventListener('edgewatch:theme', this.updateLabel)
+      window.addEventListener('storage', this.syncStorage)
+      this.updateLabel()
+    }
+
+    disconnectedCallback() {
+      this.button.removeEventListener('click', this.toggle)
+      document.removeEventListener('edgewatch:theme', this.updateLabel)
+      window.removeEventListener('storage', this.syncStorage)
+    }
+
+    get button() {
+      return this.querySelector('button')!
+    }
+
+    updateLabel = () => {
+      const label = document.documentElement.dataset.theme === 'dark'
+        ? 'Switch to light theme'
+        : 'Switch to dark theme'
+      this.button.setAttribute('aria-label', label)
+      this.button.title = label
+    }
+
+    toggle = () => {
+      const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'
+      try { localStorage.setItem('starlight-theme', theme) } catch {}
+      window.StarlightThemeProvider.updatePickers(theme)
+    }
+
+    syncStorage = (event: StorageEvent) => {
+      if (event.key === 'starlight-theme' || event.key === null) {
+        window.StarlightThemeProvider.updatePickers(event.newValue === 'light' ? 'light' : 'dark')
+      }
+    }
+  }
+
+  if (!customElements.get('edgewatch-theme-toggle')) {
+    customElements.define('edgewatch-theme-toggle', ThemeToggle)
+  }
+</script>
+
+<style>
+  button {
+    display: grid;
+    place-items: center;
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    padding: 0.5rem;
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 0.6rem;
+    background: var(--ew-panel);
+    color: var(--sl-color-text);
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--sl-color-text-accent); }
+  :global([data-theme='dark']) .moon,
+  :global([data-theme='light']) .sun { display: none; }
+</style>

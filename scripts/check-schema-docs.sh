@@ -12,10 +12,11 @@ if [ -z "$schema" ]; then
   exit 1
 fi
 
-readme=$(tr '\n' ' ' < README.md)
+compatibility_path=docs/src/content/docs/reference/database-compatibility.md
+compatibility=$(tr '\n' ' ' < "$compatibility_path")
 security=$(tr '\n' ' ' < SECURITY.md)
-if ! printf '%s' "$readme" | grep -Eq "current schema is[[:space:]]+version ${schema}"; then
-  echo "README.md does not document current schema ${schema}" >&2
+if ! printf '%s' "$compatibility" | grep -Eq "current schema is[[:space:]]+version ${schema}"; then
+  echo "${compatibility_path} does not document current schema ${schema}" >&2
   exit 1
 fi
 if ! printf '%s' "$security" | grep -Eq "schema[[:space:]]+${schema}[[:space:]]+must not"; then

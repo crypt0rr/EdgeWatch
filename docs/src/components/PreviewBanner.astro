@@ -1,0 +1,35 @@
+---
+import Default from '@astrojs/starlight/components/Banner.astro'
+---
+
+<aside class="preview-note" aria-label="Documentation preview" data-pagefind-ignore>
+  <span class="preview-label">Preview</span>
+  <span>Documentation preview — help us validate these guides before the public launch.</span>
+</aside>
+<Default><slot /></Default>
+
+<style>
+  .preview-note {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    padding: 0.65rem 1.25rem;
+    border-bottom: 1px solid var(--sl-color-hairline);
+    background: var(--ew-panel);
+    color: var(--sl-color-gray-2);
+    font-size: 0.75rem;
+    line-height: 1.6;
+  }
+  .preview-label {
+    flex-shrink: 0;
+    border: 1px solid var(--ew-amber-line);
+    border-radius: 5px;
+    padding: 0.05rem 0.4rem;
+    color: var(--ew-amber);
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+</style>

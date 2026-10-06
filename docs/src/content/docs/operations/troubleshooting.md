@@ -1,0 +1,72 @@
+---
+title: Troubleshooting
+description: Diagnose storage permissions, proxy rejection, incomplete scans, notification failures, and upgrade progress.
+---
+
+Start with a bounded log summary and the host health report:
+
+```sh
+docker compose logs --tail 100 edgewatch
+docker compose exec edgewatch edgewatch health \
+  --config /etc/edgewatch/config.yaml --output json
+```
+
+Keep credentials, setup tokens, target information, and encryption keys out of
+public issue reports. Health exits non-zero for unhealthy migrations or a
+missing daemon heartbeat; its warnings also list actions that do not stop the
+service. See [Host commands](/reference/cli/) for output and exit behavior.
+
+## Permission denied on startup
+
+The container runs as UID 0 with filesystem capabilities dropped. The data
+mount must be owned by the host identity mapped to container UID 0, with mode
+`0750`; separately mounted secrets must be readable by that identity and
+private to their owner. Run the actual read/write preflight in
+[Installation](/getting-started/installation/) and inspect the mapping for your
+Docker mode. Stop the service before correcting an existing directory's
+ownership. World-readable or world-writable permissions are not a remedy.
+
+## Proxy hostname rejected
+
+A `421 Misdirected Request` when loopback requests succeed usually means the
+public hostname is missing from `web.allowed_hosts`. Use the bare hostname,
+then recreate the container after editing configuration. Follow
+[Reverse proxies](/deployment/reverse-proxies/) for the two-request diagnostic,
+forwarded HTTPS handling, and trusted client attribution.
+
+## Scans appear stuck or incomplete
+
+Open the run's live details first. Broad scans report scanner phase, process
+heartbeat, completed probes, and resumable work. A zero-progress display alone
+does not mean that the scanner is idle. A timeout preserves work for the resume
+window; partial or failed observations cannot change the baseline.
+
+A stalled cycle holds scheduled runs until it is retried, discarded, or its
+resume window ends. The first scheduled run after expiry records the expiry;
+the next starts a fresh cycle. Read [Scanning and profiles](/user-guide/scanning/)
+and [Host commands](/reference/cli/) before changing scan scope or retrying.
+
+## Destinations are locked or delivery fails
+
+Inspect the destination's health on **Notifications**. After restoring a key,
+run `notify test` from [Host commands](/reference/cli/): it checks enabled
+web-managed destinations across the deployment and reports `deployment_locked`
+without printing URLs. Console tests cover only the current unit's destinations.
+
+Restore the original database and notification key together. A missing key
+cannot be recovered from the database alone. Paused destinations retain their
+queue without consuming retries; URL replacement discards queued alerts.
+See [Notifications](/user-guide/notifications/) for retries, terminal failures,
+and legacy-import warnings.
+
+## Upgrade or restore needs migration
+
+Only the daemon upgrades the database. Some migrations rebuild projections or
+finish deletion cleanup in restartable background batches. `health` reports
+maintenance progress and `verify` lists checkpoints. Host commands that need
+the upgraded schema refuse an older restored schema until the daemon starts.
+
+An older binary refuses a database upgraded beyond its supported version.
+Rollback requires a matching pre-upgrade backup; do not replace a live database.
+Follow [Database compatibility](/reference/database-compatibility/) and
+[Backup and recovery](/operations/backup-recovery/).

@@ -1,0 +1,40 @@
+---
+title: EdgeWatch documentation
+description: Get started with EdgeWatch, understand your monitored network surface, and contribute to the project.
+template: splash
+hero:
+  title: Know your surface. Notice what changes.
+tableOfContents: false
+prev: false
+next: false
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components'
+import FeatureOverview from '../../components/FeatureOverview.astro'
+
+## Find your starting point
+
+<CardGrid>
+  <Card title="Deploy EdgeWatch" icon="rocket">
+    Start with Docker, create your administrator account, and connect to the console.
+
+    [Installation guide →](/getting-started/installation/)
+  </Card>
+  <Card title="Monitor your network" icon="magnifier">
+    Choose your targets, run a scan, and establish an expected surface.
+
+    [Your first scan →](/getting-started/first-scan/)
+  </Card>
+  <Card title="Configure your deployment" icon="setting">
+    Understand the boundary between YAML settings and console administration.
+
+    [Configuration reference →](/reference/configuration/)
+  </Card>
+  <Card title="Build and contribute" icon="laptop">
+    Set up Go and Node.js, run the checks, and work on EdgeWatch or its documentation.
+
+    [Maintainer guide →](/maintainers/development/)
+  </Card>
+</CardGrid>
+
+<FeatureOverview />

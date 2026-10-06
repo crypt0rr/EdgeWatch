@@ -1,0 +1,37 @@
+---
+import Default from '@astrojs/starlight/components/Header.astro'
+import SiteTitle from '@astrojs/starlight/components/SiteTitle.astro'
+import Search from '@astrojs/starlight/components/Search.astro'
+import ThemeToggle from './ThemeToggle.astro'
+const isHomepage = Astro.locals.starlightRoute.id === ''
+---
+
+{isHomepage ? (
+  <div class="home-header">
+    <SiteTitle />
+    <div class="home-search"><Search /></div>
+    <nav aria-label="Main navigation">
+      <a href="/getting-started/installation/">Documentation</a>
+      <a href="https://github.com/crypt0rr/EdgeWatch">GitHub <span aria-hidden="true">↗</span></a>
+      <ThemeToggle />
+    </nav>
+  </div>
+) : <Default><slot /></Default>}
+
+<style>
+  .home-header { display: flex; align-items: center; gap: 2rem; max-width: 80rem; height: 100%; margin-inline: auto; }
+  .home-search { margin-right: auto; margin-left: 1rem; }
+  nav { display: flex; align-items: center; gap: 1.6rem; }
+  nav a { color: var(--sl-color-gray-2); font-size: 0.8rem; font-weight: 600; text-decoration: none; white-space: nowrap; }
+  nav a:hover { color: var(--sl-color-text-accent); }
+  @media (max-width: 60rem) {
+    .home-header { gap: 1rem; }
+    .home-search { margin-left: 0; }
+    nav { gap: 0.9rem; }
+    nav a:nth-child(2) { display: none; }
+  }
+  @media (max-width: 40rem) {
+    .home-search { margin-left: auto; margin-right: 0; }
+    nav a { display: none; }
+  }
+</style>

@@ -1,4 +1,7 @@
-# API compatibility
+---
+title: API compatibility
+description: Review scan response shapes, business-unit routes, and compatibility changes.
+---
 
 ## Job scan work estimates
 

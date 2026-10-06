@@ -607,6 +607,7 @@ func TestRestoreQuarantinesPendingDeliveriesByDefault(t *testing.T) {
 	createRestoreFixture(t, source, "source")
 	createRestoreFixture(t, destination, "destination")
 	addRestorePendingDelivery(t, source, "managed:alerts:1")
+	addRestoreDeadDelivery(t, source, "managed:alerts:2")
 
 	result, err := Restore(context.Background(), source, destination, RestoreOptions{})
 	if err != nil {
@@ -621,7 +622,11 @@ func TestRestoreQuarantinesPendingDeliveriesByDefault(t *testing.T) {
 	}
 	defer reader.Close()
 	var pending, quarantined, epochs int
-	if err := reader.DB.QueryRow(`SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL`).Scan(&pending); err != nil {
+	if err := reader.DB.QueryRow(`SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND terminal_at=''`).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	var dead int
+	if err := reader.DB.QueryRow(`SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND terminal_at<>''`).Scan(&dead); err != nil {
 		t.Fatal(err)
 	}
 	if err := reader.DB.QueryRow(`SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE restore_epoch=?`, result.RestoreEpoch).Scan(&quarantined); err != nil {
@@ -630,14 +635,14 @@ func TestRestoreQuarantinesPendingDeliveriesByDefault(t *testing.T) {
 	if err := reader.DB.QueryRow(`SELECT COUNT(*) FROM restore_epochs WHERE epoch=? AND pending_delivery_policy=? AND pending_delivery_count=1`, result.RestoreEpoch, PendingDeliveriesQuarantine).Scan(&epochs); err != nil {
 		t.Fatal(err)
 	}
-	if pending != 0 || quarantined != 1 || epochs != 1 {
-		t.Fatalf("pending/quarantined/epoch rows = %d/%d/%d", pending, quarantined, epochs)
+	if pending != 0 || dead != 1 || quarantined != 1 || epochs != 1 {
+		t.Fatalf("pending/dead/quarantined/epoch rows = %d/%d/%d/%d", pending, dead, quarantined, epochs)
 	}
 	var detail, actor string
 	if err := reader.DB.QueryRow(`SELECT detail,actor_username FROM security_audit WHERE action='database.restore.pending_deliveries' ORDER BY id DESC LIMIT 1`).Scan(&detail, &actor); err != nil {
 		t.Fatal(err)
 	}
-	if actor != "host-cli" || !strings.Contains(detail, "pending_deliveries=quarantine") || strings.Contains(detail, source) || strings.Contains(detail, "stale") {
+	if actor != "host-cli" || !strings.Contains(detail, "pending_deliveries=quarantine") || !strings.Contains(detail, "count=1") || strings.Contains(detail, source) || strings.Contains(detail, "stale") {
 		t.Fatalf("restore audit detail leaked data: actor=%q detail=%q", actor, detail)
 	}
 }
@@ -895,6 +900,7 @@ func TestRestorePendingDeliveryPoliciesAreExplicit(t *testing.T) {
 			createRestoreFixture(t, source, "source")
 			createRestoreFixture(t, destination, "destination")
 			addRestorePendingDelivery(t, source, "managed:alerts:1")
+			addRestoreDeadDelivery(t, source, "managed:alerts:2")
 			result, err := Restore(context.Background(), source, destination, RestoreOptions{PendingDeliveries: test.policy})
 			if err != nil {
 				t.Fatalf("restore: %v", err)
@@ -908,14 +914,15 @@ func TestRestorePendingDeliveryPoliciesAreExplicit(t *testing.T) {
 			}
 			defer reader.Close()
 			var outbox, stash int
-			if err := reader.DB.QueryRow(`SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL`).Scan(&outbox); err != nil {
+			if err := reader.DB.QueryRow(`SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND terminal_at=''`).Scan(&outbox); err != nil {
 				t.Fatal(err)
 			}
+			dead := countRows(t, reader.DB, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND terminal_at<>''`)
 			if err := reader.DB.QueryRow(`SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE restore_epoch=?`, result.RestoreEpoch).Scan(&stash); err != nil {
 				t.Fatal(err)
 			}
-			if outbox != test.outbox || stash != test.stash {
-				t.Fatalf("outbox/quarantine rows = %d/%d, want %d/%d", outbox, stash, test.outbox, test.stash)
+			if outbox != test.outbox || dead != 1 || stash != test.stash {
+				t.Fatalf("pending/dead/quarantine rows = %d/%d/%d, want %d/1/%d", outbox, dead, stash, test.outbox, test.stash)
 			}
 		})
 	}
@@ -1337,6 +1344,74 @@ func addRestorePendingDelivery(t *testing.T, path, destination string) {
 	defer s.Close()
 	if _, err := s.DB.Exec(`INSERT INTO outbox(destination,payload_json,attempts,next_at) VALUES(?,?,0,?)`, destination, []byte(`{"type":"stale","message":"stale"}`), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func addRestoreDeadDelivery(t *testing.T, path, destination string) {
+	t.Helper()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.DB.Exec(`INSERT INTO outbox(destination,payload_json,attempts,next_at,last_error,terminal_at) VALUES(?,?,15,?,'delivery_failed',?)`, destination, []byte(`{"type":"stale"}`), stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRestorePre31CountsOnlyRetryableDeliveries(t *testing.T) {
+	t.Parallel()
+	for _, policy := range []PendingDeliveryPolicy{PendingDeliveriesQuarantine, PendingDeliveriesDiscard} {
+		t.Run(string(policy), func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "pre31.db")
+			raw, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.ExecContext(ctx, `CREATE TABLE outbox (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		destination TEXT NOT NULL,
+		payload_json BLOB NOT NULL,
+		attempts INTEGER NOT NULL DEFAULT 0,
+		next_at TEXT NOT NULL,
+		sent_at TEXT,
+		last_error TEXT NOT NULL DEFAULT ''
+		); INSERT INTO outbox(destination,payload_json,attempts,next_at) VALUES('retrying','{}',0,'2026-10-01T00:00:00Z'),('exhausted','{}',8,'2026-10-01T00:00:00Z'); PRAGMA user_version=30`); err != nil {
+				raw.Close()
+				t.Fatal(err)
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			affected, err := applyRestoreDeliveryPolicy(ctx, path, policy, "pre31-restore", time.Now().UTC())
+			if err != nil {
+				t.Fatalf("apply pre-31 %s policy: %v", policy, err)
+			}
+			if affected != 1 {
+				t.Fatalf("pre-31 affected count = %d, want only the retryable row", affected)
+			}
+			reader, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.Close()
+			if got := countRows(t, reader, `SELECT COUNT(*) FROM outbox WHERE destination='exhausted'`); got != 1 {
+				t.Fatalf("exhausted pre-31 deliveries remaining = %d, want 1", got)
+			}
+			if got := countRows(t, reader, `SELECT COUNT(*) FROM outbox WHERE destination='retrying'`); got != 0 {
+				t.Fatalf("retryable pre-31 deliveries remaining = %d, want 0", got)
+			}
+			wantQuarantined := 0
+			if policy == PendingDeliveriesQuarantine {
+				wantQuarantined = 1
+			}
+			if got := countRows(t, reader, `SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE destination='retrying'`); got != wantQuarantined {
+				t.Fatalf("quarantined retryable pre-31 deliveries = %d, want %d", got, wantQuarantined)
+			}
+		})
 	}
 }
 

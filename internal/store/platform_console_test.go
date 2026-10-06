@@ -634,8 +634,12 @@ func TestPlatformConsoleNotifications(t *testing.T) {
 	}
 	queue("managed:"+created.ID+":1", nil)
 	queue("managed:"+ids.b+":1", secondTenantID)
+	terminalAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := f.store.DB.ExecContext(ctx, `INSERT INTO outbox(destination,payload_json,attempts,next_at,last_error,terminal_at,tenant_id) VALUES(?,?,15,?,'delivery_failed',?,NULL)`, "managed:"+created.ID+":1", []byte(`{}`), terminalAt, terminalAt); err != nil {
+		t.Fatal(err)
+	}
 	pending := func(destination string) int {
-		return countRows(t, f.store.DB, `SELECT COUNT(*) FROM outbox WHERE destination=? AND sent_at IS NULL`, destination)
+		return countRows(t, f.store.DB, `SELECT COUNT(*) FROM outbox WHERE destination=? AND sent_at IS NULL AND terminal_at=''`, destination)
 	}
 	for _, foreign := range []string{ids.a, ids.b, unknownNotificationID} {
 		if _, err := ps.UpdatePlatformNotificationWithAudit(ctx, foreign, 1, "renamed", "generic", []byte("sealed"), []byte("nonce"), true, platformAudit("")); !errors.Is(err, ErrNotFound) {
@@ -675,6 +679,12 @@ func TestPlatformConsoleNotifications(t *testing.T) {
 	}
 	if pending("managed:"+created.ID+":2") != 0 || pending("managed:"+ids.b+":1") != 1 {
 		t.Fatal("a credential change kept the platform's delivery or discarded unit B's")
+	}
+	if got := countRows(t, f.store.DB, `SELECT COUNT(*) FROM outbox WHERE destination=? AND terminal_at<>''`, "managed:"+created.ID+":1"); got != 1 {
+		t.Fatalf("platform credential change kept %d terminal deliveries, want 1", got)
+	}
+	if got := countRows(t, f.store.DB, `SELECT COUNT(*) FROM security_audit WHERE action='notifications.pending_discarded' AND detail LIKE 'discarded 1 pending deliveries%' AND tenant_id IS NULL`); got != 1 {
+		t.Fatalf("platform pending-discard audit rows with count=1 = %d, want 1", got)
 	}
 	if got := countRows(t, f.store.DB, `SELECT COUNT(*) FROM security_audit WHERE action='notifications.pending_discarded' AND tenant_id IS NULL AND actor_kind=?`, AuditActorPlatform); got != 1 {
 		t.Fatalf("platform discard records = %d, want 1", got)

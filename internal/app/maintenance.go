@@ -73,7 +73,7 @@ func (a *App) runMaintenancePass(ctx context.Context, system *store.SystemStore,
 		if startup {
 			message = "startup " + message
 		}
-		logger.Info(message, "rows", stats.Total(), "scans", stats.Scans, "events", stats.Events, "sent_outbox", stats.SentOutbox, "failed_outbox", stats.FailedOutbox, "revisions", stats.Revisions, "cycles", stats.Cycles, "fts_optimized", stats.FTSOptimized, "reclaimed_pages", stats.ReclaimedPages)
+		logger.Info(message, "rows", stats.Total(), "scans", stats.Scans, "events", stats.Events, "sent_outbox", stats.SentOutbox, "failed_outbox", stats.FailedOutbox, "quarantined_outbox", stats.QuarantinedOutbox, "revisions", stats.Revisions, "cycles", stats.Cycles, "fts_optimized", stats.FTSOptimized, "reclaimed_pages", stats.ReclaimedPages)
 	}
 
 	if expired, err := system.ExpireScanCycles(ctx, time.Now().UTC()); err != nil {

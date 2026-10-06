@@ -581,7 +581,7 @@ func (ps *PlatformStore) UpdatePlatformNotificationWithAudit(ctx context.Context
 	audit.Action, audit.ActorKind = auditPlatformNotificationsUpdated, AuditActorPlatform
 	audits := []AuditEntry{audit}
 	if credentialsChanged {
-		discarded, err := execCount(ctx, tx, `DELETE FROM outbox WHERE destination LIKE ? AND sent_at IS NULL`+platformDestinationSQL, "managed:"+id+":%", id)
+		discarded, err := execCount(ctx, tx, `DELETE FROM outbox WHERE destination LIKE ? AND sent_at IS NULL AND terminal_at=''`+platformDestinationSQL, "managed:"+id+":%", id)
 		if err != nil {
 			return ManagedNotification{}, err
 		}

@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 63
+const schemaVersion = 64
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -1271,6 +1271,9 @@ ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=
 		// Terminalize delivery rows that exhausted the former eight-attempt
 		// policy before schema 31 could record terminal state.
 		63: migration63Statements(),
+		// Expired restore quarantine entries by retention timestamp without
+		// rescanning the full quarantine table for each bounded delete batch.
+		64: migration64Statements(),
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL
 	// steps. FTS and other resumable backfills can be the longest part of an

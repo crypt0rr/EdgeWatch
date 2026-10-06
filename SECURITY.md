@@ -471,14 +471,16 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 63 must not be opened by an older EdgeWatch
+database upgraded to schema 64 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
 refuse a schema newer than the binary supports before they write anything.
 Schema 63 also marks legacy unsent deliveries with at least eight attempts
 and a retry scheduled before v0.22.1 as terminal; deliveries still retrying
-under the newer fifteen-attempt policy remain eligible.
+under the newer fifteen-attempt policy remain eligible. Schema 64 adds an
+index for pruning old restore-quarantine records without rewriting delivery
+history.
 Only the daemon migrates. The host commands that act on business units or
 accounts (`admin`, `scan`, `status`, `history`, `baseline`, and `notify
 test`) refuse a schema that the daemon has not upgraded yet, such as a
@@ -536,7 +538,11 @@ may explicitly choose `--pending-deliveries discard` or
 `--pending-deliveries preserve` when running the host restore command. The
 choice and a bounded count are recorded in a redacted audit event. Quarantined
 payloads remain in the restored database but are never claimed by the delivery
-worker. A restore also clears the daemon and scan leases copied from the
+worker; records older than the configured history retention are pruned in
+bounded batches. Records owned by a unit whose deletion is pending are left to
+that unit's purge. Restore policies count, quarantine, or discard only
+claimable pending deliveries; terminal failures stay in the outbox. A restore
+also clears the daemon and scan leases copied from the
 backup, because no process runs on the restored copy. It still refuses to
 replace a database whose own daemon heartbeat is recent, unless the operator
 passes the emergency `--allow-active-daemon` override.

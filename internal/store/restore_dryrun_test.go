@@ -24,6 +24,7 @@ func TestDryRunRestorePredictsRestoreOutcome(t *testing.T) {
 	destinationTemplate := filepath.Join(templates, "destination.db")
 	createRestoreFixture(t, sourceTemplate, "source")
 	addRestorePendingDelivery(t, sourceTemplate, "backup-destination")
+	addRestoreDeadDelivery(t, sourceTemplate, "dead-backup-delivery")
 	createRestoreFixture(t, destinationTemplate, "destination")
 	validSource := func(t *testing.T, path string) {
 		copyRestoreFixture(t, sourceTemplate, path)
@@ -197,6 +198,17 @@ func TestDryRunRestorePredictsRestoreOutcome(t *testing.T) {
 			}
 			if result.PendingDeliveriesAffected != dryRun.PendingDeliveriesAffected {
 				t.Fatalf("restore pending deliveries = %d, dry run predicted %d", result.PendingDeliveriesAffected, dryRun.PendingDeliveriesAffected)
+			}
+			restored, err := OpenReadOnlyExisting(destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dead := countRows(t, restored.DB, `SELECT COUNT(*) FROM outbox WHERE destination='dead-backup-delivery' AND terminal_at<>''`)
+			if err := restored.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if dead != 1 {
+				t.Fatalf("terminal deliveries remaining after restore = %d, want 1", dead)
 			}
 			if got, err := readRestoreValue(destination); err != nil || got != "source" {
 				t.Fatalf("restored value = %q, %v; want source", got, err)

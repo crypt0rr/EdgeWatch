@@ -66,10 +66,11 @@ test('release images are staged under unique candidate tags', () => {
   assert.doesNotMatch(image, /REGISTRY_IMAGE\}:/)
 })
 
-test('release image reads platform-matched CI caches without writing tag-scoped caches', () => {
+test('release image reads the verified multi-platform CI cache without tag-scoped writes', () => {
   const image = jobBlock('image')
   const build = stepBlock(image, 'Build and push image')
-  assert.match(build, /cache-from:\s*\|\n\s+type=gha,scope=container-release-multiarch\n\s+type=gha,scope=container-prebuilt-amd64\n\s+type=gha,scope=container-prebuilt-arm64/)
+  assert.match(build, /cache-from: type=gha,scope=container-release-multiarch/)
+  assert.doesNotMatch(build, /container-prebuilt-(?:amd64|arm64)/)
   assert.doesNotMatch(build, /^\s+cache-to:/m)
 })
 
@@ -81,7 +82,7 @@ test('CI exports the release-style multi-platform cache with matching inputs', (
   const cacheBuild = stepBlock(container, 'Build release-style multi-platform cache')
   assert.match(cacheBuild, /builder: \$\{\{ steps\.release-cache-builder\.outputs\.name \}\}/)
   assert.match(cacheBuild, /platforms: linux\/amd64,linux\/arm64/)
-  assert.match(cacheBuild, /build-args:\s*\|\n\s+VERSION=v0\.0\.0-ci\n\s+PREBUILT_FRONTEND=1\n\s+PREBUILT_EDGEWATCH=1/)
+  assert.match(cacheBuild, /build-args:\s*\|\n\s+VERSION=candidate-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\n\s+PREBUILT_FRONTEND=1\n\s+PREBUILT_EDGEWATCH=1/)
   assert.match(cacheBuild, /cache-from: type=gha,scope=container-release-multiarch/)
   assert.match(cacheBuild, /cache-to: \$\{\{ github\.event_name == 'push' && 'type=gha,mode=max,scope=container-release-multiarch' \|\| '' \}\}/)
 })

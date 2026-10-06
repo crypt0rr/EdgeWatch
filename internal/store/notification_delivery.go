@@ -79,6 +79,8 @@ func deliveryErrorCode(err error) string {
 		return "provider_panic"
 	case errors.Is(err, ErrDeliveryWorkerPanic):
 		return "worker_panic"
+	case errors.Is(err, ErrDeliveryPayloadInvalid):
+		return "payload_invalid"
 	case errors.Is(err, ErrDeliveryIndeterminate):
 		return "delivery_indeterminate"
 	case errors.Is(err, ErrDeliveryProvider):

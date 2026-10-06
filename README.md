@@ -943,9 +943,12 @@ heartbeat, and validation of a staged copy of the backup, which is made in a
 private directory next to the database and then removed. The destination is
 never changed. The report includes `safe`, a `refusal` reason when the restore
 would be refused, the backup's `source_schema_version`, and the number of
-pending deliveries the chosen `--pending-deliveries` policy would affect. The
-command exits non-zero when the restore would be refused, so scripts can act on
-its exit status.
+claimable pending deliveries the chosen `--pending-deliveries` policy would
+affect. Terminal failures stay in the outbox; restore policies do not quarantine
+or discard them. Quarantined payloads are removed in bounded batches after they
+fall outside the configured history retention; the purge removes them for units
+whose deletion is pending. The command exits non-zero when the restore would be
+refused, so scripts can act on its exit status.
 
 Restore and dry-run commands stop their staging work on `SIGINT` or `SIGTERM`
 and remove the temporary copy. If a process is killed outright or the host
@@ -972,19 +975,21 @@ needs one. Print a new platform setup token with `edgewatch admin
 platform-setup-token`; while no administrator exists, the daemon prints a new
 setup token when it starts.
 
-The current schema is version 63. Schema 31 records terminal notification
+The current schema is version 64. Schema 31 records terminal notification
 deliveries and marks rows that had already exhausted the original eight
 attempts. Schema 63 repairs databases that had already passed schema 31 by
 marking still-unsent rows with at least eight attempts and a scheduled retry
 before v0.22.1, when the retry budget increased to fifteen. Retries scheduled
 on or after that release remain eligible, so upgrading does not replay
-deliveries that were still retrying. Database migrations are forward-only. An
-older image must not be pointed at a database already upgraded by a newer
-image; restore the matching pre-upgrade ./data backup if a rollback is
-required. The daemon and the commands that write to the database (admin, scan,
-notify test, baseline approve and reset, and backup) refuse a newer schema
-with `database schema version N is newer than supported version M`. Back up
-such a database with the release that upgraded it, or copy ./data while
+deliveries that were still retrying. Schema 64 adds an index for pruning old
+restore-quarantine records; it does not rewrite delivery history. Database
+migrations are forward-only. An older image must not be pointed at a database
+already upgraded by a newer image; restore the matching pre-upgrade ./data
+backup if a rollback is required. The daemon and the commands that write to the
+database (admin, scan, notify test, baseline approve and reset, and backup)
+refuse versions above their supported schema version with the error
+`database schema version N is newer than supported version M`. Back up such a
+database with the release that upgraded it, or copy ./data while
 EdgeWatch is stopped. A daemon that finds another daemon's live lease exits
 before it migrates the database, and so does a daemon whose configured key
 file or notification URL is unusable (see `config validate` under

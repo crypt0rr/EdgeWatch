@@ -13,16 +13,17 @@ import (
 )
 
 type PruneStats struct {
-	Scans          int64
-	Events         int64
-	SentOutbox     int64
-	FailedOutbox   int64
-	Revisions      int64
-	Cycles         int64
-	RDAPCache      int64
-	FTSOptimized   bool
-	FTSDeferred    bool
-	ReclaimedPages int64
+	Scans             int64
+	Events            int64
+	SentOutbox        int64
+	FailedOutbox      int64
+	QuarantinedOutbox int64
+	Revisions         int64
+	Cycles            int64
+	RDAPCache         int64
+	FTSOptimized      bool
+	FTSDeferred       bool
+	ReclaimedPages    int64
 }
 
 // retentionBatchSize bounds both lock duration and rollback cost. Retention
@@ -61,7 +62,7 @@ const retentionProtectedScans = "edgewatch_retention_protected_scans"
 const purgedTenantStates = `('` + TenantStateDeleting + `','` + TenantStateDeleted + `')`
 
 func (p PruneStats) Total() int64 {
-	return p.Scans + p.Events + p.SentOutbox + p.FailedOutbox + p.Revisions + p.Cycles + p.RDAPCache
+	return p.Scans + p.Events + p.SentOutbox + p.FailedOutbox + p.QuarantinedOutbox + p.Revisions + p.Cycles + p.RDAPCache
 }
 
 // PruneWithStats removes rows outside the configured retention window while
@@ -71,6 +72,8 @@ func (p PruneStats) Total() int64 {
 // bounded batch is committed independently, making the operation resumable
 // and allowing cancellation between batches without holding the writer lock
 // for the whole retained history.
+// Restore-quarantined deliveries are expired by the same cutoff, except while
+// their tenant purge is pending.
 //
 // The pass covers every tenant, and a disabled tenant's history keeps ageing
 // out. The history of a tenant that is being deleted, or has been deleted, is
@@ -115,6 +118,11 @@ func (ss *SystemStore) PruneWithStats(ctx context.Context, before time.Time) (Pr
 	}
 	stats.FailedOutbox, err = ss.deleteRetentionBatches(ctx, `DELETE FROM outbox WHERE rowid IN (SELECT rowid FROM outbox AS delivery WHERE sent_at IS NULL AND (attempts >= ? OR terminal_at <> '') AND next_at < ?
 		AND NOT EXISTS (SELECT 1 FROM tenants WHERE tenants.id = delivery.tenant_id AND tenants.state IN `+purgedTenantStates+`) ORDER BY next_at,rowid LIMIT ?)`, deliveryMaxAttempts, cutoff)
+	if err != nil {
+		return stats, err
+	}
+	stats.QuarantinedOutbox, err = ss.deleteRetentionBatches(ctx, `DELETE FROM restore_quarantined_deliveries WHERE rowid IN (SELECT delivery.rowid FROM restore_quarantined_deliveries AS delivery WHERE quarantined_at < ?
+		AND NOT EXISTS (SELECT 1 FROM tenants WHERE tenants.id = delivery.tenant_id AND tenants.state IN `+purgedTenantStates+`) ORDER BY quarantined_at,rowid LIMIT ?)`, cutoff)
 	if err != nil {
 		return stats, err
 	}

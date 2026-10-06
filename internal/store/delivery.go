@@ -170,6 +170,7 @@ var (
 	ErrDeliveryProviderPanic      = errors.New("notification provider panicked")
 	ErrDeliveryIndeterminate      = errors.New("notification send outcome is indeterminate")
 	ErrDeliveryWorkerPanic        = errors.New("notification delivery worker panicked")
+	ErrDeliveryPayloadInvalid     = errors.New("notification delivery payload is invalid")
 )
 
 const (
@@ -387,19 +388,74 @@ func (ss *SystemStore) claimDueDeliveries(ctx context.Context, limit int, owner 
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Delivery
-	for rows.Next() {
-		var d Delivery
-		var b []byte
-		if err := rows.Scan(&d.ID, &d.Destination, &b, &d.Attempts, &d.Deferrals, &d.ClaimToken, &d.TenantID); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(b, &d.Event); err != nil {
-			return nil, err
-		}
-		out = append(out, d)
+	type claimedPayload struct {
+		delivery Delivery
+		payload  []byte
 	}
-	return out, rows.Err()
+	var claimed []claimedPayload
+	for rows.Next() {
+		var item claimedPayload
+		if err := rows.Scan(&item.delivery.ID, &item.delivery.Destination, &item.payload, &item.delivery.Attempts, &item.delivery.Deferrals, &item.delivery.ClaimToken, &item.delivery.TenantID); err != nil {
+			return nil, err
+		}
+		claimed = append(claimed, item)
+	}
+	rowsErr := rows.Err()
+	closeErr := rows.Close()
+	if rowsErr != nil {
+		return nil, rowsErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	var out []Delivery
+	for _, item := range claimed {
+		if err := json.Unmarshal(item.payload, &item.delivery.Event); err != nil {
+			if markErr := ss.failInvalidDeliveryPayload(ctx, item.delivery.ID, item.delivery.ClaimToken); markErr != nil {
+				return nil, fmt.Errorf("mark invalid notification payload terminal: %w", markErr)
+			}
+			continue
+		}
+		out = append(out, item.delivery)
+	}
+	return out, nil
+}
+
+// failInvalidDeliveryPayload dead-letters one undecodable row after the claim
+// cursor has closed. Other rows in the same claim batch remain available to
+// the caller, and a corrupt row does not occupy its lease until expiry.
+func (ss *SystemStore) failInvalidDeliveryPayload(ctx context.Context, id int64, claim string) error {
+	if claim == "" {
+		return ErrDeliveryClaimLost
+	}
+	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var destination string
+	if err := tx.QueryRowContext(ctx, `SELECT destination FROM outbox WHERE id=? AND sent_at IS NULL AND terminal_at='' AND claim_token=?`, id, claim).Scan(&destination); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrDeliveryClaimLost
+		}
+		return err
+	}
+	now := time.Now().UTC()
+	stamp := now.Format(time.RFC3339Nano)
+	result, err := tx.ExecContext(ctx, `UPDATE outbox SET terminal_at=?,last_error='payload_invalid',claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND terminal_at='' AND claim_token=?`, stamp, id, claim)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrDeliveryClaimLost
+	}
+	if err := recordDeliveryFailureTx(ctx, tx, destination, ErrDeliveryPayloadInvalid, true, now); err != nil {
+		return err
+	}
+	if err := insertTerminalDeliveryEventTx(ctx, tx, id, destination, ErrDeliveryPayloadInvalid, "invalid payload", now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ReleaseDeliveryClaims clears all active outbox leases. It is used when a

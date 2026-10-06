@@ -694,12 +694,23 @@ func applyRestoreDeliveryPolicy(ctx context.Context, path string, policy Pending
 			}
 			tenant = ",tenant_id"
 		}
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL`).Scan(&pending); err != nil {
+		// Pending means a row that can still be claimed. Older backup schemas
+		// predate terminal_at, so use the retry ceiling recorded by schema 31
+		// to distinguish exhausted deliveries there.
+		pendingPredicate := `sent_at IS NULL`
+		var pendingArgs []any
+		if columns["terminal_at"] {
+			pendingPredicate += ` AND terminal_at=''`
+		} else if columns["attempts"] {
+			pendingPredicate += ` AND attempts < ?`
+			pendingArgs = append(pendingArgs, 8)
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE `+pendingPredicate, pendingArgs...).Scan(&pending); err != nil {
 			return 0, fmt.Errorf("count pending deliveries: %w", err)
 		}
 		switch policy {
 		case PendingDeliveriesDiscard:
-			if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE sent_at IS NULL`); err != nil {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE `+pendingPredicate, pendingArgs...); err != nil {
 				return 0, fmt.Errorf("discard pending deliveries: %w", err)
 			}
 		case PendingDeliveriesQuarantine:
@@ -708,11 +719,12 @@ func applyRestoreDeliveryPolicy(ctx context.Context, path string, policy Pending
 				deferrals = "COALESCE(deferrals,0)"
 			}
 			query := `INSERT INTO restore_quarantined_deliveries(restore_epoch,destination,payload_json,attempts,deferrals,next_at,last_error,quarantined_at` + tenant + `)
-SELECT ?,destination,payload_json,attempts,` + deferrals + `,next_at,last_error,?` + tenant + ` FROM outbox WHERE sent_at IS NULL`
-			if _, err := tx.ExecContext(ctx, query, epoch, restoredAt.Format(time.RFC3339Nano)); err != nil {
+SELECT ?,destination,payload_json,attempts,` + deferrals + `,next_at,last_error,?` + tenant + ` FROM outbox WHERE ` + pendingPredicate
+			args := append([]any{epoch, restoredAt.Format(time.RFC3339Nano)}, pendingArgs...)
+			if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 				return 0, fmt.Errorf("quarantine pending deliveries: %w", err)
 			}
-			if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE sent_at IS NULL`); err != nil {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE `+pendingPredicate, pendingArgs...); err != nil {
 				return 0, fmt.Errorf("remove quarantined deliveries: %w", err)
 			}
 		case PendingDeliveriesPreserve:

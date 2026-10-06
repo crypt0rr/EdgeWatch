@@ -126,3 +126,43 @@ func TestClaimDueDeliveriesDeadLettersUndecodablePayloadAndReturnsHealthyRows(t 
 		t.Fatalf("next claim after invalid payload = %+v, %v; want none", next, err)
 	}
 }
+
+func TestFailInvalidDeliveryPayloadRejectsStaleClaimsAndStopsOnFailures(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	system := s.System()
+	if err := system.failInvalidDeliveryPayload(ctx, 1, ""); !errors.Is(err, ErrDeliveryClaimLost) {
+		t.Fatalf("invalid payload without a claim = %v, want claim lost", err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := system.failInvalidDeliveryPayload(canceled, 1, "owner"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("invalid payload with canceled context = %v, want canceled", err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := s.DB.ExecContext(ctx, `INSERT INTO outbox(destination,payload_json,next_at,tenant_id,claim_token,claim_until) VALUES('invalid-claim','{}',?,?, 'current-owner', ?)`, stamp, DefaultTenantID, stamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := system.failInvalidDeliveryPayload(ctx, id, "stale-owner"); !errors.Is(err, ErrDeliveryClaimLost) {
+		t.Fatalf("invalid payload with stale claim = %v, want claim lost", err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER reject_invalid_delivery_terminal_update BEFORE UPDATE ON outbox BEGIN SELECT RAISE(FAIL, 'forced update failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := system.failInvalidDeliveryPayload(ctx, id, "current-owner"); err == nil {
+		t.Fatal("invalid payload terminal update succeeded despite the test trigger")
+	}
+	var claim string
+	if err := s.DB.QueryRowContext(ctx, `SELECT claim_token FROM outbox WHERE id=?`, id).Scan(&claim); err != nil {
+		t.Fatal(err)
+	}
+	if claim != "current-owner" {
+		t.Fatalf("failed terminal update changed claim to %q", claim)
+	}
+}

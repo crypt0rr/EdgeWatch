@@ -21,7 +21,10 @@ class EventSourceStub {
   onmessage: ((event: MessageEvent) => void) | null = null
   close = vi.fn()
   constructor() { EventSourceStub.instances.push(this) }
-  emit(type: string, job_id?: string, details: Record<string, unknown> = {}) { this.onmessage?.({ data: JSON.stringify({ ...details, type, ...(job_id ? { job_id } : {}) }) } as MessageEvent) }
+  emit(type: string, job_id?: string, details: Record<string, unknown> | string = {}) {
+    const payload = typeof details === 'string' ? { reason: details } : details
+    this.onmessage?.({ data: JSON.stringify({ ...payload, type, ...(job_id ? { job_id } : {}) }) } as MessageEvent)
+  }
 }
 
 function CurrentPath() {
@@ -139,12 +142,17 @@ describe('application shell', () => {
   it('invalidates the affected queries for live events and falls back on malformed events', async () => {
     const { client } = renderWithProviders(<Shell displayName="Admin" role="administrator" permissions={['overview.read', 'jobs.read', 'stream.read']} onLogout={vi.fn()} />)
     const invalidate = vi.spyOn(client, 'invalidateQueries')
+    const skipped = vi.fn()
+    window.addEventListener('edgewatch:scan-skipped', skipped)
     await waitFor(() => expect(EventSourceStub.instances).toHaveLength(1))
     const stream = EventSourceStub.instances[0]
     act(() => stream.emit('scan.completed', 'job-9'))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['active-scans'] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['jobs'] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['job', 'job-9'] })
+    act(() => stream.emit('scan.skipped', 'job-9', 'paused'))
+    expect(skipped).toHaveBeenCalledWith(expect.objectContaining({ detail: { job_id: 'job-9', reason: 'paused' } }))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['active-scans'] })
     act(() => stream.onmessage?.({ data: '{not-json' } as MessageEvent))
     expect(invalidate).toHaveBeenCalledWith()
     act(() => stream.emit('application.update_status'))
@@ -163,6 +171,7 @@ describe('application shell', () => {
     await waitFor(() => expect(screen.getByRole('status', { name: 'Live updates' })).toHaveClass('live'))
     act(() => stream.onerror?.())
     await waitFor(() => expect(screen.getByRole('status', { name: 'Reconnecting…' })).toHaveClass('reconnecting'))
+    window.removeEventListener('edgewatch:scan-skipped', skipped)
   })
 
   it('refreshes pending-confirmation counts after scan and incident events', async () => {

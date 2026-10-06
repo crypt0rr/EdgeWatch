@@ -107,6 +107,13 @@ func newSlotPool(capacity int, capFor func(key string) int) *slotPool {
 // slot is released at once so it cannot leak. A waiter that FailWaiters
 // removes returns the error passed to it.
 func (p *slotPool) Acquire(ctx context.Context, key string) (func(), error) {
+	return p.AcquireWithQueued(ctx, key, nil)
+}
+
+// AcquireWithQueued behaves like Acquire and calls onQueued only when the
+// waiter remains queued after the initial dispatch. The callback runs under
+// the pool lock and must not call back into the pool.
+func (p *slotPool) AcquireWithQueued(ctx context.Context, key string, onQueued func()) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -123,6 +130,9 @@ func (p *slotPool) Acquire(ctx context.Context, key string) (func(), error) {
 	w.elem = k.waiters.PushBack(w)
 	p.queued++
 	p.dispatchLocked()
+	if w.state == slotWaiting && onQueued != nil {
+		onQueued()
+	}
 	p.mu.Unlock()
 
 	select {

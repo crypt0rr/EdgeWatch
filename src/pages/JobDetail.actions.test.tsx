@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Route, Routes } from 'react-router-dom'
 import { APIError, activeScans, approveBaseline, archiveJob, cancelScan, deleteJob, discardScanCycle, getJob, getSession, jobBaseline, jobScans, latestSuccessfulScan, resetBaseline, restoreJob, runJob, scanCycle, scanDetail, scanHosts, scanResults } from '../api'
@@ -72,6 +73,79 @@ describe('job detail actions', () => {
     fireEvent.click(queued)
     expect(runJob).toHaveBeenCalledTimes(1)
   })
+
+  it('derives the queued state from the server after reload and explains a skipped run', async () => {
+    const { client } = renderPage()
+    await screen.findByRole('button', { name: 'Scan now' })
+    client.setQueryData(['active-scans'], {
+      scans: [],
+      queued_runs: [{ job_id: 'job-1', job: 'Production', queued_at: '2026-10-06T10:00:00Z', trigger: 'scheduled' }],
+    })
+
+    expect(await screen.findByRole('heading', { name: 'Scan queued' })).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Scheduled scan accepted at')
+    expect(screen.getByRole('button', { name: 'Queued…' })).toBeDisabled()
+
+    client.setQueryData(['active-scans'], { scans: [], queued_runs: [] })
+    act(() => window.dispatchEvent(new CustomEvent('edgewatch:scan-skipped', { detail: { job_id: 'job-1', reason: 'archived' } })))
+
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Scan queued' })).not.toBeInTheDocument())
+    expect(screen.getByRole('alert')).toHaveTextContent('The job was archived before the queued scan could start.')
+    expect(screen.getByRole('button', { name: 'Scan now' })).toBeEnabled()
+
+    const skippedReasons = [
+      ['busy', 'another scan already owns this job'],
+      ['archived', 'job was archived'],
+      ['paused', 'job was paused'],
+      ['budget', 'exceeds the configured work budget'],
+      ['unit_paused', 'business unit was paused'],
+      ['shutting_down', 'EdgeWatch stopped'],
+      ['cycle_stalled', 'saved cycle is stalled'],
+      ['job_unavailable', 'job was removed'],
+      ['unexpected', 'queued scan did not start'],
+    ]
+    for (const [reason, message] of skippedReasons) {
+      act(() => window.dispatchEvent(new CustomEvent('edgewatch:scan-skipped', { detail: { job_id: 'job-1', reason } })))
+      expect(screen.getByRole('alert')).toHaveTextContent(message)
+    }
+  })
+
+  it('clears a locally queued request when the scan appears in history', async () => {
+    const { client } = renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Scan now' }))
+    expect(await screen.findByRole('heading', { name: 'Scan queued' })).toBeInTheDocument()
+
+    client.setQueryData(['active-scans'], {
+      scans: [],
+      queued_runs: [{ job_id: 'job-1', job: 'Production', queued_at: '2026-10-06T10:00:00Z', trigger: 'manual' }],
+    })
+    expect(await screen.findByRole('status')).toHaveTextContent('Scan request accepted at')
+
+    client.setQueryData(['active-scans'], { scans: [], queued_runs: [] })
+    client.setQueryData(['job-scans', 'job-1', 0], {
+      scans: [{ ...scan, id: 'scan-2' }, scan],
+      pagination: { ...page, total: 2 },
+    })
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Scan queued' })).not.toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Scan now' })).toBeEnabled()
+  })
+
+  it('explains when a queued request disappears without a scan starting', async () => {
+    const { client } = renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Scan now' }))
+    expect(await screen.findByRole('heading', { name: 'Scan queued' })).toBeInTheDocument()
+
+    client.setQueryData(['active-scans'], {
+      scans: [],
+      queued_runs: [{ job_id: 'job-1', job: 'Production', queued_at: '2026-10-06T10:00:00Z', trigger: 'manual' }],
+    })
+    expect(await screen.findByRole('status')).toHaveTextContent('Scan request accepted at')
+    client.setQueryData(['active-scans'], { scans: [], queued_runs: [] })
+
+    await act(async () => new Promise((resolve) => window.setTimeout(resolve, 5100)))
+    expect(screen.getByRole('alert')).toHaveTextContent('The queued scan did not start. Try running it again.')
+    expect(screen.getByRole('button', { name: 'Scan now' })).toBeEnabled()
+  }, 10_000)
 
   it('shows the active phase and progress and allows cancellation from the job page', async () => {
     vi.mocked(activeScans).mockResolvedValueOnce({ scans: [] }).mockResolvedValue({ scans: [activeScan] } as never)

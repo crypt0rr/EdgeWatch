@@ -359,12 +359,24 @@ type JobState struct {
 	LastIncidentReminderAt *time.Time `json:"last_incident_reminder_at,omitempty"`
 }
 
+// QueuedRun describes an accepted manual or scheduled run that has not yet
+// registered as an active scan. It is process-local operational state, not a
+// persisted scan result.
+type QueuedRun struct {
+	JobID    string    `json:"job_id"`
+	Job      string    `json:"job"`
+	QueuedAt time.Time `json:"queued_at"`
+	Trigger  string    `json:"trigger"`
+	TenantID string    `json:"-"`
+}
+
 type Event struct {
 	Type               string    `json:"type"`
 	JobID              string    `json:"job_id,omitempty"`
 	Job                string    `json:"job"`
 	ScanID             string    `json:"scan_id,omitempty"`
 	Message            string    `json:"message"`
+	Reason             string    `json:"reason,omitempty"`
 	PreviousVersion    string    `json:"previous_version,omitempty"`
 	CurrentVersion     string    `json:"current_version,omitempty"`
 	LatestVersion      string    `json:"latest_version,omitempty"`

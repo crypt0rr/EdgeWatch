@@ -339,6 +339,31 @@ func TestQueuedRunsUseJobEditedWhileWaitingForSlot(t *testing.T) {
 	}
 }
 
+func TestQueuedRunsAreVisibleOnlyToTheirTenantAndDisappearWhenStarted(t *testing.T) {
+	t.Parallel()
+	f := newTwoTenants(t, schedulerFake{}, func(name string) config.Job { return lifecycleJob(name) })
+	releaseSlot := holdScanSlot(t, f.app)
+	done := make(chan error, 1)
+	if err := f.app.StartManagedRun(f.db.Tenant(f.a), f.jobA.ID, func(_ model.Scan, _ []model.Event, err error) { done <- err }); err != nil {
+		t.Fatal(err)
+	}
+	waitForSlotQueue(t, f.app, 1)
+	queued := f.app.QueuedRuns(f.a)
+	if len(queued) != 1 || queued[0].JobID != f.jobA.ID || queued[0].Job != f.jobA.Job.Name || queued[0].Trigger != "manual" || queued[0].QueuedAt.IsZero() {
+		t.Fatalf("tenant A queued runs = %#v", queued)
+	}
+	if other := f.app.QueuedRuns(f.b); len(other) != 0 {
+		t.Fatalf("tenant B can see tenant A's queued runs: %#v", other)
+	}
+	releaseSlot()
+	if err := <-done; err != nil {
+		t.Fatalf("queued scan failed: %v", err)
+	}
+	if queued := f.app.QueuedRuns(f.a); len(queued) != 0 {
+		t.Fatalf("queued runs after scan completed = %#v", queued)
+	}
+}
+
 func TestQueuedScheduledRunSkipsJobArchivedOrPausedWhileWaiting(t *testing.T) {
 	t.Parallel()
 	for _, archive := range []bool{false, true} {
@@ -357,6 +382,8 @@ func TestQueuedScheduledRunSkipsJobArchivedOrPausedWhileWaiting(t *testing.T) {
 				t.Fatal(err)
 			}
 			releaseSlot := holdScanSlot(t, a)
+			events := make(chan model.Event, 8)
+			a.SetEventHandler(func(event model.Event) { events <- event })
 			a.startManagedScheduled(ctx, store.DefaultTenantScope(), record.ID)
 			waitForQueuedRun(t, a, record.ID)
 			if archive {
@@ -369,6 +396,23 @@ func TestQueuedScheduledRunSkipsJobArchivedOrPausedWhileWaiting(t *testing.T) {
 			}
 			releaseSlot()
 			a.wg.Wait()
+			var skipped []model.Event
+			for len(events) > 0 {
+				event := <-events
+				if event.Type == "scan.skipped" {
+					skipped = append(skipped, event)
+				}
+				if event.Type == "scan.started" {
+					t.Fatalf("skipped run emitted scan.started: %+v", event)
+				}
+			}
+			wantReason := "paused"
+			if archive {
+				wantReason = "archived"
+			}
+			if len(skipped) != 1 || skipped[0].Reason != wantReason || skipped[0].JobID != record.ID || skipped[0].TenantID != store.DefaultTenantID {
+				t.Fatalf("skip events = %+v, want one %q event scoped to the job tenant", skipped, wantReason)
+			}
 			scans, err := defaultTenant(db).ListJobScans(ctx, record.ID, 10)
 			if err != nil {
 				t.Fatal(err)
@@ -532,6 +576,44 @@ func TestCanceledQueuedManualRunReleasesNoSlot(t *testing.T) {
 	}
 	if len(scans) != 0 {
 		t.Fatalf("canceled queued run persisted scans: %#v", scans)
+	}
+}
+
+func TestQueuedManualRunReportsBusyLeaseWhenItNeverStarts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	a, db := newLifecycleTestApp(t, schedulerFake{}, nil)
+	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("slot-busy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := make(chan model.Event, 8)
+	a.SetEventHandler(func(event model.Event) { events <- event })
+	releaseSlot := holdScanSlot(t, a)
+	done := make(chan error, 1)
+	if err := a.StartManagedRun(defaultTenant(db), record.ID, func(_ model.Scan, _ []model.Event, err error) { done <- err }); err != nil {
+		t.Fatal(err)
+	}
+	waitForSlotQueue(t, a, 1)
+	if err := db.System().AcquireJobLease(ctx, record.ID, "host-cli", time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	releaseSlot()
+	if err := <-done; !errors.Is(err, scanner.ErrBusy) {
+		t.Fatalf("queued run result = %v, want busy", err)
+	}
+	var skipped []model.Event
+	for len(events) > 0 {
+		event := <-events
+		if event.Type == "scan.skipped" {
+			skipped = append(skipped, event)
+		}
+		if event.Type == "scan.started" {
+			t.Fatalf("run that did not acquire the lease emitted scan.started: %+v", event)
+		}
+	}
+	if len(skipped) != 1 || skipped[0].Reason != "busy" || skipped[0].TenantID != store.DefaultTenantID {
+		t.Fatalf("skip events = %+v, want exactly one tenant-scoped busy event", skipped)
 	}
 }
 

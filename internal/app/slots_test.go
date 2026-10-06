@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -111,6 +112,42 @@ func assertIdleGrantHistoryBound(t *testing.T, p *slotPool) {
 			t.Fatalf("obsolete idle grant for %q = %d, oldest active grant = %d", key, lastGrant, oldestActive)
 		}
 	}
+}
+
+func TestAcquireWithQueuedCallsBackOnlyForAnActualWait(t *testing.T) {
+	t.Parallel()
+	p := newSlotPool(1, nil)
+	release := mustAcquireSlot(t, p, defaultSlotKey)
+	var queuedCalls atomic.Int32
+	waiter := startQueuedSlotAcquire(p, &queuedCalls)
+	waitForSlotWaiters(t, p, defaultSlotKey, 1)
+	if queuedCalls.Load() != 1 {
+		t.Fatalf("queued callback calls = %d, want 1", queuedCalls.Load())
+	}
+	release()
+	got := receiveSlot(t, waiter)
+	if got.err != nil {
+		t.Fatalf("queued acquire: %v", got.err)
+	}
+	got.release()
+
+	immediateRelease, err := p.AcquireWithQueued(context.Background(), defaultSlotKey, func() { queuedCalls.Add(1) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	immediateRelease()
+	if queuedCalls.Load() != 1 {
+		t.Fatalf("immediate acquire invoked queued callback: %d calls", queuedCalls.Load())
+	}
+}
+
+func startQueuedSlotAcquire(p *slotPool, queuedCalls *atomic.Int32) <-chan slotResult {
+	result := make(chan slotResult, 1)
+	go func() {
+		release, err := p.AcquireWithQueued(context.Background(), defaultSlotKey, func() { queuedCalls.Add(1) })
+		result <- slotResult{release, err}
+	}()
+	return result
 }
 
 // queueOrdered queues one waiter per label, each after the previous one is

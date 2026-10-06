@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime/debug"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +42,7 @@ type App struct {
 	// requests both returning 202 and one being dropped later.
 	managedReservations sync.Map
 	running             sync.Map
+	queuedRuns          sync.Map
 	wg                  sync.WaitGroup
 	runMu               sync.Mutex
 	runCtx              context.Context
@@ -523,7 +525,48 @@ func (a *App) runJobRecordWithCompletion(ctx context.Context, record store.JobRe
 	if err != nil {
 		return model.Scan{}, nil, err
 	}
-	return a.runJob(ctx, scope, record.Job, record.ID, record.Revision, manual, publishLifecycleCompletion)
+	var accepted bool
+	scan, events, runErr := a.runJobWithQueueMarker(ctx, scope, record.Job, record.ID, record.Revision, manual, publishLifecycleCompletion, &accepted)
+	if accepted && publishLifecycleCompletion && scan.ID == "" && runErr != nil {
+		a.emitScanSkipped(scope, record.ID, record.Job.Name, scanSkipReason(runErr))
+	}
+	return scan, events, runErr
+}
+
+func scanSkipReason(err error) string {
+	switch {
+	case errors.Is(err, scanner.ErrBusy), errors.Is(err, store.ErrJobBusy):
+		return "busy"
+	case strings.Contains(strings.ToLower(err.Error()), "archived jobs cannot run"):
+		return "archived"
+	case errors.Is(err, ErrQueuedRunSkipped):
+		if strings.Contains(strings.ToLower(err.Error()), "archived") {
+			return "archived"
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "paused") {
+			return "paused"
+		}
+		return "could_not_start"
+	case errors.Is(err, ErrScanWorkBudget):
+		return "budget"
+	case errors.Is(err, store.ErrTenantNotActive):
+		return "unit_paused"
+	case errors.Is(err, context.Canceled), errors.Is(err, ErrShuttingDown):
+		return "shutting_down"
+	case errors.Is(err, ErrScanCycleStalled):
+		return "cycle_stalled"
+	case errors.Is(err, store.ErrNotFound):
+		return "job_unavailable"
+	default:
+		return "could_not_start"
+	}
+}
+
+func (a *App) emitScanSkipped(scope store.TenantScope, jobID, job, reason string) {
+	a.emitTenantEvents(scope, []model.Event{{
+		Type: "scan.skipped", JobID: jobID, Job: job,
+		Message: "Accepted scan did not start", Reason: reason, CreatedAt: time.Now().UTC(),
+	}})
 }
 
 // queuedManagedJob returns the job definition a managed run starts with once
@@ -672,6 +715,11 @@ func (a *App) StartManagedRun(ts *store.TenantStore, id string, done func(model.
 			// scan.completed, and the console then lets the operator start the
 			// next run at once.
 			a.managedReservations.CompareAndDelete(id, reservation)
+			if scan.ID == "" && err != nil {
+				if scope, scopeErr := ts.Scope(); scopeErr == nil {
+					a.emitScanSkipped(scope, id, scan.Job, scanSkipReason(err))
+				}
+			}
 			if done != nil {
 				done(scan, events, err)
 			}
@@ -682,7 +730,7 @@ func (a *App) StartManagedRun(ts *store.TenantStore, id string, done func(model.
 			return
 		}
 		if latest.Archived {
-			finish(model.Scan{}, nil, errors.New("archived jobs cannot run"))
+			finish(model.Scan{Job: latest.Job.Name}, nil, errors.New("archived jobs cannot run"))
 			return
 		}
 		// The web callback publishes the terminal event after the run's active
@@ -699,6 +747,10 @@ func (a *App) StartManagedRun(ts *store.TenantStore, id string, done func(model.
 // and writes leases, cycles and results through the system store. The
 // tenant's ID keys its scan slot.
 func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Job, jobID string, revision int64, manual, publishLifecycleCompletion bool) (model.Scan, []model.Event, error) {
+	return a.runJobWithQueueMarker(ctx, scope, job, jobID, revision, manual, publishLifecycleCompletion, nil)
+}
+
+func (a *App) runJobWithQueueMarker(ctx context.Context, scope store.TenantScope, job config.Job, jobID string, revision int64, manual, publishLifecycleCompletion bool, accepted *bool) (model.Scan, []model.Event, error) {
 	key := jobID
 	if !manual {
 		if _, reserved := a.managedReservations.Load(key); reserved {
@@ -709,9 +761,27 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 		return model.Scan{}, nil, scanner.ErrBusy
 	}
 	defer a.active.Delete(key)
-	releaseSlot, slotErr := a.slots.Acquire(ctx, scope.ID())
+	if accepted != nil {
+		*accepted = true
+	}
+	trigger := "scheduled"
+	if manual {
+		trigger = "manual"
+	}
+	queued := &model.QueuedRun{JobID: jobID, Job: job.Name, QueuedAt: time.Now().UTC(), Trigger: trigger, TenantID: scope.ID()}
+	queuedInPool := false
+	releaseSlot, slotErr := a.slots.AcquireWithQueued(ctx, scope.ID(), func() {
+		a.queuedRuns.Store(jobID, queued)
+		queuedInPool = true
+	})
 	if slotErr != nil {
+		if queuedInPool {
+			a.queuedRuns.Delete(jobID)
+		}
 		return model.Scan{}, nil, slotErr
+	}
+	if queuedInPool {
+		defer a.queuedRuns.Delete(jobID)
 	}
 	defer releaseSlot()
 	ts, system := a.Store.Tenant(scope), a.Store.System()
@@ -768,6 +838,9 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 	scanCtx, cancel := context.WithTimeout(ctx, job.Timeout.Value())
 	run := &activeRun{scan: model.ActiveScan{ID: scan.ID, JobID: jobID, Job: job.Name, JobRevision: revision, StartedAt: started, EstimatedProbes: estimate.Probes, NmapInvocations: estimate.NmapInvocations, EstimatedSeconds: estimate.EstimatedSeconds, TotalProbes: estimate.Probes, TotalInvocations: estimate.NmapInvocations, Phase: "starting", Scanner: engineName, ScannerProfileID: profileID, ScannerProfileRevision: profileRevision}, cancel: cancel}
 	a.registerRun(scope.ID(), scan.ID, run)
+	// The active entry is now visible, so remove the queue marker only after
+	// the queued-to-running handoff is observable through ActiveScans.
+	a.queuedRuns.Delete(jobID)
 	defer func() {
 		cancel()
 		a.running.Delete(scan.ID)
@@ -1040,6 +1113,26 @@ func (a *App) ActiveScans(scope store.TenantScope) []model.ActiveScan {
 		return scans[i].StartedAt.Before(scans[j].StartedAt)
 	})
 	return scans
+}
+
+// QueuedRuns returns accepted runs that have not yet registered as active
+// scans. Results are isolated to the tenant scope and sorted by acceptance
+// time so callers can present a stable queue.
+func (a *App) QueuedRuns(scope store.TenantScope) []model.QueuedRun {
+	var queued []model.QueuedRun
+	a.queuedRuns.Range(func(_, value any) bool {
+		if run, ok := value.(*model.QueuedRun); ok && run.TenantID == scope.ID() {
+			queued = append(queued, *run)
+		}
+		return true
+	})
+	sort.Slice(queued, func(i, j int) bool {
+		if queued[i].QueuedAt.Equal(queued[j].QueuedAt) {
+			return queued[i].JobID < queued[j].JobID
+		}
+		return queued[i].QueuedAt.Before(queued[j].QueuedAt)
+	})
+	return queued
 }
 
 // CancelScan requests cancellation of an active scan of the tenant of scope.

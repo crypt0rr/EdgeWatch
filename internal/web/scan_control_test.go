@@ -202,3 +202,101 @@ func TestActiveScanEndpointAndCancellationLifecycle(t *testing.T) {
 	}
 	a.StopRun()
 }
+
+func TestActiveScanEndpointIncludesTenantScopedQueuedRuns(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := app.New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner := &blockingWebScanner{started: make(chan struct{})}
+	a.Scanner = scanner
+	job := config.NormalizeJob(config.Job{Name: "slot-holder", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Hour), Timing: "balanced"})
+	first, err := defaultTenant(db).CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.Name = "queued-job"
+	second, err := defaultTenant(db).CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.BeginRun(ctx)
+	defer a.StopRun()
+	firstDone := make(chan error, 1)
+	if err := a.StartManagedRun(defaultTenant(db), first.ID, func(_ model.Scan, _ []model.Event, err error) { firstDone <- err }); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-scanner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slot-holding scan did not start")
+	}
+	secondDone := make(chan error, 1)
+	if err := a.StartManagedRun(defaultTenant(db), second.ID, func(_ model.Scan, _ []model.Event, err error) { secondDone <- err }); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(a.QueuedRuns(store.DefaultTenantScope())) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := a.QueuedRuns(store.DefaultTenantScope()); len(got) != 1 || got[0].JobID != second.ID || got[0].Trigger != "manual" {
+		t.Fatalf("queued runs = %+v", got)
+	}
+	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	list := func() struct {
+		Scans      []model.ActiveScan `json:"scans"`
+		QueuedRuns []model.QueuedRun  `json:"queued_runs"`
+	} {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		server.activeScans(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/scans/active", nil), defaultTenantStore(server))
+		var response struct {
+			Scans      []model.ActiveScan `json:"scans"`
+			QueuedRuns []model.QueuedRun  `json:"queued_runs"`
+		}
+		if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &response) != nil {
+			t.Fatalf("active scans = %d: %s", recorder.Code, recorder.Body.String())
+		}
+		return response
+	}
+	listed := list()
+	if len(listed.Scans) != 1 || len(listed.QueuedRuns) != 1 || listed.QueuedRuns[0].JobID != second.ID {
+		t.Fatalf("active endpoint while queued = %+v", listed)
+	}
+	if err := a.CancelScan(store.DefaultTenantScope(), listed.Scans[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-firstDone; err == nil {
+		t.Fatal("slot-holding scan unexpectedly succeeded after cancellation")
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	var secondActive []model.ActiveScan
+	for time.Now().Before(deadline) {
+		secondActive = a.ActiveScans(store.DefaultTenantScope())
+		if len(secondActive) == 1 && secondActive[0].JobID == second.ID {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(secondActive) != 1 || secondActive[0].JobID != second.ID {
+		t.Fatalf("queued run did not become active: %+v", secondActive)
+	}
+	listed = list()
+	if len(listed.QueuedRuns) != 0 || len(listed.Scans) != 1 || listed.Scans[0].JobID != second.ID {
+		t.Fatalf("active endpoint after queue handoff = %+v", listed)
+	}
+	if err := a.CancelScan(store.DefaultTenantScope(), secondActive[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondDone; err == nil {
+		t.Fatal("queued scan unexpectedly succeeded after cancellation")
+	}
+}

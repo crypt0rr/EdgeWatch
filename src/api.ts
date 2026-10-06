@@ -1,4 +1,4 @@
-import type { ActiveScan, ActivityEvent, BaselineHostsResponse, Change, GlobalHostsResponse, HostDetailResponse, Incident, Job, JobForm, Pagination, PendingChange, RdapResult, Scan, ScanSummary, Unit, NaabuOptions } from './types'
+import type { ActiveScan, ActivityEvent, BaselineHostsResponse, Change, GlobalHostsResponse, HostDetailResponse, Incident, Job, JobForm, Pagination, PendingChange, QueuedRun, RdapResult, Scan, ScanSummary, Unit, NaabuOptions } from './types'
 import { setDisplayTimeZone } from './format'
 
 export type NotificationDestination = {
@@ -256,7 +256,7 @@ export const scanResults = (jobId: string, scanId: string, offset = 0, limit = 5
 export const scanChanges = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ changes: Change[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${scanId}/changes?limit=${limit}&offset=${offset}`)
 export const listScans = (offset = 0, limit = 20) => api<{ scans: ScanSummary[]; pagination: Pagination }>(`/scans?limit=${limit}&offset=${offset}`)
 export const listHosts = (filters: HostFilters = {}) => api<GlobalHostsResponse>(`/hosts?${hostQuery(filters)}`, filters.signal ? { signal: filters.signal } : undefined)
-export const activeScans = () => api<{ scans: ActiveScan[] }>('/scans/active')
+export const activeScans = () => api<{ scans: ActiveScan[]; queued_runs?: QueuedRun[] }>('/scans/active')
 export const listIncidents = (offset = 0, limit = 20) => api<{ incidents: Incident[]; pagination: Pagination }>(`/incidents?limit=${limit}&offset=${offset}`)
 export const acceptIncident = (jobId: string, key: string, expectedChange: Change) => api<void>(`/jobs/${encodeURIComponent(jobId)}/incidents/accept`, { method: 'POST', body: JSON.stringify({ key, expected_change: expectedChange }) })
 export const suppressIncident = (jobId: string, key: string, expectedChange: Change) => api<void>(`/jobs/${encodeURIComponent(jobId)}/incidents/suppress`, { method: 'POST', body: JSON.stringify({ key, expected_change: expectedChange }) })

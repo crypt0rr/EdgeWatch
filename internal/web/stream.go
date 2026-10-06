@@ -782,6 +782,9 @@ func (s *Server) publishAppEvent(event model.Event) {
 	if event.ReleaseURL != "" {
 		payload["release_url"] = event.ReleaseURL
 	}
+	if event.Reason != "" {
+		payload["reason"] = event.Reason
+	}
 	s.broadcastTo(context.Background(), appEventAudience(event), payload)
 }
 

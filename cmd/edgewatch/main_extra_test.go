@@ -103,8 +103,10 @@ func TestRunVersionHelpAndConfigValidation(t *testing.T) {
 	if err := run([]string{"version", "--dry-run"}); err == nil || !strings.Contains(err.Error(), "--dry-run does not apply to version") {
 		t.Fatalf("version --dry-run error = %v, want command-specific flag rejection", err)
 	}
-	if err := run([]string{"help"}); err == nil {
-		t.Fatal("help unexpectedly succeeded")
+	for _, args := range [][]string{{"help"}, {"--help"}, {"-h"}, {"restore", "--help"}, {"admin", "reset-password", "-h"}, {"version", "--help"}} {
+		if err := run(args); err != nil {
+			t.Fatalf("%v: %v, want usage and success", args, err)
+		}
 	}
 	if err := run([]string{"notify-send"}); err == nil || !strings.Contains(err.Error(), "invalid notification child request") {
 		t.Fatalf("notification child dispatch error = %v", err)
@@ -687,8 +689,25 @@ func TestHealthCommandNamesMissingDaemonHeartbeat(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no daemon heartbeat recorded; the daemon is not running") {
 		t.Fatalf("health error = %v, want a named missing-daemon-heartbeat error", err)
 	}
+	var document struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	if decodeErr := json.Unmarshal([]byte(stdout), &document); decodeErr != nil {
+		t.Fatalf("unhealthy health output is not one JSON document: %v\n%s", decodeErr, stdout)
+	}
+	if document.Status != "unhealthy" || document.Error != err.Error() {
+		t.Fatalf("unhealthy health document = %+v, want status unhealthy and the error %q", document, err)
+	}
+
+	stdout, _, err = captureCLIOutput(t, func() error {
+		return run([]string{"health", "--config", configPath})
+	})
+	if err == nil {
+		t.Fatal("unhealthy text health unexpectedly succeeded")
+	}
 	if stdout != "" {
-		t.Fatalf("unhealthy health command printed a success document: %q", stdout)
+		t.Fatalf("unhealthy text health printed %q on stdout, want only the stderr reason", stdout)
 	}
 }
 
@@ -849,5 +868,27 @@ func TestAdminActionRequiresExplicitSetupTokenConfirmation(t *testing.T) {
 	}
 	if err := adminActionForUser(context.Background(), "reissue-setup-token", nil, "", "admin", false); err == nil {
 		t.Fatal("reissue setup token without force unexpectedly succeeded")
+	}
+}
+
+func TestCommandHelpListsOnlyTheCommandOptions(t *testing.T) {
+	stdout, _, err := captureCLIOutput(t, func() error {
+		return run([]string{"history", "--help"})
+	})
+	if err != nil {
+		t.Fatalf("history --help: %v", err)
+	}
+	for _, want := range []string{"Usage: edgewatch history [options]", "--limit\thistory limit (default 50)", "--tenant", "--config"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("history --help output lacks %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "--password-file") {
+		t.Fatalf("history --help lists another command's option:\n%s", stdout)
+	}
+
+	stdout, _, err = captureCLIOutput(t, func() error { return run([]string{"--help"}) })
+	if err != nil || !strings.Contains(stdout, "reissue-setup-token") {
+		t.Fatalf("--help = %v, output %q; want the full command list on stdout", err, stdout)
 	}
 }

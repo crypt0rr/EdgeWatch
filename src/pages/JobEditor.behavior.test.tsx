@@ -139,17 +139,91 @@ describe('job editor workflow coverage', () => {
     }] } as never)
     renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
-    await waitFor(() => expect(screen.getByLabelText('Rate')).toBeEnabled())
+    await waitFor(() => expect(screen.getByLabelText(/^Rate/)).toBeEnabled())
 
-    expect(screen.getByLabelText('Workers')).toBeDisabled()
+    expect(screen.getByLabelText(/^Workers/)).toBeDisabled()
     expect(screen.getByRole('checkbox', { name: /Verify discoveries/ })).toBeDisabled()
-    fireEvent.change(screen.getByLabelText('Rate'), { target: { value: '1500' } })
+    fireEvent.change(screen.getByLabelText(/^Rate/), { target: { value: '1500' } })
     fireEvent.change(screen.getByLabelText('Job name'), { target: { value: 'Bounded operator tuning' } })
     fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: '198.51.100.10' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create job' }))
 
     await waitFor(() => expect(createJob).toHaveBeenCalled())
     expect(vi.mocked(createJob).mock.calls[0][0].tcp).toMatchObject({ profile_id: BUILTIN_NAABU_PROFILE_ID, naabu: { rate: 1500, workers: 25, verify: true } })
+  })
+
+  it('uses the selected profile bounds and shows a rejected value next to its field', async () => {
+    vi.mocked(listScannerProfiles).mockResolvedValue({ profiles: [{
+      ...profile,
+      id: BUILTIN_NAABU_PROFILE_ID,
+      definition: { ...profile.definition, operator_adjustable: ['rate'], operator_bounds: { rate: { min: 100, max: 2000 } } },
+    }] } as never)
+    const message = 'naabu rate must be between 100 and 2000'
+    vi.mocked(createJob).mockRejectedValueOnce(new APIError(message, 'validation_failed', { rate: message }, 400))
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByLabelText(/^Rate/)).toBeEnabled())
+    const rate = screen.getByLabelText(/^Rate/)
+    expect(rate).toHaveAttribute('min', '100')
+    expect(rate).toHaveAttribute('max', '2000')
+    expect(rate.closest('label')).toHaveTextContent('100–2000')
+
+    // The browser refuses values outside min/max before submitting. The
+    // server still has the final say, for example for a pinned revision.
+    fireEvent.change(rate, { target: { value: '1500' } })
+    fireEvent.change(screen.getByLabelText('Job name'), { target: { value: 'Out of bounds' } })
+    fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: '198.51.100.10' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create job' }))
+    await waitFor(() => expect(rate.closest('label')?.querySelector('.field-error')).toHaveTextContent(message))
+  })
+
+  it('keeps discovery tuning disabled until the scanner profiles load', async () => {
+    let resolveProfiles: (value: unknown) => void = () => {}
+    vi.mocked(listScannerProfiles).mockReturnValue(new Promise(resolve => { resolveProfiles = resolve }) as never)
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    expect(screen.getByLabelText(/^Rate/)).toBeDisabled()
+    expect(screen.getByLabelText('Discovery type')).toBeDisabled()
+    expect(screen.getByText(/Loading scanner profiles/)).toBeInTheDocument()
+
+    await act(async () => resolveProfiles({ profiles: [{ ...profile, id: BUILTIN_NAABU_PROFILE_ID, definition: { ...profile.definition, operator_adjustable: ['rate'], operator_bounds: { rate: { min: 100, max: 2000 } } } }] }))
+    await waitFor(() => expect(screen.getByLabelText(/^Rate/)).toBeEnabled())
+    expect(screen.getByLabelText(/^Workers/)).toBeDisabled()
+  })
+
+  it('keeps discovery tuning disabled and offers a retry when the scanner profiles fail to load', async () => {
+    vi.mocked(listScannerProfiles).mockRejectedValueOnce(new Error('profiles unavailable'))
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    const retry = await screen.findByRole('button', { name: 'Retry' })
+    expect(screen.getByText(/Scanner profiles could not be loaded/)).toBeInTheDocument()
+    for (const label of [/^Rate/, /^Workers/, /^Retries/]) expect(screen.getByLabelText(label)).toBeDisabled()
+
+    vi.mocked(listScannerProfiles).mockResolvedValue({ profiles: [{ ...profile, id: BUILTIN_NAABU_PROFILE_ID, definition: { ...profile.definition, operator_adjustable: ['rate'], operator_bounds: { rate: { min: 100, max: 2000 } } } }] } as never)
+    fireEvent.click(retry)
+    await waitFor(() => expect(screen.getByLabelText(/^Rate/)).toBeEnabled())
+  })
+
+  it('restores a protocol’s settings when it is switched off and on again', async () => {
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText(/^TCP engine/), { target: { value: 'nmap' } })
+    fireEvent.change(screen.getByLabelText(/^Ports/), { target: { value: '22,443' } })
+    fireEvent.click(screen.getByLabelText(/TCP scan/))
+    expect(screen.queryByLabelText(/^TCP engine/)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText(/TCP scan/))
+    expect(screen.getByLabelText(/^TCP engine/)).toHaveValue('nmap')
+    expect(screen.getByLabelText(/^Ports/)).toHaveValue('22,443')
+  })
+
+  it('shows saved durations in the units the editor suggests and saves them unchanged', async () => {
+    vi.mocked(getJob).mockResolvedValue({ ...approvedJob, job: { ...approvedJob.job, timeout: '1h30m0s', resume_window: '192h0m0s' } } as never)
+    vi.mocked(updateJob).mockResolvedValue({ ...approvedJob, revision: 5 } as never)
+    renderWithProviders(<Routes><Route path="/jobs/:id/edit" element={<JobEditor />} /><Route path="/jobs/:id" element={<p>Job page</p>} /></Routes>, { route: ['/jobs/job-1/edit'] })
+    await waitFor(() => expect(screen.getByLabelText(/^Scan timeout/)).toHaveValue('1h30m'))
+    expect(screen.getByLabelText(/^Resume window/)).toHaveValue('8d')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(updateJob).toHaveBeenCalled())
+    expect(vi.mocked(updateJob).mock.calls[0][2]).toMatchObject({ timeout: '1h30m', resume_window: '8d' })
   })
 
   it('applies a newer scanner-profile revision only after an explicit choice', async () => {
@@ -176,7 +250,7 @@ describe('job editor workflow coverage', () => {
     renderWithProviders(<Routes><Route path="/jobs/:id/edit" element={<JobEditor />} /></Routes>, { route: ['/jobs/job-1/edit'] })
 
     fireEvent.click(await screen.findByRole('button', { name: 'Apply latest profile' }))
-    expect(screen.getByLabelText('Rate')).toHaveValue(2500)
+    expect(screen.getByLabelText(/^Rate/)).toHaveValue(2500)
     expect(screen.queryByRole('button', { name: 'Apply latest profile' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
     await waitFor(() => expect(updateJob).toHaveBeenCalled())
@@ -251,11 +325,19 @@ describe('job editor workflow coverage', () => {
   })
 
   it('does not turn a cleared Naabu numeric field into zero', async () => {
+    const fields = ['rate', 'workers', 'retries', 'timeout_ms', 'warm_up_seconds', 'address_batch_size']
+    vi.mocked(listScannerProfiles).mockResolvedValue({ profiles: [{
+      ...profile,
+      id: BUILTIN_NAABU_PROFILE_ID,
+      definition: { ...profile.definition, operator_adjustable: fields, operator_bounds: Object.fromEntries(fields.map(field => [field, { min: 0, max: 100000 }])) },
+    }] } as never)
     renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByLabelText(/^Rate/)).toBeEnabled())
     const optionalFields = ['Rate', 'Workers', 'Retries', 'Probe timeout (ms)', 'Warm-up (seconds)', 'Address batch size']
     for (const label of optionalFields) {
-      const input = screen.getByLabelText(label) as HTMLInputElement
+      const input = screen.getByLabelText(new RegExp(`^${label.replace(/[()]/g, '\\$&')}`)) as HTMLInputElement
+      expect(input).toBeEnabled()
       fireEvent.change(input, { target: { value: '' } })
       expect(input).toHaveValue(null)
     }
@@ -572,8 +654,8 @@ describe('job editor workflow coverage', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('SYN discovery is unavailable')
     fireEvent.change(screen.getByLabelText('Discovery type'), { target: { value: 'connect' } })
     expect(screen.queryByText('SYN discovery is unavailable')).not.toBeInTheDocument()
-    fireEvent.change(screen.getByLabelText('Rate'), { target: { value: '2500' } })
-    fireEvent.change(screen.getByLabelText('Workers'), { target: { value: '40' } })
+    fireEvent.change(screen.getByLabelText(/^Rate/), { target: { value: '2500' } })
+    fireEvent.change(screen.getByLabelText(/^Workers/), { target: { value: '40' } })
     fireEvent.click(screen.getByRole('checkbox', { name: /Verify discoveries/ }))
 
     fireEvent.click(screen.getByLabelText(/UDP scan/))

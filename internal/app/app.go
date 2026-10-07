@@ -151,6 +151,37 @@ var ErrScanCycleStalled = errors.New("scan cycle is stalled; manual retry requir
 // slot.
 var ErrQueuedRunSkipped = errors.New("queued run skipped")
 
+// ErrQueuedRunCanceled is returned by a run whose wait for a scan slot was
+// canceled with CancelQueuedRun.
+var ErrQueuedRunCanceled = errors.New("queued run was canceled")
+
+// ErrRunNotQueued is returned by CancelQueuedRun when the job has no run
+// waiting for a scan slot, for example because it has already started.
+var ErrRunNotQueued = errors.New("job has no queued run")
+
+// queuedRun is a run waiting for a scan slot. cancel ends its wait. started
+// and canceled are guarded by mu, so a cancellation either ends the wait or
+// is refused because the run has already taken its slot.
+type queuedRun struct {
+	mu       sync.Mutex
+	run      model.QueuedRun
+	cancel   context.CancelCauseFunc
+	started  bool
+	canceled bool
+}
+
+// start marks the run as having taken its slot. It reports false when the
+// run was canceled first.
+func (q *queuedRun) start() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.canceled {
+		return false
+	}
+	q.started = true
+	return true
+}
+
 const (
 	scanPersistenceTimeoutFloor      = 10 * time.Second
 	scanPersistenceTimeoutPerHost    = 25 * time.Millisecond
@@ -573,6 +604,8 @@ func scanSkipReason(err error) string {
 			return "paused"
 		}
 		return "could_not_start"
+	case errors.Is(err, ErrQueuedRunCanceled):
+		return "canceled"
 	case errors.Is(err, ErrScanWorkBudget):
 		return "budget"
 	case errors.Is(err, store.ErrTenantNotActive):
@@ -794,22 +827,33 @@ func (a *App) runJobWithQueueMarker(ctx context.Context, scope store.TenantScope
 	if manual {
 		trigger = "manual"
 	}
-	queued := &model.QueuedRun{JobID: jobID, Job: job.Name, QueuedAt: time.Now().UTC(), Trigger: trigger, TenantID: scope.ID()}
+	// The wait has its own context, so CancelQueuedRun can end it without
+	// touching the run context the scan itself will use.
+	waitCtx, cancelWait := context.WithCancelCause(ctx)
+	defer cancelWait(nil)
+	queued := &queuedRun{run: model.QueuedRun{JobID: jobID, Job: job.Name, QueuedAt: time.Now().UTC(), Trigger: trigger, TenantID: scope.ID()}, cancel: cancelWait}
 	queuedInPool := false
-	releaseSlot, slotErr := a.slots.AcquireWithQueued(ctx, scope.ID(), func() {
+	releaseSlot, slotErr := a.slots.AcquireWithQueued(waitCtx, scope.ID(), func() {
 		a.queuedRuns.Store(jobID, queued)
 		queuedInPool = true
 	})
 	if slotErr != nil {
 		if queuedInPool {
-			a.queuedRuns.Delete(jobID)
+			a.queuedRuns.CompareAndDelete(jobID, queued)
+		}
+		if errors.Is(context.Cause(waitCtx), ErrQueuedRunCanceled) {
+			return model.Scan{}, nil, ErrQueuedRunCanceled
 		}
 		return model.Scan{}, nil, slotErr
 	}
 	if queuedInPool {
-		defer a.queuedRuns.Delete(jobID)
+		defer a.queuedRuns.CompareAndDelete(jobID, queued)
 	}
 	defer releaseSlot()
+	if !queued.start() {
+		// The cancellation arrived as the slot was granted.
+		return model.Scan{}, nil, ErrQueuedRunCanceled
+	}
 	ts, system := a.Store.Tenant(scope), a.Store.System()
 	var queuedErr error
 	if job, revision, queuedErr = a.queuedManagedJob(ctx, ts, job, jobID, revision, manual); queuedErr != nil {
@@ -1151,8 +1195,8 @@ func (a *App) ActiveScans(scope store.TenantScope) []model.ActiveScan {
 func (a *App) QueuedRuns(scope store.TenantScope) []model.QueuedRun {
 	var queued []model.QueuedRun
 	a.queuedRuns.Range(func(_, value any) bool {
-		if run, ok := value.(*model.QueuedRun); ok && run.TenantID == scope.ID() {
-			queued = append(queued, *run)
+		if entry, ok := value.(*queuedRun); ok && entry.run.TenantID == scope.ID() {
+			queued = append(queued, entry.run)
 		}
 		return true
 	})
@@ -1163,6 +1207,29 @@ func (a *App) QueuedRuns(scope store.TenantScope) []model.QueuedRun {
 		return queued[i].QueuedAt.Before(queued[j].QueuedAt)
 	})
 	return queued
+}
+
+// CancelQueuedRun ends the wait of the job's run that is queued for a scan
+// slot in the tenant of scope. The run then never starts and is reported as
+// skipped. A job of another tenant, or one without a queued run, is
+// ErrRunNotQueued, exactly as a run that has already taken its slot.
+func (a *App) CancelQueuedRun(scope store.TenantScope, jobID string) error {
+	value, ok := a.queuedRuns.Load(jobID)
+	if !ok {
+		return ErrRunNotQueued
+	}
+	entry, ok := value.(*queuedRun)
+	if !ok || !scope.Valid() || entry.run.TenantID != scope.ID() {
+		return ErrRunNotQueued
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.started {
+		return ErrRunNotQueued
+	}
+	entry.canceled = true
+	entry.cancel(ErrQueuedRunCanceled)
+	return nil
 }
 
 // CancelScan requests cancellation of an active scan of the tenant of scope.
@@ -1692,7 +1759,7 @@ func (a *App) startManagedScheduled(ctx context.Context, scope store.TenantScope
 			a.Logger.Warn("scheduled run skipped because resumable cycle is stalled; manual retry required", "job", record.Job.Name)
 			return
 		}
-		if errors.Is(runErr, ErrQueuedRunSkipped) {
+		if errors.Is(runErr, ErrQueuedRunSkipped) || errors.Is(runErr, ErrQueuedRunCanceled) {
 			a.Logger.Info("scheduled run skipped", "job", record.Job.Name, "reason", runErr)
 			return
 		}

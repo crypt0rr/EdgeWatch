@@ -56,7 +56,7 @@ var knownAuditActions = map[string][]string{
 		"notifications.test", "notifications.test_failed", "notifications.update_routing",
 		"notifications.updated", "notifications.incident_reminders_changed",
 		"public_dashboard.updated",
-		"scan.cancel_requested", "scan.cycle_discarded", "scan.run_requested",
+		"scan.cancel_requested", "scan.cycle_discarded", "scan.queued_run_canceled", "scan.run_requested",
 		"scanner_profile.archived", "scanner_profile.created", "scanner_profile.restored",
 		"scanner_profile.updated",
 	},

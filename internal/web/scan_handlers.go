@@ -484,6 +484,27 @@ func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, session store
 	writeJSON(w, 204, nil)
 }
 
+// cancelQueuedRun withdraws the job's run that is waiting for a scan slot.
+// The run is then reported as skipped and never starts. A run that has taken
+// its slot is canceled with POST /scans/{id}/cancel instead.
+func (s *Server) cancelQueuedRun(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, record store.JobRecord) {
+	scope, err := ts.Scope()
+	if err != nil {
+		s.writeInternalError(w, r, "store", err)
+		return
+	}
+	if err := s.App.CancelQueuedRun(scope, record.ID); err != nil {
+		if errors.Is(err, app.ErrRunNotQueued) {
+			writeError(w, http.StatusConflict, "run_not_queued", "The job has no scan waiting for a slot.", nil)
+			return
+		}
+		s.writeInternalError(w, r, "cancel_failed", err)
+		return
+	}
+	s.auditOptionalEntry(r.Context(), ts, actorAudit(session, "scan.queued_run_canceled", record.ID))
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "canceled", "job_id": record.ID})
+}
+
 func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, record store.JobRecord) {
 	id := record.ID
 	if record.Archived {

@@ -55,7 +55,10 @@ func TestDaemonRetentionMaintenanceKeepsHeartbeatAndScheduleResponsive(t *testin
 	}
 	lastHeartbeat := lease.Heartbeat
 	heartbeatAdvances := 0
-	heartbeatDeadline := time.Now().Add(500 * time.Millisecond)
+	// The loops stop as soon as their condition holds. Their deadlines only
+	// bound a failing run, so they leave room for a runner that is busy with
+	// the package's other parallel tests under the race detector.
+	heartbeatDeadline := time.Now().Add(5 * time.Second)
 	for heartbeatAdvances < 3 && time.Now().Before(heartbeatDeadline) {
 		lease, err = db.System().DaemonLeaseStatus(ctx)
 		if err != nil {
@@ -74,7 +77,7 @@ func TestDaemonRetentionMaintenanceKeepsHeartbeatAndScheduleResponsive(t *testin
 	}
 	a.RefreshSchedules()
 	scheduled := false
-	scheduleDeadline := time.Now().Add(500 * time.Millisecond)
+	scheduleDeadline := time.Now().Add(5 * time.Second)
 	for !scheduled && time.Now().Before(scheduleDeadline) {
 		a.scheduleMu.Lock()
 		_, scheduled = a.entries[record.ID]

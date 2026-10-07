@@ -1769,12 +1769,58 @@ func (a *App) startManagedScheduled(ctx context.Context, scope store.TenantScope
 			a.Logger.Info("scheduled run skipped because the job's tenant is not active", "job", record.Job.Name)
 			return
 		}
+		var budgetErr *ScanWorkBudgetError
+		if scan.ID == "" && errors.As(runErr, &budgetErr) {
+			a.recordScheduledBudgetSkip(ctx, scope, record, budgetErr)
+			return
+		}
 		if runErr != nil {
 			a.Logger.Error("scan failed", "job", record.Job.Name, "scan_id", scan.ID, "error", runErr)
 			return
 		}
 		a.Logger.Info("scan complete", "job", record.Job.Name, "scan_id", scan.ID, "events", len(events))
 	})
+}
+
+// recordScheduledBudgetSkip reports a scheduled run that its probe budget
+// stopped before a scan record existed. A manual run reports the refusal to
+// the person who started it; nobody sees a scheduled one, so it becomes an
+// activity event delivered to the job's destinations. It is reported once for
+// each scope and budget, until a scan of the job runs again.
+func (a *App) recordScheduledBudgetSkip(ctx context.Context, scope store.TenantScope, record store.JobRecord, budgetErr *ScanWorkBudgetError) {
+	a.Logger.Warn("scheduled run skipped because it exceeds the probe budget", "job", record.Job.Name, "estimated_probes", budgetErr.Estimate.Probes, "budget", budgetErr.Budget)
+	var destinations []string
+	if a.Notifier != nil {
+		var err error
+		destinations, err = a.Notifier.Tenant(a.Store.Tenant(scope)).QueueDestinationsForJob(ctx, record.Job)
+		if err != nil {
+			// Like the silence watchdog, record nothing rather than an alert
+			// without its deliveries; the next scheduled run tries again.
+			a.Logger.Warn("budget skip notification destinations unavailable", "job", record.Job.Name, "error", err)
+			return
+		}
+	}
+	hash := record.Job.SecurityHash()
+	key := fmt.Sprintf("%s|%d", hash, budgetErr.Budget)
+	message := fmt.Sprintf("Scheduled scan skipped: about %d probes exceed the probe budget of %d. An administrator must approve high-cost scans for this job, or its scope must be reduced.", budgetErr.Estimate.Probes, budgetErr.Budget)
+	if record.Job.AllowHighCost {
+		message = fmt.Sprintf("Scheduled scan skipped: about %d probes exceed the high-cost limit of %d. Reduce the job's scope.", budgetErr.Estimate.Probes, budgetErr.Budget)
+	}
+	events, err := a.Store.System().UpdateRuntimeForScanWithOutbox(ctx, record.ID, hash, destinations, func(state *model.JobState) ([]model.Event, error) {
+		if state.BudgetSkipAlertKey == key {
+			return nil, nil
+		}
+		state.BudgetSkipAlertKey = key
+		return []model.Event{{Type: model.EventScanBudgetExceeded, JobID: record.ID, Job: record.Job.Name, Message: message, CreatedAt: time.Now().UTC()}}, nil
+	})
+	if err != nil {
+		a.Logger.Warn("budget skip could not be recorded", "job", record.Job.Name, "error", err)
+		return
+	}
+	if len(events) > 0 {
+		a.emitTenantEvents(scope, events)
+		a.wakeDelivery()
+	}
 }
 
 func (a *App) startTracked(fn func()) bool {

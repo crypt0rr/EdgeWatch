@@ -44,7 +44,7 @@ import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { PortScopeDetails } from '../components/PortScopeDetails'
 import { SurfaceUnitList } from '../components/SurfaceUnitList'
-import type { ActiveScan, QueuedRun, WorkEstimate } from '../types'
+import type { ActiveScan, QueuedRun, ScanBudget, WorkEstimate } from '../types'
 import { baselinePresentation } from '../baseline'
 import { formatDateTime } from '../format'
 import { changeKindLabel, jobStatePresentation, scanOutcomeTone, severityTone } from '../status'
@@ -541,7 +541,7 @@ export function JobDetail() {
             <h1>{value.job.name}</h1>
             <span className={`pill ${jobStatus.tone}`}>{jobStatus.label}</span>
           </div>
-          <p className="muted">Revision {value.revision} · Updated {formatDateTime(value.updated_at)}</p>
+          <p className="muted">Revision {value.revision} · Updated {formatDateTime(value.updated_at)}{value.job.allow_high_cost ? ' · High-cost scans approved' : ''}</p>
         </div>
         {canOperate && <div className="heading-actions">
           <button className="button secondary" onClick={run} disabled={value.archived || !!actionBusy || !!pendingScanRequest || !!activeJobQueuedRun || !!activeJobScan}>
@@ -559,6 +559,7 @@ export function JobDetail() {
         </div>}
       </div>
       {actionError && <div className="form-error banner" role="alert">{actionError}</div>}
+      {value.scan_budget?.exceeded && <div className="notice warning scan-budget-warning" role="status"><TimerReset size={16} /><span>{scanBudgetMessage(value.scan_budget)}</span></div>}
       {canOperate && canReadScans && active.error && <ErrorNotice message="Could not load live scan status." onRetry={() => active.refetch()} />}
       {canOperate && canReadScans && (activeJobScan || pendingScanRequest || activeJobQueuedRun) && <JobScanStatus
         scan={activeJobScan}
@@ -790,6 +791,14 @@ function JobScanStatus({ scan, queuedRun, cancelBusy, onCancel, onCancelQueued }
         {cancelBusy === scan.id ? 'Cancelling…' : 'Cancel scan'}
       </button>}
   </section>
+}
+
+function scanBudgetMessage(budget: ScanBudget) {
+  const estimate = budget.estimated_probes?.toLocaleString() ?? 'The estimated'
+  const limit = budget.limit?.toLocaleString() ?? 'its limit'
+  return budget.approval_would_fit
+    ? `About ${estimate} probes exceed this unit's probe budget of ${limit}. Scheduled scans are skipped until an administrator approves high-cost scans for this job.`
+    : `About ${estimate} probes exceed the most this job may send (${limit}). Scheduled scans are skipped until its scope is reduced.`
 }
 
 function scanSkippedMessage(reason?: string) {

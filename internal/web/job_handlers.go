@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/app"
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
@@ -170,7 +171,37 @@ func jobJSONFromStateSummary(record store.JobRecord, summary store.RuntimeStateS
 
 func (s *Server) jobJSONWithCycle(ctx context.Context, ts *store.TenantStore, record store.JobRecord, state model.JobState) map[string]any {
 	value := s.addNotificationRouting(ctx, s.tenantNotifier(ts), jobJSON(record, state))
-	return s.addJobCycleAndProfile(ctx, ts, record, value)
+	value = s.addJobCycleAndProfile(ctx, ts, record, value)
+	if budget, ok := s.jobScanBudget(ctx, ts, record.Job); ok {
+		value["scan_budget"] = budget
+	}
+	return value
+}
+
+// jobScanBudget reports whether the job's estimated work fits the probe
+// budget of its unit, so the job page can explain why its scheduled runs are
+// skipped. approval_would_fit says whether an administrator's high-cost
+// approval would let it run. It is left out when the budget cannot be read.
+func (s *Server) jobScanBudget(ctx context.Context, ts *store.TenantStore, job config.Job) (map[string]any, bool) {
+	if s.App == nil {
+		return nil, false
+	}
+	_, err := s.App.CheckScanWorkBudget(ctx, ts, job)
+	var budgetErr *app.ScanWorkBudgetError
+	switch {
+	case err == nil:
+		return map[string]any{"exceeded": false}, true
+	case !errors.As(err, &budgetErr):
+		return nil, false
+	}
+	budget := map[string]any{"exceeded": true, "estimated_probes": budgetErr.Estimate.Probes, "limit": budgetErr.Budget, "approval_would_fit": false}
+	if !job.AllowHighCost {
+		approved := job
+		approved.AllowHighCost = true
+		_, approvedErr := s.App.CheckScanWorkBudget(ctx, ts, approved)
+		budget["approval_would_fit"] = approvedErr == nil
+	}
+	return budget, true
 }
 
 type pendingChangeView struct {

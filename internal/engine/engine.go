@@ -57,6 +57,9 @@ func (e *Engine) FinalizeManagedScanWithOptions(ctx context.Context, jobID strin
 		return nil, fmt.Errorf("scan is required")
 	}
 	return e.Store.System().FinalizeManagedScanWithOptions(ctx, scan, jobID, scan.ConfigHash, destinations, options, func(state *model.JobState, current *model.Scan, reminderSettings store.IncidentReminderSettings) ([]model.Event, error) {
+		// The scan passed its probe budget when it started, so a later
+		// budget skip is reported again.
+		state.BudgetSkipAlertKey = ""
 		if current.Status == "success" {
 			MarkIncompleteScan(current)
 		}

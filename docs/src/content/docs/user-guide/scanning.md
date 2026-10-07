@@ -62,7 +62,16 @@ executables.
 
 Full-range scans are deliberately bounded by scheduler probe budgets. A scan
 that runs as a single invocation resolves DNS again when it starts, and the
-budget is checked against that resolution before any scanner runs. A broad
+budget is checked against that resolution before any scanner runs.
+
+A job whose estimated work exceeds its unit's budget needs an administrator's
+high-cost approval. **Scan now** on such a job is refused with an error. A
+scheduled run is skipped before it starts and is reported in Activity as
+**Scheduled scan skipped**, with a notification to the job's destinations. It
+is reported once for each scope and budget, and again after a scan of the job
+has run. The job page shows when a job exceeds its budget and whether an
+approval would let it run. An operator's change to a job's targets, ports, or
+scanner clears its high-cost approval; the scope-change confirmation says so. A broad
 scan may be split into resumable address, discovery, enrichment, and UDP work
 units. A timeout or restart preserves completed work for the configured resume
 window; partial work cannot change a baseline. The dashboard shows scanner

@@ -3,9 +3,11 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Archive,
+  CalendarClock,
   CheckCircle2,
   Clock3,
   Edit3,
+  Pause,
   Play,
   RotateCcw,
   ShieldAlert,
@@ -24,7 +26,9 @@ import {
   jobScans,
   latestSuccessfulScan,
   jobBaseline,
+  pauseJob,
   resetBaseline,
+  resumeJob,
   restoreJob,
   runJob,
   scanCycle,
@@ -382,6 +386,19 @@ export function JobDetail() {
       setActionBusy('')
     }
   }
+  async function setSchedule(enabled: boolean) {
+    setActionError('')
+    setActionBusy(enabled ? 'resume' : 'pause')
+    try {
+      await (enabled ? resumeJob : pauseJob)(id, value.revision)
+      await client.invalidateQueries({ queryKey: ['job', id] })
+      await client.invalidateQueries({ queryKey: ['jobs'] })
+    } catch (err) {
+      reportLifecycleError(err, enabled ? 'Could not resume this job.' : 'Could not pause this job.')
+    } finally {
+      setActionBusy('')
+    }
+  }
   async function restore() {
     setActionError('')
     setActionBusy('restore')
@@ -516,6 +533,11 @@ export function JobDetail() {
           <button className="button secondary" onClick={() => navigate(`/jobs/${id}/edit`)} disabled={!!actionBusy}>
             <Edit3 size={16} /> Edit
           </button>
+          {!value.archived && <button className="button secondary" onClick={() => void setSchedule(!value.enabled)} disabled={!!actionBusy || !!activeJobScan} title={activeJobScan ? 'Available when the running scan finishes' : undefined}>
+            {value.enabled
+              ? <><Pause size={16} /> {actionBusy === 'pause' ? 'Pausing…' : 'Pause schedule'}</>
+              : <><CalendarClock size={16} /> {actionBusy === 'resume' ? 'Resuming…' : 'Resume schedule'}</>}
+          </button>}
           {value.archived ? <><button className="button secondary" onClick={restore} disabled={!!actionBusy}>{actionBusy === 'restore' ? 'Restoring…' : 'Restore'}</button>{canDelete && <button className="button danger" onClick={() => { setActionError(''); setDialog('delete') }} disabled={!!actionBusy}>{actionBusy === 'delete' ? 'Deleting…' : 'Delete permanently'}</button>}</> : <button className="icon-button danger" aria-label="Archive job" onClick={() => { setActionError(''); setDialog('archive') }} disabled={!!actionBusy}><Archive size={17} /></button>}
         </div>}
       </div>

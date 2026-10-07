@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -885,5 +886,30 @@ func TestScannerProfilePreviewDoesNotDuplicateManagedArguments(t *testing.T) {
 	}
 	if got := countArg(previews[1].Args, "-oX"); got != 1 {
 		t.Fatalf("Nmap preview rendered structured output %d times: %#v", got, previews[1].Args)
+	}
+}
+
+func TestValidateJobRejectsNaabuConnectHostDiscovery(t *testing.T) {
+	alive, discover := true, false
+	job := func(scanType string, assumeAlive *bool) Job {
+		return Job{Name: "edge", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, AssumeAlive: assumeAlive, TCP: &Protocol{Engine: EngineNaabuNmap, Ports: "443", Naabu: &NaabuOptions{ScanType: scanType}}}
+	}
+	err := ValidateJob(job("connect", &discover))
+	var field *FieldValidationError
+	if !errors.As(err, &field) || field.Field != "assume_alive" {
+		t.Fatalf("Naabu connect with host discovery error = %v, want an assume_alive field error", err)
+	}
+	if !strings.Contains(err.Error(), "Naabu connect discovery cannot use host discovery") {
+		t.Fatalf("error = %q, want the scanner's explanation", err)
+	}
+	for name, valid := range map[string]Job{
+		"connect assuming alive": job("connect", &alive),
+		"connect default":        job("connect", nil),
+		"syn with discovery":     job("syn", &discover),
+		"nmap with discovery":    {Name: "edge", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, AssumeAlive: &discover, TCP: &Protocol{Engine: EngineNmap, Ports: "443", Mode: "connect"}},
+	} {
+		if err := ValidateJob(valid); err != nil {
+			t.Errorf("%s: unexpected error %v", name, err)
+		}
 	}
 }

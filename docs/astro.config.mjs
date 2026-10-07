@@ -21,7 +21,9 @@ export default defineConfig({
         './src/styles/edgewatch.css',
       ],
       components: {
+        Footer: './src/components/DocsFooter.astro',
         Header: './src/components/HomeHeader.astro',
+        PageSidebar: './src/components/DocsPageSidebar.astro',
         ThemeProvider: './src/components/ThemeProvider.astro',
         ThemeSelect: './src/components/ThemeToggle.astro',
         Hero: './src/components/HomeHero.astro',

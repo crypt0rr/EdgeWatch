@@ -136,6 +136,26 @@ describe('job detail actions', () => {
     expect(screen.queryByRole('button', { name: 'Cancel queued scan' })).not.toBeInTheDocument()
   })
 
+  it('explains why scheduled scans of an over-budget job are skipped', async () => {
+    vi.mocked(getJob).mockResolvedValue({ ...job, scan_budget: { exceeded: true, estimated_probes: 999, limit: 100, approval_would_fit: true } } as never)
+    const view = renderPage()
+    expect(await screen.findByText(/About 999 probes exceed this unit's probe budget of 100\. Scheduled scans are skipped until an administrator approves high-cost scans for this job\./)).toBeInTheDocument()
+    view.unmount()
+
+    vi.mocked(getJob).mockResolvedValue({ ...job, job: { ...job.job, allow_high_cost: true }, scan_budget: { exceeded: true, estimated_probes: 2000000000, limit: 1000000000, approval_would_fit: false } } as never)
+    renderPage()
+    expect(await screen.findByText(/Scheduled scans are skipped until its scope is reduced\./)).toBeInTheDocument()
+    expect(screen.getByText(/High-cost scans approved/)).toBeInTheDocument()
+  })
+
+  it('shows no budget warning for a job that fits its budget', async () => {
+    vi.mocked(getJob).mockResolvedValue({ ...job, scan_budget: { exceeded: false } } as never)
+    renderPage()
+    await screen.findByRole('button', { name: 'Scan now' })
+    expect(document.querySelector('.scan-budget-warning')).toBeNull()
+    expect(screen.queryByText(/High-cost scans approved/)).not.toBeInTheDocument()
+  })
+
   it('clears a locally queued request when the scan appears in history', async () => {
     const { client } = renderPage()
     fireEvent.click(await screen.findByRole('button', { name: 'Scan now' }))

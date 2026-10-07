@@ -502,6 +502,7 @@ describe('job editor workflow coverage', () => {
     renderWithProviders(<Routes><Route path="/jobs/:id/edit" element={<JobEditor />} /></Routes>, { route: ['/jobs/job-1/edit'] })
     await waitFor(() => expect(screen.getByDisplayValue('Broad edge')).toBeInTheDocument())
     expect(await screen.findByText(/Only an administrator can approve high-cost scans\./)).toBeInTheDocument()
+    expect(screen.getByText(/Changing the targets, ports or scanner clears this approval, and an administrator must approve the new scope again\./)).toBeInTheDocument()
     const highCost = screen.getByRole('checkbox', { name: /Allow high-cost scans/ })
     expect(highCost).toBeChecked()
     expect(highCost).toBeEnabled()

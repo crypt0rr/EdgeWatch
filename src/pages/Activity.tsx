@@ -20,6 +20,7 @@ const eventLabels: Record<string, string> = {
   'scan-incomplete': 'Scan incomplete',
   'scan-failure': 'Scan failed',
   'scan-canceled': 'Scan canceled',
+  'scan-interrupted': 'Scan interrupted',
   'scan-anomaly': 'Scan anomaly',
   'application-update-available': 'Update available',
   'application-updated': 'Application updated',

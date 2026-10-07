@@ -1367,6 +1367,16 @@ func (e *Engine) FailureForJobWithDestinations(ctx context.Context, jobID, job s
 
 func processFailure(state *model.JobState, job string, scan model.Scan) ([]model.Event, error) {
 	clearUnconfirmedTotalLoss(state)
+	if scan.Interrupted {
+		// A restart is not an operator's cancellation. Keep it in the
+		// activity history without notifying anyone; the job-silence alert
+		// still reports a daemon that keeps stopping.
+		message := "Scan interrupted"
+		if reason := strings.TrimSpace(scan.Error); reason != "" {
+			message = sanitizeNotificationText(strings.ToUpper(reason[:1]) + reason[1:])
+		}
+		return []model.Event{{Type: model.EventScanInterrupted, Job: job, ScanID: scan.ID, Message: message, CreatedAt: scan.FinishedAt}}, nil
+	}
 	if scan.Resumable && scan.CycleStatus == "paused" {
 		if scan.Status == "canceled" {
 			return []model.Event{{Type: "scan-canceled", Job: job, ScanID: scan.ID, Message: scanOutcomeMessage(scan), CreatedAt: scan.FinishedAt}}, nil

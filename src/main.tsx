@@ -141,6 +141,7 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
             case 'scan-failure':
             case 'scan-incomplete':
             case 'scan-canceled':
+            case 'scan-interrupted':
             case 'scan-anomaly':
               void client.invalidateQueries({ queryKey: ['jobs'] })
               void client.invalidateQueries({ queryKey: ['active-scans'] })

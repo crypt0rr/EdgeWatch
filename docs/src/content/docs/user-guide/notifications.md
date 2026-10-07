@@ -67,7 +67,12 @@ pause uses none of their retries and is not reported as a delivery failure.
 ## Delivery retries and health
 
 Scan changes, scan failures, cancellations, timeouts, stalled cycles, and
-recovery events can all generate notifications. Definitive provider failures
+recovery events can all generate notifications. A scan that stops because
+EdgeWatch stopped, for example during an upgrade or restart, is recorded as
+canceled with the reason "scan interrupted because EdgeWatch stopped" and
+appears in Activity as **Scan interrupted**, but sends no notification. A
+daemon that keeps stopping is still reported by the job's silence alert.
+Definitive provider failures
 are retried durably for up to 15 attempts over roughly 77 hours; the delay
 doubles from two minutes and caps at 12 hours. A restart preserves each
 delivery's retry schedule. Terminal failures are visible in the console

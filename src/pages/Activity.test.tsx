@@ -73,14 +73,17 @@ describe('activity history', () => {
       { type: 'scan-failure', job_id: 'job-1', job: 'Production', message: 'Scan failed', created_at: '2026-09-20T12:00:00Z' },
       { type: 'scan-anomaly', job_id: 'job-1', job: 'Production', message: 'Coverage was incomplete', created_at: '2026-09-20T11:00:00Z' },
       { type: 'scan-canceled', job_id: 'job-1', job: 'Production', message: 'Scan canceled', created_at: '2026-09-20T10:00:00Z' },
-    ], pagination: { ...page, total: 3 } })
+      { type: 'scan-interrupted', job_id: 'job-1', job: 'Production', message: 'Scan interrupted because EdgeWatch stopped', created_at: '2026-09-20T09:00:00Z' },
+    ], pagination: { ...page, total: 4 } })
     renderWithProviders(<Activity />)
 
-    await waitFor(() => expect(document.querySelectorAll('.activity-event')).toHaveLength(3))
+    await waitFor(() => expect(document.querySelectorAll('.activity-event')).toHaveLength(4))
     const events = Array.from(document.querySelectorAll('.activity-event'))
     expect(events[0]).toHaveClass('failure')
     expect(events[1]).toHaveClass('warning')
     expect(events[2].querySelector('.activity-event-heading strong')).toHaveTextContent('Scan canceled')
+    expect(events[3].querySelector('.activity-event-heading strong')).toHaveTextContent('Scan interrupted')
+    expect(events[3]).not.toHaveClass('failure')
     expect(screen.queryByText('Scan cancelled', { exact: true })).not.toBeInTheDocument()
   })
 

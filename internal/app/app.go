@@ -84,7 +84,29 @@ type activeRun struct {
 	cancel context.CancelFunc
 	// tenant is the ID of the run's tenant, set by registerRun.
 	tenant string
+	// finalizing is set once the result is being saved. A cancellation can
+	// no longer change the outcome then.
+	finalizing bool
 }
+
+// interruptedByShutdown reports whether scanCtx ended because the run
+// context ctx ended, as it does when the daemon stops or loses its lease,
+// rather than because someone asked to cancel this scan.
+func (r *activeRun) interruptedByShutdown(ctx, scanCtx context.Context) bool {
+	if !errors.Is(scanCtx.Err(), context.Canceled) || ctx.Err() == nil {
+		return false
+	}
+	if r == nil {
+		return true
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return !r.scan.CancelRequested
+}
+
+// ScanInterruptedMessage is the error of a scan that stopped because
+// EdgeWatch stopped while it ran.
+const ScanInterruptedMessage = "scan interrupted because EdgeWatch stopped"
 
 type cronSlogLogger struct{ logger *slog.Logger }
 
@@ -107,6 +129,10 @@ func (l cronSlogLogger) Error(err error, msg string, keysAndValues ...interface{
 // ErrShuttingDown is returned when a new asynchronous managed scan cannot be
 // accepted because the daemon is stopping.
 var ErrShuttingDown = errors.New("application is shutting down")
+
+// ErrScanFinalizing is returned by CancelScan once a scan is saving its
+// result, when cancelling it would no longer change the outcome.
+var ErrScanFinalizing = errors.New("scan is saving its result and can no longer be canceled")
 
 // ErrScanWorkBudget is returned before a lease is acquired when a job's
 // estimated probe count exceeds the deployment guard and the job has not
@@ -966,6 +992,10 @@ func (a *App) runJobWithQueueMarker(ctx context.Context, scope store.TenantScope
 			if errors.Is(scanCtx.Err(), context.Canceled) {
 				scan.Status = "canceled"
 				scan.Error = "scan canceled"
+				if run.interruptedByShutdown(ctx, scanCtx) {
+					scan.Error = ScanInterruptedMessage
+					scan.Interrupted = true
+				}
 			} else if errors.Is(scanCtx.Err(), context.DeadlineExceeded) || errors.Is(scanErr, context.DeadlineExceeded) {
 				scan.Status = "timed_out"
 				scan.Error = "scan timed out"
@@ -983,7 +1013,7 @@ func (a *App) runJobWithQueueMarker(ctx context.Context, scope store.TenantScope
 		// target scopes and will not advance a baseline from this scan.
 		engine.MarkIncompleteScan(&scan)
 	}
-	a.updateActivePhase(scan.ID, "finalizing")
+	a.beginActiveFinalization(scan.ID)
 	persistTimeout := scanPersistenceTimeout(len(scan.Snapshot.Hosts))
 	if a.persistenceBudget != nil {
 		persistTimeout = a.persistenceBudget(len(scan.Snapshot.Hosts))
@@ -1153,8 +1183,10 @@ func (a *App) CancelScan(scope store.TenantScope, id string) error {
 	if run.cancel == nil {
 		return store.ErrNotFound
 	}
-	run.cancel()
-	run.scan.Phase = "cancelling"
+	if run.finalizing {
+		return ErrScanFinalizing
+	}
+	run.requestCancelLocked()
 	return nil
 }
 
@@ -1232,7 +1264,9 @@ func (a *App) updateActiveProgress(id string, progress scanner.Progress) {
 	}
 }
 
-func (a *App) updateActivePhase(id, phase string) {
+// beginActiveFinalization reports the finalizing phase and refuses later
+// cancellation requests, which could no longer change the result.
+func (a *App) beginActiveFinalization(id string) {
 	value, ok := a.running.Load(id)
 	if !ok {
 		return
@@ -1242,8 +1276,9 @@ func (a *App) updateActivePhase(id, phase string) {
 		return
 	}
 	run.mu.Lock()
-	run.scan.Phase = phase
+	run.scan.Phase = "finalizing"
 	run.scan.ProcessAlive = false
+	run.finalizing = true
 	run.mu.Unlock()
 }
 

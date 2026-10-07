@@ -73,6 +73,12 @@ next cycle. Accepting an incident, approving or resetting the baseline, or
 changing the monitored scope discards paused progress, and the next run starts
 a fresh cycle.
 
+**Cancel scan** stops the scanner, and the job page and Overview show
+**Cancellation requested** until the scan ends. Once EdgeWatch is saving a
+scan's result, the scan can no longer be canceled. A scan that stops because
+EdgeWatch itself stopped is recorded as interrupted rather than canceled; see
+[notifications](/user-guide/notifications/#delivery-retries-and-health).
+
 ## Runtime capabilities
 
 The default Compose configuration grants `NET_RAW`. Naabu SYN additionally

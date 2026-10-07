@@ -183,9 +183,44 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
             case 'job.archived':
             case 'job.restored':
             case 'job.deleted':
+            case 'job.paused':
+            case 'job.resumed':
               void client.invalidateQueries({ queryKey: ['jobs'] })
               void client.invalidateQueries({ queryKey: ['activity-events'] })
               if (event.job_id) void client.invalidateQueries({ queryKey: ['job', event.job_id] })
+              break
+            case 'job-silent':
+              void client.invalidateQueries({ queryKey: ['jobs'] })
+              void client.invalidateQueries({ queryKey: ['activity-events'] })
+              break
+            case 'baseline-approved':
+            case 'baseline-reset':
+            case 'baseline-complete':
+            case 'baseline-updated':
+            case 'baseline-stalled':
+              void client.invalidateQueries({ queryKey: ['jobs'] })
+              void client.invalidateQueries({ queryKey: ['activity-events'] })
+              void client.invalidateQueries({ queryKey: ['incidents'] })
+              if (event.job_id) {
+                void client.invalidateQueries({ queryKey: ['job', event.job_id] })
+                void client.invalidateQueries({ queryKey: ['job-baseline-overview', event.job_id] })
+                void client.invalidateQueries({ queryKey: ['baseline-hosts', event.job_id] })
+                void client.invalidateQueries({ queryKey: ['job-pending-changes', event.job_id] })
+                void client.invalidateQueries({ queryKey: ['scan-cycle', event.job_id] })
+              }
+              break
+            case 'scan.cancellation_requested':
+              void client.invalidateQueries({ queryKey: ['active-scans'] })
+              break
+            case 'scan.cycle_discarded':
+              void client.invalidateQueries({ queryKey: ['jobs'] })
+              if (event.job_id) {
+                void client.invalidateQueries({ queryKey: ['job', event.job_id] })
+                void client.invalidateQueries({ queryKey: ['scan-cycle', event.job_id] })
+              }
+              break
+            case 'scanner-profile.changed':
+              void client.invalidateQueries({ queryKey: ['scanner-profiles'] })
               break
             case 'notification.changed':
               void client.invalidateQueries({ queryKey: ['notifications'] })

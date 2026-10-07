@@ -169,6 +169,16 @@ describe('job detail actions', () => {
     expect(await screen.findByText('Cancellation requested')).toBeInTheDocument()
   })
 
+  it('keeps a requested cancellation visible after the scanner reports progress again', async () => {
+    vi.mocked(activeScans).mockResolvedValue({ scans: [{ ...activeScan, phase: 'finalizing', cancel_requested: true }] } as never)
+    renderPage()
+
+    expect(await screen.findByRole('heading', { name: 'Scan in progress' })).toBeInTheDocument()
+    expect(screen.getByText(/· finalizing/)).toBeInTheDocument()
+    expect(screen.getByText('Cancellation requested')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Cancel scan' })).not.toBeInTheDocument()
+  })
+
   it('clears the accepted state after the completed scan appears in history', async () => {
     const { client } = renderPage()
     await screen.findByRole('button', { name: /scan-1/i })

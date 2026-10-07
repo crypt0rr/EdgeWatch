@@ -190,6 +190,10 @@ type Scan struct {
 	BaselineConfigHash string   `json:"baseline_config_hash,omitempty"`
 	Changes            []Change `json:"changes,omitempty"`
 	Snapshot           Snapshot `json:"snapshot"`
+	// Interrupted marks a canceled scan that stopped because the daemon
+	// stopped, not because someone canceled it. It decides the scan's event
+	// and is not stored.
+	Interrupted bool `json:"-"`
 }
 
 // ScanSummary is the metadata needed for history and dashboard lists. Full
@@ -234,45 +238,48 @@ type ScanSummary struct {
 // executing. It intentionally contains metadata only; the result is not
 // persisted until the scanner reaches a terminal state.
 type ActiveScan struct {
-	ID                      string    `json:"id"`
-	JobID                   string    `json:"job_id,omitempty"`
-	Job                     string    `json:"job"`
-	JobRevision             int64     `json:"job_revision,omitempty"`
-	StartedAt               time.Time `json:"started_at"`
-	EstimatedProbes         int64     `json:"estimated_probes,omitempty"`
-	NmapInvocations         int64     `json:"nmap_invocations,omitempty"`
-	EstimatedSeconds        int64     `json:"estimated_seconds,omitempty"`
-	CompletedProbes         int64     `json:"completed_probes,omitempty"`
-	TotalProbes             int64     `json:"total_probes,omitempty"`
-	CompletedInvocations    int64     `json:"completed_invocations,omitempty"`
-	TotalInvocations        int64     `json:"total_invocations,omitempty"`
-	ProgressPercent         int       `json:"progress_percent"`
-	Phase                   string    `json:"phase,omitempty"`
-	Protocol                string    `json:"protocol,omitempty"`
-	Scanner                 string    `json:"scanner,omitempty"`
-	ScannerProfileID        string    `json:"scanner_profile_id,omitempty"`
-	ScannerProfileRevision  int64     `json:"scanner_profile_revision,omitempty"`
-	DiscoveryPortsFound     int       `json:"discovery_ports_found,omitempty"`
-	DiscoveryAddresses      int       `json:"discovery_addresses,omitempty"`
-	DiscoveryDurationMS     int64     `json:"discovery_duration_ms,omitempty"`
-	EnrichmentDurationMS    int64     `json:"enrichment_duration_ms,omitempty"`
-	CurrentInvocation       int64     `json:"current_invocation,omitempty"`
-	TotalBatches            int64     `json:"total_batches,omitempty"`
-	ProcessProgressPercent  int       `json:"process_progress_percent,omitempty"`
-	ElapsedSeconds          int64     `json:"elapsed_seconds,omitempty"`
-	LastOutput              string    `json:"last_output,omitempty"`
-	ProcessAlive            bool      `json:"process_alive"`
-	CycleID                 string    `json:"cycle_id,omitempty"`
-	CycleAttempt            int       `json:"cycle_attempt,omitempty"`
-	CycleStatus             string    `json:"cycle_status,omitempty"`
-	CycleCompletedProbes    int64     `json:"cycle_completed_probes,omitempty"`
-	CycleTotalProbes        int64     `json:"cycle_total_probes,omitempty"`
-	CycleCompletedUnits     int       `json:"cycle_completed_units,omitempty"`
-	CycleTotalUnits         int       `json:"cycle_total_units,omitempty"`
-	CycleNoProgressAttempts int       `json:"cycle_no_progress_attempts,omitempty"`
-	CurrentUnit             int64     `json:"current_unit,omitempty"`
-	CurrentUnitPorts        string    `json:"current_unit_ports,omitempty"`
-	CurrentUnitAddresses    int       `json:"current_unit_addresses,omitempty"`
+	ID                   string    `json:"id"`
+	JobID                string    `json:"job_id,omitempty"`
+	Job                  string    `json:"job"`
+	JobRevision          int64     `json:"job_revision,omitempty"`
+	StartedAt            time.Time `json:"started_at"`
+	EstimatedProbes      int64     `json:"estimated_probes,omitempty"`
+	NmapInvocations      int64     `json:"nmap_invocations,omitempty"`
+	EstimatedSeconds     int64     `json:"estimated_seconds,omitempty"`
+	CompletedProbes      int64     `json:"completed_probes,omitempty"`
+	TotalProbes          int64     `json:"total_probes,omitempty"`
+	CompletedInvocations int64     `json:"completed_invocations,omitempty"`
+	TotalInvocations     int64     `json:"total_invocations,omitempty"`
+	ProgressPercent      int       `json:"progress_percent"`
+	Phase                string    `json:"phase,omitempty"`
+	// CancelRequested stays true once someone asked to cancel the scan, while
+	// Phase keeps reporting the scanner's progress until the scan ends.
+	CancelRequested         bool   `json:"cancel_requested,omitempty"`
+	Protocol                string `json:"protocol,omitempty"`
+	Scanner                 string `json:"scanner,omitempty"`
+	ScannerProfileID        string `json:"scanner_profile_id,omitempty"`
+	ScannerProfileRevision  int64  `json:"scanner_profile_revision,omitempty"`
+	DiscoveryPortsFound     int    `json:"discovery_ports_found,omitempty"`
+	DiscoveryAddresses      int    `json:"discovery_addresses,omitempty"`
+	DiscoveryDurationMS     int64  `json:"discovery_duration_ms,omitempty"`
+	EnrichmentDurationMS    int64  `json:"enrichment_duration_ms,omitempty"`
+	CurrentInvocation       int64  `json:"current_invocation,omitempty"`
+	TotalBatches            int64  `json:"total_batches,omitempty"`
+	ProcessProgressPercent  int    `json:"process_progress_percent,omitempty"`
+	ElapsedSeconds          int64  `json:"elapsed_seconds,omitempty"`
+	LastOutput              string `json:"last_output,omitempty"`
+	ProcessAlive            bool   `json:"process_alive"`
+	CycleID                 string `json:"cycle_id,omitempty"`
+	CycleAttempt            int    `json:"cycle_attempt,omitempty"`
+	CycleStatus             string `json:"cycle_status,omitempty"`
+	CycleCompletedProbes    int64  `json:"cycle_completed_probes,omitempty"`
+	CycleTotalProbes        int64  `json:"cycle_total_probes,omitempty"`
+	CycleCompletedUnits     int    `json:"cycle_completed_units,omitempty"`
+	CycleTotalUnits         int    `json:"cycle_total_units,omitempty"`
+	CycleNoProgressAttempts int    `json:"cycle_no_progress_attempts,omitempty"`
+	CurrentUnit             int64  `json:"current_unit,omitempty"`
+	CurrentUnitPorts        string `json:"current_unit_ports,omitempty"`
+	CurrentUnitAddresses    int    `json:"current_unit_addresses,omitempty"`
 }
 
 type Change struct {
@@ -392,6 +399,17 @@ type Event struct {
 	// tenant, whatever this says. It is never part of a payload or an API
 	// response.
 	TenantID string `json:"-"`
+}
+
+// EventScanInterrupted records a scan that stopped because the daemon
+// stopped. It appears in the activity history but is never delivered: a
+// restart is not an operator's cancellation.
+const EventScanInterrupted = "scan-interrupted"
+
+// EventDelivered reports whether events of the given type are queued for the
+// job's notification destinations.
+func EventDelivered(eventType string) bool {
+	return eventType != EventScanInterrupted
 }
 
 // EventPayloadLimit is the maximum serialized size of a durable event or
@@ -608,8 +626,10 @@ func (s Snapshot) Hash() string {
 
 func Fingerprint(name, product, version, extra string, cpes []string) string {
 	parts := []string{name, product, version, extra}
-	sort.Strings(cpes)
-	parts = append(parts, cpes...)
+	// Sort a copy: the caller's slice is often a stored observation's CPEs.
+	sorted := append([]string(nil), cpes...)
+	sort.Strings(sorted)
+	parts = append(parts, sorted...)
 	for i := range parts {
 		parts[i] = strings.TrimSpace(parts[i])
 	}

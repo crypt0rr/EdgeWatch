@@ -166,9 +166,17 @@ func (a *App) registerRun(tenantID, id string, run *activeRun) {
 func (run *activeRun) requestCancel() {
 	run.mu.Lock()
 	defer run.mu.Unlock()
+	run.requestCancelLocked()
+}
+
+// requestCancelLocked cancels the run and records that the cancellation was
+// requested, so the scan is reported as canceled rather than interrupted.
+// The caller holds run.mu.
+func (run *activeRun) requestCancelLocked() {
 	if run.cancel != nil {
 		run.cancel()
 		run.scan.Phase = "cancelling"
+		run.scan.CancelRequested = true
 	}
 }
 

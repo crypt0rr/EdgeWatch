@@ -203,10 +203,24 @@ func TestSnapshotNormalizeCanonicalizesAndSortsHostStates(t *testing.T) {
 	}
 }
 
+func TestEventDeliveredSkipsOnlyScanInterruptions(t *testing.T) {
+	for _, eventType := range []string{"scan-canceled", "scan-failure", "changes-detected", "job-silent"} {
+		if !EventDelivered(eventType) {
+			t.Errorf("EventDelivered(%q) = false", eventType)
+		}
+	}
+	if EventDelivered(EventScanInterrupted) {
+		t.Error("a scan interruption would be delivered")
+	}
+}
+
 func TestFingerprintAndChangeSummary(t *testing.T) {
 	cpes := []string{"cpe:/b", "cpe:/a"}
 	if got := Fingerprint(" ssh ", " OpenSSH", " 9", " Linux ", cpes); got != "ssh | OpenSSH | 9 | Linux | cpe:/a | cpe:/b" {
 		t.Fatalf("fingerprint = %q", got)
+	}
+	if cpes[0] != "cpe:/b" || cpes[1] != "cpe:/a" {
+		t.Fatalf("Fingerprint reordered the caller's CPEs to %v", cpes)
 	}
 	if got := ChangeSummary(Change{Kind: "dns-added", Target: "router", New: "192.0.2.1"}); got != "router dns-added: 192.0.2.1" {
 		t.Fatalf("DNS summary = %q", got)

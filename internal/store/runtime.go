@@ -988,6 +988,9 @@ func queueEventsTx(ctx context.Context, tx *sql.Tx, events []model.Event, destin
 	resolved := make(map[intent]managedIntent, len(destinations))
 	var discarded managedIntentDiscards
 	for _, event := range events {
+		if !model.EventDelivered(event.Type) {
+			continue
+		}
 		bounded, payload, err := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
 		if err != nil {
 			return err

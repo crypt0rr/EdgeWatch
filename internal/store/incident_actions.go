@@ -505,7 +505,7 @@ func acceptedServiceForEvidence(snapshot *model.Snapshot, protocol string, port 
 					// and cause an unchanged next scan to look like a service change.
 					fingerprint = strings.TrimSpace(service.Product)
 				case "probed":
-					fingerprint = strings.TrimSpace(model.Fingerprint(service.Name, service.Product, service.Version, service.ExtraInfo, append([]string(nil), service.CPEs...)))
+					fingerprint = strings.TrimSpace(model.Fingerprint(service.Name, service.Product, service.Version, service.ExtraInfo, service.CPEs))
 				default:
 					// Nmap's table-only service guesses are descriptive metadata; the
 					// scanner does not include them in the baseline fingerprint.

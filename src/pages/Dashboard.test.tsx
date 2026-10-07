@@ -190,6 +190,13 @@ describe('dashboard', () => {
     expect(container.textContent).toContain('1 destination tested')
   })
 
+  it('confirms a requested cancellation while the scanner keeps reporting progress', async () => {
+    vi.mocked(activeScans).mockResolvedValue({ scans: [{ ...activeScan, phase: 'scanning', cancel_requested: true }] })
+    await renderDashboard()
+    await vi.waitFor(() => expect(container.querySelector('.active-scan-row .pill')?.textContent).toBe('Cancellation requested'), { timeout: 1000 })
+    expect(Array.from(container.querySelectorAll('button')).some(button => button.textContent?.includes('Cancel scan'))).toBe(false)
+  })
+
   it('shows queued runs reported by the server without offering a cancel action', async () => {
     vi.mocked(activeScans).mockResolvedValue({ scans: [], queued_runs: [{ job_id: 'job-1', job: 'demo', queued_at: '2026-10-06T08:00:00Z', trigger: 'manual' }] })
     await renderDashboard()

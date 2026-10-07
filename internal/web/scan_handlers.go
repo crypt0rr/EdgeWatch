@@ -63,6 +63,10 @@ func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request, session stor
 			writeError(w, http.StatusConflict, "scan_not_active", "scan is no longer active", nil)
 			return
 		}
+		if errors.Is(err, app.ErrScanFinalizing) {
+			writeError(w, http.StatusConflict, "scan_finalizing", "The scan is saving its result and can no longer be canceled.", nil)
+			return
+		}
 		s.writeInternalError(w, r, "cancel_failed", err)
 		return
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/engine"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/notify"
+	"github.com/crypt0rr/edgewatch/internal/sandbox"
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/updatecheck"
@@ -35,7 +36,9 @@ type App struct {
 	Engine   *engine.Engine
 	Notifier *notify.Notifier
 	Logger   *slog.Logger
-	active   sync.Map
+	// sandbox is the policy the scanner's processes start with.
+	sandbox *sandbox.Policy
+	active  sync.Map
 	// managedReservations closes the window between an HTTP manual-run request
 	// and the goroutine reaching runJob. Scheduled work checks this map too, so
 	// a queued manual run receives the slot deterministically instead of two
@@ -385,6 +388,14 @@ type Options struct {
 	// encrypted web-managed destinations before the notifier loads its
 	// destinations. Host commands leave it unset, so they never import.
 	ImportNotificationURLs bool
+	// Sandbox confines the scanner's Nmap and Naabu processes. Nil starts
+	// them unconfined.
+	Sandbox *sandbox.Policy
+}
+
+// ScannerSandbox reports how the scanner's Nmap and Naabu processes start.
+func (a *App) ScannerSandbox() sandbox.Status {
+	return a.sandbox.Status()
 }
 
 // NewWithOptions is New with daemon-only startup work selected by options.
@@ -461,6 +472,7 @@ func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logg
 		logger.Warn("config.yaml sets obsolete settings that are ignored; business units are always on, so remove the experimental section", "settings", obsolete)
 	}
 	sc := scanner.NewWithNaabu(nmapPath, naabuPath)
+	sc.SetSandbox(options.Sandbox)
 	if err := sc.SetTargetExclusions(cfg.Scanner.TargetExclusions); err != nil {
 		return nil, fmt.Errorf("configure scanner target exclusions: %w", err)
 	}
@@ -469,7 +481,7 @@ func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logg
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, slots: newSlotPool(cfg.Scheduler.MaxConcurrent, nil), nmapVersion: sc.Version(ctx), naabuVersion: sc.NaabuVersion(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second, clock: time.Now}, nil
+	return &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, sandbox: options.Sandbox, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, slots: newSlotPool(cfg.Scheduler.MaxConcurrent, nil), nmapVersion: sc.Version(ctx), naabuVersion: sc.NaabuVersion(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second, clock: time.Now}, nil
 }
 
 // importConfiguredNotifications imports the notification URLs in config.yaml

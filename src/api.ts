@@ -167,7 +167,10 @@ export type SessionUser = { user_id: string; username: string; display_name?: st
 export type UntrustedProxy = { peer: string; header: string; last_seen_at: string }
 // untrusted_proxy is present for the administrators of a deployment with one
 // unit; with more, only the platform status has it.
-export type AdminStatus = { configured?: boolean; username?: string; display_name?: string; role?: Role; permissions?: string[]; version: string; version_release_url?: string; legacy_yaml_jobs?: string[]; notification_destinations?: number; notifications?: NotificationStatus; retention?: string; max_concurrent_scans?: number; max_probe_count?: number; max_naabu_probe_count?: number; rdap_enabled?: boolean; public_dashboard_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number }; updates?: ApplicationUpdateStatus; telemetry?: DeploymentTelemetry; untrusted_proxy?: UntrustedProxy }
+// How the scanner's Nmap and Naabu processes start. A confined process runs
+// as process_uid 65532 with only the listed capabilities.
+export type ScannerSandboxStatus = { mode: 'auto' | 'required' | 'off' | string; state: 'enforced' | 'disabled' | 'unavailable' | string; uid?: number; gid?: number; process_uid: number; capabilities?: string[]; no_new_privileges?: boolean; reason?: string }
+export type AdminStatus = { configured?: boolean; username?: string; display_name?: string; role?: Role; permissions?: string[]; version: string; version_release_url?: string; legacy_yaml_jobs?: string[]; notification_destinations?: number; notifications?: NotificationStatus; retention?: string; max_concurrent_scans?: number; max_probe_count?: number; max_naabu_probe_count?: number; rdap_enabled?: boolean; public_dashboard_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number }; updates?: ApplicationUpdateStatus; telemetry?: DeploymentTelemetry; untrusted_proxy?: UntrustedProxy; scanner_sandbox?: ScannerSandboxStatus }
 // platform_setup_available is present once the first administrator exists,
 // and true while the host's platform setup token can create the first
 // platform administrator.

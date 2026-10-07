@@ -62,6 +62,13 @@ scanner:
     - 169.254.0.0/16
     - ::1/128
     - fe80::/10
+  # Nmap and Naabu run as the unprivileged UID 65532 with only their raw-packet
+  # capabilities, so they cannot read the database or the keys. auto (the
+  # default) does so when the container grants SETUID, SETGID and KILL, as the
+  # bundled compose.yaml does, and otherwise runs them unconfined as UID 0
+  # with a warning. required refuses to scan without the sandbox; off never
+  # uses it.
+  sandbox: auto
 
 # Check the latest stable GitHub release at startup and every three hours.
 # Set enabled: false for offline or privacy-sensitive deployments. A check

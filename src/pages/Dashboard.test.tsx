@@ -440,6 +440,41 @@ describe('dashboard', () => {
     expect(heading?.textContent).not.toContain('notification destination configured')
   })
 
+  it('shows the enforced scanner sandbox in the deployment footprint', async () => {
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'enforced', uid: 65532, gid: 65532, process_uid: 65532, capabilities: ['NET_RAW'], no_new_privileges: true } })
+    await renderDashboard()
+    await vi.waitFor(() => expect(container.querySelector('.deployment-telemetry')?.textContent).toContain('Scanner sandboxEnforced · NET_RAW'), { timeout: 1000 })
+    expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
+  })
+
+  it('warns an administrator when scanner processes run unconfined as UID 0', async () => {
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'unavailable', process_uid: 0, reason: 'the container does not grant KILL, which EdgeWatch needs to start and stop scanner processes as UID 65532; add them to cap_add' } })
+    await renderDashboard()
+    await vi.waitFor(() => expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain('Scanner processes run unconfined as UID 0. the container does not grant KILL'), { timeout: 1000 })
+    expect(container.querySelector('.deployment-telemetry')?.textContent).toContain('Scanner sandboxUnavailable')
+  })
+
+  it('does not warn when scanner processes already run without root', async () => {
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'unavailable', process_uid: 1000, reason: 'EdgeWatch runs as UID 1000 rather than 0' } })
+    await renderDashboard()
+    await vi.waitFor(() => expect(container.querySelector('.deployment-telemetry')?.textContent).toContain('Scanner sandboxUnavailable'), { timeout: 1000 })
+    expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
+  })
+
+  it('labels a scanner sandbox that is off', async () => {
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'off', state: 'disabled', process_uid: 0, reason: 'scanner.sandbox is off' } })
+    await renderDashboard()
+    await vi.waitFor(() => expect(container.querySelector('.deployment-telemetry')?.textContent).toContain('Scanner sandboxOff'), { timeout: 1000 })
+    expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
+  })
+
+  it('does not show the scanner sandbox warning to an operator', async () => {
+    vi.mocked(getSession).mockResolvedValue({ ...session('operator'), permissions: ['overview.read', 'jobs.read', 'jobs.write', 'scans.read', 'incidents.read'] })
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'off', state: 'disabled', process_uid: 0 } })
+    await renderDashboard()
+    expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
+  })
+
   it('tells an operator that an administrator configures notifications', async () => {
     vi.mocked(getSession).mockResolvedValue({ ...session('operator'), permissions: ['overview.read', 'jobs.read', 'jobs.write', 'scans.read', 'incidents.read'] })
     vi.mocked(adminStatus).mockResolvedValue({ ...status, notification_destinations: 0 })

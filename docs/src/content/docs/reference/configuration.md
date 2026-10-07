@@ -18,6 +18,7 @@ validated schema.
 | `log.level` | YAML | Log verbosity: `debug`, `info`, `warn`, or `error`. |
 | `scheduler.*` | YAML | Concurrent scans and probe budgets. |
 | `scanner.target_exclusions` | YAML | Addresses that may never be scanned. |
+| `scanner.sandbox` | YAML | Whether Nmap and Naabu run as an unprivileged identity; see [the scanner sandbox](/deployment/container-hardening/#scanner-sandbox). |
 | `enrichment.rdap.enabled` | YAML | Enable or disable on-demand public network-registration lookups. |
 | `updates.enabled` | YAML | Enable or disable the three-hour stable-release check. |
 | `notifications.encryption_key_file` | YAML/secrets | Optional separate key for the encrypted notification destinations. |
@@ -38,6 +39,7 @@ recreated and reviewed explicitly in the console.
 | `scheduler.max_concurrent_scans` | `1` | 1 to 64. |
 | `scheduler.max_probe_count` | `5000000` | 1 to 100000000; `0` is rejected. |
 | `scheduler.max_naabu_probe_count` | `20000000` | 1 to 100000000; `0` is rejected. |
+| `scanner.sandbox` | `auto` | `auto`, `required`, or `off`. |
 | `web.auth_key_file` | `auth.key` next to the database | A regular file of 32 raw bytes or 64 hexadecimal characters, without group or other permissions. |
 | `notifications.encryption_key_file` | `notification.key` next to the database | A regular file of 32 raw bytes or 64 hexadecimal characters with mode `0400` or `0600`. |
 | `web.source_url` | The exact Git tag of an official build | An absolute HTTPS URL without credentials, a query, or a fragment, at most 2048 bytes. |
@@ -127,6 +129,11 @@ Jobs are configured in the console, which enforces these limits:
   replaces the defaults, so keep the default ranges when you add entries.
   Change `scanner.target_exclusions` only when you understand the host-network
   exposure.
+- `scanner.sandbox: auto` starts Nmap and Naabu as UID 65532 with only their
+  raw-packet capabilities when the container grants `SETUID`, `SETGID` and
+  `KILL`, as the bundled `compose.yaml` does. Otherwise they run unconfined as
+  UID 0 and EdgeWatch warns. Set `required` to refuse to scan without the
+  sandbox.
 - RDAP is enabled by default and is requested only when an authenticated user
   opens a public host. Private and special-use addresses are never queried.
   Set `enrichment.rdap.enabled: false` for isolated or privacy-sensitive

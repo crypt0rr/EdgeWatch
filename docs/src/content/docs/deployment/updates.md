@@ -61,9 +61,14 @@ listed under [Business units](/administration/business-units/).
 ## Runtime privileges
 
 The image uses a read-only root filesystem, drops all capabilities, and adds
-`NET_RAW` for the default scanner modes. Host networking is intentional, and the
-administration listener accepts only loopback addresses. Keep the service on
-the Docker host or reach it through an authenticated SSH tunnel.
+`NET_RAW` for the default scanner modes, plus `SETUID`, `SETGID` and `KILL` so
+EdgeWatch can run Nmap and Naabu in the
+[scanner sandbox](/deployment/container-hardening/#scanner-sandbox). A
+`compose.yaml` from a release before v0.27.0 lacks the last three; add them
+when you update, or the scanners keep running unconfined as UID 0 and
+EdgeWatch warns. Host networking is intentional, and the administration
+listener accepts only loopback addresses. Keep the service on the Docker host
+or reach it through an authenticated SSH tunnel.
 
 Naabu SYN discovery additionally needs `NET_ADMIN`. The normal Compose setup uses
 connect discovery and does not grant that capability. If you have reviewed the

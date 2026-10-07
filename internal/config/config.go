@@ -74,7 +74,18 @@ type Config struct {
 // targets.
 type ScannerConfig struct {
 	TargetExclusions []string `yaml:"target_exclusions"`
+	// Sandbox is how scanner processes start: auto (the default) runs them as
+	// an unprivileged identity when the runtime allows it, required refuses
+	// scanner work otherwise, and off never confines them.
+	Sandbox string `yaml:"sandbox"`
 }
+
+// The scanner.sandbox values.
+const (
+	ScannerSandboxAuto     = "auto"
+	ScannerSandboxRequired = "required"
+	ScannerSandboxOff      = "off"
+)
 
 // LogConfig controls the minimum level emitted by the daemon's structured
 // JSON logger. The default is info; debug is useful while diagnosing a
@@ -573,6 +584,10 @@ func applyDefaults(c *Config) {
 	if c.Scanner.TargetExclusions == nil {
 		c.Scanner.TargetExclusions = DefaultTargetExclusions()
 	}
+	c.Scanner.Sandbox = strings.ToLower(strings.TrimSpace(c.Scanner.Sandbox))
+	if c.Scanner.Sandbox == "" {
+		c.Scanner.Sandbox = ScannerSandboxAuto
+	}
 	if strings.TrimSpace(c.Log.Level) == "" {
 		c.Log.Level = "info"
 	}
@@ -980,6 +995,11 @@ func (c Config) ValidateDeployment() error {
 	}
 	if _, err := ParseTargetExclusions(c.Scanner.TargetExclusions); err != nil {
 		return fmt.Errorf("scanner.target_exclusions: %w", err)
+	}
+	switch c.Scanner.Sandbox {
+	case "", ScannerSandboxAuto, ScannerSandboxRequired, ScannerSandboxOff:
+	default:
+		return fmt.Errorf("scanner.sandbox must be auto, required, or off")
 	}
 	if level := strings.ToLower(strings.TrimSpace(c.Log.Level)); level != "" && level != "debug" && level != "info" && level != "warn" && level != "error" {
 		return fmt.Errorf("log.level must be one of debug, info, warn, or error")

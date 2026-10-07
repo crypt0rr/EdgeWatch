@@ -22,6 +22,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/sandbox"
 )
 
 const (
@@ -752,7 +753,6 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	if err := config.ValidateScannerProfile(config.ScannerProfile{Engine: config.EngineNaabuNmap, Naabu: options, NaabuArgs: profileArgs}); err != nil {
 		return naabuDiscovery{}, "", ConfigurationError(fmt.Errorf("scanner profile arguments: %w", err))
 	}
-	args := naabuArgsWithTemplate(options, path, assumeAlive, profileArgs)
 	naabuPath := strings.TrimSpace(n.NaabuPath)
 	if naabuPath == "" {
 		// Keep standalone scanner values safe and useful outside the production
@@ -761,12 +761,30 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 		// binary.
 		naabuPath = "/usr/local/bin/naabu"
 	}
-	cmd := exec.CommandContext(ctx, naabuPath, args...)
+	cmd := exec.CommandContext(ctx, naabuPath)
+	// A confined Naabu cannot reach the temporary directory, so it reads the
+	// target list through an inherited descriptor.
+	targetsPath := path
+	if n.sandbox.Enforced() {
+		targets, err := os.Open(path)
+		if err != nil {
+			return naabuDiscovery{}, "", err
+		}
+		defer targets.Close()
+		if targetsPath, err = n.sandbox.InheritFile(cmd, targets, sandbox.Read); err != nil {
+			return naabuDiscovery{}, "", err
+		}
+	}
+	args := naabuArgsWithTemplate(options, targetsPath, assumeAlive, profileArgs)
+	cmd.Args = append([]string{naabuPath}, args...)
 	// Naabu should not read an operator's home configuration or inherit
 	// credentials. A non-existent home/config directory makes profile
 	// execution deterministic and prevents an image or host-local config from
 	// enabling cloud, proxy, resolver, or output behavior behind the UI's back.
 	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/nonexistent", "XDG_CONFIG_HOME=/nonexistent"}
+	// Naabu detects its raw-packet privileges from its capabilities, so a
+	// confined Naabu needs no extra flag.
+	n.sandbox.Confine(cmd)
 	var outputExceeded atomic.Bool
 	killOnOutputLimit := func() {
 		if outputExceeded.CompareAndSwap(false, true) && cmd.Process != nil {

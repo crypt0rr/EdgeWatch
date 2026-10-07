@@ -17,11 +17,22 @@ implausible number of repeated records. Connect discovery is the least
 privileged default; SYN discovery additionally requires the explicitly opted-in
 `NET_ADMIN` and `NET_RAW` container capabilities.
 
-The final image intentionally retains UID 0 because the supported Docker
+The daemon intentionally retains UID 0 because the supported Docker
 capability model does not reliably expose raw packet privileges to an
 unprivileged process. Nmap UDP/SYN and Naabu SYN fail closed without those
-privileges. The compatibility matrix, bind-mount ownership guidance, and
-reconsideration criteria are maintained in
+privileges. The scanner processes themselves run in a sandbox: with the
+default `scanner.sandbox: auto` and the bundled Compose capabilities
+(`NET_RAW`, `SETUID`, `SETGID`, `KILL`), EdgeWatch starts Nmap and Naabu as
+UID and GID 65532 with no supplementary groups and only `NET_RAW` (and
+`NET_ADMIN` when granted) as ambient capabilities. They read their target list
+and write their results through inherited file descriptors, cannot list the
+UID 0 data directory or reach `config.yaml`, and so cannot read the database
+or the encryption keys. When the container does not grant those capabilities,
+`auto` runs them unconfined as UID 0 and warns in the log, `edgewatch health`,
+and the console; `scanner.sandbox: required` refuses to scan instead. All
+sandboxed scanner processes share UID 65532, and the notification child
+process is not sandboxed. The compatibility matrix, the sandbox, bind-mount
+ownership guidance, and the criteria for a non-root daemon are maintained in
 [`docs/src/content/docs/deployment/container-hardening.md`](docs/src/content/docs/deployment/container-hardening.md).
 
 The administration console is bound to a loopback address by default and uses

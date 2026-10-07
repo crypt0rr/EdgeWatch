@@ -24,6 +24,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/sandbox"
 )
 
 type Resolver interface {
@@ -41,6 +42,28 @@ type Nmap struct {
 	NaabuPath        string
 	Resolver         Resolver
 	targetExclusions []*net.IPNet
+	// sandbox confines scan processes. Nil starts them unconfined.
+	sandbox *sandbox.Policy
+}
+
+// SetSandbox installs the policy that confines Nmap and Naabu scan
+// processes. Nil, the default, starts them unconfined.
+func (n *Nmap) SetSandbox(policy *sandbox.Policy) {
+	n.sandbox = policy
+}
+
+// confineNmap makes cmd start its Nmap process in the sandbox. Nmap assumes
+// that a process other than UID 0 cannot send raw packets and falls back to
+// connect scans, so a confined Nmap, which holds NET_RAW as an ambient
+// capability, is told so with --privileged. The flag goes only into the
+// executed argument list; the recorded command fingerprint is computed from
+// the scan's arguments without it.
+func (n *Nmap) confineNmap(cmd *exec.Cmd) {
+	if !n.sandbox.Enforced() {
+		return
+	}
+	n.sandbox.Confine(cmd)
+	cmd.Args = append([]string{cmd.Args[0], "--privileged"}, cmd.Args[1:]...)
 }
 
 // maxProgressOutput bounds diagnostic stderr retained from either scanner.
@@ -812,6 +835,7 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 			// variables from changing the fixed scanner contract. Browser/API input
 			// never controls this environment; only the validated argv template does.
 			cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent", "NMAPDIR=/usr/share/nmap", "XDG_CONFIG_HOME=/nonexistent", "LANG=C"}
+			n.confineNmap(cmd)
 			batchProbes := int64(len(batch)) * probesPerHost
 			localInvocation := int64(start/batchLimit) + 1
 			if family == 6 && len(byFamily[4]) > 0 {
@@ -822,7 +846,7 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 			}
 			var lastOutput string
 			lastFraction := 0.0
-			stdout, stderr, err := runNmapInvocation(ctx, cmd, func(line string, fraction float64) {
+			stdout, stderr, err := runNmapInvocation(ctx, cmd, n.sandbox, func(line string, fraction float64) {
 				lastOutput = line
 				if fraction > lastFraction {
 					lastFraction = fraction
@@ -1197,13 +1221,16 @@ func sanitizeStderr(v string) string {
 // --stats-every is supplied. Run the fixed child under a private pseudo-terminal
 // so the daemon receives the same supported progress stream as an interactive
 // operator, while XML remains file-backed and bounded.
-func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string, float64), onHeartbeat func()) ([]byte, string, error) {
-	xmlPath, err := prepareNmapXMLOutput(cmd)
+func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, policy *sandbox.Policy, onOutput func(string, float64), onHeartbeat func()) ([]byte, string, error) {
+	xmlPath, releaseXML, err := prepareNmapXMLOutput(cmd, policy)
 	if err != nil {
 		return nil, "", err
 	}
 	if xmlPath != "" {
-		defer func() { _ = os.Remove(xmlPath) }()
+		defer func() {
+			releaseXML()
+			_ = os.Remove(xmlPath)
+		}()
 	}
 	var callbackMu sync.Mutex
 	emitOutput := func(line string, fraction float64) {
@@ -1403,25 +1430,38 @@ func nmapXMLOutputExceeded(path string, limit int) (bool, error) {
 // prepareNmapXMLOutput redirects the internal "-oX -" destination emitted by
 // EdgeWatch's validated templates to a private file. User-defined argument
 // arrays cannot provide alternate output destinations, so rewriting this
-// exact pair cannot broaden the scanner's command surface.
-func prepareNmapXMLOutput(cmd *exec.Cmd) (string, error) {
+// exact pair cannot broaden the scanner's command surface. It returns the
+// file's path, which the daemon reads, and a release function to call once
+// the process has exited. A confined Nmap cannot reach the temporary
+// directory, so it writes the file through an inherited descriptor.
+func prepareNmapXMLOutput(cmd *exec.Cmd, policy *sandbox.Policy) (string, func(), error) {
 	for index := 0; index+1 < len(cmd.Args); index++ {
 		if cmd.Args[index] != "-oX" || cmd.Args[index+1] != "-" {
 			continue
 		}
 		file, err := os.CreateTemp("", "edgewatch-nmap-*.xml")
 		if err != nil {
-			return "", fmt.Errorf("create nmap progress file: %w", err)
+			return "", nil, fmt.Errorf("create nmap progress file: %w", err)
 		}
 		path := file.Name()
-		if err := file.Close(); err != nil {
-			_ = os.Remove(path)
-			return "", fmt.Errorf("prepare nmap progress file: %w", err)
+		if !policy.Enforced() {
+			if err := file.Close(); err != nil {
+				_ = os.Remove(path)
+				return "", nil, fmt.Errorf("prepare nmap progress file: %w", err)
+			}
+			cmd.Args[index+1] = path
+			return path, func() {}, nil
 		}
-		cmd.Args[index+1] = path
-		return path, nil
+		childPath, err := policy.InheritFile(cmd, file, sandbox.Write)
+		if err != nil {
+			_ = file.Close()
+			_ = os.Remove(path)
+			return "", nil, fmt.Errorf("prepare nmap progress file: %w", err)
+		}
+		cmd.Args[index+1] = childPath
+		return path, func() { _ = file.Close() }, nil
 	}
-	return "", nil
+	return "", func() {}, nil
 }
 
 // readCappedFile reads a scanner result without allowing a malformed child to

@@ -605,7 +605,8 @@ func migrateLegacyScopeHashTx(ctx context.Context, tx *sql.Tx, jobID, legacyHash
 // database connection is held, so baseline reset/approval cannot slip between
 // comparison capture and the state transition. If the job's security scope
 // changed while the scanner was running, the scan is retained as immutable
-// history but the runtime state is left untouched. It is the daemon's writer
+// history, recorded as not compared, but the runtime state is left
+// untouched. It is the daemon's writer
 // and reaches a job of any tenant; the scan takes the job's tenant.
 //
 // The job's tenant must still be active. A scan that finishes after its
@@ -698,6 +699,9 @@ func (ss *SystemStore) FinalizeManagedScanWithOptions(ctx context.Context, scan 
 		return nil, err
 	}
 	if job.SecurityHash() != securityHash {
+		// The result belongs to a superseded security scope, so it is kept
+		// as history without a comparison.
+		scan.Comparison = model.ScanComparisonNotCompared
 		if err := saveScanExec(ctx, tx, *scan); err != nil {
 			return nil, err
 		}
@@ -723,6 +727,7 @@ func (ss *SystemStore) FinalizeManagedScanWithOptions(ctx context.Context, scan 
 			}
 			cycleNotResumable := cycleStatus == "discarded" || cycleStatus == "expired" || cycleEpoch != currentEpoch
 			if cycleNotResumable && (scan.Status == "success" || scan.Status == "incomplete") {
+				scan.Comparison = model.ScanComparisonNotCompared
 				if err := saveScanExec(ctx, tx, *scan); err != nil {
 					return nil, err
 				}
@@ -940,6 +945,7 @@ const ScanCanceledByPauseMessage = "scan canceled: the business unit was paused 
 // refuses its rows. scan is updated to the outcome of the pause.
 func recordScanOfPausedTenantTx(ctx context.Context, tx *sql.Tx, scan *model.Scan, tenantState string) error {
 	discardCycle := false
+	scan.Comparison = model.ScanComparisonNotCompared
 	if scan.Status == "success" || scan.Status == "incomplete" {
 		scan.Status = "canceled"
 		scan.Error = ScanCanceledByPauseMessage

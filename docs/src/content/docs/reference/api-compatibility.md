@@ -38,6 +38,26 @@ are a positive port state or `not-open`, and `key` has the form
 `address`. Clients that handle change kinds individually should treat an
 unknown kind as a generic change.
 
+## Scan comparison states
+
+`GET /api/v1/jobs/{jobID}/scans/{scanID}` and
+`GET /api/v1/jobs/{jobID}/scans/{scanID}/changes` describe how the scan was
+compared with the job's baseline:
+
+| `comparison_state` | `comparison_source` | Meaning |
+| --- | --- | --- |
+| `compared` | `scan_time` | Compared with the baseline that existed when the scan finished. `changes` is the diff stored with the scan, and `baseline_scan_id` names that baseline. |
+| `compared` | `current_baseline_legacy` | A scan recorded before v0.26.0 without a scan-time comparison, compared with the current baseline on each request. |
+| `baseline_sample` | `none` | The job had no baseline when the scan finished, so nothing was compared. |
+| `baseline_established` | `none` | The scan was the sample that completed the baseline; `baseline_scan_id` is the scan's own ID. |
+| `not_compared` | `none` | The scan failed, timed out, or was canceled, or its result was kept without a comparison. |
+
+v0.26.0 adds `baseline_sample` and `baseline_established`. Earlier releases
+reported those scans as `not_compared` while the job had no baseline, and
+compared them with the current baseline once it had one. The scan objects of
+the scan and job scan endpoints also carry the recorded `comparison`; it is
+omitted for scans recorded before v0.26.0.
+
 ## Business units
 
 v0.20.0 adds business units to every installation. The routes and response

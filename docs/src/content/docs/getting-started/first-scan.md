@@ -40,7 +40,10 @@ still apply to the job.
 ## Establish the baseline
 
 Run the job and inspect its results. Approve a successful scan as the baseline
-once you have verified that it represents the surface you expect.
+once you have verified that it represents the surface you expect. Until the
+job has collected its baseline samples, the scan detail describes each scan as
+a baseline sample instead of a comparison; see
+[Scan comparison](/user-guide/jobs-baselines-incidents/#scan-comparison).
 
 :::note[Incomplete observations do not change expectations]
 Failed, canceled, timed-out, or incomplete scans remain available for

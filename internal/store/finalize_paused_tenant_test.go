@@ -107,6 +107,10 @@ func TestFinalizeManagedScanRecordsAScanOfADisabledTenantAsCanceled(t *testing.T
 	if got, err := storedScanOutcome(f.store, scan.ID); err != nil || got != "canceled|"+ScanCanceledByPauseMessage+"|" {
 		t.Fatalf("stored scan = %q, %v; want the canceled scan", got, err)
 	}
+	var comparison string
+	if err := f.store.DB.QueryRow(`SELECT comparison FROM scans WHERE id=?`, scan.ID).Scan(&comparison); err != nil || comparison != model.ScanComparisonNotCompared {
+		t.Fatalf("stored scan comparison = %q, %v; want %q", comparison, err, model.ScanComparisonNotCompared)
+	}
 	if after := jobRuntimeDigest(t, f.store, f.jobB); after != before {
 		t.Fatalf("the scan changed the disabled tenant's job:\nbefore\n%s\nafter\n%s", before, after)
 	}

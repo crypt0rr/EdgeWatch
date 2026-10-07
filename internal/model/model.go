@@ -153,6 +153,29 @@ type Snapshot struct {
 	TargetFailures []TargetCoverageFailure `json:"target_failures,omitempty"`
 }
 
+// Scan comparison outcomes. A managed scan records one when it is finalized,
+// so its history keeps the meaning it had when it ran after the baseline is
+// established, changed, or reset.
+const (
+	// ScanComparisonLegacy is the empty value of a scan recorded before the
+	// outcome was stored. Only such a scan may be compared with the current
+	// baseline when it has no scan-time comparison.
+	ScanComparisonLegacy = ""
+	// ScanComparisonCompared marks a scan compared with the baseline that
+	// existed when it finished; its changes are the scan-time diff.
+	ScanComparisonCompared = "compared"
+	// ScanComparisonBaselineSample marks a scan that finished while the job
+	// had no baseline, so there was nothing to compare it with.
+	ScanComparisonBaselineSample = "baseline_sample"
+	// ScanComparisonBaselineEstablished marks the sample that completed the
+	// job's baseline.
+	ScanComparisonBaselineEstablished = "baseline_established"
+	// ScanComparisonNotCompared marks a scan that did not complete
+	// successfully, or whose result was kept without being compared, such as
+	// a result for a security scope that changed while it ran.
+	ScanComparisonNotCompared = "not_compared"
+)
+
 type Scan struct {
 	ID                     string    `json:"id"`
 	JobID                  string    `json:"job_id,omitempty"`
@@ -186,10 +209,13 @@ type Scan struct {
 	// BaselineScanID and BaselineConfigHash identify the comparison used when
 	// this scan was processed. Changes is the immutable scan-time diff; list
 	// endpoints intentionally use ScanSummary instead of loading it.
-	BaselineScanID     string   `json:"baseline_scan_id,omitempty"`
-	BaselineConfigHash string   `json:"baseline_config_hash,omitempty"`
-	Changes            []Change `json:"changes,omitempty"`
-	Snapshot           Snapshot `json:"snapshot"`
+	BaselineScanID     string `json:"baseline_scan_id,omitempty"`
+	BaselineConfigHash string `json:"baseline_config_hash,omitempty"`
+	// Comparison is the ScanComparison outcome recorded at finalization.
+	// It is empty for a scan recorded before the outcome was stored.
+	Comparison string   `json:"comparison,omitempty"`
+	Changes    []Change `json:"changes,omitempty"`
+	Snapshot   Snapshot `json:"snapshot"`
 	// Interrupted marks a canceled scan that stopped because the daemon
 	// stopped, not because someone canceled it. It decides the scan's event
 	// and is not stored.
@@ -229,6 +255,7 @@ type ScanSummary struct {
 	NoProgressTries        int       `json:"no_progress_attempts,omitempty"`
 	BaselineScanID         string    `json:"baseline_scan_id,omitempty"`
 	BaselineConfigHash     string    `json:"baseline_config_hash,omitempty"`
+	Comparison             string    `json:"comparison,omitempty"`
 	// TenantID is the tenant that owns the scan. It is set by the store's
 	// tenant-scoped reads and is never part of an API response.
 	TenantID string `json:"-"`

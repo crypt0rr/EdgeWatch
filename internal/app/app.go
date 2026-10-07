@@ -1081,7 +1081,9 @@ func (a *App) runJobWithQueueMarker(ctx context.Context, scope store.TenantScope
 	if destinationErr != nil {
 		// Preserve the completed scan even when notification configuration
 		// cannot be read. Runtime state is deliberately left unchanged,
-		// matching the pre-transaction behavior.
+		// matching the pre-transaction behavior, so the scan is recorded as
+		// not compared.
+		scan.Comparison = model.ScanComparisonNotCompared
 		saveCtx, saveCancel := context.WithTimeout(persistCtx, scanPersistenceWriterWaitTimeout+persistTimeout)
 		defer saveCancel()
 		if saveErr := system.SaveScan(saveCtx, scan); saveErr != nil {

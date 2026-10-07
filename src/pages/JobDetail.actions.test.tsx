@@ -4,13 +4,13 @@ import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Route, Routes } from 'react-router-dom'
-import { APIError, activeScans, approveBaseline, archiveJob, cancelScan, deleteJob, discardScanCycle, getJob, getSession, jobBaseline, jobScans, latestSuccessfulScan, pauseJob, resetBaseline, restoreJob, resumeJob, runJob, scanCycle, scanDetail, scanHosts, scanResults } from '../api'
+import { APIError, activeScans, approveBaseline, archiveJob, cancelQueuedRun, cancelScan, deleteJob, discardScanCycle, getJob, getSession, jobBaseline, jobScans, latestSuccessfulScan, pauseJob, resetBaseline, restoreJob, resumeJob, runJob, scanCycle, scanDetail, scanHosts, scanResults } from '../api'
 import { renderWithProviders, defaultUnitScope } from '../test/test-utils'
 import { JobDetail } from './JobDetail'
 
 vi.mock('../api', async () => {
   const actual = await vi.importActual<typeof import('../api')>('../api')
-  return { ...actual, activeScans: vi.fn(), approveBaseline: vi.fn(), archiveJob: vi.fn(), cancelScan: vi.fn(), deleteJob: vi.fn(), getJob: vi.fn(), getSession: vi.fn(), jobBaseline: vi.fn(), jobScans: vi.fn(), latestSuccessfulScan: vi.fn(), pauseJob: vi.fn(), resetBaseline: vi.fn(), restoreJob: vi.fn(), resumeJob: vi.fn(), runJob: vi.fn(), scanCycle: vi.fn(), discardScanCycle: vi.fn(), scanDetail: vi.fn(), scanHosts: vi.fn(), scanResults: vi.fn() }
+  return { ...actual, activeScans: vi.fn(), approveBaseline: vi.fn(), archiveJob: vi.fn(), cancelQueuedRun: vi.fn(), cancelScan: vi.fn(), deleteJob: vi.fn(), getJob: vi.fn(), getSession: vi.fn(), jobBaseline: vi.fn(), jobScans: vi.fn(), latestSuccessfulScan: vi.fn(), pauseJob: vi.fn(), resetBaseline: vi.fn(), restoreJob: vi.fn(), resumeJob: vi.fn(), runJob: vi.fn(), scanCycle: vi.fn(), discardScanCycle: vi.fn(), scanDetail: vi.fn(), scanHosts: vi.fn(), scanResults: vi.fn() }
 })
 
 const job = {
@@ -110,6 +110,50 @@ describe('job detail actions', () => {
       act(() => window.dispatchEvent(new CustomEvent('edgewatch:scan-skipped', { detail: { job_id: 'job-1', reason } })))
       expect(screen.getByRole('alert')).toHaveTextContent(message)
     }
+  })
+
+  it('cancels a queued run from the job page', async () => {
+    const queued = { scans: [], queued_runs: [{ job_id: 'job-1', job: 'Production', queued_at: '2026-10-06T10:00:00Z', trigger: 'scheduled' }] }
+    vi.mocked(activeScans).mockResolvedValue(queued as never)
+    vi.mocked(cancelQueuedRun).mockImplementation(async () => {
+      vi.mocked(activeScans).mockResolvedValue({ scans: [], queued_runs: [] })
+      return { status: 'canceled', job_id: 'job-1' }
+    })
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel queued scan' }))
+    await waitFor(() => expect(cancelQueuedRun).toHaveBeenCalledWith('job-1'))
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Scan queued' })).not.toBeInTheDocument())
+    // The run's skip event confirms the cancellation without an error.
+    act(() => window.dispatchEvent(new CustomEvent('edgewatch:scan-skipped', { detail: { job_id: 'job-1', reason: 'canceled' } })))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Scan now' })).toBeEnabled()
+  })
+
+  it('offers no queued cancel before the server reports the run as queued', async () => {
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Scan now' }))
+    expect(await screen.findByRole('heading', { name: 'Scan queued' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Cancel queued scan' })).not.toBeInTheDocument()
+  })
+
+  it('explains why scheduled scans of an over-budget job are skipped', async () => {
+    vi.mocked(getJob).mockResolvedValue({ ...job, scan_budget: { exceeded: true, estimated_probes: 999, limit: 100, approval_would_fit: true } } as never)
+    const view = renderPage()
+    expect(await screen.findByText(/About 999 probes exceed this unit's probe budget of 100\. Scheduled scans are skipped until an administrator approves high-cost scans for this job\./)).toBeInTheDocument()
+    view.unmount()
+
+    vi.mocked(getJob).mockResolvedValue({ ...job, job: { ...job.job, allow_high_cost: true }, scan_budget: { exceeded: true, estimated_probes: 2000000000, limit: 1000000000, approval_would_fit: false } } as never)
+    renderPage()
+    expect(await screen.findByText(/Scheduled scans are skipped until its scope is reduced\./)).toBeInTheDocument()
+    expect(screen.getByText(/High-cost scans approved/)).toBeInTheDocument()
+  })
+
+  it('shows no budget warning for a job that fits its budget', async () => {
+    vi.mocked(getJob).mockResolvedValue({ ...job, scan_budget: { exceeded: false } } as never)
+    renderPage()
+    await screen.findByRole('button', { name: 'Scan now' })
+    expect(document.querySelector('.scan-budget-warning')).toBeNull()
+    expect(screen.queryByText(/High-cost scans approved/)).not.toBeInTheDocument()
   })
 
   it('clears a locally queued request when the scan appears in history', async () => {

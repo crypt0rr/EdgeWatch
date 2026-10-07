@@ -193,6 +193,11 @@ describe('application shell', () => {
       expect(invalidate, type).toHaveBeenCalledWith({ queryKey: key })
       expect(invalidate, type).not.toHaveBeenCalledWith()
     }
+    invalidate.mockClear()
+    act(() => stream.emit('scan-budget-exceeded', 'job-9'))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['activity-events'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['job', 'job-9'] })
+    expect(invalidate).not.toHaveBeenCalledWith()
     act(() => stream.emit('scan.skipped', 'job-9', 'paused'))
     expect(skipped).toHaveBeenCalledWith(expect.objectContaining({ detail: { job_id: 'job-9', reason: 'paused' } }))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['active-scans'] })

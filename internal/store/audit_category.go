@@ -127,6 +127,7 @@ var auditActionCategories = map[string]string{
 	"notifications.updated":                    auditCategoryData,
 	"public_dashboard.updated":                 auditCategoryData,
 	"scan.cancel_requested":                    auditCategoryData,
+	"scan.queued_run_canceled":                 auditCategoryData,
 	"scan.cycle_discarded":                     auditCategoryData,
 	"scan.run_requested":                       auditCategoryData,
 	"scanner_profile.archived":                 auditCategoryData,

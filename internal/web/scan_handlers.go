@@ -187,6 +187,7 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 			job.AllowHighCost = false
 		}
 	}
+	approvalCleared := current.Job.AllowHighCost && !job.AllowHighCost
 	if active && scopeChanged {
 		writeError(w, 409, "job_active", "security-relevant settings cannot change during an active scan", nil)
 		return
@@ -214,7 +215,11 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		return
 	}
 	if errors.Is(err, store.ErrRebaselineRequired) {
-		writeError(w, 409, "rebaseline_confirmation_required", "security-relevant settings changed; confirm rebaseline to continue", map[string]any{"previous_hash": current.Job.SecurityHash(), "new_hash": job.SecurityHash(), "changes": securityScopeChanges(current.Job, job)})
+		changes := securityScopeChanges(current.Job, job)
+		if approvalCleared {
+			changes = append(changes, s.highCostClearedChange(r.Context(), ts, job))
+		}
+		writeError(w, 409, "rebaseline_confirmation_required", "security-relevant settings changed; confirm rebaseline to continue", map[string]any{"previous_hash": current.Job.SecurityHash(), "new_hash": job.SecurityHash(), "changes": changes})
 		return
 	}
 	if errors.Is(err, store.ErrJobScanActive) {
@@ -245,7 +250,26 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 	s.App.RefreshSchedules()
 	state, _ := ts.RuntimeState(r.Context(), id)
 	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "job.updated", "job_id": id})
-	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), ts, record, state))
+	response := s.jobJSONWithCycle(r.Context(), ts, record, state)
+	if approvalCleared {
+		response["high_cost_approval_cleared"] = true
+	}
+	writeJSON(w, 200, response)
+}
+
+// highCostClearedChange describes, in the scope-change confirmation, the
+// high-cost approval that saving the new scope clears, and whether the new
+// scope still needs one.
+func (s *Server) highCostClearedChange(ctx context.Context, ts *store.TenantStore, job config.Job) string {
+	const cleared = "high-cost approval: cleared; an administrator must approve the new scope again"
+	budget, ok := s.jobScanBudget(ctx, ts, job)
+	if !ok {
+		return cleared
+	}
+	if exceeded, _ := budget["exceeded"].(bool); exceeded {
+		return fmt.Sprintf("%s (about %d probes exceed the budget of %d, so scheduled scans are skipped until then)", cleared, budget["estimated_probes"], budget["limit"])
+	}
+	return cleared + " (the new scope fits the probe budget without it)"
 }
 
 // canOverrideHighCost deliberately reuses the administrator-only users.manage
@@ -482,6 +506,27 @@ func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, session store
 	s.App.RefreshSchedules()
 	s.broadcastTo(r.Context(), audienceTenant(ts), map[string]any{"type": action, "job_id": id})
 	writeJSON(w, 204, nil)
+}
+
+// cancelQueuedRun withdraws the job's run that is waiting for a scan slot.
+// The run is then reported as skipped and never starts. A run that has taken
+// its slot is canceled with POST /scans/{id}/cancel instead.
+func (s *Server) cancelQueuedRun(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, record store.JobRecord) {
+	scope, err := ts.Scope()
+	if err != nil {
+		s.writeInternalError(w, r, "store", err)
+		return
+	}
+	if err := s.App.CancelQueuedRun(scope, record.ID); err != nil {
+		if errors.Is(err, app.ErrRunNotQueued) {
+			writeError(w, http.StatusConflict, "run_not_queued", "The job has no scan waiting for a slot.", nil)
+			return
+		}
+		s.writeInternalError(w, r, "cancel_failed", err)
+		return
+	}
+	s.auditOptionalEntry(r.Context(), ts, actorAudit(session, "scan.queued_run_canceled", record.ID))
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "canceled", "job_id": record.ID})
 }
 
 func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, record store.JobRecord) {

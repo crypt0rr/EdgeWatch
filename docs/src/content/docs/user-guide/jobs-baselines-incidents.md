@@ -56,7 +56,10 @@ changes confirm an incident. When a security-impacting job setting changes,
 EdgeWatch shows the affected scope and asks for explicit rebaselining. Schedule
 and execution-tuning changes do not reset the baseline. A run that waits for a
 free scan slot uses the job's settings when it starts; if the job is paused or
-archived while a scheduled run waits, that run is skipped.
+archived while a scheduled run waits, that run is skipped. **Cancel queued
+scan** on the job page or the Overview withdraws a run that is still waiting
+for a slot, so it never starts; a scan that has started is stopped with
+**Cancel scan** instead.
 
 **Pause schedule** on the job page stops a job's scheduled runs without
 editing the job, and **Resume schedule** starts them again; **Scan now** keeps

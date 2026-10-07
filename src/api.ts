@@ -207,6 +207,7 @@ export const deleteJob = (id: string, confirm_name: string) => api(`/jobs/${id}?
 export const pauseJob = (id: string, revision: number) => api(`/jobs/${id}/pause`, { method: 'POST', body: JSON.stringify({ revision }) })
 export const resumeJob = (id: string, revision: number) => api(`/jobs/${id}/resume`, { method: 'POST', body: JSON.stringify({ revision }) })
 export const runJob = (id: string) => api<{ status: string; job_id: string; mode?: string; cycle_id?: string }>(`/jobs/${id}/run`, { method: 'POST' })
+export const cancelQueuedRun = (id: string) => api<{ status: string; job_id: string }>(`/jobs/${id}/run`, { method: 'DELETE' })
 // Stable identifier of the built-in Naabu → Nmap profile. New jobs select it
 // explicitly so legacy persisted jobs that omit a profile remain Nmap-only.
 export const BUILTIN_NAABU_PROFILE_ID = '00000000-0000-0000-0000-000000000014'

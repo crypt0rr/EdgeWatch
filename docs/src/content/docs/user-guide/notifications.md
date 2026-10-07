@@ -66,8 +66,9 @@ pause uses none of their retries and is not reported as a delivery failure.
 
 ## Delivery retries and health
 
-Scan changes, scan failures, cancellations, timeouts, stalled cycles, and
-recovery events can all generate notifications. A scan that stops because
+Scan changes, scan failures, cancellations, timeouts, stalled cycles,
+scheduled runs skipped because they exceed the probe budget, and recovery
+events can all generate notifications. A scan that stops because
 EdgeWatch stopped, for example during an upgrade or restart, is recorded as
 canceled with the reason "scan interrupted because EdgeWatch stopped" and
 appears in Activity as **Scan interrupted**, but sends no notification. A

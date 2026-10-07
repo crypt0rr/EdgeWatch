@@ -5,7 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { activeScans, adminStatus, cancelScan, getSession, listIncidents, listJobs, listScans, notificationTest, runJob } from '../api'
+import { activeScans, adminStatus, cancelQueuedRun, cancelScan, getSession, listIncidents, listJobs, listScans, notificationTest, runJob } from '../api'
 import type { AdminStatus, SessionUser } from '../api'
 import type { ActiveScan, Job, ScanSummary } from '../types'
 import { Dashboard } from './Dashboard'
@@ -16,6 +16,7 @@ vi.mock('../api', () => ({
   adminStatus: vi.fn(),
   cancelScan: vi.fn(),
   getSession: vi.fn(),
+  cancelQueuedRun: vi.fn(),
   listIncidents: vi.fn(),
   listJobs: vi.fn(),
   listScans: vi.fn(),
@@ -197,14 +198,33 @@ describe('dashboard', () => {
     expect(Array.from(container.querySelectorAll('button')).some(button => button.textContent?.includes('Cancel scan'))).toBe(false)
   })
 
-  it('shows queued runs reported by the server without offering a cancel action', async () => {
+  it('shows queued runs reported by the server and cancels one', async () => {
     vi.mocked(activeScans).mockResolvedValue({ scans: [], queued_runs: [{ job_id: 'job-1', job: 'demo', queued_at: '2026-10-06T08:00:00Z', trigger: 'manual' }] })
+    vi.mocked(cancelQueuedRun).mockResolvedValue({ status: 'canceled', job_id: 'job-1' })
     await renderDashboard()
 
     expect(container.textContent).toContain('Scans in progress or queued')
     expect(container.textContent).toContain('Manual scan · waiting for an available scan slot')
     expect(container.querySelector('.queued-scan-row .pill')?.textContent).toBe('Queued')
     expect(Array.from(container.querySelectorAll('button')).some(button => button.textContent?.includes('Cancel scan'))).toBe(false)
+    const cancel = container.querySelector('.queued-scan-row button') as HTMLButtonElement
+    expect(cancel.textContent).toBe('Cancel queued scan')
+    await act(async () => {
+      cancel.click()
+      await Promise.resolve()
+    })
+    expect(cancelQueuedRun).toHaveBeenCalledWith('job-1')
+  })
+
+  it('reports a queued run that could no longer be canceled', async () => {
+    vi.mocked(activeScans).mockResolvedValue({ scans: [], queued_runs: [{ job_id: 'job-1', job: 'demo', queued_at: '2026-10-06T08:00:00Z', trigger: 'scheduled' }] })
+    vi.mocked(cancelQueuedRun).mockRejectedValueOnce(new Error('The job has no scan waiting for a slot.'))
+    await renderDashboard()
+    await act(async () => {
+      (container.querySelector('.queued-scan-row button') as HTMLButtonElement).click()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(container.querySelector('[role="alert"]')?.textContent).toContain('no scan waiting for a slot'), { timeout: 1000 })
   })
 
   it('navigates to job setup from the dashboard action', async () => {

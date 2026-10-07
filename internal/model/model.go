@@ -367,6 +367,10 @@ type JobState struct {
 	// emitted for this job. It lives in runtime state so cadence survives
 	// restarts without affecting scan snapshots or baseline hashes.
 	LastIncidentReminderAt *time.Time `json:"last_incident_reminder_at,omitempty"`
+	// BudgetSkipAlertKey names the scope and probe budget of the last
+	// scheduled run that the budget stopped before it started. A skip with
+	// the same key is not reported again; any scan that runs clears it.
+	BudgetSkipAlertKey string `json:"budget_skip_alert_key,omitempty"`
 }
 
 // QueuedRun describes an accepted manual or scheduled run that has not yet
@@ -414,6 +418,10 @@ const EventScanInterrupted = "scan-interrupted"
 func EventDelivered(eventType string) bool {
 	return eventType != EventScanInterrupted
 }
+
+// EventScanBudgetExceeded records a scheduled run that its probe budget
+// stopped before it started.
+const EventScanBudgetExceeded = "scan-budget-exceeded"
 
 // EventPayloadLimit is the maximum serialized size of a durable event or
 // notification outbox payload. Change details remain available on the scan

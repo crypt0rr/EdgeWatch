@@ -756,9 +756,8 @@ function JobScanStatus({ scan, queuedRun, cancelBusy, onCancel, onCancelQueued }
         ? `${queuedRun.trigger === 'scheduled' ? 'Scheduled scan' : 'Scan request'} accepted ${queuedRun.queued_at ? `at ${formatDateTime(queuedRun.queued_at)}` : ''} and waiting for an available scan slot.`
         : 'Your scan request was accepted and is waiting for an available scan slot.'}</p>
     </div>
-    {queuedRun
-      ? <button type="button" className="button secondary" onClick={onCancelQueued} disabled={cancelBusy === 'queued'}>{cancelBusy === 'queued' ? 'Cancelling…' : 'Cancel queued scan'}</button>
-      : <span className="pill amber">Queued</span>}
+    <span className="pill amber">Queued</span>
+    {queuedRun && <button type="button" className="button secondary" onClick={onCancelQueued} disabled={cancelBusy === 'queued'}>{cancelBusy === 'queued' ? 'Cancelling…' : 'Cancel queued scan'}</button>}
   </section>
 
   const phase = scan.phase || 'Working'

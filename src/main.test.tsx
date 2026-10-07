@@ -175,6 +175,24 @@ describe('application shell', () => {
     act(() => stream.emit('scan-interrupted', 'job-9'))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['activity-events'] })
     expect(invalidate).not.toHaveBeenCalledWith()
+    for (const [type, key] of [
+      ['job.paused', ['job', 'job-9']],
+      ['job.resumed', ['jobs']],
+      ['job-silent', ['activity-events']],
+      ['baseline-approved', ['job-baseline-overview', 'job-9']],
+      ['baseline-reset', ['baseline-hosts', 'job-9']],
+      ['baseline-complete', ['job', 'job-9']],
+      ['baseline-updated', ['job-pending-changes', 'job-9']],
+      ['baseline-stalled', ['scan-cycle', 'job-9']],
+      ['scan.cancellation_requested', ['active-scans']],
+      ['scan.cycle_discarded', ['scan-cycle', 'job-9']],
+      ['scanner-profile.changed', ['scanner-profiles']],
+    ] as const) {
+      invalidate.mockClear()
+      act(() => stream.emit(type, 'job-9'))
+      expect(invalidate, type).toHaveBeenCalledWith({ queryKey: key })
+      expect(invalidate, type).not.toHaveBeenCalledWith()
+    }
     act(() => stream.emit('scan.skipped', 'job-9', 'paused'))
     expect(skipped).toHaveBeenCalledWith(expect.objectContaining({ detail: { job_id: 'job-9', reason: 'paused' } }))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['active-scans'] })

@@ -58,6 +58,11 @@ and execution-tuning changes do not reset the baseline. A run that waits for a
 free scan slot uses the job's settings when it starts; if the job is paused or
 archived while a scheduled run waits, that run is skipped.
 
+**Pause schedule** on the job page stops a job's scheduled runs without
+editing the job, and **Resume schedule** starts them again; **Scan now** keeps
+working while a job is paused. Pausing and resuming are unavailable while the
+job's scan is running.
+
 Archiving stops a job while keeping its results and incidents available. An
 administrator can permanently delete an archived job by typing its exact name;
 this also removes that job's scan results, incidents, saved scan progress, and

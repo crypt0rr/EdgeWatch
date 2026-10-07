@@ -4,13 +4,13 @@ import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Route, Routes } from 'react-router-dom'
-import { APIError, activeScans, approveBaseline, archiveJob, cancelScan, deleteJob, discardScanCycle, getJob, getSession, jobBaseline, jobScans, latestSuccessfulScan, resetBaseline, restoreJob, runJob, scanCycle, scanDetail, scanHosts, scanResults } from '../api'
+import { APIError, activeScans, approveBaseline, archiveJob, cancelScan, deleteJob, discardScanCycle, getJob, getSession, jobBaseline, jobScans, latestSuccessfulScan, pauseJob, resetBaseline, restoreJob, resumeJob, runJob, scanCycle, scanDetail, scanHosts, scanResults } from '../api'
 import { renderWithProviders, defaultUnitScope } from '../test/test-utils'
 import { JobDetail } from './JobDetail'
 
 vi.mock('../api', async () => {
   const actual = await vi.importActual<typeof import('../api')>('../api')
-  return { ...actual, activeScans: vi.fn(), approveBaseline: vi.fn(), archiveJob: vi.fn(), cancelScan: vi.fn(), deleteJob: vi.fn(), getJob: vi.fn(), getSession: vi.fn(), jobBaseline: vi.fn(), jobScans: vi.fn(), latestSuccessfulScan: vi.fn(), resetBaseline: vi.fn(), restoreJob: vi.fn(), runJob: vi.fn(), scanCycle: vi.fn(), discardScanCycle: vi.fn(), scanDetail: vi.fn(), scanHosts: vi.fn(), scanResults: vi.fn() }
+  return { ...actual, activeScans: vi.fn(), approveBaseline: vi.fn(), archiveJob: vi.fn(), cancelScan: vi.fn(), deleteJob: vi.fn(), getJob: vi.fn(), getSession: vi.fn(), jobBaseline: vi.fn(), jobScans: vi.fn(), latestSuccessfulScan: vi.fn(), pauseJob: vi.fn(), resetBaseline: vi.fn(), restoreJob: vi.fn(), resumeJob: vi.fn(), runJob: vi.fn(), scanCycle: vi.fn(), discardScanCycle: vi.fn(), scanDetail: vi.fn(), scanHosts: vi.fn(), scanResults: vi.fn() }
 })
 
 const job = {
@@ -45,6 +45,8 @@ describe('job detail actions', () => {
     vi.mocked(resetBaseline).mockResolvedValue(undefined)
     vi.mocked(approveBaseline).mockResolvedValue(undefined)
     vi.mocked(archiveJob).mockResolvedValue(undefined)
+    vi.mocked(pauseJob).mockResolvedValue(undefined)
+    vi.mocked(resumeJob).mockResolvedValue(undefined)
     vi.mocked(restoreJob).mockResolvedValue(undefined)
     vi.mocked(deleteJob).mockResolvedValue(undefined)
   })
@@ -193,6 +195,39 @@ describe('job detail actions', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('another scan already owns this job')
     expect(screen.queryByRole('heading', { name: 'Scan queued' })).not.toBeInTheDocument()
     await waitFor(() => expect(screen.getByRole('button', { name: 'Scan now' })).toBeEnabled())
+  })
+
+  it('pauses and resumes the schedule from the job page with the loaded revision', async () => {
+    vi.mocked(pauseJob).mockImplementation(async () => {
+      vi.mocked(getJob).mockResolvedValue({ ...job, enabled: false, revision: 8 } as never)
+    })
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Pause schedule' }))
+    await waitFor(() => expect(pauseJob).toHaveBeenCalledWith('job-1', 7))
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Resume schedule' }))
+    await waitFor(() => expect(resumeJob).toHaveBeenCalledWith('job-1', 8))
+  })
+
+  it('lets an operator pause a job and explains a refusal while a scan runs', async () => {
+    vi.mocked(getSession).mockResolvedValue(operator)
+    vi.mocked(pauseJob).mockRejectedValueOnce(new APIError('pause or resume is unavailable while a scan is running; wait for it to finish and try again', 'job_active', undefined, 409))
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Pause schedule' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('unavailable while a scan is running')
+  })
+
+  it('disables the schedule control while a scan runs and hides it for archived jobs', async () => {
+    vi.mocked(activeScans).mockResolvedValue({ scans: [activeScan] } as never)
+    const view = renderPage()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Pause schedule' })).toBeDisabled())
+    view.unmount()
+
+    vi.mocked(activeScans).mockResolvedValue({ scans: [] })
+    vi.mocked(getJob).mockResolvedValue({ ...job, archived: true, enabled: false } as never)
+    renderPage()
+    await screen.findByRole('button', { name: 'Restore' })
+    expect(screen.queryByRole('button', { name: /schedule/ })).not.toBeInTheDocument()
   })
 
   it('shows the active phase and progress and allows cancellation from the job page', async () => {

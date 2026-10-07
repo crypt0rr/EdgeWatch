@@ -31,8 +31,10 @@ export type ScanCycle = { id: string; job_id: string; job_revision: number; stat
 // effective addresses on which the positive port was observed.
 export type Unit = { target: string; protocol: string; addresses?: string[]; ports?: { port: number; state: string; service?: string; addresses?: string[] }[] }
 export type Scope = { target: string; protocol: string; ports: string; service_detection: boolean }
-export type Incident = { job_id: string; job: string; incident: { change: { key?: string; kind: string; target: string; protocol?: string; port?: number; old?: string; new?: string; severity: string }; scan_id?: string; opened_at: string; last_seen_at: string; recovery_count?: number } }
-export type Change = { key?: string; kind: string; target: string; protocol?: string; port?: number; old?: string; new?: string; severity: string }
+export type Incident = { job_id: string; job: string; incident: { change: { key?: string; kind: string; target: string; protocol?: string; port?: number; address?: string; old?: string; new?: string; severity: string }; scan_id?: string; opened_at: string; last_seen_at: string; recovery_count?: number } }
+// `address` names the resolved address of a DNS target on which a port opened
+// or closed (kind `port-address`); `target` stays the configured name.
+export type Change = { key?: string; kind: string; target: string; protocol?: string; port?: number; address?: string; old?: string; new?: string; severity: string }
 export type ActivityEvent = {
   type: string
   job_id?: string

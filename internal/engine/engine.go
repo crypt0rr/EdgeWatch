@@ -213,6 +213,12 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 	// a service removal; retire any existing service finding for that port here
 	// so applyChanges cannot mislabel the missing service key as a recovery.
 	retireClosedPortServiceChanges(state, scan.Snapshot)
+	// The same holds for a port's exposure on one address of a DNS target:
+	// a finding that this scan could not compare is retired, not recovered.
+	retireUncomparedPortAddressChanges(state, scan.Snapshot, scopeChanged, job)
+	if !scopeChanged && job.DNSComparisonMode != config.DNSComparisonAggregate {
+		learnMissingPortEvidence(state.Baseline, scan.Snapshot, completedDownAddressesByProtocolForJob(*state.Baseline, scan.Snapshot, job))
+	}
 	previous := make(map[string]model.Incident, len(state.Incidents))
 	sendRemindersNow := remindersEnabled && incidentReminderDue(state.LastIncidentReminderAt, reminderSettings.Cadence, now)
 	if sendRemindersNow {
@@ -401,6 +407,11 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 		for key := range deferredLearning {
 			protectedKeys[key] = true
 		}
+		// Unlike a complete scan, an incomplete one does not retire a
+		// per-address finding it could not compare; the finding waits.
+		for key := range uncomparedPortAddressKeys(state, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash, job) {
+			protectedKeys[key] = true
+		}
 		events = append(events, applyChangesWithIncomplete(state, job.Name, scan.ID, changes, job.Change.Confirmations, scan.FinishedAt, protectedKeys)...)
 	}
 	message := incompleteScanError(scan.Snapshot)
@@ -414,7 +425,13 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 // incompletePositiveAddition reports whether a positive port addition is
 // attributable only to effective addresses whose coverage completed for that
 // protocol. Legacy evidence without addresses remains conservatively blocked.
+// A port that opened on one address of a DNS target names that address, so
+// it is reported when that address completed; a closure on one address is
+// deferred like any other removal.
 func incompletePositiveAddition(change model.Change, snapshot model.Snapshot, incomplete incompleteCoverage) bool {
+	if change.Kind == "port-address" {
+		return isPositivePortState(change.New) && !incompleteCoverageHas(incomplete, change.Address, change.Protocol)
+	}
 	if change.Kind != "port" || !isPositivePortState(change.New) {
 		return false
 	}
@@ -1106,7 +1123,7 @@ func advanceCandidateWithDNSMode(state *model.JobState, scan model.Scan, require
 
 func snapshotHashForDNSMode(snapshot model.Snapshot, dnsMode string) string {
 	if dnsMode != config.DNSComparisonAggregate {
-		return snapshot.Hash()
+		return addressSensitiveSnapshotHash(snapshot)
 	}
 	stable := cloneSnapshot(snapshot)
 	dnsTargets := dnsTargetsInSnapshot(stable)
@@ -1137,6 +1154,42 @@ func snapshotHashForDNSMode(snapshot model.Snapshot, dnsMode string) string {
 	}
 	stable.Normalize()
 	return stable.Hash()
+}
+
+// addressSensitiveSnapshotHash extends the snapshot hash, which leaves out
+// port evidence, with the addresses that expose each positive port of a DNS
+// target. Address-sensitive mode compares those addresses, so samples whose
+// ports differ between a name's addresses must not converge into one
+// baseline. A snapshot without such evidence keeps the snapshot hash.
+func addressSensitiveSnapshotHash(snapshot model.Snapshot) string {
+	hash := snapshot.Hash()
+	var exposures []string
+	for _, unit := range snapshot.Units {
+		if !isDNSComparisonTarget(unit.Target) {
+			continue
+		}
+		for _, port := range unit.Ports {
+			if !isPositivePortState(port.State) || len(port.Evidence) == 0 {
+				continue
+			}
+			addresses := make([]string, 0, len(port.Evidence))
+			for address := range canonicalAddressSet(port.Evidence) {
+				addresses = append(addresses, address)
+			}
+			sort.Strings(addresses)
+			exposures = append(exposures, fmt.Sprintf("%s\x00%s\x00%d\x00%s", unit.Target, unit.Protocol, port.Port, strings.Join(addresses, ",")))
+		}
+	}
+	if len(exposures) == 0 {
+		return hash
+	}
+	sort.Strings(exposures)
+	payload, _ := json.Marshal(struct {
+		Snapshot      string   `json:"snapshot"`
+		PortAddresses []string `json:"port_addresses"`
+	}{Snapshot: hash, PortAddresses: exposures})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 func fingerprintKey(target, protocol string, port int) string {
@@ -1454,9 +1507,220 @@ func diffWithDownAddresses(old, new model.Snapshot, intersectionOnly bool, downB
 		}
 		out = append(out, c)
 	}
+	_, portAddresses := comparePortAddresses(old, new, intersectionOnly, downByProtocol)
+	out = append(out, portAddresses...)
 	out = append(out, hostStateChanges(old, new, intersectionOnly)...)
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out
+}
+
+func portAddressKey(target, protocol string, port int, address string) string {
+	return fmt.Sprintf("port-address|%s|%s|%d|%s", target, protocol, port, address)
+}
+
+// comparePortAddresses compares which resolved addresses of a DNS target
+// expose each of its ports. The target is one logical unit whose ports are
+// merged across its DNS answer, so the port comparison cannot see a port that
+// opens on one address while another address already exposes it, or that
+// closes on one address while another keeps it open. Each such difference is
+// one port-address change.
+//
+// Only a port that is positive in both snapshots, with address evidence in
+// both, is compared, and only on addresses in both DNS answers: a port that
+// appears or disappears altogether is a port change, an answer that changed
+// is a dns-added or dns-removed change, and a port without evidence, as in
+// an older baseline, has unknown addresses. A port missing from an address
+// whose host discovery completed down is that host's state change.
+//
+// It returns the key of every comparison it made, whether or not the address
+// changed, together with the changes.
+func comparePortAddresses(old, current model.Snapshot, intersectionOnly bool, downByProtocol map[string]map[string]struct{}) (map[string]struct{}, []model.Change) {
+	compared := map[string]struct{}{}
+	var changes []model.Change
+	oldUnits := unitMap(old)
+	for _, unit := range current.Units {
+		if !isDNSComparisonTarget(unit.Target) {
+			continue
+		}
+		oldUnit, ok := oldUnits[unit.Target+"\x00"+unit.Protocol]
+		if !ok {
+			continue
+		}
+		oldAnswer := canonicalAddressSet(old.DNS[unit.Target])
+		var addresses []string
+		for address := range canonicalAddressSet(current.DNS[unit.Target]) {
+			if _, inBoth := oldAnswer[address]; inBoth && net.ParseIP(address) != nil {
+				addresses = append(addresses, address)
+			}
+		}
+		if len(addresses) == 0 {
+			continue
+		}
+		sort.Strings(addresses)
+		oldPorts := make(map[int]model.PortState, len(oldUnit.Ports))
+		for _, port := range oldUnit.Ports {
+			oldPorts[port.Port] = port
+		}
+		for _, port := range unit.Ports {
+			oldPort, ok := oldPorts[port.Port]
+			if !ok || !isPositivePortState(oldPort.State) || !isPositivePortState(port.State) || len(oldPort.Evidence) == 0 || len(port.Evidence) == 0 {
+				continue
+			}
+			if intersectionOnly && !inBothScopes(old, current, item{Kind: "port", Target: unit.Target, Protocol: unit.Protocol, Port: port.Port}) {
+				continue
+			}
+			before, after := canonicalAddressSet(oldPort.Evidence), canonicalAddressSet(port.Evidence)
+			for _, address := range addresses {
+				_, wasExposed := before[address]
+				_, isExposed := after[address]
+				if !isExposed && explicitlyDownForProtocol(downByProtocol, unit.Protocol, address) {
+					// A host that is down shows no ports, so this scan cannot
+					// compare the address. Its host state change reports it.
+					continue
+				}
+				key := portAddressKey(unit.Target, unit.Protocol, port.Port, address)
+				compared[key] = struct{}{}
+				if wasExposed == isExposed {
+					continue
+				}
+				change := model.Change{Key: key, Kind: "port-address", Target: unit.Target, Protocol: unit.Protocol, Port: port.Port, Address: address}
+				if isExposed {
+					change.Old, change.New, change.Severity = "not-open", port.State, "critical"
+					if port.State == "open|filtered" {
+						change.Severity = "warning"
+					}
+				} else {
+					change.Old, change.New, change.Severity = oldPort.State, "not-open", "info"
+				}
+				changes = append(changes, change)
+			}
+		}
+	}
+	return compared, changes
+}
+
+// uncomparedPortAddressKeys returns the tracked port-address findings that
+// this scan could not compare, for example because the address left the DNS
+// answer, its host is down, or the port is no longer positive. The scan did
+// not observe such an address returning to its expected state, so the
+// finding must not count towards a recovery.
+func uncomparedPortAddressKeys(state *model.JobState, current model.Snapshot, intersectionOnly bool, job config.Job) map[string]bool {
+	uncompared := map[string]bool{}
+	if state.Baseline == nil {
+		return uncompared
+	}
+	compared := map[string]struct{}{}
+	if job.DNSComparisonMode != config.DNSComparisonAggregate {
+		compared, _ = comparePortAddresses(*state.Baseline, current, intersectionOnly, completedDownAddressesByProtocolForJob(*state.Baseline, current, job))
+	}
+	mark := func(key string, change model.Change) {
+		if change.Kind != "port-address" {
+			return
+		}
+		if _, ok := compared[key]; !ok {
+			uncompared[key] = true
+		}
+	}
+	for key, pending := range state.Pending {
+		mark(key, pending.Change)
+	}
+	for key, incident := range state.Incidents {
+		mark(key, incident.Change)
+	}
+	for key, change := range state.SuppressedChanges {
+		mark(key, change)
+	}
+	return uncompared
+}
+
+// retireUncomparedPortAddressChanges removes the port-address findings that
+// a complete scan could not compare.
+func retireUncomparedPortAddressChanges(state *model.JobState, current model.Snapshot, intersectionOnly bool, job config.Job) {
+	for key := range uncomparedPortAddressKeys(state, current, intersectionOnly, job) {
+		delete(state.Pending, key)
+		delete(state.Incidents, key)
+		delete(state.Suppressed, key)
+		delete(state.SuppressedChanges, key)
+	}
+}
+
+// learnMissingPortEvidence records which addresses expose a positive baseline
+// port of a DNS target when the baseline does not say. An incident names only
+// the logical target, so a port accepted from one has no address evidence,
+// and neither has a port of a baseline recorded before ports carried it.
+// Such a port's addresses are unknown rather than changed: this complete scan
+// supplies them, limited to addresses in both DNS answers, so that later
+// scans can compare them. A unit with an address whose host discovery
+// completed down is left for a later scan.
+func learnMissingPortEvidence(baseline *model.Snapshot, current model.Snapshot, downByProtocol map[string]map[string]struct{}) {
+	if baseline == nil {
+		return
+	}
+	currentUnits := unitMap(current)
+	for unitIndex := range baseline.Units {
+		unit := &baseline.Units[unitIndex]
+		if !isDNSComparisonTarget(unit.Target) {
+			continue
+		}
+		currentUnit, ok := currentUnits[unit.Target+"\x00"+unit.Protocol]
+		if !ok {
+			continue
+		}
+		baselineAnswer := canonicalAddressSet(baseline.DNS[unit.Target])
+		currentAnswer := canonicalAddressSet(current.DNS[unit.Target])
+		down := false
+		for address := range currentAnswer {
+			if explicitlyDownForProtocol(downByProtocol, unit.Protocol, address) {
+				down = true
+				break
+			}
+		}
+		if down {
+			continue
+		}
+		currentPorts := make(map[int]model.PortState, len(currentUnit.Ports))
+		for _, port := range currentUnit.Ports {
+			currentPorts[port.Port] = port
+		}
+		for portIndex := range unit.Ports {
+			port := &unit.Ports[portIndex]
+			observed, ok := currentPorts[port.Port]
+			if len(port.Evidence) != 0 || !isPositivePortState(port.State) || !ok || !isPositivePortState(observed.State) {
+				continue
+			}
+			var evidence []string
+			for address := range canonicalAddressSet(observed.Evidence) {
+				_, inBaseline := baselineAnswer[address]
+				_, inCurrent := currentAnswer[address]
+				if inBaseline && inCurrent {
+					evidence = append(evidence, address)
+				}
+			}
+			if len(evidence) == 0 {
+				continue
+			}
+			sort.Strings(evidence)
+			port.Evidence = evidence
+		}
+	}
+}
+
+func canonicalAddress(address string) string {
+	address = strings.TrimSpace(address)
+	if ip := net.ParseIP(address); ip != nil {
+		return ip.String()
+	}
+	return address
+}
+
+func canonicalAddressSet(addresses []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		if address = canonicalAddress(address); address != "" {
+			set[address] = struct{}{}
+		}
+	}
+	return set
 }
 
 func inBothScopes(a, b model.Snapshot, v item) bool {
@@ -1895,6 +2159,11 @@ func changeWithinScopeWithDNSAddresses(snapshot model.Snapshot, change model.Cha
 	switch change.Kind {
 	case "port":
 		return scopeAllows(snapshot, change.Target, change.Protocol, change.Port, false)
+	case "port-address":
+		if job.DNSComparisonMode == config.DNSComparisonAggregate {
+			return false
+		}
+		return scopeAllows(snapshot, change.Target, change.Protocol, change.Port, false)
 	case "service":
 		return scopeAllows(snapshot, change.Target, change.Protocol, change.Port, true)
 	case "host":
@@ -2005,6 +2274,10 @@ func filterDNSAggregateChanges(old, current model.Snapshot, changes []model.Chan
 			if _, dnsTarget := dnsTargets[change.Target]; dnsTarget {
 				continue
 			}
+		case "port-address":
+			// Aggregate mode compares only the logical port surface, not which
+			// of a name's addresses exposes each port.
+			continue
 		case "host":
 			if dnsOnlyAddressInSnapshot(change.Target, dnsAddresses, old) && !snapshotHasNonDNSAddressScope(current, change.Target) {
 				continue

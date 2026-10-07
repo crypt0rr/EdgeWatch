@@ -7,7 +7,7 @@ import { ErrorNotice } from '../components/ErrorNotice'
 import { Pagination } from '../components/Pagination'
 import type { ActivityEvent, Change, Job } from '../types'
 import { formatDateTime } from '../format'
-import { changeKindLabel, severityLabel, severityTone } from '../status'
+import { changeKindLabel, changeTargetLabel, severityLabel, severityTone } from '../status'
 
 const pageSize = 20
 
@@ -37,7 +37,7 @@ function eventTone(type: string) {
 function changeDescription(change: Change) {
   const subject = change.protocol && change.port ? ` · ${change.protocol.toUpperCase()}:${change.port}` : ''
   const transition = change.old || change.new ? ` · ${change.old || '—'} → ${change.new || '—'}` : ''
-  return `${changeKindLabel(change.kind, change.old, change.new)} · ${change.target}${subject}${transition}`
+  return `${changeKindLabel(change.kind, change.old, change.new)} · ${changeTargetLabel(change)}${subject}${transition}`
 }
 
 function ActivityChange({ change }: { change: Change }) {

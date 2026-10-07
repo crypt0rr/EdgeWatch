@@ -36,10 +36,22 @@ export function changeKindLabel(kind: string, oldValue?: string, newValue?: stri
     if (oldPositive && !newPositive) return 'Port closed'
     return 'Port state'
   }
+  // A port that opened or closed on one resolved address of a DNS target
+  // while another address exposes it.
+  if (normalized === 'port_address') {
+    if (isPositivePortState(newValue) && !isPositivePortState(oldValue)) return 'Port opened on address'
+    if (isPositivePortState(oldValue) && !isPositivePortState(newValue)) return 'Port closed on address'
+    return 'Port on address'
+  }
   if (normalized === 'dns' || normalized.startsWith('dns_')) return 'DNS'
   if (normalized === 'host' || normalized.startsWith('host_')) return 'Host state'
   if (normalized === 'service' || normalized.startsWith('service_')) return 'Service'
   return humanize(normalized || kind)
+}
+
+/** Names a change's target, followed by the resolved address for a change on one address of a DNS target. */
+export function changeTargetLabel(change: { target: string; address?: string }): string {
+  return change.address ? `${change.target} (${change.address})` : change.target
 }
 
 export function severityLabel(severity: string): string {

@@ -621,11 +621,12 @@ func isPositiveCyclePortState(state string) bool {
 }
 
 // changeExpectsOpenPort reports whether a tracked change claims its port is
-// currently open: a port change to a positive state, or a service change
-// whose new value is a fingerprint rather than the absence of the port.
+// currently open: a port change to a positive state, on the target or on one
+// of its addresses, or a service change whose new value is a fingerprint
+// rather than the absence of the port.
 func changeExpectsOpenPort(change model.Change) bool {
 	switch change.Kind {
-	case "port":
+	case "port", "port-address":
 		return isPositiveCyclePortState(change.New)
 	case "service":
 		value := strings.TrimSpace(change.New)

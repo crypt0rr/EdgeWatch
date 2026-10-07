@@ -19,7 +19,10 @@ Each job can select its own destinations. On the **Notifications** page,
   afterward remain opt-in for existing jobs;
 - saving an empty selection keeps update alerts silent while checks and the
   in-console indicator continue to work;
-- password confirmation is required for every routing or credential change.
+- password confirmation is required for every destination, credential,
+  update-alert routing, and reminder change on the **Notifications** page.
+  Selecting a job's destinations in the job editor needs only permission to
+  edit jobs, which operators have.
 
 ## Incident reminders
 
@@ -30,8 +33,9 @@ destinations. New incidents continue to get their initial alert; suppressed
 incidents and incomplete, failed, canceled, or timed-out scans do not generate
 reminders. The first successful follow-up may send a reminder immediately;
 the selected cadence limits later reminders. Administrators can turn reminders
-off or choose a minimum cadence per job: hourly (the default), every six hours,
-daily, or every successful scan. Existing saved cadence choices are retained
+off or choose one minimum cadence for the business unit: hourly (the default),
+every six hours, daily, or every successful scan. EdgeWatch applies the cadence
+to each job separately. Existing saved cadence choices are retained
 during upgrades; legacy every-scan values with no reminder-setting audit
 history are treated as inherited defaults and changed to hourly. If an older
 version recorded any reminder-setting action, EdgeWatch keeps the stored
@@ -78,6 +82,13 @@ Earlier releases also read Shoutrrr URLs from `notifications.urls` and
 `notifications.urls_file` in `config.yaml`. These keys are deprecated, and a later
 release will refuse to start while either is set. `notifications.encryption_key_file`
 stays supported.
+
+An entry in `notifications.urls` may also be a complete environment reference
+such as `${MATTERMOST_URL}`, which is read from the daemon's environment when
+the URL is imported. The reference must be the whole value: a partly expanded
+URL, or a variable that is unset, empty, or itself contains `${`, is refused.
+The URL file must be a regular file, not a symbolic link, with mode `0400` or
+`0600` and at most 1 MiB.
 
 On the first daemon start of this release, after the database migration and
 before any alert is sent, EdgeWatch imports each configured URL once as an

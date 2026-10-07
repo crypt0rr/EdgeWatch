@@ -73,7 +73,7 @@ the bind mount.
 Keep the directory and its SQLite sidecars together when backing up or
 upgrading. The same container UID is retained across image versions, so data
 owned by the mapped identity remains writable without an ownership migration.
-Do not change the Compose `user:` setting on an existing installation unless
+Do not add a Compose `user:` setting to an existing installation unless
 you have tested ownership and every configured scan mode with a copy of the
 data directory. Never use mode `0777` as a workaround; it masks ownership
 errors and weakens protection for databases and encryption keys.

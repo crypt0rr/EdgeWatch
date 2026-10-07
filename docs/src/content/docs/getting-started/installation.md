@@ -5,8 +5,11 @@ description: Deploy EdgeWatch with Docker Compose and create your first administ
 
 ## Requirements
 
-You need Docker Engine and Docker Compose v2 on a host that supports Docker
-host networking and the required scanner capabilities.
+You need Docker Engine 25 or later and Docker Compose v2 on a host that
+supports Docker host networking and the required scanner capabilities. The
+Compose file's health check uses `start_interval`, which older Docker Engine
+releases do not support; if `docker compose config` or `docker compose up`
+rejects it, update Docker Engine and Docker Compose.
 
 ## Configure storage
 
@@ -74,7 +77,7 @@ docker compose run --rm --no-deps --entrypoint /bin/sh edgewatch \
   -c 'cat /etc/edgewatch/config.yaml >/dev/null && touch /var/lib/edgewatch/.edgewatch-permission-check && rm /var/lib/edgewatch/.edgewatch-permission-check'
 ```
 
-If this check fails with `Permission denied`, inspect `docker compose logs edgewatch` and correct the host ownership described above. Do not make the data directory or secret files world-readable or world-writable.
+If this check prints `Permission denied`, correct the host ownership described above; the error appears in the terminal, not in `docker compose logs`, because the check runs in a separate one-off container. Do not make the data directory or secret files world-readable or world-writable.
 
 If you enabled a secret mount, verify the mounted file itself is readable using
 its path, for example:

@@ -518,6 +518,9 @@ func TestServerStaticSSEAndAuditHelpers(t *testing.T) {
 	if streamResponse.Code != http.StatusOK || streamResponse.Header().Get("Content-Type") != "text/event-stream" || !bytes.Contains(streamResponse.Body.Bytes(), []byte("second")) {
 		t.Fatalf("stream response = %d %s %q", streamResponse.Code, streamResponse.Header().Get("Content-Type"), streamResponse.Body.String())
 	}
+	if got := streamResponse.Header().Get("X-Accel-Buffering"); got != "no" {
+		t.Fatalf("stream X-Accel-Buffering = %q, want no so buffering proxies pass events through", got)
+	}
 	var message bytes.Buffer
 	writeSSEMessage(&message, sseMessage{id: 7, payload: []byte(`{"type":"test"}`)})
 	if message.String() != "id: 7\ndata: {\"type\":\"test\"}\n\n" {

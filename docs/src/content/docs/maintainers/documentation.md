@@ -138,10 +138,9 @@ Investigate failed checks and new warnings. The known moderate build-tool
 advisory and duplicate 404 route warning are described in `docs/README.md`.
 A successful earlier preview does not replace validation of the final commit.
 
-For the first public launch, remove the prototype banner and global `noindex`
-meta tag, point source and edit links to `main`, and replace README source-guide
-links with live URLs. Merge the website before switching Pages to `main`; the
-production branch must contain a working documentation project.
+Production is built from `main`, so merge a documentation change only after
+its preview passes; there is no separate launch step. Keep README links on
+live `https://edgewatch.offsec.nl/` URLs, and edit links on `main`.
 
 ## Verify production
 

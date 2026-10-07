@@ -23,7 +23,7 @@ database with the release that upgraded it, or copy `./data` while
 EdgeWatch is stopped. A daemon that finds another daemon's live lease exits
 before it migrates the database, and so does a daemon whose configured key
 file or notification URL is unusable (see `config validate` under
-[Useful commands](/reference/cli/)). Keep encryption keys with the database or
+[Host commands](/reference/cli/)). Keep encryption keys with the database or
 encrypted web-managed destinations and never commit them.
 
 ## Schema 58
@@ -32,6 +32,36 @@ Schema 58 rebuilds the bounded host-search indexes from retained scan and
 baseline evidence in restartable batches. Service names and products are
 prioritized so services on late ports remain searchable even when a host has
 many positive ports. The rebuild does not change scan results or baselines.
+
+## Schema 62
+
+Schema 62, introduced in v0.25.14, adds the work queues that erase a
+permanently deleted job's history in bounded transactions, and indexes that
+find the job's pending and restore-quarantined deliveries. A deletion that is
+interrupted resumes after a restart. The migration creates empty tables and
+indexes and does not change existing data.
+
+## Schema 61
+
+Schema 61, introduced in v0.23.3, changes the incident reminder cadence that a
+business unit inherited from the default, every successful scan, to hourly. A
+unit keeps its cadence when an administrator chose another value, or when its
+audit log records an earlier change of the reminder settings, because older
+releases did not record which setting changed. Check **Incident reminders** on
+the **Notifications** page after upgrading from an earlier release if you want
+a reminder on every successful scan.
+
+## Schema 60
+
+Schema 60, introduced in v0.22.0, adds each business unit's incident reminder
+cadence, with every successful scan as the initial value. It is a quick
+in-place change with no background phase.
+
+## Schema 59
+
+Schema 59, introduced in v0.21.1, adds the switch that turns incident reminders
+on or off for each business unit, on by default. It is a quick in-place change
+with no background phase.
 
 ## Migration ownership
 

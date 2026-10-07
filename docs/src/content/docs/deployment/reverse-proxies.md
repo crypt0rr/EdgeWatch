@@ -52,3 +52,35 @@ Both requests should return a successful response. If the direct request works
 but the request with the proxy `Host` returns `421`, correct
 `web.allowed_hosts`. The listener remains loopback-only; this setting approves
 the public name, not a new network bind address.
+
+## Live updates
+
+The console receives live updates over one long-lived Server-Sent Events
+response from `/api/v1/stream`. EdgeWatch writes a heartbeat comment every 25
+seconds and sends `X-Accel-Buffering: no`, which nginx honors by default. Make
+sure the proxy:
+
+- passes each event through as it is written instead of buffering the
+  response;
+- keeps an idle upstream read open for longer than the 25-second heartbeat;
+- does not compress or cache `text/event-stream` responses.
+
+A minimal nginx location:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    proxy_read_timeout 120s;
+}
+```
+
+Overwriting `X-Forwarded-For` with `$remote_addr` keeps a client-supplied header
+from reaching EdgeWatch. Tailscale Serve and Caddy stream responses without
+extra settings. When a proxy buffers the stream anyway, the console shows
+**Reconnecting…** or updates only after a reload, while ordinary pages keep
+working.

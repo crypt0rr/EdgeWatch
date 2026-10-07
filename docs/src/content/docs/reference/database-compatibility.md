@@ -5,19 +5,21 @@ description: Understand the current SQLite schema, forward-only migrations, and 
 
 ## Current schema and rollback
 
-The current schema is version 64. Schema 31 records terminal notification
+The current schema is version 65. Schema 31 records terminal notification
 deliveries and marks rows that had already exhausted the original eight
 attempts. Schema 63 repairs databases that had already passed schema 31 by
 marking still-unsent rows with at least eight attempts and a scheduled retry
 before v0.22.1, when the retry budget increased to fifteen. Retries scheduled
 on or after that release remain eligible, so upgrading does not replay
 deliveries that were still retrying. Schema 64 adds an index for pruning old
-restore-quarantine records; it does not rewrite delivery history. Database
-migrations are forward-only. An older image must not be pointed at a database
-already upgraded by a newer image; restore the matching pre-upgrade `./data`
-backup if a rollback is required. The daemon and the commands that write to the
-database (admin, scan, notify test, baseline approve and reset, and backup)
-refuse versions above their supported schema version with the error
+restore-quarantine records; it does not rewrite delivery history. Schema 65
+records how each new scan was compared with its job's baseline; it does not
+change existing scans. Database migrations are forward-only. An older image
+must not be pointed at a database already upgraded by a newer image; restore
+the matching pre-upgrade `./data` backup if a rollback is required. The daemon
+and the commands that write to the database (admin, scan, notify test,
+baseline approve and reset, and backup) refuse versions above their supported
+schema version with the error
 `database schema version N is newer than supported version M`. Back up such a
 database with the release that upgraded it, or copy `./data` while
 EdgeWatch is stopped. A daemon that finds another daemon's live lease exits
@@ -32,6 +34,23 @@ Schema 58 rebuilds the bounded host-search indexes from retained scan and
 baseline evidence in restartable batches. Service names and products are
 prioritized so services on late ports remain searchable even when a host has
 many positive ports. The rebuild does not change scan results or baselines.
+
+## Schema 65
+
+Schema 65, introduced in v0.26.0, adds a `comparison` column to the scans
+table. When a scan of a job finishes, it records whether the scan was compared
+with the baseline, was a baseline sample, established the baseline, or was not
+compared. The scan detail reports that outcome, so a successful baseline sample
+is no longer described as a scan that did not complete, and its result no
+longer changes after the baseline is established, an incident is accepted, or
+the baseline is reset; see
+[Scan comparison](/user-guide/jobs-baselines-incidents/#scan-comparison).
+Existing scans keep an empty value, because the migration cannot tell an
+earlier baseline sample from a scan recorded before scan-time comparisons. They
+behave as before: a scan without changes recorded at scan time is compared with
+the current baseline. It is a quick in-place change with no background phase.
+An older release refuses the upgraded database, so a rollback means restoring
+the pre-upgrade `./data` backup.
 
 ## Schema 62
 

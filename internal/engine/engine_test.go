@@ -1586,6 +1586,9 @@ func TestFinalizeManagedScanRecordsInitialBaselineScanMetadata(t *testing.T) {
 	if stored.BaselineScanID != current.ID || stored.BaselineConfigHash != current.ConfigHash {
 		t.Fatalf("initial baseline metadata = %#v, want scan=%s hash=%s", stored, current.ID, current.ConfigHash)
 	}
+	if stored.Comparison != model.ScanComparisonBaselineEstablished {
+		t.Fatalf("initial baseline comparison = %q, want %q", stored.Comparison, model.ScanComparisonBaselineEstablished)
+	}
 	if exists, err := defaultTenant(db).BaselineHostProjectionExists(ctx, record.ID); err != nil || !exists {
 		t.Fatalf("automatic baseline did not maintain host projection: exists=%v err=%v", exists, err)
 	}

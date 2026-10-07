@@ -670,6 +670,63 @@ func (s *Server) jobScans(w http.ResponseWriter, r *http.Request, ts *store.Tena
 	writeJSON(w, 200, map[string]any{"scans": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
 
+// scanComparisonView is how the job scan endpoints report a scan's
+// comparison: its comparison_state and comparison_source, and where its
+// changes come from.
+type scanComparisonView struct {
+	state  string
+	source string
+	// scanTime reads the change list stored with the scan.
+	scanTime bool
+	// legacy compares the scan with the job's current baseline, when there
+	// is one. Only rows recorded before scans stored their outcome use it.
+	legacy bool
+}
+
+// resolveScanComparison reads the comparison outcome that was recorded when
+// the scan was finalized. A baseline sample, and the sample that established
+// the baseline, keep that meaning after the baseline is established,
+// changed, or reset. Only a row without a recorded outcome or a scan-time
+// comparison falls back to the current baseline, as releases before schema
+// 65 did.
+func resolveScanComparison(summary model.ScanSummary) scanComparisonView {
+	notCompared := scanComparisonView{state: model.ScanComparisonNotCompared, source: "none"}
+	if summary.Status != "success" && summary.Status != "incomplete" {
+		return notCompared
+	}
+	switch summary.Comparison {
+	case model.ScanComparisonCompared:
+		return scanComparisonView{state: model.ScanComparisonCompared, source: "scan_time", scanTime: true}
+	case model.ScanComparisonBaselineSample, model.ScanComparisonBaselineEstablished:
+		return scanComparisonView{state: summary.Comparison, source: "none"}
+	case model.ScanComparisonLegacy:
+		if summary.BaselineScanID != "" || summary.BaselineConfigHash != "" {
+			return scanComparisonView{state: model.ScanComparisonCompared, source: "scan_time", scanTime: true}
+		}
+		notCompared.legacy = true
+		return notCompared
+	default:
+		return notCompared
+	}
+}
+
+// legacyScanChanges compares a legacy scan with the job's current baseline.
+// It reports false when the job has no baseline, which leaves the scan not
+// compared.
+func legacyScanChanges(ctx context.Context, ts *store.TenantStore, jobID string, summary model.ScanSummary) ([]model.Change, bool, error) {
+	state, err := ts.RuntimeState(ctx, jobID)
+	if err != nil || state.Baseline == nil {
+		return nil, false, err
+	}
+	// Only this compatibility path needs the full snapshot. Managed scans
+	// carry their immutable comparison in changes_json.
+	scan, err := ts.GetScan(ctx, summary.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	return engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != summary.ConfigHash), true, nil
+}
+
 func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord, summary model.ScanSummary) {
 	id, scanID := record.ID, summary.ID
 	offset, ok := requestOffset(w, r)
@@ -677,48 +734,33 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, ts *store.Tenan
 		return
 	}
 	limit := queryLimit(r)
-	comparisonState := "not_compared"
-	value := map[string]any{"scan": summary, "changes": []model.Change{}, "changes_pagination": paginationJSON(offset, limit, 0), "comparison_source": "none", "comparison_state": comparisonState}
-	var state model.JobState
-	var stateErr error
-	comparable := summary.Status == "success" || summary.Status == "incomplete"
-	needsCurrentBaseline := comparable && summary.BaselineScanID == "" && summary.BaselineConfigHash == ""
-	if needsCurrentBaseline {
-		state, stateErr = ts.RuntimeState(r.Context(), id)
-		if stateErr != nil {
-			s.writeInternalError(w, r, "store", stateErr)
+	view := resolveScanComparison(summary)
+	value := map[string]any{"scan": summary, "changes": []model.Change{}, "changes_pagination": paginationJSON(offset, limit, 0), "comparison_source": view.source, "comparison_state": view.state}
+	switch {
+	case view.scanTime:
+		page, pageErr := ts.ListScanChangesPage(r.Context(), scanID, limit, offset)
+		if pageErr != nil {
+			s.writeInternalError(w, r, "store", pageErr)
 			return
 		}
-	}
-	if comparable {
-		if summary.BaselineScanID != "" || summary.BaselineConfigHash != "" {
-			page, pageErr := ts.ListScanChangesPage(r.Context(), scanID, limit, offset)
-			if pageErr != nil {
-				s.writeInternalError(w, r, "store", pageErr)
-				return
-			}
-			items := page.Items
-			if items == nil {
-				items = []model.Change{}
-			}
-			value["changes"], value["changes_pagination"] = items, paginationJSON(offset, limit, page.Total)
-			value["comparison_source"] = "scan_time"
-			value["comparison_state"] = "compared"
-			value["baseline_scan_id"] = summary.BaselineScanID
-		} else if state.Baseline != nil {
-			// Legacy scans from before the immutable comparison columns were
-			// introduced retain the previous current-baseline behavior.
-			// Only this compatibility path needs the full snapshot. Managed scans
-			// always carry their immutable comparison in changes_json.
-			scan, scanErr := ts.GetScan(r.Context(), scanID)
-			if scanErr != nil {
-				s.writeInternalError(w, r, "store", scanErr)
-				return
-			}
-			changes := engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != summary.ConfigHash)
+		items := page.Items
+		if items == nil {
+			items = []model.Change{}
+		}
+		value["changes"], value["changes_pagination"] = items, paginationJSON(offset, limit, page.Total)
+		value["baseline_scan_id"] = summary.BaselineScanID
+	case view.state == model.ScanComparisonBaselineEstablished:
+		value["baseline_scan_id"] = summary.BaselineScanID
+	case view.legacy:
+		changes, compared, legacyErr := legacyScanChanges(r.Context(), ts, id, summary)
+		if legacyErr != nil {
+			s.writeInternalError(w, r, "store", legacyErr)
+			return
+		}
+		if compared {
 			value["changes"], value["changes_pagination"] = pageSlice(changes, offset, limit)
 			value["comparison_source"] = "current_baseline_legacy"
-			value["comparison_state"] = "compared"
+			value["comparison_state"] = model.ScanComparisonCompared
 		}
 	}
 	value["current_security_hash"] = record.Job.SecurityHash()
@@ -752,34 +794,30 @@ func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, ts *stor
 	limit := queryLimit(r)
 	changes := []model.Change{}
 	var total int
-	comparisonSource := "none"
-	comparisonState := "not_compared"
-	if summary.Status == "success" || summary.Status == "incomplete" {
-		if summary.BaselineScanID != "" || summary.BaselineConfigHash != "" {
-			page, pageErr := ts.ListScanChangesPage(r.Context(), scanID, limit, offset)
-			if pageErr != nil {
-				s.writeInternalError(w, r, "store", pageErr)
-				return
-			}
-			changes, total = page.Items, page.Total
-			comparisonSource = "scan_time"
-			comparisonState = "compared"
-		} else if state, stateErr := ts.RuntimeState(r.Context(), id); stateErr == nil && state.Baseline != nil {
-			scan, scanErr := ts.GetScan(r.Context(), scanID)
-			if scanErr != nil {
-				s.writeInternalError(w, r, "store", scanErr)
-				return
-			}
-			changes = engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != summary.ConfigHash)
-			comparisonSource = "current_baseline_legacy"
-			comparisonState = "compared"
-		} else if stateErr != nil {
-			s.writeInternalError(w, r, "store", stateErr)
+	view := resolveScanComparison(summary)
+	comparisonSource, comparisonState := view.source, view.state
+	switch {
+	case view.scanTime:
+		page, pageErr := ts.ListScanChangesPage(r.Context(), scanID, limit, offset)
+		if pageErr != nil {
+			s.writeInternalError(w, r, "store", pageErr)
 			return
+		}
+		changes, total = page.Items, page.Total
+	case view.legacy:
+		legacy, compared, legacyErr := legacyScanChanges(r.Context(), ts, id, summary)
+		if legacyErr != nil {
+			s.writeInternalError(w, r, "store", legacyErr)
+			return
+		}
+		if compared {
+			changes = legacy
+			comparisonSource = "current_baseline_legacy"
+			comparisonState = model.ScanComparisonCompared
 		}
 	}
 	items, page := changes, paginationJSON(offset, limit, total)
-	if comparisonSource != "scan_time" {
+	if !view.scanTime {
 		items, page = pageSlice(changes, offset, limit)
 	}
 	if items == nil {

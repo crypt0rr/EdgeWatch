@@ -146,7 +146,7 @@ func TestFinalizeManagedScanRejectsStaleCycleAfterSavingHistory(t *testing.T) {
 		t.Fatalf("stale cycle finalization error = %v", err)
 	}
 	stored, err := defaultTenant(s).GetScan(ctx, scan.ID)
-	if err != nil || stored.Status != "success" {
+	if err != nil || stored.Status != "success" || stored.Comparison != model.ScanComparisonNotCompared {
 		t.Fatalf("stale scan history = %#v, %v", stored, err)
 	}
 }

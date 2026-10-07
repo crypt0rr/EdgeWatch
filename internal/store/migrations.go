@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 64
+const schemaVersion = 65
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -75,6 +75,9 @@ var conditionalMigrationStatements = map[int]func(*sql.Tx) ([]string, error){
 	// Schema 61 distinguishes inherited cadence defaults from saved cadence
 	// preferences while migrating legacy every-scan defaults safely.
 	61: migration61ConditionalStatements,
+	// Schema 65's comparison column may already exist in a reconstructed
+	// test DB.
+	65: migration65ConditionalStatements,
 }
 
 // newerSchemaError is the refusal for a database that a newer release has
@@ -1274,6 +1277,10 @@ ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=
 		// Expired restore quarantine entries by retention timestamp without
 		// rescanning the full quarantine table for each bounded delete batch.
 		64: migration64Statements(),
+		// Scans record their comparison outcome at finalization, so baseline
+		// samples are no longer reported as failed or diffed against a later
+		// baseline. See migration65.go.
+		65: {},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL
 	// steps. FTS and other resumable backfills can be the longest part of an

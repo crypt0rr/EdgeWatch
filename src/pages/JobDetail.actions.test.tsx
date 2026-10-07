@@ -404,6 +404,44 @@ describe('job detail actions', () => {
     expect(screen.queryByRole('button', { name: 'Use as baseline' })).not.toBeInTheDocument()
   })
 
+  const comparisonCopy = {
+    sample: 'This scan was a baseline sample; no comparison was performed.',
+    incompleteSample: 'This scan ran while the baseline was being learned; no comparison was performed. Incomplete scans do not count as baseline samples.',
+    established: 'This scan established the baseline.',
+    kept: 'This scan was not compared with the baseline.',
+    failed: 'This scan was not compared because it did not complete successfully.',
+    scanTime: '0 changes recorded at scan time.',
+    legacy: '0 changes against the current baseline.',
+  }
+  it.each([
+    { name: 'a successful baseline sample', status: 'success', state: 'baseline_sample', source: 'none', copy: comparisonCopy.sample, empty: 'No comparison was performed for this scan.' },
+    { name: 'an incomplete scan while the baseline is learned', status: 'incomplete', state: 'baseline_sample', source: 'none', copy: comparisonCopy.incompleteSample, empty: 'No comparison was performed for this scan.' },
+    { name: 'the sample that established the baseline', status: 'success', state: 'baseline_established', source: 'none', copy: comparisonCopy.established, empty: 'No comparison was performed for this scan.' },
+    { name: 'a completed scan kept without a comparison', status: 'success', state: 'not_compared', source: 'none', copy: comparisonCopy.kept, empty: 'No comparison was performed for this scan.' },
+    { name: 'a failed scan', status: 'failed', state: 'not_compared', source: 'none', copy: comparisonCopy.failed, empty: 'No comparison was performed for this scan.' },
+    { name: 'a scan compared at scan time', status: 'success', state: 'compared', source: 'scan_time', copy: comparisonCopy.scanTime, empty: 'No changes detected.' },
+    { name: 'a legacy scan compared with the current baseline', status: 'success', state: 'compared', source: 'current_baseline_legacy', copy: comparisonCopy.legacy, empty: 'No changes detected.' },
+  ])('describes the comparison of $name', async ({ status, state, source, copy, empty }) => {
+    const selected = { ...scan, status }
+    vi.mocked(jobScans).mockResolvedValue({ scans: [selected], pagination: page } as never)
+    vi.mocked(scanDetail).mockResolvedValue({
+      scan: selected,
+      changes: [],
+      changes_pagination: { ...page, total: 0 },
+      comparison_state: state,
+      comparison_source: source,
+      current_security_hash: 'scope',
+    } as never)
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('button', { name: /scan-1/i }))
+    expect(await screen.findByText(copy)).toBeInTheDocument()
+    expect(screen.getByText(empty)).toBeInTheDocument()
+    for (const other of Object.values(comparisonCopy).filter((text) => text !== copy)) {
+      expect(screen.queryByText(other)).not.toBeInTheDocument()
+    }
+  })
+
   it('restores an archived job and permanently deletes it with the guarded name', async () => {
     vi.mocked(getJob).mockResolvedValue({ ...job, archived: true, enabled: false } as never)
     renderPage()

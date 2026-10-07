@@ -64,7 +64,8 @@ func (e *Engine) FinalizeManagedScanWithOptions(ctx context.Context, jobID strin
 			MarkIncompleteScan(current)
 		}
 		if current.Status == "success" || current.Status == "incomplete" {
-			if state.Baseline != nil {
+			hadBaseline := state.Baseline != nil
+			if hadBaseline {
 				current.BaselineScanID = state.BaselineScanID
 				current.BaselineConfigHash = state.BaselineConfigHash
 			}
@@ -86,6 +87,7 @@ func (e *Engine) FinalizeManagedScanWithOptions(ctx context.Context, jobID strin
 				current.BaselineScanID = state.BaselineScanID
 				current.BaselineConfigHash = state.BaselineConfigHash
 			}
+			current.Comparison = comparisonOutcome(hadBaseline, state, current)
 			if current.Resumable && current.CycleAttempt > 1 {
 				return append(events, model.Event{Type: "scan-recovered", Job: scan.Job, ScanID: scan.ID, Message: "Resumable scan cycle completed after earlier paused attempts", CreatedAt: scan.FinishedAt}), nil
 			}
@@ -94,8 +96,26 @@ func (e *Engine) FinalizeManagedScanWithOptions(ctx context.Context, jobID strin
 		// Failed, timed-out, and canceled scans never enter comparison state,
 		// but every terminal non-success outcome is retained as an event so the
 		// configured notification destinations can alert the operator.
+		current.Comparison = model.ScanComparisonNotCompared
 		return processFailure(state, job.Name, *current)
 	})
+}
+
+// comparisonOutcome names what finalizing a successful or incomplete scan
+// did. A scan that finished while the job had a baseline was compared with
+// it, even when the comparison found nothing. Without one, the scan was a
+// baseline sample, or the sample that completed the baseline. Recording the
+// outcome keeps a sample's history from being compared later with a
+// baseline that did not exist when it ran.
+func comparisonOutcome(hadBaseline bool, state *model.JobState, scan *model.Scan) string {
+	switch {
+	case hadBaseline:
+		return model.ScanComparisonCompared
+	case scan.Status == "success" && state.Baseline != nil && state.BaselineScanID == scan.ID:
+		return model.ScanComparisonBaselineEstablished
+	default:
+		return model.ScanComparisonBaselineSample
+	}
 }
 
 func processSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]model.Event, error) {

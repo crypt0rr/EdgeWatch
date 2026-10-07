@@ -84,7 +84,7 @@ func (l *resourceLookups) observe(query string, args []driver.NamedValue) error 
 		if l.failJobs {
 			return errInjectedLookup
 		}
-	case strings.Contains(query, "baseline_config_hash FROM scans WHERE id=? AND tenant_id=?") && strings.HasPrefix(query, "SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,"):
+	case strings.Contains(query, "baseline_config_hash,comparison FROM scans WHERE id=? AND tenant_id=?") && strings.HasPrefix(query, "SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,"):
 		l.scanSummaries[id]++
 		if l.failSummaries {
 			return errInjectedLookup

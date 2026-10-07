@@ -99,3 +99,30 @@ Host searches cover partial IP addresses, DNS names, targets, job names, and
 service names or products. Enter at least 3 and no more than 256 characters;
 searches stay on the indexed path and service names/products are prioritized
 within the bounded search document.
+
+## Scan comparison
+
+Each scan's detail says how the scan was compared with the job's baseline when
+it finished. That description is recorded with the scan, so it stays the same
+after the baseline is established, an incident is accepted, or the baseline is
+reset.
+
+- **Baseline sample:** the job was still learning its baseline, so there was
+  nothing to compare the scan with. A successful scan counts as one of the
+  job's baseline samples; an incomplete scan does not. Jobs created in the
+  console learn from two samples by default, so their first scan is a baseline
+  sample. Each scope change or baseline reset starts a new set of samples.
+- **Established the baseline:** the scan was the sample that completed the
+  baseline.
+- **Changes recorded at scan time:** the scan was compared with the baseline
+  that existed when it finished. Its changes are kept with it and are not
+  recalculated later.
+- **Not compared because it did not complete successfully:** the scan failed,
+  timed out, or was canceled.
+- **Not compared with the baseline:** the scan completed, but EdgeWatch kept
+  its result without a comparison, for example because the job's security
+  settings changed while it ran.
+
+Scans recorded before v0.26.0 have no recorded comparison. When such a scan has
+no changes recorded at scan time, its detail compares it with the current
+baseline and reports the changes against the current baseline.

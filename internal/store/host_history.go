@@ -90,7 +90,7 @@ func jobScansPageQueries(tenantID, jobID string, limit, offset int) scanPageQuer
 	return scanPageQueries{
 		countSQL: `SELECT COUNT(*) FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)`,
 		countArg: []any{tenantID, jobID},
-		pageSQL:  `SELECT s.id,s.job_id,s.job_revision,s.job,s.started_at,s.finished_at,s.status,s.error,s.nmap_version,s.scanner_engine,s.scanner_profile_id,s.scanner_profile_revision,s.naabu_version,s.discovery_ports,s.confirmed_ports,s.discovery_duration_ms,s.enrichment_duration_ms,s.config_hash,s.cycle_id,s.cycle_attempt,s.cycle_status,s.resumable,s.completed_probes,s.total_probes,s.completed_units,s.total_units,s.no_progress_attempts,s.baseline_scan_id,s.baseline_config_hash,s.changes_json,s.snapshot_json FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id) ORDER BY s.finished_at DESC,s.id DESC LIMIT ? OFFSET ?`,
+		pageSQL:  `SELECT s.id,s.job_id,s.job_revision,s.job,s.started_at,s.finished_at,s.status,s.error,s.nmap_version,s.scanner_engine,s.scanner_profile_id,s.scanner_profile_revision,s.naabu_version,s.discovery_ports,s.confirmed_ports,s.discovery_duration_ms,s.enrichment_duration_ms,s.config_hash,s.cycle_id,s.cycle_attempt,s.cycle_status,s.resumable,s.completed_probes,s.total_probes,s.completed_units,s.total_units,s.no_progress_attempts,s.baseline_scan_id,s.baseline_config_hash,s.comparison,s.changes_json,s.snapshot_json FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id) ORDER BY s.finished_at DESC,s.id DESC LIMIT ? OFFSET ?`,
 		pageArg:  []any{tenantID, jobID, limit, offset},
 	}
 }
@@ -282,7 +282,7 @@ func (ts *TenantStore) ListJobScansPage(ctx context.Context, jobID string, limit
 		var snapshot, changesJSON []byte
 		var baselineScanID, baselineConfigHash string
 		var resumable int
-		if err := rows.Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &baselineScanID, &baselineConfigHash, &changesJSON, &snapshot); err != nil {
+		if err := rows.Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &baselineScanID, &baselineConfigHash, &v.Comparison, &changesJSON, &snapshot); err != nil {
 			return page, err
 		}
 		v.Resumable = resumable != 0
@@ -321,7 +321,7 @@ func (ts *TenantStore) ListJobScanSummariesPage(ctx context.Context, jobID strin
 	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)`, ts.scope.id, jobID).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := readDB.QueryContext(ctx, `SELECT s.id,s.job_id,s.job_revision,s.job,s.started_at,s.finished_at,s.status,s.error,s.nmap_version,s.scanner_engine,s.scanner_profile_id,s.scanner_profile_revision,s.naabu_version,s.discovery_ports,s.confirmed_ports,s.discovery_duration_ms,s.enrichment_duration_ms,s.config_hash,s.cycle_id,s.cycle_attempt,s.cycle_status,s.resumable,s.completed_probes,s.total_probes,s.completed_units,s.total_units,s.no_progress_attempts,s.baseline_scan_id,s.baseline_config_hash FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id) ORDER BY s.finished_at DESC,s.id DESC LIMIT ? OFFSET ?`, ts.scope.id, jobID, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT s.id,s.job_id,s.job_revision,s.job,s.started_at,s.finished_at,s.status,s.error,s.nmap_version,s.scanner_engine,s.scanner_profile_id,s.scanner_profile_revision,s.naabu_version,s.discovery_ports,s.confirmed_ports,s.discovery_duration_ms,s.enrichment_duration_ms,s.config_hash,s.cycle_id,s.cycle_attempt,s.cycle_status,s.resumable,s.completed_probes,s.total_probes,s.completed_units,s.total_units,s.no_progress_attempts,s.baseline_scan_id,s.baseline_config_hash,s.comparison FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id) ORDER BY s.finished_at DESC,s.id DESC LIMIT ? OFFSET ?`, ts.scope.id, jobID, limit, offset)
 	if err != nil {
 		return page, err
 	}
@@ -332,7 +332,7 @@ func (ts *TenantStore) ListJobScanSummariesPage(ctx context.Context, jobID strin
 		var revision sql.NullInt64
 		var started, finished string
 		var resumable int
-		if err := rows.Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash); err != nil {
+		if err := rows.Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash, &v.Comparison); err != nil {
 			return page, err
 		}
 		v.Resumable = resumable != 0

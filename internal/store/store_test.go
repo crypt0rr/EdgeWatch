@@ -928,8 +928,12 @@ func TestFinalizeManagedScanRetainsSupersededScan(t *testing.T) {
 	if !errors.Is(err, ErrJobRevisionChanged) {
 		t.Fatalf("expected superseded revision error, got %v", err)
 	}
-	if _, err := defaultTenant(s).GetScan(ctx, scan.ID); err != nil {
+	if stored, err := defaultTenant(s).GetScan(ctx, scan.ID); err != nil {
 		t.Fatalf("superseded scan was not retained: %v", err)
+	} else if stored.Comparison != model.ScanComparisonNotCompared {
+		// A legacy marker would let the console diff it against the new
+		// scope's baseline.
+		t.Fatalf("superseded scan comparison = %q, want %q", stored.Comparison, model.ScanComparisonNotCompared)
 	}
 	state, err := defaultTenant(s).RuntimeState(ctx, record.ID)
 	if err != nil {

@@ -484,7 +484,7 @@ export function JobDetail() {
           <div className="panel-heading">
             <div>
               <h3 id={selectedScanTitleID}>Scan diff</h3>
-              <p className="muted">{detail.data.comparison_state === 'not_compared' ? 'This scan was not compared because it did not complete successfully.' : `${detail.data.changes_pagination?.total ?? detail.data.changes?.length ?? 0} ${detail.data.comparison_source === 'scan_time' ? 'changes recorded at scan time.' : 'changes against the current baseline.'}`}</p>
+              <p className="muted">{scanComparisonSummary(detail.data)}</p>
             </div>
             <div className="heading-actions">
               {(detail.data.scan.status === 'success' || detail.data.scan.status === 'incomplete') && <button className="button ghost" onClick={() => { setShowResults((shown) => !shown); setResultsOffset(0) }}>{showResults ? 'Hide results' : 'View results'}</button>}
@@ -517,7 +517,7 @@ export function JobDetail() {
                 </div>
               ))}
             </div>
-          ) : <div className="inline-empty">{detail.data.comparison_state === 'not_compared' ? 'No comparison was performed for this scan.' : 'No changes detected.'}</div>}
+          ) : <div className="inline-empty">{scanWasCompared(detail.data.comparison_state) ? 'No changes detected.' : 'No comparison was performed for this scan.'}</div>}
           <Pagination page={detail.data?.changes_pagination} onChange={setChangeOffset} />
           {showResults && <div className="scan-results">
             <div className="panel-heading"><div><h3>Snapshot results</h3><p className="muted">Loaded on demand; open an effective host for technical evidence.</p></div></div>
@@ -799,6 +799,39 @@ function scanBudgetMessage(budget: ScanBudget) {
   return budget.approval_would_fit
     ? `About ${estimate} probes exceed this unit's probe budget of ${limit}. Scheduled scans are skipped until an administrator approves high-cost scans for this job.`
     : `About ${estimate} probes exceed the most this job may send (${limit}). Scheduled scans are skipped until its scope is reduced.`
+}
+
+type ScanComparisonDetail = {
+  scan: { status: string }
+  changes?: unknown[]
+  changes_pagination?: { total: number }
+  comparison_source?: string
+  comparison_state?: string
+}
+
+// A scan that finished while its job was learning the baseline was not
+// compared with anything, but it did not fail: describe it as a baseline
+// sample, and reserve the failure copy for scans that did not complete.
+function scanComparisonSummary(detail: ScanComparisonDetail) {
+  const completed = detail.scan.status === 'success' || detail.scan.status === 'incomplete'
+  switch (detail.comparison_state) {
+    case 'baseline_sample':
+      return detail.scan.status === 'incomplete'
+        ? 'This scan ran while the baseline was being learned; no comparison was performed. Incomplete scans do not count as baseline samples.'
+        : 'This scan was a baseline sample; no comparison was performed.'
+    case 'baseline_established':
+      return 'This scan established the baseline.'
+    case 'not_compared':
+      return completed ? 'This scan was not compared with the baseline.' : 'This scan was not compared because it did not complete successfully.'
+    default: {
+      const count = detail.changes_pagination?.total ?? detail.changes?.length ?? 0
+      return `${count} ${detail.comparison_source === 'scan_time' ? 'changes recorded at scan time.' : 'changes against the current baseline.'}`
+    }
+  }
+}
+
+function scanWasCompared(state?: string) {
+  return state !== 'not_compared' && state !== 'baseline_sample' && state !== 'baseline_established'
 }
 
 function scanSkippedMessage(reason?: string) {

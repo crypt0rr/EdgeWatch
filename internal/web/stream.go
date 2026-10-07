@@ -56,6 +56,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	// Ask buffering reverse proxies such as nginx to pass each event through
+	// as it is written instead of holding it in a response buffer.
+	w.Header().Set("X-Accel-Buffering", "no")
 	maxSubscribers := s.sseMaxSubscribers
 	if maxSubscribers <= 0 {
 		maxSubscribers = defaultMaxSSESubscribers

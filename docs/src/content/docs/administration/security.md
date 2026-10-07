@@ -40,7 +40,8 @@ administrators and platform administrators. See
 
 Notification URLs are write-only in the API and encrypted in the database with
 `notification.key`. TOTP seeds use the independent `auth.key`. Separate configured
-key files must have private ownership and mode `0600`. Back up the original
+key files must be regular files: the notification key with mode `0400` or
+`0600`, and the authentication key without group or other permissions. Back up the original
 keys with the corresponding database; the database alone cannot recover them.
 Never commit keys, passwords, setup tokens, notification URLs, or runtime data.
 

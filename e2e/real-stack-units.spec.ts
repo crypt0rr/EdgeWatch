@@ -235,7 +235,7 @@ test('two business units stay apart through the real console, TOTP enrolment, pu
     expect(await platform.locator('main').innerText()).not.toContain(jobName)
     expect((await callAPI(platform, '/jobs', 'GET')).status).toBe(403)
 
-    // As the README asks, the platform administrator enrols TOTP from
+    // As the business-units guide asks, the platform administrator enrols TOTP from
     // Security before creating the second unit.
     await navigateFromShell(platform, 'Security')
     const platformFactor = await enrolAuthenticator(platform, platformPassword, { forced: false })

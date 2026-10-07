@@ -4,20 +4,61 @@ description: Update images, enable SYN discovery, and plan rollback before datab
 ---
 
 The supplied `compose.yaml` pulls `ghcr.io/crypt0rr/edgewatch:latest`; it does not
-build locally. Pull explicitly whenever you choose to update:
+build locally, and EdgeWatch never upgrades itself. Update deliberately, and
+prepare the rollback before you pull.
+
+## Before every update
+
+1. Note the version that is running now, which is also shown in the console
+   sidebar, next to your account:
+
+   ```console
+   docker compose exec edgewatch edgewatch version
+   ```
+
+2. Take a backup as described in [Backup and recovery](/operations/backup-recovery/).
+   Keep it together with `notification.key`, `auth.key`, and `config.yaml`.
+3. Read the release notes, and check
+   [Database compatibility](/reference/database-compatibility/) for the schema
+   the new release introduces.
+
+Then pull and start the new image:
 
 ```console
 docker compose pull
 docker compose up -d
 ```
 
-Before upgrading from v0.19.0 to v0.20.0, back up `./data` as described in
-[Data, backup, and recovery](/operations/backup-recovery/). The first start of
-v0.20.0 runs the schema 51 to 54 migrations, which move all existing data
-into the default business unit. A v0.19.0 binary cannot open the upgraded
-database, so a rollback means restoring that backup. What a single-unit
-installation notices afterward is listed under
-[Business units](/administration/business-units/).
+## Rollback
+
+A release that raises the database schema version migrates the database on its
+first start, and an older binary refuses a database with a newer schema. Such
+an update is forward-only: a rollback means restoring the backup taken before
+the update **and** running the version you noted. Because `compose.yaml` follows
+`latest`, pin the noted version in a `compose.override.yaml` next to it:
+
+```yaml
+services:
+  edgewatch:
+    image: ghcr.io/crypt0rr/edgewatch:0.25.23
+```
+
+Replace `0.25.23` with the noted version, without the leading `v`. Compose
+reads `compose.override.yaml` automatically only when you pass no `-f` option;
+with the SYN override, add it explicitly:
+`docker compose -f compose.yaml -f compose.syn.yaml -f compose.override.yaml up -d`. Stop the
+service, restore the backup as described in
+[Backup and recovery](/operations/backup-recovery/), and start it again with
+`docker compose up -d`. Remove the override to follow `latest` again. A release
+that keeps the schema version can be rolled back by pinning the earlier image
+alone.
+
+The upgrade from v0.19.0 to v0.20.0 is an example of a forward-only update: it
+runs the schema 51 to 54 migrations, which move all existing data into the
+default business unit. What a single-unit installation notices afterward is
+listed under [Business units](/administration/business-units/).
+
+## Runtime privileges
 
 The image uses a read-only root filesystem, drops all capabilities, and adds
 `NET_RAW` for the default scanner modes. Host networking is intentional, and the

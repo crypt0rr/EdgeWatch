@@ -19,8 +19,8 @@ https://github.com/user-attachments/assets/ddff32e8-617a-477f-b9b7-8681dbc25b82
 
 ## Quick start
 
-Requirements: Docker Engine and Docker Compose v2 on a host supporting host
-networking and scanner capabilities. From a checkout of this repository:
+Requirements: Docker Engine 25 or later and Docker Compose v2 on a host
+supporting host networking and scanner capabilities. From a checkout of this repository:
 
 ```sh
 cp config.example.yaml config.yaml

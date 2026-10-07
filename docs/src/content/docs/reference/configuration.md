@@ -13,6 +13,9 @@ validated schema.
 | `database`, `retention` | YAML | SQLite location and history retention. |
 | `timezone` | YAML | Optional IANA timezone for log, CLI, notification, and console times, and the default for new jobs. |
 | `web.listen`, `web.allowed_hosts`, `web.trusted_proxies`, `web.forwarded_header` | YAML | Loopback listener, approved proxy hostnames, trusted proxy networks, and the single forwarding header used for client IPs. |
+| `web.auth_key_file` | YAML/secrets | Optional separate key for the encrypted TOTP seeds. |
+| `web.source_url` | YAML | Source of a modified or forked build, the target of the console's **Source code** link. |
+| `log.level` | YAML | Log verbosity: `debug`, `info`, `warn`, or `error`. |
 | `scheduler.*` | YAML | Concurrent scans and probe budgets. |
 | `scanner.target_exclusions` | YAML | Addresses that may never be scanned. |
 | `enrichment.rdap.enabled` | YAML | Enable or disable on-demand public network-registration lookups. |
@@ -24,6 +27,30 @@ validated schema.
 The YAML jobs section from older deployments is not imported into the scheduler.
 Such jobs remain inactive and EdgeWatch shows a startup warning so they can be
 recreated and reviewed explicitly in the console.
+
+## Defaults and limits
+
+| Setting | Default | Allowed values |
+| --- | --- | --- |
+| `database` | `/var/lib/edgewatch/edgewatch.db` | A file path. |
+| `retention` | `90d` | At least `24h`. Durations use Go syntax such as `36h`, plus a `d` suffix for days. |
+| `log.level` | `info` | `debug`, `info`, `warn`, or `error`. |
+| `scheduler.max_concurrent_scans` | `1` | 1 to 64. |
+| `scheduler.max_probe_count` | `5000000` | 1 to 100000000; `0` is rejected. |
+| `scheduler.max_naabu_probe_count` | `20000000` | 1 to 100000000; `0` is rejected. |
+| `web.auth_key_file` | `auth.key` next to the database | A regular file of 32 raw bytes or 64 hexadecimal characters, without group or other permissions. |
+| `notifications.encryption_key_file` | `notification.key` next to the database | A regular file of 32 raw bytes or 64 hexadecimal characters with mode `0400` or `0600`. |
+| `web.source_url` | The exact Git tag of an official build | An absolute HTTPS URL without credentials, a query, or a fragment, at most 2048 bytes. |
+
+Jobs are configured in the console, which enforces these limits:
+
+| Job setting | Default | Allowed values |
+| --- | --- | --- |
+| Timeout | `1h` | `1s` to `30d`. |
+| Resume window | `8d` | `1h` to `30d`. |
+| Timing profile | Balanced | Conservative, balanced, or fast. |
+| Maximum expanded hosts | 256 | 1 to 1000000. |
+| Baseline samples and change confirmations | 1 | 1 to 100. |
 
 ## Important defaults
 
@@ -110,12 +137,18 @@ recreated and reviewed explicitly in the console.
 
 ## Validate changes
 
+Validate the edited file in a fresh container before you restart the service.
+A running container can still see the previous file when an editor replaces
+the bind-mounted file instead of rewriting it, so `docker compose exec` could
+validate the old configuration:
+
 ```sh
-docker compose exec edgewatch edgewatch config validate \
+docker compose run --rm --no-deps edgewatch config validate \
   --config /etc/edgewatch/config.yaml
 ```
 
-After editing the bind-mounted configuration, recreate the container:
+When the result is `"valid": true`, recreate the container so the daemon reads
+the new file:
 
 ```sh
 docker compose up -d --force-recreate edgewatch

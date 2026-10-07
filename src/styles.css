@@ -1907,6 +1907,7 @@ button[aria-disabled="true"] {
   .activity-state-list a,
   .activity-event-link,
   .pending-detail-heading a,
+  .notification-warning a,
   .user-chip .app-version .version-link,
   .user-chip .app-version .version-update,
   .public-page footer a {

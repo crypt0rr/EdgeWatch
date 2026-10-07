@@ -16,6 +16,15 @@ describe('shared status presentation', () => {
     expect(scanOutcomeTone('incomplete')).toBe('neutral')
   })
 
+  it('treats timeouts as failures unless a resumable attempt saved its progress', () => {
+    expect(scanOutcomeTone('timed_out')).toBe('fail')
+    expect(scanOutcomeTone({ status: 'timed_out', resumable: true, cycle_status: 'failed' })).toBe('fail')
+    expect(scanOutcomeTone({ status: 'timed_out', resumable: true, cycle_status: 'paused' })).toBe('neutral')
+    expect(scanOutcomeTone({ status: 'failed', resumable: true, cycle_status: 'paused' })).toBe('neutral')
+    expect(scanOutcomeTone({ status: 'failed', resumable: false, cycle_status: 'paused' })).toBe('fail')
+    expect(scanOutcomeTone({ status: 'canceled', resumable: true, cycle_status: 'paused' })).toBe('neutral')
+  })
+
   it('turns change identifiers into readable labels', () => {
     expect(changeKindLabel('Port_closed')).toBe('Port closed')
     expect(changeKindLabel('dns')).toBe('DNS')

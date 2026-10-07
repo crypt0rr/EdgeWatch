@@ -63,6 +63,22 @@ describe('job editor workflow coverage', () => {
     expect(vi.mocked(createJob).mock.calls[0][0].notification_destinations).toBeUndefined()
   })
 
+  it('shows the server rejection of host discovery with Naabu connect discovery next to the toggle', async () => {
+    const message = 'job Public edge: Naabu connect discovery cannot use host discovery; keep assume_alive enabled, choose a Naabu SYN profile, or use Nmap only'
+    vi.mocked(createJob).mockRejectedValueOnce(new APIError(message, 'validation_failed', { assume_alive: message }, 400))
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('Job name'), { target: { value: 'Public edge' } })
+    fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: '198.51.100.10' } })
+    const toggle = screen.getByLabelText(/Assume targets are alive/)
+    fireEvent.click(toggle)
+    fireEvent.click(screen.getByRole('button', { name: 'Create job' }))
+    await waitFor(() => expect(createJob).toHaveBeenCalled())
+    expect(vi.mocked(createJob).mock.calls[0][0].assume_alive).toBe(false)
+    const label = toggle.closest('label') as HTMLElement
+    await waitFor(() => expect(within(label).getByText(message)).toHaveClass('field-error'))
+  })
+
   it('creates a Naabu job with startup disabled and explicit empty notification routing', async () => {
     renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())

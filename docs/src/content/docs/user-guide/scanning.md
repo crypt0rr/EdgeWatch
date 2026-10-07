@@ -16,9 +16,10 @@ Each TCP job chooses a scanner engine:
 | **Naabu discovery to Nmap** | Naabu discovers TCP ports 1-65535, then Nmap confirms discovered ports and can identify services. Only Nmap-confirmed positive states affect baselines and incidents. |
 | **Nmap only** | Nmap scans the configured TCP port expression directly. |
 
-Naabu connect discovery is the built-in default for new TCP jobs. SYN profiles
-are available only when the runtime has both `NET_RAW` and `NET_ADMIN`. UDP is
-always Nmap-only. Naabu evidence and disagreements are retained as diagnostic
+Naabu connect discovery is the built-in default for new TCP jobs. Naabu SYN
+discovery requires both `NET_RAW` and `NET_ADMIN`, which the `compose.syn.yaml`
+override adds. Nmap-only SYN scans need only `NET_RAW`, which the default
+Compose file grants. UDP is always Nmap-only. Naabu evidence and disagreements are retained as diagnostic
 data, but they do not independently create incidents.
 
 Naabu reports open ports only, so Nmap also confirms every TCP port the job
@@ -35,6 +36,11 @@ are tracked as host-state changes, not as sets of closed ports. During Naabu
 enrichment, each address has already been discovered, so Nmap uses `-Pn` to
 confirm discovered ports without a second host-discovery pass or a verbose
 down-host signal. Omitted Nmap hosts and timed-out probes remain incomplete.
+Naabu connect discovery cannot use host discovery: a job that uses it must
+keep `assume_alive` enabled, and EdgeWatch rejects the job when it is saved
+otherwise. For host-state tracking, use **Nmap only**, or a Naabu SYN profile
+when the runtime grants `NET_RAW` and `NET_ADMIN`.
+
 Repeated Naabu results are
 counted once. One Naabu invocation keeps at most 131,070 distinct open ports,
 the equivalent of two addresses with every port open. Beyond that, the

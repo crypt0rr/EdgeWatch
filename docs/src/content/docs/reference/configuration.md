@@ -50,7 +50,8 @@ Jobs are configured in the console, which enforces these limits:
 | Resume window | `8d` | `1h` to `30d`. |
 | Timing profile | Balanced | Conservative, balanced, or fast. |
 | Maximum expanded hosts | 256 | 1 to 1000000. |
-| Baseline samples and change confirmations | 1 | 1 to 100. |
+| Baseline samples | 2 in the console; 1 when omitted through the API | 1 to 100. |
+| Change confirmations | 1 | 1 to 100. |
 
 ## Important defaults
 

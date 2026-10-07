@@ -35,6 +35,39 @@ docker compose exec edgewatch edgewatch status \
   --config /etc/edgewatch/config.yaml --tenant UNIT_SLUG --output json
 ```
 
+## Commands and options
+
+Every command takes `--config` (default `/etc/edgewatch/config.yaml`), and
+every command except `daemon`, `version`, and `help` takes `--output text|json`
+(default `text`). A command refuses an option that does not apply to it.
+`edgewatch help` and `edgewatch --help` list the commands, and
+`edgewatch COMMAND --help` lists the options of one command with their
+defaults.
+
+| Command | Further options |
+| --- | --- |
+| `daemon` | `--nmap` (fixed runtime binary; override only for local tests) |
+| `config validate` | none |
+| `scan` | `--job NAME`, `--tenant`, `--nmap` |
+| `status` | `--job NAME`, `--tenant` |
+| `history` | `--job NAME`, `--limit N` (default 50, from 1 to 1000), `--tenant` |
+| `baseline approve` | `--job NAME`, `--scan-id ID` (required: a scan of the job's current configuration whose result becomes the baseline), `--tenant` |
+| `baseline reset` | `--job NAME`, `--tenant` |
+| `baseline export` | `--job NAME`, `--out FILE`, `--tenant` |
+| `backup` | `--out FILE` (must not exist yet) |
+| `restore` | `--from FILE`, `--dry-run`, `--pending-deliveries quarantine\|discard\|preserve` (default `quarantine`), and the [emergency overrides](/operations/backup-recovery/#emergency-restore-overrides) |
+| `verify` | none |
+| `health` | none |
+| `notify test` | `--tenant` |
+| `admin setup-token` | `--force` (required, because it replaces the current token); `admin reissue-setup-token` is the same command |
+| `admin platform-setup-token` | `--force`, required only while an unused platform setup token exists |
+| `admin reset-password` | `--username` (default `admin`), `--password-file FILE`, `--tenant` |
+| `admin disable-totp` | `--username` (default `admin`), `--tenant` |
+| `version` | none |
+
+See [Account recovery](/operations/backup-recovery/#account-recovery) for
+copyable `admin reset-password` and `admin disable-totp` commands.
+
 ## Configuration validation
 
 `config validate` runs every check of the daemon's startup that needs no
@@ -70,9 +103,14 @@ refuses `--tenant`.
 
 ## Health checks
 
-`health` exits non-zero when migrations or the daemon heartbeat are unhealthy.
-Its `warnings` list actions that do not stop EdgeWatch, such as removing
-imported notification URLs from `config.yaml`.
+`health` exits non-zero when migrations or the daemon heartbeat are unhealthy,
+and writes the reason to stderr. With `--output json` it then also prints a
+document with `"status": "unhealthy"` and the reason in `error`, so a monitoring
+script always receives JSON; the text output prints nothing on stdout in that
+case. A healthy or starting daemon prints its status, and `warnings` list
+actions that do not stop EdgeWatch, such as removing imported notification URLs
+from `config.yaml`. A database that cannot be opened at all, for example one
+with a newer schema, still fails before any document is printed.
 
 ## Notification tests
 

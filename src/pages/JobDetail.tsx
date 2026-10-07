@@ -45,6 +45,12 @@ import { formatDateTime } from '../format'
 import { changeKindLabel, jobStatePresentation, scanOutcomeTone, severityTone } from '../status'
 
 type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
+
+// A run that ends before this page sees it queued or running is reported by
+// the scan.skipped live update. When that update is missed, for example
+// because the live stream is unavailable, stop waiting once polling has shown
+// neither the run nor a new scan for this long.
+const pendingScanBackstopMs = 20_000
 type PendingScanRequest = { requestedAt: number; previousScanIDs: string[] | null; observedActive: boolean; observedQueued: boolean }
 
 export function JobDetail() {
@@ -65,6 +71,9 @@ export function JobDetail() {
   const [pendingScanRequest, setPendingScanRequest] = useState<PendingScanRequest | null>(null)
   const pendingScanRequestRef = useRef<PendingScanRequest | null>(null)
   pendingScanRequestRef.current = pendingScanRequest
+  // A skip can be reported before the run request itself returns. Remember
+  // it, so the accepted request does not then wait for a run that ended.
+  const runRequest = useRef({ inFlight: false, skipped: false })
   const [dialog, setDialog] = useState<JobDialog | null>(null)
   const job = useQuery({ queryKey: ['job', id], queryFn: () => getJob(id) })
   const session = useQuery({ queryKey: ['session'], queryFn: getSession })
@@ -199,9 +208,32 @@ export function JobDetail() {
   }, [activeJobQueuedRun?.queued_at, activeJobScan?.id, client, id, pendingScanRequest?.observedQueued, pendingScanRequest?.requestedAt, scanOffset])
 
   useEffect(() => {
+    if (!pendingScanRequest || pendingScanRequest.observedQueued || pendingScanRequest.observedActive) return
+    const request = pendingScanRequest
+    const timer = window.setInterval(() => {
+      const current = pendingScanRequestRef.current
+      if (current?.requestedAt !== request.requestedAt || current.observedQueued || current.observedActive) return
+      if (Date.now() - current.requestedAt < pendingScanBackstopMs) return
+      // Decide only on answers read after the request, so a failing poll
+      // never ends the wait.
+      const activeState = client.getQueryState<{ scans: ActiveScan[]; queued_runs?: QueuedRun[] }>(['active-scans'])
+      const scanState = client.getQueryState<{ scans: { id: string; started_at: string }[] }>(['job-scans', id, scanOffset])
+      if (!activeState?.data || !scanState?.data || activeState.dataUpdatedAt < current.requestedAt || scanState.dataUpdatedAt < current.requestedAt) return
+      if (activeState.data.scans.some((scan) => scan.job_id === id) || activeState.data.queued_runs?.some((run) => run.job_id === id)) return
+      const started = scanState.data.scans.some((scan) => current.previousScanIDs
+        ? !current.previousScanIDs.includes(scan.id)
+        : Date.parse(scan.started_at) >= current.requestedAt)
+      setPendingScanRequest(null)
+      if (!started) setActionError('The scan request was accepted but did not start. Check the job and try again.')
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [client, id, pendingScanRequest?.requestedAt, pendingScanRequest?.observedQueued, pendingScanRequest?.observedActive, scanOffset])
+
+  useEffect(() => {
     const onSkipped = (event: Event) => {
       const detail = (event as CustomEvent<{ job_id?: string; reason?: string }>).detail
       if (!detail || detail.job_id !== id) return
+      if (runRequest.current.inFlight) runRequest.current.skipped = true
       setPendingScanRequest(null)
       setActionError(scanSkippedMessage(detail.reason))
     }
@@ -255,9 +287,10 @@ export function JobDetail() {
     setActionBusy('run')
     const requestedAt = Date.now()
     const previousScanIDs = scans.data?.scans.map((scan) => scan.id) ?? null
+    runRequest.current = { inFlight: true, skipped: false }
     try {
       await runJob(id)
-      setPendingScanRequest({ requestedAt, previousScanIDs, observedActive: false, observedQueued: false })
+      if (!runRequest.current.skipped) setPendingScanRequest({ requestedAt, previousScanIDs, observedActive: false, observedQueued: false })
       await Promise.all([
         client.invalidateQueries({ queryKey: ['active-scans'] }),
         client.invalidateQueries({ queryKey: ['job-scans', id] }),
@@ -268,6 +301,7 @@ export function JobDetail() {
     } catch (err) {
       reportActionError(err, 'Could not start the scan.')
     } finally {
+      runRequest.current.inFlight = false
       setActionBusy('')
     }
   }

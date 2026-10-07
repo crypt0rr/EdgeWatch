@@ -19,14 +19,14 @@ administrator notices only this:
 
 - administrators get a read-only **Audit** page with the unit's security
   audit;
-- the public status page is also served at /public/default;
+- the public status page is also served at `/public/default`;
 - host commands accept `--tenant`, and `admin reset-password` and
   `admin disable-totp` print the account's unit and role before they act
   (see [Useful commands](/reference/cli/));
 - the host can create a platform administrator, who creates further units
   (see [The platform administrator](/administration/business-units/#the-platform-administrator)).
 
-A config.yaml written for the preview of business units may still contain
+A `config.yaml` written for the preview of business units may still contain
 `experimental.business_units`. EdgeWatch ignores that setting and logs a
 warning at startup; remove the `experimental` section.
 
@@ -40,10 +40,10 @@ destinations, and reads the platform audit and status. It never sees a
 unit's jobs, scans, hosts, baselines, incidents, destinations, or public
 status settings: the platform console shows each unit with its name, slug,
 state, and counts of accounts, administrators, jobs, stored scans, and scan
-slots in use, and lists the unit's accounts without credentials. Stored
-scans counts every scan the unit's history holds, those of archived jobs
-included; retention lowers it, and while a unit is being deleted it shows
-the scans that are left to erase.
+slots in use, and lists the unit's accounts without credentials. The
+**Stored scans** count includes every scan in the unit's history, including scans for archived
+jobs. Retention reduces this count. While a unit is being deleted, the count
+shows the scans that remain to be erased.
 
 The host creates the first platform administrator, after the first
 administrator exists. Print a one-time platform setup token:
@@ -89,22 +89,22 @@ administrator. Usernames are unique across every unit and the platform.
 Once more than one unit exists, counting disabled units and units being
 deleted, every unit administrator and platform administrator must use TOTP.
 Operators and viewers are not affected. An administrator without TOTP gets a
-forced enrolment screen after signing in, which offers only the authenticator
+forced enrollment screen after signing in, which offers only the authenticator
 setup, a password change, and sign-out; until TOTP is on, the session can
 manage only its own account. A console that is already open switches to that
 screen as soon as the server refuses one of its requests, and the platform
 administrator's console does so right after it creates the second unit.
 After enabling TOTP and saving the recovery codes, sign out and sign in
 again with the authenticator's next code; the code that enabled TOTP counts
-as used. Enrol the existing administrators before you create the second unit.
+as used. Enroll the existing administrators before you create the second unit.
 The host command `admin disable-totp` stays the recovery path, and the
-account then enrols again.
+account then enrolls again.
 
 ## What belongs to each unit
 
 - **Notifications:** each unit adds and routes its own destinations; jobs can
   select only their unit's destinations. URLs from `notifications.urls` and
-  `urls_file` in config.yaml are imported into the default unit only. The
+  `urls_file` in `config.yaml` are imported into the default unit only. The
   platform has its own destinations on the platform console's
   **Notifications** page.
 - **Update alerts:** each active unit gets its own copy of an update alert,
@@ -119,16 +119,16 @@ account then enrols again.
   list of units, it records no copy, and a later check records every copy.
 - **Scanner profiles:** the built-in profiles are shared and read-only. Custom
   profiles belong to the unit that created them.
-- **YAML jobs:** the inactive jobs in config.yaml belong to the default unit.
+- **YAML jobs:** the inactive jobs in `config.yaml` belong to the default unit.
   Only its administrators and operators see them listed on **Overview**, and
   `edgewatch status` lists them for the default unit only.
 - **Public status:** each unit's administrators publish its page at
-  /public/<slug>; /public keeps serving the default unit's page. An unknown
+  `/public/<slug>`; `/public` keeps serving the default unit's page. An unknown
   slug, a page that is not enabled, and a unit that is disabled or being
   deleted get the same answer as a page that is not enabled. Each page has
   its own anonymous rate limit and cache. Changing a unit's slug changes its
   public address.
-- **Capacity:** the `scheduler` settings in config.yaml stay the deployment's
+- **Capacity:** the `scheduler` settings in `config.yaml` stay the deployment's
   limits. On a unit's **Capacity** tab, a platform administrator can cap the
   unit's scan slots and its Nmap and Naabu probe budgets below those limits,
   or keep the deployment's setting. A save changes only the settings that
@@ -144,9 +144,9 @@ account then enrols again.
   way. The high-cost ceiling is the most probes that a job approved
   for high-cost work may send. A new unit has none: its **Capacity** tab
   shows the ceiling as **Not granted**, and such an approval raises neither
-  probe budget, whatever config.yaml sets now or later, until a platform
+  probe budget, whatever `config.yaml` sets now or later, until a platform
   administrator chooses **Grant a ceiling** and enters one. A granted
-  ceiling stays in force when config.yaml later lowers the deployment's
+  ceiling stays in force when `config.yaml` later lowers the deployment's
   budgets below it; choose **Not granted** to take it away. Saving the tab
   keeps a ceiling that was not granted as it is. The default unit keeps the
   high-cost behavior from before business units.
@@ -161,7 +161,7 @@ account then enrols again.
   administrator's invitation; a token that matches no link is recorded in
   the default unit's audit. Both views are read-only. The
   platform audit filters by unit, by the start of the action, which is
-  lower-case, and by day; a day is a calendar day in the configured
+  lowercase, and by day; a day is a calendar day in the configured
   `timezone`, in which the entries are shown, or in the browser's timezone
   when it is omitted.
 
@@ -173,7 +173,7 @@ administrator's password, pauses it and keeps its data:
 - its sessions end, its open invitations are revoked, and sign-in fails as it
   does with a wrong password, without using up the one-time or recovery code
   it presents;
-- its running scans are cancelled without changing baselines, its queued runs
+- its running scans are canceled without changing baselines, its queued runs
   fail, and its jobs leave the schedule;
 - a scan that finishes after the disable, including a host `edgewatch scan`
   that the daemon cannot cancel, is recorded as canceled and changes no

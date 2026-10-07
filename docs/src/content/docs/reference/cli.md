@@ -5,7 +5,7 @@ description: Validate configuration, check health, inspect scans, and recover ac
 
 ## Command examples
 
-Run these from the host with docker compose exec:
+Run these commands from the host with `docker compose exec`:
 
 ```console
 # Validate deployment configuration
@@ -72,7 +72,7 @@ refuses `--tenant`.
 
 `health` exits non-zero when migrations or the daemon heartbeat are unhealthy.
 Its `warnings` list actions that do not stop EdgeWatch, such as removing
-imported notification URLs from config.yaml.
+imported notification URLs from `config.yaml`.
 
 ## Notification tests
 
@@ -113,6 +113,6 @@ resumable work. If a cycle has timed out, it will resume on the next scheduled
 or manual run until its resume window expires. A stalled cycle holds scheduled
 runs until an operator retries or discards it, or until its resume window
 ends; the first scheduled run after that records the expiry, and the next one
-starts a fresh cycle. Check docker compose logs
-edgewatch for a bounded error summary; do not assume a zero-progress display
-means the process is idle.
+starts a fresh cycle. Check `docker compose logs --tail 100 edgewatch` for a
+bounded error summary; do not assume a zero-progress display means the process
+is idle.

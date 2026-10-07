@@ -7,7 +7,6 @@ EdgeWatch observes authorized targets using fixed scanner executables and
 validated argument arrays. Choose the engine and profile that match your
 network and runtime capabilities.
 
-
 ## Nmap or Naabu to Nmap
 
 Each TCP job chooses a scanner engine:
@@ -18,7 +17,7 @@ Each TCP job chooses a scanner engine:
 | **Nmap only** | Nmap scans the configured TCP port expression directly. |
 
 Naabu connect discovery is the built-in default for new TCP jobs. SYN profiles
-are available only when the runtime has both NET_RAW and NET_ADMIN. UDP is
+are available only when the runtime has both `NET_RAW` and `NET_ADMIN`. UDP is
 always Nmap-only. Naabu evidence and disagreements are retained as diagnostic
 data, but they do not independently create incidents.
 
@@ -50,7 +49,7 @@ incomplete (`open-filtered-ports-unlisted`) rather than treating the ports as
 closed.
 
 Jobs can configure TCP and UDP independently, service detection, timing,
-timeouts, host discovery (assume_alive), and approved scanner-profile
+timeouts, host discovery (`assume_alive`), and approved scanner-profile
 overrides. EdgeWatch executes fixed Nmap and Naabu binaries with validated
 argument arrays; it never runs browser-supplied shell commands or arbitrary
 executables.

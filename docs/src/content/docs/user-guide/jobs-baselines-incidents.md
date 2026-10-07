@@ -21,7 +21,7 @@ backend reachability; IP and CIDR targets remain address-sensitive. Per-IP scan
 evidence is retained for investigation. This is a security-relevant change and
 requires an explicit new baseline.
 Schedules use five-field cron syntax in the selected IANA timezone. New jobs
-default to the deployment `timezone` from config.yaml, or to the browser's
+default to the deployment `timezone` from `config.yaml`, or to the browser's
 timezone when it is omitted. New jobs receive an optional 30-minute
 schedule-offset suggestion when another active job is nearby; the administrator
 can keep concurrent times.

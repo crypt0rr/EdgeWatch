@@ -14,12 +14,12 @@ on or after that release remain eligible, so upgrading does not replay
 deliveries that were still retrying. Schema 64 adds an index for pruning old
 restore-quarantine records; it does not rewrite delivery history. Database
 migrations are forward-only. An older image must not be pointed at a database
-already upgraded by a newer image; restore the matching pre-upgrade ./data
+already upgraded by a newer image; restore the matching pre-upgrade `./data`
 backup if a rollback is required. The daemon and the commands that write to the
 database (admin, scan, notify test, baseline approve and reset, and backup)
 refuse versions above their supported schema version with the error
 `database schema version N is newer than supported version M`. Back up such a
-database with the release that upgraded it, or copy ./data while
+database with the release that upgraded it, or copy `./data` while
 EdgeWatch is stopped. A daemon that finds another daemon's live lease exits
 before it migrates the database, and so does a daemon whose configured key
 file or notification URL is unusable (see `config validate` under
@@ -62,7 +62,7 @@ quick in-place change with no background phase.
 
 ## Schema 50
 
-Schema 50 records which notification URLs from config.yaml were imported as
+Schema 50 records which notification URLs from `config.yaml` were imported as
 web-managed destinations, and the outcome of the import at each daemon start.
 It is a quick in-place change; the import itself runs once after the
 migration, as described in [Notifications](/user-guide/notifications/#notification-urls-in-configyaml-deprecated).
@@ -82,7 +82,7 @@ destinations tables so that each row records the tenant that owns it; every
 existing row moves to the default tenant. It also removes the legacy
 administrator row, which the original administrator's user account already
 replaces. The rebuild runs once at startup in one transaction, and on a large
-database its foreign key check can take a while. Back up ./data before
+database its foreign key check can take a while. Back up `./data` before
 upgrading. Sign-in, setup, and the host recovery commands behave as before.
 
 ## Schema 53
@@ -131,7 +131,7 @@ is pending, `edgewatch health` reports it under `maintenance` with its
 finished; the daemon logs its start and its end. It never runs again.
 Backups taken before it has finished may still hold the erased rows of
 those units. An older release refuses the upgraded database, so a rollback
-means restoring the pre-upgrade ./data backup.
+means restoring the pre-upgrade `./data` backup.
 
 ## Schema 56
 
@@ -148,15 +148,15 @@ again. While it is pending, `edgewatch health` reports the
 `legacy_tenant_purge_maintenance` checkpoint as not complete. A deletion that
 was in progress at the upgrade and had reached its log truncation goes back
 to the overwrite. A database with `auto_vacuum` mode `incremental` is not
-changed. Raw copies of ./data made before the cleanup has finished may still
+changed. Raw copies of `./data` made before the cleanup has finished may still
 hold those rows. An older release refuses the upgraded database, so a
-rollback means restoring the pre-upgrade ./data backup.
+rollback means restoring the pre-upgrade `./data` backup.
 
 ## Schema 57
 
 Schema 57 records whether a business unit has a high-cost grant. Earlier
 releases gave each new unit a high-cost ceiling equal to the lower of the
-deployment's two probe budgets when it was created. Once config.yaml lowered
+deployment's two probe budgets when it was created. Once `config.yaml` lowered
 those budgets, that ceiling let an approval of high-cost work raise the
 unit's budgets up to it, although no platform administrator had granted it.
 The upgrade marks the ceiling of every unit other than the default one as
@@ -168,5 +168,5 @@ that was typed. After the upgrade, review the high-cost ceiling on the
 **Capacity** tab of each such unit and choose **Not granted** where no
 grant was intended. The default unit keeps its ceiling. It is a quick
 in-place change with no background phase. An older release refuses the
-upgraded database, so a rollback means restoring the pre-upgrade ./data
+upgraded database, so a rollback means restoring the pre-upgrade `./data`
 backup.

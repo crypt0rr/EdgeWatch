@@ -3,19 +3,19 @@ title: Backup and recovery
 description: Back up data and keys together, validate restores, and recover sessions safely.
 ---
 
-All runtime state lives in ./data, including:
+All runtime state lives in `./data`, including:
 
-- edgewatch.db and SQLite sidecars;
-- notification.key, which encrypts the notification destination URLs stored
-  in the database, including URLs imported from config.yaml;
-- auth.key for TOTP encryption when the default key location is used;
+- `edgewatch.db` and SQLite sidecars;
+- `notification.key`, which encrypts the notification destination URLs stored
+  in the database, including URLs imported from `config.yaml`;
+- `auth.key` for TOTP encryption when the default key location is used;
 - optional backups and exported baselines.
 
-Back up the complete ./data directory together with config.yaml and any
+Back up the complete `./data` directory together with `config.yaml` and any
 separately mounted secret files. Notification credentials live encrypted in
 the database, so a database backup is only usable with its
 `notification.key`. The backup command does not create missing directories,
-so create the backup directory first with the same owner as ./data. For
+so create the backup directory first with the same owner as `./data`. For
 standard rootful Docker:
 
 ```console
@@ -41,10 +41,10 @@ docker compose exec edgewatch edgewatch verify \
 
 `edgewatch verify` also reports the database's `auto_vacuum` mode. A
 database created by v0.18.31 or later has `incremental` and returns the pages
-it frees to the file system; an older one has `none` and keeps them in the
+it frees to the filesystem; an older one has `none` and keeps them in the
 file, with the rows they held, until SQLite reuses them. A backup made with
-the backup command holds no free pages, but a raw copy of ./data holds the
-database file whole. Deleting a business unit leaves no free page with the
+the backup command holds no free pages, but a raw copy of `./data` holds the
+entire database file. Deleting a business unit leaves no free page with the
 unit's rows in either mode.
 
 The backup command uses SQLite's online snapshot support. A raw directory copy
@@ -102,8 +102,6 @@ link from **Users**, or the platform console, for each account that still
 needs one. Print a new platform setup token with `edgewatch admin
 platform-setup-token`; while no administrator exists, the daemon prints a new
 setup token when it starts.
-
-
 
 ## Database compatibility
 

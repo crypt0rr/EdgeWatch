@@ -19,6 +19,7 @@ import {
   activeScans,
   approveBaseline,
   archiveJob,
+  cancelQueuedRun,
   cancelScan,
   deleteJob,
   getJob,
@@ -249,7 +250,9 @@ export function JobDetail() {
       if (!detail || detail.job_id !== id) return
       if (runRequest.current.inFlight) runRequest.current.skipped = true
       setPendingScanRequest(null)
-      setActionError(scanSkippedMessage(detail.reason))
+      // A canceled queued run was withdrawn on purpose; the panel closing is
+      // the feedback.
+      if (detail.reason !== 'canceled') setActionError(scanSkippedMessage(detail.reason))
     }
     window.addEventListener('edgewatch:scan-skipped', onSkipped)
     return () => window.removeEventListener('edgewatch:scan-skipped', onSkipped)
@@ -317,6 +320,20 @@ export function JobDetail() {
     } finally {
       runRequest.current.inFlight = false
       setActionBusy('')
+    }
+  }
+  async function cancelQueued() {
+    setActionError('')
+    setCancelBusyScan('queued')
+    try {
+      await cancelQueuedRun(id)
+      setPendingScanRequest(null)
+      await active.refetch()
+    } catch (err) {
+      reportActionError(err, 'Could not cancel the queued scan.')
+      await active.refetch()
+    } finally {
+      setCancelBusyScan('')
     }
   }
   async function cancelActiveScan(scanID: string) {
@@ -548,6 +565,7 @@ export function JobDetail() {
         queuedRun={activeJobQueuedRun}
         cancelBusy={cancelBusyScan}
         onCancel={cancelActiveScan}
+        onCancelQueued={cancelQueued}
       />}
 
       <div className="detail-summary">
@@ -724,11 +742,12 @@ export function JobDetail() {
   )
 }
 
-function JobScanStatus({ scan, queuedRun, cancelBusy, onCancel }: {
+function JobScanStatus({ scan, queuedRun, cancelBusy, onCancel, onCancelQueued }: {
   scan?: ActiveScan
   queuedRun?: QueuedRun
   cancelBusy: string
   onCancel: (scanID: string) => void
+  onCancelQueued: () => void
 }) {
   if (!scan) return <section className="panel job-scan-status" aria-labelledby="job-scan-status-title">
     <div>
@@ -737,7 +756,9 @@ function JobScanStatus({ scan, queuedRun, cancelBusy, onCancel }: {
         ? `${queuedRun.trigger === 'scheduled' ? 'Scheduled scan' : 'Scan request'} accepted ${queuedRun.queued_at ? `at ${formatDateTime(queuedRun.queued_at)}` : ''} and waiting for an available scan slot.`
         : 'Your scan request was accepted and is waiting for an available scan slot.'}</p>
     </div>
-    <span className="pill amber">Queued</span>
+    {queuedRun
+      ? <button type="button" className="button secondary" onClick={onCancelQueued} disabled={cancelBusy === 'queued'}>{cancelBusy === 'queued' ? 'Cancelling…' : 'Cancel queued scan'}</button>
+      : <span className="pill amber">Queued</span>}
   </section>
 
   const phase = scan.phase || 'Working'
@@ -782,6 +803,7 @@ function scanSkippedMessage(reason?: string) {
     case 'shutting_down': return 'EdgeWatch stopped before the queued scan could start.'
     case 'cycle_stalled': return 'The scan could not start because its saved cycle is stalled; retry it manually.'
     case 'job_unavailable': return 'The job was removed before the queued scan could start.'
+    case 'canceled': return 'The queued scan was canceled before it started.'
     default: return 'The queued scan did not start. Try running it again.'
   }
 }

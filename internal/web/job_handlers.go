@@ -596,6 +596,12 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 		}
 		return
 	}
+	if len(parts) == 2 && parts[1] == "run" && r.Method == http.MethodDelete {
+		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
+			s.cancelQueuedRun(w, r, session, ts, job)
+		}
+		return
+	}
 	if len(parts) == 2 && parts[1] == "scan-cycle" && r.Method == http.MethodGet {
 		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
 			s.scanCycle(w, r, ts, job)

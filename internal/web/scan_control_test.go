@@ -3,10 +3,12 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -298,5 +300,78 @@ func TestActiveScanEndpointIncludesTenantScopedQueuedRuns(t *testing.T) {
 	}
 	if err := <-secondDone; err == nil {
 		t.Fatal("queued scan unexpectedly succeeded after cancellation")
+	}
+}
+
+func TestCancelQueuedRunRouteWithdrawsTheWaitingRun(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := app.New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner := &blockingWebScanner{started: make(chan struct{})}
+	a.Scanner = scanner
+	job := config.NormalizeJob(config.Job{Name: "slot-holder", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Hour), Timing: "balanced"})
+	first, err := defaultTenant(db).CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.Name = "queued-job"
+	second, err := defaultTenant(db).CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.BeginRun(ctx)
+	defer a.StopRun()
+	if err := a.StartManagedRun(defaultTenant(db), first.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-scanner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slot-holding scan did not start")
+	}
+	secondDone := make(chan error, 1)
+	if err := a.StartManagedRun(defaultTenant(db), second.ID, func(_ model.Scan, _ []model.Event, err error) { secondDone <- err }); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(a.QueuedRuns(store.DefaultTenantScope())) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	session := store.Session{UserID: "admin", Username: "admin", Role: store.RoleAdministrator}
+	cancelRun := func(id string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		server.jobRoute(recorder, httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+id+"/run", nil), session, defaultTenantStore(server), id+"/run")
+		return recorder
+	}
+	if response := cancelRun(second.ID); response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"status":"canceled"`) {
+		t.Fatalf("cancel queued run = %d %s", response.Code, response.Body.String())
+	}
+	select {
+	case err := <-secondDone:
+		if !errors.Is(err, app.ErrQueuedRunCanceled) {
+			t.Fatalf("queued run result = %v, want ErrQueuedRunCanceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled queued run did not return")
+	}
+	// Nothing is queued now, and the running scan is not a queued run.
+	for _, id := range []string{second.ID, first.ID} {
+		want := wantErrorBody(t, "run_not_queued", "The job has no scan waiting for a slot.", nil)
+		if response := cancelRun(id); response.Code != http.StatusConflict || response.Body.String() != want {
+			t.Fatalf("cancel %s without a queued run = %d %q, want 409 %q", id, response.Code, response.Body.String(), want)
+		}
+	}
+	if active := a.ActiveScans(store.DefaultTenantScope()); len(active) != 1 || active[0].JobID != first.ID {
+		t.Fatalf("active scans after the queued cancel = %+v", active)
 	}
 }

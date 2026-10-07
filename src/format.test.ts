@@ -1,5 +1,26 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { formatDate, formatDateTime, formatRetention, formatTime, getDisplayTimeZone, setDisplayTimeZone } from './format'
+import { editableDuration, formatDate, formatDateTime, formatRetention, formatTime, getDisplayTimeZone, setDisplayTimeZone } from './format'
+
+describe('editableDuration', () => {
+  it('turns Go durations into the units the job editor accepts', () => {
+    expect(editableDuration('192h0m0s')).toBe('8d')
+    expect(editableDuration('24h0m0s')).toBe('1d')
+    expect(editableDuration('1h0m0s')).toBe('1h')
+    expect(editableDuration('36h0m0s')).toBe('36h')
+    expect(editableDuration('1h30m0s')).toBe('1h30m')
+    expect(editableDuration('1h0m30s')).toBe('1h30s')
+    expect(editableDuration('30m0s')).toBe('30m')
+    expect(editableDuration('1m30s')).toBe('1m30s')
+    expect(editableDuration('45s')).toBe('45s')
+  })
+
+  it('leaves values it cannot read unchanged', () => {
+    expect(editableDuration('8d')).toBe('8d')
+    expect(editableDuration('1.5s')).toBe('1.5s')
+    expect(editableDuration('0s')).toBe('0s')
+    expect(editableDuration('')).toBe('')
+  })
+})
 
 describe('formatRetention', () => {
   it('formats whole days without unnecessary zero units', () => {

@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Archive,
   CheckCircle2,
@@ -53,8 +53,18 @@ type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
 const pendingScanBackstopMs = 20_000
 type PendingScanRequest = { requestedAt: number; previousScanIDs: string[] | null; observedActive: boolean; observedQueued: boolean }
 
+// A scan route with ?results=N opens that scan's results at offset N. A host
+// page uses it to return to the result list the host was opened from.
+function routeResultsOffset(value: string | null): number | null {
+  if (value === null) return null
+  const offset = Number(value)
+  return Number.isSafeInteger(offset) && offset >= 0 ? offset : 0
+}
+
 export function JobDetail() {
   const { id = '', scanId: routeScanID } = useParams()
+  const [searchParams] = useSearchParams()
+  const routeResults = routeScanID ? routeResultsOffset(searchParams.get('results')) : null
   const navigate = useNavigate()
   const client = useQueryClient()
   const [selectedScan, setSelectedScan] = useState(routeScanID ?? '')
@@ -63,8 +73,8 @@ export function JobDetail() {
   const [latestResultsOffset, setLatestResultsOffset] = useState(0)
   const [pendingChangesOffset, setPendingChangesOffset] = useState(0)
   const [changeOffset, setChangeOffset] = useState(0)
-  const [resultsOffset, setResultsOffset] = useState(0)
-  const [showResults, setShowResults] = useState(false)
+  const [resultsOffset, setResultsOffset] = useState(routeResults ?? 0)
+  const [showResults, setShowResults] = useState(routeResults !== null)
   const [actionError, setActionError] = useState('')
   const [actionBusy, setActionBusy] = useState('')
   const [cancelBusyScan, setCancelBusyScan] = useState('')
@@ -139,10 +149,10 @@ export function JobDetail() {
 
   useEffect(() => {
     setSelectedScan(routeScanID ?? '')
-    setShowResults(false)
+    setShowResults(routeResults !== null)
     setChangeOffset(0)
-    setResultsOffset(0)
-  }, [routeScanID])
+    setResultsOffset(routeResults ?? 0)
+  }, [routeScanID, routeResults])
 
   useEffect(() => {
     setLatestResultsOffset(0)
@@ -477,7 +487,7 @@ export function JobDetail() {
           <Pagination page={detail.data?.changes_pagination} onChange={setChangeOffset} />
           {showResults && <div className="scan-results">
             <div className="panel-heading"><div><h3>Snapshot results</h3><p className="muted">Loaded on demand; open an effective host for technical evidence.</p></div></div>
-            {results.isLoading ? <div className="skeleton-list" /> : results.error ? <ErrorNotice message="Could not load scan results." onRetry={() => results.refetch()} /> : results.data?.hosts.length ? <div className="result-list">{results.data.hosts.map(host => <Link className="result-row" to={`/jobs/${id}/scans/${selectedScan}/hosts/${encodeURIComponent(host.address)}`} key={host.address}><strong title={host.address}>{host.address}</strong><span className="pill blue">{host.protocols?.map(protocol => protocol.protocol.toUpperCase()).join(' + ') || 'HOST'}</span><span className="muted">{host.open_ports + host.open_filtered_ports} positive ports · View host details</span></Link>)}</div> : <div className="inline-empty">No effective hosts in this scan.</div>}
+            {results.isLoading ? <div className="skeleton-list" /> : results.error ? <ErrorNotice message="Could not load scan results." onRetry={() => results.refetch()} /> : results.data?.hosts.length ? <div className="result-list">{results.data.hosts.map(host => <Link className="result-row" to={`/jobs/${id}/scans/${selectedScan}/hosts/${encodeURIComponent(host.address)}?results=${resultsOffset}`} key={host.address}><strong title={host.address}>{host.address}</strong><span className="pill blue">{host.protocols?.map(protocol => protocol.protocol.toUpperCase()).join(' + ') || 'HOST'}</span><span className="muted">{host.open_ports + host.open_filtered_ports} positive ports · View host details</span></Link>)}</div> : <div className="inline-empty">No effective hosts in this scan.</div>}
             <Pagination page={results.data?.pagination} onChange={setResultsOffset} />
           </div>}
         </>
@@ -662,7 +672,7 @@ export function JobDetail() {
                     aria-expanded={selectedScan === scan.id}
                     aria-controls={selectedScan === scan.id ? selectedScanDetailID : undefined}
                   >
-                    <span className={`activity-dot${scanOutcomeTone(scan.status) === 'neutral' ? '' : ` ${scanOutcomeTone(scan.status)}`}`} />
+                    <span className={`activity-dot${scanOutcomeTone(scan) === 'neutral' ? '' : ` ${scanOutcomeTone(scan)}`}`} />
                     <div className="scan-row-copy">
                       <strong>{formatDateTime(scan.finished_at)}</strong>
                       <span className={scan.error ? 'scan-row-error' : undefined} title={scan.status === 'success' ? 'Completed successfully · Open results to inspect the snapshot' : scan.error ?? undefined}>

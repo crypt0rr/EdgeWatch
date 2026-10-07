@@ -83,28 +83,31 @@ describe('business units in the console', () => {
     await waitFor(() => expect(unitAudit).toHaveBeenCalledWith({ before: null }))
     view.unmount()
 
-    const highlights = renderApp('/highlights')
-    expect(await screen.findByRole('heading', { name: 'Retail status' })).toBeInTheDocument()
-    expect(getPublicDashboard).toHaveBeenCalledWith('retail')
-    highlights.unmount()
-
-    renderApp('/public-dashboard')
+    // The console does not render the public page itself; the old in-console
+    // highlights route leads to the page that manages and previews it.
+    renderApp('/highlights')
+    await waitFor(() => expect(screen.getByTestId('current-path')).toHaveTextContent('/public-dashboard'))
     const preview = await screen.findByRole('link', { name: /Preview public page/ })
     expect(preview).toHaveAttribute('href', '/public/retail')
+    expect(getPublicDashboard).not.toHaveBeenCalled()
+    expect(screen.queryByRole('link', { name: /sign in/i })).not.toBeInTheDocument()
   })
 
   it('keeps the single-unit console as before apart from the audit', async () => {
     vi.mocked(getSession).mockResolvedValue(unitAdministrator({ multi_unit: false, unit: { id: 'default', name: 'Default', slug: 'default' } }))
-    const view = renderApp('/highlights')
-    expect(await screen.findByRole('heading', { name: 'Retail status' })).toBeInTheDocument()
-    expect(getPublicDashboard).toHaveBeenCalledWith(undefined)
+    const view = renderApp('/public-dashboard')
+    expect(await screen.findByRole('link', { name: /Preview public page/ })).toHaveAttribute('href', '/public')
     expect(screen.queryByText('Business unit')).not.toBeInTheDocument()
     const navigation = screen.getByRole('complementary', { name: 'Primary navigation', hidden: true })
     expect(within(navigation).getByRole('link', { name: 'Audit' })).toBeInTheDocument()
     view.unmount()
-    const admin = renderApp('/public-dashboard')
-    expect(await screen.findByRole('link', { name: /Preview public page/ })).toHaveAttribute('href', '/public')
-    admin.unmount()
+  })
+
+  it('sends a unit user without public status access from the old highlights route to the overview', async () => {
+    vi.mocked(getSession).mockResolvedValue(unitAdministrator({ role: 'operator', permissions: ['account.self', 'overview.read', 'jobs.read', 'jobs.write'] }))
+    renderApp('/highlights')
+    await waitFor(() => expect(screen.getByTestId('current-path')).toHaveTextContent(/^\/$/))
+    expect(getPublicDashboard).not.toHaveBeenCalled()
   })
 
   it('refuses the unit audit page to accounts without audit.read', async () => {

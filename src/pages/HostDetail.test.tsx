@@ -219,6 +219,26 @@ describe('host detail', () => {
     expect(container.textContent).toContain('Registry lookup is temporarily unavailable. Local host evidence is unaffected.')
   })
 
+  it('returns a job-scan host to the scan results page it was opened from', async () => {
+    await renderRoute('/jobs/job-1/scans/scan-1/hosts/198.51.100.10?results=50', '/jobs/:id/scans/:scanId/hosts/:address')
+    const back = container.querySelector('.back-link')
+    expect(back?.getAttribute('href')).toBe('/jobs/job-1/scans/scan-1?results=50')
+    expect(back?.textContent).toBe('← Scan')
+  })
+
+  it('opens the first results page when a job-scan host has no results offset', async () => {
+    await renderRoute('/jobs/job-1/scans/scan-1/hosts/198.51.100.10?results=bogus', '/jobs/:id/scans/:scanId/hosts/:address')
+    expect(container.querySelector('.back-link')?.getAttribute('href')).toBe('/jobs/job-1/scans/scan-1?results=0')
+  })
+
+  it('does not claim a host is up when no status was recorded', async () => {
+    vi.mocked(baselineHost).mockResolvedValue({ ...detail, host: { ...host, status: undefined, status_reason: undefined } })
+    await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address')
+    const badges = container.querySelector('.host-badges')
+    expect(badges?.textContent).toContain('Status not recorded')
+    expect(badges?.textContent).not.toContain('Up')
+  })
+
   it('labels legacy fallback evidence without inventing a source scan', async () => {
     vi.mocked(baselineHost).mockResolvedValue({ ...detail, data_quality: 'legacy', source_scan: undefined })
     await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address')

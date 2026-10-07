@@ -17,6 +17,25 @@ export function formatRetention(value: string): string {
   return parts.join(' ') || '0 hours'
 }
 
+/**
+ * Show a job duration from the API in the vocabulary the job editor accepts.
+ * The API returns Go durations such as 192h0m0s; whole days become Nd and
+ * zero units are dropped (36h, 1h30m). The result always parses back to the
+ * same duration. Values in any other form, such as 8d, are left unchanged.
+ */
+export function editableDuration(value: string): string {
+  const input = value.trim()
+  const match = input.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/)
+  if (!match || !input) return value
+  const total = Number(match[1] ?? 0) * 3600 + Number(match[2] ?? 0) * 60 + Number(match[3] ?? 0)
+  if (total === 0) return value
+  if (total % 86400 === 0) return `${total / 86400}d`
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = total % 60
+  return `${hours ? `${hours}h` : ''}${minutes ? `${minutes}m` : ''}${seconds ? `${seconds}s` : ''}`
+}
+
 type DateInput = string | number | Date
 
 let displayTimeZone: string | undefined

@@ -181,6 +181,14 @@ describe('job surface overview', () => {
     await vi.waitFor(() => expect(container.textContent).toContain('View host details'), { timeout: 1000 })
   })
 
+  it('reopens a scan result page from a host link and links hosts back to it', async () => {
+    vi.mocked(scanHosts).mockResolvedValue({ hosts: [{ address: '198.51.100.10', open_ports: 1, open_filtered_ports: 0, protocols: [{ protocol: 'tcp' }] }], pagination: { ...pagination, offset: 50, total: 60 } } as never)
+    await renderPage('/jobs/job-1/scans/scan-1?results=50')
+    await vi.waitFor(() => expect(container.textContent).toContain('View host details'), { timeout: 1000 })
+    expect(scanHosts).toHaveBeenCalledWith('job-1', 'scan-1', { offset: 50 })
+    expect(container.querySelector('.result-row')?.getAttribute('href')).toBe('/jobs/job-1/scans/scan-1/hosts/198.51.100.10?results=50')
+  })
+
   it('uses a neutral tone for informational scan changes', async () => {
     vi.mocked(scanDetail).mockResolvedValue({
       ...detailResponse,

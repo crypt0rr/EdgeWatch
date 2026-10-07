@@ -11,7 +11,7 @@ import type { ScannerCapabilities, ScannerProfile } from '../api'
 import { cidrWarning, duplicateTarget, targetKind } from '../target'
 import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
-import { formatDateTime, getDisplayTimeZone } from '../format'
+import { editableDuration, formatDateTime, getDisplayTimeZone } from '../format'
 
 const blank: Omit<JobForm, 'timezone'> = {
   name: '',
@@ -92,6 +92,10 @@ export function JobEditor() {
   const [rebaselinePrompt, setRebaselinePrompt] = useState<{ values: JobFormFields; changes: string[] } | null>(null)
   const [discardNavigation, setDiscardNavigation] = useState<{ destination: string; historyPop: boolean } | null>(null)
   const loadedRevision = useRef<{ id?: string; revision: number } | null>(null)
+  // Switching a protocol off keeps its settings so switching it back on in
+  // the same draft restores them instead of resetting to the defaults.
+  const lastTCP = useRef<Protocol | undefined>(undefined)
+  const lastUDP = useRef<Protocol | undefined>(undefined)
   const cronInputRef = useRef<HTMLInputElement | null>(null)
   const currentHistoryEntry = useRef<{ path: string; state: unknown } | null>(null)
   const allowHistoryPop = useRef(false)
@@ -190,10 +194,14 @@ export function JobEditor() {
     }
   }, [hasDraftChanges, location.hash, location.pathname, location.search, saving])
   const applyServerJob = (data: NonNullable<typeof existing.data>) => {
-    reset({ ...data.job, dns_comparison_mode: data.job.dns_comparison_mode || 'address_sensitive' })
+    // The API returns Go durations (192h0m0s). Show them in the units the
+    // editor suggests; both forms save the same duration.
+    reset({ ...data.job, timeout: editableDuration(data.job.timeout), resume_window: data.job.resume_window === undefined ? undefined : editableDuration(data.job.resume_window), dns_comparison_mode: data.job.dns_comparison_mode || 'address_sensitive' })
     setTargets(data.job.targets)
     setTCP(data.job.tcp)
     setUDP(data.job.udp)
+    lastTCP.current = undefined
+    lastUDP.current = undefined
     // A server revision reload must also replace the notification-routing
     // draft.  Leaving the local selection untouched allows a stale edit to
     // silently overwrite the value that was just saved in another tab.
@@ -383,8 +391,8 @@ export function JobEditor() {
 
           <div className="panel form-panel">
             <div className="panel-heading"><div><h2>Scan types</h2><p className="muted">Enable one or both protocols and set their options independently.</p></div></div>
-            <ProtocolCard label="TCP" enabled={!!tcp} profiles={scannerProfiles.data?.profiles ?? []} capabilities={scannerCapabilityState.data} onToggle={(enabled) => { setDraftDirty(true); setTCP(enabled ? defaultTCP() : undefined) }} protocol={tcp} setProtocol={(value) => { setDraftDirty(true); setTCP(value) }} />
-            <ProtocolCard label="UDP" profiles={[]} capabilities={scannerCapabilityState.data} enabled={!!udp} onToggle={(enabled) => { setDraftDirty(true); setUDP(enabled ? { ports: '53', service_detection: true, engine: 'nmap' } : undefined) }} protocol={udp} setProtocol={(value) => { setDraftDirty(true); setUDP(value) }} />
+            <ProtocolCard label="TCP" enabled={!!tcp} profiles={scannerProfiles.data?.profiles ?? []} profilesState={scannerProfiles.isSuccess ? 'ready' : scannerProfiles.isError ? 'error' : 'loading'} onRetryProfiles={() => void scannerProfiles.refetch()} fieldErrors={fieldErrors} capabilities={scannerCapabilityState.data} onToggle={(enabled) => { setDraftDirty(true); if (!enabled) lastTCP.current = tcp; setTCP(enabled ? lastTCP.current ?? defaultTCP() : undefined) }} protocol={tcp} setProtocol={(value) => { setDraftDirty(true); setTCP(value) }} />
+            <ProtocolCard label="UDP" profiles={[]} profilesState="ready" fieldErrors={fieldErrors} capabilities={scannerCapabilityState.data} enabled={!!udp} onToggle={(enabled) => { setDraftDirty(true); if (!enabled) lastUDP.current = udp; setUDP(enabled ? lastUDP.current ?? { ports: '53', service_detection: true, engine: 'nmap' } : undefined) }} protocol={udp} setProtocol={(value) => { setDraftDirty(true); setUDP(value) }} />
             {fieldErrors.protocols && <small className="field-error">{fieldErrors.protocols}</small>}
             {fieldErrors.tcp && <small className="field-error">{fieldErrors.tcp}</small>}
             {fieldErrors.udp && <small className="field-error">{fieldErrors.udp}</small>}
@@ -462,14 +470,29 @@ function TargetRow({ value, index, total, onChange, onRemove }: { value: string;
   return <div className="target-row"><input value={value} onChange={(event) => onChange(event.target.value)} placeholder={index === 0 ? '192.168.1.1 or 10.0.0.0/24 or router.example.com' : 'Add another target'} aria-label={`Target ${index + 1}`} /><span className="target-kind">{targetKind(value)}</span>{total > 1 && <button type="button" className="icon-button" aria-label="Remove target" onClick={onRemove}><Trash2 size={15} /></button>}</div>
 }
 
-function ProtocolCard({ label, enabled, onToggle, protocol, setProtocol, profiles, capabilities }: { label: string; enabled: boolean; onToggle: (enabled: boolean) => void; protocol?: Protocol; setProtocol: (value: Protocol | undefined) => void; profiles: ScannerProfile[]; capabilities?: ScannerCapabilities }) {
+type NaabuNumberField = 'rate' | 'workers' | 'retries' | 'timeout_ms' | 'warm_up_seconds' | 'address_batch_size'
+
+const naabuNumberFields: { field: NaabuNumberField; label: string; min: number; max: number }[] = [
+  { field: 'rate', label: 'Rate', min: 1, max: 100000 },
+  { field: 'workers', label: 'Workers', min: 1, max: 1024 },
+  { field: 'retries', label: 'Retries', min: 0, max: 10 },
+  { field: 'timeout_ms', label: 'Probe timeout (ms)', min: 100, max: 60000 },
+  { field: 'warm_up_seconds', label: 'Warm-up (seconds)', min: 0, max: 60 },
+  { field: 'address_batch_size', label: 'Address batch size', min: 1, max: 256 },
+]
+
+function ProtocolCard({ label, enabled, onToggle, protocol, setProtocol, profiles, profilesState, onRetryProfiles, fieldErrors, capabilities }: { label: string; enabled: boolean; onToggle: (enabled: boolean) => void; protocol?: Protocol; setProtocol: (value: Protocol | undefined) => void; profiles: ScannerProfile[]; profilesState: 'loading' | 'ready' | 'error'; onRetryProfiles?: () => void; fieldErrors: Record<string, string>; capabilities?: ScannerCapabilities }) {
   const engine = protocol?.engine ?? 'nmap'
   const selectedProfile = profiles.find(profile => profile.id === protocol?.profile_id)
   const profileOptions = profiles.filter(profile => !profile.archived && profile.definition.engine === engine)
   const defaults = { scan_type: 'connect', rate: 1000, workers: 25, retries: 3, timeout_ms: 1000, warm_up_seconds: 2, verify: true, address_batch_size: 16 }
   const naabu = { ...defaults, ...(selectedProfile?.definition.naabu ?? {}), ...(protocol?.naabu ?? {}) }
   const adjustable = selectedProfile?.definition.operator_adjustable ?? []
-  const canTune = (field: string) => !selectedProfile || adjustable.includes(field)
+  // The server applies only the fields the selected profile marks adjustable
+  // and silently keeps the profile value for every other field. Until the
+  // profile is known, no field can be tuned, so nothing typed is discarded.
+  const canTune = (field: string) => profilesState === 'ready' && !!selectedProfile && adjustable.includes(field)
+  const bounds = (field: NaabuNumberField, fallback: { min: number; max: number }) => selectedProfile?.definition.operator_bounds?.[field] ?? fallback
   const updateNaabu = (field: string, value: number | string | boolean | undefined) => setProtocol({ ...protocol!, naabu: { ...naabu, [field]: value } })
   const profileValues = (profile?: ScannerProfile, fallbackEngine = engine) => ({
     profile_id: profile?.id,
@@ -522,15 +545,16 @@ function ProtocolCard({ label, enabled, onToggle, protocol, setProtocol, profile
       {label === 'TCP' && <label>Connection mode<select value={protocol.mode ?? 'syn'} onChange={(event) => setProtocol({ ...protocol, mode: event.target.value })}><option value="syn">SYN (requires NET_RAW)</option><option value="connect">TCP connect</option></select></label>}
       <label className="switch-row"><input type="checkbox" checked={protocol.service_detection} onChange={(event) => setProtocol({ ...protocol, service_detection: event.target.checked })} /><span><strong>Service detection</strong><small>Identify likely services on open ports.</small></span></label>
       {engine === 'naabu_nmap' && <>
-        <p className="helper">Leave a number blank to use the selected scanner profile’s default.</p>
+        {profilesState === 'loading' && <p className="helper" role="status">Loading scanner profiles… Discovery tuning is available once the profile is known.</p>}
+        {profilesState === 'error' && <div className="notice warning" role="alert"><TriangleAlert size={15} /><span>Scanner profiles could not be loaded, so discovery tuning is unavailable. The job still saves with the profile’s settings. <button type="button" className="link-button" onClick={onRetryProfiles}>Retry</button></span></div>}
+        {profilesState === 'ready' && <p className="helper">{adjustable.length ? 'The selected scanner profile allows the enabled fields to be tuned within the ranges shown. Leave a number blank to use the profile’s default.' : 'The selected scanner profile fixes every discovery setting.'}</p>}
         <div className="two-fields">
-          <label>Discovery type<select value={naabu.scan_type} disabled={!canTune('scan_type')} onChange={(event) => updateNaabu('scan_type', event.target.value)}><option value="connect">Connect</option><option value="syn">SYN</option></select></label>
-          <label>Rate<input type="number" min={1} max={100000} value={naabu.rate ?? ''} disabled={!canTune('rate')} onChange={(event) => updateNaabu('rate', optionalNumber(event.target.value))} /></label>
-          <label>Workers<input type="number" min={1} max={1024} value={naabu.workers ?? ''} disabled={!canTune('workers')} onChange={(event) => updateNaabu('workers', optionalNumber(event.target.value))} /></label>
-          <label>Retries<input type="number" min={0} max={10} value={naabu.retries ?? ''} disabled={!canTune('retries')} onChange={(event) => updateNaabu('retries', optionalNumber(event.target.value))} /></label>
-          <label>Probe timeout (ms)<input type="number" min={100} max={60000} value={naabu.timeout_ms ?? ''} disabled={!canTune('timeout_ms')} onChange={(event) => updateNaabu('timeout_ms', optionalNumber(event.target.value))} /></label>
-          <label>Warm-up (seconds)<input type="number" min={0} max={60} value={naabu.warm_up_seconds ?? ''} disabled={!canTune('warm_up_seconds')} onChange={(event) => updateNaabu('warm_up_seconds', optionalNumber(event.target.value))} /></label>
-          <label>Address batch size<input type="number" min={1} max={256} value={naabu.address_batch_size ?? ''} disabled={!canTune('address_batch_size')} onChange={(event) => updateNaabu('address_batch_size', optionalNumber(event.target.value))} /></label>
+          <label>Discovery type<select value={naabu.scan_type} disabled={!canTune('scan_type')} onChange={(event) => updateNaabu('scan_type', event.target.value)}><option value="connect">Connect</option><option value="syn">SYN</option></select>{fieldErrors.scan_type && <small className="field-error">{fieldErrors.scan_type}</small>}</label>
+          {naabuNumberFields.map(({ field, label: fieldLabel, min: fallbackMin, max: fallbackMax }) => {
+            const tunable = canTune(field)
+            const { min, max } = bounds(field, { min: fallbackMin, max: fallbackMax })
+            return <label key={field}>{fieldLabel}<input type="number" min={min} max={max} value={naabu[field] ?? ''} disabled={!tunable} onChange={(event) => updateNaabu(field, optionalNumber(event.target.value))} />{fieldErrors[field] ? <small className="field-error">{fieldErrors[field]}</small> : tunable && <small>{min}–{max}</small>}</label>
+          })}
           <label className="switch-row"><input type="checkbox" checked={naabu.verify} disabled={!canTune('verify')} onChange={(event) => updateNaabu('verify', event.target.checked)} /><span><strong>Verify discoveries</strong><small>Ask Naabu to re-check discovered ports.</small></span></label>
         </div>
         {protocol.nse_profile && <div className="helper">Approved NSE profile: <strong>{protocol.nse_profile}</strong>{protocol.nse_args && Object.keys(protocol.nse_args).length ? ` · ${Object.keys(protocol.nse_args).length} structured argument${Object.keys(protocol.nse_args).length === 1 ? '' : 's'}` : ''}</div>}

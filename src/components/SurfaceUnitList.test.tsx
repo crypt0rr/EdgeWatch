@@ -45,6 +45,14 @@ describe('SurfaceUnitList', () => {
     expect(container.textContent).not.toContain('22/tcp')
   })
 
+  it('renders nothing for a port with an empty address list', () => {
+    act(() => root.render(<SurfaceUnitList units={[{ target: 'router.example', protocol: 'tcp', ports: [{ port: 22, state: 'open', addresses: [] }] }]} />))
+    const row = container.querySelector('.surface-port-evidence')?.parentElement ?? container
+    expect(container.querySelector('.surface-port-evidence')).toBeNull()
+    expect(row.textContent).toContain('22/tcp')
+    expect(row.textContent).not.toMatch(/open0/)
+  })
+
   it('makes an empty positive surface explicit', () => {
     act(() => root.render(<SurfaceUnitList units={[{ target: 'silent.example', protocol: 'udp', addresses: ['192.0.2.1'], ports: [] }]} />))
     expect(container.textContent).toContain('No positive ports')

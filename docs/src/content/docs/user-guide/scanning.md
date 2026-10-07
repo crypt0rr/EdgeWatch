@@ -98,6 +98,12 @@ Scheduled jobs retain scanner-profile revisions. Editing a profile does not
 silently change the profile revision of existing jobs. A resumable cycle uses
 the arguments with which it started; updated settings apply to a new cycle.
 
+A Naabu profile decides which discovery settings a job may tune and within
+which range. The job editor enables only those fields, shows each range, and
+keeps every field disabled until the profiles have loaded. The built-in Naabu
+profile fixes every discovery setting; an administrator can create a profile
+that allows tuning on the **Scanner profiles** page.
+
 See the [configuration reference](/reference/configuration/) for deployment
 budgets and exclusions, and [Your first scan](/getting-started/first-scan/)
 for the baseline workflow.

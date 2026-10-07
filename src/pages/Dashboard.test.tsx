@@ -407,13 +407,38 @@ describe('dashboard', () => {
     expect(scanHistoryMetric?.querySelector('.stat-detail')?.textContent).toContain('Retained scan records')
   })
 
-  it('explains when no notification destination is configured', async () => {
+  it('warns a notification manager that no destination is active', async () => {
     vi.mocked(activeScans).mockResolvedValueOnce({ scans: [activeScan] })
     vi.mocked(adminStatus).mockResolvedValue({ ...status, notification_destinations: 0 })
     await renderDashboard()
 
-    expect(container.querySelector('.page-heading')?.textContent).toContain('Notifications are configured by an administrator.')
-    expect(container.querySelector('.page-heading')?.textContent).not.toContain('notification destination configured')
+    const heading = container.querySelector('.page-heading')
+    const warning = container.querySelector('.notification-warning')
+    expect(warning?.textContent).toContain('No active notification destinations — alerts are not being delivered.')
+    expect(warning?.querySelector('a')?.getAttribute('href')).toBe('/notifications')
+    expect(heading?.textContent).not.toContain('Notifications are configured by an administrator.')
+    expect(heading?.textContent).not.toContain('notification destination configured')
+  })
+
+  it('tells an operator that an administrator configures notifications', async () => {
+    vi.mocked(getSession).mockResolvedValue({ ...session('operator'), permissions: ['overview.read', 'jobs.read', 'jobs.write', 'scans.read', 'incidents.read'] })
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, notification_destinations: 0 })
+    await renderDashboard()
+
+    const heading = container.querySelector('.page-heading')
+    expect(heading?.textContent).toContain('Notifications are configured by an administrator.')
+    expect(container.querySelector('.notification-warning')).toBeNull()
+  })
+
+  it('makes no notification claim while the destination count is unknown', async () => {
+    const { notification_destinations: _omitted, ...withoutCount } = status
+    vi.mocked(adminStatus).mockResolvedValue(withoutCount)
+    await renderDashboard()
+
+    const heading = container.querySelector('.page-heading')
+    expect(heading?.textContent).not.toContain('notification destination')
+    expect(heading?.textContent).not.toContain('Notifications are configured by an administrator.')
+    expect(container.querySelector('.notification-warning')).toBeNull()
   })
 
   it('does not report notification testing as successful when no destination was tested', async () => {

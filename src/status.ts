@@ -8,12 +8,19 @@ export function jobStatePresentation(archived: boolean, enabled: boolean): { lab
   return { label: 'Paused', tone: 'amber' }
 }
 
-/** Success and failure are emphasized; canceled and incomplete scans stay neutral. */
-export function scanOutcomeTone(status: string): 'success' | 'fail' | 'neutral' {
+type ScanOutcome = string | { status: string; resumable?: boolean; cycle_status?: string }
+
+/**
+ * Success and failure are emphasized; canceled and incomplete scans stay
+ * neutral. A resumable attempt that failed or timed out after saving its
+ * progress also stays neutral, matching the scan-paused activity event.
+ */
+export function scanOutcomeTone(scan: ScanOutcome): 'success' | 'fail' | 'neutral' {
+  const { status, resumable, cycle_status: cycleStatus } = typeof scan === 'string' ? { status: scan } : scan
   switch (status.trim().toLowerCase()) {
     case 'success': return 'success'
     case 'failed':
-    case 'error': return 'fail'
+    case 'timed_out': return resumable && cycleStatus === 'paused' ? 'neutral' : 'fail'
     default: return 'neutral'
   }
 }

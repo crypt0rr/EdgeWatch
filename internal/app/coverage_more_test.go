@@ -68,10 +68,10 @@ func TestProgressPercentAndActiveRunUpdates(t *testing.T) {
 		t.Fatalf("active progress = %#v", got)
 	}
 	a.updateActiveProgress("scan", scanner.Progress{CompletedProbes: 30, CompletedInvocations: 2, ProcessAlive: false})
-	a.updateActivePhase("missing", "ignored")
-	a.updateActivePhase("scan", "finalizing")
+	a.beginActiveFinalization("missing")
+	a.beginActiveFinalization("scan")
 	got = run.snapshot()
-	if got.CompletedProbes != 30 || got.CompletedInvocations != 2 || got.ProcessAlive || got.Phase != "finalizing" {
+	if got.CompletedProbes != 30 || got.CompletedInvocations != 2 || got.ProcessAlive || got.Phase != "finalizing" || !run.finalizing {
 		t.Fatalf("active phase update = %#v", got)
 	}
 	if (&activeRun{}).snapshot().ElapsedSeconds != 0 {

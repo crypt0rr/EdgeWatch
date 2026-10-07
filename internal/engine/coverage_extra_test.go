@@ -19,6 +19,7 @@ func TestProcessFailureAndOutcomeMessageVariants(t *testing.T) {
 		status       string
 		resumable    bool
 		cycleStatus  string
+		interrupted  bool
 		wantEvent    string
 		wantMessage  string
 		wantFailures int
@@ -26,6 +27,8 @@ func TestProcessFailureAndOutcomeMessageVariants(t *testing.T) {
 		{name: "paused", status: "failed", resumable: true, cycleStatus: "paused", wantEvent: "scan-paused", wantMessage: "Scan failed: nmap stopped", wantFailures: 0},
 		{name: "paused canceled", status: "canceled", resumable: true, cycleStatus: "paused", wantEvent: "scan-canceled", wantMessage: "Scan canceled: detail", wantFailures: 0},
 		{name: "canceled", status: "canceled", wantEvent: "scan-canceled", wantMessage: "Scan canceled: detail", wantFailures: 0},
+		{name: "interrupted", status: "canceled", interrupted: true, wantEvent: model.EventScanInterrupted, wantMessage: "Detail", wantFailures: 0},
+		{name: "interrupted paused", status: "canceled", resumable: true, cycleStatus: "paused", interrupted: true, wantEvent: model.EventScanInterrupted, wantMessage: "Detail", wantFailures: 0},
 		{name: "empty status", wantEvent: "scan-failure", wantMessage: "Scan failed: detail", wantFailures: 1},
 		{name: "timed out", status: "timeout", wantEvent: "scan-failure", wantMessage: "Scan timed out: detail", wantFailures: 1},
 		{name: "custom status", status: "provider_error", wantEvent: "scan-failure", wantMessage: "Scan provider error: detail", wantFailures: 1},
@@ -33,7 +36,7 @@ func TestProcessFailureAndOutcomeMessageVariants(t *testing.T) {
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			state := model.JobState{}
-			scan := model.Scan{Status: test.status, Resumable: test.resumable, CycleStatus: test.cycleStatus, Error: "detail"}
+			scan := model.Scan{Status: test.status, Resumable: test.resumable, CycleStatus: test.cycleStatus, Error: "detail", Interrupted: test.interrupted}
 			if test.name == "paused" {
 				scan.Error = "nmap stopped"
 			}

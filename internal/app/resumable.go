@@ -136,6 +136,10 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, ts *store.Tenant
 			if errors.Is(scanCtx.Err(), context.Canceled) {
 				scan.Status = "canceled"
 				scan.Error = "scan canceled while creating the scan plan"
+				if run.interruptedByShutdown(ctx, scanCtx) {
+					scan.Error = ScanInterruptedMessage + " while creating the scan plan"
+					scan.Interrupted = true
+				}
 			} else if errors.Is(scanCtx.Err(), context.DeadlineExceeded) || errors.Is(planErr, context.DeadlineExceeded) {
 				scan.Status = "timed_out"
 				scan.Error = "scan timed out while creating the scan plan"
@@ -441,6 +445,10 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, ts *store.Tenant
 			} else if canceled {
 				scan.Status = "canceled"
 				scan.Error = "scan canceled; progress was saved"
+				if run.interruptedByShutdown(ctx, scanCtx) {
+					scan.Error = ScanInterruptedMessage + "; progress was saved"
+					scan.Interrupted = true
+				}
 			} else {
 				scan.Status = "timed_out"
 				scan.Error = "scan timed out; progress was saved for the next trigger"

@@ -723,7 +723,9 @@ function JobScanStatus({ scan, queuedRun, cancelBusy, onCancel }: {
   const total = scan.total_probes || scan.estimated_probes || 0
   const completed = scan.completed_probes ?? 0
   const progress = Math.max(0, Math.min(100, scan.progress_percent ?? 0))
-  const cancelling = scan.phase === 'cancelling'
+  // The phase keeps following the scanner after a cancel request; the flag
+  // stays set until the scan ends. Older servers only report the phase.
+  const cancelling = scan.cancel_requested || scan.phase === 'cancelling'
 
   return <section className="panel job-scan-status" aria-labelledby="job-scan-status-title">
     <div className="job-scan-status-copy">

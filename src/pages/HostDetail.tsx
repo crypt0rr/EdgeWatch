@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Globe2, Info, LoaderCircle, Network, Server, ShieldCheck } from 'lucide-react'
 import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { baselineHost, baselineHostRDAP, historicalScanHost, historicalScanHostRDAP, scanHost, scanHostRDAP } from '../api'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { PortScopeDetails } from '../components/PortScopeDetails'
@@ -14,7 +14,7 @@ function displayStatusReason(reason?: string) {
 }
 
 function HostIdentity({ host }: { host: HostObservation }) {
-  return <div className="host-identity"><div className="host-identity-icon"><Server size={25} /></div><div><h2>{host.address}</h2><div className="host-badges"><span className="pill blue">{host.address_family ?? (host.address.includes(':') ? 'IPv6' : 'IPv4')}</span><span className={host.status === 'up' ? 'pill green' : 'pill gray'}>{hostStatusLabel(host.status ?? 'up')}</span>{host.status_reason && <span className="muted">{displayStatusReason(host.status_reason)}{host.reason_ttl ? ` · TTL ${host.reason_ttl}` : ''}</span>}</div></div></div>
+  return <div className="host-identity"><div className="host-identity-icon"><Server size={25} /></div><div><h2>{host.address}</h2><div className="host-badges"><span className="pill blue">{host.address_family ?? (host.address.includes(':') ? 'IPv6' : 'IPv4')}</span><span className={host.status === 'up' ? 'pill green' : 'pill gray'}>{host.status ? hostStatusLabel(host.status) : 'Status not recorded'}</span>{host.status_reason && <span className="muted">{displayStatusReason(host.status_reason)}{host.reason_ttl ? ` · TTL ${host.reason_ttl}` : ''}</span>}</div></div></div>
 }
 
 function ServiceText({ port }: { port: PortObservation }) {
@@ -183,9 +183,12 @@ export function HostDetail() {
   const id = params.id ?? ''
   const address = params.address ?? ''
   const scanID = params.scanId
+  const [searchParams] = useSearchParams()
   const historical = !!scanID && !id
-  const back = historical ? '/hosts' : scanID ? `/jobs/${id}` : `/jobs/${id}/baseline`
-  const backLabel = historical ? 'Hosts' : scanID ? 'Job' : 'Baseline hosts'
+  // Return a job-scan host to the scan's result list, on the page it came from.
+  const resultsOffset = Number(searchParams.get('results'))
+  const back = historical ? '/hosts' : scanID ? `/jobs/${id}/scans/${encodeURIComponent(scanID)}?results=${Number.isSafeInteger(resultsOffset) && resultsOffset > 0 ? resultsOffset : 0}` : `/jobs/${id}/baseline`
+  const backLabel = historical ? 'Hosts' : scanID ? 'Scan' : 'Baseline hosts'
   const detail = useQuery({ queryKey: ['host-detail', id, scanID, address], queryFn: () => scanID ? historical ? historicalScanHost(scanID, address) : scanHost(id, scanID, address) : baselineHost(id, address), enabled: !!address && (historical || !!id) })
   const rdap = useQuery({ queryKey: ['host-rdap', id, scanID, address], queryFn: () => scanID ? historical ? historicalScanHostRDAP(scanID, address) : scanHostRDAP(id, scanID, address) : baselineHostRDAP(id, address), enabled: !!address && (historical || !!id), retry: false })
   if (detail.isLoading) return <div className="loading"><span className="spinner" />Loading host evidence…</div>

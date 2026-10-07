@@ -48,6 +48,10 @@ func run(args []string) error {
 	if len(args) == 0 {
 		return usage()
 	}
+	if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
+		fmt.Println(usageText)
+		return nil
+	}
 	cmd := args[0]
 	action := ""
 	rest := args[1:]
@@ -75,7 +79,12 @@ func run(args []string) error {
 	username := fs.String("username", "admin", "username for administrator recovery actions")
 	force := fs.Bool("force", false, "confirm replacement of the current setup token")
 	tenantFlag := fs.String("tenant", "", "slug of the business unit a host command acts on")
+	fs.SetOutput(io.Discard)
 	if err := fs.Parse(rest); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printCommandHelp(os.Stdout, fs, cmd, action)
+			return nil
+		}
 		return err
 	}
 	if fs.NArg() > 0 {
@@ -94,9 +103,6 @@ func run(args []string) error {
 	if cmd == "version" {
 		fmt.Println("EdgeWatch", version)
 		return nil
-	}
-	if cmd == "help" {
-		return usage()
 	}
 	if cmd == "notify-send" {
 		return notify.RunSendChild(os.Stdin)
@@ -338,6 +344,13 @@ func run(args []string) error {
 	case "health":
 		health, err := s.System().HealthStatus(ctx)
 		if err != nil {
+			if *output == "json" {
+				// Keep stdout parseable for monitoring: report the failure
+				// as a document, then exit non-zero with the reason on stderr.
+				if printErr := printValue(*output, unhealthyStatus{HealthStatus: health, Status: "unhealthy", Error: err.Error()}); printErr != nil {
+					return printErr
+				}
+			}
 			return err
 		}
 		return printValue(*output, health)
@@ -346,12 +359,43 @@ func run(args []string) error {
 	}
 }
 
+const usageText = `Usage: edgewatch <command> [options]
+Commands: daemon, config validate, scan, status, history, baseline approve|reset|export, backup, restore, verify, notify test, admin setup-token|reissue-setup-token|platform-setup-token|reset-password|disable-totp, health, version, help
+Run edgewatch <command> --help for the options of one command.
+Admin recovery actions accept --username (default admin) and require host access.
+scan, status, history, baseline, and notify test accept --tenant SLUG to act on that business unit instead of the default one, and admin reset-password and disable-totp accept it to stop unless the account belongs to that unit.`
+
+// usage reports a missing or unknown command on stderr.
 func usage() error {
-	fmt.Fprintln(os.Stderr, `Usage: edgewatch <command> [options]
-	Commands: daemon, config validate, scan, status, history, baseline approve|reset|export, backup, restore, verify, notify test, admin setup-token|platform-setup-token|reset-password|disable-totp, health, version
-	Admin recovery actions accept --username (default admin) and require host access.
-	scan, status, history, baseline, and notify test accept --tenant SLUG to act on that business unit instead of the default one, and admin reset-password and disable-totp accept it to stop unless the account belongs to that unit.`)
+	fmt.Fprintln(os.Stderr, usageText)
 	return errors.New("invalid or missing command")
+}
+
+// printCommandHelp lists the options that the command accepts, with their
+// defaults, in the order of the shared flag set.
+func printCommandHelp(w io.Writer, fs *flag.FlagSet, cmd, action string) {
+	key := commandFlagKey(cmd, action)
+	allowed, known := commandFlagAllowlist[key]
+	if !known {
+		fmt.Fprintln(w, usageText)
+		return
+	}
+	fmt.Fprintf(w, "Usage: edgewatch %s [options]\n", key)
+	if len(allowed) == 0 {
+		fmt.Fprintln(w, "This command has no options.")
+		return
+	}
+	fmt.Fprintln(w, "Options:")
+	fs.VisitAll(func(f *flag.Flag) {
+		if _, ok := allowed[f.Name]; !ok {
+			return
+		}
+		line := fmt.Sprintf("  --%s\t%s", f.Name, f.Usage)
+		if f.DefValue != "" && f.DefValue != "false" {
+			line += fmt.Sprintf(" (default %s)", f.DefValue)
+		}
+		fmt.Fprintln(w, line)
+	})
 }
 
 func newLogger(level string, location *time.Location) *slog.Logger {
@@ -645,6 +689,14 @@ func contextWithSignals(parent context.Context) (context.Context, func()) {
 type notifyTestResult struct {
 	notify.TestSummary
 	DeploymentLocked int `json:"deployment_locked"`
+}
+
+// unhealthyStatus is the health document printed when the daemon is not
+// healthy. Its status field replaces the embedded one.
+type unhealthyStatus struct {
+	store.HealthStatus
+	Status string `json:"status"`
+	Error  string `json:"error"`
 }
 
 func printValue(format string, v any) error {

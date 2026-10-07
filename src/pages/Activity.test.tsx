@@ -52,6 +52,14 @@ describe('activity history', () => {
     expect(screen.getByRole('link', { name: 'Open job →' })).toHaveAttribute('href', '/jobs/job-1#pending-changes')
   })
 
+  it('names the resolved address of a port change on one address of a DNS target', async () => {
+    const change = { key: 'port-address|edge.example|tcp|22|2001:db8::10', kind: 'port-address', target: 'edge.example', protocol: 'tcp', port: 22, address: '2001:db8::10', old: 'not-open', new: 'open', severity: 'critical' }
+    vi.mocked(listEvents).mockResolvedValue({ events: [{ type: 'changes-detected', job_id: 'job-1', job: 'Production', scan_id: 'scan-3', message: '1 baseline change confirmed', changes: [change], created_at: '2026-09-20T11:00:00Z' }], pagination: { ...page, total: 1 } })
+    renderWithProviders(<Activity />)
+
+    expect(await screen.findByText('Port opened on address · edge.example (2001:db8::10) · TCP:22 · not-open → open')).toBeInTheDocument()
+  })
+
   it('filters by job and resets pagination when the filter changes', async () => {
     renderWithProviders(<Activity />, { route: ['/activity?job_id=job-1'] })
     await screen.findByText('Change accepted')

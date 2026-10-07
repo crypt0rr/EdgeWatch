@@ -34,8 +34,11 @@ func TestAggregateDNSComparisonIgnoresAnswerRotationButKeepsPortAndServiceChange
 	if baseline.Hash() == rotated.Hash() {
 		t.Fatal("historical snapshot hash unexpectedly ignored DNS and effective-host changes")
 	}
-	if got := snapshotHashForDNSMode(baseline, config.DNSComparisonAddressSensitive); got != baseline.Hash() {
-		t.Fatal("address-sensitive mode no longer uses the historical snapshot hash")
+	if got := snapshotHashForDNSMode(baseline, config.DNSComparisonAddressSensitive); got == baseline.Hash() {
+		t.Fatal("address-sensitive hash ignores which addresses expose a DNS target's port")
+	}
+	if got := snapshotHashForDNSMode(snapshot("open"), config.DNSComparisonAddressSensitive); got != snapshot("open").Hash() {
+		t.Fatal("address-sensitive hash of a snapshot without DNS port evidence differs from the snapshot hash")
 	}
 	if got, want := snapshotHashForDNSMode(rotated, job.DNSComparisonMode), snapshotHashForDNSMode(baseline, job.DNSComparisonMode); got != want {
 		t.Fatalf("aggregate hash changed after DNS answer rotation: %s != %s", got, want)

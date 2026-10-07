@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { changeKindLabel, hostStatusLabel, jobStatePresentation, scanOutcomeTone, severityLabel, severityTone } from './status'
+import { changeKindLabel, changeTargetLabel, hostStatusLabel, jobStatePresentation, scanOutcomeTone, severityLabel, severityTone } from './status'
 
 describe('shared status presentation', () => {
   it('uses consistent job labels and tones', () => {
@@ -33,6 +33,15 @@ describe('shared status presentation', () => {
     expect(changeKindLabel('port', 'closed', 'open')).toBe('Port opened')
     expect(changeKindLabel('port', 'open', 'not-open')).toBe('Port closed')
     expect(changeKindLabel('other_change')).toBe('Other change')
+  })
+
+  it('labels a port that opened or closed on one address of a DNS target', () => {
+    expect(changeKindLabel('port-address', 'not-open', 'open')).toBe('Port opened on address')
+    expect(changeKindLabel('port-address', 'not-open', 'open|filtered')).toBe('Port opened on address')
+    expect(changeKindLabel('port-address', 'open', 'not-open')).toBe('Port closed on address')
+    expect(changeKindLabel('port-address')).toBe('Port on address')
+    expect(changeTargetLabel({ target: 'edge.example', address: '2001:db8::10' })).toBe('edge.example (2001:db8::10)')
+    expect(changeTargetLabel({ target: '192.0.2.10' })).toBe('192.0.2.10')
   })
 
   it('uses explicit readable labels for lower-case severity and host states', () => {

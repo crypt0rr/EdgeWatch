@@ -27,6 +27,17 @@ that only need scan metadata should use `/summary`, then request paginated
 results or host evidence separately when needed. This avoids loading large
 snapshots just to show scan status and timestamps.
 
+## Per-address port changes
+
+A change in scan `changes`, an incident, a pending change, or an event can
+have the kind `port-address`: a port of a DNS target opened or closed on one of
+the target's resolved addresses while another address exposed it. `target` is
+the DNS name and the new `address` key is the resolved address. `old` and `new`
+are a positive port state or `not-open`, and `key` has the form
+`port-address|<target>|<protocol>|<port>|<address>`. Other change kinds have no
+`address`. Clients that handle change kinds individually should treat an
+unknown kind as a generic change.
+
 ## Business units
 
 v0.20.0 adds business units to every installation. The routes and response

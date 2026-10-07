@@ -83,6 +83,19 @@ func (ts *TenantStore) AcceptIncidentWithExpectedOutboxAndAudit(ctx context.Cont
 				return nil, err
 			}
 		}
+		// Accepting a port's closure on one address of a DNS target recomputes
+		// the port's expected service from the addresses that still expose it.
+		// A service incident that reported exactly that service is resolved by
+		// the same decision; left open, the next scan would announce it as a
+		// recovery to the old fingerprint.
+		if serviceKey, serviceIncident, ok := serviceIncidentResolvedByPortAddress(state, change); ok {
+			resolved := serviceIncident.Change
+			if resolved.Key == "" {
+				resolved.Key = serviceKey
+			}
+			accepted = append(accepted, resolved)
+			acceptedKeys = append(acceptedKeys, serviceKey)
+		}
 		// The accepted comparison state is now a deliberate runtime overlay on
 		// the immutable source scan. Host explorer endpoints use this marker to
 		// avoid serving the source scan's stale expected ports or services.
@@ -198,6 +211,39 @@ func newPortIncidentForService(state *model.JobState, key string, change model.C
 			continue
 		}
 		return candidateKey, candidate, true
+	}
+	return "", model.Incident{}, false
+}
+
+// serviceIncidentResolvedByPortAddress finds the open service incident of the
+// port whose closure on one address was just accepted, when the baseline's
+// recomputed service now matches what that incident reported.
+func serviceIncidentResolvedByPortAddress(state *model.JobState, change model.Change) (string, model.Incident, bool) {
+	if change.Kind != "port-address" || change.New != "not-open" || state.Baseline == nil {
+		return "", model.Incident{}, false
+	}
+	key := fingerprintCandidateKey(change)
+	incident, open := state.Incidents[key]
+	if !open || incident.Change.Kind != "service" {
+		return "", model.Incident{}, false
+	}
+	unitIndex := findUnit(state.Baseline, change.Target, change.Protocol)
+	if unitIndex < 0 {
+		return "", model.Incident{}, false
+	}
+	for _, port := range state.Baseline.Units[unitIndex].Ports {
+		if port.Port != change.Port {
+			continue
+		}
+		expected := port.Service
+		if expected == "" {
+			// A fingerprint that disappeared is reported as not-open.
+			expected = "not-open"
+		}
+		if incident.Change.New != expected {
+			break
+		}
+		return key, incident, true
 	}
 	return "", model.Incident{}, false
 }
@@ -367,6 +413,8 @@ func applyAcceptedChangeWithHostIndex(snapshot *model.Snapshot, change model.Cha
 	switch change.Kind {
 	case "port":
 		return acceptPortChangeWithIndex(snapshot, change, hostIndex)
+	case "port-address":
+		return acceptPortAddressChange(snapshot, change)
 	case "service":
 		return acceptServiceChangeWithIndex(snapshot, change, hostIndex)
 	case "host":
@@ -574,6 +622,103 @@ func acceptPortChangeWithIndex(snapshot *model.Snapshot, change model.Change, ho
 	syncAcceptedPortHostsWithIndex(snapshot, change, hostIndex)
 	snapshot.Normalize()
 	return nil
+}
+
+// acceptPortAddressChange records that a port of a DNS target is now, or is
+// no longer, exposed on one of the target's resolved addresses. The logical
+// port stays in the baseline. Its address evidence changes, the expected host
+// view of the address follows, and a closure recomputes the port's expected
+// service from the addresses that still expose it, as an accepted host-down
+// change does.
+func acceptPortAddressChange(snapshot *model.Snapshot, change model.Change) error {
+	address := normalizedAcceptedTarget(change.Address)
+	if strings.TrimSpace(change.Target) == "" || strings.TrimSpace(change.Protocol) == "" || change.Port < 1 || change.Port > 65535 || net.ParseIP(address) == nil {
+		return fmt.Errorf("%w: invalid port address change", ErrUnsupportedIncidentChange)
+	}
+	opened := positiveAcceptedPortState(change.New)
+	if !opened && change.New != "not-open" {
+		return fmt.Errorf("%w: invalid port address state", ErrUnsupportedIncidentChange)
+	}
+	unitIndex := findUnit(snapshot, change.Target, change.Protocol)
+	portIndex := -1
+	if unitIndex >= 0 {
+		for i := range snapshot.Units[unitIndex].Ports {
+			if snapshot.Units[unitIndex].Ports[i].Port == change.Port {
+				portIndex = i
+				break
+			}
+		}
+	}
+	if portIndex < 0 {
+		// A port that has left the baseline is not exposed on any address.
+		if !opened {
+			return nil
+		}
+		return fmt.Errorf("%w: baseline port is missing", ErrUnsupportedIncidentChange)
+	}
+	port := &snapshot.Units[unitIndex].Ports[portIndex]
+	if len(port.Evidence) == 0 {
+		// The port's addresses are unknown, and the next complete scan records
+		// them. There is no expectation to change.
+		return nil
+	}
+	evidence := make([]string, 0, len(port.Evidence)+1)
+	for _, existing := range port.Evidence {
+		if existing = normalizedAcceptedTarget(existing); existing != address {
+			evidence = append(evidence, existing)
+		}
+	}
+	if opened {
+		evidence = append(evidence, address)
+	}
+	port.Evidence = evidence
+	syncAcceptedPortAddressHost(snapshot, change, address, port.State, opened)
+	if !opened && len(evidence) > 0 {
+		if service, found := acceptedServiceForEvidence(snapshot, change.Protocol, change.Port, evidence); found {
+			port.Service = service
+		}
+	}
+	snapshot.Normalize()
+	return nil
+}
+
+// syncAcceptedPortAddressHost adds the accepted port to, or removes it from,
+// the expected host view of one address. Other addresses of the target keep
+// their own evidence.
+func syncAcceptedPortAddressHost(snapshot *model.Snapshot, change model.Change, address, state string, opened bool) {
+	if opened {
+		target := normalizedAcceptedTarget(change.Target)
+		ensureAcceptedHostProtocols(snapshot, change, acceptedHostAddressIndex{target: {address: {}}})
+	}
+	for hostIndex := range snapshot.Hosts {
+		host := &snapshot.Hosts[hostIndex]
+		if normalizedAcceptedTarget(host.Address) != address {
+			continue
+		}
+		for protocolIndex := range host.Protocols {
+			protocol := &host.Protocols[protocolIndex]
+			if !strings.EqualFold(protocol.Protocol, change.Protocol) {
+				continue
+			}
+			ports := protocol.Ports[:0]
+			found := false
+			for _, port := range protocol.Ports {
+				if port.Port != change.Port {
+					ports = append(ports, port)
+					continue
+				}
+				if opened {
+					port.State = state
+					ports = append(ports, port)
+					found = true
+				}
+			}
+			if opened && !found {
+				ports = append(ports, model.PortObservation{Port: change.Port, State: state})
+			}
+			protocol.Ports = ports
+		}
+	}
 }
 
 func acceptServiceChange(snapshot *model.Snapshot, change model.Change) error {

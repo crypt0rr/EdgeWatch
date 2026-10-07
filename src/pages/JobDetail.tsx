@@ -47,7 +47,7 @@ import { SurfaceUnitList } from '../components/SurfaceUnitList'
 import type { ActiveScan, QueuedRun, ScanBudget, WorkEstimate } from '../types'
 import { baselinePresentation } from '../baseline'
 import { formatDateTime } from '../format'
-import { changeKindLabel, jobStatePresentation, scanOutcomeTone, severityTone } from '../status'
+import { changeKindLabel, changeTargetLabel, jobStatePresentation, scanOutcomeTone, severityTone } from '../status'
 
 type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
 
@@ -512,7 +512,7 @@ export function JobDetail() {
               {detail.data.changes.map((change, index) => (
                 <div className="change-row" key={`${change.kind}-${index}`}>
                   <span className={`pill ${severityTone(change.severity)}`}>{changeKindLabel(change.kind, change.old, change.new)}</span>
-                  <strong>{change.target}{change.port ? ` · ${change.protocol}:${change.port}` : ''}</strong>
+                  <strong>{changeTargetLabel(change)}{change.port ? ` · ${change.protocol}:${change.port}` : ''}</strong>
                   <span className="muted">{change.old ?? '—'} → {change.new ?? '—'}</span>
                 </div>
               ))}
@@ -662,7 +662,7 @@ export function JobDetail() {
           )}
           {canReadScans && (value.baseline.pending ?? 0) > 0 && <section className="pending-detail" id="pending-changes" aria-labelledby="job-pending-title">
             <div className="pending-detail-heading"><div><h3 id="job-pending-title">Pending confirmations</h3><p className="muted">These differences have not reached the {value.job.change_confirmations}-scan confirmation threshold yet.</p></div><Link to={`/activity?job_id=${encodeURIComponent(id)}`}>Activity history →</Link></div>
-            {pendingChanges.isLoading ? <div className="skeleton-list pending-skeleton" aria-label="Loading pending changes" /> : pendingChanges.error ? <ErrorNotice message="Could not load pending baseline changes." onRetry={() => pendingChanges.refetch()} /> : pendingChanges.data?.pending_changes.length ? <><ul className="pending-change-list">{pendingChanges.data.pending_changes.map(item => <li key={item.key}><span>{changeKindLabel(item.change.kind, item.change.old, item.change.new)} · {item.change.target}{item.change.protocol && item.change.port ? ` · ${item.change.protocol.toUpperCase()}:${item.change.port}` : ''}{item.change.old || item.change.new ? ` · ${item.change.old || '—'} → ${item.change.new || '—'}` : ''}</span><span className="pending-count">{item.count} / {value.job.change_confirmations} scans</span></li>)}</ul><Pagination page={pendingChanges.data.pagination} onChange={setPendingChangesOffset} label="Pending changes pagination" /></> : pendingChanges.data?.pagination.total ? <Pagination page={pendingChanges.data.pagination} onChange={setPendingChangesOffset} label="Pending changes pagination" /> : <p className="inline-empty">No changes are awaiting confirmation.</p>}
+            {pendingChanges.isLoading ? <div className="skeleton-list pending-skeleton" aria-label="Loading pending changes" /> : pendingChanges.error ? <ErrorNotice message="Could not load pending baseline changes." onRetry={() => pendingChanges.refetch()} /> : pendingChanges.data?.pending_changes.length ? <><ul className="pending-change-list">{pendingChanges.data.pending_changes.map(item => <li key={item.key}><span>{changeKindLabel(item.change.kind, item.change.old, item.change.new)} · {changeTargetLabel(item.change)}{item.change.protocol && item.change.port ? ` · ${item.change.protocol.toUpperCase()}:${item.change.port}` : ''}{item.change.old || item.change.new ? ` · ${item.change.old || '—'} → ${item.change.new || '—'}` : ''}</span><span className="pending-count">{item.count} / {value.job.change_confirmations} scans</span></li>)}</ul><Pagination page={pendingChanges.data.pagination} onChange={setPendingChangesOffset} label="Pending changes pagination" /></> : pendingChanges.data?.pagination.total ? <Pagination page={pendingChanges.data.pagination} onChange={setPendingChangesOffset} label="Pending changes pagination" /> : <p className="inline-empty">No changes are awaiting confirmation.</p>}
           </section>}
         </div>
 

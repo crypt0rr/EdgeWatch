@@ -103,8 +103,9 @@ describe('job editor workflow coverage', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
     fireEvent.change(screen.getByLabelText('Job name'), { target: { value: 'Rotating DNS service' } })
     fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: 'edge.example' } })
+    expect(screen.getByText(/a port that opens or closes on one address alerts even while another address exposes it/)).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('DNS comparison'), { target: { value: 'aggregate' } })
-    expect(screen.getByText(/Address rotation and individual backend reachability will not alert/)).toBeInTheDocument()
+    expect(screen.getByText(/Address rotation, individual backend reachability, and a port that opens or closes on one address while another address exposes it will not alert/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Create job' }))
 
     await waitFor(() => expect(createJob).toHaveBeenCalled())

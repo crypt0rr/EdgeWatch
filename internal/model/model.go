@@ -289,8 +289,11 @@ type Change struct {
 	Target   string `json:"target"`
 	Protocol string `json:"protocol,omitempty"`
 	Port     int    `json:"port,omitempty"`
-	Old      string `json:"old,omitempty"`
-	New      string `json:"new,omitempty"`
+	// Address is the resolved address of a DNS target on which a port opened
+	// or closed (kind port-address). Target remains the configured name.
+	Address string `json:"address,omitempty"`
+	Old     string `json:"old,omitempty"`
+	New     string `json:"new,omitempty"`
 }
 
 type Pending struct {
@@ -652,6 +655,8 @@ func ChangeSummary(c Change) string {
 		return fmt.Sprintf("%s %s: %s", c.Target, c.Kind, nonempty(c.New, c.Old))
 	case "service":
 		return fmt.Sprintf("%s %s/%d service: %s -> %s", c.Target, c.Protocol, c.Port, c.Old, c.New)
+	case "port-address":
+		return fmt.Sprintf("%s %s/%d on %s: %s -> %s", c.Target, c.Protocol, c.Port, c.Address, c.Old, c.New)
 	default:
 		return fmt.Sprintf("%s %s/%d: %s -> %s", c.Target, c.Protocol, c.Port, c.Old, c.New)
 	}

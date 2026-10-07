@@ -334,9 +334,9 @@ describe('job editor workflow coverage', () => {
     renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
     await waitFor(() => expect(screen.getByLabelText(/^Rate/)).toBeEnabled())
-    const optionalFields = ['Rate', 'Workers', 'Retries', 'Probe timeout (ms)', 'Warm-up (seconds)', 'Address batch size']
+    const optionalFields = [/^Rate/, /^Workers/, /^Retries/, /^Probe timeout \(ms\)/, /^Warm-up \(seconds\)/, /^Address batch size/]
     for (const label of optionalFields) {
-      const input = screen.getByLabelText(new RegExp(`^${label.replace(/[()]/g, '\\$&')}`)) as HTMLInputElement
+      const input = screen.getByLabelText(label) as HTMLInputElement
       expect(input).toBeEnabled()
       fireEvent.change(input, { target: { value: '' } })
       expect(input).toHaveValue(null)

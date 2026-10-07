@@ -147,6 +147,54 @@ describe('job detail actions', () => {
     expect(screen.getByRole('button', { name: 'Scan now' })).toBeEnabled()
   }, 10_000)
 
+  it('stops waiting for an accepted run that the page never saw queued or running', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      renderPage()
+      fireEvent.click(await screen.findByRole('button', { name: 'Scan now' }))
+      expect(await screen.findByRole('heading', { name: 'Scan queued' })).toBeInTheDocument()
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+      expect(screen.getByRole('button', { name: 'Queued…' })).toBeDisabled()
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(12_000) })
+      await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('The scan request was accepted but did not start. Check the job and try again.'))
+      expect(screen.queryByRole('heading', { name: 'Scan queued' })).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Scan now' })).toBeEnabled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps waiting while the scan status cannot be read', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      renderPage()
+      const scanNow = await screen.findByRole('button', { name: 'Scan now' })
+      await waitFor(() => expect(activeScans).toHaveBeenCalled())
+      vi.mocked(activeScans).mockRejectedValue(new Error('status unavailable'))
+      fireEvent.click(scanNow)
+      expect(await screen.findByRole('heading', { name: 'Scan queued' })).toBeInTheDocument()
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+      expect(screen.getByRole('heading', { name: 'Scan queued' })).toBeInTheDocument()
+      expect(screen.queryByText(/accepted but did not start/)).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not wait for a run whose skip was reported before the request returned', async () => {
+    let accept: (value: { status: string; job_id: string }) => void = () => {}
+    vi.mocked(runJob).mockReturnValue(new Promise(resolve => { accept = resolve }))
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Scan now' }))
+    act(() => window.dispatchEvent(new CustomEvent('edgewatch:scan-skipped', { detail: { job_id: 'job-1', reason: 'busy' } })))
+    await act(async () => accept({ status: 'accepted', job_id: 'job-1' }))
+
+    expect(screen.getByRole('alert')).toHaveTextContent('another scan already owns this job')
+    expect(screen.queryByRole('heading', { name: 'Scan queued' })).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan now' })).toBeEnabled())
+  })
+
   it('shows the active phase and progress and allows cancellation from the job page', async () => {
     vi.mocked(activeScans).mockResolvedValueOnce({ scans: [] }).mockResolvedValue({ scans: [activeScan] } as never)
     vi.mocked(cancelScan).mockImplementation(async (id) => {

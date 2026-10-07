@@ -5,8 +5,8 @@ description: Deploy EdgeWatch with Docker Compose and create your first administ
 
 ## Requirements
 
-Docker Engine and Docker Compose v2 on a host where Docker host
-networking and the required scanner capabilities are available.
+You need Docker Engine and Docker Compose v2 on a host that supports Docker
+host networking and the required scanner capabilities.
 
 ## Configure storage
 
@@ -17,8 +17,8 @@ cp config.example.yaml config.yaml
 ```
 
 Choose the data-directory owner for your Docker mode. The container runs as
-UID 0 with filesystem capabilities dropped, so mode `0750` must be owned by the
-host identity mapped to container UID 0.
+UID 0 with filesystem capabilities dropped. The data directory must have mode
+`0750` and be owned by the host identity mapped to container UID 0.
 
 For standard rootful Docker:
 
@@ -41,7 +41,7 @@ docker compose up -d
 
 The container uses host networking so scanners can reach the same networks as
 the Docker host. Runtime state, the SQLite database, and generated encryption
-keys are stored in ./data.
+keys are stored in `./data`.
 
 The container runs as UID 0 with filesystem capabilities dropped. The `0750`
 data directory must be owned by the host identity mapped to container UID 0:
@@ -85,7 +85,7 @@ docker compose run --rm --no-deps --entrypoint /bin/sh edgewatch \
 ```
 
 If you are upgrading from a deployment that used the old named
-edgewatch-data volume, the bind mount starts with fresh state. That volume is
+`edgewatch-data` volume, the bind mount starts with fresh state. That volume is
 left untouched and is not read or migrated automatically; restore or copy its
 data only through a deliberate, stopped-database recovery procedure.
 
@@ -119,8 +119,6 @@ This recovery action is refused after an administrator has been created.
 A platform administrator, who manages business units, is created the same
 way once the first administrator exists; see
 [Business units](/administration/business-units/).
-
-
 
 ## Next steps
 

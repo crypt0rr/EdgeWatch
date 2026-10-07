@@ -1,8 +1,9 @@
 # EdgeWatch documentation website
 
 The Astro Starlight documentation website for `https://edgewatch.offsec.nl`.
-Production is deployed from `main`; pull requests use branch previews. Dark mode is the default, with a persistent light/dark
-toggle. The site uses the console's palette, brand mark, and Inter typography.
+Production is deployed from `main`; pull requests use branch previews. Dark
+mode is the default, with a persistent light/dark toggle. The site uses the
+console's palette, brand mark, and Inter typography.
 
 From the repository root, using the Node version in `.node-version`:
 
@@ -44,7 +45,8 @@ at 1280 × 720 and AAC audio; `faststart` lets playback begin before the entire
 file downloads. The poster is extracted at 12 seconds from the source.
 
 The video starts muted and inline, with native controls hidden and a compact
-play/pause button in its frame. Reduced-motion visitors get the poster and can start playback themselves. Leaving the video
+play/pause button in its frame. Visitors who prefer reduced motion get the
+poster and can start playback themselves. Scrolling the video out of view
 or hiding the tab pauses it; returning resumes automatic playback unless the
 visitor explicitly paused it. If autoplay is blocked, the play button remains
 available. A failed media load exposes a link to the original video.

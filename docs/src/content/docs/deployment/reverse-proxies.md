@@ -30,8 +30,8 @@ actually connect to EdgeWatch when the proxy runs elsewhere. If a
 TLS-terminating proxy rewrites the upstream `Host` to a loopback address, list
 the proxy address or network in `web.trusted_proxies` so EdgeWatch can trust its
 `X-Forwarded-Proto: https` (or RFC 7239 `Forwarded: ...;proto=https`) signal
-and keep the session cookie Secure. Do not trust untrusted peers: the configured
-proxy must sanitize the forwarding headers.
+and keep the session cookie Secure. Trust only proxies you control, and configure them to sanitize forwarding
+headers.
 
 After changing the bind-mounted configuration, recreate the container:
 

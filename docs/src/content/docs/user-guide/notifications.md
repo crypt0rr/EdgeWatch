@@ -27,7 +27,7 @@ Each job can select its own destinations. On the **Notifications** page,
 enabled by default. After a fully successful scan that still confirms an open
 incident, EdgeWatch sends a grouped reminder to that job's selected
 destinations. New incidents continue to get their initial alert; suppressed
-incidents and incomplete, failed, cancelled, or timed-out scans do not generate
+incidents and incomplete, failed, canceled, or timed-out scans do not generate
 reminders. The first successful follow-up may send a reminder immediately;
 the selected cadence limits later reminders. Administrators can turn reminders
 off or choose a minimum cadence per job: hourly (the default), every six hours,
@@ -72,10 +72,10 @@ shows its pending and retrying alerts, terminal failures, and last success or
 failure on its unit's **Notifications** page, or on the platform console for
 platform-owned destinations.
 
-## Notification URLs in config.yaml (deprecated)
+## Notification URLs in `config.yaml` (deprecated)
 
 Earlier releases also read Shoutrrr URLs from `notifications.urls` and
-`notifications.urls_file` in config.yaml. These keys are deprecated, and a later
+`notifications.urls_file` in `config.yaml`. These keys are deprecated, and a later
 release will refuse to start while either is set. `notifications.encryption_key_file`
 stays supported.
 
@@ -95,12 +95,12 @@ encrypted destination on the **Notifications** page:
   not exist yet, as for the first destination added in the console. A
   configured `notifications.encryption_key_file` is used instead.
 
-After the import, EdgeWatch no longer delivers to the URLs in config.yaml. Each
-start logs a warning while config.yaml still lists them, and `edgewatch health`
+After the import, EdgeWatch no longer delivers to the URLs in `config.yaml`. Each
+start logs a warning while `config.yaml` still lists them, and `edgewatch health`
 reports `notification URLs in config.yaml were imported; remove them from
 config.yaml`. Remove `notifications.urls` and `notifications.urls_file` from
-config.yaml, and the URL file mount from compose.yaml. A URL that is added to
-or changed in config.yaml later is imported as an additional destination at
+`config.yaml`, and the URL file mount from `compose.yaml`. A URL that is added to
+or changed in `config.yaml` later is imported as an additional destination at
 the next start. An imported destination that you delete in the console is not
 recreated.
 
@@ -116,10 +116,10 @@ destination IDs only.
 
 Only the daemon imports. Host commands such as `notify test` keep using the
 configured URLs until the daemon has imported them, and use the imported
-destinations afterwards. A backup taken before the import is imported again
+destinations afterward. A backup taken before the import is imported again
 after it is restored.
 
-Until its import succeeds, a URL in config.yaml is a read-only deployment
+Until its import succeeds, a URL in `config.yaml` is a read-only deployment
 destination. Its ID follows its exact URL, so changing any part of the URL
 creates a new destination at the next restart, and alerts still queued for the
 old URL are not delivered. Jobs do not follow that change: EdgeWatch logs a
@@ -127,4 +127,4 @@ warning that names the jobs whose routing selects a destination that no longer
 exists, each affected job shows a notice in the console, and saving the job
 editor removes the missing selection. After the import, change a URL by
 replacing it on the **Notifications** page instead; a changed URL in
-config.yaml only adds another destination.
+`config.yaml` only adds another destination.

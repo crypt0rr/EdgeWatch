@@ -252,3 +252,29 @@ func TestProbeRunsTheBinaryConfined(t *testing.T) {
 		t.Fatalf("unprivileged Detect = %+v, want unavailable", policy.Status())
 	}
 }
+
+// TestDetectWithoutThePlatformHooks covers the platforms that install no
+// hooks. It replaces package hooks, so it must not run in parallel.
+func TestDetectWithoutThePlatformHooks(t *testing.T) {
+	detect, confine, name := detectPlatform, confineProcess, nameCapability
+	t.Cleanup(func() { detectPlatform, confineProcess, nameCapability = detect, confine, name })
+	detectPlatform, confineProcess, nameCapability = nil, nil, nil
+
+	if got := Detect(""); got.Enforced() || got.Status().State != StateUnavailable || got.Status().Reason != "the scanner sandbox requires Linux" || got.Status().ProcessUID != os.Geteuid() {
+		t.Fatalf("auto without hooks = %+v", got.Status())
+	}
+	if got := Detect("off").Status(); got.State != StateDisabled || got.Reason != "scanner.sandbox is off" {
+		t.Fatalf("off without hooks = %+v", got)
+	}
+	if err := Detect(ModeRequired).Require(); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("required without hooks = %v", err)
+	}
+	cmd := exec.Command("/bin/true")
+	NewEnforced(unix.CAP_NET_RAW).Confine(cmd)
+	if cmd.SysProcAttr != nil {
+		t.Fatalf("Confine without hooks changed the command: %+v", cmd.SysProcAttr)
+	}
+	if got := capabilityName(unix.CAP_NET_RAW); got != "CAP_13" {
+		t.Fatalf("capability name without hooks = %q", got)
+	}
+}

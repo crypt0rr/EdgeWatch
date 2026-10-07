@@ -69,6 +69,48 @@ type Status struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// The platform hooks. Only Linux installs them, because the sandbox relies on
+// Linux identity changes and ambient capabilities; elsewhere Detect reports
+// the sandbox as unavailable and Confine leaves commands unchanged.
+var (
+	detectPlatform func(mode string) *Policy
+	confineProcess func(cmd *exec.Cmd, ambient []uintptr)
+	nameCapability func(capability uintptr) string
+)
+
+// Detect decides how scanner processes start in this runtime for the
+// configured scanner.sandbox mode. Unless the mode is off, it starts a
+// short-lived confined process to confirm that the runtime allows the
+// identity change and the capabilities.
+func Detect(mode string) *Policy {
+	mode = normalizedMode(mode)
+	if detectPlatform != nil {
+		return detectPlatform(mode)
+	}
+	status := Status{Mode: mode, State: StateUnavailable, ProcessUID: os.Geteuid(), Reason: "the scanner sandbox requires Linux"}
+	if mode == ModeOff {
+		status.State, status.Reason = StateDisabled, "scanner.sandbox is off"
+	}
+	return &Policy{status: status}
+}
+
+// Confine makes cmd start its process confined. It keeps any process
+// attributes already set, such as the session and controlling terminal of a
+// pseudo-terminal. When the policy is not enforced, cmd is unchanged.
+func (p *Policy) Confine(cmd *exec.Cmd) {
+	if !p.Enforced() || confineProcess == nil {
+		return
+	}
+	confineProcess(cmd, p.ambient)
+}
+
+func capabilityName(capability uintptr) string {
+	if nameCapability != nil {
+		return nameCapability(capability)
+	}
+	return fmt.Sprintf("CAP_%d", capability)
+}
+
 // Policy decides how scanner processes start. A nil Policy, like a policy
 // that is not enforced, starts them unconfined.
 type Policy struct {

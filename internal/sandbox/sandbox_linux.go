@@ -43,12 +43,10 @@ type environment struct {
 	probe func(ambient []uintptr) error
 }
 
-// Detect decides how scanner processes start in this runtime for the
-// configured scanner.sandbox mode. Unless the mode is off, it starts a
-// short-lived confined process to confirm that the runtime allows the
-// identity change and the capabilities.
-func Detect(mode string) *Policy {
-	return detect(mode, systemEnvironment())
+func init() {
+	detectPlatform = func(mode string) *Policy { return detect(mode, systemEnvironment()) }
+	confineProcess = confineLinux
+	nameCapability = linuxCapabilityName
 }
 
 func detect(mode string, env environment) *Policy {
@@ -97,20 +95,16 @@ func detect(mode string, env environment) *Policy {
 	return policy
 }
 
-// Confine makes cmd start its process confined. It keeps any process
-// attributes already set, such as the session and controlling terminal of a
-// pseudo-terminal. When the policy is not enforced, cmd is unchanged.
-func (p *Policy) Confine(cmd *exec.Cmd) {
-	if !p.Enforced() {
-		return
-	}
+// confineLinux starts cmd's process as UID and GID with no supplementary
+// groups and the ambient capabilities.
+func confineLinux(cmd *exec.Cmd, ambient []uintptr) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	// An empty, non-nil Groups clears the supplementary groups. Keeping UID
 	// 0's groups would give the process the root group's access.
 	cmd.SysProcAttr.Credential = &syscall.Credential{Uid: UID, Gid: GID, Groups: []uint32{}}
-	cmd.SysProcAttr.AmbientCaps = append([]uintptr(nil), p.ambient...)
+	cmd.SysProcAttr.AmbientCaps = append([]uintptr(nil), ambient...)
 }
 
 func systemEnvironment() environment {
@@ -166,7 +160,7 @@ func probeProcess(ambient []uintptr) error {
 	return cmd.Run()
 }
 
-func capabilityName(capability uintptr) string {
+func linuxCapabilityName(capability uintptr) string {
 	switch capability {
 	case unix.CAP_NET_RAW:
 		return "NET_RAW"

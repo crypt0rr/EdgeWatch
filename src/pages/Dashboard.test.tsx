@@ -447,8 +447,22 @@ describe('dashboard', () => {
     expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
   })
 
+  it('shows Landlock beside the enforced scanner sandbox', async () => {
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'enforced', uid: 65532, gid: 65532, process_uid: 65532, capabilities: ['NET_RAW', 'NET_ADMIN'], no_new_privileges: true, landlock: { mode: 'auto', state: 'enforced', abi: 6 } } })
+    await renderDashboard()
+    await vi.waitFor(() => expect(container.querySelector('.deployment-telemetry')?.textContent).toContain('Scanner sandboxEnforced · NET_RAW, NET_ADMIN · Landlock'), { timeout: 1000 })
+    expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
+  })
+
+  it('warns an administrator when scanner processes run as UID 0 with only Landlock', async () => {
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'unavailable', process_uid: 0, reason: 'the container does not grant KILL', landlock: { mode: 'auto', state: 'enforced', abi: 6 } } })
+    await renderDashboard()
+    await vi.waitFor(() => expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain('Scanner processes run as UID 0, restricted only by Landlock. the container does not grant KILL'), { timeout: 1000 })
+    expect(container.querySelector('.deployment-telemetry')?.textContent).toContain('Scanner sandboxLandlock only')
+  })
+
   it('warns an administrator when scanner processes run unconfined as UID 0', async () => {
-    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'unavailable', process_uid: 0, reason: 'the container does not grant KILL, which EdgeWatch needs to start and stop scanner processes as UID 65532; add them to cap_add' } })
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'unavailable', process_uid: 0, reason: 'the container does not grant KILL, which EdgeWatch needs to start and stop scanner processes as UID 65532; add them to cap_add', landlock: { mode: 'auto', state: 'unavailable', reason: 'the kernel does not provide Landlock' } } })
     await renderDashboard()
     await vi.waitFor(() => expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain('Scanner processes run unconfined as UID 0. the container does not grant KILL'), { timeout: 1000 })
     expect(container.querySelector('.deployment-telemetry')?.textContent).toContain('Scanner sandboxUnavailable')

@@ -109,11 +109,13 @@ document with `"status": "unhealthy"` and the reason in `error`, so a monitoring
 script always receives JSON; the text output prints nothing on stdout in that
 case. A healthy or starting daemon prints its status, and `warnings` list
 actions that do not stop EdgeWatch, such as removing imported notification URLs
-from `config.yaml`, or scanner processes that run unconfined as UID 0. Both
+from `config.yaml`, or scanner processes that run as UID 0 outside the sandbox. Both
 documents include `scanner_sandbox`, which reports how scanner processes start
 in this container: `state` is `enforced`, `disabled`, or `unavailable`,
 `process_uid` is the UID they run as, `capabilities` lists what a sandboxed
-scanner keeps, and `reason` explains a sandbox that is not enforced. See
+scanner keeps, and `reason` explains a sandbox that is not enforced. Its
+`landlock` object reports the Landlock restriction with its own `state` and
+`reason`, and `abi`, the kernel's Landlock version. See
 [the scanner sandbox](/deployment/container-hardening/#scanner-sandbox). A database that cannot be opened at all, for example one
 with a newer schema, still fails before any document is printed.
 

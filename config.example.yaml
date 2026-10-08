@@ -65,10 +65,15 @@ scanner:
   # Nmap and Naabu run as the unprivileged UID 65532 with only their raw-packet
   # capabilities, so they cannot read the database or the keys. auto (the
   # default) does so when the container grants SETUID, SETGID and KILL, as the
-  # bundled compose.yaml does, and otherwise runs them unconfined as UID 0
-  # with a warning. required refuses to scan without the sandbox; off never
-  # uses it.
+  # bundled compose.yaml does, and otherwise runs them as UID 0 with a
+  # warning. required refuses to scan without the sandbox; off never
+  # uses it, nor Landlock.
   sandbox: auto
+  # Landlock limits Nmap and Naabu, whatever their UID, to the system files a
+  # scan reads, the files EdgeWatch passes to them, and /tmp. auto (the
+  # default) applies it when the kernel provides Landlock; required refuses
+  # to scan without it; off never applies it.
+  landlock: auto
 
 # Check the latest stable GitHub release at startup and every three hours.
 # Set enabled: false for offline or privacy-sensitive deployments. A check

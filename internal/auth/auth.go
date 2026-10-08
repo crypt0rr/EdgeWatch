@@ -100,14 +100,18 @@ func RetryAfterHeaderValue(err error) string {
 
 // dummyPasswordHash is used for unknown and disabled accounts so an invalid
 // login spends the same Argon2id work regardless of whether the username is
-// present. It is generated once with the same parameters as real passwords.
-var dummyPasswordHash = func() string {
+// present. It is generated once with the same parameters as real passwords,
+// when the first Manager is created, so that the first invalid login costs no
+// more than later ones. A process that never checks a password, such as each
+// scanner process that starts through the sandbox-exec command, does not
+// spend that work.
+var dummyPasswordHash = sync.OnceValue(func() string {
 	hash, err := PasswordHash("edgewatch-invalid-login-sentinel")
 	if err != nil {
 		panic(fmt.Sprintf("create authentication timing sentinel: %v", err))
 	}
 	return hash
-}()
+})
 
 const (
 	forwardedHeaderXForwardedFor = "x-forwarded-for"
@@ -242,6 +246,7 @@ func (m *Manager) UntrustedProxy() (UntrustedProxy, bool) {
 }
 
 func NewManager(s *store.Store) *Manager {
+	dummyPasswordHash()
 	return &Manager{
 		Store: s, Now: time.Now,
 		forwardedHeader: forwardedHeaderXForwardedFor,
@@ -765,7 +770,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		// A username that no account has gets the same password check as a
 		// disabled account, so the answer costs the same.
 		if err := m.withArgon2(ctx, func() error {
-			_ = VerifyPassword(dummyPasswordHash, password)
+			_ = VerifyPassword(dummyPasswordHash(), password)
 			return nil
 		}); err != nil {
 			if errors.Is(err, ErrRateLimited) {
@@ -782,7 +787,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		// prevents the login endpoint from becoming an account-enumeration oracle
 		// while the administration UI can still show the disabled state.
 		if err := m.withArgon2(ctx, func() error {
-			_ = VerifyPassword(dummyPasswordHash, password)
+			_ = VerifyPassword(dummyPasswordHash(), password)
 			return nil
 		}); err != nil {
 			if errors.Is(err, ErrRateLimited) {

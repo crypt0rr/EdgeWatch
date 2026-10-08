@@ -40,8 +40,32 @@ reason names the cause:
   not map UID 65532 into the container's user namespace. Use a full
   subordinate UID range for rootless Docker or user-namespace remapping.
 
-Scans keep working unconfined in either case. Set `scanner.sandbox: required`
-to refuse to scan without the sandbox instead.
+Scans keep working as UID 0 in either case. Where the kernel provides
+[Landlock](/deployment/container-hardening/#landlock), the warning reads
+"scanner processes run as UID 0, restricted only by Landlock": scanner
+processes still cannot read the database, keys, or configuration. Set
+`scanner.sandbox: required` to refuse to scan without the sandbox instead.
+
+## Scanner processes start without Landlock
+
+EdgeWatch logs this at startup, with the reason, and `edgewatch health`
+reports `scanner_sandbox.landlock.state` as `unavailable`, when
+`scanner.landlock` is `auto` and Nmap and Naabu cannot be restricted with
+[Landlock](/deployment/container-hardening/#landlock):
+
+- **The kernel does not provide Landlock, or the container's seccomp profile
+  blocks it.** The host kernel is older than Linux 5.13 or built without
+  Landlock, or a custom seccomp profile denies the `landlock_*` system calls.
+  Use Docker's default profile or allow those calls.
+- **Landlock is built into the kernel but not enabled.** Add `landlock` to
+  the host's `lsm=` boot parameter, or to `CONFIG_LSM`, and reboot.
+- **nmap could not start with Landlock.** Nmap, or a library it loads, lies
+  outside the paths the restriction allows, as in a modified image. The
+  reason ends with Nmap's last diagnostic line.
+
+Scans keep working without Landlock, in the identity sandbox when it is
+enforced. Set `scanner.landlock: required` to refuse to scan without it
+instead, or `scanner.landlock: off` to stop trying.
 
 ## Proxy hostname rejected
 

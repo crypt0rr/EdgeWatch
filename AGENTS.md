@@ -19,7 +19,7 @@ It uses a Go backend, SQLite storage, and a React/TypeScript web console.
 | `internal/app/` | Application coordination, scan lifecycle, and resumable work |
 | `internal/config/` | Configuration validation and scanner profiles |
 | `internal/scanner/` | Nmap and Naabu execution, parsing, and scan plans |
-| `internal/sandbox/` | The unprivileged identity and capabilities scanner processes start with |
+| `internal/sandbox/` | The unprivileged identity, capabilities, and Landlock restriction scanner processes start with |
 | `internal/engine/` | Baseline comparison and change detection |
 | `internal/model/` | Shared domain types |
 | `internal/store/` | SQLite queries, migrations, history, backup, and restore |
@@ -70,7 +70,7 @@ Documentation-only changes need a diff review and checks of referenced paths and
 | Database schema | Store migration tests and `./scripts/check-schema-docs.sh` |
 | Compose configuration | Run `docker compose config --quiet` and `docker compose -f compose.yaml -f compose.syn.yaml config --quiet`, then verify the rendered capability, hardening, image, and storage policies described in `docs/src/content/docs/deployment/container-hardening.md` and the CI `Validate Compose deployment` step |
 | Scanner dependency pin | `./scripts/verify-naabu-pin.sh` |
-| Scanner execution or sandbox | Build the image and run `./scripts/verify-scanner-sandbox.sh IMAGE`, which needs Docker; it compares real sandboxed and unconfined scans of local listeners |
+| Scanner execution or sandbox | Build the image and run `./scripts/verify-scanner-sandbox.sh IMAGE`, which needs Docker and a kernel with Landlock; it compares real sandboxed, Landlock-only, and unconfined scans of local listeners and tries Landlock escapes |
 | Release helper scripts | `./scripts/test-release-artifacts.sh`; this uses fixture binaries and does not build a release candidate |
 | Release workflow or GoReleaser configuration | Follow the exact GoReleaser check and immutable-candidate gates in `.github/workflows/release.yml`; the candidate, publication, image, and runtime smoke gates run only for tags |
 
@@ -94,7 +94,7 @@ Report the checks you ran and any failures or checks you could not run.
 - Use controlled listeners for integration scans and scan only authorized targets.
 - Preserve target exclusions, probe budgets, cancellation, and resumable scan behavior.
 - Keep scanner execution shell-free on fixed executables with validated argument arrays and `exec.CommandContext`; preserve the minimal environment, private temporary inputs and outputs, bounded diagnostic and structured output, and child termination when those bounds are exceeded.
-- Start every Nmap and Naabu process through the scanner's sandbox policy (`internal/sandbox`): confine the command, and pass private files with `InheritFile` rather than by path. Confined processes keep only `NET_RAW` and `NET_ADMIN` as ambient capabilities, and the bundled Compose capability set stays exact.
+- Start every Nmap and Naabu process through the scanner's sandbox policy (`internal/sandbox`): pass private files with `InheritFile` rather than by path, read-only or write-only as the scanner uses them, and confine the command after that, because the Landlock restriction lets a scanner reopen only the files it inherited. Confined processes keep only `NET_RAW` and `NET_ADMIN` as ambient capabilities, and the bundled Compose capability set stays exact.
 - Keep UDP scans on Nmap and require Nmap confirmation before Naabu discoveries enter baselines or incidents.
 - Preserve job profile revisions so profile edits do not silently change scheduled jobs.
 - Preserve baseline state for failed or incomplete observations and retain scan history when users accept changes.

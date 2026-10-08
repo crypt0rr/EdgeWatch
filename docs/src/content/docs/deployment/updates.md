@@ -63,7 +63,9 @@ listed under [Business units](/administration/business-units/).
 The image uses a read-only root filesystem, drops all capabilities, and adds
 `NET_RAW` for the default scanner modes, plus `SETUID`, `SETGID` and `KILL` so
 EdgeWatch can run Nmap and Naabu in the
-[scanner sandbox](/deployment/container-hardening/#scanner-sandbox). A
+[scanner sandbox](/deployment/container-hardening/#scanner-sandbox), and the
+notification process in its
+[own sandbox](/deployment/container-hardening/#notification-sandbox). A
 `compose.yaml` from a release before v0.27.0 lacks the last three; add them
 when you update, or the scanners keep running as UID 0 and EdgeWatch warns.
 Where the kernel provides Landlock, EdgeWatch also restricts the files the

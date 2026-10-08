@@ -134,7 +134,8 @@ var sqlAuditActionPattern = regexp.MustCompile(`'([a-z][a-z0-9_]*(?:\.[a-z0-9_]+
 
 // notAuditActions are the dotted string literals in the sources that are not
 // audit actions: live-update message types, file and host names, and the
-// path of an obsolete config.yaml setting. Permission names are declared in
+// paths of config.yaml settings, such as an obsolete one and the sandbox
+// settings that reasons name. Permission names are declared in
 // internal/auth/permissions.go, which is not scanned.
 var notAuditActions = map[string]bool{
 	"application.update_status":   true,
@@ -149,6 +150,9 @@ var notAuditActions = map[string]bool{
 	"github.com":                  true,
 	"localhost.localdomain":       true,
 	"experimental.business_units": true,
+	"scanner.sandbox":             true,
+	"scanner.landlock":            true,
+	"notifications.sandbox":       true,
 }
 
 // Every string in the non-test sources that looks like an audit action is

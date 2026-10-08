@@ -152,7 +152,7 @@ func TestRestrictedNmapStartsThroughSandboxExecWithItsXMLFile(t *testing.T) {
 			defer os.Remove(path)
 			defer release()
 			confineNmap(cmd, test.policy)
-			want := []string{helper, sandbox.ExecCommand, "--files", "1", "--", nmap}
+			want := []string{helper, sandbox.ExecCommand, "--profile", "scanner", "--files", "1", "--", nmap}
 			if test.privileged {
 				want = append(want, "--privileged")
 			}
@@ -176,7 +176,7 @@ func TestRestrictedNmapInvocationSharesTheXMLFileBeforeStarting(t *testing.T) {
 	dir := t.TempDir()
 	// The stand-in writes the XML through the descriptor named after -oX, and
 	// refuses to run when it was started before the file was shared.
-	helper := writeFakeHelper(t, dir, `[ "$3" = 1 ] || exit 9
+	helper := writeFakeHelper(t, dir, `[ "$5" = 1 ] || exit 9
 while [ "$#" -gt 0 ]; do
   if [ "$1" = -oX ]; then printf '%s' '<nmaprun></nmaprun>' > "$2"; fi
   shift
@@ -192,7 +192,7 @@ done
 		t.Fatalf("XML = %q", stdout)
 	}
 	args, err := os.ReadFile(filepath.Join(dir, "args"))
-	if err != nil || !strings.HasPrefix(string(args), sandbox.ExecCommand+"\n--files\n1\n--\n") {
+	if err != nil || !strings.HasPrefix(string(args), sandbox.ExecCommand+"\n--profile\nscanner\n--files\n1\n--\n") {
 		t.Fatalf("sandbox-exec arguments = %q, %v", args, err)
 	}
 }
@@ -212,7 +212,7 @@ func TestRestrictedNaabuReadsTargetsThroughSandboxExec(t *testing.T) {
 		t.Fatalf("results = %#v", results)
 	}
 	args, err := os.ReadFile(filepath.Join(dir, "args"))
-	if err != nil || !strings.HasPrefix(string(args), sandbox.ExecCommand+"\n--files\n1\n--\n"+naabu+"\n-list\n/dev/fd/3\n") {
+	if err != nil || !strings.HasPrefix(string(args), sandbox.ExecCommand+"\n--profile\nscanner\n--files\n1\n--\n"+naabu+"\n-list\n/dev/fd/3\n") {
 		t.Fatalf("sandbox-exec arguments = %q, %v", args, err)
 	}
 	if targets, err := os.ReadFile(filepath.Join(dir, "targets")); err != nil || string(targets) != "192.0.2.1\n" {

@@ -39,8 +39,13 @@ func TestAdminStatusReportsTheScannerSandbox(t *testing.T) {
 	if err := json.Unmarshal(status(admin)["scanner_sandbox"], &sandbox); err != nil || sandbox.State != "disabled" {
 		t.Fatalf("administrator scanner_sandbox = %+v (%v), want disabled", sandbox, err)
 	}
+	if err := json.Unmarshal(status(admin)["notification_sandbox"], &sandbox); err != nil || sandbox.State != "disabled" {
+		t.Fatalf("administrator notification_sandbox = %+v (%v), want disabled", sandbox, err)
+	}
 	viewer := store.Session{UserID: viewerUser.ID, Username: viewerUser.Username, Role: store.RoleViewer}
-	if _, ok := status(viewer)["scanner_sandbox"]; ok {
-		t.Fatal("a viewer's status names the scanner sandbox")
+	for _, key := range []string{"scanner_sandbox", "notification_sandbox"} {
+		if _, ok := status(viewer)[key]; ok {
+			t.Fatalf("a viewer's status names %s", key)
+		}
 	}
 }

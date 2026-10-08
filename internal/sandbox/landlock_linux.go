@@ -41,11 +41,10 @@ type landlockPath struct {
 	access uint64
 }
 
-// landlockPaths are what a scanner opens besides the files it inherits.
-// Paths that do not exist on a host are skipped. A restricted process can
-// create files only below /tmp, write elsewhere only to /dev/null, /dev/tty,
-// and the files it inherits, and execute only programs below the system
-// directories.
+// landlockPaths are what every restricted process opens besides the files it
+// inherits. Paths that do not exist on a host are skipped. A restricted
+// process can write only to /dev/null, the files it inherits, and the paths
+// its profile adds, and execute only programs below the system directories.
 var landlockPaths = []landlockPath{
 	// Programs, the dynamic loader, shared libraries, and scanner data such
 	// as /usr/share/nmap.
@@ -88,6 +87,11 @@ var landlockPaths = []landlockPath{
 	{"/dev/zero", unix.LANDLOCK_ACCESS_FS_READ_FILE},
 	{"/dev/random", unix.LANDLOCK_ACCESS_FS_READ_FILE},
 	{"/dev/urandom", unix.LANDLOCK_ACCESS_FS_READ_FILE},
+}
+
+// scannerLandlockPaths are what a scanner opens besides landlockPaths. A
+// restricted scanner can create files only below /tmp.
+var scannerLandlockPaths = []landlockPath{
 	// Nmap reads keyboard commands from its controlling terminal, which is
 	// the daemon's private pseudo-terminal.
 	{"/dev/tty", unix.LANDLOCK_ACCESS_FS_READ_FILE | unix.LANDLOCK_ACCESS_FS_WRITE_FILE},
@@ -141,14 +145,14 @@ func handledScopes(abi int) uint64 {
 
 // execLandlocked is the sandbox-exec command:
 //
-//	sandbox-exec --files N -- PROGRAM [ARGUMENT...]
+//	sandbox-exec --profile PROFILE --files N -- PROGRAM [ARGUMENT...]
 //
-// It restricts its own process with Landlock to landlockPaths and its N
-// inherited descriptors, starting at 3, sets no_new_privs, and then executes
-// PROGRAM in place. The process keeps its identity, capabilities,
+// It restricts its own process with Landlock to the paths of PROFILE and its
+// N inherited descriptors, starting at 3, sets no_new_privs, and then
+// executes PROGRAM in place. The process keeps its identity, capabilities,
 // descriptors, and environment, and the daemon's handle on it stays valid.
 func execLandlocked(args []string) error {
-	files, argv, err := parseExecArgs(args)
+	profile, files, argv, err := parseExecArgs(args)
 	if err != nil {
 		return err
 	}
@@ -160,7 +164,7 @@ func execLandlocked(args []string) error {
 	for index := range inherited {
 		inherited[index] = 3 + index
 	}
-	if err := restrictSelf(scannerPaths(), inherited); err != nil {
+	if err := restrictSelf(profilePaths(profile, os.Getenv), inherited); err != nil {
 		return fmt.Errorf("%s: %w", ExecCommand, err)
 	}
 	if err := syscall.Exec(argv[0], argv, os.Environ()); err != nil {
@@ -169,28 +173,45 @@ func execLandlocked(args []string) error {
 	return nil
 }
 
-func parseExecArgs(args []string) (int, []string, error) {
-	usage := fmt.Errorf("usage: %s --files N -- PROGRAM [ARGUMENT...]", ExecCommand)
-	if len(args) < 4 || args[0] != "--files" || args[2] != "--" {
-		return 0, nil, usage
+func parseExecArgs(args []string) (Profile, int, []string, error) {
+	usage := fmt.Errorf("usage: %s --profile scanner|notifier --files N -- PROGRAM [ARGUMENT...]", ExecCommand)
+	if len(args) < 6 || args[0] != "--profile" || args[2] != "--files" || args[4] != "--" {
+		return "", 0, nil, usage
 	}
-	files, err := strconv.Atoi(args[1])
-	if err != nil || files < 0 || files > maxInheritedFiles {
-		return 0, nil, usage
+	profile := Profile(args[1])
+	files, err := strconv.Atoi(args[3])
+	if !profile.valid() || err != nil || files < 0 || files > maxInheritedFiles {
+		return "", 0, nil, usage
 	}
-	if !filepath.IsAbs(args[3]) {
-		return 0, nil, fmt.Errorf("%s: the program %q is not an absolute path", ExecCommand, args[3])
+	if !filepath.IsAbs(args[5]) {
+		return "", 0, nil, fmt.Errorf("%s: the program %q is not an absolute path", ExecCommand, args[5])
 	}
-	return files, args[3:], nil
+	return profile, files, args[5:], nil
 }
 
-// scannerPaths are landlockPaths and the search path files of musl's dynamic
-// loader, which are named after the architecture.
-func scannerPaths() []landlockPath {
+// profilePaths are landlockPaths, the search path files of musl's dynamic
+// loader, which are named after the architecture, and the paths of profile.
+// The notification process also reads the certificate authorities that the
+// SSL_CERT_FILE and SSL_CERT_DIR variables of its environment name, which
+// the daemon passes on from its own.
+func profilePaths(profile Profile, getenv func(string) string) []landlockPath {
 	paths := append([]landlockPath(nil), landlockPaths...)
 	musl, _ := filepath.Glob("/etc/ld-musl-*.path")
 	for _, path := range musl {
 		paths = append(paths, landlockPath{path, landlockRead})
+	}
+	switch profile {
+	case Scanner:
+		paths = append(paths, scannerLandlockPaths...)
+	case Notifier:
+		if file := getenv("SSL_CERT_FILE"); file != "" {
+			paths = append(paths, landlockPath{file, landlockRead})
+		}
+		for _, directory := range filepath.SplitList(getenv("SSL_CERT_DIR")) {
+			if directory != "" {
+				paths = append(paths, landlockPath{directory, landlockRead})
+			}
+		}
 	}
 	return paths
 }

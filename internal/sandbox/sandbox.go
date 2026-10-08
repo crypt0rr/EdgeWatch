@@ -1,6 +1,7 @@
 // Package sandbox starts scanner processes as an unprivileged identity that
 // keeps only the network capabilities a scan needs, and restricts the files
-// they can open with Landlock.
+// they can open with Landlock. It confines the notification process the same
+// way, as its own identity and without capabilities.
 //
 // Nmap, its NSE scripts, and Naabu parse responses from the networks they
 // scan. When the daemon runs as UID 0, as the container does, a scanner
@@ -55,43 +56,100 @@ const (
 	GID = 65532
 )
 
-// ExecCommand is the hidden EdgeWatch command through which a scanner process
+// NotifierUID and NotifierGID identify the confined notification process. It
+// has an identity of its own, so a compromised scanner process can neither
+// signal it nor read the destination URL from its memory.
+const (
+	NotifierUID = 65531
+	NotifierGID = 65531
+)
+
+// Profile names the kind of process a policy confines.
+type Profile string
+
+const (
+	// Scanner confines Nmap and Naabu as UID and GID, with the raw-packet
+	// capabilities the daemon holds.
+	Scanner Profile = "scanner"
+	// Notifier confines the notification process as NotifierUID and
+	// NotifierGID, without capabilities and without any file it can write.
+	Notifier Profile = "notifier"
+)
+
+// profileSpec describes how a profile confines its processes.
+type profileSpec struct {
+	uid, gid int
+	// keepsNetwork keeps the raw-packet capabilities the daemon holds.
+	keepsNetwork bool
+	// processes names the confined processes, and testProcess the probe that
+	// confirms the identity change, in reasons.
+	processes, testProcess string
+	// sandboxSetting and landlockSetting select the identity and Landlock
+	// modes.
+	sandboxSetting, landlockSetting string
+}
+
+func (profile Profile) spec() profileSpec {
+	if profile == Notifier {
+		return profileSpec{
+			uid: NotifierUID, gid: NotifierGID, processes: "the notification process", testProcess: "a test notification process",
+			sandboxSetting: "notifications.sandbox", landlockSetting: "notifications.sandbox",
+		}
+	}
+	return profileSpec{
+		uid: UID, gid: GID, keepsNetwork: true, processes: "scanner processes", testProcess: "a test process",
+		sandboxSetting: "scanner.sandbox", landlockSetting: "scanner.landlock",
+	}
+}
+
+func (profile Profile) valid() bool {
+	return profile == Scanner || profile == Notifier
+}
+
+func profileOrScanner(profile Profile) Profile {
+	if profile == "" {
+		return Scanner
+	}
+	return profile
+}
+
+// ExecCommand is the hidden EdgeWatch command through which a process
 // restricted with Landlock starts.
 const ExecCommand = "sandbox-exec"
 
-// ErrUnavailable reports that scanner.sandbox or scanner.landlock is required
-// but scanner processes cannot be confined that way.
-var ErrUnavailable = errors.New("the scanner sandbox is unavailable")
+// ErrUnavailable reports that a sandbox setting, such as scanner.sandbox, is
+// required but the processes cannot be confined that way.
+var ErrUnavailable = errors.New("the sandbox is unavailable")
 
-// Status describes how scanner processes start.
+// Status describes how the processes of a profile start.
 type Status struct {
-	// Mode is the configured scanner.sandbox mode.
+	// Mode is the configured mode, such as scanner.sandbox.
 	Mode string `json:"mode"`
 	// State is enforced, disabled, or unavailable.
 	State string `json:"state"`
-	// UID and GID are the identity of confined scanner processes.
+	// UID and GID are the identity of the confined processes.
 	UID int `json:"uid,omitempty"`
 	GID int `json:"gid,omitempty"`
-	// ProcessUID is the UID scanner processes run as: UID when confined,
+	// ProcessUID is the UID the processes run as: UID when confined,
 	// otherwise the daemon's own.
 	ProcessUID int `json:"process_uid"`
-	// Capabilities are the capabilities a confined scanner process keeps.
+	// Capabilities are the capabilities a confined process keeps.
 	Capabilities []string `json:"capabilities,omitempty"`
-	// NoNewPrivileges reports whether scanner processes run with
+	// NoNewPrivileges reports whether the processes run with
 	// no_new_privs: the daemon's, which they inherit, or the one the Landlock
 	// restriction sets.
 	NoNewPrivileges bool `json:"no_new_privileges,omitempty"`
 	// Reason explains a disabled or unavailable sandbox.
 	Reason string `json:"reason,omitempty"`
-	// Landlock describes the restriction of the files scanner processes can
+	// Landlock describes the restriction of the files the processes can
 	// open.
 	Landlock LandlockStatus `json:"landlock"`
 }
 
-// LandlockStatus describes how the files scanner processes can open are
+// LandlockStatus describes how the files the processes can open are
 // restricted.
 type LandlockStatus struct {
-	// Mode is the configured scanner.landlock mode.
+	// Mode is the configured Landlock mode, such as scanner.landlock.
 	Mode string `json:"mode"`
 	// State is enforced, disabled, or unavailable.
 	State string `json:"state"`
@@ -104,15 +162,35 @@ type LandlockStatus struct {
 
 // Options configures Detect.
 type Options struct {
-	// Mode is the scanner.sandbox mode.
+	// Profile is the kind of process to confine. Empty is Scanner.
+	Profile Profile
+	// Mode is the identity mode, such as scanner.sandbox.
 	Mode string
-	// Landlock is the scanner.landlock mode.
+	// Landlock is the Landlock mode, such as scanner.landlock.
 	Landlock string
-	// Probes are scanner commands, such as a version command, that Detect
-	// runs confined as scanner processes would be, to confirm that each
-	// scanner can start with the Landlock restriction. A probe whose
-	// executable does not exist is skipped.
-	Probes [][]string
+	// IdentityProbe is the command Detect runs as the confined identity,
+	// without Landlock, to confirm that the runtime allows the identity
+	// change. Empty runs the EdgeWatch version command.
+	IdentityProbe Probe
+	// Probes are commands, such as a scanner's version command, that Detect
+	// runs confined as the processes would be, to confirm that each can
+	// start and work with the Landlock restriction.
+	Probes []Probe
+}
+
+// Probe is a short-lived command that Detect runs confined. A probe whose
+// executable does not exist is skipped.
+type Probe struct {
+	// Name names the probed process in reasons. Empty uses the
+	// executable's name.
+	Name string
+	// Args is the command and its arguments. With Self, they are the
+	// arguments of the EdgeWatch executable.
+	Args []string
+	Self bool
+	// Env is the command's environment. Nil gives it only a fixed PATH and
+	// HOME.
+	Env []string
 }
 
 // The platform hooks. Only Linux installs them, because the sandbox relies on
@@ -121,38 +199,40 @@ type Options struct {
 // Exec fails.
 var (
 	detectPlatform func(options Options) *Policy
-	confineProcess func(cmd *exec.Cmd, ambient []uintptr)
+	confineProcess func(cmd *exec.Cmd, uid, gid int, ambient []uintptr)
 	nameCapability func(capability uintptr) string
 	execRestricted func(args []string) error
 )
 
-// Detect decides how scanner processes start in this runtime for the
-// configured scanner.sandbox and scanner.landlock modes. Unless a mode is off,
-// it starts short-lived confined processes to confirm that the runtime allows
-// the identity change, the capabilities, and the Landlock restriction.
+// Detect decides how the processes of a profile start in this runtime for the
+// configured modes. Unless a mode is off, it starts short-lived confined
+// processes to confirm that the runtime allows the identity change, the
+// capabilities, and the Landlock restriction.
 func Detect(options Options) *Policy {
+	options.Profile = profileOrScanner(options.Profile)
 	options.Mode = normalizedMode(options.Mode)
 	options.Landlock = normalizedMode(options.Landlock)
 	if detectPlatform != nil {
 		return detectPlatform(options)
 	}
+	spec := options.Profile.spec()
 	status := Status{
-		Mode: options.Mode, State: StateUnavailable, ProcessUID: os.Geteuid(), Reason: "the scanner sandbox requires Linux",
+		Mode: options.Mode, State: StateUnavailable, ProcessUID: os.Geteuid(), Reason: "the sandbox requires Linux",
 		Landlock: LandlockStatus{Mode: options.Landlock, State: StateUnavailable, Reason: "Landlock requires Linux"},
 	}
 	switch {
 	case options.Mode == ModeOff:
-		status.State, status.Reason = StateDisabled, "scanner.sandbox is off"
-		status.Landlock.State, status.Landlock.Reason = StateDisabled, "scanner.sandbox is off"
+		status.State, status.Reason = StateDisabled, spec.sandboxSetting+" is off"
+		status.Landlock.State, status.Landlock.Reason = StateDisabled, spec.sandboxSetting+" is off"
 	case options.Landlock == ModeOff:
-		status.Landlock.State, status.Landlock.Reason = StateDisabled, "scanner.landlock is off"
+		status.Landlock.State, status.Landlock.Reason = StateDisabled, spec.landlockSetting+" is off"
 	}
-	return &Policy{status: status}
+	return &Policy{profile: options.Profile, status: status}
 }
 
 // Exec runs the sandbox-exec command: it restricts its own process with
-// Landlock and then executes the scanner in its place. It returns only when
-// the scanner cannot be started.
+// Landlock and then executes the program in its place. It returns only when
+// the program cannot be started.
 func Exec(args []string) error {
 	if execRestricted == nil {
 		return errors.New(ExecCommand + " requires Linux")
@@ -170,19 +250,21 @@ func (p *Policy) Confine(cmd *exec.Cmd) {
 		return
 	}
 	if p.enforce && confineProcess != nil {
-		confineProcess(cmd, p.ambient)
+		spec := p.profileName().spec()
+		confineProcess(cmd, spec.uid, spec.gid, p.ambient)
 	}
 	if p.helper != "" {
-		startThroughHelper(cmd, p.helper)
+		startThroughHelper(cmd, p.helper, p.profileName())
 	}
 }
 
 // startThroughHelper makes cmd start the sandbox-exec command of the EdgeWatch
-// executable helper, which restricts itself and then executes cmd's program
-// with cmd's arguments and the descriptors cmd passes. A program that does
-// not exist makes cmd's start fail with that error instead, so callers still
-// recognize a missing scanner, and never starts it without the restriction.
-func startThroughHelper(cmd *exec.Cmd, helper string) {
+// executable helper, which restricts itself for profile and then executes
+// cmd's program with cmd's arguments and the descriptors cmd passes. A
+// program that does not exist makes cmd's start fail with that error instead,
+// so callers still recognize a missing scanner, and never starts it without
+// the restriction.
+func startThroughHelper(cmd *exec.Cmd, helper string, profile Profile) {
 	if cmd.Err != nil {
 		return
 	}
@@ -190,7 +272,7 @@ func startThroughHelper(cmd *exec.Cmd, helper string) {
 		cmd.Err = err
 		return
 	}
-	args := []string{helper, ExecCommand, "--files", strconv.Itoa(len(cmd.ExtraFiles)), "--", cmd.Path}
+	args := []string{helper, ExecCommand, "--profile", string(profile), "--files", strconv.Itoa(len(cmd.ExtraFiles)), "--", cmd.Path}
 	cmd.Args = append(args, cmd.Args[1:]...)
 	cmd.Path = helper
 }
@@ -202,15 +284,23 @@ func capabilityName(capability uintptr) string {
 	return fmt.Sprintf("CAP_%d", capability)
 }
 
-// Policy decides how scanner processes start. A nil Policy, like a policy
-// that confines nothing, starts them unconfined.
+// Policy decides how the processes of a profile start. A nil Policy, like a
+// policy that confines nothing, starts them unconfined.
 type Policy struct {
+	profile Profile
 	status  Status
 	enforce bool
 	ambient []uintptr
 	// helper is the EdgeWatch executable whose sandbox-exec command restricts
-	// scanner processes with Landlock. Empty starts them without it.
+	// the processes with Landlock. Empty starts them without it.
 	helper string
+}
+
+func (p *Policy) profileName() Profile {
+	if p == nil {
+		return Scanner
+	}
+	return profileOrScanner(p.profile)
 }
 
 // Access is how a confined process uses a file it inherits.
@@ -246,26 +336,36 @@ func normalizedMode(mode string) string {
 // ambient capabilities, without Landlock and without checking that the
 // runtime allows it. Detect is the entry point that checks.
 func NewEnforced(ambient ...uintptr) *Policy {
+	return NewEnforcedFor(Scanner, ambient...)
+}
+
+// NewEnforcedFor returns a policy that confines the processes of profile as
+// its identity with the given ambient capabilities, without Landlock and
+// without checking that the runtime allows it.
+func NewEnforcedFor(profile Profile, ambient ...uintptr) *Policy {
+	profile = profileOrScanner(profile)
+	spec := profile.spec()
 	names := make([]string, 0, len(ambient))
 	for _, capability := range ambient {
 		names = append(names, capabilityName(capability))
 	}
 	return &Policy{
+		profile: profile,
 		status: Status{
-			Mode: ModeAuto, State: StateEnforced, UID: UID, GID: GID, ProcessUID: UID, Capabilities: names,
-			Landlock: LandlockStatus{Mode: ModeOff, State: StateDisabled, Reason: "scanner.landlock is off"},
+			Mode: ModeAuto, State: StateEnforced, UID: spec.uid, GID: spec.gid, ProcessUID: spec.uid, Capabilities: names,
+			Landlock: LandlockStatus{Mode: ModeOff, State: StateDisabled, Reason: spec.landlockSetting + " is off"},
 		},
 		enforce: true,
 		ambient: append([]uintptr(nil), ambient...),
 	}
 }
 
-// WithLandlock returns a copy of p that also starts scanner processes through
-// the sandbox-exec command of the EdgeWatch executable helper, which restricts
+// WithLandlock returns a copy of p that also starts its processes through the
+// sandbox-exec command of the EdgeWatch executable helper, which restricts
 // them with Landlock ABI abi, without checking that the kernel allows it. A
-// nil p gives a policy that only restricts them with Landlock.
+// nil p gives a policy that only restricts scanner processes with Landlock.
 func (p *Policy) WithLandlock(helper string, abi int) *Policy {
-	restricted := &Policy{status: Status{Mode: ModeOff, State: StateDisabled, ProcessUID: os.Geteuid(), Reason: "scanner.sandbox is off"}}
+	restricted := &Policy{profile: Scanner, status: Status{Mode: ModeOff, State: StateDisabled, ProcessUID: os.Geteuid(), Reason: "scanner.sandbox is off"}}
 	if p != nil {
 		copied := *p
 		copied.status.Capabilities = append([]string(nil), p.status.Capabilities...)
@@ -278,14 +378,13 @@ func (p *Policy) WithLandlock(helper string, abi int) *Policy {
 	return restricted
 }
 
-// Enforced reports whether scanner processes start as the confined identity
-// with only the ambient capabilities.
+// Enforced reports whether the processes start as the confined identity with
+// only the ambient capabilities.
 func (p *Policy) Enforced() bool {
 	return p != nil && p.enforce
 }
 
-// Restricted reports whether scanner processes start restricted with
-// Landlock.
+// Restricted reports whether the processes start restricted with Landlock.
 func (p *Policy) Restricted() bool {
 	return p != nil && p.helper != ""
 }
@@ -297,12 +396,12 @@ func (p *Policy) InheritsFiles() bool {
 	return p.Enforced() || p.Restricted()
 }
 
-// Status reports how scanner processes start.
+// Status reports how the processes start.
 func (p *Policy) Status() Status {
 	if p == nil {
 		return Status{
-			Mode: ModeOff, State: StateDisabled, ProcessUID: os.Geteuid(), Reason: "scanner processes are not confined",
-			Landlock: LandlockStatus{Mode: ModeOff, State: StateDisabled, Reason: "scanner processes are not confined"},
+			Mode: ModeOff, State: StateDisabled, ProcessUID: os.Geteuid(), Reason: "the processes are not confined",
+			Landlock: LandlockStatus{Mode: ModeOff, State: StateDisabled, Reason: "the processes are not confined"},
 		}
 	}
 	status := p.status
@@ -310,18 +409,18 @@ func (p *Policy) Status() Status {
 	return status
 }
 
-// Require reports ErrUnavailable, with the reason, when scanner.sandbox or
-// scanner.landlock is required and scanner processes cannot be confined that
-// way.
+// Require reports ErrUnavailable, with the reason, when the identity or the
+// Landlock mode is required and the processes cannot be confined that way.
 func (p *Policy) Require() error {
 	if p == nil {
 		return nil
 	}
+	spec := p.profileName().spec()
 	if p.status.Mode == ModeRequired && !p.enforce {
-		return fmt.Errorf("%w: %s; set scanner.sandbox to auto to start scanner processes unconfined", ErrUnavailable, p.status.Reason)
+		return fmt.Errorf("%w: %s; set %s to auto to start %s unconfined", ErrUnavailable, p.status.Reason, spec.sandboxSetting, spec.processes)
 	}
 	if p.status.Landlock.Mode == ModeRequired && p.helper == "" {
-		return fmt.Errorf("%w: %s; set scanner.landlock to auto to start scanner processes without Landlock", ErrUnavailable, p.status.Landlock.Reason)
+		return fmt.Errorf("%w: %s; set %s to auto to start %s without Landlock", ErrUnavailable, p.status.Landlock.Reason, spec.landlockSetting, spec.processes)
 	}
 	return nil
 }

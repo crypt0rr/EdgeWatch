@@ -14,6 +14,7 @@ import (
 var commandFlagAllowlist = map[string]map[string]struct{}{
 	"help":                       {},
 	"notify-send":                {},
+	"notify-check":               {},
 	"version":                    {},
 	"daemon":                     allowedFlags("config", "nmap"),
 	"config validate":            allowedFlags("config", "output"),

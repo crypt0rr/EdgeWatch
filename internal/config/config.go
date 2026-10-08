@@ -85,7 +85,7 @@ type ScannerConfig struct {
 	Landlock string `yaml:"landlock"`
 }
 
-// The scanner.sandbox and scanner.landlock values.
+// The scanner.sandbox, scanner.landlock, and notifications.sandbox values.
 const (
 	ScannerSandboxAuto     = "auto"
 	ScannerSandboxRequired = "required"
@@ -211,6 +211,11 @@ type Notifications struct {
 	URLs              []string `yaml:"urls"`
 	URLsFile          string   `yaml:"urls_file"`
 	EncryptionKeyFile string   `yaml:"encryption_key_file"`
+	// Sandbox is how the notification process starts: auto (the default)
+	// runs it as an unprivileged identity without capabilities, restricted
+	// with Landlock when the kernel provides it, required refuses to deliver
+	// notifications without the identity, and off never confines it.
+	Sandbox string `yaml:"sandbox"`
 }
 type Job struct {
 	Name              string    `yaml:"name"`
@@ -596,6 +601,10 @@ func applyDefaults(c *Config) {
 	c.Scanner.Landlock = strings.ToLower(strings.TrimSpace(c.Scanner.Landlock))
 	if c.Scanner.Landlock == "" {
 		c.Scanner.Landlock = ScannerSandboxAuto
+	}
+	c.Notifications.Sandbox = strings.ToLower(strings.TrimSpace(c.Notifications.Sandbox))
+	if c.Notifications.Sandbox == "" {
+		c.Notifications.Sandbox = ScannerSandboxAuto
 	}
 	if strings.TrimSpace(c.Log.Level) == "" {
 		c.Log.Level = "info"
@@ -1017,6 +1026,11 @@ func (c Config) ValidateDeployment() error {
 	}
 	if c.Scanner.Landlock == ScannerSandboxRequired && c.Scanner.Sandbox == ScannerSandboxOff {
 		return fmt.Errorf("scanner.landlock cannot be required while scanner.sandbox is off, which turns off Landlock too")
+	}
+	switch c.Notifications.Sandbox {
+	case "", ScannerSandboxAuto, ScannerSandboxRequired, ScannerSandboxOff:
+	default:
+		return fmt.Errorf("notifications.sandbox must be auto, required, or off")
 	}
 	if level := strings.ToLower(strings.TrimSpace(c.Log.Level)); level != "" && level != "debug" && level != "info" && level != "warn" && level != "error" {
 		return fmt.Errorf("log.level must be one of debug, info, warn, or error")

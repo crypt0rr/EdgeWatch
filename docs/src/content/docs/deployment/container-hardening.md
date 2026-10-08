@@ -11,7 +11,8 @@ supplementary groups and only the raw-packet capabilities a scan needs. A
 compromised scanner process cannot read the database or the encryption keys.
 When the kernel provides [Landlock](#landlock), EdgeWatch also limits each
 scanner process to the files a scan needs, and this holds even for a scanner
-process that runs as UID 0.
+process that runs as UID 0. The process that delivers notifications runs in a
+[sandbox](#notification-sandbox) of its own, without capabilities.
 
 The daemon itself keeps UID 0 for compatibility. Nmap UDP and SYN scans, and
 Naabu SYN discovery, need raw-packet privileges. On the supported Docker
@@ -24,8 +25,8 @@ The image and Compose deployment still apply the following controls:
 
 - all capabilities are dropped first;
 - the base deployment adds `NET_RAW` for the scanners, and `SETUID`, `SETGID`
-  and `KILL` so the daemon can start scanner processes as the sandbox identity
-  and stop them;
+  and `KILL` so the daemon can start scanner and notification processes as
+  their sandbox identities and stop them;
 - `compose.syn.yaml` is an explicit administrator opt-in for `NET_ADMIN`;
 - `no-new-privileges` is enabled;
 - the container is not privileged, sets no `unconfined` seccomp or AppArmor
@@ -209,10 +210,44 @@ needed; `./data` keeps its UID 0 ownership.
   scanner process could observe other scans that run at the same time.
 - A scanner process keeps its network access; target exclusions and probe
   budgets are enforced by EdgeWatch before it starts.
-- On a kernel without Landlock, a scanner process can read every file its
+- On a kernel without Landlock, a sandboxed process can read every file its
   identity may read.
-- Notification delivery runs in its own child process, which is not yet
-  sandboxed.
+
+## Notification sandbox
+
+Each notification is delivered by a short-lived child process, so a fault in
+a provider cannot stop the daemon. The child receives one destination URL and
+the message, and needs no other private data. `notifications.sandbox` in
+`config.yaml` selects how it starts:
+
+| Value | Behaviour |
+| --- | --- |
+| `auto` (default) | Starts the notification process in the sandbox when the container allows it. Otherwise it starts unconfined, and EdgeWatch logs a warning and adds it to `edgewatch health` when it runs as UID 0. |
+| `required` | Refuses to start the daemon, or `edgewatch notify test`, when the sandbox is unavailable. |
+| `off` | Starts the notification process unconfined, as releases before the sandbox did, without Landlock. |
+
+A sandboxed notification process:
+
+- runs as UID and GID 65531 (`edgewatch-notify`) with no supplementary groups
+  and no capabilities. It has an identity of its own, so a compromised
+  scanner process can neither signal it nor read its memory;
+- is restricted with [Landlock](#landlock), when the kernel provides it, to the
+  same system files as a scanner process, without `/tmp`: it can write no file
+  at all;
+- keeps its network access and the proxy, time zone, and certificate authority
+  variables the daemon passes to it: `HTTP_PROXY`, `HTTPS_PROXY`,
+  `ALL_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `TZ`, `LANG`, and
+  `LC_ALL`.
+
+At startup EdgeWatch runs a short check as the notification process would
+run. The check reads the certificate authorities that `SSL_CERT_FILE` and
+`SSL_CERT_DIR` name. When a private certificate authority is mounted with a
+mode that UID 65531 cannot read, the notification process keeps UID 0,
+restricted only with Landlock where the kernel provides it, and the reason
+names the file. TLS destinations behind that authority keep working. Make
+such files readable by others, as certificates usually are, to enable the
+sandbox. `notification_sandbox` in `edgewatch health` and
+on the Overview reports the outcome, in the same form as `scanner_sandbox`.
 
 A non-root daemon remains unsupported until the supported Docker and
 rootless or containerd combinations provide a documented way to grant it the

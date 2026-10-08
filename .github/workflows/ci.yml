@@ -380,6 +380,40 @@ jobs:
       - name: Verify prebuilt ARM64 image
         run: bash ./scripts/test-prebuilt-image.sh edgewatch:prebuilt-arm64 linux/arm64 v0.0.0-ci
 
+  # The release also publishes an ARM64 image. Its seccomp filter numbers the
+  # system calls differently, and its Landlock restriction runs on another
+  # kernel. The container job builds that image only under emulation, where
+  # neither runs, so this job runs the sandbox tests and the real scans on an
+  # ARM64 kernel.
+  arm64-sandbox:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test the sandbox, scanner, and notification packages
+        run: go test -race -timeout=15m ./internal/sandbox/ ./internal/scanner/ ./internal/notify/
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the ARM64 image natively
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          platforms: linux/arm64
+          tags: edgewatch:arm64
+          build-args: |
+            VERSION=v0.0.0-ci
+          cache-from: type=gha,scope=container-native-arm64
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=container-native-arm64' || '' }}
+      - name: Verify scanner sandbox with real scans
+        run: ./scripts/verify-scanner-sandbox.sh edgewatch:arm64
+
   # GitHub Actions caches are ref-isolated, so release tags cannot restore a
   # cache written by main. Seed separate main and release GHCR caches here;
   # tags refresh only the release cache. Grant package writes only to trusted

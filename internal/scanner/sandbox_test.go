@@ -9,11 +9,27 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/sandbox"
 	"golang.org/x/sys/unix"
 )
+
+// writeScript writes a script that the test then runs. A process that a
+// parallel test forks while the script is open for writing inherits the
+// descriptor until it executes its own program, and running the script
+// meanwhile fails with "text file busy". Go forks only while it holds
+// syscall.ForkLock exclusively, so holding it shared while the script is
+// written keeps every fork out of that window.
+func writeScript(t *testing.T, path, script string) {
+	t.Helper()
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // writeFakeHelper writes a stand-in for the EdgeWatch executable whose
 // sandbox-exec command records its arguments and inherited descriptor in dir
@@ -21,19 +37,14 @@ import (
 func writeFakeHelper(t *testing.T, dir, body string) string {
 	t.Helper()
 	path := filepath.Join(dir, "edgewatch")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + filepath.Join(dir, "args") + "\n" + body
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	writeScript(t, path, "#!/bin/sh\nprintf '%s\\n' \"$@\" > "+filepath.Join(dir, "args")+"\n"+body)
 	return path
 }
 
 func writeFakeScanner(t *testing.T, name string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 99\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	writeScript(t, path, "#!/bin/sh\nexit 99\n")
 	return path
 }
 

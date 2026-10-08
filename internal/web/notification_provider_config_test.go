@@ -68,6 +68,27 @@ func TestNotificationDestinationURLRejectsConflictingCredentialInputs(t *testing
 	}
 }
 
+func TestNotificationProviderConfigRejectsMalformedInputWithoutDisclosingCredentials(t *testing.T) {
+	t.Parallel()
+	server, _, admin := newUsersTestServer(t)
+	body := `{"name":"Invalid push","config":{"provider":"ntfy","fields":{"topic":"alerts","server":"https://notify.example.test?token=private-provider-token"}},"password":"administrator password"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.createNotificationDestination(response, request, admin, defaultTenantStore(server))
+	expectError(t, response, http.StatusBadRequest, "validation_failed", "invalid unit provider configuration")
+	expectNoMarkers(t, response.Body.String(), "invalid unit provider configuration", "private-provider-token", "notify.example.test")
+}
+
+func TestPlatformNotificationProviderConfigRejectsMalformedInputWithoutDisclosingCredentials(t *testing.T) {
+	t.Parallel()
+	f := newPlatformFixture(t)
+	body := confirmBody(`"name":"Invalid push","config":{"provider":"ntfy","fields":{"topic":"alerts","server":"https://notify.example.test?token=private-platform-token"}}`)
+	response := f.call(t, actorPlatform, http.MethodPost, "/platform/notifications", body)
+	expectError(t, response, http.StatusBadRequest, "validation_failed", "invalid platform provider configuration")
+	expectNoMarkers(t, response.Body.String(), "invalid platform provider configuration", "private-platform-token", "notify.example.test")
+}
+
 func TestPlatformNotificationProviderConfigUsesEncryptedWriteOnlyDestination(t *testing.T) {
 	t.Parallel()
 	f := newPlatformFixture(t)

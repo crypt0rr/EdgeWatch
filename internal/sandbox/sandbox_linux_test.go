@@ -64,7 +64,7 @@ func TestDetectEnforcesWithTheContainerNetworkCapabilities(t *testing.T) {
 	if !policy.Enforced() || !policy.Restricted() {
 		t.Fatalf("policy = %+v, want enforced", policy.Status())
 	}
-	want := Status{Mode: ModeAuto, State: StateEnforced, UID: UID, GID: GID, ProcessUID: UID, Capabilities: []string{"NET_RAW"}, NoNewPrivileges: true, Landlock: enforcedLandlock}
+	want := Status{Mode: ModeAuto, State: StateEnforced, UID: UID, GID: GID, ProcessUID: UID, Capabilities: []string{"NET_RAW"}, NoNewPrivileges: true, Landlock: enforcedLandlock, Seccomp: SeccompStatus{State: StateEnforced}}
 	if got := policy.Status(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("status = %+v, want %+v", got, want)
 	}
@@ -174,6 +174,58 @@ func TestDetectProbesEachScannerWithLandlock(t *testing.T) {
 	// identity change.
 	if !reflect.DeepEqual(identity, []string{"/usr/local/bin/edgewatch", "version"}) {
 		t.Fatalf("identity probe = %q", identity)
+	}
+}
+
+func TestDetectAddsTheSeccompFilterWhenItWorks(t *testing.T) {
+	t.Parallel()
+	nmap := []Probe{{Args: []string{"/usr/bin/nmap", "--version"}}}
+	env, _ := containerEnvironment()
+	var filtered []bool
+	env.run = func(policy *Policy, command, _ []string) error {
+		if policy.Restricted() {
+			filtered = append(filtered, policy.seccomp)
+		}
+		return nil
+	}
+	policy := detect(Options{Probes: nmap}, env)
+	if !policy.seccomp || policy.Status().Seccomp.State != StateEnforced || !reflect.DeepEqual(filtered, []bool{true}) {
+		t.Fatalf("seccomp = %v %+v, probes with the filter %v", policy.seccomp, policy.Status().Seccomp, filtered)
+	}
+
+	// A scanner that fails only with the filter keeps Landlock.
+	env.run = failing(func(policy *Policy) bool { return policy.seccomp }, errors.New("signal: bad system call"))
+	policy = detect(Options{Probes: nmap}, env)
+	status := policy.Status()
+	if policy.seccomp || !policy.Restricted() || status.Landlock.State != StateEnforced || status.Seccomp.State != StateUnavailable ||
+		status.Seccomp.Reason != "nmap could not start with the seccomp filter: signal: bad system call" {
+		t.Fatalf("status without the filter = %+v", status)
+	}
+
+	// A kernel without the filter's actions keeps Landlock.
+	env, _ = containerEnvironment()
+	env.seccompErr = unix.ENOSYS
+	if got := detect(Options{Probes: nmap}, env).Status(); got.Landlock.State != StateEnforced || got.Seccomp.State != StateUnavailable || !strings.Contains(got.Seccomp.Reason, "does not provide seccomp filters") {
+		t.Fatalf("status without seccomp support = %+v", got)
+	}
+
+	// Without Landlock, nothing installs the filter.
+	env.landlockErr = unix.ENOSYS
+	if got := detect(Options{Probes: nmap}, env).Status().Seccomp; got.State != StateUnavailable || got.Reason != "the seccomp filter applies only with Landlock" {
+		t.Fatalf("seccomp without Landlock = %+v", got)
+	}
+	if got := detect(Options{Landlock: ModeOff}, env).Status().Seccomp; got.State != StateDisabled {
+		t.Fatalf("seccomp with Landlock off = %+v", got)
+	}
+	if got := detect(Options{Mode: ModeOff}, env).Status().Seccomp; got.State != StateDisabled {
+		t.Fatalf("seccomp with the sandbox off = %+v", got)
+	}
+
+	// The filter reaches sandbox-exec as an argument.
+	cmd := exec.Command("/bin/true")
+	NewEnforced().WithLandlock("/usr/local/bin/edgewatch", 6).WithSeccomp().Confine(cmd)
+	if want := []string{"/usr/local/bin/edgewatch", ExecCommand, "--profile", "scanner", "--files", "0", "--seccomp", "--", "/bin/true"}; !reflect.DeepEqual(cmd.Args, want) {
+		t.Fatalf("filtered command = %q, want %q", cmd.Args, want)
 	}
 }
 

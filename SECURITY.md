@@ -35,6 +35,10 @@ scanner process, whatever its identity, to reading and executing the system
 directories, reading the `/etc` files a scan needs, writing the files EdgeWatch
 passes to it, and creating files only below `/tmp`, none of which it can
 execute; it cannot read the database, the keys, or `config.yaml` even as UID 0.
+With Landlock, a seccomp filter also refuses the system calls no scanner or
+notification process needs, such as `ptrace`, io_uring, BPF, and namespace and
+mount changes. No EdgeWatch process can dump core: each sets a zero core file
+size limit, which its children inherit, and is non-dumpable.
 All sandboxed scanner processes share UID 65532 and `/tmp`. The
 notification child process, which receives one destination URL, runs in a
 sandbox of its own with `notifications.sandbox: auto`: as UID and GID 65531

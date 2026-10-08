@@ -87,7 +87,12 @@ reports `scanner_sandbox.landlock.state` as `unavailable`, when
   reason ends with Nmap's last diagnostic line.
 
 Scans keep working without Landlock, in the identity sandbox when it is
-enforced. Set `scanner.landlock: required` to refuse to scan without it
+enforced.
+
+`scanner_sandbox.seccomp.state` is `unavailable` when the kernel offers no
+seccomp filters, or the container's seccomp profile blocks them, or when
+Nmap could not start with the [seccomp filter](/deployment/container-hardening/#seccomp-filter).
+In that case Landlock still applies alone, and the reason names the cause. Set `scanner.landlock: required` to refuse to scan without it
 instead, or `scanner.landlock: off` to stop trying.
 
 ## Proxy hostname rejected

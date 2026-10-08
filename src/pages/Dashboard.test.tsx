@@ -454,9 +454,9 @@ describe('dashboard', () => {
   })
 
   it('shows Landlock beside the enforced scanner sandbox', async () => {
-    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'enforced', uid: 65532, gid: 65532, process_uid: 65532, capabilities: ['NET_RAW', 'NET_ADMIN'], no_new_privileges: true, landlock: { mode: 'auto', state: 'enforced', abi: 6 } } })
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'enforced', uid: 65532, gid: 65532, process_uid: 65532, capabilities: ['NET_RAW', 'NET_ADMIN'], no_new_privileges: true, landlock: { mode: 'auto', state: 'enforced', abi: 6 }, seccomp: { state: 'enforced' } } })
     await renderDashboard()
-    await vi.waitFor(() => expect(container.querySelector('.deployment-telemetry')?.textContent).toContain('Scanner sandboxEnforced · NET_RAW, NET_ADMIN · Landlock'), { timeout: 1000 })
+    await vi.waitFor(() => expect(container.querySelector('.deployment-telemetry')?.textContent).toContain('Scanner sandboxEnforced · NET_RAW, NET_ADMIN · Landlock · seccomp'), { timeout: 1000 })
     expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
   })
 

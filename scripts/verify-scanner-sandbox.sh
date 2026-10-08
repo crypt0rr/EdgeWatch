@@ -10,7 +10,8 @@ set -euo pipefail
 # can neither list the data directory nor read the configuration, and that a
 # process restricted with Landlock cannot do so even as UID 0. Deliver a test
 # notification to a local webhook and require that the notification process
-# runs as UID 65531 without capabilities.
+# runs as UID 65531 without capabilities. Require that both run with the
+# seccomp filter, one more than the daemon's, and that no process dumps core.
 image=${1:?usage: verify-scanner-sandbox.sh IMAGE}
 
 workdir=$(mktemp -d)
@@ -297,7 +298,21 @@ stop_daemon() {
 # and the Landlock state that the health command reports.
 health_state() {
   docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml --output json |
-    python3 -c 'import json, sys; sandbox = json.load(sys.stdin)["scanner_sandbox"]; print(sandbox["state"], sandbox.get("process_uid"), ",".join(sandbox.get("capabilities") or []) or "-", "landlock:" + sandbox["landlock"]["state"])'
+    python3 -c 'import json, sys; sandbox = json.load(sys.stdin)["scanner_sandbox"]; print(sandbox["state"], sandbox.get("process_uid"), ",".join(sandbox.get("capabilities") or []) or "-", "landlock:" + sandbox["landlock"]["state"], "seccomp:" + sandbox["seccomp"]["state"])'
+}
+
+# process_hardening PID prints the number of seccomp filters of a process in
+# the daemon's container and its soft and hard core file size limits.
+process_hardening() {
+  docker exec "$container" /bin/sh -c 'awk "/^Seccomp_filters:/{print \$2}" "/proc/$1/status"; awk "/^Max core file size/{print \$5, \$6}" "/proc/$1/limits"' sh "$1" | tr '\n' ' ' | sed 's/ $//'
+}
+
+# expect_filtered NAME HARDENING requires a process's hardening to be one
+# seccomp filter more than the daemon's and no core dumps.
+expect_filtered() {
+  local name=$1 got=$2 daemon_filters
+  daemon_filters=$(process_hardening 1 | cut -d' ' -f1)
+  [ "$got" = "$((daemon_filters + 1)) 0 0" ] || fail "the $name process has seccomp filters and core limits '$got', want '$((daemon_filters + 1)) 0 0'"
 }
 
 expect_health() {
@@ -310,7 +325,7 @@ expect_health() {
 # and its Landlock state that the health command reports.
 notification_health_state() {
   docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml --output json |
-    python3 -c 'import json, sys; sandbox = json.load(sys.stdin)["notification_sandbox"]; print(sandbox["state"], sandbox.get("process_uid"), "landlock:" + sandbox["landlock"]["state"])'
+    python3 -c 'import json, sys; sandbox = json.load(sys.stdin)["notification_sandbox"]; print(sandbox["state"], sandbox.get("process_uid"), "landlock:" + sandbox["landlock"]["state"], "seccomp:" + sandbox["seccomp"]["state"])'
 }
 
 expect_notification_health() {
@@ -337,8 +352,11 @@ deliver_notification() {
   python3 "$workdir/driver.py" notify "$base" "$state" "$name" "generic://127.0.0.1:$webhook_port/hook?disabletls=yes&template=json" >"$workdir/notify-$name.json" &
   sent=$!
   for attempt in $(seq 1 40); do
-    identity=$(docker exec "$container" /bin/sh -c 'for process in /proc/[0-9]*; do if [ "$(tr "\0" " " <"$process/cmdline" 2>/dev/null)" = "/usr/local/bin/edgewatch notify-send " ]; then awk "/^Uid:/{uid=\$2} /^Gid:/{gid=\$2} /^Groups:/{groups=\$2} /^CapEff:/{cap=\$2} END{print uid, gid, (groups == \"\" ? \"-\" : groups), cap}" "$process/status"; break; fi; done' 2>/dev/null || true)
-    [ -n "$identity" ] && break
+    identity=$(docker exec "$container" /bin/sh -c 'for process in /proc/[0-9]*; do if [ "$(tr "\0" " " <"$process/cmdline" 2>/dev/null)" = "/usr/local/bin/edgewatch notify-send " ]; then awk "/^Uid:/{uid=\$2} /^Gid:/{gid=\$2} /^Groups:/{groups=\$2} /^CapEff:/{cap=\$2} END{print uid, gid, (groups == \"\" ? \"-\" : groups), cap}" "$process/status"; echo "${process#/proc/}"; break; fi; done' 2>/dev/null || true)
+    if [ -n "$identity" ]; then
+      identity="$(printf '%s\n' "$identity" | head -1) | $(process_hardening "$(printf '%s\n' "$identity" | tail -1)")"
+      break
+    fi
     sleep 0.25
   done
   wait "$sent" || fail "the $name test notification failed: $(cat "$workdir/notify-$name.json" 2>/dev/null)"
@@ -351,7 +369,8 @@ udp_ports="$udp_open"
 
 # The bundled Compose deployment: the sandbox keeps NET_RAW only.
 run_daemon base auto "${bundled_caps[@]}"
-expect_health "enforced 65532 NET_RAW landlock:enforced"
+expect_health "enforced 65532 NET_RAW landlock:enforced seccomp:enforced"
+[ "$(process_hardening 1 | cut -d' ' -f2-)" = "0 0" ] || fail "the daemon may dump core: $(process_hardening 1)"
 sandboxed=$(python3 "$workdir/driver.py" scan "$base" "$state" sandboxed "$tcp_ports" "$udp_ports")
 
 # Landlock restricts a process whatever its identity: as UID 0, which owns
@@ -381,9 +400,10 @@ done
 
 # A test notification reaches the webhook from a notification process that
 # runs as UID 65531 with no capabilities.
-expect_notification_health "enforced 65531 landlock:enforced"
-notifier_identity=$(deliver_notification base)
-[ "$notifier_identity" = "65531 65531 - 0000000000000000" ] || fail "the notification process identity is '$notifier_identity', want '65531 65531 - 0000000000000000'"
+expect_notification_health "enforced 65531 landlock:enforced seccomp:enforced"
+notifier=$(deliver_notification base)
+[ "${notifier%% | *}" = "65531 65531 - 0000000000000000" ] || fail "the notification process identity is '${notifier%% | *}', want '65531 65531 - 0000000000000000'"
+expect_filtered notification "${notifier##* | }"
 
 # A certificate authority the notification identity cannot read keeps the
 # notification process as UID 0, so its TLS destinations keep working, though
@@ -412,11 +432,14 @@ job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
 nmap_identity=
 for attempt in $(seq 1 60); do
-  nmap_identity=$(docker exec "$container" /bin/sh -c 'for status in /proc/[0-9]*/status; do if grep -q "^Name:[[:space:]]*nmap$" "$status" 2>/dev/null; then awk "/^Uid:/{uid=\$2} /^Gid:/{gid=\$2} /^Groups:/{groups=\$2} /^CapEff:/{cap=\$2} END{print uid, gid, (groups == \"\" ? \"-\" : groups), cap}" "$status"; break; fi; done' 2>/dev/null || true)
+  nmap_identity=$(docker exec "$container" /bin/sh -c 'for status in /proc/[0-9]*/status; do if grep -q "^Name:[[:space:]]*nmap$" "$status" 2>/dev/null; then awk "/^Uid:/{uid=\$2} /^Gid:/{gid=\$2} /^Groups:/{groups=\$2} /^CapEff:/{cap=\$2} END{print uid, gid, (groups == \"\" ? \"-\" : groups), cap}" "$status"; pid=${status#/proc/}; echo "${pid%/status}"; break; fi; done' 2>/dev/null || true)
   [ -n "$nmap_identity" ] && break
   sleep 0.5
 done
+nmap_pid=$(printf '%s\n' "$nmap_identity" | tail -1)
+nmap_identity=$(printf '%s\n' "$nmap_identity" | head -1)
 [ "$nmap_identity" = "65532 65532 - 0000000000002000" ] || fail "running Nmap identity is '$nmap_identity', want '65532 65532 - 0000000000002000'"
+expect_filtered Nmap "$(process_hardening "$nmap_pid")"
 cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
 [ "$cancelled" = canceled ] || fail "the cancelled scan ended '$cancelled'"
 if docker exec "$container" /bin/sh -c 'grep -l "^Name:[[:space:]]*nmap$" /proc/[0-9]*/status' >/dev/null 2>&1; then
@@ -427,22 +450,22 @@ stop_daemon
 # The SYN override: a sandboxed Naabu keeps NET_RAW and NET_ADMIN, and
 # discovers ports with the target list it reads through its descriptor.
 run_daemon syn auto "${bundled_caps[@]}" NET_ADMIN
-expect_health "enforced 65532 NET_RAW,NET_ADMIN landlock:enforced"
+expect_health "enforced 65532 NET_RAW,NET_ADMIN landlock:enforced seccomp:enforced"
 naabu_sandboxed=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-sandboxed "$tcp_open")
 stop_daemon
 
 # A Compose file from before v0.27.0 grants no SETUID, SETGID, or KILL:
 # scanner processes stay UID 0, restricted only by Landlock.
 run_daemon legacy auto NET_RAW NET_ADMIN
-expect_health "unavailable 0 - landlock:enforced"
-expect_notification_health "unavailable 0 landlock:enforced"
+expect_health "unavailable 0 - landlock:enforced seccomp:enforced"
+expect_notification_health "unavailable 0 landlock:enforced seccomp:enforced"
 deliver_notification legacy >/dev/null
 landlock_only=$(python3 "$workdir/driver.py" scan "$base" "$state" landlock-only "$tcp_ports" "$udp_ports")
 naabu_landlock_only=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-landlock-only "$tcp_open")
 stop_daemon
 
 run_daemon off off "${bundled_caps[@]}" NET_ADMIN
-expect_health "disabled 0 - landlock:disabled"
+expect_health "disabled 0 - landlock:disabled seccomp:disabled"
 unconfined=$(python3 "$workdir/driver.py" scan "$base" "$state" unconfined "$tcp_ports" "$udp_ports")
 naabu_unconfined=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-unconfined "$tcp_open")
 stop_daemon

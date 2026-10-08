@@ -80,7 +80,10 @@ directory, and that a process restricted with Landlock cannot read the
 database, list the data directory, read `config.yaml`, write to the data
 directory, or execute a file it wrote, even as UID 0. It requires that a
 running Nmap and the notification process each have one seccomp filter more
-than the daemon, and that neither they nor the daemon can dump core.
+than the daemon, and that neither they nor the daemon can dump core. The
+seccomp filter and the Landlock restriction depend on the architecture and
+the kernel, so CI also runs the sandbox tests and these real scans on an
+ARM64 runner, against an ARM64 image built there.
 
 ## Data ownership and upgrades
 

@@ -70,7 +70,7 @@ Documentation-only changes need a diff review and checks of referenced paths and
 | Database schema | Store migration tests and `./scripts/check-schema-docs.sh` |
 | Compose configuration | Run `docker compose config --quiet` and `docker compose -f compose.yaml -f compose.syn.yaml config --quiet`, then verify the rendered capability, hardening, image, and storage policies described in `docs/src/content/docs/deployment/container-hardening.md` and the CI `Validate Compose deployment` step |
 | Scanner dependency pin | `./scripts/verify-naabu-pin.sh` |
-| Scanner execution or sandbox | Build the image and run `./scripts/verify-scanner-sandbox.sh IMAGE`, which needs Docker and a kernel with Landlock; it compares real sandboxed, Landlock-only, and unconfined scans of local listeners, tries Landlock escapes, and checks the seccomp filter, core limits, and a sandboxed notification delivery |
+| Scanner execution or sandbox | Build the image and run `./scripts/verify-scanner-sandbox.sh IMAGE`, which needs Docker and a kernel with Landlock; it compares real sandboxed, Landlock-only, and unconfined scans of local listeners, tries Landlock escapes, and checks the seccomp filter, core limits, and a sandboxed notification delivery; CI runs it on AMD64 and ARM64 runners |
 | Release helper scripts | `./scripts/test-release-artifacts.sh`; this uses fixture binaries and does not build a release candidate |
 | Release workflow or GoReleaser configuration | Follow the exact GoReleaser check and immutable-candidate gates in `.github/workflows/release.yml`; the candidate, publication, image, and runtime smoke gates run only for tags |
 

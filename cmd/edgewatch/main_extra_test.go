@@ -690,14 +690,22 @@ func TestHealthCommandNamesMissingDaemonHeartbeat(t *testing.T) {
 		t.Fatalf("health error = %v, want a named missing-daemon-heartbeat error", err)
 	}
 	var document struct {
-		Status string `json:"status"`
-		Error  string `json:"error"`
+		Status         string `json:"status"`
+		Error          string `json:"error"`
+		ScannerSandbox struct {
+			Mode  string `json:"mode"`
+			State string `json:"state"`
+		} `json:"scanner_sandbox"`
 	}
 	if decodeErr := json.Unmarshal([]byte(stdout), &document); decodeErr != nil {
 		t.Fatalf("unhealthy health output is not one JSON document: %v\n%s", decodeErr, stdout)
 	}
 	if document.Status != "unhealthy" || document.Error != err.Error() {
 		t.Fatalf("unhealthy health document = %+v, want status unhealthy and the error %q", document, err)
+	}
+	// A test binary is never confined, so the sandbox is reported unavailable.
+	if document.ScannerSandbox.Mode != "auto" || document.ScannerSandbox.State != "unavailable" {
+		t.Fatalf("health scanner sandbox = %+v, want auto and unavailable", document.ScannerSandbox)
 	}
 
 	stdout, _, err = captureCLIOutput(t, func() error {

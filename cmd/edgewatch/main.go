@@ -21,6 +21,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/notify"
+	"github.com/crypt0rr/edgewatch/internal/sandbox"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/web"
 	"github.com/robfig/cron/v3"
@@ -128,6 +129,16 @@ func run(args []string) error {
 		// Refuse an unusable key file or notification URL before the
 		// database is opened, so a refused start never migrates it.
 		if err := validateStartupConfig(cfg); err != nil {
+			return err
+		}
+	}
+	// The daemon and the scan command start scanner processes. A required
+	// sandbox refuses them, before the database is opened, when the runtime
+	// cannot confine those processes.
+	var scannerSandbox *sandbox.Policy
+	if cmd == "daemon" || cmd == "scan" {
+		scannerSandbox = sandbox.Detect(cfg.Scanner.Sandbox)
+		if err := scannerSandbox.Require(); err != nil {
 			return err
 		}
 	}
@@ -265,11 +276,14 @@ func run(args []string) error {
 		// Only the daemon imports notification URLs from config.yaml, after
 		// the migrations above and before its notifier and delivery worker
 		// start. Host commands keep using the configured URLs until then.
-		application, err = app.NewWithOptions(cfg, s, *nmapPath, logger, app.Options{ImportNotificationURLs: cmd == "daemon"})
+		application, err = app.NewWithOptions(cfg, s, *nmapPath, logger, app.Options{ImportNotificationURLs: cmd == "daemon", Sandbox: scannerSandbox})
 		if err != nil {
 			return err
 		}
 		application.Version = version
+		if scannerSandbox != nil {
+			logScannerSandbox(logger, scannerSandbox.Status())
+		}
 	}
 	switch cmd {
 	case "daemon":
@@ -343,17 +357,21 @@ func run(args []string) error {
 		return err
 	case "health":
 		health, err := s.System().HealthStatus(ctx)
+		// The sandbox is detected for this container, which grants the
+		// health command the daemon's capabilities and configuration.
+		scannerSandbox := sandbox.Detect(cfg.Scanner.Sandbox).Status()
+		health.Warnings = append(health.Warnings, scannerSandboxWarnings(scannerSandbox)...)
 		if err != nil {
 			if *output == "json" {
 				// Keep stdout parseable for monitoring: report the failure
 				// as a document, then exit non-zero with the reason on stderr.
-				if printErr := printValue(*output, unhealthyStatus{HealthStatus: health, Status: "unhealthy", Error: err.Error()}); printErr != nil {
+				if printErr := printValue(*output, unhealthyStatus{HealthStatus: health, ScannerSandbox: scannerSandbox, Status: "unhealthy", Error: err.Error()}); printErr != nil {
 					return printErr
 				}
 			}
 			return err
 		}
-		return printValue(*output, health)
+		return printValue(*output, healthReport{HealthStatus: health, ScannerSandbox: scannerSandbox})
 	default:
 		return usage()
 	}
@@ -695,8 +713,41 @@ type notifyTestResult struct {
 // healthy. Its status field replaces the embedded one.
 type unhealthyStatus struct {
 	store.HealthStatus
-	Status string `json:"status"`
-	Error  string `json:"error"`
+	ScannerSandbox sandbox.Status `json:"scanner_sandbox"`
+	Status         string         `json:"status"`
+	Error          string         `json:"error"`
+}
+
+// healthReport is the health command's document: the daemon's health and how
+// scanner processes start in this container.
+type healthReport struct {
+	store.HealthStatus
+	ScannerSandbox sandbox.Status `json:"scanner_sandbox"`
+}
+
+// scannerSandboxWarnings reports a sandbox that auto mode could not enforce
+// while scanner processes run as UID 0. A daemon that runs as another user
+// starts scanner processes as that user, which the sandbox would not improve
+// on.
+func scannerSandboxWarnings(status sandbox.Status) []string {
+	if status.State != sandbox.StateUnavailable || status.ProcessUID != 0 {
+		return nil
+	}
+	return []string{"scanner processes run unconfined as UID 0: " + status.Reason}
+}
+
+// logScannerSandbox records how scanner processes start.
+func logScannerSandbox(logger *slog.Logger, status sandbox.Status) {
+	switch {
+	case status.State == sandbox.StateEnforced:
+		logger.Info("scanner processes are sandboxed", "uid", status.UID, "gid", status.GID, "capabilities", status.Capabilities, "no_new_privileges", status.NoNewPrivileges)
+	case status.State == sandbox.StateUnavailable && status.ProcessUID == 0:
+		logger.Warn("scanner processes run unconfined as UID 0; see the container hardening guide", "reason", status.Reason)
+	case status.State == sandbox.StateUnavailable:
+		logger.Info("scanner processes run as the daemon's user", "uid", status.ProcessUID, "reason", status.Reason)
+	default:
+		logger.Info("scanner sandbox is off; scanner processes run unconfined", "uid", status.ProcessUID)
+	}
 }
 
 func printValue(format string, v any) error {

@@ -76,13 +76,21 @@ if service.get("network_mode") != "host":
 caps = {str(cap) for cap in service.get("cap_add") or []}
 if "NET_RAW" not in caps:
     raise SystemExit("NET_RAW is required for Nmap and Naabu")
+# The daemon needs SETUID and SETGID to start Nmap and Naabu as the
+# unprivileged sandbox identity, and KILL to stop them; without them the
+# scanner processes would run unconfined as UID 0.
+missing_sandbox_caps = sorted({"SETUID", "SETGID", "KILL"} - caps)
+if missing_sandbox_caps:
+    raise SystemExit(f"the scanner sandbox requires cap_add: {', '.join(missing_sandbox_caps)}")
 if mode == "base" and "NET_ADMIN" in caps:
     raise SystemExit("base Compose must not grant NET_ADMIN")
 if mode == "syn" and "NET_ADMIN" not in caps:
     raise SystemExit("SYN override must grant NET_ADMIN")
 # The documented policy is an exact set, not a minimum: any extra entry,
 # including ALL, would restore capabilities that cap_drop removed.
-allowed_caps = {"NET_RAW", "NET_ADMIN"} if mode == "syn" else {"NET_RAW"}
+allowed_caps = {"NET_RAW", "SETUID", "SETGID", "KILL"}
+if mode == "syn":
+    allowed_caps.add("NET_ADMIN")
 unexpected_caps = sorted(caps - allowed_caps)
 if unexpected_caps:
     raise SystemExit(

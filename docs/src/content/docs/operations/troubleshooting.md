@@ -26,6 +26,23 @@ private to their owner. Run the actual read/write preflight in
 Docker mode. Stop the service before correcting an existing directory's
 ownership. World-readable or world-writable permissions are not a remedy.
 
+## Scanner processes run unconfined as UID 0
+
+EdgeWatch logs this warning, adds it to `edgewatch health`, and shows it on the
+Overview when `scanner.sandbox` is `auto` and Nmap and Naabu cannot run in the
+[scanner sandbox](/deployment/container-hardening/#scanner-sandbox). The
+reason names the cause:
+
+- **The container does not grant SETUID, SETGID, KILL.** Your `compose.yaml`
+  predates the sandbox. Add the three capabilities to `cap_add`, as in the
+  bundled file, and recreate the container with `docker compose up -d`.
+- **A test process could not start as UID 65532.** The container runtime does
+  not map UID 65532 into the container's user namespace. Use a full
+  subordinate UID range for rootless Docker or user-namespace remapping.
+
+Scans keep working unconfined in either case. Set `scanner.sandbox: required`
+to refuse to scan without the sandbox instead.
+
 ## Proxy hostname rejected
 
 A `421 Misdirected Request` when loopback requests succeed usually means the

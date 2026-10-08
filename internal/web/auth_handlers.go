@@ -101,6 +101,9 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 		"version":      s.Version,
 		"retention":    s.App.Config.Retention.Value().String(),
 		"rdap_enabled": s.App.Config.RDAPEnabled(),
+		// How scanner processes start is deployment-wide and names no
+		// unit's data.
+		"scanner_sandbox": s.App.ScannerSandbox(),
 	}
 	// The scan capacity is the tenant's own, as the scheduler enforces it
 	// for its runs: the deployment's slots and probe budgets, lowered to the

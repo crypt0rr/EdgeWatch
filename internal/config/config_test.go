@@ -72,6 +72,9 @@ jobs:
 	if cfg.Scheduler.MaxNaabuProbeCount != DefaultNaabuMaxProbeCount {
 		t.Fatalf("Naabu probe budget default %d", cfg.Scheduler.MaxNaabuProbeCount)
 	}
+	if cfg.Scanner.Sandbox != ScannerSandboxAuto {
+		t.Fatalf("scanner sandbox default %q", cfg.Scanner.Sandbox)
+	}
 	if cfg.LogLevel() != "info" || cfg.Log.Level != "info" {
 		t.Fatalf("log level default = %q", cfg.Log.Level)
 	}
@@ -911,5 +914,31 @@ func TestValidateJobRejectsNaabuConnectHostDiscovery(t *testing.T) {
 		if err := ValidateJob(valid); err != nil {
 			t.Errorf("%s: unexpected error %v", name, err)
 		}
+	}
+}
+
+func TestScannerSandboxModes(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	load := func(mode string) (*Config, error) {
+		t.Helper()
+		path := filepath.Join(dir, "config-"+strings.TrimSpace(mode)+".yaml")
+		yaml := "database: " + filepath.Join(dir, "db.sqlite") + "\nscanner:\n  sandbox: \"" + mode + "\"\n"
+		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(path)
+	}
+	for mode, want := range map[string]string{"auto": ScannerSandboxAuto, " Required ": ScannerSandboxRequired, "OFF": ScannerSandboxOff} {
+		cfg, err := load(mode)
+		if err != nil {
+			t.Fatalf("scanner.sandbox %q: %v", mode, err)
+		}
+		if cfg.Scanner.Sandbox != want {
+			t.Fatalf("scanner.sandbox %q = %q, want %q", mode, cfg.Scanner.Sandbox, want)
+		}
+	}
+	if _, err := load("strict"); err == nil || !strings.Contains(err.Error(), "scanner.sandbox must be auto, required, or off") {
+		t.Fatalf("unknown scanner.sandbox error = %v", err)
 	}
 }

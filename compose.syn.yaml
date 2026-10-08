@@ -10,6 +10,8 @@
 # default Naabu CONNECT profile without NET_ADMIN.
 services:
   edgewatch:
+    # Compose merges this list with the base file's; NET_ADMIN is the only
+    # addition. A sandboxed Naabu keeps it alongside NET_RAW.
     cap_add:
       - NET_RAW
       - NET_ADMIN

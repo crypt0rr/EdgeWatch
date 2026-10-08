@@ -42,6 +42,8 @@ type environment struct {
 	// it has none.
 	landlockABI int
 	landlockErr error
+	// seccompErr is why the kernel cannot run the seccomp filter, or nil.
+	seccompErr error
 	// executable is the EdgeWatch executable, or executableErr why it cannot
 	// start sandboxed processes.
 	executable    string
@@ -89,6 +91,20 @@ func init() {
 	confineProcess = confineLinux
 	nameCapability = linuxCapabilityName
 	execRestricted = execLandlocked
+	hardenProcess = hardenLinux
+}
+
+// hardenLinux sets a soft and hard core file size limit of zero, which the
+// processes this one starts inherit and cannot raise, and clears the dumpable
+// flag, which execve sets again for the program it runs.
+func hardenLinux() error {
+	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{}); err != nil {
+		return fmt.Errorf("disable core dumps: %w", err)
+	}
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		return fmt.Errorf("make the process non-dumpable: %w", err)
+	}
+	return nil
 }
 
 func detect(options Options, env environment) *Policy {
@@ -100,6 +116,7 @@ func detect(options Options, env environment) *Policy {
 		status.State = StateDisabled
 		status.Reason = spec.sandboxSetting + " is off"
 		status.Landlock = LandlockStatus{Mode: normalizedMode(options.Landlock), State: StateDisabled, Reason: spec.sandboxSetting + " is off"}
+		status.Seccomp = SeccompStatus{State: StateDisabled, Reason: seccompWithoutLandlock}
 		return &Policy{profile: profile, status: status}
 	}
 	return detectLandlock(detectIdentity(profile, mode, status, options.IdentityProbe, env), options, env)
@@ -159,6 +176,7 @@ func detectLandlock(policy *Policy, options Options, env environment) *Policy {
 	unrestricted := func(state, reason string) *Policy {
 		status.State, status.Reason = state, reason
 		policy.status.Landlock = status
+		policy.status.Seccomp = SeccompStatus{State: state, Reason: seccompWithoutLandlock}
 		return policy
 	}
 	switch {
@@ -173,11 +191,31 @@ func detectLandlock(policy *Policy, options Options, env environment) *Policy {
 	}
 	restricted := policy.WithLandlock(env.executable, env.landlockABI)
 	restricted.status.Landlock.Mode = mode
-	for _, probe := range options.Probes {
-		if err := env.runProbe(restricted, probe); err != nil {
-			return unrestricted(StateUnavailable, fmt.Sprintf("%s could not start with Landlock: %v", probeName(probe), err))
+	probe := func(candidate *Policy) (string, error) {
+		for _, probe := range options.Probes {
+			if err := env.runProbe(candidate, probe); err != nil {
+				return probeName(probe), err
+			}
 		}
+		return "", nil
 	}
+	// The seccomp filter rides on the Landlock restriction. When the probes
+	// fail with it, Landlock may still apply alone.
+	seccompReason := ""
+	if env.seccompErr != nil {
+		seccompReason = seccompUnavailableReason(env.seccompErr)
+	} else {
+		filtered := restricted.WithSeccomp()
+		name, err := probe(filtered)
+		if err == nil {
+			return filtered
+		}
+		seccompReason = fmt.Sprintf("%s could not start with the seccomp filter: %v", name, err)
+	}
+	if name, err := probe(restricted); err != nil {
+		return unrestricted(StateUnavailable, fmt.Sprintf("%s could not start with Landlock: %v", name, err))
+	}
+	restricted.status.Seccomp = SeccompStatus{State: StateUnavailable, Reason: seccompReason}
 	return restricted
 }
 
@@ -208,6 +246,7 @@ func confineLinux(cmd *exec.Cmd, uid, gid int, ambient []uintptr) {
 func systemEnvironment() environment {
 	env := environment{euid: os.Geteuid(), run: runConfined}
 	env.landlockABI, env.landlockErr = landlockVersion()
+	env.seccompErr = seccompSupport()
 	env.executable, env.executableErr = os.Executable()
 	if env.executableErr == nil {
 		env.executableErr = refuseTestBinary(env.executable)

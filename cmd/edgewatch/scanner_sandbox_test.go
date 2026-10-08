@@ -54,7 +54,7 @@ func TestSandboxExecIsHandledBeforeFlagParsing(t *testing.T) {
 	// The scanner's own flags must reach sandbox-exec untouched; flag
 	// parsing would reject them. Malformed arguments get its usage.
 	err := run([]string{sandbox.ExecCommand, "--config", "x", "-oX", "-"})
-	if err == nil || !strings.Contains(err.Error(), "usage: sandbox-exec --profile scanner|notifier --files N -- PROGRAM") {
+	if err == nil || !strings.Contains(err.Error(), "usage: sandbox-exec --profile scanner|notifier --files N [--seccomp] -- PROGRAM") {
 		t.Fatalf("sandbox-exec = %v, want its usage", err)
 	}
 }
@@ -145,7 +145,7 @@ func TestLogNotificationSandboxNamesTheOutcome(t *testing.T) {
 		status sandbox.Status
 		want   string
 	}{
-		"enforced":                {status: sandbox.NewEnforcedFor(sandbox.Notifier).WithLandlock("/usr/local/bin/edgewatch", 6).Status(), want: `"level":"INFO","msg":"the notification process is sandboxed","uid":65531,"gid":65531,"landlock":"enforced"`},
+		"enforced":                {status: sandbox.NewEnforcedFor(sandbox.Notifier).WithLandlock("/usr/local/bin/edgewatch", 6).Status(), want: `"level":"INFO","msg":"the notification process is sandboxed","uid":65531,"gid":65531,"landlock":"enforced","landlock_reason":"","seccomp":"unavailable"`},
 		"root with Landlock only": {status: sandbox.Status{State: sandbox.StateUnavailable, Reason: "no KILL", Landlock: restricted}, want: `"level":"WARN","msg":"the notification process runs as UID 0, restricted only by Landlock; see the container hardening guide","reason":"no KILL"`},
 		"unavailable root":        {status: sandbox.Status{State: sandbox.StateUnavailable, Reason: "no KILL"}, want: `"level":"WARN","msg":"the notification process runs unconfined as UID 0; see the container hardening guide","reason":"no KILL"`},
 		"unavailable user":        {status: sandbox.Status{State: sandbox.StateUnavailable, ProcessUID: 1000, Reason: "not root", Landlock: restricted}, want: `"level":"INFO","msg":"the notification process runs as the daemon's user","uid":1000,"reason":"not root","landlock":"enforced"`},
@@ -173,7 +173,7 @@ func TestLogScannerSandboxNamesTheOutcome(t *testing.T) {
 			status: sandbox.Status{State: sandbox.StateUnavailable, Reason: "no KILL", Landlock: sandbox.LandlockStatus{State: sandbox.StateEnforced, ABI: 6}},
 			want:   `"level":"WARN","msg":"scanner processes run as UID 0, restricted only by Landlock; see the container hardening guide","reason":"no KILL"`,
 		},
-		"Landlock": {status: sandbox.NewEnforced().WithLandlock("/usr/local/bin/edgewatch", 6).Status(), want: `"level":"INFO","msg":"scanner processes are restricted with Landlock","abi":6`},
+		"Landlock": {status: sandbox.NewEnforced().WithLandlock("/usr/local/bin/edgewatch", 6).WithSeccomp().Status(), want: `"level":"INFO","msg":"scanner processes are restricted with Landlock","abi":6,"seccomp":"enforced"`},
 		"no Landlock": {
 			status: sandbox.Status{State: sandbox.StateEnforced, Landlock: sandbox.LandlockStatus{State: sandbox.StateUnavailable, Reason: "old kernel"}},
 			want:   `"level":"INFO","msg":"scanner processes start without Landlock","reason":"old kernel"`,

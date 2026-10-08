@@ -145,17 +145,19 @@ func handledScopes(abi int) uint64 {
 
 // execLandlocked is the sandbox-exec command:
 //
-//	sandbox-exec --profile PROFILE --files N -- PROGRAM [ARGUMENT...]
+//	sandbox-exec --profile PROFILE --files N [--seccomp] -- PROGRAM [ARGUMENT...]
 //
 // It restricts its own process with Landlock to the paths of PROFILE and its
-// N inherited descriptors, starting at 3, sets no_new_privs, and then
-// executes PROGRAM in place. The process keeps its identity, capabilities,
-// descriptors, and environment, and the daemon's handle on it stays valid.
+// N inherited descriptors, starting at 3, sets no_new_privs, installs the
+// seccomp filter with --seccomp, and then executes PROGRAM in place. The
+// process keeps its identity, capabilities, descriptors, and environment, and
+// the daemon's handle on it stays valid.
 func execLandlocked(args []string) error {
-	profile, files, argv, err := parseExecArgs(args)
+	request, err := parseExecArgs(args)
 	if err != nil {
 		return err
 	}
+	profile, files, argv := request.profile, request.files, request.argv
 	// no_new_privs and the Landlock domain belong to the calling thread, and
 	// PROGRAM executes from it, so the goroutine must not move to another
 	// thread. The process ends with the exec, so the thread stays locked.
@@ -167,26 +169,62 @@ func execLandlocked(args []string) error {
 	if err := restrictSelf(profilePaths(profile, os.Getenv), inherited); err != nil {
 		return fmt.Errorf("%s: %w", ExecCommand, err)
 	}
+	if request.seccomp {
+		if err := installSeccompFilter(); err != nil {
+			return fmt.Errorf("%s: %w", ExecCommand, err)
+		}
+	}
 	if err := syscall.Exec(argv[0], argv, os.Environ()); err != nil {
 		return fmt.Errorf("%s: execute %s: %w", ExecCommand, argv[0], err)
 	}
 	return nil
 }
 
-func parseExecArgs(args []string) (Profile, int, []string, error) {
-	usage := fmt.Errorf("usage: %s --profile scanner|notifier --files N -- PROGRAM [ARGUMENT...]", ExecCommand)
-	if len(args) < 6 || args[0] != "--profile" || args[2] != "--files" || args[4] != "--" {
-		return "", 0, nil, usage
+// execRequest is what the sandbox-exec arguments ask for.
+type execRequest struct {
+	profile Profile
+	files   int
+	seccomp bool
+	argv    []string
+}
+
+func parseExecArgs(args []string) (execRequest, error) {
+	usage := fmt.Errorf("usage: %s --profile scanner|notifier --files N [--seccomp] -- PROGRAM [ARGUMENT...]", ExecCommand)
+	request := execRequest{files: -1}
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--profile":
+			if index+1 >= len(args) || request.profile != "" {
+				return execRequest{}, usage
+			}
+			index++
+			request.profile = Profile(args[index])
+		case "--files":
+			if index+1 >= len(args) || request.files >= 0 {
+				return execRequest{}, usage
+			}
+			index++
+			files, err := strconv.Atoi(args[index])
+			if err != nil || files < 0 || files > maxInheritedFiles {
+				return execRequest{}, usage
+			}
+			request.files = files
+		case "--seccomp":
+			request.seccomp = true
+		case "--":
+			request.argv = args[index+1:]
+			index = len(args)
+		default:
+			return execRequest{}, usage
+		}
 	}
-	profile := Profile(args[1])
-	files, err := strconv.Atoi(args[3])
-	if !profile.valid() || err != nil || files < 0 || files > maxInheritedFiles {
-		return "", 0, nil, usage
+	if !request.profile.valid() || request.files < 0 || len(request.argv) == 0 {
+		return execRequest{}, usage
 	}
-	if !filepath.IsAbs(args[5]) {
-		return "", 0, nil, fmt.Errorf("%s: the program %q is not an absolute path", ExecCommand, args[5])
+	if !filepath.IsAbs(request.argv[0]) {
+		return execRequest{}, fmt.Errorf("%s: the program %q is not an absolute path", ExecCommand, request.argv[0])
 	}
-	return profile, files, args[5:], nil
+	return request, nil
 }
 
 // profilePaths are landlockPaths, the search path files of musl's dynamic

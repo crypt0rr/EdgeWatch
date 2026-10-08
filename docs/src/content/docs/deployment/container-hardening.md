@@ -11,7 +11,9 @@ supplementary groups and only the raw-packet capabilities a scan needs. A
 compromised scanner process cannot read the database or the encryption keys.
 When the kernel provides [Landlock](#landlock), EdgeWatch also limits each
 scanner process to the files a scan needs, and this holds even for a scanner
-process that runs as UID 0. The process that delivers notifications runs in a
+process that runs as UID 0. A [seccomp filter](#seccomp-filter) refuses the
+system calls no scanner needs, and [no EdgeWatch process dumps
+core](#core-dumps). The process that delivers notifications runs in a
 [sandbox](#notification-sandbox) of its own, without capabilities.
 
 The daemon itself keeps UID 0 for compatibility. Nmap UDP and SYN scans, and
@@ -60,9 +62,9 @@ published:
 
 | Runtime | Capabilities | Supported work | Result |
 | --- | --- | --- | --- |
-| UID 0 daemon, base Compose | `NET_RAW`, `SETUID`, `SETGID`, `KILL` | Nmap TCP SYN/connect, Nmap UDP, Naabu connect, each in the sandbox as UID 65532 with `NET_RAW`, restricted with Landlock | supported |
-| UID 0 daemon, `compose.syn.yaml` | the above and `NET_ADMIN` | Naabu SYN in addition to the base modes, in the sandbox with `NET_RAW` and `NET_ADMIN`, restricted with Landlock | supported |
-| UID 0 daemon, `NET_RAW` only | `NET_RAW` | the base modes as UID 0, restricted only with Landlock | supported; the identity sandbox is unavailable and EdgeWatch warns |
+| UID 0 daemon, base Compose | `NET_RAW`, `SETUID`, `SETGID`, `KILL` | Nmap TCP SYN/connect, Nmap UDP, Naabu connect, each in the sandbox as UID 65532 with `NET_RAW`, restricted with Landlock and the seccomp filter | supported |
+| UID 0 daemon, `compose.syn.yaml` | the above and `NET_ADMIN` | Naabu SYN in addition to the base modes, in the sandbox with `NET_RAW` and `NET_ADMIN`, restricted with Landlock and the seccomp filter | supported |
+| UID 0 daemon, `NET_RAW` only | `NET_RAW` | the base modes as UID 0, restricted only with Landlock and the seccomp filter | supported; the identity sandbox is unavailable and EdgeWatch warns |
 | UID 65532, experimental probe | none effective (even when `NET_RAW` is requested) | Naabu connect and Nmap TCP connect only | supported for those modes; not a supported default |
 | UID 65532, experimental probe | none effective | Nmap SYN or UDP, Naabu SYN | rejected by the scanner or unavailable |
 
@@ -76,7 +78,9 @@ only Landlock, and with the sandbox off, and requires the same results from
 all three. It checks that the sandbox identity cannot read the data
 directory, and that a process restricted with Landlock cannot read the
 database, list the data directory, read `config.yaml`, write to the data
-directory, or execute a file it wrote, even as UID 0.
+directory, or execute a file it wrote, even as UID 0. It requires that a
+running Nmap and the notification process each have one seccomp filter more
+than the daemon, and that neither they nor the daemon can dump core.
 
 ## Data ownership and upgrades
 
@@ -185,6 +189,44 @@ Docker's default seccomp profile permits the Landlock system calls. A custom
 profile must allow `landlock_create_ruleset`, `landlock_add_rule` and
 `landlock_restrict_self`, or Landlock is reported unavailable.
 
+### Seccomp filter
+
+With Landlock, the `sandbox-exec` command also installs a seccomp filter on
+top of the container's seccomp profile. The scanner keeps the filter, and so
+does every process the scanner starts. The filter:
+
+- refuses with `EPERM` the system calls no scanner or notification process
+  needs. These trace another process or read its memory (`ptrace`,
+  `process_vm_readv`, `process_vm_writev`, `kcmp`), or use io_uring,
+  `userfaultfd`, `perf_event_open`, or `bpf`. Others reach the kernel
+  keyring, load kernels or modules, change mounts, namespaces, or the root
+  directory (`unshare`, `setns`, `chroot`), or control the host's swap,
+  reboot, accounting, quotas, file handles, and kernel log. On x86-64 it also
+  refuses port I/O and `uselib`;
+- refuses a `clone` that creates a namespace, and makes `clone3`, whose flags
+  a filter cannot read, fail with `ENOSYS`, so that C libraries use `clone`;
+- refuses the x32 ABI on x86-64, and kills a process that makes a system call
+  of another architecture.
+
+Docker's default profile already refuses most of these calls. The filter
+keeps them refused under a runtime or profile that does not, and it refuses
+`ptrace` and io_uring, which recent Docker profiles allow. The startup probe
+runs Nmap with the filter. When Nmap cannot start that way, scanners run
+with Landlock alone. `scanner_sandbox.seccomp` in `edgewatch health` reports
+`enforced`, `unavailable` with the reason, or `disabled`. The filter applies
+only with Landlock: `scanner.landlock: off` turns it off too.
+
+### Core dumps
+
+Every EdgeWatch process sets its soft and hard core file size limits to zero
+and clears its dumpable flag at startup. Its child processes inherit the
+limit and cannot raise it. A crash of the daemon, the notification process,
+or a scanner therefore leaves no core file. Such a file would hold the keys,
+a destination URL, or scan data, and could reach a core handler on the host
+outside the container. A non-dumpable process cannot be traced, and its
+memory cannot be read, by another process of its identity without
+`CAP_SYS_PTRACE`.
+
 ### Upgrading an existing deployment
 
 A `compose.yaml` from an earlier release adds only `NET_RAW`. With it,
@@ -233,7 +275,10 @@ A sandboxed notification process:
   scanner process can neither signal it nor read its memory;
 - is restricted with [Landlock](#landlock), when the kernel provides it, to the
   same system files as a scanner process, without `/tmp`: it can write no file
-  at all;
+  at all. The [seccomp filter](#seccomp-filter) applies as it does to
+  scanners;
+- is non-dumpable for its whole run, so another process of its identity can
+  neither trace it nor read the destination URL from its memory;
 - keeps its network access and the proxy, time zone, and certificate authority
   variables the daemon passes to it: `HTTP_PROXY`, `HTTPS_PROXY`,
   `ALL_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `TZ`, `LANG`, and

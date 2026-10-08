@@ -15,14 +15,35 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// hardenCheck is the argument with which the test binary hardens itself and
+// prints its dumpable flag and core file size limits.
+const hardenCheck = "harden-check"
+
 // TestMain lets the test binary stand in for the EdgeWatch executable as the
-// sandbox-exec command.
+// sandbox-exec command, and harden a process of its own.
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == ExecCommand {
 		if err := Exec(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
 		os.Exit(126)
+	}
+	if len(os.Args) > 1 && os.Args[1] == hardenCheck {
+		if err := HardenProcess(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		dumpable, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
+		var limit unix.Rlimit
+		if err == nil {
+			err = unix.Getrlimit(unix.RLIMIT_CORE, &limit)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println(dumpable, limit.Cur, limit.Max)
+		os.Exit(0)
 	}
 	os.Exit(m.Run())
 }
@@ -38,12 +59,13 @@ func requireLandlock(t *testing.T) int {
 
 func TestParseExecArgs(t *testing.T) {
 	t.Parallel()
-	profile, files, argv, err := parseExecArgs([]string{"--profile", "scanner", "--files", "2", "--", "/usr/bin/nmap", "--privileged", "-oX", "/dev/fd/3"})
-	if err != nil || profile != Scanner || files != 2 || strings.Join(argv, " ") != "/usr/bin/nmap --privileged -oX /dev/fd/3" {
-		t.Fatalf("parse = %q %d %q %v", profile, files, argv, err)
+	request, err := parseExecArgs([]string{"--profile", "scanner", "--files", "2", "--", "/usr/bin/nmap", "--privileged", "-oX", "/dev/fd/3"})
+	if err != nil || request.profile != Scanner || request.files != 2 || request.seccomp || strings.Join(request.argv, " ") != "/usr/bin/nmap --privileged -oX /dev/fd/3" {
+		t.Fatalf("parse = %+v %v", request, err)
 	}
-	if profile, _, _, err := parseExecArgs([]string{"--profile", "notifier", "--files", "0", "--", "/usr/local/bin/edgewatch", "notify-send"}); err != nil || profile != Notifier {
-		t.Fatalf("notifier parse = %q %v", profile, err)
+	request, err = parseExecArgs([]string{"--seccomp", "--files", "0", "--profile", "notifier", "--", "/usr/local/bin/edgewatch", "notify-send"})
+	if err != nil || request.profile != Notifier || !request.seccomp || request.files != 0 {
+		t.Fatalf("notifier parse = %+v %v", request, err)
 	}
 	for name, args := range map[string][]string{
 		"empty":           nil,
@@ -54,12 +76,18 @@ func TestParseExecArgs(t *testing.T) {
 		"bad count":       {"--profile", "scanner", "--files", "x", "--", "/usr/bin/nmap"},
 		"negative":        {"--profile", "scanner", "--files", "-1", "--", "/usr/bin/nmap"},
 		"too many files":  {"--profile", "scanner", "--files", "17", "--", "/usr/bin/nmap"},
+		"no count":        {"--profile", "scanner", "--", "/usr/bin/nmap"},
+		"profile twice":   {"--profile", "scanner", "--profile", "notifier", "--files", "0", "--", "/usr/bin/nmap"},
+		"count twice":     {"--profile", "scanner", "--files", "0", "--files", "1", "--", "/usr/bin/nmap"},
+		"dangling flag":   {"--profile"},
+		"dangling count":  {"--profile", "scanner", "--files"},
+		"unknown flag":    {"--profile", "scanner", "--files", "0", "--network", "--", "/usr/bin/nmap"},
 	} {
-		if _, _, _, err := parseExecArgs(args); err == nil || !strings.Contains(err.Error(), "usage: sandbox-exec") {
+		if _, err := parseExecArgs(args); err == nil || !strings.Contains(err.Error(), "usage: sandbox-exec") {
 			t.Errorf("%s: parse = %v, want usage", name, err)
 		}
 	}
-	if _, _, _, err := parseExecArgs([]string{"--profile", "scanner", "--files", "0", "--", "nmap"}); err == nil || !strings.Contains(err.Error(), "not an absolute path") {
+	if _, err := parseExecArgs([]string{"--profile", "scanner", "--files", "0", "--", "nmap"}); err == nil || !strings.Contains(err.Error(), "not an absolute path") {
 		t.Fatalf("relative program = %v", err)
 	}
 	if err := execLandlocked([]string{"--files"}); err == nil || !strings.Contains(err.Error(), "usage") {

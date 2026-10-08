@@ -163,7 +163,8 @@ function BaselinePill({ baseline }: { baseline: BaselineStatusInfo }) {
 
 function sandboxLabel(status: NonNullable<Awaited<ReturnType<typeof adminStatus>>['scanner_sandbox']>) {
   const landlock = status.landlock?.state === 'enforced'
-  if (status.state === 'enforced') return [status.capabilities?.length ? `Enforced · ${status.capabilities.join(', ')}` : 'Enforced', ...(landlock ? ['Landlock'] : [])].join(' · ')
+  const restrictions = [...(landlock ? ['Landlock'] : []), ...(status.seccomp?.state === 'enforced' ? ['seccomp'] : [])]
+  if (status.state === 'enforced') return [status.capabilities?.length ? `Enforced · ${status.capabilities.join(', ')}` : 'Enforced', ...restrictions].join(' · ')
   if (landlock) return 'Landlock only'
   if (status.state === 'disabled') return 'Off'
   return 'Unavailable'

@@ -140,8 +140,10 @@ Jobs are configured in the console, which enforces these limits:
   `off` also turns off Landlock.
 - `scanner.landlock: auto` also restricts Nmap and Naabu with Landlock to the
   system files a scan reads, the files EdgeWatch passes to them, and `/tmp`,
-  when the kernel provides it. Set `required` to refuse to scan without it, or
-  `off` if a scanner needs files outside those paths.
+  when the kernel provides it, and installs a seccomp filter that refuses the
+  system calls no scanner needs. Set `required` to refuse to scan without
+  Landlock, or `off`, which turns off the filter too, if a scanner needs files
+  outside those paths.
 - `notifications.sandbox: auto` delivers notifications from a process that runs
   as UID 65531 without capabilities, restricted with Landlock, when the
   container grants `SETUID`, `SETGID` and `KILL` and that process can read the

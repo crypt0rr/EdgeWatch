@@ -113,6 +113,10 @@ func profileOrScanner(profile Profile) Profile {
 	return profile
 }
 
+// seccompWithoutLandlock is why the seccomp filter does not apply: the
+// sandbox-exec command that installs it runs only with Landlock.
+const seccompWithoutLandlock = "the seccomp filter applies only with Landlock"
+
 // ExecCommand is the hidden EdgeWatch command through which a process
 // restricted with Landlock starts.
 const ExecCommand = "sandbox-exec"
@@ -144,6 +148,17 @@ type Status struct {
 	// Landlock describes the restriction of the files the processes can
 	// open.
 	Landlock LandlockStatus `json:"landlock"`
+	// Seccomp describes the filter of the system calls the processes can
+	// make, which the Landlock restriction installs.
+	Seccomp SeccompStatus `json:"seccomp"`
+}
+
+// SeccompStatus describes the seccomp filter of the processes.
+type SeccompStatus struct {
+	// State is enforced, disabled, or unavailable.
+	State string `json:"state"`
+	// Reason explains a disabled or unavailable filter.
+	Reason string `json:"reason,omitempty"`
 }
 
 // LandlockStatus describes how the files the processes can open are
@@ -202,7 +217,22 @@ var (
 	confineProcess func(cmd *exec.Cmd, uid, gid int, ambient []uintptr)
 	nameCapability func(capability uintptr) string
 	execRestricted func(args []string) error
+	hardenProcess  func() error
 )
+
+// HardenProcess keeps the calling process, and every process it starts, from
+// dumping core, and makes the calling process non-dumpable, so that a process
+// of the same identity without CAP_SYS_PTRACE can neither trace it nor read
+// its memory. A core dump of the daemon, the notification process, or a
+// scanner would hold the keys, a destination URL, or scan data, and the
+// host's core handler would keep it outside the container. Elsewhere than
+// Linux it does nothing.
+func HardenProcess() error {
+	if hardenProcess == nil {
+		return nil
+	}
+	return hardenProcess()
+}
 
 // Detect decides how the processes of a profile start in this runtime for the
 // configured modes. Unless a mode is off, it starts short-lived confined
@@ -219,6 +249,7 @@ func Detect(options Options) *Policy {
 	status := Status{
 		Mode: options.Mode, State: StateUnavailable, ProcessUID: os.Geteuid(), Reason: "the sandbox requires Linux",
 		Landlock: LandlockStatus{Mode: options.Landlock, State: StateUnavailable, Reason: "Landlock requires Linux"},
+		Seccomp:  SeccompStatus{State: StateUnavailable, Reason: seccompWithoutLandlock},
 	}
 	switch {
 	case options.Mode == ModeOff:
@@ -254,17 +285,17 @@ func (p *Policy) Confine(cmd *exec.Cmd) {
 		confineProcess(cmd, spec.uid, spec.gid, p.ambient)
 	}
 	if p.helper != "" {
-		startThroughHelper(cmd, p.helper, p.profileName())
+		startThroughHelper(cmd, p.helper, p.profileName(), p.seccomp)
 	}
 }
 
 // startThroughHelper makes cmd start the sandbox-exec command of the EdgeWatch
-// executable helper, which restricts itself for profile and then executes
-// cmd's program with cmd's arguments and the descriptors cmd passes. A
-// program that does not exist makes cmd's start fail with that error instead,
-// so callers still recognize a missing scanner, and never starts it without
-// the restriction.
-func startThroughHelper(cmd *exec.Cmd, helper string, profile Profile) {
+// executable helper, which restricts itself for profile, with the seccomp
+// filter when seccomp is set, and then executes cmd's program with cmd's
+// arguments and the descriptors cmd passes. A program that does not exist
+// makes cmd's start fail with that error instead, so callers still recognize
+// a missing scanner, and never starts it without the restriction.
+func startThroughHelper(cmd *exec.Cmd, helper string, profile Profile, seccomp bool) {
 	if cmd.Err != nil {
 		return
 	}
@@ -272,7 +303,11 @@ func startThroughHelper(cmd *exec.Cmd, helper string, profile Profile) {
 		cmd.Err = err
 		return
 	}
-	args := []string{helper, ExecCommand, "--profile", string(profile), "--files", strconv.Itoa(len(cmd.ExtraFiles)), "--", cmd.Path}
+	args := []string{helper, ExecCommand, "--profile", string(profile), "--files", strconv.Itoa(len(cmd.ExtraFiles))}
+	if seccomp {
+		args = append(args, "--seccomp")
+	}
+	args = append(args, "--", cmd.Path)
 	cmd.Args = append(args, cmd.Args[1:]...)
 	cmd.Path = helper
 }
@@ -294,6 +329,8 @@ type Policy struct {
 	// helper is the EdgeWatch executable whose sandbox-exec command restricts
 	// the processes with Landlock. Empty starts them without it.
 	helper string
+	// seccomp makes sandbox-exec also install the seccomp filter.
+	seccomp bool
 }
 
 func (p *Policy) profileName() Profile {
@@ -354,6 +391,7 @@ func NewEnforcedFor(profile Profile, ambient ...uintptr) *Policy {
 		status: Status{
 			Mode: ModeAuto, State: StateEnforced, UID: spec.uid, GID: spec.gid, ProcessUID: spec.uid, Capabilities: names,
 			Landlock: LandlockStatus{Mode: ModeOff, State: StateDisabled, Reason: spec.landlockSetting + " is off"},
+			Seccomp:  SeccompStatus{State: StateDisabled, Reason: seccompWithoutLandlock},
 		},
 		enforce: true,
 		ambient: append([]uintptr(nil), ambient...),
@@ -373,9 +411,23 @@ func (p *Policy) WithLandlock(helper string, abi int) *Policy {
 		restricted = &copied
 	}
 	restricted.helper = helper
+	restricted.seccomp = false
 	restricted.status.NoNewPrivileges = true
 	restricted.status.Landlock = LandlockStatus{Mode: ModeAuto, State: StateEnforced, ABI: abi}
+	restricted.status.Seccomp = SeccompStatus{State: StateUnavailable, Reason: "the seccomp filter was not requested"}
 	return restricted
+}
+
+// WithSeccomp returns a copy of p, which must restrict its processes with
+// Landlock, whose sandbox-exec command also installs the seccomp filter,
+// without checking that the kernel allows it.
+func (p *Policy) WithSeccomp() *Policy {
+	filtered := *p
+	filtered.status.Capabilities = append([]string(nil), p.status.Capabilities...)
+	filtered.ambient = append([]uintptr(nil), p.ambient...)
+	filtered.seccomp = true
+	filtered.status.Seccomp = SeccompStatus{State: StateEnforced}
+	return &filtered
 }
 
 // Enforced reports whether the processes start as the confined identity with
@@ -402,6 +454,7 @@ func (p *Policy) Status() Status {
 		return Status{
 			Mode: ModeOff, State: StateDisabled, ProcessUID: os.Geteuid(), Reason: "the processes are not confined",
 			Landlock: LandlockStatus{Mode: ModeOff, State: StateDisabled, Reason: "the processes are not confined"},
+			Seccomp:  SeccompStatus{State: StateDisabled, Reason: "the processes are not confined"},
 		}
 	}
 	status := p.status

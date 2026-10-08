@@ -39,6 +39,12 @@ var exitProcess = os.Exit
 const daemonShutdownTimeout = 6 * time.Minute
 
 func main() {
+	// Every EdgeWatch process can hold a key, a destination URL, or scan
+	// data, so none dumps core and none can be read by a debugger of its own
+	// identity.
+	if err := sandbox.HardenProcess(); err != nil {
+		fmt.Fprintln(os.Stderr, "edgewatch: warning:", err)
+	}
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "edgewatch:", err)
 		os.Exit(1)
@@ -826,7 +832,7 @@ func logScannerSandbox(logger *slog.Logger, status sandbox.Status) {
 	}
 	switch {
 	case status.Landlock.State == sandbox.StateEnforced:
-		logger.Info("scanner processes are restricted with Landlock", "abi", status.Landlock.ABI)
+		logger.Info("scanner processes are restricted with Landlock", "abi", status.Landlock.ABI, "seccomp", status.Seccomp.State, "seccomp_reason", status.Seccomp.Reason)
 	case status.Landlock.State == sandbox.StateUnavailable:
 		logger.Info("scanner processes start without Landlock", "reason", status.Landlock.Reason)
 	case status.State != sandbox.StateDisabled:
@@ -838,7 +844,7 @@ func logScannerSandbox(logger *slog.Logger, status sandbox.Status) {
 func logNotificationSandbox(logger *slog.Logger, status sandbox.Status) {
 	switch {
 	case status.State == sandbox.StateEnforced:
-		logger.Info("the notification process is sandboxed", "uid", status.UID, "gid", status.GID, "landlock", status.Landlock.State, "landlock_reason", status.Landlock.Reason)
+		logger.Info("the notification process is sandboxed", "uid", status.UID, "gid", status.GID, "landlock", status.Landlock.State, "landlock_reason", status.Landlock.Reason, "seccomp", status.Seccomp.State)
 	case status.State == sandbox.StateUnavailable && status.ProcessUID == 0 && status.Landlock.State == sandbox.StateEnforced:
 		logger.Warn("the notification process runs as UID 0, restricted only by Landlock; see the container hardening guide", "reason", status.Reason)
 	case status.State == sandbox.StateUnavailable && status.ProcessUID == 0:

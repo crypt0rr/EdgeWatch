@@ -28,6 +28,7 @@ const frontendReport = (overrides = {}) => {
     'src/components/AuditLog.tsx',
     'src/components/ErrorNotice.tsx',
     'src/components/HostEmptyState.tsx',
+    'src/components/NotificationDestinationConfig.tsx',
     'src/components/navigation.ts',
     'src/components/OneTimeLink.tsx',
     'src/components/PasswordField.tsx',

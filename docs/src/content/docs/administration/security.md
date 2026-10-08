@@ -38,12 +38,14 @@ administrators and platform administrators. See
 
 ## Secrets and backups
 
-Notification URLs are write-only in the API and encrypted in the database with
-`notification.key`. TOTP seeds use the independent `auth.key`. Separate configured
+Notification credentials, supplied as provider fields or a Shoutrrr URL, are
+write-only in the API and saved as encrypted URLs with `notification.key`.
+TOTP seeds use the independent `auth.key`. Separate configured
 key files must be regular files: the notification key with mode `0400` or
 `0600`, and the authentication key without group or other permissions. Back up the original
 keys with the corresponding database; the database alone cannot recover them.
-Never commit keys, passwords, setup tokens, notification URLs, or runtime data.
+Never commit keys, passwords, setup tokens, notification credentials or URLs,
+or runtime data.
 
 After a successful legacy notification import, remove plaintext URLs and URL
 file mounts from the deployment. Rotate credentials through the console.

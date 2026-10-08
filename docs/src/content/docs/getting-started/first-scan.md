@@ -8,9 +8,12 @@ administrator you created during setup.
 
 ## Set up notifications
 
-Open **Notifications** and add a named Shoutrrr destination. Notification URLs
-are write-only: the console does not return an existing URL after you save it.
-Treat these URLs as secrets.
+Open **Notifications** and choose Email (SMTP), Discord webhook, ntfy, or
+**Advanced Shoutrrr URL**. Add a name, connection details, and confirm your
+account password. Credentials are write-only and encrypted; the console does
+not return them after you save them. Use **Test** and check that the message
+arrives. When you create a job, select the destination in its notification
+routing.
 
 The [notification guide](/user-guide/notifications/)
 covers routing, delivery health, and destinations imported from older deployments.

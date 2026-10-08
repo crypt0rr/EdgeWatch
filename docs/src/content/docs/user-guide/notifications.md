@@ -8,6 +8,27 @@ Destinations are named and managed on the **Notifications** page. Their URLs
 are write-only and encrypted at rest with `notification.key`; their
 credentials are never returned by the API or written to logs.
 
+## Add a destination
+
+Choose a built-in provider to enter connection details in separate fields:
+
+- **Email (SMTP):** server, sender address, recipients, and optional login.
+  Recipients can be comma-separated. The port defaults to 25; StartTLS is
+  enabled when the server advertises support.
+- **Discord webhook:** paste the HTTPS webhook URL for a Discord channel.
+- **ntfy:** enter a topic and, when needed, a server and login. A blank server
+  uses `https://ntfy.sh`.
+- **Advanced Shoutrrr URL:** use this for any other provider Shoutrrr supports
+  or when you already have a URL.
+
+The form never reads a saved credential back. To rotate a saved destination,
+edit it and enter all fields for its new provider configuration; leaving the
+Advanced URL blank keeps its existing credentials. Replacing credentials
+discards alerts queued for the old credentials. A successful test means the
+provider accepted the test send; check the recipient to confirm the message
+arrived. Destinations added after existing job routing is frozen remain
+opt-in. Select a destination in each job that should use it.
+
 ## Routing and update alerts
 
 Each job can select its own destinations. On the **Notifications** page,
@@ -51,8 +72,9 @@ audit record. Its delivery health goes with it, so its failures no longer
 count in the notification totals.
 
 Renaming a destination keeps its queued alerts, including an alert that is
-raised while the rename is saved. Replacing its URL discards its queued alerts
-instead of sending them to the new URL, and deleting it discards them too.
+raised while the rename is saved. Replacing its URL or provider configuration
+discards its queued alerts instead of sending them to the new credentials, and
+deleting it discards them too.
 This includes an alert that a delivery pass has picked up but not yet sent. An
 alert raised while either change is saved is also discarded, and the security
 audit log records it as `notifications.pending_discarded`. An alert raised

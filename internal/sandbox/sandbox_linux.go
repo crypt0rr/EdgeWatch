@@ -19,8 +19,8 @@ import (
 )
 
 // controlCapabilities are the capabilities the daemon needs to start a
-// scanner process as another identity and to stop it: KILL is what lets UID 0
-// signal a process of another UID once filesystem and process capabilities
+// confined process as another identity and to stop it: KILL is what lets UID
+// 0 signal a process of another UID once filesystem and process capabilities
 // are dropped.
 var controlCapabilities = []uintptr{unix.CAP_SETUID, unix.CAP_SETGID, unix.CAP_KILL}
 
@@ -38,20 +38,50 @@ type environment struct {
 	permitted  uint64
 	capErr     error
 	noNewPrivs bool
-	// probe starts a short-lived process confined with ambient and reports
-	// whether it ran.
-	probe func(ambient []uintptr) error
 	// landlockABI is the kernel's Landlock ABI version, or landlockErr why
 	// it has none.
 	landlockABI int
 	landlockErr error
-	// executable is the EdgeWatch executable, or executableErr why it could
-	// not be found.
+	// executable is the EdgeWatch executable, or executableErr why it cannot
+	// start sandboxed processes.
 	executable    string
 	executableErr error
-	// probeLandlock runs command as policy, which restricts it with
-	// Landlock, starts it, and reports whether it ran.
-	probeLandlock func(policy *Policy, command []string) error
+	// run starts command confined by policy in environment and reports
+	// whether it succeeded.
+	run func(policy *Policy, command, environment []string) error
+}
+
+// command returns the command line of probe.
+func (env environment) command(probe Probe) ([]string, error) {
+	if !probe.Self {
+		return probe.Args, nil
+	}
+	if env.executableErr != nil {
+		return nil, env.executableErr
+	}
+	return append([]string{env.executable}, probe.Args...), nil
+}
+
+// runProbe runs probe confined by policy.
+func (env environment) runProbe(policy *Policy, probe Probe) error {
+	command, err := env.command(probe)
+	if err != nil {
+		return err
+	}
+	if len(command) == 0 {
+		return nil
+	}
+	return env.run(policy, command, probe.Env)
+}
+
+func probeName(probe Probe) string {
+	if probe.Name != "" {
+		return probe.Name
+	}
+	if len(probe.Args) == 0 || probe.Self {
+		return "edgewatch"
+	}
+	return filepath.Base(probe.Args[0])
 }
 
 func init() {
@@ -62,30 +92,33 @@ func init() {
 }
 
 func detect(options Options, env environment) *Policy {
+	profile := profileOrScanner(options.Profile)
+	spec := profile.spec()
 	mode := normalizedMode(options.Mode)
 	status := Status{Mode: mode, ProcessUID: env.euid}
 	if mode == ModeOff {
 		status.State = StateDisabled
-		status.Reason = "scanner.sandbox is off"
-		status.Landlock = LandlockStatus{Mode: normalizedMode(options.Landlock), State: StateDisabled, Reason: "scanner.sandbox is off"}
-		return &Policy{status: status}
+		status.Reason = spec.sandboxSetting + " is off"
+		status.Landlock = LandlockStatus{Mode: normalizedMode(options.Landlock), State: StateDisabled, Reason: spec.sandboxSetting + " is off"}
+		return &Policy{profile: profile, status: status}
 	}
-	return detectLandlock(detectIdentity(mode, status, env), options, env)
+	return detectLandlock(detectIdentity(profile, mode, status, options.IdentityProbe, env), options, env)
 }
 
-// detectIdentity decides whether scanner processes start as the confined
-// identity.
-func detectIdentity(mode string, status Status, env environment) *Policy {
+// detectIdentity decides whether the processes of profile start as its
+// confined identity.
+func detectIdentity(profile Profile, mode string, status Status, probe Probe, env environment) *Policy {
+	spec := profile.spec()
 	unavailable := func(reason string) *Policy {
 		status.State = StateUnavailable
 		status.Reason = reason
-		return &Policy{status: status}
+		return &Policy{profile: profile, status: status}
 	}
 	if !ValidMode(mode) {
-		return unavailable(fmt.Sprintf("scanner.sandbox %q is not auto, required, or off", mode))
+		return unavailable(fmt.Sprintf("%s %q is not auto, required, or off", spec.sandboxSetting, mode))
 	}
 	if env.euid != 0 {
-		return unavailable(fmt.Sprintf("EdgeWatch runs as UID %d rather than 0, so it cannot start scanner processes as another identity", env.euid))
+		return unavailable(fmt.Sprintf("EdgeWatch runs as UID %d rather than 0, so it cannot start %s as another identity", env.euid, spec.processes))
 	}
 	if env.capErr != nil {
 		return unavailable(fmt.Sprintf("the daemon's capabilities could not be read: %v", env.capErr))
@@ -97,26 +130,30 @@ func detectIdentity(mode string, status Status, env environment) *Policy {
 		}
 	}
 	if len(missing) > 0 {
-		return unavailable(fmt.Sprintf("the container does not grant %s, which EdgeWatch needs to start and stop scanner processes as UID %d; add them to cap_add", strings.Join(missing, ", "), UID))
+		return unavailable(fmt.Sprintf("the container does not grant %s, which EdgeWatch needs to start and stop %s as UID %d; add them to cap_add", strings.Join(missing, ", "), spec.processes, spec.uid))
 	}
 	var ambient []uintptr
 	for _, capability := range networkCapabilities {
-		if env.permitted&(1<<capability) != 0 {
+		if spec.keepsNetwork && env.permitted&(1<<capability) != 0 {
 			ambient = append(ambient, capability)
 		}
 	}
-	if err := env.probe(ambient); err != nil {
-		return unavailable(fmt.Sprintf("a test process could not start as UID %d: %v", UID, err))
+	if len(probe.Args) == 0 {
+		probe = Probe{Self: true, Args: []string{"version"}}
 	}
-	policy := NewEnforced(ambient...)
+	policy := NewEnforcedFor(profile, ambient...)
+	if err := env.runProbe(policy, probe); err != nil {
+		return unavailable(fmt.Sprintf("%s could not start as UID %d: %v", spec.testProcess, spec.uid, err))
+	}
 	policy.status.Mode = mode
 	policy.status.NoNewPrivileges = env.noNewPrivs
 	return policy
 }
 
-// detectLandlock decides whether scanner processes also start restricted
-// with Landlock. When they cannot, policy keeps its identity confinement.
+// detectLandlock decides whether the processes also start restricted with
+// Landlock. When they cannot, policy keeps its identity confinement.
 func detectLandlock(policy *Policy, options Options, env environment) *Policy {
+	spec := policy.profileName().spec()
 	mode := normalizedMode(options.Landlock)
 	status := LandlockStatus{Mode: mode}
 	unrestricted := func(state, reason string) *Policy {
@@ -126,22 +163,19 @@ func detectLandlock(policy *Policy, options Options, env environment) *Policy {
 	}
 	switch {
 	case mode == ModeOff:
-		return unrestricted(StateDisabled, "scanner.landlock is off")
+		return unrestricted(StateDisabled, spec.landlockSetting+" is off")
 	case !ValidMode(mode):
-		return unrestricted(StateUnavailable, fmt.Sprintf("scanner.landlock %q is not auto, required, or off", mode))
+		return unrestricted(StateUnavailable, fmt.Sprintf("%s %q is not auto, required, or off", spec.landlockSetting, mode))
 	case env.landlockErr != nil:
 		return unrestricted(StateUnavailable, landlockUnavailableReason(env.landlockErr))
 	case env.executableErr != nil:
-		return unrestricted(StateUnavailable, fmt.Sprintf("the EdgeWatch executable cannot start scanner processes with Landlock: %v", env.executableErr))
+		return unrestricted(StateUnavailable, fmt.Sprintf("the EdgeWatch executable cannot start %s with Landlock: %v", spec.processes, env.executableErr))
 	}
 	restricted := policy.WithLandlock(env.executable, env.landlockABI)
 	restricted.status.Landlock.Mode = mode
-	for _, command := range options.Probes {
-		if len(command) == 0 {
-			continue
-		}
-		if err := env.probeLandlock(restricted, command); err != nil {
-			return unrestricted(StateUnavailable, fmt.Sprintf("%s could not start with Landlock: %v", filepath.Base(command[0]), err))
+	for _, probe := range options.Probes {
+		if err := env.runProbe(restricted, probe); err != nil {
+			return unrestricted(StateUnavailable, fmt.Sprintf("%s could not start with Landlock: %v", probeName(probe), err))
 		}
 	}
 	return restricted
@@ -159,20 +193,20 @@ func landlockUnavailableReason(err error) string {
 	}
 }
 
-// confineLinux starts cmd's process as UID and GID with no supplementary
+// confineLinux starts cmd's process as uid and gid with no supplementary
 // groups and the ambient capabilities.
-func confineLinux(cmd *exec.Cmd, ambient []uintptr) {
+func confineLinux(cmd *exec.Cmd, uid, gid int, ambient []uintptr) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	// An empty, non-nil Groups clears the supplementary groups. Keeping UID
 	// 0's groups would give the process the root group's access.
-	cmd.SysProcAttr.Credential = &syscall.Credential{Uid: UID, Gid: GID, Groups: []uint32{}}
+	cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid), Groups: []uint32{}}
 	cmd.SysProcAttr.AmbientCaps = append([]uintptr(nil), ambient...)
 }
 
 func systemEnvironment() environment {
-	env := environment{euid: os.Geteuid(), probe: probeProcess, probeLandlock: probeLandlocked}
+	env := environment{euid: os.Geteuid(), run: runConfined}
 	env.landlockABI, env.landlockErr = landlockVersion()
 	env.executable, env.executableErr = os.Executable()
 	if env.executableErr == nil {
@@ -205,28 +239,6 @@ func readNoNewPrivs(path string) bool {
 	return false
 }
 
-// probeProcess runs the EdgeWatch binary's version command confined. The
-// kernel refuses the identity change or an ambient capability the daemon does
-// not hold before the process starts, so a successful run proves that scanner
-// processes can be confined the same way.
-func probeProcess(ambient []uintptr) error {
-	executable, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	if err := refuseTestBinary(executable); err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, executable, "version")
-	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent"}
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	NewEnforced(ambient...).Confine(cmd)
-	return cmd.Run()
-}
-
 // refuseTestBinary keeps a Go test binary from running its whole test suite
 // as a probe or as the sandbox-exec command. Tests describe the runtime
 // instead.
@@ -240,19 +252,26 @@ func refuseTestBinary(executable string) error {
 // maxProbeDiagnostic bounds the diagnostic output a failed probe reports.
 const maxProbeDiagnostic = 4 << 10
 
-// probeLandlocked runs command as policy starts scanner processes, through
-// the sandbox-exec command. A scanner whose executable or shared libraries
-// lie outside the paths the restriction allows fails here, at startup,
-// instead of failing every scan. A command whose executable does not exist is
-// skipped: that scanner is not installed.
-func probeLandlocked(policy *Policy, command []string) error {
+// defaultProbeEnvironment is the environment of a probe that sets none.
+var defaultProbeEnvironment = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/nonexistent", "XDG_CONFIG_HOME=/nonexistent"}
+
+// runConfined runs command as policy starts its processes: as the confined
+// identity, which the kernel refuses before the process starts when the
+// runtime does not allow the identity change or an ambient capability, and
+// through the sandbox-exec command when the policy restricts it with
+// Landlock. A command that fails reports its last diagnostic line. A command
+// whose executable does not exist is skipped: that program is not installed.
+func runConfined(policy *Policy, command, environment []string) error {
 	if _, err := os.Stat(command[0]); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
-	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/nonexistent", "XDG_CONFIG_HOME=/nonexistent"}
+	cmd.Env = environment
+	if cmd.Env == nil {
+		cmd.Env = defaultProbeEnvironment
+	}
 	cmd.Stdout = io.Discard
 	diagnostic := &boundedBuffer{limit: maxProbeDiagnostic}
 	cmd.Stderr = diagnostic

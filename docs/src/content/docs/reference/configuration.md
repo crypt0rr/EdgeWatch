@@ -23,6 +23,7 @@ validated schema.
 | `enrichment.rdap.enabled` | YAML | Enable or disable on-demand public network-registration lookups. |
 | `updates.enabled` | YAML | Enable or disable the three-hour stable-release check. |
 | `notifications.encryption_key_file` | YAML/secrets | Optional separate key for the encrypted notification destinations. |
+| `notifications.sandbox` | YAML | Whether the notification process runs as an unprivileged identity, restricted with Landlock; see [the notification sandbox](/deployment/container-hardening/#notification-sandbox). |
 | `notifications.urls`, `urls_file` | YAML/secrets | Deprecated. Imported once as web-managed destinations; see [Notifications](/user-guide/notifications/). |
 | Jobs, users, profiles, notification destinations | Web console | Runtime administration stored in SQLite. |
 
@@ -44,6 +45,7 @@ recreated and reviewed explicitly in the console.
 | `scanner.landlock` | `auto` | `auto`, `required`, or `off`; `required` needs `scanner.sandbox` other than `off`. |
 | `web.auth_key_file` | `auth.key` next to the database | A regular file of 32 raw bytes or 64 hexadecimal characters, without group or other permissions. |
 | `notifications.encryption_key_file` | `notification.key` next to the database | A regular file of 32 raw bytes or 64 hexadecimal characters with mode `0400` or `0600`. |
+| `notifications.sandbox` | `auto` | `auto`, `required`, or `off`. |
 | `web.source_url` | The exact Git tag of an official build | An absolute HTTPS URL without credentials, a query, or a fragment, at most 2048 bytes. |
 
 Jobs are configured in the console, which enforces these limits:
@@ -140,6 +142,12 @@ Jobs are configured in the console, which enforces these limits:
   system files a scan reads, the files EdgeWatch passes to them, and `/tmp`,
   when the kernel provides it. Set `required` to refuse to scan without it, or
   `off` if a scanner needs files outside those paths.
+- `notifications.sandbox: auto` delivers notifications from a process that runs
+  as UID 65531 without capabilities, restricted with Landlock, when the
+  container grants `SETUID`, `SETGID` and `KILL` and that process can read the
+  certificate authorities `SSL_CERT_FILE` and `SSL_CERT_DIR` name. Set
+  `required` to refuse to start without it, or `off` to deliver from an
+  unconfined process.
 - RDAP is enabled by default and is requested only when an authenticated user
   opens a public host. Private and special-use addresses are never queried.
   Set `enrichment.rdap.enabled: false` for isolated or privacy-sensitive

@@ -58,7 +58,9 @@ RUN apk add --no-cache ca-certificates=20260909-r0 gcompat=1.1.0-r4 nmap=7.99-r0
     && mkdir -p /etc/edgewatch /var/lib/edgewatch /run/secrets \
     && chmod 0750 /etc/edgewatch /var/lib/edgewatch /run/secrets \
     && addgroup -S -g 65532 edgewatch-scanner \
-    && adduser -S -D -H -u 65532 -G edgewatch-scanner -h /nonexistent -s /sbin/nologin edgewatch-scanner
+    && adduser -S -D -H -u 65532 -G edgewatch-scanner -h /nonexistent -s /sbin/nologin edgewatch-scanner \
+    && addgroup -S -g 65531 edgewatch-notify \
+    && adduser -S -D -H -u 65531 -G edgewatch-notify -h /nonexistent -s /sbin/nologin edgewatch-notify
 COPY --from=build /out/edgewatch /usr/local/bin/edgewatch
 COPY --from=naabu /out/naabu /usr/local/bin/naabu
 COPY LICENSE LICENSE.md THIRD_PARTY_LICENSES.md /usr/share/licenses/edgewatch/

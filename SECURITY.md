@@ -35,8 +35,11 @@ scanner process, whatever its identity, to reading and executing the system
 directories, reading the `/etc` files a scan needs, writing the files EdgeWatch
 passes to it, and creating files only below `/tmp`, none of which it can
 execute; it cannot read the database, the keys, or `config.yaml` even as UID 0.
-All sandboxed scanner processes share UID 65532 and `/tmp`, and the
-notification child process is not sandboxed. The compatibility matrix, the sandbox, bind-mount
+All sandboxed scanner processes share UID 65532 and `/tmp`. The
+notification child process, which receives one destination URL, runs in a
+sandbox of its own with `notifications.sandbox: auto`: as UID and GID 65531
+without capabilities, restricted with Landlock to reading the system files
+and the certificate authorities it trusts, and unable to write any file. The compatibility matrix, the sandbox, bind-mount
 ownership guidance, and the criteria for a non-root daemon are maintained in
 [`docs/src/content/docs/deployment/container-hardening.md`](docs/src/content/docs/deployment/container-hardening.md).
 

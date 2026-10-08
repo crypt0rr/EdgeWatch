@@ -38,24 +38,28 @@ func requireLandlock(t *testing.T) int {
 
 func TestParseExecArgs(t *testing.T) {
 	t.Parallel()
-	files, argv, err := parseExecArgs([]string{"--files", "2", "--", "/usr/bin/nmap", "--privileged", "-oX", "/dev/fd/3"})
-	if err != nil || files != 2 || strings.Join(argv, " ") != "/usr/bin/nmap --privileged -oX /dev/fd/3" {
-		t.Fatalf("parse = %d %q %v", files, argv, err)
+	profile, files, argv, err := parseExecArgs([]string{"--profile", "scanner", "--files", "2", "--", "/usr/bin/nmap", "--privileged", "-oX", "/dev/fd/3"})
+	if err != nil || profile != Scanner || files != 2 || strings.Join(argv, " ") != "/usr/bin/nmap --privileged -oX /dev/fd/3" {
+		t.Fatalf("parse = %q %d %q %v", profile, files, argv, err)
+	}
+	if profile, _, _, err := parseExecArgs([]string{"--profile", "notifier", "--files", "0", "--", "/usr/local/bin/edgewatch", "notify-send"}); err != nil || profile != Notifier {
+		t.Fatalf("notifier parse = %q %v", profile, err)
 	}
 	for name, args := range map[string][]string{
-		"empty":          nil,
-		"no program":     {"--files", "0", "--"},
-		"no separator":   {"--files", "0", "/usr/bin/nmap", "-n"},
-		"no count":       {"--", "/usr/bin/nmap", "-n", "x"},
-		"bad count":      {"--files", "x", "--", "/usr/bin/nmap"},
-		"negative":       {"--files", "-1", "--", "/usr/bin/nmap"},
-		"too many files": {"--files", "17", "--", "/usr/bin/nmap"},
+		"empty":           nil,
+		"no profile":      {"--files", "0", "--", "/usr/bin/nmap", "-n", "x"},
+		"unknown profile": {"--profile", "daemon", "--files", "0", "--", "/usr/bin/nmap"},
+		"no program":      {"--profile", "scanner", "--files", "0", "--"},
+		"no separator":    {"--profile", "scanner", "--files", "0", "/usr/bin/nmap", "-n"},
+		"bad count":       {"--profile", "scanner", "--files", "x", "--", "/usr/bin/nmap"},
+		"negative":        {"--profile", "scanner", "--files", "-1", "--", "/usr/bin/nmap"},
+		"too many files":  {"--profile", "scanner", "--files", "17", "--", "/usr/bin/nmap"},
 	} {
-		if _, _, err := parseExecArgs(args); err == nil || !strings.Contains(err.Error(), "usage: sandbox-exec") {
+		if _, _, _, err := parseExecArgs(args); err == nil || !strings.Contains(err.Error(), "usage: sandbox-exec") {
 			t.Errorf("%s: parse = %v, want usage", name, err)
 		}
 	}
-	if _, _, err := parseExecArgs([]string{"--files", "0", "--", "nmap"}); err == nil || !strings.Contains(err.Error(), "not an absolute path") {
+	if _, _, _, err := parseExecArgs([]string{"--profile", "scanner", "--files", "0", "--", "nmap"}); err == nil || !strings.Contains(err.Error(), "not an absolute path") {
 		t.Fatalf("relative program = %v", err)
 	}
 	if err := execLandlocked([]string{"--files"}); err == nil || !strings.Contains(err.Error(), "usage") {
@@ -156,7 +160,7 @@ func TestRestrictSelfLimitsTheThreadToTheScannerFiles(t *testing.T) {
 	// processes may write. Without that rule, the directory stands in for
 	// the data directory.
 	var withoutTemporary []landlockPath
-	for _, path := range scannerPaths() {
+	for _, path := range profilePaths(Scanner, os.Getenv) {
 		if path.path != "/tmp" {
 			withoutTemporary = append(withoutTemporary, path)
 		}
@@ -180,7 +184,7 @@ func TestRestrictSelfLimitsTheThreadToTheScannerFiles(t *testing.T) {
 
 	scratch := filepath.Join("/tmp", fmt.Sprintf("edgewatch-landlock-test-%d", os.Getpid()))
 	t.Cleanup(func() { _ = os.Remove(scratch) })
-	got = onRestrictedThread(t, scannerPaths(), nil, func() map[string]error {
+	got = onRestrictedThread(t, profilePaths(Scanner, os.Getenv), nil, func() map[string]error {
 		return map[string]error{
 			"create a temporary file":         tryOpen(scratch, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL),
 			"create a file in /etc":           tryOpen("/etc/edgewatch-landlock-test", unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL),
@@ -193,6 +197,61 @@ func TestRestrictSelfLimitsTheThreadToTheScannerFiles(t *testing.T) {
 		got["write a system file"] = unix.EACCES
 	}
 	checkAccess(t, got, []string{"create a temporary file", "read the hosts file, if present"}, []string{"create a file in /etc", "write a system file"})
+}
+
+func TestNotifierPathsAddTheCertificateAuthoritiesOnly(t *testing.T) {
+	t.Parallel()
+	has := func(paths []landlockPath, path string) uint64 {
+		for _, candidate := range paths {
+			if candidate.path == path {
+				return candidate.access
+			}
+		}
+		return 0
+	}
+	environment := map[string]string{"SSL_CERT_FILE": "/run/secrets/ca.pem", "SSL_CERT_DIR": "/etc/corp-ca::/opt/ca"}
+	notifier := profilePaths(Notifier, func(key string) string { return environment[key] })
+	for _, path := range []string{"/run/secrets/ca.pem", "/etc/corp-ca", "/opt/ca"} {
+		if has(notifier, path) != landlockRead {
+			t.Errorf("notifier access to %s = %#x, want read", path, has(notifier, path))
+		}
+	}
+	if has(notifier, "/tmp") != 0 || has(notifier, "/dev/tty") != 0 || has(notifier, "") != 0 {
+		t.Fatalf("the notifier may open a scanner path: %+v", notifier)
+	}
+	scanner := profilePaths(Scanner, func(key string) string { return environment[key] })
+	if has(scanner, "/tmp") != landlockTemporary || has(scanner, "/run/secrets/ca.pem") != 0 {
+		t.Fatalf("scanner paths = %+v", scanner)
+	}
+
+	// On a restricted thread, the notifier reads the certificate file its
+	// environment names and nothing else beside it, and creates no file,
+	// not even in /tmp.
+	requireLandlock(t)
+	dir := t.TempDir()
+	certificate, other := filepath.Join(dir, "ca.pem"), filepath.Join(dir, "edgewatch.db")
+	for _, path := range []string{certificate, other} {
+		if err := os.WriteFile(path, []byte("data\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scratch := filepath.Join("/tmp", fmt.Sprintf("edgewatch-notifier-test-%d", os.Getpid()))
+	t.Cleanup(func() { _ = os.Remove(scratch) })
+	paths := profilePaths(Notifier, func(key string) string {
+		if key == "SSL_CERT_FILE" {
+			return certificate
+		}
+		return ""
+	})
+	got := onRestrictedThread(t, paths, nil, func() map[string]error {
+		return map[string]error{
+			"read the certificate file": tryOpen(certificate, unix.O_RDONLY),
+			"read a file beside it":     tryOpen(other, unix.O_RDONLY),
+			"create a temporary file":   tryOpen(scratch, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL),
+			"write the null device":     tryOpen("/dev/null", unix.O_WRONLY),
+		}
+	})
+	checkAccess(t, got, []string{"read the certificate file", "write the null device"}, []string{"read a file beside it", "create a temporary file"})
 }
 
 func TestRulesReportWhatCannotBeAllowed(t *testing.T) {
@@ -308,7 +367,7 @@ func TestSandboxExecRestrictsTheScannerProcess(t *testing.T) {
 	}
 }
 
-func TestProbeLandlockedStartsTheScannerRestricted(t *testing.T) {
+func TestRunConfinedStartsTheProgramRestricted(t *testing.T) {
 	t.Parallel()
 	abi := requireLandlock(t)
 	helper, err := os.Executable()
@@ -316,17 +375,17 @@ func TestProbeLandlockedStartsTheScannerRestricted(t *testing.T) {
 		t.Fatal(err)
 	}
 	policy := (*Policy)(nil).WithLandlock(helper, abi)
-	if err := probeLandlocked(policy, []string{"/bin/sh", "-c", "exit 0"}); err != nil {
+	if err := runConfined(policy, []string{"/bin/sh", "-c", "exit 0"}, nil); err != nil {
 		t.Fatalf("a scanner that starts restricted = %v", err)
 	}
-	if err := probeLandlocked(policy, []string{filepath.Join(t.TempDir(), "naabu"), "-version"}); err != nil {
+	if err := runConfined(policy, []string{filepath.Join(t.TempDir(), "naabu"), "-version"}, nil); err != nil {
 		t.Fatalf("a scanner that is not installed = %v, want it skipped", err)
 	}
-	err = probeLandlocked(policy, []string{"/bin/sh", "-c", "echo first >&2; echo cannot open libpcap >&2; exit 3"})
+	err = runConfined(policy, []string{"/bin/sh", "-c", "echo first >&2; echo cannot open libpcap >&2; exit 3"}, nil)
 	if err == nil || err.Error() != "exit status 3: cannot open libpcap" {
 		t.Fatalf("a scanner that fails restricted = %v, want its last diagnostic line", err)
 	}
-	if err := probeLandlocked(policy, []string{"/bin/sh", "-c", "exit 4"}); err == nil || err.Error() != "exit status 4" {
+	if err := runConfined(policy, []string{"/bin/sh", "-c", "exit 4"}, nil); err == nil || err.Error() != "exit status 4" {
 		t.Fatalf("a silent failure = %v", err)
 	}
 }
@@ -338,7 +397,7 @@ func TestSandboxExecReportsAProgramThatCannotStart(t *testing.T) {
 	go func() {
 		// sandbox-exec locks and restricts this goroutine's thread, which
 		// then ends with the goroutine.
-		results <- execLandlocked([]string{"--files", "0", "--", filepath.Join(os.TempDir(), "edgewatch-missing-scanner")})
+		results <- execLandlocked([]string{"--profile", "scanner", "--files", "0", "--", filepath.Join(os.TempDir(), "edgewatch-missing-scanner")})
 	}()
 	if err := <-results; !errors.Is(err, unix.ENOENT) || !strings.Contains(err.Error(), "sandbox-exec: execute") {
 		t.Fatalf("missing program = %v", err)

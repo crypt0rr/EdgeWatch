@@ -72,8 +72,8 @@ jobs:
 	if cfg.Scheduler.MaxNaabuProbeCount != DefaultNaabuMaxProbeCount {
 		t.Fatalf("Naabu probe budget default %d", cfg.Scheduler.MaxNaabuProbeCount)
 	}
-	if cfg.Scanner.Sandbox != ScannerSandboxAuto || cfg.Scanner.Landlock != ScannerSandboxAuto {
-		t.Fatalf("scanner sandbox defaults = %q, Landlock %q", cfg.Scanner.Sandbox, cfg.Scanner.Landlock)
+	if cfg.Scanner.Sandbox != ScannerSandboxAuto || cfg.Scanner.Landlock != ScannerSandboxAuto || cfg.Notifications.Sandbox != ScannerSandboxAuto {
+		t.Fatalf("sandbox defaults = %q, Landlock %q, notifications %q", cfg.Scanner.Sandbox, cfg.Scanner.Landlock, cfg.Notifications.Sandbox)
 	}
 	if cfg.LogLevel() != "info" || cfg.Log.Level != "info" {
 		t.Fatalf("log level default = %q", cfg.Log.Level)
@@ -974,5 +974,31 @@ func TestScannerLandlockModes(t *testing.T) {
 	}
 	if cfg, err := load("off", "  sandbox: off\n  landlock: auto\n"); err != nil || cfg.Scanner.Landlock != ScannerSandboxAuto {
 		t.Fatalf("auto Landlock with the sandbox off = %v", err)
+	}
+}
+
+func TestNotificationSandboxModes(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	load := func(name, mode string) (*Config, error) {
+		t.Helper()
+		path := filepath.Join(dir, "config-"+name+".yaml")
+		yaml := "database: " + filepath.Join(dir, "db.sqlite") + "\nnotifications:\n  sandbox: \"" + mode + "\"\n"
+		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(path)
+	}
+	for mode, want := range map[string]string{"auto": ScannerSandboxAuto, " Required ": ScannerSandboxRequired, "OFF": ScannerSandboxOff} {
+		cfg, err := load(strings.TrimSpace(mode), mode)
+		if err != nil {
+			t.Fatalf("notifications.sandbox %q: %v", mode, err)
+		}
+		if cfg.Notifications.Sandbox != want {
+			t.Fatalf("notifications.sandbox %q = %q, want %q", mode, cfg.Notifications.Sandbox, want)
+		}
+	}
+	if _, err := load("strict", "strict"); err == nil || !strings.Contains(err.Error(), "notifications.sandbox must be auto, required, or off") {
+		t.Fatalf("unknown notifications.sandbox error = %v", err)
 	}
 }

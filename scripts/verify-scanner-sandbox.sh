@@ -8,12 +8,15 @@ set -euo pipefail
 # With the sandbox enforced, also require that a running Nmap is UID 65532
 # holding only NET_RAW, that cancelling it works, that the sandbox identity
 # can neither list the data directory nor read the configuration, and that a
-# process restricted with Landlock cannot do so even as UID 0.
+# process restricted with Landlock cannot do so even as UID 0. Deliver a test
+# notification to a local webhook and require that the notification process
+# runs as UID 65531 without capabilities.
 image=${1:?usage: verify-scanner-sandbox.sh IMAGE}
 
 workdir=$(mktemp -d)
 container=
 listener_pid=
+webhook_pid=
 cleanup() {
   if [ -n "$container" ]; then
     docker logs "$container" >"$workdir/last-daemon.log" 2>&1 || true
@@ -21,6 +24,9 @@ cleanup() {
   fi
   if [ -n "$listener_pid" ]; then
     kill "$listener_pid" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$webhook_pid" ]; then
+    kill "$webhook_pid" >/dev/null 2>&1 || true
   fi
   for data in "$workdir"/data-*; do
     [ -d "$data" ] || continue
@@ -58,6 +64,32 @@ udp.bind(("127.0.0.1", int(sys.argv[2])))
 time.sleep(3600)
 PY
 listener_pid=$!
+
+# The webhook records each notification and answers after a pause, so the
+# notification process can be observed while it waits.
+webhook_port=$(free_port)
+python3 - "$webhook_port" "$workdir/notifications.log" <<'PY' &
+import http.server
+import sys
+import time
+
+
+class Hook(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        time.sleep(3)
+        with open(sys.argv[2], "ab") as log:
+            log.write(body + b"\n")
+        self.send_response(204)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Hook).serve_forever()
+PY
+webhook_pid=$!
 
 cat >"$workdir/driver.py" <<'PY'
 """Drive the EdgeWatch API for verify-scanner-sandbox.sh."""
@@ -184,6 +216,10 @@ def main():
                     return
             time.sleep(0.5)
         raise SystemExit("the slow scan never became active")
+    elif command == "notify":
+        name, url = args
+        request(base, state, "POST", "/notifications/destinations", {"name": name, "url": url, "enabled": True, "password": PASSWORD})
+        print(json.dumps(request(base, state, "POST", "/notifications/test")))
     elif command == "cancel":
         job_id, scan_id = args
         request(base, state, "POST", f"/scans/{scan_id}/cancel")
@@ -270,10 +306,44 @@ expect_health() {
   [ "$got" = "$want" ] || fail "health reports the sandbox as '$got', want '$want'"
 }
 
+# notification_health_state prints the notification sandbox state, its UID,
+# and its Landlock state that the health command reports.
+notification_health_state() {
+  docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml --output json |
+    python3 -c 'import json, sys; sandbox = json.load(sys.stdin)["notification_sandbox"]; print(sandbox["state"], sandbox.get("process_uid"), "landlock:" + sandbox["landlock"]["state"])'
+}
+
+expect_notification_health() {
+  local want=$1 got
+  got=$(notification_health_state)
+  [ "$got" = "$want" ] || fail "health reports the notification sandbox as '$got', want '$want'"
+}
+
 # landlocked runs a command in the daemon's container as UID 0, restricted
-# with Landlock as scanner processes are.
+# with Landlock as scanner processes are; landlocked_notifier as the
+# notification process is.
 landlocked() {
-  docker exec "$container" edgewatch sandbox-exec --files 0 -- "$@"
+  docker exec "$container" edgewatch sandbox-exec --profile scanner --files 0 -- "$@"
+}
+landlocked_notifier() {
+  docker exec "$container" edgewatch sandbox-exec --profile notifier --files 0 -- "$@"
+}
+
+# deliver_notification NAME sends a test notification to the webhook and
+# prints the identity of the notification process while it waits for the
+# webhook's answer.
+deliver_notification() {
+  local name=$1 sent identity=
+  python3 "$workdir/driver.py" notify "$base" "$state" "$name" "generic://127.0.0.1:$webhook_port/hook?disabletls=yes&template=json" >"$workdir/notify-$name.json" &
+  sent=$!
+  for attempt in $(seq 1 40); do
+    identity=$(docker exec "$container" /bin/sh -c 'for process in /proc/[0-9]*; do if [ "$(tr "\0" " " <"$process/cmdline" 2>/dev/null)" = "/usr/local/bin/edgewatch notify-send " ]; then awk "/^Uid:/{uid=\$2} /^Gid:/{gid=\$2} /^Groups:/{groups=\$2} /^CapEff:/{cap=\$2} END{print uid, gid, (groups == \"\" ? \"-\" : groups), cap}" "$process/status"; break; fi; done' 2>/dev/null || true)
+    [ -n "$identity" ] && break
+    sleep 0.25
+  done
+  wait "$sent" || fail "the $name test notification failed: $(cat "$workdir/notify-$name.json" 2>/dev/null)"
+  grep -q '"sent": 1' "$workdir/notify-$name.json" || fail "the $name test notification reported $(cat "$workdir/notify-$name.json")"
+  printf '%s\n' "$identity"
 }
 
 tcp_ports="$tcp_open,$tcp_closed"
@@ -300,6 +370,31 @@ for escape in "cat /var/lib/edgewatch/edgewatch.db" "ls /var/lib/edgewatch" "cat
   fi
   printf '%s\n' "$output" | grep -qi 'permission denied' || fail "'$escape' failed for another reason than Landlock: $output"
 done
+# The notification process writes no file at all, not even in /tmp.
+landlocked_notifier /bin/cat /etc/ssl/certs/ca-certificates.crt >/dev/null || fail "a restricted notification process could not read the system certificate authorities"
+for escape in "cat /var/lib/edgewatch/edgewatch.db" "cat /etc/edgewatch/config.yaml" "echo x >/tmp/escape"; do
+  if output=$(landlocked_notifier /bin/sh -c "$escape" 2>&1); then
+    fail "a restricted notification process succeeded at: $escape"
+  fi
+  printf '%s\n' "$output" | grep -qi 'permission denied' || fail "'$escape' failed for another reason than Landlock: $output"
+done
+
+# A test notification reaches the webhook from a notification process that
+# runs as UID 65531 with no capabilities.
+expect_notification_health "enforced 65531 landlock:enforced"
+notifier_identity=$(deliver_notification base)
+[ "$notifier_identity" = "65531 65531 - 0000000000000000" ] || fail "the notification process identity is '$notifier_identity', want '65531 65531 - 0000000000000000'"
+
+# A certificate authority the notification identity cannot read keeps the
+# notification process as UID 0, so its TLS destinations keep working, though
+# still restricted with Landlock, and health names the file.
+docker exec "$container" /bin/sh -c 'umask 077 && echo private >/var/lib/edgewatch/private-ca.pem'
+private_ca=$(docker exec -e SSL_CERT_FILE=/var/lib/edgewatch/private-ca.pem "$container" edgewatch health --config /etc/edgewatch/config.yaml --output json |
+  python3 -c 'import json, sys; health = json.load(sys.stdin); sandbox = health["notification_sandbox"]; print(sandbox["state"], sandbox["landlock"]["state"], "|", sandbox.get("reason", ""), "|", any("the notification process runs as UID 0, restricted only by Landlock" in warning for warning in health.get("warnings") or []))')
+case "$private_ca" in
+  "unavailable enforced | "*"read SSL_CERT_FILE"*"permission denied"*" | True") ;;
+  *) fail "an unreadable SSL_CERT_FILE gave the notification sandbox '$private_ca'" ;;
+esac
 
 # The sandbox identity cannot list the data directory or reach the
 # configuration, whatever the files' own modes.
@@ -340,6 +435,8 @@ stop_daemon
 # scanner processes stay UID 0, restricted only by Landlock.
 run_daemon legacy auto NET_RAW NET_ADMIN
 expect_health "unavailable 0 - landlock:enforced"
+expect_notification_health "unavailable 0 landlock:enforced"
+deliver_notification legacy >/dev/null
 landlock_only=$(python3 "$workdir/driver.py" scan "$base" "$state" landlock-only "$tcp_ports" "$udp_ports")
 naabu_landlock_only=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-landlock-only "$tcp_open")
 stop_daemon
@@ -357,4 +454,6 @@ printf '%s\n' "$sandboxed" | grep -q "\"tcp\", $tcp_open, \"open\"" || fail "the
 [ "$naabu_sandboxed" = "$naabu_unconfined" ] || fail "sandboxed Naabu results $naabu_sandboxed differ from unconfined results $naabu_unconfined"
 [ "$naabu_sandboxed" = "[[\"tcp\", $tcp_open, \"open\"]]" ] || fail "Naabu did not report the open TCP listener: $naabu_sandboxed"
 
-echo "scanner sandbox verified for $image: Nmap $sandboxed, Naabu $naabu_sandboxed"
+[ "$(grep -c . "$workdir/notifications.log")" = 2 ] || fail "the webhook received $(grep -c . "$workdir/notifications.log") notifications, want 2"
+
+echo "scanner and notification sandboxes verified for $image: Nmap $sandboxed, Naabu $naabu_sandboxed"

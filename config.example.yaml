@@ -102,6 +102,14 @@ notifications:
   # and files larger than 1 MiB are rejected at startup.
   # urls_file: /run/secrets/edgewatch-notification-urls
   # urls: []
+  #
+  # Notifications are delivered by a short-lived process that runs as the
+  # unprivileged UID 65531 without capabilities, restricted with Landlock.
+  # auto (the default) does so when the container grants SETUID, SETGID and
+  # KILL and that process can read the certificate authorities SSL_CERT_FILE
+  # and SSL_CERT_DIR name; required refuses to start without it; off never
+  # uses it.
+  sandbox: auto
 
 # Jobs are created and scheduled from the web interface. YAML jobs from older
 # releases are intentionally not imported; they remain inactive with a

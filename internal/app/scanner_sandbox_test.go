@@ -39,4 +39,11 @@ func TestNewWithOptionsInstallsTheScannerSandbox(t *testing.T) {
 	if got := newApp(Options{}).ScannerSandbox(); got.State != sandbox.StateDisabled {
 		t.Fatalf("application without a policy reports %+v, want disabled", got)
 	}
+	notifying := newApp(Options{NotificationSandbox: sandbox.NewEnforcedFor(sandbox.Notifier)})
+	if got := notifying.NotificationSandbox(); got.State != sandbox.StateEnforced || got.UID != sandbox.NotifierUID {
+		t.Fatalf("notification sandbox status = %+v", got)
+	}
+	if got := newApp(Options{}).NotificationSandbox(); got.State != sandbox.StateDisabled {
+		t.Fatalf("application without a notification policy reports %+v, want disabled", got)
+	}
 }

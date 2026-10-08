@@ -113,6 +113,9 @@ func run(args []string) error {
 	if cmd == "notify-send" {
 		return notify.RunSendChild(os.Stdin)
 	}
+	if cmd == "notify-check" {
+		return notify.CheckChildTrust()
+	}
 	if cmd == "config" {
 		if action != "validate" {
 			return errors.New("expected: config validate")
@@ -146,6 +149,16 @@ func run(args []string) error {
 		if err := scannerSandbox.Require(); err != nil {
 			return err
 		}
+	}
+	// The daemon and the notify test command start notification processes,
+	// in the same way.
+	var notificationSandbox *sandbox.Policy
+	if cmd == "daemon" || (cmd == "notify" && action == "test") {
+		notificationSandbox = sandbox.Detect(notificationSandboxOptions(cfg))
+		if err := notificationSandbox.Require(); err != nil {
+			return err
+		}
+		notify.SetSandbox(notificationSandbox)
 	}
 	ctx, stop := contextWithSignals(context.Background())
 	defer stop()
@@ -281,13 +294,16 @@ func run(args []string) error {
 		// Only the daemon imports notification URLs from config.yaml, after
 		// the migrations above and before its notifier and delivery worker
 		// start. Host commands keep using the configured URLs until then.
-		application, err = app.NewWithOptions(cfg, s, *nmapPath, logger, app.Options{ImportNotificationURLs: cmd == "daemon", Sandbox: scannerSandbox})
+		application, err = app.NewWithOptions(cfg, s, *nmapPath, logger, app.Options{ImportNotificationURLs: cmd == "daemon", Sandbox: scannerSandbox, NotificationSandbox: notificationSandbox})
 		if err != nil {
 			return err
 		}
 		application.Version = version
 		if scannerSandbox != nil {
 			logScannerSandbox(logger, scannerSandbox.Status())
+		}
+		if notificationSandbox != nil {
+			logNotificationSandbox(logger, notificationSandbox.Status())
 		}
 	}
 	switch cmd {
@@ -365,18 +381,20 @@ func run(args []string) error {
 		// The sandbox is detected for this container, which grants the
 		// health command the daemon's capabilities and configuration.
 		scannerSandbox := sandbox.Detect(scannerSandboxOptions(cfg, *nmapPath)).Status()
+		notificationSandbox := sandbox.Detect(notificationSandboxOptions(cfg)).Status()
 		health.Warnings = append(health.Warnings, scannerSandboxWarnings(scannerSandbox)...)
+		health.Warnings = append(health.Warnings, notificationSandboxWarnings(notificationSandbox)...)
 		if err != nil {
 			if *output == "json" {
 				// Keep stdout parseable for monitoring: report the failure
 				// as a document, then exit non-zero with the reason on stderr.
-				if printErr := printValue(*output, unhealthyStatus{HealthStatus: health, ScannerSandbox: scannerSandbox, Status: "unhealthy", Error: err.Error()}); printErr != nil {
+				if printErr := printValue(*output, unhealthyStatus{HealthStatus: health, ScannerSandbox: scannerSandbox, NotificationSandbox: notificationSandbox, Status: "unhealthy", Error: err.Error()}); printErr != nil {
 					return printErr
 				}
 			}
 			return err
 		}
-		return printValue(*output, healthReport{HealthStatus: health, ScannerSandbox: scannerSandbox})
+		return printValue(*output, healthReport{HealthStatus: health, ScannerSandbox: scannerSandbox, NotificationSandbox: notificationSandbox})
 	default:
 		return usage()
 	}
@@ -718,16 +736,18 @@ type notifyTestResult struct {
 // healthy. Its status field replaces the embedded one.
 type unhealthyStatus struct {
 	store.HealthStatus
-	ScannerSandbox sandbox.Status `json:"scanner_sandbox"`
-	Status         string         `json:"status"`
-	Error          string         `json:"error"`
+	ScannerSandbox      sandbox.Status `json:"scanner_sandbox"`
+	NotificationSandbox sandbox.Status `json:"notification_sandbox"`
+	Status              string         `json:"status"`
+	Error               string         `json:"error"`
 }
 
 // healthReport is the health command's document: the daemon's health and how
-// scanner processes start in this container.
+// scanner and notification processes start in this container.
 type healthReport struct {
 	store.HealthStatus
-	ScannerSandbox sandbox.Status `json:"scanner_sandbox"`
+	ScannerSandbox      sandbox.Status `json:"scanner_sandbox"`
+	NotificationSandbox sandbox.Status `json:"notification_sandbox"`
 }
 
 // scannerSandboxOptions describes the configured sandbox and the scanner
@@ -740,7 +760,29 @@ func scannerSandboxOptions(cfg *config.Config, nmapPath string) sandbox.Options 
 	return sandbox.Options{
 		Mode:     cfg.Scanner.Sandbox,
 		Landlock: cfg.Scanner.Landlock,
-		Probes:   [][]string{{nmapPath, "--version"}},
+		Probes:   []sandbox.Probe{{Args: []string{nmapPath, "--version"}}},
+	}
+}
+
+// notificationSandboxOptions describes the configured notification sandbox.
+// One setting selects both confinements: required needs the identity, and
+// Landlock applies unless the setting is off. Both probes run the
+// notify-check command in the notification process's own environment, so a
+// certificate authority that SSL_CERT_FILE or SSL_CERT_DIR names and the
+// confined process could not read keeps it unconfined instead of failing its
+// deliveries.
+func notificationSandboxOptions(cfg *config.Config) sandbox.Options {
+	landlock := sandbox.ModeAuto
+	if strings.EqualFold(strings.TrimSpace(cfg.Notifications.Sandbox), sandbox.ModeOff) {
+		landlock = sandbox.ModeOff
+	}
+	check := sandbox.Probe{Name: "the notification process", Self: true, Args: []string{"notify-check"}, Env: notify.ChildEnvironment()}
+	return sandbox.Options{
+		Profile:       sandbox.Notifier,
+		Mode:          cfg.Notifications.Sandbox,
+		Landlock:      landlock,
+		IdentityProbe: check,
+		Probes:        []sandbox.Probe{check},
 	}
 }
 
@@ -749,13 +791,23 @@ func scannerSandboxOptions(cfg *config.Config, nmapPath string) sandbox.Options 
 // starts scanner processes as that user, which the sandbox would not improve
 // on.
 func scannerSandboxWarnings(status sandbox.Status) []string {
+	return unconfinedRootWarnings("scanner processes run", status)
+}
+
+// notificationSandboxWarnings reports a notification sandbox that auto mode
+// could not enforce while the notification process runs as UID 0.
+func notificationSandboxWarnings(status sandbox.Status) []string {
+	return unconfinedRootWarnings("the notification process runs", status)
+}
+
+func unconfinedRootWarnings(subject string, status sandbox.Status) []string {
 	if status.State != sandbox.StateUnavailable || status.ProcessUID != 0 {
 		return nil
 	}
 	if status.Landlock.State == sandbox.StateEnforced {
-		return []string{"scanner processes run as UID 0, restricted only by Landlock: " + status.Reason}
+		return []string{subject + " as UID 0, restricted only by Landlock: " + status.Reason}
 	}
-	return []string{"scanner processes run unconfined as UID 0: " + status.Reason}
+	return []string{subject + " unconfined as UID 0: " + status.Reason}
 }
 
 // logScannerSandbox records how scanner processes start.
@@ -779,6 +831,22 @@ func logScannerSandbox(logger *slog.Logger, status sandbox.Status) {
 		logger.Info("scanner processes start without Landlock", "reason", status.Landlock.Reason)
 	case status.State != sandbox.StateDisabled:
 		logger.Info("scanner.landlock is off; scanner processes start without Landlock")
+	}
+}
+
+// logNotificationSandbox records how the notification process starts.
+func logNotificationSandbox(logger *slog.Logger, status sandbox.Status) {
+	switch {
+	case status.State == sandbox.StateEnforced:
+		logger.Info("the notification process is sandboxed", "uid", status.UID, "gid", status.GID, "landlock", status.Landlock.State, "landlock_reason", status.Landlock.Reason)
+	case status.State == sandbox.StateUnavailable && status.ProcessUID == 0 && status.Landlock.State == sandbox.StateEnforced:
+		logger.Warn("the notification process runs as UID 0, restricted only by Landlock; see the container hardening guide", "reason", status.Reason)
+	case status.State == sandbox.StateUnavailable && status.ProcessUID == 0:
+		logger.Warn("the notification process runs unconfined as UID 0; see the container hardening guide", "reason", status.Reason)
+	case status.State == sandbox.StateUnavailable:
+		logger.Info("the notification process runs as the daemon's user", "uid", status.ProcessUID, "reason", status.Reason, "landlock", status.Landlock.State)
+	default:
+		logger.Info("notification sandbox is off; the notification process runs unconfined", "uid", status.ProcessUID)
 	}
 }
 

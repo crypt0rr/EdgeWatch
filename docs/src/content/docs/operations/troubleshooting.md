@@ -46,6 +46,29 @@ Scans keep working as UID 0 in either case. Where the kernel provides
 processes still cannot read the database, keys, or configuration. Set
 `scanner.sandbox: required` to refuse to scan without the sandbox instead.
 
+## The notification process runs unconfined as UID 0
+
+EdgeWatch logs this warning and adds it to `edgewatch health` when
+`notifications.sandbox` is `auto` and the process that delivers
+notifications cannot run in the
+[notification sandbox](/deployment/container-hardening/#notification-sandbox).
+The reason names the cause:
+
+- **The container does not grant SETUID, SETGID, KILL.** As for the scanner
+  sandbox, add the three capabilities to `cap_add`.
+- **A test notification process could not start as UID 65531**, with
+  `read SSL_CERT_FILE` or `read SSL_CERT_DIR` and a file name. A private
+  certificate authority is mounted with a mode that UID 65531 cannot read.
+  Certificates are public: make the file readable by others, for example
+  with mode `0644`, and its directory searchable, then recreate the
+  container.
+
+Notifications keep being delivered in either case. Where the kernel provides
+Landlock, the warning reads "the notification process runs as UID 0,
+restricted only by Landlock": the process still cannot read the database,
+keys, or configuration. Set `notifications.sandbox: required` to refuse to
+start without the sandbox instead.
+
 ## Scanner processes start without Landlock
 
 EdgeWatch logs this at startup, with the reason, and `edgewatch health`

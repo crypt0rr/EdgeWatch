@@ -3,15 +3,20 @@ package notify
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 
+	"github.com/crypt0rr/edgewatch/internal/sandbox"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -40,6 +45,23 @@ var notificationChildEnvironmentAllowlist = []string{
 
 const notificationChildPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+// childSandbox confines the notification child. Nil, the default, starts it
+// unconfined.
+var childSandbox atomic.Pointer[sandbox.Policy]
+
+// SetSandbox installs the policy that confines the notification child of
+// this process. Nil starts it unconfined.
+func SetSandbox(policy *sandbox.Policy) {
+	childSandbox.Store(policy)
+}
+
+// ChildEnvironment is the environment of the notification child: a fixed
+// PATH and the daemon's proxy, certificate authority, time zone, and locale
+// variables.
+func ChildEnvironment() []string {
+	return notificationChildEnvironment()
+}
+
 // runNotificationProcess executes provider code in a short-lived child. A
 // provider panic can therefore terminate only this child instead of the
 // daemon's notification worker or process. The caller supplies the hard
@@ -67,6 +89,7 @@ func runNotificationProcess(ctx context.Context, rawURL, message string) error {
 	command.Stdin = bytes.NewReader(payload)
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
+	childSandbox.Load().Confine(command)
 	if err := command.Run(); err != nil {
 		if childCtx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return errors.Join(ErrNotificationSendIndeterminate, err)
@@ -104,6 +127,50 @@ func RunSendChild(input io.Reader) error {
 		return errors.New("notification child URL is required")
 	}
 	return sendInProcess(request.URL, request.Message)
+}
+
+// CheckChildTrust is the hidden command with which the daemon confirms that a
+// confined notification child trusts the same certificate authorities as an
+// unconfined one. It reads the files that SSL_CERT_FILE and SSL_CERT_DIR name,
+// which a child that runs as another identity, or is restricted with
+// Landlock, might not be allowed to open, and loads the system roots. Go
+// skips missing files and directories, so they fail no check.
+func CheckChildTrust() error {
+	readable := func(variable, path string) error {
+		if _, err := os.ReadFile(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("read %s: %w", variable, err)
+		}
+		return nil
+	}
+	if file := os.Getenv("SSL_CERT_FILE"); file != "" {
+		if err := readable("SSL_CERT_FILE", file); err != nil {
+			return err
+		}
+	}
+	for _, directory := range filepath.SplitList(os.Getenv("SSL_CERT_DIR")) {
+		if directory == "" {
+			continue
+		}
+		entries, err := os.ReadDir(directory)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read SSL_CERT_DIR: %w", err)
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			if err := readable("SSL_CERT_DIR", filepath.Join(directory, entry.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := x509.SystemCertPool(); err != nil {
+		return fmt.Errorf("load the system certificate authorities: %w", err)
+	}
+	return nil
 }
 
 func isTestBinary() bool {

@@ -76,11 +76,16 @@ type ScannerConfig struct {
 	TargetExclusions []string `yaml:"target_exclusions"`
 	// Sandbox is how scanner processes start: auto (the default) runs them as
 	// an unprivileged identity when the runtime allows it, required refuses
-	// scanner work otherwise, and off never confines them.
+	// scanner work otherwise, and off never confines them, including with
+	// Landlock.
 	Sandbox string `yaml:"sandbox"`
+	// Landlock restricts the files scanner processes can open: auto (the
+	// default) applies the restriction when the kernel provides Landlock,
+	// required refuses scanner work otherwise, and off never applies it.
+	Landlock string `yaml:"landlock"`
 }
 
-// The scanner.sandbox values.
+// The scanner.sandbox and scanner.landlock values.
 const (
 	ScannerSandboxAuto     = "auto"
 	ScannerSandboxRequired = "required"
@@ -588,6 +593,10 @@ func applyDefaults(c *Config) {
 	if c.Scanner.Sandbox == "" {
 		c.Scanner.Sandbox = ScannerSandboxAuto
 	}
+	c.Scanner.Landlock = strings.ToLower(strings.TrimSpace(c.Scanner.Landlock))
+	if c.Scanner.Landlock == "" {
+		c.Scanner.Landlock = ScannerSandboxAuto
+	}
 	if strings.TrimSpace(c.Log.Level) == "" {
 		c.Log.Level = "info"
 	}
@@ -1000,6 +1009,14 @@ func (c Config) ValidateDeployment() error {
 	case "", ScannerSandboxAuto, ScannerSandboxRequired, ScannerSandboxOff:
 	default:
 		return fmt.Errorf("scanner.sandbox must be auto, required, or off")
+	}
+	switch c.Scanner.Landlock {
+	case "", ScannerSandboxAuto, ScannerSandboxRequired, ScannerSandboxOff:
+	default:
+		return fmt.Errorf("scanner.landlock must be auto, required, or off")
+	}
+	if c.Scanner.Landlock == ScannerSandboxRequired && c.Scanner.Sandbox == ScannerSandboxOff {
+		return fmt.Errorf("scanner.landlock cannot be required while scanner.sandbox is off, which turns off Landlock too")
 	}
 	if level := strings.ToLower(strings.TrimSpace(c.Log.Level)); level != "" && level != "debug" && level != "info" && level != "warn" && level != "error" {
 		return fmt.Errorf("log.level must be one of debug, info, warn, or error")

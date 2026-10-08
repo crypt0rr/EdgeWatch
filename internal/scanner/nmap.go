@@ -57,13 +57,13 @@ func (n *Nmap) SetSandbox(policy *sandbox.Policy) {
 // connect scans, so a confined Nmap, which holds NET_RAW as an ambient
 // capability, is told so with --privileged. The flag goes only into the
 // executed argument list; the recorded command fingerprint is computed from
-// the scan's arguments without it.
-func (n *Nmap) confineNmap(cmd *exec.Cmd) {
-	if !n.sandbox.Enforced() {
-		return
+// the scan's arguments without it. Call it once the XML output file is
+// shared: Landlock lets Nmap reopen only the files it inherits by then.
+func confineNmap(cmd *exec.Cmd, policy *sandbox.Policy) {
+	if policy.Enforced() {
+		cmd.Args = append([]string{cmd.Args[0], "--privileged"}, cmd.Args[1:]...)
 	}
-	n.sandbox.Confine(cmd)
-	cmd.Args = append([]string{cmd.Args[0], "--privileged"}, cmd.Args[1:]...)
+	policy.Confine(cmd)
 }
 
 // maxProgressOutput bounds diagnostic stderr retained from either scanner.
@@ -835,7 +835,6 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 			// variables from changing the fixed scanner contract. Browser/API input
 			// never controls this environment; only the validated argv template does.
 			cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent", "NMAPDIR=/usr/share/nmap", "XDG_CONFIG_HOME=/nonexistent", "LANG=C"}
-			n.confineNmap(cmd)
 			batchProbes := int64(len(batch)) * probesPerHost
 			localInvocation := int64(start/batchLimit) + 1
 			if family == 6 && len(byFamily[4]) > 0 {
@@ -1232,6 +1231,7 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, policy *sandbox.Polic
 			_ = os.Remove(xmlPath)
 		}()
 	}
+	confineNmap(cmd, policy)
 	var callbackMu sync.Mutex
 	emitOutput := func(line string, fraction float64) {
 		if onOutput == nil {
@@ -1433,7 +1433,8 @@ func nmapXMLOutputExceeded(path string, limit int) (bool, error) {
 // exact pair cannot broaden the scanner's command surface. It returns the
 // file's path, which the daemon reads, and a release function to call once
 // the process has exited. A confined Nmap cannot reach the temporary
-// directory, so it writes the file through an inherited descriptor.
+// directory, so it writes the file through an inherited write-only
+// descriptor.
 func prepareNmapXMLOutput(cmd *exec.Cmd, policy *sandbox.Policy) (string, func(), error) {
 	for index := 0; index+1 < len(cmd.Args); index++ {
 		if cmd.Args[index] != "-oX" || cmd.Args[index+1] != "-" {
@@ -1444,22 +1445,27 @@ func prepareNmapXMLOutput(cmd *exec.Cmd, policy *sandbox.Policy) (string, func()
 			return "", nil, fmt.Errorf("create nmap progress file: %w", err)
 		}
 		path := file.Name()
-		if !policy.Enforced() {
-			if err := file.Close(); err != nil {
-				_ = os.Remove(path)
-				return "", nil, fmt.Errorf("prepare nmap progress file: %w", err)
-			}
+		if err := file.Close(); err != nil {
+			_ = os.Remove(path)
+			return "", nil, fmt.Errorf("prepare nmap progress file: %w", err)
+		}
+		if !policy.InheritsFiles() {
 			cmd.Args[index+1] = path
 			return path, func() {}, nil
 		}
-		childPath, err := policy.InheritFile(cmd, file, sandbox.Write)
+		output, err := os.OpenFile(path, os.O_WRONLY, 0)
 		if err != nil {
-			_ = file.Close()
+			_ = os.Remove(path)
+			return "", nil, fmt.Errorf("prepare nmap progress file: %w", err)
+		}
+		childPath, err := policy.InheritFile(cmd, output, sandbox.Write)
+		if err != nil {
+			_ = output.Close()
 			_ = os.Remove(path)
 			return "", nil, fmt.Errorf("prepare nmap progress file: %w", err)
 		}
 		cmd.Args[index+1] = childPath
-		return path, func() { _ = file.Close() }, nil
+		return path, func() { _ = output.Close() }, nil
 	}
 	return "", func() {}, nil
 }

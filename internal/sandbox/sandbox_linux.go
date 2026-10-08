@@ -41,22 +41,41 @@ type environment struct {
 	// probe starts a short-lived process confined with ambient and reports
 	// whether it ran.
 	probe func(ambient []uintptr) error
+	// landlockABI is the kernel's Landlock ABI version, or landlockErr why
+	// it has none.
+	landlockABI int
+	landlockErr error
+	// executable is the EdgeWatch executable, or executableErr why it could
+	// not be found.
+	executable    string
+	executableErr error
+	// probeLandlock runs command as policy, which restricts it with
+	// Landlock, starts it, and reports whether it ran.
+	probeLandlock func(policy *Policy, command []string) error
 }
 
 func init() {
-	detectPlatform = func(mode string) *Policy { return detect(mode, systemEnvironment()) }
+	detectPlatform = func(options Options) *Policy { return detect(options, systemEnvironment()) }
 	confineProcess = confineLinux
 	nameCapability = linuxCapabilityName
+	execRestricted = execLandlocked
 }
 
-func detect(mode string, env environment) *Policy {
-	mode = normalizedMode(mode)
+func detect(options Options, env environment) *Policy {
+	mode := normalizedMode(options.Mode)
 	status := Status{Mode: mode, ProcessUID: env.euid}
 	if mode == ModeOff {
 		status.State = StateDisabled
 		status.Reason = "scanner.sandbox is off"
+		status.Landlock = LandlockStatus{Mode: normalizedMode(options.Landlock), State: StateDisabled, Reason: "scanner.sandbox is off"}
 		return &Policy{status: status}
 	}
+	return detectLandlock(detectIdentity(mode, status, env), options, env)
+}
+
+// detectIdentity decides whether scanner processes start as the confined
+// identity.
+func detectIdentity(mode string, status Status, env environment) *Policy {
 	unavailable := func(reason string) *Policy {
 		status.State = StateUnavailable
 		status.Reason = reason
@@ -95,6 +114,51 @@ func detect(mode string, env environment) *Policy {
 	return policy
 }
 
+// detectLandlock decides whether scanner processes also start restricted
+// with Landlock. When they cannot, policy keeps its identity confinement.
+func detectLandlock(policy *Policy, options Options, env environment) *Policy {
+	mode := normalizedMode(options.Landlock)
+	status := LandlockStatus{Mode: mode}
+	unrestricted := func(state, reason string) *Policy {
+		status.State, status.Reason = state, reason
+		policy.status.Landlock = status
+		return policy
+	}
+	switch {
+	case mode == ModeOff:
+		return unrestricted(StateDisabled, "scanner.landlock is off")
+	case !ValidMode(mode):
+		return unrestricted(StateUnavailable, fmt.Sprintf("scanner.landlock %q is not auto, required, or off", mode))
+	case env.landlockErr != nil:
+		return unrestricted(StateUnavailable, landlockUnavailableReason(env.landlockErr))
+	case env.executableErr != nil:
+		return unrestricted(StateUnavailable, fmt.Sprintf("the EdgeWatch executable cannot start scanner processes with Landlock: %v", env.executableErr))
+	}
+	restricted := policy.WithLandlock(env.executable, env.landlockABI)
+	restricted.status.Landlock.Mode = mode
+	for _, command := range options.Probes {
+		if len(command) == 0 {
+			continue
+		}
+		if err := env.probeLandlock(restricted, command); err != nil {
+			return unrestricted(StateUnavailable, fmt.Sprintf("%s could not start with Landlock: %v", filepath.Base(command[0]), err))
+		}
+	}
+	return restricted
+}
+
+// landlockUnavailableReason explains why the kernel offers no Landlock ABI.
+func landlockUnavailableReason(err error) string {
+	switch {
+	case errors.Is(err, unix.ENOSYS):
+		return "the kernel does not provide Landlock, or the container's seccomp profile blocks it"
+	case errors.Is(err, unix.EOPNOTSUPP):
+		return "Landlock is built into the kernel but not enabled; add landlock to the lsm= boot parameter"
+	default:
+		return fmt.Sprintf("Landlock could not be detected: %v", err)
+	}
+}
+
 // confineLinux starts cmd's process as UID and GID with no supplementary
 // groups and the ambient capabilities.
 func confineLinux(cmd *exec.Cmd, ambient []uintptr) {
@@ -108,7 +172,12 @@ func confineLinux(cmd *exec.Cmd, ambient []uintptr) {
 }
 
 func systemEnvironment() environment {
-	env := environment{euid: os.Geteuid(), probe: probeProcess}
+	env := environment{euid: os.Geteuid(), probe: probeProcess, probeLandlock: probeLandlocked}
+	env.landlockABI, env.landlockErr = landlockVersion()
+	env.executable, env.executableErr = os.Executable()
+	if env.executableErr == nil {
+		env.executableErr = refuseTestBinary(env.executable)
+	}
 	header := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
 	var data [2]unix.CapUserData
 	if err := unix.Capget(&header, &data[0]); err != nil {
@@ -145,10 +214,8 @@ func probeProcess(ambient []uintptr) error {
 	if err != nil {
 		return err
 	}
-	// A Go test binary would run its whole test suite as the probe. Tests
-	// describe the runtime instead.
-	if strings.HasSuffix(filepath.Base(executable), ".test") {
-		return errors.New("the probe does not run from a test binary")
+	if err := refuseTestBinary(executable); err != nil {
+		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
@@ -158,6 +225,65 @@ func probeProcess(ambient []uintptr) error {
 	cmd.Stderr = io.Discard
 	NewEnforced(ambient...).Confine(cmd)
 	return cmd.Run()
+}
+
+// refuseTestBinary keeps a Go test binary from running its whole test suite
+// as a probe or as the sandbox-exec command. Tests describe the runtime
+// instead.
+func refuseTestBinary(executable string) error {
+	if strings.HasSuffix(filepath.Base(executable), ".test") {
+		return errors.New("a test binary does not start sandboxed processes")
+	}
+	return nil
+}
+
+// maxProbeDiagnostic bounds the diagnostic output a failed probe reports.
+const maxProbeDiagnostic = 4 << 10
+
+// probeLandlocked runs command as policy starts scanner processes, through
+// the sandbox-exec command. A scanner whose executable or shared libraries
+// lie outside the paths the restriction allows fails here, at startup,
+// instead of failing every scan. A command whose executable does not exist is
+// skipped: that scanner is not installed.
+func probeLandlocked(policy *Policy, command []string) error {
+	if _, err := os.Stat(command[0]); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/nonexistent", "XDG_CONFIG_HOME=/nonexistent"}
+	cmd.Stdout = io.Discard
+	diagnostic := &boundedBuffer{limit: maxProbeDiagnostic}
+	cmd.Stderr = diagnostic
+	policy.Confine(cmd)
+	if err := cmd.Run(); err != nil {
+		if detail := lastLine(diagnostic.String()); detail != "" {
+			return fmt.Errorf("%w: %s", err, detail)
+		}
+		return err
+	}
+	return nil
+}
+
+// boundedBuffer keeps the first limit bytes written to it.
+type boundedBuffer struct {
+	limit int
+	data  []byte
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if room := b.limit - len(b.data); room > 0 {
+		b.data = append(b.data, p[:min(room, len(p))]...)
+	}
+	return len(p), nil
+}
+
+func (b *boundedBuffer) String() string { return string(b.data) }
+
+func lastLine(text string) string {
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
 }
 
 func linuxCapabilityName(capability uintptr) string {

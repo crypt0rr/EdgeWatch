@@ -763,9 +763,9 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	}
 	cmd := exec.CommandContext(ctx, naabuPath)
 	// A confined Naabu cannot reach the temporary directory, so it reads the
-	// target list through an inherited descriptor.
+	// target list through an inherited read-only descriptor.
 	targetsPath := path
-	if n.sandbox.Enforced() {
+	if n.sandbox.InheritsFiles() {
 		targets, err := os.Open(path)
 		if err != nil {
 			return naabuDiscovery{}, "", err

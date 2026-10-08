@@ -49,6 +49,11 @@ func run(args []string) error {
 	if len(args) == 0 {
 		return usage()
 	}
+	// Scanner processes restricted with Landlock start through this hidden
+	// command. Its arguments are the scanner's, so it bypasses flag parsing.
+	if args[0] == sandbox.ExecCommand {
+		return sandbox.Exec(args[1:])
+	}
 	if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
 		fmt.Println(usageText)
 		return nil
@@ -137,7 +142,7 @@ func run(args []string) error {
 	// cannot confine those processes.
 	var scannerSandbox *sandbox.Policy
 	if cmd == "daemon" || cmd == "scan" {
-		scannerSandbox = sandbox.Detect(cfg.Scanner.Sandbox)
+		scannerSandbox = sandbox.Detect(scannerSandboxOptions(cfg, *nmapPath))
 		if err := scannerSandbox.Require(); err != nil {
 			return err
 		}
@@ -359,7 +364,7 @@ func run(args []string) error {
 		health, err := s.System().HealthStatus(ctx)
 		// The sandbox is detected for this container, which grants the
 		// health command the daemon's capabilities and configuration.
-		scannerSandbox := sandbox.Detect(cfg.Scanner.Sandbox).Status()
+		scannerSandbox := sandbox.Detect(scannerSandboxOptions(cfg, *nmapPath)).Status()
 		health.Warnings = append(health.Warnings, scannerSandboxWarnings(scannerSandbox)...)
 		if err != nil {
 			if *output == "json" {
@@ -725,6 +730,20 @@ type healthReport struct {
 	ScannerSandbox sandbox.Status `json:"scanner_sandbox"`
 }
 
+// scannerSandboxOptions describes the configured sandbox and the scanner
+// command whose start with Landlock the sandbox confirms. Nmap loads shared
+// libraries, so its start shows whether the restriction allows the dynamic
+// loader and the libraries' paths. Naabu is a static binary below /usr, which
+// the restriction always allows, and its version command takes half a
+// second, too long for every health check.
+func scannerSandboxOptions(cfg *config.Config, nmapPath string) sandbox.Options {
+	return sandbox.Options{
+		Mode:     cfg.Scanner.Sandbox,
+		Landlock: cfg.Scanner.Landlock,
+		Probes:   [][]string{{nmapPath, "--version"}},
+	}
+}
+
 // scannerSandboxWarnings reports a sandbox that auto mode could not enforce
 // while scanner processes run as UID 0. A daemon that runs as another user
 // starts scanner processes as that user, which the sandbox would not improve
@@ -732,6 +751,9 @@ type healthReport struct {
 func scannerSandboxWarnings(status sandbox.Status) []string {
 	if status.State != sandbox.StateUnavailable || status.ProcessUID != 0 {
 		return nil
+	}
+	if status.Landlock.State == sandbox.StateEnforced {
+		return []string{"scanner processes run as UID 0, restricted only by Landlock: " + status.Reason}
 	}
 	return []string{"scanner processes run unconfined as UID 0: " + status.Reason}
 }
@@ -741,12 +763,22 @@ func logScannerSandbox(logger *slog.Logger, status sandbox.Status) {
 	switch {
 	case status.State == sandbox.StateEnforced:
 		logger.Info("scanner processes are sandboxed", "uid", status.UID, "gid", status.GID, "capabilities", status.Capabilities, "no_new_privileges", status.NoNewPrivileges)
+	case status.State == sandbox.StateUnavailable && status.ProcessUID == 0 && status.Landlock.State == sandbox.StateEnforced:
+		logger.Warn("scanner processes run as UID 0, restricted only by Landlock; see the container hardening guide", "reason", status.Reason)
 	case status.State == sandbox.StateUnavailable && status.ProcessUID == 0:
 		logger.Warn("scanner processes run unconfined as UID 0; see the container hardening guide", "reason", status.Reason)
 	case status.State == sandbox.StateUnavailable:
 		logger.Info("scanner processes run as the daemon's user", "uid", status.ProcessUID, "reason", status.Reason)
 	default:
 		logger.Info("scanner sandbox is off; scanner processes run unconfined", "uid", status.ProcessUID)
+	}
+	switch {
+	case status.Landlock.State == sandbox.StateEnforced:
+		logger.Info("scanner processes are restricted with Landlock", "abi", status.Landlock.ABI)
+	case status.Landlock.State == sandbox.StateUnavailable:
+		logger.Info("scanner processes start without Landlock", "reason", status.Landlock.Reason)
+	case status.State != sandbox.StateDisabled:
+		logger.Info("scanner.landlock is off; scanner processes start without Landlock")
 	}
 }
 

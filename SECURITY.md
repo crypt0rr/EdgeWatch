@@ -28,10 +28,15 @@ UID and GID 65532 with no supplementary groups and only `NET_RAW` (and
 and write their results through inherited file descriptors, cannot list the
 UID 0 data directory or reach `config.yaml`, and so cannot read the database
 or the encryption keys. When the container does not grant those capabilities,
-`auto` runs them unconfined as UID 0 and warns in the log, `edgewatch health`,
-and the console; `scanner.sandbox: required` refuses to scan instead. All
-sandboxed scanner processes share UID 65532, and the notification child
-process is not sandboxed. The compatibility matrix, the sandbox, bind-mount
+`auto` runs them as UID 0 and warns in the log, `edgewatch health`, and the
+console; `scanner.sandbox: required` refuses to scan instead. When the kernel
+provides Landlock, the default `scanner.landlock: auto` also restricts each
+scanner process, whatever its identity, to reading and executing the system
+directories, reading the `/etc` files a scan needs, writing the files EdgeWatch
+passes to it, and creating files only below `/tmp`, none of which it can
+execute; it cannot read the database, the keys, or `config.yaml` even as UID 0.
+All sandboxed scanner processes share UID 65532 and `/tmp`, and the
+notification child process is not sandboxed. The compatibility matrix, the sandbox, bind-mount
 ownership guidance, and the criteria for a non-root daemon are maintained in
 [`docs/src/content/docs/deployment/container-hardening.md`](docs/src/content/docs/deployment/container-hardening.md).
 

@@ -72,8 +72,8 @@ jobs:
 	if cfg.Scheduler.MaxNaabuProbeCount != DefaultNaabuMaxProbeCount {
 		t.Fatalf("Naabu probe budget default %d", cfg.Scheduler.MaxNaabuProbeCount)
 	}
-	if cfg.Scanner.Sandbox != ScannerSandboxAuto {
-		t.Fatalf("scanner sandbox default %q", cfg.Scanner.Sandbox)
+	if cfg.Scanner.Sandbox != ScannerSandboxAuto || cfg.Scanner.Landlock != ScannerSandboxAuto {
+		t.Fatalf("scanner sandbox defaults = %q, Landlock %q", cfg.Scanner.Sandbox, cfg.Scanner.Landlock)
 	}
 	if cfg.LogLevel() != "info" || cfg.Log.Level != "info" {
 		t.Fatalf("log level default = %q", cfg.Log.Level)
@@ -940,5 +940,39 @@ func TestScannerSandboxModes(t *testing.T) {
 	}
 	if _, err := load("strict"); err == nil || !strings.Contains(err.Error(), "scanner.sandbox must be auto, required, or off") {
 		t.Fatalf("unknown scanner.sandbox error = %v", err)
+	}
+}
+
+func TestScannerLandlockModes(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	load := func(name, scanner string) (*Config, error) {
+		t.Helper()
+		path := filepath.Join(dir, "config-"+name+".yaml")
+		yaml := "database: " + filepath.Join(dir, "db.sqlite") + "\nscanner:\n" + scanner
+		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(path)
+	}
+	for mode, want := range map[string]string{"auto": ScannerSandboxAuto, " Required ": ScannerSandboxRequired, "OFF": ScannerSandboxOff} {
+		cfg, err := load(strings.TrimSpace(mode), "  landlock: \""+mode+"\"\n")
+		if err != nil {
+			t.Fatalf("scanner.landlock %q: %v", mode, err)
+		}
+		if cfg.Scanner.Landlock != want {
+			t.Fatalf("scanner.landlock %q = %q, want %q", mode, cfg.Scanner.Landlock, want)
+		}
+	}
+	if _, err := load("strict", "  landlock: strict\n"); err == nil || !strings.Contains(err.Error(), "scanner.landlock must be auto, required, or off") {
+		t.Fatalf("unknown scanner.landlock error = %v", err)
+	}
+	// scanner.sandbox off turns off Landlock too, so requiring it would
+	// refuse every start.
+	if _, err := load("contradiction", "  sandbox: off\n  landlock: required\n"); err == nil || !strings.Contains(err.Error(), "scanner.landlock cannot be required while scanner.sandbox is off") {
+		t.Fatalf("required Landlock with the sandbox off = %v", err)
+	}
+	if cfg, err := load("off", "  sandbox: off\n  landlock: auto\n"); err != nil || cfg.Scanner.Landlock != ScannerSandboxAuto {
+		t.Fatalf("auto Landlock with the sandbox off = %v", err)
 	}
 }

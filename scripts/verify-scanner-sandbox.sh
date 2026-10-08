@@ -2,11 +2,13 @@
 set -euo pipefail
 
 # Run real Nmap TCP SYN and UDP scans and a Naabu discovery of local
-# listeners through EdgeWatch, with the scanner sandbox enforced and with it
-# off, and require the same results from both. With the sandbox enforced, also
-# require that a running Nmap is UID 65532 holding only NET_RAW, that
-# cancelling it works, and that the sandbox identity can neither list the data
-# directory nor read the configuration.
+# listeners through EdgeWatch, with the scanner sandbox enforced, with only
+# its Landlock restriction (the capabilities of a Compose file from before
+# v0.27.0), and with it off, and require the same results from all of them.
+# With the sandbox enforced, also require that a running Nmap is UID 65532
+# holding only NET_RAW, that cancelling it works, that the sandbox identity
+# can neither list the data directory nor read the configuration, and that a
+# process restricted with Landlock cannot do so even as UID 0.
 image=${1:?usage: verify-scanner-sandbox.sh IMAGE}
 
 workdir=$(mktemp -d)
@@ -195,16 +197,18 @@ def main():
 main()
 PY
 
-# run_daemon NAME MODE [CAPABILITY...] starts a daemon whose configuration
-# sets scanner.sandbox to MODE, with the bundled Compose capabilities and any
-# extra ones, waits until it serves requests, and signs in as its
-# administrator.
+# The capabilities of the bundled Compose file.
+bundled_caps=(NET_RAW SETUID SETGID KILL)
+
+# run_daemon NAME MODE CAPABILITY... starts a daemon whose configuration sets
+# scanner.sandbox to MODE, with the given capabilities, waits until it serves
+# requests, and signs in as its administrator.
 run_daemon() {
   local name=$1 mode=$2
   shift 2
-  local extra_caps=()
+  local caps=()
   for capability in "$@"; do
-    extra_caps+=(--cap-add "$capability")
+    caps+=(--cap-add "$capability")
   done
   local data="$workdir/data-$name"
   web_port=$(free_port)
@@ -225,7 +229,7 @@ updates:
 EOF
   chmod 0644 "$workdir/config-$name.yaml"
   container=$(docker run -d --network host --read-only --tmpfs /tmp:size=128m,mode=1777 \
-    --cap-drop ALL --cap-add NET_RAW --cap-add SETUID --cap-add SETGID --cap-add KILL "${extra_caps[@]}" \
+    --cap-drop ALL "${caps[@]}" \
     --security-opt no-new-privileges:true --env TMPDIR=/var/lib/edgewatch/tmp \
     --volume "$workdir/config-$name.yaml:/etc/edgewatch/config.yaml:ro" \
     --volume "$data:/var/lib/edgewatch:rw" "$image" daemon --config /etc/edgewatch/config.yaml)
@@ -253,18 +257,49 @@ stop_daemon() {
   container=
 }
 
+# health_state prints the sandbox state, the scanner UID, the capabilities,
+# and the Landlock state that the health command reports.
 health_state() {
   docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml --output json |
-    python3 -c 'import json, sys; sandbox = json.load(sys.stdin)["scanner_sandbox"]; print(sandbox["state"], sandbox.get("process_uid"), ",".join(sandbox.get("capabilities") or []))'
+    python3 -c 'import json, sys; sandbox = json.load(sys.stdin)["scanner_sandbox"]; print(sandbox["state"], sandbox.get("process_uid"), ",".join(sandbox.get("capabilities") or []) or "-", "landlock:" + sandbox["landlock"]["state"])'
+}
+
+expect_health() {
+  local want=$1 got
+  got=$(health_state)
+  [ "$got" = "$want" ] || fail "health reports the sandbox as '$got', want '$want'"
+}
+
+# landlocked runs a command in the daemon's container as UID 0, restricted
+# with Landlock as scanner processes are.
+landlocked() {
+  docker exec "$container" edgewatch sandbox-exec --files 0 -- "$@"
 }
 
 tcp_ports="$tcp_open,$tcp_closed"
 udp_ports="$udp_open"
 
 # The bundled Compose deployment: the sandbox keeps NET_RAW only.
-run_daemon base auto
-[ "$(health_state)" = "enforced 65532 NET_RAW" ] || fail "health reports the sandbox as '$(health_state)', want 'enforced 65532 NET_RAW'"
+run_daemon base auto "${bundled_caps[@]}"
+expect_health "enforced 65532 NET_RAW landlock:enforced"
 sandboxed=$(python3 "$workdir/driver.py" scan "$base" "$state" sandboxed "$tcp_ports" "$udp_ports")
+
+# Landlock restricts a process whatever its identity: as UID 0, which owns
+# the database, a restricted process can neither read it nor list the data
+# directory, read the configuration, write outside /tmp, or execute a file it
+# wrote. The unrestricted reads show that only Landlock refuses them; the
+# read-only root filesystem already refuses writes elsewhere.
+docker exec "$container" cat /var/lib/edgewatch/edgewatch.db >/dev/null || fail "UID 0 could not read the database without Landlock"
+docker exec "$container" cat /etc/edgewatch/config.yaml >/dev/null || fail "UID 0 could not read the configuration without Landlock"
+landlocked /bin/cat /etc/hosts >/dev/null || fail "a restricted process could not read /etc/hosts"
+landlocked /bin/sh -c 'echo scanner >/tmp/edgewatch-landlock && rm /tmp/edgewatch-landlock' || fail "a restricted process could not use /tmp"
+for escape in "cat /var/lib/edgewatch/edgewatch.db" "ls /var/lib/edgewatch" "cat /etc/edgewatch/config.yaml" \
+  "touch /var/lib/edgewatch/escape" "cp /bin/true /tmp/escape && /tmp/escape"; do
+  if output=$(landlocked /bin/sh -c "$escape" 2>&1); then
+    fail "a restricted UID 0 process succeeded at: $escape"
+  fi
+  printf '%s\n' "$output" | grep -qi 'permission denied' || fail "'$escape' failed for another reason than Landlock: $output"
+done
 
 # The sandbox identity cannot list the data directory or reach the
 # configuration, whatever the files' own modes.
@@ -296,18 +331,28 @@ stop_daemon
 
 # The SYN override: a sandboxed Naabu keeps NET_RAW and NET_ADMIN, and
 # discovers ports with the target list it reads through its descriptor.
-run_daemon syn auto NET_ADMIN
-[ "$(health_state)" = "enforced 65532 NET_RAW,NET_ADMIN" ] || fail "health reports the SYN sandbox as '$(health_state)', want 'enforced 65532 NET_RAW,NET_ADMIN'"
+run_daemon syn auto "${bundled_caps[@]}" NET_ADMIN
+expect_health "enforced 65532 NET_RAW,NET_ADMIN landlock:enforced"
 naabu_sandboxed=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-sandboxed "$tcp_open")
 stop_daemon
 
-run_daemon off off NET_ADMIN
-[ "$(health_state)" = "disabled 0 " ] || fail "health reports the sandbox as '$(health_state)', want 'disabled 0'"
+# A Compose file from before v0.27.0 grants no SETUID, SETGID, or KILL:
+# scanner processes stay UID 0, restricted only by Landlock.
+run_daemon legacy auto NET_RAW NET_ADMIN
+expect_health "unavailable 0 - landlock:enforced"
+landlock_only=$(python3 "$workdir/driver.py" scan "$base" "$state" landlock-only "$tcp_ports" "$udp_ports")
+naabu_landlock_only=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-landlock-only "$tcp_open")
+stop_daemon
+
+run_daemon off off "${bundled_caps[@]}" NET_ADMIN
+expect_health "disabled 0 - landlock:disabled"
 unconfined=$(python3 "$workdir/driver.py" scan "$base" "$state" unconfined "$tcp_ports" "$udp_ports")
 naabu_unconfined=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-unconfined "$tcp_open")
 stop_daemon
 
 [ "$sandboxed" = "$unconfined" ] || fail "sandboxed Nmap results $sandboxed differ from unconfined results $unconfined"
+[ "$landlock_only" = "$unconfined" ] || fail "Nmap results with only Landlock $landlock_only differ from unconfined results $unconfined"
+[ "$naabu_landlock_only" = "$naabu_unconfined" ] || fail "Naabu results with only Landlock $naabu_landlock_only differ from unconfined results $naabu_unconfined"
 printf '%s\n' "$sandboxed" | grep -q "\"tcp\", $tcp_open, \"open\"" || fail "the open TCP listener was not reported open: $sandboxed"
 [ "$naabu_sandboxed" = "$naabu_unconfined" ] || fail "sandboxed Naabu results $naabu_sandboxed differ from unconfined results $naabu_unconfined"
 [ "$naabu_sandboxed" = "[[\"tcp\", $tcp_open, \"open\"]]" ] || fail "Naabu did not report the open TCP listener: $naabu_sandboxed"

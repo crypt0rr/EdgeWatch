@@ -15,11 +15,29 @@ import (
 )
 
 type notificationPayload struct {
-	Name     string  `json:"name"`
-	URL      *string `json:"url"`
-	Password string  `json:"password"`
-	Enabled  *bool   `json:"enabled"`
-	Revision *int64  `json:"revision"`
+	Name     string                 `json:"name"`
+	URL      *string                `json:"url"`
+	Config   *notify.ProviderConfig `json:"config"`
+	Password string                 `json:"password"`
+	Enabled  *bool                  `json:"enabled"`
+	Revision *int64                 `json:"revision"`
+}
+
+func notificationDestinationURL(rawURL *string, providerConfig *notify.ProviderConfig, required bool) (*string, error) {
+	if rawURL != nil && providerConfig != nil {
+		return nil, notify.ErrInvalidProviderConfiguration
+	}
+	if providerConfig != nil {
+		compiled, err := notify.CompileProviderConfig(*providerConfig)
+		if err != nil {
+			return nil, err
+		}
+		return &compiled, nil
+	}
+	if rawURL == nil && required {
+		return nil, errors.New("notification URL is required")
+	}
+	return rawURL, nil
 }
 
 // listNotificationDestinations lists the destinations of the session's
@@ -291,11 +309,12 @@ func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Re
 	if input.Enabled != nil {
 		enabled = *input.Enabled
 	}
-	if input.URL == nil {
-		writeError(w, http.StatusBadRequest, "validation_failed", "notification URL is required", map[string]string{"url": "notification URL is required"})
+	rawURL, err := notificationDestinationURL(input.URL, input.Config, true)
+	if err != nil {
+		s.writeNotificationError(w, err)
 		return
 	}
-	view, err := s.App.Notifier.Tenant(ts).CreateManagedWithAudit(r.Context(), input.Name, *input.URL, enabled, store.AuditEntry{Action: "notifications.created", Detail: "managed notification created", ActorUserID: session.UserID, ActorUsername: session.Username})
+	view, err := s.App.Notifier.Tenant(ts).CreateManagedWithAudit(r.Context(), input.Name, *rawURL, enabled, store.AuditEntry{Action: "notifications.created", Detail: "managed notification created", ActorUserID: session.UserID, ActorUsername: session.Username})
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "notifications.created") {
 			return
@@ -376,7 +395,12 @@ func (s *Server) updateNotificationDestination(w http.ResponseWriter, r *http.Re
 		s.writeNotificationAuthError(w, err)
 		return
 	}
-	view, err := s.App.Notifier.Tenant(ts).UpdateManagedWithAudit(r.Context(), id, *input.Revision, input.Name, input.URL, input.Enabled, store.AuditEntry{Action: "notifications.updated", Detail: "managed notification updated: " + id, ActorUserID: session.UserID, ActorUsername: session.Username})
+	rawURL, err := notificationDestinationURL(input.URL, input.Config, false)
+	if err != nil {
+		s.writeNotificationError(w, err)
+		return
+	}
+	view, err := s.App.Notifier.Tenant(ts).UpdateManagedWithAudit(r.Context(), id, *input.Revision, input.Name, rawURL, input.Enabled, store.AuditEntry{Action: "notifications.updated", Detail: "managed notification updated: " + id, ActorUserID: session.UserID, ActorUsername: session.Username})
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "notifications.updated") {
 			return
@@ -444,6 +468,8 @@ func (s *Server) writePasswordConfirmationError(w http.ResponseWriter, err error
 func (s *Server) writeNotificationError(w http.ResponseWriter, err error) {
 	lower := strings.ToLower(err.Error())
 	switch {
+	case errors.Is(err, notify.ErrInvalidProviderConfiguration):
+		writeError(w, http.StatusBadRequest, "validation_failed", "notification provider configuration is invalid", map[string]string{"config": "check the selected provider and its required fields"})
 	case errors.Is(err, store.ErrConflict):
 		writeError(w, http.StatusConflict, "conflict", "notification was modified; reload before saving", nil)
 	case errors.Is(err, store.ErrNotFound):

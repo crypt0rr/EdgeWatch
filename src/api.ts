@@ -23,6 +23,11 @@ export type NotificationDestination = {
   last_error_code?: string
   last_error_fingerprint?: string
 }
+export type NotificationProvider = 'smtp' | 'discord' | 'ntfy'
+export type NotificationProviderConfig = {
+  provider: NotificationProvider
+  fields: Record<string, string>
+}
 export type NotificationStatus = {
   deployment: number
   managed: number
@@ -273,8 +278,11 @@ export const updateNotificationRouting = (destinations: string[], password: stri
 export const toggleNotificationUpdateAlert = (destinationID: string, enabled: boolean, password: string) => api<NotificationUpdateRouting>('/notifications/update-routing', { method: 'PATCH', body: JSON.stringify({ destination_id: destinationID, enabled, password }) })
 export const updateIncidentReminders = (settings: { enabled?: boolean; cadence?: IncidentReminderCadence }, password: string) => api<{ enabled: boolean; cadence: IncidentReminderCadence }>('/notifications/incident-reminders', { method: 'PUT', body: JSON.stringify({ ...settings, password }) })
 export const getNotificationDestination = (id: string) => api<NotificationDestination>(`/notifications/destinations/${encodeURIComponent(id)}`)
-export const createNotificationDestination = (name: string, url: string, password: string, enabled = true) => api<NotificationDestination>('/notifications/destinations', { method: 'POST', body: JSON.stringify({ name, url, password, enabled }) })
-export const updateNotificationDestination = (id: string, revision: number, name: string, password: string, options: { url?: string; enabled?: boolean } = {}) => api<NotificationDestination>(`/notifications/destinations/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ name, revision, password, ...options }) })
+function notificationCredentialField(input: string | NotificationProviderConfig) {
+  return typeof input === 'string' ? { url: input } : { config: input }
+}
+export const createNotificationDestination = (name: string, credentials: string | NotificationProviderConfig, password: string, enabled = true) => api<NotificationDestination>('/notifications/destinations', { method: 'POST', body: JSON.stringify({ name, ...notificationCredentialField(credentials), password, enabled }) })
+export const updateNotificationDestination = (id: string, revision: number, name: string, password: string, options: { url?: string; config?: NotificationProviderConfig; enabled?: boolean } = {}) => api<NotificationDestination>(`/notifications/destinations/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ name, revision, password, ...options }) })
 export const deleteNotificationDestination = (id: string, revision: number, password: string) => api<void>(`/notifications/destinations/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ revision, password }) })
 export const testNotificationDestination = (id: string) => api<{ sent: number }>(`/notifications/destinations/${encodeURIComponent(id)}/test`, { method: 'POST' })
 
@@ -388,8 +396,8 @@ export const renewPlatformAdminInvitation = (id: string, password: string) => ap
 export const deletePendingPlatformAdmin = (id: string, password: string) => api<void>(`/platform/admins/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ password }) })
 // The platform's own notification destinations. Like a unit's, their URLs are write-only.
 export const listPlatformNotifications = () => api<NotificationDestinationsResponse>('/platform/notifications')
-export const createPlatformNotification = (name: string, url: string, password: string, enabled = true) => api<NotificationDestination>('/platform/notifications', { method: 'POST', body: JSON.stringify({ name, url, password, enabled }) })
-export const updatePlatformNotification = (id: string, revision: number, name: string, password: string, options: { url?: string; enabled?: boolean } = {}) => api<NotificationDestination>(`/platform/notifications/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name, revision, password, ...options }) })
+export const createPlatformNotification = (name: string, credentials: string | NotificationProviderConfig, password: string, enabled = true) => api<NotificationDestination>('/platform/notifications', { method: 'POST', body: JSON.stringify({ name, ...notificationCredentialField(credentials), password, enabled }) })
+export const updatePlatformNotification = (id: string, revision: number, name: string, password: string, options: { url?: string; config?: NotificationProviderConfig; enabled?: boolean } = {}) => api<NotificationDestination>(`/platform/notifications/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name, revision, password, ...options }) })
 export const deletePlatformNotification = (id: string, revision: number, password: string) => api<void>(`/platform/notifications/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ revision, password }) })
 export const updatePlatformNotificationRouting = (destinations: string[], password: string) => api<NotificationUpdateRouting>('/platform/notifications/update-routing', { method: 'PUT', body: JSON.stringify({ destinations, password }) })
 export const togglePlatformNotificationUpdateAlert = (destinationID: string, enabled: boolean, password: string) => api<NotificationUpdateRouting>('/platform/notifications/update-routing', { method: 'PATCH', body: JSON.stringify({ destination_id: destinationID, enabled, password }) })

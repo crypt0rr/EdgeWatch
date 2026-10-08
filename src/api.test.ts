@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createUser, getPublicDashboard, getScan, getScanSummary, historicalScanHost, issueUserActivation, issueUserPasswordReset, listHosts, listScans, listUsers, login, recordActivity, revokeUserSessions, scheduleSuggestion, setCSRF, setForbiddenHandler, setup, setupStatus, suppressIncident, updateNotificationDestination, updateUser } from './api'
+import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createPlatformNotification, createUser, getPublicDashboard, getScan, getScanSummary, historicalScanHost, issueUserActivation, issueUserPasswordReset, listHosts, listScans, listUsers, login, recordActivity, revokeUserSessions, scheduleSuggestion, setCSRF, setForbiddenHandler, setup, setupStatus, suppressIncident, updateNotificationDestination, updatePlatformNotification, updateUser } from './api'
 import * as apiRoutes from './api'
 import { getDisplayTimeZone, setDisplayTimeZone } from './format'
 
@@ -212,6 +212,35 @@ describe('notification API contract', () => {
     const updateBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as Record<string, unknown>
     expect(updateBody).toMatchObject({ revision: 1, name: 'Ops', password: 'correct horse battery staple', enabled: false })
     expect(updateBody.url).toBeUndefined()
+  })
+
+  it('sends structured provider fields through unit and platform routes', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ id: 'dest-1', name: 'Ops', provider: 'ntfy', source: 'web', enabled: true, locked: false, read_only: false, revision: 2 }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    setCSRF('csrf-token')
+    const config = { provider: 'ntfy' as const, fields: { topic: 'edgewatch-alerts', password: 'provider-token' } }
+
+    await createNotificationDestination('Ops', config, 'account password')
+    const unitCreate = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as Record<string, unknown>
+    expect(unitCreate).toMatchObject({ name: 'Ops', config, password: 'account password', enabled: true })
+    expect(unitCreate.url).toBeUndefined()
+
+    await updateNotificationDestination('dest-1', 1, 'Ops', 'account password', { config })
+    const unitUpdate = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as Record<string, unknown>
+    expect(unitUpdate).toMatchObject({ name: 'Ops', revision: 1, config })
+    expect(unitUpdate.url).toBeUndefined()
+
+    await createPlatformNotification('Platform ops', config, 'platform password')
+    const platformCreate = JSON.parse(String(fetchMock.mock.calls[2][1]?.body)) as Record<string, unknown>
+    expect(String(fetchMock.mock.calls[2][0])).toBe('/api/v1/platform/notifications')
+    expect(platformCreate).toMatchObject({ name: 'Platform ops', config, password: 'platform password', enabled: true })
+    expect(platformCreate.url).toBeUndefined()
+
+    await updatePlatformNotification('dest-1', 2, 'Platform ops', 'platform password', { config })
+    const platformUpdate = JSON.parse(String(fetchMock.mock.calls[3][1]?.body)) as Record<string, unknown>
+    expect(String(fetchMock.mock.calls[3][0])).toContain('/api/v1/platform/notifications/dest-1')
+    expect(platformUpdate).toMatchObject({ name: 'Platform ops', revision: 2, config })
+    expect(platformUpdate.url).toBeUndefined()
   })
 })
 

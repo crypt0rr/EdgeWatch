@@ -330,7 +330,7 @@ describe('platform notifications', () => {
     vi.mocked(togglePlatformNotificationUpdateAlert).mockResolvedValue({ configured: true, destinations: ['p-ops'] })
   })
 
-  it('manages the platform’s own destinations with write-only URLs and routes update alerts to none by default', async () => {
+  it('manages the platform’s own destinations with write-only credentials and routes update alerts to none by default', async () => {
     renderWithProviders(<PlatformNotifications />)
     expect(await screen.findByText('Operations')).toBeInTheDocument()
     expect(screen.getByText(/Each business unit manages its own destinations/)).toBeInTheDocument()
@@ -340,6 +340,7 @@ describe('platform notifications', () => {
     expect(document.querySelector('.notification-config-import')).toBeNull()
 
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Pager' } })
+    fireEvent.change(screen.getByRole('combobox', { name: 'Notification service' }), { target: { value: 'url' } })
     fireEvent.change(screen.getByLabelText(/^Shoutrrr URL/), { target: { value: 'generic://pager.example.test/hook' } })
     fireEvent.change(screen.getByLabelText(/^Password confirmation/), { target: { value: 'my-password' } })
     await act(async () => {
@@ -347,7 +348,7 @@ describe('platform notifications', () => {
       await Promise.resolve()
     })
     await waitFor(() => expect(createPlatformNotification).toHaveBeenCalledWith('Pager', 'generic://pager.example.test/hook', 'my-password', true))
-    expect(await screen.findByText(/The URL is stored encrypted and will not be shown again/)).toBeInTheDocument()
+    expect(await screen.findByText(/Credentials are stored encrypted and cannot be read back/)).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('checkbox', { name: 'Enable update alerts for Operations' }))
     await confirmWithPassword('Account password')
@@ -377,13 +378,13 @@ describe('platform notifications', () => {
     expect(within(security).queryByText('Delivery health')).toBeNull()
   })
 
-  it('reports discarded alerts only when an edit replaces the URL', async () => {
+  it('reports discarded alerts only when an edit replaces credentials', async () => {
     renderWithProviders(<PlatformNotifications />)
     const operations = (await screen.findByText('Operations')).closest('.notification-row') as HTMLElement
     const edits: { change: (form: HTMLFormElement) => void; options: { url?: string; enabled?: boolean }; name: string; banner: string }[] = [
       { change: form => fireEvent.change(within(form).getByDisplayValue('Operations'), { target: { value: 'Operations renamed' } }), options: { enabled: true }, name: 'Operations renamed', banner: 'Notification destination updated.' },
       { change: form => fireEvent.click(within(form).getByRole('checkbox')), options: { enabled: false }, name: 'Operations', banner: 'Notification destination updated.' },
-      { change: form => fireEvent.change(within(form).getByPlaceholderText('Leave blank to keep the encrypted URL'), { target: { value: 'generic://pager.example.test/rotated' } }), options: { enabled: true, url: 'generic://pager.example.test/rotated' }, name: 'Operations', banner: 'Notification destination updated. Alerts queued for the previous URL were discarded.' },
+      { change: form => fireEvent.change(within(form).getByPlaceholderText('generic://host/path?disabletls=yes'), { target: { value: 'generic://pager.example.test/rotated' } }), options: { enabled: true, url: 'generic://pager.example.test/rotated' }, name: 'Operations', banner: 'Notification destination updated. Alerts queued for the previous credentials were discarded.' },
     ]
     for (const edit of edits) {
       vi.mocked(updatePlatformNotification).mockClear()

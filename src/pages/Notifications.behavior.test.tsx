@@ -61,6 +61,7 @@ describe('notification destination workflows', () => {
     await waitFor(() => expect(screen.getByText('Mattermost')).toBeInTheDocument())
 
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Alerts' } })
+    fireEvent.change(screen.getByRole('combobox', { name: 'Notification service' }), { target: { value: 'url' } })
     fireEvent.change(screen.getByLabelText(/^Shoutrrr URL/), { target: { value: 'generic://example.test/path' } })
     const createForm = screen.getByRole('button', { name: 'Add destination' }).closest('form')!
     fireEvent.change(createForm.querySelector('input[type="password"]')!, { target: { value: 'administrator-password' } })
@@ -85,7 +86,68 @@ describe('notification destination workflows', () => {
     await waitFor(() => expect(deleteNotificationDestination).toHaveBeenCalledWith('destination-1', 4, 'administrator-password'))
   })
 
-  // Only a new URL discards the alerts queued for a destination; a rename or
+  it('creates a Discord destination from its native webhook URL', async () => {
+    renderWithProviders(<Notifications />)
+    await waitFor(() => expect(screen.getByText('Mattermost')).toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Discord alerts' } })
+    fireEvent.change(screen.getByRole('combobox', { name: 'Notification service' }), { target: { value: 'discord' } })
+    fireEvent.change(screen.getByLabelText(/^Discord webhook URL/), { target: { value: 'https://discord.com/api/webhooks/12345678/secret-token' } })
+    const createForm = screen.getByRole('button', { name: 'Add destination' }).closest('form')!
+    fireEvent.change(createForm.querySelector('input[type="password"]')!, { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add destination' }))
+
+    await waitFor(() => expect(createNotificationDestination).toHaveBeenCalledWith(
+      'Discord alerts',
+      { provider: 'discord', fields: { webhook_url: 'https://discord.com/api/webhooks/12345678/secret-token' } },
+      'administrator-password',
+      true,
+    ))
+    expect(screen.queryByDisplayValue('https://discord.com/api/webhooks/12345678/secret-token')).not.toBeInTheDocument()
+  })
+
+  it('creates an SMTP destination from server, sender, and recipient fields', async () => {
+    renderWithProviders(<Notifications />)
+    await waitFor(() => expect(screen.getByText('Mattermost')).toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Mail alerts' } })
+    fireEvent.change(screen.getByLabelText(/^SMTP server/), { target: { value: 'mail.example.test' } })
+    fireEvent.change(screen.getByLabelText(/^Port/), { target: { value: '587' } })
+    fireEvent.change(screen.getByLabelText(/^From address/), { target: { value: 'edgewatch@example.test' } })
+    fireEvent.change(screen.getByLabelText(/^Recipients/), { target: { value: 'ops@example.test, oncall@example.test' } })
+    fireEvent.change(screen.getByLabelText(/^SMTP username/), { target: { value: 'edgewatch' } })
+    fireEvent.change(screen.getByLabelText(/^SMTP password/), { target: { value: 'smtp-token' } })
+    fireEvent.change(screen.getByLabelText(/^Password confirmation/), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add destination' }))
+
+    await waitFor(() => expect(createNotificationDestination).toHaveBeenCalledWith(
+      'Mail alerts',
+      { provider: 'smtp', fields: { host: 'mail.example.test', port: '587', from: 'edgewatch@example.test', to: 'ops@example.test, oncall@example.test', username: 'edgewatch', password: 'smtp-token' } },
+      'administrator-password',
+      true,
+    ))
+  })
+
+  it('creates an ntfy destination using the default server when left blank', async () => {
+    renderWithProviders(<Notifications />)
+    await waitFor(() => expect(screen.getByText('Mattermost')).toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Push alerts' } })
+    fireEvent.change(screen.getByRole('combobox', { name: 'Notification service' }), { target: { value: 'ntfy' } })
+    fireEvent.change(screen.getByLabelText(/^Topic/), { target: { value: 'edgewatch-alerts' } })
+    fireEvent.change(screen.getByLabelText(/^Password or token/), { target: { value: 'ntfy-token' } })
+    fireEvent.change(screen.getByLabelText(/^Password confirmation/), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add destination' }))
+
+    await waitFor(() => expect(createNotificationDestination).toHaveBeenCalledWith(
+      'Push alerts',
+      { provider: 'ntfy', fields: { topic: 'edgewatch-alerts', password: 'ntfy-token' } },
+      'administrator-password',
+      true,
+    ))
+  })
+
+  // Only replacement credentials discard the alerts queued for a destination; a rename or
   // a pause saved through the edit form keeps them.
   async function saveEdit(change: (form: HTMLFormElement) => void) {
     renderWithProviders(<Notifications />)
@@ -114,7 +176,7 @@ describe('notification destination workflows', () => {
   it('reports discarded alerts after an edit that replaces the URL', async () => {
     const banner = await saveEdit(form => fireEvent.change(form.querySelector('input[type="url"]')!, { target: { value: ' generic://example.test/rotated ' } }))
     expect(updateNotificationDestination).toHaveBeenCalledWith('destination-1', 4, 'Mattermost', 'administrator-password', { enabled: true, url: 'generic://example.test/rotated' })
-    expect(banner).toBe('Notification destination updated. Alerts queued for the previous URL were discarded.')
+    expect(banner).toBe('Notification destination updated. Alerts queued for the previous credentials were discarded.')
   })
 
   it('saves a unit destination against the revision opened and reloads after a conflict', async () => {

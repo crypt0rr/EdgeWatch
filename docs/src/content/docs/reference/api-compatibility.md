@@ -58,6 +58,34 @@ compared them with the current baseline once it had one. The scan objects of
 the scan and job scan endpoints also carry the recorded `comparison`; it is
 omitted for scans recorded before v0.26.0.
 
+## Notification destination provider configuration
+
+v0.31.0 adds structured provider configuration to notification destination
+create and update routes. They accept the existing `url` field or a structured
+`config` object. A structured configuration has the
+shape `{provider, fields}`; supported providers are `smtp`, `discord`, and
+`ntfy`. For example, an ntfy destination can be created with:
+
+```json
+{
+  "name": "Operations",
+  "config": {
+    "provider": "ntfy",
+    "fields": { "topic": "edgewatch-alerts" }
+  },
+  "password": "account password"
+}
+```
+
+Unit destinations use `POST /api/v1/notifications/destinations` and
+`PUT /api/v1/notifications/destinations/{id}`. Platform destinations use
+`POST /api/v1/platform/notifications` and
+`PATCH /api/v1/platform/notifications/{id}`. The update routes require the
+current `revision`; omitting both `url` and `config` preserves credentials.
+Providing either replaces them. Responses remain write-only and contain
+provider metadata, never the URL or fields. Existing clients can continue to
+send `url` unchanged.
+
 ## Business units
 
 v0.20.0 adds business units to every installation. The routes and response

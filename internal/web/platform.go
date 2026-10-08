@@ -959,12 +959,13 @@ func (s *Server) createPlatformNotification(w http.ResponseWriter, r *http.Reque
 	if !decodeJSON(w, r, &input) || !s.confirmNotificationPassword(w, r, session, input.Password) {
 		return
 	}
-	if input.URL == nil {
-		writeError(w, http.StatusBadRequest, "validation_failed", "notification URL is required", map[string]string{"url": "notification URL is required"})
+	rawURL, err := notificationDestinationURL(input.URL, input.Config, true)
+	if err != nil {
+		s.writeNotificationError(w, err)
 		return
 	}
 	enabled := input.Enabled == nil || *input.Enabled
-	view, err := s.App.Notifier.Platform(s.Store.Platform()).CreateManagedWithAudit(r.Context(), input.Name, *input.URL, enabled, platformActorAudit(session, "", "platform notification destination created"))
+	view, err := s.App.Notifier.Platform(s.Store.Platform()).CreateManagedWithAudit(r.Context(), input.Name, *rawURL, enabled, platformActorAudit(session, "", "platform notification destination created"))
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "platform_notifications.created") {
 			return
@@ -987,7 +988,12 @@ func (s *Server) updatePlatformNotification(w http.ResponseWriter, r *http.Reque
 	if !s.confirmNotificationPassword(w, r, session, input.Password) {
 		return
 	}
-	view, err := s.App.Notifier.Platform(s.Store.Platform()).UpdateManagedWithAudit(r.Context(), id, *input.Revision, input.Name, input.URL, input.Enabled, platformActorAudit(session, "", "platform notification destination updated: "+id))
+	rawURL, err := notificationDestinationURL(input.URL, input.Config, false)
+	if err != nil {
+		s.writeNotificationError(w, err)
+		return
+	}
+	view, err := s.App.Notifier.Platform(s.Store.Platform()).UpdateManagedWithAudit(r.Context(), id, *input.Revision, input.Name, rawURL, input.Enabled, platformActorAudit(session, "", "platform notification destination updated: "+id))
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "platform_notifications.updated") {
 			return

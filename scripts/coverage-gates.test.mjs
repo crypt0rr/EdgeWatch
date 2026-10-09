@@ -28,7 +28,9 @@ const frontendReport = (overrides = {}) => {
     'src/components/AuditLog.tsx',
     'src/components/ErrorNotice.tsx',
     'src/components/HostEmptyState.tsx',
+    'src/components/MonitorNextActions.tsx',
     'src/components/NotificationDestinationConfig.tsx',
+    'src/components/NotificationDestinationCreateForm.tsx',
     'src/components/navigation.ts',
     'src/components/OneTimeLink.tsx',
     'src/components/PasswordField.tsx',
@@ -38,7 +40,10 @@ const frontendReport = (overrides = {}) => {
     'src/components/SurfaceUnitList.tsx',
     'src/components/UntrustedProxyBanner.tsx',
     'src/format.ts',
+    'src/firstScanIntent.ts',
     'src/hostSearch.ts',
+    'src/job-creation-draft.tsx',
+    'src/job-form.ts',
     'src/one-time-factor.ts',
     'src/main.tsx',
     'src/pages/Activity.tsx',
@@ -50,6 +55,7 @@ const frontendReport = (overrides = {}) => {
     'src/pages/Hosts.tsx',
     'src/pages/JobDetail.tsx',
     'src/pages/JobEditor.tsx',
+    'src/pages/MonitorSetup.tsx',
     'src/pages/Notifications.tsx',
     'src/pages/platform/common.tsx',
     'src/pages/platform/PlatformAdmins.tsx',
@@ -127,6 +133,22 @@ test('frontend coverage gates reject low aggregate and missing critical entries'
     delete missingSource['src/baseline.ts']
     await writeFile(reportPath, JSON.stringify(missingSource))
     assert.notEqual(runScript('check-frontend-coverage.mjs', [reportPath]).status, 0)
+
+    for (const source of [
+      'src/components/MonitorNextActions.tsx',
+      'src/components/NotificationDestinationCreateForm.tsx',
+      'src/firstScanIntent.ts',
+      'src/job-creation-draft.tsx',
+      'src/job-form.ts',
+      'src/pages/MonitorSetup.tsx',
+    ]) {
+      const missingNewSource = frontendReport()
+      delete missingNewSource[source]
+      await writeFile(reportPath, JSON.stringify(missingNewSource))
+      const result = runScript('check-frontend-coverage.mjs', [reportPath])
+      assert.notEqual(result.status, 0, `${source} passed without a coverage entry`)
+      assert.match(result.stderr, new RegExp(`${source.replaceAll('.', '\\.')}\\: coverage entry is missing`))
+    }
 
     const sourceRegression = frontendReport({
       'src/api.ts': { lines: percentage(100), branches: percentage(59), functions: percentage(100) },

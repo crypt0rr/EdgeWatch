@@ -1,6 +1,6 @@
 module github.com/crypt0rr/edgewatch
 
-go 1.27.1
+go 1.27.2
 
 require (
 	github.com/containrrr/shoutrrr v0.8.0

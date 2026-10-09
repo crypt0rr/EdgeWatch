@@ -2350,7 +2350,7 @@ label small,
 
 .monitor-steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; margin: 0 0 18px; }
 .monitor-step { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: #0b1a2c; color: #8198b1; text-align: left; font-size: 11px; }
-.monitor-step > span { display: grid; place-items: center; width: 23px; height: 23px; flex: 0 0 23px; border: 1px solid #35516f; border-radius: 50%; color: #a8bfd8; font-size: 10px; font-weight: 700; }
+.monitor-step > span { display: grid; place-items: center; width: 23px; height: 23px; flex: 0 0 23px; border: 1px solid #35516f; border-radius: 50%; color: #a8bfd8; font-size: 11px; font-weight: 700; }
 .monitor-step.active { border-color: #3875aa; background: #102947; color: #e4f1ff; }
 .monitor-step.active > span,.monitor-step.complete > span { border-color: #3987e7; background: #2877d5; color: #fff; }
 .monitor-step.complete { color: #abd2fb; }
@@ -2405,7 +2405,7 @@ label small,
 }
 @media (max-width: 480px) {
   .monitor-steps { gap: 6px; }
-  .monitor-step { padding: 8px; font-size: 10px; }
+  .monitor-step { padding: 8px; font-size: 11px; }
   .monitor-step > span { width: 20px; height: 20px; flex-basis: 20px; }
   .monitor-actions,.monitor-actions > div { flex-direction: column; }
   .monitor-actions > div { width: 100%; }
@@ -2413,4 +2413,8 @@ label small,
   .monitor-review-list dt { padding-bottom: 0; border-bottom: 0; }
   .monitor-review-list dd { padding-top: 3px; border-top: 0; }
   .estimate-grid { grid-template-columns: 1fr; }
+  .coverage-choice small,
+  .monitor-review-list code,
+  .monitor-estimate > span,
+  .monitor-estimate > small { font-size: 11px; }
 }

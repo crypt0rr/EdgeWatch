@@ -237,6 +237,17 @@ test('guided setup fits narrow mobile viewports without horizontal scrolling', a
   await continueButton.click()
   await expect(page.getByRole('heading', { name: 'Set scan coverage' })).toBeVisible()
   await expectNoHorizontalOverflow(page)
+
+  await page.getByRole('radio', { name: /Selected TCP ports/ }).check()
+  await page.getByRole('textbox', { name: /TCP ports/ }).fill('22')
+  await page.getByRole('button', { name: 'Continue to schedule' }).click()
+  await expect(page.getByRole('heading', { name: 'Set schedule and alerts' })).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+
+  await page.getByRole('button', { name: 'Continue without alerts' }).click()
+  await page.getByRole('button', { name: 'Review monitor' }).click()
+  await expect(page.getByRole('heading', { name: 'Coverage and scan cost' })).toBeVisible()
+  await expectNoHorizontalOverflow(page)
 })
 
 test('operators can select a saved destination but cannot manage destinations or high-cost approval', async ({ page }, testInfo) => {

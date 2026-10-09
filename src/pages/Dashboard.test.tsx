@@ -229,7 +229,7 @@ describe('dashboard', () => {
 
   it('navigates to job setup from the dashboard action', async () => {
     await renderDashboard()
-    const configure = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Configure job')) as HTMLButtonElement
+    const configure = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Set up a monitor')) as HTMLButtonElement
     await act(async () => configure.click())
     expect(container.querySelector('[data-testid="current-path"]')?.textContent).toBe('/jobs/new')
   })
@@ -320,7 +320,7 @@ describe('dashboard', () => {
     vi.mocked(getSession).mockResolvedValue({ ...session('operator'), permissions: ['jobs.read', 'jobs.write', 'scans.read'] })
     await renderDashboard()
     expect(container.querySelector('button[aria-label="Run demo"]')).toBeTruthy()
-    expect(container.textContent).toContain('Configure job')
+    expect(container.textContent).toContain('Set up a monitor')
     expect(container.textContent).not.toContain('Test notifications')
     expect(notificationTest).not.toHaveBeenCalled()
   })

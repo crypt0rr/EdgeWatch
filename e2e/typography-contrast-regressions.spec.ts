@@ -4,6 +4,7 @@ import { mockConsole } from './mock-console'
 const operatorPages = [
   '/jobs',
   '/jobs/new',
+  '/jobs/new/advanced',
   '/jobs/job-1',
   '/incidents',
   '/activity',
@@ -240,7 +241,7 @@ test('headings and primary actions meet contrast expectations and archived jobs 
   expect(styles.footerContrast).toBeGreaterThanOrEqual(4.5)
   expect(styles.headingWeight).toBeGreaterThanOrEqual(600)
 
-  await page.goto('/jobs/new')
+  await page.goto('/jobs/new/advanced')
   const panelHeading = page.locator('.panel h2').first()
   await expect(panelHeading).toBeVisible()
   expect(Number.parseInt(await panelHeading.evaluate(element => getComputedStyle(element).fontWeight), 10)).toBeGreaterThanOrEqual(600)

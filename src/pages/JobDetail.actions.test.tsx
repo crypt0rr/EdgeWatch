@@ -1,11 +1,12 @@
 /** @vitest-environment jsdom */
 
 import { fireEvent, screen, waitFor } from '@testing-library/react'
-import { act } from 'react'
+import { StrictMode, act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Route, Routes } from 'react-router-dom'
+import { Route, Routes, useLocation, useNavigate, type MemoryRouterProps } from 'react-router-dom'
 import { APIError, activeScans, approveBaseline, archiveJob, cancelQueuedRun, cancelScan, deleteJob, discardScanCycle, getJob, getSession, jobBaseline, jobScans, latestSuccessfulScan, pauseJob, resetBaseline, restoreJob, resumeJob, runJob, scanCycle, scanDetail, scanHosts, scanResults } from '../api'
 import { renderWithProviders, defaultUnitScope } from '../test/test-utils'
+import { consumeFirstScanIntent, issueFirstScanIntent } from '../firstScanIntent'
 import { JobDetail } from './JobDetail'
 
 vi.mock('../api', async () => {
@@ -20,13 +21,14 @@ const job = {
 }
 const scan = { id: 'scan-1', job_id: 'job-1', job: 'Production', started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z', status: 'success', config_hash: 'scope' }
 const page = { limit: 10, offset: 0, total: 1, has_more: false, next_offset: null }
-const administrator = { role: 'administrator' as const, user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'jobs.delete', 'scans.read', 'baselines.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope }
+const administrator = { role: 'administrator' as const, user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'jobs.run', 'jobs.delete', 'scans.read', 'baselines.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope }
 const operator = { ...administrator, role: 'operator' as const, user_id: 'operator', username: 'operator', permissions: ['jobs.write', 'scans.read', 'baselines.read'] }
 const activeScan = {
   id: 'active-scan-1', job_id: 'job-1', job: 'Production', started_at: '2026-01-01T00:00:00Z',
   progress_percent: 42, completed_probes: 42, total_probes: 100, phase: 'tcp discovery', protocol: 'tcp',
   elapsed_seconds: 17, process_alive: true, scanner: 'naabu_nmap', cycle_id: 'cycle-1', cycle_completed_units: 1, cycle_total_units: 3,
 }
+let routeJobTwoToken = ''
 
 describe('job detail actions', () => {
   beforeEach(() => {
@@ -52,17 +54,145 @@ describe('job detail actions', () => {
   })
   afterEach(() => vi.clearAllMocks())
 
-  function renderPage(route = ['/jobs/job-1']) {
-    return renderWithProviders(<Routes><Route path="/jobs/:id/scans/:scanId" element={<JobDetail />} /><Route path="/jobs/:id/*" element={<JobDetail />} /></Routes>, { route })
+  function RouteState() {
+    const location = useLocation()
+    const navigate = useNavigate()
+    return <><span data-testid="route-state">{JSON.stringify(location.state)}</span><button type="button" onClick={() => navigate(-1)}>Back</button><button type="button" onClick={() => navigate(1)}>Forward</button><button type="button" onClick={() => navigate('/jobs/job-2', { state: { startFirstScanToken: routeJobTwoToken } })}>Open job 2</button></>
+  }
+
+  function renderPage(route: NonNullable<MemoryRouterProps['initialEntries']> = ['/jobs/job-1'], strict = false) {
+    const content = <><Routes><Route path="/jobs/:id/scans/:scanId" element={<JobDetail />} /><Route path="/jobs/:id/*" element={<JobDetail />} /></Routes><RouteState /></>
+    return renderWithProviders(strict ? <StrictMode>{content}</StrictMode> : content, { route })
   }
 
   it('starts a scan and refreshes the relevant queries', async () => {
     const { client } = renderPage()
     const invalidate = vi.spyOn(client, 'invalidateQueries')
-    await waitFor(() => expect(screen.getByRole('button', { name: /Scan now/ })).toBeInTheDocument())
-    fireEvent.click(screen.getByRole('button', { name: /Scan now/ }))
+    // This render starts with an empty query cache. Wait for the fetched job
+    // before asserting the action and dispatching its request.
+    await screen.findByRole('heading', { name: 'Production' }, { timeout: 10_000 })
+    fireEvent.click(await screen.findByRole('button', { name: /Scan now/ }, { timeout: 10_000 }))
     await waitFor(() => expect(runJob).toHaveBeenCalledWith('job-1'))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['latest-successful-scan', 'job-1'] })
+  }, 15_000)
+
+  it('consumes the create-and-start handoff once under StrictMode and clears its history state', async () => {
+    const token = issueFirstScanIntent('job-1')
+    renderPage([{ pathname: '/jobs/job-1', state: { startFirstScanToken: token } }], true)
+
+    await waitFor(() => expect(runJob).toHaveBeenCalledTimes(1))
+    expect(runJob).toHaveBeenCalledWith('job-1')
+    expect(await screen.findByTestId('route-state')).toHaveTextContent('null')
+  })
+
+  it('does not replay a consumed history marker after reload or remount', async () => {
+    const token = issueFirstScanIntent('job-1')
+    expect(consumeFirstScanIntent('job-1', token)).toBe(true)
+    renderPage([{ pathname: '/jobs/job-1', state: { startFirstScanToken: token } }])
+
+    await screen.findByRole('button', { name: 'Scan now' })
+    expect(runJob).not.toHaveBeenCalled()
+    expect(screen.getByTestId('route-state')).toHaveTextContent('null')
+  })
+
+  it('does not dispatch again after back and forward through the cleared history entry', async () => {
+    const token = issueFirstScanIntent('job-1')
+    renderPage(['/jobs', { pathname: '/jobs/job-1', state: { startFirstScanToken: token } }])
+
+    await waitFor(() => expect(runJob).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Production' })).not.toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Forward' }))
+    await screen.findByRole('heading', { name: 'Production' })
+
+    expect(runJob).toHaveBeenCalledTimes(1)
+  })
+
+  it('binds a delayed handoff to its job when JobDetail is reused for a second route', async () => {
+    let resolveJobOne!: (value: typeof job) => void
+    vi.mocked(getJob).mockImplementation((id) => id === 'job-1'
+      ? new Promise((resolve) => { resolveJobOne = resolve }) as never
+      : Promise.resolve({ ...job, id: 'job-2', job: { ...job.job, name: 'Development' } }) as never)
+    const tokenOne = issueFirstScanIntent('job-1')
+    const tokenTwo = issueFirstScanIntent('job-2')
+    routeJobTwoToken = tokenTwo
+    renderPage(['/jobs', { pathname: '/jobs/job-1', state: { startFirstScanToken: tokenOne } }])
+
+    await waitFor(() => expect(getJob).toHaveBeenCalledWith('job-1'))
+    await screen.findByText('Loading job…')
+    fireEvent.click(screen.getByRole('button', { name: 'Open job 2' }))
+
+    await waitFor(() => expect(runJob).toHaveBeenCalledTimes(1))
+    expect(runJob).toHaveBeenCalledWith('job-2')
+    expect(await screen.findByRole('heading', { name: 'Development' })).toBeInTheDocument()
+    resolveJobOne(job)
+    await waitFor(() => expect(runJob).toHaveBeenCalledTimes(1))
+    expect(runJob).not.toHaveBeenCalledWith('job-1')
+    routeJobTwoToken = ''
+  })
+
+  it('ignores a stale run response after route reuse and does not clear the new job run state', async () => {
+    let rejectJobOne!: (error: Error) => void
+    let resolveJobTwo!: (value: { status: string; job_id: string }) => void
+    vi.mocked(runJob).mockImplementation((id) => id === 'job-1'
+      ? new Promise((_resolve, reject) => { rejectJobOne = reject }) as never
+      : new Promise((resolve) => { resolveJobTwo = resolve }) as never)
+    vi.mocked(getJob).mockImplementation((id) => Promise.resolve(id === 'job-2'
+      ? { ...job, id: 'job-2', job: { ...job.job, name: 'Development' } }
+      : job) as never)
+    const tokenOne = issueFirstScanIntent('job-1')
+    routeJobTwoToken = ''
+    renderPage(['/jobs', { pathname: '/jobs/job-1', state: { startFirstScanToken: tokenOne } }])
+
+    await waitFor(() => expect(runJob).toHaveBeenCalledWith('job-1'))
+    fireEvent.click(screen.getByRole('button', { name: 'Open job 2' }))
+    await screen.findByRole('heading', { name: 'Development' })
+    fireEvent.click(screen.getByRole('button', { name: 'Scan now' }))
+    await waitFor(() => expect(runJob).toHaveBeenCalledWith('job-2'))
+    expect(screen.getByRole('button', { name: 'Starting…' })).toBeDisabled()
+
+    await act(async () => {
+      rejectJobOne(new APIError('Old job run failed.', 'scan_failed', undefined, 422))
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('button', { name: 'Starting…' })).toBeDisabled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+
+    await act(async () => {
+      resolveJobTwo({ status: 'accepted', job_id: 'job-2' })
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Queued…' })).toBeDisabled())
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    routeJobTwoToken = ''
+  })
+
+  it('keeps a created job open after first-run failure and retries only the run', async () => {
+    vi.mocked(runJob).mockRejectedValueOnce(new APIError('The probe budget changed before the scan could start.', 'scan_work_budget_exceeded', undefined, 422))
+    const token = issueFirstScanIntent('job-1')
+    renderPage([{ pathname: '/jobs/job-1', state: { startFirstScanToken: token } }])
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The probe budget changed before the scan could start.')
+    expect(screen.getByRole('heading', { name: 'Production' })).toBeInTheDocument()
+    expect(getJob).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Scan now' }))
+    await waitFor(() => expect(runJob).toHaveBeenCalledTimes(2))
+    expect(runJob).toHaveBeenNthCalledWith(2, 'job-1')
+    expect(getJob).toHaveBeenCalledTimes(1)
+  })
+
+  it('reconciles an ambiguous run response against queued state before allowing retry', async () => {
+    vi.mocked(runJob).mockImplementationOnce(async () => {
+      vi.mocked(activeScans).mockResolvedValue({ scans: [], queued_runs: [{ job_id: 'job-1', job: 'Production', queued_at: '2026-10-09T10:00:00Z', trigger: 'manual' }] } as never)
+      throw new TypeError('Failed to fetch')
+    })
+    const token = issueFirstScanIntent('job-1')
+    renderPage([{ pathname: '/jobs/job-1', state: { startFirstScanToken: token } }])
+
+    expect(await screen.findByRole('heading', { name: 'Scan queued' })).toBeInTheDocument()
+    expect(runJob).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: 'Queued…' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Run another sample' })).not.toBeInTheDocument()
   })
 
   it('keeps an accepted scan visible while queued and prevents a duplicate start', async () => {
@@ -342,7 +472,7 @@ describe('job detail actions', () => {
   })
 
   it('reports action failures and archives through confirmation', async () => {
-    vi.mocked(runJob).mockRejectedValue(new Error('scanner unavailable'))
+    vi.mocked(runJob).mockRejectedValue(new APIError('scanner unavailable', 'scanner_unavailable', undefined, 422))
     renderPage()
     await waitFor(() => expect(screen.getByRole('button', { name: /Scan now/ })).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: /Scan now/ }))
@@ -510,8 +640,9 @@ describe('job detail actions', () => {
       baseline: { status: 'learning', samples: 1, attempts: 1 },
     } as never)
     renderPage()
-    await waitFor(() => expect(screen.getByText('Learning')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getAllByText('Learning').length).toBeGreaterThan(0))
     expect(screen.getByText('1 of 1 samples')).toBeInTheDocument()
+    expect(screen.getByText('1 of 1 successful samples collected.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Explore baseline/ })).not.toBeInTheDocument()
   })
 
@@ -549,7 +680,7 @@ describe('job detail actions', () => {
       baseline: { status: 'updating', samples: 0, attempts: 0, scan_id: 'scan-1', host_count: 1 },
     } as never)
     renderPage()
-    await waitFor(() => expect(screen.getByText('Ready (updating scope)')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getAllByText('Ready (updating scope)').length).toBeGreaterThan(0))
     expect(screen.getByText('Baseline is active')).toBeInTheDocument()
     expect(screen.queryByText(/Baseline is learning/)).not.toBeInTheDocument()
     expect(screen.queryByText(/0 of 2 samples/)).not.toBeInTheDocument()

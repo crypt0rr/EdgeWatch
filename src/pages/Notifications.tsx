@@ -19,12 +19,8 @@ import {
 } from '../api'
 import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
-import {
-  credentialsFromNotificationDraft,
-  initialNotificationConfigDraft,
-  NotificationDestinationConfig,
-  type NotificationConfigDraft,
-} from '../components/NotificationDestinationConfig'
+import { credentialsFromNotificationDraft, NotificationDestinationConfig, type NotificationConfigDraft } from '../components/NotificationDestinationConfig'
+import { NotificationDestinationCreateForm } from '../components/NotificationDestinationCreateForm'
 import { formatDateTime } from '../format'
 
 type EditState = {
@@ -52,7 +48,7 @@ type DestinationFeedback = { message?: string; error?: string }
 export type NotificationScope = {
   queryKey: readonly unknown[]
   list: () => Promise<NotificationDestinationsResponse>
-  create: (name: string, credentials: string | NotificationProviderConfig, password: string, enabled: boolean) => Promise<unknown>
+  create: (name: string, credentials: string | NotificationProviderConfig, password: string, enabled: boolean) => Promise<NotificationDestination>
   update: (id: string, revision: number, name: string, password: string, options: { url?: string; config?: NotificationProviderConfig; enabled?: boolean }) => Promise<unknown>
   remove: (id: string, revision: number, password: string) => Promise<unknown>
   /** Sends a test message; the platform's destinations have none. */
@@ -96,28 +92,13 @@ export function Notifications() {
 export function NotificationsView({ scope, canManage }: { scope: NotificationScope; canManage: boolean }) {
   const client = useQueryClient()
   const destinations = useQuery({ queryKey: scope.queryKey, queryFn: scope.list, refetchInterval: 30_000 })
-  const [name, setName] = useState('')
-  const [configuration, setConfiguration] = useState(initialNotificationConfigDraft)
-  const [enabled, setEnabled] = useState(true)
-  const [password, setPassword] = useState('')
   const [edit, setEdit] = useState<EditState | null>(null)
   const [passwordPrompt, setPasswordPrompt] = useState<PasswordPromptState | null>(null)
-  const [message, setMessage] = useState('')
-  const [error, setError] = useState('')
   const [reminderError, setReminderError] = useState('')
   const [reminderFeedback, setReminderFeedback] = useState('')
   const [busy, setBusy] = useState('')
   const [rowFeedback, setRowFeedback] = useState<Record<string, DestinationFeedback>>({})
   const [listFeedback, setListFeedback] = useState('')
-
-  function resetFeedback() {
-    setMessage('')
-    setError('')
-  }
-
-  function reportError(err: unknown, fallback: string) {
-    setError(destinationErrorText(err, fallback))
-  }
 
   function clearRowFeedback(id: string) {
     setRowFeedback(current => {
@@ -144,33 +125,7 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
     return err instanceof Error ? err.message : fallback
   }
 
-  async function create(event: FormEvent) {
-    event.preventDefault()
-    resetFeedback()
-    const credentials = credentialsFromNotificationDraft(configuration)
-    if (!name.trim() || !credentials || !password) {
-      setError('Name, provider details, and password confirmation are required.')
-      return
-    }
-    setBusy('create')
-    try {
-      const providerInput = 'url' in credentials ? credentials.url : credentials.config
-      await scope.create(name.trim(), providerInput, password, enabled)
-      setName('')
-      setConfiguration(initialNotificationConfigDraft())
-      setPassword('')
-      setEnabled(true)
-      setMessage('Notification destination added. Credentials are stored encrypted and cannot be read back.')
-      await client.invalidateQueries({ queryKey: scope.queryKey })
-    } catch (err) {
-      reportError(err, 'Could not add notification destination.')
-    } finally {
-      setBusy('')
-    }
-  }
-
   function beginEdit(destination: NotificationDestination) {
-    resetFeedback()
     clearRowFeedback(destination.id)
     setEdit({ id: destination.id, name: destination.name, configuration: { provider: 'url', fields: {} }, enabled: destination.enabled, revision: destination.revision })
   }
@@ -386,14 +341,7 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
 
     {canManage && <div className="panel notification-create">
       <div className="panel-heading"><div><h2>Add destination</h2><p className="muted">Choose a notification service and enter its connection details. Credentials are never returned by the API.</p></div><ShieldCheck className="green-icon" size={20} /></div>
-      <form className="settings-form" onSubmit={create}>
-        <label>Name<input value={name} onChange={event => setName(event.target.value)} maxLength={100} placeholder="Production alerts" autoComplete="off" required /><small>A friendly label only; credentials are not included in it.</small></label>
-        <NotificationDestinationConfig idPrefix="new-destination" draft={configuration} onChange={setConfiguration} />
-        <div className="two-fields"><label className="switch-row notification-check"><input type="checkbox" checked={enabled} onChange={event => setEnabled(event.target.checked)} /><span><strong>Enabled</strong><small>Include this destination in future deliveries.</small></span></label><label>Password confirmation<input type="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete="current-password" required /><small>Required for every credential or delivery-state change.</small></label></div>
-        <button className="button primary" type="submit" disabled={busy === 'create'}><Plug size={16} />{busy === 'create' ? 'Saving…' : 'Add destination'}</button>
-        {message && <div className="success-banner save-feedback" role="status"><Check size={17} />{message}</div>}
-        {error && <div className="form-error save-feedback" role="alert"><AlertTriangle size={17} />{error}</div>}
-      </form>
+      <NotificationDestinationCreateForm create={scope.create} onCreated={() => client.invalidateQueries({ queryKey: scope.queryKey })} onTest={scope.test ? destination => scope.test!(destination.id) : undefined} />
     </div>}
 
     <div className="panel notification-list-panel">

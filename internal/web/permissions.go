@@ -112,6 +112,8 @@ func requiredPermission(path, method string) string {
 		case http.MethodPost:
 			return auth.PermissionJobsWrite
 		}
+	case path == "/jobs/preview" && method == http.MethodPost:
+		return auth.PermissionJobsWrite
 	}
 	if strings.HasPrefix(path, "/jobs/") {
 		return requiredJobPermission(path, method)
@@ -554,6 +556,7 @@ var apiRoutes = []apiRoute{
 	// Jobs.
 	{Method: http.MethodGet, Template: "/jobs", Permission: auth.PermissionJobsRead, Example: "/jobs"},
 	{Method: http.MethodPost, Template: "/jobs", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs"},
+	{Method: http.MethodPost, Template: "/jobs/preview", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/preview"},
 	{Method: http.MethodGet, Template: "/jobs/schedule-suggestion", Permission: auth.PermissionJobsRead, Example: "/jobs/schedule-suggestion"},
 	{Method: http.MethodGet, Template: "/jobs/{id}", Permission: auth.PermissionJobsRead, Example: "/jobs/job-1"},
 	{Method: http.MethodPut, Template: "/jobs/{id}", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1"},

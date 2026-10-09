@@ -376,7 +376,7 @@ describe('job editor workflow coverage', () => {
     expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument()
     expect(screen.queryByRole('dialog', { name: 'Discard unsaved changes?' })).not.toBeInTheDocument()
 
-    await act(async () => finishCreate({} as never))
+    await act(async () => finishCreate({ id: 'job-created' } as never))
     await waitFor(() => expect(screen.getByText('Jobs list')).toBeInTheDocument())
   })
 

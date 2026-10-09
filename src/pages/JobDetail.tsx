@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Archive,
   CalendarClock,
@@ -32,6 +32,7 @@ import {
   resumeJob,
   restoreJob,
   runJob,
+  scheduleSuggestion,
   scanCycle,
   discardScanCycle,
   getSession,
@@ -43,11 +44,13 @@ import { Pagination } from '../components/Pagination'
 import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { PortScopeDetails } from '../components/PortScopeDetails'
+import { MonitorNextActions } from '../components/MonitorNextActions'
 import { SurfaceUnitList } from '../components/SurfaceUnitList'
 import type { ActiveScan, QueuedRun, ScanBudget, WorkEstimate } from '../types'
 import { baselinePresentation } from '../baseline'
 import { formatDateTime } from '../format'
 import { changeKindLabel, changeTargetLabel, jobStatePresentation, scanOutcomeTone, severityTone } from '../status'
+import { consumeFirstScanIntent } from '../firstScanIntent'
 
 type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
 
@@ -56,7 +59,7 @@ type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
 // because the live stream is unavailable, stop waiting once polling has shown
 // neither the run nor a new scan for this long.
 const pendingScanBackstopMs = 20_000
-type PendingScanRequest = { requestedAt: number; previousScanIDs: string[] | null; observedActive: boolean; observedQueued: boolean }
+type PendingScanRequest = { jobID: string; requestedAt: number; previousScanIDs: string[] | null; observedActive: boolean; observedQueued: boolean }
 
 // A scan route with ?results=N opens that scan's results at offset N. A host
 // page uses it to return to the result list the host was opened from.
@@ -69,9 +72,14 @@ function routeResultsOffset(value: string | null): number | null {
 export function JobDetail() {
   const { id = '', scanId: routeScanID } = useParams()
   const [searchParams] = useSearchParams()
+  const location = useLocation()
   const routeResults = routeScanID ? routeResultsOffset(searchParams.get('results')) : null
   const navigate = useNavigate()
   const client = useQueryClient()
+  const routeState = location.state as { startFirstScanToken?: unknown } | null
+  const firstScanToken = routeState?.startFirstScanToken
+  const firstScanIntentHandled = useRef<{ jobID: string; token: string } | null>(null)
+  const firstScanIntentToRun = useRef<{ jobID: string; token: string } | null>(null)
   const [selectedScan, setSelectedScan] = useState(routeScanID ?? '')
   const [scanOffset, setScanOffset] = useState(0)
   const [baselineOffset, setBaselineOffset] = useState(0)
@@ -88,7 +96,10 @@ export function JobDetail() {
   pendingScanRequestRef.current = pendingScanRequest
   // A skip can be reported before the run request itself returns. Remember
   // it, so the accepted request does not then wait for a run that ended.
-  const runRequest = useRef({ inFlight: false, skipped: false })
+  const currentRouteJobID = useRef(id)
+  currentRouteJobID.current = id
+  const runRequests = useRef(new Map<string, { inFlight: boolean; skipped: boolean }>())
+  const runActionGeneration = useRef(0)
   const [dialog, setDialog] = useState<JobDialog | null>(null)
   const job = useQuery({ queryKey: ['job', id], queryFn: () => getJob(id) })
   const session = useQuery({ queryKey: ['session'], queryFn: getSession })
@@ -96,10 +107,13 @@ export function JobDetail() {
   // avoiding a transient unauthorized request, this keeps viewer pages from
   // ever fetching scan history that their role cannot read.
   const canOperate = session.data?.permissions.includes('jobs.write') ?? false
+  const canRun = session.data?.permissions.includes('jobs.run') ?? false
   // Permanent deletion is administrator-only (jobs.delete); operators may
   // archive and restore, but the API rejects their delete requests.
   const canDelete = session.data?.permissions.includes('jobs.delete') ?? false
   const canReadScans = session.data?.permissions.includes('scans.read') ?? false
+  const canReadBaseline = session.data?.permissions.includes('baselines.read') ?? false
+  const canReadIncidents = session.data?.permissions.includes('incidents.read') ?? false
   const active = useQuery({
     queryKey: ['active-scans'],
     queryFn: activeScans,
@@ -120,7 +134,7 @@ export function JobDetail() {
   const baseline = useQuery({
     queryKey: ['job-baseline-overview', id, baselineOffset],
     queryFn: () => jobBaseline(id, baselineOffset, 10),
-    enabled: !!id && baselineActive,
+    enabled: !!id && baselineActive && canReadBaseline,
   })
   const latest = useQuery({
     queryKey: ['latest-successful-scan', id],
@@ -141,6 +155,14 @@ export function JobDetail() {
     refetchInterval: 10000,
   })
   const cycle = useQuery({ queryKey: ['scan-cycle', id], queryFn: () => scanCycle(id), enabled: !!id && canOperate, refetchInterval: 5000 })
+  const scheduleInput = job.data?.job
+  const scheduleGuidanceNeeded = !!job.data && (baselinePresentation(job.data.baseline).status !== 'complete' || job.data.baseline.status === 'updating')
+  const nextRun = useQuery({
+    queryKey: ['job-next-run', id, scheduleInput?.schedule, scheduleInput?.timezone],
+    queryFn: () => scheduleSuggestion(scheduleInput?.schedule ?? '', scheduleInput?.timezone ?? ''),
+    enabled: !!job.data?.enabled && !job.data.archived && scheduleGuidanceNeeded && !!scheduleInput?.schedule?.trim(),
+    refetchInterval: 60_000,
+  })
   const detail = useQuery({
     queryKey: ['scan-detail', id, selectedScan, changeOffset],
     queryFn: () => scanDetail(id, selectedScan, changeOffset),
@@ -160,6 +182,17 @@ export function JobDetail() {
   }, [routeScanID, routeResults])
 
   useEffect(() => {
+    // JobDetail can remain mounted while its route changes. Do not let one
+    // job's pending scan or action feedback leak into the next job.
+    runActionGeneration.current += 1
+    pendingScanRequestRef.current = null
+    setPendingScanRequest(null)
+    setActionError('')
+    setActionBusy('')
+    setCancelBusyScan('')
+  }, [id])
+
+  useEffect(() => {
     setLatestResultsOffset(0)
   }, [latestScanID])
 
@@ -171,6 +204,10 @@ export function JobDetail() {
 
   useEffect(() => {
     if (!pendingScanRequest) return
+    if (pendingScanRequest.jobID !== id) {
+      setPendingScanRequest(null)
+      return
+    }
     if (activeJobScan) {
       if (!pendingScanRequest.observedActive) {
         setPendingScanRequest({ ...pendingScanRequest, observedActive: true })
@@ -248,7 +285,8 @@ export function JobDetail() {
     const onSkipped = (event: Event) => {
       const detail = (event as CustomEvent<{ job_id?: string; reason?: string }>).detail
       if (!detail || detail.job_id !== id) return
-      if (runRequest.current.inFlight) runRequest.current.skipped = true
+      const request = runRequests.current.get(id)
+      if (request?.inFlight) request.skipped = true
       setPendingScanRequest(null)
       // A canceled queued run was withdrawn on purpose; the panel closing is
       // the feedback.
@@ -263,6 +301,43 @@ export function JobDetail() {
     // rows. Start its independent pager at the first page in either case.
     setBaselineOffset(0)
   }, [job.data?.baseline.status, job.data?.baseline.scan_id])
+
+  useEffect(() => {
+    if (typeof firstScanToken !== 'string') return
+    const previous = firstScanIntentHandled.current
+    if (previous?.jobID === id && previous.token === firstScanToken) return
+    firstScanIntentHandled.current = { jobID: id, token: firstScanToken }
+    // Consumption is synchronous and precedes any run request. A history
+    // entry can survive reload, but its token cannot: the module registry is
+    // in-memory and StrictMode replays cannot consume it twice.
+    firstScanIntentToRun.current = null
+    if (consumeFirstScanIntent(id, firstScanToken)) firstScanIntentToRun.current = { jobID: id, token: firstScanToken }
+    navigate(`${location.pathname}${location.search}${location.hash}`, { replace: true, state: null })
+  }, [firstScanToken, id, location.hash, location.pathname, location.search, navigate])
+
+  useEffect(() => {
+    const intent = firstScanIntentToRun.current
+    if (!intent) return
+    if (intent.jobID !== id) {
+      firstScanIntentToRun.current = null
+      return
+    }
+    if (job.isLoading || session.isLoading || (!job.error && job.data && job.data.id !== intent.jobID)) return
+    firstScanIntentToRun.current = null
+    if (job.error || !job.data || job.data.id !== intent.jobID) {
+      setActionError('The job was created, but its first scan could not be started. Reload the job and retry the scan.')
+      return
+    }
+    if (!canRun) {
+      setActionError('The job was created, but this account cannot start scans. Ask an operator or administrator to start the first sample.')
+      return
+    }
+    if (job.data.archived) {
+      setActionError('The job was created, but it is archived and cannot start a scan. Restore it before retrying.')
+      return
+    }
+    void run()
+  }, [canRun, id, job.data, job.error, job.isLoading, run, session.isLoading])
 
   if (job.isLoading) {
     return <div className="loading"><span className="spinner" />Loading job…</div>
@@ -300,14 +375,22 @@ export function JobDetail() {
     if (err instanceof APIError && err.code === 'conflict') void client.invalidateQueries({ queryKey: ['job', id] })
   }
   async function run() {
+    let request = runRequests.current.get(id)
+    if (request?.inFlight) return
+    if (!request) {
+      request = { inFlight: false, skipped: false }
+      runRequests.current.set(id, request)
+    }
+    request.inFlight = true
+    request.skipped = false
+    const actionGeneration = ++runActionGeneration.current
     setActionError('')
     setActionBusy('run')
     const requestedAt = Date.now()
     const previousScanIDs = scans.data?.scans.map((scan) => scan.id) ?? null
-    runRequest.current = { inFlight: true, skipped: false }
     try {
       await runJob(id)
-      if (!runRequest.current.skipped) setPendingScanRequest({ requestedAt, previousScanIDs, observedActive: false, observedQueued: false })
+      if (!request.skipped && currentRouteJobID.current === id && runActionGeneration.current === actionGeneration) setPendingScanRequest({ jobID: id, requestedAt, previousScanIDs, observedActive: false, observedQueued: false })
       await Promise.all([
         client.invalidateQueries({ queryKey: ['active-scans'] }),
         client.invalidateQueries({ queryKey: ['job-scans', id] }),
@@ -316,10 +399,27 @@ export function JobDetail() {
         client.invalidateQueries({ queryKey: ['jobs'] }),
       ])
     } catch (err) {
-      reportActionError(err, 'Could not start the scan.')
+      const outcomeUnknown = !(err instanceof APIError) || (err.status ?? 0) >= 500
+      const routeIsCurrent = currentRouteJobID.current === id && runActionGeneration.current === actionGeneration
+      if (routeIsCurrent && outcomeUnknown && canReadScans) {
+        // The request may have reached the server even though its response did
+        // not. Keep retries disabled until fresh active/history reads show
+        // whether it queued, started, or completed.
+        setPendingScanRequest({ jobID: id, requestedAt, previousScanIDs, observedActive: false, observedQueued: false })
+        setActionError('Could not confirm whether the scan started. Checking its status before offering a retry.')
+      } else if (routeIsCurrent) {
+        reportActionError(err, 'Could not start the scan.')
+      }
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['active-scans'] }),
+        client.invalidateQueries({ queryKey: ['job-scans', id] }),
+        client.invalidateQueries({ queryKey: ['latest-successful-scan', id] }),
+        client.invalidateQueries({ queryKey: ['jobs'] }),
+      ])
     } finally {
-      runRequest.current.inFlight = false
-      setActionBusy('')
+      request.inFlight = false
+      if (runRequests.current.get(id) === request) runRequests.current.delete(id)
+      if (currentRouteJobID.current === id && runActionGeneration.current === actionGeneration) setActionBusy('')
     }
   }
   async function cancelQueued() {
@@ -568,6 +668,36 @@ export function JobDetail() {
         onCancel={cancelActiveScan}
         onCancelQueued={cancelQueued}
       />}
+      <MonitorNextActions
+        job={value}
+        canRun={canRun}
+        canReadScans={canReadScans}
+        canReadBaseline={canReadBaseline}
+        canReadIncidents={canReadIncidents}
+        liveStatusRequested={canOperate && canReadScans}
+        liveStatusReady={canOperate && canReadScans && active.isSuccess && !active.error}
+        liveStatusLoading={canOperate && canReadScans && active.isLoading}
+        liveStatusError={canOperate && canReadScans && !!active.error}
+        activeScan={activeJobScan}
+        queuedRun={activeJobQueuedRun}
+        pendingRun={!!pendingScanRequest}
+        cycleKnown={canOperate && cycle.isSuccess && !cycle.error}
+        cycle={cycle.data ? cycle.data.cycle : value.scan_cycle}
+        scans={scans.data?.scans}
+        scansLoading={canReadScans && scans.isLoading}
+        scansError={canReadScans && !!scans.error}
+        baseline={baseline.data}
+        baselineLoading={canReadBaseline && baseline.isLoading}
+        baselineError={canReadBaseline && !!baseline.error}
+        latestSuccessfulScan={latest.data?.scan ?? undefined}
+        schedule={nextRun.data}
+        scheduleLoading={!!job.data?.enabled && nextRun.isLoading}
+        scheduleError={!!job.data?.enabled && !!nextRun.error}
+        runBusy={!!actionBusy}
+        onRun={run}
+        onRetryScans={() => { void scans.refetch() }}
+        onRetrySchedule={() => { void nextRun.refetch() }}
+      />
 
       <div className="detail-summary">
         <div className="summary-card">
@@ -688,7 +818,7 @@ export function JobDetail() {
           ) : <div className="inline-empty">No successful scans have run yet.</div>}
         </div>}
 
-        {canReadScans && <div className="panel">
+        {canReadScans && <div className="panel" id="recent-scans">
           <div className="panel-heading">
             <div>
               <h2>Recent scans</h2>

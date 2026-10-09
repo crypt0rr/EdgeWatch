@@ -93,6 +93,19 @@ var ErrScannerProfileNotFound = NewValidationError(config.NewFieldValidationErro
 // so the store refuses one, whoever owns it, as the console does.
 var ErrUDPScannerProfile = NewValidationError(config.NewFieldValidationError("udp", errors.New("udp scanner profiles are not supported; UDP uses Nmap defaults")))
 
+// ValidateManagedJob applies the deployment's installed target-exclusion
+// policy and the standard managed-job validation to a candidate job. It is
+// intended for advisory preflight checks; writes validate again in their
+// transaction so a preview never reserves or weakens the final decision.
+// The validator preserves the distinction between an unconfigured nil policy
+// and an explicitly empty policy installed by the deployment.
+func (ts *TenantStore) ValidateManagedJob(job config.Job) error {
+	if err := ts.ready(); err != nil {
+		return err
+	}
+	return ts.store.validateManagedJob(config.NormalizeJob(job))
+}
+
 // checkPinnedScannerProfileTx refuses a job whose TCP scan pins a scanner
 // profile that is neither built in nor the tenant's own. The TCP profile is
 // the one a scan applies, and the one the console checks. A UDP profile is

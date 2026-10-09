@@ -628,6 +628,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.listJobs(w, r, ts)
 	case path == "/jobs" && r.Method == http.MethodPost:
 		s.createJob(w, r, session, ts)
+	case path == "/jobs/preview" && r.Method == http.MethodPost:
+		s.previewJob(w, r, session, ts)
 	case path == "/jobs/schedule-suggestion" && r.Method == http.MethodGet:
 		s.scheduleSuggestion(w, r, ts)
 	case path == "/scans" && r.Method == http.MethodGet:

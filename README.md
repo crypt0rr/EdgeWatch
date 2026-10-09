@@ -58,9 +58,13 @@ loopback-only. For a remote host, tunnel from your workstation:
 ssh -L 8080:127.0.0.1:8080 user@docker-host
 ```
 
-Then add notification destinations and create your first monitoring job in the
-console. Runtime state and generated encryption keys live in `./data`; back
-them up together.
+Then open **Jobs → New job** and follow the guided monitor setup to choose authorized targets, scan
+coverage, a schedule, and alerts. You can also add and test a notification
+destination during setup; operators can select existing destinations, and
+choosing no alerts is supported. Review the scan estimate and budget before
+creating the monitor. Runtime state and generated encryption keys live in
+`./data`; back them up together. See the [first-scan guide](https://edgewatch.offsec.nl/getting-started/first-scan/)
+for the initial scan and baseline workflow.
 
 ## Documentation
 

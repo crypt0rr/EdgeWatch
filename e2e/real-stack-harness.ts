@@ -4,6 +4,7 @@ import { once } from 'node:events'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
+import { createServer, type Server } from 'node:http'
 import net from 'node:net'
 import { promisify } from 'node:util'
 
@@ -26,8 +27,18 @@ export type Harness = {
   setupToken: () => string
   start: () => Promise<void>
   stop: () => Promise<void>
+  close: () => Promise<void>
+  notificationURL?: string
+  notificationMessages: () => string[]
   /** Runs a host command of the same binary against the daemon's configuration and returns its standard output. */
   cli: (args: string[]) => Promise<string>
+}
+
+export type HarnessOptions = {
+  /** `changing` preserves the historical port transition used for incident tests. */
+  scannerMode?: 'changing' | 'stable' | 'empty' | 'incomplete'
+  /** Start an authorized loopback HTTP sink for Shoutrrr's generic provider. */
+  notificationSink?: boolean
 }
 
 async function availablePort(): Promise<number> {
@@ -47,7 +58,7 @@ export async function delay(ms: number): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, ms))
 }
 
-export async function createHarness(): Promise<Harness> {
+export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
   const binary = process.env.EDGEWATCH_E2E_BINARY
   if (!binary) throw new Error('EDGEWATCH_E2E_BINARY is unset; Playwright global setup must build the daemon first')
   await access(binary)
@@ -55,6 +66,7 @@ export async function createHarness(): Promise<Harness> {
   const directory = await mkdtemp(join(tmpdir(), 'edgewatch-real-stack-'))
   const port = await availablePort()
   const counter = join(directory, 'nmap-count')
+  const scannerMode = options.scannerMode ?? 'changing'
   const nmap = join(directory, 'fake-nmap.sh')
   await writeFile(nmap, `#!/bin/sh
 if [ "\${1:-}" = "--version" ]; then
@@ -66,7 +78,15 @@ if [ -f '${counter}' ]; then count=$(cat '${counter}'); fi
 count=$((count + 1))
 printf '%s' "$count" > '${counter}'
 port=22
-if [ "$count" -ge 2 ]; then port=23; fi
+if [ '${scannerMode}' = 'changing' ] && [ "$count" -ge 2 ]; then port=23; fi
+if [ '${scannerMode}' = 'incomplete' ]; then
+  cat <<EOF
+<?xml version="1.0"?>
+<nmaprun><host><status state="up"/><address addr="127.0.0.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="$port"><state state="open"/></port></ports></host>
+<runstats><finished exit="success"/></runstats></nmaprun>
+EOF
+  exit 0
+fi
 cat <<EOF
 <?xml version="1.0"?>
 <nmaprun>
@@ -74,7 +94,7 @@ cat <<EOF
     <status state="up"/>
     <address addr="127.0.0.1" addrtype="ipv4"/>
     <ports>
-      <port protocol="tcp" portid="$port"><state state="open"/></port>
+      ${scannerMode === 'empty' ? '' : `<port protocol="tcp" portid="$port"><state state="open"/></port>`}
     </ports>
   </host>
   <runstats><finished exit="success"/></runstats>
@@ -100,6 +120,27 @@ notifications:
   let output = ''
   let setupToken = ''
   let firstStart = true
+  let notificationSink: Server | undefined
+  let notificationURL: string | undefined
+  const notificationMessages: string[] = []
+  if (options.notificationSink) {
+    notificationSink = createServer((request, response) => {
+      const chunks: Buffer[] = []
+      request.on('data', chunk => chunks.push(Buffer.from(chunk)))
+      request.on('end', () => {
+        notificationMessages.push(Buffer.concat(chunks).toString('utf8'))
+        response.writeHead(200, { 'Content-Type': 'text/plain' })
+        response.end('accepted')
+      })
+    })
+    await new Promise<void>((resolve, reject) => {
+      notificationSink!.once('error', reject)
+      notificationSink!.listen(0, '127.0.0.1', resolve)
+    })
+    const address = notificationSink.address()
+    if (!address || typeof address === 'string') throw new Error('could not allocate the notification sink')
+    notificationURL = `generic://127.0.0.1:${address.port}/edgewatch?disabletls=yes&template=json`
+  }
   const url = `http://127.0.0.1:${port}`
 
   const start = async () => {
@@ -171,7 +212,14 @@ notifications:
     return stdout
   }
 
-  const harness: Harness = { url, setupToken: () => setupToken, start, stop, cli }
+  const close = async () => {
+    await stop()
+    if (notificationSink) {
+      await new Promise<void>((resolve, reject) => notificationSink!.close(error => error ? reject(error) : resolve()))
+      notificationSink = undefined
+    }
+  }
+  const harness: Harness = { url, setupToken: () => setupToken, start, stop, close, notificationURL, notificationMessages: () => [...notificationMessages], cli }
   // Register cleanup before waiting for readiness. If compilation, binding,
   // or database startup fails, the caller never receives a harness on which it
   // could run its normal finally block.
@@ -179,12 +227,29 @@ notifications:
     await start()
     return harness
   } catch (error) {
-    await stop()
+    await close()
     throw error
   }
 }
 
 export type APIResult = { status: number; body: any }
+
+/** Complete the first administrator setup against a fresh harness and return its CSRF token. */
+export async function bootstrapAdministrator(page: Page, harness: Harness): Promise<string> {
+  await page.goto(harness.url)
+  await page.getByLabel('Setup token').fill(harness.setupToken())
+  await page.locator('input[autocomplete="new-password"]').first().fill(password)
+  await page.locator('input[autocomplete="new-password"]').nth(1).fill(password)
+  await page.getByRole('button', { name: 'Create administrator' }).click()
+  await page.locator('input[autocomplete="current-password"]').fill(password)
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await page.getByRole('heading', { name: /Good day, admin/i }).waitFor({ state: 'visible' })
+  const session = await callAPI(page, '/auth/session', 'GET')
+  if (session.status !== 200 || typeof session.body.csrf_token !== 'string') {
+    throw new Error(`Administrator session was not ready: ${session.status}`)
+  }
+  return session.body.csrf_token
+}
 
 export async function callAPI(page: Page, path: string, method: string, csrf = '', payload?: unknown): Promise<APIResult> {
   return page.evaluate(async ({ path, method, csrf, payload }) => {
@@ -211,6 +276,17 @@ export async function waitForScan(page: Page, jobID: string, csrf: string, count
     await delay(200)
   }
   throw new Error(`scan ${count} did not complete`)
+}
+
+export async function waitForScanStatus(page: Page, jobID: string, csrf: string, count: number, status: string): Promise<any[]> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const response = await callAPI(page, `/jobs/${jobID}/scans?limit=10`, 'GET', csrf)
+    const scans = response.body?.scans as any[] | undefined
+    if (response.status === 200 && Array.isArray(scans) && scans.length >= count && scans.slice(0, count).every(scan => scan.status === status)) return scans
+    await delay(200)
+  }
+  const latest = await callAPI(page, `/jobs/${jobID}/scans?limit=10`, 'GET', csrf)
+  throw new Error(`scan ${count} did not reach ${status}: ${JSON.stringify(latest.body?.scans?.slice(0, count) ?? latest.body)}`)
 }
 
 // The scan row is saved before the run releases its job lease, so a click

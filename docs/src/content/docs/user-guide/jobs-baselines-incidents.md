@@ -66,6 +66,43 @@ editing the job, and **Resume schedule** starts them again; **Scan now** keeps
 working while a job is paused. Pausing and resuming are unavailable while the
 job's scan is running.
 
+## First scan and baseline learning
+
+On the final review, choose **Create and start first scan** to save and open the
+job page, then request one scan, or choose **Create without starting** to save
+the job without requesting an immediate scan. Creating the job and starting its
+scan are separate actions.
+If the scan request fails, the job remains saved on its page; retrying starts a
+scan for that job and does not create another copy. Refreshing the page or
+returning to it later does not replay the one-time create-and-start action.
+Existing schedule settings and the configured `run_on_start` behavior remain
+authoritative, including when EdgeWatch restarts.
+
+The job page's **Next steps** card reads the saved job, scan, and baseline
+state. It shows successful samples collected against the configured sample
+count and, while the schedule is enabled, the next scheduled sample in the
+job's timezone. A paused schedule has no automatic next sample. A job with no
+schedule can still be sampled manually by a permitted operator or
+administrator. If the unit's scan slots are full, an explicit manual request
+waits in the queue and can be canceled before it starts.
+
+Only successful scans with complete coverage count toward learning. Failed,
+canceled, timed-out, and incomplete scans stay in history but do not count as
+samples or remove expected results. If learning stalls after incomplete
+coverage, open the scan evidence and correct target reachability or the saved
+scanner profile, then retry. The scan uses the job's current saved settings;
+the next scheduled run also uses the current revision. Once the configured
+number of complete successful samples has been recorded, EdgeWatch establishes
+the baseline automatically. It never lowers that sample count or performs the
+explicit **Use as baseline** override on your behalf. Incident acceptance
+remains an explicit decision.
+
+An active baseline applies to the targets and TCP/UDP ports configured for that
+job. It can be complete even when no positive ports were found; the job page
+states this as a valid empty baseline. When the card says **Ready (updating
+scope)**, the existing baseline remains active while its stored scope is
+re-keyed by the next finalized scan or a saved job change.
+
 Archiving stops a job while keeping its results and incidents available. An
 administrator can permanently delete an archived job by typing its exact name;
 this also removes that job's scan results, incidents, saved scan progress, and

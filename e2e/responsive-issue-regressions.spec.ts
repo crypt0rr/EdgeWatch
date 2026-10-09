@@ -416,7 +416,7 @@ test.describe('responsive issue regressions', () => {
 
     for (const width of [320, 1280]) {
       await page.setViewportSize({ width, height: 900 })
-      await page.goto('/jobs/new')
+      await page.goto('/jobs/new/advanced')
       const suggestion = page.locator('.schedule-suggestion')
       await expect(suggestion).toBeVisible({ timeout: 5_000 })
       const copy = suggestion.locator('.schedule-suggestion-copy')
@@ -855,7 +855,7 @@ test.describe('responsive issue regressions', () => {
     } }))
     for (const width of [375, 768, 834, 1024]) {
       await page.setViewportSize({ width, height: 900 })
-      await page.goto('/jobs/new')
+      await page.goto('/jobs/new/advanced')
       const main = (await page.locator('.editor-main').boundingBox())!
       const side = (await page.locator('.editor-side').boundingBox())!
       const actions = (await page.locator('.editor-actions').boundingBox())!

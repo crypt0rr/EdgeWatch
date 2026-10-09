@@ -1,68 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { z } from 'zod'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Bell, Info, Plus, Save, Trash2, TriangleAlert } from 'lucide-react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { APIError, BUILTIN_NAABU_PROFILE_ID, createJob, getJob, getSession, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
-import type { JobForm, Protocol } from '../types'
+import type { Job, Protocol } from '../types'
 import type { ScannerCapabilities, ScannerProfile } from '../api'
 import { cidrWarning, duplicateTarget, targetKind } from '../target'
 import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { editableDuration, formatDateTime, getDisplayTimeZone } from '../format'
-
-const blank: Omit<JobForm, 'timezone'> = {
-  name: '',
-  schedule: '0 */6 * * *',
-  run_on_start: false,
-  assume_alive: true,
-  dns_comparison_mode: 'address_sensitive',
-  targets: [''],
-  max_expanded_hosts: 256,
-  timing: 'balanced',
-  timeout: '1h',
-  resume_window: '8d',
-  baseline_samples: 2,
-  change_confirmations: 1,
-  allow_high_cost: false,
-  enabled: true,
-}
-
-// New jobs default to the deployment timezone from config.yaml and otherwise
-// to the browser's timezone. Resolve it when the editor opens, after the
-// signed-in session has supplied the deployment setting.
-const newJobDefaults = (): JobForm => ({
-  ...blank,
-  timezone: getDisplayTimeZone() || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-})
-
-const defaultTCP = (): Protocol => ({
-  ports: '1-65535',
-  mode: 'connect',
-  service_detection: false,
-  engine: 'naabu_nmap',
-  profile_id: BUILTIN_NAABU_PROFILE_ID,
-})
-
-const jobFormSchema = z.object({
-  name: z.string().trim().min(1, 'A name is required.').refine((value) => Array.from(value).length <= 200, 'Use at most 200 characters.').refine((value) => !/\p{Cc}/u.test(value), 'Remove control characters such as tabs or line breaks.'), // Mirrors the server's job-name rule (config.MaxJobNameRunes).
-  schedule: z.string().trim().min(1, 'A cron schedule is required.'),
-  timezone: z.string().trim().min(1, 'A timezone is required.'),
-  run_on_start: z.boolean().optional(),
-  assume_alive: z.boolean().optional(),
-  dns_comparison_mode: z.enum(['address_sensitive', 'aggregate']),
-  max_expanded_hosts: z.number().int('Use a whole number of hosts.').min(1, 'Use at least one host.').max(1_000_000, 'The expansion limit is too high.'),
-  timing: z.string().refine((value) => ['conservative', 'balanced', 'fast'].includes(value), 'Choose a valid timing profile.'),
-  timeout: z.string().trim().min(1, 'A scan timeout is required.'),
-  resume_window: z.string().trim().min(1, 'A resume window is required.'),
-  baseline_samples: z.number().int('Use a whole number of samples.').min(1, 'Use at least one baseline sample.').max(100, 'Use no more than 100 baseline samples.'),
-  change_confirmations: z.number().int('Use a whole number of confirmations.').min(1, 'Use at least one confirmation.').max(100, 'Use no more than 100 confirmations.'),
-  allow_high_cost: z.boolean().optional(),
-  enabled: z.boolean().optional(),
-})
-type JobFormFields = z.infer<typeof jobFormSchema>
+import { cloneJobCreationDraft, cloneProtocol, defaultTCP, jobFormSchema, newJobCreationDraft, optionalNumber, presetFor, toJobFormPayload, type JobFormFields } from '../job-form'
+import { useOptionalJobCreationDraft } from '../job-creation-draft'
 
 export function JobEditor() {
   const { id } = useParams()
@@ -70,18 +20,23 @@ export function JobEditor() {
   const navigate = useNavigate()
   const location = useLocation()
   const client = useQueryClient()
+  const creation = useOptionalJobCreationDraft()
+  const updateCreationDraft = creation?.updateDraft
+  const advancedCreation = !edit && location.pathname === '/jobs/new/advanced'
+  const [localInitialDraft] = useState(newJobCreationDraft)
+  const initialDraft = creation?.draft ?? localInitialDraft
   const existing = useQuery({ queryKey: ['job', id], queryFn: () => getJob(id!), enabled: edit })
   const session = useQuery({ queryKey: ['session'], queryFn: getSession })
   const notificationDestinations = useQuery({ queryKey: ['notifications'], queryFn: listNotificationDestinations, staleTime: 30_000 })
   const scannerProfiles = useQuery({ queryKey: ['scanner-profiles'], queryFn: () => listScannerProfiles(false), staleTime: 60_000 })
   const scannerCapabilityState = useQuery({ queryKey: ['scanner-capabilities'], queryFn: scannerCapabilities, staleTime: 5 * 60_000, retry: false })
-  const [defaults] = useState(newJobDefaults)
-  const [targets, setTargets] = useState<string[]>(defaults.targets)
-  const [tcp, setTCP] = useState<Protocol | undefined>(() => defaultTCP())
-  const [udp, setUDP] = useState<Protocol | undefined>()
-  const [selectedNotificationIDs, setSelectedNotificationIDs] = useState<string[]>([])
-  const [notificationSelectionTouched, setNotificationSelectionTouched] = useState(false)
-  const [scheduleEnabled, setScheduleEnabled] = useState(true)
+  const [defaults] = useState(() => ({ ...initialDraft.fields }))
+  const [targets, setTargets] = useState<string[]>(() => [...initialDraft.targets])
+  const [tcp, setTCP] = useState<Protocol | undefined>(() => cloneJobCreationDraft(initialDraft).tcp)
+  const [udp, setUDP] = useState<Protocol | undefined>(() => cloneJobCreationDraft(initialDraft).udp)
+  const [selectedNotificationIDs, setSelectedNotificationIDs] = useState<string[]>(() => [...initialDraft.notificationIDs])
+  const [notificationSelectionTouched, setNotificationSelectionTouched] = useState(() => initialDraft.notificationSelectionTouched)
+  const [scheduleEnabled, setScheduleEnabled] = useState(() => initialDraft.scheduleEnabled)
   const [error, setError] = useState('')
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
@@ -92,10 +47,11 @@ export function JobEditor() {
   const [rebaselinePrompt, setRebaselinePrompt] = useState<{ values: JobFormFields; changes: string[] } | null>(null)
   const [discardNavigation, setDiscardNavigation] = useState<{ destination: string; historyPop: boolean } | null>(null)
   const loadedRevision = useRef<{ id?: string; revision: number } | null>(null)
+  const saveLock = useRef(false)
   // Switching a protocol off keeps its settings so switching it back on in
   // the same draft restores them instead of resetting to the defaults.
-  const lastTCP = useRef<Protocol | undefined>(undefined)
-  const lastUDP = useRef<Protocol | undefined>(undefined)
+  const lastTCP = useRef<Protocol | undefined>(cloneJobCreationDraft(initialDraft).lastTCP)
+  const lastUDP = useRef<Protocol | undefined>(cloneJobCreationDraft(initialDraft).lastUDP)
   const cronInputRef = useRef<HTMLInputElement | null>(null)
   const currentHistoryEntry = useRef<{ path: string; state: unknown } | null>(null)
   const allowHistoryPop = useRef(false)
@@ -133,9 +89,13 @@ export function JobEditor() {
   const suggestionKey = currentSuggestion?.nearest ? `${currentSuggestion.nearest.id}:${suggestionInput.schedule}:${suggestionInput.timezone}` : ''
   const showSuggestion = !!currentSuggestion?.suggested && suggestionKey !== dismissedSuggestion
 
-  const hasDraftChanges = isDirty || draftDirty
+  const hasDraftChanges = isDirty || draftDirty || (!edit && (creation?.dirty ?? false))
   const requestNavigation = (destination: string) => {
     if (saving) return
+    if (!edit && isCreationPath(destination)) {
+      navigate(destination)
+      return
+    }
     if (hasDraftChanges) {
       setDiscardNavigation({ destination, historyPop: false })
       return
@@ -148,7 +108,33 @@ export function JobEditor() {
   }, [location.hash, location.key, location.pathname, location.search])
 
   useEffect(() => {
-    if (!hasDraftChanges || saving) return
+    if (edit || !updateCreationDraft) return
+    const subscription = watch(values => {
+      updateCreationDraft(draft => ({ ...draft, fields: { ...draft.fields, ...values } }), true)
+    })
+    return () => subscription.unsubscribe()
+  }, [edit, updateCreationDraft, watch])
+
+  useEffect(() => {
+    if (edit || !updateCreationDraft) return
+    const snapshot = cloneProtocol(tcp) ?? cloneProtocol(lastTCP.current)
+    updateCreationDraft(draft => ({
+      ...draft,
+      targets: [...targets],
+      tcp: cloneProtocol(tcp),
+      udp: cloneProtocol(udp),
+      lastTCP: cloneProtocol(lastTCP.current),
+      lastUDP: cloneProtocol(lastUDP.current),
+      tcpFullSnapshot: snapshot?.engine === 'naabu_nmap' ? cloneProtocol(snapshot) : cloneProtocol(draft.tcpFullSnapshot),
+      tcpSelectedSnapshot: snapshot && snapshot.engine !== 'naabu_nmap' ? cloneProtocol(snapshot) : cloneProtocol(draft.tcpSelectedSnapshot),
+      notificationIDs: [...selectedNotificationIDs],
+      notificationSelectionTouched,
+      scheduleEnabled,
+    }), hasDraftChanges)
+  }, [edit, updateCreationDraft, targets, tcp, udp, selectedNotificationIDs, notificationSelectionTouched, scheduleEnabled, hasDraftChanges])
+
+  useEffect(() => {
+    if (!hasDraftChanges && !saving) return
     const currentPath = `${location.pathname}${location.search}${location.hash}`
     const onInternalLinkClick = (event: MouseEvent) => {
       if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
@@ -160,6 +146,12 @@ export function JobEditor() {
       if (destination.origin !== window.location.origin) return
       const nextPath = `${destination.pathname}${destination.search}${destination.hash}`
       if (nextPath === currentPath) return
+      if (saving) {
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
+      if (!edit && isCreationPath(currentPath) && isCreationPath(nextPath)) return
       event.preventDefault()
       event.stopPropagation()
       setDiscardNavigation({ destination: nextPath, historyPop: false })
@@ -171,6 +163,13 @@ export function JobEditor() {
       }
       const nextPath = `${window.location.pathname}${window.location.search}${window.location.hash}`
       if (nextPath === currentPath) return
+      if (saving) {
+        event.stopImmediatePropagation()
+        const current = currentHistoryEntry.current
+        if (current) window.history.pushState(current.state, '', current.path)
+        return
+      }
+      if (!edit && isCreationPath(currentPath) && isCreationPath(nextPath)) return
 
       // Browser history has already moved by the time popstate fires. Stop
       // BrowserRouter from applying that location, then restore the exact
@@ -192,7 +191,7 @@ export function JobEditor() {
       window.removeEventListener('popstate', onPopState, true)
       window.removeEventListener('beforeunload', onBeforeUnload)
     }
-  }, [hasDraftChanges, location.hash, location.pathname, location.search, saving])
+  }, [edit, hasDraftChanges, location.hash, location.pathname, location.search, saving])
   const applyServerJob = (data: NonNullable<typeof existing.data>) => {
     // The API returns Go durations (192h0m0s). Show them in the units the
     // editor suggests; both forms save the same duration.
@@ -237,14 +236,14 @@ export function JobEditor() {
   // destination list is available, make that compatibility behavior explicit
   // in the editor while preserving an intentional empty selection.
   useEffect(() => {
-    if (!notificationDestinations.data || notificationSelectionTouched) return
+    if (!notificationDestinations.data || notificationSelectionTouched || (!edit && selectedNotificationIDs.length > 0)) return
     const configured = existing.data?.job.notification_destinations
     if (configured !== undefined) {
       setSelectedNotificationIDs([...configured])
       return
     }
     setSelectedNotificationIDs(notificationDestinations.data.destinations.filter(isActiveDestination).map(destination => destination.id))
-  }, [existing.data, notificationDestinations.data, notificationSelectionTouched])
+  }, [edit, existing.data, notificationDestinations.data, notificationSelectionTouched, selectedNotificationIDs.length])
 
   // A saved selection can outlive its destination: a deployment URL change in
   // config.yaml creates a new destination ID. Show those IDs so the operator
@@ -259,6 +258,7 @@ export function JobEditor() {
   }
 
   const save = async (values: JobFormFields, confirm = false) => {
+    if (saveLock.current || saving || (!edit && creation?.createOutcomeUnknown)) return
     setFieldErrors({})
     const normalizedTargets = targets.map((value) => value.trim()).filter(Boolean)
     const duplicate = duplicateTarget(normalizedTargets)
@@ -281,7 +281,17 @@ export function JobEditor() {
       setError('This job changed in another tab. Reload the saved version before continuing.')
       return
     }
-    const payload = { ...values, enabled: scheduleEnabled, targets: normalizedTargets, tcp, udp, notification_destinations: notificationDestinations.data ? selectedNotificationIDs.filter(idValue => availableNotificationIDs.has(idValue)) : undefined }
+    const payload = toJobFormPayload(values, {
+      targets: normalizedTargets,
+      tcp,
+      udp,
+      scheduleEnabled,
+      notificationIDs: selectedNotificationIDs,
+      notificationSelectionTouched,
+      notificationsLoaded: !!notificationDestinations.data,
+      availableNotificationIDs,
+    })
+    saveLock.current = true
     setSaving(true)
     setError('')
     try {
@@ -297,7 +307,37 @@ export function JobEditor() {
           void client.invalidateQueries({ queryKey: ['job', id], refetchType: 'none' })
         }
       } else {
-        await createJob(payload)
+        let created: Job
+        try {
+          created = await createJob(payload)
+        } catch (err) {
+          const knownResponse = err instanceof APIError && err.status !== undefined && err.status < 500
+          if (!knownResponse) {
+            creation?.markCreateOutcomeUnknown()
+            setError('EdgeWatch did not confirm whether this job was created. Do not submit this draft again; check Jobs first.')
+            return
+          }
+          const message = err instanceof Error ? err.message : 'Could not create job'
+          if (err instanceof APIError && err.code === 'validation_failed') {
+            const details = Object.entries(err.details ?? {}).reduce<Record<string, string>>((out, [key, value]) => {
+              if (typeof value === 'string') out[key] = value
+              return out
+            }, {})
+            setFieldErrors(details)
+          }
+          setError(message)
+          return
+        }
+        if (!created?.id?.trim()) {
+          creation?.markCreateOutcomeUnknown()
+          setError('The create response did not include a job ID. Check Jobs before taking another action; this draft will not be submitted again.')
+          return
+        }
+        creation?.clearDraft()
+        client.setQueryData(['job', created.id], created)
+        void client.invalidateQueries({ queryKey: ['jobs'] }).catch(() => undefined)
+        navigate('/jobs')
+        return
       }
       await client.invalidateQueries({ queryKey: ['jobs'] })
       navigate(edit ? `/jobs/${id}` : '/jobs')
@@ -317,6 +357,7 @@ export function JobEditor() {
         setError(message)
       }
     } finally {
+      saveLock.current = false
       setSaving(false)
     }
   }
@@ -352,7 +393,7 @@ export function JobEditor() {
     <section className="page">
       <div className="page-heading">
         <div>
-          <Link className="back-link" to={edit ? `/jobs/${id}` : '/jobs'}><ArrowLeft size={15} /> {edit ? 'Back to job' : 'Back to jobs'}</Link>
+          <Link className="back-link" to={edit ? `/jobs/${id}` : advancedCreation ? '/jobs/new' : '/jobs'}><ArrowLeft size={15} /> {edit ? 'Back to job' : advancedCreation ? 'Back to guided setup' : 'Back to jobs'}</Link>
           <p className="eyebrow">{edit ? 'Edit configuration' : 'New configuration'}</p>
           <h1>{edit ? 'Tune your monitoring job' : 'Create a monitoring job'}</h1>
           <p className="muted">Choose a clear scope. EdgeWatch will validate targets before it saves.</p>
@@ -360,6 +401,8 @@ export function JobEditor() {
       </div>
 
       <form className="editor" onSubmit={handleSubmit((values) => save(values))}>
+        <fieldset className="editor-fields" disabled={!edit && saving} aria-busy={!edit && saving}>
+        <legend className="sr-only">Job configuration</legend>
         <div className="editor-main">
           <div className="panel form-panel">
             <div className="panel-heading"><div><h2>Basics</h2><p className="muted">A name and the systems this job should watch.</p></div></div>
@@ -456,9 +499,11 @@ export function JobEditor() {
         </aside>
         <div className="editor-actions">
           {error && <div className="form-error" role="alert">{error}</div>}
-          <button disabled={saving} className="button primary" type="submit"><Save size={16} />{saving ? 'Saving…' : edit ? 'Save changes' : 'Create job'}</button>
-          <button type="button" className="button ghost" onClick={() => requestNavigation(edit ? `/jobs/${id}` : '/jobs')}>Cancel</button>
+          {!edit && creation?.createOutcomeUnknown && <div className="form-error" role="alert">The create result is still unknown. <Link to="/jobs" target="_blank" rel="noreferrer">Open Jobs in another tab</Link> to check before starting a new monitor.</div>}
+          <button disabled={saving || (!edit && !!creation?.createOutcomeUnknown)} className="button primary" type="submit"><Save size={16} />{saving ? 'Saving…' : edit ? 'Save changes' : 'Create job'}</button>
+          <button type="button" className="button ghost" onClick={() => requestNavigation(edit ? `/jobs/${id}` : advancedCreation ? '/jobs/new' : '/jobs')}>Cancel</button>
         </div>
+        </fieldset>
       </form>
       {rebaselinePrompt && <ActionDialog title="Confirm scan-scope change" description="This changes the scan scope. The current baseline and active incidents will be cleared, and a new baseline will be learned." confirmLabel="Reset baseline and save" destructive onConfirm={async () => { await save(rebaselinePrompt.values, true) }} onCancel={() => { setRebaselinePrompt(null); setError('Scope change canceled.') }} error={error}>{rebaselinePrompt.changes.length > 0 && <ul className="scope-change-list">{rebaselinePrompt.changes.map(change => <li key={change}>{change}</li>)}</ul>}</ActionDialog>}
       {discardNavigation && <ActionDialog title="Discard unsaved changes?" description="Your job configuration changes have not been saved. Leave this page and discard the draft?" confirmLabel="Discard changes" destructive onConfirm={() => { const navigation = discardNavigation; setDiscardNavigation(null); if (navigation.historyPop) { allowHistoryPop.current = true; window.history.back() } else navigate(navigation.destination) }} onCancel={() => setDiscardNavigation(null)} />}
@@ -564,14 +609,6 @@ function ProtocolCard({ label, enabled, onToggle, protocol, setProtocol, profile
   </div>
 }
 
-function presetFor(schedule: string) {
-  return ['0 */6 * * *', '0 * * * *', '0 3 * * *', '0 3 * * 0'].includes(schedule) ? schedule : 'custom'
-}
-
-function optionalNumber(value: string): number | undefined {
-  return value.trim() === '' ? undefined : Number(value)
-}
-
 // Show the neighbouring job's next run in the timezone the notice names: its
 // own. A zone this browser cannot render falls back to the console's display
 // timezone, and the notice then names that zone instead.
@@ -593,4 +630,9 @@ function formatGap(minutes: number) {
 
 function isActiveDestination(destination: { enabled: boolean; locked: boolean }) {
   return destination.enabled && !destination.locked
+}
+
+function isCreationPath(path: string) {
+  const pathname = path.split(/[?#]/, 1)[0]
+  return pathname === '/jobs/new' || pathname.startsWith('/jobs/new/')
 }

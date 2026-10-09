@@ -11,6 +11,106 @@ defensible duration estimate is available. Clients should treat this field as
 optional and must not infer that a scan will finish within any fixed time from
 the probe count alone.
 
+## Job creation preview
+
+v0.32.0 adds `POST /api/v1/jobs/preview`. Send the same new-job JSON payload
+accepted by `POST /api/v1/jobs`; the response returns the normalized public
+job form, the existing `WorkEstimate`, the existing `ScanBudget` outcome, and
+at most five stable warnings:
+
+```json
+{
+  "job": {
+    "name": "edge inventory",
+    "schedule": "0 * * * *",
+    "timezone": "UTC",
+    "run_on_start": false,
+    "assume_alive": true,
+    "targets": ["198.51.100.10"],
+    "dns_comparison_mode": "address_sensitive",
+    "max_expanded_hosts": 256,
+    "tcp": {
+      "ports": "22,443",
+      "mode": "connect",
+      "service_detection": false,
+      "engine": "nmap"
+    },
+    "udp": null,
+    "timing": "balanced",
+    "timeout": "1m0s",
+    "resume_window": "192h0m0s",
+    "baseline_samples": 2,
+    "change_confirmations": 2,
+    "enabled": true,
+    "allow_high_cost": false
+  },
+  "scan_estimate": {
+    "hosts": 1,
+    "tcp_ports": 2,
+    "udp_ports": 0,
+    "probes": 2,
+    "naabu_probes": 0,
+    "nmap_probes": 2,
+    "nmap_invocations": 1,
+    "naabu_invocations": 0,
+    "unknown_dns": 0
+  },
+  "scan_budget": {"exceeded": false},
+  "warnings": [
+    {
+      "code": "elapsed_time_unknown",
+      "message": "Probe and process counts are preflight estimates; elapsed scan time depends on DNS, scanner behavior, target responses, retries, and discovered ports."
+    },
+    {
+      "code": "tcp_partial_coverage",
+      "field": "tcp.ports",
+      "message": "This Nmap TCP selection covers only the configured ports, not the full TCP port range."
+    }
+  ]
+}
+```
+
+The preview applies the same new-job defaults, selected scanner-profile
+resolution, destination routing, deployment target exclusions, and permission
+rules as creation. It then compares the prepared estimate with the current
+unit probe budget. When TCP engine/profile is omitted, the existing default
+Naabu-to-Nmap profile and its full TCP discovery range are returned in `job`;
+clients that deliberately select only some TCP ports must send
+`engine: "nmap"`. Optional UDP work is included in the estimate.
+
+`scan_estimate` is a bounded preflight, not a duration promise. Each DNS name
+is counted as one logical address and increments `unknown_dns`; preview does
+not resolve names. Naabu's known discovery pass covers ports 1–65535, while
+the subsequent Nmap confirmation work depends on discovered ports and is not
+included before discovery. Warnings have stable `code` values, an optional
+field path, and user-facing text. Clients should handle unknown warning codes
+as generic advisories.
+
+A valid estimate above the unit budget still returns `200`. Its
+`scan_budget.exceeded` is `true`, with `estimated_probes`, `limit`, and
+`approval_would_fit`; the latter says whether the unit's high-cost ceiling
+would admit the estimate if the caller is authorized to enable that approval.
+A job over the absolute probe ceiling cannot fit even with that approval.
+Creating a job remains compatible with existing behavior, but preview does
+not reserve budget and a later run checks the current limits again. Do not
+promise that an over-budget job will start.
+If the unit budget cannot be read, preview returns `503 preview_unavailable`
+with `details.reason: "scan_budget_unavailable"` and does not claim a fit.
+
+Preview is advisory and read-only: it creates no job or revision, baseline,
+scan, audit entry, outbox item, or schedule change; it does not resolve DNS,
+start scanner or notification processes, reserve capacity, or publish an SSE
+event. Creation and run remain authoritative and revalidate current policy and
+resources. Invalid input and stale profile selections keep creation's
+validation/conflict semantics. A foreign unit's profile or destination ID is
+indistinguishable from an unknown ID.
+
+The route requires `jobs.write`, so unit administrators and operators may
+preview; viewers, platform administrators, and anonymous callers may not. It
+uses the existing authenticated POST session and CSRF checks. It has no
+additional route-specific Origin check; sending an Origin does not replace
+CSRF validation. `allow_high_cost` remains administrator-only.
+
 ## Scan history
 
 The authenticated scan-history endpoints provide metadata, full results, and

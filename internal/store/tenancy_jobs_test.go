@@ -306,6 +306,27 @@ var jobAudit = AuditEntry{Action: "job.test", ActorUsername: "tenant-test"}
 
 // jobLeakCases hold the leak cases of the job writes and JobActive.
 var jobLeakCases = map[string]tenantLeakCase{
+	"ValidateManagedJob": {run: func(t *testing.T, f tenantFixture) {
+		if err := f.store.SetTargetExclusions([]string{"127.0.0.0/8"}); err != nil {
+			t.Fatal(err)
+		}
+		beforeA, beforeB := tenantJobDigest(t, f.store, f.a), tenantJobDigest(t, f.store, f.b)
+		var want string
+		for _, scope := range []TenantScope{f.a, f.b} {
+			err := f.store.Tenant(scope).ValidateManagedJob(testJob("candidate"))
+			if !errors.Is(err, ErrValidation) {
+				t.Errorf("tenant %s validation = %v, want target policy validation error", scope.ID(), err)
+			}
+			if want == "" {
+				want = err.Error()
+			} else if err.Error() != want {
+				t.Errorf("tenant %s validation = %q, want same policy response %q", scope.ID(), err, want)
+			}
+		}
+		if tenantJobDigest(t, f.store, f.a) != beforeA || tenantJobDigest(t, f.store, f.b) != beforeB {
+			t.Fatal("managed-job validation changed tenant data")
+		}
+	}},
 	"CreateJob": {writes: true, run: func(t *testing.T, f tenantFixture) {
 		assertTenantCreatesJobs(t, f, func(ts *TenantStore, job config.Job) (JobRecord, error) {
 			return ts.CreateJob(context.Background(), job)

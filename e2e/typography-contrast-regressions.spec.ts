@@ -4,6 +4,7 @@ import { mockConsole } from './mock-console'
 const operatorPages = [
   '/jobs',
   '/jobs/new',
+  '/jobs/new/advanced',
   '/jobs/job-1',
   '/incidents',
   '/activity',
@@ -23,6 +24,12 @@ async function expectNoTinyVisibleText(page: import('@playwright/test').Page, pa
     })
     .map(element => `${element.tagName.toLowerCase()}.${typeof element.className === 'string' ? element.className : ''} ${getComputedStyle(element).fontSize}: ${element.textContent?.trim().slice(0, 40)}`))
   expect(tiny, `visible text smaller than 11px on ${path}`).toEqual([])
+}
+
+async function expectNarrowTextAndLayout(page: import('@playwright/test').Page, path: string) {
+  await expectNoTinyVisibleText(page, path)
+  const width = await page.evaluate(() => ({ document: document.documentElement.scrollWidth, viewport: window.innerWidth }))
+  expect(width.document, `horizontal overflow on ${path}`).toBeLessThanOrEqual(width.viewport)
 }
 
 async function installIssue1128Fixtures(page: import('@playwright/test').Page) {
@@ -96,9 +103,26 @@ test('operational text stays at least 11px on narrow screens', async ({ page }, 
     if (path === '/activity') await expect(page.locator('.activity-event-heading time').first()).toBeVisible()
     if (path === '/jobs/job-1') await expect(page.locator('.pending-detail-heading')).toBeVisible()
     if (path.startsWith('/scans/')) await expect(page.locator('.nse-output-panel')).toBeVisible()
-    await expectNoTinyVisibleText(page, path)
-    const width = await page.evaluate(() => ({ document: document.documentElement.scrollWidth, viewport: window.innerWidth }))
-    expect(width.document, `horizontal overflow on ${path}`).toBeLessThanOrEqual(width.viewport)
+    await expectNarrowTextAndLayout(page, path)
+
+    if (path === '/jobs/new') {
+      await page.getByLabel('Monitor name').fill('typography-floor-monitor')
+      await page.getByLabel('Target 1').fill('192.0.2.10')
+      await page.getByRole('button', { name: 'Continue to coverage' }).click()
+      await expect(page.getByRole('heading', { name: 'Set scan coverage' })).toBeVisible()
+      await expectNarrowTextAndLayout(page, 'guided setup coverage')
+
+      await page.getByRole('radio', { name: /Selected TCP ports/ }).check()
+      await page.getByRole('textbox', { name: /TCP ports/ }).fill('22')
+      await page.getByRole('button', { name: 'Continue to schedule' }).click()
+      await expect(page.getByRole('heading', { name: 'Set schedule and alerts' })).toBeVisible()
+      await expectNarrowTextAndLayout(page, 'guided setup schedule and alerts')
+
+      await page.getByRole('button', { name: 'Continue without alerts' }).click()
+      await page.getByRole('button', { name: 'Review monitor' }).click()
+      await expect(page.getByRole('heading', { name: 'Coverage and scan cost' })).toBeVisible()
+      await expectNarrowTextAndLayout(page, 'guided setup review')
+    }
   }
 })
 
@@ -240,7 +264,7 @@ test('headings and primary actions meet contrast expectations and archived jobs 
   expect(styles.footerContrast).toBeGreaterThanOrEqual(4.5)
   expect(styles.headingWeight).toBeGreaterThanOrEqual(600)
 
-  await page.goto('/jobs/new')
+  await page.goto('/jobs/new/advanced')
   const panelHeading = page.locator('.panel h2').first()
   await expect(panelHeading).toBeVisible()
   expect(Number.parseInt(await panelHeading.evaluate(element => getComputedStyle(element).fontWeight), 10)).toBeGreaterThanOrEqual(600)

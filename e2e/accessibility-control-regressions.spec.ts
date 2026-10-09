@@ -34,7 +34,7 @@ test('the dark scheme and form controls remain legible under either system prefe
 test('keyboard focus is visible on switches, host filters, unit rows and tabs (#985)', async ({ page, browser, baseURL }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'Keyboard focus states are verified once on desktop.')
   await mockConsole(page)
-  await page.goto('/jobs/new')
+  await page.goto('/jobs/new/advanced')
   const checkbox = page.locator('.switch-row input[type="checkbox"]').first()
   await focusWithKeyboard(page, checkbox)
   await expect.poll(() => checkbox.evaluate(element => getComputedStyle(element).outlineStyle)).toBe('solid')

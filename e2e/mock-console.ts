@@ -28,6 +28,8 @@ export const rolePermissions: Record<ConsoleRole, string[]> = {
 
 export type ConsoleMockControls = {
   failNext: (operation: string) => void
+  setPreviewResponse: (response: unknown) => void
+  deferNextPreview: () => { started: Promise<void>; resolve: (response: unknown) => void }
   calls: Record<string, number>
   payloads: Record<string, unknown[]>
 }
@@ -177,12 +179,25 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
   }
   const platformAdmins: any[] = [platformAccount({ id: 'user-platform_admin', username: 'platform', display_name: 'platform_admin', role: 'platform_admin', totp_enabled: true })]
   let createdUnitUser: Record<string, unknown> | null = null
+  let createdJob: any = null
+  let createdDestination: any = null
+  let previewResponse: unknown = null
+  const previewGates: Array<{ started: () => void; response: Promise<unknown> }> = []
   let platformRouting = { configured: false, destinations: [] as string[] }
   const failures = new Set<string>()
   const calls: Record<string, number> = {}
   const payloads: Record<string, unknown[]> = {}
   const controls: ConsoleMockControls = {
     failNext: (operation) => failures.add(operation),
+    setPreviewResponse: (response) => { previewResponse = response },
+    deferNextPreview: () => {
+      let markStarted!: () => void
+      let release!: (response: unknown) => void
+      const started = new Promise<void>(resolve => { markStarted = resolve })
+      const response = new Promise<unknown>(resolve => { release = resolve })
+      previewGates.push({ started: markStarted, response })
+      return { started, resolve: release }
+    },
     calls,
     payloads,
   }
@@ -246,7 +261,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
         if (failures.delete('unit-create')) { await json(jsonError('unit-create'), 422); return }
         const created = platformUnit({ id: `unit-${units.length + 1}`, name: value.name, slug: value.slug || String(value.name ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-') })
         units.push(created)
-        unitAccounts[created.id] = []
+        unitAccounts[String((created as Record<string, unknown>).id)] = []
         await json(created, 201); return
       }
       if (unit && parts.length === 2 && method === 'GET') { await json(unit); return }
@@ -345,9 +360,11 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
       const hosts = [{ ...host, job_id: 'job-1', job: 'fixture-job', scan_id: 'scan-1', scanned_at: scan.finished_at, open_ports: 1, open_filtered_ports: 0, has_open_ports: true, data_quality: 'detailed' }]
       await json({ hosts, pagination: pagination(hosts.length) }); return
     }
-    if (path === '/jobs' && method === 'GET') { await json({ jobs: [job] }); return }
-    if (path === '/jobs/schedule-suggestion' && method === 'GET') { await json({ suggested: false, gap_minutes: 45 }); return }
+    if (path === '/jobs' && method === 'GET') { await json({ jobs: createdJob ? [job, createdJob] : [job] }); return }
+    if (path === '/jobs/schedule-suggestion' && method === 'GET') { await json({ suggested: false, draft_next_run: '2026-01-01T06:00:00Z', gap_minutes: 45 }); return }
     if (path === '/jobs/job-1' && method === 'GET') { await json(job); return }
+    if (path === '/jobs/job-created' && method === 'GET') { createdJob ? await json(createdJob) : await json({ error: { code: 'not_found', message: 'job not found' } }, 404); return }
+    if (path === '/jobs/job-created/scans' && method === 'GET') { await json({ scans: [], pagination: pagination(0, 20) }); return }
     if (path === '/jobs/job-1/scans' && method === 'GET') { await json({ scans: [scan], pagination: pagination(1, 20) }); return }
     if (path === '/jobs/job-1/scans/scan-1' && method === 'GET') { await json({ scan, changes: [], changes_pagination: pagination(0), current_security_hash: job.security_hash }); return }
     if (path === '/jobs/job-1/scans/scan-1/results' && method === 'GET') { await json({ results: [], pagination: pagination(0) }); return }
@@ -359,7 +376,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/scans/scan-1' && method === 'GET') { await json({ scan }); return }
     if (path.startsWith('/scans/scan-1/hosts') && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, scan, data_quality: 'detailed', hosts: [host], pagination: pagination(1) }); return }
     if (path === '/scans/active' && method === 'GET') { await json({ scans: [] }); return }
-    if (path === '/notifications/destinations' && method === 'GET') { await json({ destinations: [destination], status: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' }, update_routing: updateRouting, incident_reminders_enabled: incidentRemindersEnabled, incident_reminder_cadence: incidentReminderCadence }); return }
+    if (path === '/notifications/destinations' && method === 'GET') { await json({ destinations: createdDestination ? [destination, createdDestination] : [destination], status: { deployment: 0, managed: createdDestination ? 2 : 1, active: createdDestination ? 2 : 1, locked: 0, key_state: 'ready' }, update_routing: updateRouting, incident_reminders_enabled: incidentRemindersEnabled, incident_reminder_cadence: incidentReminderCadence }); return }
     if (path === '/users' && method === 'GET') {
       const users = [{ id: 'user-2', username: 'operator', display_name: 'Operator', role: 'operator', enabled: true, pending: false, totp_enabled: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', revision: 1 }]
       await json({ users: createdUnitUser ? [...users, createdUnitUser] : users }); return
@@ -376,7 +393,39 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/scanner-profiles' && method === 'GET') { await json({ profiles: [profile] }); return }
     if (path === '/scanner-profiles/profile-1' && method === 'GET') { await json(profile); return }
 
-    if (path === '/jobs' && method === 'POST') { await mutate('job-create', { ...job, id: 'job-created', job: body() }, 201); return }
+    if (path === '/jobs/preview' && method === 'POST') {
+      const value = body() as Record<string, any>
+      const estimate = { hosts: value.targets?.length ?? 1, tcp_ports: value.tcp?.ports === '1-65535' ? 65_535 : value.tcp ? 2 : 0, udp_ports: value.udp ? 1 : 0, probes: value.tcp?.ports === '1-65535' ? 65_535 : 2, nmap_invocations: value.tcp?.engine === 'naabu_nmap' ? 1 : Number(!!value.tcp) + Number(!!value.udp), naabu_invocations: value.tcp?.engine === 'naabu_nmap' ? 1 : 0, unknown_dns: value.targets?.some((target: string) => !/^\d/.test(target)) ? 1 : 0 }
+      const override = previewResponse as Record<string, unknown> | null
+      let response: unknown = override
+        ? { ...override, job: override.job ?? value }
+        : { job: value, scan_estimate: estimate, scan_budget: { exceeded: false, limit: 5_000_000 }, warnings: [{ code: 'elapsed_time_unknown', message: 'Elapsed time depends on scanner behavior and target responses.' }] }
+      const gate = previewGates.shift()
+      if (gate) {
+        gate.started()
+        response = await gate.response
+      }
+      try {
+        await mutate('job-preview', response)
+      } catch {
+        // A guided form may abort an old preview when the draft changes.
+      }
+      return
+    }
+    if (path === '/jobs' && method === 'POST') {
+      const value = body()
+      record('job-create', value)
+      if (failures.delete('job-create')) { await json(jsonError('job-create'), 422); return }
+      createdJob = { ...job, id: 'job-created', revision: 1, job: value, baseline: { status: 'learning', samples: 0, attempts: 0 }, scan_budget: { exceeded: false }, scan_cycle: null }
+      await json(createdJob, 201)
+      return
+    }
+    if (path === '/jobs/job-created/run' && method === 'POST') {
+      record('job-run', body())
+      if (failures.delete('job-run')) { await json(jsonError('job-run'), 422); return }
+      await json({ status: 'accepted', job_id: 'job-created' }, 202)
+      return
+    }
     if (path === '/jobs/job-1' && method === 'PUT') { await mutate('job-update', job); return }
     if (path === '/jobs/job-1/incidents/accept' && method === 'POST') {
       record('incident-accept', body())
@@ -407,10 +456,17 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
       incidentReminderCadence = value.cadence ?? incidentReminderCadence
       await json({ enabled: incidentRemindersEnabled, cadence: incidentReminderCadence }); return
     }
-    if (path === '/notifications/destinations' && method === 'POST') { await mutate('notification-create', destination, 201); return }
+    if (path === '/notifications/destinations' && method === 'POST') {
+      const value = body() as { name?: string }
+      record('notification-create', value)
+      if (failures.delete('notification-create')) { await json(jsonError('notification-create'), 422); return }
+      createdDestination = { ...destination, id: 'dest-created', name: value.name ?? 'Test destination', provider: 'generic', source: 'web' }
+      await json(createdDestination, 201)
+      return
+    }
     if (path === '/notifications/destinations/dest-1' && method === 'PUT') { await mutate('notification-update', destination); return }
     if (path === '/notifications/destinations/dest-1' && method === 'DELETE') { await mutate('notification-delete', undefined, 204); return }
-    if (path === '/notifications/destinations/dest-1/test' && method === 'POST') { await mutate('notification-test', { sent: 1 }); return }
+    if (path.startsWith('/notifications/destinations/') && path.endsWith('/test') && method === 'POST') { await mutate('notification-test', { sent: 1 }); return }
     if (path === '/scanner-profiles/validate' && method === 'POST') { await mutate('profile-validate', { valid: true, preview: [{ executable: '/usr/bin/nmap', args: ['-n', '-Pn', '-p', '22'] }] }); return }
     if (path === '/scanner-profiles' && method === 'POST') { await mutate('profile-create', profile, 201); return }
     if (path === '/scanner-profiles/profile-1' && method === 'PUT') { await mutate('profile-update', profile); return }

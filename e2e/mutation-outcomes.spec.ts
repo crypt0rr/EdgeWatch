@@ -150,7 +150,7 @@ test('user invitation exposes failure and success outcomes', async ({ page }, te
 test('job creation exposes failure and success outcomes', async ({ page }, testInfo) => {
   test.skip(!desktopOnly(testInfo), 'Mutation journeys run once on desktop; responsive behavior is covered separately.')
   const controls = await mockConsole(page)
-  await page.goto('/jobs/new')
+  await page.goto('/jobs/new/advanced')
   await page.getByLabel('Job name').fill('created-from-browser')
   await page.getByLabel('Target 1').fill('192.0.2.10')
   // Keep this journey independent of Naabu availability: the job builder must

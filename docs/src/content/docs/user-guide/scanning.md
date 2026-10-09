@@ -7,6 +7,14 @@ EdgeWatch observes authorized targets using fixed scanner executables and
 validated argument arrays. Choose the engine and profile that match your
 network and runtime capabilities.
 
+The guided monitor setup starts with full-range TCP discovery: Naabu checks
+ports 1–65535 and Nmap confirms discoveries. Choosing specific TCP ports
+switches that job to Nmap-only partial coverage. UDP is optional and uses Nmap
+for the selected ports. Switching between full-range and selected TCP coverage
+preserves the prior settings for each mode; the full editor also keeps a pinned
+profile revision and its tuning when you return to that mode. Review the actual
+engine, port scope, profile revision, and estimate before creating the job.
+
 ## Nmap or Naabu to Nmap
 
 Each TCP job chooses a scanner engine:

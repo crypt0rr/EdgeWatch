@@ -155,6 +155,12 @@ describe('job surface overview', () => {
       for (const retry of retries) retry.click()
       await Promise.resolve()
     })
+    await vi.waitFor(() => {
+      expect(jobBaseline).toHaveBeenCalledTimes(2)
+      expect(latestSuccessfulScan).toHaveBeenCalledTimes(2)
+      expect(jobScans).toHaveBeenCalledTimes(2)
+    }, { timeout: 1000 })
+    await vi.waitFor(() => expect(container.textContent).toContain('443/tcp'), { timeout: 1000 })
     await vi.waitFor(() => expect(container.textContent).toContain('Could not load latest scan results.'), { timeout: 1000 })
     const latestResultsRetry = Array.from(container.querySelectorAll('.error-card')).find(notice => notice.textContent?.includes('Could not load latest scan results.'))?.querySelector('button') as HTMLButtonElement
     await act(async () => latestResultsRetry.click())

@@ -204,6 +204,40 @@ func (s *Server) jobScanBudget(ctx context.Context, ts *store.TenantStore, job c
 	return budget, true
 }
 
+// jobScanBudgetOutcome returns an estimate only with a complete budget
+// decision. Preview uses this stricter helper so an unavailable unit capacity
+// read cannot be mistaken for a fit or for a definite over-budget result.
+func (s *Server) jobScanBudgetOutcome(ctx context.Context, ts *store.TenantStore, job config.Job) (config.WorkEstimate, map[string]any, error) {
+	if s.App == nil || s.App.Config == nil {
+		return config.WorkEstimate{}, nil, app.ErrProbeBudgetUnavailable
+	}
+	estimate, err := s.App.CheckScanWorkBudget(ctx, ts, job)
+	var budgetErr *app.ScanWorkBudgetError
+	switch {
+	case err == nil:
+		return estimate, map[string]any{"exceeded": false}, nil
+	case !errors.As(err, &budgetErr):
+		return estimate, nil, err
+	}
+	budget := map[string]any{"exceeded": true, "estimated_probes": budgetErr.Estimate.Probes, "limit": budgetErr.Budget, "approval_would_fit": false}
+	if !job.AllowHighCost {
+		approved := job
+		approved.AllowHighCost = true
+		_, approvedErr := s.App.CheckScanWorkBudget(ctx, ts, approved)
+		var approvedBudgetErr *app.ScanWorkBudgetError
+		switch {
+		case approvedErr == nil:
+			budget["approval_would_fit"] = true
+		case errors.As(approvedErr, &approvedBudgetErr):
+			// The elevated budget and absolute ceiling were both available and
+			// the estimate still did not fit.
+		default:
+			return estimate, nil, approvedErr
+		}
+	}
+	return estimate, budget, nil
+}
+
 type pendingChangeView struct {
 	Key    string       `json:"key"`
 	Change model.Change `json:"change"`
@@ -441,39 +475,9 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request, ts *store.Tena
 }
 
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
-	var p jobPayload
-	if !decodeJSON(w, r, &p) {
+	job, enabled, ok := s.prepareNewJob(w, r, session, ts)
+	if !ok {
 		return
-	}
-	if strings.TrimSpace(p.Timezone) == "" {
-		// New jobs without an explicit schedule timezone follow config.yaml;
-		// without a deployment timezone, job normalization keeps UTC.
-		p.Timezone = s.deploymentTimezone()
-	}
-	defaultNewScannerProfile(&p)
-	job, err := p.config()
-	if err != nil {
-		writeValidationError(w, err)
-		return
-	}
-	if job.AllowHighCost && !canOverrideHighCost(session) {
-		writeError(w, http.StatusForbidden, "high_cost_admin_required", "only administrators may enable high-cost scans", nil)
-		return
-	}
-	if err := s.applySelectedScannerProfile(r.Context(), ts, &job, false, auth.HasPermission(session, auth.PermissionScannerProfilesManage)); err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			writeError(w, http.StatusConflict, "profile_conflict", "scanner profile was modified; reload and select its current revision", nil)
-		} else {
-			s.writeStoreWriteError(w, r, err, "scanner profile not found")
-		}
-		return
-	}
-	if !s.validateNotificationSelection(w, r, ts, job) {
-		return
-	}
-	enabled := true
-	if p.Enabled != nil {
-		enabled = *p.Enabled
 	}
 	record, err := ts.CreateJobWithEnabledAndAudit(r.Context(), job, enabled, actorAudit(session, "job.created", job.Name))
 	if err != nil {
@@ -491,6 +495,132 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store
 	state, _ := ts.RuntimeState(r.Context(), record.ID)
 	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "job.created", "job_id": record.ID})
 	writeJSON(w, http.StatusCreated, s.jobJSONWithCycle(r.Context(), ts, record, state))
+}
+
+// prepareNewJob centralizes the new-job defaults and policy checks shared by
+// create and preview. The final create transaction repeats storage validation
+// and profile ownership checks, so this advisory pass cannot reserve or pin
+// resources and a create still revalidates against concurrent changes.
+func (s *Server) prepareNewJob(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) (config.Job, bool, bool) {
+	var p jobPayload
+	if !decodeJSON(w, r, &p) {
+		return config.Job{}, false, false
+	}
+	if strings.TrimSpace(p.Timezone) == "" {
+		// New jobs without an explicit schedule timezone follow config.yaml;
+		// without a deployment timezone, job normalization keeps UTC.
+		p.Timezone = s.deploymentTimezone()
+	}
+	defaultNewScannerProfile(&p)
+	job, err := p.config()
+	if err != nil {
+		writeValidationError(w, err)
+		return config.Job{}, false, false
+	}
+	if job.AllowHighCost && !canOverrideHighCost(session) {
+		writeError(w, http.StatusForbidden, "high_cost_admin_required", "only administrators may enable high-cost scans", nil)
+		return config.Job{}, false, false
+	}
+	if err := s.applySelectedScannerProfile(r.Context(), ts, &job, false, auth.HasPermission(session, auth.PermissionScannerProfilesManage)); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "profile_conflict", "scanner profile was modified; reload and select its current revision", nil)
+		} else {
+			s.writeStoreWriteError(w, r, err, "scanner profile not found")
+		}
+		return config.Job{}, false, false
+	}
+	if !s.validateNotificationSelection(w, r, ts, job) {
+		return config.Job{}, false, false
+	}
+	if err := ts.ValidateManagedJob(job); err != nil {
+		s.writeStoreWriteError(w, r, err, "job not found")
+		return config.Job{}, false, false
+	}
+	enabled := true
+	if p.Enabled != nil {
+		enabled = *p.Enabled
+	}
+	return job, enabled, true
+}
+
+type jobPreviewWarning struct {
+	Code    string `json:"code"`
+	Field   string `json:"field,omitempty"`
+	Message string `json:"message"`
+}
+
+const maxJobPreviewWarnings = 5
+
+func jobPreviewWarnings(job config.Job, estimate config.WorkEstimate) []jobPreviewWarning {
+	warnings := make([]jobPreviewWarning, 0, maxJobPreviewWarnings)
+	add := func(warning jobPreviewWarning) {
+		if len(warnings) < maxJobPreviewWarnings {
+			warnings = append(warnings, warning)
+		}
+	}
+	add(jobPreviewWarning{
+		Code:    "elapsed_time_unknown",
+		Message: "Probe and process counts are preflight estimates; elapsed scan time depends on DNS, scanner behavior, target responses, retries, and discovered ports.",
+	})
+	if estimate.UnknownDNS > 0 {
+		add(jobPreviewWarning{
+			Code:    "dns_expansion_unknown",
+			Field:   "targets",
+			Message: "Each DNS name counts as one address here. Preview does not resolve DNS, so the address count and work may change when the scan runs.",
+		})
+	}
+	if job.TCP != nil && job.TCP.Engine == config.EngineNaabuNmap {
+		add(jobPreviewWarning{
+			Code:    "naabu_enrichment_data_dependent",
+			Field:   "tcp",
+			Message: "Naabu discovery uses the full TCP port range. The later Nmap confirmation work depends on discovered ports and is not included in this preflight estimate.",
+		})
+	}
+	if job.TCP != nil && job.TCP.Engine == config.EngineNmap {
+		if ports, err := config.ParsePorts(job.TCP.Ports); err == nil && len(ports) < 65535 {
+			add(jobPreviewWarning{
+				Code:    "tcp_partial_coverage",
+				Field:   "tcp.ports",
+				Message: "This Nmap TCP selection covers only the configured ports, not the full TCP port range.",
+			})
+		}
+	}
+	if job.AllowHighCost {
+		add(jobPreviewWarning{
+			Code:    "high_cost_approved",
+			Field:   "allow_high_cost",
+			Message: "High-cost approval uses the unit's elevated probe budget; the absolute probe ceiling still applies.",
+		})
+	}
+	return warnings
+}
+
+func (s *Server) previewJob(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
+	job, enabled, ok := s.prepareNewJob(w, r, session, ts)
+	if !ok {
+		return
+	}
+	estimate, budget, err := s.jobScanBudgetOutcome(r.Context(), ts, job)
+	if err != nil {
+		if s.Log != nil {
+			s.Log.WarnContext(r.Context(), "job preview could not confirm scan budget", "request_id", RequestID(r.Context()), "error", err)
+		}
+		writeError(w, http.StatusServiceUnavailable, "preview_unavailable", "job preview could not confirm the unit scan budget", map[string]string{"reason": "scan_budget_unavailable"})
+		return
+	}
+
+	publicJob := fromConfig(job)
+	publicJob.Enabled = &enabled
+	value := s.addNotificationRouting(r.Context(), s.tenantNotifier(ts), map[string]any{"job": publicJob})
+	if normalized, ok := value["job"].(jobPayload); ok {
+		publicJob = normalized
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"job":           publicJob,
+		"scan_estimate": estimate,
+		"scan_budget":   budget,
+		"warnings":      jobPreviewWarnings(job, estimate),
+	})
 }
 
 // defaultNewScannerProfile keeps new web-created TCP jobs on the faster,
@@ -547,7 +677,11 @@ func (s *Server) validateNotificationSelection(w http.ResponseWriter, r *http.Re
 	}
 	if err := s.App.Notifier.Tenant(ts).ValidateDestinationSelection(r.Context(), job.NotificationDestinations); err != nil {
 		if errors.Is(err, notify.ErrInvalidDestinationSelection) {
-			writeError(w, http.StatusBadRequest, "validation_failed", err.Error(), map[string]string{"notification_destinations": err.Error()})
+			// Selectors are opaque caller input. A foreign destination must be
+			// indistinguishable from an unknown one, and neither error should
+			// reflect arbitrary IDs back to the caller.
+			message := "notification destination selection is invalid"
+			writeError(w, http.StatusBadRequest, "validation_failed", message, map[string]string{"notification_destinations": message})
 		} else {
 			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
 		}

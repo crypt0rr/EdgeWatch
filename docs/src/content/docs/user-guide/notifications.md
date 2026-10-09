@@ -29,6 +29,14 @@ provider accepted the test send; check the recipient to confirm the message
 arrived. Destinations added after existing job routing is frozen remain
 opt-in. Select a destination in each job that should use it.
 
+You can also add and test a destination while creating a monitor. This uses the
+same provider fields and account-password confirmation as this page. The
+destination is saved independently from the monitor: if you cancel the monitor
+or its creation fails, the destination remains here. Credentials and the
+account password stay in the temporary form and are cleared after saving.
+Operators can select available destinations but cannot add or test them. They
+can explicitly create a monitor without alerts.
+
 ## Routing and update alerts
 
 Each job can select its own destinations. On the **Notifications** page,

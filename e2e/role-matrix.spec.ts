@@ -18,6 +18,7 @@ const routePermissions: Array<{ path: string; permission?: string; refusedToHome
   { path: '/', permission: 'overview.read' },
   { path: '/jobs', permission: 'jobs.read' },
   { path: '/jobs/new', permission: 'jobs.write' },
+  { path: '/jobs/new/advanced', permission: 'jobs.write' },
   { path: '/jobs/job-1', permission: 'jobs.read' },
   { path: '/jobs/job-1/edit', permission: 'jobs.write' },
   { path: '/jobs/job-1/baseline', permission: 'baselines.read' },

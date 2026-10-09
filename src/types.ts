@@ -9,6 +9,8 @@ export type JobForm = {
   resume_window?: string; notification_destinations?: string[]
 }
 export type WorkEstimate = { hosts: number; tcp_ports: number; udp_ports: number; probes: number; naabu_probes?: number; nmap_probes?: number; naabu_invocations?: number; nmap_invocations: number; estimated_seconds?: number; unknown_dns: number }
+export type JobPreviewWarning = { code: string; field?: string; message: string }
+export type JobPreview = { job: JobForm; scan_estimate: WorkEstimate; scan_budget: ScanBudget; warnings: JobPreviewWarning[] }
 export type Job = { id: string; revision: number; enabled: boolean; archived: boolean; security_hash: string; created_at: string; updated_at: string; job: JobForm; baseline: { status: string; samples?: number; attempts?: number; incomplete_attempts?: number; scan_id?: string; modified?: boolean; incidents?: number; pending?: number; host_count?: number }; scan_estimate?: WorkEstimate; scan_budget?: ScanBudget; high_cost_approval_cleared?: boolean; scan_cycle?: ScanCycle | null; scan_cycle_error?: 'cycle_status_unavailable'; missing_notification_destinations?: string[] }
 // scan_budget says whether the job's estimated work fits its unit's probe
 // budget; a scheduled run that does not fit is skipped before it starts.

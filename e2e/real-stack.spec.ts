@@ -24,6 +24,7 @@ test('real EdgeWatch setup, baseline, change detection, and restart persistence'
 
     await navigateFromShell(page, 'Jobs')
     await page.getByRole('button', { name: 'New job' }).click()
+    await page.getByRole('link', { name: 'Open full editor' }).click()
     await expect(page.getByRole('heading', { name: 'Create a monitoring job' })).toBeVisible()
     await page.getByLabel('Job name').fill('real-stack-fixture')
     await page.getByLabel('Target 1').fill('127.0.0.1')

@@ -1,4 +1,4 @@
-import type { ActiveScan, ActivityEvent, BaselineHostsResponse, Change, GlobalHostsResponse, HostDetailResponse, Incident, Job, JobForm, Pagination, PendingChange, QueuedRun, RdapResult, Scan, ScanComparison, ScanSummary, Unit, NaabuOptions } from './types'
+import type { ActiveScan, ActivityEvent, BaselineHostsResponse, Change, GlobalHostsResponse, HostDetailResponse, Incident, Job, JobForm, JobPreview, Pagination, PendingChange, QueuedRun, RdapResult, Scan, ScanComparison, ScanSummary, Unit, NaabuOptions } from './types'
 import { setDisplayTimeZone } from './format'
 
 export type NotificationDestination = {
@@ -209,6 +209,7 @@ export type ScheduleSuggestion = {
 export const scheduleSuggestion = (schedule: string, timezone: string) => api<ScheduleSuggestion>(`/jobs/schedule-suggestion?${new URLSearchParams({ schedule, timezone }).toString()}`)
 export const getJob = (id: string) => api<Job>(`/jobs/${id}`)
 export const createJob = (job: JobForm) => api<Job>('/jobs', { method: 'POST', body: JSON.stringify(job) })
+export const previewJob = (draft: JobForm, signal?: AbortSignal) => api<JobPreview>('/jobs/preview', { method: 'POST', body: JSON.stringify(draft), signal })
 export const updateJob = (id: string, revision: number, job: JobForm, confirm_rebaseline = false) => api<Job>(`/jobs/${id}`, { method: 'PUT', body: JSON.stringify({ ...job, revision, confirm_rebaseline }) })
 export const archiveJob = (id: string, revision: number) => api(`/jobs/${id}/archive`, { method: 'POST', body: JSON.stringify({ revision }) })
 export const restoreJob = (id: string, revision: number) => api(`/jobs/${id}/restore`, { method: 'POST', body: JSON.stringify({ revision }) })

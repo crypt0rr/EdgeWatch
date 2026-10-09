@@ -213,6 +213,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   await expect(page.getByRole('heading', { name: '192.0.2.1' })).toBeVisible()
   await navigateFromShell(page, 'Jobs')
   await page.getByRole('button', { name: 'New job' }).click()
+  await page.getByRole('link', { name: 'Open full editor' }).click()
   await expect(page.getByRole('heading', { name: 'Create a monitoring job' })).toBeVisible()
   await expect(page.getByLabel('TCP engine')).toHaveValue('naabu_nmap')
   await expect(page.getByText('Stagger scheduled scans')).toBeVisible()

@@ -157,6 +157,7 @@ function storedScans(row: Locator): Locator {
 async function createJob(page: Page): Promise<string> {
   await navigateFromShell(page, 'Jobs')
   await page.getByRole('button', { name: 'New job' }).click()
+  await page.getByRole('link', { name: 'Open full editor' }).click()
   await expect(page.getByRole('heading', { name: 'Create a monitoring job' })).toBeVisible()
   await page.getByLabel('Job name').fill(jobName)
   await page.getByLabel('Target 1').fill('127.0.0.1')

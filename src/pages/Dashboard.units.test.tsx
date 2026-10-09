@@ -30,6 +30,8 @@ describe('dashboard footprint with business units', () => {
     renderWithProviders(<Dashboard />)
     const footprint = (await screen.findByRole('heading', { name: 'Deployment footprint' })).closest('.panel') as HTMLElement
     expect(within(footprint).getByText('Effective hosts')).toBeInTheDocument()
+    expect(within(footprint).getAllByRole('term').map(term => term.textContent)).toEqual(['Effective hosts', 'Host observations', 'Retained scans', 'Events', 'Pending delivery'])
+    expect(within(footprint).getAllByRole('definition').map(value => value.textContent)).toEqual(['4', '3', '2', '5', '7'])
     expect(within(footprint).queryByText('Database')).not.toBeInTheDocument()
     expect(within(footprint).queryByText('0 B')).not.toBeInTheDocument()
   })

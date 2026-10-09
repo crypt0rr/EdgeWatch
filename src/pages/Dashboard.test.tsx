@@ -110,6 +110,25 @@ function LocationProbe() {
   return <output data-testid="current-path">{location.pathname}</output>
 }
 
+// Reads one sandbox of the footprint's process isolation list as an
+// administrator or a screen reader reads it: its status, each layer with the
+// state that follows its name, and one line per reason a layer does not hold.
+function isolationEntry(container: HTMLElement, name: string) {
+  const heading = Array.from(container.querySelectorAll('.deployment-telemetry h3')).find(element => element.textContent === 'Process isolation')
+  const list = Array.from(container.querySelectorAll('.deployment-telemetry ul')).find(element => heading?.id && element.getAttribute('aria-labelledby') === heading.id)
+  const entry = Array.from(list?.children ?? []).find(item => item.querySelector('.isolation-name')?.textContent === name)
+  if (!entry) return undefined
+  const state = entry.querySelector('.isolation-state')
+  return {
+    state: state?.textContent,
+    tone: Array.from(state?.classList ?? []).find(token => ['green', 'amber', 'red', 'gray'].includes(token)),
+    icon: state?.querySelector('svg') != null,
+    layers: Array.from(entry.querySelectorAll(`ul[aria-label="${name} layers"] > li`)).map(item => item.textContent),
+    reasons: Array.from(entry.querySelectorAll('.isolation-reasons > li')).map(item => item.textContent),
+    keeps: entry.querySelector('.isolation-capabilities')?.textContent ?? '',
+  }
+}
+
 describe('dashboard', () => {
   let root: Root
   let container: HTMLDivElement
@@ -158,7 +177,13 @@ describe('dashboard', () => {
     await renderDashboard()
     expect(container.textContent).toContain('Good day, Alice')
     expect(container.textContent).toContain('Deployment footprint')
-    expect(container.textContent).toContain('1.5 KB')
+    const footprint = container.querySelector('.deployment-telemetry')
+    const metrics = Array.from(footprint?.querySelectorAll('dl > div') ?? []).map(metric => [metric.querySelector('dt')?.textContent, metric.querySelector('dd')?.textContent])
+    expect(metrics).toEqual([['Database', '1.5 KB'], ['Effective hosts', '1'], ['Host observations', '1'], ['Retained scans', '1'], ['Events', '1'], ['Pending delivery', '0']])
+    const collected = footprint?.querySelector('.panel-heading time')
+    expect(footprint?.querySelector('.telemetry-updated')?.textContent).toBe(`Collected ${collected?.textContent}`)
+    expect(collected?.textContent).toMatch(/^\d{1,2}:\d{2}/)
+    expect(collected?.getAttribute('datetime')).toBe('2026-09-12T08:00:00Z')
     expect(container.textContent).toContain('Naabu → Nmap · tcp discovery · TCP')
     expect(container.textContent).toContain('batch 1/2')
     expect(container.textContent).toContain('2 ports found across 1 hosts')
@@ -443,20 +468,22 @@ describe('dashboard', () => {
   it('shows the enforced scanner sandbox in the deployment footprint', async () => {
     vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'enforced', uid: 65532, gid: 65532, process_uid: 65532, capabilities: ['NET_RAW'], no_new_privileges: true } })
     await renderDashboard()
-    await vi.waitFor(() => expect(container.querySelector('.deployment-telemetry')?.textContent).toContain('Scanner sandboxEnforced · NET_RAW'), { timeout: 1000 })
+    await vi.waitFor(() => expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Enforced', tone: 'green', icon: true, layers: ['UID 65532: enforced'], reasons: [], keeps: 'Keeps NET_RAW' }), { timeout: 1000 })
+    expect(isolationEntry(container, 'Notifications')).toBeUndefined()
     expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
   })
 
   it('shows the notification sandbox in the deployment footprint', async () => {
     vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'enforced', process_uid: 65532, capabilities: ['NET_RAW'] }, notification_sandbox: { mode: 'auto', state: 'enforced', uid: 65531, gid: 65531, process_uid: 65531, no_new_privileges: true, landlock: { mode: 'auto', state: 'enforced', abi: 6 } } })
     await renderDashboard()
-    await vi.waitFor(() => expect(container.querySelector('.deployment-telemetry')?.textContent).toContain('Notification sandboxEnforced · Landlock'), { timeout: 1000 })
+    await vi.waitFor(() => expect(isolationEntry(container, 'Notifications')).toEqual({ state: 'Enforced', tone: 'green', icon: true, layers: ['UID 65531: enforced', 'Landlock: enforced'], reasons: [], keeps: '' }), { timeout: 1000 })
+    expect(isolationEntry(container, 'Scanners')).toMatchObject({ layers: ['UID 65532: enforced'], keeps: 'Keeps NET_RAW' })
   })
 
   it('shows Landlock beside the enforced scanner sandbox', async () => {
     vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'enforced', uid: 65532, gid: 65532, process_uid: 65532, capabilities: ['NET_RAW', 'NET_ADMIN'], no_new_privileges: true, landlock: { mode: 'auto', state: 'enforced', abi: 6 }, seccomp: { state: 'enforced' } } })
     await renderDashboard()
-    await vi.waitFor(() => expect(container.querySelector('.deployment-telemetry')?.textContent).toContain('Scanner sandboxEnforced · NET_RAW, NET_ADMIN · Landlock · seccomp'), { timeout: 1000 })
+    await vi.waitFor(() => expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Enforced', tone: 'green', icon: true, layers: ['UID 65532: enforced', 'Landlock: enforced', 'seccomp: enforced'], reasons: [], keeps: 'Keeps NET_RAW, NET_ADMIN' }), { timeout: 1000 })
     expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
   })
 
@@ -464,28 +491,62 @@ describe('dashboard', () => {
     vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'unavailable', process_uid: 0, reason: 'the container does not grant KILL', landlock: { mode: 'auto', state: 'enforced', abi: 6 } } })
     await renderDashboard()
     await vi.waitFor(() => expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain('Scanner processes run as UID 0, restricted only by Landlock. the container does not grant KILL'), { timeout: 1000 })
-    expect(container.querySelector('.deployment-telemetry')?.textContent).toContain('Scanner sandboxLandlock only')
+    expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Partial', tone: 'amber', icon: true, layers: ['Identity: unavailable', 'Landlock: enforced'], reasons: ['Identity: The container does not grant KILL.'], keeps: '' })
   })
 
   it('warns an administrator when scanner processes run unconfined as UID 0', async () => {
     vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'unavailable', process_uid: 0, reason: 'the container does not grant KILL, which EdgeWatch needs to start and stop scanner processes as UID 65532; add them to cap_add', landlock: { mode: 'auto', state: 'unavailable', reason: 'the kernel does not provide Landlock' } } })
     await renderDashboard()
     await vi.waitFor(() => expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain('Scanner processes run unconfined as UID 0. the container does not grant KILL'), { timeout: 1000 })
-    expect(container.querySelector('.deployment-telemetry')?.textContent).toContain('Scanner sandboxUnavailable')
+    expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Unavailable', tone: 'red', icon: true, layers: ['Identity: unavailable', 'Landlock: unavailable'], reasons: ['Identity: The container does not grant KILL, which EdgeWatch needs to start and stop scanner processes as UID 65532; add them to cap_add.', 'Landlock: The kernel does not provide Landlock.'], keeps: '' })
   })
 
   it('does not warn when scanner processes already run without root', async () => {
     vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'unavailable', process_uid: 1000, reason: 'EdgeWatch runs as UID 1000 rather than 0' } })
     await renderDashboard()
-    await vi.waitFor(() => expect(container.querySelector('.deployment-telemetry')?.textContent).toContain('Scanner sandboxUnavailable'), { timeout: 1000 })
+    await vi.waitFor(() => expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Unavailable', tone: 'red', icon: true, layers: ['Identity: unavailable'], reasons: ['Identity: EdgeWatch runs as UID 1000 rather than 0.'], keeps: '' }), { timeout: 1000 })
     expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
   })
 
   it('labels a scanner sandbox that is off', async () => {
     vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'off', state: 'disabled', process_uid: 0, reason: 'scanner.sandbox is off' } })
     await renderDashboard()
-    await vi.waitFor(() => expect(container.querySelector('.deployment-telemetry')?.textContent).toContain('Scanner sandboxOff'), { timeout: 1000 })
+    await vi.waitFor(() => expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Off', tone: 'gray', icon: true, layers: ['Identity: off'], reasons: ['Identity: scanner.sandbox is off.'], keeps: '' }), { timeout: 1000 })
+    expect(container.querySelector('.isolation-reasons code')?.textContent).toBe('scanner.sandbox')
     expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
+  })
+
+  it('shows the reason a notification sandbox is unavailable', async () => {
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, notification_sandbox: { mode: 'auto', state: 'unavailable', process_uid: 0, reason: 'a test notification process could not start as UID 65531: read SSL_CERT_FILE: permission denied', landlock: { mode: 'auto', state: 'unavailable', reason: 'the kernel does not provide Landlock' }, seccomp: { state: 'unavailable', reason: 'the seccomp filter applies only with Landlock' } } })
+    await renderDashboard()
+    await vi.waitFor(() => expect(isolationEntry(container, 'Notifications')).toEqual({
+      state: 'Unavailable', tone: 'red', icon: true,
+      layers: ['Identity: unavailable', 'Landlock: unavailable', 'seccomp: unavailable'],
+      // The seccomp filter is installed with Landlock, so it shares the Landlock reason.
+      reasons: ['Identity: A test notification process could not start as UID 65531: read SSL_CERT_FILE: permission denied.', 'Landlock, seccomp: The kernel does not provide Landlock.'],
+      keeps: '',
+    }), { timeout: 1000 })
+    expect(isolationEntry(container, 'Scanners')).toBeUndefined()
+  })
+
+  it('never shows a sandbox as enforced while one of its layers does not hold', async () => {
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'enforced', uid: 65532, gid: 65532, process_uid: 65532, capabilities: ['NET_RAW'], landlock: { mode: 'auto', state: 'enforced', abi: 6 }, seccomp: { state: 'unavailable', reason: 'nmap could not start with the seccomp filter: signal: bad system call' } } })
+    await renderDashboard()
+    await vi.waitFor(() => expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Partial', tone: 'amber', icon: true, layers: ['UID 65532: enforced', 'Landlock: enforced', 'seccomp: unavailable'], reasons: ['seccomp: Nmap could not start with the seccomp filter: signal: bad system call.'], keeps: 'Keeps NET_RAW' }), { timeout: 1000 })
+    expect(container.querySelector('.deployment-telemetry .panel-heading p')?.textContent).toBe('Storage, scale, and process isolation of this deployment.')
+  })
+
+  it('names every layer one reason explains when the sandbox is off', async () => {
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, notification_sandbox: { mode: 'off', state: 'disabled', process_uid: 0, reason: 'notifications.sandbox is off', landlock: { mode: 'off', state: 'disabled', reason: 'notifications.sandbox is off' }, seccomp: { state: 'disabled', reason: 'the seccomp filter applies only with Landlock' } } })
+    await renderDashboard()
+    await vi.waitFor(() => expect(isolationEntry(container, 'Notifications')).toEqual({ state: 'Off', tone: 'gray', icon: true, layers: ['Identity: off', 'Landlock: off', 'seccomp: off'], reasons: ['Identity, Landlock, seccomp: notifications.sandbox is off.'], keeps: '' }), { timeout: 1000 })
+  })
+
+  it('leaves process isolation out for a daemon that reports no sandbox', async () => {
+    await renderDashboard()
+    await vi.waitFor(() => expect(container.querySelector('.deployment-telemetry')).not.toBeNull(), { timeout: 1000 })
+    expect(container.querySelector('.deployment-telemetry')?.textContent).not.toContain('Process isolation')
+    expect(container.querySelector('.deployment-telemetry .panel-heading p')?.textContent).toBe('Cached storage and operational scale indicators.')
   })
 
   it('does not show the scanner sandbox warning to an operator', async () => {

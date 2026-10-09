@@ -39,7 +39,7 @@ env:
   # names may contain uppercase characters.
   REGISTRY_IMAGE: ghcr.io/crypt0rr/edgewatch
   NODE_VERSION: 24.21.0
-  GORELEASER_VERSION: v2.18.2
+  GORELEASER_VERSION: v2.18.3
   # docker/build-push-action uploads a build-record artifact for every image
   # build. The job summary still reports the build; skip the artifact.
   DOCKER_BUILD_RECORD_UPLOAD: "false"

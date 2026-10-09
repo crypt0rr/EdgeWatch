@@ -400,7 +400,7 @@ export function MonitorSetup() {
     {step === 'targets' && <div className="monitor-step-content">
       <div className="panel form-panel">
         <div className="panel-heading"><div><h2>Name and authorized targets</h2><p className="muted">Use systems you own or have permission to monitor.</p></div><Network className="muted-icon" size={19} /></div>
-        <label>Monitor name<input value={draft.fields.name} maxLength={200} autoComplete="off" placeholder="Production edge" onChange={event => updateFields({ name: event.currentTarget.value })} aria-describedby="monitor-name-help" />{fieldError && !draft.fields.name.trim() && <small className="field-error">{fieldError}</small>}<small id="monitor-name-help">A clear name helps operators recognize this scope.</small></label>
+        <label>Monitor name<input value={draft.fields.name} autoComplete="off" placeholder="Production edge" onChange={event => updateFields({ name: event.currentTarget.value })} aria-describedby="monitor-name-help" />{fieldError && !draft.fields.name.trim() && <small className="field-error">{fieldError}</small>}<small id="monitor-name-help">A clear name helps operators recognize this scope.</small></label>
         <div className="field-section">
           <div className="field-title"><span>Targets</span><span className="field-help">IP · CIDR · DNS</span></div>
           <p className="helper">One address or network per row. CIDRs expand at scan time; DNS names resolve before each scan. The server applies configured exclusions.</p>

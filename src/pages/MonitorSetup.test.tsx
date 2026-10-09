@@ -123,6 +123,23 @@ describe('guided monitor creation', () => {
     window.history.replaceState(null, '', '/')
   })
 
+  it('counts guided monitor names by Unicode code point', async () => {
+    renderJourney()
+    await screen.findByRole('heading', { name: 'Choose targets' })
+    const name = screen.getByLabelText(/^Monitor name/)
+    const target = screen.getByLabelText('Target 1')
+    fireEvent.change(target, { target: { value: '198.51.100.20' } })
+
+    fireEvent.change(name, { target: { value: '🙂'.repeat(201) } })
+    expect(name).toHaveValue('🙂'.repeat(201))
+    fireEvent.click(screen.getByRole('button', { name: /Continue to coverage/ }))
+    expect(screen.getByRole('alert')).toHaveTextContent('Use a name of up to 200 characters without control characters.')
+
+    fireEvent.change(name, { target: { value: '🙂'.repeat(200) } })
+    fireEvent.click(screen.getByRole('button', { name: /Continue to coverage/ }))
+    await screen.findByRole('heading', { name: 'Set scan coverage' })
+  })
+
   it('offers full TCP discovery by default, and makes selected TCP ports an explicit Nmap scope', async () => {
     renderJourney()
     await screen.findByRole('heading', { name: 'Choose targets' })

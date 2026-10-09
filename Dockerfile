@@ -17,7 +17,7 @@ RUN if [ "$PREBUILT_FRONTEND" = "1" ] && [ -f ./prebuilt-dist/index.html ]; then
       npm run build; \
     fi
 
-FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS naabu
+FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine3.24@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673 AS naabu
 ARG NAABU_VERSION=v2.6.1
 ARG NAABU_COMMIT=5a0ca8bde91b5bb16213e9e8b5c6871eac954bd8
 ARG TARGETOS
@@ -34,7 +34,7 @@ RUN git init . \
     && git checkout --detach ${NAABU_COMMIT}
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/naabu ./cmd/naabu
 
-FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine3.24@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673 AS build
 WORKDIR /src
 RUN apk add --no-cache ca-certificates=20260909-r0 git=2.54.0-r0
 COPY go.mod go.sum ./

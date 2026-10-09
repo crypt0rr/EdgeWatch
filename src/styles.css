@@ -956,15 +956,71 @@
   .public-updated { display: block; margin-top: 10px; }
 }
 
-.deployment-telemetry { margin-bottom: 18px; }
-.telemetry-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 9px; }
-.telemetry-metric { min-width: 0; padding: 10px; border: 1px solid #1d3854; border-radius: 7px; background: #0a1929; }
-.telemetry-metric span, .telemetry-metric strong { display: block; }
-.telemetry-metric span { overflow: hidden; color: #7895b2; font-size: 9px; letter-spacing: .07em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
-.telemetry-metric strong { margin-top: 5px; color: #dcecff; font-size: 16px; }
-.telemetry-updated { display: block; margin-top: 10px; font-size: 10px; }
-@media (max-width: 1050px) { .telemetry-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-@media (max-width: 760px) { .telemetry-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+/* Deployment footprint: one strip of counters with hairline dividers, then
+   the process isolation of each sandbox. The strip sizes itself to its own
+   width, because the sidebar makes the viewport a poor guide; on a wide strip
+   the isolation entries line up with the second counter. */
+.deployment-telemetry { margin-bottom: 18px; container: footprint-panel / inline-size; }
+.telemetry-heading-meta { display: flex; flex: 0 0 auto; align-items: center; gap: 10px; }
+.telemetry-updated { color: var(--muted); font-size: 12px; line-height: 18px; white-space: nowrap; }
+.telemetry-updated time { color: #c3d2e3; font-variant-numeric: tabular-nums; }
+.telemetry-strip { container: footprint / inline-size; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: rgba(6, 15, 28, .45); }
+.telemetry-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: -1px 0 0 -1px; }
+.telemetry-metric { display: flex; flex-direction: column; justify-content: space-between; gap: 6px; min-width: 0; padding: 13px 14px 12px; border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
+.telemetry-strip[data-columns="5"] .telemetry-metric:last-child { grid-column: 1 / -1; }
+.telemetry-metric dt { color: var(--muted); font-size: 12px; line-height: 1.35; }
+/* Counters scale with their column, so an eight-digit count still fits its
+   cell; a longer one wraps inside the cell rather than running into the
+   next. */
+.telemetry-metric dd { margin: 0; color: #eef4fb; font-size: clamp(16px, 6.8cqi, 21px); font-weight: 650; letter-spacing: -.02em; line-height: 1.15; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.telemetry-isolation { padding: 12px 14px 14px; border-top: 1px solid var(--line); }
+.telemetry-isolation h3 { margin: 0 0 9px; color: var(--muted); font-size: 12px; font-weight: 600; line-height: 1.35; letter-spacing: 0; }
+.isolation-list { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 12px; margin: 0; padding: 0; list-style: none; }
+.isolation-entry { display: grid; grid-column: 1 / -1; column-gap: 12px; grid-template-columns: 7.5em minmax(0, 1fr); grid-template-columns: subgrid; align-items: start; min-width: 0; }
+.isolation-name { color: #dcecff; font-size: 13px; font-weight: 600; line-height: 22px; white-space: nowrap; }
+.isolation-state.pill { justify-self: start; gap: 5px; min-height: 22px; margin: 0; padding: 3px 9px; line-height: 16px; }
+.isolation-state svg { flex: 0 0 auto; }
+.isolation-details { display: grid; grid-column: 1 / -1; gap: 5px; min-width: 0; margin-top: 7px; }
+.isolation-layer-row { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; min-width: 0; }
+.isolation-layers { display: flex; flex-wrap: wrap; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.isolation-capabilities { color: var(--muted); font-size: 12px; line-height: 22px; white-space: nowrap; }
+.isolation-layer { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px 2px 6px; border-radius: 6px; background: #10233a; color: #c3d2e3; font-size: 12px; line-height: 18px; white-space: nowrap; }
+.isolation-layer.holds svg { color: var(--green); }
+.isolation-layer.fails { background: rgba(243, 125, 131, .1); color: #f4b6ba; }
+.isolation-layer.fails svg { color: var(--red); }
+.isolation-layer.off { background: #172536; color: #a5b3c5; }
+.isolation-layer.off svg { color: #8ca0b9; }
+.isolation-reasons { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; }
+.isolation-reasons li { color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.isolation-reason-layers { color: #c3d2e3; font-weight: 600; }
+.isolation-reasons code { color: #c3d2e3; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+@container footprint (min-width: 432px) {
+  .telemetry-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .telemetry-metric { padding: 14px 16px 13px; }
+  .telemetry-metric dd { font-size: clamp(16px, 4.6cqi, 21px); }
+  .telemetry-strip[data-columns="5"] .telemetry-metric:last-child { grid-column: span 2; }
+  .telemetry-isolation { padding: 12px 16px 14px; }
+}
+@container footprint (min-width: 560px) {
+  /* The status column keeps the width of its widest word, Unavailable, so
+     the layers start at the same place whatever the sandboxes report. */
+  .isolation-list { grid-template-columns: max-content minmax(7rem, max-content) minmax(0, 1fr); gap: 10px 14px; }
+  .isolation-entry { column-gap: 14px; grid-template-columns: 7.5em 7rem minmax(0, 1fr); grid-template-columns: subgrid; }
+  .isolation-details { grid-column: auto; margin-top: 0; }
+}
+@container footprint (min-width: 870px) {
+  .telemetry-metrics, .telemetry-isolation { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .telemetry-strip[data-columns="5"] :is(.telemetry-metrics, .telemetry-isolation) { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .telemetry-strip[data-columns="5"] .telemetry-metric:last-child { grid-column: auto; }
+  .telemetry-metric dd { font-size: clamp(16px, 2.3cqi, 21px); }
+  .telemetry-isolation { display: grid; align-items: start; padding: 12px 0 13px; }
+  .telemetry-isolation h3 { grid-column: 1; margin: 0; padding: 0 16px; line-height: 22px; white-space: nowrap; }
+  .isolation-list { grid-column: 2 / -1; padding: 0 16px; }
+}
+@container footprint-panel (max-width: 479px) {
+  .deployment-telemetry .panel-heading { flex-direction: column; gap: 6px; }
+  .telemetry-heading-meta .muted-icon { display: none; }
+}
 
 /* Keep keyboard focus visible on rows that navigate to details. The dark
    inset ring remains legible against both the row hover state and the page
@@ -2042,8 +2098,6 @@ th,
 .job-notification-option .pill,
 .evidence-port-row,
 .scanner-run-summary strong,
-.telemetry-metric span,
-.telemetry-updated,
 .stat-retry,
 .surface-unit-addresses,
 .surface-port,

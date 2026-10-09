@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
-import { Activity, AlertTriangle, Bell, CheckCircle2, Clock3, Database, Play, Radar, ShieldAlert } from 'lucide-react'
-import { activeScans, adminStatus, cancelQueuedRun, cancelScan, getSession, listIncidents, listJobs, listScans, notificationTest, runJob } from '../api'
+import { useId, useState } from 'react'
+import { Activity, AlertTriangle, Bell, Check, CheckCircle2, Clock3, Database, Minus, Play, Radar, ShieldAlert, ShieldCheck, ShieldHalf, ShieldOff, ShieldX, X } from 'lucide-react'
+import { activeScans, adminStatus, cancelQueuedRun, cancelScan, getSession, listIncidents, listJobs, listScans, notificationTest, runJob, type DeploymentTelemetry, type ScannerSandboxStatus } from '../api'
 import { Link, useNavigate } from 'react-router-dom'
 import { formatDate, formatDateTime, formatRetention, formatTime } from '../format'
 import { baselinePresentation, type BaselineStatusInfo } from '../baseline'
@@ -88,7 +88,7 @@ export function Dashboard() {
     <div className="page-heading"><div><p className="eyebrow">Monitoring console</p><h1>Good day, {displayName}</h1><p className="muted">A calm view of your network’s expected surface. {!canOperate ? '' : notificationCount ? `${notificationCount} notification destination${notificationCount === 1 ? '' : 's'} configured.` : !canManageNotifications ? 'Notifications are configured by an administrator.' : ''} {policy}</p></div><div className="heading-actions">{isAdmin && <button className="button secondary" onClick={async () => { try { const value = await notificationTest(); setNotifyState(value.sent === 0 ? { text: 'No enabled notification destinations were tested.', state: 'warning' } : { text: `${value.sent} destination${value.sent === 1 ? '' : 's'} tested`, state: 'success' }) } catch (err) { setNotifyState({ text: err instanceof Error ? err.message : 'Notification test failed', state: 'error' }) } }}><Bell size={16} /> Test notifications</button>}{canOperate && <button className="button secondary" onClick={() => navigate('/jobs/new')}><Radar size={16} /> Set up a monitor</button>}</div></div>
     {notifyState && <div className={notifyState.state === 'error' ? 'form-error' : notifyState.state === 'warning' ? 'notice warning' : 'success-banner'} role={notifyState.state === 'error' ? 'alert' : 'status'}>{notifyState.state === 'success' ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}{notifyState.text}</div>}{canManageNotifications && notificationCount === 0 && <div className="notice warning notification-warning" role="status"><AlertTriangle size={16} /><span>No active notification destinations — alerts are not being delivered. <Link to="/notifications">Add a destination</Link>.</span></div>}{runError && <div className="form-error banner" role="alert"><AlertTriangle size={16} />{runError}</div>}{setup.error && <QueryError message="Operational status could not be loaded. Some dashboard metrics may be unavailable." onRetry={() => setup.refetch()} />}{canOperate && active.error && <QueryError message="Could not load scans in progress." onRetry={() => active.refetch()} />}{canOperate && incidents.error && <QueryError message="Could not load the incident count." onRetry={() => incidents.refetch()} />}{canOperate && setup.data?.legacy_yaml_jobs?.length ? <div className="legacy-banner"><AlertTriangle size={17} /><span><strong>Legacy YAML jobs are inactive.</strong> Recreate {setup.data.legacy_yaml_jobs.join(', ')} in the console to resume scheduling.</span><button type="button" className="text-button legacy-banner-recheck" onClick={() => void setup.refetch()}>Check again</button></div> : null}<UntrustedProxyBanner proxy={setup.data?.untrusted_proxy} />{scannerUnconfinedAsRoot && <div className="notice warning scanner-sandbox-warning" role="status"><ShieldAlert size={16} /><span><strong>{scannerSandbox?.landlock?.state === 'enforced' ? 'Scanner processes run as UID 0, restricted only by Landlock.' : 'Scanner processes run unconfined as UID 0.'}</strong> {scannerSandbox?.reason ? `${scannerSandbox.reason}.` : ''} See “Container runtime hardening” in the EdgeWatch documentation.</span></div>}
     <div className="stat-grid"><Stat icon={<Radar />} label="Active jobs" value={activeJobs} detail={`${ready} baselines ready`} tone="blue" status={jobsMetricState} onRetry={() => jobs.refetch()} /><Stat icon={<CheckCircle2 />} label="Healthy baselines" value={ready} detail="Stable monitoring scopes" tone="green" status={jobsMetricState} onRetry={() => jobs.refetch()} />{canOperate && <Stat icon={<AlertTriangle />} label="Open incidents" value={incidentTotal} detail="Confirmed changes" tone="amber" status={incidentsMetricState} onRetry={() => incidents.refetch()} />}<Stat icon={<Activity />} label="Scan history" value={scanTotal} detail="Retained scan records" tone="purple" status={scansMetricState} onRetry={() => scans.refetch()} /></div>
-    {isAdmin && telemetry && <div className="panel deployment-telemetry"><div className="panel-heading"><div><h2>Deployment footprint</h2><p className="muted">Cached storage and operational scale indicators.</p></div><Database size={18} className="muted-icon" /></div><div className="telemetry-grid">{telemetry.database_bytes !== undefined && <TelemetryMetric label="Database" value={formatBytes(telemetry.database_bytes)} />}<TelemetryMetric label="Effective hosts" value={telemetry.effective_hosts.toLocaleString()} /><TelemetryMetric label="Host observations" value={telemetry.host_observations.toLocaleString()} /><TelemetryMetric label="Retained scans" value={telemetry.scans.toLocaleString()} /><TelemetryMetric label="Events" value={telemetry.events.toLocaleString()} /><TelemetryMetric label="Pending delivery" value={telemetry.outbox_pending.toLocaleString()} />{scannerSandbox && <TelemetryMetric label="Scanner sandbox" value={sandboxLabel(scannerSandbox)} />}{notificationSandbox && <TelemetryMetric label="Notification sandbox" value={sandboxLabel(notificationSandbox)} />}</div><small className="muted telemetry-updated">Collected {formatTime(telemetry.collected_at, { hour: '2-digit', minute: '2-digit' })}</small></div>}
+    {isAdmin && telemetry && <DeploymentFootprint telemetry={telemetry} scannerSandbox={scannerSandbox} notificationSandbox={notificationSandbox} />}
     {canOperate && ((active.data?.scans.length ?? 0) > 0 || queuedRuns.length > 0) ? <div className="panel active-scans-panel"><div className="panel-heading"><div><h2>{queuedRuns.length ? 'Scans in progress or queued' : 'Scans in progress'}</h2><p className="muted">Broad scans can take time; progress follows Nmap task updates when available and reports process liveness between them.</p></div><Activity size={18} className="muted-icon" /></div><div className="active-scan-list">{queuedRuns.map(run => <QueuedRunRow key={run.job_id} run={run} cancelBusy={cancelBusy} onCancel={cancelQueued} />)}{(active.data?.scans ?? []).map(scan => <ActiveScanRow key={scan.id} scan={scan} cancelBusy={cancelBusy} onCancel={cancelActiveScan} />)}</div></div> : null}
     <div className="dashboard-columns"><div className="panel"><div className="panel-heading"><div><h2>Jobs at a glance</h2><p className="muted">{canOperate ? 'Run or inspect any saved job.' : 'Inspect saved jobs and their baselines.'}</p></div><button className="text-button" onClick={() => navigate('/jobs')}>View all →</button></div>{jobs.isLoading ? <div className="skeleton-list" /> : jobs.error ? <QueryError message="Could not load jobs." onRetry={() => jobs.refetch()} /> : jobs.data?.jobs.length ? <div className="dashboard-jobs">{jobs.data.jobs.slice(0, 5).map(job => <div className="dashboard-job" key={job.id}><div className="job-icon"><Radar size={17} /></div><div className="dashboard-job-info"><strong>{job.job.name}</strong><span>{job.job.targets.length} targets · {job.job.schedule}</span></div><BaselinePill baseline={job.baseline} />{canOperate && <button aria-label={`Run ${job.job.name}`} className="icon-button" onClick={() => runConfiguredJob(job.id)} disabled={!!runningJob}>{runningJob === job.id ? <span className="spinner" /> : <Play size={15} />}</button>}</div>)}</div> : <div className="inline-empty">No jobs configured yet.{canOperate && <button type="button" className="text-button" onClick={() => navigate('/jobs/new')}>Set up your first monitor</button>}</div>}</div>
       <div className="panel"><div className="panel-heading"><div><h2>Latest activity</h2><p className="muted">The most recent scan outcomes.</p></div><Clock3 size={18} className="muted-icon" /></div>{scans.isLoading ? <div className="skeleton-list" /> : scans.error ? <QueryError message="Could not load recent scans." onRetry={() => scans.refetch()} /> : scans.data?.scans.length ? <div className="activity-list latest-activity-list">{scans.data.scans.slice(0, 6).map(scan => <LatestActivityRow key={scan.id} scan={scan} />)}</div> : <div className="inline-empty">Your first scan will appear here.</div>}</div></div>
@@ -161,16 +161,101 @@ function BaselinePill({ baseline }: { baseline: BaselineStatusInfo }) {
   return <span className={`pill ${presentation.tone}`}>{presentation.label}</span>
 }
 
-function sandboxLabel(status: NonNullable<Awaited<ReturnType<typeof adminStatus>>['scanner_sandbox']>) {
-  const landlock = status.landlock?.state === 'enforced'
-  const restrictions = [...(landlock ? ['Landlock'] : []), ...(status.seccomp?.state === 'enforced' ? ['seccomp'] : [])]
-  if (status.state === 'enforced') return [status.capabilities?.length ? `Enforced · ${status.capabilities.join(', ')}` : 'Enforced', ...restrictions].join(' · ')
-  if (landlock) return 'Landlock only'
-  if (status.state === 'disabled') return 'Off'
-  return 'Unavailable'
+// The footprint shows the cached counters in one strip, then how the scanner
+// and notification processes are isolated. Either sandbox may be absent on an
+// older daemon, and a unit view leaves out the database size.
+function DeploymentFootprint({ telemetry, scannerSandbox, notificationSandbox }: { telemetry: DeploymentTelemetry; scannerSandbox?: ScannerSandboxStatus; notificationSandbox?: ScannerSandboxStatus }) {
+  const isolationID = useId()
+  const metrics = [
+    ...(telemetry.database_bytes === undefined ? [] : [{ label: 'Database', value: formatBytes(telemetry.database_bytes) }]),
+    { label: 'Effective hosts', value: telemetry.effective_hosts.toLocaleString() },
+    { label: 'Host observations', value: telemetry.host_observations.toLocaleString() },
+    { label: 'Retained scans', value: telemetry.scans.toLocaleString() },
+    { label: 'Events', value: telemetry.events.toLocaleString() },
+    { label: 'Pending delivery', value: telemetry.outbox_pending.toLocaleString() },
+  ]
+  const sandboxes = ([['Scanners', scannerSandbox], ['Notifications', notificationSandbox]] as const).flatMap(([name, status]) => status ? [{ name, status }] : [])
+  return <div className="panel deployment-telemetry">
+    <div className="panel-heading"><div><h2>Deployment footprint</h2><p className="muted">{sandboxes.length ? 'Storage, scale, and process isolation of this deployment.' : 'Cached storage and operational scale indicators.'}</p></div><div className="telemetry-heading-meta"><span className="telemetry-updated">Collected <time dateTime={telemetry.collected_at}>{formatTime(telemetry.collected_at, { hour: '2-digit', minute: '2-digit' })}</time></span><Database size={18} className="muted-icon" aria-hidden="true" /></div></div>
+    <div className="telemetry-strip" data-columns={metrics.length}>
+      <dl className="telemetry-metrics">{metrics.map(({ label, value }) => <div key={label} className="telemetry-metric"><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
+      {sandboxes.length > 0 && <div className="telemetry-isolation"><h3 id={isolationID}>Process isolation</h3><ul className="isolation-list" role="list" aria-labelledby={isolationID}>{sandboxes.map(({ name, status }) => <SandboxEntry key={name} name={name} status={status} />)}</ul></div>}
+    </div>
+  </div>
 }
 
-function TelemetryMetric({ label, value }: { label: string; value: string }) { return <div className="telemetry-metric"><span>{label}</span><strong>{value}</strong></div> }
+type SandboxLayer = { name: string; label: string; state: string; reason?: string }
+
+const layerStateText: Record<string, string> = { enforced: 'enforced', disabled: 'off', unavailable: 'unavailable' }
+
+function SandboxEntry({ name, status }: { name: string; status: ScannerSandboxStatus }) {
+  const { label, tone, Icon } = sandboxPresentation(status)
+  const layers = sandboxLayers(status)
+  const reasons = layerReasons(layers)
+  return <li className="isolation-entry">
+    <span className="isolation-name">{name}</span>
+    <span className={`pill ${tone} isolation-state`}><Icon size={12} aria-hidden="true" />{label}</span>
+    <div className="isolation-details">
+      <div className="isolation-layer-row"><ul className="isolation-layers" role="list" aria-label={`${name} layers`}>{layers.map(layer => {
+        const LayerIcon = layer.state === 'enforced' ? Check : layer.state === 'disabled' ? Minus : X
+        return <li key={layer.name} className={`isolation-layer ${layer.state === 'enforced' ? 'holds' : layer.state === 'disabled' ? 'off' : 'fails'}`}><LayerIcon size={12} strokeWidth={2.5} aria-hidden="true" />{layer.label}<span className="sr-only">: {layerStateText[layer.state] ?? layer.state}</span></li>
+      })}</ul>{status.state === 'enforced' && status.capabilities?.length ? <span className="isolation-capabilities">Keeps {status.capabilities.join(', ')}</span> : null}</div>
+      {reasons.length > 0 && <ul className="isolation-reasons" role="list">{reasons.map(({ names, reason }) => <li key={names.join()}><span className="isolation-reason-layers">{names.join(', ')}:</span> <SandboxReason text={reason} /></li>)}</ul>}
+    </div>
+  </li>
+}
+
+// A sandbox confines its processes in up to three layers: the sandbox
+// identity, Landlock, and the seccomp filter. The capabilities the confined
+// identity keeps are shown after the layers, since they grant rather than
+// confine. Older daemons report no Landlock or seccomp state; those layers are
+// left out rather than shown as missing.
+function sandboxLayers(status: ScannerSandboxStatus): SandboxLayer[] {
+  return [
+    { name: 'Identity', label: status.state === 'enforced' ? `UID ${status.uid ?? status.process_uid}` : 'Identity', state: status.state, reason: status.reason },
+    ...(status.landlock ? [{ name: 'Landlock', label: 'Landlock', state: status.landlock.state, reason: status.landlock.reason }] : []),
+    ...(status.seccomp ? [{ name: 'seccomp', label: 'seccomp', state: status.seccomp.state, reason: status.seccomp.reason }] : []),
+  ]
+}
+
+// Enforced only when every reported layer holds, so a sandbox whose seccomp
+// filter failed never shows green. Off is the configured opt-out; Partial
+// still confines the processes in some layer, and Unavailable in none.
+function sandboxPresentation(status: ScannerSandboxStatus) {
+  const layers = sandboxLayers(status)
+  const holding = layers.filter(layer => layer.state === 'enforced').length
+  if (holding === layers.length) return { label: 'Enforced', tone: 'green', Icon: ShieldCheck }
+  if (status.state === 'disabled' && holding === 0) return { label: 'Off', tone: 'gray', Icon: ShieldOff }
+  if (holding > 0) return { label: 'Partial', tone: 'amber', Icon: ShieldHalf }
+  return { label: 'Unavailable', tone: 'red', Icon: ShieldX }
+}
+
+// One line per reason, naming the layers it explains. The seccomp filter is
+// installed with Landlock, so while Landlock does not hold, seccomp shares its
+// reason; layers whose reasons are the same share one line.
+function layerReasons(layers: SandboxLayer[]) {
+  const landlockHolds = layers.find(layer => layer.name === 'Landlock')?.state === 'enforced'
+  const lines: { names: string[]; reason: string }[] = []
+  for (const layer of layers) {
+    if (layer.state === 'enforced') continue
+    const reason = (layer.name === 'seccomp' && !landlockHolds ? layers.find(candidate => candidate.name === 'Landlock')?.reason : layer.reason)?.trim()
+    if (!reason) continue
+    const line = lines.find(candidate => candidate.reason === reason)
+    if (line) line.names.push(layer.name)
+    else lines.push({ names: [layer.name], reason })
+  }
+  return lines
+}
+
+// Reasons arrive as lowercase clauses. Start a sentence with them, except
+// when the clause opens with a configuration key such as scanner.sandbox,
+// which keeps its case and is set as code.
+function SandboxReason({ text }: { text: string }) {
+  const [first = '', ...rest] = text.replace(/[\s.]+$/, '').split(' ')
+  const tail = `${rest.length ? ` ${rest.join(' ')}` : ''}.`
+  if (/^[a-z_]+(\.[a-z_]+)+$/.test(first)) return <><code>{first}</code>{tail}</>
+  return <>{first.charAt(0).toUpperCase() + first.slice(1) + tail}</>
+}
 
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value < 1024) return `${Math.max(0, Math.round(value || 0))} B`

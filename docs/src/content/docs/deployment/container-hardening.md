@@ -140,8 +140,19 @@ docker compose exec edgewatch edgewatch health --config /etc/edgewatch/config.ya
 
 `scanner_sandbox.state` is `enforced`, `disabled` or `unavailable`, and
 `reason` explains a sandbox that is not enforced. `scanner_sandbox.landlock`
-reports [Landlock](#landlock) the same way. The Overview's deployment
-footprint shows both.
+reports [Landlock](#landlock) the same way.
+
+Administrators see the same information on the Overview, in the deployment
+footprint's **Process isolation** section. Each sandbox has a status:
+
+- **Enforced:** every layer holds.
+- **Partial:** some layers hold.
+- **Unavailable:** no layer holds.
+- **Off:** the setting turns the sandbox off.
+
+The section marks each layer (the sandbox identity, Landlock, and the
+[seccomp filter](#seccomp-filter)) as holding, unavailable, or off, and gives
+the reason for each layer that does not hold.
 
 The sandbox needs the user namespace of the container to map UID 65532. Standard
 rootful Docker, rootless Docker, and user-namespace remapping with a full

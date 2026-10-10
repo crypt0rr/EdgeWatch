@@ -292,8 +292,8 @@ func (s *Server) validateScannerProfileDraft(w http.ResponseWriter, r *http.Requ
 }
 
 // renderScannerProfileDraft serves POST /scanner-profiles/preview: it
-// renders the submitted definition, which also renders an existing
-// revision.
+// renders the submitted definition without the rules of a definition being
+// saved, so that it also renders an existing revision.
 func (s *Server) renderScannerProfileDraft(w http.ResponseWriter, r *http.Request) {
 	var payload scannerProfilePayload
 	if !decodeJSON(w, r, &payload) {

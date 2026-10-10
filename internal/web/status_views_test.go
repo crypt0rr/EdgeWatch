@@ -16,6 +16,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 	"github.com/crypt0rr/edgewatch/internal/updatecheck"
 )
 
@@ -404,7 +405,7 @@ func compareUpdateStatuses(t *testing.T, server *Server, accounts []statusAccoun
 func TestStatusStructsWriteTheLegacyBytesWithOneUnit(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	server, _, admin := newUsersTestServer(t)
+	server, db, admin := newUsersTestServer(t)
 	ts := defaultTenantStore(server)
 	accounts := []statusAccount{{name: store.RoleAdministrator, session: admin, ts: ts}}
 	for _, role := range []string{store.RoleOperator, store.RoleViewer} {
@@ -413,7 +414,7 @@ func TestStatusStructsWriteTheLegacyBytesWithOneUnit(t *testing.T) {
 		if role == store.RoleViewer {
 			display = "Viewer"
 		}
-		user, err := ts.CreateUser(ctx, store.User{Username: role + "-account", DisplayName: display, Role: role, PasswordHash: cheapPasswordHash("status password"), Enabled: true}, store.AuditEntry{})
+		user, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: role + "-account", DisplayName: display, Role: role, PasswordHash: cheapPasswordHash("status password"), Enabled: true})
 		if err != nil {
 			t.Fatal(err)
 		}

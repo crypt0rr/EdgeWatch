@@ -75,6 +75,30 @@ const (
 	// written at most once per window, and this bounds the records waiting
 	// for the writer at once; one that finds no room is not written.
 	rateLimitRecordsPending = 64
+	// Every account with TOTP has a budget of wrong one-time and recovery
+	// codes of its own, whichever clients send them, since the client
+	// budgets bound only what one address can try. After the threshold of
+	// wrong codes within the window, the account's codes are not checked
+	// for a lockout that starts at the base length and doubles with each
+	// further lockout, up to the maximum. The long window bounds a caller
+	// that paces its guesses below the threshold: once the threshold is
+	// reached, each further wrong code within the window starts the next
+	// lockout. See admitSecondFactor.
+	secondFactorFailureThreshold = 10
+	secondFactorFailureWindow    = 24 * time.Hour
+	secondFactorLockoutBase      = 15 * time.Minute
+	secondFactorLockoutMax       = 4 * time.Hour
+	// defaultIPv6RateLimitPrefix is the prefix length by which the rate
+	// limits group IPv6 client addresses when none is configured: one /64 is
+	// the usual allocation of a single site or host, so its addresses share
+	// one budget.
+	defaultIPv6RateLimitPrefix = 64
+	// oversizedLoginIdentity is the limiter identity of every sign-in with
+	// a username longer than store.MaxUsernameBytes. No account can have
+	// such a name, so they share one identity, and the limiter keeps no
+	// copy of the submitted name. A username cannot contain a control
+	// character, so the identity names no account either.
+	oversizedLoginIdentity = "\x00oversized"
 )
 
 var ErrRateLimited = errors.New("too many authentication attempts; try again later")
@@ -138,9 +162,15 @@ type Manager struct {
 	accountInFlight     map[string]int
 	loginClientInFlight map[string]int
 	rateAudit           map[string]time.Time
-	trustedProxies      []*net.IPNet
-	forwardedHeader     string
-	argon2Sem           chan struct{}
+	// secondFactor holds each account's wrong one-time and recovery codes,
+	// by account ID, whatever their source; see admitSecondFactor.
+	secondFactor    map[string]*secondFactorState
+	trustedProxies  []*net.IPNet
+	forwardedHeader string
+	// ipv6Prefix is the prefix length by which the rate limits group IPv6
+	// client addresses; zero is defaultIPv6RateLimitPrefix.
+	ipv6Prefix int
+	argon2Sem  chan struct{}
 	// rateRecordSlots holds a slot for each rate-limit record of a refused
 	// sign-in that is being written. rateRecordsPending counts them for
 	// WaitForRateLimitRecords, and rateRecordsIdle is closed once the count
@@ -254,7 +284,7 @@ func NewManager(s *store.Store) *Manager {
 		accountFails: map[string][]time.Time{}, accountBlocked: map[string]time.Time{},
 		loginClientFails: map[string][]time.Time{}, loginClientBlocked: map[string]time.Time{},
 		sourceInFlight: map[string]int{}, accountInFlight: map[string]int{}, loginClientInFlight: map[string]int{},
-		rateAudit: map[string]time.Time{}, argon2Sem: make(chan struct{}, authArgon2MaxConcurrent),
+		rateAudit: map[string]time.Time{}, secondFactor: map[string]*secondFactorState{}, argon2Sem: make(chan struct{}, authArgon2MaxConcurrent),
 		rateRecordSlots: make(chan struct{}, rateLimitRecordsPending),
 	}
 }
@@ -336,6 +366,47 @@ func (m *Manager) SetForwardedHeader(value string) error {
 	return nil
 }
 
+// SetIPv6RateLimitPrefix sets the prefix length by which the rate limits
+// group IPv6 client addresses: every address in one such network is one
+// client for the sign-in, setup, activation, and confirmation limits, and
+// for the anonymous limits of the web server. 128 counts each address on
+// its own. Audit records and the untrusted-proxy notice keep the full
+// address.
+func (m *Manager) SetIPv6RateLimitPrefix(bits int) error {
+	if bits < 1 || bits > 128 {
+		return fmt.Errorf("IPv6 rate-limit prefix must be between 1 and 128, not %d", bits)
+	}
+	m.mu.Lock()
+	m.ipv6Prefix = bits
+	m.mu.Unlock()
+	return nil
+}
+
+// RateLimitIdentity returns the client identity under which the rate limits
+// count the request: the address that ClientIP resolves, with an IPv6
+// address other than loopback replaced by its network of the configured
+// prefix length, so that a client cannot gain budgets by rotating the
+// addresses of its own network. A loopback address stays as it is, because
+// the limits recognize a shared loopback peer by it.
+func (m *Manager) RateLimitIdentity(request *http.Request) string {
+	client := limiterKey(m.ClientIP(request))
+	ip := net.ParseIP(client)
+	if ip == nil || ip.To4() != nil || ip.IsLoopback() {
+		return client
+	}
+	m.mu.Lock()
+	bits := m.ipv6Prefix
+	m.mu.Unlock()
+	if bits == 0 {
+		bits = defaultIPv6RateLimitPrefix
+	}
+	if bits >= 128 {
+		return ip.String()
+	}
+	mask := net.CIDRMask(bits, 128)
+	return (&net.IPNet{IP: ip.Mask(mask), Mask: mask}).String()
+}
+
 // IsTrustedProxy reports whether the directly connected peer belongs to the
 // explicitly configured proxy networks. It is intentionally limited to the
 // peer address and never considers forwarded headers; callers can therefore
@@ -354,7 +425,8 @@ func (m *Manager) IsTrustedProxy(request *http.Request) bool {
 	return ipInNetworks(peer, trusted)
 }
 
-// ClientIP resolves the request identity for rate limiting and audit records.
+// ClientIP resolves the client address of the request for audit records;
+// the rate limits group it with RateLimitIdentity.
 // Forwarding headers are considered only when the directly connected peer is
 // in the configured trusted-proxy set. The chain is walked from right to left
 // and stops at the first untrusted hop, preventing clients from spoofing an
@@ -732,7 +804,7 @@ func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, to
 func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, password, otp, recovery string) (string, store.User, error) {
 	identity := normalizeLoginIdentity(username)
 	source := m.sourceScopeFor(request, "login")
-	account := "login:" + identity
+	account := loginAccount(identity)
 	if !m.allowScoped(source, account) {
 		m.auditLoginRateLimit(ctx, identity, request)
 		return "", store.User{}, m.rateLimitError(source, account)
@@ -837,9 +909,22 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	factor := store.NoSignInFactor
 	acceptedTOTPSecret := ""
 	if user.TOTPEnabled {
+		// The account's budget of wrong codes, which no client budget
+		// bounds, is reached only with the right password, so a caller
+		// without it can neither spend the budget nor tell whether it is
+		// spent; see admitSecondFactor. A sign-in that the budget refuses
+		// still checks its code, and then gets the answer of a wrong code
+		// whatever the code was, so the refusal looks, costs, and takes the
+		// same as a wrong code. One clock read serves the admission and the
+		// code check.
+		checkedAt := m.now()
+		admitted := m.admitSecondFactor(user.ID, checkedAt)
+		if admitted {
+			defer m.releaseSecondFactor(user.ID)
+		}
 		valid := false
 		if user.TOTPSecretError == nil {
-			if step, stepValid := VerifyTOTPAtStep(user.TOTPSecret, otp, m.now()); stepValid {
+			if step, stepValid := VerifyTOTPAtStep(user.TOTPSecret, otp, checkedAt); stepValid {
 				available, availableErr := m.Store.TOTPStepAvailable(ctx, user.ID, step)
 				if availableErr != nil {
 					return "", user, availableErr
@@ -857,9 +942,15 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 				factor.RecoveryCodeHash = match
 			}
 		}
+		if !admitted {
+			valid, factor, acceptedTOTPSecret = false, store.NoSignInFactor, ""
+		}
 		if !valid {
 			m.failedScoped(source, account, loginClient)
 			m.auditAccountFailure(ctx, "auth.totp_failed", identity, user, request)
+			if admitted {
+				m.secondFactorFailed(ctx, user, request)
+			}
 			return "", user, errors.New("one-time code is required")
 		}
 	}
@@ -1068,13 +1159,24 @@ func (m *Manager) ConfirmTOTPForUser(ctx context.Context, request *http.Request,
 	}
 	defer m.releaseScoped(source, account)
 	user, err := m.Store.GetAccount(ctx, userID)
+	// The account's budget of wrong codes is the one its sign-ins use; see
+	// admitSecondFactor. A confirmation that the budget refuses checks no
+	// code, so it spends no time step or recovery code, and gets the answer
+	// of a wrong code.
+	admitted := false
+	if err == nil {
+		admitted = m.admitSecondFactor(user.ID, m.now())
+		if admitted {
+			defer m.releaseSecondFactor(user.ID)
+		}
+	}
 	valid := false
-	if err == nil && user.Enabled && user.TOTPEnabled && user.TOTPSecretError == nil {
+	if admitted && user.Enabled && user.TOTPEnabled && user.TOTPSecretError == nil {
 		if step, stepValid := VerifyTOTPAtStep(user.TOTPSecret, otp, m.now()); stepValid {
 			valid, err = m.Store.ConsumeTOTPStep(ctx, user.ID, step, m.now())
 		}
 	}
-	if !valid && err == nil && recovery != "" {
+	if admitted && !valid && err == nil && recovery != "" {
 		valid, err = m.Store.ConsumeRecoveryCodeTextForUser(ctx, user.ID, recovery, m.now())
 	}
 	if err != nil {
@@ -1087,6 +1189,9 @@ func (m *Manager) ConfirmTOTPForUser(ctx context.Context, request *http.Request,
 	if !valid {
 		m.failedScoped(source, account, "")
 		m.auditConfirmationFailure(ctx, "auth.totp_confirmation_failed", "TOTP confirmation", userID, user, request)
+		if admitted {
+			m.secondFactorFailed(ctx, user, request)
+		}
 		return errors.New("current one-time code is required")
 	}
 	m.clearScoped(source, account)
@@ -1375,6 +1480,22 @@ func (m *Manager) claimRateAudit(subject, tenantID string, platform bool, reques
 				delete(m.rateAudit, candidate)
 			}
 		}
+		// Refusals from many sources can keep every window open. Drop the
+		// oldest windows other than the one just started until the bound
+		// holds, as the failure buckets do; a source whose window is dropped
+		// gets its next record sooner, and nothing else changes.
+		for len(m.rateAudit) > authLimiterMaxEntries {
+			oldestKey, oldestAt := "", now
+			for candidate, timestamp := range m.rateAudit {
+				if candidate != key && (oldestKey == "" || timestamp.Before(oldestAt)) {
+					oldestKey, oldestAt = candidate, timestamp
+				}
+			}
+			if oldestKey == "" {
+				break
+			}
+			delete(m.rateAudit, oldestKey)
+		}
 	}
 	m.mu.Unlock()
 	return true
@@ -1451,7 +1572,19 @@ func (m *Manager) sourceScopeFor(request *http.Request, namespace string) string
 	if namespace == "" {
 		namespace = "auth"
 	}
-	return "source:" + namespace + ":" + limiterKey(m.ClientIP(request))
+	return "source:" + namespace + ":" + m.RateLimitIdentity(request)
+}
+
+// loginAccount returns the limiter name of the sign-in account with the
+// identity. An identity longer than any username, which names no account,
+// is oversizedLoginIdentity, so the size of a limiter key does not depend
+// on the submitted name. Such a sign-in still checks a password and counts
+// against the client's budget, as every sign-in with an unknown name does.
+func loginAccount(identity string) string {
+	if len(identity) > store.MaxUsernameBytes {
+		identity = oversizedLoginIdentity
+	}
+	return "login:" + identity
 }
 
 func normalizeLoginIdentity(username string) string {
@@ -1618,6 +1751,155 @@ func (m *Manager) releaseLoginClient(client string) {
 	} else {
 		delete(m.loginClientInFlight, client)
 	}
+}
+
+// secondFactorState is an account's record of wrong second factors: the
+// times of its latest wrong codes within secondFactorFailureWindow, at most
+// secondFactorFailureThreshold of them, the end of its lockout, the
+// lockouts since the record started, and the checks of its codes in
+// flight. The record ends, and with it the doubling of the lockouts, once
+// the account has had no wrong code for secondFactorFailureWindow.
+type secondFactorState struct {
+	failures    []time.Time
+	lockedUntil time.Time
+	lockouts    int
+	inFlight    int
+}
+
+// recentFailuresLocked drops the failures that left the window and returns
+// how many remain.
+func (state *secondFactorState) recentFailuresLocked(now time.Time) int {
+	cut := now.Add(-secondFactorFailureWindow)
+	kept := state.failures[:0]
+	for _, failure := range state.failures {
+		if failure.After(cut) {
+			kept = append(kept, failure)
+		}
+	}
+	state.failures = kept
+	return len(kept)
+}
+
+// admitSecondFactor reserves the check of a one-time or recovery code of
+// the account with the ID, whose password the caller verified, until
+// releaseSecondFactor. The budget is the account's own, whichever clients
+// send the codes and however many there are, so it bounds the guesses at
+// the account's second factor after a password leak. It refuses the check
+// while the account is locked out, and while as many checks are in flight
+// as wrong codes would start a lockout: before the threshold, the wrong
+// codes it has left; after it, one, because every wrong code then starts
+// the next lockout. Concurrent requests therefore cannot check more codes
+// than the budget allows. A refused check costs the budget nothing. now is
+// the time of the check, which the caller reads.
+func (m *Manager) admitSecondFactor(userID string, now time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureScopedLimiterMapsLocked()
+	state := m.secondFactor[userID]
+	if state == nil {
+		state = &secondFactorState{}
+		m.secondFactor[userID] = state
+	}
+	if now.Before(state.lockedUntil) {
+		return false
+	}
+	room := max(secondFactorFailureThreshold-state.recentFailuresLocked(now), 1)
+	if state.inFlight >= room {
+		return false
+	}
+	state.inFlight++
+	return true
+}
+
+// releaseSecondFactor drops the reservation of admitSecondFactor. The
+// account's record stays while it has a wrong code in the window, a
+// lockout in effect, or another check in flight.
+func (m *Manager) releaseSecondFactor(userID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	state := m.secondFactor[userID]
+	if state == nil {
+		return
+	}
+	if state.inFlight > 0 {
+		state.inFlight--
+	}
+	if secondFactorStateIdle(now, state) {
+		delete(m.secondFactor, userID)
+	}
+}
+
+// failedSecondFactor records a wrong code of the account with the ID that
+// admitSecondFactor admitted. A failure that brings the account's wrong
+// codes within the window to the threshold starts a lockout, of
+// secondFactorLockoutBase doubled for every earlier lockout of the record,
+// up to secondFactorLockoutMax; failedSecondFactor returns its length, or
+// zero when the failure starts none.
+func (m *Manager) failedSecondFactor(userID string) time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	m.ensureScopedLimiterMapsLocked()
+	state := m.secondFactor[userID]
+	if state == nil {
+		state = &secondFactorState{}
+		m.secondFactor[userID] = state
+	}
+	state.recentFailuresLocked(now)
+	state.failures = append(state.failures, now)
+	if excess := len(state.failures) - secondFactorFailureThreshold; excess > 0 {
+		state.failures = state.failures[excess:]
+	}
+	if len(state.failures) < secondFactorFailureThreshold || now.Before(state.lockedUntil) {
+		return 0
+	}
+	lockout := secondFactorLockoutBase
+	for range state.lockouts {
+		if lockout >= secondFactorLockoutMax {
+			break
+		}
+		lockout *= 2
+	}
+	lockout = min(lockout, secondFactorLockoutMax)
+	state.lockouts++
+	state.lockedUntil = now.Add(lockout)
+	return lockout
+}
+
+// secondFactorStateIdle reports whether the account's record holds nothing
+// that the budget still needs: no wrong code in the window, no lockout in
+// effect, and no check in flight.
+func secondFactorStateIdle(now time.Time, state *secondFactorState) bool {
+	return state.inFlight == 0 && !now.Before(state.lockedUntil) && state.recentFailuresLocked(now) == 0
+}
+
+// secondFactorFailed records a wrong code of the account, which
+// admitSecondFactor admitted, and when the failure starts a lockout,
+// records the lockout in the account's scope: one record for each
+// lockout, however many codes it then refuses.
+func (m *Manager) secondFactorFailed(ctx context.Context, account store.User, request *http.Request) {
+	lockout := m.failedSecondFactor(account.ID)
+	if lockout == 0 {
+		return
+	}
+	entry, write := m.authEvent("auth.second_factor_locked", account.Username, account.TenantID, account.Role == store.RolePlatformAdmin, request)
+	entry.Detail = fmt.Sprintf("one-time and recovery codes of %s are refused for %s after %d wrong codes", entry.ActorUsername, lockoutText(lockout), secondFactorFailureThreshold)
+	if err := write(ctx, entry); err != nil {
+		slog.Default().Warn("security audit write failed", "action", entry.Action, "error", err)
+	}
+}
+
+// lockoutText describes the length of a second-factor lockout, a whole
+// number of minutes or hours, for its audit record.
+func lockoutText(lockout time.Duration) string {
+	if lockout < time.Hour {
+		return strconv.Itoa(int(lockout/time.Minute)) + " minutes"
+	}
+	if hours := int(lockout / time.Hour); hours != 1 {
+		return strconv.Itoa(hours) + " hours"
+	}
+	return "1 hour"
 }
 
 // failedScoped records a failed authentication in the source backstop and in
@@ -1788,6 +2070,9 @@ func (m *Manager) ensureScopedLimiterMapsLocked() {
 	if m.rateAudit == nil {
 		m.rateAudit = map[string]time.Time{}
 	}
+	if m.secondFactor == nil {
+		m.secondFactor = map[string]*secondFactorState{}
+	}
 }
 
 func recordFailureLocked(now time.Time, key string, threshold int, fails map[string][]time.Time, blocked map[string]time.Time) {
@@ -1854,6 +2139,11 @@ func (m *Manager) sweepLimiterLocked(now time.Time) {
 	}
 	if m.loginClientFails != nil {
 		sweepFailureBucketLocked(now, m.loginClientFails, m.loginClientBlocked, authFailureThreshold)
+	}
+	for userID, state := range m.secondFactor {
+		if secondFactorStateIdle(now, state) {
+			delete(m.secondFactor, userID)
+		}
 	}
 }
 

@@ -157,3 +157,39 @@ func TestTargetExclusionNetworkMatchingAndOverlap(t *testing.T) {
 		t.Fatalf("non-matching exclusion = %q", got)
 	}
 }
+
+// web.ipv6_rate_limit_prefix defaults to /64 when it is omitted, and
+// accepts a prefix length from /32 to /128; an explicit zero is rejected,
+// not replaced by the default.
+func TestIPv6RateLimitPrefixConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	for contents, want := range map[string]int{
+		"":                                     DefaultIPv6RateLimitPrefix,
+		"web:\n  ipv6_rate_limit_prefix: 56\n": 56,
+	} {
+		path := filepath.Join(dir, "config.yaml")
+		if err := os.WriteFile(path, []byte("database: "+filepath.Join(dir, "edgewatch.db")+"\nretention: 24h\n"+contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.Web.RateLimitIPv6Prefix(); got != want {
+			t.Errorf("IPv6 rate-limit prefix from %q = %d, want %d", contents, got, want)
+		}
+	}
+	base := Config{Version: 1, Database: "db", Retention: Duration(24 * time.Hour), Scheduler: Scheduler{MaxConcurrent: 1}, Web: Web{Listen: "127.0.0.1:8080"}}
+	for _, prefix := range []int{MinIPv6RateLimitPrefix, 48, 64, 128} {
+		base.Web.IPv6RateLimitPrefix = &prefix
+		if err := base.ValidateDeployment(); err != nil {
+			t.Errorf("prefix /%d rejected: %v", prefix, err)
+		}
+	}
+	for _, prefix := range []int{0, MinIPv6RateLimitPrefix - 1, 129, -64} {
+		base.Web.IPv6RateLimitPrefix = &prefix
+		if err := base.ValidateDeployment(); err == nil || !strings.Contains(err.Error(), "web.ipv6_rate_limit_prefix") {
+			t.Errorf("prefix %d accepted: %v", prefix, err)
+		}
+	}
+}

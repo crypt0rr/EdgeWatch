@@ -32,7 +32,11 @@ right client. Follow [Reverse proxies](/deployment/reverse-proxies/) and the
 Use the least powerful account role appropriate to each person. Enroll
 administrators in TOTP, keep recovery codes private, and review active sessions
 and audit records. With multiple business units, TOTP is required for unit
-administrators and platform administrators. See
+administrators and platform administrators. An `auth.second_factor_locked`
+record means that an account received ten wrong one-time or recovery codes
+within a day, each with its right password or from its own session. Unless
+the account's owner sent them, someone holds the password, so change it; see
+[the configuration defaults](/reference/configuration/#important-defaults). See
 [Accounts and public status](/administration/accounts-public-status/) and
 [Business units](/administration/business-units/).
 

@@ -155,6 +155,15 @@ making the daemon unhealthy; see
 database that cannot be opened at all, for example one with a newer schema,
 still fails before any document is printed.
 
+`health` needs shell access to the container. From v0.36.0, a monitor
+outside it can poll `GET /healthz` on the console's listener instead, which
+reports the same migration and heartbeat outcome as one word, `ready`,
+`starting`, or `unhealthy`, without the reason, the warnings, or the
+sandboxes; Prometheus can scrape the opt-in `GET /metrics`. See
+[Monitor the monitor](/operations/troubleshooting/#monitor-the-monitor). The
+bundled Compose health check keeps running `health`, which also covers the
+sandboxes and backups.
+
 ## Notification tests
 
 `notify test` sends one test message to each enabled destination of the unit

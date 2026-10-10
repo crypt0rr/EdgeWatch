@@ -120,6 +120,13 @@ func parseStartupTime(raw string) (time.Time, error) {
 	return value.UTC(), nil
 }
 
+// HealthStatus is SystemStore.HealthStatus for the web server's health
+// endpoint and metrics: the deployment's migration and daemon state, which
+// names no tenant.
+func (ps *PlatformStore) HealthStatus(ctx context.Context) (HealthStatus, error) {
+	return ps.store.System().HealthStatus(ctx)
+}
+
 // HealthStatus reads migration progress first, then falls back to the daemon
 // lease once startup work has completed. The migration state is considered
 // healthy while its heartbeat is recent; stale or failed migration state is a

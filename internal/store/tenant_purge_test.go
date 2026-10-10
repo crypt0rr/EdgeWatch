@@ -27,6 +27,7 @@ var tenantPurgeOracle = map[string]string{
 	"restore_quarantined_deliveries":   `SELECT rowid FROM restore_quarantined_deliveries WHERE tenant_id=?1`,
 	"scanner_profiles":                 `SELECT rowid FROM scanner_profiles WHERE tenant_id=?1`,
 	"scans":                            `SELECT rowid FROM scans WHERE tenant_id=?1`,
+	"security_alert_windows":           `SELECT rowid FROM security_alert_windows WHERE tenant_id=?1`,
 	"security_audit":                   `SELECT rowid FROM security_audit WHERE tenant_id=?1`,
 	"users":                            `SELECT rowid FROM users WHERE tenant_id=?1`,
 	"baseline_hosts":                   `SELECT x.rowid FROM baseline_hosts AS x JOIN jobs AS j ON j.id=x.job_id WHERE j.tenant_id=?1`,
@@ -145,6 +146,7 @@ func addTenantPurgeRows(t *testing.T, f tenantFixture) {
 			{`INSERT INTO totp_replay(user_id,last_step,updated_at) VALUES(?,1,?)`, []any{owner.account, stamp}},
 			{`INSERT INTO job_history_purges(tenant_id,job_id,phase,created_at,updated_at) VALUES(?,?,?,?,?)`, []any{tenant, owner.job, jobPurgePhaseCycleCheckpoints, stamp, stamp}},
 			{`INSERT INTO job_history_purge_host_keys(tenant_id,job_id,address) VALUES(?,?,?)`, []any{tenant, owner.job, "192.0.2.10"}},
+			{`INSERT INTO security_alert_windows(tenant_id,kind,started_at,suppressed) VALUES(?,'rate_limited',?,2)`, []any{tenant, stamp}},
 		} {
 			if _, err := f.store.DB.ExecContext(ctx, statement.query, statement.args...); err != nil {
 				t.Fatalf("%s: %v", statement.query, err)

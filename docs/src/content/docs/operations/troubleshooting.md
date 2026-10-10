@@ -1,6 +1,6 @@
 ---
 title: Troubleshooting
-description: Diagnose storage permissions, proxy rejection, incomplete scans, notification failures, RDAP behind a proxy, and upgrade progress.
+description: Monitor the daemon from outside, and diagnose storage permissions, proxy rejection, incomplete scans, notification failures, RDAP behind a proxy, and upgrade progress.
 ---
 
 Start with a bounded log summary and the host health report:
@@ -15,6 +15,35 @@ Keep credentials, setup tokens, target information, and encryption keys out of
 public issue reports. Health exits non-zero for unhealthy migrations or a
 missing daemon heartbeat; its warnings also list actions that do not stop the
 service. See [Host commands](/reference/cli/) for output and exit behavior.
+
+## Monitor the monitor
+
+The job silence alert and the deployment alerts are raised by the daemon
+itself, so they cannot report a daemon that stopped or hangs. From v0.36.0,
+an uptime checker can poll `GET /healthz` on the console's listener:
+
+```sh
+curl -fsS http://127.0.0.1:8080/healthz
+```
+
+It needs no session and no approved host name, and answers only
+`{"status":"ready"}` with `200`, or `{"status":"starting"}` while a migration
+runs or `{"status":"unhealthy"}` with `503`: for a failed or stalled
+migration, a daemon heartbeat older than two minutes, no daemon, or a
+database that cannot be read. It names no reason and no unit; run
+`edgewatch health` for the details. Each client may send 120 requests a
+minute, as for the public status pages, and gets `{"status":"rate_limited"}`
+with `429` beyond that. The answer is reused for one second.
+
+For Prometheus, turn on the opt-in `GET /metrics` with `web.metrics.enabled`
+and a bearer token in `web.metrics.token_file`; see
+[the configuration reference](/reference/configuration/#metrics). It reports
+deployment aggregates only, such as the heartbeat age, the migration state,
+the scan slots, the notification backlog, the database size, and the sandbox
+states, never a unit's name, job, or target. The metric names are listed in
+[the API reference](/reference/api-compatibility/#health-and-metrics). Keep
+`/metrics` off a public reverse proxy; see
+[Reverse proxies](/deployment/reverse-proxies/).
 
 ## Permission denied on startup
 

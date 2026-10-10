@@ -5,6 +5,7 @@ import type { ApplicationUpdateStatus } from '../../generated/api-types'
 import { UntrustedProxyBanner } from '../../components/UntrustedProxyBanner'
 import { ScheduledBackupBanner } from '../../components/ScheduledBackupBanner'
 import { ErrorNotice } from '../../components/ErrorNotice'
+import { formatBytes, formatTime } from '../../format'
 import { formatCount, Loading, plural } from './common'
 
 /** How the release check describes the running version. */
@@ -20,7 +21,8 @@ export function updateSummary(updates?: ApplicationUpdateStatus) {
 
 /**
  * The deployment as numbers: its business units by state, their accounts and
- * jobs, the platform administrators, and the scan capacity and its use, with
+ * jobs, the platform administrators, the scan capacity and its use, and the
+ * database size and notification backlog of the whole deployment, with
  * warnings about an untrusted proxy and failing scheduled backups. It names
  * no unit and no unit's data.
  */
@@ -51,6 +53,14 @@ export function PlatformStatusPage() {
           <div><dt>Absolute probe ceiling</dt><dd>{formatCount(limits.max_probe_count_limit)}</dd></div>
         </dl>
       </div>
+      {value.telemetry && <div className="panel platform-telemetry"><div className="panel-heading"><div><h2>Storage and delivery</h2><p className="muted">Every unit’s data together, counted at most every 30 seconds; collected <time dateTime={value.telemetry.collected_at}>{formatTime(value.telemetry.collected_at, { hour: '2-digit', minute: '2-digit' })}</time>.</p></div></div>
+        <dl className="fact-grid">
+          <div><dt>Database</dt><dd>{formatBytes(value.telemetry.database_bytes)}</dd></div>
+          <div><dt>Alerts waiting</dt><dd>{formatCount(Math.max(value.telemetry.outbox_pending - value.telemetry.outbox_failed, 0))}</dd></div>
+          <div><dt>Alerts retrying</dt><dd>{formatCount(value.telemetry.outbox_retrying)}</dd></div>
+          <div><dt>Alerts failed for good</dt><dd>{formatCount(value.telemetry.outbox_failed)}</dd></div>
+        </dl>
+      </div>}
       <div className="panel"><div className="panel-heading"><div><h2>Version</h2>{!updateAvailable && <p className="muted">{updateSummary(value.updates)}</p>}</div></div>
         {updateAvailable && <div className="notice platform-update-notice" role="status"><ArrowUp size={15} aria-hidden="true" /><span>{updateSummary(value.updates)}{releaseURL && <> <a className="text-button" href={releaseURL} target="_blank" rel="noopener noreferrer">Release notes</a></>}</span></div>}
         <dl className="fact-grid">

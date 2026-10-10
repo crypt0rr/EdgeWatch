@@ -139,6 +139,8 @@ var apiRoutes = withPathAlias("/scanner-profiles", "/scanner/profiles", []apiRou
 	{Method: http.MethodGet, Template: "/notifications/options", Permission: auth.PermissionNotificationOptions, Example: "/notifications/options", Handle: tenantHandler((*Server).listNotificationDestinations)},
 	{Method: http.MethodPut, Template: "/notifications/update-routing", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/update-routing", Handle: sessionTenantHandler((*Server).updateNotificationRouting)},
 	{Method: http.MethodPatch, Template: "/notifications/update-routing", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/update-routing", Handle: sessionTenantHandler((*Server).toggleNotificationUpdateRouting)},
+	{Method: http.MethodPut, Template: "/notifications/security-routing", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/security-routing", Handle: sessionTenantHandler((*Server).updateSecurityRouting)},
+	{Method: http.MethodPatch, Template: "/notifications/security-routing", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/security-routing", Handle: sessionTenantHandler((*Server).toggleSecurityRouting)},
 	{Method: http.MethodPut, Template: "/notifications/incident-reminders", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/incident-reminders", Handle: sessionTenantHandler((*Server).updateIncidentReminders)},
 	{Method: http.MethodGet, Template: "/notifications/destinations", Permission: auth.PermissionNotificationOptions, Example: "/notifications/destinations", Handle: tenantHandler((*Server).listNotificationDestinations)},
 	{Method: http.MethodPost, Template: "/notifications/destinations", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations", Handle: sessionTenantHandler((*Server).createNotificationDestination)},
@@ -226,7 +228,8 @@ var apiRoutes = withPathAlias("/scanner-profiles", "/scanner/profiles", []apiRou
 	// The platform console, for platform administrators: the business
 	// units, their administrators and capacity, the platform
 	// administrators, the platform audit, the platform's notification
-	// destinations and update routing, and the deployment status.
+	// destinations and their update, security and deployment alert routing,
+	// and the deployment status.
 	{Method: http.MethodGet, Template: "/platform/units", Permission: auth.PermissionUnitsManage, Example: "/platform/units", TrailingSlash: true, Handle: platformHandler(requestHandler((*Server).listPlatformUnits))},
 	{Method: http.MethodPost, Template: "/platform/units", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units", TrailingSlash: true, Handle: platformHandler(sessionHandler((*Server).createPlatformUnit))},
 	{Method: http.MethodGet, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Example: "/platform/units/unit-1", TrailingSlash: true, Handle: platformHandler(idHandler((*Server).getPlatformUnit))},
@@ -259,6 +262,18 @@ var apiRoutes = withPathAlias("/scanner-profiles", "/scanner/profiles", []apiRou
 	{Method: http.MethodPost, Template: "/platform/notifications", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications", TrailingSlash: true, Handle: platformHandler(sessionHandler((*Server).createPlatformNotification))},
 	{Method: http.MethodPut, Template: "/platform/notifications/update-routing", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/update-routing", TrailingSlash: true, Handle: platformHandler(sessionHandler((*Server).updatePlatformNotificationRouting))},
 	{Method: http.MethodPatch, Template: "/platform/notifications/update-routing", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/update-routing", TrailingSlash: true, Handle: platformHandler(sessionHandler((*Server).togglePlatformNotificationRouting))},
+	{Method: http.MethodPut, Template: "/platform/notifications/security-routing", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/security-routing", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.updatePlatformAlertRouting(w, r, c.session, platformSecurityRouting)
+	})},
+	{Method: http.MethodPatch, Template: "/platform/notifications/security-routing", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/security-routing", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.togglePlatformAlertRouting(w, r, c.session, platformSecurityRouting)
+	})},
+	{Method: http.MethodPut, Template: "/platform/notifications/health-routing", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/health-routing", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.updatePlatformAlertRouting(w, r, c.session, platformHealthRouting)
+	})},
+	{Method: http.MethodPatch, Template: "/platform/notifications/health-routing", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/health-routing", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.togglePlatformAlertRouting(w, r, c.session, platformHealthRouting)
+	})},
 	{Method: http.MethodPatch, Template: "/platform/notifications/{id}", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/destination-1", TrailingSlash: true, Handle: platformHandler(sessionIDHandler((*Server).updatePlatformNotification))},
 	{Method: http.MethodDelete, Template: "/platform/notifications/{id}", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/destination-1", TrailingSlash: true, Handle: platformHandler(sessionIDHandler((*Server).deletePlatformNotification))},
 	{Method: http.MethodGet, Template: "/platform/status", Permission: auth.PermissionPlatformStatusRead, Example: "/platform/status", TrailingSlash: true, Handle: platformHandler(requestHandler((*Server).platformStatus))},

@@ -430,6 +430,9 @@ type Event struct {
 	ChangesTruncated   bool      `json:"changes_truncated,omitempty"`
 	HasCriticalChanges bool      `json:"has_critical_changes,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
+	// Alert is the structured content of a security or deployment-health
+	// alert, which FormatEvent renders. Other events leave it out.
+	Alert *AlertDetail `json:"alert,omitempty"`
 	// TenantID names the tenant of an event without a job, such as a
 	// tenant's copy of an update alert. An event without a job or a tenant
 	// belongs to the platform, and a job's event always belongs to the job's
@@ -452,6 +455,51 @@ func EventDelivered(eventType string) bool {
 // EventScanBudgetExceeded records a scheduled run that its probe budget
 // stopped before it started.
 const EventScanBudgetExceeded = "scan-budget-exceeded"
+
+// EventSecurityAlert is a security alert: an authentication anomaly, or a
+// platform administrator's action on a business unit's account. It goes to
+// the destinations that its owner, the unit or the platform, selected for
+// security alerts, and never enters the activity history; the security
+// audit holds the record it reports.
+const EventSecurityAlert = "security.alert"
+
+// EventHealthAlert is a deployment-health alert of the application, such as
+// a degraded sandbox, a version rollback, or alerts that failed for good. It
+// goes only to the platform destinations selected for deployment alerts and
+// is recorded in the platform audit.
+const EventHealthAlert = "application.health_alert"
+
+// AlertDetail is what a security or deployment-health alert reports. Every
+// field is bounded: names and fixed vocabulary, an address, counts, and
+// times, never a secret, a token, a URL, a path, or a provider's answer.
+type AlertDetail struct {
+	// Kind names what happened, from a fixed vocabulary.
+	Kind string `json:"kind"`
+	// Operation is the operation of a rate-limit episode, such as sign-in.
+	Operation string `json:"operation,omitempty"`
+	// Unit is the name of the business unit the alert belongs to.
+	Unit string `json:"unit,omitempty"`
+	// Account is the username of the account the alert is about, and Actor
+	// the platform administrator who acted on it.
+	Account string `json:"account,omitempty"`
+	Actor   string `json:"actor,omitempty"`
+	// Source is the client address of an authentication event.
+	Source string `json:"source,omitempty"`
+	// Previous and Current are the states of a transition, such as the
+	// sandbox states or the versions of a rollback.
+	Previous string `json:"previous,omitempty"`
+	Current  string `json:"current,omitempty"`
+	// Subject names the part of the deployment a health alert is about,
+	// such as scanner or notification for a sandbox.
+	Subject string `json:"subject,omitempty"`
+	// Count is the number of events that the alert reports beyond the one
+	// it describes, or, for failed deliveries, the alerts that failed;
+	// PlatformCount is the part of them that the platform owns.
+	Count         int `json:"count,omitempty"`
+	PlatformCount int `json:"platform_count,omitempty"`
+	// Since is when the events that Count reports began.
+	Since time.Time `json:"since,omitzero"`
+}
 
 // EventPayloadLimit is the maximum serialized size of a durable event or
 // notification outbox payload. Change details remain available on the scan

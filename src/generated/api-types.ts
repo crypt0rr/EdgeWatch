@@ -147,6 +147,7 @@ export type PlatformStatus = {
   jobs: number
   platform_admins: PlatformAdminCounts
   stored_scans: number
+  telemetry?: PlatformTelemetry
   units: PlatformUnitCounts
   untrusted_proxy?: UntrustedProxy
   updates: ApplicationUpdateStatus
@@ -187,6 +188,21 @@ export type DeploymentSlots = {
   capacity: number
   in_use: number
   queued: number
+}
+
+// PlatformTelemetry is store.DeploymentTelemetry.
+export type PlatformTelemetry = {
+  collected_at: string
+  database_bytes: number
+  jobs: number
+  scans: number
+  host_observations: number
+  effective_hosts: number
+  events: number
+  scan_cycles: number
+  outbox_pending: number
+  outbox_retrying: number
+  outbox_failed: number
 }
 
 // Scan is model.Scan.

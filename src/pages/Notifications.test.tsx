@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   getSession,
   listNotificationDestinations,
+  toggleNotificationSecurityAlert,
   toggleNotificationUpdateAlert,
   updateIncidentReminders,
 } from '../api'
@@ -23,6 +24,7 @@ vi.mock('../api', () => ({
   listNotificationDestinations: vi.fn(),
   testNotificationDestination: vi.fn(),
   updateNotificationDestination: vi.fn(),
+  toggleNotificationSecurityAlert: vi.fn(),
   toggleNotificationUpdateAlert: vi.fn(),
   updateIncidentReminders: vi.fn(),
 }))
@@ -351,5 +353,75 @@ describe('notification URLs imported from config.yaml', () => {
   it('shows no import banner when config.yaml lists no imported URLs', async () => {
     await renderWithImport()
     expect(container.querySelector('.notification-config-import')).toBeNull()
+  })
+})
+
+describe('notification security-alert routing', () => {
+  let root: Root
+  let container: HTMLDivElement
+  let queryClient: QueryClient
+  const deployment = { id: 'file:deploy', name: 'Deployment', provider: 'generic', source: 'deployment', enabled: true, locked: false, read_only: true }
+
+  beforeEach(() => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
+    vi.mocked(listNotificationDestinations).mockResolvedValue({ ...response(true, []), destinations: [...destinations, deployment], security_routing: { configured: true, destinations: ['dest-1'] } })
+    vi.mocked(toggleNotificationSecurityAlert).mockResolvedValue({ configured: true, destinations: ['dest-1', 'dest-2'] })
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    queryClient.clear()
+    container.remove()
+    vi.clearAllMocks()
+  })
+
+  it('turns a web-managed destination’s security alerts on after confirmation', async () => {
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><Notifications /></QueryClientProvider>)
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(container.querySelectorAll('.notification-alert-toggle input')).toHaveLength(2), { timeout: 1000 })
+    // A deployment destination from config.yaml cannot receive security alerts.
+    expect(container.querySelector('input[aria-label="Enable security alerts for Deployment"]')).toBeNull()
+    expect((container.querySelector('input[aria-label="Disable security alerts for Operations"]') as HTMLInputElement).checked).toBe(true)
+    const backup = container.querySelector('input[aria-label="Enable security alerts for Backup"]') as HTMLInputElement
+    expect(backup.checked).toBe(false)
+    act(() => backup.click())
+    const dialog = document.body.querySelector('[role="dialog"]') as HTMLElement
+    expect(dialog.textContent).toContain('Confirm security alerts for Backup')
+    expect(dialog.textContent).toContain('platform administrator actions on this unit’s accounts')
+    vi.mocked(listNotificationDestinations).mockResolvedValue({ ...response(true, []), destinations: [...destinations, deployment], security_routing: { configured: true, destinations: ['dest-1', 'dest-2'] } })
+    setInputValue(dialog.querySelector('input[type="password"]') as HTMLInputElement, 'fixture-password')
+    await act(async () => {
+      ;(dialog.querySelector('button[type="submit"]') as HTMLButtonElement).click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('Security alerts enabled for Backup.'), { timeout: 1000 })
+    expect(toggleNotificationSecurityAlert).toHaveBeenCalledWith('dest-2', true, 'fixture-password')
+    await vi.waitFor(() => expect((container.querySelector('input[aria-label="Disable security alerts for Backup"]') as HTMLInputElement).checked).toBe(true), { timeout: 1000 })
+  })
+
+  it('reports a routing change that fails', async () => {
+    vi.mocked(toggleNotificationSecurityAlert).mockRejectedValueOnce(new Error('server refused'))
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><Notifications /></QueryClientProvider>)
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(container.querySelector('input[aria-label="Disable security alerts for Operations"]')).toBeTruthy(), { timeout: 1000 })
+    act(() => (container.querySelector('input[aria-label="Disable security alerts for Operations"]') as HTMLInputElement).click())
+    const dialog = document.body.querySelector('[role="dialog"]') as HTMLElement
+    setInputValue(dialog.querySelector('input[type="password"]') as HTMLInputElement, 'fixture-password')
+    await act(async () => {
+      ;(dialog.querySelector('button[type="submit"]') as HTMLButtonElement).click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(container.querySelector('[role="alert"]')?.textContent).toContain('server refused'), { timeout: 1000 })
+    expect(toggleNotificationSecurityAlert).toHaveBeenCalledWith('dest-1', false, 'fixture-password')
   })
 })

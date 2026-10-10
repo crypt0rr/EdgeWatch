@@ -77,8 +77,9 @@ type applicationUpdateStatusView struct {
 // platformStatusView reports the deployment to the platform administrators
 // as numbers: the units by state, their accounts, jobs, and stored scans,
 // the platform administrators, the scan capacity and its use, the version
-// and update status, the untrusted proxy once one was seen, and the outcome
-// of the scheduled backups when they are on.
+// and update status, the untrusted proxy once one was seen, the outcome of
+// the scheduled backups when they are on, and the deployment's telemetry
+// unless it cannot be read.
 type platformStatusView struct {
 	Accounts          int                         `json:"accounts"`
 	Backups           *app.BackupStatus           `json:"backups,omitempty"`
@@ -86,6 +87,7 @@ type platformStatusView struct {
 	Jobs              int                         `json:"jobs"`
 	PlatformAdmins    platformAdminCountsView     `json:"platform_admins"`
 	StoredScans       int64                       `json:"stored_scans"`
+	Telemetry         *store.DeploymentTelemetry  `json:"telemetry,omitempty"`
 	Units             platformUnitCountsView      `json:"units"`
 	UntrustedProxy    *auth.UntrustedProxy        `json:"untrusted_proxy,omitempty"`
 	Updates           applicationUpdateStatusView `json:"updates"`

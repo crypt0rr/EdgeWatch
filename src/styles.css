@@ -2496,3 +2496,9 @@ label small,
   .notification-failed-row .notification-meta strong,
   .notification-failed-row .notification-meta span { white-space: normal; }
 }
+/* The opt-in alert toggles of a web-managed destination, below its name.
+   Each looks like the destination's update-alert toggle. */
+.notification-alert-toggles{display:flex;flex-wrap:wrap;gap:8px 18px;margin:10px 0 0 43px}
+.notification-alert-toggle{display:flex;align-items:center;gap:8px;flex:0 0 auto;min-width:166px;cursor:pointer}.notification-alert-toggle input{appearance:none;width:36px!important;height:20px!important;padding:0!important;margin:0!important;border:1px solid #35516e;border-radius:999px;background:#1a2b40;position:relative;flex:0 0 auto;cursor:pointer;transition:background .18s,border-color .18s,box-shadow .18s}.notification-alert-toggle input::after{content:"";position:absolute;top:3px;left:3px;width:12px;height:12px;border-radius:50%;background:#8da4bb;transition:transform .18s,background .18s}.notification-alert-toggle input:checked{background:#15533f;border-color:#48bc8c}.notification-alert-toggle input:checked::after{background:#7ae4b8;transform:translateX(16px)}.notification-alert-toggle input:focus-visible{outline:2px solid #71b7ff;outline-offset:2px}.notification-alert-toggle span{min-width:0}.notification-alert-toggle strong,.notification-alert-toggle small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.notification-alert-toggle strong{font-size:10px;color:#dcecff}.notification-alert-toggle small{margin-top:3px;color:#7892ae;font-size:9px}.notification-alert-toggle input:disabled{cursor:not-allowed}.notification-alert-toggle:has(input:disabled){cursor:not-allowed;opacity:.65}
+.notification-alert-toggle strong,.notification-alert-toggle small{font-size:11px}
+@media (pointer: coarse){.notification-alert-toggle{min-height:44px}}

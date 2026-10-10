@@ -267,6 +267,11 @@ func (s *Server) legacyPlatformStatus(w http.ResponseWriter, r *http.Request) {
 	if backups := s.App.BackupStatus(); backups != nil {
 		status["backups"] = backups
 	}
+	// Added on purpose after the structs replaced the maps: the
+	// deployment's telemetry, from the same 30-second cache.
+	if telemetry, err := s.cachedDeploymentTelemetry(r.Context()); err == nil {
+		status["telemetry"] = telemetry
+	}
 	s.legacyAddVersionReleaseURL(status)
 	writeJSON(w, http.StatusOK, status)
 }
@@ -432,7 +437,7 @@ func TestStatusStructsWriteTheLegacyBytesWithOneUnit(t *testing.T) {
 	requireFields(t, "a deployment with every signal", store.RoleOperator, bodies[store.RoleOperator], false, "untrusted_proxy", "backups")
 	requireFields(t, "a deployment with every signal", store.RoleViewer, bodies[store.RoleViewer], true, "version", "version_release_url", "updates")
 	requireFields(t, "a deployment with every signal", store.RoleViewer, bodies[store.RoleViewer], false, "configured", "username", "permissions", "notifications", "live_updates", "untrusted_proxy", "backups", "legacy_yaml_jobs", "telemetry", "scanner_sandbox")
-	requireFields(t, "a deployment with every signal", "the platform", bodies["platform"], true, "untrusted_proxy", "backups", "version_release_url")
+	requireFields(t, "a deployment with every signal", "the platform", bodies["platform"], true, "untrusted_proxy", "backups", "telemetry", "version_release_url")
 
 	compareUpdateStatuses(t, server, accounts)
 }

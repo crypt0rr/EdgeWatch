@@ -600,6 +600,13 @@ func (ts *TenantStore) deleteManagedNotificationWithAudits(ctx context.Context, 
 	if routingChanged {
 		audits = append(audits, deletedDestinationRoutingAudit(audits, "notifications.update_routing", fmt.Sprintf("removed deleted notification destination %s from application update notification routing", id)))
 	}
+	securityChanged, err := removeSecurityAlertDestinationTx(ctx, tx, ts.scope.id, id)
+	if err != nil {
+		return nil, err
+	}
+	if securityChanged {
+		audits = append(audits, deletedDestinationRoutingAudit(audits, auditSecurityRouting, fmt.Sprintf("removed deleted notification destination %s from security alert routing", id)))
+	}
 	if err := ts.insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return nil, err
 	}

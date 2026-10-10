@@ -1,6 +1,6 @@
 ---
 title: API compatibility
-description: Review scan response shapes, business-unit routes, and compatibility changes.
+description: Review scan response shapes, business-unit routes, health and metrics endpoints, and compatibility changes.
 ---
 
 ## Job scan work estimates
@@ -315,6 +315,89 @@ status lacks, and a property typed `| null` can be `null`. The full scan
 response of a scan that an older release recorded can still lack keys, as
 [Scan history](#scan-history) describes.
 
+## Health and metrics
+
+v0.36.0 adds two endpoints outside the versioned APIs, on the console's
+listener. Neither is in `apiRoutes`: `Server.Handler` registers each
+beside the two API bases, and the route drift test lists them among the
+patterns that it may register.
+
+`GET /healthz` (and `HEAD`) needs no session and accepts any `Host`, as the
+public status pages do. Its body is always one key, `status`:
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| `ready` | `200` | The daemon's heartbeat is less than two minutes old. |
+| `starting` | `503` | A startup migration runs and its heartbeat is recent. |
+| `unhealthy` | `503` | A migration failed or stalled, the daemon heartbeat is stale or missing, or the database cannot be read. |
+| `rate_limited` | `429` | The client sent more than 120 requests in a minute; `Retry-After: 60`. |
+
+Other methods get `405` with `{"status":"method_not_allowed"}`. The answer
+carries no reason, phase, version, or unit, and is reused for one second.
+
+`GET /metrics` (and `HEAD`) answers `404` unless `web.metrics.enabled` is
+true. Then it needs `Authorization: Bearer <token>` with the token of
+`web.metrics.token_file`: a request without it, or with another token, gets
+`401` with `WWW-Authenticate: Bearer realm="edgewatch-metrics"`, and a token
+file that cannot be read keeps the endpoint at `503 metrics_unavailable`.
+Each client may send 120 requests a minute (`429 rate_limited`). The answer
+is `text/plain; version=0.0.4` and holds only these gauges; their names and
+labels are stable, and a label never names a business unit, an account, a
+job, a target, or a destination:
+
+| Metric | Labels | Value |
+| --- | --- | --- |
+| `edgewatch_build_info` | `version` | `1` for the running build. |
+| `edgewatch_health_status` | `status`: `ready`, `starting`, `unhealthy` | `1` for the answer of `/healthz`, `0` for the others. |
+| `edgewatch_daemon_heartbeat_age_seconds` | | Seconds since the daemon renewed its lease; only while it is ready. |
+| `edgewatch_migration_state` | `state`: `migrating`, `ready`, `failed`, `unknown` | `1` for the startup migration's state. |
+| `edgewatch_migration_phase_info` | `phase` | `1` for the running migration phase, such as `host-search:scan_hosts`; only while migrating. |
+| `edgewatch_migration_progress_ratio` | | The running phase's progress from 0 to 1, when it reports one. |
+| `edgewatch_scan_slots_capacity` | | The deployment's scan slots. |
+| `edgewatch_scan_slots_in_use` | | Slots that running scans hold. |
+| `edgewatch_scans_queued` | | Accepted scans that wait for a slot. |
+| `edgewatch_database_bytes` | | The size SQLite has allocated for the database. |
+| `edgewatch_notification_outbox_pending` | | Alerts still to be delivered, including those retrying. |
+| `edgewatch_notification_outbox_retrying` | | Alerts whose delivery failed at least once and is retried. |
+| `edgewatch_notification_outbox_terminal` | | Alerts that failed for good and are kept in the outbox. |
+| `edgewatch_telemetry_collected_timestamp_seconds` | | When the database and outbox counts were read; they are read at most every 30 seconds. |
+| `edgewatch_scanner_sandbox_state` | `state`: `sandboxed`, `identity_only`, `landlock_only`, `unconfined` | `1` for how scanner processes are confined. |
+| `edgewatch_notification_sandbox_state` | `state`, as above | `1` for how the notification process is confined. |
+| `edgewatch_update_check_status` | `status`: `up_to_date`, `update_available`, `ahead`, `check_failed`, `disabled`, `development_build` | `1` for the release check's status. |
+| `edgewatch_update_available` | | `1` when a newer release is available. |
+| `edgewatch_update_last_successful_check_timestamp_seconds` | | When the release check last succeeded. |
+
+`GET /api/v1/platform/status` also gains `telemetry`: the deployment's
+counts of jobs, scans, host observations, effective hosts, events, and scan
+cycles, `database_bytes`, `outbox_pending`, `outbox_retrying`,
+`outbox_failed`, and `collected_at`, read at most every 30 seconds and left
+out when they cannot be read.
+
+## Security and deployment alert routing
+
+v0.36.0 adds opt-in routings for the security and deployment alerts; see
+[Notifications](/user-guide/notifications/#security-alerts). Each routing
+starts empty. A `PUT` takes `{destinations, password}` and replaces it, an
+empty array selecting none; a `PATCH` takes `{destination_id, enabled,
+password}` and turns one destination on or off against the saved routing.
+Both confirm the caller's password and answer `{configured: true,
+destinations}`. A destination that is not the owner's, an unknown ID, and a
+deployment destination from `config.yaml` get `400 validation_failed` naming
+the ID, and nothing changes.
+
+| Endpoint | Permission | Routing |
+| --- | --- | --- |
+| `PUT`, `PATCH /api/v1/notifications/security-routing` | `notifications.manage` | The unit's security alerts, to the unit's web-managed destinations. Recorded in the unit's audit as `notifications.security_routing`. |
+| `PUT`, `PATCH /api/v1/platform/notifications/security-routing` | `platform_notifications.manage` | The platform's security alerts, to platform destinations. Recorded as `platform_notifications.security_routing`. |
+| `PUT`, `PATCH /api/v1/platform/notifications/health-routing` | `platform_notifications.manage` | The deployment alerts, to platform destinations. Recorded as `platform_notifications.health_routing`. |
+
+`GET /api/v1/notifications/destinations` and `/notifications/options` add
+`security_routing`, and `GET /api/v1/platform/notifications` adds
+`security_routing` and `health_routing`, each as `{configured, destinations}`.
+The alerts are delivered as events of the types `security.alert` and
+`application.health_alert`, which a destination's failed alerts can list;
+they do not appear in the activity history.
+
 ## Business units
 
 v0.20.0 adds business units to every installation. The routes and response
@@ -395,4 +478,4 @@ of `200`. `POST /api/v1/platform/admins/{id}/activation` and
 | `PATCH /api/v1/platform/notifications/{id}` | `platform_notifications.manage` | `{revision, name, url, enabled, password}`; an absent `url` or `enabled`, or an empty `name`, keeps its value. |
 | `DELETE /api/v1/platform/notifications/{id}` | `platform_notifications.manage` | `{revision, password}`. `204`. |
 | `PUT /api/v1/platform/notifications/update-routing` | `platform_notifications.manage` | `{destinations, password}`; platform destination IDs only, and an empty array selects none. |
-| `GET /api/v1/platform/status` | `platform_status.read` | Units by state, account, job, and stored scan totals (`accounts`, `jobs`, `stored_scans`), platform administrator counts, the deployment's scan limits and slot use, and the version and update status. |
+| `GET /api/v1/platform/status` | `platform_status.read` | Units by state, account, job, and stored scan totals (`accounts`, `jobs`, `stored_scans`), platform administrator counts, the deployment's scan limits and slot use, the version and update status, and, from v0.36.0, the deployment's `telemetry`. |

@@ -121,6 +121,9 @@ that the table refuses ambiguous patterns; these fail-closed answers; that no
 other function reads the request path or registers a ServeMux pattern; and
 that a handler reads only the path values of its template.
 `TestRouteInventoryGateMatrix` sends every entry as each role.
+The few paths served outside the two APIs, such as `/healthz` and
+`/metrics`, are registered in `Server.Handler` and listed in
+`handlerPatterns` in `internal/web/route_drift_test.go`.
 
 ## Validate changes
 

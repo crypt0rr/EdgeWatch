@@ -126,7 +126,12 @@ service, restore the backup as described in
 [Backup and recovery](/operations/backup-recovery/), and start it again with
 `docker compose up -d`. Remove the override to follow `latest` again. A release
 that keeps the schema version can be rolled back by pinning the earlier image
-alone.
+alone. From v0.36.0, a release that starts on a database whose installed
+version is newer logs `application version rollback detected` and records a
+[deployment alert](/user-guide/notifications/#deployment-alerts) in the
+platform audit, which the platform destinations selected for deployment
+alerts receive. A rollback to a release before v0.36.0 does not report
+itself.
 
 The upgrade from v0.19.0 to v0.20.0 is an example of a forward-only update: it
 runs the schema 51 to 54 migrations, which move all existing data into the

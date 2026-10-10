@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"modernc.org/sqlite"
@@ -42,6 +43,27 @@ type Store struct {
 	// library compatibility); a non-nil empty slice is an explicit allow-all
 	// override.
 	targetExclusions []string
+	// alertWake is the hook that SetAlertWake installs.
+	alertWake atomic.Pointer[func()]
+}
+
+// SetAlertWake installs the hook that the store calls after it has
+// committed an audit record that can send a security alert outside a
+// caller's transaction, so the daemon's delivery worker sends the alert
+// promptly instead of on its next tick.
+func (s *Store) SetAlertWake(wake func()) {
+	if wake == nil {
+		s.alertWake.Store(nil)
+		return
+	}
+	s.alertWake.Store(&wake)
+}
+
+// wakeAlerts calls the hook of SetAlertWake, if any.
+func (s *Store) wakeAlerts() {
+	if wake := s.alertWake.Load(); wake != nil {
+		(*wake)()
+	}
 }
 
 type rowQueryer interface {

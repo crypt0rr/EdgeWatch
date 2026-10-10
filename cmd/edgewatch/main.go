@@ -968,6 +968,11 @@ func validateStartupConfig(cfg *config.Config) error {
 	if err := notify.ValidateConfiguredURLs(cfg.Notifications.URLs); err != nil {
 		return fmt.Errorf("%w in notifications.urls or notifications.urls_file", err)
 	}
+	if cfg.Web.Metrics.Enabled {
+		if _, err := config.ReadMetricsToken(cfg.Web.Metrics.TokenFile); err != nil {
+			return fmt.Errorf("validate metrics token file (web.metrics.token_file): %w", err)
+		}
+	}
 	return nil
 }
 

@@ -2052,6 +2052,12 @@ func unitMap(s model.Snapshot) map[string]model.Unit {
 }
 
 func FormatEvent(e model.Event) string {
+	switch e.Type {
+	case model.EventSecurityAlert:
+		return formatSecurityAlert(e)
+	case model.EventHealthAlert:
+		return formatHealthAlert(e)
+	}
 	var b strings.Builder
 	if e.Type == "application-update-available" {
 		b.WriteString("⬆️ EdgeWatch update available")

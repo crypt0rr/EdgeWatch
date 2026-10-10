@@ -156,6 +156,8 @@ func TestNotificationRoutesUseTheSessionTenant(t *testing.T) {
 	sameAsUnknown(http.MethodPut, destination, fmt.Sprintf(`{"name":"stolen","url":%q,"enabled":true,"revision":1,%s}`, urls["other"], password), http.StatusNotFound)
 	sameAsUnknown(http.MethodDelete, destination, `{"revision":1,`+password+`}`, http.StatusNotFound)
 	sameAsUnknown(http.MethodPut, "/api/v1/notifications/update-routing", `{"destinations":["{id}"],`+password+`}`, http.StatusBadRequest)
+	sameAsUnknown(http.MethodPut, "/api/v1/notifications/security-routing", `{"destinations":["{id}"],`+password+`}`, http.StatusBadRequest)
+	sameAsUnknown(http.MethodPatch, "/api/v1/notifications/security-routing", `{"destination_id":"{id}","enabled":true,`+password+`}`, http.StatusBadRequest)
 	newJob := `{"name":"routed-elsewhere","schedule":"0 * * * *","timezone":"UTC","targets":["192.0.2.20"],"tcp":{"ports":"1","mode":"connect"},"notification_destinations":["{id}"]}`
 	sameAsUnknown(http.MethodPost, "/api/v1/jobs", newJob, http.StatusBadRequest)
 	update := fromConfig(job)

@@ -45,6 +45,8 @@ var knownAuditActions = map[string][]string{
 		"tenant.enabled", "tenant.purged", "tenant.renamed",
 		"platform_notifications.created", "platform_notifications.deleted",
 		"platform_notifications.update_routing", "platform_notifications.updated",
+		"platform_notifications.security_routing", "platform_notifications.health_routing",
+		"application.health_alert",
 	},
 	auditCategoryData: {
 		"baseline.approved", "baseline.reset",
@@ -56,6 +58,7 @@ var knownAuditActions = map[string][]string{
 		"notifications.pending_kept", "notifications.redelivered",
 		"notifications.test", "notifications.test_failed", "notifications.update_routing",
 		"notifications.updated", "notifications.incident_reminders_changed",
+		"notifications.security_routing",
 		"public_dashboard.updated",
 		"scan.cancel_requested", "scan.cycle_discarded", "scan.queued_run_canceled", "scan.run_requested",
 		"scanner_profile.archived", "scanner_profile.created", "scanner_profile.restored",
@@ -112,6 +115,7 @@ var sqlAuditActionPattern = regexp.MustCompile(`'([a-z][a-z0-9_]*(?:\.[a-z0-9_]+
 // names are declared in internal/auth/permissions.go, which is not scanned.
 var notAuditActions = map[string]bool{
 	"application.update_status":   true,
+	"security.alert":              true, // A security alert's event type; the audit holds the record it reports.
 	"notification.changed":        true,
 	"scan.cancellation_requested": true,
 	"scan.completed":              true,

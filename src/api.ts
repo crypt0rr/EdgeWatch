@@ -50,6 +50,10 @@ export type NotificationDestinationsResponse = {
   destinations: NotificationDestination[]
   status: NotificationStatus
   update_routing?: NotificationUpdateRouting
+  /** The destinations of the security alerts; a unit's and the platform's start empty. */
+  security_routing?: NotificationUpdateRouting
+  /** The platform destinations of the deployment-health alerts; only the platform has them. */
+  health_routing?: NotificationUpdateRouting
   incident_reminders_enabled?: boolean
   incident_reminder_cadence?: IncidentReminderCadence
 }
@@ -237,6 +241,7 @@ export const notificationTest = () => api<{ sent: number }>('/notifications/test
 export const listNotificationDestinations = () => api<NotificationDestinationsResponse>('/notifications/destinations')
 export const updateNotificationRouting = (destinations: string[], password: string) => api<NotificationUpdateRouting>('/notifications/update-routing', { method: 'PUT', body: JSON.stringify({ destinations, password }) })
 export const toggleNotificationUpdateAlert = (destinationID: string, enabled: boolean, password: string) => api<NotificationUpdateRouting>('/notifications/update-routing', { method: 'PATCH', body: JSON.stringify({ destination_id: destinationID, enabled, password }) })
+export const toggleNotificationSecurityAlert = (destinationID: string, enabled: boolean, password: string) => api<NotificationUpdateRouting>('/notifications/security-routing', { method: 'PATCH', body: JSON.stringify({ destination_id: destinationID, enabled, password }) })
 export const updateIncidentReminders = (settings: { enabled?: boolean; cadence?: IncidentReminderCadence }, password: string) => api<{ enabled: boolean; cadence: IncidentReminderCadence }>('/notifications/incident-reminders', { method: 'PUT', body: JSON.stringify({ ...settings, password }) })
 export const getNotificationDestination = (id: string) => api<NotificationDestination>(`/notifications/destinations/${encodeURIComponent(id)}`)
 function notificationCredentialField(input: string | NotificationProviderConfig) {
@@ -365,6 +370,8 @@ export const updatePlatformNotification = (id: string, revision: number, name: s
 export const deletePlatformNotification = (id: string, revision: number, password: string) => api<void>(`/platform/notifications/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ revision, password }) })
 export const updatePlatformNotificationRouting = (destinations: string[], password: string) => api<NotificationUpdateRouting>('/platform/notifications/update-routing', { method: 'PUT', body: JSON.stringify({ destinations, password }) })
 export const togglePlatformNotificationUpdateAlert = (destinationID: string, enabled: boolean, password: string) => api<NotificationUpdateRouting>('/platform/notifications/update-routing', { method: 'PATCH', body: JSON.stringify({ destination_id: destinationID, enabled, password }) })
+export const togglePlatformSecurityAlert = (destinationID: string, enabled: boolean, password: string) => api<NotificationUpdateRouting>('/platform/notifications/security-routing', { method: 'PATCH', body: JSON.stringify({ destination_id: destinationID, enabled, password }) })
+export const togglePlatformDeploymentAlert = (destinationID: string, enabled: boolean, password: string) => api<NotificationUpdateRouting>('/platform/notifications/health-routing', { method: 'PATCH', body: JSON.stringify({ destination_id: destinationID, enabled, password }) })
 export const platformStatus = () => api<PlatformStatus>('/platform/status')
 
 // Both audit views are paged newest first by keyset: pass the previous page's

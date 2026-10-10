@@ -196,6 +196,8 @@ type Web struct {
 	// DefaultMaxLiveStreamsPerUnit, or MaxLiveStreams when that is lower.
 	MaxLiveStreams        *int `yaml:"max_live_streams"`
 	MaxLiveStreamsPerUnit *int `yaml:"max_live_streams_per_unit"`
+	// Metrics is the opt-in Prometheus endpoint; see WebMetrics.
+	Metrics WebMetrics `yaml:"metrics"`
 }
 
 // RateLimitIPv6Prefix returns web.ipv6_rate_limit_prefix, or
@@ -1089,6 +1091,9 @@ func (c Config) ValidateDeployment() error {
 		return fmt.Errorf("web.max_live_streams must be between 1 and %d", MaxLiveStreamsLimit)
 	} else if perUnit < 1 || perUnit > total {
 		return fmt.Errorf("web.max_live_streams_per_unit must be between 1 and web.max_live_streams (%d)", total)
+	}
+	if err := c.Web.Metrics.validate(); err != nil {
+		return err
 	}
 	if c.Web.SourceURL != "" {
 		source, err := url.Parse(c.Web.SourceURL)

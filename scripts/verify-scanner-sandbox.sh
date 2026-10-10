@@ -47,7 +47,14 @@ trap cleanup EXIT
 fail() {
   echo "scanner sandbox check failed: $*" >&2
   if [ -n "$container" ]; then
-    docker logs "$container" 2>&1 | tail -40 >&2 || true
+    docker logs "$container" 2>&1 | tail -80 >&2 || true
+    # What was running, and what the daemon thought it was doing, when the
+    # check gave up.
+    echo "processes in the daemon container (name state ppid uid):" >&2
+    docker exec "$container" /bin/sh -c 'for status in /proc/[0-9]*/status; do awk "/^Name:/{n=\$2} /^State:/{s=\$2} /^PPid:/{p=\$2} /^Uid:/{u=\$2} END{print n, s, p, u}" "$status" 2>/dev/null; done' >&2 || true
+    if [ -n "${base:-}" ] && [ -n "${state:-}" ]; then
+      python3 "$workdir/driver.py" diagnose "$base" "$state" >&2 || true
+    fi
   fi
   exit 1
 }
@@ -236,6 +243,11 @@ def main():
         name, url = args
         request(base, state, "POST", "/notifications/destinations", {"name": name, "url": url, "enabled": True, "password": PASSWORD})
         print(json.dumps(request(base, state, "POST", "/notifications/test")))
+    elif command == "diagnose":
+        print("active scans:", json.dumps(request(base, state, "GET", "/scans/active")))
+        for job in request(base, state, "GET", "/jobs")["jobs"]:
+            print("job", job["id"], job["job"]["name"], "scan cycle:", json.dumps(request(base, state, "GET", f"/jobs/{job['id']}/scan-cycle")))
+        return
     elif command == "cancel":
         job_id, scan_id = args
         request(base, state, "POST", f"/scans/{scan_id}/cancel")

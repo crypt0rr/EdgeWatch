@@ -242,11 +242,10 @@ func TestProviderTimeoutIsRetriedAsAProviderAttempt(t *testing.T) {
 // a definitive success, and only a child that runs longer is ended and its
 // delivery deferred as indeterminate.
 func TestCanceledDeliveryWaitsForTheChildWithinTheGrace(t *testing.T) {
-	ctx := context.Background()
 	t.Run("finishes within the grace", func(t *testing.T) {
 		started := useFakeChild(t, "sleep 0.3; exit 0")
 		notifier, db, _ := queuedManagedDelivery(t, "generic://203.0.113.10/alerts")
-		drainCtx, cancel := context.WithCancel(ctx)
+		drainCtx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { done <- notifier.Drain(drainCtx) }()
 		select {
@@ -265,7 +264,7 @@ func TestCanceledDeliveryWaitsForTheChildWithinTheGrace(t *testing.T) {
 	t.Run("runs past the grace", func(t *testing.T) {
 		started := useFakeChild(t, "exec sleep 30")
 		notifier, db, _ := queuedManagedDelivery(t, "generic://203.0.113.10/alerts")
-		drainCtx, cancel := context.WithCancel(ctx)
+		drainCtx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { done <- notifier.Drain(drainCtx) }()
 		select {
@@ -292,7 +291,6 @@ func TestCanceledDeliveryWaitsForTheChildWithinTheGrace(t *testing.T) {
 // writer is free, and the next pass does not send it again. A result that
 // still cannot be written is reported as sent but not recorded.
 func TestSentDeliveryResultSurvivesWriterContention(t *testing.T) {
-	ctx := context.Background()
 	previousTimeout, previousDelay, previousWindow := deliveryResultTimeout, deliveryResultRetryDelay, deliveryResultRetryWindow
 	deliveryResultTimeout, deliveryResultRetryDelay = 100*time.Millisecond, 50*time.Millisecond
 	t.Cleanup(func() {
@@ -309,6 +307,7 @@ func TestSentDeliveryResultSurvivesWriterContention(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			deliveryResultRetryWindow = tc.window
 			notifier, db, _ := queuedManagedDelivery(t, "generic://203.0.113.10/alerts")
+			ctx := context.Background()
 			var sends atomic.Int32
 			released := make(chan struct{})
 			previous := notificationProviderSend

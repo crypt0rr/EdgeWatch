@@ -127,7 +127,7 @@ that only need scan metadata should use `/summary`, then request paginated
 results or host evidence separately when needed. This avoids loading large
 snapshots just to show scan status and timestamps.
 
-Since the release after v0.34.0, the full-response endpoint writes the
+Since v0.35.0, the full-response endpoint writes the
 `snapshot` and `changes` that EdgeWatch stored for the scan as they are,
 rather than decoding and encoding them again, so a broad scan is held in the
 daemon's memory once. For a scan that this release recorded, the response is
@@ -143,7 +143,7 @@ one of them to finish.
 `GET /api/v1/jobs/{jobID}/baseline` returns the job's baseline summary and
 one page of its logical units in `snapshot.units`, with the baseline's
 `scopes`, `dns`, and `target_failures` on every page. A page carries neither
-the host observations (`hosts`) nor, since the release after v0.34.0, the
+the host observations (`hosts`) nor, since v0.35.0, the
 per-address `host_states`: both grow with every address in the scope, so a
 page of a broad baseline would otherwise grow without bound. Request host
 evidence from `GET /api/v1/jobs/{jobID}/baseline/hosts`, which is paginated
@@ -222,7 +222,7 @@ session, and the job API still enforces the rule.
 
 ## Notification delivery outcomes
 
-v0.34.0 changes these notification destination responses and adds two
+v0.35.0 changes these notification destination responses and adds two
 routes for a unit's destinations:
 
 | Endpoint | Change |

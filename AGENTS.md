@@ -126,7 +126,11 @@ Report the checks you ran and any failures or checks you could not run.
 - Never commit notification URLs, authentication tokens, passwords, or encryption keys.
 - Use temporary databases in tests and preserve migration compatibility, transaction boundaries, and restore checks.
   For a fresh database, use `openTestStore` in `internal/store` and `storetest.OpenFresh` or `storetest.FreshPath` elsewhere; these copy a migrated template.
-  Migrate from scratch only in tests that need it, such as migration, setup, and restore tests, because a full migration takes seconds under `-race`.
+  Migrate from scratch only in tests that need it, such as migration, setup, and restore tests: a new database starts from the frozen schema 54 baseline but still runs every later migration and startup phase, which costs far more than a copy under `-race`.
+- Upgrades start at schema 54 (`minimumUpgradeSchema`); the daemon refuses an older database before it writes, and v0.35.0 upgrades it.
+  Never edit `baselineSchemaStatements`, `baselineSchemaRows`, or `internal/store/testdata/schema54-migration-chain.golden`; change the schema with a new migration, and test a step on a database at the schema before it, as `reapplyMigration` does.
+  List a version that rebuilds a table other tables reference in `foreignKeysOffMigrations`; `applyMigration` refuses its `DROP TABLE` otherwise.
+  Begin a startup phase that reads before it writes with `beginWriteTx`, so a concurrent host command delays it instead of failing the start.
 - When the schema changes, update [database compatibility](docs/src/content/docs/reference/database-compatibility.md) and `SECURITY.md`.
 - Keep runtime configuration, databases, keys, and generated assets out of source control.
 

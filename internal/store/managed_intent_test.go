@@ -2,8 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -226,71 +224,5 @@ func TestManagedIntentResolutionSkipsMalformedAndUnknownKeys(t *testing.T) {
 	audits := managedIntentDiscardAudits(t, s)
 	if len(audits) != 2 || !strings.Contains(audits[0], "managed notification ops after credential rotation") || !strings.Contains(audits[1], "managed notification gone after the destination was deleted") {
 		t.Fatalf("unknown managed revision audits = %v", audits)
-	}
-}
-
-// Schema 49 adds the credential revision. Existing destinations have no
-// history, so the migration conservatively treats their current revision as
-// the one that set the credentials.
-func TestMigration49RecordsCurrentRevisionAsCredentialRevision(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "credential-revision.db")
-	s, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := defaultTenant(s).CreateManagedNotification(ctx, "ops", "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
-		s.Close()
-		t.Fatal(err)
-	}
-	for revision := int64(1); revision < 3; revision++ {
-		if _, err := defaultTenant(s).UpdateManagedNotification(ctx, "ops", revision, "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
-			s.Close()
-			t.Fatal(err)
-		}
-	}
-	job, err := defaultTenant(s).CreateJob(ctx, testJob("credential-migration"))
-	if err != nil {
-		s.Close()
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, statement := range []string{`ALTER TABLE managed_notifications DROP COLUMN credential_revision`, `PRAGMA user_version=48`} {
-		if _, err := raw.ExecContext(ctx, statement); err != nil {
-			raw.Close()
-			t.Fatal(err)
-		}
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	upgraded, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer upgraded.Close()
-	var revision, credentialRevision int64
-	if err := upgraded.DB.QueryRowContext(ctx, `SELECT revision,credential_revision FROM managed_notifications WHERE id='ops'`).Scan(&revision, &credentialRevision); err != nil {
-		t.Fatal(err)
-	}
-	if revision != 3 || credentialRevision != 3 {
-		t.Fatalf("migrated revision/credential revision = %d/%d, want 3/3", revision, credentialRevision)
-	}
-	if _, err := defaultTenant(upgraded).ResetRuntimeWithOutbox(ctx, job.ID, job.Job.Name, []string{"managed:ops:2"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := defaultTenant(upgraded).ResetRuntimeWithOutbox(ctx, job.ID, job.Job.Name, []string{"managed:ops:3"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := managedIntentOutbox(t, upgraded); len(got) != 1 || got[0] != "managed:ops:3" {
-		t.Fatalf("outbox after migration = %v, want only the current-revision intent", got)
 	}
 }

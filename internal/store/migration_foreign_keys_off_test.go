@@ -76,8 +76,12 @@ func openRebuildTestDB(t *testing.T) *sql.DB {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(4)
 	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.Exec(rebuildFixtureSchema); err != nil {
-		t.Fatal(err)
+	// Each schema step takes its write lock through startup_state, which
+	// the migration creates before any step.
+	for _, statement := range []string{startupStateSchema, rebuildFixtureSchema} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := db.Exec("CREATE TEMP TABLE " + pinnedConnectionMarker + " (x)"); err != nil {
 		t.Fatal(err)
@@ -269,26 +273,97 @@ func TestForeignKeysOffMigrationRebuildKeepsCascadeChildren(t *testing.T) {
 	}
 }
 
-// The plain runner shows the problem the foreign-keys-off runner solves: the
-// same rebuild succeeds but DROP TABLE cascades into, and empties, the
-// child tables.
-func TestPlainMigrationRebuildDeletesCascadeChildren(t *testing.T) {
+// The plain runner refuses the rebuild that the foreign-keys-off runner
+// runs: with enforcement on, its DROP TABLE would cascade into, and empty,
+// the child tables. The refusal names the remedy and changes nothing.
+func TestPlainMigrationRefusesRebuildOfReferencedTable(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	db := openRebuildTestDB(t)
+	before := rebuildFixtureRows(t, db)
 
-	if err := runMigration(ctx, db, 7, parentsRebuild.statements(), false); err != nil {
-		t.Fatalf("rebuild: %v", err)
+	err := runMigration(ctx, db, 7, parentsRebuild.statements(), false)
+	want := "schema migration 7 drops table parents, which parent_notes references with a foreign key: with foreign keys on, the drop would delete or change the referencing rows; list the version in foreignKeysOffMigrations"
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
 	}
+	assertParentsUnchanged(t, db, before)
+	if got := rebuildTestCount(t, db, "SELECT COUNT(*) FROM parent_notes"); got != 3 {
+		t.Fatalf("parent_notes rows = %d, want 3", got)
+	}
+	if got := rebuildTestCount(t, db, "SELECT COUNT(*) FROM parent_tags"); got != 4 {
+		t.Fatalf("parent_tags rows = %d, want 4", got)
+	}
+}
 
-	if got := rebuildTestCount(t, db, "SELECT COUNT(*) FROM parents"); got != 3 {
-		t.Fatalf("parents rows = %d, want 3", got)
+// Every form of DROP TABLE is found, also in a statement string that holds
+// several statements, while a table that nothing references, a missing
+// table, and a self-reference may still be dropped.
+func TestRefuseReferencedTableDrop(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openRebuildTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE lonely (id INTEGER PRIMARY KEY, parent INTEGER REFERENCES lonely(id))`); err != nil {
+		t.Fatal(err)
 	}
-	if got := rebuildTestCount(t, db, "SELECT COUNT(*) FROM parent_notes"); got != 0 {
-		t.Fatalf("parent_notes rows = %d, want the cascade to have deleted all of them", got)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := rebuildTestCount(t, db, "SELECT COUNT(*) FROM parent_tags"); got != 0 {
-		t.Fatalf("parent_tags rows = %d, want the cascade to have deleted all of them", got)
+	defer func() { _ = tx.Rollback() }()
+	for _, test := range []struct {
+		statement string
+		refused   bool
+	}{
+		{"DROP TABLE parents", true},
+		{"drop table if exists PARENTS", true},
+		{`DROP TABLE "parents"`, true},
+		{"DROP TABLE main.parents", true},
+		{"CREATE TABLE scratch (x); DROP TABLE  IF  EXISTS\n parents", true},
+		{"DROP TABLE parent_notes", false},
+		{"DROP TABLE lonely", false},
+		{"DROP TABLE IF EXISTS missing", false},
+		{"DROP VIEW parent_names", false},
+		{"DROP INDEX parents_name_id", false},
+	} {
+		err := refuseReferencedTableDrop(ctx, tx, 9, test.statement)
+		if refused := err != nil; refused != test.refused {
+			t.Errorf("%q: error = %v, want refused %t", test.statement, err, test.refused)
+		}
+	}
+}
+
+// Lint the migration source: a version that drops a table which the
+// current schema references with a foreign key must be listed in
+// foreignKeysOffMigrations, and every listed version must exist. The
+// runtime check in applyMigration refuses the drop as well; this test
+// reports the mistake without a database at that version.
+func TestMigrationsDropReferencedTablesOnlyWithForeignKeysOff(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	referenced := map[string]bool{}
+	for _, table := range queryStrings(t, s.DB, `SELECT DISTINCT lower(f."table") FROM sqlite_master AS m, pragma_foreign_key_list(m.name) AS f WHERE m.type='table'`) {
+		referenced[table] = true
+	}
+	for _, parent := range []string{"jobs", "users", "tenants", "scans", "scanner_profiles"} {
+		if !referenced[parent] {
+			t.Fatalf("the schema does not reference %s; the lint reads the wrong schema: %v", parent, referenced)
+		}
+	}
+	migrations := schemaMigrationStatements()
+	for version, statements := range migrations {
+		for _, statement := range statements {
+			for _, match := range dropTablePattern.FindAllStringSubmatch(statement, -1) {
+				if referenced[strings.ToLower(match[1])] && !foreignKeysOffMigrations[version] {
+					t.Errorf("schema %d drops %s, which other tables reference, but is not listed in foreignKeysOffMigrations", version, match[1])
+				}
+			}
+		}
+	}
+	for version := range foreignKeysOffMigrations {
+		if _, ok := migrations[version]; !ok {
+			t.Errorf("foreignKeysOffMigrations lists schema %d, which has no migration", version)
+		}
 	}
 }
 

@@ -128,6 +128,13 @@ func (ss *SystemStore) HealthStatus(ctx context.Context) (HealthStatus, error) {
 		return status, errors.New("database is not open")
 	}
 	reader := ss.store.reader()
+	// The daemon refuses a schema older than this release upgrades before it
+	// writes startup_state, so the state there is an earlier release's;
+	// report the refusal instead. Any other answer of the check leaves the
+	// report to the state and the lease below.
+	if _, err := checkUpgradableSchemaContext(ctx, reader); errors.Is(err, ErrSchemaBelowUpgradeFloor) {
+		return status, err
+	}
 	var tableCount int
 	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='startup_state'`).Scan(&tableCount); err != nil {
 		return status, err

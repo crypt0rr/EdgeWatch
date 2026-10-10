@@ -3,10 +3,8 @@ package store
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"errors"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -475,85 +473,6 @@ func TestImportDeploymentNotificationsRejectsIncompleteItems(t *testing.T) {
 	}
 	if result, err := s.System().ImportDeploymentNotifications(context.Background(), nil); err != nil || len(result.Imported) != 0 {
 		t.Fatalf("empty import = %#v, %v", result, err)
-	}
-}
-
-// Schema 50 records the import on the deployment ID rows of a populated
-// schema-49 database without changing the rows it already has.
-func TestMigration50AddsNotificationImportState(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "schema49.db")
-	s, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := testURLDigest("schema49")
-	ids, err := s.System().EnsureDeploymentNotificationIDs(ctx, []string{digest})
-	if err != nil {
-		s.Close()
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, statement := range []string{
-		`ALTER TABLE deployment_notification_ids DROP COLUMN managed_notification_id`,
-		`ALTER TABLE deployment_notification_ids DROP COLUMN imported_at`,
-		`DROP TABLE notification_config_import`,
-		`PRAGMA user_version=49`,
-	} {
-		if _, err := raw.ExecContext(ctx, statement); err != nil {
-			raw.Close()
-			t.Fatal(err)
-		}
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	// A host command that opens the schema-49 file before the daemon has
-	// upgraded it keeps treating every configured URL as not imported.
-	existing, err := OpenExisting(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	imported, err := existing.System().ImportedDeploymentNotifications(ctx, []string{digest})
-	if err != nil || len(imported) != 0 {
-		t.Fatalf("imported digests before migration = %v, %v", imported, err)
-	}
-	if state, err := existing.System().NotificationConfigImportState(ctx); err != nil || state.Status != NotificationConfigImportNone {
-		t.Fatalf("import state before migration = %#v, %v", state, err)
-	}
-	if err := existing.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	upgraded, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer upgraded.Close()
-	var version int
-	if err := upgraded.DB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
-		t.Fatalf("schema version = %d, %v; want %d", version, err, schemaVersion)
-	}
-	var opaque, managedID, importedAt string
-	if err := upgraded.DB.QueryRowContext(ctx, `SELECT opaque_id,managed_notification_id,imported_at FROM deployment_notification_ids WHERE legacy_hash=?`, digest).Scan(&opaque, &managedID, &importedAt); err != nil {
-		t.Fatal(err)
-	}
-	if opaque != ids[digest] || managedID != "" || importedAt != "" {
-		t.Fatalf("migrated mapping = %q/%q/%q, want the same opaque ID and no import", opaque, managedID, importedAt)
-	}
-	if state, err := upgraded.System().NotificationConfigImportState(ctx); err != nil || state.Status != NotificationConfigImportNone {
-		t.Fatalf("import state after migration = %#v, %v", state, err)
-	}
-	if _, err := upgraded.System().ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(digest, "after-upgrade")}); err != nil {
-		t.Fatalf("import after upgrade: %v", err)
 	}
 }
 

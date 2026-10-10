@@ -476,9 +476,9 @@ func TestRestoreKeyMismatchErrorNamesTheCounts(t *testing.T) {
 }
 
 // The key check reads the sealed destinations and TOTP seeds of every owner
-// with columns that every schema since they exist has, and finds none in a
-// database from before them.
-func TestKeyCheckReadersCoverEveryOwnerAndOlderSchemas(t *testing.T) {
+// with columns that every supported schema has, and finds none in a database
+// without their tables.
+func TestKeyCheckReadersCoverEveryOwner(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s, database := openFreshFileStore(t)
@@ -510,36 +510,9 @@ func TestKeyCheckReadersCoverEveryOwnerAndOlderSchemas(t *testing.T) {
 		t.Fatalf("default authentication key of an in-memory database = %q", path)
 	}
 
-	// A database of the first schemas keeps the administrator's seed in
-	// admins, which the key check reads with the legacy owner; a plaintext
-	// seed of v0.3 needs no key.
-	legacy := filepath.Join(t.TempDir(), "legacy.db")
-	raw, err := sql.Open("sqlite", legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := raw.Exec(`CREATE TABLE admins(id INTEGER PRIMARY KEY, totp_secret TEXT NOT NULL DEFAULT ''); INSERT INTO admins(id,totp_secret) VALUES(1,'JBSWY3DPEHPK3PXP')`); err != nil {
-		raw.Close()
-		t.Fatal(err)
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	old, err := OpenReadOnlyExisting(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer old.Close()
-	if sealed, err := old.System().SealedManagedNotifications(ctx); err != nil || len(sealed) != 0 {
-		t.Fatalf("sealed destinations of an old schema = %+v, %v", sealed, err)
-	}
-	if seeds, unreadable, err := old.System().TOTPKeyCheck(ctx); err != nil || seeds != 1 || unreadable != 0 {
-		t.Fatalf("TOTP key check of an old schema = %d, %d, %v", seeds, unreadable, err)
-	}
-
-	// A database without either table has no seed.
+	// A database without the tables has no seed and no destination.
 	empty := filepath.Join(t.TempDir(), "empty.db")
-	raw, err = sql.Open("sqlite", empty)
+	raw, err := sql.Open("sqlite", empty)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,6 +530,9 @@ func TestKeyCheckReadersCoverEveryOwnerAndOlderSchemas(t *testing.T) {
 	defer none.Close()
 	if seeds, unreadable, err := none.System().TOTPKeyCheck(ctx); err != nil || seeds != 0 || unreadable != 0 {
 		t.Fatalf("TOTP key check without accounts = %d, %d, %v", seeds, unreadable, err)
+	}
+	if sealed, err := none.System().SealedManagedNotifications(ctx); err != nil || len(sealed) != 0 {
+		t.Fatalf("sealed destinations without the table = %+v, %v", sealed, err)
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()

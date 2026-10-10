@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"slices"
 	"testing"
 )
 
@@ -10,22 +11,19 @@ func TestScanHistoryIndexesSupportManagedQueries(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 
-	// Exercise the upgrade path from schema 20 rather than only checking a
-	// fresh database: schema 22 adds the job and cycle indexes, and schema
-	// 66 replaces them with indexes that hold the columns the history reads
-	// test. This also catches a future migration that forgets an index when
-	// an operator upgrades an existing installation.
-	if _, err := s.DB.ExecContext(ctx, `DROP INDEX IF EXISTS scans_job_id_history;
-DROP INDEX IF EXISTS scans_tenant_history;
-DROP INDEX IF EXISTS scans_identity;
-DROP INDEX IF EXISTS scans_cycle_outcome;
-DROP INDEX IF EXISTS scans_job_id_revision;
-DROP INDEX IF EXISTS scans_finished_at;
-PRAGMA user_version = 20;`); err != nil {
-		t.Fatal(err)
+	// Exercise the upgrade path from schema 54, the oldest that this release
+	// upgrades, rather than only checking a fresh database: schema 66
+	// replaces the job, tenant and cycle indexes with indexes that hold the
+	// columns the history reads test. This also catches a future migration
+	// that forgets an index when an operator upgrades an existing
+	// installation.
+	for _, statement := range append(slices.Clone(schema66UndoStatements), "PRAGMA user_version = 54") {
+		if _, err := s.DB.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
 	}
 	if err := migrate(s.DB); err != nil {
-		t.Fatalf("reapply migrations from schema 20: %v", err)
+		t.Fatalf("reapply migrations from schema 54: %v", err)
 	}
 
 	want := map[string]bool{

@@ -310,21 +310,15 @@ func (s *Store) openTOTPSecretForOwner(owner, stored string) (string, bool, erro
 
 // TOTPKeyCheck counts the accounts of every tenant and of the platform that
 // have a stored TOTP seed, and the seeds that the store's authentication key
-// cannot open, for a check of the key against a backup. A database from
-// before the users table keeps the original administrator's seed in admins.
+// cannot open, for a check of the key against a backup. Every supported
+// schema keeps the seeds in users; a database without that table has none.
 // It reads only and never creates a key.
 func (ss *SystemStore) TOTPKeyCheck(ctx context.Context) (seeds, unreadable int, err error) {
 	reader := ss.store.reader()
-	query := `SELECT id,totp_secret FROM users WHERE totp_secret<>''`
-	if exists, err := readerTableExists(ctx, reader, "users"); err != nil {
+	if exists, err := readerTableExists(ctx, reader, "users"); err != nil || !exists {
 		return 0, 0, err
-	} else if !exists {
-		if exists, err := readerTableExists(ctx, reader, "admins"); err != nil || !exists {
-			return 0, 0, err
-		}
-		query = `SELECT '` + LegacyAdminUserID + `',totp_secret FROM admins WHERE totp_secret<>''`
 	}
-	rows, err := reader.QueryContext(ctx, query)
+	rows, err := reader.QueryContext(ctx, `SELECT id,totp_secret FROM users WHERE totp_secret<>''`)
 	if err != nil {
 		return 0, 0, err
 	}

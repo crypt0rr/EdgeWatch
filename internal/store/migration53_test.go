@@ -1,59 +1,18 @@
 package store
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
-
-// schema53Triggers are the guard triggers that schema 53 adds.
-var schema53Triggers = []string{
-	scansTenantInsertTrigger,
-	scansTenantImmutableTrigger,
-	eventsTenantInsertTrigger,
-	eventsTenantImmutableTrigger,
-	publicDashboardHostsTenantInsertTrigger,
-	publicDashboardHostsTenantUpdateTrigger,
-	publicDashboardsTenantImmutableTrigger,
-	jobsTenantImmutableTrigger,
-}
-
-// schema53Tables are the tables that gain tenant_id in schema 53.
-var schema53Tables = []string{"scans", "events", "outbox", "restore_quarantined_deliveries"}
-
-// schema52FixtureStatements turn a current database into the schema-52
-// shape. They first undo schema 54, see schema53FixtureStatements. Then the
-// guard triggers, the tenant indexes and the tenant_id columns of schema 53
-// are removed.
-var schema52FixtureStatements = func() []string {
-	statements := slices.Clone(schema53FixtureStatements)
-	for _, trigger := range schema53Triggers {
-		statements = append(statements, "DROP TRIGGER "+trigger)
-	}
-	statements = append(statements,
-		"DROP INDEX scans_tenant_id_time",
-		"DROP INDEX events_tenant_id_time",
-		// Schema 62 adds payload expression indexes that depend on these tenant
-		// columns. Remove them before rewinding the fixture to schema 52.
-		"DROP INDEX outbox_job_purge",
-		"DROP INDEX restore_quarantined_job_purge",
-	)
-	for _, table := range schema53Tables {
-		statements = append(statements, "ALTER TABLE "+table+" DROP COLUMN tenant_id")
-	}
-	return append(statements, "PRAGMA user_version=52")
-}()
 
 const defaultTenantLiteral = "'" + DefaultTenantID + "'"
 
@@ -77,105 +36,6 @@ func largeSnapshotScan(id, jobID, job string, finished time.Time) model.Scan {
 		Status: "success", ConfigHash: "config-" + job, Snapshot: model.Snapshot{Hosts: hosts},
 		Changes: []model.Change{{Key: "change-" + id, Kind: "port-opened", Target: job, New: strings.Repeat("d", 512)}},
 	}
-}
-
-// fixtureScansPerJob is the number of large scans of each fixture job.
-const fixtureScansPerJob = 6
-
-type schema52Fixture struct {
-	path   string
-	jobIDs []string
-}
-
-// newSchema52Fixture writes a populated database with the current code and
-// rewrites it into the schema-52 shape. It has scans of two jobs, a legacy
-// scan without a job ID stored as NULL and one stored as an empty string;
-// job, legacy and platform events; the deliveries queued for them;
-// quarantined deliveries; and published hosts of both jobs.
-func newSchema52Fixture(t *testing.T) schema52Fixture {
-	t.Helper()
-	ctx := context.Background()
-	fixture := schema52Fixture{path: filepath.Join(t.TempDir(), "schema52.db")}
-	s, err := Open(fixture.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	exec := func(query string, args ...any) {
-		t.Helper()
-		if _, err := s.DB.ExecContext(ctx, query, args...); err != nil {
-			t.Fatalf("%s: %v", query, err)
-		}
-	}
-	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
-	for i, name := range []string{"edge-a", "edge-b"} {
-		job, err := defaultTenant(s).CreateJob(ctx, testJob(name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		fixture.jobIDs = append(fixture.jobIDs, job.ID)
-		for j := range fixtureScansPerJob {
-			if err := s.System().SaveScan(ctx, largeSnapshotScan(fmt.Sprintf("scan-%s-%d", name, j), job.ID, name, now.Add(time.Duration(10*i+j)*time.Minute))); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if _, err := defaultTenant(s).ResetRuntimeWithOutbox(ctx, job.ID, name, []string{"deployment-alerts"}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// A config.yaml job has no job ID: SaveScan stores NULL, and older
-	// releases stored an empty string.
-	if err := s.System().SaveScan(ctx, largeSnapshotScan("scan-legacy-null", "", "legacy", now.Add(time.Hour))); err != nil {
-		t.Fatal(err)
-	}
-	exec(`INSERT INTO scans(id,job_id,job,started_at,finished_at,status,config_hash,snapshot_json) VALUES('scan-legacy-empty','','legacy',?,?,'failed','config-legacy','{}')`, sqliteTimestamp(now), sqliteTimestamp(now.Add(2*time.Hour)))
-	if _, err := s.System().UpdateState(ctx, "legacy", func(*model.JobState) ([]model.Event, error) {
-		return []model.Event{{Type: "change", Job: "legacy", Message: "legacy change", CreatedAt: now}}, nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.System().QueueEvent(ctx, "deployment-legacy", model.Event{Type: "change", Job: "legacy", Message: "legacy change", CreatedAt: now}); err != nil {
-		t.Fatal(err)
-	}
-	// Before schema 53, an update alert was one event, queued to the
-	// deployment's destinations.
-	alerts, err := s.Platform().RecordReleaseCheck(ctx, "1.0.0", "1.1.0", "https://example.invalid/releases/1.1.0", "EdgeWatch 1.1.0", "", "etag", true, nil)
-	if err != nil || len(alerts) != 1 {
-		t.Fatalf("update alert = %v, %v", alerts, err)
-	}
-	if err := s.System().QueueEvent(ctx, "deployment-alerts", alerts[0]); err != nil {
-		t.Fatal(err)
-	}
-	exec(`INSERT INTO restore_quarantined_deliveries(restore_epoch,destination,payload_json,next_at,quarantined_at,tenant_id) VALUES('epoch-1','deployment-alerts','{"type":"job"}',?,?,?)`, sqliteTimestamp(now), sqliteTimestamp(now), DefaultTenantID)
-	exec(`INSERT INTO restore_quarantined_deliveries(restore_epoch,destination,payload_json,next_at,quarantined_at,tenant_id) VALUES('epoch-1','deployment-alerts','{"type":"platform"}',?,?,NULL)`, sqliteTimestamp(now), sqliteTimestamp(now))
-	if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Enabled: true, Title: "Perimeter"}, []PublicDashboardHost{
-		{JobID: fixture.jobIDs[0], Address: "192.0.2.10"},
-		{JobID: fixture.jobIDs[1], Address: "192.0.2.11"},
-	}, AuditEntry{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	execFixtureStatements(t, fixture.path, schema52FixtureStatements)
-
-	raw, err := sql.Open("sqlite", fixture.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
-	for _, table := range schema53Tables {
-		if got := countRows(t, raw, `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name='tenant_id'`, table); got != 0 {
-			t.Fatalf("schema 52 fixture %s still has tenant_id", table)
-		}
-		if got := countRows(t, raw, `SELECT COUNT(*) FROM `+table); got < 2 {
-			t.Fatalf("schema 52 fixture has %d %s rows", got, table)
-		}
-	}
-	if got := countRows(t, raw, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN ('`+strings.Join(schema53Triggers, "','")+`')`); got != 0 {
-		t.Fatalf("schema 52 fixture still has %d schema 53 triggers", got)
-	}
-	return fixture
 }
 
 // columnSnapshot renders the rows of table with the given columns, each with
@@ -216,44 +76,6 @@ func queryStrings(t *testing.T, db *sql.DB, query string, args ...any) []string 
 	return values
 }
 
-func columnNames(t *testing.T, db *sql.DB, table string) []string {
-	t.Helper()
-	return queryStrings(t, db, `SELECT name FROM pragma_table_info(?) ORDER BY cid`, table)
-}
-
-// tablePages returns the bytes of every page of the given tables' b-trees,
-// including their overflow pages, keyed by page number.
-func tablePages(t *testing.T, path string, tables ...string) map[int64][]byte {
-	t.Helper()
-	raw, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
-	if _, err := raw.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
-		t.Fatal(err)
-	}
-	var pageSize int64
-	if err := raw.QueryRow(`PRAGMA page_size`).Scan(&pageSize); err != nil {
-		t.Fatal(err)
-	}
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pages := map[int64][]byte{}
-	for _, table := range tables {
-		for _, number := range queryStrings(t, raw, `SELECT pageno FROM dbstat WHERE name=?`, table) {
-			page, err := strconv.ParseInt(number, 10, 64)
-			if err != nil {
-				t.Fatal(err)
-			}
-			pages[page] = contents[(page-1)*pageSize : page*pageSize]
-		}
-	}
-	return pages
-}
-
 // indexKeys lists the key columns of index with their sort order.
 func indexKeys(t *testing.T, db *sql.DB, index string) string {
 	t.Helper()
@@ -285,269 +107,6 @@ func queryPlan(t *testing.T, db *sql.DB, query string, args ...any) string {
 		t.Fatal(err)
 	}
 	return strings.Join(details, "; ")
-}
-
-func TestMigration53AttributesHistoryToTheDefaultTenant(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	fixture := newSchema52Fixture(t)
-	tables := append(slices.Clone(schema53Tables), "public_dashboard_hosts")
-	raw, err := sql.Open("sqlite", fixture.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	columnsBefore := map[string][]string{}
-	rowsBefore := map[string]string{}
-	for _, table := range tables {
-		columnsBefore[table] = columnNames(t, raw, table)
-		rowsBefore[table] = columnSnapshot(t, raw, table, columnsBefore[table])
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	pagesBefore := tablePages(t, fixture.path, "scans", "events")
-
-	s, err := Open(fixture.path)
-	if err != nil {
-		t.Fatalf("upgrade from schema 52: %v", err)
-	}
-	open := true
-	defer func() {
-		if open {
-			s.Close()
-		}
-	}()
-	if version := countRows(t, s.DB, `PRAGMA user_version`); version != schemaVersion {
-		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
-	}
-
-	// Every row keeps its rowid and values, and gains the default tenant.
-	wantTenantColumn := map[string]string{
-		"scans":                          "tenant_id TEXT notnull=1 default=" + defaultTenantLiteral + " pk=0",
-		"events":                         "tenant_id TEXT notnull=0 default=" + defaultTenantLiteral + " pk=0",
-		"outbox":                         "tenant_id TEXT notnull=0 default=" + defaultTenantLiteral + " pk=0",
-		"restore_quarantined_deliveries": "tenant_id TEXT notnull=0 default=" + defaultTenantLiteral + " pk=0",
-	}
-	for _, table := range tables {
-		if after := columnSnapshot(t, s.DB, table, columnsBefore[table]); after != rowsBefore[table] {
-			t.Fatalf("%s rows changed:\nbefore:\n%s\nafter:\n%s", table, rowsBefore[table], after)
-		}
-		want, gainsTenant := wantTenantColumn[table]
-		columns := tableColumns(t, s.DB, table)
-		if !gainsTenant {
-			if len(columns) != len(columnsBefore[table]) {
-				t.Fatalf("%s columns = %v, want them unchanged", table, columns)
-			}
-			continue
-		}
-		if len(columns) != len(columnsBefore[table])+1 || columns[len(columns)-1] != want {
-			t.Fatalf("%s columns = %v, want %q appended", table, columns, want)
-		}
-		if got := countRows(t, s.DB, `SELECT COUNT(*) FROM `+table+` WHERE tenant_id IS NOT `+defaultTenantLiteral); got != 0 {
-			t.Fatalf("%s rows outside the default tenant = %d", table, got)
-		}
-	}
-	// The table pages, including the overflow pages of the snapshots and
-	// payloads, are not rewritten. The database uses auto-vacuum, where a new
-	// index takes the lowest free page number for its root page: SQLite moves
-	// the page that holds that number, unchanged, and updates the one pointer
-	// to it. So each of the two new indexes, and each of the five b-trees of
-	// the tenant-keyed latest host projection that the upgrade to schema 54
-	// creates next, can change two pages, while rewriting the rows would
-	// change nearly every page.
-	open = false
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	pagesAfter := tablePages(t, fixture.path, "scans", "events")
-	if len(pagesAfter) != len(pagesBefore) {
-		t.Fatalf("scans and events pages = %d, want %d", len(pagesAfter), len(pagesBefore))
-	}
-	var changed []int64
-	for page, contents := range pagesBefore {
-		if !bytes.Equal(pagesAfter[page], contents) {
-			changed = append(changed, page)
-		}
-	}
-	if len(pagesBefore) < 50 || len(changed) > 2*(2+5) {
-		t.Fatalf("%d of %d scans and events pages changed: %v", len(changed), len(pagesBefore), changed)
-	}
-	s, err = Open(fixture.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	open = true
-
-	// Schema 66 replaced scans_tenant_id_time with an index that has its
-	// keys first.
-	for index, want := range map[string]string{
-		scansTenantHistoryIndex: schema66ScanIndexes[scansTenantHistoryIndex],
-		"events_tenant_id_time": "tenant_id,created_at DESC,id DESC",
-	} {
-		if got := indexKeys(t, s.DB, index); got != want {
-			t.Fatalf("%s keys = %q, want %q", index, got, want)
-		}
-	}
-	for _, trigger := range schema53Triggers {
-		if got := countRows(t, s.DB, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?`, trigger); got != 1 {
-			t.Fatalf("trigger %s is missing", trigger)
-		}
-	}
-	// A tenant-filtered history list is served in order by the tenant
-	// index, without sorting the history.
-	for _, check := range []struct {
-		query string
-		index string
-	}{
-		{`SELECT id,job_id,job,started_at,finished_at,status FROM scans WHERE tenant_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, scansTenantHistoryIndex},
-		{`SELECT COUNT(*) FROM scans WHERE tenant_id=?`, scansTenantHistoryIndex},
-		{`SELECT payload_json FROM events WHERE tenant_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, "events_tenant_id_time"},
-	} {
-		args := []any{DefaultTenantID, 50, 0}[:strings.Count(check.query, "?")]
-		plan := queryPlan(t, s.DB, check.query, args...)
-		if !strings.Contains(plan, check.index) || strings.Contains(plan, "TEMP B-TREE") {
-			t.Fatalf("plan of %s = %q, want %s without a sort", check.query, plan, check.index)
-		}
-	}
-	var integrity string
-	if err := s.DB.QueryRow(`PRAGMA integrity_check`).Scan(&integrity); err != nil || integrity != "ok" {
-		t.Fatalf("integrity_check = %q, %v", integrity, err)
-	}
-	assertForeignKeysClean(t, s.DB)
-
-	// The store reads the migrated rows as before.
-	scans, err := defaultTenant(s).ListScanSummariesPage(ctx, "", 50, 0)
-	if err != nil || scans.Total != 2*fixtureScansPerJob+2 {
-		t.Fatalf("scan history = %d, %v; want %d", scans.Total, err, 2*fixtureScansPerJob+2)
-	}
-	events, err := defaultTenant(s).ListEventsPage(ctx, "", 50, 0)
-	if err != nil || events.Total != 4 {
-		t.Fatalf("event history = %d, %v; want 4", events.Total, err)
-	}
-	dashboard, err := defaultTenant(s).GetPublicDashboard(ctx)
-	if err != nil || len(dashboard.Hosts) != 2 {
-		t.Fatalf("public dashboard = %#v, %v", dashboard, err)
-	}
-	scan, err := defaultTenant(s).GetScan(ctx, "scan-edge-a-0")
-	if err != nil || len(scan.Snapshot.Hosts) != largeSnapshotHosts || len(scan.Changes) != 1 {
-		t.Fatalf("scan after the upgrade = %d hosts, %d changes, %v", len(scan.Snapshot.Hosts), len(scan.Changes), err)
-	}
-}
-
-// Some recovery databases carry a schema marker without every table. The
-// migration creates the tables it changes and the tables its triggers read,
-// and the writers work on the result.
-func TestMigration53UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
-	t.Parallel()
-	all := []string{"scans", "events", "outbox", "restore_quarantined_deliveries", "public_dashboard_hosts", "public_dashboards", "jobs", "tenants"}
-	cases := []struct {
-		name    string
-		missing []string
-	}{{name: "all", missing: all}}
-	for _, table := range all {
-		cases = append(cases, struct {
-			name    string
-			missing []string
-		}{name: table, missing: []string{table}})
-	}
-	base := newSchema52Fixture(t)
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			fixture := base
-			fixture.path = copyFixture(t, base.path)
-			extra := make([]string, 0, len(tc.missing))
-			for _, table := range tc.missing {
-				extra = append(extra, "DROP TABLE "+table)
-			}
-			execFixtureStatements(t, fixture.path, extra)
-
-			s, err := Open(fixture.path)
-			if err != nil {
-				t.Fatalf("upgrade without %v: %v", tc.missing, err)
-			}
-			defer s.Close()
-			if version := countRows(t, s.DB, `PRAGMA user_version`); version != schemaVersion {
-				t.Fatalf("schema version = %d, want %d", version, schemaVersion)
-			}
-			if got := countRows(t, s.DB, `SELECT COUNT(*) FROM tenants WHERE id=? AND is_default=1`, DefaultTenantID); got != 1 {
-				t.Fatalf("default tenant rows = %d", got)
-			}
-			for _, table := range schema53Tables {
-				if got := countRows(t, s.DB, `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name='tenant_id'`, table); got != 1 {
-					t.Fatalf("%s has no tenant_id", table)
-				}
-			}
-			for _, trigger := range schema53Triggers {
-				if got := countRows(t, s.DB, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?`, trigger); got != 1 {
-					t.Fatalf("trigger %s is missing", trigger)
-				}
-			}
-
-			job, err := defaultTenant(s).CreateJob(ctx, testJob("recovered"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := s.System().SaveScan(ctx, largeSnapshotScan("scan-recovered", job.ID, "recovered", time.Now().UTC())); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := defaultTenant(s).ResetRuntimeWithOutbox(ctx, job.ID, "recovered", []string{"deployment-recovered"}); err != nil {
-				t.Fatal(err)
-			}
-			if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Enabled: true}, []PublicDashboardHost{{JobID: job.ID, Address: "192.0.2.10"}}, AuditEntry{}); err != nil {
-				t.Fatal(err)
-			}
-			for query, want := range map[string]int{
-				`SELECT COUNT(*) FROM scans WHERE id='scan-recovered' AND tenant_id=` + defaultTenantLiteral:                                1,
-				`SELECT COUNT(*) FROM events WHERE type='baseline-reset' AND job_id='` + job.ID + `' AND tenant_id=` + defaultTenantLiteral: 1,
-				`SELECT COUNT(*) FROM outbox WHERE destination='deployment-recovered' AND tenant_id=` + defaultTenantLiteral:                1,
-				`SELECT COUNT(*) FROM public_dashboard_hosts WHERE job_id='` + job.ID + `'`:                                                 1,
-			} {
-				if got := countRows(t, s.DB, query); got != want {
-					t.Fatalf("%s = %d, want %d", query, got, want)
-				}
-			}
-		})
-	}
-}
-
-// Running the migration again, after the schema marker was reset, changes
-// no row and no schema object.
-func TestMigration53IsANoOpWhenRepeated(t *testing.T) {
-	t.Parallel()
-	fixture := newSchema52Fixture(t)
-	s, err := Open(fixture.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot := func(db *sql.DB) string {
-		var out strings.Builder
-		for _, table := range append(slices.Clone(schema53Tables), "public_dashboard_hosts", "public_dashboards", "jobs", "tenants") {
-			if err := snapshotRows(db, `SELECT rowid,* FROM `+table+` ORDER BY rowid`, &out); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := snapshotRows(db, `SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_master ORDER BY type,name`, &out); err != nil {
-			t.Fatal(err)
-		}
-		return out.String()
-	}
-	before := snapshot(s.DB)
-	if _, err := s.DB.Exec(`PRAGMA user_version=52`); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	repeated, err := Open(fixture.path)
-	if err != nil {
-		t.Fatalf("repeat migration 53: %v", err)
-	}
-	defer repeated.Close()
-	if after := snapshot(repeated.DB); after != before {
-		t.Fatalf("repeating migration 53 changed the database:\nbefore:\n%s\nafter:\n%s", before, after)
-	}
-	assertForeignKeysClean(t, repeated.DB)
 }
 
 // insertJobRows creates bare default-tenant jobs rows for fixtures that save
@@ -933,9 +492,7 @@ func excludeAllBut(t *testing.T, s *Store, keep string) []string {
 	return queryStrings(t, s.DB, `SELECT DISTINCT destination FROM outbox WHERE destination<>?`, keep)
 }
 
-// A quarantined delivery keeps the tenant of its outbox row. A backup from
-// before schema 53 has no tenant yet; the migration after the restore gives
-// its rows the default tenant.
+// A quarantined delivery keeps the tenant of its outbox row.
 func TestRestoreQuarantineKeepsTheDeliveryTenant(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -945,20 +502,15 @@ func TestRestoreQuarantineKeepsTheDeliveryTenant(t *testing.T) {
 		want   map[string]string
 	}{
 		{
-			name: "schema 53 backup",
+			name: "backup",
 			want: map[string]string{"queued-job-a": DefaultTenantID, "queued-job-b": secondTenantID, "queued-platform": "<null>"},
 		},
 		{
 			// The quarantine table is created by the restore, in its
 			// schema-35 shape, and gains the tenant column.
-			name:   "schema 53 backup without a quarantine table",
+			name:   "backup without a quarantine table",
 			staged: []string{"DROP TABLE restore_quarantined_deliveries"},
 			want:   map[string]string{"queued-job-a": DefaultTenantID, "queued-job-b": secondTenantID, "queued-platform": "<null>"},
-		},
-		{
-			name:   "schema 52 backup",
-			staged: schema52FixtureStatements,
-			want:   map[string]string{"queued-job-a": DefaultTenantID, "queued-job-b": DefaultTenantID, "queued-platform": DefaultTenantID},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

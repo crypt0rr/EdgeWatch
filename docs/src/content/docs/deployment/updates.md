@@ -20,7 +20,10 @@ prepare the rollback before you pull.
    Keep it together with `notification.key`, `auth.key`, and `config.yaml`.
 3. Read the release notes, and check
    [Database compatibility](/reference/database-compatibility/) for the schema
-   the new release introduces.
+   the new release introduces and the oldest schema it upgrades. From v0.36.0,
+   that is schema 54, of v0.20.0; an older installation updates through
+   v0.35.0 first, see
+   [Upgrade from a release before v0.20.0](#upgrade-from-a-release-before-v0200).
 
 Then pull and start the new image:
 
@@ -129,6 +132,36 @@ The upgrade from v0.19.0 to v0.20.0 is an example of a forward-only update: it
 runs the schema 51 to 54 migrations, which move all existing data into the
 default business unit. What a single-unit installation notices afterward is
 listed under [Business units](/administration/business-units/).
+
+## Upgrade from a release before v0.20.0
+
+From v0.36.0, EdgeWatch upgrades a database written by v0.20.0 or a later
+release, which has schema 54 or later; see
+[Upgrade floor](/reference/database-compatibility/#upgrade-floor). It refuses
+an older database before it changes anything, and the service exits with
+`database schema version N is older than schema 54, the oldest that this
+release upgrades; upgrade through v0.35.0 first`. Update such an installation
+in two steps, each with the preparation under
+[Before every update](#before-every-update):
+
+1. Pin v0.35.0, which still upgrades every older schema, in a
+   `compose.override.yaml` next to `compose.yaml`, as under
+   [Rollback](#rollback):
+
+   ```yaml
+   services:
+     edgewatch:
+       image: ghcr.io/crypt0rr/edgewatch:0.35.0
+   ```
+
+2. Start it with `docker compose up -d` and wait until
+   `docker compose exec edgewatch edgewatch health` reports `ready`. Its
+   migration and startup phases have then finished.
+3. Take a backup, remove the override, and update to the current release with
+   `docker compose pull` and `docker compose up -d`.
+
+A rollback to the release before v0.20.0 means restoring the backup taken
+before the first step.
 
 ## Runtime privileges
 

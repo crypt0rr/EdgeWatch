@@ -99,7 +99,9 @@ func ensureBuiltinScannerProfilesContext(ctx context.Context, db *sql.DB) error 
 		{BuiltinNmapProfileID, "Nmap standard", config.BuiltinNmapProfile()},
 		{BuiltinNaabuProfileID, "Naabu full TCP → Nmap", config.BuiltinNaabuProfile()},
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	// The seeding reads each built-in profile before it writes it, so it
+	// takes the write lock first.
+	tx, err := beginWriteTx(ctx, db)
 	if err != nil {
 		return err
 	}

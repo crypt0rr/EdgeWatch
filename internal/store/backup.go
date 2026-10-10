@@ -88,7 +88,9 @@ func (e *VerificationError) Error() string {
 	if e.ForeignKeyViolations > 0 {
 		parts = append(parts, fmt.Sprintf("foreign_key_check: %d violation(s)", e.ForeignKeyViolations))
 	}
-	if e.SchemaChecked && !e.SchemaSupported {
+	if e.belowUpgradeFloor() {
+		parts = append(parts, schemaBelowUpgradeFloorError{version: e.SchemaVersion}.Error())
+	} else if e.SchemaChecked && !e.SchemaSupported {
 		parts = append(parts, fmt.Sprintf("unsupported schema version: %d", e.SchemaVersion))
 	}
 	if e.SchemaChecked && !e.EdgeWatchSchema {
@@ -98,6 +100,18 @@ func (e *VerificationError) Error() string {
 		return "database verification failed"
 	}
 	return strings.Join(parts, "; ")
+}
+
+// belowUpgradeFloor reports an EdgeWatch database whose schema is older than
+// this release upgrades, such as a backup of a release before v0.20.0.
+func (e *VerificationError) belowUpgradeFloor() bool {
+	return e != nil && e.SchemaChecked && e.EdgeWatchSchema && e.SchemaVersion < minimumUpgradeSchema
+}
+
+// Is matches ErrSchemaBelowUpgradeFloor for a database whose schema is older
+// than this release upgrades.
+func (e *VerificationError) Is(target error) bool {
+	return target == ErrSchemaBelowUpgradeFloor && e.belowUpgradeFloor()
 }
 
 // The SQLite consistency checks that verification runs. integrity_check
@@ -135,7 +149,7 @@ func (s *Store) verify(ctx context.Context, check string) (DatabaseVerification,
 		return result, err
 	}
 	result.SchemaVersion = schemaVersionValue
-	result.SchemaSupported = schemaVersionValue >= 1 && schemaVersionValue <= schemaVersion
+	result.SchemaSupported = schemaVersionValue >= minimumUpgradeSchema && schemaVersionValue <= schemaVersion
 	result.EdgeWatchSchema = detectEdgeWatchSchema(ctx, reader)
 	var autoVacuum int
 	if err := reader.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&autoVacuum); err != nil {

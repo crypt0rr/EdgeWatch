@@ -1,6 +1,6 @@
 ---
 title: Database compatibility
-description: Understand the current SQLite schema, forward-only migrations, and historical upgrade steps.
+description: Understand the current SQLite schema, the oldest schema that upgrades, forward-only migrations, and historical upgrade steps.
 ---
 
 ## Current schema and rollback
@@ -29,12 +29,47 @@ file or notification URL is unusable (see `config validate` under
 [Host commands](/reference/cli/)). Keep encryption keys with the database or
 encrypted web-managed destinations and never commit them.
 
+## Upgrade floor
+
+From v0.36.0, EdgeWatch upgrades a database from schema 54, the schema of
+v0.20.0, the first release with business units, or from any later schema.
+The daemon refuses an older database before it changes anything, so its
+schema version and its startup state stay as they were, and exits with:
+
+```text
+database schema version N is older than schema 54, the oldest that this release upgrades; upgrade through v0.35.0 first
+```
+
+`edgewatch health` and `edgewatch verify` report the same error, and the host
+commands refuse with it instead of advising you to start the daemon. A
+database without a schema version that already holds tables, such as one of
+the releases before the web console, is refused as schema version 0.
+
+v0.35.0 still upgrades every schema back to schema 1. To upgrade such a
+database, back up `./data`, run v0.35.0 on it, as described under
+[Upgrade from a release before v0.20.0](/deployment/updates/#upgrade-from-a-release-before-v0200),
+until `edgewatch health` reports `ready`, then back up again and update to the
+current release. A restore refuses a backup older than schema 54 with the same
+error and leaves the database unchanged; see
+[Restore a backup of an older release](/operations/backup-recovery/#restore-a-backup-of-an-older-release).
+
+A new database starts from a frozen copy of schema 54, the schema that the
+retired migrations from schema 1 created, and then runs the later migrations
+and startup phases as an upgraded database does.
+
 ## Schema 58
 
 Schema 58 rebuilds the bounded host-search indexes from retained scan and
 baseline evidence in restartable batches. Service names and products are
 prioritized so services on late ports remain searchable even when a host has
 many positive ports. The rebuild does not change scan results or baselines.
+From v0.36.0 it starts by dropping the scan and latest-host search indexes and
+creating them empty, in one short transaction; earlier releases deleted every
+entry in one transaction, which held the database's writer and grew the
+write-ahead log with the retained history. Search results stay empty until
+the batches have indexed the hosts again, as before. After an upgrade, the
+daemon truncates the write-ahead log once its startup work has finished, so a
+large migration step does not leave a log of its size beside the database.
 
 ## Schema 66
 
@@ -111,10 +146,10 @@ with no background phase.
 ## Migration ownership
 
 Only the daemon migrates the database, when it starts. A restored backup of an
-older release keeps its schema until then. On such a database, `restore`,
-`verify`, `health`, and `backup` work as usual, so the restored copy can be
-checked and backed up first, and `verify --from` checks a backup file of an
-older release in the same way. The commands that act on business units or
+older release, back to schema 54, keeps its schema until then. On such a
+database, `restore`, `verify`, `health`, and `backup` work as usual, so the
+restored copy can be checked and backed up first, and `verify --from` checks
+a backup file of an older release in the same way. The commands that act on business units or
 accounts need the upgraded schema, whether they only read (`status`,
 `history`, and `baseline export`) or also write (`admin`, `scan`, `baseline
 approve` and `reset`, and `notify test`). They change nothing and stop with
@@ -122,6 +157,28 @@ approve` and `reset`, and `notify test`). They change nothing and stop with
 daemon once to upgrade it, then run this command again`. Start the service,
 for example with `docker compose up -d edgewatch`, and run the command
 again; it can run while the daemon is running.
+
+One process migrates a database at a time. From v0.36.0, the daemon holds an
+advisory lock on the database directory from before it opens the database
+until its migration and startup phases have finished, the lock with which
+restores of that directory are serialized. A second daemon on the same data
+volume exits with `another EdgeWatch process is migrating or restoring the
+database in this directory` and changes nothing, and a restore waits until
+the migration has finished. Each migration step also
+checks, in its own transaction, that the schema version is still the one it
+upgrades from, so no step runs twice even where the directory cannot be
+locked. The startup phases that read their progress before they write, such
+as the backfills, take the database's write lock first, so a host command
+that writes while they run, such as `scan` or `admin`, makes them wait, up
+to the five-second busy timeout, instead of failing the daemon's start.
+
+## Schemas 48 to 54
+
+This release no longer runs the migrations to schema 54 or earlier: v0.35.0
+runs them when it upgrades an older database, as described under
+[Upgrade floor](#upgrade-floor), and the sections below describe what those
+upgrades do. The startup copy of schema 54 still runs when an earlier release
+upgraded a database to schema 54 but the copy has not finished.
 
 ## Schema 48
 

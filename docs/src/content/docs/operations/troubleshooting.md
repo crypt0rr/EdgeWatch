@@ -162,6 +162,16 @@ finish deletion cleanup in restartable background batches. `health` reports
 maintenance progress and `verify` lists checkpoints. Host commands that need
 the upgraded schema refuse an older restored schema until the daemon starts.
 
+A database older than schema 54, written by a release before v0.20.0, is
+refused with `upgrade through v0.35.0 first` and left unchanged; update
+through v0.35.0 as described under
+[Upgrade from a release before v0.20.0](/deployment/updates/#upgrade-from-a-release-before-v0200).
+A daemon that exits with `another EdgeWatch process is migrating or restoring
+the database in this directory` found another daemon migrating the database
+on the same data volume, or a restore replacing it. Let the restore finish,
+or make sure that only one daemon uses the volume, and start the service
+again.
+
 An older binary refuses a database upgraded beyond its supported version.
 Rollback requires a matching pre-upgrade backup; do not replace a live database.
 Follow [Database compatibility](/reference/database-compatibility/) and

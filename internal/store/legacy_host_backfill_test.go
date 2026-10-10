@@ -58,7 +58,7 @@ func TestLegacyHostBackfillBuildsIndexedHostsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := raw.Exec(`DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill; PRAGMA user_version=38`); err != nil {
+	if _, err := raw.Exec(`DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill; UPDATE fts_backfill_state SET complete=0 WHERE table_name='legacy_scan_host_index'`); err != nil {
 		raw.Close()
 		t.Fatal(err)
 	}
@@ -425,7 +425,7 @@ func TestLegacyHostBackfillDeduplicatesCanonicalAddresses(t *testing.T) {
 		raw.Close()
 		t.Fatal(err)
 	}
-	if _, err := raw.Exec(`DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill; PRAGMA user_version=38`); err != nil {
+	if _, err := raw.Exec(`DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill; UPDATE fts_backfill_state SET complete=0 WHERE table_name='legacy_scan_host_index'`); err != nil {
 		raw.Close()
 		t.Fatal(err)
 	}
@@ -497,7 +497,7 @@ func TestLegacyHostBackfillSkipsMalformedScanAndContinues(t *testing.T) {
 		raw.Close()
 		t.Fatal(err)
 	}
-	if _, err := raw.Exec(`DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill; PRAGMA user_version=38`); err != nil {
+	if _, err := raw.Exec(`DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill; UPDATE fts_backfill_state SET complete=0 WHERE table_name='legacy_scan_host_index'`); err != nil {
 		raw.Close()
 		t.Fatal(err)
 	}

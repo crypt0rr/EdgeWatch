@@ -1,10 +1,5 @@
 package store
 
-import (
-	"sort"
-	"strings"
-)
-
 // Security audit categories. The category says what an audit record is
 // about, independently of who performed the action:
 //
@@ -148,25 +143,4 @@ func auditCategory(action string) string {
 		return category
 	}
 	return auditCategoryData
-}
-
-// auditCategoryBackfillStatement categorizes the audit records that have no
-// category yet, the records written before schema 51, with the same mapping
-// as auditCategory. The action names are constants of this package.
-func auditCategoryBackfillStatement() string {
-	byCategory := map[string][]string{}
-	for action, category := range auditActionCategories {
-		if category != auditCategoryData {
-			byCategory[category] = append(byCategory[category], "'"+strings.ReplaceAll(action, "'", "''")+"'")
-		}
-	}
-	var statement strings.Builder
-	statement.WriteString("UPDATE security_audit SET category=CASE")
-	for _, category := range []string{auditCategoryAccount, auditCategoryPlatform} {
-		actions := byCategory[category]
-		sort.Strings(actions)
-		statement.WriteString(" WHEN action IN (" + strings.Join(actions, ",") + ") THEN '" + category + "'")
-	}
-	statement.WriteString(" ELSE '" + auditCategoryData + "' END WHERE category=''")
-	return statement.String()
 }

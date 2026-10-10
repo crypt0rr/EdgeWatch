@@ -51,7 +51,9 @@ func assertHostSearchSchemaContract(t *testing.T, s *Store) {
 	}
 }
 
-func TestMigration22RepairsScanHostsCascade(t *testing.T) {
+// A scan_hosts table without the cascade to its scan, which a recovery
+// fallback of migration 15 created, is rebuilt with it at startup.
+func TestStartupRepairsScanHostsCascade(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -62,7 +64,6 @@ func TestMigration22RepairsScanHostsCascade(t *testing.T) {
 	}
 	if _, err := s.DB.ExecContext(ctx, `
 DROP TABLE scan_hosts;
-DROP TABLE fts_backfill_state;
 CREATE TABLE scan_hosts (
  scan_id TEXT NOT NULL,
  address TEXT NOT NULL,
@@ -84,8 +85,7 @@ CREATE TABLE scan_hosts (
 );
 INSERT INTO scans(id,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json)
  VALUES('cascade-source','edge','2026-09-09T00:00:00Z','2026-09-09T00:00:01Z','success','','','hash','{}');
-INSERT INTO scan_hosts(scan_id,address,host_json) VALUES('cascade-source','198.51.100.9','{"address":"198.51.100.9"}');
-PRAGMA user_version = 21;`); err != nil {
+INSERT INTO scan_hosts(scan_id,address,host_json) VALUES('cascade-source','198.51.100.9','{"address":"198.51.100.9"}');`); err != nil {
 		t.Fatal(err)
 	}
 	if err := migrate(s.DB); err != nil {
@@ -130,15 +130,16 @@ PRAGMA user_version = 21;`); err != nil {
 	}
 }
 
-func TestMigration22BackfillsFTSWithProgress(t *testing.T) {
+// A host search rebuild indexes every row in bounded batches and recomputes
+// the search text of each.
+func TestHostSearchRebuildIndexesEveryRow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.DB.ExecContext(ctx, `
 INSERT INTO scans(id,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json)
  VALUES('fts-source','edge','2026-09-09T00:00:00Z','2026-09-09T00:00:01Z','success','','','hash','{}');
-DROP TABLE fts_backfill_state;
-PRAGMA user_version = 21;`); err != nil {
+UPDATE fts_backfill_state SET last_rowid=0,processed_rows=0,initialized=0,complete=0 WHERE table_name IN ('scan_hosts','latest_scan_hosts');`); err != nil {
 		t.Fatal(err)
 	}
 	const hostCount = ftsBackfillBatchSize*2 + 37
@@ -171,36 +172,6 @@ PRAGMA user_version = 21;`); err != nil {
 	}
 	if !strings.Contains(searchText, "198.18.2.36") {
 		t.Fatalf("backfilled search text = %q", searchText)
-	}
-}
-
-func TestMigration28AddsFTSProgressToLegacyState(t *testing.T) {
-	t.Parallel()
-	s := openTestStore(t)
-	defer s.Close()
-	ctx := context.Background()
-	if _, err := s.DB.ExecContext(ctx, `
-DROP TABLE fts_backfill_state;
-CREATE TABLE fts_backfill_state (
- table_name TEXT PRIMARY KEY,
- last_rowid INTEGER NOT NULL DEFAULT 0,
- initialized INTEGER NOT NULL DEFAULT 0,
- complete INTEGER NOT NULL DEFAULT 0,
- updated_at TEXT NOT NULL DEFAULT ''
-);
-INSERT INTO fts_backfill_state(table_name) VALUES('scan_hosts'),('latest_scan_hosts');
-PRAGMA user_version = 24;`); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrate(s.DB); err != nil {
-		t.Fatalf("migrate legacy FTS state: %v", err)
-	}
-	var present int
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fts_backfill_state') WHERE name='processed_rows'`).Scan(&present); err != nil {
-		t.Fatal(err)
-	}
-	if present != 1 {
-		t.Fatal("migration 28 did not add processed_rows to legacy FTS state")
 	}
 }
 
@@ -358,28 +329,5 @@ func TestFTSBackfillBookkeepingWaitsForConcurrentWriter(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("bookkeeping did not resume after writer release")
-	}
-}
-
-func TestMigration29AddsBaselineHostProjection(t *testing.T) {
-	t.Parallel()
-	s := openTestStore(t)
-	ctx := context.Background()
-	if _, err := s.DB.ExecContext(ctx, `DROP TABLE baseline_hosts; PRAGMA user_version = 28;`); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrate(s.DB); err != nil {
-		t.Fatal(err)
-	}
-	var version int
-	if err := s.DB.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if version != schemaVersion {
-		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
-	}
-	var table string
-	if err := s.DB.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='baseline_hosts'`).Scan(&table); err != nil {
-		t.Fatal(err)
 	}
 }

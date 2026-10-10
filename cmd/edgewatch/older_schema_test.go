@@ -15,13 +15,12 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
-// olderSchemaVersion is the schema of the last release before business
-// units (v0.19).
-const olderSchemaVersion = 50
+// olderSchemaVersion is the schema of v0.20.0, the first release with
+// business units and the oldest that this release upgrades.
+const olderSchemaVersion = 54
 
 // writeOlderSchemaDatabase writes a database with the original
-// administrator, as a release before business units left it: its schema
-// version is 50 and it has no tenants table, which schema 51 adds.
+// administrator under the schema version of v0.20.0.
 func writeOlderSchemaDatabase(t *testing.T, database string) {
 	t.Helper()
 	raw, err := os.ReadFile(storetest.FreshPath(t))
@@ -48,10 +47,8 @@ func writeOlderSchemaDatabase(t *testing.T, database string) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, statement := range []string{"DROP TABLE tenants", fmt.Sprintf("PRAGMA user_version=%d", olderSchemaVersion)} {
-		if _, err := db.Exec(statement); err != nil {
-			t.Fatalf("%s: %v", statement, err)
-		}
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version=%d", olderSchemaVersion)); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -161,10 +158,6 @@ func sqliteUserVersionSupported(t *testing.T) int {
 // commands that act on units or accounts wait for the daemon's upgrade.
 func TestWholeDatabaseCommandsAcceptAnOlderSchema(t *testing.T) {
 	dir := t.TempDir()
-	// The staged restore passes the foreign key check only with the tenants
-	// table, so this backup keeps the current tables under the older
-	// schema version; the store tests cover the audit of a restore on the
-	// schema-50 tables.
 	source := storetest.FreshPath(t)
 	setSQLiteUserVersion(t, source, olderSchemaVersion)
 	database := filepath.Join(dir, "data", "edgewatch.db")
@@ -254,5 +247,84 @@ func TestAdminRecoveryReportsLookupFailuresAsTheyAre(t *testing.T) {
 	}
 	if err := run([]string{"admin", "disable-totp", "--username", "admin", "--config", configPath}); err == nil || strings.Contains(err.Error(), "is not configured") || !strings.Contains(err.Error(), "no such table") {
 		t.Fatalf("unreadable unit error = %v, want the database error", err)
+	}
+}
+
+// belowFloorSchemaVersion is the schema of v0.19, the last release before
+// business units, which this release no longer upgrades.
+const belowFloorSchemaVersion = 50
+
+// A database older than schema 54 is refused by every command with the
+// release to upgrade through, and nothing writes to it: the daemon does not
+// migrate it, health and verify report it, a restore of it as a backup is
+// refused, and the host commands do not advise starting the daemon.
+func TestCommandsRefuseASchemaBelowTheUpgradeFloor(t *testing.T) {
+	want := fmt.Sprintf("database schema version %d is older than schema 54, the oldest that this release upgrades; upgrade through v0.35.0 first", belowFloorSchemaVersion)
+	fixture := storetest.FreshPath(t)
+	setSQLiteUserVersion(t, fixture, belowFloorSchemaVersion)
+	raw, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "daemon", args: []string{"daemon"}},
+		{name: "health", args: []string{"health"}},
+		{name: "verify", args: []string{"verify"}},
+		{name: "status", args: []string{"status"}},
+		{name: "admin setup-token", args: []string{"admin", "setup-token", "--force"}},
+		{name: "restore", args: []string{"restore", "--from", "BACKUP"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			database := filepath.Join(dir, "data", "edgewatch.db")
+			if err := os.MkdirAll(filepath.Dir(database), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			backup := filepath.Join(dir, "backup.db")
+			target := database
+			if tc.name == "restore" {
+				// The current database stays; the backup is below the floor.
+				current, err := os.ReadFile(storetest.FreshPath(t))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(database, current, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				target = backup
+			}
+			if err := os.WriteFile(target, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// The daemon's configuration names a busy listener, so a daemon
+			// that got past the refusal could not serve either.
+			configPath := writeDaemonLeaseConfig(t, dir, database)
+			before, err := os.ReadFile(database)
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := make([]string, 0, len(tc.args)+4)
+			for _, arg := range tc.args {
+				args = append(args, strings.ReplaceAll(arg, "BACKUP", backup))
+			}
+			args = append(args, "--config", configPath)
+			if tc.name != "daemon" {
+				args = append(args, "--output", "json")
+			}
+			_, _, err = captureCLIOutput(t, func() error { return run(args) })
+			if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "start the daemon") {
+				t.Fatalf("error = %v, want %q", err, want)
+			}
+			after, err := os.ReadFile(database)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Fatal("the refused command changed the database")
+			}
+		})
 	}
 }

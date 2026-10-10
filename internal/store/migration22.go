@@ -29,18 +29,20 @@ var scanHostSearchTriggerNames = []string{
 	"latest_scan_hosts_search_ad",
 }
 
-// repairScanHostsForeignKey repairs databases created by the migration-15
+// repairScanHostsForeignKeyContext repairs databases created by the migration-15
 // recovery fallback before the fallback included the source-row cascade. SQLite
 // cannot add a foreign key to an existing table, so only tables that are
 // missing the exact scans(id) ON DELETE CASCADE constraint are rebuilt.
-func repairScanHostsForeignKey(db *sql.DB) error {
+func repairScanHostsForeignKeyContext(ctx context.Context, db *sql.DB) error {
 	// The repair recreates every host search trigger. While the schema 54
 	// copy is pending, the latest-host triggers on the new table would index
 	// the copied rows a second time, so finish the copy first.
-	if err := awaitLatestScanHostsTenantRekeyContext(context.Background(), db); err != nil {
+	if err := awaitLatestScanHostsTenantRekeyContext(ctx, db); err != nil {
 		return err
 	}
-	tx, err := db.Begin()
+	// The repair reads the table's foreign keys before it rebuilds it, so it
+	// takes the write lock first.
+	tx, err := beginWriteTx(ctx, db)
 	if err != nil {
 		return err
 	}
@@ -397,7 +399,9 @@ func logFTSProgress(logger *slog.Logger, progress ftsBatchProgress) {
 }
 
 func ensureHostSearchTriggersContext(ctx context.Context, db *sql.DB) error {
-	tx, err := db.BeginTx(ctx, nil)
+	// The check reads the triggers before it may install them, so it takes
+	// the write lock first.
+	tx, err := beginWriteTx(ctx, db)
 	if err != nil {
 		return err
 	}
@@ -479,10 +483,23 @@ func initializeFTSBackfillContext(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if initialized == 0 {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM scan_host_search`); err != nil {
+		// Drop the projections and create them again, empty, instead of
+		// deleting their rows. An FTS5 DELETE rewrites the whole index in
+		// this one transaction, so it holds the writer and grows the
+		// write-ahead log with the retained history, and an interrupted
+		// start rolls it back and begins again. DROP TABLE only frees the
+		// index pages. The triggers go first, because their bodies name the
+		// projections, and ensureHostSearchSchemaTx installs them again. The
+		// bounded batches below then index the rows.
+		if err := dropHostSearchTriggersTx(tx); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM latest_host_search`); err != nil {
+		for _, table := range []string{"scan_host_search", "latest_host_search"} {
+			if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS `+table); err != nil {
+				return err
+			}
+		}
+		if err := ensureHostSearchSchemaTx(tx, true); err != nil {
 			return err
 		}
 		now := time.Now().UTC().Format(time.RFC3339Nano)

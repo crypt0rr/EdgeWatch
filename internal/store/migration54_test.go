@@ -27,8 +27,6 @@ var schema54Triggers = []string{latestScanHostsTenantInsertTrigger, latestScanHo
 // schema54RekeyTriggers refuse other writes while the copy runs.
 var schema54RekeyTriggers = []string{latestScanHostsRekeyInsertTrigger, latestScanHostsRekeyUpdateTrigger, latestScanHostsRekeyDeleteTrigger}
 
-// latestScanHostsColumnList is latestScanHostsCopyColumns as a slice.
-var latestScanHostsColumnList = strings.Split(latestScanHostsCopyColumns, ",")
 var latestScanHostsStableColumnList = strings.Split(strings.TrimSuffix(latestScanHostsCopyColumns, ",search_text"), ",")
 
 // schema53FixtureStatements turn a current database into the schema-53
@@ -72,6 +70,40 @@ var schema53FixtureStatements = slices.Concat(schema66UndoStatements, []string{
 	"DELETE FROM fts_backfill_state WHERE table_name='" + latestScanHostsTenantRekeyState + "'",
 	"PRAGMA user_version=53",
 })
+
+// schema54SwapStatements turn a schema 53 fixture into the state in which
+// the schema 54 step, now part of the baseline, left an upgraded database:
+// latest_scan_hosts renamed to latestScanHostsPreTenantTable, without its
+// search triggers and indexes, beside an empty tenant-keyed projection whose
+// triggers refuse other writes, and the checkpoint of the copy at its start.
+// A database that v0.20.0 to v0.35.0 upgraded to schema 54 stays in this
+// state until its startup copy completes. The new table, its indexes and
+// its triggers are the baseline's.
+var schema54SwapStatements = slices.Concat([]string{
+	"DROP TRIGGER IF EXISTS latest_scan_hosts_search_ai",
+	"DROP TRIGGER IF EXISTS latest_scan_hosts_search_au",
+	"DROP TRIGGER IF EXISTS latest_scan_hosts_search_ad",
+	"ALTER TABLE latest_scan_hosts RENAME TO " + latestScanHostsPreTenantTable,
+	"DROP INDEX IF EXISTS latest_scan_hosts_open",
+	"DROP INDEX IF EXISTS latest_scan_hosts_protocol_open",
+}, baselineStatementsWithPrefix("CREATE TABLE latest_scan_hosts ", "CREATE INDEX latest_scan_hosts_", "CREATE TRIGGER latest_scan_hosts_rekey_"), []string{
+	`INSERT INTO fts_backfill_state(table_name,last_rowid,processed_rows,initialized,complete,updated_at)
+VALUES('` + latestScanHostsTenantRekeyState + `',0,0,1,0,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=1,complete=0,updated_at=excluded.updated_at`,
+	"PRAGMA user_version=54",
+})
+
+// baselineStatementsWithPrefix returns the baseline statements that start
+// with one of the prefixes, in their order.
+func baselineStatementsWithPrefix(prefixes ...string) []string {
+	var statements []string
+	for _, statement := range baselineSchemaStatements {
+		if slices.ContainsFunc(prefixes, func(prefix string) bool { return strings.HasPrefix(statement, prefix) }) {
+			statements = append(statements, statement)
+		}
+	}
+	return statements
+}
 
 // Fixture hosts: the first job scans hosts [0, fixtureJobAHosts) and, in an
 // older scan, the first few of them; the second job scans the overlapping
@@ -410,6 +442,7 @@ func TestMigration54KeysLatestHostsByTenant(t *testing.T) {
 	ctx := context.Background()
 	path := newSchema53Fixture(t)
 	before := readLatestHostsBefore(t, path)
+	execFixtureStatements(t, path, schema54SwapStatements)
 	// Record every startup heartbeat so the copy must report its progress
 	// while it runs.
 	execFixtureStatements(t, path, []string{
@@ -419,7 +452,7 @@ func TestMigration54KeysLatestHostsByTenant(t *testing.T) {
 
 	s, err := Open(path)
 	if err != nil {
-		t.Fatalf("upgrade from schema 53: %v", err)
+		t.Fatalf("upgrade from schema 54: %v", err)
 	}
 	defer s.Close()
 	assertLatestHostsRekeyed(t, s, before)
@@ -466,18 +499,16 @@ func TestMigration54KeysLatestHostsByTenant(t *testing.T) {
 	}
 }
 
-// openRekeyPending opens a schema 53 fixture without migrating it and
-// applies the schema 54 table swap, so the copy is pending.
+// openRekeyPending applies the schema 54 table swap to a schema 53 fixture
+// and opens it without migrating it, so the copy is pending.
 func openRekeyPending(t *testing.T, path string) *Store {
 	t.Helper()
+	execFixtureStatements(t, path, schema54SwapStatements)
 	s, err := OpenExisting(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	if err := applyMigration(s.DB, 54, migration54Statements()); err != nil {
-		t.Fatalf("schema 54 table swap: %v", err)
-	}
 	for _, name := range append(slices.Clone(schema54RekeyTriggers), latestScanHostsPreTenantTable) {
 		if got := countRows(t, s.DB, `SELECT COUNT(*) FROM sqlite_master WHERE name=?`, name); got != 1 {
 			t.Fatalf("%s is missing after the table swap", name)
@@ -603,7 +634,7 @@ func TestMigration54StartupPhasesWaitForTheCopy(t *testing.T) {
 		phase func(*sql.DB) error
 	}{
 		{name: "host search", phase: func(db *sql.DB) error { return backfillHostSearchIndexesContext(context.Background(), db) }},
-		{name: "scan host repair", phase: repairScanHostsForeignKey},
+		{name: "scan host repair", phase: func(db *sql.DB) error { return repairScanHostsForeignKeyContext(context.Background(), db) }},
 		{name: "legacy host index", phase: func(db *sql.DB) error { return backfillLegacyScanHostsContext(context.Background(), db) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -860,77 +891,11 @@ func TestSchema54KeepsTheLatestHostOfEachTenant(t *testing.T) {
 	}
 }
 
-// Some recovery databases carry the schema marker without every table. The
-// migration creates the tables that the swap and the copy read, and the
-// writers work on the result.
-func TestMigration54UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
-	t.Parallel()
-	all := []string{"latest_scan_hosts", "latest_host_search", "fts_backfill_state", "scans", "tenants"}
-	cases := []struct {
-		name    string
-		missing []string
-	}{{name: "all", missing: all}}
-	for _, table := range all {
-		cases = append(cases, struct {
-			name    string
-			missing []string
-		}{name: table, missing: []string{table}})
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			path := newSchema53Fixture(t)
-			extra := make([]string, 0, len(tc.missing))
-			for _, table := range tc.missing {
-				extra = append(extra, "DROP TABLE "+table)
-			}
-			execFixtureStatements(t, path, extra)
-
-			s, err := Open(path)
-			if err != nil {
-				t.Fatalf("upgrade without %v: %v", tc.missing, err)
-			}
-			defer s.Close()
-			if version := countRows(t, s.DB, `PRAGMA user_version`); version != schemaVersion {
-				t.Fatalf("schema version = %d, want %d", version, schemaVersion)
-			}
-			if got := countRows(t, s.DB, `SELECT COUNT(*) FROM pragma_table_info('latest_scan_hosts') WHERE name='tenant_id' AND pk=1`); got != 1 {
-				t.Fatal("latest_scan_hosts is not keyed by tenant")
-			}
-			for _, trigger := range slices.Concat(latestHostSearchTriggerNames, schema54Triggers) {
-				if got := countRows(t, s.DB, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?`, trigger); got != 1 {
-					t.Fatalf("trigger %s is missing", trigger)
-				}
-			}
-			if got := countRows(t, s.DB, `SELECT COUNT(*) FROM fts_backfill_state WHERE complete=1 AND table_name IN ('scan_hosts','latest_scan_hosts',?)`, latestScanHostsTenantRekeyState); got != 3 {
-				t.Fatalf("complete checkpoints = %d, want 3", got)
-			}
-			var integrity string
-			if err := s.DB.QueryRow(`PRAGMA integrity_check`).Scan(&integrity); err != nil || integrity != "ok" {
-				t.Fatalf("integrity_check = %q, %v", integrity, err)
-			}
-
-			job, err := defaultTenant(s).CreateJob(ctx, testJob("recovered"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			host := fixtureHost(8000)
-			host.Protocols[0].Ports[0].Service = &model.ServiceObservation{Name: "https", Product: "recovered-server"}
-			if err := s.System().SaveScan(ctx, fixtureScan("scan-recovered", job.ID, "recovered", time.Now().UTC(), []model.HostObservation{host})); err != nil {
-				t.Fatal(err)
-			}
-			page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "recovered-server", "", nil, 50, 0)
-			if err != nil || page.Total != 1 || page.Items[0].Host.Address != host.Address {
-				t.Fatalf("search after the recovery upgrade = %#v, %v", page, err)
-			}
-		})
-	}
-}
-
 // Reopening a current-schema database changes no row and no schema object.
 func TestCurrentSchemaOpenIsANoOpWhenRepeated(t *testing.T) {
 	t.Parallel()
 	path := newSchema53Fixture(t)
+	execFixtureStatements(t, path, schema54SwapStatements)
 	s, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -959,7 +924,7 @@ func TestCurrentSchemaOpenIsANoOpWhenRepeated(t *testing.T) {
 	}
 	defer repeated.Close()
 	if after := snapshot(repeated.DB); after != before {
-		t.Fatalf("repeating migration 54 changed the database:\nbefore:\n%s\nafter:\n%s", before, after)
+		t.Fatalf("repeating the open changed the database:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 	assertForeignKeysClean(t, repeated.DB)
 }
@@ -1018,8 +983,10 @@ func BenchmarkMigration54Rekey(b *testing.B) {
 		}
 		b.StartTimer()
 		started := time.Now()
-		if err := applyMigration(s.DB, 54, migration54Statements()); err != nil {
-			b.Fatal(err)
+		for _, statement := range schema54SwapStatements {
+			if _, err := s.DB.Exec(statement); err != nil {
+				b.Fatal(err)
+			}
 		}
 		if err := rekeyLatestScanHostsByTenantContext(ctx, s.DB, nil); err != nil {
 			b.Fatal(err)

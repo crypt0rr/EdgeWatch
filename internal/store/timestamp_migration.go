@@ -99,7 +99,9 @@ func normalizePersistedTimestampsContextWithProgress(ctx context.Context, db *sq
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			tx, err := db.BeginTx(ctx, nil)
+			// The batch reads the timestamps before it rewrites them, so it
+			// takes the write lock first.
+			tx, err := beginWriteTx(ctx, db)
 			if err != nil {
 				return err
 			}

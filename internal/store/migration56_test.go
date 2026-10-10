@@ -158,7 +158,7 @@ func TestLegacyPurgeMaintenanceOverwritesFreePages(t *testing.T) {
 	if _, err := f.store.DB.Exec(`UPDATE tenants SET state=?,purge_phase=? WHERE id=?`, TenantStateDeleted, tenantPurgePhaseComplete, secondTenantID); err != nil {
 		t.Fatal(err)
 	}
-	if err := applyMigration(f.store.DB, 55, migration55Statements()); err != nil {
+	if err := reapplyMigration(t, f.store.DB, 55, migration55Statements()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.store.DB.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {

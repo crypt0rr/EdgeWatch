@@ -84,13 +84,15 @@ func TestEventTimestampNormalizationPreservesOrderingRetentionAndSilence(t *test
 	}
 }
 
-func TestEventTimestampMigrationRepairsSchema45Rows(t *testing.T) {
+// The timestamp normalization, which schema 46 set back to pending to repair
+// the events, rewrites a variable-width event timestamp at startup.
+func TestEventTimestampNormalizationRepairsVariableWidthRows(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	base := time.Date(2026, time.September, 22, 13, 14, 15, 500000000, time.UTC)
 	insertRawEvent(t, s.DB, "", base.Format(time.RFC3339Nano))
-	if _, err := s.DB.ExecContext(ctx, `UPDATE timestamp_normalization_state SET complete=1 WHERE id=1; PRAGMA user_version=45`); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `UPDATE timestamp_normalization_state SET complete=0 WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
 	if err := migrateContext(ctx, s.DB); err != nil {

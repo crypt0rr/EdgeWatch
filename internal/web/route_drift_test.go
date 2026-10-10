@@ -43,6 +43,9 @@ var routeDriftPathRouters = map[string]func(apiRoute) (string, bool){
 	"api": func(route apiRoute) (string, bool) {
 		return route.Template, route.Access != routePublic
 	},
+	"legacyAPI": func(route apiRoute) (string, bool) {
+		return route.Template, route.Access != routePublic
+	},
 	"publicAPI": func(route apiRoute) (string, bool) {
 		return publicAPIBase + route.Template, route.Access == routePublic
 	},
@@ -59,6 +62,9 @@ var routeDriftPathRouters = map[string]func(apiRoute) (string, bool){
 var routeDriftAllowlist = map[string]map[string]string{
 	"api": {
 		consoleAPIBase: "the console API base that api strips from r.URL.Path; inventory templates are relative to it",
+	},
+	"legacyAPI": {
+		consoleAPIBase: "the console API base that legacyAPI strips from r.URL.Path; inventory templates are relative to it",
 	},
 	"Handler": {
 		"/assets/": "embedded console assets served by asset, not an API route",
@@ -834,6 +840,10 @@ func analyzeRouteDrift(fset *token.FileSet, files []*ast.File, routes []apiRoute
 	}
 
 	for _, route := range routes {
+		if route.Handle != nil {
+			// The route table dispatches the route itself.
+			continue
+		}
 		var dispatchedAt []string
 		for _, observation := range analyzer.observations {
 			if observation.atoms.method == route.Method && observation.atoms.query == route.Query && observation.matches(route) {
@@ -885,7 +895,7 @@ func TestRouteInventoryCoversRoutingSource(t *testing.T) {
 	// to cover, or an empty result would prove nothing.
 	analyzer := &routeDriftAnalyzer{fset: fset, consumed: map[token.Pos]bool{}}
 	methods := serverMethods(files)
-	for _, name := range []string{"api", "publicAPI", "jobRoute", "usersRoute", "scannerProfilesRoute", "notificationDestinationRoute", "platformRoute"} {
+	for _, name := range []string{"legacyAPI", "publicAPI", "jobRoute", "usersRoute", "notificationDestinationRoute", "platformRoute"} {
 		function, ok := methods[name]
 		if !ok {
 			t.Errorf("routing function %s was not found", name)
@@ -898,7 +908,6 @@ func TestRouteInventoryCoversRoutingSource(t *testing.T) {
 	for name, want := range map[string][]string{
 		"jobRoute":                     {"/jobs"},
 		"usersRoute":                   {"/users"},
-		"scannerProfilesRoute":         {"/scanner-profiles", "/scanner/profiles"},
 		"notificationDestinationRoute": {"/notifications/destinations"},
 		"platformRoute":                {"/platform"},
 	} {
@@ -1018,8 +1027,6 @@ func TestRouteInventoryDriftDetectsRemovedEntries(t *testing.T) {
 	t.Parallel()
 	fset, files := parseWebPackageSource(t)
 	for _, removed := range []string{
-		"GET /setup/status (unauthenticated)",
-		"GET /status",
 		"GET /scans/{id}/summary",
 		"POST /scans/{id}/cancel",
 		"GET /scans/{id}/hosts/{address}/rdap",
@@ -1027,7 +1034,6 @@ func TestRouteInventoryDriftDetectsRemovedEntries(t *testing.T) {
 		"DELETE /jobs/{id}?permanent=true",
 		"GET /jobs/{id}/baseline/hosts/{address}/rdap",
 		"PATCH /users/{id}",
-		"POST /scanner/profiles/{id}/restore",
 		"DELETE /notifications/destinations/{id}",
 		"GET /audit",
 		"PATCH /platform/units/{id}/capacity",

@@ -8,52 +8,12 @@ import (
 )
 
 // requiredPermission maps an API method and path, relative to /api/v1, to
-// the capability a session needs. Every route it grants must be listed in
-// apiRoutes below; the route inventory tests check this function,
-// Server.api and its sub-routers against that table.
+// the capability a session needs, for the routes that legacyAPI still
+// dispatches. Every route it grants must be listed in apiRoutes below; the
+// route inventory tests check this function, legacyAPI and its sub-routers
+// against that table.
 func requiredPermission(path, method string) string {
-	// These are the only routes intentionally reachable without a capability.
-	// Keep the list exact so an accidentally added /auth/* endpoint cannot
-	// silently become an authorization exemption.
-	if (path == "/setup/status" && method == http.MethodGet) ||
-		(path == "/setup" && method == http.MethodPost) ||
-		(path == "/setup/platform" && method == http.MethodPost) ||
-		(path == "/auth/login" && method == http.MethodPost) ||
-		(path == "/auth/activate" && method == http.MethodPost) ||
-		(path == "/auth/session" && method == http.MethodGet) {
-		return ""
-	}
-	if strings.HasPrefix(path, "/auth/") {
-		switch {
-		case path == "/auth/logout" && method == http.MethodPost,
-			path == "/auth/activity" && method == http.MethodPost,
-			path == "/auth/display-name" && method == http.MethodPut,
-			path == "/auth/password" && method == http.MethodPut,
-			path == "/auth/totp/setup" && method == http.MethodPost,
-			path == "/auth/totp/enable" && method == http.MethodPost,
-			path == "/auth/totp/recovery-codes" && method == http.MethodPost,
-			path == "/auth/totp" && method == http.MethodDelete,
-			path == "/auth/sessions" && method == http.MethodDelete:
-			return auth.PermissionAccountSelf
-		}
-	}
 	switch {
-	case path == "/status":
-		if method == http.MethodGet {
-			// Every authenticated console role needs the small version status;
-			// adminStatus returns only version/update fields to viewers.
-			return auth.PermissionJobsRead
-		}
-	case path == "/scanner/capabilities":
-		if method == http.MethodGet {
-			return auth.PermissionScannerProfilesRead
-		}
-	case isScannerProfilesPath(path):
-		return requiredScannerProfilePermission(path, method)
-	case path == "/stream":
-		if method == http.MethodGet {
-			return auth.PermissionStreamRead
-		}
 	case path == "/notifications/test":
 		if method == http.MethodPost {
 			return auth.PermissionNotificationsManage
@@ -121,18 +81,9 @@ func requiredPermission(path, method string) string {
 	return auth.PermissionDenied
 }
 
-// isScannerProfilesPath and isUsersPath keep the route matrix in lockstep
-// with the prefixes handled by api. A prefix match alone is not sufficient:
-// the corresponding helper validates the rest of the path grammar.
-func isScannerProfilesPath(path string) bool {
-	for _, prefix := range []string{"/scanner-profiles", "/scanner/profiles"} {
-		if path == prefix || strings.HasPrefix(path, prefix+"/") {
-			return true
-		}
-	}
-	return false
-}
-
+// isUsersPath keeps the route matrix in lockstep with the prefix handled by
+// legacyAPI. A prefix match alone is not sufficient: the corresponding
+// helper validates the rest of the path grammar.
 func isUsersPath(path string) bool {
 	return path == "/users" || strings.HasPrefix(path, "/users/")
 }
@@ -146,44 +97,6 @@ func routeParts(path, prefix string) ([]string, bool) {
 		return nil, true
 	}
 	return strings.Split(rest, "/"), true
-}
-
-func requiredScannerProfilePermission(path, method string) string {
-	prefix := "/scanner-profiles"
-	if strings.HasPrefix(path, "/scanner/profiles") {
-		prefix = "/scanner/profiles"
-	}
-	parts, ok := routeParts(path, prefix)
-	if !ok {
-		return auth.PermissionDenied
-	}
-	switch len(parts) {
-	case 0:
-		switch method {
-		case http.MethodGet:
-			return auth.PermissionScannerProfilesRead
-		case http.MethodPost:
-			return auth.PermissionScannerProfilesManage
-		}
-	case 1:
-		if (parts[0] == "validate" || parts[0] == "preview") && method == http.MethodPost {
-			return auth.PermissionScannerProfilesManage
-		}
-		switch method {
-		case http.MethodGet:
-			return auth.PermissionScannerProfilesRead
-		case http.MethodPut, http.MethodDelete:
-			return auth.PermissionScannerProfilesManage
-		}
-	case 2:
-		if parts[1] == "revisions" && method == http.MethodGet {
-			return auth.PermissionScannerProfilesRead
-		}
-		if (parts[1] == "restore" || parts[1] == "validate" || parts[1] == "preview") && method == http.MethodPost {
-			return auth.PermissionScannerProfilesManage
-		}
-	}
-	return auth.PermissionDenied
 }
 
 func requiredUsersPermission(path, method string) string {
@@ -439,14 +352,16 @@ const (
 // apiRoute is one method and path combination that a handler serves.
 type apiRoute struct {
 	Method string
-	// Template is the path relative to the API base. A {name} segment
-	// matches exactly one non-empty path segment.
+	// Template is the path relative to the API base, which is also the
+	// route's ServeMux pattern. A {name} segment matches exactly one
+	// non-empty path segment; a {name...} segment, which must be the last,
+	// matches the rest of the path.
 	Template string
 	// Query, when set, selects a distinct action on the same method and
-	// path, and requestPermission maps it to a different capability.
+	// path, with its own capability and handler.
 	Query string
-	// Permission is what requestPermission returns for the route: a
-	// capability, or "" for unauthenticated and public routes.
+	// Permission is the capability the gate requires for the route, or ""
+	// for unauthenticated and public routes.
 	Permission string
 	// Mutates reports whether the method changes state. Session routes that
 	// mutate require a CSRF token.
@@ -454,9 +369,16 @@ type apiRoute struct {
 	// Example is a concrete path that matches Template, used by the tests.
 	Example string
 	Access  routeAccess
-	// NoHandler marks a capability mapping that requiredPermission keeps
-	// although Server.api has no handler for it. Authorized requests receive
-	// the not-found default.
+	// TrailingSlash reports whether the route also answers its path with one
+	// trailing slash, as the sub-routers that the table replaced did.
+	TrailingSlash bool
+	// NoTenant marks a session route whose handler reads and changes no
+	// tenant data, so the gate resolves no tenant store for it.
+	NoTenant bool
+	// Handle serves the route once the gate admitted the request.
+	Handle routeHandler
+	// NoHandler marks a capability mapping that the gate keeps although
+	// nothing serves it. Authorized requests receive the not-found default.
 	NoHandler bool
 }
 
@@ -467,54 +389,76 @@ type apiRoute struct {
 // cannot skip authorization tests. Paths that are not listed fail closed.
 var apiRoutes = []apiRoute{
 	// Entry points dispatched before the session gate.
-	{Method: http.MethodGet, Template: "/setup/status", Example: "/setup/status", Access: routeUnauthenticated},
-	{Method: http.MethodPost, Template: "/setup", Mutates: true, Example: "/setup", Access: routeUnauthenticated},
+	{Method: http.MethodGet, Template: "/setup/status", Example: "/setup/status", Access: routeUnauthenticated, Handle: requestHandler((*Server).setupStatus)},
+	{Method: http.MethodPost, Template: "/setup", Mutates: true, Example: "/setup", Access: routeUnauthenticated, Handle: requestHandler((*Server).setup)},
 	// The platform setup redeems the host's platform setup token.
-	{Method: http.MethodPost, Template: "/setup/platform", Mutates: true, Example: "/setup/platform", Access: routeUnauthenticated},
-	{Method: http.MethodPost, Template: "/auth/login", Mutates: true, Example: "/auth/login", Access: routeUnauthenticated},
-	{Method: http.MethodPost, Template: "/auth/activate", Mutates: true, Example: "/auth/activate", Access: routeUnauthenticated},
+	{Method: http.MethodPost, Template: "/setup/platform", Mutates: true, Example: "/setup/platform", Access: routeUnauthenticated, Handle: requestHandler((*Server).platformSetup)},
+	{Method: http.MethodPost, Template: "/auth/login", Mutates: true, Example: "/auth/login", Access: routeUnauthenticated, Handle: requestHandler((*Server).login)},
+	{Method: http.MethodPost, Template: "/auth/activate", Mutates: true, Example: "/auth/activate", Access: routeUnauthenticated, Handle: requestHandler((*Server).activateUser)},
 	// The session probe authenticates itself but needs no capability.
-	{Method: http.MethodGet, Template: "/auth/session", Example: "/auth/session", Access: routeUnauthenticated},
+	{Method: http.MethodGet, Template: "/auth/session", Example: "/auth/session", Access: routeUnauthenticated, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) { s.withAuth(w, r, s.session) }},
 
 	// Account self-service.
-	{Method: http.MethodPost, Template: "/auth/activity", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/activity"},
-	{Method: http.MethodPost, Template: "/auth/logout", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/logout"},
-	{Method: http.MethodPut, Template: "/auth/display-name", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/display-name"},
-	{Method: http.MethodPut, Template: "/auth/password", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/password"},
-	{Method: http.MethodPost, Template: "/auth/totp/setup", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/totp/setup"},
-	{Method: http.MethodPost, Template: "/auth/totp/enable", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/totp/enable"},
-	{Method: http.MethodPost, Template: "/auth/totp/recovery-codes", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/totp/recovery-codes"},
-	{Method: http.MethodDelete, Template: "/auth/totp", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/totp"},
-	{Method: http.MethodDelete, Template: "/auth/sessions", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/sessions"},
+	{Method: http.MethodPost, Template: "/auth/activity", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/activity", NoTenant: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		writeJSON(w, http.StatusNoContent, nil)
+	}},
+	{Method: http.MethodPost, Template: "/auth/logout", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/logout", NoTenant: true, Handle: sessionHandler((*Server).logout)},
+	{Method: http.MethodPut, Template: "/auth/display-name", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/display-name", Handle: accountHandler((*Server).changeDisplayName)},
+	{Method: http.MethodPut, Template: "/auth/password", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/password", Handle: accountHandler((*Server).changePassword)},
+	{Method: http.MethodPost, Template: "/auth/totp/setup", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/totp/setup", Handle: accountHandler((*Server).totpSetup)},
+	{Method: http.MethodPost, Template: "/auth/totp/enable", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/totp/enable", Handle: accountHandler((*Server).totpEnable)},
+	{Method: http.MethodPost, Template: "/auth/totp/recovery-codes", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/totp/recovery-codes", Handle: accountHandler((*Server).totpRecoveryCodes)},
+	{Method: http.MethodDelete, Template: "/auth/totp", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/totp", Handle: accountHandler((*Server).totpDisable)},
+	{Method: http.MethodDelete, Template: "/auth/sessions", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/sessions", Handle: accountHandler((*Server).revokeOwnSessions)},
 
 	// Console status and live updates.
-	{Method: http.MethodGet, Template: "/status", Permission: auth.PermissionJobsRead, Example: "/status"},
-	{Method: http.MethodGet, Template: "/stream", Permission: auth.PermissionStreamRead, Example: "/stream"},
+	{Method: http.MethodGet, Template: "/status", Permission: auth.PermissionJobsRead, Example: "/status", Handle: sessionTenantHandler((*Server).adminStatus)},
+	{Method: http.MethodGet, Template: "/stream", Permission: auth.PermissionStreamRead, Example: "/stream", Handle: sessionTenantHandler((*Server).stream)},
 
 	// Scanner capabilities and profiles, under both path spellings.
-	{Method: http.MethodGet, Template: "/scanner/capabilities", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/capabilities"},
-	{Method: http.MethodGet, Template: "/scanner-profiles", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner-profiles"},
-	{Method: http.MethodPost, Template: "/scanner-profiles", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles"},
-	{Method: http.MethodPost, Template: "/scanner-profiles/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/validate"},
-	{Method: http.MethodPost, Template: "/scanner-profiles/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/preview"},
-	{Method: http.MethodGet, Template: "/scanner-profiles/{id}", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner-profiles/profile-1"},
-	{Method: http.MethodPut, Template: "/scanner-profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1"},
-	{Method: http.MethodDelete, Template: "/scanner-profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1"},
-	{Method: http.MethodPost, Template: "/scanner-profiles/{id}/restore", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1/restore"},
-	{Method: http.MethodGet, Template: "/scanner-profiles/{id}/revisions", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner-profiles/profile-1/revisions"},
-	{Method: http.MethodPost, Template: "/scanner-profiles/{id}/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1/validate"},
-	{Method: http.MethodPost, Template: "/scanner-profiles/{id}/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1/preview"},
-	{Method: http.MethodGet, Template: "/scanner/profiles", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles"},
-	{Method: http.MethodPost, Template: "/scanner/profiles", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles"},
-	{Method: http.MethodPost, Template: "/scanner/profiles/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/validate"},
-	{Method: http.MethodPost, Template: "/scanner/profiles/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/preview"},
-	{Method: http.MethodGet, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles/profile-1"},
-	{Method: http.MethodPut, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1"},
-	{Method: http.MethodDelete, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1"},
-	{Method: http.MethodPost, Template: "/scanner/profiles/{id}/restore", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1/restore"},
-	{Method: http.MethodGet, Template: "/scanner/profiles/{id}/revisions", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles/profile-1/revisions"},
-	{Method: http.MethodPost, Template: "/scanner/profiles/{id}/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1/validate"},
-	{Method: http.MethodPost, Template: "/scanner/profiles/{id}/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1/preview"},
+	{Method: http.MethodGet, Template: "/scanner/capabilities", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/capabilities", Handle: requestHandler((*Server).scannerCapabilities)},
+	{Method: http.MethodGet, Template: "/scanner-profiles", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner-profiles", TrailingSlash: true, Handle: tenantHandler((*Server).listScannerProfiles)},
+	{Method: http.MethodPost, Template: "/scanner-profiles", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles", TrailingSlash: true, Handle: sessionTenantHandler((*Server).createScannerProfile)},
+	{Method: http.MethodPost, Template: "/scanner-profiles/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/validate", TrailingSlash: true, Handle: requestHandler((*Server).validateScannerProfileDraft)},
+	{Method: http.MethodPost, Template: "/scanner-profiles/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/preview", TrailingSlash: true, Handle: requestHandler((*Server).renderScannerProfileDraft)},
+	{Method: http.MethodGet, Template: "/scanner-profiles/{id}", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner-profiles/profile-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.getScannerProfile(w, r, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodPut, Template: "/scanner-profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.updateScannerProfile(w, r, c.session, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodDelete, Template: "/scanner-profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.setScannerProfileArchived(w, r, c.session, c.tenant, r.PathValue("id"), true)
+	}},
+	{Method: http.MethodPost, Template: "/scanner-profiles/{id}/restore", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1/restore", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.setScannerProfileArchived(w, r, c.session, c.tenant, r.PathValue("id"), false)
+	}},
+	{Method: http.MethodGet, Template: "/scanner-profiles/{id}/revisions", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner-profiles/profile-1/revisions", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.listScannerProfileRevisions(w, r, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodPost, Template: "/scanner-profiles/{id}/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1/validate", TrailingSlash: true, Handle: requestHandler((*Server).validateScannerProfile)},
+	{Method: http.MethodPost, Template: "/scanner-profiles/{id}/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1/preview", TrailingSlash: true, Handle: requestHandler((*Server).previewScannerProfile)},
+	{Method: http.MethodGet, Template: "/scanner/profiles", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles", TrailingSlash: true, Handle: tenantHandler((*Server).listScannerProfiles)},
+	{Method: http.MethodPost, Template: "/scanner/profiles", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles", TrailingSlash: true, Handle: sessionTenantHandler((*Server).createScannerProfile)},
+	{Method: http.MethodPost, Template: "/scanner/profiles/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/validate", TrailingSlash: true, Handle: requestHandler((*Server).validateScannerProfileDraft)},
+	{Method: http.MethodPost, Template: "/scanner/profiles/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/preview", TrailingSlash: true, Handle: requestHandler((*Server).renderScannerProfileDraft)},
+	{Method: http.MethodGet, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles/profile-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.getScannerProfile(w, r, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodPut, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.updateScannerProfile(w, r, c.session, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodDelete, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.setScannerProfileArchived(w, r, c.session, c.tenant, r.PathValue("id"), true)
+	}},
+	{Method: http.MethodPost, Template: "/scanner/profiles/{id}/restore", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1/restore", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.setScannerProfileArchived(w, r, c.session, c.tenant, r.PathValue("id"), false)
+	}},
+	{Method: http.MethodGet, Template: "/scanner/profiles/{id}/revisions", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles/profile-1/revisions", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.listScannerProfileRevisions(w, r, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodPost, Template: "/scanner/profiles/{id}/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1/validate", TrailingSlash: true, Handle: requestHandler((*Server).validateScannerProfile)},
+	{Method: http.MethodPost, Template: "/scanner/profiles/{id}/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1/preview", TrailingSlash: true, Handle: requestHandler((*Server).previewScannerProfile)},
 
 	// User administration.
 	{Method: http.MethodGet, Template: "/users", Permission: auth.PermissionUsersManage, Example: "/users"},
@@ -636,6 +580,6 @@ var apiRoutes = []apiRoute{
 	// Unauthenticated public status projection, relative to publicAPIBase:
 	// the default business unit's page, and a unit's page by its slug.
 	// Server.publicAPI also accepts one trailing slash.
-	{Method: http.MethodGet, Template: "/dashboard", Example: "/dashboard", Access: routePublic},
-	{Method: http.MethodGet, Template: "/dashboard/{slug}", Example: "/dashboard/default", Access: routePublic},
+	{Method: http.MethodGet, Template: "/dashboard", Example: "/dashboard", Access: routePublic, TrailingSlash: true},
+	{Method: http.MethodGet, Template: "/dashboard/{slug...}", Example: "/dashboard/default", Access: routePublic, TrailingSlash: true},
 }

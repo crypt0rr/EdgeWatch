@@ -420,12 +420,12 @@ func TestRequiredPermissionFailsClosedOutsideInventory(t *testing.T) {
 		if matches := inventoryRoutesFor(apiRoutes, test.method, test.path); len(matches) > 0 {
 			t.Fatalf("%s %s is expected to be unknown but matches %s", test.method, test.path, routeInventoryName(matches[0]))
 		}
-		if got := requiredPermission(test.path, test.method); got != auth.PermissionDenied {
+		if got := routePermission(test.path, test.method); got != auth.PermissionDenied {
 			t.Errorf("unknown route %s %q returned %q, want %q", test.method, test.path, got, auth.PermissionDenied)
 		}
 	}
 	nestedPermanent := httptest.NewRequest(http.MethodDelete, consoleAPIBase+"/jobs/id/not-a-route?permanent=true", nil)
-	if got := requestPermission("/jobs/id/not-a-route", nestedPermanent); got != auth.PermissionDenied {
+	if got := routeRequestPermission("/jobs/id/not-a-route", nestedPermanent); got != auth.PermissionDenied {
 		t.Fatalf("unknown nested job permission = %q, want %q", got, auth.PermissionDenied)
 	}
 
@@ -457,8 +457,8 @@ func TestRequiredPermissionFailsClosedOutsideInventory(t *testing.T) {
 				} else {
 					denied++
 				}
-				if got := requiredPermission(path, method); got != want {
-					t.Errorf("requiredPermission(%q, %q) = %q, want %q", path, method, got, want)
+				if got := routePermission(path, method); got != want {
+					t.Errorf("routePermission(%q, %q) = %q, want %q", path, method, got, want)
 				}
 			}
 		}

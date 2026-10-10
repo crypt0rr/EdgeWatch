@@ -474,56 +474,23 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// api serves the console API from consoleRoutes. A route with a handler
+// passes the gate in serveRoute; the routes that are not yet in the table
+// pass legacyAPI's gate, with the capability that requestPermission
+// assigns, and its dispatch.
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {
+	if route := consoleRoutes.match(r); route != nil && (route.Handle != nil || route.NoHandler) {
+		s.serveRoute(w, r, route)
+		return
+	}
+	s.legacyAPI(w, r)
+}
+
+func (s *Server) legacyAPI(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1")
 	if path == "" {
 		path = "/"
 	}
-	if path == "/setup/status" && r.Method == http.MethodGet {
-		s.setupStatus(w, r)
-		return
-	}
-	if path == "/setup" && r.Method == http.MethodPost {
-		if !validateBrowserOrigin(r) {
-			writeError(w, http.StatusForbidden, "origin", "request origin is not allowed", nil)
-			return
-		}
-		s.setup(w, r)
-		return
-	}
-	if path == "/setup/platform" && r.Method == http.MethodPost {
-		if !validateBrowserOrigin(r) {
-			writeError(w, http.StatusForbidden, "origin", "request origin is not allowed", nil)
-			return
-		}
-		s.platformSetup(w, r)
-		return
-	}
-	if path == "/auth/login" && r.Method == http.MethodPost {
-		if !validateBrowserOrigin(r) {
-			writeError(w, http.StatusForbidden, "origin", "request origin is not allowed", nil)
-			return
-		}
-		s.login(w, r)
-		return
-	}
-	if path == "/auth/activate" && r.Method == http.MethodPost {
-		if !validateBrowserOrigin(r) {
-			writeError(w, http.StatusForbidden, "origin", "request origin is not allowed", nil)
-			return
-		}
-		s.activateUser(w, r)
-		return
-	}
-	if path == "/auth/session" && r.Method == http.MethodGet {
-		s.withAuth(w, r, s.session)
-		return
-	}
-
-	// Authentication and ordinary reads are read-only. Background polling and
-	// EventSource reconnects must not keep idle sessions alive or contend for
-	// SQLite's single writer connection. Real interactions are recorded below,
-	// after CSRF and route authorization have succeeded.
 	session, ok := s.Auth.AuthenticateReadOnly(r.Context(), r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required", nil)
@@ -537,89 +504,26 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	if permission == "" || permission == auth.PermissionDenied || !auth.HasPermission(session, permission) {
 		details := map[string]string{"permission": permission}
 		if permission == auth.PermissionDenied || permission == "" {
-			// Keep the internal sentinel out of the public API. Callers only need
-			// to know that the route is not authorized, not how the matrix stores
-			// its fail-closed default.
 			details["permission"] = "route"
 		}
 		writeError(w, http.StatusForbidden, "forbidden", "your account is not allowed to perform this action", details)
 		return
 	}
-	// Recording activity and signing out need no tenant. Every other route
-	// reads or changes the data of the account's tenant, including the
-	// account's own routes under /auth/ that change the account, which
-	// belongs to the tenant. Its store is resolved once, here, from the
-	// session. Each handler that reads or changes tenant data takes this
-	// store; handlers never choose a tenant. A nil store refuses every call.
-	// A platform administrator has no tenant: the gate above admits it only
-	// to its own account's routes, which change that account through the
-	// platform's store bound to the signed-in account.
 	var ts *store.TenantStore
-	var account accountStore
 	switch {
-	case path == "/auth/activity" || path == "/auth/logout":
-	case session.Role == store.RolePlatformAdmin && permission == auth.PermissionAccountSelf:
-		account = s.Store.Platform().Account(session.UserID)
 	case session.Role == store.RolePlatformAdmin && isPlatformPermission(permission):
-		// The platform routes read and change the platform's own data and
-		// the business units by ID, through the platform's store. They
-		// never take a tenant's store.
 	default:
 		if ts, ok = s.requestTenant(w, r, session); !ok {
 			return
 		}
-		account = ts
 	}
 	if isMutation(r.Method) {
 		if err := s.Auth.RecordActivity(r.Context(), session); err != nil {
-			// Activity persistence is opportunistic and bounded. It must never
-			// delay or fail the user's actual authorized operation.
 			s.Log.Debug("session activity timestamp could not be refreshed", "error", err)
 		}
 	}
 
 	switch {
-	case path == "/auth/activity" && r.Method == http.MethodPost:
-		writeJSON(w, http.StatusNoContent, nil)
-	case path == "/auth/logout" && r.Method == http.MethodPost:
-		s.logout(w, r, session)
-	case path == "/auth/display-name" && r.Method == http.MethodPut:
-		s.changeDisplayName(w, r, session, account)
-	case path == "/auth/password" && r.Method == http.MethodPut:
-		s.changePassword(w, r, session, account)
-	case path == "/auth/totp/setup" && r.Method == http.MethodPost:
-		s.totpSetup(w, r, session, account)
-	case path == "/auth/totp/enable" && r.Method == http.MethodPost:
-		s.totpEnable(w, r, session, account)
-	case path == "/auth/totp/recovery-codes" && r.Method == http.MethodPost:
-		s.totpRecoveryCodes(w, r, session, account)
-	case path == "/auth/totp" && r.Method == http.MethodDelete:
-		s.totpDisable(w, r, session, account)
-	case path == "/auth/sessions" && r.Method == http.MethodDelete:
-		action := "user.sessions_revoked"
-		if session.Role == store.RoleAdministrator {
-			action = "admin.sessions_revoked"
-		}
-		if err := account.DeleteUserSessionsWithAudit(r.Context(), session.UserID, actorAudit(session, action, "all sessions revoked")); err != nil {
-			if errors.Is(err, store.ErrAuditUnavailable) {
-				s.revokeSSEUser(session.UserID)
-				s.auditFailure(err, action)
-				writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "sessions were revoked, but the security audit is temporarily unavailable", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "store", "sessions could not be revoked", nil)
-			return
-		}
-		s.revokeSSEUser(session.UserID)
-		writeJSON(w, http.StatusNoContent, nil)
-	case path == "/status" && r.Method == http.MethodGet:
-		s.adminStatus(w, r, session, ts)
-	case path == "/scanner/capabilities" && r.Method == http.MethodGet:
-		s.scannerCapabilities(w, r)
-	case path == "/scanner-profiles" || strings.HasPrefix(path, "/scanner-profiles/"):
-		s.scannerProfilesRoute(w, r, session, ts, strings.TrimPrefix(path, "/scanner-profiles"))
-	case path == "/scanner/profiles" || strings.HasPrefix(path, "/scanner/profiles/"):
-		s.scannerProfilesRoute(w, r, session, ts, strings.TrimPrefix(path, "/scanner/profiles"))
 	case path == "/users" || strings.HasPrefix(path, "/users/"):
 		s.usersRoute(w, r, session, ts, strings.TrimPrefix(path, "/users"))
 	case path == "/public-dashboard" && (r.Method == http.MethodGet || r.Method == http.MethodPut):
@@ -640,8 +544,6 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.createNotificationDestination(w, r, session, ts)
 	case strings.HasPrefix(path, "/notifications/destinations/"):
 		s.notificationDestinationRoute(w, r, session, ts, strings.TrimPrefix(path, "/notifications/destinations/"))
-	case path == "/stream" && r.Method == http.MethodGet:
-		s.stream(w, r, session, ts)
 	case path == "/jobs" && r.Method == http.MethodGet:
 		s.listJobs(w, r, ts)
 	case path == "/jobs" && r.Method == http.MethodPost:

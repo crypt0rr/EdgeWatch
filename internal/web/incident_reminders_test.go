@@ -17,7 +17,7 @@ func TestIncidentReminderSettingRequiresAdministratorPassword(t *testing.T) {
 	t.Parallel()
 	server, db, admin := newUsersTestServer(t)
 	ts := defaultTenantStore(server)
-	if got := requiredPermission("/notifications/incident-reminders", http.MethodPut); got != auth.PermissionNotificationsManage {
+	if got := routePermission("/notifications/incident-reminders", http.MethodPut); got != auth.PermissionNotificationsManage {
 		t.Fatalf("reminder permission=%q", got)
 	}
 	get := func() (bool, string) {

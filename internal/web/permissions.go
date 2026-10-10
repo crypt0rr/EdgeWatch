@@ -2,6 +2,7 @@ package web
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
 )
@@ -69,8 +70,10 @@ type apiRoute struct {
 // that serves it. consoleRoutes and publicRoutes register these entries, and
 // nothing else in the package dispatches an API path. Tests drive the
 // permission and isolation matrices from this table, so a new route cannot
-// skip authorization tests. Paths that are not listed fail closed.
-var apiRoutes = []apiRoute{
+// skip authorization tests. Paths that are not listed fail closed. The
+// scanner profile routes are listed once, under /scanner-profiles, and
+// withPathAlias adds their /scanner/profiles spelling.
+var apiRoutes = withPathAlias("/scanner-profiles", "/scanner/profiles", []apiRoute{
 	// Entry points served before the session gate.
 	{Method: http.MethodGet, Template: "/setup/status", Example: "/setup/status", Access: routeUnauthenticated, Handle: requestHandler((*Server).setupStatus)},
 	{Method: http.MethodPost, Template: "/setup", Mutates: true, Example: "/setup", Access: routeUnauthenticated, Handle: requestHandler((*Server).setup)},
@@ -98,7 +101,8 @@ var apiRoutes = []apiRoute{
 	{Method: http.MethodGet, Template: "/status", Permission: auth.PermissionJobsRead, Example: "/status", Handle: sessionTenantHandler((*Server).adminStatus)},
 	{Method: http.MethodGet, Template: "/stream", Permission: auth.PermissionStreamRead, Example: "/stream", Handle: sessionTenantHandler((*Server).stream)},
 
-	// Scanner capabilities and profiles, under both path spellings.
+	// Scanner capabilities and profiles. withPathAlias also serves each
+	// /scanner-profiles route under /scanner/profiles.
 	{Method: http.MethodGet, Template: "/scanner/capabilities", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/capabilities", Handle: requestHandler((*Server).scannerCapabilities)},
 	{Method: http.MethodGet, Template: "/scanner-profiles", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner-profiles", TrailingSlash: true, Handle: tenantHandler((*Server).listScannerProfiles)},
 	{Method: http.MethodPost, Template: "/scanner-profiles", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles", TrailingSlash: true, Handle: sessionTenantHandler((*Server).createScannerProfile)},
@@ -115,21 +119,6 @@ var apiRoutes = []apiRoute{
 	{Method: http.MethodGet, Template: "/scanner-profiles/{id}/revisions", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner-profiles/profile-1/revisions", TrailingSlash: true, Handle: tenantIDHandler((*Server).listScannerProfileRevisions)},
 	{Method: http.MethodPost, Template: "/scanner-profiles/{id}/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1/validate", TrailingSlash: true, Handle: requestHandler((*Server).validateScannerProfile)},
 	{Method: http.MethodPost, Template: "/scanner-profiles/{id}/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1/preview", TrailingSlash: true, Handle: requestHandler((*Server).previewScannerProfile)},
-	{Method: http.MethodGet, Template: "/scanner/profiles", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles", TrailingSlash: true, Handle: tenantHandler((*Server).listScannerProfiles)},
-	{Method: http.MethodPost, Template: "/scanner/profiles", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles", TrailingSlash: true, Handle: sessionTenantHandler((*Server).createScannerProfile)},
-	{Method: http.MethodPost, Template: "/scanner/profiles/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/validate", TrailingSlash: true, Handle: requestHandler((*Server).validateScannerProfileDraft)},
-	{Method: http.MethodPost, Template: "/scanner/profiles/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/preview", TrailingSlash: true, Handle: requestHandler((*Server).renderScannerProfileDraft)},
-	{Method: http.MethodGet, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles/profile-1", TrailingSlash: true, Handle: tenantIDHandler((*Server).getScannerProfile)},
-	{Method: http.MethodPut, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1", TrailingSlash: true, Handle: sessionTenantIDHandler((*Server).updateScannerProfile)},
-	{Method: http.MethodDelete, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.setScannerProfileArchived(w, r, c.session, c.tenant, r.PathValue("id"), true)
-	}},
-	{Method: http.MethodPost, Template: "/scanner/profiles/{id}/restore", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1/restore", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.setScannerProfileArchived(w, r, c.session, c.tenant, r.PathValue("id"), false)
-	}},
-	{Method: http.MethodGet, Template: "/scanner/profiles/{id}/revisions", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles/profile-1/revisions", TrailingSlash: true, Handle: tenantIDHandler((*Server).listScannerProfileRevisions)},
-	{Method: http.MethodPost, Template: "/scanner/profiles/{id}/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1/validate", TrailingSlash: true, Handle: requestHandler((*Server).validateScannerProfile)},
-	{Method: http.MethodPost, Template: "/scanner/profiles/{id}/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1/preview", TrailingSlash: true, Handle: requestHandler((*Server).previewScannerProfile)},
 
 	// User administration.
 	{Method: http.MethodGet, Template: "/users", Permission: auth.PermissionUsersManage, Example: "/users", TrailingSlash: true, Handle: tenantHandler((*Server).listUsers)},
@@ -279,4 +268,27 @@ var apiRoutes = []apiRoute{
 	// which is the rest of the path.
 	{Method: http.MethodGet, Template: "/dashboard", Example: "/dashboard", Access: routePublic, TrailingSlash: true, Handle: requestHandler((*Server).defaultPublicPage)},
 	{Method: http.MethodGet, Template: "/dashboard/{slug...}", Example: "/dashboard/default", Access: routePublic, TrailingSlash: true, Handle: requestHandler((*Server).slugPublicPage)},
+})
+
+// withPathAlias returns routes with a copy of each route under prefix that
+// serves the same path under alias, placed after the last route under
+// prefix. A copy differs from its route only in its template and example,
+// so the two spellings of a path share their method, capability and
+// handler and cannot drift apart.
+func withPathAlias(prefix, alias string, routes []apiRoute) []apiRoute {
+	var copies []apiRoute
+	last := -1
+	for index, route := range routes {
+		if route.Template != prefix && !strings.HasPrefix(route.Template, prefix+"/") {
+			continue
+		}
+		route.Template = alias + strings.TrimPrefix(route.Template, prefix)
+		route.Example = alias + strings.TrimPrefix(route.Example, prefix)
+		copies = append(copies, route)
+		last = index
+	}
+	result := make([]apiRoute, 0, len(routes)+len(copies))
+	result = append(result, routes[:last+1]...)
+	result = append(result, copies...)
+	return append(result, routes[last+1:]...)
 }

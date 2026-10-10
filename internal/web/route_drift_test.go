@@ -131,6 +131,19 @@ func describeExpr(expr ast.Expr) string {
 	return fmt.Sprintf("%T", expr)
 }
 
+// routeTableLiteral returns the composite literal that lists the entries
+// of apiRoutes: the value itself, or the literal that withPathAlias takes.
+// A copy that withPathAlias makes keeps its entry's handler, and the
+// prefixes it swaps have no placeholder, so checking the entry checks the
+// copy.
+func routeTableLiteral(value ast.Expr) *ast.CompositeLit {
+	if call, ok := value.(*ast.CallExpr); ok && len(call.Args) > 0 {
+		value = call.Args[len(call.Args)-1]
+	}
+	literal, _ := value.(*ast.CompositeLit)
+	return literal
+}
+
 // routePathValueFindings reports a route whose handler reads a path value
 // that its template does not define, which would always read "". It reads
 // the r.PathValue calls in each entry's Handle expression and in the
@@ -149,7 +162,7 @@ func routePathValueFindings(fset *token.FileSet, files []*ast.File) (findings []
 					if !ok || len(value.Names) != 1 || value.Names[0].Name != "apiRoutes" || len(value.Values) != 1 {
 						continue
 					}
-					table, _ = value.Values[0].(*ast.CompositeLit)
+					table = routeTableLiteral(value.Values[0])
 				}
 			}
 		}

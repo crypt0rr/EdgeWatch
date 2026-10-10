@@ -105,6 +105,9 @@ To add a route:
   own permission and handler.
 - Set `TrailingSlash` only where the route's family accepts one trailing
   slash.
+- List a scanner profile route once, under `/scanner-profiles`.
+  `withPathAlias` copies it to the `/scanner/profiles` spelling with the
+  same permission and handler, so the two spellings cannot differ.
 - Teach `TestIsolationMatrix` a new path placeholder, and follow the tenancy
   rules in the repository's `AGENTS.md`.
 

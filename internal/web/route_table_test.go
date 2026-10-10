@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -433,6 +434,84 @@ func TestRoutePlaceholderNamesOnlyBracedSegments(t *testing.T) {
 		name, rest, ok := routePlaceholder(test.segment)
 		if name != test.name || rest != test.rest || ok != test.ok {
 			t.Errorf("routePlaceholder(%q) = %q, %t, %t; want %q, %t, %t", test.segment, name, rest, ok, test.name, test.rest, test.ok)
+		}
+	}
+}
+
+// withPathAlias copies each route under the prefix, and only those, to the
+// alias, after the last of them, and a copy runs its route's handler.
+func TestWithPathAliasCopiesTheRoutesUnderThePrefix(t *testing.T) {
+	t.Parallel()
+	var ran []string
+	handle := func(name string) routeHandler {
+		return func(*Server, http.ResponseWriter, *http.Request, routeCall) { ran = append(ran, name) }
+	}
+	routes := []apiRoute{
+		{Method: http.MethodGet, Template: "/a", Example: "/a", Handle: handle("a")},
+		{Method: http.MethodGet, Template: "/p", Permission: "p.read", Example: "/p", TrailingSlash: true, Handle: handle("p")},
+		{Method: http.MethodPost, Template: "/p/{id}/run", Permission: "p.run", Mutates: true, Example: "/p/p-1/run", Handle: handle("p run")},
+		{Method: http.MethodGet, Template: "/px", Example: "/px", Handle: handle("px")},
+		{Method: http.MethodGet, Template: "/b/p", Example: "/b/p", Handle: handle("b")},
+	}
+	got := withPathAlias("/p", "/q/r", routes)
+	var templates []string
+	for _, route := range got {
+		templates = append(templates, route.Method+" "+route.Template+" "+route.Example)
+		route.Handle(nil, nil, nil, routeCall{})
+	}
+	want := []string{"GET /a /a", "GET /p /p", "POST /p/{id}/run /p/p-1/run", "GET /q/r /q/r", "POST /q/r/{id}/run /q/r/p-1/run", "GET /px /px", "GET /b/p /b/p"}
+	if strings.Join(templates, ",") != strings.Join(want, ",") {
+		t.Fatalf("withPathAlias = %q, want %q", templates, want)
+	}
+	if wantRan := "a,p,p run,p,p run,px,b"; strings.Join(ran, ",") != wantRan {
+		t.Fatalf("the handlers ran as %q, want %q", strings.Join(ran, ","), wantRan)
+	}
+	if got[3].Permission != "p.read" || !got[3].TrailingSlash || got[4].Permission != "p.run" || !got[4].Mutates {
+		t.Fatalf("the copies changed their routes: %+v, %+v", got[3], got[4])
+	}
+	if len(routes) != 5 || routes[1].Template != "/p" {
+		t.Fatalf("withPathAlias changed its argument: %+v", routes)
+	}
+	if unchanged := withPathAlias("/missing", "/alias", routes); len(unchanged) != len(routes) {
+		t.Fatalf("withPathAlias without a route under the prefix = %+v", unchanged)
+	}
+}
+
+// Each /scanner/profiles route is its /scanner-profiles route under the
+// other spelling, so the two cannot differ in method, capability, access or
+// handler.
+func TestScannerProfileAliasRoutesMirrorTheConsoleRoutes(t *testing.T) {
+	t.Parallel()
+	const prefix, alias = "/scanner-profiles", "/scanner/profiles"
+	canonical := map[string]apiRoute{}
+	aliased := map[string]apiRoute{}
+	for _, route := range apiRoutes {
+		switch {
+		case route.Template == prefix || strings.HasPrefix(route.Template, prefix+"/"):
+			canonical[route.Method+" "+strings.TrimPrefix(route.Template, prefix)] = route
+		case route.Template == alias || strings.HasPrefix(route.Template, alias+"/"):
+			aliased[route.Method+" "+strings.TrimPrefix(route.Template, alias)] = route
+		}
+	}
+	if len(canonical) != 11 || len(aliased) != len(canonical) {
+		t.Fatalf("found %d scanner profile routes and %d aliases, want 11 of each", len(canonical), len(aliased))
+	}
+	for key, route := range canonical {
+		copied, ok := aliased[key]
+		if !ok {
+			t.Errorf("%s has no %s spelling", routeInventoryName(route), alias)
+			continue
+		}
+		if copied.Example != alias+strings.TrimPrefix(route.Example, prefix) {
+			t.Errorf("%s example = %s, want the example of %s", routeInventoryName(copied), copied.Example, routeInventoryName(route))
+		}
+		if (copied.Handle == nil) != (route.Handle == nil) {
+			t.Errorf("%s has a handler %t, want %t", routeInventoryName(copied), copied.Handle != nil, route.Handle != nil)
+		}
+		copied.Template, copied.Example, copied.Handle = route.Template, route.Example, nil
+		route.Handle = nil
+		if !reflect.DeepEqual(copied, route) {
+			t.Errorf("the %s spelling of %s = %+v, want %+v", alias, routeInventoryName(route), copied, route)
 		}
 	}
 }

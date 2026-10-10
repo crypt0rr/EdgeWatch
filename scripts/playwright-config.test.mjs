@@ -12,7 +12,7 @@ function loadConfig(overrides) {
   const env = { ...process.env }
   for (const name of ['CI', 'PLAYWRIGHT_PORT', 'PLAYWRIGHT_REUSE_SERVER']) delete env[name]
   Object.assign(env, overrides)
-  const script = `const { default: config } = await import(${JSON.stringify(configURL)}); console.log(JSON.stringify({ globalSetup: config.globalSetup, reuse: config.webServer.reuseExistingServer, url: config.webServer.url }))`
+  const script = `const { default: config } = await import(${JSON.stringify(configURL)}); console.log(JSON.stringify({ forbidOnly: config.forbidOnly, globalSetup: config.globalSetup, reuse: config.webServer.reuseExistingServer, url: config.webServer.url }))`
   return spawnSync(process.execPath, ['--input-type=module', '--no-warnings', '-e', script], { cwd: repositoryRoot, env, encoding: 'utf8' })
 }
 
@@ -29,6 +29,12 @@ function globalSetup() {
   return JSON.parse(result.stdout).globalSetup
 }
 
+function forbidOnly(overrides) {
+  const result = loadConfig(overrides)
+  assert.equal(result.status, 0, result.stderr)
+  return JSON.parse(result.stdout).forbidOnly
+}
+
 test('real-stack browser tests use one daemon build for the whole run', () => {
   assert.equal(globalSetup(), './e2e/global-setup.ts')
 })
@@ -38,6 +44,14 @@ test('local runs start a fresh server unless reuse is requested', () => {
   assert.equal(webServer({ PLAYWRIGHT_REUSE_SERVER: '0' }).reuse, false)
   assert.equal(webServer({ PLAYWRIGHT_REUSE_SERVER: '1' }).reuse, true)
   assert.deepEqual(webServer({ PLAYWRIGHT_PORT: '4191', PLAYWRIGHT_REUSE_SERVER: '1' }), { reuse: true, url: 'http://127.0.0.1:4191' })
+})
+
+// A committed test.only would otherwise shrink the CI and release browser gates
+// to the focused tests while still reporting success.
+test('CI rejects focused tests, which local runs allow', () => {
+  assert.equal(forbidOnly({ CI: 'true' }), true)
+  assert.equal(forbidOnly({ CI: '1' }), true)
+  assert.equal(forbidOnly({}), false)
 })
 
 test('CI never reuses a running server', () => {

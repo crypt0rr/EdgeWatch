@@ -32,6 +32,7 @@ jobs:
           # shallow two-commit checkout lets an earlier commit in a multi-
           # commit branch escape the diff and makes the gate non-deterministic.
           fetch-depth: 0
+          persist-credentials: false
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -111,6 +112,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -156,6 +158,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -237,6 +241,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -296,6 +301,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Go for release-style inputs
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -328,10 +335,16 @@ jobs:
               go build -trimpath -ldflags='-s -w -X main.version=v0.0.0-ci' \
               -o "release-binaries/linux_${arch}/edgewatch" ./cmd/edgewatch
           done
+      # Pin the privileged binfmt installer and BuildKit as the release does.
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          image: docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          cache-image: false
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=docker.io/moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       # Each image build keeps its BuildKit cache in its own scope so the
       # builds do not replace each other's cache. Only pushes to main save
       # cache: a pull request's cache is visible to that pull request alone,
@@ -364,6 +377,8 @@ jobs:
         run: ./scripts/verify-container-runtime.sh edgewatch:prebuilt-amd64
       - name: Verify scanner sandbox with real scans
         run: ./scripts/verify-scanner-sandbox.sh edgewatch:prebuilt-amd64
+      - name: Verify Compose deployment
+        run: ./scripts/verify-compose-deployment.sh edgewatch:prebuilt-amd64
       - name: Build prebuilt ARM64 image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -379,18 +394,31 @@ jobs:
           cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=container-prebuilt-arm64' || '' }}
       - name: Verify prebuilt ARM64 image
         run: bash ./scripts/test-prebuilt-image.sh edgewatch:prebuilt-arm64 linux/arm64 v0.0.0-ci
+      # The release runs the same scan on the candidate before publication.
+      - name: Scan images for known vulnerabilities
+        env:
+          GRYPE_DB_CACHE_DIR: ${{ runner.temp }}/grype-db
+        run: |
+          status=0
+          ./scripts/scan-image-vulnerabilities.sh edgewatch:prebuilt-amd64 linux/amd64 || status=1
+          ./scripts/scan-image-vulnerabilities.sh edgewatch:prebuilt-arm64 linux/arm64 || status=1
+          exit "$status"
 
   # The release also publishes an ARM64 image. Its seccomp filter numbers the
   # system calls differently, and its Landlock restriction runs on another
   # kernel. The container job builds that image only under emulation, where
   # neither runs, so this job runs the sandbox tests and the real scans on an
-  # ARM64 kernel.
+  # ARM64 kernel. It also runs every check that the release's smoke-arm64
+  # job runs on the ARM64 candidate, so they are known to pass on this runner
+  # before a tag needs them.
   arm64-sandbox:
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -400,6 +428,8 @@ jobs:
         run: go test -race -timeout=15m ./internal/sandbox/ ./internal/scanner/ ./internal/notify/
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=docker.io/moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - name: Build the ARM64 image natively
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -411,90 +441,11 @@ jobs:
             VERSION=v0.0.0-ci
           cache-from: type=gha,scope=container-native-arm64
           cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=container-native-arm64' || '' }}
+      - name: Verify the ARM64 image
+        run: bash ./scripts/test-prebuilt-image.sh edgewatch:arm64 linux/arm64 v0.0.0-ci
+      - name: Verify container runtime capability matrix
+        run: ./scripts/verify-container-runtime.sh edgewatch:arm64
       - name: Verify scanner sandbox with real scans
         run: ./scripts/verify-scanner-sandbox.sh edgewatch:arm64
-
-  # GitHub Actions caches are ref-isolated, so release tags cannot restore a
-  # cache written by main. Seed separate main and release GHCR caches here;
-  # tags refresh only the release cache. Grant package writes only to trusted
-  # pushes or deliberate dispatches on main.
-  release-cache:
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
-    needs: container
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up Go for release-style inputs
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Set up Node for release-style inputs
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
-        with:
-          node-version: 24.21.0
-          cache: npm
-      - name: Build release-style prebuilt inputs
-        run: |
-          npm ci
-          npm run build
-          go mod download
-          mkdir -p release-binaries/linux_amd64 release-binaries/linux_arm64
-          for arch in amd64 arm64; do
-            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
-              go build -trimpath -ldflags='-s -w -X main.version=v0.0.0-ci' \
-              -o "release-binaries/linux_${arch}/edgewatch" ./cmd/edgewatch
-          done
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-      - name: Set up Docker Buildx for cache export
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Log in to GHCR for the release cache
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Export release-style multi-platform cache
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          push: false
-          platforms: linux/amd64,linux/arm64
-          tags: edgewatch:release-prebuilt-multiarch
-          build-args: |
-            VERSION=v0.0.0-ci
-            PREBUILT_FRONTEND=1
-            PREBUILT_EDGEWATCH=1
-          # Seed the registry cache from the main-only per-architecture GHA
-          # caches when the registry ref is new or needs invalidated layers.
-          cache-from: |
-            type=registry,ref=ghcr.io/crypt0rr/edgewatch:buildcache
-            type=gha,scope=container-prebuilt-amd64
-            type=gha,scope=container-prebuilt-arm64
-          cache-to: |
-            type=registry,ref=ghcr.io/crypt0rr/edgewatch:buildcache,mode=max
-            type=registry,ref=ghcr.io/crypt0rr/edgewatch:releasecache,mode=max
-      # Read the just-exported ref on a clean worker to prove that both
-      # architecture-specific Naabu compile results are in the registry cache.
-      - name: Set up isolated Buildx for cache verification
-        id: release-cache-builder
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Verify release-style multi-platform cache
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          builder: ${{ steps.release-cache-builder.outputs.name }}
-          context: .
-          push: false
-          platforms: linux/amd64,linux/arm64
-          tags: edgewatch:release-prebuilt-multiarch
-          build-args: |
-            VERSION=v0.0.0-ci
-            PREBUILT_FRONTEND=1
-            PREBUILT_EDGEWATCH=1
-          cache-from: type=registry,ref=ghcr.io/crypt0rr/edgewatch:releasecache
+      - name: Verify Compose deployment
+        run: ./scripts/verify-compose-deployment.sh edgewatch:arm64

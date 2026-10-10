@@ -68,10 +68,12 @@ Documentation-only changes need a diff review and checks of referenced paths and
 | Browser behavior | `npm run test:e2e` |
 | Documentation website | `npm --prefix docs ci`, `npm --prefix docs run build`, and browser review for visible changes |
 | Database schema | Store migration tests and `./scripts/check-schema-docs.sh` |
-| Compose configuration | Run `docker compose config --quiet` and `docker compose -f compose.yaml -f compose.syn.yaml config --quiet`, then verify the rendered capability, hardening, image, and storage policies described in `docs/src/content/docs/deployment/container-hardening.md` and the CI `Validate Compose deployment` step |
-| Scanner dependency pin | `./scripts/verify-naabu-pin.sh` |
-| Scanner execution or sandbox | Build the image and run `./scripts/verify-scanner-sandbox.sh IMAGE`, which needs Docker and a kernel with Landlock; it compares real sandboxed, Landlock-only, and unconfined scans of local listeners, tries Landlock escapes, and checks the seccomp filter, core limits, and a sandboxed notification delivery; CI runs it on AMD64 and ARM64 runners |
+| Compose configuration | Run `docker compose config --quiet` and `docker compose -f compose.yaml -f compose.syn.yaml config --quiet`, then verify the rendered capability, hardening, image, and storage policies described in `docs/src/content/docs/deployment/container-hardening.md` and the CI `Validate Compose deployment` step; build the image and run `./scripts/verify-compose-deployment.sh IMAGE`, which starts it with `compose.yaml` and requires both sandboxes enforced |
+| Image packages or bundled binaries | Build the image and run `./scripts/scan-image-vulnerabilities.sh IMAGE PLATFORM`, which runs govulncheck on the bundled Naabu and Grype on the Alpine packages; pin every `apk add` package to a version that Renovate's repology manager tracks, and accept a finding only after triage, in `scripts/naabu-vulncheck-allowlist.txt` or `.grype.yaml` with its reason |
+| Scanner dependency pin | `./scripts/verify-naabu-pin.sh`, then the image vulnerability scan above |
+| Scanner execution or sandbox | Build the image and run `./scripts/verify-scanner-sandbox.sh IMAGE`, which needs Docker and a kernel with Landlock; it compares real sandboxed, Landlock-only, and unconfined scans of local listeners, tries Landlock escapes, and checks the seccomp filter, core limits, and a sandboxed notification delivery; CI runs it on AMD64 and ARM64 runners, and the release runs it on both against the candidate image |
 | Release helper scripts | `./scripts/test-release-artifacts.sh`; this uses fixture binaries and does not build a release candidate |
+| CI or release workflows | `node --test scripts/release-workflow.test.mjs`, which enforces the release gates and the supply-chain rules under "Behavior to preserve" |
 | Release workflow or GoReleaser configuration | Follow the exact GoReleaser check and immutable-candidate gates in `.github/workflows/release.yml`; the candidate, publication, image, and runtime smoke gates run only for tags |
 
 Install Chromium before the first browser test with `npx playwright install --with-deps chromium`.
@@ -121,7 +123,13 @@ Report the checks you ran and any failures or checks you could not run.
 For container changes, read [docs/src/content/docs/deployment/container-hardening.md](docs/src/content/docs/deployment/container-hardening.md).
 Preserve the default capability limits and the explicit SYN override.
 For release changes, preserve the immutable candidate build implemented in
-`.github/workflows/release.yml`.
+`.github/workflows/release.yml`, and these workflow rules:
+
+- A job that holds a write scope runs no npm packages; npm runs in read-only jobs that pass artifacts.
+- Every `actions/checkout` step sets `persist-credentials: false`.
+- The release restores no cache: the image builds with `no-cache: true`, and Go and Node run without Actions caches.
+- Pin every action by commit SHA and every image that a step starts by digest, in a form that a Renovate manager in `renovate.json` updates.
+- The release publishes only a commit on `main` with a passing CI run, after the vulnerability scan and the AMD64 and ARM64 smoke jobs pass.
 
 ## Change scope and pull requests
 

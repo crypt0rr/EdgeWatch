@@ -53,12 +53,16 @@ The image and Compose deployment still apply the following controls:
 CI renders `compose.yaml`, and `compose.yaml` with `compose.syn.yaml`, and
 `scripts/verify-compose-policy.sh` checks the capability, privilege,
 namespace, device, filesystem and mount controls above on each render. A
-change to either file that drops one of them fails CI.
+change to either file that drops one of them fails CI. CI and the release
+also start the image with `compose.yaml` itself, replacing only the image and
+the container name, in `scripts/verify-compose-deployment.sh`: the container
+must become healthy with the capabilities, `TMPDIR` and memory limit of the
+file, and `edgewatch health` must report both sandboxes enforced.
 
 ## Compatibility matrix
 
 The release workflow runs the following matrix against the image before it is
-published:
+published, on AMD64 and on ARM64:
 
 | Runtime | Capabilities | Supported work | Result |
 | --- | --- | --- | --- |
@@ -82,8 +86,10 @@ directory, or execute a file it wrote, even as UID 0. It requires that a
 running Nmap and the notification process each have one seccomp filter more
 than the daemon, and that neither they nor the daemon can dump core. The
 seccomp filter and the Landlock restriction depend on the architecture and
-the kernel, so CI also runs the sandbox tests and these real scans on an
-ARM64 runner, against an ARM64 image built there.
+the kernel, so the release runs these checks on an ARM64 runner against the
+ARM64 image it publishes, and runs the ARM64 archive there. CI runs the
+sandbox tests and the same checks on an ARM64 runner for every change,
+against an ARM64 image built there.
 
 ## Data ownership and upgrades
 

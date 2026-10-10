@@ -51,6 +51,8 @@ are not committed; preserve its tracked `.gitkeep`.
 | Console code | `npm run lint`, `npm run build`, `npm run test:coverage` |
 | Browser behavior | `npm run test:e2e` |
 | Database schema | Migration tests and `./scripts/check-schema-docs.sh` |
+| Container image or `compose.yaml` | `./scripts/verify-compose-deployment.sh IMAGE` and `./scripts/scan-image-vulnerabilities.sh IMAGE PLATFORM` on a built image |
+| CI or release workflows | `node --test scripts/release-workflow.test.mjs` |
 | Documentation website | `npm --prefix docs ci`, `npm --prefix docs run build`, browser review |
 
 `make check` verifies Go formatting, runs vet and race tests, checks console

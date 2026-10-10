@@ -29,6 +29,75 @@ docker compose pull
 docker compose up -d
 ```
 
+## Verify a release
+
+The [release workflow](https://github.com/crypt0rr/EdgeWatch/blob/main/.github/workflows/release.yml)
+builds each release from a commit on `main` whose CI passed. Before it
+publishes a release, it scans the image for known vulnerabilities and runs it
+on AMD64 and ARM64, including with the bundled `compose.yaml`. It publishes
+signed build provenance for the image and for each archive: an attestation
+that the file was built by that workflow from the tagged commit. Check it with
+the [GitHub CLI](https://cli.github.com/) before you deploy a release, and
+note the digest of the image you verified:
+
+```console
+gh attestation verify oci://ghcr.io/crypt0rr/edgewatch:0.33.0 \
+  --repo crypt0rr/EdgeWatch \
+  --signer-workflow crypt0rr/EdgeWatch/.github/workflows/release.yml \
+  --source-ref refs/tags/v0.33.0
+docker buildx imagetools inspect ghcr.io/crypt0rr/edgewatch:0.33.0 \
+  --format '{{.Manifest.Digest}}'
+```
+
+Replace `0.33.0` with the version, and `v0.33.0` with its tag. The first
+command exits with status 0 only when the image has provenance from the
+release workflow for that tag. The provenance names the digest of the image
+index, which covers both platforms.
+
+A tag can be moved to another image; a digest cannot. To run exactly the
+image you verified, pin its digest in a `compose.override.yaml` next to
+`compose.yaml`:
+
+```yaml
+services:
+  edgewatch:
+    image: ghcr.io/crypt0rr/edgewatch:0.33.0@sha256:<digest>
+```
+
+Docker pulls the digest and ignores the tag, which keeps the version
+readable. Compose reads the override as described under [Rollback](#rollback).
+Verify the next release and update the pin when you update.
+
+To verify a release archive, download it with `checksums.txt`, check the
+checksum, and verify the archive's provenance:
+
+```console
+gh release download v0.33.0 --repo crypt0rr/EdgeWatch \
+  --pattern 'EdgeWatch_0.33.0_linux_amd64.tar.gz' --pattern checksums.txt
+sha256sum --ignore-missing --check checksums.txt
+gh attestation verify EdgeWatch_0.33.0_linux_amd64.tar.gz \
+  --repo crypt0rr/EdgeWatch \
+  --signer-workflow crypt0rr/EdgeWatch/.github/workflows/release.yml \
+  --source-ref refs/tags/v0.33.0
+```
+
+Use `EdgeWatch_0.33.0_linux_arm64.tar.gz` for ARM64. The provenance covers
+each archive, not `checksums.txt` itself. The release's
+`release-manifest.json` records the source commit, the toolchain, and the
+Naabu release of the build.
+
+The image also carries an SPDX software bill of materials for each platform:
+
+```console
+docker buildx imagetools inspect ghcr.io/crypt0rr/edgewatch:0.33.0 \
+  --format '{{json (index .SBOM "linux/amd64").SPDX}}'
+```
+
+Tags named `candidate-<run>-<attempt>` are staging images that the release
+workflow pushes before it has verified them. Do not deploy them: deploy a
+version tag, such as `0.33.0`, or `latest`, which point only to images that
+passed every release check.
+
 ## Rollback
 
 A release that raises the database schema version migrates the database on its
@@ -43,7 +112,10 @@ services:
     image: ghcr.io/crypt0rr/edgewatch:0.25.23
 ```
 
-Replace `0.25.23` with the noted version, without the leading `v`. Compose
+Replace `0.25.23` with the noted version, without the leading `v`, and add
+the digest you [verified](#verify-a-release), as in
+`ghcr.io/crypt0rr/edgewatch:0.25.23@sha256:<digest>`, to run exactly that
+image. Compose
 reads `compose.override.yaml` automatically only when you pass no `-f` option;
 with the SYN override, add it explicitly:
 `docker compose -f compose.yaml -f compose.syn.yaml -f compose.override.yaml up -d`. Stop the

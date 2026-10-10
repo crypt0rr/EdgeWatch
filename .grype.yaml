@@ -1,0 +1,12 @@
+# Ignore rules for the Grype scan in scripts/scan-image-vulnerabilities.sh,
+# which fails on a vulnerability of high or critical severity that a newer
+# package fixes. Add a rule only after triage, as narrowly as the finding
+# allows (the vulnerability ID and the package name and version), with the
+# reason it is accepted.
+ignore:
+  # govulncheck checks the Go binaries in the image for the vulnerable
+  # symbols they contain. Grype matches Go modules by version alone, so its
+  # findings would duplicate govulncheck's without that precision.
+  - package:
+      type: go-module
+    reason: the scan checks Go binaries with govulncheck

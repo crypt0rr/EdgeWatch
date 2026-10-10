@@ -1,0 +1,48 @@
+# Vulnerabilities that scripts/scan-image-vulnerabilities.sh accepts in the
+# bundled Naabu binary.
+#
+# govulncheck finds the vulnerable symbols below in Naabu v2.6.1, the latest
+# Naabu release. EdgeWatch builds Naabu from that release without changing its
+# dependencies, so no update removes them until a Naabu release does; the
+# scan fails on every vulnerability not listed here.
+#
+# Remove an entry once a Naabu update no longer contains it; the scan prints
+# the entries it did not find. Add an entry only after triage, and say which
+# module and version it affects and why it is accepted.
+#
+# Format: the OSV ID, then the reason. Lines that start with # are comments.
+
+GO-2026-5841 github.com/klauspost/compress@v1.18.2 in Naabu v2.6.1, fixed in v1.18.7: OOB read in github.com/klauspost/compress/s2
+GO-2026-5320 github.com/yuin/goldmark@v1.7.4 in Naabu v2.6.1, fixed in v1.7.17: Cross-site Scripting (XSS) in github.com/yuin/goldmark
+GO-2026-5005 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, fixed in v0.52.0: Invoking key constraints not enforced in golang.org/x/crypto/ssh/agent
+GO-2026-5006 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, fixed in v0.52.0: Invoking agent constraints dropped when forwarding keys in golang.org/x/crypto/ssh/agent
+GO-2026-5013 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, fixed in v0.52.0: Invoking byte arithmetic causes underflow and panic in golang.org/x/crypto/ssh
+GO-2026-5014 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, fixed in v0.52.0: Invoking bypass of certificate restrictions in golang.org/x/crypto/ssh
+GO-2026-5015 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, fixed in v0.52.0: Invoking server panic during CheckHostKey/Authenticate in golang.org/x/crypto/ssh
+GO-2026-5016 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, fixed in v0.52.0: Invoking memory leak when rejecting channels can lead to DoS in golang.org/x/crypto/ssh
+GO-2026-5017 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, fixed in v0.52.0: Invoking client can cause server deadlock on unexpected responses in golang.org/x/crypto/ssh
+GO-2026-5018 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, fixed in v0.52.0: Invoking pathological RSA/DSA parameters may cause DoS in golang.org/x/crypto/ssh
+GO-2026-5019 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, fixed in v0.52.0: Invoking bypass of FIDO/U2F security keys physical interaction in golang.org/x/crypto/ssh
+GO-2026-5020 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, fixed in v0.52.0: Invoking infinite loop on large channel writes in golang.org/x/crypto/ssh
+GO-2026-5021 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, fixed in v0.52.0: Invoking auth bypass via unenforced @revoked status in golang.org/x/crypto/ssh/knownhosts
+GO-2026-5023 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, fixed in v0.52.0: Invoking VerifiedPublicKeyCallback permissions skip enforcement in golang.org/x/crypto/ssh
+GO-2026-5033 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, fixed in v0.52.0: Invoking pathological inputs can lead to client panic in golang.org/x/crypto/ssh/agent
+GO-2026-5932 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, no fixed version: The golang.org/x/crypto/openpgp package is unmaintained, unsafe by design, and has known security issues
+GO-2026-6303 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, fixed in v0.55.0: Source-address critical option not enforced for non-public-key auth callbacks in golang.org/x/crypto/ssh
+GO-2026-6354 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, fixed in v0.56.0: Prevent DoS on deadlocked undecided channel in golang.org/x/crypto/ssh
+GO-2026-6355 golang.org/x/crypto@v0.46.0 in Naabu v2.6.1, fixed in v0.56.0: Prevent DoS on deadlocked established channel in golang.org/x/crypto/ssh
+GO-2026-4918 golang.org/x/net@v0.48.0 in Naabu v2.6.1, fixed in v0.53.0: Infinite loop in HTTP/2 transport when given bad SETTINGS_MAX_FRAME_SIZE in net/http/internal/http2 in golang.org/x/net
+GO-2026-5025 golang.org/x/net@v0.48.0 in Naabu v2.6.1, fixed in v0.55.0: Invoking incorrect handling of namespaced elements in foreign content in golang.org/x/net/html
+GO-2026-5026 golang.org/x/net@v0.48.0 in Naabu v2.6.1, fixed in v0.55.0: Invoking failure to reject ASCII-only Punycode-encoded labels in golang.org/x/net/idna
+GO-2026-5027 golang.org/x/net@v0.48.0 in Naabu v2.6.1, fixed in v0.55.0: Invoking incorrect handling of HTML elements in foreign content in golang.org/x/net/html
+GO-2026-5028 golang.org/x/net@v0.48.0 in Naabu v2.6.1, fixed in v0.55.0: Invoking denial of service when parsing arbitrary HTML in golang.org/x/net/html
+GO-2026-5029 golang.org/x/net@v0.48.0 in Naabu v2.6.1, fixed in v0.55.0: Invoking incorrect handling of character references in DOCTYPE nodes in golang.org/x/net/html
+GO-2026-5030 golang.org/x/net@v0.48.0 in Naabu v2.6.1, fixed in v0.55.0: Invoking duplicate attributes can cause XSS in golang.org/x/net/html
+GO-2026-5942 golang.org/x/net@v0.48.0 in Naabu v2.6.1, fixed in v0.56.0: Parsing an invalid SVCB or HTTPS RR can panic in golang.org/x/net/dns/dnsmessage
+GO-2026-6603 golang.org/x/net@v0.48.0 in Naabu v2.6.1, fixed in v0.60.0: HTTP/2 server memory exhaustion due to Trailer headers in net/http
+GO-2026-6610 golang.org/x/net@v0.48.0 in Naabu v2.6.1, fixed in v0.60.0: HTTP/2 transport accepts malformed framing-related headers in net/http
+GO-2026-6611 golang.org/x/net@v0.48.0 in Naabu v2.6.1, fixed in v0.60.0: Excessive CPU consumption from repeated initial window changes in net/http
+GO-2026-6612 golang.org/x/net@v0.48.0 in Naabu v2.6.1, fixed in v0.60.0: Double flow control refund on HTTP/2 server streams in net/http
+GO-2026-6617 golang.org/x/net@v0.48.0 in Naabu v2.6.1, fixed in v0.60.0: HTTP/2 server crash due to HPACK encoder race in net/http
+GO-2026-5970 golang.org/x/text@v0.32.0 in Naabu v2.6.1, fixed in v0.39.0: Infinite loop on invalid input in golang.org/x/text
+GO-2026-6629 golang.org/x/text@v0.32.0 in Naabu v2.6.1, fixed in v0.41.0: Panic parsing crafted input in x/text/secure/precis in golang.org/x/text

@@ -3,17 +3,47 @@
   "extends": [
     "config:recommended"
   ],
-  "description": "Renovate owns version updates for Go, npm, Node.js, GoReleaser, Dockerfiles, Docker images, and GitHub Actions. GitHub security alerts remain enabled separately.",
+  "description": "Renovate owns version updates for Go, npm, Node.js, GoReleaser, Naabu, govulncheck, Dockerfiles, Docker images, and GitHub Actions. GitHub security alerts remain enabled separately.",
   "customManagers": [
     {
       "customType": "regex",
       "managerFilePatterns": ["/(^|/)Dockerfile$/"],
       "matchStrings": [
-        "(?<depName>ca-certificates|gcompat|git|nmap|nmap-scripts|tzdata)=(?<currentValue>[0-9][0-9A-Za-z.+~-]*)"
+        "(?<depName>ca-certificates|gcompat|git|nmap|nmap-scripts|tzdata|zlib)=(?<currentValue>[0-9][0-9A-Za-z.+~-]*)"
       ],
       "datasourceTemplate": "repology",
       "packageNameTemplate": "alpine_3_24/{{{depName}}}",
       "versioningTemplate": "loose"
+    },
+    {
+      "customType": "regex",
+      "description": "Update the Naabu release that the image builds together with the commit its tag resolves to, which scripts/verify-naabu-pin.sh and the Dockerfile check.",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": [
+        "ARG NAABU_VERSION=(?<currentValue>v[0-9][0-9A-Za-z.+-]*)\\nARG NAABU_COMMIT=(?<currentDigest>[0-9a-f]{40})\\n"
+      ],
+      "depNameTemplate": "projectdiscovery/naabu",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "customType": "regex",
+      "description": "Update the digest-pinned images that workflow steps and scripts start: the QEMU binfmt installer, BuildKit, the BuildKit SBOM generator, and Grype.",
+      "managerFilePatterns": [
+        "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/",
+        "/(^|/)scripts/scan-image-vulnerabilities\\.sh$/"
+      ],
+      "matchStrings": [
+        "(?<depName>docker\\.io(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._-]*)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/(^|/)Makefile$/"],
+      "matchStrings": ["GOVULNCHECK_VERSION \\?= (?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)"],
+      "depNameTemplate": "golang.org/x/vuln",
+      "datasourceTemplate": "go"
     },
     {
       "customType": "regex",
@@ -38,6 +68,16 @@
     {
       "matchPackageNames": ["node"],
       "allowedVersions": "/^24\\./"
+    },
+    {
+      "description": "Wait three days before proposing an npm release: the registry lets its author unpublish it within 72 hours, and most malicious releases are found and removed in that time. Security updates are not delayed.",
+      "matchDatasources": ["npm"],
+      "minimumReleaseAge": "3 days"
+    },
+    {
+      "description": "binfmt tags name the QEMU version, such as qemu-v10.2.3.",
+      "matchDepNames": ["docker.io/tonistiigi/binfmt"],
+      "versioning": "regex:^qemu-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$"
     }
   ]
 }

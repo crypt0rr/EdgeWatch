@@ -96,8 +96,9 @@ need:
   unit's rows carry its `tenant_id`, and deleting the unit erases them with
   its other rows.
 
-The migration adds a column with a default and two empty tables, so it is
-quick and has no background phase. It runs in one transaction that first
+The migration adds a column with a default, the platform's alert row with
+empty routings, and an empty `security_alert_windows` table, so it is quick
+and has no background phase. It runs in one transaction that first
 checks that the database is still at schema 66, like every step described
 under [Migration ownership](#migration-ownership), and it rebuilds no table.
 An older release refuses the upgraded database, so a rollback means

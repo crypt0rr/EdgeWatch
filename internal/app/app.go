@@ -1102,6 +1102,18 @@ func (a *App) runJobWithQueueMarker(ctx context.Context, scope store.TenantScope
 	}
 	destinationCancel()
 	if destinationErr != nil {
+		if completedCycleResult(scan) {
+			// The merged result of a completed resumable cycle stays in its
+			// checkpoints until a scan promotes it. Saving it now as not
+			// compared would discard the whole cycle's comparison; leaving the
+			// cycle unpromoted lets the next trigger promote and compare it,
+			// as after a crash in this window.
+			if a.Logger != nil {
+				a.Logger.Warn("notification destinations unavailable; the completed scan cycle is compared on the next run", "job", job.Name, "scan_id", scan.ID, "cycle_id", scan.CycleID, "error", destinationErr)
+			}
+			lifecycleExitMessage = "Scan attempt could not be finalized because notification destinations were unavailable; the completed cycle is compared on the next run"
+			return scan, nil, destinationErr
+		}
 		// Preserve the completed scan even when notification configuration
 		// cannot be read. Runtime state is deliberately left unchanged,
 		// matching the pre-transaction behavior, so the scan is recorded as
@@ -1190,6 +1202,13 @@ func (a *App) runJobWithQueueMarker(ctx context.Context, scope store.TenantScope
 		return scan, events, scanErr
 	}
 	return scan, events, nil
+}
+
+// completedCycleResult reports whether scan carries the merged result of a
+// resumable cycle that completed, which only its promotion compares with the
+// baseline.
+func completedCycleResult(scan model.Scan) bool {
+	return scan.Resumable && scan.CycleID != "" && scan.CycleStatus == "completed" && (scan.Status == "success" || scan.Status == "incomplete")
 }
 
 // ActiveScans returns a stable snapshot of the scans of the tenant of scope

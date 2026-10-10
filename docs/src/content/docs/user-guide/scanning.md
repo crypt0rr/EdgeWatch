@@ -83,7 +83,9 @@ approval would let it run. An operator's change to a job's targets, ports, or
 scanner clears its high-cost approval; the scope-change confirmation says so. A broad
 scan may be split into resumable address, discovery, enrichment, and UDP work
 units. A timeout or restart preserves completed work for the configured resume
-window; partial work cannot change a baseline. The dashboard shows scanner
+window; partial work cannot change a baseline. When a cycle completes but
+EdgeWatch cannot read the job's notification destinations, the cycle's result
+is kept and compared on the next run instead of being scanned again. The dashboard shows scanner
 phase, heartbeat, completed probes, ports found, and the last sanitized output.
 A resumed cycle keeps the scanner-profile arguments it started with, and its
 scans record that job and profile revision; a profile change applies from the

@@ -598,6 +598,19 @@ paths, passwords, or TOTP secrets. A CLI scan uses the same
 `scan.run_requested` action as a run started from the console. Read-only
 commands, including `restore --dry-run`, write no audit entries.
 
+Releases are built by the release workflow only from commits on `main` whose
+CI passed. It builds the image from scratch, without build caches, and with
+the QEMU, BuildKit, and SBOM generator images pinned by digest; no job that
+can publish runs npm packages, and no checkout keeps the job token. Before
+publishing, it scans the bundled Naabu with govulncheck and the image's
+Alpine packages with Grype, and runs the image natively on AMD64 and ARM64.
+Known vulnerabilities in the bundled Naabu that no Naabu release fixes yet
+are listed, and accepted, in `scripts/naabu-vulncheck-allowlist.txt`. The
+workflow publishes build provenance for the image and the archives; verify it
+and pin the image by digest as described in
+[Verify a release](docs/src/content/docs/deployment/updates.md#verify-a-release).
+Images tagged `candidate-<run>-<attempt>` are unverified staging images.
+
 By default, EdgeWatch checks the latest stable release on GitHub at startup and
 every three hours. This outbound request reveals the Docker host's public IP
 and the EdgeWatch user agent to GitHub; set `updates.enabled: false` for

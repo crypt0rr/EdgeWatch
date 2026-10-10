@@ -3,6 +3,7 @@ import { Activity, ArrowUp } from 'lucide-react'
 import { platformStatus } from '../../api'
 import type { ApplicationUpdateStatus } from '../../api'
 import { UntrustedProxyBanner } from '../../components/UntrustedProxyBanner'
+import { ScheduledBackupBanner } from '../../components/ScheduledBackupBanner'
 import { ErrorNotice } from '../../components/ErrorNotice'
 import { formatCount, Loading, plural } from './common'
 
@@ -19,8 +20,9 @@ export function updateSummary(updates?: ApplicationUpdateStatus) {
 
 /**
  * The deployment as numbers: its business units by state, their accounts and
- * jobs, the platform administrators, and the scan capacity and its use. It
- * names no unit and no unit's data.
+ * jobs, the platform administrators, and the scan capacity and its use, with
+ * warnings about an untrusted proxy and failing scheduled backups. It names
+ * no unit and no unit's data.
  */
 export function PlatformStatusPage() {
   const status = useQuery({ queryKey: ['platform-status'], queryFn: platformStatus, refetchInterval: 15_000 })
@@ -33,6 +35,7 @@ export function PlatformStatusPage() {
   return <section className="page">
     <div className="page-heading"><div><p className="eyebrow">Platform</p><h1>Status</h1><p className="muted">The deployment at a glance. Which jobs run is visible only inside each unit.</p></div><Activity className="muted-icon" size={24} /></div>
     <UntrustedProxyBanner proxy={value.untrusted_proxy} />
+    <ScheduledBackupBanner backups={value.backups} />
     <div className="detail-summary platform-status">
       <div className="summary-card"><span className="summary-label">Business units</span><strong>{value.units.total}</strong><span className="muted">{value.units.active} active · {value.units.disabled} disabled · {value.units.deleting} deleting</span></div>
       <div className="summary-card"><span className="summary-label">Accounts in units</span><strong>{formatCount(value.accounts)}</strong><span className="muted">{plural(value.jobs, 'job')} across all units</span></div>

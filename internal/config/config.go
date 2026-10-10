@@ -56,6 +56,7 @@ type Config struct {
 	Enrichment    Enrichment    `yaml:"enrichment"`
 	Updates       Updates       `yaml:"updates"`
 	Notifications Notifications `yaml:"notifications"`
+	Backup        Backup        `yaml:"backup"`
 	// Experimental is accepted only so that a configuration written for the
 	// business units preview still starts; see ObsoleteSettings.
 	Experimental obsoleteExperimental `yaml:"experimental"`
@@ -680,6 +681,7 @@ func applyDefaults(c *Config) {
 		enabled := true
 		c.Updates.Enabled = &enabled
 	}
+	applyBackupDefaults(&c.Backup)
 	for i := range c.Jobs {
 		j := &c.Jobs[i]
 		if j.DNSComparisonMode == "" {
@@ -1091,6 +1093,9 @@ func (c Config) ValidateDeployment() error {
 	case "", ScannerSandboxAuto, ScannerSandboxRequired, ScannerSandboxOff:
 	default:
 		return fmt.Errorf("notifications.sandbox must be auto, required, or off")
+	}
+	if err := c.Backup.validate(); err != nil {
+		return err
 	}
 	if level := strings.ToLower(strings.TrimSpace(c.Log.Level)); level != "" && level != "debug" && level != "info" && level != "warn" && level != "error" {
 		return fmt.Errorf("log.level must be one of debug, info, warn, or error")

@@ -33,6 +33,81 @@ var ErrRestoreDaemonLive = errors.New("restore refused because an EdgeWatch daem
 // validation and staged verification still run before replacement.
 var ErrRestoreDestinationUnreadable = errors.New("restore destination is unreadable")
 
+// ErrRestoreKeyMismatch is returned when the configured keys cannot open
+// encrypted secrets in the backup: web-managed notification destinations or
+// TOTP seeds. Restoring it would lock those destinations, so that their alerts
+// are dropped after the delivery deferrals run out, and lock the accounts out
+// of TOTP until the host disables it.
+var ErrRestoreKeyMismatch = errors.New("restore refused because the configured keys cannot open the backup's secrets")
+
+// RestoreKeyCheck counts the encrypted secrets of a staged backup copy and
+// those that the configured keys cannot open. It carries counts only, never
+// a secret, a URL, or an account.
+type RestoreKeyCheck struct {
+	// Destinations is the number of web-managed notification destinations of
+	// every business unit and of the platform, paused or not, and
+	// DestinationsLocked the number of them the notification key cannot open.
+	Destinations       int `json:"destinations"`
+	DestinationsLocked int `json:"destinations_locked"`
+	// TOTPSecrets is the number of accounts with a stored TOTP seed, and
+	// TOTPUnreadable the number of those seeds the authentication key cannot
+	// open.
+	TOTPSecrets    int `json:"totp_secrets"`
+	TOTPUnreadable int `json:"totp_unreadable"`
+}
+
+// Mismatch reports whether a key cannot open a secret of the copy.
+func (check RestoreKeyCheck) Mismatch() bool {
+	return check.DestinationsLocked > 0 || check.TOTPUnreadable > 0
+}
+
+// RestoreKeyMismatchError reports the counts of a refused key check. It
+// wraps ErrRestoreKeyMismatch.
+type RestoreKeyMismatchError struct {
+	Check RestoreKeyCheck
+}
+
+func (e *RestoreKeyMismatchError) Error() string {
+	if e == nil {
+		return ErrRestoreKeyMismatch.Error()
+	}
+	var parts []string
+	if e.Check.DestinationsLocked > 0 {
+		parts = append(parts, fmt.Sprintf("the notification key cannot open %d of %d web-managed destinations", e.Check.DestinationsLocked, e.Check.Destinations))
+	}
+	if e.Check.TOTPUnreadable > 0 {
+		parts = append(parts, fmt.Sprintf("the authentication key cannot open %d of %d TOTP seeds", e.Check.TOTPUnreadable, e.Check.TOTPSecrets))
+	}
+	if len(parts) == 0 {
+		return ErrRestoreKeyMismatch.Error()
+	}
+	return ErrRestoreKeyMismatch.Error() + ": " + strings.Join(parts, "; ")
+}
+
+func (e *RestoreKeyMismatchError) Unwrap() error { return ErrRestoreKeyMismatch }
+
+// StagedInspection opens the staged database copy at path, read-only, and
+// counts its secrets that the configured keys cannot open. The store does
+// not decrypt the secrets itself; the caller supplies the keys.
+type StagedInspection func(ctx context.Context, path string) (RestoreKeyCheck, error)
+
+// checkStagedKeys runs inspect on the staged copy at path. A copy whose
+// secrets a key cannot open is refused with a RestoreKeyMismatchError unless
+// allowMismatch is set; the counts are returned either way.
+func checkStagedKeys(ctx context.Context, path string, inspect StagedInspection, allowMismatch bool) (*RestoreKeyCheck, error) {
+	if inspect == nil {
+		return nil, nil
+	}
+	check, err := inspect(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("check the configured keys against the backup: %w", err)
+	}
+	if check.Mismatch() && !allowMismatch {
+		return &check, &RestoreKeyMismatchError{Check: check}
+	}
+	return &check, nil
+}
+
 // PendingDeliveryPolicy controls what happens to unsent notification rows
 // copied from a backup. A restore is an epoch boundary: replaying an older
 // outbox by accident can send stale incident or lifecycle alerts. The zero
@@ -100,6 +175,14 @@ type RestoreOptions struct {
 	// PendingDeliveries applies an explicit restore epoch policy to unsent
 	// notification rows. Empty uses the safe quarantine default.
 	PendingDeliveries PendingDeliveryPolicy
+	// InspectStaged, when set, runs on the sanitized staged copy before the
+	// destination is replaced, and counts the secrets that the configured
+	// keys cannot open. A copy with such a secret is refused unless
+	// AllowKeyMismatch is set.
+	InspectStaged StagedInspection
+	// AllowKeyMismatch restores a copy whose secrets InspectStaged found
+	// that the keys cannot open. It is never inferred.
+	AllowKeyMismatch bool
 }
 
 // RestoreResult describes a successfully replaced database file.
@@ -113,6 +196,8 @@ type RestoreResult struct {
 	SidecarsPresent           []string              `json:"sidecars_present,omitempty"`
 	SidecarsRemoved           []string              `json:"sidecars_removed,omitempty"`
 	SidecarsWarning           string                `json:"sidecars_warning,omitempty"`
+	// KeyCheck is the result of RestoreOptions.InspectStaged, when it ran.
+	KeyCheck *RestoreKeyCheck `json:"key_check,omitempty"`
 }
 
 // RestoreSidecarError includes the exact paths that made a restore
@@ -193,6 +278,8 @@ type RestoreDryRun struct {
 	SourceSchemaVersion       int                   `json:"source_schema_version,omitempty"`
 	PendingDeliveriesPolicy   PendingDeliveryPolicy `json:"pending_deliveries_policy,omitempty"`
 	PendingDeliveriesAffected int                   `json:"pending_deliveries_affected"`
+	// KeyCheck is the result of RestoreOptions.InspectStaged, when it ran.
+	KeyCheck *RestoreKeyCheck `json:"key_check,omitempty"`
 }
 
 // DryRunRestore predicts Restore without replacing the destination. The
@@ -208,6 +295,7 @@ func DryRunRestore(ctx context.Context, source, destination string, options Rest
 		SourceSchemaVersion:       staged.schemaVersion,
 		PendingDeliveriesPolicy:   staged.policy,
 		PendingDeliveriesAffected: staged.pending,
+		KeyCheck:                  staged.keyCheck,
 	}
 	if err != nil {
 		result.Refusal = err.Error()
@@ -229,6 +317,7 @@ type stagedRestore struct {
 	epoch         string
 	restoredAt    time.Time
 	pending       int
+	keyCheck      *RestoreKeyCheck
 }
 
 // discard removes the private staging directory and everything left in it.
@@ -282,6 +371,7 @@ func Restore(ctx context.Context, source, destination string, options RestoreOpt
 		RestoreEpoch:              staged.epoch,
 		PendingDeliveriesPolicy:   staged.policy,
 		PendingDeliveriesAffected: staged.pending,
+		KeyCheck:                  staged.keyCheck,
 	}
 	if !preflight.Safe {
 		for _, sidecar := range preflight.SourceSidecars {
@@ -405,6 +495,13 @@ func stageRestore(ctx context.Context, source, destination string, options Resto
 	staged.epoch = uuid.NewString()
 	staged.restoredAt = time.Now().UTC()
 	staged.pending, err = applyRestoreDeliveryPolicy(ctx, staged.path, policy, staged.epoch, staged.restoredAt)
+	if err != nil {
+		return staged, err
+	}
+	// The key check opens the sanitized copy read-only, so what it counts is
+	// exactly what would replace the destination. Any sidecar its connection
+	// creates stays in the private staging directory.
+	staged.keyCheck, err = checkStagedKeys(ctx, staged.path, options.InspectStaged, options.AllowKeyMismatch)
 	if err != nil {
 		return staged, err
 	}

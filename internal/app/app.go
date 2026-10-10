@@ -81,6 +81,9 @@ type App struct {
 	// reservation by a web request, its claim, its wait for a scan slot, and
 	// its running scan; see runs.go.
 	runs runRegistry
+	// backupWait overrides the wait for the next scheduled backup in
+	// deterministic tests; see backups.go.
+	backupWait func(context.Context, time.Time) bool
 }
 
 type activeRun struct {
@@ -1142,6 +1145,7 @@ func (a *App) Daemon(ctx context.Context) error {
 	deliveryDone := a.startDeliveryWorker(workerCtx)
 	purgeDone := a.startUnitPurgeWorker(workerCtx)
 	maintenanceDone := a.startMaintenanceWorker(workerCtx, system)
+	backupDone := a.startBackupWorker(workerCtx)
 	defer func() {
 		// Cancel before joining. This ordering is required on heartbeat/lease
 		// errors, where the parent context may still be live. Cancelling the
@@ -1158,6 +1162,7 @@ func (a *App) Daemon(ctx context.Context) error {
 		<-deliveryDone
 		<-purgeDone
 		<-maintenanceDone
+		<-backupDone
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if released, err := system.ReleaseDeliveryClaims(releaseCtx); err != nil {

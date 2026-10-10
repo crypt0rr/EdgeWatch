@@ -123,7 +123,10 @@ web-managed destinations across the deployment and reports `deployment_locked`
 without printing URLs. Console tests cover only the current unit's destinations.
 
 Restore the original database and notification key together. A missing key
-cannot be recovered from the database alone. Paused destinations retain their
+cannot be recovered from the database alone. The restore refuses a backup
+that the configured keys cannot open and reports the locked counts in
+`key_check`; `verify --from` reports them for a backup file without a
+restore. Paused destinations retain their
 queue without consuming retries; URL replacement discards queued alerts unless
 you select **Keep queued alerts**. After an outage, an administrator can
 redeliver a destination's alerts that ran out of retries from its **Failed

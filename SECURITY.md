@@ -2,7 +2,7 @@
 
 Please report security vulnerabilities privately through GitHub's security advisory feature for this repository. Do not open a public issue containing exploit details, credentials, notification URLs, or target information.
 
-EdgeWatch executes Nmap with validated argument arrays and does not expose arbitrary Nmap flags. Treat its configuration, SQLite volume, notification encryption key, and any remaining notification URL file as sensitive. Only configure targets you own or are explicitly authorized to scan.
+EdgeWatch executes Nmap with validated argument arrays and does not expose arbitrary Nmap flags. Treat its configuration, SQLite volume, backups, notification encryption key, and any remaining notification URL file as sensitive. Only configure targets you own or are explicitly authorized to scan.
 
 TCP jobs may use the optional Naabu discovery-to-Nmap pipeline. Both scanners
 are fixed, image-bundled executables (`/usr/local/bin/naabu` and
@@ -568,7 +568,16 @@ command can still disable TOTP and invalidate sessions.
 If the key is lost or replaced, web-managed destinations become unavailable;
 they cannot be recovered from the database alone. Restore the original key and
 database together, or delete and recreate the affected destinations after
-confirming that the old credentials are revoked. After restoring a key, run
+confirming that the old credentials are revoked. The restore command and its
+dry run open the staged copy of the backup with the configured
+`notification.key` and `auth.key` before it can replace the database, and
+refuse it while either key cannot open a web-managed destination, paused or
+not, of any unit or of the platform, or a stored TOTP seed, unless the
+operator passes `--allow-key-mismatch`; `verify --from` reports the same
+check for a backup file. They report only the counts of destinations and seeds
+and of those the keys cannot open, never a URL, a seed, or an account, and
+they never create a key. A restore therefore needs the configured key files
+to be readable. After restoring a key, run
 `notify test`: it fails while any enabled web-managed destination of any unit
 or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
@@ -651,6 +660,34 @@ backup, because no process runs on the restored copy. It still refuses to
 replace a database whose own daemon heartbeat is recent, unless the operator
 passes the emergency `--allow-active-daemon` override.
 
+The backup command, and each scheduled backup, check the file they wrote
+before it is published, as a restore checks its source: SQLite's
+`quick_check` (or `integrity_check` with `--full-check`), the foreign-key
+check, and a supported EdgeWatch schema. A file that fails is never
+published. The backup is written, made owner-only, and checked inside a
+private `0700` directory next to the output, then linked into place without
+replacing an existing file; nothing changes the mode of any other file in the
+output directory afterwards, including files named like the backup's SQLite
+companions. `verify --from` reads a backup file once into a
+private `0700` directory below `TMPDIR`, checks that copy, which holds the
+encrypted secrets of every unit, and removes it; it never opens the configured
+database or its lease, and leaves the backup file unchanged.
+
+Scheduled backups are off unless `backup.directory` is set. The daemon then
+writes a checked backup there on `backup.schedule` as
+`edgewatch-scheduled-YYYYMMDDTHHMMSSZ.db` with mode `0600`, and keeps the
+newest `backup.keep`. It removes only regular `0600` files with exactly that
+name, never a symbolic link or any other file in the directory, and removes
+nothing after a failed backup. Each backup holds every unit's data and is only
+usable with its keys: keep the directory as private as `./data`, and copy the
+backups off the host together with `notification.key` and `auth.key`. The
+daemon records the outcome in `backup-status.json` next to the database: the
+directory, schedule, file names, times, sizes, schema versions, and a bounded
+error reason, without any secret. `edgewatch health` and the platform status
+report it, and so does the status of a single unit's administrators; with more
+than one unit, a unit's status leaves it out. Scheduled backups are logged,
+not recorded in the security audit.
+
 Restore and dry-run commands cancel staging on `SIGINT` or `SIGTERM` and
 remove the temporary copy. The next restore or dry run removes abandoned
 `.edgewatch-restore-*` staging directories left by a process killed outright
@@ -676,7 +713,8 @@ IDs, file base names, and outcomes, and for `admin reset-password` and
 or the platform; they never include scan targets, notification URLs, full
 paths, passwords, or TOTP secrets. A CLI scan uses the same
 `scan.run_requested` action as a run started from the console. Read-only
-commands, including `restore --dry-run`, write no audit entries.
+commands, including `restore --dry-run` and `verify --from`, write no audit
+entries.
 
 Releases are built by the release workflow only from commits on `main` whose
 CI passed. It builds the image from scratch, without build caches, and with

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/crypt0rr/edgewatch/internal/config"
+	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -109,16 +111,68 @@ func auditPathName(path string) string {
 	return string(runes)
 }
 
-func backup(ctx context.Context, s *store.Store, output, format string) error {
-	path, err := s.Backup(ctx, output)
+// backup writes a backup that passed its checks, quick_check or with
+// fullCheck integrity_check, and prints its path, size, schema version, and
+// check results. A backup that fails a check is not published.
+func backup(ctx context.Context, s *store.Store, output, format string, fullCheck bool) error {
+	result, err := s.BackupWithOptions(ctx, output, store.BackupOptions{FullIntegrityCheck: fullCheck})
 	if err != nil {
 		return err
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
+	return printValue(format, result)
+}
+
+// verifyBackupFile is verify --from: it checks a backup file on a private
+// copy, without the configured database, and with the configured keys. It
+// prints the report even when a check fails, then fails.
+func verifyBackupFile(ctx context.Context, cfg *config.Config, from string, allowKeyMismatch bool, format string) error {
+	report, err := store.VerifyBackupFile(ctx, from, store.BackupFileOptions{LiveDatabase: cfg.Database, InspectStaged: stagedKeyCheck(cfg), AllowKeyMismatch: allowKeyMismatch})
+	if printErr := printValue(format, report); printErr != nil {
+		return errors.Join(err, printErr)
 	}
-	return printValue(format, map[string]any{"path": path, "bytes": info.Size()})
+	return keyMismatchHint(err)
+}
+
+// stagedKeyCheck opens a staged copy of a backup, read-only, with the keys
+// that the daemon uses for cfg: notifications.encryption_key_file or
+// notification.key beside the database, and web.auth_key_file or auth.key
+// beside the database. It counts the web-managed destinations and TOTP seeds
+// that they cannot open, and never creates a key.
+func stagedKeyCheck(cfg *config.Config) store.StagedInspection {
+	notificationKey := strings.TrimSpace(cfg.Notifications.EncryptionKeyFile)
+	if notificationKey == "" {
+		notificationKey = notify.DefaultKeyPath(cfg.Database)
+	}
+	authKey := strings.TrimSpace(cfg.Web.AuthKeyFile)
+	if authKey == "" {
+		authKey = store.DefaultAuthKeyPath(cfg.Database)
+	}
+	return func(ctx context.Context, path string) (store.RestoreKeyCheck, error) {
+		var check store.RestoreKeyCheck
+		staged, err := store.OpenReadOnlyExistingContext(ctx, path)
+		if err != nil {
+			return check, err
+		}
+		defer staged.Close()
+		// The copy lies in a private directory, so its default key, beside
+		// it, would never be the configured one.
+		staged.SetAuthKeyPath(authKey)
+		check.Destinations, check.DestinationsLocked, err = notify.CheckKey(ctx, staged, notificationKey)
+		if err != nil {
+			return check, err
+		}
+		check.TOTPSecrets, check.TOTPUnreadable, err = staged.System().TOTPKeyCheck(ctx)
+		return check, err
+	}
+}
+
+// keyMismatchHint names the files and the option that a refused key check
+// leaves the operator.
+func keyMismatchHint(err error) error {
+	if errors.Is(err, store.ErrRestoreKeyMismatch) {
+		return fmt.Errorf("%w; put the notification.key and auth.key that belong to the backup in place, or pass --allow-key-mismatch to accept the locked secrets", err)
+	}
+	return err
 }
 
 func verify(ctx context.Context, s *store.Store, format string) error {

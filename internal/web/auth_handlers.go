@@ -155,6 +155,13 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 		if proxy, seen := s.Auth.UntrustedProxy(); seen && session.Role == store.RoleAdministrator {
 			status["untrusted_proxy"] = proxy
 		}
+		// The scheduled backups cover the whole deployment and are the host
+		// operator's too, and their status names no unit's data. With one
+		// unit, its administrators see it; with more, only the platform
+		// status reports it.
+		if backups := s.App.BackupStatus(); backups != nil && session.Role == store.RoleAdministrator {
+			status["backups"] = backups
+		}
 	}
 	status["updates"] = s.applicationUpdateStatus(r.Context())
 	if telemetry, telemetryErr := s.cachedTenantTelemetry(r.Context(), ts); telemetryErr != nil {

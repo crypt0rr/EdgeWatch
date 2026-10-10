@@ -78,6 +78,8 @@ func TestRestoreCommandTerminationSignalsRemoveStagingCopy(t *testing.T) {
 	}{
 		{name: "SIGINT", signal: os.Interrupt},
 		{name: "SIGTERM", signal: syscall.SIGTERM},
+		// A hung-up terminal stops a command like a termination does.
+		{name: "SIGHUP", signal: syscall.SIGHUP},
 	} {
 		termination := termination
 		t.Run(termination.name, func(t *testing.T) {

@@ -138,7 +138,10 @@ in this container: `state` is `enforced`, `disabled`, or `unavailable`,
 scanner keeps, and `reason` explains a sandbox that is not enforced. Its
 `landlock` object reports the Landlock restriction with its own `state` and
 `reason`, and `abi`, the kernel's Landlock version, and its `seccomp` object
-reports the seccomp filter with its `state` and `reason`. See
+reports the seccomp filter with its `state` and `reason`. Its `limits` object,
+present when Landlock applies, reports the scanner's `oom_score_adj` and
+`max_open_files`; see
+[resource limits](/deployment/container-hardening/#resource-limits). See
 [the scanner sandbox](/deployment/container-hardening/#scanner-sandbox).
 `notification_sandbox` reports the process that delivers notifications in the
 same form; see

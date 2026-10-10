@@ -84,7 +84,14 @@ directory, and that a process restricted with Landlock cannot read the
 database, list the data directory, read `config.yaml`, write to the data
 directory, or execute a file it wrote, even as UID 0. It requires that a
 running Nmap and the notification process each have one seccomp filter more
-than the daemon, and that neither they nor the daemon can dump core. The
+than the daemon, and that neither they nor the daemon can dump core. With
+`TMPDIR` unset, it requires that a running scan's XML output and Naabu's target
+list lie in the [scanner files directory](#scanner-files), and that another
+sandboxed process can open neither. It requires that a running Nmap has the
+[resource limits](#resource-limits) below, and that cancelling a scan whose
+stand-in scanner left a background process that ignores hangups stops that
+process too, that such a process cannot leave its process group, and that a
+sandboxed Nmap dies with the `edgewatch scan` command that started it. The
 seccomp filter and the Landlock restriction depend on the architecture and
 the kernel, so the release runs these checks on an ARM64 runner against the
 ARM64 image it publishes, and runs the ARM64 archive there. CI runs the
@@ -127,7 +134,8 @@ A sandboxed scanner process:
   capabilities and no other capability;
 - cannot read or list `./data`, which belongs to UID 0 with mode `0750`, or
   read `config.yaml`; it reads its target list and writes its results through
-  file descriptors that EdgeWatch passes to it;
+  file descriptors that EdgeWatch passes to it, to [files](#scanner-files)
+  that no scanner can open by name;
 - inherits `no-new-privileges`, and the image contains no setuid or file-capability
   binary it could use to gain privileges.
 
@@ -179,8 +187,9 @@ place. The restricted process:
   `/sys`; `config.yaml` and `/run/secrets` stay closed;
 - can write only to `/dev/null`, its terminal, and the files EdgeWatch passes
   to it, and can reopen a passed file only with the access EdgeWatch gave it;
-- can create, change and remove files only below `/tmp`, where Naabu keeps
-  its working files, and can execute none of them;
+- creates no file when it is Nmap. Naabu, which keeps its own target list and
+  address map in temporary files, can create, change and remove files only
+  below `/tmp`, and can execute none of them;
 - with Landlock ABI 6 (Linux 6.12) or later, cannot signal processes outside
   its restriction, such as the daemon, or connect to their abstract UNIX
   sockets.
@@ -225,6 +234,8 @@ does every process the scanner starts. The filter:
   refuses port I/O and `uselib`;
 - refuses a `clone` that creates a namespace, and makes `clone3`, whose flags
   a filter cannot read, fail with `ENOSYS`, so that C libraries use `clone`;
+- refuses `setsid` and `setpgid`, so that every process a scanner starts stays
+  in the process group that EdgeWatch [stops](#stopping-scanners);
 - refuses the x32 ABI on x86-64, and kills a process that makes a system call
   of another architecture.
 
@@ -235,6 +246,78 @@ runs Nmap with the filter. When Nmap cannot start that way, scanners run
 with Landlock alone. `scanner_sandbox.seccomp` in `edgewatch health` reports
 `enforced`, `unavailable` with the reason, or `disabled`. The filter applies
 only with Landlock: `scanner.landlock: off` turns it off too.
+
+### Scanner files
+
+EdgeWatch passes Nmap a file for its XML output and Naabu a file with its
+target list. It creates them in `tmp/scanner` beside the database,
+`/var/lib/edgewatch/tmp/scanner` in the container, whatever `TMPDIR` names.
+The directory has mode `0700` and belongs to the daemon: EdgeWatch restricts a
+directory there that grants its group or others any access, and refuses to
+start when the path is not a directory, such as a symbolic link, or belongs to
+another user. Each EdgeWatch process keeps its files in a directory of its own
+below it, which it locks while it runs. At startup the daemon, and
+`edgewatch scan`, remove the directories of processes that no longer run, with
+the files of scans they were stopped in.
+
+A sandboxed scanner cannot list `./data` or reach a file below it by its name,
+and Landlock never grants the data directory to a scanner, even one that runs
+as UID 0, so a scanner reaches only the files of its own scan, through the
+descriptors it inherits. The bundled `compose.yaml` sets `TMPDIR` to
+`/var/lib/edgewatch/tmp` for the daemon's other temporary files, such as
+SQLite's, so they share the data volume rather than the 128 MiB `/tmp`
+tmpfs.
+
+### Stopping scanners
+
+Each Nmap and Naabu process leads a process group of its own; Nmap in the
+session of its private pseudo-terminal. When a scan is cancelled, times out,
+or a scanner exceeds an output bound, EdgeWatch kills the whole group, and
+when a scanner exits, EdgeWatch kills what is left in its group before it
+collects the scanner's exit status. A scanner can therefore leave no process
+behind that keeps probing or holds the scan open, such as a background process
+that ignores the hangup of the terminal. Once the scanner has exited,
+EdgeWatch waits at most five seconds, one deadline for all of them, for the
+scanner's output pipes and Nmap's terminal to close, and fails the scan when a
+process outside the group still holds one. The
+[seccomp filter](#seccomp-filter) refuses the calls that leave a process
+group. On Linux the kernel also kills a scanner whose EdgeWatch process dies,
+and `edgewatch scan` cancels its scan when its terminal hangs up, as it does on
+an interrupt or a termination signal.
+
+### Scan memory
+
+The daemon keeps a scope and, at a scan's end, a result for every address a
+job's targets expand to. The bundled `compose.yaml` limits the container to
+512 MiB: a resumable scan of a /16 with every address unreachable peaked at
+about 344 MB of it, and a /14 was killed for lack of memory. So
+`scanner.max_job_hosts` in `config.yaml`, 65,536 by default, caps the
+addresses one job may scan; see the
+[configuration reference](/reference/configuration/). Raise the setting only
+together with the memory limit, and keep several large scans from running at
+once with `scheduler.max_concurrent_scans`.
+
+### Resource limits
+
+With Landlock, the `sandbox-exec` command also sets the following limits for
+each scanner process before it restricts it. Every process the scanner starts
+inherits them:
+
+- `oom_score_adj` is `1000`, the highest value, so that when the container or
+  host runs out of memory the kernel's out-of-memory killer stops a scanner
+  before the daemon, which every business unit shares. The scan fails; the
+  daemon keeps running.
+- The soft and hard open file limits are at most 65,536 descriptors. Nmap
+  raises its soft limit to the hard limit for connect scans, and Naabu holds
+  about one socket for each of at most 1,024 workers.
+
+`scanner_sandbox.limits` in `edgewatch health` reports them, as
+`oom_score_adj` and `max_open_files`; it is absent when Landlock does not
+apply. EdgeWatch sets no process count limit (`RLIMIT_NPROC`), which the
+kernel counts for the scanner's UID across all of its scans, threads, and
+other containers that use the same UID, and no address space or data limit,
+which would fail large scans whose memory needs the release matrix does not
+cover.
 
 ### Core dumps
 
@@ -268,8 +351,14 @@ needed; `./data` keeps its UID 0 ownership.
 
 - The daemon, which serves the console and holds the database and keys, still
   runs as UID 0 with the container's capabilities.
-- All sandboxed scanner processes share UID 65532 and `/tmp`, so a compromised
-  scanner process could observe other scans that run at the same time.
+- All sandboxed scanner processes share UID 65532, and all Naabu processes
+  share `/tmp`, so a compromised scanner process could observe other scans
+  that run at the same time. It cannot reach their XML output or target
+  lists, which lie in the [scanner files directory](#scanner-files).
+- Where the seccomp filter does not apply, such as on a kernel without
+  Landlock, a process that a compromised scanner starts can leave the
+  scanner's process group with `setsid` and outlive the scan. Without
+  Landlock, the [resource limits](#resource-limits) do not apply either.
 - A scanner process keeps its network access; target exclusions and probe
   budgets are enforced by EdgeWatch before it starts.
 - On a kernel without Landlock, a sandboxed process can read every file its

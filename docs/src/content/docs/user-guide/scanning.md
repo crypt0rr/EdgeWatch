@@ -73,6 +73,18 @@ Full-range scans are deliberately bounded by scheduler probe budgets. A scan
 that runs as a single invocation resolves DNS again when it starts, and the
 budget is checked against that resolution before any scanner runs.
 
+A job's targets expand to at most its **Maximum expanded hosts**, and to at
+most the deployment's `scanner.max_job_hosts`, 65,536 addresses, a /16, by
+default. The daemon, which every business unit shares, keeps a scope and a
+result for every address of a running scan in its memory, and a scan of a /16
+was tested within the 512 MiB limit of the bundled `compose.yaml`. A job whose
+targets expand to more fails to scan with
+`expanded targets exceed scanner.max_job_hosts=65536`; split its targets into
+several jobs. The editor and the guided setup warn while targets expand to
+more, the daemon logs such jobs at startup, and `edgewatch health` lists
+them. See the [configuration reference](/reference/configuration/) before
+raising the setting.
+
 A job whose estimated work exceeds its unit's budget needs an administrator's
 high-cost approval. **Scan now** on such a job is refused with an error. A
 scheduled run is skipped before it starts and is reported in Activity as
@@ -95,8 +107,9 @@ next cycle. Accepting an incident, approving or resetting the baseline, or
 changing the monitored scope discards paused progress, and the next run starts
 a fresh cycle.
 
-**Cancel scan** stops the scanner, and the job page and Overview show
-**Cancellation requested** until the scan ends. Once EdgeWatch is saving a
+**Cancel scan** stops the scanner and every process it started, and the job
+page and Overview show **Cancellation requested** until the scan ends; see
+[stopping scanners](/deployment/container-hardening/#stopping-scanners). Once EdgeWatch is saving a
 scan's result, the scan can no longer be canceled. A scan that stops because
 EdgeWatch itself stopped is recorded as interrupted rather than canceled; see
 [notifications](/user-guide/notifications/#delivery-retries-and-health).
@@ -125,6 +138,38 @@ which range. The job editor enables only those fields, shows each range, and
 keeps every field disabled until the profiles have loaded. The built-in Naabu
 profile fixes every discovery setting; an administrator can create a profile
 that allows tuning on the **Scanner profiles** page.
+
+## NSE scripts
+
+A scanner profile can run one approved NSE script with Nmap, and pass it
+arguments of its own:
+
+| Script | Arguments |
+| --- | --- |
+| `banner` | `banner.ports`, `banner.timeout` |
+| `http-headers` | `http-headers.path`, `http-headers.useget` |
+| `http-title` | `http-title.url` |
+| `ssh-hostkey` | `ssh_hostkey` |
+| `ssl-cert` | none |
+| `dns-recursion` | none |
+
+A script also reads the arguments of the NSE libraries and of other scripts,
+such as `newtargets`, which would let a script add scan targets that the
+target exclusions and probe budgets never see, so saving a profile refuses
+any other argument. Values cannot contain a comma or a quote, which would
+start another argument, nor paths, wildcards, or `@file` references. A
+profile revision saved before v0.36.0 with other arguments keeps
+working for the jobs that use it, and the daemon logs a warning naming those
+arguments each time such a job scans. Saving the profile again requires
+removing them; then update the jobs to the new revision.
+
+## Scanner output
+
+Nmap's terminal status stream is only a progress hint while Nmap writes its
+XML result to a file, so a long scan is never stopped for the amount of status
+it prints. The XML result is limited to 16 MiB and Nmap's diagnostic output to
+8 MiB; a scanner that exceeds either is stopped and the error names the
+limit.
 
 See the [configuration reference](/reference/configuration/) for deployment
 budgets and exclusions, and [Your first scan](/getting-started/first-scan/)

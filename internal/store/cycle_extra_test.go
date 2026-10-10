@@ -404,7 +404,7 @@ func TestScanCycleAuxiliaryLifecycleAndFragments(t *testing.T) {
 	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp"}}}); err != nil {
 		t.Fatal(err)
 	}
-	if fragmentsPlan, fragments, err := s.System().LoadScanCycleFragments(ctx, cycle.ID); err != nil || len(fragmentsPlan.Units) != 1 || len(fragments) != 1 {
+	if fragmentsPlan, fragments, err := s.System().LoadScanCycleFragments(ctx, cycle.ID); err != nil || fragmentsPlan.TotalUnits != 1 || len(fragmentsPlan.Scopes) != 1 || len(fragments) != 1 {
 		t.Fatalf("cycle fragments = %#v, %#v, %v", fragmentsPlan, fragments, err)
 	}
 	if _, err := s.System().CompleteScanCycle(ctx, cycle.ID); err != nil {

@@ -92,21 +92,31 @@ type ResumableScanner interface {
 // Plan resolves targets once and creates deterministic address/port work
 // units. It does not start a scan process beyond the DNS resolution needed to
 // pin the cycle's effective targets.
+//
+// A configured CIDR is pinned as one target that holds all of its addresses,
+// in the plan and in each unit, rather than as one target per address. A
+// scan reads such a target exactly as it reads one literal target per
+// address, including a release that predates the grouping and resumes the
+// cycle, while the plan keeps one copy of each address in its targets and
+// one in its units.
 func (n *Nmap) Plan(ctx context.Context, job config.Job) (WorkPlan, error) {
 	job = config.NormalizeJob(job)
-	targets, failures, err := n.resolvePartial(ctx, job)
+	naabu := job.TCP != nil && job.TCP.Engine == config.EngineNaabuNmap
+	targets, failures, err := n.resolveTargets(ctx, job, !naabu)
 	if err != nil {
 		return WorkPlan{}, err
 	}
-	if job.TCP != nil && job.TCP.Engine == config.EngineNaabuNmap {
+	if naabu {
 		return n.planNaabuPipeline(ctx, job, targets, failures)
 	}
-	plan := WorkPlan{CreatedAt: time.Now().UTC(), Job: job, Targets: exportResolvedTargets(targets), DNS: map[string][]string{}, TargetFailures: coverageFailures(failures)}
+	plan := WorkPlan{CreatedAt: time.Now().UTC(), Job: job, Targets: shareResolvedTargets(targets), DNS: map[string][]string{}, TargetFailures: coverageFailures(failures)}
 	for _, target := range targets {
 		if target.Hostname {
 			plan.DNS[target.Name] = append([]string(nil), target.Addresses...)
 		}
 	}
+	pinned := pinAddresses(targets)
+	families := map[int]addressGroups{4: pinned.family(4), 6: pinned.family(6)}
 	for _, item := range []struct {
 		protocol string
 		config.Protocol
@@ -125,21 +135,12 @@ func (n *Nmap) Plan(ctx context.Context, job config.Job) (WorkPlan, error) {
 			return WorkPlan{}, ConfigurationError(fmt.Errorf("%s: %w", item.protocol, err))
 		}
 		for _, target := range targets {
-			plan.Scopes = append(plan.Scopes, model.Scope{Target: target.Name, Protocol: item.protocol, Ports: item.Ports, ServiceDetection: item.ServiceDetection})
-		}
-		addressesByFamily := map[int][]string{4: {}, 6: {}}
-		seen := map[string]bool{}
-		for _, target := range targets {
+			if !target.network {
+				plan.Scopes = append(plan.Scopes, model.Scope{Target: target.Name, Protocol: item.protocol, Ports: item.Ports, ServiceDetection: item.ServiceDetection})
+				continue
+			}
 			for _, address := range target.Addresses {
-				if seen[address] {
-					continue
-				}
-				seen[address] = true
-				family := 4
-				if net.ParseIP(address).To4() == nil {
-					family = 6
-				}
-				addressesByFamily[family] = append(addressesByFamily[family], address)
+				plan.Scopes = append(plan.Scopes, model.Scope{Target: address, Protocol: item.protocol, Ports: item.Ports, ServiceDetection: item.ServiceDetection})
 			}
 		}
 		// A singular address placeholder is an explicit profile contract: the
@@ -152,12 +153,13 @@ func (n *Nmap) Plan(ctx context.Context, job config.Job) (WorkPlan, error) {
 			if err := ctx.Err(); err != nil {
 				return WorkPlan{}, err
 			}
-			addresses := addressesByFamily[family]
-			sort.Strings(addresses)
-			for addressStart := 0; addressStart < len(addresses); addressStart += addressBatchSize {
-				addressEnd := min(addressStart+addressBatchSize, len(addresses))
-				addressBatch := append([]string(nil), addresses[addressStart:addressEnd]...)
-				unitTargets := subsetResolvedTargets(targets, addressBatch)
+			familyAddresses := families[family]
+			for addressStart := 0; addressStart < len(familyAddresses); addressStart += addressBatchSize {
+				addressEnd := min(addressStart+addressBatchSize, len(familyAddresses))
+				// Every port chunk of the batch shares its addresses and
+				// targets; the plan never changes them.
+				addressBatch := familyAddresses[addressStart:addressEnd].addresses()
+				unitTargets := familyAddresses[addressStart:addressEnd].targets(plan.Targets)
 				factor := int64(1)
 				if item.ServiceDetection {
 					factor = 2
@@ -176,8 +178,8 @@ func (n *Nmap) Plan(ctx context.Context, job config.Job) (WorkPlan, error) {
 						Sequence:  len(plan.Units),
 						Protocol:  item.protocol,
 						Family:    family,
-						Targets:   exportResolvedTargets(unitTargets),
-						Addresses: append([]string(nil), addressBatch...),
+						Targets:   unitTargets,
+						Addresses: addressBatch,
 						Ports:     formatPorts(chunk),
 						PortCount: len(chunk),
 						Probes:    int64(len(addressBatch)) * int64(len(chunk)) * factor,
@@ -191,6 +193,107 @@ func (n *Nmap) Plan(ctx context.Context, job config.Job) (WorkPlan, error) {
 	plan.Scopes = appendTargetFailureScopes(plan.Scopes, plan.TargetFailures, job)
 	plan.TotalUnits = len(plan.Units)
 	return plan, nil
+}
+
+// pinnedAddress is one address of a pinned target: target is the target's
+// index in the plan and position the address's index in the target.
+type pinnedAddress struct {
+	address  string
+	target   int32
+	position int32
+}
+
+// pinnedAddresses are the addresses of a plan's targets, each with every
+// target it belongs to, sorted by address and then by target.
+type pinnedAddresses []pinnedAddress
+
+func pinAddresses(targets []resolvedTarget) pinnedAddresses {
+	count := 0
+	for _, target := range targets {
+		count += len(target.Addresses)
+	}
+	pinned := make(pinnedAddresses, 0, count)
+	for index, target := range targets {
+		for position, address := range target.Addresses {
+			pinned = append(pinned, pinnedAddress{address: address, target: int32(index), position: int32(position)})
+		}
+	}
+	sort.Slice(pinned, func(i, j int) bool {
+		if pinned[i].address != pinned[j].address {
+			return pinned[i].address < pinned[j].address
+		}
+		return pinned[i].target < pinned[j].target
+	})
+	return pinned
+}
+
+// family returns the distinct addresses of an address family, each with all
+// of its targets, as groups in address order. An address that several
+// targets hold is scanned once.
+func (pinned pinnedAddresses) family(family int) addressGroups {
+	var groups addressGroups
+	for start := 0; start < len(pinned); {
+		end := start + 1
+		for end < len(pinned) && pinned[end].address == pinned[start].address {
+			end++
+		}
+		if (net.ParseIP(pinned[start].address).To4() == nil) == (family == 6) {
+			groups = append(groups, pinned[start:end])
+		}
+		start = end
+	}
+	return groups
+}
+
+// addressGroups are consecutive distinct addresses from pinnedAddresses.family.
+type addressGroups []pinnedAddresses
+
+func (groups addressGroups) addresses() []string {
+	out := make([]string, 0, len(groups))
+	for _, group := range groups {
+		out = append(out, group[0].address)
+	}
+	return out
+}
+
+// targets returns the targets that hold the batch's addresses, in plan order,
+// each with only those of its addresses, in its own order.
+func (groups addressGroups) targets(planTargets []ResolvedTarget) []ResolvedTarget {
+	var selected []pinnedAddress
+	for _, group := range groups {
+		selected = append(selected, group...)
+	}
+	sort.Slice(selected, func(i, j int) bool {
+		if selected[i].target != selected[j].target {
+			return selected[i].target < selected[j].target
+		}
+		return selected[i].position < selected[j].position
+	})
+	var out []ResolvedTarget
+	for start := 0; start < len(selected); {
+		end := start + 1
+		for end < len(selected) && selected[end].target == selected[start].target {
+			end++
+		}
+		target := planTargets[selected[start].target]
+		target.Addresses = make([]string, 0, end-start)
+		for _, address := range selected[start:end] {
+			target.Addresses = append(target.Addresses, address.address)
+		}
+		out = append(out, target)
+		start = end
+	}
+	return out
+}
+
+// shareResolvedTargets is exportResolvedTargets without copying the
+// addresses, which the plan only reads.
+func shareResolvedTargets(targets []resolvedTarget) []ResolvedTarget {
+	out := make([]ResolvedTarget, 0, len(targets))
+	for _, target := range targets {
+		out = append(out, ResolvedTarget{Name: target.Name, ConfiguredTarget: target.ConfiguredTarget, Addresses: target.Addresses, Aggregate: target.Aggregate, Hostname: target.Hostname})
+	}
+	return out
 }
 
 // planNaabuPipeline resolves the complete target set once and creates one

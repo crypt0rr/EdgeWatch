@@ -30,3 +30,26 @@ export function duplicateTarget(values: string[]) {
     return false
   })
 }
+
+/** The addresses a target expands to: a CIDR's, one for an address or a DNS name, none for anything else. */
+export function targetHosts(value: string) {
+  const target = value.trim()
+  const kind = targetKind(target)
+  if (kind === 'IP' || kind === 'DNS') return 1
+  if (kind !== 'CIDR') return 0
+  const [address, prefixText] = target.split('/')
+  const bits = address.includes(':') ? 128 : 32
+  const prefix = Number(prefixText)
+  if (!/^\d+$/.test(prefixText ?? '') || prefix > bits) return 0
+  return 2 ** (bits - prefix)
+}
+
+/**
+ * Warns when targets expand to more addresses than the deployment lets one job
+ * scan, scanner.max_job_hosts, which the server reports: such a job's scans fail.
+ */
+export function hostCeilingWarning(targets: string[], ceiling?: number) {
+  if (!ceiling) return ''
+  const hosts = targets.reduce((total, target) => total + targetHosts(target), 0)
+  return hosts > ceiling ? `These targets expand to more than the ${ceiling.toLocaleString()} hosts that one job may scan in this deployment (scanner.max_job_hosts), so their scans would fail. Split them into several jobs.` : ''
+}

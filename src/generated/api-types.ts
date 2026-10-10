@@ -78,6 +78,7 @@ export type ScannerSandboxStatus = {
   reason?: string
   landlock: ScannerLandlockStatus
   seccomp: ScannerSeccompStatus
+  limits?: ScannerProcessLimits
 }
 
 // ScannerLandlockStatus is sandbox.LandlockStatus.
@@ -92,6 +93,12 @@ export type ScannerLandlockStatus = {
 export type ScannerSeccompStatus = {
   state: string
   reason?: string
+}
+
+// ScannerProcessLimits is sandbox.ProcessLimits.
+export type ScannerProcessLimits = {
+  oom_score_adj: number
+  max_open_files: number
 }
 
 // ScheduledBackupStatus is app.BackupStatus.

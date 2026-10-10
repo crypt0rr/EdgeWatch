@@ -140,6 +140,23 @@ describe('guided monitor creation', () => {
     await screen.findByRole('heading', { name: 'Set scan coverage' })
   })
 
+  it('warns when the targets expand beyond the deployment host ceiling', async () => {
+    vi.mocked(scannerCapabilities).mockResolvedValue({ ...capabilities, max_job_hosts: 1024 })
+    renderJourney()
+    await screen.findByRole('heading', { name: 'Choose targets' })
+    fireEvent.change(screen.getByLabelText(/^Monitor name/), { target: { value: 'Campus' } })
+    fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: '10.20.0.0/16' } })
+    await waitFor(() => expect(screen.getByText(/more than the 1,024 hosts that one job may scan in this deployment/)).toBeInTheDocument())
+    const limit = screen.getByLabelText(/^Maximum expanded hosts/)
+    expect(limit).toHaveAttribute('max', '1000000')
+    fireEvent.change(limit, { target: { value: '65536' } })
+    expect(limit).toHaveValue(65536)
+    fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: '10.20.0.0/24' } })
+    expect(screen.queryByText(/that one job may scan in this deployment/)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Continue to coverage/ }))
+    await screen.findByRole('heading', { name: 'Set scan coverage' })
+  })
+
   it('offers full TCP discovery by default, and makes selected TCP ports an explicit Nmap scope', async () => {
     renderJourney()
     await screen.findByRole('heading', { name: 'Choose targets' })

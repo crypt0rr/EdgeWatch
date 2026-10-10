@@ -25,6 +25,7 @@ func ResponseTypes() []apitypes.Type {
 		{Name: "ScannerSandboxStatus", Value: sandbox.Status{}},
 		{Name: "ScannerLandlockStatus", Value: sandbox.LandlockStatus{}},
 		{Name: "ScannerSeccompStatus", Value: sandbox.SeccompStatus{}},
+		{Name: "ScannerProcessLimits", Value: sandbox.ProcessLimits{}},
 		{Name: "ScheduledBackupStatus", Value: app.BackupStatus{}},
 		{Name: "UntrustedProxy", Value: auth.UntrustedProxy{}},
 		{Name: "DeploymentTelemetry", Value: store.TenantTelemetry{}},

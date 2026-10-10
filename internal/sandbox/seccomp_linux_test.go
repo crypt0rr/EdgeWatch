@@ -223,6 +223,9 @@ func TestInstalledSeccompFilterRefusesTheDeniedCalls(t *testing.T) {
 			"clone":          call(unix.SYS_CLONE, unix.CLONE_NEWUSER|unix.CLONE_FS),
 			"clone3":         call(unix.SYS_CLONE3, 0, 0),
 			"io_uring_setup": call(unix.SYS_IO_URING_SETUP, 0, 0),
+			// A negative process group fails with EINVAL, so this call
+			// never moves the test process; only the filter makes it EPERM.
+			"setpgid": call(unix.SYS_SETPGID, 0, ^uintptr(0)),
 		}
 		if runtime.GOARCH == "amd64" {
 			got["x32"] = call(x32Bit | unix.SYS_GETPID)
@@ -238,7 +241,7 @@ func TestInstalledSeccompFilterRefusesTheDeniedCalls(t *testing.T) {
 	if got["getpid"] != nil {
 		t.Fatalf("getpid = %v, want allowed", got["getpid"])
 	}
-	for _, name := range []string{"ptrace", "unshare", "clone", "io_uring_setup", "x32"} {
+	for _, name := range []string{"ptrace", "unshare", "clone", "io_uring_setup", "setpgid", "x32"} {
 		if err, ok := got[name]; ok && !errors.Is(err, unix.EPERM) {
 			t.Errorf("%s = %v, want EPERM", name, err)
 		}

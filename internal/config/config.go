@@ -84,6 +84,28 @@ type ScannerConfig struct {
 	// default) applies the restriction when the kernel provides Landlock,
 	// required refuses scanner work otherwise, and off never applies it.
 	Landlock string `yaml:"landlock"`
+	// MaxJobHosts is the most addresses the targets of one job may expand
+	// to when it scans, whatever the job's max_expanded_hosts allows. A
+	// scan keeps a scope and a result for every address in the memory of
+	// the daemon, which every business unit shares, so the deployment sets
+	// it, never a unit. nil, when the key is omitted, is DefaultMaxJobHosts.
+	MaxJobHosts *int `yaml:"max_job_hosts"`
+}
+
+// The scanner.max_job_hosts default and range. A scan of a /16 peaked at
+// about 344 MB of the bundled compose.yaml's 512 MiB memory limit.
+const (
+	DefaultMaxJobHosts = 65_536
+	MaxJobHostsLimit   = 1_000_000
+)
+
+// MaxJobHostsValue returns scanner.max_job_hosts, or DefaultMaxJobHosts when
+// the key is omitted.
+func (s ScannerConfig) MaxJobHostsValue() int {
+	if s.MaxJobHosts == nil {
+		return DefaultMaxJobHosts
+	}
+	return *s.MaxJobHosts
 }
 
 // The scanner.sandbox, scanner.landlock, and notifications.sandbox values.
@@ -1086,6 +1108,9 @@ func (c Config) ValidateDeployment() error {
 	case "", ScannerSandboxAuto, ScannerSandboxRequired, ScannerSandboxOff:
 	default:
 		return fmt.Errorf("scanner.landlock must be auto, required, or off")
+	}
+	if c.Scanner.MaxJobHosts != nil && (*c.Scanner.MaxJobHosts < 1 || *c.Scanner.MaxJobHosts > MaxJobHostsLimit) {
+		return fmt.Errorf("scanner.max_job_hosts must be between 1 and %d", MaxJobHostsLimit)
 	}
 	if c.Scanner.Landlock == ScannerSandboxRequired && c.Scanner.Sandbox == ScannerSandboxOff {
 		return fmt.Errorf("scanner.landlock cannot be required while scanner.sandbox is off, which turns off Landlock too")

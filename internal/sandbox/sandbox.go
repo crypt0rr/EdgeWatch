@@ -56,6 +56,21 @@ const (
 	GID = 65532
 )
 
+// The resource limits of a scanner process restricted with Landlock, which
+// the sandbox-exec command sets before it restricts the process.
+const (
+	// ScannerOOMScoreAdj is the oom_score_adj of a restricted scanner
+	// process, the highest there is: when memory runs out, the kernel's
+	// out-of-memory killer stops a scanner before the daemon, which every
+	// business unit shares.
+	ScannerOOMScoreAdj = 1000
+	// ScannerMaxOpenFiles bounds the descriptors a restricted scanner process
+	// can hold, and so the sockets it can open at once. Nmap raises its own
+	// soft limit to the hard limit; Naabu holds about one socket for each of
+	// at most 1024 workers.
+	ScannerMaxOpenFiles = 65536
+)
+
 // NotifierUID and NotifierGID identify the confined notification process. It
 // has an identity of its own, so a compromised scanner process can neither
 // signal it nor read the destination URL from its memory.
@@ -151,6 +166,17 @@ type Status struct {
 	// Seccomp describes the filter of the system calls the processes can
 	// make, which the Landlock restriction installs.
 	Seccomp SeccompStatus `json:"seccomp"`
+	// Limits are the resource limits the Landlock restriction gives scanner
+	// processes. Nil when it does not apply them.
+	Limits *ProcessLimits `json:"limits,omitempty"`
+}
+
+// ProcessLimits are the resource limits of a restricted scanner process.
+type ProcessLimits struct {
+	// OOMScoreAdj is the process's oom_score_adj.
+	OOMScoreAdj int `json:"oom_score_adj"`
+	// MaxOpenFiles is the most descriptors the process can hold.
+	MaxOpenFiles int `json:"max_open_files"`
 }
 
 // SeccompStatus describes the seccomp filter of the processes.
@@ -273,10 +299,22 @@ func Exec(args []string) error {
 
 // Confine makes cmd start its process confined. Call it after InheritFile:
 // a process restricted with Landlock can reopen only the files it inherits by
-// then. Confine keeps any process attributes already set, such as the session
-// and controlling terminal of a pseudo-terminal. When the policy confines
-// nothing, cmd is unchanged.
+// then, and creates no file. Confine keeps any process attributes already
+// set, such as the session and controlling terminal of a pseudo-terminal.
+// When the policy confines nothing, cmd is unchanged.
 func (p *Policy) Confine(cmd *exec.Cmd) {
+	p.confine(cmd, false)
+}
+
+// ConfineWithTemporaryFiles is Confine for a scanner process that keeps
+// temporary files of its own, such as Naabu: the Landlock restriction also
+// lets it create, change, and remove files below /tmp, none of which it can
+// execute.
+func (p *Policy) ConfineWithTemporaryFiles(cmd *exec.Cmd) {
+	p.confine(cmd, true)
+}
+
+func (p *Policy) confine(cmd *exec.Cmd, temporary bool) {
 	if p == nil {
 		return
 	}
@@ -285,17 +323,18 @@ func (p *Policy) Confine(cmd *exec.Cmd) {
 		confineProcess(cmd, spec.uid, spec.gid, p.ambient)
 	}
 	if p.helper != "" {
-		startThroughHelper(cmd, p.helper, p.profileName(), p.seccomp)
+		startThroughHelper(cmd, p.helper, p.profileName(), p.seccomp, temporary && p.profileName() == Scanner)
 	}
 }
 
 // startThroughHelper makes cmd start the sandbox-exec command of the EdgeWatch
-// executable helper, which restricts itself for profile, with the seccomp
-// filter when seccomp is set, and then executes cmd's program with cmd's
-// arguments and the descriptors cmd passes. A program that does not exist
-// makes cmd's start fail with that error instead, so callers still recognize
-// a missing scanner, and never starts it without the restriction.
-func startThroughHelper(cmd *exec.Cmd, helper string, profile Profile, seccomp bool) {
+// executable helper, which restricts itself for profile, with /tmp when
+// temporary is set and the seccomp filter when seccomp is set, and then
+// executes cmd's program with cmd's arguments and the descriptors cmd
+// passes. A program that does not exist makes cmd's start fail with that
+// error instead, so callers still recognize a missing scanner, and never
+// starts it without the restriction.
+func startThroughHelper(cmd *exec.Cmd, helper string, profile Profile, seccomp, temporary bool) {
 	if cmd.Err != nil {
 		return
 	}
@@ -304,6 +343,9 @@ func startThroughHelper(cmd *exec.Cmd, helper string, profile Profile, seccomp b
 		return
 	}
 	args := []string{helper, ExecCommand, "--profile", string(profile), "--files", strconv.Itoa(len(cmd.ExtraFiles))}
+	if temporary {
+		args = append(args, "--tmp")
+	}
 	if seccomp {
 		args = append(args, "--seccomp")
 	}
@@ -415,6 +457,10 @@ func (p *Policy) WithLandlock(helper string, abi int) *Policy {
 	restricted.status.NoNewPrivileges = true
 	restricted.status.Landlock = LandlockStatus{Mode: ModeAuto, State: StateEnforced, ABI: abi}
 	restricted.status.Seccomp = SeccompStatus{State: StateUnavailable, Reason: "the seccomp filter was not requested"}
+	restricted.status.Limits = nil
+	if restricted.profileName() == Scanner {
+		restricted.status.Limits = &ProcessLimits{OOMScoreAdj: ScannerOOMScoreAdj, MaxOpenFiles: ScannerMaxOpenFiles}
+	}
 	return restricted
 }
 
@@ -459,6 +505,10 @@ func (p *Policy) Status() Status {
 	}
 	status := p.status
 	status.Capabilities = append([]string(nil), p.status.Capabilities...)
+	if p.status.Limits != nil {
+		limits := *p.status.Limits
+		status.Limits = &limits
+	}
 	return status
 }
 

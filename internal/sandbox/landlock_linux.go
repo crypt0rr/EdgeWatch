@@ -90,15 +90,20 @@ var landlockPaths = []landlockPath{
 }
 
 // scannerLandlockPaths are what a scanner opens besides landlockPaths. A
-// restricted scanner can create files only below /tmp.
+// restricted scanner creates no file, unless it is started with temporary
+// files.
 var scannerLandlockPaths = []landlockPath{
 	// Nmap reads keyboard commands from its controlling terminal, which is
 	// the daemon's private pseudo-terminal.
 	{"/dev/tty", unix.LANDLOCK_ACCESS_FS_READ_FILE | unix.LANDLOCK_ACCESS_FS_WRITE_FILE},
-	// Naabu keeps its target list and address map in temporary files. The
-	// scanner environment sets no TMPDIR, so they go to /tmp, a private
-	// tmpfs in the container; the daemon keeps its own temporary files in
-	// the data directory.
+}
+
+// temporaryLandlockPaths are what a scanner started with temporary files
+// opens besides scannerLandlockPaths. Naabu keeps its target list and address
+// map in temporary files. The scanner environment sets no TMPDIR, so they go
+// to /tmp, a private tmpfs in the container. The files EdgeWatch passes to
+// scanners lie in its data directory, which no scanner can reach.
+var temporaryLandlockPaths = []landlockPath{
 	{"/tmp", landlockTemporary},
 }
 
@@ -145,13 +150,14 @@ func handledScopes(abi int) uint64 {
 
 // execLandlocked is the sandbox-exec command:
 //
-//	sandbox-exec --profile PROFILE --files N [--seccomp] -- PROGRAM [ARGUMENT...]
+//	sandbox-exec --profile PROFILE --files N [--tmp] [--seccomp] -- PROGRAM [ARGUMENT...]
 //
-// It restricts its own process with Landlock to the paths of PROFILE and its
-// N inherited descriptors, starting at 3, sets no_new_privs, installs the
-// seccomp filter with --seccomp, and then executes PROGRAM in place. The
-// process keeps its identity, capabilities, descriptors, and environment, and
-// the daemon's handle on it stays valid.
+// It restricts its own process with Landlock to the paths of PROFILE, /tmp
+// with --tmp, and its N inherited descriptors, starting at 3, sets
+// no_new_privs, installs the seccomp filter with --seccomp, and then executes
+// PROGRAM in place. A scanner also gets the resource limits of
+// limitScannerResources first. The process keeps its identity, capabilities,
+// descriptors, and environment, and the daemon's handle on it stays valid.
 func execLandlocked(args []string) error {
 	request, err := parseExecArgs(args)
 	if err != nil {
@@ -166,7 +172,10 @@ func execLandlocked(args []string) error {
 	for index := range inherited {
 		inherited[index] = 3 + index
 	}
-	if err := restrictSelf(profilePaths(profile, os.Getenv), inherited); err != nil {
+	if profile == Scanner {
+		limitScannerResources()
+	}
+	if err := restrictSelf(profilePaths(profile, request.temporary, os.Getenv), inherited); err != nil {
 		return fmt.Errorf("%s: %w", ExecCommand, err)
 	}
 	if request.seccomp {
@@ -184,12 +193,14 @@ func execLandlocked(args []string) error {
 type execRequest struct {
 	profile Profile
 	files   int
-	seccomp bool
-	argv    []string
+	// temporary lets a scanner create files below /tmp.
+	temporary bool
+	seccomp   bool
+	argv      []string
 }
 
 func parseExecArgs(args []string) (execRequest, error) {
-	usage := fmt.Errorf("usage: %s --profile scanner|notifier --files N [--seccomp] -- PROGRAM [ARGUMENT...]", ExecCommand)
+	usage := fmt.Errorf("usage: %s --profile scanner|notifier --files N [--tmp] [--seccomp] -- PROGRAM [ARGUMENT...]", ExecCommand)
 	request := execRequest{files: -1}
 	for index := 0; index < len(args); index++ {
 		switch args[index] {
@@ -209,6 +220,8 @@ func parseExecArgs(args []string) (execRequest, error) {
 				return execRequest{}, usage
 			}
 			request.files = files
+		case "--tmp":
+			request.temporary = true
 		case "--seccomp":
 			request.seccomp = true
 		case "--":
@@ -218,7 +231,7 @@ func parseExecArgs(args []string) (execRequest, error) {
 			return execRequest{}, usage
 		}
 	}
-	if !request.profile.valid() || request.files < 0 || len(request.argv) == 0 {
+	if !request.profile.valid() || request.files < 0 || len(request.argv) == 0 || (request.temporary && request.profile != Scanner) {
 		return execRequest{}, usage
 	}
 	if !filepath.IsAbs(request.argv[0]) {
@@ -228,11 +241,12 @@ func parseExecArgs(args []string) (execRequest, error) {
 }
 
 // profilePaths are landlockPaths, the search path files of musl's dynamic
-// loader, which are named after the architecture, and the paths of profile.
-// The notification process also reads the certificate authorities that the
-// SSL_CERT_FILE and SSL_CERT_DIR variables of its environment name, which
-// the daemon passes on from its own.
-func profilePaths(profile Profile, getenv func(string) string) []landlockPath {
+// loader, which are named after the architecture, and the paths of profile:
+// for a scanner with temporary set, also /tmp. The notification process also
+// reads the certificate authorities that the SSL_CERT_FILE and SSL_CERT_DIR
+// variables of its environment name, which the daemon passes on from its
+// own.
+func profilePaths(profile Profile, temporary bool, getenv func(string) string) []landlockPath {
 	paths := append([]landlockPath(nil), landlockPaths...)
 	musl, _ := filepath.Glob("/etc/ld-musl-*.path")
 	for _, path := range musl {
@@ -241,6 +255,9 @@ func profilePaths(profile Profile, getenv func(string) string) []landlockPath {
 	switch profile {
 	case Scanner:
 		paths = append(paths, scannerLandlockPaths...)
+		if temporary {
+			paths = append(paths, temporaryLandlockPaths...)
+		}
 	case Notifier:
 		if file := getenv("SSL_CERT_FILE"); file != "" {
 			paths = append(paths, landlockPath{file, landlockRead})

@@ -170,6 +170,12 @@ func (a *App) prepareRun(ctx context.Context, scope store.TenantScope, job confi
 			engineName = job.TCP.Engine
 		}
 		profileID, profileRevision = job.TCP.ProfileID, job.TCP.ProfileRevision
+		// A profile revision saved before NSE arguments were limited to the
+		// script's own keeps scanning, and says so.
+		if keys := config.NSEArgumentsOutsideScript(job.TCP.NSEProfile, job.TCP.NSEArgs); len(keys) > 0 {
+			a.Logger.Warn("the job's scanner profile revision passes NSE arguments that are not its script's own; save the profile again without them and update the job to the new revision",
+				"job_id", jobID, "profile_id", profileID, "profile_revision", profileRevision, "nse_profile", job.TCP.NSEProfile, "nse_arguments", keys)
+		}
 	}
 	scan := model.Scan{ID: scanner.NewID(started), JobID: jobID, JobRevision: revision, Job: job.Name, StartedAt: started, ConfigHash: job.SecurityHash(), NmapVersion: a.nmapVersion, ScannerEngine: engineName, ScannerProfileID: profileID, ScannerProfileRevision: profileRevision}
 	if engineName == config.EngineNaabuNmap {

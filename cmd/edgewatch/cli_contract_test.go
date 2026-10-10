@@ -325,6 +325,19 @@ func TestRunScanRecordsHostAuditEntry(t *testing.T) {
 	if err := scan("managed", writeFakeNmap(t, dir, false)); err != nil {
 		t.Fatalf("successful scan: %v", err)
 	}
+	// The scan kept its files in a private directory beside the database,
+	// whatever TMPDIR names, and removed them.
+	scannerFiles := filepath.Join(dir, "tmp", "scanner")
+	if info, err := os.Stat(scannerFiles); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("scanner temporary directory = %v, %v; want mode 0700", info, err)
+	}
+	runs, err := filepath.Glob(filepath.Join(scannerFiles, "run-*", "*"))
+	if err != nil || len(runs) != 0 {
+		t.Fatalf("the scan left files behind: %v, %v", runs, err)
+	}
+	if scannerTemporaryDirectory(&store.Store{}) != "" {
+		t.Fatal("an in-memory database got a scanner temporary directory")
+	}
 	if err := scan("managed", writeFakeNmap(t, dir, true)); err == nil {
 		t.Fatal("failing scanner did not fail the scan")
 	}

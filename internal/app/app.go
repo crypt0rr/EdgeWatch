@@ -400,6 +400,10 @@ type Options struct {
 	// the notification process, which the application reports. Nil reports
 	// it unconfined.
 	NotificationSandbox *sandbox.Policy
+	// ScannerTemporaryDirectory is where the scanner keeps the private files
+	// of its scans; see scanner.Nmap.SetTemporaryDirectory. Empty keeps them
+	// in the system's temporary directory.
+	ScannerTemporaryDirectory string
 }
 
 // ScannerSandbox reports how the scanner's Nmap and Naabu processes start.
@@ -480,6 +484,7 @@ func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logg
 		logger.Info("froze legacy notification selections", "jobs", materialized)
 	}
 	reportMissingNotificationDestinations(context.Background(), s, n, logger)
+	reportJobsBeyondHostCeiling(context.Background(), s, cfg, logger)
 	if len(cfg.Jobs) > 0 {
 		legacyNames := make([]string, 0, len(cfg.Jobs))
 		for _, job := range cfg.Jobs {
@@ -492,6 +497,12 @@ func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logg
 	}
 	sc := scanner.NewWithNaabu(nmapPath, naabuPath)
 	sc.SetSandbox(options.Sandbox)
+	sc.SetMaxJobHosts(cfg.Scanner.MaxJobHostsValue())
+	if options.ScannerTemporaryDirectory != "" {
+		if err := sc.SetTemporaryDirectory(options.ScannerTemporaryDirectory); err != nil {
+			return nil, err
+		}
+	}
 	if err := sc.SetTargetExclusions(cfg.Scanner.TargetExclusions); err != nil {
 		return nil, fmt.Errorf("configure scanner target exclusions: %w", err)
 	}

@@ -9,7 +9,15 @@ are fixed, image-bundled executables (`/usr/local/bin/naabu` and
 `/usr/bin/nmap`); administrators can edit only validated argument arrays and
 approved placeholders. EdgeWatch invokes them directly without a shell, so
 shell syntax, alternate binaries, arbitrary output paths, and unapproved NSE
-scripts are rejected. Naabu discovery is JSONL and Nmap confirmation remains
+scripts are rejected. A new or changed profile may pass an approved NSE script
+only arguments of that script's own, without commas or quotes, so no profile
+can set an NSE library argument such as `newtargets`, which would let a
+script add targets that the exclusions and budgets never see; a revision
+saved before v0.36.0 with other arguments keeps scanning, and the daemon warns
+about it on every scan. The deployment's `scanner.max_job_hosts`, 65,536 by
+default and settable only in `config.yaml`, caps the addresses one job's
+targets expand to, so that one unit's scan cannot exhaust the memory of the
+daemon that every unit shares. Naabu discovery is JSONL and Nmap confirmation remains
 authoritative for baselines and incidents. EdgeWatch parses Naabu output as a
 stream, rejects records for addresses outside the invocation, keeps each
 distinct result once, and stops the child on an oversized line or an
@@ -29,17 +37,31 @@ and write their results through inherited file descriptors, cannot list the
 UID 0 data directory or reach `config.yaml`, and so cannot read the database
 or the encryption keys. When the container does not grant those capabilities,
 `auto` runs them as UID 0 and warns in the log, `edgewatch health`, and the
-console; `scanner.sandbox: required` refuses to scan instead. When the kernel
+console; `scanner.sandbox: required` refuses to scan instead. EdgeWatch
+creates the files it passes to scanners in `tmp/scanner` beside the
+database, a `0700` directory of the daemon, whatever `TMPDIR` names, so no
+scanner can open another scan's XML output or target list by its name. Each
+scanner leads a process group of its own, which EdgeWatch kills when the scan
+is cancelled, times out, or exceeds an output bound, and once the scanner
+exits, so no process it started outlives the scan, and on Linux the kernel
+kills a scanner whose EdgeWatch process dies. Once a scanner has exited,
+EdgeWatch waits at most five seconds for its output and terminal to close, and
+fails the scan when a process still holds either. When the kernel
 provides Landlock, the default `scanner.landlock: auto` also restricts each
 scanner process, whatever its identity, to reading and executing the system
-directories, reading the `/etc` files a scan needs, writing the files EdgeWatch
-passes to it, and creating files only below `/tmp`, none of which it can
-execute; it cannot read the database, the keys, or `config.yaml` even as UID 0.
-With Landlock, a seccomp filter also refuses the system calls no scanner or
-notification process needs, such as `ptrace`, io_uring, BPF, and namespace and
-mount changes. No EdgeWatch process can dump core: each sets a zero core file
+directories, reading the `/etc` files a scan needs, and writing the files
+EdgeWatch passes to it; Nmap creates no file, and Naabu creates files only
+below `/tmp`, none of which it can execute. A scanner cannot read the
+database, the keys, or `config.yaml` even as UID 0. With Landlock, a seccomp
+filter also refuses the system calls no scanner or notification process
+needs, such as `ptrace`, io_uring, BPF, namespace and mount changes, and
+`setsid` and `setpgid`, which would let a process leave the scanner's process
+group; and each scanner gets an `oom_score_adj` of 1000, so that the kernel's
+out-of-memory killer stops a scanner before the daemon, and at most 65,536
+open files. No EdgeWatch process can dump core: each sets a zero core file
 size limit, which its children inherit, and is non-dumpable.
-All sandboxed scanner processes share UID 65532 and `/tmp`. The
+All sandboxed scanner processes share UID 65532, and Naabu processes share
+`/tmp`. The
 notification child process, which receives one destination URL, runs in a
 sandbox of its own with `notifications.sandbox: auto`: as UID and GID 65531
 without capabilities, restricted with Landlock to reading the system files

@@ -173,13 +173,13 @@ func TestNmapOutputBoundariesAndProgressWriters(t *testing.T) {
 	}
 
 	cmd := exec.Command("nmap", "--reason")
-	if got, release, err := prepareNmapXMLOutput(cmd, nil); err != nil || got != "" || cmd.Args[1] != "--reason" {
+	if got, release, err := prepareNmapXMLOutput(cmd, nil, ""); err != nil || got != "" || cmd.Args[1] != "--reason" {
 		t.Fatalf("command without XML output = %q, %v, %#v", got, err, cmd.Args)
 	} else {
 		release()
 	}
 	cmd = exec.Command("nmap", "-oX", "-")
-	path, release, err := prepareNmapXMLOutput(cmd, nil)
+	path, release, err := prepareNmapXMLOutput(cmd, nil, "")
 	if err != nil || path == "" || cmd.Args[2] != path || len(cmd.ExtraFiles) != 0 {
 		t.Fatalf("command XML output rewrite = %q, %v, %#v", path, err, cmd.Args)
 	}

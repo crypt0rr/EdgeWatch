@@ -285,7 +285,7 @@ var cycleTenantLeakCases = map[string]tenantLeakCase{
 		for scope, job := range map[TenantScope]string{f.a: f.jobA, f.b: f.jobB} {
 			cycles := cyclesOf(f, scope)
 			cycle, err := f.store.Tenant(scope).GetScanCycle(ctx, cycles.active)
-			if err != nil || cycle.ID != cycles.active || cycle.JobID != job || cycle.Status != "paused" || cycle.TotalProbes != cycles.discovery+cycles.nmap || len(cycle.Plan.Units) != 2 {
+			if err != nil || cycle.ID != cycles.active || cycle.JobID != job || cycle.Status != "paused" || cycle.TotalProbes != cycles.discovery+cycles.nmap || cycle.TotalUnits != 2 || cycle.Plan.TotalUnits != 2 {
 				t.Errorf("tenant %s: own cycle = %+v, %v", scope.ID(), cycle, err)
 			}
 		}

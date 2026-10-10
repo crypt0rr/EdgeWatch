@@ -920,3 +920,38 @@ func TestExitStatusReportsTheNotificationChildFailureClass(t *testing.T) {
 		t.Fatal("an ordinary failure does not exit with 1")
 	}
 }
+
+// health names the jobs whose targets expand beyond scanner.max_job_hosts.
+func TestHealthCommandNamesJobsBeyondTheHostCeiling(t *testing.T) {
+	dir := t.TempDir()
+	database := filepath.Join(dir, "edgewatch.db")
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("database: "+database+"\nscanner:\n  max_job_hosts: 1024\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := managedCLIJob("wide")
+	job.Targets, job.MaxExpandedHosts = []string{"10.0.0.0/20"}, 1_000_000
+	if _, err := s.Tenant(store.DefaultTenantScope()).CreateJob(context.Background(), job); err != nil {
+		s.Close()
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, _ := captureCLIOutput(t, func() error {
+		return run([]string{"health", "--config", configPath, "--output", "json"})
+	})
+	var document struct {
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &document); err != nil {
+		t.Fatalf("health output %q: %v", stdout, err)
+	}
+	if !strings.Contains(strings.Join(document.Warnings, "\n"), "expand to more than scanner.max_job_hosts=1024 hosts") {
+		t.Fatalf("health warnings = %q", document.Warnings)
+	}
+}

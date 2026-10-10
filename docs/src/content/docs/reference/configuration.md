@@ -22,6 +22,7 @@ validated schema.
 | `scanner.target_exclusions` | YAML | Addresses that may never be scanned. |
 | `scanner.sandbox` | YAML | Whether Nmap and Naabu run as an unprivileged identity; see [the scanner sandbox](/deployment/container-hardening/#scanner-sandbox). |
 | `scanner.landlock` | YAML | Whether Landlock restricts the files Nmap and Naabu can open; see [Landlock](/deployment/container-hardening/#landlock). |
+| `scanner.max_job_hosts` | YAML | The most addresses the targets of one job may expand to when it scans, for every unit. |
 | `enrichment.rdap.enabled` | YAML | Enable or disable on-demand public network-registration lookups. |
 | `updates.enabled` | YAML | Enable or disable the three-hour stable-release check. |
 | `notifications.encryption_key_file` | YAML/secrets | Optional separate key for the encrypted notification destinations. |
@@ -46,6 +47,7 @@ recreated and reviewed explicitly in the console.
 | `scheduler.max_naabu_probe_count` | `20000000` | 1 to 100000000; `0` is rejected. |
 | `scanner.sandbox` | `auto` | `auto`, `required`, or `off`. |
 | `scanner.landlock` | `auto` | `auto`, `required`, or `off`; `required` needs `scanner.sandbox` other than `off`. |
+| `scanner.max_job_hosts` | `65536` | 1 to 1000000. |
 | `web.ipv6_rate_limit_prefix` | `64` | 32 to 128; `128` counts each IPv6 address on its own. |
 | `web.auth_key_file` | `auth.key` next to the database | A regular file of 32 raw bytes or 64 hexadecimal characters, without group or other permissions. |
 | `notifications.encryption_key_file` | `notification.key` next to the database | A regular file of 32 raw bytes or 64 hexadecimal characters with mode `0400` or `0600`. |
@@ -64,7 +66,7 @@ Jobs are configured in the console, which enforces these limits:
 | Timeout | `1h` | `1s` to `30d`. |
 | Resume window | `8d` | `1h` to `30d`. |
 | Timing profile | Balanced | Conservative, balanced, or fast. |
-| Maximum expanded hosts | 256 | 1 to 1000000. |
+| Maximum expanded hosts | 256 | 1 to 1000000; scans also stop at `scanner.max_job_hosts`. |
 | Baseline samples | 2 in the console; 1 when omitted through the API | 1 to 100. |
 | Change confirmations | 1 | 1 to 100. |
 
@@ -179,11 +181,30 @@ Jobs are configured in the console, which enforces these limits:
   EdgeWatch warns. Set `required` to refuse to scan without the sandbox.
   `off` also turns off Landlock.
 - `scanner.landlock: auto` also restricts Nmap and Naabu with Landlock to the
-  system files a scan reads, the files EdgeWatch passes to them, and `/tmp`,
-  when the kernel provides it, and installs a seccomp filter that refuses the
-  system calls no scanner needs. Set `required` to refuse to scan without
-  Landlock, or `off`, which turns off the filter too, if a scanner needs files
-  outside those paths.
+  system files a scan reads and the files EdgeWatch passes to them, and lets
+  only Naabu create files, below `/tmp`, when the kernel provides it. It
+  installs a seccomp filter that refuses the system calls no scanner needs and
+  makes the kernel's out-of-memory killer stop a scanner before the daemon.
+  Set `required` to refuse to scan without Landlock, or `off`, which turns off
+  the filter and the limits too, if a scanner needs files outside those paths.
+- EdgeWatch keeps the files it passes to scanners, Nmap's XML output and
+  Naabu's target list, in `tmp/scanner` beside the database, which only the
+  daemon can open, whatever `TMPDIR` names; see
+  [scanner files](/deployment/container-hardening/#scanner-files).
+- `scanner.max_job_hosts`, 65,536 by default, a /16, caps the addresses the
+  targets of one job expand to when it scans, whatever the job's own
+  `max_expanded_hosts` allows: a scan keeps a scope and a result for every
+  address in the daemon's memory, which every business unit shares. A job
+  whose targets expand to more fails to scan with
+  `expanded targets exceed scanner.max_job_hosts=65536`; split its targets
+  into several jobs. The daemon logs such jobs at startup, `edgewatch health`
+  lists them in `warnings`, and the job editor warns while you enter them.
+  Raise the setting only with matching container memory: a resumable scan of
+  a /16 peaked at about 344 MB in the 512 MiB limit of the bundled
+  `compose.yaml`, and a /14 did not fit. Only `config.yaml` sets it, never a
+  unit or the API. A resumable cycle that a release before v0.36.0 planned
+  keeps its pinned addresses and is not checked again; discard it to replan
+  a job whose targets now exceed the setting.
 - `notifications.sandbox: auto` delivers notifications from a process that runs
   as UID 65531 without capabilities, restricted with Landlock, when the
   container grants `SETUID`, `SETGID` and `KILL` and that process can read the

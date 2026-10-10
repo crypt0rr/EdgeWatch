@@ -730,7 +730,7 @@ func (n *Nmap) scanUDPAfterNaabu(ctx context.Context, job config.Job, targets []
 }
 
 func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profileArgs, addresses []string, assumeAlive bool, statusReports ...func(invocationProgress)) (naabuDiscovery, string, error) {
-	file, err := os.CreateTemp("", "edgewatch-naabu-targets-*")
+	file, err := os.CreateTemp(n.workDir, "edgewatch-naabu-targets-*")
 	if err != nil {
 		return naabuDiscovery{}, "", err
 	}
@@ -783,15 +783,19 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	// enabling cloud, proxy, resolver, or output behavior behind the UI's back.
 	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/nonexistent", "XDG_CONFIG_HOME=/nonexistent"}
 	// Naabu detects its raw-packet privileges from its capabilities, so a
-	// confined Naabu needs no extra flag.
-	n.sandbox.Confine(cmd)
+	// confined Naabu needs no extra flag. It keeps its own target list and
+	// address map in temporary files, the only scanner that does. It leads a
+	// process group of its own, which cancellation, an exceeded bound, and
+	// its exit stop.
+	n.sandbox.ConfineWithTemporaryFiles(cmd)
+	startInProcessGroup(cmd, false)
 	var outputExceeded atomic.Bool
 	killOnOutputLimit := func() {
-		if outputExceeded.CompareAndSwap(false, true) && cmd.Process != nil {
+		if outputExceeded.CompareAndSwap(false, true) {
 			// Stop the child as soon as either output channel reaches its cap
 			// or emits an invalid record. Returning an error only after Wait
 			// would leave a malformed scanner free to consume CPU.
-			_ = cmd.Process.Kill()
+			_ = stopProcessGroup(cmd)
 		}
 	}
 	stdout := newNaabuResultCollector(addresses, killOnOutputLimit)
@@ -845,7 +849,7 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	} else {
 		close(heartbeatDone)
 	}
-	waitErr := cmd.Wait()
+	waitErr := scannerWaitError("naabu", waitProcessGroup(cmd))
 	close(heartbeatStop)
 	if status != nil {
 		// Flush a final partial diagnostic line before publishing the terminal

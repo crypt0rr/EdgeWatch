@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -64,8 +65,12 @@ func TestParseExecArgs(t *testing.T) {
 		t.Fatalf("parse = %+v %v", request, err)
 	}
 	request, err = parseExecArgs([]string{"--seccomp", "--files", "0", "--profile", "notifier", "--", "/usr/local/bin/edgewatch", "notify-send"})
-	if err != nil || request.profile != Notifier || !request.seccomp || request.files != 0 {
+	if err != nil || request.profile != Notifier || !request.seccomp || request.files != 0 || request.temporary {
 		t.Fatalf("notifier parse = %+v %v", request, err)
+	}
+	request, err = parseExecArgs([]string{"--profile", "scanner", "--files", "1", "--tmp", "--", "/usr/local/bin/naabu", "-list", "/dev/fd/3"})
+	if err != nil || request.profile != Scanner || !request.temporary || strings.Join(request.argv, " ") != "/usr/local/bin/naabu -list /dev/fd/3" {
+		t.Fatalf("parse with temporary files = %+v %v", request, err)
 	}
 	for name, args := range map[string][]string{
 		"empty":           nil,
@@ -82,6 +87,8 @@ func TestParseExecArgs(t *testing.T) {
 		"dangling flag":   {"--profile"},
 		"dangling count":  {"--profile", "scanner", "--files"},
 		"unknown flag":    {"--profile", "scanner", "--files", "0", "--network", "--", "/usr/bin/nmap"},
+		// The notification process writes no file at all.
+		"temporary notifier": {"--profile", "notifier", "--files", "0", "--tmp", "--", "/usr/local/bin/edgewatch", "notify-send"},
 	} {
 		if _, err := parseExecArgs(args); err == nil || !strings.Contains(err.Error(), "usage: sandbox-exec") {
 			t.Errorf("%s: parse = %v, want usage", name, err)
@@ -188,7 +195,7 @@ func TestRestrictSelfLimitsTheThreadToTheScannerFiles(t *testing.T) {
 	// processes may write. Without that rule, the directory stands in for
 	// the data directory.
 	var withoutTemporary []landlockPath
-	for _, path := range profilePaths(Scanner, os.Getenv) {
+	for _, path := range profilePaths(Scanner, true, os.Getenv) {
 		if path.path != "/tmp" {
 			withoutTemporary = append(withoutTemporary, path)
 		}
@@ -212,7 +219,7 @@ func TestRestrictSelfLimitsTheThreadToTheScannerFiles(t *testing.T) {
 
 	scratch := filepath.Join("/tmp", fmt.Sprintf("edgewatch-landlock-test-%d", os.Getpid()))
 	t.Cleanup(func() { _ = os.Remove(scratch) })
-	got = onRestrictedThread(t, profilePaths(Scanner, os.Getenv), nil, func() map[string]error {
+	got = onRestrictedThread(t, profilePaths(Scanner, true, os.Getenv), nil, func() map[string]error {
 		return map[string]error{
 			"create a temporary file":         tryOpen(scratch, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL),
 			"create a file in /etc":           tryOpen("/etc/edgewatch-landlock-test", unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL),
@@ -238,7 +245,7 @@ func TestNotifierPathsAddTheCertificateAuthoritiesOnly(t *testing.T) {
 		return 0
 	}
 	environment := map[string]string{"SSL_CERT_FILE": "/run/secrets/ca.pem", "SSL_CERT_DIR": "/etc/corp-ca::/opt/ca"}
-	notifier := profilePaths(Notifier, func(key string) string { return environment[key] })
+	notifier := profilePaths(Notifier, false, func(key string) string { return environment[key] })
 	for _, path := range []string{"/run/secrets/ca.pem", "/etc/corp-ca", "/opt/ca"} {
 		if has(notifier, path) != landlockRead {
 			t.Errorf("notifier access to %s = %#x, want read", path, has(notifier, path))
@@ -247,9 +254,17 @@ func TestNotifierPathsAddTheCertificateAuthoritiesOnly(t *testing.T) {
 	if has(notifier, "/tmp") != 0 || has(notifier, "/dev/tty") != 0 || has(notifier, "") != 0 {
 		t.Fatalf("the notifier may open a scanner path: %+v", notifier)
 	}
-	scanner := profilePaths(Scanner, func(key string) string { return environment[key] })
+	scanner := profilePaths(Scanner, true, func(key string) string { return environment[key] })
 	if has(scanner, "/tmp") != landlockTemporary || has(scanner, "/run/secrets/ca.pem") != 0 {
 		t.Fatalf("scanner paths = %+v", scanner)
+	}
+	// Only a scanner started with temporary files may create any; Nmap is
+	// not, and the notifier never is.
+	if nmap := profilePaths(Scanner, false, os.Getenv); has(nmap, "/tmp") != 0 || has(nmap, "/dev/tty") == 0 {
+		t.Fatalf("scanner paths without temporary files = %+v", nmap)
+	}
+	if has(profilePaths(Notifier, true, os.Getenv), "/tmp") != 0 {
+		t.Fatal("the notifier may create temporary files")
 	}
 
 	// On a restricted thread, the notifier reads the certificate file its
@@ -265,7 +280,7 @@ func TestNotifierPathsAddTheCertificateAuthoritiesOnly(t *testing.T) {
 	}
 	scratch := filepath.Join("/tmp", fmt.Sprintf("edgewatch-notifier-test-%d", os.Getpid()))
 	t.Cleanup(func() { _ = os.Remove(scratch) })
-	paths := profilePaths(Notifier, func(key string) string {
+	paths := profilePaths(Notifier, false, func(key string) string {
 		if key == "SSL_CERT_FILE" {
 			return certificate
 		}
@@ -359,7 +374,7 @@ func TestSandboxExecRestrictsTheScannerProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer output.Close()
-	run := func(script string) error {
+	run := func(script string, temporary bool) (string, error) {
 		t.Helper()
 		cmd := exec.Command("/bin/sh", "-c", script)
 		path, err := policy.InheritFile(cmd, output, Write)
@@ -367,30 +382,57 @@ func TestSandboxExecRestrictsTheScannerProcess(t *testing.T) {
 			t.Fatal(err)
 		}
 		cmd.Env = []string{"PATH=/usr/bin:/bin", "OUTPUT=" + path, "PRIVATE=" + private}
-		policy.Confine(cmd)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+		if temporary {
+			policy.ConfineWithTemporaryFiles(cmd)
+		} else {
+			policy.Confine(cmd)
 		}
-		return nil
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+		}
+		return string(out), nil
 	}
-	if err := run(`echo restricted > "$OUTPUT" && cat /dev/null`); err != nil {
+	if _, err := run(`echo restricted > "$OUTPUT" && cat /dev/null`, false); err != nil {
 		t.Fatalf("an allowed scanner action failed: %v", err)
 	}
 	if data, err := os.ReadFile(output.Name()); err != nil || string(data) != "restricted\n" {
 		t.Fatalf("inherited output = %q, %v", data, err)
 	}
-	for name, script := range map[string]string{
-		"read a private file":      `cat "$PRIVATE"`,
-		"list a private directory": `ls "$(dirname "$PRIVATE")"`,
-		"execute a dropped file":   `dir=$(mktemp -d) && trap 'rm -rf "$dir"' EXIT && cp /bin/true "$dir/run" && echo copied && "$dir/run"`,
+	for name, test := range map[string]struct {
+		script    string
+		temporary bool
+	}{
+		"read a private file":          {script: `cat "$PRIVATE"`},
+		"list a private directory":     {script: `ls "$(dirname "$PRIVATE")"`},
+		"create a temporary file":      {script: `mktemp`},
+		"execute a dropped file":       {script: `dir=$(mktemp -d) && trap 'rm -rf "$dir"' EXIT && cp /bin/true "$dir/run" && echo copied && "$dir/run"`, temporary: true},
+		"read a private file with tmp": {script: `cat "$PRIVATE"`, temporary: true},
 	} {
-		err := run(script)
+		_, err := run(test.script, test.temporary)
 		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "permission denied") {
 			t.Errorf("%s: %v, want permission denied", name, err)
 		}
-		// The dropped file is written to /tmp; only executing it is refused.
+		// With temporary files, the dropped file is written to /tmp; only
+		// executing it is refused.
 		if name == "execute a dropped file" && (err == nil || !strings.Contains(err.Error(), "copied")) {
 			t.Errorf("%s: %v, want the copy to /tmp to succeed", name, err)
+		}
+	}
+
+	// sandbox-exec makes the out-of-memory killer prefer a scanner and bounds
+	// its descriptors before it restricts the process.
+	limits, err := run(`cat /proc/self/oom_score_adj; ulimit -Hn; ulimit -Sn`, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(limits)
+	if len(fields) != 3 || fields[0] != strconv.Itoa(ScannerOOMScoreAdj) {
+		t.Fatalf("restricted scanner limits = %q, want oom_score_adj %d", limits, ScannerOOMScoreAdj)
+	}
+	for _, field := range fields[1:] {
+		if value, err := strconv.Atoi(field); err != nil || value > ScannerMaxOpenFiles {
+			t.Fatalf("restricted scanner open file limits = %q, want at most %d", limits, ScannerMaxOpenFiles)
 		}
 	}
 }

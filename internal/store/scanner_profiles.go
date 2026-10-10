@@ -201,7 +201,7 @@ func validateScannerProfileRecord(name string, definition config.ScannerProfile)
 		return NewValidationError(config.NewFieldValidationError("name", errors.New("scanner profile name contains invalid characters")))
 	}
 	definition = config.NormalizeScannerProfile(definition)
-	return NewValidationError(config.ValidateScannerProfile(definition))
+	return NewValidationError(config.ValidateNewScannerProfile(definition))
 }
 
 func marshalProfileDefinition(definition config.ScannerProfile) ([]byte, error) {

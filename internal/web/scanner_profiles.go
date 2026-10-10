@@ -224,8 +224,14 @@ func scannerProfileDefinitionJSON(profile config.ScannerProfile) map[string]any 
 	return map[string]any{"engine": profile.Engine, "naabu": profile.Naabu, "naabu_args": profile.NaabuArgs, "nmap_args": profile.NmapArgs, "enrichment_args": profile.EnrichmentArgs, "nse_profile": profile.NSEProfile, "nse_args": profile.NSEArgs, "operator_adjustable": profile.OperatorAdjustable, "operator_bounds": profile.OperatorBounds, "description": profile.Description}
 }
 
+// scannerCapabilities reports the fixed scanners and scanner.max_job_hosts,
+// the most addresses one job may scan, which the editor warns about. Both are
+// the deployment's and name no unit's data.
 func (s *Server) scannerCapabilities(w http.ResponseWriter, r *http.Request) {
-	capabilities := map[string]any{"engines": []string{config.EngineNmap, config.EngineNaabuNmap}, "nmap": map[string]any{"path": "/usr/bin/nmap", "version": "unknown", "available": false}, "naabu": map[string]any{"path": "/usr/local/bin/naabu", "version": "unknown", "available": false, "syn_supported": false}}
+	capabilities := map[string]any{"engines": []string{config.EngineNmap, config.EngineNaabuNmap}, "nmap": map[string]any{"path": "/usr/bin/nmap", "version": "unknown", "available": false}, "naabu": map[string]any{"path": "/usr/local/bin/naabu", "version": "unknown", "available": false, "syn_supported": false}, "max_job_hosts": config.DefaultMaxJobHosts}
+	if s.App != nil && s.App.Config != nil {
+		capabilities["max_job_hosts"] = s.App.Config.Scanner.MaxJobHostsValue()
+	}
 	if s.App != nil {
 		if versioned, ok := s.App.Scanner.(interface{ Version(context.Context) string }); ok {
 			version := versioned.Version(r.Context())
@@ -279,6 +285,14 @@ func (s *Server) scannerProfilesRoute(w http.ResponseWriter, r *http.Request, se
 		if !decodeJSON(w, r, &payload) {
 			return
 		}
+		// Validation applies the rules of a definition being saved; a preview
+		// also renders an existing revision.
+		if parts[0] == "validate" {
+			if err := config.ValidateNewScannerProfile(payload.definition()); err != nil {
+				writeValidationError(w, err)
+				return
+			}
+		}
 		preview, err := config.RenderScannerProfilePreview(payload.definition())
 		if err != nil {
 			writeValidationError(w, err)
@@ -327,7 +341,7 @@ func (s *Server) scannerProfilesRoute(w http.ResponseWriter, r *http.Request, se
 		if !decodeJSON(w, r, &payload) {
 			return
 		}
-		if err := config.ValidateScannerProfile(payload.definition()); err != nil {
+		if err := config.ValidateNewScannerProfile(payload.definition()); err != nil {
 			writeValidationError(w, err)
 			return
 		}

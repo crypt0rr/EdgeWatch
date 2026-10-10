@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,6 +39,11 @@ const scanCycleReconcileBatchSize = 64
 // ScanCycleRecord is the durable state for a complete scope scan that may
 // require more than one attempt. The plan includes the normalized job and
 // pinned DNS expansion so a resumed cycle never silently changes scope.
+//
+// A cycle read from the store carries only the plan's creation time, job, and
+// totals: its targets, scopes, and DNS expansion, which grow with the scope,
+// are read only where they are used, by LoadScanCycleFragments and the
+// enrichment reconciliation. Its units are the rows of scan_cycle_units.
 type ScanCycleRecord struct {
 	ID                 string
 	JobID              string
@@ -153,7 +160,11 @@ func (ss *SystemStore) CreateScanCycle(ctx context.Context, cycle ScanCycleRecor
 	cycle.TotalProbes = plannedProbes
 	cycle.Plan.TotalUnits = cycle.TotalUnits
 	cycle.Plan.TotalProbes = plannedProbes
-	planJSON, err := json.Marshal(cycle.Plan)
+	// The units are stored once, as scan_cycle_units rows, and no reader of
+	// plan_json takes them from there.
+	stored := cycle.Plan
+	stored.Units = nil
+	planJSON, err := json.Marshal(stored)
 	if err != nil {
 		return ScanCycleRecord{}, err
 	}
@@ -203,6 +214,9 @@ func (ss *SystemStore) ReconcileScanCycleEnrichment(ctx context.Context, cycleID
 	}
 	if cycle.Plan.Job.TCP == nil || cycle.Plan.Job.TCP.Engine != config.EngineNaabuNmap {
 		return nil
+	}
+	if cycle.Plan, err = ss.scanCyclePlan(ctx, cycleID); err != nil {
+		return err
 	}
 
 	for {
@@ -773,13 +787,19 @@ func buildCycleUDPUnits(plan scanner.WorkPlan, sequence int) []scanner.WorkUnit 
 	return out
 }
 
+// cyclePlanPrefix is how much of plan_json a cycle read takes. The plan's job
+// comes first and fits in it, unless the job lists a very long target list;
+// the read then takes all of plan_json.
+const cyclePlanPrefix = 256 << 10
+
 // scanCycleColumns are the columns of a scan_cycles row aliased c that
-// scanScanCycle reads.
-const scanCycleColumns = `c.id,c.job_id,c.job,c.job_revision,c.config_hash,c.execution_hash,c.baseline_epoch,c.plan_json,c.status,c.attempt_count,c.no_progress_attempts,c.total_units,c.completed_units,c.total_probes,c.completed_probes,c.started_at,c.updated_at,c.expires_at,c.finished_at,c.last_error`
+// scanScanCycle reads: of plan_json only its first cyclePlanPrefix bytes.
+var scanCycleColumns = `c.id,c.job_id,c.job,c.job_revision,c.config_hash,c.execution_hash,c.baseline_epoch,substr(c.plan_json,1,` + strconv.Itoa(cyclePlanPrefix) + `),c.status,c.attempt_count,c.no_progress_attempts,c.total_units,c.completed_units,c.total_probes,c.completed_probes,c.started_at,c.updated_at,c.expires_at,c.finished_at,c.last_error`
 
 // scanScanCycle reads the scanCycleColumns of the cycle with the given ID
-// from row. A missing row is ErrNoScanCycle.
-func scanScanCycle(row *sql.Row, id string) (ScanCycleRecord, error) {
+// from row. A missing row is ErrNoScanCycle. When the plan's job does not fit
+// in the prefix of plan_json that the row holds, fullPlan reads all of it.
+func scanScanCycle(row *sql.Row, id string, fullPlan func() ([]byte, error)) (ScanCycleRecord, error) {
 	var cycle ScanCycleRecord
 	var planJSON []byte
 	var started, updated, expires, finished string
@@ -790,7 +810,12 @@ func scanScanCycle(row *sql.Row, id string) (ScanCycleRecord, error) {
 	if err != nil {
 		return cycle, err
 	}
-	if err = json.Unmarshal(planJSON, &cycle.Plan); err != nil {
+	if cycle.Plan, err = decodeCyclePlanHeader(planJSON); err != nil && len(planJSON) >= cyclePlanPrefix {
+		if planJSON, err = fullPlan(); err == nil {
+			cycle.Plan, err = decodeCyclePlanHeader(planJSON)
+		}
+	}
+	if err != nil {
 		return cycle, err
 	}
 	// scan_cycle_units is the authoritative source for dynamically generated
@@ -806,6 +831,67 @@ func scanScanCycle(row *sql.Row, id string) (ScanCycleRecord, error) {
 	return cycle, nil
 }
 
+// decodeCyclePlanHeader decodes the created_at and job members of a cycle's
+// plan_json, which json.Marshal of a scanner.WorkPlan writes before the
+// members that grow with the scope, and stops there. Every cycle read, after
+// each completed unit too, then costs the same whatever the cycle's scope.
+func decodeCyclePlanHeader(raw []byte) (scanner.WorkPlan, error) {
+	var plan scanner.WorkPlan
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return plan, fmt.Errorf("decode scan cycle plan: not a JSON object")
+	}
+	for found := 0; found < 2 && decoder.More(); {
+		token, err := decoder.Token()
+		if err != nil {
+			return plan, fmt.Errorf("decode scan cycle plan: %w", err)
+		}
+		var value any = &skippedJSON{}
+		switch token {
+		case "created_at":
+			value, found = &plan.CreatedAt, found+1
+		case "job":
+			value, found = &plan.Job, found+1
+		}
+		if err := decoder.Decode(value); err != nil {
+			return plan, fmt.Errorf("decode scan cycle plan: %w", err)
+		}
+	}
+	return plan, nil
+}
+
+// skippedJSON discards a JSON value.
+type skippedJSON struct{}
+
+func (*skippedJSON) UnmarshalJSON([]byte) error { return nil }
+
+// storedWorkPlan decodes a plan_json without its units, which cycles created
+// before the units were left out of it still hold.
+type storedWorkPlan struct {
+	scanner.WorkPlan
+	Units skippedJSON `json:"units"`
+}
+
+// scanCyclePlan returns the complete plan of a cycle of any tenant, without
+// its units, with the totals of the cycle's durable columns.
+func (ss *SystemStore) scanCyclePlan(ctx context.Context, id string) (scanner.WorkPlan, error) {
+	var raw []byte
+	var plan storedWorkPlan
+	err := ss.store.reader().QueryRowContext(ctx, `SELECT plan_json,total_units,total_probes FROM scan_cycles WHERE id=?`, id).Scan(&raw, &plan.TotalUnits, &plan.TotalProbes)
+	if errors.Is(err, sql.ErrNoRows) {
+		return scanner.WorkPlan{}, fmt.Errorf("%w: %s", ErrNoScanCycle, id)
+	}
+	if err != nil {
+		return scanner.WorkPlan{}, err
+	}
+	totalUnits, totalProbes := plan.TotalUnits, plan.TotalProbes
+	if err := json.Unmarshal(raw, &plan); err != nil {
+		return scanner.WorkPlan{}, err
+	}
+	plan.TotalUnits, plan.TotalProbes = totalUnits, totalProbes
+	return plan.WorkPlan, nil
+}
+
 // GetScanCycle returns one of the tenant's cycles with its pinned plan. A
 // cycle belongs to the tenant of its job; a cycle of another tenant is
 // ErrNoScanCycle, like an unknown ID.
@@ -813,13 +899,21 @@ func (ts *TenantStore) GetScanCycle(ctx context.Context, id string) (ScanCycleRe
 	if err := ts.ready(); err != nil {
 		return ScanCycleRecord{}, err
 	}
-	return scanScanCycle(ts.store.reader().QueryRowContext(ctx, `SELECT `+scanCycleColumns+` FROM scan_cycles c JOIN jobs j ON j.id=c.job_id AND j.tenant_id=? WHERE c.id=?`, ts.scope.id, id), id)
+	return scanScanCycle(ts.store.reader().QueryRowContext(ctx, `SELECT `+scanCycleColumns+` FROM scan_cycles c JOIN jobs j ON j.id=c.job_id AND j.tenant_id=? WHERE c.id=?`, ts.scope.id, id), id, func() ([]byte, error) {
+		var raw []byte
+		err := ts.store.reader().QueryRowContext(ctx, `SELECT c.plan_json FROM scan_cycles c JOIN jobs j ON j.id=c.job_id AND j.tenant_id=? WHERE c.id=?`, ts.scope.id, id).Scan(&raw)
+		return raw, err
+	})
 }
 
 // scanCycle returns a cycle of any tenant. The daemon's lifecycle writers
 // use it to return the cycle they changed.
 func (ss *SystemStore) scanCycle(ctx context.Context, id string) (ScanCycleRecord, error) {
-	return scanScanCycle(ss.store.reader().QueryRowContext(ctx, `SELECT `+scanCycleColumns+` FROM scan_cycles c WHERE c.id=?`, id), id)
+	return scanScanCycle(ss.store.reader().QueryRowContext(ctx, `SELECT `+scanCycleColumns+` FROM scan_cycles c WHERE c.id=?`, id), id, func() ([]byte, error) {
+		var raw []byte
+		err := ss.store.reader().QueryRowContext(ctx, `SELECT plan_json FROM scan_cycles WHERE id=?`, id).Scan(&raw)
+		return raw, err
+	})
 }
 
 // ScanCycleProbeTotals reports the durable execution categories for one of
@@ -1610,7 +1704,7 @@ func (ss *SystemStore) clearExpiredCyclePayloads(ctx context.Context, ids []stri
 // every completed unit, in order, to merge into the cycle's scan. A reclaimed
 // checkpoint is ErrMissingCheckpoint.
 func (ss *SystemStore) LoadScanCycleFragments(ctx context.Context, cycleID string) (scanner.WorkPlan, []model.Snapshot, error) {
-	cycle, err := ss.scanCycle(ctx, cycleID)
+	plan, err := ss.scanCyclePlan(ctx, cycleID)
 	if err != nil {
 		return scanner.WorkPlan{}, nil, err
 	}
@@ -1640,7 +1734,7 @@ func (ss *SystemStore) LoadScanCycleFragments(ctx context.Context, cycleID strin
 		}
 		fragments = append(fragments, snapshot)
 	}
-	return cycle.Plan, fragments, rows.Err()
+	return plan, fragments, rows.Err()
 }
 
 func trimCycleError(raw string) string {

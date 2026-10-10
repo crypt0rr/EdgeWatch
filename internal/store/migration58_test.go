@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -181,5 +182,102 @@ func TestHostSearchRebuildDropsTheOldIndexes(t *testing.T) {
 	page, err := defaultTenant(s).ListScanHostsPage(ctx, ids[0], "10.0.39.15", "", nil, 10, 0)
 	if err != nil || page.Total != 1 {
 		t.Fatalf("search after the rebuild = %#v, %v", page, err)
+	}
+}
+
+// largeLogBytes is the size of the transaction with which
+// crashCopyWithLargeLog grows the write-ahead log, as a large upgrade step
+// does.
+const largeLogBytes = 8 << 20
+
+// crashCopyWithLargeLog prepares a copy of the migrated template with the
+// statements and returns it as a start that was killed leaves it: beside the
+// database file is a write-ahead log at the size of a large transaction,
+// which no clean close has removed.
+func crashCopyWithLargeLog(t *testing.T, statements ...string) string {
+	t.Helper()
+	path := freshTestDatabasePath(t)
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	statements = append([]string{`PRAGMA journal_mode=WAL`}, statements...)
+	// The filler is dropped in a later transaction, which reuses the log from
+	// its start once it has been checkpointed: the file keeps its size.
+	statements = append(statements,
+		`CREATE TABLE wal_filler(data BLOB NOT NULL)`,
+		fmt.Sprintf(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<%d) INSERT INTO wal_filler(data) SELECT zeroblob(65536) FROM n`, largeLogBytes/65536),
+		`DROP TABLE wal_filler`)
+	for _, statement := range statements {
+		if _, err := raw.Exec(statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	crashed := filepath.Join(t.TempDir(), "edgewatch.db")
+	for _, suffix := range []string{"", "-wal"} {
+		contents, err := os.ReadFile(path + suffix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(crashed+suffix, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if info, err := os.Stat(crashed + "-wal"); err != nil || info.Size() < largeLogBytes {
+		t.Fatalf("crash copy's write-ahead log = %v, %v; want at least %d bytes", info, err, largeLogBytes)
+	}
+	return crashed
+}
+
+// The daemon truncates the write-ahead log once its startup work has
+// finished, so a large migration step does not leave a log of its size
+// beside the database while the daemon runs. That holds for a start that
+// upgrades the schema and for one that finds the schema current and
+// finishes the startup work that a killed start left, such as a pending
+// host search rebuild.
+func TestOpenTruncatesTheWriteAheadLogAfterItsStartupWork(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name       string
+		statements []string
+	}{
+		{
+			name:       "upgrade",
+			statements: []string{fmt.Sprintf(`PRAGMA user_version=%d`, schemaVersion-1)},
+		},
+		{
+			name: "resumed upgrade",
+			statements: []string{
+				`UPDATE startup_state SET state='migrating',owner='migration/1',phase='host-search',started_at='2026-01-02T03:04:05Z',updated_at='2026-01-02T03:04:06Z' WHERE id=1`,
+				`UPDATE fts_backfill_state SET last_rowid=0,processed_rows=0,initialized=0,complete=0 WHERE table_name IN ('scan_hosts','latest_scan_hosts')`,
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			path := crashCopyWithLargeLog(t, test.statements...)
+			s, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			info, err := os.Stat(path + "-wal")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Size() > 64<<10 {
+				t.Fatalf("write-ahead log = %d bytes after the start, want it truncated from at least %d", info.Size(), largeLogBytes)
+			}
+			if got := countRows(t, s.DB, `PRAGMA user_version`); got != schemaVersion {
+				t.Fatalf("user_version = %d, want %d", got, schemaVersion)
+			}
+			if got := queryStrings(t, s.DB, `SELECT state FROM startup_state WHERE id=1`); len(got) != 1 || got[0] != "ready" {
+				t.Fatalf("startup state after the start = %v, want ready", got)
+			}
+			if got := countRows(t, s.DB, `SELECT COUNT(*) FROM fts_backfill_state WHERE table_name IN ('scan_hosts','latest_scan_hosts') AND initialized=1 AND complete=1`); got != 2 {
+				t.Fatalf("finished host search rebuilds = %d, want 2", got)
+			}
+		})
 	}
 }

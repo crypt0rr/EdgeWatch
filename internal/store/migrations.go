@@ -112,7 +112,6 @@ func migrateContextWithLogger(ctx context.Context, db *sql.DB, logger *slog.Logg
 	if err := ensureStartupStateContext(ctx, db); err != nil {
 		return err
 	}
-	from := version
 	migrations := schemaMigrationStatements()
 	// Mark the complete startup reconciliation as active, not only the DDL
 	// steps. FTS and other resumable backfills can be the longest part of an
@@ -239,20 +238,21 @@ func migrateContextWithLogger(ctx context.Context, db *sql.DB, logger *slog.Logg
 		markMigrationFailed(ctx, db, err)
 		return err
 	}
-	if from < schemaVersion {
-		truncateWriteAheadLog(ctx, db)
-	}
+	truncateWriteAheadLog(ctx, db)
 	logger.Info("database migration completed", "schema", version)
 	return nil
 }
 
-// truncateWriteAheadLog checkpoints the write-ahead log and truncates it after
-// an upgrade. SQLite reuses the log from its start after a checkpoint but
-// keeps the file at the size of the largest transaction it held, so a large
-// upgrade step would otherwise leave a log of that size beside the database
-// while the daemon runs. It is best effort: a reader that holds an older
-// snapshot keeps the log until the next checkpoint, and an error only means
-// the file keeps its size.
+// truncateWriteAheadLog checkpoints the write-ahead log and truncates it once
+// the startup work has finished. SQLite reuses the log from its start after a
+// checkpoint but keeps the file at the size of the largest transaction it
+// held, so a large upgrade step would otherwise leave a log of that size
+// beside the database while the daemon runs. It runs on every start, not
+// only on one that moves the schema marker: the start after one that was
+// stopped during its startup phases finds the schema current, finishes the
+// remaining work, and has the log that the stopped start left. It is best
+// effort: a reader that holds an older snapshot keeps the log until the next
+// checkpoint, and an error only means the file keeps its size.
 func truncateWriteAheadLog(ctx context.Context, db *sql.DB) {
 	var busy, logFrames, checkpointed int
 	_ = db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed)

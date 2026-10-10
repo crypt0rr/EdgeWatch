@@ -64,9 +64,11 @@ func boundedMigrationError(err error) string {
 }
 
 // ensureStartupStateContext creates the small status table before the first
-// migration transaction. This is intentionally idempotent and runs before the
-// schema version is read so health checks can observe a long upgrade even when
-// the database is still on a legacy schema.
+// migration transaction, so health checks can observe a long upgrade. It is
+// intentionally idempotent. The migration calls it only after
+// checkUpgradableSchemaContext has accepted the schema, so a database that it
+// refuses, newer than this release or older than minimumUpgradeSchema, never
+// gets the table or its row written.
 func ensureStartupStateContext(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, startupStateSchema); err != nil {
 		return err

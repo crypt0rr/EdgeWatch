@@ -67,9 +67,11 @@ From v0.36.0 it starts by dropping the scan and latest-host search indexes and
 creating them empty, in one short transaction; earlier releases deleted every
 entry in one transaction, which held the database's writer and grew the
 write-ahead log with the retained history. Search results stay empty until
-the batches have indexed the hosts again, as before. After an upgrade, the
+the batches have indexed the hosts again, as before. On every start, the
 daemon truncates the write-ahead log once its startup work has finished, so a
 large migration step does not leave a log of its size beside the database.
+That includes a start that finds the schema current and finishes the rebuild
+of a start that was stopped before it was ready.
 
 ## Schema 66
 

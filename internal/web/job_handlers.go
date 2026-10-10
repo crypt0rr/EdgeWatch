@@ -653,11 +653,12 @@ func (s *Server) validateNotificationSelection(w http.ResponseWriter, r *http.Re
 	return true
 }
 
-// jobRoute dispatches /jobs/{id}/* and loads the job once for the handler.
-// Routes that validated their request before looking up the job still do so
-// first, so a malformed request for a missing job stays a 400 and the
-// administrator check for a permanent delete stays a 403. Each route keeps
-// its historical response to a failed lookup through its jobLookupFailure.
+// The routes under /jobs/{id} load the job once for their handler, in the
+// request's tenant. A route that validates its request before it looks the
+// job up still does so first, so a malformed request for a missing job stays
+// a 400 and the administrator check for a permanent delete stays a 403. Each
+// route keeps its historical response to a failed lookup through its
+// jobLookupFailure.
 //
 // The lifecycle writes (archive, restore, pause, resume) and the baseline
 // host RDAP route never loaded the job record. The lifecycle writes look the
@@ -665,210 +666,134 @@ func (s *Server) validateNotificationSelection(w http.ResponseWriter, r *http.Re
 // so another tenant's job is not found there; the RDAP route answers a
 // missing job as a missing baseline host. They keep taking the ID, because a
 // lookup here would add a query and change those responses.
-func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, rest string) {
-	parts := strings.Split(strings.Trim(rest, "/"), "/")
-	if len(parts) == 0 || parts[0] == "" {
-		writeError(w, 404, "not_found", "job not found", nil)
-		return
-	}
-	id := parts[0]
-	if len(parts) == 1 && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
-			s.getJob(w, r, ts, job)
+
+// jobHandler adapts the handler of a route under /jobs/{id} that reads the
+// job named by the id path value.
+func jobHandler(failure jobLookupFailure, handle func(*Server, http.ResponseWriter, *http.Request, *store.TenantStore, store.JobRecord)) routeHandler {
+	return func(s *Server, w http.ResponseWriter, r *http.Request, call routeCall) {
+		if job, ok := s.resolveJob(w, r, call.tenant, r.PathValue("id"), failure); ok {
+			handle(s, w, r, call.tenant, job)
 		}
-		return
 	}
-	if len(parts) == 1 && r.Method == http.MethodPut {
-		update, ok := decodeJobUpdate(w, r)
-		if !ok {
-			return
+}
+
+// jobSessionHandler is jobHandler for a handler that also takes the session.
+func jobSessionHandler(failure jobLookupFailure, handle func(*Server, http.ResponseWriter, *http.Request, store.Session, *store.TenantStore, store.JobRecord)) routeHandler {
+	return func(s *Server, w http.ResponseWriter, r *http.Request, call routeCall) {
+		if job, ok := s.resolveJob(w, r, call.tenant, r.PathValue("id"), failure); ok {
+			handle(s, w, r, call.session, call.tenant, job)
 		}
-		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
-			s.updateJob(w, r, session, ts, job, update)
+	}
+}
+
+// jobScanHandler adapts the handler of a route under /jobs/{id}/scans/{scan}
+// that reads the job and its scan.
+func jobScanHandler(jobFailure jobLookupFailure, scanFailure scanLookupFailure, handle func(*Server, http.ResponseWriter, *http.Request, *store.TenantStore, store.JobRecord, model.ScanSummary)) routeHandler {
+	return func(s *Server, w http.ResponseWriter, r *http.Request, call routeCall) {
+		if job, scan, ok := s.resolveJobAndScan(w, r, call.tenant, r.PathValue("id"), jobFailure, r.PathValue("scan"), scanFailure); ok {
+			handle(s, w, r, call.tenant, job, scan)
 		}
+	}
+}
+
+// updateJobRoute serves PUT /jobs/{id}.
+func (s *Server) updateJobRoute(w http.ResponseWriter, r *http.Request, call routeCall) {
+	update, ok := decodeJobUpdate(w, r)
+	if !ok {
 		return
 	}
-	if len(parts) == 1 && r.Method == http.MethodDelete {
-		if r.URL.Query().Get("permanent") == "true" {
-			confirmName, ok := decodePermanentDelete(w, r, session)
-			if !ok {
-				return
-			}
-			if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
-				s.permanentDelete(w, r, session, ts, job, confirmName)
-			}
-		} else {
-			s.archiveJob(w, r, session, ts, id, true)
-		}
+	if job, ok := s.resolveJob(w, r, call.tenant, r.PathValue("id"), jobStoreErrorInternal); ok {
+		s.updateJob(w, r, call.session, call.tenant, job, update)
+	}
+}
+
+// permanentDeleteJobRoute serves DELETE /jobs/{id}?permanent=true.
+func (s *Server) permanentDeleteJobRoute(w http.ResponseWriter, r *http.Request, call routeCall) {
+	confirmName, ok := decodePermanentDelete(w, r, call.session)
+	if !ok {
 		return
 	}
-	if len(parts) == 2 && parts[1] == "archive" && r.Method == http.MethodPost {
-		s.archiveJob(w, r, session, ts, id, true)
+	if job, ok := s.resolveJob(w, r, call.tenant, r.PathValue("id"), jobMissingOnAnyError); ok {
+		s.permanentDelete(w, r, call.session, call.tenant, job, confirmName)
+	}
+}
+
+// discardScanCycleRoute serves DELETE /jobs/{id}/scan-cycle/{cycle}.
+func (s *Server) discardScanCycleRoute(w http.ResponseWriter, r *http.Request, call routeCall) {
+	if job, ok := s.resolveJob(w, r, call.tenant, r.PathValue("id"), jobStoreErrorInternal); ok {
+		s.discardScanCycle(w, r, call.session, call.tenant, job, r.PathValue("cycle"))
+	}
+}
+
+// jobScanResultsRoute serves GET /jobs/{id}/scans/{scan}/results.
+func (s *Server) jobScanResultsRoute(w http.ResponseWriter, r *http.Request, call routeCall) {
+	if _, scan, ok := s.resolveJobAndScan(w, r, call.tenant, r.PathValue("id"), jobStoreErrorInternal, r.PathValue("scan"), scanStoreErrorInternal); ok {
+		s.jobScanResults(w, r, call.tenant, scan)
+	}
+}
+
+// jobScanHostRoute serves GET /jobs/{id}/scans/{scan}/hosts/{address}.
+func (s *Server) jobScanHostRoute(w http.ResponseWriter, r *http.Request, call routeCall) {
+	if job, scan, ok := s.resolveJobAndScan(w, r, call.tenant, r.PathValue("id"), jobStoreErrorJobDetail, r.PathValue("scan"), scanStoreErrorDetail); ok {
+		s.jobScanHost(w, r, call.tenant, job, scan, r.PathValue("address"))
+	}
+}
+
+// jobScanHostRDAPRoute serves GET
+// /jobs/{id}/scans/{scan}/hosts/{address}/rdap.
+func (s *Server) jobScanHostRDAPRoute(w http.ResponseWriter, r *http.Request, call routeCall) {
+	if _, scan, ok := s.resolveJobAndScan(w, r, call.tenant, r.PathValue("id"), jobStoreErrorHostDetail, r.PathValue("scan"), scanStoreErrorDetail); ok {
+		s.jobScanHostRDAP(w, r, call.tenant, scan, r.PathValue("address"))
+	}
+}
+
+// jobBaselineHostRoute serves GET /jobs/{id}/baseline/hosts/{address}.
+func (s *Server) jobBaselineHostRoute(w http.ResponseWriter, r *http.Request, call routeCall) {
+	if job, ok := s.resolveJob(w, r, call.tenant, r.PathValue("id"), jobStoreErrorInternal); ok {
+		s.jobBaselineHost(w, r, call.tenant, job, r.PathValue("address"))
+	}
+}
+
+// acceptIncidentRoute serves POST /jobs/{id}/incidents/accept.
+func (s *Server) acceptIncidentRoute(w http.ResponseWriter, r *http.Request, call routeCall) {
+	action, ok := decodeIncidentAction(w, r)
+	if !ok {
 		return
 	}
-	if len(parts) == 2 && parts[1] == "restore" && r.Method == http.MethodPost {
-		s.archiveJob(w, r, session, ts, id, false)
+	if job, ok := s.resolveJob(w, r, call.tenant, r.PathValue("id"), jobStoreErrorInternal); ok {
+		s.acceptIncident(w, r, call.session, call.tenant, job, action)
+	}
+}
+
+// suppressIncidentRoute serves POST /jobs/{id}/incidents/suppress.
+func (s *Server) suppressIncidentRoute(w http.ResponseWriter, r *http.Request, call routeCall) {
+	action, ok := decodeIncidentAction(w, r)
+	if !ok {
 		return
 	}
-	if len(parts) == 2 && parts[1] == "pause" && r.Method == http.MethodPost {
-		s.enableJob(w, r, session, ts, id, false)
+	if job, ok := s.resolveJob(w, r, call.tenant, r.PathValue("id"), jobStoreErrorInternal); ok {
+		s.suppressIncident(w, r, call.session, call.tenant, job, action)
+	}
+}
+
+// resetBaselineRoute serves POST /jobs/{id}/baseline/reset.
+func (s *Server) resetBaselineRoute(w http.ResponseWriter, r *http.Request, call routeCall) {
+	input, ok := decodeResetBaseline(w, r)
+	if !ok {
 		return
 	}
-	if len(parts) == 2 && parts[1] == "resume" && r.Method == http.MethodPost {
-		s.enableJob(w, r, session, ts, id, true)
+	if job, ok := s.resolveJob(w, r, call.tenant, r.PathValue("id"), jobMissingOnAnyError); ok {
+		s.resetBaseline(w, r, call.session, call.tenant, job, input)
+	}
+}
+
+// approveBaselineRoute serves POST /jobs/{id}/baseline/approve.
+func (s *Server) approveBaselineRoute(w http.ResponseWriter, r *http.Request, call routeCall) {
+	input, ok := decodeApproveBaseline(w, r)
+	if !ok {
 		return
 	}
-	if len(parts) == 2 && parts[1] == "run" && r.Method == http.MethodPost {
-		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
-			s.runJob(w, r, session, ts, job)
-		}
-		return
+	if job, ok := s.resolveJob(w, r, call.tenant, r.PathValue("id"), jobMissingOnAnyError); ok {
+		s.approveBaseline(w, r, call.session, call.tenant, job, input)
 	}
-	if len(parts) == 2 && parts[1] == "run" && r.Method == http.MethodDelete {
-		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
-			s.cancelQueuedRun(w, r, session, ts, job)
-		}
-		return
-	}
-	if len(parts) == 2 && parts[1] == "scan-cycle" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
-			s.scanCycle(w, r, ts, job)
-		}
-		return
-	}
-	if len(parts) == 3 && parts[1] == "scan-cycle" && r.Method == http.MethodDelete {
-		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
-			s.discardScanCycle(w, r, session, ts, job, parts[2])
-		}
-		return
-	}
-	if len(parts) == 2 && parts[1] == "scans" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
-			s.jobScans(w, r, ts, job)
-		}
-		return
-	}
-	if len(parts) == 2 && parts[1] == "pending-changes" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
-			s.jobPendingChanges(w, r, ts, job)
-		}
-		return
-	}
-	if len(parts) == 3 && parts[1] == "scans" && parts[2] == "latest-successful" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
-			s.latestSuccessfulScan(w, r, ts, job)
-		}
-		return
-	}
-	if len(parts) == 3 && parts[1] == "scans" && r.Method == http.MethodGet {
-		if job, scan, ok := s.resolveJobAndScan(w, r, ts, id, jobStoreErrorInternal, parts[2], scanStoreErrorInternal); ok {
-			s.jobScan(w, r, ts, job, scan)
-		}
-		return
-	}
-	if len(parts) == 4 && parts[1] == "scans" && parts[3] == "results" && r.Method == http.MethodGet {
-		if _, scan, ok := s.resolveJobAndScan(w, r, ts, id, jobStoreErrorInternal, parts[2], scanStoreErrorInternal); ok {
-			s.jobScanResults(w, r, ts, scan)
-		}
-		return
-	}
-	if len(parts) == 4 && parts[1] == "scans" && parts[3] == "hosts" && r.Method == http.MethodGet {
-		if job, scan, ok := s.resolveJobAndScan(w, r, ts, id, jobStoreErrorInternal, parts[2], scanStoreErrorInternal); ok {
-			s.jobScanHosts(w, r, ts, job, scan)
-		}
-		return
-	}
-	if len(parts) == 5 && parts[1] == "scans" && parts[3] == "hosts" && r.Method == http.MethodGet {
-		if job, scan, ok := s.resolveJobAndScan(w, r, ts, id, jobStoreErrorJobDetail, parts[2], scanStoreErrorDetail); ok {
-			s.jobScanHost(w, r, ts, job, scan, parts[4])
-		}
-		return
-	}
-	if len(parts) == 6 && parts[1] == "scans" && parts[3] == "hosts" && parts[5] == "rdap" && r.Method == http.MethodGet {
-		if _, scan, ok := s.resolveJobAndScan(w, r, ts, id, jobStoreErrorHostDetail, parts[2], scanStoreErrorDetail); ok {
-			s.jobScanHostRDAP(w, r, ts, scan, parts[4])
-		}
-		return
-	}
-	if len(parts) == 3 && parts[1] == "baseline" && parts[2] == "hosts" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
-			s.jobBaselineHosts(w, r, ts, job)
-		}
-		return
-	}
-	if len(parts) == 4 && parts[1] == "baseline" && parts[2] == "hosts" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
-			s.jobBaselineHost(w, r, ts, job, parts[3])
-		}
-		return
-	}
-	if len(parts) == 5 && parts[1] == "baseline" && parts[2] == "hosts" && parts[4] == "rdap" && r.Method == http.MethodGet {
-		s.jobBaselineHostRDAP(w, r, ts, id, parts[3])
-		return
-	}
-	if len(parts) == 4 && parts[1] == "scans" && parts[3] == "changes" && r.Method == http.MethodGet {
-		if job, scan, ok := s.resolveJobAndScan(w, r, ts, id, jobStoreErrorInternal, parts[2], scanStoreErrorInternal); ok {
-			s.jobScanChanges(w, r, ts, job, scan)
-		}
-		return
-	}
-	if len(parts) == 2 && parts[1] == "incidents" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
-			s.jobIncidents(w, r, ts, job)
-		}
-		return
-	}
-	if len(parts) == 3 && parts[1] == "incidents" && parts[2] == "accept" && r.Method == http.MethodPost {
-		action, ok := decodeIncidentAction(w, r)
-		if !ok {
-			return
-		}
-		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
-			s.acceptIncident(w, r, session, ts, job, action)
-		}
-		return
-	}
-	if len(parts) == 3 && parts[1] == "incidents" && parts[2] == "suppress" && r.Method == http.MethodPost {
-		action, ok := decodeIncidentAction(w, r)
-		if !ok {
-			return
-		}
-		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
-			s.suppressIncident(w, r, session, ts, job, action)
-		}
-		return
-	}
-	if len(parts) == 2 && parts[1] == "events" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
-			s.jobEvents(w, r, ts, job)
-		}
-		return
-	}
-	if len(parts) == 2 && parts[1] == "baseline" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
-			s.jobBaseline(w, r, ts, job)
-		}
-		return
-	}
-	if len(parts) == 3 && parts[1] == "baseline" && parts[2] == "reset" && r.Method == http.MethodPost {
-		input, ok := decodeResetBaseline(w, r)
-		if !ok {
-			return
-		}
-		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
-			s.resetBaseline(w, r, session, ts, job, input)
-		}
-		return
-	}
-	if len(parts) == 3 && parts[1] == "baseline" && parts[2] == "approve" && r.Method == http.MethodPost {
-		input, ok := decodeApproveBaseline(w, r)
-		if !ok {
-			return
-		}
-		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
-			s.approveBaseline(w, r, session, ts, job, input)
-		}
-		return
-	}
-	writeError(w, 404, "not_found", "job endpoint not found", nil)
 }

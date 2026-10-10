@@ -235,6 +235,37 @@ job (`allow_high_cost`); the key is absent otherwise. Today that is an
 administrator of a unit. The console shows the approval control only to such a
 session, and the job API still enforces the rule.
 
+## Request paths
+
+From v0.36.0, one route table serves the console API under `/api/v1` and
+the public API under `/api/public/v1`: each route's method, path, and
+permission are listed once, in `apiRoutes` in `internal/web/permissions.go`,
+with the handler that serves it. A request that no route serves gets the
+answer it always got: `401 unauthorized` without a session, `403 csrf` for a
+state-changing request without the CSRF token, and otherwise `403 forbidden`
+with `details.permission` set to `route`. The public API answers such a
+request with `404 not_found`. Neither API redirects a request or answers
+`405`; the server's path cleaning still redirects a path such as
+`/api/v1/jobs//{id}` before any route is looked up, as before.
+
+A path segment is percent-decoded before it is matched, and an escaped slash
+(`%2F`) separates segments, as before. The routes that always accepted one
+trailing slash still do: the scanner profile and user routes, the
+notification destination routes from `/api/v1/notifications/destinations/{id}`
+down, the job routes from `/api/v1/jobs/{id}` down, the platform console's
+routes, and the public pages. These requests now get `403 route`, like any
+other path that no route serves:
+
+| Request | Before v0.36.0 |
+| --- | --- |
+| A scan route with a trailing slash, such as `GET /api/v1/scans/{id}/` or `GET /api/v1/scans/active/` | `404 not_found`: the slash became part of the ID or address |
+| `GET /api/v1/jobs/schedule-suggestion/` | `404 not_found`, as a job with the ID `schedule-suggestion` |
+| A path with an empty segment behind an escaped slash, such as `/api/v1/users/%2F{id}` or `/api/v1/platform/%2Funits` | Answered as if the empty segment were not there |
+
+On the public API, a slug with an empty segment, such as
+`/api/public/v1/dashboard/%2F{slug}`, gets `404 not_found` instead of
+`404 public_disabled`. No unit can have such a slug.
+
 ## Notification delivery outcomes
 
 v0.35.0 changes these notification destination responses and adds two

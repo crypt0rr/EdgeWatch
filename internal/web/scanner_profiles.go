@@ -251,122 +251,117 @@ func (s *Server) scannerCapabilities(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, capabilities)
 }
 
-func (s *Server) scannerProfilesRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, rest string) {
-	parts := strings.Split(strings.Trim(rest, "/"), "/")
-	if len(parts) == 1 && parts[0] == "" {
-		if r.Method == http.MethodGet {
-			result, err := ts.ListScannerProfilesReport(r.Context(), r.URL.Query().Get("include_archived") == "true")
-			if err != nil {
-				s.writeInternalError(w, r, "store", err)
-				return
-			}
-			items := make([]map[string]any, 0, len(result.Profiles))
-			for _, profile := range result.Profiles {
-				items = append(items, scannerProfileJSON(profile, true))
-			}
-			invalid := result.Invalid
-			if invalid == nil {
-				invalid = []store.InvalidScannerProfile{}
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"profiles": items, "invalid_profiles": invalid})
-			return
-		}
-		if r.Method == http.MethodPost {
-			s.createScannerProfile(w, r, session, ts)
-			return
-		}
+// listScannerProfiles serves GET /scanner-profiles: the tenant's profiles,
+// with the archived ones when include_archived=true, and the stored
+// profiles that no longer validate.
+func (s *Server) listScannerProfiles(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
+	result, err := ts.ListScannerProfilesReport(r.Context(), r.URL.Query().Get("include_archived") == "true")
+	if err != nil {
+		s.writeInternalError(w, r, "store", err)
+		return
 	}
-	if len(parts) < 1 || parts[0] == "" {
+	items := make([]map[string]any, 0, len(result.Profiles))
+	for _, profile := range result.Profiles {
+		items = append(items, scannerProfileJSON(profile, true))
+	}
+	invalid := result.Invalid
+	if invalid == nil {
+		invalid = []store.InvalidScannerProfile{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"profiles": items, "invalid_profiles": invalid})
+}
+
+// validateScannerProfileDraft serves POST /scanner-profiles/validate: it
+// checks the submitted definition with the rules of a definition being
+// saved, and renders it.
+func (s *Server) validateScannerProfileDraft(w http.ResponseWriter, r *http.Request) {
+	var payload scannerProfilePayload
+	if !decodeJSON(w, r, &payload) {
+		return
+	}
+	if err := config.ValidateNewScannerProfile(payload.definition()); err != nil {
+		writeValidationError(w, err)
+		return
+	}
+	preview, err := config.RenderScannerProfilePreview(payload.definition())
+	if err != nil {
+		writeValidationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "preview": preview})
+}
+
+// renderScannerProfileDraft serves POST /scanner-profiles/preview: it
+// renders the submitted definition without the rules of a definition being
+// saved, so that it also renders an existing revision.
+func (s *Server) renderScannerProfileDraft(w http.ResponseWriter, r *http.Request) {
+	var payload scannerProfilePayload
+	if !decodeJSON(w, r, &payload) {
+		return
+	}
+	preview, err := config.RenderScannerProfilePreview(payload.definition())
+	if err != nil {
+		writeValidationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "preview": preview})
+}
+
+func (s *Server) getScannerProfile(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string) {
+	profile, err := ts.GetScannerProfile(r.Context(), id)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "scanner profile not found", nil)
 		return
 	}
-	if len(parts) == 1 && (parts[0] == "validate" || parts[0] == "preview") && r.Method == http.MethodPost {
-		var payload scannerProfilePayload
-		if !decodeJSON(w, r, &payload) {
-			return
-		}
-		// Validation applies the rules of a definition being saved; a preview
-		// also renders an existing revision.
-		if parts[0] == "validate" {
-			if err := config.ValidateNewScannerProfile(payload.definition()); err != nil {
-				writeValidationError(w, err)
-				return
-			}
-		}
-		preview, err := config.RenderScannerProfilePreview(payload.definition())
-		if err != nil {
-			writeValidationError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"valid": true, "preview": preview})
+	writeJSON(w, http.StatusOK, scannerProfileJSON(profile, true))
+}
+
+func (s *Server) listScannerProfileRevisions(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string) {
+	revisions, err := ts.ListScannerProfileRevisions(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "scanner profile not found", nil)
 		return
 	}
-	id := parts[0]
-	if len(parts) == 1 && r.Method == http.MethodGet {
-		profile, err := ts.GetScannerProfile(r.Context(), id)
-		if err != nil {
-			writeError(w, http.StatusNotFound, "not_found", "scanner profile not found", nil)
-			return
-		}
-		writeJSON(w, http.StatusOK, scannerProfileJSON(profile, true))
+	items := make([]map[string]any, 0, len(revisions))
+	for _, revision := range revisions {
+		items = append(items, map[string]any{"profile_id": revision.ProfileID, "revision": revision.Revision, "created_by": revision.CreatedBy, "created_at": revision.CreatedAt, "definition": scannerProfileDefinitionJSON(revision.Definition)})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"revisions": items})
+}
+
+// validateScannerProfile serves POST /scanner-profiles/{id}/validate. It
+// validates the submitted definition with the rules of a definition being
+// saved and renders it, and never reads the profile.
+func (s *Server) validateScannerProfile(w http.ResponseWriter, r *http.Request) {
+	var payload scannerProfilePayload
+	if !decodeJSON(w, r, &payload) {
 		return
 	}
-	if len(parts) == 1 && r.Method == http.MethodPut {
-		s.updateScannerProfile(w, r, session, ts, id)
+	if err := config.ValidateNewScannerProfile(payload.definition()); err != nil {
+		writeValidationError(w, err)
 		return
 	}
-	if len(parts) == 1 && r.Method == http.MethodDelete {
-		s.setScannerProfileArchived(w, r, session, ts, id, true)
+	preview, err := config.RenderScannerProfilePreview(payload.definition())
+	if err != nil {
+		writeValidationError(w, err)
 		return
 	}
-	if len(parts) == 2 && parts[1] == "restore" && r.Method == http.MethodPost {
-		s.setScannerProfileArchived(w, r, session, ts, id, false)
+	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "preview": preview})
+}
+
+// previewScannerProfile serves POST /scanner-profiles/{id}/preview. It
+// renders the submitted definition and never reads the profile.
+func (s *Server) previewScannerProfile(w http.ResponseWriter, r *http.Request) {
+	var payload scannerProfilePayload
+	if !decodeJSON(w, r, &payload) {
 		return
 	}
-	if len(parts) == 2 && parts[1] == "revisions" && r.Method == http.MethodGet {
-		revisions, err := ts.ListScannerProfileRevisions(r.Context(), id)
-		if err != nil {
-			writeError(w, http.StatusNotFound, "not_found", "scanner profile not found", nil)
-			return
-		}
-		items := make([]map[string]any, 0, len(revisions))
-		for _, revision := range revisions {
-			items = append(items, map[string]any{"profile_id": revision.ProfileID, "revision": revision.Revision, "created_by": revision.CreatedBy, "created_at": revision.CreatedAt, "definition": scannerProfileDefinitionJSON(revision.Definition)})
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"revisions": items})
+	preview, err := config.RenderScannerProfilePreview(payload.definition())
+	if err != nil {
+		writeValidationError(w, err)
 		return
 	}
-	if len(parts) == 2 && parts[1] == "validate" && r.Method == http.MethodPost {
-		var payload scannerProfilePayload
-		if !decodeJSON(w, r, &payload) {
-			return
-		}
-		if err := config.ValidateNewScannerProfile(payload.definition()); err != nil {
-			writeValidationError(w, err)
-			return
-		}
-		preview, err := config.RenderScannerProfilePreview(payload.definition())
-		if err != nil {
-			writeValidationError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"valid": true, "preview": preview})
-		return
-	}
-	if len(parts) == 2 && parts[1] == "preview" && r.Method == http.MethodPost {
-		var payload scannerProfilePayload
-		if !decodeJSON(w, r, &payload) {
-			return
-		}
-		preview, err := config.RenderScannerProfilePreview(payload.definition())
-		if err != nil {
-			writeValidationError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"preview": preview})
-		return
-	}
-	writeError(w, http.StatusNotFound, "not_found", "scanner profile endpoint not found", nil)
+	writeJSON(w, http.StatusOK, map[string]any{"preview": preview})
 }
 
 func (s *Server) confirmProfilePassword(w http.ResponseWriter, r *http.Request, session store.Session, password string) bool {

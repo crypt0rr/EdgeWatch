@@ -449,6 +449,28 @@ func (s *Server) addSessionPermissions(response map[string]any, session store.Se
 	}
 }
 
+// revokeOwnSessions signs the signed-in account out everywhere: it deletes
+// every session of the account, this one included, and ends the account's
+// live-update streams.
+func (s *Server) revokeOwnSessions(w http.ResponseWriter, r *http.Request, session store.Session, account accountStore) {
+	action := "user.sessions_revoked"
+	if session.Role == store.RoleAdministrator {
+		action = "admin.sessions_revoked"
+	}
+	if err := account.DeleteUserSessionsWithAudit(r.Context(), session.UserID, actorAudit(session, action, "all sessions revoked")); err != nil {
+		if errors.Is(err, store.ErrAuditUnavailable) {
+			s.revokeSSEUser(session.UserID)
+			s.auditFailure(err, action)
+			writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "sessions were revoked, but the security audit is temporarily unavailable", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "store", "sessions could not be revoked", nil)
+		return
+	}
+	s.revokeSSEUser(session.UserID)
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
 func (s *Server) logout(w http.ResponseWriter, r *http.Request, session store.Session) {
 	err := s.Auth.LogoutSession(r.Context(), r, session)
 	auth.ClearSessionCookie(w, s.sessionCookieSecure(r))

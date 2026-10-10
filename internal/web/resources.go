@@ -9,9 +9,9 @@ import (
 
 // The /jobs/{id}/* and /scans/{id}/* routes load the job or scan named in the
 // path once, through the resolvers below, and pass the record to the handler.
-// jobRoute does this for jobs; for scans, the API router calls getScan,
-// getScanSummary and the scan*Route functions, which resolve the scan and,
-// when it records one, its owning job. Scan cancellation is the exception: it
+// jobHandler and the other job route handlers do this for jobs; for scans,
+// the routes call getScan, getScanSummary and the scan*Route functions,
+// which resolve the scan and, when it records one, its owning job. Scan cancellation is the exception: it
 // acts on the in-memory active scan and never loads a stored record. The
 // resolvers and handlers take the request's tenant store, which the API
 // router resolves once from the session.

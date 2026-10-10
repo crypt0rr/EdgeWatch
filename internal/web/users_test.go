@@ -220,8 +220,8 @@ func TestUsersRouteValidationAndSessionRevocation(t *testing.T) {
 	if rec := call(http.MethodPatch, "/"+store.LegacyAdminUserID, `{"role":"viewer","password":"administrator password"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "self") {
 		t.Fatalf("self demotion response = %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec := call(http.MethodGet, "/unknown/sessions", ""); rec.Code != http.StatusNotFound {
-		t.Fatalf("unknown subresource status = %d", rec.Code)
+	if rec := call(http.MethodGet, "/unknown/sessions", ""); rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"permission":"route"`) {
+		t.Fatalf("unknown subresource = %d %s, want the gate's 403 route", rec.Code, rec.Body.String())
 	}
 
 	hash, err := auth.PasswordHash("operator account password")

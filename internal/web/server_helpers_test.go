@@ -28,25 +28,25 @@ func TestRequiredPermissionAndMutationMatrix(t *testing.T) {
 		if route.Access == routePublic {
 			// Server.publicAPI serves the public projection; the session API
 			// must not route the same relative path.
-			if got := requiredPermission(route.Example, route.Method); got != auth.PermissionDenied {
+			if got := routePermission(route.Example, route.Method); got != auth.PermissionDenied {
 				t.Errorf("%s: session API permission for %s = %q, want %q", name, route.Example, got, auth.PermissionDenied)
 			}
 			continue
 		}
 		request := httptest.NewRequest(route.Method, routeMatrixTarget(route), nil)
-		if got := requestPermission(route.Example, request); got != route.Permission {
-			t.Errorf("%s: requestPermission(%q) = %q, want %q", name, route.Example, got, route.Permission)
+		if got := routeRequestPermission(route.Example, request); got != route.Permission {
+			t.Errorf("%s: routeRequestPermission(%q) = %q, want %q", name, route.Example, got, route.Permission)
 		}
 		if route.Query != "" {
 			// The query selects a different action than the plain route, so
 			// the path alone must not carry the query's capability.
-			if got := requiredPermission(route.Example, route.Method); got == route.Permission {
-				t.Errorf("%s: requiredPermission without the query = %q, want a different capability", name, got)
+			if got := routePermission(route.Example, route.Method); got == route.Permission {
+				t.Errorf("%s: routePermission without the query = %q, want a different capability", name, got)
 			}
 			continue
 		}
-		if got := requiredPermission(route.Example, route.Method); got != route.Permission {
-			t.Errorf("%s: requiredPermission(%q, %q) = %q, want %q", name, route.Example, route.Method, got, route.Permission)
+		if got := routePermission(route.Example, route.Method); got != route.Permission {
+			t.Errorf("%s: routePermission(%q, %q) = %q, want %q", name, route.Example, route.Method, got, route.Permission)
 		}
 	}
 
@@ -126,8 +126,8 @@ func TestRequiredPermissionAndMutationMatrix(t *testing.T) {
 		{"/jobs/id/scans/scan/not-a-route", http.MethodGet, auth.PermissionDenied},
 	}
 	for _, test := range cases {
-		if got := requiredPermission(test.path, test.method); got != test.want {
-			t.Errorf("requiredPermission(%q, %q) = %q, want %q", test.path, test.method, got, test.want)
+		if got := routePermission(test.path, test.method); got != test.want {
+			t.Errorf("routePermission(%q, %q) = %q, want %q", test.path, test.method, got, test.want)
 		}
 		matches := inventoryRoutesFor(apiRoutes, test.method, test.path)
 		switch {
@@ -150,15 +150,15 @@ func TestRequiredPermissionAndMutationMatrix(t *testing.T) {
 		}
 	}
 	permanent := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/id?permanent=true", nil)
-	if got := requestPermission("/jobs/id", permanent); got != auth.PermissionJobsDelete {
+	if got := routeRequestPermission("/jobs/id", permanent); got != auth.PermissionJobsDelete {
 		t.Fatalf("permanent job delete permission = %q, want %q", got, auth.PermissionJobsDelete)
 	}
 	archive := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/id", nil)
-	if got := requestPermission("/jobs/id", archive); got != auth.PermissionJobsWrite {
+	if got := routeRequestPermission("/jobs/id", archive); got != auth.PermissionJobsWrite {
 		t.Fatalf("job archive permission = %q, want %q", got, auth.PermissionJobsWrite)
 	}
 	nestedPermanent := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/id/not-a-route?permanent=true", nil)
-	if got := requestPermission("/jobs/id/not-a-route", nestedPermanent); got != auth.PermissionDenied {
+	if got := routeRequestPermission("/jobs/id/not-a-route", nestedPermanent); got != auth.PermissionDenied {
 		t.Fatalf("unknown nested job permission = %q, want %q", got, auth.PermissionDenied)
 	}
 	for _, route := range []struct {
@@ -169,7 +169,7 @@ func TestRequiredPermissionAndMutationMatrix(t *testing.T) {
 		{path: "/auth/not-a-route", method: http.MethodGet},
 		{path: "/jobs/id/not-a-route", method: http.MethodGet},
 	} {
-		if got := requiredPermission(route.path, route.method); got != auth.PermissionDenied {
+		if got := routePermission(route.path, route.method); got != auth.PermissionDenied {
 			t.Errorf("unmatched route %s %s returned %q, want %q", route.method, route.path, got, auth.PermissionDenied)
 		}
 	}

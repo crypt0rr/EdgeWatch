@@ -364,9 +364,10 @@ func TestPositiveMatrix(t *testing.T) {
 	}
 }
 
-// The platform console's handler checks the role again: a session that is
+// The platform console's handlers check the role again: a session that is
 // not a platform administrator's is refused like an unknown route, even if
-// it reached the handler, and an unknown platform path is not found.
+// it reached the handler, and an unknown platform path is refused as the
+// gate refuses any path outside the route table.
 func TestPlatformRouteRefusesUnitSessions(t *testing.T) {
 	t.Parallel()
 	f := newPlatformFixture(t)
@@ -379,8 +380,8 @@ func TestPlatformRouteRefusesUnitSessions(t *testing.T) {
 	}
 	recorder := httptest.NewRecorder()
 	f.server.platformRoute(recorder, httptest.NewRequest(http.MethodGet, consoleAPIBase+"/platform/unknown", nil), f.sessions[actorPlatform].session, "unknown")
-	if recorder.Code != http.StatusNotFound {
-		t.Errorf("platformRoute of an unknown path = %d %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), `"route"`) {
+		t.Errorf("platformRoute of an unknown path = %d %s, want the gate's 403 route", recorder.Code, recorder.Body.String())
 	}
 }
 

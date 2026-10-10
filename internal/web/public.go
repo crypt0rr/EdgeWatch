@@ -87,26 +87,35 @@ const publicDashboardRateLimit = "public-dashboard"
 
 // publicAPI is intentionally separate from /api/v1. It has no session
 // middleware and exposes one fixed, sanitized projection without resource
-// selectors that could be used to enumerate jobs or hosts. The legacy URL
-// serves the default tenant's page, and /api/public/v1/dashboard/<slug> the
-// page of the business unit with that slug. Both accept one trailing slash.
+// selectors that could be used to enumerate jobs or hosts. It serves the
+// public routes of apiRoutes from publicRoutes: the legacy URL serves the
+// default tenant's page, and /api/public/v1/dashboard/<slug> the page of the
+// business unit with that slug. Both accept one trailing slash. Any other
+// method or path is not found.
 func (s *Server) publicAPI(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimSuffix(r.URL.Path, "/")
-	if r.Method == http.MethodGet && path == "/api/public/v1/dashboard" {
-		s.servePublicPage(w, r, publicDashboardRateLimit, func(context.Context) (store.PublicScope, error) {
-			return store.DefaultPublicScope(), nil
-		})
+	if route := publicRoutes.match(r); route != nil {
+		route.Handle(s, w, r, routeCall{})
 		return
 	}
-	if r.Method == http.MethodGet && strings.HasPrefix(path, "/api/public/v1/dashboard/") {
-		if slug := strings.TrimPrefix(path, "/api/public/v1/dashboard/"); slug != "" {
-			s.servePublicPage(w, r, publicPageRateLimit(slug), func(ctx context.Context) (store.PublicScope, error) {
-				return s.publicScopeForSlug(ctx, slug)
-			})
-			return
-		}
-	}
 	writeError(w, http.StatusNotFound, "not_found", "endpoint not found", nil)
+}
+
+// defaultPublicPage serves GET /api/public/v1/dashboard, the default
+// tenant's page.
+func (s *Server) defaultPublicPage(w http.ResponseWriter, r *http.Request) {
+	s.servePublicPage(w, r, publicDashboardRateLimit, func(context.Context) (store.PublicScope, error) {
+		return store.DefaultPublicScope(), nil
+	})
+}
+
+// slugPublicPage serves GET /api/public/v1/dashboard/{slug...}. The slug is
+// the rest of the path, which can hold more than one segment; such a slug
+// names no unit and is answered like any other slug without a page.
+func (s *Server) slugPublicPage(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("slug")
+	s.servePublicPage(w, r, publicPageRateLimit(slug), func(ctx context.Context) (store.PublicScope, error) {
+		return s.publicScopeForSlug(ctx, slug)
+	})
 }
 
 // publicSlugWellFormed reports whether slug can name a business unit: it
@@ -462,21 +471,28 @@ func publicDashboardTextError(title, introduction string) (string, map[string]st
 	return strings.Join(reasons, "; "), details
 }
 
-// publicDashboardRoute reads and saves the public page of the session's
-// tenant. A selection is checked through that tenant's public scope, the
-// reads its public page renders with, so only a host of the tenant's own jobs
-// can be published.
-func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
+// getPublicDashboard reads the public page of the session's tenant, or the
+// page that it would publish when it has none.
+func (s *Server) getPublicDashboard(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	dashboard, err := ts.GetPublicDashboard(r.Context())
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) {
+		dashboard, err = store.PublicDashboard{Title: "EdgeWatch public status", Hosts: []store.PublicDashboardHost{}}, nil
+	}
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", "public dashboard could not be loaded", nil)
 		return
 	}
-	if r.Method == http.MethodGet {
-		if errors.Is(err, store.ErrNotFound) {
-			dashboard = store.PublicDashboard{Title: "EdgeWatch public status", Hosts: []store.PublicDashboardHost{}}
-		}
-		writeJSON(w, http.StatusOK, dashboard)
+	writeJSON(w, http.StatusOK, dashboard)
+}
+
+// savePublicDashboard saves the public page of the session's tenant. A
+// selection is checked through that tenant's public scope, the reads its
+// public page renders with, so only a host of the tenant's own jobs can be
+// published.
+func (s *Server) savePublicDashboard(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
+	dashboard, err := ts.GetPublicDashboard(r.Context())
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, "store", "public dashboard could not be loaded", nil)
 		return
 	}
 	var input publicDashboardPayload

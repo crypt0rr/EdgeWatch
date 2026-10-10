@@ -97,6 +97,11 @@ var auditActionCategories = map[string]string{
 	auditPlatformNotificationsUpdated:       auditCategoryPlatform,
 	auditPlatformNotificationsDeleted:       auditCategoryPlatform,
 	auditPlatformNotificationsUpdateRouting: auditCategoryPlatform,
+	// The platform's security and deployment alert routing, and the
+	// deployment-health alerts that the daemon raises.
+	auditPlatformNotificationsSecurityRouting: auditCategoryPlatform,
+	auditPlatformNotificationsHealthRouting:   auditCategoryPlatform,
+	auditApplicationHealthAlert:               auditCategoryPlatform,
 
 	// Monitored data and its configuration.
 	"baseline.approved":                        auditCategoryData,
@@ -121,6 +126,7 @@ var auditActionCategories = map[string]string{
 	"notifications.test":                       auditCategoryData,
 	"notifications.test_failed":                auditCategoryData,
 	"notifications.update_routing":             auditCategoryData,
+	auditSecurityRouting:                       auditCategoryData,
 	"notifications.incident_reminders_changed": auditCategoryData,
 	"notifications.updated":                    auditCategoryData,
 	"public_dashboard.updated":                 auditCategoryData,

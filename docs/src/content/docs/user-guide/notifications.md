@@ -1,6 +1,6 @@
 ---
 title: Notifications
-description: Manage destinations, reminders, update alerts, delivery retries, and legacy imports.
+description: Manage destinations, reminders, update, security, and deployment alerts, delivery retries, and legacy imports.
 ---
 
 EdgeWatch uses [Shoutrrr](https://github.com/containrrr/shoutrrr) for delivery.
@@ -91,6 +91,90 @@ Each job can select its own destinations. On the **Notifications** page,
   Selecting a job's destinations in the job editor needs only permission to
   edit jobs, which operators have.
 
+## Security alerts
+
+From v0.36.0, a business unit can send its security events to its own
+destinations as they happen, instead of leaving them for a later review of
+its audit. **Security alerts** is a toggle on each web-managed destination on
+the unit's **Notifications** page. It is off for every destination until an
+administrator turns it on, and turning it on or off needs the account
+password, as every change on the page does. A deployment destination from
+`config.yaml` cannot receive security alerts.
+
+These audit records send a security alert:
+
+| Event | Audit action | The alert names |
+| --- | --- | --- |
+| A client became rate limited on sign-in, password or TOTP confirmation, activation, or setup | `auth.rate_limited` | the operation, the client's address, and, for a sign-in, the unit's account |
+| An account's one-time and recovery codes were locked after ten wrong codes | `auth.second_factor_locked` | the account and the address of the code that started the lockout |
+| An account signed in with a recovery code | `auth.recovery_code_used` | the account and the client's address |
+| A platform administrator invited a unit administrator | `user.created` with the `platform` actor | the invited account and the platform administrator |
+| A platform administrator issued a password-reset link for a unit administrator | `user.password_reset_issued` with the `platform` actor | the account and the platform administrator |
+| A platform administrator ended the sessions of a unit's account | `user.sessions_revoked` with the `platform` actor | the account and the platform administrator |
+
+Each alert goes to the destinations of the unit that the record belongs to,
+the unit of the account it names, and never to another unit's or the
+platform's. It is queued in the same database change as its audit record, so
+it is sent only when the record is kept, and it is delivered and retried like
+any other alert. The alerts of a unit that is disabled or being deleted are
+not sent; its audit keeps the records. An alert carries only the fixed
+wording of its event, the unit's name, usernames, a client address, counts,
+and times. It never contains a password, a code, a token or link, a URL, or a
+file path, and an alert about a platform administrator's action leaves out
+the administrator's address, as the unit's audit does.
+
+Alerts are coalesced so that an attack cannot flood a destination. A rate
+limit already records one `auth.rate_limited` per client, operation, and unit
+in five minutes. On top of that, each unit gets at most one alert of each kind
+every 15 minutes: the first event of a kind sends its alert at once and opens
+a 15-minute window, and the events of that kind within the window are counted
+instead of sent. When the window ends, the daemon sends one summary, such as
+`3 more rate-limit episodes since 12:30 UTC`, which opens the next window; a
+window that ends without further events sends nothing. The three platform
+administrator actions share one window. The summary names no account; the
+unit's audit holds every record. A failure to queue an alert never fails the
+action or its audit record; the daemon logs a warning instead.
+
+The platform has security alerts of its own, for the records in platform
+scope: the rate limits, lockouts, and recovery-code sign-ins of platform
+administrators, and the rate limits of sign-ins with a username that no
+account has, whose alert leaves the username out. Platform administrators turn
+them on per platform destination with the **Security alerts** toggle on the
+platform console's **Notifications** page.
+
+## Deployment alerts
+
+From v0.36.0, the daemon reports problems with the deployment itself to the
+platform's destinations. **Deployment alerts** is a toggle on each platform
+destination on the platform console's **Notifications** page, off until a
+platform administrator turns it on. A unit's destinations never receive them.
+Each deployment alert is also recorded in the platform audit as
+`application.health_alert`, whether or not a destination is selected.
+
+| Alert | When |
+| --- | --- |
+| A sandbox lost confinement | The scanner or notification processes start with less confinement than the last alert reported: they lost the sandbox identity and run as UID 0, or they lost Landlock. See [the container hardening guide](/deployment/container-hardening/). |
+| A sandbox regained confinement | They start with more confinement than the last alert reported, and lost none. |
+| A version rollback | The daemon starts a version older than the installed one. |
+| Alerts failed for good | Alerts of any unit or the platform dropped after their retries ran out since the previous report. The alert gives their number and how many of them were the platform's, never a destination, a URL, or a provider's answer. |
+
+The daemon compares the sandboxes when it starts and with each heartbeat,
+against the state that the last alert reported, so a restart with the same
+state sends nothing. The first start of v0.36.0 records the current state;
+when it is already degraded, it is reported once. A sandbox alert and a
+rollback alert are sent at most once an hour each, so a daemon that restarts
+in a loop, or whose sandbox comes and goes, cannot flood a destination; a
+change within the hour is reported when the hour ends, if it still holds. A
+rollback within the hour is recorded in the platform audit without being sent
+again. Failed alerts are reported at most once every six hours, and the
+failure of a deployment alert itself is not counted, so it cannot start a
+loop. A lost or replaced `notification.key` locks every destination, the
+platform's too, so it cannot be reported this way, and `/healthz` stays
+`ready` because the daemon keeps running. Watch for it with the
+`edgewatch_notification_destinations_locked` metric (see
+[Monitor the monitor](/operations/troubleshooting/#monitor-the-monitor)),
+the locked count on **Notifications**, or `edgewatch notify test`.
+
 ## Incident reminders
 
 **Incident reminders** is a separate business-unit setting on the same page,
@@ -113,7 +197,8 @@ routing.
 ## Changing destinations
 
 Deleting a destination removes it from every job and from the update-alert
-routing in the same change. Each affected job gets a new revision and an
+and security-alert routing, and a platform destination also from the
+deployment-alert routing, in the same change. Each affected job gets a new revision and an
 audit record. Its delivery health goes with it, so its failures no longer
 count in the notification totals.
 
@@ -152,7 +237,9 @@ events can all generate notifications. A scan that stops because
 EdgeWatch stopped, for example during an upgrade or restart, is recorded as
 canceled with the reason "scan interrupted because EdgeWatch stopped" and
 appears in Activity as **Scan interrupted**, but sends no notification. A
-daemon that keeps stopping is still reported by the job's silence alert.
+daemon that keeps stopping is still reported by the job's silence alert, which
+the daemon itself raises; to detect a daemon that stopped or hangs from
+outside, poll [`GET /healthz`](/operations/troubleshooting/#monitor-the-monitor).
 Definitive provider failures
 are retried durably for up to 15 attempts over roughly 77 hours; the delay
 doubles from two minutes and caps at 12 hours. A restart preserves each

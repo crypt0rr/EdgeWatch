@@ -5,7 +5,7 @@ description: Understand the current SQLite schema, the oldest schema that upgrad
 
 ## Current schema and rollback
 
-The current schema is version 66. Schema 31 records terminal notification
+The current schema is version 67. Schema 31 records terminal notification
 deliveries and marks rows that had already exhausted the original eight
 attempts. Schema 63 repairs databases that had already passed schema 31 by
 marking still-unsent rows with at least eight attempts and a scheduled retry
@@ -15,7 +15,9 @@ deliveries that were still retrying. Schema 64 adds an index for pruning old
 restore-quarantine records; it does not rewrite delivery history. Schema 65
 records how each new scan was compared with its job's baseline; it does not
 change existing scans. Schema 66 replaces scan history indexes; it does not
-change scans either. Database migrations are forward-only. An older image
+change scans either. Schema 67 adds the routing and state of the security
+and deployment alerts; no existing row changes and every routing starts
+empty. Database migrations are forward-only. An older image
 must not be pointed at a database already upgraded by a newer image; restore
 the matching pre-upgrade `./data` backup if a rollback is required. The daemon
 and the commands that write to the database (admin, scan, notify test,
@@ -25,9 +27,10 @@ schema version with the error
 database with the release that upgraded it, or copy `./data` while
 EdgeWatch is stopped. A daemon that finds another daemon's live lease exits
 before it migrates the database, and so does a daemon whose configured key
-file or notification URL is unusable (see `config validate` under
-[Host commands](/reference/cli/)). Keep encryption keys with the database or
-encrypted web-managed destinations and never commit them.
+file, notification URL, or metrics token file is unusable (see
+`config validate` under [Host commands](/reference/cli/)). Keep encryption
+keys with the database or encrypted web-managed destinations and never
+commit them.
 
 ## Upgrade floor
 
@@ -72,6 +75,34 @@ daemon truncates the write-ahead log once its startup work has finished, so a
 large migration step does not leave a log of its size beside the database.
 That includes a start that finds the schema current and finishes the rebuild
 of a start that was stopped before it was ready.
+
+## Schema 67
+
+Schema 67, introduced in v0.36.0, adds what the
+[security and deployment alerts](/user-guide/notifications/#security-alerts)
+need:
+
+- `tenants.security_destinations_json`, each business unit's security alert
+  routing, the IDs of its web-managed destinations. It defaults to an empty
+  selection, so every existing and new unit gets no security alerts until its
+  administrators turn them on.
+- `platform_alert_state`, one platform row with the platform's security alert
+  and deployment alert routing, both empty, the sandbox states and times that
+  the last deployment alerts reported, the time of the last rollback alert,
+  and the count of alerts that failed for good since the last report. It
+  holds no business unit's data.
+- `security_alert_windows`, the open alert window of each business unit, or
+  of the platform, and alert kind, with the number of alerts it held back. A
+  unit's rows carry its `tenant_id`, and deleting the unit erases them with
+  its other rows.
+
+The migration adds a column with a default, the platform's alert row with
+empty routings, and an empty `security_alert_windows` table, so it is quick
+and has no background phase. It runs in one transaction that first
+checks that the database is still at schema 66, like every step described
+under [Migration ownership](#migration-ownership), and it rebuilds no table.
+An older release refuses the upgraded database, so a rollback means
+restoring the pre-upgrade `./data` backup.
 
 ## Schema 66
 
@@ -173,6 +204,9 @@ locked. The startup phases that read their progress before they write, such
 as the backfills, take the database's write lock first, so a host command
 that writes while they run, such as `scan` or `admin`, makes them wait, up
 to the five-second busy timeout, instead of failing the daemon's start.
+The daemon also opens its listener before it migrates, so `GET /healthz`
+answers `starting` during a long upgrade; see
+[Monitor the monitor](/operations/troubleshooting/#monitor-the-monitor).
 
 ## Schemas 48 to 54
 

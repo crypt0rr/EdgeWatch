@@ -561,6 +561,8 @@ func (s *Server) invitePlatformUnitAdmin(w http.ResponseWriter, r *http.Request,
 		s.writePlatformError(w, r, err, "user.created", "business unit not found")
 		return
 	}
+	// The record may have queued the unit's security alert.
+	s.App.WakeDelivery()
 	writeJSON(w, http.StatusCreated, map[string]any{"user": user.Summary(), "activation_token": plain, "activation_path": activationPath(plain)})
 }
 
@@ -620,6 +622,7 @@ func (s *Server) resetPlatformUnitAdmin(w http.ResponseWriter, r *http.Request, 
 		s.writePlatformError(w, r, err, "user.password_reset_issued", "account not found")
 		return
 	}
+	s.App.WakeDelivery()
 	writeJSON(w, http.StatusOK, map[string]any{"activation_token": plain, "activation_path": activationPath(plain), "expires_at": expires, "totp_enrolled": account.TOTPEnabled})
 }
 
@@ -648,6 +651,7 @@ func (s *Server) revokePlatformUnitAccountSessions(w http.ResponseWriter, r *htt
 		return
 	}
 	s.revokeSSEUser(userID)
+	s.App.WakeDelivery()
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
@@ -814,7 +818,15 @@ func (s *Server) listPlatformNotifications(w http.ResponseWriter, r *http.Reques
 		destinations = []string{}
 	}
 	routing := map[string]any{"configured": state.UpdateNotificationDestinationsConfigured, "destinations": destinations}
-	writeJSON(w, http.StatusOK, map[string]any{"destinations": views, "status": status, "update_routing": routing})
+	alerts, err := s.Store.Platform().PlatformAlertRouting(r.Context())
+	if err != nil {
+		if s.Log != nil {
+			s.Log.Warn("platform alert routing state unavailable", "error", err)
+		}
+		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"destinations": views, "status": status, "update_routing": routing, "security_routing": alertRoutingView(alerts.Security), "health_routing": alertRoutingView(alerts.Health)})
 }
 
 // confirmNotificationPassword applies the notification routes' password
@@ -982,8 +994,9 @@ func (s *Server) togglePlatformNotificationRouting(w http.ResponseWriter, r *htt
 
 // platformStatus reports the deployment as numbers: the units by state,
 // their accounts, jobs and stored scans, the platform administrators, the
-// scan capacity and its use, the version and update status, and the
-// outcome of the scheduled backups when they are on.
+// scan capacity and its use, the version and update status, the outcome of
+// the scheduled backups when they are on, and the deployment's telemetry:
+// the database size and the notification outbox backlog.
 func (s *Server) platformStatus(w http.ResponseWriter, r *http.Request) {
 	platform := s.Store.Platform()
 	records, err := platform.ListTenants(r.Context())
@@ -1025,5 +1038,14 @@ func (s *Server) platformStatus(w http.ResponseWriter, r *http.Request) {
 		status.UntrustedProxy = &proxy
 	}
 	status.Backups = s.App.BackupStatus()
+	// The deployment's aggregate counters, with the database size and the
+	// notification outbox, read at most every 30 seconds. Like the units'
+	// counts, they are numbers only; they are left out when they cannot be
+	// read.
+	if telemetry, err := s.cachedDeploymentTelemetry(r.Context()); err == nil {
+		status.Telemetry = &telemetry
+	} else if s.Log != nil {
+		s.Log.Warn("deployment telemetry refresh failed", "error", err)
+	}
 	writeJSON(w, http.StatusOK, status)
 }

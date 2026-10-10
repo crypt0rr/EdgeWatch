@@ -27,15 +27,20 @@ var routePathReaders = map[string]string{
 	"asset":          "serves the embedded console assets",
 	"spa":            "serves the console shell and static files, and rejects every /api/ path",
 	"requestLogging": "logs the path of each request",
+	"startupHandler": "serves /healthz, /metrics, and 503 starting for every other path while the daemon migrates, before any route is served",
 }
 
 // handlerPatterns are the patterns that Handler registers on the outer
-// ServeMux. Only the two API bases reach apiRoutes.
+// ServeMux. Only the two API bases reach apiRoutes; /healthz and /metrics
+// are served outside the versioned APIs, each by one handler that reads no
+// path.
 var handlerPatterns = map[string]bool{
 	publicAPIBase + "/":  true,
 	consoleAPIBase + "/": true,
 	"/assets/":           true,
 	"/source":            true,
+	"/healthz":           true,
+	"/metrics":           true,
 	"/":                  true,
 }
 

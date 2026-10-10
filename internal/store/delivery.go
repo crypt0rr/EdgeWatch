@@ -645,7 +645,11 @@ func insertTerminalDeliveryEventTx(ctx context.Context, tx *sql.Tx, outboxID int
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,scan_id,payload_json,created_at,tenant_id) VALUES(?,?,?,?,?,(SELECT tenant_id FROM outbox WHERE id=?))`, bounded.Type, "", "", payload, sqliteTimestamp(now), outboxID)
-	return err
+	if err != nil {
+		return err
+	}
+	noteFailedDeliveryTx(ctx, tx, outboxID, now)
+	return nil
 }
 
 func deliveryRetryDelay(attempts int) time.Duration {

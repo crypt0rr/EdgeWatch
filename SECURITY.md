@@ -37,7 +37,9 @@ and write their results through inherited file descriptors, cannot list the
 UID 0 data directory or reach `config.yaml`, and so cannot read the database
 or the encryption keys. When the container does not grant those capabilities,
 `auto` runs them as UID 0 and warns in the log, `edgewatch health`, and the
-console; `scanner.sandbox: required` refuses to scan instead. EdgeWatch
+console, and records a deployment alert in the platform audit, which the
+platform destinations selected for deployment alerts receive;
+`scanner.sandbox: required` refuses to scan instead. EdgeWatch
 creates the files it passes to scanners in `tmp/scanner` beside the
 database, a `0700` directory of the daemon, whatever `TMPDIR` names, so no
 scanner can open another scan's XML output or target list by its name. Each
@@ -70,7 +72,40 @@ ownership guidance, and the criteria for a non-root daemon are maintained in
 [`docs/src/content/docs/deployment/container-hardening.md`](docs/src/content/docs/deployment/container-hardening.md).
 
 The administration console is bound to a loopback address by default and uses
-server-side sessions, CSRF protection, and Argon2id password storage. Keep the
+server-side sessions, CSRF protection, and Argon2id password storage. Two
+endpoints on its listener answer outside the console's API. `GET /healthz`
+needs no session and no approved host name, like the public status pages,
+and is limited to 120 requests a minute per client; it answers one word,
+`ready`, `starting`, `unhealthy`, or `rate_limited`, and never a reason, a
+version, or a unit. The daemon opens the listener before it migrates the
+database; until the console is up, a startup server without a store or a
+session answers only these two endpoints, from the startup state that it
+reads through a read-only database handle, and every other path with `503`.
+`GET /metrics` is off unless `web.metrics.enabled` is
+true, and then needs the bearer token of `web.metrics.token_file`, a file
+without group or other permissions that the daemon checks before it opens
+the database; the token is compared by its SHA-256 digest in constant time,
+never logged, and limited to 120 requests a minute per client. The metrics
+are deployment aggregates, the health, heartbeat age, migration state, scan
+slots, notification backlog, locked notification destinations, database
+size, sandbox states, and release check, without a label that names a unit,
+an account, a job, a target, or a destination. Keep `/metrics` off a public
+proxy.
+
+The daemon also reports the deployment's own health to the platform
+destinations that platform administrators select for deployment alerts: a
+scanner or notification sandbox that lost confinement since the last alert,
+or regained it, a version rollback, and the number of alerts that failed for
+good, counts only, without a destination, a URL, or a provider's answer. Each
+is recorded in the platform audit as `application.health_alert`, and none
+reaches a unit's destinations. A restart with the same state records nothing;
+a sandbox or rollback alert is sent at most once an hour, and failed
+deliveries are reported at most every six hours, without counting a failed
+deployment alert. A missing or replaced notification key locks the
+platform's destinations too, so it cannot be reported this way, and
+`/healthz`, which reads only the migration and daemon state, still answers
+`ready`; the `edgewatch_notification_destinations_locked` metric, the locked
+count on Notifications, and `notify test` are the way to see it. Keep the
 Docker host and any SSH tunnel access restricted to trusted administrators.
 When an untrusted tunnel or reverse proxy makes every remote client appear as
 the same loopback peer, all login attempts are throttled after five failed
@@ -134,8 +169,28 @@ only when it is a proxy that you run. The notice never changes the address
 that EdgeWatch uses for a client. EdgeWatch also logs a startup warning when
 proxy hostnames are approved without trusted client-IP forwarding. Failed
 login and TOTP attempts, second-factor lockouts, and rate-limit events are
-written to the security audit log; they do not currently send
-notification-channel alerts.
+written to the security audit log. A fixed set of these records also sends a
+security alert to destinations that their owner selected: the start of a
+rate-limited episode (`auth.rate_limited`), a second-factor lockout
+(`auth.second_factor_locked`), a sign-in with a recovery code
+(`auth.recovery_code_used`), and a platform administrator's invitation of a
+unit administrator, password-reset link for one, or end of a unit account's
+sessions. A record of a unit goes to that unit's destinations only, and a
+record in platform scope to the platform's only. Security alerts are off
+until an administrator selects a destination with its **Security alerts**
+toggle, which needs the account password, and only web-managed destinations
+can receive them. The alert is queued in the transaction of its record, and
+a failure to queue it never fails the record or the action. Each owner gets
+at most one alert of each kind every 15 minutes; the events of a kind within
+that window are reported once it ends as one count. An alert carries only
+fixed wording, the unit's name, usernames, a client address, counts, and
+times: never a password, a code, a token or link, a URL, or a path. A
+rate-limit alert in platform scope leaves out the username, which may be any
+name a client sent, and an alert about a platform administrator's action
+leaves out the administrator's address. The alerts tell a unit's
+administrators when they are attacked or when a platform administrator acts
+on their accounts, which is their purpose; they also reveal the timing of
+those events to whoever reads the selected destinations.
 
 Each account with TOTP also has a budget of wrong one-time and recovery
 codes of its own, whichever clients send them and however many addresses
@@ -310,8 +365,11 @@ the account's TOTP secret and recovery codes, so it lets nobody sign in to an
 administrator who has enrolled TOTP without that authenticator; the reset
 response reports `totp_enrolled`. It does not protect an administrator who
 has not enrolled yet, because the new password is enough to enrol a new
-authenticator. Keep unit administrators on TOTP and have them review the
-platform actions in their audit. The platform administrator also sees each
+authenticator. Keep unit administrators on TOTP, and have them turn on
+security alerts for one of their unit's destinations, so they learn of a
+platform administrator's invitation, password-reset link, or end of sessions
+for their unit's accounts when it happens, or review the platform actions in
+their audit. The platform administrator also sees each
 unit's account list, with usernames, display names, roles, TOTP state, and
 last sign-in, and every unit's account records in the platform audit,
 including the source addresses of sign-in attempts.
@@ -621,7 +679,7 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 66 must not be opened by an older EdgeWatch
+database upgraded to schema 67 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
@@ -642,6 +700,10 @@ replaces scan history indexes with ones that hold each scan's tenant, job,
 and outcome, and records when the backfill of the host index of pre-index
 scans has completed; scans, their results, and the guard that keeps a
 latest-host row in its scan's tenant are unchanged.
+Schema 67 adds each unit's security alert routing and the platform's
+security and deployment alert routing, all empty, the deployment's sandbox
+and alert state, and the security alert windows; a unit's windows are erased
+with the unit.
 Only the daemon migrates, and only one process at a time: from v0.36.0 the
 daemon holds an advisory lock on the database directory, which restores take
 too, from before it opens the database until its migration and startup
@@ -654,9 +716,10 @@ business units or accounts (`admin`, `scan`, `status`, `history`, `baseline`, an
 test`) refuse a schema that the daemon has not upgraded yet, such as a
 restored backup of an older release, before they read or write anything, so
 account recovery never reports an existing account as missing. The daemon
-checks `web.auth_key_file`, `notifications.encryption_key_file`, and the
-notification URLs in config.yaml before it opens the database, so a start
-that these refuse never migrates it; `config validate` runs the same checks.
+checks `web.auth_key_file`, `notifications.encryption_key_file`, the
+notification URLs in config.yaml, and, with `web.metrics.enabled`, the token
+in `web.metrics.token_file` before it opens the database, so a start that
+these refuse never migrates it; `config validate` runs the same checks.
 Schema 51 keeps every security audit record, attributes it to the default
 tenant, and adds a category derived from its action. Update alert routing and
 the public status publication move to the default tenant unchanged: alerts go

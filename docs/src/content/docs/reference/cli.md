@@ -73,8 +73,11 @@ copyable `admin reset-password` and `admin disable-totp` commands.
 `config validate` runs every check of the daemon's startup that needs no
 database: the deployment settings, the notification URLs file, the key in
 `web.auth_key_file` and in `notifications.encryption_key_file` when they are
-set (present, private to its owner, and well formed), and the syntax of each
-notification URL in `notifications.urls` and `notifications.urls_file`. It
+set (present, private to its owner, and well formed), the bearer token in
+`web.metrics.token_file` when `web.metrics.enabled` is true (a regular file
+without group or other permissions that holds 32 to 1024 printable
+characters without spaces), and the syntax of each notification URL in
+`notifications.urls` and `notifications.urls_file`. It
 prints the normalized configuration with `"valid": true`, or `"valid": false`
 with the reason and exits non-zero. An invalid URL is named by a digest
 prefix, never by the URL. The daemon runs the same checks before it opens the
@@ -154,6 +157,17 @@ making the daemon unhealthy; see
 [Scheduled backups](/operations/backup-recovery/#scheduled-backups). A
 database that cannot be opened at all, for example one with a newer schema,
 still fails before any document is printed.
+
+`health` needs shell access to the container. From v0.36.0, a monitor
+outside it can poll `GET /healthz` on the console's listener instead, which
+reports the migration and heartbeat outcome as one word, `ready`,
+`starting`, or `unhealthy`, without the reason, the warnings, or the
+sandboxes. The daemon answers it from before it migrates the database; a
+migration that fails ends the daemon, so only `health` reports that
+failure; Prometheus can scrape the opt-in `GET /metrics`. See
+[Monitor the monitor](/operations/troubleshooting/#monitor-the-monitor). The
+bundled Compose health check keeps running `health`, which also covers the
+sandboxes and backups.
 
 ## Notification tests
 

@@ -102,6 +102,8 @@ const eventLabels: Record<string, string> = {
   'scan-budget-exceeded': 'Scheduled scan skipped',
   'application-update-available': 'Update available',
   'application-updated': 'Application updated',
+  'application.health_alert': 'Deployment alert',
+  'security.alert': 'Security alert',
   'job-silent': 'Job notification warning',
 }
 

@@ -4,7 +4,7 @@ import { Activity, AlertTriangle, Bell, Check, CheckCircle2, Clock3, Database, M
 import { activeScans, adminStatus, cancelQueuedRun, cancelScan, getSession, listIncidents, listJobs, listScans, notificationTest, runJob } from '../api'
 import type { DeploymentTelemetry, ScannerSandboxStatus } from '../generated/api-types'
 import { Link, useNavigate } from 'react-router-dom'
-import { formatDate, formatDateTime, formatRetention, formatTime } from '../format'
+import { formatBytes, formatDate, formatDateTime, formatRetention, formatTime } from '../format'
 import { baselinePresentation, type BaselineStatusInfo } from '../baseline'
 import { UntrustedProxyBanner } from '../components/UntrustedProxyBanner'
 import { ScheduledBackupBanner } from '../components/ScheduledBackupBanner'
@@ -262,15 +262,6 @@ function SandboxReason({ text }: { text: string }) {
   const tail = `${rest.length ? ` ${rest.join(' ')}` : ''}.`
   if (/^[a-z_]+(\.[a-z_]+)+$/.test(first)) return <><code>{first}</code>{tail}</>
   return <>{first.charAt(0).toUpperCase() + first.slice(1) + tail}</>
-}
-
-function formatBytes(value: number) {
-  if (!Number.isFinite(value) || value < 1024) return `${Math.max(0, Math.round(value || 0))} B`
-  const units = ['KB', 'MB', 'GB', 'TB']
-  let amount = value
-  let unit = -1
-  while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit += 1 }
-  return `${amount >= 10 ? amount.toFixed(0) : amount.toFixed(1)} ${units[unit]}`
 }
 
 function formatElapsed(seconds: number) {

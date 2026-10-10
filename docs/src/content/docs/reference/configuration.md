@@ -17,6 +17,7 @@ validated schema.
 | `web.auth_key_file` | YAML/secrets | Optional separate key for the encrypted TOTP seeds. |
 | `web.source_url` | YAML | Source of a modified or forked build, the target of the console's **Source code** link. |
 | `web.max_live_streams`, `web.max_live_streams_per_unit` | YAML | Live-update streams the deployment keeps open, and the most that one business unit may hold. |
+| `web.metrics.enabled`, `web.metrics.token_file` | YAML/secrets | The opt-in Prometheus endpoint `GET /metrics` and its bearer token; see [Metrics](#metrics). |
 | `log.level` | YAML | Log verbosity: `debug`, `info`, `warn`, or `error`. |
 | `scheduler.*` | YAML | Concurrent scans and probe budgets. |
 | `scanner.target_exclusions` | YAML | Addresses that may never be scanned. |
@@ -55,6 +56,8 @@ recreated and reviewed explicitly in the console.
 | `web.source_url` | The exact Git tag of an official build | An absolute HTTPS URL without credentials, a query, or a fragment, at most 2048 bytes. |
 | `web.max_live_streams` | `256` | 1 to 4096; `0` is rejected. |
 | `web.max_live_streams_per_unit` | `64`, or `web.max_live_streams` when that is lower | 1 to `web.max_live_streams`; `0` is rejected. |
+| `web.metrics.enabled` | `false` | `true` or `false`; `true` requires `web.metrics.token_file`. |
+| `web.metrics.token_file` | Not set | The absolute path of a regular file, without group or other permissions, that holds one token of 32 to 1024 printable ASCII characters without spaces. Requires `web.metrics.enabled: true`. |
 | `backup.directory` | Not set: no scheduled backups | The absolute path of an existing directory, other than `/`. |
 | `backup.schedule` | `0 3 * * *` (daily at 03:00) | A five-field cron expression that fires, in `timezone` when it is set and UTC otherwise, without a `TZ=` or `CRON_TZ=` prefix. Requires `backup.directory`. |
 | `backup.keep` | `7` | 1 to 1000 scheduled backups. Requires `backup.directory`. |
@@ -232,6 +235,51 @@ Jobs are configured in the console, which enforces these limits:
   and consider stable GitHub releases only. Set `updates.enabled: false` for
   offline deployments. Checks reveal the host's public IP and EdgeWatch user
   agent to GitHub; EdgeWatch reports updates but never upgrades itself.
+
+## Metrics
+
+From v0.36.0, EdgeWatch can serve deployment metrics in the Prometheus text
+format at `GET /metrics` on the console's listener. The endpoint is off by
+default; while it is off, `/metrics` answers `404`. Turn it on with a bearer
+token that only the scraper knows:
+
+```sh
+umask 077
+openssl rand -hex 32 > ./secrets/metrics.token
+```
+
+```yaml
+web:
+  metrics:
+    enabled: true
+    token_file: /run/secrets/edgewatch-metrics-token
+```
+
+Mount the file read-only into the container and give Prometheus the same
+token:
+
+```yaml
+scrape_configs:
+  - job_name: edgewatch
+    authorization:
+      credentials_file: /etc/prometheus/edgewatch-metrics.token
+    static_configs:
+      - targets: ["127.0.0.1:8080"]
+```
+
+The daemon and `config validate` refuse to start while the token file is
+missing, readable by its group or other users, or holds no valid token, and
+no message repeats the token. EdgeWatch reads it once at startup, so restart
+the container after replacing it. A request without the token, or with
+another one, gets `401` with `WWW-Authenticate: Bearer`, and each client may
+send 120 requests a minute. The metrics are deployment aggregates only: no
+metric has a label that names a business unit, an account, a job, a target,
+or a destination. Their names are a compatibility contract, listed in
+[the API reference](/reference/api-compatibility/#health-and-metrics). Keep
+the endpoint off a public proxy; see
+[Reverse proxies](/deployment/reverse-proxies/#health-and-metrics).
+`GET /healthz` needs no configuration; see
+[Monitor the monitor](/operations/troubleshooting/#monitor-the-monitor).
 
 ## Validate changes
 

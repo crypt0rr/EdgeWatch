@@ -132,6 +132,8 @@ var globalStoreMethods = map[string]string{
 	"FilePath":            globalLifecycle,
 	"SetAuthKeyPath":      globalLifecycle,
 	"SetTargetExclusions": globalLifecycle,
+	"SetAlertWake":        globalLifecycle,
+	"wakeAlerts":          globalLifecycle,
 	"authKeyForWrite":     globalLifecycle,
 	"reader":              globalLifecycle,
 	"validateManagedJob":  globalLifecycle,

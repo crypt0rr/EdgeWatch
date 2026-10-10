@@ -60,6 +60,10 @@ type AuditEntry struct {
 	// so no caller outside the store can move a record out of a tenant's
 	// audit.
 	platform bool
+	// alertAccount is the username of the account that a platform
+	// administrator's action changed, which the record's security alert
+	// names. It is not stored; only the store's platform writers set it.
+	alertAccount string
 }
 
 // Audit actor kinds, as security_audit.actor_kind stores them. A record
@@ -861,7 +865,11 @@ func (s *Store) Audit(ctx context.Context, action, detail string) error {
 func (s *Store) AuditEntry(ctx context.Context, entry AuditEntry) error {
 	persistCtx, cancel := auditPersistenceContext(ctx)
 	defer cancel()
-	return insertAuditEntryExec(persistCtx, s.DB, entry, time.Now().UTC())
+	err := insertAuditEntryExec(persistCtx, s.DB, entry, time.Now().UTC())
+	if err == nil && securityAlertKindOf(entry) != "" {
+		s.wakeAlerts()
+	}
+	return err
 }
 
 // Audit records a security event of the tenant without an actor, outside a
@@ -943,6 +951,12 @@ func insertAuditEntryExec(ctx context.Context, execer contextExecer, entry Audit
 	default:
 		return fmt.Errorf("%w: unknown audit actor kind %q", ErrAuditUnavailable, entry.ActorKind)
 	}
+	alertKind := securityAlertKindOf(entry)
+	if db, ok := execer.(*sql.DB); ok && alertKind != "" {
+		// A record that sends a security alert is written with its alert in
+		// one transaction.
+		return insertAlertingAuditEntry(ctx, db, entry, now)
+	}
 	requestContext := auditContextFromContext(ctx)
 	if strings.TrimSpace(entry.RequestID) == "" {
 		entry.RequestID = requestContext.RequestID
@@ -952,7 +966,27 @@ func insertAuditEntryExec(ctx context.Context, execer contextExecer, entry Audit
 	}
 	createdAt := now.UTC().Format(time.RFC3339Nano)
 	_, err := execer.ExecContext(ctx, auditInsertSQL, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, auditCategory(entry.Action), createdAt, entry.TenantID, entry.ActorKind, entry.ActorUserID, boolInt(entry.platform))
+	if tx, ok := execer.(*sql.Tx); ok && err == nil && alertKind != "" {
+		queueSecurityAlertForAuditTx(ctx, tx, entry, alertKind, now)
+	}
 	if err != nil {
+		return fmt.Errorf("%w: %v", ErrAuditUnavailable, err)
+	}
+	return nil
+}
+
+// insertAlertingAuditEntry writes a record that sends a security alert, and
+// the alert, in one transaction of db.
+func insertAlertingAuditEntry(ctx context.Context, db *sql.DB, entry AuditEntry, now time.Time) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrAuditUnavailable, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := insertAuditEntryExec(ctx, tx, entry, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("%w: %v", ErrAuditUnavailable, err)
 	}
 	return nil

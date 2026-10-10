@@ -125,6 +125,7 @@ var tenantPurgeSteps = []tenantPurgeStep{
 	{table: "events", rowids: `SELECT rowid FROM events WHERE tenant_id=?1`},
 	{table: "outbox", rowids: `SELECT rowid FROM outbox WHERE tenant_id=?1`},
 	{table: "restore_quarantined_deliveries", rowids: `SELECT rowid FROM restore_quarantined_deliveries WHERE tenant_id=?1`},
+	{table: "security_alert_windows", rowids: `SELECT rowid FROM security_alert_windows WHERE tenant_id=?1`},
 	{table: "job_history_purge_host_keys", rowids: `SELECT rowid FROM job_history_purge_host_keys WHERE tenant_id=?1`},
 	{table: "job_history_purges", rowids: `SELECT rowid FROM job_history_purges WHERE tenant_id=?1`},
 	{table: "jobs", rowids: `SELECT rowid FROM jobs WHERE tenant_id=?1`},

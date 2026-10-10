@@ -158,6 +158,16 @@ account then enrolls again.
   budgets below it; choose **Not granted** to take it away. Saving the tab
   keeps a ceiling that was not granted as it is. The default unit keeps the
   high-cost behavior from before business units.
+- **Security alerts:** from v0.36.0, each unit chooses its own destinations
+  for its [security alerts](/user-guide/notifications/#security-alerts) with
+  their **Security alerts** toggle, and every unit, the default one too,
+  starts with none. A platform administrator's invitation of a unit
+  administrator, password-reset link for one, and end of a unit account's
+  sessions alert that unit, and the unit's rate limits, second-factor
+  lockouts, and recovery-code sign-ins alert it too; no other unit and not
+  the platform receive them. The platform's own security alerts and its
+  deployment alerts go only to the platform destinations selected on the
+  platform console's **Notifications** page.
 - **Audit:** a unit's administrators read its security audit on **Audit**,
   including a platform administrator's actions on the unit's accounts and
   capacity, such as the links that stopped working because the platform

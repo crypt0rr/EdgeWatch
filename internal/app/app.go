@@ -511,7 +511,11 @@ func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logg
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, sandbox: options.Sandbox, notificationSandbox: options.NotificationSandbox, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, slots: newSlotPool(cfg.Scheduler.MaxConcurrent, nil), nmapVersion: sc.Version(ctx), naabuVersion: sc.NaabuVersion(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second, clock: time.Now}, nil
+	a := &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, sandbox: options.Sandbox, notificationSandbox: options.NotificationSandbox, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, slots: newSlotPool(cfg.Scheduler.MaxConcurrent, nil), nmapVersion: sc.Version(ctx), naabuVersion: sc.NaabuVersion(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second, clock: time.Now}
+	// A security alert that an authentication record queues outside a
+	// request's transaction is sent at once, not on the worker's next tick.
+	s.SetAlertWake(a.wakeDelivery)
+	return a, nil
 }
 
 // importConfiguredNotifications imports the notification URLs in config.yaml
@@ -1183,6 +1187,9 @@ func (a *App) Daemon(ctx context.Context) error {
 		}
 	}()
 	a.wakeDelivery()
+	// Compare the sandboxes with the states that the last deployment-health
+	// alerts reported, once at startup and then with each heartbeat.
+	a.checkDeploymentAlerts(ctx, a.nowUTC())
 	// Check managed jobs once during startup as well as on each heartbeat. This
 	// surfaces a daemon that came back after a missed schedule without waiting
 	// for the next cron tick.
@@ -1218,6 +1225,7 @@ func (a *App) Daemon(ctx context.Context) error {
 			}
 			missedHeartbeats = 0
 			a.checkJobSilenceBounded(ctx, a.nowUTC())
+			a.checkDeploymentAlerts(ctx, a.nowUTC())
 		case <-a.scheduleWake:
 			if err := a.reconcileSchedules(ctx, false); err != nil {
 				a.Logger.Error("job schedule reconciliation failed", "error", err)
@@ -1364,7 +1372,8 @@ func (a *App) runUpdateCheck(ctx context.Context) {
 		} else {
 			versionComparison := updatecheck.CompareVersions(current, state.InstalledVersion)
 			notifyUpgrade := state.InstalledVersion != "" && versionComparison > 0
-			if state.InstalledVersion != "" && versionComparison < 0 {
+			rollback := state.InstalledVersion != "" && versionComparison < 0
+			if rollback {
 				logger.Warn("application version rollback detected", "previous_version", state.InstalledVersion, "current_version", current)
 			}
 			releaseURL := ""
@@ -1379,7 +1388,15 @@ func (a *App) runUpdateCheck(ctx context.Context) {
 			if notifyUpgrade {
 				routes, routesErr = a.updateAlertRoutes(ctx)
 			}
-			if routesErr != nil {
+			if rollback {
+				// The rollback is recorded with its deployment-health alert,
+				// which goes to the platform's deployment alert routing.
+				if queued, recordErr := a.Store.Platform().RecordInstalledVersionRollback(ctx, current, a.nowUTC()); recordErr != nil {
+					logger.Warn("application version state update failed", "error", recordErr)
+				} else if queued {
+					a.wakeDelivery()
+				}
+			} else if routesErr != nil {
 				// Keep the previous installed version, so the next check
 				// still sees the upgrade and records every copy of its alert.
 				logger.Warn("application upgrade alert postponed to the next update check", "error", routesErr)
@@ -1737,6 +1754,9 @@ func (a *App) wakeDelivery() {
 // notification intent promptly. It is safe for callers used by the web API
 // when the daemon is not running; the periodic worker remains the fallback.
 func (a *App) WakeDelivery() {
+	if a == nil {
+		return
+	}
 	a.wakeDelivery()
 }
 

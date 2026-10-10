@@ -53,6 +53,13 @@ func (ss *SystemStore) DeploymentTelemetry(ctx context.Context) (DeploymentTelem
 	return telemetry, nil
 }
 
+// DeploymentTelemetry is SystemStore.DeploymentTelemetry for the platform
+// console and the metrics endpoint: the deployment's aggregate counters,
+// numbers only, which name no tenant.
+func (ps *PlatformStore) DeploymentTelemetry(ctx context.Context) (DeploymentTelemetry, error) {
+	return ps.store.System().DeploymentTelemetry(ctx)
+}
+
 // databaseBytes returns the size that SQLite has allocated for the
 // database: its page count times its page size, capped at math.MaxInt64.
 func databaseBytes(ctx context.Context, reader *sql.DB) (int64, error) {

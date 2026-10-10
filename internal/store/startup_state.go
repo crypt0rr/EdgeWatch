@@ -120,6 +120,56 @@ func parseStartupTime(raw string) (time.Time, error) {
 	return value.UTC(), nil
 }
 
+// ErrStartupNotRecorded is the answer of ReadStartupHealth for a database
+// that the starting daemon has not created yet, or whose startup state it
+// has not recorded yet.
+var ErrStartupNotRecorded = errors.New("the daemon has not recorded its startup yet")
+
+// ReadStartupHealth reads the health of the database at path for the
+// daemon's listener while the daemon opens and migrates that database. It
+// reads through a read-only handle that never migrates or writes, as
+// edgewatch health does, and closes it again. A database file that does not
+// exist yet or is still empty is not opened, and it and a database without
+// a recorded startup state report ErrStartupNotRecorded.
+func ReadStartupHealth(ctx context.Context, path string) (HealthStatus, error) {
+	artifact, err := sqliteArtifactPath(path)
+	if err != nil {
+		return HealthStatus{}, err
+	}
+	info, err := os.Stat(artifact)
+	if errors.Is(err, os.ErrNotExist) || (err == nil && info.Mode().IsRegular() && info.Size() == 0) {
+		return HealthStatus{}, ErrStartupNotRecorded
+	}
+	if err != nil {
+		return HealthStatus{}, err
+	}
+	reader, err := OpenReadOnlyExistingContext(ctx, path)
+	if err != nil {
+		return HealthStatus{}, err
+	}
+	defer reader.Close()
+	var recorded int
+	if err := reader.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='startup_state'`).Scan(&recorded); err != nil {
+		return HealthStatus{}, err
+	}
+	if recorded > 0 {
+		if err := reader.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM startup_state WHERE id=1`).Scan(&recorded); err != nil {
+			return HealthStatus{}, err
+		}
+	}
+	if recorded == 0 {
+		return HealthStatus{}, ErrStartupNotRecorded
+	}
+	return reader.System().HealthStatus(ctx)
+}
+
+// HealthStatus is SystemStore.HealthStatus for the web server's health
+// endpoint and metrics: the deployment's migration and daemon state, which
+// names no tenant.
+func (ps *PlatformStore) HealthStatus(ctx context.Context) (HealthStatus, error) {
+	return ps.store.System().HealthStatus(ctx)
+}
+
 // HealthStatus reads migration progress first, then falls back to the daemon
 // lease once startup work has completed. The migration state is considered
 // healthy while its heartbeat is recent; stale or failed migration state is a

@@ -295,6 +295,18 @@ func TestLockedDestinationsCoversEveryOwner(t *testing.T) {
 	if strings.Contains(err.Error(), "generic://") {
 		t.Fatalf("the key check error leaks a URL: %v", err)
 	}
+	// The count of the metrics follows the destinations that were loaded
+	// last, and so the wrong key from the next reload, as a delivery pass
+	// does, with the same owners and without the paused one.
+	if count := notifier.LockedDestinationCount(); count != 0 {
+		t.Fatalf("locked count before a reload = %d, want the loaded destinations' 0", count)
+	}
+	if err := notifier.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if count := notifier.LockedDestinationCount(); count != 2 {
+		t.Fatalf("locked count after a reload with a wrong key = %d, want 2", count)
+	}
 	// The default tenant's own test still covers only its destinations, of
 	// which the paused one is not tested.
 	if summary, err := defaultNotifier(notifier).TestSummary(ctx); err != nil || summary != (TestSummary{}) {

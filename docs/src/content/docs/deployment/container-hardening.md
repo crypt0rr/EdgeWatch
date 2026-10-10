@@ -122,7 +122,7 @@ errors and weakens protection for databases and encryption keys.
 
 | Value | Behaviour |
 | --- | --- |
-| `auto` (default) | Starts Nmap and Naabu in the sandbox when the container allows it. Otherwise they start as UID 0, restricted only with [Landlock](#landlock) when the kernel provides it, and EdgeWatch logs a warning, adds it to `edgewatch health`, and shows it on the Overview for administrators. |
+| `auto` (default) | Starts Nmap and Naabu in the sandbox when the container allows it. Otherwise they start as UID 0, restricted only with [Landlock](#landlock) when the kernel provides it, and EdgeWatch logs a warning, adds it to `edgewatch health`, shows it on the Overview for administrators, and, from v0.36.0, records a [deployment alert](#deployment-alerts). |
 | `required` | Refuses to start the daemon, or `edgewatch scan`, when the sandbox is unavailable. |
 | `off` | Starts scanner processes unconfined, as releases before the sandbox did, without Landlock. |
 
@@ -364,6 +364,27 @@ needed; `./data` keeps its UID 0 ownership.
 - On a kernel without Landlock, a sandboxed process can read every file its
   identity may read.
 
+## Deployment alerts
+
+A Compose edit that drops `SETUID`, `SETGID`, or `KILL`, or a kernel without
+Landlock, turns confinement off in `auto` mode without stopping EdgeWatch. So
+that this does not go unnoticed, the daemon compares, when it starts and with
+each heartbeat, how the scanner and notification processes start with the
+state that the last deployment alert reported. A sandbox that lost its
+identity without root, so that its processes run as UID 0, or lost Landlock,
+records one `application.health_alert` in the platform audit and sends it to
+the platform destinations selected for **Deployment alerts**; a sandbox that
+regains confinement records one recovery. A restart with the same state
+records nothing, and each sandbox raises at most one alert an hour, so a
+restart loop cannot flood a destination. The first start of v0.36.0 records
+the current state and reports it once when it is already degraded. A daemon
+that does not run as root counts as confined by identity, and a sandbox set
+to `off` as unconfined when the daemon runs as UID 0. See
+[Notifications](/user-guide/notifications/#deployment-alerts), which also
+describes the rollback and failed-delivery alerts. `scanner.sandbox: required`
+and `notifications.sandbox: required` remain the way to refuse to run
+degraded.
+
 ## Notification sandbox
 
 Each notification is delivered by a short-lived child process, so a fault in
@@ -373,7 +394,7 @@ the message, and needs no other private data. `notifications.sandbox` in
 
 | Value | Behaviour |
 | --- | --- |
-| `auto` (default) | Starts the notification process in the sandbox when the container allows it. Otherwise it starts unconfined, and EdgeWatch logs a warning and adds it to `edgewatch health` when it runs as UID 0. |
+| `auto` (default) | Starts the notification process in the sandbox when the container allows it. Otherwise it starts unconfined, and EdgeWatch logs a warning and adds it to `edgewatch health` when it runs as UID 0, and, from v0.36.0, records a [deployment alert](#deployment-alerts). |
 | `required` | Refuses to start the daemon, or `edgewatch notify test`, when the sandbox is unavailable. |
 | `off` | Starts the notification process unconfined, as releases before the sandbox did, without Landlock. |
 

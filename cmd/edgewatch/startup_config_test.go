@@ -48,6 +48,19 @@ func startupConfigCases() []startupConfigCase {
 			}
 			return fmt.Sprintf("web:\n  listen: %s\nnotifications:\n  encryption_key_file: %s\n", listen, keyPath)
 		}},
+		{name: "missing metrics token", want: "web.metrics.token_file", section: func(_ *testing.T, dir, listen string) string {
+			return fmt.Sprintf("web:\n  listen: %s\n  metrics:\n    enabled: true\n    token_file: %s\n", listen, filepath.Join(dir, "missing-metrics.token"))
+		}},
+		{name: "shared metrics token", want: "web.metrics.token_file", section: func(t *testing.T, dir, listen string) string {
+			tokenPath := filepath.Join(dir, "metrics.token")
+			if err := os.WriteFile(tokenPath, []byte(strings.Repeat("t", 40)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(tokenPath, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return fmt.Sprintf("web:\n  listen: %s\n  metrics:\n    enabled: true\n    token_file: %s\n", listen, tokenPath)
+		}},
 		{name: "invalid notification URL", want: "notifications.urls", section: func(_ *testing.T, _, listen string) string {
 			return fmt.Sprintf("web:\n  listen: %s\nnotifications:\n  urls:\n    - %q\n", listen, invalidStartupURL)
 		}},

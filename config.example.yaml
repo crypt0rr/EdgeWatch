@@ -41,6 +41,14 @@ web:
   # max_live_streams, at least 4 and at most max_live_streams_per_unit.
   # max_live_streams: 256
   # max_live_streams_per_unit: 64
+  # Opt-in Prometheus metrics at GET /metrics, deployment aggregates only.
+  # The token file holds one bearer token of 32 to 1024 printable characters
+  # and must be mode 0400 or 0600; scrapers send it as
+  # "Authorization: Bearer <token>". Keep /metrics off public proxies.
+  # GET /healthz needs no configuration.
+  # metrics:
+  #   enabled: true
+  #   token_file: /run/secrets/edgewatch-metrics-token
 
 scheduler:
   max_concurrent_scans: 1

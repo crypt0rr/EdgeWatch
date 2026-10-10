@@ -52,6 +52,13 @@ const (
 // platform destination's deletion, by the destination's ID.
 const platformNotificationRoutingRemovedDetail = "removed deleted platform notification destination %s from the platform update routing"
 
+// platformAlertRoutingRemovedDetail describes, by the audit action of the
+// routing, the routing change of a platform destination's deletion.
+var platformAlertRoutingRemovedDetail = map[string]string{
+	auditPlatformNotificationsSecurityRouting: "removed deleted platform notification destination %s from the platform security alert routing",
+	auditPlatformNotificationsHealthRouting:   "removed deleted platform notification destination %s from the deployment alert routing",
+}
+
 // UnitAccounts returns the accounts of the tenant as summaries, ordered by
 // username, without credentials. A missing or deleted tenant is
 // ErrNoTenantScope, which wraps ErrNotFound.
@@ -97,8 +104,8 @@ func (ps *PlatformStore) RevokeUnitAccountSessions(ctx context.Context, tenantID
 	if err := requirePlatformActorTx(ctx, tx, audit.ActorUserID); err != nil {
 		return err
 	}
-	var present int
-	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM users WHERE id=? AND tenant_id=?`, userID, tenantID).Scan(&present); errors.Is(err, sql.ErrNoRows) {
+	var username string
+	if err := tx.QueryRowContext(ctx, `SELECT username FROM users WHERE id=? AND tenant_id=?`, userID, tenantID).Scan(&username); errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: user %s", ErrNotFound, userID)
 	} else if err != nil {
 		return err
@@ -107,7 +114,7 @@ func (ps *PlatformStore) RevokeUnitAccountSessions(ctx context.Context, tenantID
 	if _, err := tx.ExecContext(ctx, revoke, userID, tenantID); err != nil {
 		return err
 	}
-	audit.TenantID, audit.ActorKind = tenantID, AuditActorPlatform
+	audit.TenantID, audit.ActorKind, audit.alertAccount = tenantID, AuditActorPlatform, username
 	if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
 		_ = tx.Rollback()
 		persistCtx, cancel := auditPersistenceContext(ctx)
@@ -660,6 +667,15 @@ func (ps *PlatformStore) DeletePlatformNotificationWithAudit(ctx context.Context
 			return err
 		}
 		entry := deletedDestinationRoutingAudit(audits, auditPlatformNotificationsUpdateRouting, fmt.Sprintf(platformNotificationRoutingRemovedDetail, id))
+		entry.ActorKind = AuditActorPlatform
+		audits = append(audits, entry)
+	}
+	alertRoutings, err := removePlatformAlertDestinationTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	for _, action := range alertRoutings {
+		entry := deletedDestinationRoutingAudit(audits, action, fmt.Sprintf(platformAlertRoutingRemovedDetail[action], id))
 		entry.ActorKind = AuditActorPlatform
 		audits = append(audits, entry)
 	}

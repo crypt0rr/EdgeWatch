@@ -84,3 +84,29 @@ from reaching EdgeWatch. Tailscale Serve and Caddy stream responses without
 extra settings. When a proxy buffers the stream anyway, the console shows
 **Reconnecting…** or updates only after a reload, while ordinary pages keep
 working.
+
+## Health and metrics
+
+`GET /healthz` answers only `{"status":"ready"}`, `{"status":"starting"}`,
+or `{"status":"unhealthy"}`, needs no session, and accepts any `Host`, as the
+public status pages do, so an uptime checker can reach it through the proxy
+or on the loopback listener. The daemon answers it while it migrates the
+database too; until the console is up, the proxy gets `503` for every other
+path. It is rate limited to 120 requests a minute for
+each client; behind a proxy that `web.trusted_proxies` does not list, every
+client shares the proxy's budget.
+
+Keep the opt-in `GET /metrics` off the public proxy, even though it needs a
+bearer token. Let Prometheus scrape it on the loopback listener or a private
+network, and refuse the path at the proxy, for example in nginx:
+
+```nginx
+location = /metrics {
+    return 404;
+}
+```
+
+With Tailscale Serve, publish only the console's path and scrape the
+listener from the host. EdgeWatch never adds the token to a response or a
+log; anyone who holds it can read the deployment's aggregates, but nothing
+else.

@@ -87,7 +87,12 @@ func (s *Server) listNotificationDestinations(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "notification_failed", "incident reminder setting could not be loaded", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"destinations": views, "status": status, "update_routing": routing, "incident_reminders_enabled": reminderSettings.Enabled, "incident_reminder_cadence": reminderSettings.Cadence})
+	security, err := ts.SecurityAlertRouting(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "notification_failed", "security alert routing could not be loaded", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"destinations": views, "status": status, "update_routing": routing, "security_routing": alertRoutingView(security), "incident_reminders_enabled": reminderSettings.Enabled, "incident_reminder_cadence": reminderSettings.Cadence})
 }
 
 type incidentReminderPayload struct {

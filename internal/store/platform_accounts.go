@@ -74,7 +74,11 @@ func (ps *PlatformStore) ActiveTenantCount(ctx context.Context) (int, error) {
 func (ps *PlatformStore) AuditEntry(ctx context.Context, entry AuditEntry) error {
 	persistCtx, cancel := auditPersistenceContext(ctx)
 	defer cancel()
-	return insertPlatformAuditEntry(persistCtx, ps.store.DB, entry, time.Now().UTC())
+	err := insertPlatformAuditEntry(persistCtx, ps.store.DB, entry, time.Now().UTC())
+	if err == nil && securityAlertKindOf(entry) != "" {
+		ps.store.wakeAlerts()
+	}
+	return err
 }
 
 // IssuePlatformSetupToken replaces the setup token with a platform setup
@@ -284,7 +288,7 @@ func (ps *PlatformStore) InviteUnitAdmin(ctx context.Context, tenantID string, u
 	if err != nil {
 		return User{}, err
 	}
-	audit.ActorKind = AuditActorPlatform
+	audit.ActorKind, audit.alertAccount = AuditActorPlatform, u.Username
 	return ts.createUser(ctx, u, &userInviteRecord{idHash: idHash, created: created, expires: expires}, audit, func(ctx context.Context, tx *sql.Tx) error {
 		if err := requirePlatformActorTx(ctx, tx, audit.ActorUserID); err != nil {
 			return err
@@ -308,6 +312,10 @@ func (ps *PlatformStore) IssueUnitAdminPasswordReset(ctx context.Context, tenant
 		return err
 	}
 	audit.ActorKind = AuditActorPlatform
+	// The security alert of the record names the account. A username never
+	// changes, so it is read before the transaction, which checks the
+	// account again.
+	_ = ps.store.reader().QueryRowContext(ctx, `SELECT username FROM users WHERE id=? AND tenant_id=?`, userID, tenantID).Scan(&audit.alertAccount)
 	return ts.createUserInviteWithAudit(ctx, idHash, userID, created, expires, audit, func(ctx context.Context, tx *sql.Tx) error {
 		if err := requirePlatformActorTx(ctx, tx, audit.ActorUserID); err != nil {
 			return err

@@ -88,6 +88,7 @@ var tenancyTables = map[string]tableTenancy{
 	"restore_quarantined_deliveries": directTable,
 	"scanner_profiles":               directTable,
 	"scans":                          directTable,
+	"security_alert_windows":         directTable,
 	"security_audit":                 directTable,
 	"users":                          directTable,
 
@@ -142,9 +143,11 @@ var tenancyTables = map[string]tableTenancy{
 	"scan_host_search_docsize":     systemTable,
 	"scan_host_search_idx":         systemTable,
 
-	// The platform: the tenants, the installation's setup tokens, and the
-	// update check with its platform routing.
+	// The platform: the tenants, the installation's setup tokens, the
+	// update check with its platform routing, and the platform's security
+	// and deployment alert routing with the deployment's health state.
 	"application_update_state": platformTable,
+	"platform_alert_state":     platformTable,
 	"setup_tokens":             platformTable,
 	"tenants":                  platformTable,
 

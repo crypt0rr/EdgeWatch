@@ -82,6 +82,19 @@ type Server struct {
 	telemetryMu              sync.Mutex
 	// telemetry caches each tenant's status telemetry by tenant ID.
 	telemetry map[string]*tenantTelemetryCache
+	// deploymentTelemetry caches the deployment's telemetry for the platform
+	// status and the metrics endpoint.
+	deploymentTelemetry singleFlight[store.DeploymentTelemetry]
+	// healthMu guards health, the cached answer of GET /healthz.
+	healthMu sync.Mutex
+	health   healthAnswer
+	// metrics is the configured metrics endpoint; see configureMetrics.
+	metrics metricsSettings
+	// startupDatabase is the database path of the startup server, which
+	// serves the listener while the daemon opens and migrates the database
+	// and reads the health from it through a read-only handle; see
+	// ListenForStartup. It is empty on the console's server.
+	startupDatabase string
 	// writeTimeout bounds ordinary HTTP responses. SSE clears this deadline
 	// explicitly in stream because that endpoint is intentionally long-lived.
 	// It is configurable only for deterministic server tests; production uses
@@ -228,6 +241,7 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 		if err := v.Auth.SetIPv6RateLimitPrefix(a.Config.Web.RateLimitIPv6Prefix()); err != nil {
 			logger.Error("IPv6 rate-limit prefix configuration rejected", "error", err)
 		}
+		v.configureMetrics(a.Config.Web.Metrics)
 		if len(a.Config.Web.AllowedHosts) > 0 && (len(a.Config.Web.TrustedProxies) == 0 || strings.EqualFold(strings.TrimSpace(a.Config.Web.ForwardedHeader), "none")) {
 			logger.Warn("approved proxy hosts have no trusted client-IP forwarding; remote clients share the loopback login cooldown and audit identity", "hint", "configure web.trusted_proxies and the sanitized web.forwarded_header")
 		}
@@ -265,6 +279,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/", s.api)
 	mux.HandleFunc("/assets/", s.asset)
 	mux.HandleFunc("/source", s.source)
+	mux.HandleFunc("/healthz", s.healthz)
+	mux.HandleFunc("/metrics", s.metricsEndpoint)
 	mux.HandleFunc("/", s.spa)
 	// Apply Host validation at the HTTP boundary, before API routing and
 	// authentication. Direct handler calls used by package tests intentionally
@@ -310,17 +326,28 @@ func (s *Server) noteUntrustedProxy(r *http.Request) {
 }
 
 func (s *Server) ListenAndServe(ctx context.Context, address string) error {
-	if address == "" {
-		address = "127.0.0.1:8080"
-	}
-	if err := validateListenAddress(address); err != nil {
-		return err
-	}
-	listener, err := net.Listen("tcp", address)
+	listener, address, err := listenConsole(address)
 	if err != nil {
 		return err
 	}
 	return s.serveListener(ctx, listener, address, s.Handler())
+}
+
+// listenConsole opens the console's listener on address, or on
+// 127.0.0.1:8080 when it is empty, after checking that it is a loopback
+// address. It returns the address that it listens on.
+func listenConsole(address string) (net.Listener, string, error) {
+	if address == "" {
+		address = "127.0.0.1:8080"
+	}
+	if err := validateListenAddress(address); err != nil {
+		return nil, address, err
+	}
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, address, err
+	}
+	return listener, address, nil
 }
 
 // serveListener runs the HTTP server and does not return until a graceful

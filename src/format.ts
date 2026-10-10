@@ -109,3 +109,13 @@ export function formatDate(value: DateInput, options: Intl.DateTimeFormatOptions
 export function formatTime(value: DateInput, options: Intl.DateTimeFormatOptions = {}): string {
   return new Date(value).toLocaleTimeString(undefined, { ...options, timeZone: displayTimeZone })
 }
+
+/** A size in bytes in the largest binary unit that keeps it at least 1. */
+export function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value < 1024) return `${Math.max(0, Math.round(value || 0))} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let amount = value
+  let unit = -1
+  while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit += 1 }
+  return `${amount >= 10 ? amount.toFixed(0) : amount.toFixed(1)} ${units[unit]}`
+}

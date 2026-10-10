@@ -2,7 +2,7 @@
 
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { APIError, createPlatformNotification, deletePendingPlatformAdmin, deletePlatformNotification, getSession, invitePlatformAdmin, listPlatformAdmins, listPlatformNotifications, listUnits, platformAudit, platformStatus, renewPlatformAdminInvitation, revokePlatformAdminInvitation, setPlatformAdminEnabled, togglePlatformNotificationUpdateAlert, updatePlatformNotification } from '../../api'
+import { APIError, createPlatformNotification, deletePendingPlatformAdmin, deletePlatformNotification, getSession, invitePlatformAdmin, listPlatformAdmins, listPlatformNotifications, listUnits, platformAudit, platformStatus, renewPlatformAdminInvitation, revokePlatformAdminInvitation, setPlatformAdminEnabled, togglePlatformDeploymentAlert, togglePlatformNotificationUpdateAlert, togglePlatformSecurityAlert, updatePlatformNotification } from '../../api'
 import type { AuditEntry, NotificationDestination, UserSummary } from '../../api'
 import { formatDateTime, setDisplayTimeZone } from '../../format'
 import { businessUnit, deploymentLimits as limits, platformSession } from '../../test/platform-fixtures'
@@ -15,7 +15,7 @@ import { PlatformStatusPage, updateSummary } from './PlatformStatus'
 
 vi.mock('../../api', async () => {
   const actual = await vi.importActual<typeof import('../../api')>('../../api')
-  return { ...actual, createPlatformNotification: vi.fn(), deletePendingPlatformAdmin: vi.fn(), deletePlatformNotification: vi.fn(), getSession: vi.fn(), invitePlatformAdmin: vi.fn(), listPlatformAdmins: vi.fn(), listPlatformNotifications: vi.fn(), listUnits: vi.fn(), platformAudit: vi.fn(), platformStatus: vi.fn(), renewPlatformAdminInvitation: vi.fn(), revokePlatformAdminInvitation: vi.fn(), setPlatformAdminEnabled: vi.fn(), togglePlatformNotificationUpdateAlert: vi.fn(), updatePlatformNotification: vi.fn() }
+  return { ...actual, createPlatformNotification: vi.fn(), deletePendingPlatformAdmin: vi.fn(), deletePlatformNotification: vi.fn(), getSession: vi.fn(), invitePlatformAdmin: vi.fn(), listPlatformAdmins: vi.fn(), listPlatformNotifications: vi.fn(), listUnits: vi.fn(), platformAudit: vi.fn(), platformStatus: vi.fn(), renewPlatformAdminInvitation: vi.fn(), revokePlatformAdminInvitation: vi.fn(), setPlatformAdminEnabled: vi.fn(), togglePlatformDeploymentAlert: vi.fn(), togglePlatformNotificationUpdateAlert: vi.fn(), togglePlatformSecurityAlert: vi.fn(), updatePlatformNotification: vi.fn() }
 })
 
 function admin(overrides: Partial<UserSummary> & Pick<UserSummary, 'id' | 'username'>): UserSummary {
@@ -364,6 +364,41 @@ describe('platform notifications', () => {
     await waitFor(() => expect(deletePlatformNotification).toHaveBeenCalledWith('p-ops', 2, 'my-password'))
   })
 
+  it('routes the platform’s security and deployment alerts per destination, off until one is selected', async () => {
+    vi.mocked(listPlatformNotifications).mockResolvedValue({
+      destinations: [destination({ id: 'p-ops', name: 'Operations', revision: 2 }), destination({ id: 'p-sec', name: 'Security desk' })],
+      status: { deployment: 0, managed: 2, active: 2, locked: 0, key_state: 'ready' },
+      update_routing: { configured: true, destinations: [] },
+      security_routing: { configured: true, destinations: ['p-sec'] },
+      health_routing: { configured: true, destinations: [] },
+    })
+    vi.mocked(togglePlatformDeploymentAlert).mockResolvedValue({ configured: true, destinations: ['p-ops'] })
+    vi.mocked(togglePlatformSecurityAlert).mockRejectedValueOnce(new APIError('the routing could not be saved', 'notification'))
+    renderWithProviders(<PlatformNotifications />)
+    expect(await screen.findByRole('checkbox', { name: 'Disable security alerts for Security desk' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Enable security alerts for Operations' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Enable deployment alerts for Operations' })).not.toBeChecked()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Enable deployment alerts for Operations' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('Confirm deployment alerts for Operations')
+    expect(dialog).toHaveTextContent('sandbox degradation, version rollbacks, and alerts that failed for good')
+    await confirmWithPassword('Account password')
+    await waitFor(() => expect(togglePlatformDeploymentAlert).toHaveBeenCalledWith('p-ops', true, 'my-password'))
+    expect(await screen.findByText('Deployment alerts enabled for Operations.')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Disable security alerts for Security desk' }))
+    await confirmWithPassword('Account password')
+    await waitFor(() => expect(togglePlatformSecurityAlert).toHaveBeenCalledWith('p-sec', false, 'my-password'))
+    expect(await screen.findByText('the routing could not be saved')).toBeInTheDocument()
+
+    // Cancelling the confirmation changes nothing.
+    vi.mocked(togglePlatformSecurityAlert).mockClear()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Enable security alerts for Operations' }))
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel' }))
+    expect(togglePlatformSecurityAlert).not.toHaveBeenCalled()
+  })
+
   it('shows the delivery health of a failing platform destination', async () => {
     vi.mocked(listPlatformNotifications).mockResolvedValue({
       destinations: [destination({ id: 'p-ops', name: 'Operations', revision: 2, pending: 1, terminal_failures: 2, last_failure_at: '2026-09-20T10:00:00Z', last_terminal_at: '2026-09-20T10:00:00Z', last_error_code: 'delivery_failed' }), destination({ id: 'p-sec', name: 'Security desk' })],
@@ -535,6 +570,16 @@ describe('platform status', () => {
     expect(screen.getByRole('link', { name: 'EdgeWatch v0.19.0' })).toHaveAttribute('href', 'https://example.test/v0.19.0')
     expect(screen.getByRole('link', { name: 'v0.20.0' })).toHaveAttribute('href', 'https://example.test/v0.20.0')
     expect(screen.queryByText(/web\.trusted_proxies/)).not.toBeInTheDocument()
+  })
+
+  it('reports the deployment’s database size and notification backlog', async () => {
+    vi.mocked(platformStatus).mockResolvedValue({ version: 'v0.19.0', updates: developmentBuildUpdates, units: { total: 2, active: 2, disabled: 0, deleting: 0 }, accounts: 4, jobs: 1, stored_scans: 0, platform_admins: { total: 1, enabled: 1 }, capacity: { limits, slots: { capacity: 2, in_use: 0, queued: 0 } }, telemetry: { collected_at: '2026-10-10T12:00:00Z', database_bytes: 5 * 1024 * 1024, jobs: 1, scans: 0, host_observations: 0, effective_hosts: 0, events: 0, scan_cycles: 0, outbox_pending: 9, outbox_retrying: 3, outbox_failed: 2 } })
+    renderWithProviders(<PlatformStatusPage />)
+    const panel = (await screen.findByRole('heading', { name: 'Storage and delivery' })).closest('.panel') as HTMLElement
+    expect(within(panel).getByText('5.0 MB')).toBeInTheDocument()
+    expect(within(panel).getByText('Alerts waiting').nextSibling).toHaveTextContent('7')
+    expect(within(panel).getByText('Alerts retrying').nextSibling).toHaveTextContent('3')
+    expect(within(panel).getByText('Alerts failed for good').nextSibling).toHaveTextContent('2')
   })
 
   it('warns about a proxy that web.trusted_proxies does not list', async () => {

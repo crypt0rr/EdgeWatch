@@ -126,7 +126,8 @@ account then enrolls again.
   `/public/<slug>`; `/public` keeps serving the default unit's page. An unknown
   slug, a page that is not enabled, and a unit that is disabled or being
   deleted get the same answer as a page that is not enabled. Each page has
-  its own anonymous rate limit and cache. Changing a unit's slug changes its
+  its own anonymous rate limit and cache, and a visitor's requests for all
+  pages together share one more limit. Changing a unit's slug changes its
   public address.
 - **Capacity:** the `scheduler` settings in `config.yaml` stay the deployment's
   limits. On a unit's **Capacity** tab, a platform administrator can cap the

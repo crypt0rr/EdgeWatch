@@ -160,7 +160,7 @@ func TestPublicAPIDisabledEnabledAndRateLimited(t *testing.T) {
 	if rec := call(http.MethodGet, "/api/public/v1/dashboard/", "198.51.100.20:1002"); rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("enabled public API = %d: %s", rec.Code, rec.Body.String())
 	}
-	server.publicHits = map[string][]time.Time{}
+	server.publicHits = anonymousBuckets{}
 	for i := 0; i < 120; i++ {
 		if !server.allowAnonymousRequest(httptest.NewRequest(http.MethodGet, "/", nil), "public-dashboard") {
 			t.Fatalf("request %d unexpectedly rate limited", i+1)
@@ -170,19 +170,19 @@ func TestPublicAPIDisabledEnabledAndRateLimited(t *testing.T) {
 		t.Fatal("121st request was not rate limited")
 	}
 	old := time.Now().UTC().Add(-2 * time.Minute)
-	server.publicHits = map[string][]time.Time{}
+	server.publicHits = anonymousBuckets{}
 	for i := 0; i < 4096; i++ {
-		server.publicHits["old-"+strconv.Itoa(i)] = []time.Time{old}
+		server.publicHits.count("old-"+strconv.Itoa(i), old.Unix())
 	}
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	request.RemoteAddr = "new-client:1234"
 	if !server.allowAnonymousRequest(request, "public-dashboard") {
 		t.Fatal("new client was unexpectedly rate limited")
 	}
-	if len(server.publicHits) != 1 {
-		t.Fatalf("expired rate-limit entries were not removed: %d remain", len(server.publicHits))
+	if server.publicHits.len() != 1 {
+		t.Fatalf("expired rate-limit entries were not removed: %d remain", server.publicHits.len())
 	}
-	server.publicHits = map[string][]time.Time{}
+	server.publicHits = anonymousBuckets{}
 	for i := 0; i < 120; i++ {
 		if rec := call(http.MethodGet, "/api/public/v1/dashboard", "198.51.100.22:1000"); rec.Code != http.StatusOK {
 			t.Fatalf("public request %d status = %d: %s", i+1, rec.Code, rec.Body.String())
@@ -219,17 +219,16 @@ func TestPublicDashboardFailureCacheAndFreshBucketEviction(t *testing.T) {
 		t.Fatalf("negative dashboard cache error = %v", err)
 	}
 
-	server.publicHits = make(map[string][]time.Time, 4097)
-	for i := 0; i < 4097; i++ {
-		server.publicHits[fmt.Sprintf("fresh-%d", i)] = []time.Time{now.Add(-time.Duration(i) * time.Millisecond)}
+	for i := 0; i < anonymousBucketLimit; i++ {
+		server.publicHits.count(fmt.Sprintf("fresh-%d", i), now.Add(-time.Duration(i)*time.Millisecond).Unix())
 	}
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	request.RemoteAddr = "198.51.100.250:1234"
 	if !server.allowAnonymousRequest(request, "public-dashboard") {
 		t.Fatal("fresh bucket was unexpectedly rate limited")
 	}
-	if len(server.publicHits) > 4096 {
-		t.Fatalf("fresh rate-limit buckets exceeded bound: %d", len(server.publicHits))
+	if server.publicHits.len() > anonymousBucketLimit {
+		t.Fatalf("fresh rate-limit buckets exceeded bound: %d", server.publicHits.len())
 	}
 }
 

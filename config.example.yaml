@@ -26,6 +26,11 @@ web:
   # or none to ignore forwarding headers even when trusted proxies are configured.
   forwarded_header: x-forwarded-for
   # trusted_proxies: ["127.0.0.1/32"]
+  # The sign-in and anonymous rate limits count an IPv6 client by its network
+  # of this prefix length, so every address of one /64 shares one budget.
+  # Audit records keep the full address. 32 to 128; use 128 to count each
+  # address on its own when unrelated clients share one /64. The default is 64.
+  # ipv6_rate_limit_prefix: 64
   # Optional separate key for encrypting the TOTP seed. The default is
   # ./data/auth.key; an explicit file must contain 32 raw bytes or 64 hex
   # characters, be mode 0600, and be mounted into the container.

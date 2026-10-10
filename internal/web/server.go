@@ -64,8 +64,9 @@ type Server struct {
 	// changing different destinations cannot overwrite one another.
 	updateRoutingMu sync.Mutex
 	publicMu        sync.Mutex
-	publicHits      map[string][]time.Time
-	publicCacheMu   sync.Mutex
+	// publicHits holds the anonymous rate-limit buckets, under publicMu.
+	publicHits    anonymousBuckets
+	publicCacheMu sync.Mutex
 	// publicPageCache caches the default tenant's page, which the legacy
 	// public URLs serve, and publicPages the page of any other tenant, by
 	// tenant ID. A request reads and fills only the cache of its public
@@ -180,7 +181,7 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	if a != nil && a.Config != nil && a.Config.Web.SourceURL != "" {
 		sourceURL = a.Config.Web.SourceURL
 	}
-	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, sourceURL: sourceURL, now: time.Now, subscribers: map[chan sseMessage]struct{}{}, shutdown: make(chan struct{}), sseCancels: map[chan sseMessage]context.CancelFunc{}, sseSessionKey: map[chan sseMessage]string{}, sseUserKey: map[chan sseMessage]string{}, sseAuthCache: map[string]sseAuthCacheEntry{}, sseAuthTTL: defaultSSEAuthCacheTTL, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}, publicHits: map[string][]time.Time{}}
+	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, sourceURL: sourceURL, now: time.Now, subscribers: map[chan sseMessage]struct{}{}, shutdown: make(chan struct{}), sseCancels: map[chan sseMessage]context.CancelFunc{}, sseSessionKey: map[chan sseMessage]string{}, sseUserKey: map[chan sseMessage]string{}, sseAuthCache: map[string]sseAuthCacheEntry{}, sseAuthTTL: defaultSSEAuthCacheTTL, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}}
 	if s != nil {
 		if start, end, err := s.SSECursor().Reserve(context.Background(), sseEventIDBlockSize); err != nil {
 			logger.Warn("SSE event cursor could not be reserved", "error", err)
@@ -209,6 +210,9 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 		}
 		if err := v.Auth.SetForwardedHeader(a.Config.Web.ForwardedHeader); err != nil {
 			logger.Error("trusted proxy forwarding header configuration rejected", "error", err)
+		}
+		if err := v.Auth.SetIPv6RateLimitPrefix(a.Config.Web.RateLimitIPv6Prefix()); err != nil {
+			logger.Error("IPv6 rate-limit prefix configuration rejected", "error", err)
 		}
 		if len(a.Config.Web.AllowedHosts) > 0 && (len(a.Config.Web.TrustedProxies) == 0 || strings.EqualFold(strings.TrimSpace(a.Config.Web.ForwardedHeader), "none")) {
 			logger.Warn("approved proxy hosts have no trusted client-IP forwarding; remote clients share the loopback login cooldown and audit identity", "hint", "configure web.trusted_proxies and the sanitized web.forwarded_header")

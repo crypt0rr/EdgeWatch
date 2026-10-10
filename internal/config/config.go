@@ -138,6 +138,15 @@ type RDAP struct {
 
 const defaultForwardedHeader = "x-forwarded-for"
 
+const (
+	// DefaultIPv6RateLimitPrefix is the prefix length by which the rate
+	// limits group IPv6 client addresses when web.ipv6_rate_limit_prefix is
+	// omitted. MinIPv6RateLimitPrefix is the shortest prefix it accepts: a
+	// shorter one would group whole providers' networks.
+	DefaultIPv6RateLimitPrefix = 64
+	MinIPv6RateLimitPrefix     = 32
+)
+
 // Web contains the local administrative HTTP listener settings. The v0.3
 // appliance deliberately only permits loopback listeners; users who need
 // remote access should put a TLS reverse proxy or an SSH tunnel in front of it.
@@ -151,7 +160,23 @@ type Web struct {
 	// to reach the authenticated web API through a tunnel or reverse proxy.
 	// Loopback IP literals and localhost are always accepted.
 	AllowedHosts []string `yaml:"allowed_hosts"`
+	// IPv6RateLimitPrefix is the prefix length by which the sign-in and
+	// anonymous rate limits group IPv6 client addresses, so that every
+	// address of one network shares a budget; 128 counts each address on
+	// its own. nil, when the key is omitted, is DefaultIPv6RateLimitPrefix.
+	// Audit records keep the full address.
+	IPv6RateLimitPrefix *int `yaml:"ipv6_rate_limit_prefix"`
 }
+
+// RateLimitIPv6Prefix returns web.ipv6_rate_limit_prefix, or
+// DefaultIPv6RateLimitPrefix when the key is omitted.
+func (w Web) RateLimitIPv6Prefix() int {
+	if w.IPv6RateLimitPrefix == nil {
+		return DefaultIPv6RateLimitPrefix
+	}
+	return *w.IPv6RateLimitPrefix
+}
+
 type Scheduler struct {
 	MaxConcurrent      int   `yaml:"max_concurrent_scans"`
 	MaxProbeCount      int64 `yaml:"max_probe_count"`
@@ -1041,6 +1066,9 @@ func (c Config) ValidateDeployment() error {
 	}
 	if forwardedHeader != "x-forwarded-for" && forwardedHeader != "forwarded" && forwardedHeader != "none" {
 		return fmt.Errorf("web.forwarded_header must be one of x-forwarded-for, forwarded, or none")
+	}
+	if prefix := c.Web.RateLimitIPv6Prefix(); prefix < MinIPv6RateLimitPrefix || prefix > 128 {
+		return fmt.Errorf("web.ipv6_rate_limit_prefix must be between %d and 128", MinIPv6RateLimitPrefix)
 	}
 	for index, raw := range c.Web.TrustedProxies {
 		value := strings.TrimSpace(raw)

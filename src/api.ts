@@ -24,6 +24,18 @@ export type NotificationDestination = {
   last_error_fingerprint?: string
 }
 export type NotificationProvider = 'smtp' | 'discord' | 'ntfy'
+/** An alert that a destination dropped after its retries ran out: metadata only, never its message or the URL. */
+export type TerminalDelivery = {
+  id: number
+  event_type: string
+  job?: string
+  event_at?: string
+  terminal_at: string
+  attempts: number
+  deferrals: number
+  error_code?: string
+}
+export type TerminalDeliveriesPage = { deliveries: TerminalDelivery[]; next_before: number | null }
 export type NotificationProviderConfig = {
   provider: NotificationProvider
   fields: Record<string, string>
@@ -283,9 +295,13 @@ function notificationCredentialField(input: string | NotificationProviderConfig)
   return typeof input === 'string' ? { url: input } : { config: input }
 }
 export const createNotificationDestination = (name: string, credentials: string | NotificationProviderConfig, password: string, enabled = true) => api<NotificationDestination>('/notifications/destinations', { method: 'POST', body: JSON.stringify({ name, ...notificationCredentialField(credentials), password, enabled }) })
-export const updateNotificationDestination = (id: string, revision: number, name: string, password: string, options: { url?: string; config?: NotificationProviderConfig; enabled?: boolean } = {}) => api<NotificationDestination>(`/notifications/destinations/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ name, revision, password, ...options }) })
+/** keep_pending moves the queued alerts of a destination whose credentials are replaced to the new credentials instead of discarding them. */
+export const updateNotificationDestination = (id: string, revision: number, name: string, password: string, options: { url?: string; config?: NotificationProviderConfig; enabled?: boolean; keep_pending?: boolean } = {}) => api<NotificationDestination>(`/notifications/destinations/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ name, revision, password, ...options }) })
 export const deleteNotificationDestination = (id: string, revision: number, password: string) => api<void>(`/notifications/destinations/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ revision, password }) })
 export const testNotificationDestination = (id: string) => api<{ sent: number }>(`/notifications/destinations/${encodeURIComponent(id)}/test`, { method: 'POST' })
+export const listTerminalDeliveries = (id: string, before?: number, limit = 50) => api<TerminalDeliveriesPage>(`/notifications/destinations/${encodeURIComponent(id)}/deliveries?state=terminal&limit=${limit}${before ? `&before=${before}` : ''}`)
+/** Queues the destination's failed alerts again, or only those that deliveryIDs names, for its current URL. */
+export const redeliverTerminalDeliveries = (id: string, deliveryIDs?: number[]) => api<{ redelivered: number }>(`/notifications/destinations/${encodeURIComponent(id)}/deliveries/redeliver`, { method: 'POST', body: JSON.stringify(deliveryIDs ? { delivery_ids: deliveryIDs } : {}) })
 
 export type NumericBound = { min: number; max: number }
 export type ScannerProfileDefinition = { engine: string; naabu: NaabuOptions; naabu_args?: string[]; nmap_args?: string[]; enrichment_args?: string[]; nse_profile?: string; nse_args?: Record<string, string>; operator_adjustable?: string[]; operator_bounds?: Record<string, NumericBound>; description?: string }

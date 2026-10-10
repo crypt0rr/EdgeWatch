@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -583,4 +584,15 @@ func TestServerStaticSSEAndAuditHelpers(t *testing.T) {
 	}
 	server.auditOptional(context.Background(), "test.optional", "safe detail")
 	server.auditOptionalEntry(context.Background(), server.Store, store.AuditEntry{Action: "test.optional.entry", Detail: "safe detail"})
+}
+
+// A daemon whose RDAP lookups would ignore a configured proxy says so once
+// at startup, naming the variables but not their values.
+func TestServerLogsThatRDAPIgnoresTheProxyEnvironment(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://user:secret@proxy.example:3128")
+	var logged bytes.Buffer
+	NewServer(nil, nil, slog.New(slog.NewTextHandler(&logged, nil)))
+	if text := logged.String(); !strings.Contains(text, "RDAP lookups ignore the proxy environment") || !strings.Contains(text, "HTTPS_PROXY") || strings.Contains(text, "secret") {
+		t.Fatalf("startup log = %q", text)
+	}
 }

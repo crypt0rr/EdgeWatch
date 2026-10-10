@@ -2481,3 +2481,18 @@ label small,
   .monitor-estimate > span,
   .monitor-estimate > small { font-size: 11px; }
 }
+
+/* Failed alerts of a notification destination. */
+.notification-failed-alerts { display: grid; gap: 10px; border: 1px solid #2c5279; background: #0b2035; border-radius: 8px; margin: 13px 0 0 43px; padding: 12px 14px; }
+.notification-failed-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.notification-failed-row { display: flex; align-items: center; gap: 10px; border-top: 1px solid #1d344d; padding: 9px 0; min-width: 0; }
+.notification-failed-row:first-child { border-top: 0; padding-top: 0; }
+.notification-failed-row .button { flex: 0 0 auto; font-size: 11px; padding: 7px 9px; }
+.notification-failed-row .button:disabled { cursor: not-allowed; opacity: .5; }
+.notification-failed-alerts .notification-actions { margin-top: 0; }
+@media (max-width: 760px) {
+  .notification-failed-alerts { margin-left: 0; }
+  .notification-failed-row { flex-wrap: wrap; }
+  .notification-failed-row .notification-meta strong,
+  .notification-failed-row .notification-meta span { white-space: normal; }
+}

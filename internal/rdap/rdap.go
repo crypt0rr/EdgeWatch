@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -749,6 +750,30 @@ func canonicalAuthority(parsed *url.URL) (string, error) {
 		host = ip.String()
 	}
 	return "https://" + net.JoinHostPort(host, port), nil
+}
+
+// proxyVariables are the proxy environment variables that an operator sets
+// for outbound requests. Update checks and notifications use them; RDAP
+// lookups do not, because a proxy would resolve and connect to the registry
+// host itself, past the pinned dial and its refusal of private addresses.
+var proxyVariables = []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"}
+
+// IgnoredProxyVariables returns the names of the proxy environment
+// variables that are set while RDAP is enabled, which RDAP lookups ignore:
+// they need direct HTTPS egress to IANA and the regional registries. It
+// returns none while RDAP is disabled, so the daemon logs its notice only
+// when lookups would fail in a network that only a proxy can leave.
+func IgnoredProxyVariables(enabled bool) []string {
+	if !enabled {
+		return nil
+	}
+	var set []string
+	for _, name := range proxyVariables {
+		if value, ok := os.LookupEnv(name); ok && strings.TrimSpace(value) != "" {
+			set = append(set, name)
+		}
+	}
+	return set
 }
 
 func (c *Client) lookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {

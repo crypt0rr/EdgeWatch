@@ -6,7 +6,10 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/model"
@@ -60,6 +63,10 @@ func eventOwner(event model.Event) string {
 	}
 }
 
+// deliveryErrorCodes are the codes that deliveryErrorCode returns for a
+// failure.
+var deliveryErrorCodes = []string{"canceled", "timeout", "destination_locked", "destination_missing", "destination_excluded", "provider_panic", "worker_panic", "payload_invalid", "provider_timeout", "delivery_indeterminate", "delivery_failed"}
+
 func deliveryErrorCode(err error) string {
 	if err == nil {
 		return ""
@@ -75,12 +82,16 @@ func deliveryErrorCode(err error) string {
 		return "destination_locked"
 	case errors.Is(err, ErrDeliveryDestinationMissing):
 		return "destination_missing"
+	case errors.Is(err, ErrDeliveryDestinationExcluded):
+		return "destination_excluded"
 	case errors.Is(err, ErrDeliveryProviderPanic):
 		return "provider_panic"
 	case errors.Is(err, ErrDeliveryWorkerPanic):
 		return "worker_panic"
 	case errors.Is(err, ErrDeliveryPayloadInvalid):
 		return "payload_invalid"
+	case errors.Is(err, ErrDeliveryProviderTimeout):
+		return "provider_timeout"
 	case errors.Is(err, ErrDeliveryIndeterminate):
 		return "delivery_indeterminate"
 	case errors.Is(err, ErrDeliveryProvider):
@@ -89,12 +100,85 @@ func deliveryErrorCode(err error) string {
 	return "delivery_failed"
 }
 
+// The classes of a failed send that the notification child reports, without
+// provider text: the provider's name could not be resolved, it could not be
+// reached, its certificate or TLS handshake failed, it did not answer in
+// time, or it answered with a failure or failed in another way.
+const (
+	DeliveryClassDNS      = "dns"
+	DeliveryClassConnect  = "connect"
+	DeliveryClassTLS      = "tls"
+	DeliveryClassTimeout  = "timeout"
+	DeliveryClassProvider = "provider"
+)
+
+var deliveryFailureClasses = []string{DeliveryClassDNS, DeliveryClassConnect, DeliveryClassTLS, DeliveryClassTimeout, DeliveryClassProvider}
+
+// DeliveryFailure is a redacted send failure: one of the delivery error
+// sentinels, such as ErrDeliveryProvider, and the class of the failure, one
+// of the DeliveryClass names. It never holds provider text, so a provider
+// that echoes a destination URL in its error cannot leak it.
+type DeliveryFailure struct {
+	Err   error
+	Class string
+}
+
+func (f *DeliveryFailure) Error() string {
+	if f.Class == "" {
+		return f.Err.Error()
+	}
+	return f.Err.Error() + " (" + f.Class + ")"
+}
+
+func (f *DeliveryFailure) Unwrap() error { return f.Err }
+
+// deliveryErrorClass returns the class of a DeliveryFailure in err, or ""
+// when err has none.
+func deliveryErrorClass(err error) string {
+	var failure *DeliveryFailure
+	if errors.As(err, &failure) && slices.Contains(deliveryFailureClasses, failure.Class) {
+		return failure.Class
+	}
+	return ""
+}
+
+// deliveryErrorFingerprint identifies the kind of a failure by its error
+// code and class only. Both are fixed names, so every destination that fails
+// the same way has the same fingerprint, and the fingerprint reveals nothing
+// about a destination: no URL, digest of one, or provider text goes into it.
 func deliveryErrorFingerprint(err error) string {
 	if err == nil {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(err.Error()))
+	return errorKindFingerprint(deliveryErrorCode(err), deliveryErrorClass(err))
+}
+
+func errorKindFingerprint(code, class string) string {
+	sum := sha256.Sum256([]byte("edgewatch delivery error\x00" + code + "\x00" + class))
 	return hex.EncodeToString(sum[:])[:16]
+}
+
+// errorKindFingerprints holds every fingerprint that deliveryErrorFingerprint
+// can return.
+var errorKindFingerprints = sync.OnceValue(func() map[string]struct{} {
+	fingerprints := map[string]struct{}{}
+	for _, code := range deliveryErrorCodes {
+		for _, class := range append([]string{""}, deliveryFailureClasses...) {
+			fingerprints[errorKindFingerprint(code, class)] = struct{}{}
+		}
+	}
+	return fingerprints
+})
+
+// currentErrorFingerprint returns a stored fingerprint when it is one that
+// deliveryErrorFingerprint returns, and "" otherwise. Earlier releases stored
+// a digest of the error text, which held a digest of the destination URL, so
+// such a value is never returned.
+func currentErrorFingerprint(stored string) string {
+	if _, ok := errorKindFingerprints()[stored]; ok {
+		return stored
+	}
+	return ""
 }
 
 func deliverySelectorFingerprint(selector string) string {
@@ -218,6 +302,7 @@ func listDeliveryHealth(ctx context.Context, reader *sql.DB, healthQuery string,
 			rows.Close()
 			return nil, err
 		}
+		item.LastErrorFingerprint = currentErrorFingerprint(item.LastErrorFingerprint)
 		item.LastSuccessAt = scanTime(success)
 		item.LastFailureAt = scanTime(failure)
 		item.LastTerminalAt = scanTime(terminal)
@@ -255,4 +340,141 @@ func listDeliveryHealth(ctx context.Context, reader *sql.DB, healthQuery string,
 		return nil, err
 	}
 	return out, rows.Close()
+}
+
+// TerminalDelivery is an alert that a destination dropped for good after its
+// retry or deferral budget ran out. It holds the alert's metadata only:
+// never its message, the destination's URL, or provider text.
+type TerminalDelivery struct {
+	ID int64
+	// EventType, Job, and EventAt are the type, job name, and time of the
+	// alert's event; Job is empty for an alert without a job.
+	EventType  string
+	Job        string
+	EventAt    time.Time
+	TerminalAt time.Time
+	Attempts   int
+	Deferrals  int
+	ErrorCode  string
+}
+
+// MaxTerminalDeliveriesPage is the largest page that ListTerminalDeliveries
+// returns.
+const MaxTerminalDeliveriesPage = 100
+
+// terminalDeliverySQL selects the deliveries, aliased o, of the managed
+// destination aliased m that failed for good and were queued for its current
+// credentials: an alert queued for credentials that were replaced since is
+// never sent with the new ones. A delivery's selector is
+// "managed:<id>:<revision>", so its revision starts after the ID.
+const terminalDeliverySQL = `o.destination LIKE 'managed:' || m.id || ':%' AND o.sent_at IS NULL AND o.terminal_at<>''
+  AND CAST(substr(o.destination, length(m.id)+10) AS INTEGER) >= m.credential_revision`
+
+// ListTerminalDeliveries returns, newest first, up to limit alerts that the
+// tenant's destination dropped for good and that RedeliverTerminalDeliveries
+// would queue again. A positive before pages to the alerts with smaller IDs.
+// A destination of another tenant or of the platform is ErrNotFound, exactly
+// as an unknown ID.
+func (ts *TenantStore) ListTerminalDeliveries(ctx context.Context, destinationID string, before int64, limit int) ([]TerminalDelivery, error) {
+	if err := ts.ready(); err != nil {
+		return nil, err
+	}
+	if limit < 1 || limit > MaxTerminalDeliveriesPage {
+		limit = MaxTerminalDeliveriesPage
+	}
+	reader := ts.store.reader()
+	var exists int
+	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_notifications WHERE id=? AND tenant_id=?`, destinationID, ts.scope.id).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if exists == 0 {
+		return nil, fmt.Errorf("%w: notification %s", ErrNotFound, destinationID)
+	}
+	rows, err := reader.QueryContext(ctx, `SELECT o.id,
+  CASE WHEN json_valid(CAST(o.payload_json AS TEXT)) THEN COALESCE(json_extract(CAST(o.payload_json AS TEXT),'$.type'),'') ELSE '' END,
+  CASE WHEN json_valid(CAST(o.payload_json AS TEXT)) THEN COALESCE(json_extract(CAST(o.payload_json AS TEXT),'$.job'),'') ELSE '' END,
+  CASE WHEN json_valid(CAST(o.payload_json AS TEXT)) THEN COALESCE(json_extract(CAST(o.payload_json AS TEXT),'$.created_at'),'') ELSE '' END,
+  o.terminal_at,o.attempts,o.deferrals,o.last_error
+FROM outbox AS o JOIN managed_notifications AS m ON m.id=? AND m.tenant_id=?
+WHERE `+terminalDeliverySQL+` AND o.tenant_id=? AND (?=0 OR o.id<?)
+ORDER BY o.id DESC LIMIT ?`, destinationID, ts.scope.id, ts.scope.id, before, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	deliveries := []TerminalDelivery{}
+	for rows.Next() {
+		var item TerminalDelivery
+		var eventAt, terminalAt string
+		if err := rows.Scan(&item.ID, &item.EventType, &item.Job, &eventAt, &terminalAt, &item.Attempts, &item.Deferrals, &item.ErrorCode); err != nil {
+			return nil, err
+		}
+		item.EventAt, item.TerminalAt = scanTime(eventAt), scanTime(terminalAt)
+		deliveries = append(deliveries, item)
+	}
+	return deliveries, rows.Err()
+}
+
+// RedeliverTerminalDeliveries queues again the alerts that the tenant's
+// destination dropped for good, as ListTerminalDeliveries lists them, or
+// those of them that ids names, and returns how many it queued. Each is due
+// at once with fresh retry and deferral budgets and the destination's
+// current selector, so a paused or locked destination holds it as any other
+// alert, and its delivery health counts one terminal failure fewer. An alert
+// queued for replaced credentials, and one in restore quarantine, which is
+// not in the outbox, is never queued. When it queues any, the audit entry is
+// recorded in the same transaction, with a detail that has the count. A
+// destination of another tenant or of the platform is ErrNotFound, and
+// nothing changes.
+func (ts *TenantStore) RedeliverTerminalDeliveries(ctx context.Context, destinationID string, ids []int64, audit AuditEntry) (int, error) {
+	if err := ts.ready(); err != nil {
+		return 0, err
+	}
+	tx, err := ts.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var revision int64
+	err = tx.QueryRowContext(ctx, `SELECT revision FROM managed_notifications WHERE id=? AND tenant_id=?`, destinationID, ts.scope.id).Scan(&revision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("%w: notification %s", ErrNotFound, destinationID)
+	}
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now().UTC()
+	query := `UPDATE outbox SET destination=?,attempts=0,deferrals=0,terminal_at='',next_at=?,last_error='',claim_token='',claim_until=''
+WHERE id IN (SELECT o.id FROM outbox AS o JOIN managed_notifications AS m ON m.id=? AND m.tenant_id=? WHERE ` + terminalDeliverySQL + ` AND o.tenant_id=?`
+	args := []any{managedNotificationKey(destinationID, revision), now.Format(time.RFC3339Nano), destinationID, ts.scope.id, ts.scope.id}
+	if ids != nil {
+		if len(ids) == 0 {
+			return 0, nil
+		}
+		placeholders := make([]string, len(ids))
+		for i, id := range ids {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		query += ` AND o.id IN (` + strings.Join(placeholders, ",") + `)`
+	}
+	result, err := tx.ExecContext(ctx, query+`)`, args...)
+	if err != nil {
+		return 0, err
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return 0, nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE notification_delivery_health SET terminal_failures=MAX(0,terminal_failures-?),updated_at=? WHERE destination_identity=?`+ownedDestinationSQL, count, now.Format(time.RFC3339Nano), "managed:"+destinationID, destinationID, ts.scope.id); err != nil {
+		return 0, err
+	}
+	audit.Detail = fmt.Sprintf("redelivered %d failed deliveries for managed notification %s", count, destinationID)
+	if err := ts.insertAuditEntries(ctx, tx, []AuditEntry{audit}, now); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int(count), nil
 }

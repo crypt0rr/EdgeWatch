@@ -164,7 +164,11 @@ Jobs are configured in the console, which enforces these limits:
   endpoint enabled or `100.100.100.200/32` on Alibaba Cloud. An explicit list
   replaces the defaults, so keep the default ranges when you add entries.
   Change `scanner.target_exclusions` only when you understand the host-network
-  exposure.
+  exposure. The same list keeps a unit's notification destinations away from
+  these addresses, and EdgeWatch refuses a unit's destination on an
+  unspecified, loopback, or link-local address whatever the list holds. An
+  explicitly empty list, `[]`, allows every address for both; see
+  [destination addresses](/user-guide/notifications/#destination-addresses).
 - `scanner.sandbox: auto` starts Nmap and Naabu as UID 65532 with only their
   raw-packet capabilities when the container grants `SETUID`, `SETGID` and
   `KILL`, as the bundled `compose.yaml` does. Otherwise they run as UID 0 and
@@ -185,7 +189,13 @@ Jobs are configured in the console, which enforces these limits:
 - RDAP is enabled by default and is requested only when an authenticated user
   opens a public host. Private and special-use addresses are never queried.
   Set `enrichment.rdap.enabled: false` for isolated or privacy-sensitive
-  deployments.
+  deployments. RDAP lookups need direct HTTPS egress to IANA and the regional
+  registries: they ignore `HTTPS_PROXY` and the other proxy variables, which
+  update checks and notifications use, because a proxy would resolve and
+  connect to the registry itself, past the checks that keep lookups away from
+  private addresses. Where only a proxy reaches the internet, host pages show
+  RDAP as unavailable; set `enrichment.rdap.enabled: false` there. The daemon
+  logs a warning at startup when RDAP is enabled and a proxy variable is set.
 - Update checks are enabled by default, run at startup and every three hours,
   and consider stable GitHub releases only. Set `updates.enabled: false` for
   offline deployments. Checks reveal the host's public IP and EdgeWatch user

@@ -31,6 +31,7 @@ const frontendReport = (overrides = {}) => {
     'src/components/MonitorNextActions.tsx',
     'src/components/NotificationDestinationConfig.tsx',
     'src/components/NotificationDestinationCreateForm.tsx',
+    'src/components/NotificationFailedAlerts.tsx',
     'src/components/navigation.ts',
     'src/components/OneTimeLink.tsx',
     'src/components/PasswordField.tsx',

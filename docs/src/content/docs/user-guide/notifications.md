@@ -24,10 +24,48 @@ Choose a built-in provider to enter connection details in separate fields:
 The form never reads a saved credential back. To rotate a saved destination,
 edit it and enter all fields for its new provider configuration; leaving the
 Advanced URL blank keeps its existing credentials. Replacing credentials
-discards alerts queued for the old credentials. A successful test means the
-provider accepted the test send; check the recipient to confirm the message
-arrived. Destinations added after existing job routing is frozen remain
-opt-in. Select a destination in each job that should use it.
+discards alerts queued for the old credentials unless you choose to keep them;
+see [Changing destinations](#changing-destinations). A successful test means
+the provider accepted the test send; check the recipient to confirm the
+message arrived. A test that the provider does not answer within 15 seconds
+reports that the destination did not answer in time: nothing was saved, and
+the message may still arrive. Destinations added after existing job routing
+is frozen remain opt-in. Select a destination in each job that should use it.
+
+## Destination addresses
+
+A unit's destinations cannot point the daemon at the addresses that the
+scanner refuses to scan. EdgeWatch refuses a destination whose host is, or
+resolves to, an address in `scanner.target_exclusions` or an unspecified,
+loopback, or link-local address, such as `127.0.0.1`, `::1`, or the
+`169.254.169.254` cloud metadata endpoint. It checks the host when a
+destination is created or its URL is replaced, and again before each delivery
+and test, so a name whose DNS answer changes to such an address afterwards is
+not contacted either. The error says only that the deployment does not allow
+the address; it never repeats the URL or the address. A delivery that is
+refused fails with the error code `destination_excluded` and is retried like
+any other failed delivery.
+
+The check uses the host that the provider connects to: the host of the URL
+for providers such as the generic webhook, ntfy, Gotify, Matrix, Mattermost,
+and SMTP, and the `host` parameter for Teams. Providers that always connect
+to their public service, such as Discord, Slack, and Telegram, need no check.
+
+The rule follows `scanner.target_exclusions`, with the same override: set it
+to an explicitly empty list, `[]`, to allow every address, which also lets the
+scanner scan the host itself. A receiver on the Docker host, such as a local
+ntfy server, otherwise needs an address that is not loopback. Destinations
+that the host operator or a platform administrator configured are not
+checked: platform destinations, URLs that `config.yaml` still lists, and a
+destination imported from `config.yaml` until its URL is replaced in the
+console. A destination that a unit's administrator added on a loopback or
+link-local address before this check existed is refused from the upgrade on;
+its deliveries fail with `destination_excluded` until you move the receiver
+or set the override.
+
+The check resolves names with the daemon's resolver. It cannot see a
+redirect that the provider follows, or a name whose answer changes between
+the check and the notification process's own lookup.
 
 You can also add and test a destination while creating a monitor. This uses the
 same provider fields and account-password confirmation as this page. The
@@ -83,6 +121,18 @@ Renaming a destination keeps its queued alerts, including an alert that is
 raised while the rename is saved. Replacing its URL or provider configuration
 discards its queued alerts instead of sending them to the new credentials, and
 deleting it discards them too.
+
+When you repair a broken URL, such as a revoked webhook token, select
+**Keep queued alerts** in the edit form. The replacement then keeps the alerts
+queued for the old credentials and sends them with the new ones: alerts that
+are waiting or retrying become due at once with their retries reset, and
+alerts that failed for good stay in the destination's
+[failed alerts](#failed-alerts), where you can redeliver them. The security
+audit log records the counts as `notifications.pending_kept`. Do not keep
+them when the new URL belongs to another recipient, who would receive alerts
+meant for the old one. An alert that a delivery is sending at that moment may
+also reach the old URL, and an alert raised while the replacement is saved is
+still discarded.
 This includes an alert that a delivery pass has picked up but not yet sent. An
 alert raised while either change is saved is also discarded, and the security
 audit log records it as `notifications.pending_discarded`. An alert raised
@@ -106,11 +156,56 @@ daemon that keeps stopping is still reported by the job's silence alert.
 Definitive provider failures
 are retried durably for up to 15 attempts over roughly 77 hours; the delay
 doubles from two minutes and caps at 12 hours. A restart preserves each
-delivery's retry schedule. Terminal failures are visible in the console
-without exposing provider errors or destination secrets. Each destination
-shows its pending and retrying alerts, terminal failures, and last success or
-failure on its unit's **Notifications** page, or on the platform console for
-platform-owned destinations.
+delivery's retry schedule. A provider that does not answer within 15 seconds
+counts as a failed attempt too, so an outage that shows up as hanging
+requests keeps alerts for the same retry schedule. Because such a provider may
+have accepted the message, the alert is not sent again sooner than 30
+minutes later. A delivery that EdgeWatch itself interrupts, for example when
+the daemon stops, gets two seconds to finish; one that does not is deferred
+for 30 minutes, at most eight times, without using an attempt. An alert that
+is delivered more than ten minutes after it was raised names the time it was
+raised.
+
+Delivery is at least once. After a provider accepts an alert, EdgeWatch
+retries recording the delivery for up to a minute if the database is busy.
+If it still cannot record it, the daemon logs `notification sent but its
+delivery could not be recorded; it may be sent again`, and the alert is sent
+again when its 30-minute claim ends or at the next start. A provider that
+accepts an alert without answering in time can also receive it twice.
+
+Terminal failures are visible in the console without exposing provider errors
+or destination secrets. Each destination shows its pending and retrying
+alerts, terminal failures, and last success or failure with its error code on
+its unit's **Notifications** page, or on the platform console for
+platform-owned destinations. The API also returns an error fingerprint that
+identifies the kind of the last failure, such as a name that did not resolve,
+a refused connection, a certificate that is not trusted, or a provider that
+did not answer in time. It is the same for every destination that fails the
+same way and is derived from nothing that identifies the destination.
+
+### Failed alerts
+
+An administrator can review the alerts that a destination dropped after its
+retries ran out: open **Failed alerts** on a destination with terminal
+failures. The list shows each alert's event, job, the time it was raised and
+dropped, its attempts and deferrals, and its error code, never its message or
+the destination's URL. **Redeliver** queues one alert again and **Redeliver
+all** queues all of the destination's failed alerts; the next delivery pass
+sends them to the destination's current URL with fresh retries, and each
+message names when the alert was raised. Redelivered alerts no longer count
+as terminal failures. The security
+audit log records each redelivery as `notifications.redelivered` with a count.
+Only alerts queued for the destination's current credentials are listed, and
+alerts held in restore quarantine are never redelivered. A paused or locked
+destination holds redelivered alerts like any other alert. A provider that
+accepted an alert but reported a failure receives it again.
+
+### Proxies
+
+Notifications to providers that use HTTPS or HTTP go through the proxy that
+the daemon's `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` variables name, as
+update checks do; SMTP connects directly. RDAP lookups ignore these variables;
+see [the configuration reference](/reference/configuration/).
 
 ## Notification URLs in `config.yaml` (deprecated)
 

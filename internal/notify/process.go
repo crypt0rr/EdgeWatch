@@ -3,12 +3,14 @@ package notify
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -62,12 +64,68 @@ func ChildEnvironment() []string {
 	return notificationChildEnvironment()
 }
 
+// The notification child's exit status reports the class of a failed send,
+// so the daemon learns it without reading provider text. Any other status,
+// including that of a child that could not start, is a provider failure.
+const (
+	childExitDNS     = 10
+	childExitConnect = 11
+	childExitTLS     = 12
+	// childExitTimeout reports a provider that did not answer within the
+	// provider timeout. The provider may have accepted the message.
+	childExitTimeout = 13
+)
+
+// ChildExitError is the error of a failed send in the notification child.
+// ExitCode is the exit status that reports its class to the daemon.
+type ChildExitError struct {
+	code int
+	err  error
+}
+
+func (e *ChildExitError) Error() string { return e.err.Error() }
+
+func (e *ChildExitError) Unwrap() error { return e.err }
+
+// ExitCode is the exit status of the notification child for the failure.
+func (e *ChildExitError) ExitCode() int { return e.code }
+
+// childExitCode is the exit status that reports a failure class.
+func childExitCode(class string) int {
+	switch class {
+	case store.DeliveryClassDNS:
+		return childExitDNS
+	case store.DeliveryClassConnect:
+		return childExitConnect
+	case store.DeliveryClassTLS:
+		return childExitTLS
+	case store.DeliveryClassTimeout:
+		return childExitTimeout
+	}
+	return 1
+}
+
+// childFailure is the redacted failure that a child's exit status reports.
+func childFailure(code int) error {
+	switch code {
+	case childExitDNS:
+		return &store.DeliveryFailure{Err: store.ErrDeliveryProvider, Class: store.DeliveryClassDNS}
+	case childExitConnect:
+		return &store.DeliveryFailure{Err: store.ErrDeliveryProvider, Class: store.DeliveryClassConnect}
+	case childExitTLS:
+		return &store.DeliveryFailure{Err: store.ErrDeliveryProvider, Class: store.DeliveryClassTLS}
+	case childExitTimeout:
+		return providerTimeoutFailure()
+	}
+	return &store.DeliveryFailure{Err: store.ErrDeliveryProvider, Class: store.DeliveryClassProvider}
+}
+
 // runNotificationProcess executes provider code in a short-lived child. A
 // provider panic can therefore terminate only this child instead of the
 // daemon's notification worker or process. The caller supplies the hard
 // timeout/cancellation context; CommandContext kills and reaps the child
 // before returning, and ordinary failures are converted into a redacted
-// delivery error.
+// delivery error of the class that the child's exit status reports.
 //
 //nolint:contextcheck // this low-level process boundary intentionally accepts the caller's lifecycle context.
 func runNotificationProcess(ctx context.Context, rawURL, message string) error {
@@ -94,7 +152,12 @@ func runNotificationProcess(ctx context.Context, rawURL, message string) error {
 		if childCtx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return errors.Join(ErrNotificationSendIndeterminate, err)
 		}
-		return errors.Join(store.ErrDeliveryProvider, errors.New("isolated notification provider failed"))
+		code := -1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			code = exitErr.ExitCode()
+		}
+		return childFailure(code)
 	}
 	return nil
 }
@@ -113,7 +176,8 @@ func notificationChildEnvironment() []string {
 // RunSendChild is the hidden command entry point used by the daemon's
 // notification subprocess. It is intentionally small and does not load the
 // EdgeWatch configuration or open SQLite; only the fixed Shoutrrr provider
-// implementation is invoked.
+// implementation is invoked. A failed send is a ChildExitError, whose exit
+// status reports the class of the failure.
 func RunSendChild(input io.Reader) error {
 	if input == nil {
 		return errors.New("notification child input is required")
@@ -126,7 +190,61 @@ func RunSendChild(input io.Reader) error {
 	if strings.TrimSpace(request.URL) == "" {
 		return errors.New("notification child URL is required")
 	}
-	return sendInProcess(request.URL, request.Message)
+	if err := sendInProcess(request.URL, request.Message); err != nil {
+		return &ChildExitError{code: childExitCode(failureClass(err)), err: err}
+	}
+	return nil
+}
+
+// failureClass names the class of a provider error: a name that could not be
+// resolved, a connection that could not be made, a failed certificate check
+// or TLS handshake, a provider that did not answer in time, or any other
+// failure. It reads the type of the error and, for a provider that formats
+// the error of its client into its own instead of wrapping it, the error
+// text, which never leaves the process: only the class does.
+func failureClass(err error) string {
+	var dnsErr *net.DNSError
+	var verifyErr *tls.CertificateVerificationError
+	var authorityErr x509.UnknownAuthorityError
+	var hostnameErr x509.HostnameError
+	var invalidErr x509.CertificateInvalidError
+	var recordErr tls.RecordHeaderError
+	var alertErr tls.AlertError
+	var opErr *net.OpError
+	switch {
+	case errors.Is(err, errProviderTimeout):
+		return store.DeliveryClassTimeout
+	case errors.As(err, &dnsErr):
+		return store.DeliveryClassDNS
+	case errors.As(err, &verifyErr), errors.As(err, &authorityErr), errors.As(err, &hostnameErr), errors.As(err, &invalidErr), errors.As(err, &recordErr), errors.As(err, &alertErr):
+		return store.DeliveryClassTLS
+	case errors.As(err, &opErr) && opErr.Op == "dial":
+		return store.DeliveryClassConnect
+	}
+	return failureClassFromText(err.Error())
+}
+
+// failureClassFromText classifies the text of a Go network or TLS error that
+// a provider formatted into its own error.
+func failureClassFromText(text string) string {
+	text = strings.ToLower(text)
+	containsAny := func(parts ...string) bool {
+		for _, part := range parts {
+			if strings.Contains(text, part) {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case strings.Contains(text, "lookup ") && containsAny("no such host", "server misbehaving", "name resolution", "i/o timeout"):
+		return store.DeliveryClassDNS
+	case containsAny("x509: ", "tls: ", "remote error: tls", "certificate"):
+		return store.DeliveryClassTLS
+	case containsAny("dial tcp", "dial udp", "connection refused", "no route to host", "network is unreachable"):
+		return store.DeliveryClassConnect
+	}
+	return store.DeliveryClassProvider
 }
 
 // CheckChildTrust is the hidden command with which the daemon confirms that a

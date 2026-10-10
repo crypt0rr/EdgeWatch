@@ -47,8 +47,19 @@ func main() {
 	}
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "edgewatch:", err)
-		os.Exit(1)
+		os.Exit(exitStatus(err))
 	}
+}
+
+// exitStatus is the exit status of a command that failed with err. The
+// notification child reports the class of a failed send with its status;
+// every other failure exits with 1.
+func exitStatus(err error) int {
+	var childErr *notify.ChildExitError
+	if errors.As(err, &childErr) {
+		return childErr.ExitCode()
+	}
+	return 1
 }
 
 func run(args []string) error {

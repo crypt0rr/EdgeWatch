@@ -133,6 +133,15 @@ func queueFixtureDeliveries(t *testing.T, f tenantFixture) {
 	}
 }
 
+// terminateFixtureDeliveries ends every delivery of the fixture for good,
+// as its retry budget running out does.
+func terminateFixtureDeliveries(t *testing.T, f tenantFixture) {
+	t.Helper()
+	if _, err := f.store.DB.Exec(`UPDATE outbox SET attempts=15,terminal_at=?,last_error='delivery_failed' WHERE sent_at IS NULL`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // selectDestinations sets the routing of the tenant's jobs through the
 // tenant's own store.
 func selectDestinations(t *testing.T, f tenantFixture, scope TenantScope, selection ...string) {
@@ -347,6 +356,55 @@ var notificationLeakCases = map[string]tenantLeakCase{
 			t.Fatalf("tenant B's own update: %v", err)
 		}
 		assertDeliveriesDiscarded(t, f, tenantFixtureNotifications.b)
+	}},
+	// Tenant B cannot replace a foreign destination's credentials and keep
+	// its deliveries: A's deliveries stay where they are. B's own keep its
+	// deliveries under the new revision.
+	"UpdateManagedNotificationKeepingPendingWithAudit": {writes: true, run: func(t *testing.T, f tenantFixture) {
+		queueFixtureDeliveries(t, f)
+		err := assertNotificationWritesStayInTenant(t, f, func(ts *TenantStore, id string) error {
+			_, err := ts.UpdateManagedNotificationKeepingPendingWithAudit(context.Background(), id, 1, "stolen", "generic", []byte("sealed stolen"), []byte("nonce"), true, AuditEntry{Action: "notifications.updated"})
+			return err
+		})
+		if err != nil {
+			t.Fatalf("tenant B's own update: %v", err)
+		}
+		var kept int
+		if err := f.store.DB.QueryRow(`SELECT COUNT(*) FROM outbox WHERE destination=? AND sent_at IS NULL`, managedNotificationKey(tenantFixtureNotifications.b, 2)).Scan(&kept); err != nil || kept != 1 {
+			t.Fatalf("tenant B kept %d deliveries, %v; want its one", kept, err)
+		}
+	}},
+	// Tenant B cannot list or redeliver a foreign destination's terminal
+	// deliveries: each is ErrNotFound, as an unknown destination is, and A's
+	// deliveries stay terminal.
+	"ListTerminalDeliveries": {writes: true, run: func(t *testing.T, f tenantFixture) {
+		ctx := context.Background()
+		queueFixtureDeliveries(t, f)
+		terminateFixtureDeliveries(t, f)
+		for _, id := range foreignNotificationIDs() {
+			if deliveries, err := f.store.Tenant(f.b).ListTerminalDeliveries(ctx, id, 0, 10); !errors.Is(err, ErrNotFound) || deliveries != nil {
+				t.Errorf("tenant B listed destination %s's deliveries: %+v, %v", id, deliveries, err)
+			}
+		}
+		for scope, own := range map[TenantScope]string{f.a: tenantFixtureNotifications.a, f.b: tenantFixtureNotifications.b} {
+			deliveries, err := f.store.Tenant(scope).ListTerminalDeliveries(ctx, own, 0, 10)
+			if err != nil || len(deliveries) != 1 {
+				t.Errorf("tenant %s: its own terminal deliveries = %+v, %v", scope.ID(), deliveries, err)
+			}
+		}
+	}},
+	"RedeliverTerminalDeliveries": {writes: true, run: func(t *testing.T, f tenantFixture) {
+		queueFixtureDeliveries(t, f)
+		terminateFixtureDeliveries(t, f)
+		count := 0
+		err := assertNotificationWritesStayInTenant(t, f, func(ts *TenantStore, id string) error {
+			var err error
+			count, err = ts.RedeliverTerminalDeliveries(context.Background(), id, nil, AuditEntry{Action: "notifications.redelivered"})
+			return err
+		})
+		if err != nil || count != 1 {
+			t.Fatalf("tenant B's own redelivery = %d, %v; want its one", count, err)
+		}
 	}},
 	// Tenant B cannot delete a foreign destination. Deleting its own removes
 	// it from B's jobs and B's update routing only, even where tenant A's

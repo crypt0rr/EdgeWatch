@@ -34,11 +34,18 @@ type ManagedNotification struct {
 	CredentialRevision int64
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
+	// ConfigImported reports a destination that the daemon imported from
+	// config.yaml and whose credentials have not changed since: the host
+	// operator configured its URL.
+	ConfigImported bool
 }
 
 // managedNotificationColumns are the columns that scanManagedNotification
-// reads, in order.
-const managedNotificationColumns = `id,name,provider,ciphertext,nonce,enabled,revision,credential_revision,created_at,updated_at`
+// reads, in order, from an unaliased managed_notifications. An import keeps
+// the destination's ID in deployment_notification_ids and creates it at
+// credential revision 1, which any credential change advances.
+const managedNotificationColumns = `id,name,provider,ciphertext,nonce,enabled,revision,credential_revision,created_at,updated_at,
+ (credential_revision=1 AND EXISTS (SELECT 1 FROM deployment_notification_ids AS imported WHERE imported.managed_notification_id=managed_notifications.id AND imported.imported_at<>''))`
 
 // ownedDestinationSQL limits a statement on the outbox to the deliveries of a
 // destination that the tenant owns. It takes two arguments, the destination
@@ -49,13 +56,14 @@ const ownedDestinationSQL = ` AND EXISTS (SELECT 1 FROM managed_notifications AS
 
 func scanManagedNotification(scanner interface{ Scan(...any) error }, tail ...any) (ManagedNotification, error) {
 	var destination ManagedNotification
-	var enabled int
+	var enabled, imported int
 	var created, updated string
-	columns := append([]any{&destination.ID, &destination.Name, &destination.Provider, &destination.Ciphertext, &destination.Nonce, &enabled, &destination.Revision, &destination.CredentialRevision, &created, &updated}, tail...)
+	columns := append([]any{&destination.ID, &destination.Name, &destination.Provider, &destination.Ciphertext, &destination.Nonce, &enabled, &destination.Revision, &destination.CredentialRevision, &created, &updated, &imported}, tail...)
 	if err := scanner.Scan(columns...); err != nil {
 		return destination, err
 	}
 	destination.Enabled = enabled != 0
+	destination.ConfigImported = imported != 0
 	destination.CreatedAt = scanTime(created)
 	destination.UpdatedAt = scanTime(updated)
 	return destination, nil
@@ -352,6 +360,16 @@ func pendingManagedDeliveryDiscardAudit(audits []AuditEntry, id string, count in
 	return entry
 }
 
+// keptManagedDeliveryAudit records the deliveries that a credential change
+// kept, with the attribution of the update, as
+// pendingManagedDeliveryDiscardAudit records discarded ones.
+func keptManagedDeliveryAudit(audits []AuditEntry, id string, pending, terminal int64) AuditEntry {
+	entry := pendingManagedDeliveryDiscardAudit(audits, id, 0)
+	entry.Action = "notifications.pending_kept"
+	entry.Detail = fmt.Sprintf("kept %d pending and %d failed deliveries for managed notification %s for its replaced credentials", pending, terminal, id)
+	return entry
+}
+
 // UpdateManagedNotification atomically updates the metadata and ciphertext
 // of one of the tenant's destinations. Metadata only changes keep pending
 // delivery intents by moving the current revision selector to the new
@@ -360,17 +378,31 @@ func pendingManagedDeliveryDiscardAudit(audits []AuditEntry, id string, count in
 // recorded as a redacted security-audit event. A destination of another
 // tenant or of the platform is ErrNotFound, and nothing changes.
 func (ts *TenantStore) UpdateManagedNotification(ctx context.Context, id string, expectedRevision int64, name, provider string, ciphertext, nonce []byte, enabled bool) (ManagedNotification, error) {
-	return ts.updateManagedNotificationWithAudits(ctx, id, expectedRevision, name, provider, ciphertext, nonce, enabled, nil)
+	return ts.updateManagedNotificationWithAudits(ctx, id, expectedRevision, name, provider, ciphertext, nonce, enabled, false, nil)
 }
 
 // UpdateManagedNotificationWithAudit atomically updates one of the tenant's
 // encrypted destinations, invalidates old pending deliveries, and records
 // the action.
 func (ts *TenantStore) UpdateManagedNotificationWithAudit(ctx context.Context, id string, expectedRevision int64, name, provider string, ciphertext, nonce []byte, enabled bool, audit AuditEntry) (ManagedNotification, error) {
-	return ts.updateManagedNotificationWithAudits(ctx, id, expectedRevision, name, provider, ciphertext, nonce, enabled, []AuditEntry{audit})
+	return ts.updateManagedNotificationWithAudits(ctx, id, expectedRevision, name, provider, ciphertext, nonce, enabled, false, []AuditEntry{audit})
 }
 
-func (ts *TenantStore) updateManagedNotificationWithAudits(ctx context.Context, id string, expectedRevision int64, name, provider string, ciphertext, nonce []byte, enabled bool, audits []AuditEntry) (ManagedNotification, error) {
+// UpdateManagedNotificationKeepingPendingWithAudit is
+// UpdateManagedNotificationWithAudit for an administrator who repairs a
+// destination's credentials and chose to keep its alerts: a credential
+// change moves the destination's unsent deliveries to the new credentials
+// instead of discarding them. Queued and retrying deliveries become due at
+// once with their retry and deferral budgets reset, and deliveries that
+// failed for good stay failed, so they can be redelivered. The count of
+// each is recorded in a notifications.pending_kept audit entry. A delivery
+// that a worker is sending at that moment may also reach the old
+// credentials. A metadata-only edit behaves as UpdateManagedNotificationWithAudit.
+func (ts *TenantStore) UpdateManagedNotificationKeepingPendingWithAudit(ctx context.Context, id string, expectedRevision int64, name, provider string, ciphertext, nonce []byte, enabled bool, audit AuditEntry) (ManagedNotification, error) {
+	return ts.updateManagedNotificationWithAudits(ctx, id, expectedRevision, name, provider, ciphertext, nonce, enabled, true, []AuditEntry{audit})
+}
+
+func (ts *TenantStore) updateManagedNotificationWithAudits(ctx context.Context, id string, expectedRevision int64, name, provider string, ciphertext, nonce []byte, enabled, keepPending bool, audits []AuditEntry) (ManagedNotification, error) {
 	if err := ts.ready(); err != nil {
 		return ManagedNotification{}, err
 	}
@@ -414,7 +446,25 @@ func (ts *TenantStore) updateManagedNotificationWithAudits(ctx context.Context, 
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return ManagedNotification{}, ErrConflict
 	}
-	if credentialsChanged {
+	if credentialsChanged && keepPending {
+		// Clearing the claims stops a delivery that a worker has picked up
+		// but not sent yet: its claim check fails, and a later pass sends it
+		// with the new credentials.
+		stamp := now.Format(time.RFC3339Nano)
+		moved, err := tx.ExecContext(ctx, `UPDATE outbox SET destination=?,attempts=0,deferrals=0,next_at=?,last_error='',claim_token='',claim_until='' WHERE destination LIKE ? AND sent_at IS NULL AND terminal_at=''`+ownedDestinationSQL, newKey, stamp, "managed:"+id+":%", id, ts.scope.id)
+		if err != nil {
+			return ManagedNotification{}, err
+		}
+		failed, err := tx.ExecContext(ctx, `UPDATE outbox SET destination=? WHERE destination LIKE ? AND sent_at IS NULL AND terminal_at<>''`+ownedDestinationSQL, newKey, "managed:"+id+":%", id, ts.scope.id)
+		if err != nil {
+			return ManagedNotification{}, err
+		}
+		pending, _ := moved.RowsAffected()
+		terminal, _ := failed.RowsAffected()
+		if pending > 0 || terminal > 0 {
+			audits = append(audits, keptManagedDeliveryAudit(audits, id, pending, terminal))
+		}
+	} else if credentialsChanged {
 		var pending int64
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination LIKE ? AND sent_at IS NULL AND terminal_at=''`+ownedDestinationSQL, "managed:"+id+":%", id, ts.scope.id).Scan(&pending); err != nil {
 			return ManagedNotification{}, err
@@ -439,7 +489,7 @@ func (ts *TenantStore) updateManagedNotificationWithAudits(ctx context.Context, 
 	if err := tx.Commit(); err != nil {
 		return ManagedNotification{}, err
 	}
-	return ManagedNotification{ID: id, TenantID: ts.scope.id, Name: name, Provider: provider, Ciphertext: append([]byte(nil), ciphertext...), Nonce: append([]byte(nil), nonce...), Enabled: enabled, Revision: next, CredentialRevision: credentialRevision, CreatedAt: current.CreatedAt, UpdatedAt: now}, nil
+	return ManagedNotification{ID: id, TenantID: ts.scope.id, Name: name, Provider: provider, Ciphertext: append([]byte(nil), ciphertext...), Nonce: append([]byte(nil), nonce...), Enabled: enabled, Revision: next, CredentialRevision: credentialRevision, CreatedAt: current.CreatedAt, UpdatedAt: now, ConfigImported: current.ConfigImported && !credentialsChanged}, nil
 }
 
 // DeleteManagedNotification removes one of the tenant's destinations, as

@@ -641,11 +641,18 @@ func (ss *SystemStore) FinalizeManagedScanWithReminderSettings(ctx context.Conte
 // ManagedScanFinalizationOptions separates time spent waiting for SQLite's
 // single writer from the bounded work performed after the writer is acquired.
 // Lease renewal and release are committed with the scan when LeaseOwner is set.
+//
+// DaemonOwner names the daemon whose lease a bounded finalization renews
+// when it takes the writer. The finalization holds SQLite's only writer for
+// up to WorkTimeout, so the daemon cannot renew its lease meanwhile; the
+// renewal is committed before the finalization transaction begins, and
+// keeps the lease fresh for that budget.
 type ManagedScanFinalizationOptions struct {
 	WriterWaitTimeout time.Duration
 	WorkTimeout       time.Duration
 	LeaseOwner        string
 	LeaseUntil        time.Time
+	DaemonOwner       string
 }
 
 // FinalizeManagedScanWithOptions finalizes a managed scan using a bounded
@@ -829,6 +836,23 @@ func (ss *SystemStore) beginManagedScanFinalization(ctx context.Context, jobID s
 			cancelTxLifetime()
 			return nil, nil, nil, err
 		}
+		if options.DaemonOwner != "" {
+			// A change inside the transaction stays invisible to the health
+			// check and to another daemon until the commit, so the lease is
+			// renewed in its own write first.
+			if err := renewDaemonLeaseForWork(waitCtx, conn, options.DaemonOwner, options.WorkTimeout); err != nil {
+				_ = conn.Close()
+				if isSQLiteWriterBusy(err) && waitCtx.Err() == nil {
+					if waitErr := waitForWriterRetry(waitCtx, retryDelay); waitErr == nil {
+						retryDelay = nextWriterRetryDelay(retryDelay)
+						continue
+					}
+				}
+				cancelWait()
+				cancelTxLifetime()
+				return nil, nil, nil, err
+			}
+		}
 		tx, err := conn.BeginTx(txLifetimeCtx, nil)
 		if err != nil {
 			_ = conn.Close()
@@ -885,6 +909,17 @@ func (ss *SystemStore) beginManagedScanFinalization(ctx context.Context, jobID s
 		}
 		return tx, workCtx, cleanup, nil
 	}
+}
+
+// renewDaemonLeaseForWork renews the lease of a daemon that is about to hold
+// the writer for work. It records the heartbeat at the end of that work, so
+// the lease stays fresh for the stale window after the work's deadline, as
+// after a heartbeat written then. The regular heartbeat records the current
+// time again once the writer is free. A lease that another daemon took over
+// is left as it is.
+func renewDaemonLeaseForWork(ctx context.Context, conn *sql.Conn, owner string, work time.Duration) error {
+	_, err := conn.ExecContext(ctx, `UPDATE daemon_lease SET heartbeat=? WHERE id=1 AND owner=?`, time.Now().UTC().Add(work).Format(time.RFC3339Nano), owner)
+	return err
 }
 
 func isSQLiteWriterBusy(err error) bool {

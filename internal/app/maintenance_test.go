@@ -7,6 +7,8 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -165,5 +167,99 @@ func TestRunMaintenancePassContinuesAfterFailures(t *testing.T) {
 		if !strings.Contains(logs.String(), expected) {
 			t.Errorf("maintenance log missing %q: %s", expected, logs.String())
 		}
+	}
+}
+
+// syncBuffer is a log sink that a background worker and the test can use at
+// the same time.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// One panicking pass must not stop the maintenance worker: it logs the
+// panic, retries after its backoff, and keeps running until the daemon
+// stops.
+func TestMaintenanceWorkerContinuesAfterAPanickingPass(t *testing.T) {
+	t.Parallel()
+	var logs syncBuffer
+	a, db := newLifecycleTestApp(t, schedulerFake{}, &logs)
+	a.maintenanceRetry = 10 * time.Millisecond
+	var calls atomic.Int32
+	secondPass := make(chan struct{})
+	a.pruneHistory = func(context.Context, time.Time) (store.PruneStats, error) {
+		switch calls.Add(1) {
+		case 1:
+			panic("injected retention defect")
+		case 2:
+			close(secondPass)
+		}
+		return store.PruneStats{}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := a.startMaintenanceWorker(ctx, db.System())
+	select {
+	case <-secondPass:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the maintenance pass after a panic did not run")
+	}
+	select {
+	case <-done:
+		t.Fatal("the maintenance worker stopped after a panicking pass")
+	case <-time.After(20 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the maintenance worker did not stop with its context")
+	}
+	for _, expected := range []string{"background goroutine panic recovered", "goroutine=history-maintenance-retention", "injected retention defect", "history maintenance pass panicked; retrying", "retry_in=10ms"} {
+		if !strings.Contains(logs.String(), expected) {
+			t.Errorf("maintenance log missing %q: %s", expected, logs.String())
+		}
+	}
+}
+
+// A step that panics does not skip the steps after it.
+func TestRunMaintenancePassRunsEveryStepAfterAPanic(t *testing.T) {
+	t.Parallel()
+	a, db := newLifecycleTestApp(t, schedulerFake{}, io.Discard)
+	ctx := context.Background()
+	job, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("maintenance-after-panic"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := scanner.WorkPlan{Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "1", PortCount: 1, Probes: 1}}}
+	cycle, err := db.System().CreateScanCycle(ctx, store.ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, Plan: plan, ExpiresAt: time.Now().UTC().Add(-time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	panicked := a.runMaintenancePass(ctx, db.System(), func(context.Context, time.Time) (store.PruneStats, error) {
+		panic("injected retention defect")
+	}, false)
+	if !panicked {
+		t.Fatal("a pass with a panicking step reported no panic")
+	}
+	if expired, err := defaultTenant(db).GetScanCycle(ctx, cycle.ID); err != nil || expired.Status != "expired" {
+		t.Fatalf("cycle after a panicking retention step = %#v, %v; want expired", expired, err)
+	}
+	if a.runMaintenancePass(ctx, db.System(), func(context.Context, time.Time) (store.PruneStats, error) {
+		return store.PruneStats{}, nil
+	}, false) {
+		t.Fatal("a pass without a panic reported one")
 	}
 }

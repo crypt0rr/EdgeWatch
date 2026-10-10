@@ -169,9 +169,6 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		return events, nil, nil
 	}
 	scopeChanged := state.BaselineConfigHash != scan.ConfigHash
-	if scopeChanged {
-		retireOutOfScopeChanges(state, scan.Snapshot, job)
-	}
 	// A complete scan that suddenly reports no positive ports across a
 	// previously non-empty baseline is usually a degraded discovery result
 	// (for example, a transient firewall or scanner-capability problem). Do
@@ -191,11 +188,12 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		// zero-positive-port guard waits for confirmation of the port loss. It
 		// does not confirm individual ports as closed.
 		hostChanges := filterDNSAggregateChanges(*state.Baseline, scan.Snapshot, hostStateChanges(*state.Baseline, scan.Snapshot, scopeChanged), job)
+		seen := observe(state, job, scanView{snapshot: scan.Snapshot, changes: hostChanges, scopeChanged: scopeChanged, hostsOnly: true})
 		if len(hostChanges) > 0 {
-			protected := protectedNonHostChangeKeys(state)
-			events := append(event, applyChangesWithIncomplete(state, job.Name, scan.ID, hostChanges, job.Change.Confirmations, now, protected)...)
+			events := append(event, applyObservedChanges(state, job.Name, scan.ID, hostChanges, job.Change.Confirmations, now, seen)...)
 			return events, hostChanges, nil
 		}
+		seen.retireFrom(state)
 		return event, nil, nil
 	}
 	var learningServices map[string]struct{}
@@ -231,14 +229,9 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		}
 		changes = filtered
 	}
-	// A service fingerprint is meaningful only while its port is positively
-	// observed. Diff intentionally reports a port closure without also emitting
-	// a service removal; retire any existing service finding for that port here
-	// so applyChanges cannot mislabel the missing service key as a recovery.
-	retireClosedPortServiceChanges(state, scan.Snapshot)
-	// The same holds for a port's exposure on one address of a DNS target:
-	// a finding that this scan could not compare is retired, not recovered.
-	retireUncomparedPortAddressChanges(state, scan.Snapshot, scopeChanged, job)
+	// Decide what the scan observed before port evidence is learned into the
+	// baseline below; the per-address comparison uses the baseline's evidence.
+	seen := observe(state, job, scanView{snapshot: scan.Snapshot, changes: changes, scopeChanged: scopeChanged})
 	if !scopeChanged && job.DNSComparisonMode != config.DNSComparisonAggregate {
 		learnMissingPortEvidence(state.Baseline, scan.Snapshot, completedDownAddressesByProtocolForJob(*state.Baseline, scan.Snapshot, job))
 	}
@@ -249,7 +242,7 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 			previous[key] = incident
 		}
 	}
-	events := applyChanges(state, job.Name, scan.ID, changes, job.Change.Confirmations, now)
+	events := applyObservedChanges(state, job.Name, scan.ID, changes, job.Change.Confirmations, now, seen)
 	if sendRemindersNow {
 		var reminded []model.Change
 		for _, change := range changes {
@@ -336,31 +329,6 @@ func baselineSurfaceIsExplicitlyDownForJob(baseline, current model.Snapshot, job
 	return positivePorts > 0
 }
 
-// protectedNonHostChangeKeys prevents a total-loss anomaly from advancing
-// recovery, pending confirmation, or one-scan suppression for port and
-// service changes while the guard evaluates only an explicit host transition.
-func protectedNonHostChangeKeys(state *model.JobState) map[string]bool {
-	protected := map[string]bool{}
-	protect := func(key string) {
-		if !strings.HasPrefix(key, "host|") {
-			protected[key] = true
-		}
-	}
-	for key := range state.Pending {
-		protect(key)
-	}
-	for key := range state.Incidents {
-		protect(key)
-	}
-	for key := range state.Suppressed {
-		protect(key)
-	}
-	for key := range state.SuppressedChanges {
-		protect(key)
-	}
-	return protected
-}
-
 // processIncompleteSuccess compares only evidence that is complete for this
 // scan. It deliberately leaves baseline candidates, fingerprint learning, and
 // failure counters untouched: an incomplete result is useful for detecting a
@@ -396,7 +364,6 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 		clearTotalLossCandidate(state)
 		changes = diffForJob(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash, job)
 		filtered := changes[:0]
-		allowedIncompleteAdditions := make(map[string]struct{})
 		deferredLearning := make(map[string]struct{})
 		for _, change := range changes {
 			// A complete scan learns a missing fingerprint of a baseline port
@@ -416,26 +383,19 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 				// remain protected because their aggregate evidence is ambiguous.
 				if incompletePositiveAddition(change, scan.Snapshot, incompleteProtocols) {
 					filtered = append(filtered, change)
-					allowedIncompleteAdditions[change.Key] = struct{}{}
 				}
 				continue
 			}
 			filtered = append(filtered, change)
 		}
 		changes = filtered
-		protectedKeys := protectedChangeKeys(state, *state.Baseline, scan.Snapshot, protectedTargetProtocols, protectedTargets)
-		for key := range allowedIncompleteAdditions {
-			delete(protectedKeys, key)
-		}
-		for key := range deferredLearning {
-			protectedKeys[key] = true
-		}
-		// Unlike a complete scan, an incomplete one does not retire a
-		// per-address finding it could not compare; the finding waits.
-		for key := range uncomparedPortAddressKeys(state, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash, job) {
-			protectedKeys[key] = true
-		}
-		events = append(events, applyChangesWithIncomplete(state, job.Name, scan.ID, changes, job.Change.Confirmations, scan.FinishedAt, protectedKeys)...)
+		// Unlike a complete scan, an incomplete one retires nothing that it
+		// could not compare; such a finding waits for a complete scan.
+		seen := observe(state, job, scanView{
+			snapshot: scan.Snapshot, changes: changes, scopeChanged: state.BaselineConfigHash != scan.ConfigHash,
+			incomplete: &missingCoverage{protocols: protectedTargetProtocols, targets: protectedTargets}, deferred: deferredLearning,
+		})
+		events = append(events, applyObservedChanges(state, job.Name, scan.ID, changes, job.Change.Confirmations, scan.FinishedAt, seen)...)
 	}
 	message := incompleteScanError(scan.Snapshot)
 	events = append(events, model.Event{Type: "scan-incomplete", Job: scan.Job, ScanID: scan.ID, Message: message, CreatedAt: scan.FinishedAt})
@@ -1055,36 +1015,6 @@ func incompleteChange(change model.Change, protocols, targets map[string]struct{
 	return ok
 }
 
-func protectedChangeKeys(state *model.JobState, baseline, current model.Snapshot, protocols, targets map[string]struct{}) map[string]bool {
-	protected := make(map[string]bool)
-	for key, value := range items(baseline) {
-		if incompleteChange(model.Change{Target: value.Target, Protocol: value.Protocol}, protocols, targets) {
-			protected[key] = true
-		}
-	}
-	for key, value := range items(current) {
-		if incompleteChange(model.Change{Target: value.Target, Protocol: value.Protocol}, protocols, targets) {
-			protected[key] = true
-		}
-	}
-	for _, pending := range state.Pending {
-		if incompleteChange(pending.Change, protocols, targets) {
-			protected[pending.Change.Key] = true
-		}
-	}
-	for _, incident := range state.Incidents {
-		if incompleteChange(incident.Change, protocols, targets) {
-			protected[incident.Change.Key] = true
-		}
-	}
-	for key, change := range state.SuppressedChanges {
-		if incompleteChange(change, protocols, targets) {
-			protected[key] = true
-		}
-	}
-	return protected
-}
-
 func advanceCandidate(state *model.JobState, scan model.Scan, required int, merge bool) []model.Event {
 	return advanceCandidateWithDNSMode(state, scan, required, merge, config.DNSComparisonAddressSensitive)
 }
@@ -1632,51 +1562,6 @@ func comparePortAddresses(old, current model.Snapshot, intersectionOnly bool, do
 	return compared, changes
 }
 
-// uncomparedPortAddressKeys returns the tracked port-address findings that
-// this scan could not compare, for example because the address left the DNS
-// answer, its host is down, or the port is no longer positive. The scan did
-// not observe such an address returning to its expected state, so the
-// finding must not count towards a recovery.
-func uncomparedPortAddressKeys(state *model.JobState, current model.Snapshot, intersectionOnly bool, job config.Job) map[string]bool {
-	uncompared := map[string]bool{}
-	if state.Baseline == nil {
-		return uncompared
-	}
-	compared := map[string]struct{}{}
-	if job.DNSComparisonMode != config.DNSComparisonAggregate {
-		compared, _ = comparePortAddresses(*state.Baseline, current, intersectionOnly, completedDownAddressesByProtocolForJob(*state.Baseline, current, job))
-	}
-	mark := func(key string, change model.Change) {
-		if change.Kind != "port-address" {
-			return
-		}
-		if _, ok := compared[key]; !ok {
-			uncompared[key] = true
-		}
-	}
-	for key, pending := range state.Pending {
-		mark(key, pending.Change)
-	}
-	for key, incident := range state.Incidents {
-		mark(key, incident.Change)
-	}
-	for key, change := range state.SuppressedChanges {
-		mark(key, change)
-	}
-	return uncompared
-}
-
-// retireUncomparedPortAddressChanges removes the port-address findings that
-// a complete scan could not compare.
-func retireUncomparedPortAddressChanges(state *model.JobState, current model.Snapshot, intersectionOnly bool, job config.Job) {
-	for key := range uncomparedPortAddressKeys(state, current, intersectionOnly, job) {
-		delete(state.Pending, key)
-		delete(state.Incidents, key)
-		delete(state.Suppressed, key)
-		delete(state.SuppressedChanges, key)
-	}
-}
-
 // learnMissingPortEvidence records which addresses expose a positive baseline
 // port of a DNS target when the baseline does not say. An incident names only
 // the logical target, so a port accepted from one has no address evidence,
@@ -1770,35 +1655,7 @@ func missingPositivePortExplainedByDown(old model.Snapshot, value item, downByPr
 	if len(downByProtocol) == 0 {
 		return false
 	}
-	addresses := map[string]struct{}{}
-	found := false
-	for _, unit := range old.Units {
-		if unit.Target != value.Target || !strings.EqualFold(unit.Protocol, value.Protocol) {
-			continue
-		}
-		for _, port := range unit.Ports {
-			if port.Port != value.Port || !isPositivePortState(port.State) {
-				continue
-			}
-			found = true
-			portAddresses := port.Evidence
-			if len(portAddresses) == 0 {
-				portAddresses = unit.Addresses
-			}
-			if len(portAddresses) == 0 {
-				portAddresses = old.DNS[unit.Target]
-			}
-			if len(portAddresses) == 0 && net.ParseIP(strings.TrimSpace(unit.Target)) != nil {
-				portAddresses = []string{unit.Target}
-			}
-			if len(portAddresses) == 0 {
-				return false
-			}
-			for _, address := range portAddresses {
-				addresses[strings.TrimSpace(address)] = struct{}{}
-			}
-		}
-	}
+	addresses, found := positivePortAddresses(old, value.Target, value.Protocol, value.Port)
 	if !found || len(addresses) == 0 {
 		return false
 	}
@@ -1811,6 +1668,62 @@ func missingPositivePortExplainedByDown(old model.Snapshot, value item, downByPr
 		}
 	}
 	return true
+}
+
+// positivePortAddresses returns the effective addresses that exposed a
+// positive port of snapshot: the port's evidence, or else its unit's
+// addresses, the target's DNS answer, or the IP literal target. found
+// reports whether the snapshot has the port as positive at all. The address
+// set is nil when a matching port has no address that can be determined.
+func positivePortAddresses(snapshot model.Snapshot, target, protocol string, port int) (map[string]struct{}, bool) {
+	addresses := map[string]struct{}{}
+	found := false
+	for _, unit := range snapshot.Units {
+		if unit.Target != target || !strings.EqualFold(unit.Protocol, protocol) {
+			continue
+		}
+		for _, value := range unit.Ports {
+			if value.Port != port || !isPositivePortState(value.State) {
+				continue
+			}
+			found = true
+			portAddresses := value.Evidence
+			if len(portAddresses) == 0 {
+				portAddresses = unit.Addresses
+			}
+			if len(portAddresses) == 0 {
+				portAddresses = snapshot.DNS[unit.Target]
+			}
+			if len(portAddresses) == 0 && net.ParseIP(strings.TrimSpace(unit.Target)) != nil {
+				portAddresses = []string{unit.Target}
+			}
+			if len(portAddresses) == 0 {
+				return nil, true
+			}
+			for _, address := range portAddresses {
+				addresses[strings.TrimSpace(address)] = struct{}{}
+			}
+		}
+	}
+	return addresses, found
+}
+
+// targetAddresses returns the effective addresses that a scan examined for
+// a target and protocol: its unit's addresses, or else the target's DNS
+// answer or the IP literal target.
+func targetAddresses(snapshot model.Snapshot, target, protocol string) []string {
+	for _, unit := range snapshot.Units {
+		if unit.Target == target && strings.EqualFold(unit.Protocol, protocol) && len(unit.Addresses) > 0 {
+			return unit.Addresses
+		}
+	}
+	if addresses := snapshot.DNS[target]; len(addresses) > 0 {
+		return addresses
+	}
+	if net.ParseIP(strings.TrimSpace(target)) != nil {
+		return []string{target}
+	}
+	return nil
 }
 
 // completedDownAddressesByProtocol includes protocol-specific Nmap discovery
@@ -1890,176 +1803,6 @@ func scopeAllows(s model.Snapshot, target, protocol string, port int, service bo
 		}
 	}
 	return false
-}
-
-func applyChanges(state *model.JobState, job, scanID string, current []model.Change, required int, now time.Time) []model.Event {
-	return applyChangesWithIncomplete(state, job, scanID, current, required, now, nil)
-}
-
-// retireClosedPortServiceChanges removes service findings whose port is no
-// longer positive in this complete snapshot. Such a service has not been
-// observed returning to its baseline fingerprint, so it is not a recovery.
-// Incomplete scans return earlier in processSuccessWithReminderSettings and
-// must not use absence as evidence to retire findings.
-func retireClosedPortServiceChanges(state *model.JobState, snapshot model.Snapshot) {
-	positivePorts := make(map[string]struct{})
-	for _, unit := range snapshot.Units {
-		for _, port := range unit.Ports {
-			if isPositivePortState(port.State) {
-				positivePorts[fmt.Sprintf("port|%s|%s|%d", unit.Target, unit.Protocol, port.Port)] = struct{}{}
-			}
-		}
-	}
-	retire := func(key string, change model.Change) {
-		if change.Kind != "service" {
-			return
-		}
-		portKey := fmt.Sprintf("port|%s|%s|%d", change.Target, change.Protocol, change.Port)
-		if _, positive := positivePorts[portKey]; positive {
-			return
-		}
-		delete(state.Pending, key)
-		delete(state.Incidents, key)
-		delete(state.Suppressed, key)
-		delete(state.SuppressedChanges, key)
-	}
-	for key, pending := range state.Pending {
-		retire(key, pending.Change)
-	}
-	for key, incident := range state.Incidents {
-		retire(key, incident.Change)
-	}
-	for key, change := range state.SuppressedChanges {
-		retire(key, change)
-	}
-	// State can contain a service suppression without its payload. The stable
-	// change-key format still lets us expire that stale suppression when the
-	// port is gone.
-	for key := range state.Suppressed {
-		if !strings.HasPrefix(key, "service|") {
-			continue
-		}
-		portKey := "port|" + strings.TrimPrefix(key, "service|")
-		if _, positive := positivePorts[portKey]; !positive {
-			delete(state.Suppressed, key)
-			delete(state.SuppressedChanges, key)
-		}
-	}
-}
-
-func applyChangesWithIncomplete(state *model.JobState, job, scanID string, current []model.Change, required int, now time.Time, protected map[string]bool) []model.Event {
-	currentMap := map[string]model.Change{}
-	for _, c := range current {
-		currentMap[c.Key] = c
-	}
-	// Suppression is counted in successful scans, rather than wall-clock time.
-	// Keep the confirmed change one extra state transition so an unchanged
-	// incident can be re-opened immediately when its one-scan suppression ends.
-	suppressedThisScan := map[string]bool{}
-	expiredSuppression := map[string]model.Change{}
-	for key, remaining := range state.Suppressed {
-		if protected[key] {
-			continue
-		}
-		if remaining <= 0 {
-			if change, ok := state.SuppressedChanges[key]; ok {
-				expiredSuppression[key] = change
-			}
-			delete(state.Suppressed, key)
-			delete(state.SuppressedChanges, key)
-			continue
-		}
-		suppressedThisScan[key] = true
-		state.Suppressed[key] = remaining - 1
-	}
-	allCurrent := make(map[string]model.Change, len(currentMap))
-	for key, change := range currentMap {
-		allCurrent[key] = change
-	}
-	for key := range suppressedThisScan {
-		// The action removes the active incident immediately. Repeat that
-		// cleanup here so a state written by an older server cannot leak a
-		// suppressed row or pending confirmation into the next scan.
-		delete(currentMap, key)
-		delete(state.Pending, key)
-		delete(state.Incidents, key)
-	}
-	for key, change := range expiredSuppression {
-		if current, ok := allCurrent[key]; ok && current.New == change.New {
-			// Re-open below without making the administrator confirm the same
-			// already-confirmed change again. A changed value is processed by the
-			// normal confirmation path instead.
-			delete(currentMap, key)
-			delete(state.Pending, key)
-			delete(state.Incidents, key)
-		}
-	}
-	var opened, recovered []model.Change
-	for key, c := range currentMap {
-		if incident, ok := state.Incidents[key]; ok && incident.Change.New == c.New {
-			incident.LastSeenAt = now
-			incident.RecoveryCount = 0
-			state.Incidents[key] = incident
-			delete(state.Pending, key)
-			continue
-		}
-		p := state.Pending[key]
-		if p.Change.New == c.New && p.Change.Old == c.Old {
-			p.Count++
-		} else {
-			p = model.Pending{Change: c, Count: 1}
-		}
-		if p.Count >= required {
-			state.Incidents[key] = model.Incident{Change: c, ScanID: scanID, OpenedAt: now, LastSeenAt: now}
-			delete(state.Pending, key)
-			opened = append(opened, c)
-		} else {
-			state.Pending[key] = p
-		}
-	}
-	for key, change := range expiredSuppression {
-		currentChange, ok := allCurrent[key]
-		if !ok || currentChange.New != change.New {
-			continue
-		}
-		state.Incidents[key] = model.Incident{Change: currentChange, ScanID: scanID, OpenedAt: now, LastSeenAt: now}
-		opened = append(opened, currentChange)
-	}
-	for key := range state.Pending {
-		if protected[key] {
-			continue
-		}
-		if _, ok := currentMap[key]; !ok {
-			delete(state.Pending, key)
-		}
-	}
-	for key, incident := range state.Incidents {
-		if protected[key] {
-			continue
-		}
-		if _, ok := allCurrent[key]; ok {
-			continue
-		}
-		incident.RecoveryCount++
-		if incident.RecoveryCount >= required {
-			recovery := incident.Change
-			recovery.Old, recovery.New = recovery.New, recovery.Old
-			recovered = append(recovered, recovery)
-			delete(state.Incidents, key)
-		} else {
-			state.Incidents[key] = incident
-		}
-	}
-	sort.Slice(opened, func(i, j int) bool { return opened[i].Key < opened[j].Key })
-	sort.Slice(recovered, func(i, j int) bool { return recovered[i].Key < recovered[j].Key })
-	var events []model.Event
-	if len(opened) > 0 {
-		events = append(events, model.Event{Type: "changes-detected", Job: job, ScanID: scanID, Message: baselineChangeMessage(len(opened), "confirmed"), Changes: opened, CreatedAt: now})
-	}
-	if len(recovered) > 0 {
-		events = append(events, model.Event{Type: "changes-recovered", Job: job, ScanID: scanID, Message: baselineChangeMessage(len(recovered), "recovered"), Changes: recovered, CreatedAt: now})
-	}
-	return events
 }
 
 func baselineChangeCount(count int) string {
@@ -2163,55 +1906,6 @@ func mergeForScopeChange(old, candidate model.Snapshot) model.Snapshot {
 	}
 	result.Normalize()
 	return result
-}
-
-// retireOutOfScopeChanges drops runtime findings that the new complete scan
-// can no longer observe. They are not recoveries: no scan established that
-// the old state changed back to baseline.
-func retireOutOfScopeChanges(state *model.JobState, snapshot model.Snapshot, job config.Job) {
-	dnsAddresses := dnsAddressesInSnapshot(snapshot)
-	for key, pending := range state.Pending {
-		if !changeWithinScopeWithDNSAddresses(snapshot, pending.Change, job, dnsAddresses) {
-			delete(state.Pending, key)
-		}
-	}
-	for key, incident := range state.Incidents {
-		if !changeWithinScopeWithDNSAddresses(snapshot, incident.Change, job, dnsAddresses) {
-			delete(state.Incidents, key)
-		}
-	}
-	for key, change := range state.SuppressedChanges {
-		if !changeWithinScopeWithDNSAddresses(snapshot, change, job, dnsAddresses) {
-			delete(state.SuppressedChanges, key)
-			delete(state.Suppressed, key)
-		}
-	}
-}
-
-func changeWithinScopeWithDNSAddresses(snapshot model.Snapshot, change model.Change, job config.Job, dnsAddresses map[string]struct{}) bool {
-	switch change.Kind {
-	case "port":
-		return scopeAllows(snapshot, change.Target, change.Protocol, change.Port, false)
-	case "port-address":
-		if job.DNSComparisonMode == config.DNSComparisonAggregate {
-			return false
-		}
-		return scopeAllows(snapshot, change.Target, change.Protocol, change.Port, false)
-	case "service":
-		return scopeAllows(snapshot, change.Target, change.Protocol, change.Port, true)
-	case "host":
-		if job.DNSComparisonMode == config.DNSComparisonAggregate && dnsOnlyAddressInSnapshot(change.Target, dnsAddresses, snapshot) {
-			return false
-		}
-		return hostInScope(snapshot, change.Target)
-	case "dns", "dns-added", "dns-removed":
-		if job.DNSComparisonMode == config.DNSComparisonAggregate {
-			return false
-		}
-		return hasTarget(snapshot, change.Target)
-	default:
-		return false
-	}
 }
 
 func dnsTargetsInSnapshot(snapshot model.Snapshot) map[string]struct{} {

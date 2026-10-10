@@ -121,12 +121,11 @@ func (a *App) pauseUnit(id string) {
 		a.units.paused = map[string]bool{}
 	}
 	a.units.paused[id] = true
-	a.running.Range(func(_, value any) bool {
-		if run, ok := value.(*activeRun); ok && run.tenant == id {
+	for _, run := range a.runs.activeRuns() {
+		if run.tenant == id {
 			run.requestCancel()
 		}
-		return true
-	})
+	}
 	a.units.mu.Unlock()
 	a.eventMu.RLock()
 	handler := a.unitPausedHandler
@@ -149,14 +148,15 @@ func (a *App) SetUnitPausedHandler(handler func(tenantID string)) {
 }
 
 // registerRun makes a run of the tenant visible to ActiveScans and
-// CancelScan. A run of a unit that this process paused is cancelled at
-// once: it took its scan lease before the pause was committed, and the
-// pause could not see it yet.
+// CancelScan, which also ends the wait of its job's run for a scan slot. A
+// run of a unit that this process paused is cancelled at once: it took its
+// scan lease before the pause was committed, and the pause could not see it
+// yet.
 func (a *App) registerRun(tenantID, id string, run *activeRun) {
 	a.units.mu.Lock()
 	defer a.units.mu.Unlock()
 	run.tenant = tenantID
-	a.running.Store(id, run)
+	a.runs.start(run.scan.JobID, id, run)
 	if a.units.paused[tenantID] {
 		run.requestCancel()
 	}

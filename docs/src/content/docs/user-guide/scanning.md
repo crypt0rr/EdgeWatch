@@ -40,7 +40,8 @@ default). With SYN host discovery, Naabu cannot tell a down address from one
 without open ports, so that address stays incomplete. With **Nmap only** and
 host discovery enabled (`assume_alive: false`), EdgeWatch adds Nmap verbosity
 level 1 (`-v`) so explicit down hosts appear in Nmap's XML output. Those results
-are tracked as host-state changes, not as sets of closed ports. During Naabu
+are tracked as host-state changes, not as sets of closed ports, and the
+incidents of a down host's ports do not recover while it is down. During Naabu
 enrichment, each address has already been discovered, so Nmap uses `-Pn` to
 confirm discovered ports without a second host-discovery pass or a verbose
 down-host signal. Omitted Nmap hosts and timed-out probes remain incomplete.
@@ -82,7 +83,9 @@ approval would let it run. An operator's change to a job's targets, ports, or
 scanner clears its high-cost approval; the scope-change confirmation says so. A broad
 scan may be split into resumable address, discovery, enrichment, and UDP work
 units. A timeout or restart preserves completed work for the configured resume
-window; partial work cannot change a baseline. The dashboard shows scanner
+window; partial work cannot change a baseline. When a cycle completes but
+EdgeWatch cannot read the job's notification destinations, the cycle's result
+is kept and compared on the next run instead of being scanned again. The dashboard shows scanner
 phase, heartbeat, completed probes, ports found, and the last sanitized output.
 A resumed cycle keeps the scanner-profile arguments it started with, and its
 scans record that job and profile revision; a profile change applies from the

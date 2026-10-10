@@ -104,7 +104,10 @@ refuses `--tenant`.
 ## Health checks
 
 `health` exits non-zero when migrations or the daemon heartbeat are unhealthy,
-and writes the reason to stderr. With `--output json` it then also prints a
+and writes the reason to stderr. The heartbeat is stale two minutes after the
+daemon last renewed it. Saving the result of a very large scan can hold the
+database for longer, so before it saves a scan, the daemon renews its
+heartbeat for as long as saving that scan may take. With `--output json` it then also prints a
 document with `"status": "unhealthy"` and the reason in `error`, so a monitoring
 script always receives JSON; the text output prints nothing on stdout in that
 case. A healthy or starting daemon prints its status, and `warnings` list

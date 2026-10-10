@@ -895,7 +895,7 @@ func TestRouteInventoryCoversRoutingSource(t *testing.T) {
 	// to cover, or an empty result would prove nothing.
 	analyzer := &routeDriftAnalyzer{fset: fset, consumed: map[token.Pos]bool{}}
 	methods := serverMethods(files)
-	for _, name := range []string{"legacyAPI", "publicAPI", "jobRoute", "platformRoute"} {
+	for _, name := range []string{"legacyAPI", "publicAPI", "platformRoute"} {
 		function, ok := methods[name]
 		if !ok {
 			t.Errorf("routing function %s was not found", name)
@@ -906,7 +906,6 @@ func TestRouteInventoryCoversRoutingSource(t *testing.T) {
 		}
 	}
 	for name, want := range map[string][]string{
-		"jobRoute":      {"/jobs"},
 		"platformRoute": {"/platform"},
 	} {
 		if got := subRouterPrefixes(methods, name); !slices.Equal(got, want) {
@@ -1025,9 +1024,6 @@ func TestRouteInventoryDriftDetectsRemovedEntries(t *testing.T) {
 	t.Parallel()
 	fset, files := parseWebPackageSource(t)
 	for _, removed := range []string{
-		"POST /jobs/{id}/run",
-		"DELETE /jobs/{id}?permanent=true",
-		"GET /jobs/{id}/baseline/hosts/{address}/rdap",
 		"PATCH /platform/units/{id}/capacity",
 		"DELETE /platform/units/{id}/accounts/{uid}/sessions",
 		"PUT /platform/notifications/update-routing",
@@ -1060,7 +1056,7 @@ func TestRouteInventoryDriftDetectsRemovedEntries(t *testing.T) {
 	var flips int
 	for index, route := range flipped {
 		switch routeInventoryName(route) {
-		case "GET /jobs", "POST /scans":
+		case "GET /platform/units", "POST /scans":
 			flipped[index].NoHandler = !route.NoHandler
 			flips++
 		}
@@ -1074,7 +1070,7 @@ func TestRouteInventoryDriftDetectsRemovedEntries(t *testing.T) {
 			stale = append(stale, finding.message)
 		}
 	}
-	if len(stale) != 2 || !strings.Contains(strings.Join(stale, "\n"), "GET /jobs is marked NoHandler") || !strings.Contains(strings.Join(stale, "\n"), "POST /scans is in the route inventory") {
+	if len(stale) != 2 || !strings.Contains(strings.Join(stale, "\n"), "GET /platform/units is marked NoHandler") || !strings.Contains(strings.Join(stale, "\n"), "POST /scans is in the route inventory") {
 		t.Fatalf("stale NoHandler findings = %q", stale)
 	}
 }

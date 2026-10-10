@@ -30,9 +30,9 @@ func routeRequestPermission(path string, r *http.Request) string {
 
 // serveRouteAs serves path, relative to /api/v1, with the handler of the
 // route that serves it, as the session and with ts as its tenant's and
-// account's store. It skips the gate, as the tests of the handlers did when
-// they called the sub-routers that the route table replaced, and answers a
-// path that no route serves with 404 not_found.
+// account's store. It skips the rest of the gate, as the tests of the
+// handlers did when they called the sub-routers that the route table
+// replaced, and answers a path that no route serves as the gate does.
 func (s *Server) serveRouteAs(w http.ResponseWriter, r *http.Request, path string, session store.Session, ts *store.TenantStore) {
 	target := *r.URL
 	target.Path, target.RawPath = consoleAPIBase+path, ""
@@ -40,7 +40,7 @@ func (s *Server) serveRouteAs(w http.ResponseWriter, r *http.Request, path strin
 	request.URL = &target
 	route := consoleRoutes.match(request)
 	if route == nil || route.Handle == nil {
-		writeError(w, http.StatusNotFound, "not_found", "endpoint not found", nil)
+		forbiddenRoute(w)
 		return
 	}
 	call := routeCall{session: session, tenant: ts}
@@ -71,4 +71,9 @@ func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Req
 // through serveRouteAs.
 func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	s.serveRouteAs(w, r, "/public-dashboard", session, ts)
+}
+
+// jobRoute serves rest, the path after /jobs/, through serveRouteAs.
+func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, rest string) {
+	s.serveRouteAs(w, r, "/jobs/"+rest, session, ts)
 }

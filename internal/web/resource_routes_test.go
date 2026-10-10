@@ -472,24 +472,16 @@ func TestJobRoutesValidateRequestsBeforeResolvingTheJob(t *testing.T) {
 		}
 	}
 
-	// Paths that name no job, or no known sub-route, keep their router
-	// responses and never load a job.
-	for _, tc := range []struct {
-		rest string
-		body string
-	}{
-		{"", wantErrorBody(t, "not_found", "job not found", nil)},
-		{f.active.ID + "/no-such-route", wantErrorBody(t, "not_found", "job endpoint not found", nil)},
-		{f.missingID + "/scans/" + f.scan.ID + "/no-such-route", wantErrorBody(t, "not_found", "job endpoint not found", nil)},
-	} {
+	// Paths that name no job, or no known sub-route, are refused by the
+	// gate like any path outside the route table, and never load a job.
+	for _, rest := range []string{"", f.active.ID + "/no-such-route", f.missingID + "/scans/" + f.scan.ID + "/no-such-route"} {
 		f.lookups.reset()
-		recorder := httptest.NewRecorder()
-		f.server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+tc.rest, nil), store.Session{}, defaultTenantStore(f.server), tc.rest)
-		if recorder.Code != http.StatusNotFound || recorder.Body.String() != tc.body {
-			t.Fatalf("job route %q = %d %q, want 404 %q", tc.rest, recorder.Code, recorder.Body.String(), tc.body)
+		response := f.serve("admin", http.MethodGet, "/jobs/"+rest, "")
+		if want := wantErrorBody(t, "forbidden", "your account is not allowed to perform this action", map[string]string{"permission": "route"}); response.Code != http.StatusForbidden || response.Body.String() != want {
+			t.Fatalf("job route %q = %d %q, want 403 %q", rest, response.Code, response.Body.String(), want)
 		}
 		if got := f.lookups.jobLookups(); got != 0 {
-			t.Fatalf("job route %q loaded the job %d times", tc.rest, got)
+			t.Fatalf("job route %q loaded the job %d times", rest, got)
 		}
 	}
 }

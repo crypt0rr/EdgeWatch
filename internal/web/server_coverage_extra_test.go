@@ -157,9 +157,11 @@ func TestNotificationDestinationRouteGuardsAndTestDelivery(t *testing.T) {
 		{name: "unsupported method", method: http.MethodPatch, rest: "id"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			// No route serves the path, so it is refused as the gate refuses
+			// a path outside the route table.
 			recorder := httptest.NewRecorder()
 			server.notificationDestinationRoute(recorder, httptest.NewRequest(test.method, "/api/v1/notifications/destinations/"+test.rest, nil), admin, defaultTenantStore(server), test.rest)
-			if recorder.Code != http.StatusNotFound {
+			if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), `"permission":"route"`) {
 				t.Fatalf("route status = %d, body = %s", recorder.Code, recorder.Body.String())
 			}
 		})
@@ -274,11 +276,13 @@ func TestServerSetupStatusAndRouteGuards(t *testing.T) {
 	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"configured":true`) || strings.Contains(status.Body.String(), `"version"`) {
 		t.Fatalf("setup status = %d %s", status.Code, status.Body.String())
 	}
+	// No route serves these paths, so they are refused as the gate refuses
+	// a path outside the route table.
 	for _, rest := range []string{"", "/unknown", "job/unknown"} {
 		recorder := httptest.NewRecorder()
 		server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+rest, nil), admin, defaultTenantStore(server), rest)
-		if recorder.Code != http.StatusNotFound {
-			t.Errorf("job route %q status = %d", rest, recorder.Code)
+		if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), `"permission":"route"`) {
+			t.Errorf("job route %q = %d %s", rest, recorder.Code, recorder.Body.String())
 		}
 	}
 	missing := httptest.NewRecorder()

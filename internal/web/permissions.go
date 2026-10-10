@@ -16,18 +16,6 @@ func requiredPermission(path, method string) string {
 	switch {
 	case strings.HasPrefix(path, "/platform/"):
 		return requiredPlatformPermission(path, method)
-	case path == "/jobs":
-		switch method {
-		case http.MethodGet:
-			return auth.PermissionJobsRead
-		case http.MethodPost:
-			return auth.PermissionJobsWrite
-		}
-	case path == "/jobs/preview" && method == http.MethodPost:
-		return auth.PermissionJobsWrite
-	}
-	if strings.HasPrefix(path, "/jobs/") {
-		return requiredJobPermission(path, method)
 	}
 	return auth.PermissionDenied
 }
@@ -43,120 +31,10 @@ func routeParts(path, prefix string) ([]string, bool) {
 	return strings.Split(rest, "/"), true
 }
 
-// requiredJobPermission mirrors the explicit grammar in jobRoute. Keeping
-// malformed or future nested paths denied is important: a new handler must
-// add its route and capability here before it can be reached by a session.
-func requiredJobPermission(path, method string) string {
-	parts := strings.Split(strings.Trim(strings.TrimPrefix(path, "/jobs/"), "/"), "/")
-	if len(parts) == 0 || parts[0] == "" {
-		return auth.PermissionDenied
-	}
-	switch len(parts) {
-	case 1:
-		switch method {
-		case http.MethodGet:
-			return auth.PermissionJobsRead
-		case http.MethodPut, http.MethodDelete:
-			return auth.PermissionJobsWrite
-		default:
-			return auth.PermissionDenied
-		}
-	case 2:
-		switch parts[1] {
-		case "archive", "restore", "pause", "resume":
-			if method == http.MethodPost {
-				return auth.PermissionJobsWrite
-			}
-		case "run":
-			if method == http.MethodPost || method == http.MethodDelete {
-				return auth.PermissionJobsRun
-			}
-		case "scan-cycle":
-			if method == http.MethodGet {
-				return auth.PermissionScansRead
-			}
-		case "scans":
-			if method == http.MethodGet {
-				return auth.PermissionScansRead
-			}
-		case "pending-changes":
-			if method == http.MethodGet {
-				return auth.PermissionScansRead
-			}
-		case "incidents":
-			if method == http.MethodGet {
-				return auth.PermissionIncidentsRead
-			}
-		case "events":
-			if method == http.MethodGet {
-				return auth.PermissionScansRead
-			}
-		case "baseline":
-			if method == http.MethodGet {
-				return auth.PermissionBaselinesRead
-			}
-		}
-	case 3:
-		switch {
-		case parts[1] == "scan-cycle" && method == http.MethodDelete:
-			return auth.PermissionJobsRun
-		case parts[1] == "scans" && method == http.MethodGet:
-			return auth.PermissionScansRead
-		case parts[1] == "incidents" && (parts[2] == "accept" || parts[2] == "suppress") && method == http.MethodPost:
-			return auth.PermissionIncidentsManage
-		case parts[1] == "baseline" && (parts[2] == "reset" || parts[2] == "approve") && method == http.MethodPost:
-			return auth.PermissionBaselinesManage
-		case parts[1] == "baseline" && parts[2] == "hosts" && method == http.MethodGet:
-			return auth.PermissionBaselinesRead
-		}
-	case 4:
-		if parts[1] == "scans" && method == http.MethodGet {
-			if parts[3] == "hosts" {
-				return auth.PermissionHostsRead
-			}
-			if parts[3] == "results" || parts[3] == "changes" {
-				return auth.PermissionScansRead
-			}
-		}
-		if parts[1] == "baseline" && parts[2] == "hosts" && method == http.MethodGet {
-			return auth.PermissionBaselinesRead
-		}
-	case 5:
-		if parts[1] == "scans" && parts[3] == "hosts" && method == http.MethodGet {
-			return auth.PermissionHostsRead
-		}
-		if parts[1] == "baseline" && parts[2] == "hosts" && parts[4] == "rdap" && method == http.MethodGet {
-			return auth.PermissionBaselinesRead
-		}
-	case 6:
-		if parts[1] == "scans" && parts[3] == "hosts" && parts[5] == "rdap" && method == http.MethodGet {
-			return auth.PermissionHostsRead
-		}
-	}
-	return auth.PermissionDenied
-}
-
-// requestPermission applies the route matrix and then handles the one
-// query-controlled action whose authorization differs from the ordinary
-// resource mutation. Keeping this decision next to requiredPermission means
-// handlers do not need their own role checks that can drift from the API
-// boundary.
+// requestPermission is the capability that legacyAPI requires for a
+// request.
 func requestPermission(path string, r *http.Request) string {
-	permission := requiredPermission(path, r.Method)
-	// Only a direct job item supports the permanent-delete query switch. Do
-	// not let an unknown nested route opt into the stronger permission.
-	if permission != auth.PermissionDenied && isJobItemPath(path) && r.Method == http.MethodDelete && r.URL.Query().Get("permanent") == "true" {
-		return auth.PermissionJobsDelete
-	}
-	return permission
-}
-
-func isJobItemPath(path string) bool {
-	if !strings.HasPrefix(path, "/jobs/") {
-		return false
-	}
-	rest := strings.Trim(strings.TrimPrefix(path, "/jobs/"), "/")
-	return rest != "" && !strings.Contains(rest, "/")
+	return requiredPermission(path, r.Method)
 }
 
 func isMutation(method string) bool {
@@ -381,41 +259,53 @@ var apiRoutes = []apiRoute{
 	}},
 
 	// Jobs.
-	{Method: http.MethodGet, Template: "/jobs", Permission: auth.PermissionJobsRead, Example: "/jobs"},
-	{Method: http.MethodPost, Template: "/jobs", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs"},
-	{Method: http.MethodPost, Template: "/jobs/preview", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/preview"},
-	{Method: http.MethodGet, Template: "/jobs/schedule-suggestion", Permission: auth.PermissionJobsRead, Example: "/jobs/schedule-suggestion"},
-	{Method: http.MethodGet, Template: "/jobs/{id}", Permission: auth.PermissionJobsRead, Example: "/jobs/job-1"},
-	{Method: http.MethodPut, Template: "/jobs/{id}", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1"},
-	{Method: http.MethodDelete, Template: "/jobs/{id}", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1"},
-	{Method: http.MethodDelete, Template: "/jobs/{id}", Query: "permanent=true", Permission: auth.PermissionJobsDelete, Mutates: true, Example: "/jobs/job-1"},
-	{Method: http.MethodPost, Template: "/jobs/{id}/archive", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1/archive"},
-	{Method: http.MethodPost, Template: "/jobs/{id}/restore", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1/restore"},
-	{Method: http.MethodPost, Template: "/jobs/{id}/pause", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1/pause"},
-	{Method: http.MethodPost, Template: "/jobs/{id}/resume", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1/resume"},
-	{Method: http.MethodPost, Template: "/jobs/{id}/run", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/jobs/job-1/run"},
-	{Method: http.MethodDelete, Template: "/jobs/{id}/run", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/jobs/job-1/run"},
-	{Method: http.MethodGet, Template: "/jobs/{id}/scan-cycle", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scan-cycle"},
-	{Method: http.MethodDelete, Template: "/jobs/{id}/scan-cycle/{cycle}", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/jobs/job-1/scan-cycle/cycle-1"},
-	{Method: http.MethodGet, Template: "/jobs/{id}/scans", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans"},
-	{Method: http.MethodGet, Template: "/jobs/{id}/pending-changes", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/pending-changes"},
-	{Method: http.MethodGet, Template: "/jobs/{id}/scans/latest-successful", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans/latest-successful"},
-	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans/scan-1"},
-	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}/results", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans/scan-1/results"},
-	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}/changes", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans/scan-1/changes"},
-	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}/hosts", Permission: auth.PermissionHostsRead, Example: "/jobs/job-1/scans/scan-1/hosts"},
-	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}/hosts/{address}", Permission: auth.PermissionHostsRead, Example: "/jobs/job-1/scans/scan-1/hosts/2001:db8::1"},
-	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}/hosts/{address}/rdap", Permission: auth.PermissionHostsRead, Example: "/jobs/job-1/scans/scan-1/hosts/2001:db8::1/rdap"},
-	{Method: http.MethodGet, Template: "/jobs/{id}/baseline", Permission: auth.PermissionBaselinesRead, Example: "/jobs/job-1/baseline"},
-	{Method: http.MethodPost, Template: "/jobs/{id}/baseline/reset", Permission: auth.PermissionBaselinesManage, Mutates: true, Example: "/jobs/job-1/baseline/reset"},
-	{Method: http.MethodPost, Template: "/jobs/{id}/baseline/approve", Permission: auth.PermissionBaselinesManage, Mutates: true, Example: "/jobs/job-1/baseline/approve"},
-	{Method: http.MethodGet, Template: "/jobs/{id}/baseline/hosts", Permission: auth.PermissionBaselinesRead, Example: "/jobs/job-1/baseline/hosts"},
-	{Method: http.MethodGet, Template: "/jobs/{id}/baseline/hosts/{address}", Permission: auth.PermissionBaselinesRead, Example: "/jobs/job-1/baseline/hosts/198.51.100.1"},
-	{Method: http.MethodGet, Template: "/jobs/{id}/baseline/hosts/{address}/rdap", Permission: auth.PermissionBaselinesRead, Example: "/jobs/job-1/baseline/hosts/198.51.100.1/rdap"},
-	{Method: http.MethodGet, Template: "/jobs/{id}/incidents", Permission: auth.PermissionIncidentsRead, Example: "/jobs/job-1/incidents"},
-	{Method: http.MethodPost, Template: "/jobs/{id}/incidents/accept", Permission: auth.PermissionIncidentsManage, Mutates: true, Example: "/jobs/job-1/incidents/accept"},
-	{Method: http.MethodPost, Template: "/jobs/{id}/incidents/suppress", Permission: auth.PermissionIncidentsManage, Mutates: true, Example: "/jobs/job-1/incidents/suppress"},
-	{Method: http.MethodGet, Template: "/jobs/{id}/events", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/events"},
+	{Method: http.MethodGet, Template: "/jobs", Permission: auth.PermissionJobsRead, Example: "/jobs", Handle: tenantHandler((*Server).listJobs)},
+	{Method: http.MethodPost, Template: "/jobs", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs", Handle: sessionTenantHandler((*Server).createJob)},
+	{Method: http.MethodPost, Template: "/jobs/preview", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/preview", Handle: sessionTenantHandler((*Server).previewJob)},
+	{Method: http.MethodGet, Template: "/jobs/schedule-suggestion", Permission: auth.PermissionJobsRead, Example: "/jobs/schedule-suggestion", Handle: tenantHandler((*Server).scheduleSuggestion)},
+	{Method: http.MethodGet, Template: "/jobs/{id}", Permission: auth.PermissionJobsRead, Example: "/jobs/job-1", TrailingSlash: true, Handle: jobHandler(jobMissingOnAnyError, (*Server).getJob)},
+	{Method: http.MethodPut, Template: "/jobs/{id}", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1", TrailingSlash: true, Handle: (*Server).updateJobRoute},
+	{Method: http.MethodDelete, Template: "/jobs/{id}", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.archiveJob(w, r, c.session, c.tenant, r.PathValue("id"), true)
+	}},
+	{Method: http.MethodDelete, Template: "/jobs/{id}", Query: "permanent=true", Permission: auth.PermissionJobsDelete, Mutates: true, Example: "/jobs/job-1", TrailingSlash: true, Handle: (*Server).permanentDeleteJobRoute},
+	{Method: http.MethodPost, Template: "/jobs/{id}/archive", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1/archive", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.archiveJob(w, r, c.session, c.tenant, r.PathValue("id"), true)
+	}},
+	{Method: http.MethodPost, Template: "/jobs/{id}/restore", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1/restore", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.archiveJob(w, r, c.session, c.tenant, r.PathValue("id"), false)
+	}},
+	{Method: http.MethodPost, Template: "/jobs/{id}/pause", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1/pause", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.enableJob(w, r, c.session, c.tenant, r.PathValue("id"), false)
+	}},
+	{Method: http.MethodPost, Template: "/jobs/{id}/resume", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1/resume", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.enableJob(w, r, c.session, c.tenant, r.PathValue("id"), true)
+	}},
+	{Method: http.MethodPost, Template: "/jobs/{id}/run", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/jobs/job-1/run", TrailingSlash: true, Handle: jobSessionHandler(jobMissingOnAnyError, (*Server).runJob)},
+	{Method: http.MethodDelete, Template: "/jobs/{id}/run", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/jobs/job-1/run", TrailingSlash: true, Handle: jobSessionHandler(jobMissingOnAnyError, (*Server).cancelQueuedRun)},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scan-cycle", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scan-cycle", TrailingSlash: true, Handle: jobHandler(jobStoreErrorInternal, (*Server).scanCycle)},
+	{Method: http.MethodDelete, Template: "/jobs/{id}/scan-cycle/{cycle}", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/jobs/job-1/scan-cycle/cycle-1", TrailingSlash: true, Handle: (*Server).discardScanCycleRoute},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scans", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans", TrailingSlash: true, Handle: jobHandler(jobStoreErrorInternal, (*Server).jobScans)},
+	{Method: http.MethodGet, Template: "/jobs/{id}/pending-changes", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/pending-changes", TrailingSlash: true, Handle: jobHandler(jobStoreErrorInternal, (*Server).jobPendingChanges)},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scans/latest-successful", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans/latest-successful", TrailingSlash: true, Handle: jobHandler(jobMissingOnAnyError, (*Server).latestSuccessfulScan)},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans/scan-1", TrailingSlash: true, Handle: jobScanHandler(jobStoreErrorInternal, scanStoreErrorInternal, (*Server).jobScan)},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}/results", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans/scan-1/results", TrailingSlash: true, Handle: (*Server).jobScanResultsRoute},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}/changes", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans/scan-1/changes", TrailingSlash: true, Handle: jobScanHandler(jobStoreErrorInternal, scanStoreErrorInternal, (*Server).jobScanChanges)},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}/hosts", Permission: auth.PermissionHostsRead, Example: "/jobs/job-1/scans/scan-1/hosts", TrailingSlash: true, Handle: jobScanHandler(jobStoreErrorInternal, scanStoreErrorInternal, (*Server).jobScanHosts)},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}/hosts/{address}", Permission: auth.PermissionHostsRead, Example: "/jobs/job-1/scans/scan-1/hosts/2001:db8::1", TrailingSlash: true, Handle: (*Server).jobScanHostRoute},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}/hosts/{address}/rdap", Permission: auth.PermissionHostsRead, Example: "/jobs/job-1/scans/scan-1/hosts/2001:db8::1/rdap", TrailingSlash: true, Handle: (*Server).jobScanHostRDAPRoute},
+	{Method: http.MethodGet, Template: "/jobs/{id}/baseline", Permission: auth.PermissionBaselinesRead, Example: "/jobs/job-1/baseline", TrailingSlash: true, Handle: jobHandler(jobMissingOnAnyError, (*Server).jobBaseline)},
+	{Method: http.MethodPost, Template: "/jobs/{id}/baseline/reset", Permission: auth.PermissionBaselinesManage, Mutates: true, Example: "/jobs/job-1/baseline/reset", TrailingSlash: true, Handle: (*Server).resetBaselineRoute},
+	{Method: http.MethodPost, Template: "/jobs/{id}/baseline/approve", Permission: auth.PermissionBaselinesManage, Mutates: true, Example: "/jobs/job-1/baseline/approve", TrailingSlash: true, Handle: (*Server).approveBaselineRoute},
+	{Method: http.MethodGet, Template: "/jobs/{id}/baseline/hosts", Permission: auth.PermissionBaselinesRead, Example: "/jobs/job-1/baseline/hosts", TrailingSlash: true, Handle: jobHandler(jobStoreErrorInternal, (*Server).jobBaselineHosts)},
+	{Method: http.MethodGet, Template: "/jobs/{id}/baseline/hosts/{address}", Permission: auth.PermissionBaselinesRead, Example: "/jobs/job-1/baseline/hosts/198.51.100.1", TrailingSlash: true, Handle: (*Server).jobBaselineHostRoute},
+	{Method: http.MethodGet, Template: "/jobs/{id}/baseline/hosts/{address}/rdap", Permission: auth.PermissionBaselinesRead, Example: "/jobs/job-1/baseline/hosts/198.51.100.1/rdap", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.jobBaselineHostRDAP(w, r, c.tenant, r.PathValue("id"), r.PathValue("address"))
+	}},
+	{Method: http.MethodGet, Template: "/jobs/{id}/incidents", Permission: auth.PermissionIncidentsRead, Example: "/jobs/job-1/incidents", TrailingSlash: true, Handle: jobHandler(jobMissingOnAnyError, (*Server).jobIncidents)},
+	{Method: http.MethodPost, Template: "/jobs/{id}/incidents/accept", Permission: auth.PermissionIncidentsManage, Mutates: true, Example: "/jobs/job-1/incidents/accept", TrailingSlash: true, Handle: (*Server).acceptIncidentRoute},
+	{Method: http.MethodPost, Template: "/jobs/{id}/incidents/suppress", Permission: auth.PermissionIncidentsManage, Mutates: true, Example: "/jobs/job-1/incidents/suppress", TrailingSlash: true, Handle: (*Server).suppressIncidentRoute},
+	{Method: http.MethodGet, Template: "/jobs/{id}/events", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/events", TrailingSlash: true, Handle: jobHandler(jobMissingOnAnyError, (*Server).jobEvents)},
 
 	// The unit's security audit, for its administrators.
 	{Method: http.MethodGet, Template: "/audit", Permission: auth.PermissionAuditRead, Example: "/audit", Handle: tenantHandler((*Server).unitAudit)},

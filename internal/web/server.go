@@ -509,11 +509,8 @@ func (s *Server) legacyAPI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden", "your account is not allowed to perform this action", details)
 		return
 	}
-	var ts *store.TenantStore
-	switch {
-	case session.Role == store.RolePlatformAdmin && isPlatformPermission(permission):
-	default:
-		if ts, ok = s.requestTenant(w, r, session); !ok {
+	if session.Role != store.RolePlatformAdmin || !isPlatformPermission(permission) {
+		if _, ok := s.requestTenant(w, r, session); !ok {
 			return
 		}
 	}
@@ -524,18 +521,8 @@ func (s *Server) legacyAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
-	case path == "/jobs" && r.Method == http.MethodGet:
-		s.listJobs(w, r, ts)
-	case path == "/jobs" && r.Method == http.MethodPost:
-		s.createJob(w, r, session, ts)
-	case path == "/jobs/preview" && r.Method == http.MethodPost:
-		s.previewJob(w, r, session, ts)
-	case path == "/jobs/schedule-suggestion" && r.Method == http.MethodGet:
-		s.scheduleSuggestion(w, r, ts)
 	case strings.HasPrefix(path, "/platform/"):
 		s.platformRoute(w, r, session, strings.TrimPrefix(path, "/platform/"))
-	case strings.HasPrefix(path, "/jobs/"):
-		s.jobRoute(w, r, session, ts, strings.TrimPrefix(path, "/jobs/"))
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "endpoint not found", nil)
 	}

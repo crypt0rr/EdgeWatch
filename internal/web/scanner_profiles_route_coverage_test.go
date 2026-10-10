@@ -69,8 +69,8 @@ func TestScannerProfilesRouteLifecycleAndValidationBranches(t *testing.T) {
 	if got := scannerProfileRequest(server, admin, http.MethodGet, createdJSON.ID+"/revisions", ""); got.Code != http.StatusOK {
 		t.Fatalf("revisions status = %d: %s", got.Code, got.Body.String())
 	}
-	if got := scannerProfileRequest(server, admin, http.MethodGet, createdJSON.ID+"/unknown", ""); got.Code != http.StatusNotFound {
-		t.Fatalf("unknown child status = %d", got.Code)
+	if got := scannerProfileRequest(server, admin, http.MethodGet, createdJSON.ID+"/unknown", ""); got.Code != http.StatusForbidden || !strings.Contains(got.Body.String(), `"permission":"route"`) {
+		t.Fatalf("unknown child = %d %s, want the gate's 403 route", got.Code, got.Body.String())
 	}
 
 	preview := `{"engine":"nmap"}`

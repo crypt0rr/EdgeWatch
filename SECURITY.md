@@ -83,9 +83,10 @@ without group or other permissions that the daemon checks before it opens
 the database; the token is compared by its SHA-256 digest in constant time,
 never logged, and limited to 120 requests a minute per client. The metrics
 are deployment aggregates, the health, heartbeat age, migration state, scan
-slots, notification backlog, database size, sandbox states, and release
-check, without a label that names a unit, an account, a job, a target, or a
-destination. Keep `/metrics` off a public proxy.
+slots, notification backlog, locked notification destinations, database
+size, sandbox states, and release check, without a label that names a unit,
+an account, a job, a target, or a destination. Keep `/metrics` off a public
+proxy.
 
 The daemon also reports the deployment's own health to the platform
 destinations that platform administrators select for deployment alerts: a
@@ -97,8 +98,10 @@ reaches a unit's destinations. A restart with the same state records nothing;
 a sandbox or rollback alert is sent at most once an hour, and failed
 deliveries are reported at most every six hours, without counting a failed
 deployment alert. A missing or replaced notification key locks the
-platform's destinations too, so it cannot be reported this way; `/healthz`,
-the metrics, and `notify test` remain the way to see it. Keep the
+platform's destinations too, so it cannot be reported this way, and
+`/healthz`, which reads only the migration and daemon state, still answers
+`ready`; the `edgewatch_notification_destinations_locked` metric, the locked
+count on Notifications, and `notify test` are the way to see it. Keep the
 Docker host and any SSH tunnel access restricted to trusted administrators.
 When an untrusted tunnel or reverse proxy makes every remote client appear as
 the same loopback peer, all login attempts are throttled after five failed
@@ -709,9 +712,10 @@ business units or accounts (`admin`, `scan`, `status`, `history`, `baseline`, an
 test`) refuse a schema that the daemon has not upgraded yet, such as a
 restored backup of an older release, before they read or write anything, so
 account recovery never reports an existing account as missing. The daemon
-checks `web.auth_key_file`, `notifications.encryption_key_file`, and the
-notification URLs in config.yaml before it opens the database, so a start
-that these refuse never migrates it; `config validate` runs the same checks.
+checks `web.auth_key_file`, `notifications.encryption_key_file`, the
+notification URLs in config.yaml, and, with `web.metrics.enabled`, the token
+in `web.metrics.token_file` before it opens the database, so a start that
+these refuse never migrates it; `config validate` runs the same checks.
 Schema 51 keeps every security audit record, attributes it to the default
 tenant, and adds a category derived from its action. Update alert routing and
 the public status publication move to the default tenant unchanged: alerts go

@@ -949,8 +949,9 @@ func printValue(format string, v any) error {
 	return nil
 }
 
-// validateStartupConfig checks the configured key files and the notification
-// URLs from config.yaml as the daemon's startup does, with no database: the
+// validateStartupConfig checks the configured key files, the notification
+// URLs from config.yaml, and the metrics token file when the metrics
+// endpoint is enabled, as the daemon's startup does, with no database: the
 // daemon runs it before it opens and migrates the database, and config
 // validate runs it after config.Load. The URL error names only a digest
 // prefix. app.New keeps its own checks for embedded callers.

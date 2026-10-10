@@ -1130,6 +1130,17 @@ func (n *Notifier) LockedDestinations(ctx context.Context) (int, error) {
 	return 0, nil
 }
 
+// LockedDestinationCount returns how many enabled web-managed destinations,
+// of every tenant and of the platform, are locked in the destinations that
+// the notifier loaded last: the notification key is missing, unreadable, or
+// not the one that sealed them, or their URL is no longer valid. Each
+// delivery pass loads them again, so the count follows a lost or replaced
+// key without a database read of its own. It is a count only, as
+// LockedDestinations.
+func (n *Notifier) LockedDestinationCount() int {
+	return len(n.lockedDestinationKeys())
+}
+
 // CheckKey opens every web-managed destination stored in the database of s,
 // of every tenant and of the platform, paused or not, with the notification
 // key at keyPath, as Reload would, and returns how many destinations there

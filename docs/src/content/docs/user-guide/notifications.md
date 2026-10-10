@@ -169,9 +169,11 @@ rollback within the hour is recorded in the platform audit without being sent
 again. Failed alerts are reported at most once every six hours, and the
 failure of a deployment alert itself is not counted, so it cannot start a
 loop. A lost or replaced `notification.key` locks every destination, the
-platform's too, so it cannot be reported this way; watch for it with
-[`/healthz` and the metrics](/operations/troubleshooting/#monitor-the-monitor)
-or `edgewatch notify test`.
+platform's too, so it cannot be reported this way, and `/healthz` stays
+`ready` because the daemon keeps running. Watch for it with the
+`edgewatch_notification_destinations_locked` metric (see
+[Monitor the monitor](/operations/troubleshooting/#monitor-the-monitor)),
+the locked count on **Notifications**, or `edgewatch notify test`.
 
 ## Incident reminders
 

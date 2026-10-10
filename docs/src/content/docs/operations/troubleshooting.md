@@ -39,11 +39,19 @@ For Prometheus, turn on the opt-in `GET /metrics` with `web.metrics.enabled`
 and a bearer token in `web.metrics.token_file`; see
 [the configuration reference](/reference/configuration/#metrics). It reports
 deployment aggregates only, such as the heartbeat age, the migration state,
-the scan slots, the notification backlog, the database size, and the sandbox
-states, never a unit's name, job, or target. The metric names are listed in
+the scan slots, the notification backlog, the locked notification
+destinations, the database size, and the sandbox states, never a unit's
+name, job, or target. The metric names are listed in
 [the API reference](/reference/api-compatibility/#health-and-metrics). Keep
 `/metrics` off a public reverse proxy; see
 [Reverse proxies](/deployment/reverse-proxies/).
+
+A lost or replaced notification key locks every web-managed destination, the
+platform's too, so no alert can report it, and `/healthz` stays `ready`
+because the daemon keeps running. Alert on
+`edgewatch_notification_destinations_locked` above zero, or run
+`edgewatch notify test` after a restore; see
+[Destinations are locked or delivery fails](#destinations-are-locked-or-delivery-fails).
 
 ## Permission denied on startup
 

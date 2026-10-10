@@ -27,9 +27,10 @@ schema version with the error
 database with the release that upgraded it, or copy `./data` while
 EdgeWatch is stopped. A daemon that finds another daemon's live lease exits
 before it migrates the database, and so does a daemon whose configured key
-file or notification URL is unusable (see `config validate` under
-[Host commands](/reference/cli/)). Keep encryption keys with the database or
-encrypted web-managed destinations and never commit them.
+file, notification URL, or metrics token file is unusable (see
+`config validate` under [Host commands](/reference/cli/)). Keep encryption
+keys with the database or encrypted web-managed destinations and never
+commit them.
 
 ## Upgrade floor
 

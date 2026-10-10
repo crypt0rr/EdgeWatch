@@ -360,6 +360,7 @@ job, a target, or a destination:
 | `edgewatch_notification_outbox_pending` | | Alerts still to be delivered, including those retrying. |
 | `edgewatch_notification_outbox_retrying` | | Alerts whose delivery failed at least once and is retried. |
 | `edgewatch_notification_outbox_terminal` | | Alerts that failed for good and are kept in the outbox. |
+| `edgewatch_notification_destinations_locked` | | Enabled web-managed destinations, of every unit and the platform, that alerts cannot reach: the notification key cannot open them, or their URL is no longer valid. It follows a lost or replaced key from the next delivery pass, normally within 30 seconds. |
 | `edgewatch_telemetry_collected_timestamp_seconds` | | When the database and outbox counts were read; they are read at most every 30 seconds. |
 | `edgewatch_scanner_sandbox_state` | `state`: `sandboxed`, `identity_only`, `landlock_only`, `unconfined` | `1` for how scanner processes are confined. |
 | `edgewatch_notification_sandbox_state` | `state`, as above | `1` for how the notification process is confined. |

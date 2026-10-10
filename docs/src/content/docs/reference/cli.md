@@ -73,8 +73,11 @@ copyable `admin reset-password` and `admin disable-totp` commands.
 `config validate` runs every check of the daemon's startup that needs no
 database: the deployment settings, the notification URLs file, the key in
 `web.auth_key_file` and in `notifications.encryption_key_file` when they are
-set (present, private to its owner, and well formed), and the syntax of each
-notification URL in `notifications.urls` and `notifications.urls_file`. It
+set (present, private to its owner, and well formed), the bearer token in
+`web.metrics.token_file` when `web.metrics.enabled` is true (a regular file
+without group or other permissions that holds 32 to 1024 printable
+characters without spaces), and the syntax of each notification URL in
+`notifications.urls` and `notifications.urls_file`. It
 prints the normalized configuration with `"valid": true`, or `"valid": false`
 with the reason and exits non-zero. An invalid URL is named by a digest
 prefix, never by the URL. The daemon runs the same checks before it opens the

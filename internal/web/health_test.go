@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -116,6 +118,69 @@ func TestHealthzAnswersEachHealthOutcome(t *testing.T) {
 	}
 	if response := getHealthz(server, http.MethodGet, "192.0.2.50"); response.Code != http.StatusOK {
 		t.Errorf("cached GET /healthz = %d, want the cached ready answer", response.Code)
+	}
+}
+
+// recordDaemonHeartbeat records a fresh daemon heartbeat, so a fresh
+// database's health is ready.
+func recordDaemonHeartbeat(t *testing.T, db *store.Store) {
+	t.Helper()
+	if _, err := db.DB.Exec(`INSERT OR REPLACE INTO daemon_lease(id,owner,heartbeat) VALUES(1,'daemon',?)`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A client that drops its connection cancels its request's context. The
+// answer that its request reads is every client's, so the read ignores that
+// cancellation: the next client still gets ready, not an unhealthy answer
+// cached from a cancelled read.
+func TestHealthzIgnoresACancelledRequest(t *testing.T) {
+	t.Parallel()
+	server, db := newHealthServer(t)
+	recordDaemonHeartbeat(t, db)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil).WithContext(ctx)
+	request.RemoteAddr = "198.51.100.7:4000"
+	dropped := httptest.NewRecorder()
+	server.Handler().ServeHTTP(dropped, request)
+	if dropped.Code != http.StatusOK {
+		t.Errorf("cancelled GET /healthz = %d %s, want the deployment's ready answer", dropped.Code, dropped.Body.String())
+	}
+	if response := getHealthz(server, http.MethodGet, "192.0.2.64"); response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != `{"status":"ready"}` {
+		t.Errorf("GET /healthz after a cancelled request = %d %s, want 200 ready", response.Code, response.Body.String())
+	}
+}
+
+// The cached answer is dated when its read ends, so an answer whose read
+// took longer than the TTL is still reused for the TTL after it, and the
+// requests that waited for it do not each read again.
+func TestHealthzDatesTheAnswerWhenTheReadEnds(t *testing.T) {
+	t.Parallel()
+	server, db := newHealthServer(t)
+	recordDaemonHeartbeat(t, db)
+	// The first read starts at start and ends 1.5 s later, as a slow
+	// database read would. The next requests come 2 s and 2.6 s after
+	// start, and the last read ends then too.
+	start := time.Now().UTC()
+	readings := []time.Duration{0, 1500 * time.Millisecond, 2 * time.Second, 2600 * time.Millisecond}
+	var next atomic.Int64
+	server.now = func() time.Time {
+		return start.Add(readings[min(int(next.Add(1)-1), len(readings)-1)])
+	}
+	if status := server.readHealth(context.Background()); status != healthReady {
+		t.Fatalf("first answer = %q", status)
+	}
+	if _, err := db.DB.Exec(`DELETE FROM daemon_lease`); err != nil {
+		t.Fatal(err)
+	}
+	// 500 ms after the first read ended, its answer is reused.
+	if status := server.readHealth(context.Background()); status != healthReady {
+		t.Errorf("answer 500 ms after the read ended = %q, want the cached ready answer", status)
+	}
+	// 1.1 s after it ended, the answer is read again.
+	if status := server.readHealth(context.Background()); status != healthUnhealthy {
+		t.Errorf("answer 1.1 s after the read ended = %q, want a new unhealthy answer", status)
 	}
 }
 
@@ -238,6 +303,7 @@ func TestMetricsReportDeploymentAggregatesOnly(t *testing.T) {
 		"edgewatch_notification_outbox_pending 0",
 		"edgewatch_notification_outbox_retrying 0",
 		"edgewatch_notification_outbox_terminal 0",
+		"edgewatch_notification_destinations_locked 0",
 		`edgewatch_update_check_status{status="development_build"} 1`,
 		"edgewatch_update_available 0",
 		`edgewatch_build_info{version="dev"} 1`,
@@ -255,6 +321,41 @@ func TestMetricsReportDeploymentAggregatesOnly(t *testing.T) {
 	for _, line := range strings.Split(strings.TrimSpace(body), "\n") {
 		if !strings.HasPrefix(line, "# ") && !sample.MatchString(line) {
 			t.Errorf("malformed sample %q", line)
+		}
+	}
+}
+
+// A lost or replaced notification key locks every web-managed destination,
+// the platform's too, so no alert can report it; /metrics counts the
+// enabled destinations that are locked once a delivery pass loads them
+// again. A paused destination gets no alert and is not counted.
+func TestMetricsCountLockedNotificationDestinations(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	server, db := newHealthServer(t)
+	server.configureMetrics(config.WebMetrics{Enabled: true, TokenFile: writeMetricsToken(t, metricsTestToken, 0o600)})
+	unit := server.App.Notifier.Tenant(defaultTenantStore(server))
+	for name, enabled := range map[string]bool{"Ops": true, "Paused": false} {
+		if _, err := unit.CreateManagedWithAudit(ctx, name, "generic://127.0.0.1:9/"+strings.ToLower(name)+"?disabletls=yes", enabled, store.AuditEntry{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if body := getMetrics(server, "Bearer "+metricsTestToken, "192.0.2.85").Body.String(); !strings.Contains(body, "\nedgewatch_notification_destinations_locked 0\n") {
+		t.Errorf("/metrics with the key lacks a zero locked count:\n%s", body)
+	}
+	if err := os.Remove(filepath.Join(filepath.Dir(db.Path), "notification.key")); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.App.Notifier.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	body := getMetrics(server, "Bearer "+metricsTestToken, "192.0.2.85").Body.String()
+	if !strings.Contains(body, "\nedgewatch_notification_destinations_locked 1\n") {
+		t.Errorf("/metrics without the key lacks one locked destination:\n%s", body)
+	}
+	for _, detail := range []string{"generic://", "127.0.0.1:9", "Ops", "Paused"} {
+		if strings.Contains(body, detail) {
+			t.Errorf("/metrics names %q:\n%s", detail, body)
 		}
 	}
 }

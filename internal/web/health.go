@@ -58,7 +58,10 @@ func healthStatus(health store.HealthStatus, err error) string {
 
 // readHealth returns the health answer, from the cache when it is fresh.
 // The lock is held while the answer is read, so concurrent requests share
-// one read.
+// one read. The answer is every client's, so the read ignores the
+// cancellation of the request that makes it: a client that drops its
+// connection must not cache unhealthy for the others. The answer is dated
+// when the read ends, so a slow read is still reused for the whole TTL.
 func (s *Server) readHealth(ctx context.Context) string {
 	s.healthMu.Lock()
 	defer s.healthMu.Unlock()
@@ -68,12 +71,12 @@ func (s *Server) readHealth(ctx context.Context) string {
 	}
 	status := healthUnhealthy
 	if s.Store != nil {
-		readCtx, cancel := context.WithTimeout(ctx, healthReadTimeout)
+		readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), healthReadTimeout)
 		health, err := s.Store.Platform().HealthStatus(readCtx)
 		cancel()
 		status = healthStatus(health, err)
 	}
-	s.health = healthAnswer{status: status, at: now}
+	s.health = healthAnswer{status: status, at: s.currentTime()}
 	return status
 }
 
@@ -250,10 +253,11 @@ var (
 
 // writeMetrics writes the deployment's metrics. They are deployment
 // aggregates only: the build, the health and its heartbeat, the migration
-// state, the scan slots, the notification outbox, the database size, the
-// sandbox states, and the update check. No metric has a label that names a
-// business unit, an account, a job, a target, or a destination, and the
-// names are stable; see the API reference.
+// state, the scan slots, the notification outbox, the locked notification
+// destinations, the database size, the sandbox states, and the update
+// check. No metric has a label that names a business unit, an account, a
+// job, a target, or a destination, and the names are stable; see the API
+// reference.
 func (s *Server) writeMetrics(ctx context.Context, b *bytes.Buffer) {
 	m := metricsWriter{b: b}
 	version := s.Version
@@ -310,6 +314,11 @@ func (s *Server) writeMetrics(ctx context.Context, b *bytes.Buffer) {
 		m.gauge("edgewatch_notification_outbox_retrying", "Alerts whose delivery failed at least once and is retried.", float64(telemetry.OutboxRetrying))
 		m.gauge("edgewatch_notification_outbox_terminal", "Alerts whose delivery failed for good.", float64(telemetry.OutboxFailed))
 		m.gauge("edgewatch_telemetry_collected_timestamp_seconds", "When the database and outbox counts were read, as a Unix time.", float64(telemetry.CollectedAt.Unix()))
+	}
+	if s.App != nil && s.App.Notifier != nil {
+		// A lost or replaced notification key locks every web-managed
+		// destination, the platform's too, so no alert can report it.
+		m.gauge("edgewatch_notification_destinations_locked", "Enabled web-managed destinations that alerts cannot reach, because the notification key cannot open them or their URL is no longer valid.", float64(s.App.Notifier.LockedDestinationCount()))
 	}
 
 	if s.App != nil {

@@ -304,8 +304,8 @@ func isMutation(method string) bool {
 // are served without a session, after the browser origin check for those
 // that change state. Every other request is authenticated read-only, checked
 // for its CSRF token when it is a mutation, and refused unless it has a route
-// whose permission the session holds; auth.HasPermission also refuses a
-// session that must enrol TOTP first everything but its own account.
+// whose permission the session holds; auth.HasPermission also holds a
+// session that must enrol TOTP first to its own account's routes.
 func (s *Server) serveRoute(w http.ResponseWriter, r *http.Request, route *apiRoute) {
 	if route != nil && route.Access == routeUnauthenticated {
 		if route.Mutates && !validateBrowserOrigin(r) {

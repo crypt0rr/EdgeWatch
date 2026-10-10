@@ -160,9 +160,11 @@ still fails before any document is printed.
 
 `health` needs shell access to the container. From v0.36.0, a monitor
 outside it can poll `GET /healthz` on the console's listener instead, which
-reports the same migration and heartbeat outcome as one word, `ready`,
+reports the migration and heartbeat outcome as one word, `ready`,
 `starting`, or `unhealthy`, without the reason, the warnings, or the
-sandboxes; Prometheus can scrape the opt-in `GET /metrics`. See
+sandboxes. The daemon answers it from before it migrates the database; a
+migration that fails ends the daemon, so only `health` reports that
+failure; Prometheus can scrape the opt-in `GET /metrics`. See
 [Monitor the monitor](/operations/troubleshooting/#monitor-the-monitor). The
 bundled Compose health check keeps running `health`, which also covers the
 sandboxes and backups.

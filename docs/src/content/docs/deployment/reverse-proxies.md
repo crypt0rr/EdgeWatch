@@ -90,7 +90,9 @@ working.
 `GET /healthz` answers only `{"status":"ready"}`, `{"status":"starting"}`,
 or `{"status":"unhealthy"}`, needs no session, and accepts any `Host`, as the
 public status pages do, so an uptime checker can reach it through the proxy
-or on the loopback listener. It is rate limited to 120 requests a minute for
+or on the loopback listener. The daemon answers it while it migrates the
+database too; until the console is up, the proxy gets `503` for every other
+path. It is rate limited to 120 requests a minute for
 each client; behind a proxy that `web.trusted_proxies` does not list, every
 client shares the proxy's budget.
 

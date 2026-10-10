@@ -328,12 +328,23 @@ public status pages do. Its body is always one key, `status`:
 | Status | Code | Meaning |
 | --- | --- | --- |
 | `ready` | `200` | The daemon's heartbeat is less than two minutes old. |
-| `starting` | `503` | A startup migration runs and its heartbeat is recent. |
-| `unhealthy` | `503` | A migration failed or stalled, the daemon heartbeat is stale or missing, or the database cannot be read. |
+| `starting` | `503` | The daemon starts: it migrates the database with a recent heartbeat, or has not served the console yet. |
+| `unhealthy` | `503` | A migration stalled or an earlier start left a failed one, the daemon heartbeat is stale or missing, or the database cannot be read. |
 | `rate_limited` | `429` | The client sent more than 120 requests in a minute; `Retry-After: 60`. |
 
 Other methods get `405` with `{"status":"method_not_allowed"}`. The answer
 carries no reason, phase, version, or unit, and is reused for one second.
+
+The daemon opens the listener before it opens and migrates the database.
+Until it serves the console, the listener answers `/healthz` and `/metrics`
+from the database's startup state, which it reads through a read-only handle
+that never migrates or writes, and every other path, the console and both
+APIs, with `503` and the error code `starting`. A migration that fails ends
+the daemon and closes the listener, as before, so `edgewatch health` and the
+log report the failure, and a check that gets no answer should count as
+unhealthy. When the address cannot be opened before the migration, the
+daemon opens it after the migration, as earlier releases did, and fails its
+start there if the address is still taken.
 
 `GET /metrics` (and `HEAD`) answers `404` unless `web.metrics.enabled` is
 true. Then it needs `Authorization: Bearer <token>` with the token of
@@ -343,7 +354,9 @@ file that cannot be read keeps the endpoint at `503 metrics_unavailable`.
 Each client may send 120 requests a minute (`429 rate_limited`). The answer
 is `text/plain; version=0.0.4` and holds only these gauges; their names and
 labels are stable, and a label never names a business unit, an account, a
-job, a target, or a destination:
+job, a target, or a destination. Until the daemon serves the console, it
+holds only `edgewatch_build_info`, `edgewatch_health_status`, and the
+`edgewatch_migration_*` gauges:
 
 | Metric | Labels | Value |
 | --- | --- | --- |

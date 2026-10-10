@@ -90,6 +90,11 @@ type Server struct {
 	health   healthAnswer
 	// metrics is the configured metrics endpoint; see configureMetrics.
 	metrics metricsSettings
+	// startupDatabase is the database path of the startup server, which
+	// serves the listener while the daemon opens and migrates the database
+	// and reads the health from it through a read-only handle; see
+	// ListenForStartup. It is empty on the console's server.
+	startupDatabase string
 	// writeTimeout bounds ordinary HTTP responses. SSE clears this deadline
 	// explicitly in stream because that endpoint is intentionally long-lived.
 	// It is configurable only for deterministic server tests; production uses
@@ -321,17 +326,28 @@ func (s *Server) noteUntrustedProxy(r *http.Request) {
 }
 
 func (s *Server) ListenAndServe(ctx context.Context, address string) error {
-	if address == "" {
-		address = "127.0.0.1:8080"
-	}
-	if err := validateListenAddress(address); err != nil {
-		return err
-	}
-	listener, err := net.Listen("tcp", address)
+	listener, address, err := listenConsole(address)
 	if err != nil {
 		return err
 	}
 	return s.serveListener(ctx, listener, address, s.Handler())
+}
+
+// listenConsole opens the console's listener on address, or on
+// 127.0.0.1:8080 when it is empty, after checking that it is a loopback
+// address. It returns the address that it listens on.
+func listenConsole(address string) (net.Listener, string, error) {
+	if address == "" {
+		address = "127.0.0.1:8080"
+	}
+	if err := validateListenAddress(address); err != nil {
+		return nil, address, err
+	}
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, address, err
+	}
+	return listener, address, nil
 }
 
 // serveListener runs the HTTP server and does not return until a graceful

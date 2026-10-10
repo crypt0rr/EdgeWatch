@@ -77,7 +77,11 @@ endpoints on its listener answer outside the console's API. `GET /healthz`
 needs no session and no approved host name, like the public status pages,
 and is limited to 120 requests a minute per client; it answers one word,
 `ready`, `starting`, `unhealthy`, or `rate_limited`, and never a reason, a
-version, or a unit. `GET /metrics` is off unless `web.metrics.enabled` is
+version, or a unit. The daemon opens the listener before it migrates the
+database; until the console is up, a startup server without a store or a
+session answers only these two endpoints, from the startup state that it
+reads through a read-only database handle, and every other path with `503`.
+`GET /metrics` is off unless `web.metrics.enabled` is
 true, and then needs the bearer token of `web.metrics.token_file`, a file
 without group or other permissions that the daemon checks before it opens
 the database; the token is compared by its SHA-256 digest in constant time,

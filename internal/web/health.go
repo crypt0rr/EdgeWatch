@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -56,6 +57,52 @@ func healthStatus(health store.HealthStatus, err error) string {
 	}
 }
 
+// startupHealthStatus is healthStatus while the daemon opens and migrates
+// the database, before the console is served: the process is starting, so
+// the answer is starting unless the database reports a stalled migration, a
+// failed one that an earlier start left, or a schema that this release does
+// not open. A database or startup state that the daemon has not created yet,
+// a recorded state that its migration has not replaced yet, and a finished
+// migration whose daemon has not taken its lease yet are starting too.
+func startupHealthStatus(health store.HealthStatus, err error) string {
+	switch {
+	case errors.Is(err, store.ErrStartupNotRecorded):
+		return healthStarting
+	case err == nil:
+		return healthStarting
+	case health.Status == healthReady:
+		return healthStarting
+	default:
+		return healthUnhealthy
+	}
+}
+
+// loadHealth reads the daemon's health: from the store once the daemon has
+// opened it, and before that, on the startup server, through a read-only
+// handle of the database, see store.ReadStartupHealth. A server with neither
+// reports an error.
+func (s *Server) loadHealth(ctx context.Context) (store.HealthStatus, error) {
+	readCtx, cancel := context.WithTimeout(ctx, healthReadTimeout)
+	defer cancel()
+	switch {
+	case s.startupDatabase != "":
+		return store.ReadStartupHealth(readCtx, s.startupDatabase)
+	case s.Store != nil:
+		return s.Store.Platform().HealthStatus(readCtx)
+	default:
+		return store.HealthStatus{}, errors.New("the database is not open")
+	}
+}
+
+// healthAnswerOf maps the health that loadHealth read to the answer of
+// GET /healthz.
+func (s *Server) healthAnswerOf(health store.HealthStatus, err error) string {
+	if s.startupDatabase != "" {
+		return startupHealthStatus(health, err)
+	}
+	return healthStatus(health, err)
+}
+
 // readHealth returns the health answer, from the cache when it is fresh.
 // The lock is held while the answer is read, so concurrent requests share
 // one read. The answer is every client's, so the read ignores the
@@ -69,13 +116,7 @@ func (s *Server) readHealth(ctx context.Context) string {
 	if s.health.status != "" && now.Sub(s.health.at) < healthCacheTTL && !now.Before(s.health.at) {
 		return s.health.status
 	}
-	status := healthUnhealthy
-	if s.Store != nil {
-		readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), healthReadTimeout)
-		health, err := s.Store.Platform().HealthStatus(readCtx)
-		cancel()
-		status = healthStatus(health, err)
-	}
+	status := s.healthAnswerOf(s.loadHealth(context.WithoutCancel(ctx)))
 	s.health = healthAnswer{status: status, at: s.currentTime()}
 	return status
 }
@@ -257,7 +298,8 @@ var (
 // destinations, the database size, the sandbox states, and the update
 // check. No metric has a label that names a business unit, an account, a
 // job, a target, or a destination, and the names are stable; see the API
-// reference.
+// reference. The startup server, which has no store yet, writes the build,
+// the health, and the migration only.
 func (s *Server) writeMetrics(ctx context.Context, b *bytes.Buffer) {
 	m := metricsWriter{b: b}
 	version := s.Version
@@ -267,16 +309,8 @@ func (s *Server) writeMetrics(ctx context.Context, b *bytes.Buffer) {
 	m.family("edgewatch_build_info", "The running EdgeWatch build, by version.")
 	m.sample("edgewatch_build_info", 1, "version", version)
 
-	var health store.HealthStatus
-	var healthErr error
-	if s.Store != nil {
-		readCtx, cancel := context.WithTimeout(ctx, healthReadTimeout)
-		health, healthErr = s.Store.Platform().HealthStatus(readCtx)
-		cancel()
-	} else {
-		healthErr = context.Canceled
-	}
-	status := healthStatus(health, healthErr)
+	health, healthErr := s.loadHealth(ctx)
+	status := s.healthAnswerOf(health, healthErr)
 	m.stateSet("edgewatch_health_status", "The answer of GET /healthz, 1 for the current status.", "status", status, metricsHealthStates)
 	if status == healthReady && !health.UpdatedAt.IsZero() {
 		m.gauge("edgewatch_daemon_heartbeat_age_seconds", "Seconds since the daemon last renewed its lease.", max(s.currentTime().Sub(health.UpdatedAt).Seconds(), 0))
@@ -331,6 +365,11 @@ func (s *Server) writeMetrics(ctx context.Context, b *bytes.Buffer) {
 		}
 	}
 
+	if s.Store == nil {
+		// The startup server reports only the build, the health, and the
+		// migration until the daemon has opened the database.
+		return
+	}
 	updates := s.applicationUpdateStatus(ctx)
 	m.stateSet("edgewatch_update_check_status", "The release check, 1 for the current status.", "status", updates.Status, metricsUpdateStatuses)
 	m.gauge("edgewatch_update_available", "Whether a newer release is available.", boolMetric(updates.Available))

@@ -204,6 +204,9 @@ locked. The startup phases that read their progress before they write, such
 as the backfills, take the database's write lock first, so a host command
 that writes while they run, such as `scan` or `admin`, makes them wait, up
 to the five-second busy timeout, instead of failing the daemon's start.
+The daemon also opens its listener before it migrates, so `GET /healthz`
+answers `starting` during a long upgrade; see
+[Monitor the monitor](/operations/troubleshooting/#monitor-the-monitor).
 
 ## Schemas 48 to 54
 

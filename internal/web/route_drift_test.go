@@ -27,6 +27,7 @@ var routePathReaders = map[string]string{
 	"asset":          "serves the embedded console assets",
 	"spa":            "serves the console shell and static files, and rejects every /api/ path",
 	"requestLogging": "logs the path of each request",
+	"startupHandler": "serves /healthz, /metrics, and 503 starting for every other path while the daemon migrates, before any route is served",
 }
 
 // handlerPatterns are the patterns that Handler registers on the outer

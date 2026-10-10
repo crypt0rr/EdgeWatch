@@ -27,11 +27,16 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 It needs no session and no approved host name, and answers only
-`{"status":"ready"}` with `200`, or `{"status":"starting"}` while a migration
-runs or `{"status":"unhealthy"}` with `503`: for a failed or stalled
-migration, a daemon heartbeat older than two minutes, no daemon, or a
-database that cannot be read. It names no reason and no unit; run
-`edgewatch health` for the details. Each client may send 120 requests a
+`{"status":"ready"}` with `200`, or with `503` `{"status":"starting"}` while
+the daemon starts and migrates the database, or `{"status":"unhealthy"}`: for
+a stalled migration, a daemon heartbeat older than two minutes or missing, or
+a database that cannot be read. The daemon opens its listener before it
+migrates the database, so a long upgrade answers `starting` instead of
+refusing the connection, and every other path answers `503` until the
+console is up. A migration that fails ends the daemon, and its listener with
+it, so count a check that gets no answer as unhealthy; `edgewatch health`
+and the daemon log report the error. The answer names no reason and no
+unit; run `edgewatch health` for the details. Each client may send 120 requests a
 minute, as for the public status pages, and gets `{"status":"rate_limited"}`
 with `429` beyond that. The answer is reused for one second.
 

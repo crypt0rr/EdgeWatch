@@ -34,6 +34,15 @@ var version = "dev"
 // path without terminating the test binary.
 var exitProcess = os.Exit
 
+// commandContext is the parent context of a command, and wrapLogHandler
+// wraps the handler of its logger. They are variables so that the daemon
+// startup test can stop the daemon without a signal and pause its
+// migration at one of its log records.
+var (
+	commandContext = context.Background
+	wrapLogHandler = func(handler slog.Handler) slog.Handler { return handler }
+)
+
 // Final scan persistence is allowed up to five minutes for a large host
 // inventory. Keep the component join deadline above that bound so a graceful
 // container stop can finish the transaction before Docker sends SIGKILL.
@@ -180,7 +189,7 @@ func run(args []string) error {
 		}
 		notify.SetSandbox(notificationSandbox)
 	}
-	ctx, stop := contextWithSignals(context.Background())
+	ctx, stop := contextWithSignals(commandContext())
 	defer stop()
 	if cmd == "verify" && *fromPath != "" {
 		// A backup file is checked on a private copy, without opening the
@@ -237,13 +246,17 @@ func run(args []string) error {
 	// Initialize the configured logger before opening the writable store so
 	// migration and resumable-backfill progress uses the same structured output
 	// as the rest of the daemon.
-	logger := newLoggerTo(commandLogWriter(cmd), cfg.LogLevel(), deploymentLocation(cfg))
+	logger := slog.New(wrapLogHandler(newLoggerTo(commandLogWriter(cmd), cfg.LogLevel(), deploymentLocation(cfg)).Handler()))
 	// health, verify, and backup work on the whole database, of the current
 	// schema or of an older one, so that a restored older backup can be
 	// verified and backed up before the daemon upgrades it. The other
 	// commands act on business units or accounts, whose rows the migrations
 	// reshape: they refuse a database that the daemon has not upgraded yet.
 	var openStore func(string) (*store.Store, error)
+	// The daemon's listener opens before the migration, see below. A start
+	// that fails before the console's server takes it over closes it.
+	var startup *web.StartupListener
+	defer func() { _ = startup.Close() }()
 	switch {
 	case cmd == "health" || cmd == "verify":
 		openStore = store.OpenReadOnlyExisting
@@ -267,6 +280,19 @@ func run(args []string) error {
 					return nil, err
 				}
 				logger.Warn("could not check the daemon lease before migration", "error", err)
+			}
+			// Open the console's listener before the migration, so that
+			// GET /healthz answers starting while the database is
+			// migrated instead of refusing the connection like a daemon
+			// that is down; see web.ListenForStartup. A listener that
+			// cannot be opened yet does not stop the start: runDaemon
+			// opens it once the database is ready, as before, and fails
+			// the start there if it still cannot.
+			listener, err := web.ListenForStartup(cfg.Web, path, version, logger)
+			if err != nil {
+				logger.Warn("the web listener could not be opened before the database migration; it is opened once the daemon has started", "error", err)
+			} else {
+				startup = listener
 			}
 			return store.OpenWithLogger(path, logger)
 		}
@@ -344,7 +370,7 @@ func run(args []string) error {
 	}
 	switch cmd {
 	case "daemon":
-		return runDaemon(ctx, application, cfg.Web.Listen, s, logger)
+		return runDaemon(ctx, application, cfg.Web.Listen, startup, s, logger)
 	case "scan":
 		if *jobName == "" {
 			return errors.New("--job is required")
@@ -687,12 +713,21 @@ func adminRecovery(ctx context.Context, action string, s *store.Store, passwordF
 	}
 }
 
-func runDaemon(ctx context.Context, application *app.App, listen string, s *store.Store, logger *slog.Logger) error {
+// runDaemon runs the daemon and the console's server until ctx ends or one
+// of them fails. The console's server takes over startup, the listener that
+// answered health checks while the database was migrated, or listens on
+// listen when the daemon could not open that listener before the migration.
+func runDaemon(ctx context.Context, application *app.App, listen string, startup *web.StartupListener, s *store.Store, logger *slog.Logger) error {
 	runCtx, _ := application.BeginRun(ctx)
 	server := web.NewServer(application, s, logger)
 	errCh := make(chan error, 2)
 	go runComponent(errCh, logger, "daemon", func() error { return application.Daemon(runCtx) })
-	go runComponent(errCh, logger, "web", func() error { return server.ListenAndServe(runCtx, listen) })
+	go runComponent(errCh, logger, "web", func() error {
+		if startup != nil {
+			return server.ServeStartupListener(runCtx, startup)
+		}
+		return server.ListenAndServe(runCtx, listen)
+	})
 	first := <-errCh
 	// One component returning (including an HTTP bind or daemon lease error)
 	// must stop the other component before the database is closed by run(). A

@@ -67,6 +67,32 @@ func accountHandler(handle func(*Server, http.ResponseWriter, *http.Request, sto
 	}
 }
 
+// idHandler, sessionIDHandler, tenantIDHandler and sessionTenantIDHandler
+// adapt the handlers of routes whose one path value is {id}.
+func idHandler(handle func(*Server, http.ResponseWriter, *http.Request, string)) routeHandler {
+	return func(s *Server, w http.ResponseWriter, r *http.Request, _ routeCall) {
+		handle(s, w, r, r.PathValue("id"))
+	}
+}
+
+func sessionIDHandler(handle func(*Server, http.ResponseWriter, *http.Request, store.Session, string)) routeHandler {
+	return func(s *Server, w http.ResponseWriter, r *http.Request, call routeCall) {
+		handle(s, w, r, call.session, r.PathValue("id"))
+	}
+}
+
+func tenantIDHandler(handle func(*Server, http.ResponseWriter, *http.Request, *store.TenantStore, string)) routeHandler {
+	return func(s *Server, w http.ResponseWriter, r *http.Request, call routeCall) {
+		handle(s, w, r, call.tenant, r.PathValue("id"))
+	}
+}
+
+func sessionTenantIDHandler(handle func(*Server, http.ResponseWriter, *http.Request, store.Session, *store.TenantStore, string)) routeHandler {
+	return func(s *Server, w http.ResponseWriter, r *http.Request, call routeCall) {
+		handle(s, w, r, call.session, call.tenant, r.PathValue("id"))
+	}
+}
+
 // consoleRoutes serves the console API under consoleAPIBase, and
 // publicRoutes the public API under publicAPIBase.
 var consoleRoutes, publicRoutes = mustRouteTables(apiRoutes)
@@ -266,6 +292,12 @@ func routePlaceholder(segment string) (name string, rest, ok bool) {
 	}
 	name, rest = strings.CutSuffix(inner, "...")
 	return name, rest, name != ""
+}
+
+// isMutation reports whether a request method changes state, which needs a
+// CSRF token on the console API.
+func isMutation(method string) bool {
+	return method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions
 }
 
 // serveRoute runs the gate for a console request and the route's handler.

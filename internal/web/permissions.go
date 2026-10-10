@@ -6,10 +6,6 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/auth"
 )
 
-func isMutation(method string) bool {
-	return method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions
-}
-
 // routeAccess records which gate a request passes before its handler runs.
 type routeAccess int
 
@@ -37,10 +33,10 @@ const (
 // apiRoute is one method and path combination that a handler serves.
 type apiRoute struct {
 	Method string
-	// Template is the path relative to the API base, which is also the
-	// route's ServeMux pattern. A {name} segment matches exactly one
-	// non-empty path segment; a {name...} segment, which must be the last,
-	// matches the rest of the path.
+	// Template is the path relative to the API base. With the method and
+	// the base, it is the route's ServeMux pattern. A {name} segment matches
+	// exactly one non-empty path segment; a {name...} segment, which must be
+	// the last, matches the rest of the path.
 	Template string
 	// Query, when set, selects a distinct action on the same method and
 	// path, with its own capability and handler.
@@ -55,7 +51,8 @@ type apiRoute struct {
 	Example string
 	Access  routeAccess
 	// TrailingSlash reports whether the route also answers its path with one
-	// trailing slash, as the sub-routers that the table replaced did.
+	// trailing slash. The scanner profile, user, notification destination,
+	// job item, platform console and public page routes always have.
 	TrailingSlash bool
 	// NoTenant marks a session route whose handler reads and changes no
 	// tenant data, so the gate resolves no tenant store for it.
@@ -107,66 +104,42 @@ var apiRoutes = []apiRoute{
 	{Method: http.MethodPost, Template: "/scanner-profiles", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles", TrailingSlash: true, Handle: sessionTenantHandler((*Server).createScannerProfile)},
 	{Method: http.MethodPost, Template: "/scanner-profiles/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/validate", TrailingSlash: true, Handle: requestHandler((*Server).validateScannerProfileDraft)},
 	{Method: http.MethodPost, Template: "/scanner-profiles/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/preview", TrailingSlash: true, Handle: requestHandler((*Server).renderScannerProfileDraft)},
-	{Method: http.MethodGet, Template: "/scanner-profiles/{id}", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner-profiles/profile-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.getScannerProfile(w, r, c.tenant, r.PathValue("id"))
-	}},
-	{Method: http.MethodPut, Template: "/scanner-profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.updateScannerProfile(w, r, c.session, c.tenant, r.PathValue("id"))
-	}},
+	{Method: http.MethodGet, Template: "/scanner-profiles/{id}", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner-profiles/profile-1", TrailingSlash: true, Handle: tenantIDHandler((*Server).getScannerProfile)},
+	{Method: http.MethodPut, Template: "/scanner-profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1", TrailingSlash: true, Handle: sessionTenantIDHandler((*Server).updateScannerProfile)},
 	{Method: http.MethodDelete, Template: "/scanner-profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
 		s.setScannerProfileArchived(w, r, c.session, c.tenant, r.PathValue("id"), true)
 	}},
 	{Method: http.MethodPost, Template: "/scanner-profiles/{id}/restore", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1/restore", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
 		s.setScannerProfileArchived(w, r, c.session, c.tenant, r.PathValue("id"), false)
 	}},
-	{Method: http.MethodGet, Template: "/scanner-profiles/{id}/revisions", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner-profiles/profile-1/revisions", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.listScannerProfileRevisions(w, r, c.tenant, r.PathValue("id"))
-	}},
+	{Method: http.MethodGet, Template: "/scanner-profiles/{id}/revisions", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner-profiles/profile-1/revisions", TrailingSlash: true, Handle: tenantIDHandler((*Server).listScannerProfileRevisions)},
 	{Method: http.MethodPost, Template: "/scanner-profiles/{id}/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1/validate", TrailingSlash: true, Handle: requestHandler((*Server).validateScannerProfile)},
 	{Method: http.MethodPost, Template: "/scanner-profiles/{id}/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1/preview", TrailingSlash: true, Handle: requestHandler((*Server).previewScannerProfile)},
 	{Method: http.MethodGet, Template: "/scanner/profiles", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles", TrailingSlash: true, Handle: tenantHandler((*Server).listScannerProfiles)},
 	{Method: http.MethodPost, Template: "/scanner/profiles", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles", TrailingSlash: true, Handle: sessionTenantHandler((*Server).createScannerProfile)},
 	{Method: http.MethodPost, Template: "/scanner/profiles/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/validate", TrailingSlash: true, Handle: requestHandler((*Server).validateScannerProfileDraft)},
 	{Method: http.MethodPost, Template: "/scanner/profiles/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/preview", TrailingSlash: true, Handle: requestHandler((*Server).renderScannerProfileDraft)},
-	{Method: http.MethodGet, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles/profile-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.getScannerProfile(w, r, c.tenant, r.PathValue("id"))
-	}},
-	{Method: http.MethodPut, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.updateScannerProfile(w, r, c.session, c.tenant, r.PathValue("id"))
-	}},
+	{Method: http.MethodGet, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles/profile-1", TrailingSlash: true, Handle: tenantIDHandler((*Server).getScannerProfile)},
+	{Method: http.MethodPut, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1", TrailingSlash: true, Handle: sessionTenantIDHandler((*Server).updateScannerProfile)},
 	{Method: http.MethodDelete, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
 		s.setScannerProfileArchived(w, r, c.session, c.tenant, r.PathValue("id"), true)
 	}},
 	{Method: http.MethodPost, Template: "/scanner/profiles/{id}/restore", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1/restore", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
 		s.setScannerProfileArchived(w, r, c.session, c.tenant, r.PathValue("id"), false)
 	}},
-	{Method: http.MethodGet, Template: "/scanner/profiles/{id}/revisions", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles/profile-1/revisions", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.listScannerProfileRevisions(w, r, c.tenant, r.PathValue("id"))
-	}},
+	{Method: http.MethodGet, Template: "/scanner/profiles/{id}/revisions", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles/profile-1/revisions", TrailingSlash: true, Handle: tenantIDHandler((*Server).listScannerProfileRevisions)},
 	{Method: http.MethodPost, Template: "/scanner/profiles/{id}/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1/validate", TrailingSlash: true, Handle: requestHandler((*Server).validateScannerProfile)},
 	{Method: http.MethodPost, Template: "/scanner/profiles/{id}/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1/preview", TrailingSlash: true, Handle: requestHandler((*Server).previewScannerProfile)},
 
 	// User administration.
 	{Method: http.MethodGet, Template: "/users", Permission: auth.PermissionUsersManage, Example: "/users", TrailingSlash: true, Handle: tenantHandler((*Server).listUsers)},
 	{Method: http.MethodPost, Template: "/users", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users", TrailingSlash: true, Handle: sessionTenantHandler((*Server).createUser)},
-	{Method: http.MethodGet, Template: "/users/{id}", Permission: auth.PermissionUsersManage, Example: "/users/user-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.getUser(w, r, c.tenant, r.PathValue("id"))
-	}},
-	{Method: http.MethodPatch, Template: "/users/{id}", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.updateUser(w, r, c.session, c.tenant, r.PathValue("id"))
-	}},
-	{Method: http.MethodPost, Template: "/users/{id}/activation", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/activation", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.issueAccountLink(w, r, c.session, c.tenant, r.PathValue("id"))
-	}},
-	{Method: http.MethodDelete, Template: "/users/{id}/activation", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/activation", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.revokeActivation(w, r, c.session, c.tenant, r.PathValue("id"))
-	}},
-	{Method: http.MethodPost, Template: "/users/{id}/password-reset", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/password-reset", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.issueAccountLink(w, r, c.session, c.tenant, r.PathValue("id"))
-	}},
-	{Method: http.MethodDelete, Template: "/users/{id}/sessions", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/sessions", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.revokeUserSessions(w, r, c.session, c.tenant, r.PathValue("id"))
-	}},
+	{Method: http.MethodGet, Template: "/users/{id}", Permission: auth.PermissionUsersManage, Example: "/users/user-1", TrailingSlash: true, Handle: tenantIDHandler((*Server).getUser)},
+	{Method: http.MethodPatch, Template: "/users/{id}", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1", TrailingSlash: true, Handle: sessionTenantIDHandler((*Server).updateUser)},
+	{Method: http.MethodPost, Template: "/users/{id}/activation", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/activation", TrailingSlash: true, Handle: sessionTenantIDHandler((*Server).issueAccountLink)},
+	{Method: http.MethodDelete, Template: "/users/{id}/activation", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/activation", TrailingSlash: true, Handle: sessionTenantIDHandler((*Server).revokeActivation)},
+	{Method: http.MethodPost, Template: "/users/{id}/password-reset", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/password-reset", TrailingSlash: true, Handle: sessionTenantIDHandler((*Server).issueAccountLink)},
+	{Method: http.MethodDelete, Template: "/users/{id}/sessions", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/sessions", TrailingSlash: true, Handle: sessionTenantIDHandler((*Server).revokeUserSessions)},
 
 	// Public status publication settings.
 	{Method: http.MethodGet, Template: "/public-dashboard", Permission: auth.PermissionPublicManage, Example: "/public-dashboard", Handle: tenantHandler((*Server).getPublicDashboard)},
@@ -180,24 +153,12 @@ var apiRoutes = []apiRoute{
 	{Method: http.MethodPut, Template: "/notifications/incident-reminders", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/incident-reminders", Handle: sessionTenantHandler((*Server).updateIncidentReminders)},
 	{Method: http.MethodGet, Template: "/notifications/destinations", Permission: auth.PermissionNotificationOptions, Example: "/notifications/destinations", Handle: tenantHandler((*Server).listNotificationDestinations)},
 	{Method: http.MethodPost, Template: "/notifications/destinations", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations", Handle: sessionTenantHandler((*Server).createNotificationDestination)},
-	{Method: http.MethodGet, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationOptions, Example: "/notifications/destinations/destination-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.getNotificationDestination(w, r, c.tenant, r.PathValue("id"))
-	}},
-	{Method: http.MethodPut, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.updateNotificationDestination(w, r, c.session, c.tenant, r.PathValue("id"))
-	}},
-	{Method: http.MethodDelete, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.deleteNotificationDestination(w, r, c.session, c.tenant, r.PathValue("id"))
-	}},
-	{Method: http.MethodPost, Template: "/notifications/destinations/{id}/test", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1/test", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.testNotificationDestination(w, r, c.session, c.tenant, r.PathValue("id"))
-	}},
-	{Method: http.MethodGet, Template: "/notifications/destinations/{id}/deliveries", Permission: auth.PermissionNotificationsManage, Example: "/notifications/destinations/destination-1/deliveries", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.listTerminalDeliveries(w, r, c.tenant, r.PathValue("id"))
-	}},
-	{Method: http.MethodPost, Template: "/notifications/destinations/{id}/deliveries/redeliver", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1/deliveries/redeliver", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.redeliverTerminalDeliveries(w, r, c.session, c.tenant, r.PathValue("id"))
-	}},
+	{Method: http.MethodGet, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationOptions, Example: "/notifications/destinations/destination-1", TrailingSlash: true, Handle: tenantIDHandler((*Server).getNotificationDestination)},
+	{Method: http.MethodPut, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1", TrailingSlash: true, Handle: sessionTenantIDHandler((*Server).updateNotificationDestination)},
+	{Method: http.MethodDelete, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1", TrailingSlash: true, Handle: sessionTenantIDHandler((*Server).deleteNotificationDestination)},
+	{Method: http.MethodPost, Template: "/notifications/destinations/{id}/test", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1/test", TrailingSlash: true, Handle: sessionTenantIDHandler((*Server).testNotificationDestination)},
+	{Method: http.MethodGet, Template: "/notifications/destinations/{id}/deliveries", Permission: auth.PermissionNotificationsManage, Example: "/notifications/destinations/destination-1/deliveries", TrailingSlash: true, Handle: tenantIDHandler((*Server).listTerminalDeliveries)},
+	{Method: http.MethodPost, Template: "/notifications/destinations/{id}/deliveries/redeliver", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1/deliveries/redeliver", TrailingSlash: true, Handle: sessionTenantIDHandler((*Server).redeliverTerminalDeliveries)},
 
 	// Global inventories.
 	{Method: http.MethodGet, Template: "/hosts", Permission: auth.PermissionHostsRead, Example: "/hosts", Handle: tenantHandler((*Server).listHosts)},
@@ -210,18 +171,10 @@ var apiRoutes = []apiRoute{
 	{Method: http.MethodGet, Template: "/scans", Permission: auth.PermissionScansRead, Example: "/scans", Handle: tenantHandler((*Server).listScans)},
 	{Method: http.MethodPost, Template: "/scans", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/scans", NoHandler: true},
 	{Method: http.MethodGet, Template: "/scans/active", Permission: auth.PermissionScansRead, Example: "/scans/active", Handle: tenantHandler((*Server).activeScans)},
-	{Method: http.MethodGet, Template: "/scans/{id}", Permission: auth.PermissionScansRead, Example: "/scans/scan-1", Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.getScan(w, r, c.tenant, r.PathValue("id"))
-	}},
-	{Method: http.MethodGet, Template: "/scans/{id}/summary", Permission: auth.PermissionScansRead, Example: "/scans/scan-1/summary", Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.getScanSummary(w, r, c.tenant, r.PathValue("id"))
-	}},
-	{Method: http.MethodPost, Template: "/scans/{id}/cancel", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/scans/scan-1/cancel", Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.cancelScan(w, r, c.session, c.tenant, r.PathValue("id"))
-	}},
-	{Method: http.MethodGet, Template: "/scans/{id}/hosts", Permission: auth.PermissionHostsRead, Example: "/scans/scan-1/hosts", Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.scanHostsRoute(w, r, c.tenant, r.PathValue("id"))
-	}},
+	{Method: http.MethodGet, Template: "/scans/{id}", Permission: auth.PermissionScansRead, Example: "/scans/scan-1", Handle: tenantIDHandler((*Server).getScan)},
+	{Method: http.MethodGet, Template: "/scans/{id}/summary", Permission: auth.PermissionScansRead, Example: "/scans/scan-1/summary", Handle: tenantIDHandler((*Server).getScanSummary)},
+	{Method: http.MethodPost, Template: "/scans/{id}/cancel", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/scans/scan-1/cancel", Handle: sessionTenantIDHandler((*Server).cancelScan)},
+	{Method: http.MethodGet, Template: "/scans/{id}/hosts", Permission: auth.PermissionHostsRead, Example: "/scans/scan-1/hosts", Handle: tenantIDHandler((*Server).scanHostsRoute)},
 	{Method: http.MethodGet, Template: "/scans/{id}/hosts/{address}", Permission: auth.PermissionHostsRead, Example: "/scans/scan-1/hosts/198.51.100.10", Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
 		s.scanHostRoute(w, r, c.tenant, r.PathValue("id"), r.PathValue("address"))
 	}},
@@ -287,33 +240,19 @@ var apiRoutes = []apiRoute{
 	// destinations and update routing, and the deployment status.
 	{Method: http.MethodGet, Template: "/platform/units", Permission: auth.PermissionUnitsManage, Example: "/platform/units", TrailingSlash: true, Handle: platformHandler(requestHandler((*Server).listPlatformUnits))},
 	{Method: http.MethodPost, Template: "/platform/units", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units", TrailingSlash: true, Handle: platformHandler(sessionHandler((*Server).createPlatformUnit))},
-	{Method: http.MethodGet, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Example: "/platform/units/unit-1", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.getPlatformUnit(w, r, r.PathValue("id"))
-	})},
-	{Method: http.MethodPatch, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.renamePlatformUnit(w, r, c.session, r.PathValue("id"))
-	})},
-	{Method: http.MethodDelete, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.deletePlatformUnit(w, r, c.session, r.PathValue("id"))
-	})},
+	{Method: http.MethodGet, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Example: "/platform/units/unit-1", TrailingSlash: true, Handle: platformHandler(idHandler((*Server).getPlatformUnit))},
+	{Method: http.MethodPatch, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1", TrailingSlash: true, Handle: platformHandler(sessionIDHandler((*Server).renamePlatformUnit))},
+	{Method: http.MethodDelete, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1", TrailingSlash: true, Handle: platformHandler(sessionIDHandler((*Server).deletePlatformUnit))},
 	{Method: http.MethodPost, Template: "/platform/units/{id}/disable", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1/disable", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
 		s.setPlatformUnitState(w, r, c.session, r.PathValue("id"), false)
 	})},
 	{Method: http.MethodPost, Template: "/platform/units/{id}/enable", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1/enable", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
 		s.setPlatformUnitState(w, r, c.session, r.PathValue("id"), true)
 	})},
-	{Method: http.MethodGet, Template: "/platform/units/{id}/capacity", Permission: auth.PermissionUnitsManage, Example: "/platform/units/unit-1/capacity", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.getPlatformUnitCapacity(w, r, r.PathValue("id"))
-	})},
-	{Method: http.MethodPatch, Template: "/platform/units/{id}/capacity", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1/capacity", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.updatePlatformUnitCapacity(w, r, c.session, r.PathValue("id"))
-	})},
-	{Method: http.MethodGet, Template: "/platform/units/{id}/accounts", Permission: auth.PermissionUnitAccountsManage, Example: "/platform/units/unit-1/accounts", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.listPlatformUnitAccounts(w, r, r.PathValue("id"))
-	})},
-	{Method: http.MethodPost, Template: "/platform/units/{id}/accounts", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/units/unit-1/accounts", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.invitePlatformUnitAdmin(w, r, c.session, r.PathValue("id"))
-	})},
+	{Method: http.MethodGet, Template: "/platform/units/{id}/capacity", Permission: auth.PermissionUnitsManage, Example: "/platform/units/unit-1/capacity", TrailingSlash: true, Handle: platformHandler(idHandler((*Server).getPlatformUnitCapacity))},
+	{Method: http.MethodPatch, Template: "/platform/units/{id}/capacity", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1/capacity", TrailingSlash: true, Handle: platformHandler(sessionIDHandler((*Server).updatePlatformUnitCapacity))},
+	{Method: http.MethodGet, Template: "/platform/units/{id}/accounts", Permission: auth.PermissionUnitAccountsManage, Example: "/platform/units/unit-1/accounts", TrailingSlash: true, Handle: platformHandler(idHandler((*Server).listPlatformUnitAccounts))},
+	{Method: http.MethodPost, Template: "/platform/units/{id}/accounts", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/units/unit-1/accounts", TrailingSlash: true, Handle: platformHandler(sessionIDHandler((*Server).invitePlatformUnitAdmin))},
 	{Method: http.MethodPost, Template: "/platform/units/{id}/accounts/{uid}/password-reset", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/units/unit-1/accounts/user-1/password-reset", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
 		s.resetPlatformUnitAdmin(w, r, c.session, r.PathValue("id"), r.PathValue("uid"))
 	})},
@@ -322,29 +261,17 @@ var apiRoutes = []apiRoute{
 	})},
 	{Method: http.MethodGet, Template: "/platform/admins", Permission: auth.PermissionUnitAccountsManage, Example: "/platform/admins", TrailingSlash: true, Handle: platformHandler(requestHandler((*Server).listPlatformAdmins))},
 	{Method: http.MethodPost, Template: "/platform/admins", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins", TrailingSlash: true, Handle: platformHandler(sessionHandler((*Server).invitePlatformAdmin))},
-	{Method: http.MethodPatch, Template: "/platform/admins/{id}", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.updatePlatformAdmin(w, r, c.session, r.PathValue("id"))
-	})},
-	{Method: http.MethodDelete, Template: "/platform/admins/{id}", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.deletePendingPlatformAdmin(w, r, c.session, r.PathValue("id"))
-	})},
-	{Method: http.MethodPost, Template: "/platform/admins/{id}/activation", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1/activation", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.renewPlatformAdminInvitation(w, r, c.session, r.PathValue("id"))
-	})},
-	{Method: http.MethodDelete, Template: "/platform/admins/{id}/activation", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1/activation", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.revokePlatformAdminInvitation(w, r, c.session, r.PathValue("id"))
-	})},
+	{Method: http.MethodPatch, Template: "/platform/admins/{id}", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1", TrailingSlash: true, Handle: platformHandler(sessionIDHandler((*Server).updatePlatformAdmin))},
+	{Method: http.MethodDelete, Template: "/platform/admins/{id}", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1", TrailingSlash: true, Handle: platformHandler(sessionIDHandler((*Server).deletePendingPlatformAdmin))},
+	{Method: http.MethodPost, Template: "/platform/admins/{id}/activation", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1/activation", TrailingSlash: true, Handle: platformHandler(sessionIDHandler((*Server).renewPlatformAdminInvitation))},
+	{Method: http.MethodDelete, Template: "/platform/admins/{id}/activation", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1/activation", TrailingSlash: true, Handle: platformHandler(sessionIDHandler((*Server).revokePlatformAdminInvitation))},
 	{Method: http.MethodGet, Template: "/platform/audit", Permission: auth.PermissionPlatformAuditRead, Example: "/platform/audit", TrailingSlash: true, Handle: platformHandler(requestHandler((*Server).platformAudit))},
 	{Method: http.MethodGet, Template: "/platform/notifications", Permission: auth.PermissionPlatformNotificationsManage, Example: "/platform/notifications", TrailingSlash: true, Handle: platformHandler(requestHandler((*Server).listPlatformNotifications))},
 	{Method: http.MethodPost, Template: "/platform/notifications", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications", TrailingSlash: true, Handle: platformHandler(sessionHandler((*Server).createPlatformNotification))},
 	{Method: http.MethodPut, Template: "/platform/notifications/update-routing", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/update-routing", TrailingSlash: true, Handle: platformHandler(sessionHandler((*Server).updatePlatformNotificationRouting))},
 	{Method: http.MethodPatch, Template: "/platform/notifications/update-routing", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/update-routing", TrailingSlash: true, Handle: platformHandler(sessionHandler((*Server).togglePlatformNotificationRouting))},
-	{Method: http.MethodPatch, Template: "/platform/notifications/{id}", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/destination-1", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.updatePlatformNotification(w, r, c.session, r.PathValue("id"))
-	})},
-	{Method: http.MethodDelete, Template: "/platform/notifications/{id}", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/destination-1", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
-		s.deletePlatformNotification(w, r, c.session, r.PathValue("id"))
-	})},
+	{Method: http.MethodPatch, Template: "/platform/notifications/{id}", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/destination-1", TrailingSlash: true, Handle: platformHandler(sessionIDHandler((*Server).updatePlatformNotification))},
+	{Method: http.MethodDelete, Template: "/platform/notifications/{id}", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/destination-1", TrailingSlash: true, Handle: platformHandler(sessionIDHandler((*Server).deletePlatformNotification))},
 	{Method: http.MethodGet, Template: "/platform/status", Permission: auth.PermissionPlatformStatusRead, Example: "/platform/status", TrailingSlash: true, Handle: platformHandler(requestHandler((*Server).platformStatus))},
 
 	// Unauthenticated public status projection, relative to publicAPIBase:

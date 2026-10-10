@@ -497,7 +497,7 @@ func TestSingleUnitSessionResponses(t *testing.T) {
 	response := callAPI(t, server, admin, http.MethodGet, "/auth/session", "")
 	expectResponse(t, response, http.StatusOK, "session", nil)
 	payload, keys := sessionKeys(t, response.Body.Bytes())
-	if want := []string{"csrf_token", "display_name", "multi_unit", "password_requirements", "permissions", "role", "scope", "timezone", "totp_enabled", "unit", "user_id", "username"}; !reflect.DeepEqual(keys, want) {
+	if want := []string{"csrf_token", "display_name", "high_cost_override", "multi_unit", "password_requirements", "permissions", "role", "scope", "timezone", "totp_enabled", "unit", "user_id", "username"}; !reflect.DeepEqual(keys, want) {
 		t.Fatalf("session keys = %v, want %v", keys, want)
 	}
 	if payload["scope"] != "unit" || payload["multi_unit"] != false || !reflect.DeepEqual(payload["unit"], map[string]any{"id": store.DefaultTenantID, "name": "Default", "slug": "default"}) {
@@ -517,7 +517,7 @@ func TestSingleUnitSessionResponses(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	server.api(recorder, login)
 	loginPayload, loginKeys := sessionKeys(t, recorder.Body.Bytes())
-	if want := []string{"csrf_token", "display_name", "permissions", "role", "totp_required", "username"}; !reflect.DeepEqual(loginKeys, want) || !reflect.DeepEqual(loginPayload["permissions"], toAnySlice(full)) {
+	if want := []string{"csrf_token", "display_name", "high_cost_override", "permissions", "role", "totp_required", "username"}; !reflect.DeepEqual(loginKeys, want) || !reflect.DeepEqual(loginPayload["permissions"], toAnySlice(full)) {
 		t.Fatalf("login = %s", recorder.Body.String())
 	}
 }

@@ -235,7 +235,9 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
       const scope = role === 'platform_admin' ? { scope: 'platform', unit: null, multi_unit: multipleUnits() } : { scope: 'unit', unit: { id: 'unit-default', name: 'Default', slug: 'default' }, multi_unit: false }
       const permissions = mustEnrol() ? ['account.self'] : rolePermissions[role]
       const enrolment = mustEnrol() ? { totp_enrollment_required: true } : {}
-      await json({ user_id: `user-${role}`, username: role === 'administrator' ? 'admin' : role === 'platform_admin' ? 'platform' : role, display_name: role, role, permissions, csrf_token: 'fixture-csrf', totp_enabled: role === 'platform_admin' && platformTOTP, password_requirements: { minimum_length: 12 }, ...scope, ...enrolment })
+      // Only a unit administrator may approve high-cost scans.
+      const highCost = role === 'administrator' && !mustEnrol() ? { high_cost_override: true } : {}
+      await json({ user_id: `user-${role}`, username: role === 'administrator' ? 'admin' : role === 'platform_admin' ? 'platform' : role, display_name: role, role, permissions, csrf_token: 'fixture-csrf', totp_enabled: role === 'platform_admin' && platformTOTP, password_requirements: { minimum_length: 12 }, ...scope, ...enrolment, ...highCost })
       return
     }
     if (mustEnrol() && path.startsWith('/platform/')) {
@@ -363,6 +365,10 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/jobs' && method === 'GET') { await json({ jobs: createdJob ? [job, createdJob] : [job] }); return }
     if (path === '/jobs/schedule-suggestion' && method === 'GET') { await json({ suggested: false, draft_next_run: '2026-01-01T06:00:00Z', gap_minutes: 45 }); return }
     if (path === '/jobs/job-1' && method === 'GET') { await json(job); return }
+    // Like the API, a known job with no successful scan or no saved cycle
+    // answers 200 with null rather than 404.
+    if (/^\/jobs\/job-(1|created)\/scans\/latest-successful$/.test(path) && method === 'GET') { await json({ scan: path.startsWith('/jobs/job-1/') ? scan : null }); return }
+    if (/^\/jobs\/job-(1|created)\/scan-cycle$/.test(path) && method === 'GET') { await json({ cycle: null }); return }
     if (path === '/jobs/job-created' && method === 'GET') { createdJob ? await json(createdJob) : await json({ error: { code: 'not_found', message: 'job not found' } }, 404); return }
     if (path === '/jobs/job-created/scans' && method === 'GET') { await json({ scans: [], pagination: pagination(0, 20) }); return }
     if (path === '/jobs/job-1/scans' && method === 'GET') { await json({ scans: [scan], pagination: pagination(1, 20) }); return }

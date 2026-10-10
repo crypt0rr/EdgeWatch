@@ -94,6 +94,10 @@ type Server struct {
 	sseMaxSubscribers        int
 	sseMaxSubscribersPerUser int
 	sseMaxSubscribersPerUnit int
+	// fullScanSlots bounds the full-result scan responses in flight; see
+	// getScan.
+	fullScanSlots    chan struct{}
+	fullScanSlotOnce sync.Once
 }
 
 type sseMessage struct {

@@ -1,7 +1,9 @@
 package web
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -842,10 +844,96 @@ func (s *Server) listScans(w http.ResponseWriter, r *http.Request, ts *store.Ten
 	writeJSON(w, 200, map[string]any{"scans": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
 
+// maxConcurrentFullScans bounds the full-result scan responses in flight.
+// Each holds its scan's snapshot in memory, and a read connection, until the
+// client has received it.
+const maxConcurrentFullScans = 2
+
+// getScan serves the full-result compatibility endpoint. It writes the
+// stored snapshot and change list as they were saved, without decoding and
+// encoding them again, so a broad scan is held in memory once rather than
+// as decoded structs and a second encoding. For a scan that EdgeWatch saved,
+// the response is the one that decoding and encoding it gave. A request
+// waits for one of maxConcurrentFullScans slots, so parallel requests cannot
+// multiply that memory without bound.
 func (s *Server) getScan(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string) {
-	if scan, ok := s.resolveScan(w, r, ts, id); ok {
-		writeJSON(w, http.StatusOK, map[string]any{"scan": scan})
+	s.fullScanSlotOnce.Do(func() { s.fullScanSlots = make(chan struct{}, maxConcurrentFullScans) })
+	select {
+	case s.fullScanSlots <- struct{}{}:
+	case <-r.Context().Done():
+		return
 	}
+	defer func() { <-s.fullScanSlots }()
+	err := ts.WithScanDocument(r.Context(), id, func(scan model.Scan, snapshot, changes []byte) error {
+		return writeStoredScan(w, scan, snapshot, changes)
+	})
+	if errors.Is(err, errScanNotVerbatim) {
+		// The stored values are not what EdgeWatch writes. Decode them, as
+		// releases before this one did for every scan.
+		if scan, ok := s.resolveScan(w, r, ts, id); ok {
+			writeJSON(w, http.StatusOK, map[string]any{"scan": scan})
+		}
+		return
+	}
+	if err != nil && !errors.Is(err, errScanResponseStarted) {
+		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+	}
+}
+
+// errScanNotVerbatim reports a stored snapshot or change list that cannot
+// be written out as it is. errScanResponseStarted reports a failed write
+// after the response status was sent.
+var (
+	errScanNotVerbatim     = errors.New("stored scan cannot be written verbatim")
+	errScanResponseStarted = errors.New("scan response interrupted")
+)
+
+// fullScanMetadata encodes a scan without its snapshot and changes: the
+// fields of the same JSON names hide those of the embedded scan.
+type fullScanMetadata struct {
+	model.Scan
+	Changes  *struct{} `json:"changes,omitempty"`
+	Snapshot *struct{} `json:"snapshot,omitempty"`
+}
+
+// writeStoredScan writes {"scan": scan} with the stored snapshot and
+// changes in place of the scan's own, as encoding the decoded scan with
+// writeJSON would: changes come before the snapshot, as in model.Scan, and
+// an empty change list is left out. A snapshot that is not a JSON object, or
+// changes that are not null or a JSON array, are errScanNotVerbatim, and
+// nothing is written.
+func writeStoredScan(w http.ResponseWriter, scan model.Scan, snapshot, changes []byte) error {
+	snapshot, changes = bytes.TrimSpace(snapshot), bytes.TrimSpace(changes)
+	if len(snapshot) == 0 || snapshot[0] != '{' || !json.Valid(snapshot) {
+		return errScanNotVerbatim
+	}
+	switch {
+	case len(changes) == 0 || bytes.Equal(changes, []byte("null")):
+		changes = nil
+	case changes[0] != '[' || !json.Valid(changes):
+		return errScanNotVerbatim
+	case len(bytes.TrimSpace(changes[1:len(changes)-1])) == 0:
+		changes = nil
+	}
+	scan.Snapshot, scan.Changes = model.Snapshot{}, nil
+	metadata, err := json.Marshal(fullScanMetadata{Scan: scan})
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	parts := [][]byte{[]byte(`{"scan":`), metadata[:len(metadata)-1]}
+	if changes != nil {
+		parts = append(parts, []byte(`,"changes":`), changes)
+	}
+	parts = append(parts, []byte(`,"snapshot":`), snapshot, []byte("}}\n"))
+	for _, part := range parts {
+		if _, err := w.Write(part); err != nil {
+			return errScanResponseStarted
+		}
+	}
+	return nil
 }
 
 // getScanSummary serves metadata for historical scan views without decoding

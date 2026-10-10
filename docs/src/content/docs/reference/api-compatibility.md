@@ -127,6 +127,17 @@ that only need scan metadata should use `/summary`, then request paginated
 results or host evidence separately when needed. This avoids loading large
 snapshots just to show scan status and timestamps.
 
+Since the release after v0.34.0, the full-response endpoint writes the
+`snapshot` and `changes` that EdgeWatch stored for the scan as they are,
+rather than decoding and encoding them again, so a broad scan is held in the
+daemon's memory once. For a scan that this release recorded, the response is
+the same, byte for byte. A scan recorded by an older release can lack keys
+that a newer release adds to its stored results; the response then lacks them
+too, where it used to show them with empty values. A stored value that is not
+a JSON object (`snapshot`) or array (`changes`) is still decoded as before.
+The daemon answers two such requests at a time; further requests wait for
+one of them to finish.
+
 ## Job baseline pages
 
 `GET /api/v1/jobs/{jobID}/baseline` returns the job's baseline summary and

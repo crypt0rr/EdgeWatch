@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -113,6 +114,29 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 			scan, err := f.store.Tenant(scope).GetScan(ctx, want)
 			if err != nil || scan.ID != want || len(scan.Snapshot.Hosts) != 3 {
 				t.Errorf("tenant %s: own scan = %s with %d hosts, %v", scope.ID(), scan.ID, len(scan.Snapshot.Hosts), err)
+			}
+		}
+	}},
+	"WithScanDocument": {run: func(t *testing.T, f tenantFixture) {
+		ctx := context.Background()
+		for _, id := range []string{f.scanA, "missing-scan"} {
+			called := false
+			if err := f.store.Tenant(f.b).WithScanDocument(ctx, id, func(model.Scan, []byte, []byte) error { called = true; return nil }); !errors.Is(err, ErrNotFound) || called {
+				t.Errorf("tenant B read scan %s: called %v, %v", id, called, err)
+			}
+		}
+		for scope, want := range map[TenantScope]string{f.a: f.scanA, f.b: f.scanB} {
+			var got model.Scan
+			var hosts int
+			err := f.store.Tenant(scope).WithScanDocument(ctx, want, func(scan model.Scan, snapshot, _ []byte) error {
+				var decoded model.Snapshot
+				got = scan
+				err := json.Unmarshal(snapshot, &decoded)
+				hosts = len(decoded.Hosts)
+				return err
+			})
+			if err != nil || got.ID != want || hosts != 3 {
+				t.Errorf("tenant %s: own scan document = %s with %d hosts, %v", scope.ID(), got.ID, hosts, err)
 			}
 		}
 	}},

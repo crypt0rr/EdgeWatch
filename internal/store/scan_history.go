@@ -441,32 +441,16 @@ func (ts *TenantStore) GetScan(ctx context.Context, id string) (model.Scan, erro
 	if err := ts.ready(); err != nil {
 		return model.Scan{}, err
 	}
-	var v model.Scan
-	var started, finished string
+	var row fullScanRow
 	var snapshot, changesJSON []byte
-	var baselineScanID, baselineConfigHash string
-	var jobID sql.NullString
-	var revision sql.NullInt64
-	var resumable int
-	readDB := ts.store.reader()
-	err := readDB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,comparison,changes_json,snapshot_json FROM scans WHERE id=? AND tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`, id, ts.scope.id).
-		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &baselineScanID, &baselineConfigHash, &v.Comparison, &changesJSON, &snapshot)
+	err := ts.store.reader().QueryRowContext(ctx, fullScanQuery, id, ts.scope.id).Scan(row.dest(&changesJSON, &snapshot)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Scan{}, scanNotFound(id)
 	}
+	v := row.scan()
 	if err != nil {
 		return v, err
 	}
-	if jobID.Valid {
-		v.JobID = jobID.String
-	}
-	if revision.Valid {
-		v.JobRevision = revision.Int64
-	}
-	v.Resumable = resumable != 0
-	v.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
-	v.FinishedAt, _ = time.Parse(time.RFC3339Nano, finished)
-	v.BaselineScanID, v.BaselineConfigHash = baselineScanID, baselineConfigHash
 	if len(changesJSON) > 0 && string(changesJSON) != "null" {
 		if err := json.Unmarshal(changesJSON, &v.Changes); err != nil {
 			return v, err
@@ -476,6 +460,77 @@ func (ts *TenantStore) GetScan(ctx context.Context, id string) (model.Scan, erro
 		return v, err
 	}
 	return v, nil
+}
+
+// WithScanDocument calls fn with one of the tenant's scans and the JSON of
+// its snapshot and change list as they were saved. The scan passed to fn has
+// neither a snapshot nor changes. The two JSON values are the driver's copy
+// of the stored columns and are valid only while fn runs, so a large
+// snapshot is held in memory once and can be written out without being
+// decoded. A scan of another tenant is ErrNotFound, like an unknown ID, and
+// fn is not called.
+func (ts *TenantStore) WithScanDocument(ctx context.Context, id string, fn func(scan model.Scan, snapshot, changes []byte) error) error {
+	if err := ts.ready(); err != nil {
+		return err
+	}
+	rows, err := ts.store.reader().QueryContext(ctx, fullScanQuery, id, ts.scope.id)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return scanNotFound(id)
+	}
+	var row fullScanRow
+	var snapshot, changes sql.RawBytes
+	if err := rows.Scan(row.dest(&changes, &snapshot)...); err != nil {
+		return err
+	}
+	if err := fn(row.scan(), snapshot, changes); err != nil {
+		return err
+	}
+	return rows.Close()
+}
+
+// fullScanQuery reads one of the tenant's scans with its stored change list
+// and snapshot, in the column order of fullScanRow.dest.
+const fullScanQuery = `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,comparison,changes_json,snapshot_json FROM scans WHERE id=? AND tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`
+
+// fullScanRow receives the metadata columns of fullScanQuery.
+type fullScanRow struct {
+	v                  model.Scan
+	started, finished  string
+	baselineScanID     string
+	baselineConfigHash string
+	jobID              sql.NullString
+	revision           sql.NullInt64
+	resumable          int
+}
+
+// dest returns the scan destinations of fullScanQuery, with changes and
+// snapshot for its last two columns.
+func (row *fullScanRow) dest(changes, snapshot any) []any {
+	v := &row.v
+	return []any{&v.ID, &row.jobID, &row.revision, &v.Job, &row.started, &row.finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &row.resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &row.baselineScanID, &row.baselineConfigHash, &v.Comparison, changes, snapshot}
+}
+
+// scan returns the scanned metadata as a scan without snapshot or changes.
+func (row *fullScanRow) scan() model.Scan {
+	v := row.v
+	if row.jobID.Valid {
+		v.JobID = row.jobID.String
+	}
+	if row.revision.Valid {
+		v.JobRevision = row.revision.Int64
+	}
+	v.Resumable = row.resumable != 0
+	v.StartedAt, _ = time.Parse(time.RFC3339Nano, row.started)
+	v.FinishedAt, _ = time.Parse(time.RFC3339Nano, row.finished)
+	v.BaselineScanID, v.BaselineConfigHash = row.baselineScanID, row.baselineConfigHash
+	return v
 }
 
 // GetScanSummary returns the metadata of one of the tenant's scans without

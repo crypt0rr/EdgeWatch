@@ -263,4 +263,53 @@ describe('public dashboard pages', () => {
     expect(savePublicDashboardConfig).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: false, introduction: 'Changed elsewhere', updated_at: current.updated_at }))
     await vi.waitFor(() => expect(container.textContent).toContain('Public view saved.'), { timeout: 1000 })
   })
+  it('keeps an edited draft when a background refetch brings another administrator\'s save', async () => {
+    await renderPage(<PublicDashboardAdmin />)
+    const host = () => document.getElementById('public-host-job-1-198.51.100.10-0') as HTMLInputElement
+    await vi.waitFor(() => expect(host()).toBeTruthy(), { timeout: 1000 })
+    act(() => host().click())
+    expect(host().checked).toBe(true)
+
+    // Another administrator saves a title; a focus or reconnect refetch arrives.
+    vi.mocked(getPublicDashboardConfig).mockResolvedValue({ ...publicConfig, title: 'Changed elsewhere', updated_at: '2026-09-12T09:00:00Z' })
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ['public-dashboard-config'] })
+    })
+    await vi.waitFor(() => expect(container.textContent).toContain('Another administrator saved the public view while you were editing.'), { timeout: 1000 })
+    expect(host().checked).toBe(true)
+    expect((container.querySelector('input:not([type])') as HTMLInputElement).value).toBe(publicConfig.title)
+
+    // Saving the draft still carries the token it was loaded with, so the
+    // server can refuse it instead of silently undoing the other save.
+    vi.mocked(savePublicDashboardConfig).mockRejectedValueOnce(new APIError('public status was changed by another administrator; reload before saving', 'conflict'))
+    await act(async () => {
+      (Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Save public view')) as HTMLButtonElement).click()
+      await Promise.resolve()
+    })
+    expect(savePublicDashboardConfig).toHaveBeenLastCalledWith(expect.objectContaining({ hosts: [{ job_id: 'job-1', address: '198.51.100.10' }], updated_at: publicConfig.updated_at }))
+    await vi.waitFor(() => expect((container.querySelector('input:not([type])') as HTMLInputElement).value).toBe('Changed elsewhere'), { timeout: 1000 })
+    expect(host().checked).toBe(false)
+  })
+
+  it('discards an edited draft on request and follows the server again', async () => {
+    await renderPage(<PublicDashboardAdmin />)
+    const enabled = container.querySelector('#public-status-enabled') as HTMLInputElement
+    act(() => enabled.click())
+    vi.mocked(getPublicDashboardConfig).mockResolvedValue({ ...publicConfig, introduction: 'Changed elsewhere', updated_at: '2026-09-12T09:00:00Z' })
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ['public-dashboard-config'] })
+    })
+    const discard = await vi.waitFor(() => {
+      const button = Array.from(container.querySelectorAll('button')).find(item => item.textContent === 'Discard my changes and load theirs')
+      expect(button).toBeTruthy()
+      return button as HTMLButtonElement
+    }, { timeout: 1000 })
+    await act(async () => {
+      discard.click()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('Changed elsewhere'), { timeout: 1000 })
+    expect((container.querySelector('#public-status-enabled') as HTMLInputElement).checked).toBe(false)
+    expect(container.textContent).not.toContain('Another administrator saved the public view while you were editing.')
+  })
 })

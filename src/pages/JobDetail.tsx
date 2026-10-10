@@ -106,8 +106,12 @@ export function JobDetail() {
   // Wait for the principal before enabling scan/action queries. Besides
   // avoiding a transient unauthorized request, this keeps viewer pages from
   // ever fetching scan history that their role cannot read.
+  // Each control follows the permission its endpoint checks: editing,
+  // scheduling and archiving need jobs.write, running and cancelling need
+  // jobs.run, and baseline approval and reset need baselines.manage.
   const canOperate = session.data?.permissions.includes('jobs.write') ?? false
   const canRun = session.data?.permissions.includes('jobs.run') ?? false
+  const canManageBaseline = session.data?.permissions.includes('baselines.manage') ?? false
   // Permanent deletion is administrator-only (jobs.delete); operators may
   // archive and restore, but the API rejects their delete requests.
   const canDelete = session.data?.permissions.includes('jobs.delete') ?? false
@@ -117,7 +121,7 @@ export function JobDetail() {
   const active = useQuery({
     queryKey: ['active-scans'],
     queryFn: activeScans,
-    enabled: !!id && canOperate && canReadScans,
+    enabled: !!id && canReadScans,
     refetchInterval: 2000,
   })
   const activeJobScan = active.data?.scans.find((scan) => scan.job_id === id)
@@ -154,7 +158,7 @@ export function JobDetail() {
     enabled: !!id && canReadScans && (job.data?.baseline.pending ?? 0) > 0,
     refetchInterval: 10000,
   })
-  const cycle = useQuery({ queryKey: ['scan-cycle', id], queryFn: () => scanCycle(id), enabled: !!id && canOperate, refetchInterval: 5000 })
+  const cycle = useQuery({ queryKey: ['scan-cycle', id], queryFn: () => scanCycle(id), enabled: !!id && canReadScans, refetchInterval: 5000 })
   const scheduleInput = job.data?.job
   const scheduleGuidanceNeeded = !!job.data && (baselinePresentation(job.data.baseline).status !== 'complete' || job.data.baseline.status === 'updating')
   const nextRun = useQuery({
@@ -343,7 +347,10 @@ export function JobDetail() {
     return <div className="loading"><span className="spinner" />Loading job…</div>
   }
   if (job.error || !job.data) {
-    return <section className="page"><Link className="back-link" to="/jobs">← Jobs</Link><ErrorNotice message={job.error ? 'This job could not be loaded.' : 'This job could not be found.'} onRetry={job.error ? () => job.refetch() : undefined} /></section>
+    // A deleted job, or another unit's, answers 404: say so instead of
+    // offering a retry that fails the same way.
+    const jobNotFound = isNotFound(job.error)
+    return <section className="page"><Link className="back-link" to="/jobs">← Jobs</Link><ErrorNotice message={job.error && !jobNotFound ? 'This job could not be loaded.' : 'This job could not be found.'} onRetry={job.error && !jobNotFound ? () => job.refetch() : undefined} /></section>
   }
 
   const value = job.data
@@ -373,6 +380,17 @@ export function JobDetail() {
     // A lifecycle conflict means this page holds an older revision. Reload
     // it so a retry sends the current revision.
     if (err instanceof APIError && err.code === 'conflict') void client.invalidateQueries({ queryKey: ['job', id] })
+  }
+  function reportBaselineError(err: unknown, fallback: string) {
+    // The baseline changed after this page read it, so a retry would send
+    // the same stale expectation. Reload it and ask for a fresh review.
+    if (err instanceof APIError && err.code === 'baseline_conflict') {
+      setActionError('The baseline changed while this page was open. Review the refreshed baseline and confirm again.')
+      void client.invalidateQueries({ queryKey: ['job', id] })
+      void client.invalidateQueries({ queryKey: ['job-baseline-overview', id] })
+      return
+    }
+    reportActionError(err, fallback)
   }
   async function run() {
     let request = runRequests.current.get(id)
@@ -462,7 +480,7 @@ export function JobDetail() {
       setBaselineOffset(0)
       setDialog(null)
     } catch (err) {
-      reportActionError(err, 'Could not reset the baseline.')
+      reportBaselineError(err, 'Could not reset the baseline.')
     } finally {
       setActionBusy('')
     }
@@ -483,7 +501,7 @@ export function JobDetail() {
       setSelectedScan('')
       setDialog(null)
     } catch (err) {
-      reportActionError(err, 'Could not approve this baseline.')
+      reportBaselineError(err, 'Could not approve this baseline.')
     } finally {
       setActionBusy('')
     }
@@ -566,7 +584,7 @@ export function JobDetail() {
   // A successful poll that returns {cycle: null} is authoritative. Falling
   // back to the job payload in that case would keep a discarded/expired cycle
   // banner visible until the next full job refetch.
-  const activeCycle = canOperate ? (cycle.data ? cycle.data.cycle : value.scan_cycle) : null
+  const activeCycle = canReadScans ? (cycle.data ? cycle.data.cycle : value.scan_cycle) : null
   const selectedScanDetailID = selectedScan ? `scan-detail-${encodeURIComponent(selectedScan)}` : undefined
   const selectedScanTitleID = selectedScan ? `scan-detail-title-${encodeURIComponent(selectedScan)}` : undefined
   const selectedScanDetail = selectedScan ? (
@@ -578,7 +596,7 @@ export function JobDetail() {
       aria-label={detail.data ? undefined : `Details for scan ${selectedScan.slice(0, 8)}`}
     >
       {detail.isLoading && <div className="loading"><span className="spinner" />Loading scan details…</div>}
-      {detail.error && <ErrorNotice message="Could not load this scan’s details." onRetry={() => detail.refetch()} />}
+      {detail.error && (isNotFound(detail.error) ? <ErrorNotice message="This scan no longer exists; retention may have removed it." /> : <ErrorNotice message="Could not load this scan’s details." onRetry={() => detail.refetch()} />)}
       {detail.data && (
         <>
           <div className="panel-heading">
@@ -595,7 +613,7 @@ export function JobDetail() {
           {selectedScanCanBeBaseline && (
             <div className="baseline-approval">
               <span className="muted">This successful scan matches the current security scope.</span>
-              {canOperate && <button className="button secondary" onClick={() => { setActionError(''); setDialog('approve') }} disabled={!!actionBusy}>{actionBusy === 'approve' ? 'Approving…' : 'Use as baseline'}</button>}
+              {canManageBaseline && <button className="button secondary" onClick={() => { setActionError(''); setDialog('approve') }} disabled={!!actionBusy}>{actionBusy === 'approve' ? 'Approving…' : 'Use as baseline'}</button>}
             </div>
           )}
           {(detail.data.scan.scanner_engine === 'naabu_nmap' || detail.data.scan.naabu_version || detail.data.scan.scanner_profile_id) && (
@@ -618,11 +636,11 @@ export function JobDetail() {
               ))}
             </div>
           ) : <div className="inline-empty">{scanWasCompared(detail.data.comparison_state) ? 'No changes detected.' : 'No comparison was performed for this scan.'}</div>}
-          <Pagination page={detail.data?.changes_pagination} onChange={setChangeOffset} />
+          <Pagination page={detail.data?.changes_pagination} onChange={setChangeOffset} label="Scan changes pagination" />
           {showResults && <div className="scan-results">
             <div className="panel-heading"><div><h3>Snapshot results</h3><p className="muted">Loaded on demand; open an effective host for technical evidence.</p></div></div>
             {results.isLoading ? <div className="skeleton-list" /> : results.error ? <ErrorNotice message="Could not load scan results." onRetry={() => results.refetch()} /> : results.data?.hosts.length ? <div className="result-list">{results.data.hosts.map(host => <Link className="result-row" to={`/jobs/${id}/scans/${selectedScan}/hosts/${encodeURIComponent(host.address)}?results=${resultsOffset}`} key={host.address}><strong title={host.address}>{host.address}</strong><span className="pill blue">{host.protocols?.map(protocol => protocol.protocol.toUpperCase()).join(' + ') || 'HOST'}</span><span className="muted">{host.open_ports + host.open_filtered_ports} positive ports · View host details</span></Link>)}</div> : <div className="inline-empty">No effective hosts in this scan.</div>}
-            <Pagination page={results.data?.pagination} onChange={setResultsOffset} />
+            <Pagination page={results.data?.pagination} onChange={setResultsOffset} label="Scan results pagination" />
           </div>}
         </>
       )}
@@ -643,25 +661,25 @@ export function JobDetail() {
           </div>
           <p className="muted">Revision {value.revision} · Updated {formatDateTime(value.updated_at)}{value.job.allow_high_cost ? ' · High-cost scans approved' : ''}</p>
         </div>
-        {canOperate && <div className="heading-actions">
-          <button className="button secondary" onClick={run} disabled={value.archived || !!actionBusy || !!pendingScanRequest || !!activeJobQueuedRun || !!activeJobScan}>
+        {(canOperate || canRun) && <div className="heading-actions">
+          {canRun && <button className="button secondary" onClick={run} disabled={value.archived || !!actionBusy || !!pendingScanRequest || !!activeJobQueuedRun || !!activeJobScan}>
             <Play size={16} /> {actionBusy === 'run' ? 'Starting…' : activeJobScan ? (activeJobScan.phase === 'cancelling' ? 'Cancelling…' : 'Scanning…') : pendingScanRequest || activeJobQueuedRun ? 'Queued…' : 'Scan now'}
-          </button>
-          <button className="button secondary" onClick={() => navigate(`/jobs/${id}/edit`)} disabled={!!actionBusy}>
+          </button>}
+          {canOperate && <button className="button secondary" onClick={() => navigate(`/jobs/${id}/edit`)} disabled={!!actionBusy}>
             <Edit3 size={16} /> Edit
-          </button>
-          {!value.archived && <button className="button secondary" onClick={() => void setSchedule(!value.enabled)} disabled={!!actionBusy || !!activeJobScan} title={activeJobScan ? 'Available when the running scan finishes' : undefined}>
+          </button>}
+          {canOperate && !value.archived && <button className="button secondary" onClick={() => void setSchedule(!value.enabled)} disabled={!!actionBusy || !!activeJobScan} title={activeJobScan ? 'Available when the running scan finishes' : undefined}>
             {value.enabled
               ? <><Pause size={16} /> {actionBusy === 'pause' ? 'Pausing…' : 'Pause schedule'}</>
               : <><CalendarClock size={16} /> {actionBusy === 'resume' ? 'Resuming…' : 'Resume schedule'}</>}
           </button>}
-          {value.archived ? <><button className="button secondary" onClick={restore} disabled={!!actionBusy}>{actionBusy === 'restore' ? 'Restoring…' : 'Restore'}</button>{canDelete && <button className="button danger" onClick={() => { setActionError(''); setDialog('delete') }} disabled={!!actionBusy}>{actionBusy === 'delete' ? 'Deleting…' : 'Delete permanently'}</button>}</> : <button className="icon-button danger" aria-label="Archive job" onClick={() => { setActionError(''); setDialog('archive') }} disabled={!!actionBusy}><Archive size={17} /></button>}
+          {canOperate && (value.archived ? <><button className="button secondary" onClick={restore} disabled={!!actionBusy}>{actionBusy === 'restore' ? 'Restoring…' : 'Restore'}</button>{canDelete && <button className="button danger" onClick={() => { setActionError(''); setDialog('delete') }} disabled={!!actionBusy}>{actionBusy === 'delete' ? 'Deleting…' : 'Delete permanently'}</button>}</> : <button className="icon-button danger" aria-label="Archive job" onClick={() => { setActionError(''); setDialog('archive') }} disabled={!!actionBusy}><Archive size={17} /></button>)}
         </div>}
       </div>
       {actionError && <div className="form-error banner" role="alert">{actionError}</div>}
       {value.scan_budget?.exceeded && <div className="notice warning scan-budget-warning" role="status"><TimerReset size={16} /><span>{scanBudgetMessage(value.scan_budget)}</span></div>}
-      {canOperate && canReadScans && active.error && <ErrorNotice message="Could not load live scan status." onRetry={() => active.refetch()} />}
-      {canOperate && canReadScans && (activeJobScan || pendingScanRequest || activeJobQueuedRun) && <JobScanStatus
+      {canReadScans && active.error && <ErrorNotice message="Could not load live scan status." onRetry={() => active.refetch()} />}
+      {canReadScans && (activeJobScan || pendingScanRequest || activeJobQueuedRun) && <JobScanStatus
         scan={activeJobScan}
         queuedRun={activeJobQueuedRun}
         cancelBusy={cancelBusyScan}
@@ -674,14 +692,14 @@ export function JobDetail() {
         canReadScans={canReadScans}
         canReadBaseline={canReadBaseline}
         canReadIncidents={canReadIncidents}
-        liveStatusRequested={canOperate && canReadScans}
-        liveStatusReady={canOperate && canReadScans && active.isSuccess && !active.error}
-        liveStatusLoading={canOperate && canReadScans && active.isLoading}
-        liveStatusError={canOperate && canReadScans && !!active.error}
+        liveStatusRequested={canReadScans}
+        liveStatusReady={canReadScans && active.isSuccess && !active.error}
+        liveStatusLoading={canReadScans && active.isLoading}
+        liveStatusError={canReadScans && !!active.error}
         activeScan={activeJobScan}
         queuedRun={activeJobQueuedRun}
         pendingRun={!!pendingScanRequest}
-        cycleKnown={canOperate && cycle.isSuccess && !cycle.error}
+        cycleKnown={canReadScans && cycle.isSuccess && !cycle.error}
         cycle={cycle.data ? cycle.data.cycle : value.scan_cycle}
         scans={scans.data?.scans}
         scansLoading={canReadScans && scans.isLoading}
@@ -737,7 +755,7 @@ export function JobDetail() {
         </div>
       </div>
       {value.scan_estimate && <div className="notice" role="status"><span><strong>Scan work per run:</strong> {value.scan_estimate.probes.toLocaleString()} estimated probes across {value.scan_estimate.hosts.toLocaleString()} configured hosts/targets ({formatEstimateProcesses(value.scan_estimate)}). Elapsed time varies with target responses and scanner settings{value.scan_estimate.unknown_dns ? `; DNS expansion may increase the work for ${value.scan_estimate.unknown_dns} name${value.scan_estimate.unknown_dns === 1 ? '' : 's'}` : ''}.</span></div>}
-      {activeCycle && <div className={activeCycle.status === 'stalled' ? 'form-error banner cycle-banner' : 'notice cycle-banner'} role="status"><span className="cycle-banner-copy"><strong>{activeCycle.status === 'paused' ? 'Broad scan paused safely.' : activeCycle.status === 'stalled' ? 'Broad scan stalled.' : 'Broad scan cycle active.'}</strong> {activeCycle.completed_units} of {activeCycle.total_units} work units and {activeCycle.completed_probes.toLocaleString()} of {activeCycle.total_probes.toLocaleString()} probes complete. {activeCycle.last_error && <span>{activeCycle.last_error}</span>}</span> {canOperate && (activeCycle.status === 'paused' || activeCycle.status === 'stalled') && <button className="button ghost" onClick={() => { setActionError(''); setDialog('discard-cycle') }} disabled={!!actionBusy}>Discard saved progress</button>}</div>}
+      {activeCycle && <div className={activeCycle.status === 'stalled' ? 'form-error banner cycle-banner' : 'notice cycle-banner'} role="status"><span className="cycle-banner-copy"><strong>{activeCycle.status === 'paused' ? 'Broad scan paused safely.' : activeCycle.status === 'stalled' ? 'Broad scan stalled.' : 'Broad scan cycle active.'}</strong> {activeCycle.completed_units} of {activeCycle.total_units} work units and {activeCycle.completed_probes.toLocaleString()} of {activeCycle.total_probes.toLocaleString()} probes complete. {activeCycle.last_error && <span>{activeCycle.last_error}</span>}</span> {canRun && (activeCycle.status === 'paused' || activeCycle.status === 'stalled') && <button className="button ghost" onClick={() => { setActionError(''); setDialog('discard-cycle') }} disabled={!!actionBusy}>Discard saved progress</button>}</div>}
       {value.scan_cycle_error === 'cycle_status_unavailable' && !cycle.data && <div className="notice" role="status">Saved scan progress could not be loaded. EdgeWatch will retry automatically; refresh the job if this continues.</div>}
       {!!value.missing_notification_destinations?.length && <div className="notice warning" role="status"><span><strong>Notification routing needs attention.</strong> {value.missing_notification_destinations.length === 1 ? 'A selected notification destination no longer exists' : `${value.missing_notification_destinations.length} selected notification destinations no longer exist`}, so this job’s alerts do not reach {value.missing_notification_destinations.length === 1 ? 'it' : 'them'}. Changing a deployment URL in config.yaml creates a new destination. {canOperate && !value.archived ? <Link to={`/jobs/${id}/edit`}>Edit the job to choose a current destination.</Link> : 'An operator can edit the job to choose a current destination.'}</span></div>}
 
@@ -781,13 +799,13 @@ export function JobDetail() {
             )}
           </div>
           <div className="overview-actions">
-            {canOperate && <button className="button secondary" onClick={() => { setActionError(''); setDialog('reset') }} disabled={!!actionBusy}><RotateCcw size={16} /> {actionBusy === 'reset' ? 'Resetting…' : 'Reset baseline'}</button>}
+            {canManageBaseline && <button className="button secondary" onClick={() => { setActionError(''); setDialog('reset') }} disabled={!!actionBusy}><RotateCcw size={16} /> {actionBusy === 'reset' ? 'Resetting…' : 'Reset baseline'}</button>}
             {baselineActive && <Link className="button secondary explore-button" to={`/jobs/${id}/baseline`}><Server size={16} /> Explore baseline <span className="button-count">{value.baseline.host_count ?? 'hosts'}</span></Link>}
           </div>
           {baselineActive && (
             <div className="overview-results">
               {baseline.isLoading ? <div className="skeleton-list" /> : baseline.error ? <ErrorNotice message="Could not load expected baseline results." onRetry={() => baseline.refetch()} /> : baseline.data?.snapshot?.units?.length ? <SurfaceUnitList units={baseline.data.snapshot.units} /> : <div className="inline-empty">No positive ports are in the current baseline.</div>}
-              <Pagination page={baseline.data?.pagination} onChange={setBaselineOffset} />
+              <Pagination page={baseline.data?.pagination} onChange={setBaselineOffset} label="Expected baseline pagination" />
             </div>
           )}
           {canReadScans && (value.baseline.pending ?? 0) > 0 && <section className="pending-detail" id="pending-changes" aria-labelledby="job-pending-title">
@@ -812,7 +830,7 @@ export function JobDetail() {
               </div>
               <div className="overview-results">
                 {latestResults.isLoading ? <div className="skeleton-list" /> : latestResults.error ? <ErrorNotice message="Could not load latest scan results." onRetry={() => latestResults.refetch()} /> : latestResults.data?.results?.length ? <SurfaceUnitList units={latestResults.data.results} emptyLabel="No positive ports were found in this scan." /> : <div className="inline-empty">No positive ports were found in this scan.</div>}
-                <Pagination page={latestResults.data?.pagination} onChange={setLatestResultsOffset} />
+                <Pagination page={latestResults.data?.pagination} onChange={setLatestResultsOffset} label="Latest results pagination" />
               </div>
             </>
           ) : <div className="inline-empty">No successful scans have run yet.</div>}
@@ -861,7 +879,7 @@ export function JobDetail() {
               ))}
             </div>
           ) : <div className="inline-empty">No scans have run yet.</div>}
-          <Pagination page={scans.data?.pagination} onChange={changeScanPage} />
+          <Pagination page={scans.data?.pagination} onChange={changeScanPage} label="Scan history pagination" />
         </div>}
       </div>
       {dialog === 'reset' && <ActionDialog title="Reset this baseline?" description="New scans will be learned before changes are reported. Existing history is preserved." confirmLabel="Reset baseline" destructive onConfirm={() => reset()} onCancel={() => { setDialog(null); setActionError('') }} error={actionError} />}
@@ -1003,4 +1021,8 @@ function formatRunDuration(ms?: number) {
   if (!ms || ms < 1) return '—'
   if (ms < 1000) return `${ms} ms`
   return `${(ms / 1000).toFixed(ms >= 10000 ? 0 : 1)} s`
+}
+
+function isNotFound(error: unknown) {
+  return (error as { code?: string } | null)?.code === 'not_found'
 }

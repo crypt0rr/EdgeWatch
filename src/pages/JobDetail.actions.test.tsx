@@ -8,6 +8,8 @@ import { APIError, activeScans, approveBaseline, archiveJob, cancelQueuedRun, ca
 import { renderWithProviders, defaultUnitScope } from '../test/test-utils'
 import { consumeFirstScanIntent, issueFirstScanIntent } from '../firstScanIntent'
 import { JobDetail } from './JobDetail'
+import { createQueryClient } from '../main'
+import type { QueryClient } from '@tanstack/react-query'
 
 vi.mock('../api', async () => {
   const actual = await vi.importActual<typeof import('../api')>('../api')
@@ -21,8 +23,8 @@ const job = {
 }
 const scan = { id: 'scan-1', job_id: 'job-1', job: 'Production', started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z', status: 'success', config_hash: 'scope' }
 const page = { limit: 10, offset: 0, total: 1, has_more: false, next_offset: null }
-const administrator = { role: 'administrator' as const, user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'jobs.run', 'jobs.delete', 'scans.read', 'baselines.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope }
-const operator = { ...administrator, role: 'operator' as const, user_id: 'operator', username: 'operator', permissions: ['jobs.write', 'scans.read', 'baselines.read'] }
+const administrator = { role: 'administrator' as const, user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'jobs.run', 'jobs.delete', 'scans.read', 'baselines.read', 'baselines.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope }
+const operator = { ...administrator, role: 'operator' as const, user_id: 'operator', username: 'operator', permissions: ['jobs.write', 'jobs.run', 'scans.read', 'baselines.read', 'baselines.manage'] }
 const activeScan = {
   id: 'active-scan-1', job_id: 'job-1', job: 'Production', started_at: '2026-01-01T00:00:00Z',
   progress_percent: 42, completed_probes: 42, total_probes: 100, phase: 'tcp discovery', protocol: 'tcp',
@@ -60,9 +62,9 @@ describe('job detail actions', () => {
     return <><span data-testid="route-state">{JSON.stringify(location.state)}</span><button type="button" onClick={() => navigate(-1)}>Back</button><button type="button" onClick={() => navigate(1)}>Forward</button><button type="button" onClick={() => navigate('/jobs/job-2', { state: { startFirstScanToken: routeJobTwoToken } })}>Open job 2</button></>
   }
 
-  function renderPage(route: NonNullable<MemoryRouterProps['initialEntries']> = ['/jobs/job-1'], strict = false) {
+  function renderPage(route: NonNullable<MemoryRouterProps['initialEntries']> = ['/jobs/job-1'], strict = false, client?: QueryClient) {
     const content = <><Routes><Route path="/jobs/:id/scans/:scanId" element={<JobDetail />} /><Route path="/jobs/:id/*" element={<JobDetail />} /></Routes><RouteState /></>
-    return renderWithProviders(strict ? <StrictMode>{content}</StrictMode> : content, { route })
+    return renderWithProviders(strict ? <StrictMode>{content}</StrictMode> : content, { route, client })
   }
 
   it('starts a scan and refreshes the relevant queries', async () => {
@@ -697,5 +699,61 @@ describe('job detail actions', () => {
     vi.mocked(getJob).mockResolvedValueOnce(job as never)
     fireEvent.click(retry)
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Production' })).toBeInTheDocument())
+  })
+
+  it('says a deleted job is not found after one request, without a retry', async () => {
+    vi.mocked(getJob).mockRejectedValue(new APIError('job not found', 'not_found', undefined, 404))
+    renderPage(['/jobs/job-1'], false, createQueryClient())
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('This job could not be found.'))
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+    expect(getJob).toHaveBeenCalledTimes(1)
+  })
+
+  it('says a pruned scan no longer exists instead of offering a retry', async () => {
+    vi.mocked(scanDetail).mockRejectedValue(new APIError('scan not found', 'not_found', undefined, 404))
+    renderPage(['/jobs/job-1/scans/scan-1'])
+    await waitFor(() => expect(screen.getByText('This scan no longer exists; retention may have removed it.')).toBeInTheDocument())
+    expect(screen.queryByText('Could not load this scan’s details.')).not.toBeInTheDocument()
+  })
+
+  it('reloads the job after a baseline conflict so the next confirmation sends the current baseline', async () => {
+    vi.mocked(resetBaseline).mockRejectedValueOnce(new APIError('baseline changed', 'baseline_conflict', { current: { scan_id: 'scan-2', modified: false } }, 409))
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Reset baseline' }))
+    vi.mocked(getJob).mockResolvedValue({ ...job, baseline: { ...job.baseline, scan_id: 'scan-2' } } as never)
+    fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent('The baseline changed while this page was open.'))
+    await waitFor(() => expect(getJob).toHaveBeenCalledTimes(2))
+    fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
+    await waitFor(() => expect(resetBaseline).toHaveBeenLastCalledWith('job-1', 'scan-2', false))
+  })
+
+  it('shows run controls to a role that may run scans without editing jobs, and the reverse', async () => {
+    vi.mocked(getSession).mockResolvedValue({ ...administrator, permissions: ['jobs.read', 'jobs.run', 'scans.read', 'baselines.read'] })
+    const runner = renderPage()
+    expect(await screen.findByRole('button', { name: /Scan now/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Archive job' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reset baseline' })).not.toBeInTheDocument()
+    await waitFor(() => expect(activeScans).toHaveBeenCalled())
+    runner.unmount()
+
+    vi.mocked(getSession).mockResolvedValue({ ...administrator, permissions: ['jobs.read', 'jobs.write', 'scans.read', 'baselines.read'] })
+    renderPage()
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Scan now/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reset baseline' })).not.toBeInTheDocument()
+  })
+
+  it('names each pager on the page differently', async () => {
+    const pages = { limit: 10, offset: 0, total: 25, has_more: true, next_offset: 10 }
+    vi.mocked(jobBaseline).mockResolvedValue({ job_id: 'job-1', job: 'Production', revision: 7, security_hash: 'scope', baseline: job.baseline, snapshot: { units: [{ target: '198.51.100.10', protocol: 'tcp', addresses: ['198.51.100.10'], ports: [] }], scopes: [] }, pagination: pages } as never)
+    vi.mocked(jobScans).mockResolvedValue({ scans: [scan], pagination: pages } as never)
+    vi.mocked(scanResults).mockResolvedValue({ results: [{ target: '198.51.100.10', protocol: 'tcp', addresses: ['198.51.100.10'], ports: [] }], pagination: pages } as never)
+    renderPage()
+    await waitFor(() => expect(screen.getAllByRole('navigation').length).toBeGreaterThanOrEqual(3))
+    const names = screen.getAllByRole('navigation').map(nav => nav.getAttribute('aria-label'))
+    expect(new Set(names).size).toBe(names.length)
+    expect(names).toEqual(expect.arrayContaining(['Expected baseline pagination', 'Latest results pagination', 'Scan history pagination']))
   })
 })

@@ -1,10 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { Globe2, Info, LoaderCircle, Network, Server, ShieldCheck } from 'lucide-react'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { baselineHost, baselineHostRDAP, historicalScanHost, historicalScanHostRDAP, scanHost, scanHostRDAP } from '../api'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { PortScopeDetails } from '../components/PortScopeDetails'
+import { useIsMobile } from '../components/navigation'
 import type { HostObservation, PortObservation, ProtocolObservation, RdapResult } from '../types'
 import { formatDate, formatDateTime } from '../format'
 import { hostStatusLabel } from '../status'
@@ -70,10 +71,18 @@ function NSEOutputPanel({ protocol, outputs }: { protocol: string; outputs?: str
   </section>
 }
 
+// A target that answers on almost every port (a tarpit, SYN proxy, or a
+// UDP range reported open|filtered) can carry tens of thousands of ports;
+// the card renders them a page at a time so the tab stays responsive.
+const PORT_PAGE_SIZE = 500
+
 function ProtocolCard({ protocol }: { protocol: ProtocolObservation }) {
   const [sortKey, setSortKey] = useState<PortSortKey>('port')
   const [descending, setDescending] = useState(false)
-  const ports = [...(protocol.ports ?? [])].sort((left, right) => {
+  const [shown, setShown] = useState(PORT_PAGE_SIZE)
+  // One layout is rendered: the table on wider screens, cards on phones.
+  const mobile = useIsMobile()
+  const sorted = useMemo(() => [...(protocol.ports ?? [])].sort((left, right) => {
     let result = 0
     if (sortKey === 'port') result = left.port - right.port
     if (sortKey === 'state') result = left.state.localeCompare(right.state)
@@ -81,7 +90,8 @@ function ProtocolCard({ protocol }: { protocol: ProtocolObservation }) {
     if (sortKey === 'service') result = serviceSortValue(left).localeCompare(serviceSortValue(right))
     if (result === 0) result = left.port - right.port
     return descending ? -result : result
-  })
+  }), [protocol.ports, sortKey, descending])
+  const ports = sorted.length > shown ? sorted.slice(0, shown) : sorted
   function sortBy(next: PortSortKey) {
     if (next === sortKey) setDescending(value => !value)
     else { setSortKey(next); setDescending(false) }
@@ -123,7 +133,7 @@ function ProtocolCard({ protocol }: { protocol: ProtocolObservation }) {
       </div>)}
     </div>
     {ports.length ? <>
-      <div className="port-table-wrap" role="region" aria-label={evidenceLabel} tabIndex={0}>
+      {!mobile && <div className="port-table-wrap" role="region" aria-label={evidenceLabel} tabIndex={0}>
         <table className="port-table">
           <thead><tr>
             <th scope="col" aria-sort={sortKey === 'port' ? (descending ? 'descending' : 'ascending') : 'none'}>{sortLabel('port', 'Port')}</th>
@@ -138,8 +148,8 @@ function ProtocolCard({ protocol }: { protocol: ProtocolObservation }) {
             <td><ServiceText port={port} /></td>
           </tr>)}</tbody>
         </table>
-      </div>
-      <div className="mobile-port-list" aria-label={evidenceLabel}>
+      </div>}
+      {mobile && <div className="mobile-port-list" aria-label={evidenceLabel}>
         <div className="mobile-port-sort" role="group" aria-label={`Sort ${protocol.protocol.toUpperCase()} ports`}>
           <span>Sort:</span>{sortLabel('port', 'Port')}{sortLabel('state', 'State')}{sortLabel('reason', 'Reason')}{sortLabel('service', 'Service')}
         </div>
@@ -153,7 +163,11 @@ function ProtocolCard({ protocol }: { protocol: ProtocolObservation }) {
             <div><dt>Service and evidence</dt><dd><ServiceText port={port} /></dd></div>
           </dl>
         </article>)}
-      </div>
+      </div>}
+      {sorted.length > ports.length && <div className="port-page-more">
+        <span className="muted">Showing {ports.length.toLocaleString()} of {sorted.length.toLocaleString()} positive ports.</span>
+        <button type="button" className="button secondary" onClick={() => setShown(value => value + PORT_PAGE_SIZE)}>Show {Math.min(PORT_PAGE_SIZE, sorted.length - ports.length).toLocaleString()} more</button>
+      </div>}
     </> : <div className="inline-empty">No open or open|filtered ports were recorded.</div>}
     <NSEOutputPanel protocol={protocol.protocol} outputs={protocol.nse_output} />
     <EvidencePorts title="Naabu discoveries" description="Ports found by fast TCP discovery. These are retained for diagnostics and are not baseline evidence until Nmap confirms them." ports={discovered} />

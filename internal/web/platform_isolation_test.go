@@ -404,16 +404,19 @@ func TestSessionDescribesTheBusinessUnit(t *testing.T) {
 	for actor, want := range map[string]struct {
 		scope string
 		unit  any
+		// highCost is high_cost_override: only a session that may approve
+		// high-cost scans carries it.
+		highCost any
 	}{
-		actorAdminA:   {"unit", map[string]any{"id": store.DefaultTenantID, "name": "Default", "slug": "default"}},
-		actorViewerA:  {"unit", map[string]any{"id": store.DefaultTenantID, "name": "Default", "slug": "default"}},
-		actorAdminB:   {"unit", map[string]any{"id": f.unitB, "name": "Bravo Unit", "slug": "bravo"}},
-		actorPlatform: {"platform", nil},
+		actorAdminA:   {"unit", map[string]any{"id": store.DefaultTenantID, "name": "Default", "slug": "default"}, true},
+		actorViewerA:  {"unit", map[string]any{"id": store.DefaultTenantID, "name": "Default", "slug": "default"}, nil},
+		actorAdminB:   {"unit", map[string]any{"id": f.unitB, "name": "Bravo Unit", "slug": "bravo"}, true},
+		actorPlatform: {"platform", nil, nil},
 	} {
 		response := f.call(t, actor, http.MethodGet, "/auth/session", "")
 		expectResponse(t, response, http.StatusOK, actor+" session", nil)
 		payload, _ := sessionKeys(t, response.Body.Bytes())
-		if payload["scope"] != want.scope || !reflect.DeepEqual(payload["unit"], want.unit) || payload["multi_unit"] != true {
+		if payload["scope"] != want.scope || !reflect.DeepEqual(payload["unit"], want.unit) || payload["multi_unit"] != true || payload["high_cost_override"] != want.highCost {
 			t.Errorf("%s session = %s", actor, response.Body.String())
 		}
 	}

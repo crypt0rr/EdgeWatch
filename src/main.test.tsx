@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQuery } from '@tanstack/react-query'
 import { useLocation } from 'react-router-dom'
 import { APIError, adminStatus, acceptIncident, getSession, listEvents, listIncidents, listJobs, login, logout, recordActivity, setupStatus, suppressIncident } from './api'
-import { AppContent, AuthRoutes, createQueryClient, Incidents, Jobs, ProtectedApp, retryQuery, Shell, unitBreadcrumb } from './main'
+import { AppContent, AuthRoutes, createQueryClient, Incidents, Jobs, ProtectedApp, retryQuery, retryQueryDelay, Shell, unitBreadcrumb } from './main'
 import { renderWithProviders } from './test/test-utils'
 
 vi.mock('./api', async () => {
@@ -43,7 +43,7 @@ describe('application shell', () => {
     vi.mocked(listEvents).mockResolvedValue({ events: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] } as never)
-    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'incidents.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'incidents.read', 'incidents.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
     vi.mocked(login).mockResolvedValue({ role: 'administrator', username: 'admin', permissions: ['jobs.write'], csrf_token: '', totp_required: false } as never)
     vi.mocked(logout).mockResolvedValue(undefined)
     vi.mocked(recordActivity).mockResolvedValue(undefined)
@@ -509,6 +509,18 @@ describe('application shell', () => {
     })
   })
 
+  it('shows incidents without accept or suppress actions to a session that may only read them', async () => {
+    vi.mocked(getSession).mockResolvedValue({ role: 'operator', user_id: 'reader', username: 'reader', permissions: ['incidents.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    const incident = { job_id: 'job-1', job: 'TCP monitor', incident: { change: { key: 'tcp:198.51.100.10:443', kind: 'port', target: '198.51.100.10', protocol: 'tcp', port: 443, old: 'closed', new: 'open', severity: 'critical' }, last_seen_at: '2026-09-13T10:00:00Z' } }
+    vi.mocked(listIncidents).mockResolvedValue({ incidents: [incident], pagination: { limit: 50, offset: 0, total: 1, has_more: false, next_offset: null } } as never)
+    renderWithProviders(<Incidents />)
+    await waitFor(() => expect(screen.getAllByText('Port opened / tcp:443').length).toBeGreaterThan(0))
+    await waitFor(() => expect(getSession).toHaveBeenCalled())
+    expect(screen.queryByRole('button', { name: 'Accept change' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Suppress 1 scan' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'Actions' })).not.toBeInTheDocument()
+  })
+
   it('shows informational incidents neutrally and closes and refreshes a missing incident action', async () => {
     const row = { job_id: 'job-1', job: 'Mail monitor', incident: { change: { key: 'service|198.51.100.10|tcp|25', kind: 'service', target: '198.51.100.10', protocol: 'tcp', port: 25, old: 'smtp', new: 'unknown', severity: 'info' }, opened_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:01:00Z' } }
     const page = { limit: 50, offset: 0, total: 1, has_more: false, next_offset: null }
@@ -682,5 +694,22 @@ describe('console query defaults', () => {
     await waitFor(() => expect(screen.getByTestId('query-status')).toHaveTextContent('error'))
     expect(queryFn).toHaveBeenCalledTimes(1)
     client.clear()
+  })
+
+  it('does not retry deterministic client errors, but retries timeouts and rate limits', () => {
+    // A deleted job, a pruned scan, or another unit's ID answers 404 every time.
+    expect(retryQuery(0, new APIError('job not found', 'not_found', undefined, 404))).toBe(false)
+    expect(retryQuery(0, new APIError('baseline changed', 'baseline_conflict', undefined, 409))).toBe(false)
+    expect(retryQuery(0, new APIError('gone', 'gone', undefined, 410))).toBe(false)
+    expect(retryQuery(0, new APIError('request timeout', 'timeout', undefined, 408))).toBe(true)
+    const limited = new APIError('too many requests', 'rate_limited', undefined, 429, 7)
+    expect(retryQuery(0, limited)).toBe(true)
+    expect(retryQuery(3, limited)).toBe(false)
+    // A 429 waits as long as Retry-After asks; other failures back off.
+    expect(retryQueryDelay(0, limited)).toBe(7000)
+    expect(retryQueryDelay(0, new APIError('too many requests', 'rate_limited', undefined, 429))).toBe(1000)
+    expect(retryQueryDelay(1, new Error('offline'))).toBe(2000)
+    expect(retryQueryDelay(10, new Error('offline'))).toBe(30_000)
+    expect(createQueryClient().getDefaultOptions().queries?.retryDelay).toBe(retryQueryDelay)
   })
 })

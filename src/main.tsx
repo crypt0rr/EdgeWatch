@@ -40,18 +40,26 @@ import './styles.css'
 
 /** The console's query defaults, shared by the browser bootstrap and tests. */
 export function createQueryClient() {
-  return new QueryClient({ defaultOptions: { queries: { staleTime: 5000, refetchOnWindowFocus: true, retry: retryQuery } } })
+  return new QueryClient({ defaultOptions: { queries: { staleTime: 5000, refetchOnWindowFocus: true, retry: retryQuery, retryDelay: retryQueryDelay } } })
 }
 
 /**
- * A refused request is not retried: a 400 fails the same way again, a 401
- * ends the session, and a 403 makes the console re-read its session, which
- * may now be restricted. Other failures keep React Query's default of three
- * retries.
+ * A refused request is not retried: a 4xx answer fails the same way again
+ * (a 404 is as deterministic as a 400, and another unit's ID answers 404
+ * too), a 401 ends the session, and a 403 makes the console re-read its
+ * session, which may now be restricted. A timeout (408) or a rate limit
+ * (429) may pass later; they and other failures keep React Query's default
+ * of three retries, and a 429 waits as long as its Retry-After asks.
  */
 export function retryQuery(failureCount: number, error: Error) {
-  if (error instanceof APIError && (error.status === 400 || error.status === 401 || error.status === 403)) return false
+  if (error instanceof APIError && error.status !== undefined && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429) return false
   return failureCount < 3
+}
+
+/** React Query's default backoff, or the delay a 429 asked for. */
+export function retryQueryDelay(failureCount: number, error: Error) {
+  if (error instanceof APIError && error.status === 429 && error.retryAfterSeconds) return error.retryAfterSeconds * 1000
+  return Math.min(1000 * 2 ** failureCount, 30_000)
 }
 const queryClient = createQueryClient()
 
@@ -415,6 +423,10 @@ export function Incidents() {
   const actionErrorRef = useRef<HTMLDivElement>(null)
   const client = useQueryClient()
   const incidents = useQuery({ queryKey: ['incidents', offset], queryFn: () => listIncidents(offset) })
+  const session = useQuery({ queryKey: ['session'], queryFn: getSession })
+  // Reading incidents needs incidents.read; accepting or suppressing one
+  // needs incidents.manage, so a reader sees the list without the actions.
+  const canManage = session.data?.permissions.includes('incidents.manage') ?? false
   const incidentPage = incidents.data?.pagination
   const pageIsPastEnd = !!incidents.data && !incidents.data.incidents.length && !!incidentPage?.total && offset > 0
   useEffect(() => {
@@ -473,21 +485,21 @@ export function Incidents() {
     setActionError('')
     setPendingAction({ row, action })
   }
-  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Change tracking</p><h1>Incidents</h1><p className="muted">Confirmed changes detected against active baselines.</p></div></div>{actionError && !pendingAction && <div ref={actionErrorRef} className="form-error banner" role="alert" tabIndex={-1}>{actionError}</div>}{incidents.isLoading ? <Loading /> : incidents.error ? <ErrorNotice message="Could not load active incidents." onRetry={() => incidents.refetch()} /> : incidents.data?.incidents.length ? <><div className="table-card incident-table-card"><div className="desktop-incident-table"><table><thead><tr><th scope="col">Job</th><th scope="col">Target</th><th scope="col">Change</th><th scope="col">Severity</th><th scope="col">Last seen</th><th scope="col">Actions</th></tr></thead><tbody>{incidents.data.incidents.map((row, i) => <IncidentTableRow key={`${row.job_id}-${row.incident.change.key ?? i}`} row={row} busy={busy} onAction={actionFor} />)}</tbody></table></div><div className="mobile-incident-list" aria-label="Incidents">{incidents.data.incidents.map((row, i) => <IncidentCard key={`${row.job_id}-${row.incident.change.key ?? i}`} row={row} busy={busy} onAction={actionFor} />)}</div></div><Pagination page={incidents.data.pagination} onChange={setOffset} /></> : incidents.data?.pagination.total ? <><div className="inline-empty">No incidents on this page.</div><Pagination page={incidents.data.pagination} onChange={setOffset} /></> : <Empty icon={<ClipboardList />} title="No active incidents" body="EdgeWatch will show confirmed port, service, or DNS changes here." />}{pendingAction && <ActionDialog title={pendingAction.action === 'accept' ? 'Accept this change?' : 'Suppress this incident for one scan?'} description={pendingAction.action === 'accept' ? `Accept this change into the baseline for “${pendingAction.row.job}”? Future scans will treat it as expected.` : 'The incident will be suppressed for the next successful scan. If it is still present after that scan, it will be reported again.'} confirmLabel={pendingAction.action === 'accept' ? 'Accept change' : 'Suppress 1 scan'} destructive={pendingAction.action === 'suppress'} onConfirm={() => act(pendingAction.row, pendingAction.action)} onCancel={() => { setPendingAction(null); setActionError('') }} error={actionError} />}</section>
+  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Change tracking</p><h1>Incidents</h1><p className="muted">Confirmed changes detected against active baselines.</p></div></div>{actionError && !pendingAction && <div ref={actionErrorRef} className="form-error banner" role="alert" tabIndex={-1}>{actionError}</div>}{incidents.isLoading ? <Loading /> : incidents.error ? <ErrorNotice message="Could not load active incidents." onRetry={() => incidents.refetch()} /> : incidents.data?.incidents.length ? <><div className="table-card incident-table-card"><div className="desktop-incident-table"><table><thead><tr><th scope="col">Job</th><th scope="col">Target</th><th scope="col">Change</th><th scope="col">Severity</th><th scope="col">Last seen</th>{canManage && <th scope="col">Actions</th>}</tr></thead><tbody>{incidents.data.incidents.map((row, i) => <IncidentTableRow key={`${row.job_id}-${row.incident.change.key ?? i}`} row={row} busy={busy} onAction={canManage ? actionFor : undefined} />)}</tbody></table></div><div className="mobile-incident-list" aria-label="Incidents">{incidents.data.incidents.map((row, i) => <IncidentCard key={`${row.job_id}-${row.incident.change.key ?? i}`} row={row} busy={busy} onAction={canManage ? actionFor : undefined} />)}</div></div><Pagination page={incidents.data.pagination} onChange={setOffset} /></> : incidents.data?.pagination.total ? <><div className="inline-empty">No incidents on this page.</div><Pagination page={incidents.data.pagination} onChange={setOffset} /></> : <Empty icon={<ClipboardList />} title="No active incidents" body="EdgeWatch will show confirmed port, service, or DNS changes here." />}{pendingAction && <ActionDialog title={pendingAction.action === 'accept' ? 'Accept this change?' : 'Suppress this incident for one scan?'} description={pendingAction.action === 'accept' ? `Accept this change into the baseline for “${pendingAction.row.job}”? Future scans will treat it as expected.` : 'The incident will be suppressed for the next successful scan. If it is still present after that scan, it will be reported again.'} confirmLabel={pendingAction.action === 'accept' ? 'Accept change' : 'Suppress 1 scan'} destructive={pendingAction.action === 'suppress'} onConfirm={() => act(pendingAction.row, pendingAction.action)} onCancel={() => { setPendingAction(null); setActionError('') }} error={actionError} />}</section>
 }
 
-function IncidentTableRow({ row, busy, onAction }: { row: Incident; busy: string; onAction: (row: Incident, action: 'accept' | 'suppress') => void }) {
+function IncidentTableRow({ row, busy, onAction }: { row: Incident; busy: string; onAction?: (row: Incident, action: 'accept' | 'suppress') => void }) {
   const key = row.incident.change.key
   const acceptID = `accept:${row.job_id}:${key ?? ''}`
   const suppressID = `suppress:${row.job_id}:${key ?? ''}`
-  return <tr><td><strong>{row.job}</strong></td><td>{changeTargetLabel(row.incident.change)}</td><td><strong>{formatIncidentChange(row.incident.change)}</strong><br /><span className="muted">{changeValues(row.incident.change)}</span></td><td><span className={`pill ${severityTone(row.incident.change.severity)}`}>{severityLabel(row.incident.change.severity)}</span></td><td>{formatDateTime(row.incident.last_seen_at)}</td><td><IncidentActions row={row} busy={busy} acceptID={acceptID} suppressID={suppressID} onAction={onAction} /></td></tr>
+  return <tr><td><strong>{row.job}</strong></td><td>{changeTargetLabel(row.incident.change)}</td><td><strong>{formatIncidentChange(row.incident.change)}</strong><br /><span className="muted">{changeValues(row.incident.change)}</span></td><td><span className={`pill ${severityTone(row.incident.change.severity)}`}>{severityLabel(row.incident.change.severity)}</span></td><td>{formatDateTime(row.incident.last_seen_at)}</td>{onAction && <td><IncidentActions row={row} busy={busy} acceptID={acceptID} suppressID={suppressID} onAction={onAction} /></td>}</tr>
 }
 
-function IncidentCard({ row, busy, onAction }: { row: Incident; busy: string; onAction: (row: Incident, action: 'accept' | 'suppress') => void }) {
+function IncidentCard({ row, busy, onAction }: { row: Incident; busy: string; onAction?: (row: Incident, action: 'accept' | 'suppress') => void }) {
   const key = row.incident.change.key
   const acceptID = `accept:${row.job_id}:${key ?? ''}`
   const suppressID = `suppress:${row.job_id}:${key ?? ''}`
-  return <article className="incident-card" aria-label={`Incident for ${row.job}`}><div className="incident-card-heading"><strong>{row.job}</strong><span className={`pill ${severityTone(row.incident.change.severity)}`}>{severityLabel(row.incident.change.severity)}</span></div><dl className="incident-facts"><div><dt>Target</dt><dd>{changeTargetLabel(row.incident.change)}</dd></div><div><dt>Change</dt><dd><strong>{formatIncidentChange(row.incident.change)}</strong><br /><span className="muted">{changeValues(row.incident.change)}</span></dd></div><div><dt>Last seen</dt><dd>{formatDateTime(row.incident.last_seen_at)}</dd></div></dl><IncidentActions row={row} busy={busy} acceptID={acceptID} suppressID={suppressID} onAction={onAction} /></article>
+  return <article className="incident-card" aria-label={`Incident for ${row.job}`}><div className="incident-card-heading"><strong>{row.job}</strong><span className={`pill ${severityTone(row.incident.change.severity)}`}>{severityLabel(row.incident.change.severity)}</span></div><dl className="incident-facts"><div><dt>Target</dt><dd>{changeTargetLabel(row.incident.change)}</dd></div><div><dt>Change</dt><dd><strong>{formatIncidentChange(row.incident.change)}</strong><br /><span className="muted">{changeValues(row.incident.change)}</span></dd></div><div><dt>Last seen</dt><dd>{formatDateTime(row.incident.last_seen_at)}</dd></div></dl>{onAction && <IncidentActions row={row} busy={busy} acceptID={acceptID} suppressID={suppressID} onAction={onAction} />}</article>
 }
 
 function formatIncidentChange(change: Incident['incident']['change']) {

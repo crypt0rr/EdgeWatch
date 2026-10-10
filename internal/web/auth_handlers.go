@@ -449,11 +449,17 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 // describes the signed-in account. A session that must enrol TOTP before it
 // may do anything else also carries totp_enrollment_required, and holds only
 // its own account's self-service; the key is absent otherwise, so a session
-// without the requirement is described exactly as before.
+// without the requirement is described exactly as before. A session that may
+// approve high-cost scans carries high_cost_override, so the console gates
+// that control on the rule the job handlers apply rather than on a
+// permission that happens to accompany it.
 func (s *Server) addSessionPermissions(response map[string]any, session store.Session) {
 	response["permissions"] = auth.PermissionsForSession(session)
 	if session.TOTPEnrollmentRequired {
 		response["totp_enrollment_required"] = true
+	}
+	if canOverrideHighCost(session) {
+		response["high_cost_override"] = true
 	}
 }
 

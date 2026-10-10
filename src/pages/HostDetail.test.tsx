@@ -131,9 +131,36 @@ describe('host detail', () => {
     expect(stateSort.textContent).toContain('↑')
     act(() => stateSort.click())
     expect(stateSort.textContent).toContain('↓')
-    const serviceSort = container.querySelector('button[aria-label="Sort by service"]') as HTMLButtonElement
+    const serviceSort = container.querySelector('button[aria-label="Sort by service and evidence"]') as HTMLButtonElement
     act(() => serviceSort.click())
     expect(serviceSort.textContent).toContain('↑')
+  })
+
+  it('renders a host that answers on every port one layout and one page at a time', async () => {
+    const ports = Array.from({ length: 65_535 }, (_, index) => ({ port: index + 1, state: 'open', reason: 'syn-ack' }))
+    vi.mocked(baselineHost).mockResolvedValue({ ...detail, host: { ...host, protocols: [{ ...host.protocols![0], ports, nse_output: [] }] } })
+    await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address')
+    // Only the table renders on a desktop-width screen, a page at a time.
+    expect(container.querySelector('.mobile-port-list')).toBeNull()
+    expect(container.querySelectorAll('.port-table tbody tr')).toHaveLength(500)
+    expect(container.textContent).toContain('Showing 500 of 65,535 positive ports.')
+    const more = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Show 500 more') as HTMLButtonElement
+    await act(async () => more.click())
+    expect(container.querySelectorAll('.port-table tbody tr')).toHaveLength(1000)
+    expect(container.textContent).toContain('Showing 1,000 of 65,535 positive ports.')
+  })
+
+  it('renders port cards instead of the table on a phone', async () => {
+    const matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })
+    vi.stubGlobal('matchMedia', matchMedia)
+    try {
+      await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address')
+      expect(container.querySelector('.port-table-wrap')).toBeNull()
+      expect(container.querySelectorAll('.mobile-port-card').length).toBeGreaterThan(0)
+      expect(container.querySelector('.port-page-more')).toBeNull()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('renders every stored NSE script summary as safe text without truncating it again', async () => {

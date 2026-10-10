@@ -104,6 +104,20 @@ describe('global hosts explorer', () => {
     })
   })
 
+  it('shows the loading state, not a false empty result, while a newly valid search settles', async () => {
+    await renderPage()
+    const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement
+    setInputValue(search, '19')
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    setInputValue(search, '198')
+    // The debounced query has not started yet: nothing may claim "No hosts match".
+    expect(container.querySelector('.host-empty-results')).toBeNull()
+    expect(container.querySelector('.loading')).not.toBeNull()
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    await vi.waitFor(() => expect(container.querySelector('.loading')).toBeNull(), { timeout: 1000 })
+    expect(listHosts).toHaveBeenLastCalledWith(expect.objectContaining({ q: '198' }))
+  })
+
   it('asks for three characters and does not submit short or oversized searches', async () => {
     await renderPage()
     const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement

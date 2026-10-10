@@ -193,3 +193,60 @@ func TestIPv6RateLimitPrefixConfiguration(t *testing.T) {
 		}
 	}
 }
+
+// web.max_live_streams and web.max_live_streams_per_unit default to 256 and
+// 64 when they are omitted, the per-unit limit to the deployment-wide one
+// when that is lower; an explicit zero is rejected, not replaced by the
+// default.
+func TestLiveStreamLimitConfiguration(t *testing.T) {
+	base := Config{Version: 1, Database: "db", Retention: Duration(24 * time.Hour), Scheduler: Scheduler{MaxConcurrent: 1}, Web: Web{Listen: "127.0.0.1:8080"}}
+	limit := func(value int) *int { return &value }
+	for _, check := range []struct {
+		total, perUnit         *int
+		wantTotal, wantPerUnit int
+	}{
+		{nil, nil, DefaultMaxLiveStreams, DefaultMaxLiveStreamsPerUnit},
+		{limit(1024), nil, 1024, DefaultMaxLiveStreamsPerUnit},
+		{limit(32), nil, 32, 32},
+		{nil, limit(100), DefaultMaxLiveStreams, 100},
+		{limit(MaxLiveStreamsLimit), limit(MaxLiveStreamsLimit), MaxLiveStreamsLimit, MaxLiveStreamsLimit},
+		{limit(1), limit(1), 1, 1},
+	} {
+		base.Web.MaxLiveStreams, base.Web.MaxLiveStreamsPerUnit = check.total, check.perUnit
+		if err := base.ValidateDeployment(); err != nil {
+			t.Errorf("limits %d/%d rejected: %v", check.wantTotal, check.wantPerUnit, err)
+		}
+		if total, perUnit := base.Web.LiveStreamLimits(); total != check.wantTotal || perUnit != check.wantPerUnit {
+			t.Errorf("limits = %d/%d, want %d/%d", total, perUnit, check.wantTotal, check.wantPerUnit)
+		}
+	}
+	for _, check := range []struct {
+		total, perUnit *int
+		field          string
+	}{
+		{limit(0), nil, "web.max_live_streams "},
+		{limit(-1), nil, "web.max_live_streams "},
+		{limit(MaxLiveStreamsLimit + 1), nil, "web.max_live_streams "},
+		{nil, limit(0), "web.max_live_streams_per_unit"},
+		{nil, limit(-1), "web.max_live_streams_per_unit"},
+		{nil, limit(DefaultMaxLiveStreams + 1), "web.max_live_streams_per_unit"},
+		{limit(16), limit(17), "web.max_live_streams_per_unit"},
+	} {
+		base.Web.MaxLiveStreams, base.Web.MaxLiveStreamsPerUnit = check.total, check.perUnit
+		if err := base.ValidateDeployment(); err == nil || !strings.Contains(err.Error(), check.field) {
+			t.Errorf("limits %v/%v = %v, want a %s error", check.total, check.perUnit, err, check.field)
+		}
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("database: "+filepath.Join(dir, "edgewatch.db")+"\nretention: 24h\nweb:\n  max_live_streams: 512\n  max_live_streams_per_unit: 32\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total, perUnit := cfg.Web.LiveStreamLimits(); total != 512 || perUnit != 32 {
+		t.Fatalf("loaded limits = %d/%d", total, perUnit)
+	}
+}

@@ -440,8 +440,8 @@ func TestHostSearchIndexCoversServiceFieldsAndProjectionUpdates(t *testing.T) {
 
 	// The FTS virtual-table plan proves the search predicate is served by the
 	// normalized index rather than a LIKE over host_json.
-	searchQueries := latestScanHostsPageQueries(DefaultTenantID, "nginx", "", nil, 50, 0)
-	rows, err := s.DB.QueryContext(ctx, `EXPLAIN QUERY PLAN `+searchQueries.pageSQL, searchQueries.pageArg...)
+	searchSQL, searchArgs := latestScanHostsPageQueries(DefaultTenantID, "nginx", "", nil).segment(false, 50, 0)
+	rows, err := s.DB.QueryContext(ctx, `EXPLAIN QUERY PLAN `+searchSQL, searchArgs...)
 	if err != nil {
 		t.Fatal(err)
 	}

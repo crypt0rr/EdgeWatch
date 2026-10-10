@@ -59,14 +59,8 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	// Ask buffering reverse proxies such as nginx to pass each event through
 	// as it is written instead of holding it in a response buffer.
 	w.Header().Set("X-Accel-Buffering", "no")
-	maxSubscribers := s.sseMaxSubscribers
-	if maxSubscribers <= 0 {
-		maxSubscribers = defaultMaxSSESubscribers
-	}
-	maxSubscribersPerUser := s.sseMaxSubscribersPerUser
-	if maxSubscribersPerUser <= 0 {
-		maxSubscribersPerUser = defaultMaxSSESubscribersPerUser
-	}
+	maxSubscribers := s.maxSSESubscribers()
+	maxSubscribersPerUser := s.maxSSESubscribersPerUser()
 	// Per-user limits must be keyed by the stable account identity, not by a
 	// session hash. Otherwise one account can consume the entire nominal limit
 	// simply by opening several browser sessions (or bypass it by rotating
@@ -107,6 +101,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	if s.sseIdentity == nil {
 		s.sseIdentity = map[chan sseMessage]sseSubscriber{}
 	}
+	if s.sseUnitUse == nil {
+		s.sseUnitUse = map[sseSubscriber]int{}
+	}
 	if channelClosed(shutdown) {
 		s.mu.Unlock()
 		return
@@ -117,7 +114,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 		writeSSELimit(w, flusher, "too many live streams")
 		return
 	}
-	if maxSubscribersPerUnit > 0 && s.unitSubscribersLocked(subscriber) >= maxSubscribersPerUnit {
+	if maxSubscribersPerUnit > 0 && s.sseUnitUse[subscriber] >= maxSubscribersPerUnit {
 		s.mu.Unlock()
 		s.setSSEWriteDeadline(w)
 		writeSSELimit(w, flusher, "too many live streams for this business unit")
@@ -134,6 +131,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	s.sseIdentity[ch] = subscriber
 	s.subscriberKey[ch] = subscriberKey
 	s.subscriberUse[subscriberKey]++
+	s.sseUnitUse[subscriber]++
 	s.sseCancels[ch] = streamCancel
 	s.sseSessionKey[ch] = strings.TrimSpace(session.IDHash)
 	s.sseUserKey[ch] = strings.TrimSpace(session.UserID)
@@ -159,6 +157,11 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 			delete(s.subscriberUse, subscriberKey)
 		} else {
 			s.subscriberUse[subscriberKey] = use - 1
+		}
+		if use := s.sseUnitUse[subscriber]; use <= 1 {
+			delete(s.sseUnitUse, subscriber)
+		} else {
+			s.sseUnitUse[subscriber] = use - 1
 		}
 		close(ch)
 		s.mu.Unlock()
@@ -331,33 +334,53 @@ func (s *Server) revokeSSETenant(tenantID string) {
 
 // sseUnitStreamLimit returns how many live-update streams one business
 // unit, or the platform, may hold, or 0 when only the deployment-wide limit
-// applies. With a single unit that is the case, as before business units
-// existed. Once more than one unit exists, each unit gets its own share, so
-// one unit's streams cannot use up the deployment-wide limit and lock the
-// other units out. If the units cannot be counted, the share applies.
+// applies. With a single active unit that is the case, as before business
+// units existed. Once more than one unit is active, each unit gets its share
+// of the deployment-wide limit, see sseUnitStreamShare, so the streams of
+// some units cannot use up the limit and lock the other units out. If the
+// units cannot be counted, the per-unit limit applies.
 func (s *Server) sseUnitStreamLimit(ctx context.Context) int {
 	limit := s.sseMaxSubscribersPerUnit
 	if limit <= 0 {
 		limit = defaultMaxSSESubscribersPerUnit
 	}
-	if s.Store != nil {
-		if multiple, err := s.Store.Platform().HasMultipleTenants(ctx); err == nil && !multiple {
-			return 0
-		}
+	if s.Store == nil {
+		return limit
 	}
-	return limit
+	units, err := s.Store.Platform().ActiveTenantCount(ctx)
+	if err != nil {
+		return limit
+	}
+	if units <= 1 {
+		return 0
+	}
+	return sseUnitStreamShare(s.maxSSESubscribers(), s.maxSSESubscribersPerUser(), limit, units)
 }
 
-// unitSubscribersLocked counts the open streams with the same business unit,
-// or the platform, as subscriber. The caller holds mu.
-func (s *Server) unitSubscribersLocked(subscriber sseSubscriber) int {
-	count := 0
-	for _, identity := range s.sseIdentity {
-		if identity == subscriber {
-			count++
-		}
+// sseUnitStreamShare divides the deployment-wide stream limit evenly among
+// the active units, so the shares of all units together fit in it, and
+// every unit can open its share however many streams the others hold. A
+// share is at least one account's streams, and at most the per-unit limit.
+// The floor means that the shares fit only while there are at most total /
+// perUser units; past that, a unit can be refused before it reaches its
+// share. Shares change when units are added or removed: a stream already
+// open over a smaller share is kept, and only new streams are refused.
+func sseUnitStreamShare(total, perUser, perUnit, units int) int {
+	return min(max(total/units, perUser), perUnit)
+}
+
+func (s *Server) maxSSESubscribers() int {
+	if s.sseMaxSubscribers > 0 {
+		return s.sseMaxSubscribers
 	}
-	return count
+	return defaultMaxSSESubscribers
+}
+
+func (s *Server) maxSSESubscribersPerUser() int {
+	if s.sseMaxSubscribersPerUser > 0 {
+		return s.sseMaxSubscribersPerUser
+	}
+	return defaultMaxSSESubscribersPerUser
 }
 
 func (s *Server) sseWriteTimeoutValue() time.Duration {

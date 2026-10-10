@@ -458,10 +458,18 @@ to platform streams only, and a platform stream would never receive a unit's
 update. Disabling or deleting a unit through the running daemon ends the
 unit's open streams at once; the change also ends the unit's sessions, so a
 disable from another process takes effect through the revalidation fallback.
-Once more than one unit exists, each unit (and the platform) may hold at most
-64 of the 256 streams that the deployment allows, so one unit cannot lock the
-others out; a stream over either limit receives the in-band `stream_limit`
-backoff. With a single unit only the deployment-wide limit applies. Event IDs
+The deployment keeps at most 256 streams open (`web.max_live_streams`), and
+one account at most four. Once more than one unit is active, each unit (and
+the platform) may hold an equal share of the deployment's streams: the limit
+divided by the number of active units, at least four, one account's streams,
+and at most 64 (`web.max_live_streams_per_unit`). While the active units
+number at most a quarter of the deployment-wide limit, 64 units with the
+default, the shares fit within it, so the units' streams cannot lock any unit
+out of its share; with more active units, raise `web.max_live_streams`. A
+share that shrinks when a unit is added applies to new streams; streams that
+are already open are kept. A stream over any limit receives the in-band
+`stream_limit` backoff. With a single active unit only the deployment-wide
+limit applies. Event IDs
 and the in-memory replay window are shared by every unit: a unit can tell
 from gaps in its event IDs that other units received updates, but not what
 they were, and a burst in another unit can shorten its replay window, after

@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"reflect"
@@ -395,11 +394,4 @@ func TestRuntimeStateSummariesReportsQueryAndScanErrors(t *testing.T) {
 			t.Fatal("expected invalid runtime metadata integer to fail scanning")
 		}
 	})
-}
-
-func TestLegacyRuntimeHostCountFallsBackToZero(t *testing.T) {
-	t.Parallel()
-	if got := legacyRuntimeHostCount(sql.NullInt64{}, sql.NullInt64{}); got != 0 {
-		t.Fatalf("empty legacy host counts = %d, want 0", got)
-	}
 }

@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -131,23 +133,65 @@ func TestJobPendingChangesWithoutRuntimeStateReturnsAnEmptyArray(t *testing.T) {
 	}
 }
 
-func TestPendingChangeViewsSortTiesByProtocolPortKindAndKey(t *testing.T) {
+func TestJobPendingChangesSortTiesByProtocolPortKindAndKey(t *testing.T) {
 	t.Parallel()
-	items := pendingChangeViews(map[string]model.Pending{
-		"z":       {Change: model.Change{Target: "192.0.2.30", Protocol: "tcp", Port: 80, Kind: "port"}},
-		"a":       {Change: model.Change{Target: "192.0.2.30", Protocol: "tcp", Port: 80, Kind: "port"}},
-		"udp":     {Change: model.Change{Target: "192.0.2.30", Protocol: "udp", Port: 80, Kind: "port"}},
-		"443":     {Change: model.Change{Target: "192.0.2.30", Protocol: "tcp", Port: 443, Kind: "port"}},
-		"service": {Change: model.Change{Target: "192.0.2.30", Protocol: "tcp", Port: 80, Kind: "service"}},
-	})
-	want := []string{"a", "z", "service", "443", "udp"}
-	if len(items) != len(want) {
-		t.Fatalf("sorted pending changes = %#v", items)
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	record, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name:     "pending-change-order",
+		Schedule: "0 * * * *",
+		Timezone: "UTC",
+		Targets:  []string{"192.0.2.30"},
+		TCP:      &config.Protocol{Ports: "80,443", Mode: "connect"},
+		Timeout:  config.Duration(time.Minute),
+		Timing:   "balanced",
+	}))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for index, key := range want {
-		if items[index].Key != key {
-			t.Fatalf("sorted pending change %d = %q, want %q; all items: %#v", index, items[index].Key, key, items)
+	if _, err := db.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Pending = map[string]model.Pending{
+			"z":       {Change: model.Change{Target: "192.0.2.30", Protocol: "tcp", Port: 80, Kind: "port"}},
+			"a":       {Change: model.Change{Target: "192.0.2.30", Protocol: "tcp", Port: 80, Kind: "port"}},
+			"udp":     {Change: model.Change{Target: "192.0.2.30", Protocol: "udp", Port: 80, Kind: "port"}},
+			"443":     {Change: model.Change{Target: "192.0.2.30", Protocol: "tcp", Port: 443, Kind: "port"}},
+			"9":       {Change: model.Change{Target: "192.0.2.30", Protocol: "tcp", Port: 9, Kind: "port"}},
+			"service": {Change: model.Change{Target: "192.0.2.30", Protocol: "tcp", Port: 80, Kind: "service"}},
+			"target":  {Change: model.Change{Target: "192.0.2.4", Kind: "host"}},
 		}
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Ports sort as numbers and targets as text, as the Go comparison of
+	// the decoded changes did.
+	want := []string{"9", "a", "z", "service", "443", "udp", "target"}
+	var got []string
+	for offset := 0; offset < len(want); offset += 3 {
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/pending-changes?limit=3&offset="+strconv.Itoa(offset), nil)
+		response := httptest.NewRecorder()
+		server.jobRoute(response, request, admin, defaultTenantStore(server), record.ID+"/pending-changes")
+		if response.Code != http.StatusOK {
+			t.Fatalf("pending changes status = %d: %s", response.Code, response.Body.String())
+		}
+		var payload struct {
+			PendingChanges []pendingChangeView `json:"pending_changes"`
+			Pagination     struct {
+				Total int `json:"total"`
+			} `json:"pagination"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Pagination.Total != len(want) {
+			t.Fatalf("pending changes total = %d, want %d", payload.Pagination.Total, len(want))
+		}
+		for _, item := range payload.PendingChanges {
+			got = append(got, item.Key)
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("pending change order = %v, want %v", got, want)
 	}
 }
 

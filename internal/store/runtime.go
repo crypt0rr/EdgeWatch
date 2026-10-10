@@ -158,10 +158,11 @@ func (ts *TenantStore) RuntimeBaselineEpoch(ctx context.Context, jobID string) (
 	return epoch.Int64, nil
 }
 
-// RuntimeStateSummary is the bounded state projection used by job-list
-// responses. It deliberately avoids unmarshalling the baseline/candidate
-// snapshots merely to render counters and host_count. Detailed state remains
-// available through RuntimeState for mutation and detail endpoints.
+// RuntimeStateSummary is the bounded state projection used by job-list and
+// job-detail responses. It deliberately avoids unmarshalling the
+// baseline/candidate snapshots merely to render counters and host_count.
+// Detailed state remains available through RuntimeState for mutation
+// endpoints.
 type RuntimeStateSummary struct {
 	HasBaseline                 bool
 	BaselineScanID              string
@@ -177,7 +178,9 @@ type RuntimeStateSummary struct {
 
 // RuntimeStateSummary returns the bounded state projection of one of the
 // tenant's jobs. An unknown job and a job of another tenant have no state
-// and read as a zero summary.
+// and read as a zero summary. A job whose compact metadata is current never
+// has its runtime JSON read, unless it has a baseline that neither indexed
+// host table counts.
 func (ts *TenantStore) RuntimeStateSummary(ctx context.Context, jobID string) (RuntimeStateSummary, error) {
 	if err := ts.ready(); err != nil {
 		return RuntimeStateSummary{}, err
@@ -207,12 +210,20 @@ func (ts *TenantStore) RuntimeStateSummary(ctx context.Context, jobID string) (R
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return summary, err
 	}
-	// Compatibility fallback for databases written before migration 40 and
-	// fixtures that intentionally write only job_runtime. This path is bounded
-	// to old rows; current writes always use the scalar projection above.
-	var baselineType sql.NullString
+	return ts.legacyRuntimeStateSummary(ctx, jobID)
+}
+
+// legacyRuntimeStateSummary derives the summary of one of the tenant's jobs
+// from its runtime JSON. It is the compatibility fallback for databases
+// written before migration 40 and fixtures that intentionally write only
+// job_runtime; current writes always keep the scalar projection current.
+// The JSON stays in SQLite: only its counters and arrays are counted.
+func (ts *TenantStore) legacyRuntimeStateSummary(ctx context.Context, jobID string) (RuntimeStateSummary, error) {
+	var summary RuntimeStateSummary
+	var baselineType, scanID, configHash sql.NullString
+	var modified, candidateCount, candidateAttempts, incompleteCandidateAttempts, pendingCount sql.NullInt64
 	var incidentCount, hostArrayCount, unitAddressCount sql.NullInt64
-	err = reader.QueryRowContext(ctx, `SELECT
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT
  json_type(r.state_json,'$.baseline'),
  json_extract(r.state_json,'$.baseline_scan_id'),
  json_extract(r.state_json,'$.baseline_config_hash'),
@@ -252,7 +263,7 @@ func (ts *TenantStore) RuntimeStateSummary(ctx context.Context, jobID string) (R
 	// available. The JSON array fallback is only for old databases that predate
 	// migration 29 or contain a legacy snapshot without scan_hosts rows.
 	if summary.BaselineModified {
-		if countErr := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM baseline_hosts b JOIN jobs j ON j.id=b.job_id AND j.tenant_id=? WHERE b.job_id=?`, ts.scope.id, jobID).Scan(&summary.BaselineHostCount); countErr != nil && !errors.Is(countErr, sql.ErrNoRows) {
+		if countErr := ts.store.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM baseline_hosts b JOIN jobs j ON j.id=b.job_id AND j.tenant_id=? WHERE b.job_id=?`, ts.scope.id, jobID).Scan(&summary.BaselineHostCount); countErr != nil && !errors.Is(countErr, sql.ErrNoRows) {
 			return summary, countErr
 		}
 	}
@@ -269,11 +280,15 @@ func (ts *TenantStore) RuntimeStateSummary(ctx context.Context, jobID string) (R
 }
 
 // RuntimeStateSummaries returns the job-list baseline projections of the
-// tenant's jobs in one bounded query. The legacy JSON fallback stays inside
-// SQLite and counts only each job's runtime arrays; it never loads scan
-// snapshots or unmarshals the runtime JSON into Go. The tenant predicate is
-// on the jobs; every other count is correlated with one of those jobs or its
-// runtime rows, including the host count of the job's baseline scan.
+// tenant's jobs. One statement reads the compact metadata, the indexed
+// counts, and the time the runtime row was written; it never reads the
+// runtime JSON, so its cost does not grow with the size of a job's baseline
+// or candidate. The JSON is read, inside SQLite and one job at a time, only
+// for a job whose metadata is older than its runtime row (a database written
+// before migration 40, or a fixture), and for a job with a baseline that
+// neither indexed host table counts. The tenant predicate is on the jobs;
+// every other count is correlated with one of those jobs or its runtime rows,
+// including the host count of the job's baseline scan.
 func (ts *TenantStore) RuntimeStateSummaries(ctx context.Context, includeArchived bool) (map[string]RuntimeStateSummary, error) {
 	if err := ts.ready(); err != nil {
 		return nil, err
@@ -285,27 +300,10 @@ func (ts *TenantStore) RuntimeStateSummaries(ctx context.Context, includeArchive
  COALESCE(m.candidate_count,0), COALESCE(m.candidate_attempts,0),
  COALESCE(m.incomplete_candidate_attempts,0), COALESCE(m.pending_count,0),
  COALESCE(m.updated_at,''), COALESCE(r.updated_at,''),
- (SELECT COUNT(*) FROM runtime_incidents i WHERE i.job_id=j.id),
- CASE WHEN r.job_id IS NOT NULL AND json_valid(r.state_json) THEN json_type(r.state_json,'$.baseline') END,
- CASE WHEN r.job_id IS NOT NULL AND json_valid(r.state_json) THEN json_extract(r.state_json,'$.baseline_scan_id') END,
- CASE WHEN r.job_id IS NOT NULL AND json_valid(r.state_json) THEN json_extract(r.state_json,'$.baseline_config_hash') END,
- CASE WHEN r.job_id IS NOT NULL AND json_valid(r.state_json) THEN COALESCE(json_extract(r.state_json,'$.baseline_modified'),0) ELSE 0 END,
- CASE WHEN r.job_id IS NOT NULL AND json_valid(r.state_json) THEN COALESCE(json_extract(r.state_json,'$.candidate_count'),0) ELSE 0 END,
- CASE WHEN r.job_id IS NOT NULL AND json_valid(r.state_json) THEN COALESCE(json_extract(r.state_json,'$.candidate_attempts'),0) ELSE 0 END,
- CASE WHEN r.job_id IS NOT NULL AND json_valid(r.state_json) THEN COALESCE(json_extract(r.state_json,'$.incomplete_candidate_attempts'),0) ELSE 0 END,
- CASE WHEN r.job_id IS NOT NULL AND json_valid(r.state_json) THEN COALESCE((SELECT COUNT(*) FROM json_each(r.state_json,'$.incidents')),0) ELSE 0 END,
- CASE WHEN r.job_id IS NOT NULL AND json_valid(r.state_json) THEN COALESCE((SELECT COUNT(*) FROM json_each(r.state_json,'$.pending')),0) ELSE 0 END,
- CASE WHEN r.job_id IS NOT NULL AND json_valid(r.state_json) AND json_type(r.state_json,'$.baseline')='object' THEN json_array_length(r.state_json,'$.baseline.hosts') END,
- CASE WHEN r.job_id IS NOT NULL AND json_valid(r.state_json) AND json_type(r.state_json,'$.baseline')='object' THEN COALESCE((
-   SELECT COUNT(DISTINCT addresses.value)
-   FROM json_each(r.state_json,'$.baseline.units') AS units
-   JOIN json_each(units.value,'$.addresses') AS addresses
- ),0) END,
- (SELECT COUNT(*) FROM baseline_hosts b WHERE b.job_id=j.id),
- (SELECT COUNT(*) FROM scan_hosts sh WHERE sh.scan_id=NULLIF(m.baseline_scan_id,'')),
- (SELECT COUNT(*) FROM scan_hosts sh WHERE sh.scan_id=CASE WHEN r.job_id IS NOT NULL AND json_valid(r.state_json) THEN json_extract(r.state_json,'$.baseline_scan_id') END),
  CASE WHEN r.job_id IS NULL THEN 0 ELSE 1 END,
- CASE WHEN r.job_id IS NULL THEN 1 ELSE json_valid(r.state_json) END
+ (SELECT COUNT(*) FROM runtime_incidents i WHERE i.job_id=j.id),
+ (SELECT COUNT(*) FROM baseline_hosts b WHERE b.job_id=j.id),
+ (SELECT COUNT(*) FROM scan_hosts sh WHERE sh.scan_id=NULLIF(m.baseline_scan_id,''))
  FROM jobs j
  LEFT JOIN job_runtime_meta m ON m.job_id=j.id
  LEFT JOIN job_runtime r ON r.job_id=j.id
@@ -317,83 +315,76 @@ func (ts *TenantStore) RuntimeStateSummaries(ctx context.Context, includeArchive
 	}
 	defer rows.Close()
 	out := make(map[string]RuntimeStateSummary)
+	var legacyJobs, hostCountJobs []string
 	for rows.Next() {
 		var jobID string
 		var metadataVersion, projectionVersion, modified, candidateCount, candidateAttempts, incompleteAttempts, pendingCount int64
-		var scanID, configHash, legacyBaselineType, legacyScanID, legacyConfigHash sql.NullString
+		var scanID, configHash sql.NullString
 		var metaUpdated, runtimeUpdated string
-		var incidentCount, legacyModified, legacyCandidateCount, legacyCandidateAttempts, legacyIncompleteAttempts, legacyIncidentCount, legacyPendingCount int64
-		var legacyHostArrayCount, legacyUnitAddressCount sql.NullInt64
-		var baselineHostCount, metadataScanHostCount, legacyScanHostCount int64
-		var runtimeExists, runtimeJSONValid int
+		var runtimeExists int
+		var incidentCount, baselineHostCount, scanHostCount int64
 		if err := rows.Scan(
 			&jobID, &metadataVersion, &projectionVersion, &scanID, &configHash, &modified,
 			&candidateCount, &candidateAttempts, &incompleteAttempts, &pendingCount,
-			&metaUpdated, &runtimeUpdated, &incidentCount, &legacyBaselineType,
-			&legacyScanID, &legacyConfigHash, &legacyModified, &legacyCandidateCount,
-			&legacyCandidateAttempts, &legacyIncompleteAttempts, &legacyIncidentCount,
-			&legacyPendingCount, &legacyHostArrayCount, &legacyUnitAddressCount,
-			&baselineHostCount, &metadataScanHostCount, &legacyScanHostCount, &runtimeExists, &runtimeJSONValid,
+			&metaUpdated, &runtimeUpdated, &runtimeExists, &incidentCount, &baselineHostCount, &scanHostCount,
 		); err != nil {
 			return nil, err
 		}
-
-		summary := RuntimeStateSummary{}
-		currentProjection := metadataVersion > 0 && (runtimeUpdated == "" || metaUpdated >= runtimeUpdated)
-		if currentProjection {
-			summary.HasBaseline = projectionVersion > 0 || (scanID.Valid && scanID.String != "")
-			summary.BaselineScanID, summary.BaselineConfigHash = scanID.String, configHash.String
-			summary.BaselineModified = modified != 0
-			summary.CandidateCount = int(candidateCount)
-			summary.CandidateAttempts = int(candidateAttempts)
-			summary.IncompleteCandidateAttempts = int(incompleteAttempts)
-			summary.IncidentCount = int(incidentCount)
-			summary.PendingCount = int(pendingCount)
-			if baselineHostCount > 0 {
-				summary.BaselineHostCount = int(baselineHostCount)
-			} else if metadataScanHostCount > 0 {
-				summary.BaselineHostCount = int(metadataScanHostCount)
-			} else if legacyBaselineType.Valid && legacyBaselineType.String == "object" {
-				summary.BaselineHostCount = legacyRuntimeHostCount(legacyHostArrayCount, legacyUnitAddressCount)
+		if metadataVersion <= 0 || (runtimeUpdated != "" && metaUpdated < runtimeUpdated) {
+			// Stale or missing metadata: only the runtime JSON, if there is
+			// any, describes the job.
+			if runtimeExists != 0 {
+				legacyJobs = append(legacyJobs, jobID)
 			}
-		} else if runtimeExists != 0 {
-			if runtimeJSONValid == 0 {
-				return nil, fmt.Errorf("invalid runtime JSON while resolving baseline summary for job %s", jobID)
-			}
-			summary.HasBaseline = legacyBaselineType.Valid && legacyBaselineType.String != "null" && legacyBaselineType.String != ""
-			summary.BaselineScanID, summary.BaselineConfigHash = legacyScanID.String, legacyConfigHash.String
-			summary.BaselineModified = legacyModified != 0
-			summary.CandidateCount = int(legacyCandidateCount)
-			summary.CandidateAttempts = int(legacyCandidateAttempts)
-			summary.IncompleteCandidateAttempts = int(legacyIncompleteAttempts)
-			summary.IncidentCount = int(legacyIncidentCount)
-			summary.PendingCount = int(legacyPendingCount)
-			if summary.BaselineScanID != "" {
-				summary.BaselineHostCount = int(legacyScanHostCount)
-			}
-			if summary.BaselineModified {
-				summary.BaselineHostCount = int(baselineHostCount)
-			}
-			if summary.BaselineHostCount == 0 {
-				summary.BaselineHostCount = legacyRuntimeHostCount(legacyHostArrayCount, legacyUnitAddressCount)
-			}
+			out[jobID] = RuntimeStateSummary{}
+			continue
+		}
+		summary := RuntimeStateSummary{
+			HasBaseline:                 projectionVersion > 0 || (scanID.Valid && scanID.String != ""),
+			BaselineScanID:              scanID.String,
+			BaselineConfigHash:          configHash.String,
+			BaselineModified:            modified != 0,
+			CandidateCount:              int(candidateCount),
+			CandidateAttempts:           int(candidateAttempts),
+			IncompleteCandidateAttempts: int(incompleteAttempts),
+			IncidentCount:               int(incidentCount),
+			PendingCount:                int(pendingCount),
+		}
+		switch {
+		case baselineHostCount > 0:
+			summary.BaselineHostCount = int(baselineHostCount)
+		case scanHostCount > 0:
+			summary.BaselineHostCount = int(scanHostCount)
+		case summary.HasBaseline && runtimeExists != 0:
+			hostCountJobs = append(hostCountJobs, jobID)
 		}
 		out[jobID] = summary
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, jobID := range legacyJobs {
+		summary, err := ts.legacyRuntimeStateSummary(ctx, jobID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve legacy runtime summary for job %s: %w", jobID, err)
+		}
+		out[jobID] = summary
+	}
+	for _, jobID := range hostCountJobs {
+		count, present, err := ts.legacyRuntimeBaselineHostCount(ctx, jobID)
+		if err != nil {
+			return nil, err
+		}
+		if present {
+			summary := out[jobID]
+			summary.BaselineHostCount = count
+			out[jobID] = summary
+		}
+	}
 	return out, nil
-}
-
-func legacyRuntimeHostCount(hostArrayCount, unitAddressCount sql.NullInt64) int {
-	if hostArrayCount.Valid && hostArrayCount.Int64 >= 0 {
-		return int(hostArrayCount.Int64)
-	}
-	if unitAddressCount.Valid && unitAddressCount.Int64 >= 0 {
-		return int(unitAddressCount.Int64)
-	}
-	return 0
 }
 
 // completeRuntimeSummary adds the baseline host count to the summary of one
@@ -415,6 +406,11 @@ func (ts *TenantStore) completeRuntimeSummary(ctx context.Context, jobID string,
 		if summary.BaselineHostCount > 0 {
 			return summary, nil
 		}
+	}
+	// A job without a baseline has no host count. It may be collecting a
+	// large candidate snapshot, which must not be parsed for a counter.
+	if !summary.HasBaseline {
+		return summary, nil
 	}
 	// Migration 40 can create current runtime metadata for a legacy baseline
 	// before the resumable scan-host backfill has populated scan_hosts. Keep the

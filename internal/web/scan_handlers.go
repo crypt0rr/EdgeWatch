@@ -1,7 +1,9 @@
 package web
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -78,12 +80,12 @@ func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request, session stor
 }
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord) {
-	state, err := ts.RuntimeState(r.Context(), record.ID)
+	summary, err := ts.RuntimeStateSummary(r.Context(), record.ID)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
 	}
-	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), ts, record, state))
+	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), ts, record, summary))
 }
 
 // latestSuccessfulScan returns only the newest completed scan summary. The
@@ -248,9 +250,9 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		s.App.WakeDelivery()
 	}
 	s.App.RefreshSchedules()
-	state, _ := ts.RuntimeState(r.Context(), id)
+	summary, _ := ts.RuntimeStateSummary(r.Context(), id)
 	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "job.updated", "job_id": id})
-	response := s.jobJSONWithCycle(r.Context(), ts, record, state)
+	response := s.jobJSONWithCycle(r.Context(), ts, record, summary)
 	if approvalCleared {
 		response["high_cost_approval_cleared"] = true
 	}
@@ -842,10 +844,96 @@ func (s *Server) listScans(w http.ResponseWriter, r *http.Request, ts *store.Ten
 	writeJSON(w, 200, map[string]any{"scans": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
 
+// maxConcurrentFullScans bounds the full-result scan responses in flight.
+// Each holds its scan's snapshot in memory, and a read connection, until the
+// client has received it.
+const maxConcurrentFullScans = 2
+
+// getScan serves the full-result compatibility endpoint. It writes the
+// stored snapshot and change list as they were saved, without decoding and
+// encoding them again, so a broad scan is held in memory once rather than
+// as decoded structs and a second encoding. For a scan that EdgeWatch saved,
+// the response is the one that decoding and encoding it gave. A request
+// waits for one of maxConcurrentFullScans slots, so parallel requests cannot
+// multiply that memory without bound.
 func (s *Server) getScan(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string) {
-	if scan, ok := s.resolveScan(w, r, ts, id); ok {
-		writeJSON(w, http.StatusOK, map[string]any{"scan": scan})
+	s.fullScanSlotOnce.Do(func() { s.fullScanSlots = make(chan struct{}, maxConcurrentFullScans) })
+	select {
+	case s.fullScanSlots <- struct{}{}:
+	case <-r.Context().Done():
+		return
 	}
+	defer func() { <-s.fullScanSlots }()
+	err := ts.WithScanDocument(r.Context(), id, func(scan model.Scan, snapshot, changes []byte) error {
+		return writeStoredScan(w, scan, snapshot, changes)
+	})
+	if errors.Is(err, errScanNotVerbatim) {
+		// The stored values are not what EdgeWatch writes. Decode them, as
+		// releases before this one did for every scan.
+		if scan, ok := s.resolveScan(w, r, ts, id); ok {
+			writeJSON(w, http.StatusOK, map[string]any{"scan": scan})
+		}
+		return
+	}
+	if err != nil && !errors.Is(err, errScanResponseStarted) {
+		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+	}
+}
+
+// errScanNotVerbatim reports a stored snapshot or change list that cannot
+// be written out as it is. errScanResponseStarted reports a failed write
+// after the response status was sent.
+var (
+	errScanNotVerbatim     = errors.New("stored scan cannot be written verbatim")
+	errScanResponseStarted = errors.New("scan response interrupted")
+)
+
+// fullScanMetadata encodes a scan without its snapshot and changes: the
+// fields of the same JSON names hide those of the embedded scan.
+type fullScanMetadata struct {
+	model.Scan
+	Changes  *struct{} `json:"changes,omitempty"`
+	Snapshot *struct{} `json:"snapshot,omitempty"`
+}
+
+// writeStoredScan writes {"scan": scan} with the stored snapshot and
+// changes in place of the scan's own, as encoding the decoded scan with
+// writeJSON would: changes come before the snapshot, as in model.Scan, and
+// an empty change list is left out. A snapshot that is not a JSON object, or
+// changes that are not null or a JSON array, are errScanNotVerbatim, and
+// nothing is written.
+func writeStoredScan(w http.ResponseWriter, scan model.Scan, snapshot, changes []byte) error {
+	snapshot, changes = bytes.TrimSpace(snapshot), bytes.TrimSpace(changes)
+	if len(snapshot) == 0 || snapshot[0] != '{' || !json.Valid(snapshot) {
+		return errScanNotVerbatim
+	}
+	switch {
+	case len(changes) == 0 || bytes.Equal(changes, []byte("null")):
+		changes = nil
+	case changes[0] != '[' || !json.Valid(changes):
+		return errScanNotVerbatim
+	case len(bytes.TrimSpace(changes[1:len(changes)-1])) == 0:
+		changes = nil
+	}
+	scan.Snapshot, scan.Changes = model.Snapshot{}, nil
+	metadata, err := json.Marshal(fullScanMetadata{Scan: scan})
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	parts := [][]byte{[]byte(`{"scan":`), metadata[:len(metadata)-1]}
+	if changes != nil {
+		parts = append(parts, []byte(`,"changes":`), changes)
+	}
+	parts = append(parts, []byte(`,"snapshot":`), snapshot, []byte("}}\n"))
+	for _, part := range parts {
+		if _, err := w.Write(part); err != nil {
+			return errScanResponseStarted
+		}
+	}
+	return nil
 }
 
 // getScanSummary serves metadata for historical scan views without decoding
@@ -1064,7 +1152,10 @@ func (s *Server) broadcastIncidentEvents(ctx context.Context, audience sseAudien
 // jobBaseline exposes the current comparison state without requiring clients
 // to fetch the full job record. Baseline units are paginated because a broad
 // CIDR can produce a large snapshot; the scope metadata remains intact on
-// every page.
+// every page. Host observations and host states grow with every address in
+// the scope, so no page carries them: the dedicated, filtered baseline host
+// endpoints serve the observations. The store decodes only the units on the
+// page and the scope metadata.
 func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord) {
 	id := record.ID
 	offset, ok := requestOffset(w, r)
@@ -1072,7 +1163,7 @@ func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, ts *store.T
 		return
 	}
 	limit := queryLimit(r)
-	state, err := ts.RuntimeState(r.Context(), id)
+	summary, err := ts.RuntimeStateSummary(r.Context(), id)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -1082,22 +1173,22 @@ func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, ts *store.T
 		"job":           record.Job.Name,
 		"revision":      record.Revision,
 		"security_hash": record.Job.SecurityHash(),
-		"baseline":      baselineJSON(state, record.Job.SecurityHash()),
+		"baseline":      baselineJSONFromSummary(summary, record.Job.SecurityHash()),
+		"snapshot":      nil,
+		"pagination":    paginationJSON(offset, limit, 0),
 	}
-	if state.Baseline == nil {
-		value["snapshot"] = nil
-		value["pagination"] = paginationJSON(offset, limit, 0)
+	if !summary.HasBaseline {
 		writeJSON(w, http.StatusOK, value)
 		return
 	}
-	units, page := pageSlice(state.Baseline.Units, offset, limit)
-	snapshot := *state.Baseline
-	snapshot.Units = units
-	// Host observations are served by the dedicated, filtered host endpoints.
-	// Do not copy the complete evidence array into every paginated baseline
-	// response; a large CIDR baseline would otherwise defeat pagination.
-	snapshot.Hosts = nil
-	value["snapshot"], value["pagination"] = snapshot, page
+	page, err := ts.RuntimeBaselinePage(r.Context(), id, limit, offset)
+	if err != nil {
+		s.writeInternalError(w, r, "store", err)
+		return
+	}
+	if page.Present {
+		value["snapshot"], value["pagination"] = page.Snapshot, paginationJSON(offset, limit, page.Total)
+	}
 	writeJSON(w, http.StatusOK, value)
 }
 

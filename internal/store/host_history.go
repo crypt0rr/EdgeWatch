@@ -223,11 +223,31 @@ func scanHostsPageQueries(tenantID, scanID, query, protocol string, hasOpen *boo
 	}
 }
 
+// latestHostPageQueries lists the tenant's host inventory: first the hosts
+// of jobs that are not archived, by address, then the hosts of archived
+// jobs, by address. countSQL returns the number of matching hosts and how
+// many of them belong to jobs that are not archived; segment selects part of
+// one of the two segments.
+type latestHostPageQueries struct {
+	countSQL   string
+	countArg   []any
+	segmentSQL string
+	filterArg  []any
+}
+
+// segment returns the statement and arguments that select limit hosts from
+// offset of the archived or the other segment. A negative limit selects the
+// rest of the segment. Within a segment, SQLite reads the hosts in the order
+// of the (tenant_id, address) primary key, so a page reads the host_json of
+// its own rows only and never sorts the inventory.
+func (q latestHostPageQueries) segment(archived bool, limit, offset int) (string, []any) {
+	return q.segmentSQL, append(append([]any(nil), q.filterArg...), boolInt(archived), limit, offset)
+}
+
 // latestScanHostsPageQueries lists the tenant's host inventory. The
 // projection is keyed by (tenant_id, address), so each tenant has its own
 // row for an address, and the tenant predicate leads its indexes.
-func latestScanHostsPageQueries(tenantID, query, protocol string, hasOpen *bool, limit, offset int) scanPageQueries {
-	limit, offset = normalizePage(limit, offset)
+func latestScanHostsPageQueries(tenantID, query, protocol string, hasOpen *bool) latestHostPageQueries {
 	filter := buildHostFilter(query, protocol, hasOpen)
 	where := append([]string{`NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=h.tenant_id AND purge.job_id=h.job_id)`}, filter.where...)
 	args := append([]any{tenantID}, filter.args...)
@@ -242,11 +262,12 @@ func latestScanHostsPageQueries(tenantID, query, protocol string, hasOpen *bool,
 	for _, clause := range where {
 		filterSQL += " AND " + clause
 	}
-	return scanPageQueries{
-		countSQL: `SELECT COUNT(*) FROM latest_scan_hosts h` + join + ` WHERE h.tenant_id=?` + filterSQL,
-		countArg: append([]any(nil), args...),
-		pageSQL:  `SELECT h.scan_id,h.address,h.data_quality,h.host_json,h.job_id,h.job,h.finished_at,COALESCE(j.archived,0) FROM latest_scan_hosts h LEFT JOIN jobs j ON j.id=h.job_id` + join + ` WHERE h.tenant_id=?` + filterSQL + ` ORDER BY COALESCE(j.archived,0) ASC,h.address LIMIT ? OFFSET ?`,
-		pageArg:  append(append([]any(nil), args...), limit, offset),
+	from := ` FROM latest_scan_hosts h LEFT JOIN jobs j ON j.id=h.job_id` + join + ` WHERE h.tenant_id=?` + filterSQL
+	return latestHostPageQueries{
+		countSQL:   `SELECT COUNT(*),COALESCE(SUM(COALESCE(j.archived,0)=0),0)` + from,
+		countArg:   append([]any(nil), args...),
+		segmentSQL: `SELECT h.scan_id,h.address,h.data_quality,h.host_json,h.job_id,h.job,h.finished_at,COALESCE(j.archived,0)` + from + ` AND COALESCE(j.archived,0)=? ORDER BY h.address LIMIT ? OFFSET ?`,
+		filterArg:  args,
 	}
 }
 

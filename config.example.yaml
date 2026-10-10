@@ -35,6 +35,12 @@ web:
   # ./data/auth.key; an explicit file must contain 32 raw bytes or 64 hex
   # characters, be mode 0600, and be mounted into the container.
   # auth_key_file: /run/secrets/edgewatch-auth-key
+  # Live-update streams the deployment keeps open (one per open console, at
+  # most four per account), and the most one business unit may hold. With
+  # more than one active unit, each unit gets an equal share of
+  # max_live_streams, at least 4 and at most max_live_streams_per_unit.
+  # max_live_streams: 256
+  # max_live_streams_per_unit: 64
 
 scheduler:
   max_concurrent_scans: 1

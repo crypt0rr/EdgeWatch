@@ -90,6 +90,26 @@ func addTenantRuntime(t *testing.T, s *Store, ids tenantFixtureIDs) {
 	}
 }
 
+// addTenantRuntimePages gives each tenant's archived job, on a private copy
+// of the fixture, a baseline unit and a pending change that name the
+// tenant, for the paged runtime reads.
+func addTenantRuntimePages(t *testing.T, f tenantFixture) {
+	t.Helper()
+	for _, owner := range []struct {
+		scope TenantScope
+		job   string
+	}{{f.a, f.archivedA}, {f.b, f.archivedB}} {
+		target := runtimeMarker(f, owner.scope) + ".example"
+		if _, err := f.store.System().UpdateRuntime(context.Background(), owner.job, func(state *model.JobState) ([]model.Event, error) {
+			state.Baseline.Units = []model.Unit{{Target: target, Protocol: "tcp", Addresses: []string{runtimeAddress}}}
+			state.Pending = map[string]model.Pending{target: {Change: model.Change{Key: target, Kind: "port", Target: target, Protocol: "tcp", Port: 22}, Count: 1}}
+			return nil, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // runtimeApproveScan is the ID of the successful scan of the current scope
 // that prepareRuntimeWrites saves for a tenant's archived job.
 func runtimeApproveScan(marker string) string { return "approve-scan-" + marker }
@@ -425,6 +445,28 @@ var runtimeTenantLeakCases = map[string]tenantLeakCase{
 		}, func(t *testing.T, scope TenantScope, epoch int64) {
 			if epoch == 0 {
 				t.Errorf("tenant %s: own baseline epoch is zero", scope.ID())
+			}
+		})
+	}},
+	"RuntimeBaselinePage": {writes: true, run: func(t *testing.T, f tenantFixture) {
+		addTenantRuntimePages(t, f)
+		checkTenantRuntimeReads(t, f, func(ts *TenantStore, jobID string) (RuntimeBaselinePage, error) {
+			return ts.RuntimeBaselinePage(context.Background(), jobID, 50, 0)
+		}, func(t *testing.T, scope TenantScope, page RuntimeBaselinePage) {
+			want := []model.Unit{{Target: runtimeMarker(f, scope) + ".example", Protocol: "tcp", Addresses: []string{runtimeAddress}}}
+			if !page.Present || page.Total != 1 || !reflect.DeepEqual(page.Snapshot.Units, want) || page.Snapshot.Hosts != nil {
+				t.Errorf("tenant %s: own baseline page = %+v", scope.ID(), page)
+			}
+		})
+	}},
+	"RuntimePendingChangesPage": {writes: true, run: func(t *testing.T, f tenantFixture) {
+		addTenantRuntimePages(t, f)
+		checkTenantRuntimeReads(t, f, func(ts *TenantStore, jobID string) (Page[RuntimePendingChange], error) {
+			return ts.RuntimePendingChangesPage(context.Background(), jobID, 50, 0)
+		}, func(t *testing.T, scope TenantScope, page Page[RuntimePendingChange]) {
+			target := runtimeMarker(f, scope) + ".example"
+			if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Key != target || page.Items[0].Change.Target != target {
+				t.Errorf("tenant %s: own pending changes = %+v", scope.ID(), page)
 			}
 		})
 	}},

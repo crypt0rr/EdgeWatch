@@ -234,10 +234,15 @@ which still upgrades every older schema:
 
 1. Pin `ghcr.io/crypt0rr/edgewatch:0.35.0` in a `compose.override.yaml`, as
    under [Upgrade from a release before v0.20.0](/deployment/updates/#upgrade-from-a-release-before-v0200).
+   v0.35.0 refuses the settings that v0.36.0 introduced,
+   `scanner.max_job_hosts` and `web.metrics`, so comment them out of
+   `config.yaml` until the last step; see
+   [Settings and older releases](/reference/configuration/#settings-and-older-releases).
 2. Restore the backup with that image as shown above, start the service, and
    wait until `edgewatch health` reports `ready`.
-3. Take a new backup, remove the override, and update to the current release.
-   Its daemon then upgrades the database from schema 65.
+3. Take a new backup, remove the override, set again any settings you
+   commented out, and update to the current release. Its daemon then upgrades
+   the database from schema 65.
 
 ## Emergency restore overrides
 

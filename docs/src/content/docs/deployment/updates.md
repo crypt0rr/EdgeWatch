@@ -133,6 +133,13 @@ platform audit, which the platform destinations selected for deployment
 alerts receive. A rollback to a release before v0.36.0 does not report
 itself.
 
+An older release also refuses a `config.yaml` with a setting that a later
+release introduced, such as `scanner.max_job_hosts` and `web.metrics` of
+v0.36.0 or `backup` of v0.35.0. Before you start the older release, remove
+such settings or restore the `config.yaml` you kept with the backup;
+[Settings and older releases](/reference/configuration/#settings-and-older-releases)
+lists each setting with the release that introduced it.
+
 The upgrade from v0.19.0 to v0.20.0 is an example of a forward-only update: it
 runs the schema 51 to 54 migrations, which move all existing data into the
 default business unit. What a single-unit installation notices afterward is
@@ -159,11 +166,17 @@ in two steps, each with the preparation under
        image: ghcr.io/crypt0rr/edgewatch:0.35.0
    ```
 
+   v0.35.0 refuses the settings that v0.36.0 introduced,
+   `scanner.max_job_hosts` and `web.metrics`; comment them out of
+   `config.yaml` until the last step. See
+   [Settings and older releases](/reference/configuration/#settings-and-older-releases).
+
 2. Start it with `docker compose up -d` and wait until
    `docker compose exec edgewatch edgewatch health` reports `ready`. Its
    migration and startup phases have then finished.
-3. Take a backup, remove the override, and update to the current release with
-   `docker compose pull` and `docker compose up -d`.
+3. Take a backup, remove the override, set again any settings you commented
+   out, and update to the current release with `docker compose pull` and
+   `docker compose up -d`.
 
 A rollback to the release before v0.20.0 means restoring the backup taken
 before the first step.

@@ -299,3 +299,29 @@ the new file:
 ```sh
 docker compose up -d --force-recreate edgewatch
 ```
+
+## Settings and older releases
+
+Every release refuses a `config.yaml` with a setting it does not know, and
+exits with an error that names it, such as
+`field max_job_hosts not found in type config.ScannerConfig`. Before you start
+an older release, for a [rollback](/deployment/updates/#rollback) or to
+upgrade a database or backup through v0.35.0, as under
+[Upgrade from a release before v0.20.0](/deployment/updates/#upgrade-from-a-release-before-v0200),
+remove or comment out the settings that a later release introduced. Set them
+again once you run the release that introduced them:
+
+| Setting | Introduced in |
+| --- | --- |
+| `scanner.max_job_hosts` | v0.36.0 |
+| `web.metrics.enabled`, `web.metrics.token_file` | v0.36.0 |
+| `backup.directory`, `backup.schedule`, `backup.keep` | v0.35.0 |
+| `web.max_live_streams`, `web.max_live_streams_per_unit` | v0.35.0 |
+| `web.ipv6_rate_limit_prefix` | v0.34.0 |
+| `notifications.sandbox` | v0.29.0 |
+| `scanner.landlock` | v0.28.0 |
+| `scanner.sandbox` | v0.27.0 |
+| `web.source_url` | v0.25.0 |
+
+`config.example.yaml` leaves every setting that v0.35.0 does not know
+commented out, so a configuration copied from it also starts v0.35.0.

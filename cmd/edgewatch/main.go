@@ -988,8 +988,8 @@ func printValue(format string, v any) error {
 // URLs from config.yaml, and the metrics token file when the metrics
 // endpoint is enabled, as the daemon's startup does, with no database: the
 // daemon runs it before it opens and migrates the database, and config
-// validate runs it after config.Load. The URL error names only a digest
-// prefix. app.New keeps its own checks for embedded callers.
+// validate runs it after config.Load. The URL error names only the URL's
+// position. app.New keeps its own checks for embedded callers.
 func validateStartupConfig(cfg *config.Config) error {
 	if cfg.Web.AuthKeyFile != "" {
 		if err := store.ValidateAuthKeyFile(cfg.Web.AuthKeyFile); err != nil {

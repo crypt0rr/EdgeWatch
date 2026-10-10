@@ -158,7 +158,10 @@ preview of this checkout that you started yourself.
 
 Use controlled listeners for integration scans and scan only authorized
 targets. Keep runtime configuration, databases, keys, notification URLs,
-passwords, and authentication tokens out of source control.
+passwords, and authentication tokens out of source control. Keep build
+output out of it too: `npm run test:coverage` runs
+`scripts/repository-files.test.mjs`, which fails when a tracked file is a
+compiled executable or larger than 10 MB.
 
 Use temporary databases and preserve migration compatibility and tenant
 isolation. Add regression coverage for changed behavior, using nearby tests

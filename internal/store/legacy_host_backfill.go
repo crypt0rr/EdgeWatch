@@ -30,6 +30,22 @@ const (
 	maxLegacyHostBackfillErrorBytes      = 512
 )
 
+// legacyHostBackfillCandidateSQL selects, with the scan as s, the scans that
+// the legacy host backfill indexes: successful scans without host rows or a
+// backfill checkpoint. It leaves out the scans whose job history is being
+// purged and those of a tenant that is being deleted or was deleted, which
+// the purges erase. A tenant purge erases a scan's host rows and checkpoint
+// before the scan, so a purge that stops between those steps leaves scans
+// that look unindexed; indexing one would write a latest host for the
+// tenant, which the guard triggers of latestScanHostsTenantTriggerSQL refuse,
+// and fail every start until the purge, which only the daemon runs,
+// finishes.
+const legacyHostBackfillCandidateSQL = `s.status='success'
+  AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
+  AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=s.id)
+  AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)
+  AND NOT EXISTS (SELECT 1 FROM tenants WHERE tenants.id=s.tenant_id AND tenants.state IN ` + purgedTenantStates + `)`
+
 type legacyHostBackfillLimits struct {
 	maxScans         int
 	maxSnapshotBytes int64
@@ -125,10 +141,7 @@ func backfillLegacyScanHostsContextWithLoggerAndProgress(ctx context.Context, db
 		}
 		rows, err := tx.QueryContext(ctx, `SELECT s.id,s.tenant_id,COALESCE(s.job_id,''),s.job,s.finished_at,COALESCE(length(s.snapshot_json),0)
 FROM scans s
-WHERE s.status='success'
-  AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
-  AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=s.id)
-  AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)
+WHERE `+legacyHostBackfillCandidateSQL+`
 ORDER BY s.finished_at,s.id LIMIT ?`, limits.maxScans)
 		if err != nil {
 			_ = tx.Rollback()
@@ -293,12 +306,7 @@ func decodeLegacyHostBackfillHosts(item legacyHostBackfillScan) ([]model.HostObs
 
 func countLegacyHostBackfillCandidates(ctx context.Context, db *sql.DB) (int64, error) {
 	var total int64
-	err := db.QueryRowContext(ctx, `SELECT COUNT(*)
-FROM scans s
-WHERE s.status='success'
-  AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
-  AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=s.id)
-  AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)`).Scan(&total)
+	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans s WHERE `+legacyHostBackfillCandidateSQL).Scan(&total)
 	return total, err
 }
 

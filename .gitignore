@@ -1,4 +1,5 @@
 /edgewatch
+*.exe
 /dist/
 /docs/dist/
 /docs/.astro/

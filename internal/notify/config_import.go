@@ -93,7 +93,7 @@ func configuredURLs(urls []string) ([]configuredURL, error) {
 
 // ValidateConfiguredURLs checks the notification URLs from config.yaml as
 // the daemon's import does at startup, without a database. The error names
-// only a short digest prefix of an invalid URL, never the URL.
+// only the position of an invalid URL, never the URL or a digest of it.
 func ValidateConfiguredURLs(urls []string) error {
 	_, err := configuredURLs(urls)
 	return err

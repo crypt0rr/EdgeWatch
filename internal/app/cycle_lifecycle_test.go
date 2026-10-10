@@ -273,7 +273,7 @@ func waitForQueuedRun(t *testing.T, a *App, key string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := a.active.Load(key); ok {
+		if a.runs.claimed(key) {
 			return
 		}
 		if time.Now().After(deadline) {

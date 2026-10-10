@@ -360,12 +360,5 @@ func TestRunLifecycleLeavesNoEntryAfterShutdown(t *testing.T) {
 
 // runEntries counts the run bookkeeping entries of a.
 func runEntries(a *App) int {
-	count := 0
-	for _, entries := range []*sync.Map{&a.active, &a.managedReservations, &a.queuedRuns, &a.running} {
-		entries.Range(func(any, any) bool {
-			count++
-			return true
-		})
-	}
-	return count
+	return a.runs.size()
 }

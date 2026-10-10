@@ -56,7 +56,7 @@ func TestProgressPercentAndActiveRunUpdates(t *testing.T) {
 
 	a := &App{}
 	run := &activeRun{scan: model.ActiveScan{StartedAt: time.Now().UTC().Add(-time.Second)}}
-	a.running.Store("scan", run)
+	a.runs.start("", "scan", run)
 	a.updateActiveProgress("missing", scanner.Progress{TotalProbes: 10})
 	a.updateActiveProgress("scan", scanner.Progress{
 		TotalProbes: 100, CompletedProbes: 25, TotalInvocations: 4, CompletedInvocations: 1,
@@ -83,7 +83,7 @@ func TestActiveProgressDoesNotRegressWhenPhasesExpandWork(t *testing.T) {
 	t.Parallel()
 	a := &App{}
 	run := &activeRun{scan: model.ActiveScan{StartedAt: time.Now().UTC()}}
-	a.running.Store("phased", run)
+	a.runs.start("", "phased", run)
 	a.updateActiveProgress("phased", scanner.Progress{TotalProbes: 100, CompletedProbes: 100, TotalInvocations: 1, CompletedInvocations: 1, Phase: "tcp discovery"})
 	a.updateActiveProgress("phased", scanner.Progress{TotalProbes: 300, CompletedProbes: 110, TotalInvocations: 3, CompletedInvocations: 1, Phase: "nmap enrichment"})
 	got := run.snapshot()
@@ -241,17 +241,23 @@ func TestManagedRunReservationsRejectDuplicateAndScheduledStarts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.managedReservations.Store(record.ID, "already-queued")
+	if err := a.runs.reserve(record.ID, "already-queued"); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.StartManagedRun(defaultTenant(a.Store), record.ID, nil); !errors.Is(err, scanner.ErrBusy) {
 		t.Fatalf("duplicate reservation error = %v, want ErrBusy", err)
 	}
-	a.managedReservations.Delete(record.ID)
-	a.active.Store(record.ID, true)
+	a.runs.unreserve(record.ID, "already-queued")
+	if err := a.runs.claim(record.ID, true); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.StartManagedRun(defaultTenant(a.Store), record.ID, nil); !errors.Is(err, scanner.ErrBusy) {
 		t.Fatalf("active reservation error = %v, want ErrBusy", err)
 	}
-	a.active.Delete(record.ID)
-	a.managedReservations.Store(record.ID, "scheduled-reservation")
+	a.runs.unclaim(record.ID)
+	if err := a.runs.reserve(record.ID, "scheduled-reservation"); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := a.runJob(ctx, store.DefaultTenantScope(), record.Job, record.ID, record.Revision, false, true); !errors.Is(err, scanner.ErrBusy) {
 		t.Fatalf("scheduled reservation error = %v, want ErrBusy", err)
 	}

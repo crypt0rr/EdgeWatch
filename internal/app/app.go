@@ -40,14 +40,6 @@ type App struct {
 	// notificationSandbox the one of the notification process.
 	sandbox             *sandbox.Policy
 	notificationSandbox *sandbox.Policy
-	active              sync.Map
-	// managedReservations closes the window between an HTTP manual-run request
-	// and the goroutine reaching runJob. Scheduled work checks this map too, so
-	// a queued manual run receives the slot deterministically instead of two
-	// requests both returning 202 and one being dropped later.
-	managedReservations sync.Map
-	running             sync.Map
-	queuedRuns          sync.Map
 	wg                  sync.WaitGroup
 	runMu               sync.Mutex
 	runCtx              context.Context
@@ -85,6 +77,10 @@ type App struct {
 	// units tracks the business units that this process paused, and wakes
 	// the purge of deleted ones; see units.go.
 	units unitLifecycle
+	// runs records each job's run from its acceptance to its end: its
+	// reservation by a web request, its claim, its wait for a scan slot, and
+	// its running scan; see runs.go.
+	runs runRegistry
 }
 
 type activeRun struct {
@@ -764,19 +760,19 @@ func (a *App) recoverBackgroundPanic(name string) {
 // reservation is released, so the callback may start the next run. ts is the
 // store of the requesting tenant: a job of another tenant is not found.
 func (a *App) StartManagedRun(ts *store.TenantStore, id string, done func(model.Scan, []model.Event, error)) error {
+	// The reservation closes the window between an HTTP manual-run request
+	// and the goroutine reaching runJob. Scheduled work checks it too, so a
+	// queued manual run receives the slot deterministically instead of two
+	// requests both returning 202 and one being dropped later.
 	reservation := scanner.NewID(time.Now().UTC())
-	if _, loaded := a.managedReservations.LoadOrStore(id, reservation); loaded {
-		return scanner.ErrBusy
-	}
-	if _, active := a.active.Load(id); active {
-		a.managedReservations.Delete(id)
-		return scanner.ErrBusy
+	if err := a.runs.reserve(id, reservation); err != nil {
+		return err
 	}
 	a.runMu.Lock()
 	if !a.runAccepting {
 		if a.runStarted {
 			a.runMu.Unlock()
-			a.managedReservations.Delete(id)
+			a.runs.unreserve(id, reservation)
 			return ErrShuttingDown
 		}
 		// Keep direct httptest/embedded-server users functional before a daemon
@@ -793,14 +789,14 @@ func (a *App) StartManagedRun(ts *store.TenantStore, id string, done func(model.
 		// Each release compares the stored value, so this goroutine can never
 		// remove a reservation that a newer run made after the early release
 		// below. The deferred release covers a panic before that point.
-		defer a.managedReservations.CompareAndDelete(id, reservation)
+		defer a.runs.unreserve(id, reservation)
 		defer a.recoverBackgroundPanic("managed-scan")
 		finish := func(scan model.Scan, events []model.Event, err error) {
 			// The run has returned, so it no longer holds the job lease.
 			// Release the reservation before done: the web callback broadcasts
 			// scan.completed, and the console then lets the operator start the
 			// next run at once.
-			a.managedReservations.CompareAndDelete(id, reservation)
+			a.runs.unreserve(id, reservation)
 			if scan.ID == "" && err != nil {
 				if scope, scopeErr := ts.Scope(); scopeErr == nil {
 					a.emitScanSkipped(scope, id, scan.Job, scanSkipReason(err))
@@ -836,389 +832,6 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 	return a.runJobWithQueueMarker(ctx, scope, job, jobID, revision, manual, publishLifecycleCompletion, nil)
 }
 
-func (a *App) runJobWithQueueMarker(ctx context.Context, scope store.TenantScope, job config.Job, jobID string, revision int64, manual, publishLifecycleCompletion bool, accepted *bool) (model.Scan, []model.Event, error) {
-	key := jobID
-	if !manual {
-		if _, reserved := a.managedReservations.Load(key); reserved {
-			return model.Scan{}, nil, scanner.ErrBusy
-		}
-	}
-	if _, loaded := a.active.LoadOrStore(key, true); loaded {
-		return model.Scan{}, nil, scanner.ErrBusy
-	}
-	defer a.active.Delete(key)
-	if accepted != nil {
-		*accepted = true
-	}
-	trigger := "scheduled"
-	if manual {
-		trigger = "manual"
-	}
-	// The wait has its own context, so CancelQueuedRun can end it without
-	// touching the run context the scan itself will use.
-	waitCtx, cancelWait := context.WithCancelCause(ctx)
-	defer cancelWait(nil)
-	queued := &queuedRun{run: model.QueuedRun{JobID: jobID, Job: job.Name, QueuedAt: time.Now().UTC(), Trigger: trigger, TenantID: scope.ID()}, cancel: cancelWait}
-	queuedInPool := false
-	releaseSlot, slotErr := a.slots.AcquireWithQueued(waitCtx, scope.ID(), func() {
-		a.queuedRuns.Store(jobID, queued)
-		queuedInPool = true
-	})
-	if slotErr != nil {
-		if queuedInPool {
-			a.queuedRuns.CompareAndDelete(jobID, queued)
-		}
-		if errors.Is(context.Cause(waitCtx), ErrQueuedRunCanceled) {
-			return model.Scan{}, nil, ErrQueuedRunCanceled
-		}
-		return model.Scan{}, nil, slotErr
-	}
-	if queuedInPool {
-		defer a.queuedRuns.CompareAndDelete(jobID, queued)
-	}
-	defer releaseSlot()
-	if !queued.start() {
-		// The cancellation arrived as the slot was granted.
-		return model.Scan{}, nil, ErrQueuedRunCanceled
-	}
-	ts, system := a.Store.Tenant(scope), a.Store.System()
-	var queuedErr error
-	if job, revision, queuedErr = a.queuedManagedJob(ctx, ts, job, jobID, revision, manual); queuedErr != nil {
-		return model.Scan{}, nil, queuedErr
-	}
-	estimate, err := config.EstimateJobWork(job)
-	if err != nil {
-		return model.Scan{}, nil, err
-	}
-	// The run reads its tenant's probe budget once. The estimate, the
-	// resolved plan and the direct scanner's own check all use it; the
-	// resumable path checks each attempt against the current budget.
-	budget, err := a.tenantProbeBudget(ctx, ts)
-	if err != nil {
-		return model.Scan{}, nil, err
-	}
-	if err := checkEstimatedProbeBudget(budget, job, estimate); err != nil {
-		return model.Scan{}, nil, err
-	}
-	if !manual {
-		if cycle, cycleErr := ts.GetActiveScanCycle(ctx, jobID); cycleErr == nil && cycle.Status == "stalled" && !cycleResumeWindowElapsed(cycle, time.Now().UTC()) {
-			return model.Scan{}, nil, ErrScanCycleStalled
-		}
-	}
-	started := time.Now().UTC()
-	engineName := config.EngineNmap
-	profileID, profileRevision := "", int64(0)
-	if job.TCP != nil {
-		if job.TCP.Engine != "" {
-			engineName = job.TCP.Engine
-		}
-		profileID, profileRevision = job.TCP.ProfileID, job.TCP.ProfileRevision
-	}
-	scan := model.Scan{ID: scanner.NewID(started), JobID: jobID, JobRevision: revision, Job: job.Name, StartedAt: started, ConfigHash: job.SecurityHash(), NmapVersion: a.nmapVersion, ScannerEngine: engineName, ScannerProfileID: profileID, ScannerProfileRevision: profileRevision}
-	if engineName == config.EngineNaabuNmap {
-		scan.NaabuVersion = a.naabuVersion
-	}
-	leaseKey := jobID
-	leaseOwner := scan.ID
-	if daemonOwner := a.currentDaemonOwner(); daemonOwner != "" {
-		leaseOwner = "daemon/" + daemonOwner + "/" + scan.ID
-	}
-	// The lease also refuses a job whose tenant is not active, so a paused
-	// tenant starts no scan, whether scheduled or manual.
-	if err := system.AcquireJobLeaseForRevision(ctx, leaseKey, leaseOwner, revision, started.Add(job.Timeout.Value()+time.Minute)); err != nil {
-		if errors.Is(err, store.ErrJobBusy) {
-			return model.Scan{}, nil, scanner.ErrBusy
-		}
-		return model.Scan{}, nil, err
-	}
-	leaseReleased := false
-	scanCtx, cancel := context.WithTimeout(ctx, job.Timeout.Value())
-	run := &activeRun{scan: model.ActiveScan{ID: scan.ID, JobID: jobID, Job: job.Name, JobRevision: revision, StartedAt: started, EstimatedProbes: estimate.Probes, NmapInvocations: estimate.NmapInvocations, EstimatedSeconds: estimate.EstimatedSeconds, TotalProbes: estimate.Probes, TotalInvocations: estimate.NmapInvocations, Phase: "starting", Scanner: engineName, ScannerProfileID: profileID, ScannerProfileRevision: profileRevision}, cancel: cancel}
-	a.registerRun(scope.ID(), scan.ID, run)
-	// The active entry is now visible, so remove the queue marker only after
-	// the queued-to-running handoff is observable through ActiveScans.
-	a.queuedRuns.Delete(jobID)
-	defer func() {
-		cancel()
-		a.running.Delete(scan.ID)
-	}()
-	// Legacy nil selections are frozen at scan start as well as when they are
-	// persisted. This closes the race where a new endpoint is added while an
-	// older scan is running: that scan must not deliver its completion events to
-	// an endpoint that did not exist when the scan began. Stable selectors are
-	// resolved again at finalization so managed credential rotations still use
-	// the current revision. Both follow the destinations of the job's tenant,
-	// so a nil selection never reaches another tenant's destinations.
-	var legacyNotificationSelection []string
-	legacySelectionCaptured := false
-	if job.NotificationDestinations == nil {
-		if selection, selectionErr := a.Notifier.Tenant(ts).LegacySelection(ctx); selectionErr != nil {
-			a.Logger.Warn("legacy notification selection snapshot failed", "job", job.Name, "error", selectionErr)
-		} else {
-			legacyNotificationSelection = selection
-			legacySelectionCaptured = true
-		}
-	}
-	var scanErr error
-	completionEvent := model.Event{Type: "scan.completed", JobID: jobID, Job: job.Name, ScanID: scan.ID}
-	completionPublished := false
-	lifecycleExitMessage := ""
-	publishCompletion := func(message string) {
-		if completionPublished {
-			return
-		}
-		completionPublished = true
-		if !publishLifecycleCompletion {
-			return
-		}
-		completionEvent.Message = message
-		completionEvent.CreatedAt = scan.FinishedAt
-		if completionEvent.CreatedAt.IsZero() {
-			completionEvent.CreatedAt = time.Now().UTC()
-		}
-		a.emitTenantEvents(scope, []model.Event{completionEvent})
-	}
-	// Publish lifecycle updates to the web console without persisting them as
-	// alert events. This keeps SSE subscribers responsive even when a scan has
-	// no baseline or incident event to emit.
-	a.emitTenantEvents(scope, []model.Event{{Type: "scan.started", JobID: jobID, Job: job.Name, ScanID: scan.ID, Message: "Scan started", CreatedAt: started}})
-	defer func() {
-		if completionPublished {
-			return
-		}
-		if lifecycleExitMessage == "" {
-			switch {
-			case errors.Is(scanErr, ErrScanCycleStalled):
-				lifecycleExitMessage = "Scan attempt stopped because its resumable cycle is stalled"
-			case scanErr != nil:
-				lifecycleExitMessage = "Scan attempt stopped before finalization"
-			default:
-				lifecycleExitMessage = "Scan attempt ended before finalization"
-			}
-		}
-		publishCompletion(lifecycleExitMessage)
-	}()
-	defer func() {
-		if leaseReleased {
-			return
-		}
-		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), scanPersistenceWriterWaitTimeout)
-		defer releaseCancel()
-		if err := system.ReleaseJobLease(releaseCtx, leaseKey, leaseOwner); err != nil && a.Logger != nil {
-			a.Logger.Warn("scan lease fallback release failed", "job", job.Name, "scan_id", scan.ID, "error", err)
-		}
-	}()
-	var snapshot model.Snapshot
-	resumableRun := false
-	// The scanner planner owns both ordinary Nmap units and Naabu pipeline
-	// batches. Naabu units checkpoint a pinned address batch after discovery and
-	// enrichment, so a paused cycle can resume without replaying completed
-	// batches or bypassing the discovery phase.
-	if resumableScanner, ok := a.Scanner.(scanner.ResumableScanner); ok {
-		var handled bool
-		handled, snapshot, scanErr = a.runResumableAttempt(ctx, scanCtx, ts, job, jobID, &scan, run, resumableScanner, manual)
-		resumableRun = handled
-		if errors.Is(scanErr, ErrScanCycleStalled) {
-			// A scheduled trigger that races with a newly stalled cycle must
-			// not create a synthetic failed scan or notification. The cycle's
-			// original stall attempt already recorded the actionable alert.
-			lifecycleExitMessage = "Scan attempt stopped because its resumable cycle became stalled"
-			return model.Scan{}, nil, scanErr
-		}
-	}
-	if !resumableRun {
-		if scanErr == nil {
-			// The direct scanner path resolves DNS again. A budgeted scanner
-			// checks the work of that resolution before it starts, so a DNS
-			// answer that grew since the plan cannot bypass the probe budget.
-			if budgetedScanner, ok := a.Scanner.(BudgetedProgressScanner); ok {
-				snapshot, scanErr = budgetedScanner.ScanWithProgressBudget(scanCtx, job, func(progress scanner.Progress) {
-					a.updateActiveProgress(scan.ID, progress)
-				}, func(discoveryProbes, nmapProbes int64) error {
-					return checkResolvedProbeBudget(budget, job, discoveryProbes, nmapProbes)
-				})
-			} else if progressScanner, ok := a.Scanner.(ProgressScanner); ok {
-				snapshot, scanErr = progressScanner.ScanWithProgress(scanCtx, job, func(progress scanner.Progress) {
-					a.updateActiveProgress(scan.ID, progress)
-				})
-			} else {
-				snapshot, scanErr = a.Scanner.Scan(scanCtx, job)
-			}
-		}
-	}
-	// Scanner progress carries phase timing for the optional Naabu pipeline.
-	// Capture it before the active run is removed by the deferred cleanup so
-	// the immutable scan record remains useful after completion.
-	if current := run.snapshot(); current.DiscoveryDurationMS > 0 || current.EnrichmentDurationMS > 0 {
-		scan.DiscoveryDurationMS = current.DiscoveryDurationMS
-		scan.EnrichmentDurationMS = current.EnrichmentDurationMS
-	}
-	scan.FinishedAt = time.Now().UTC()
-	scan.Snapshot = snapshot
-	if scan.ScannerEngine == config.EngineNaabuNmap {
-		scan.DiscoveryPorts, scan.ConfirmedPorts = scannerDiscoveryStats(snapshot)
-	}
-	if scanErr != nil {
-		if !resumableRun {
-			if errors.Is(scanCtx.Err(), context.Canceled) {
-				scan.Status = "canceled"
-				scan.Error = "scan canceled"
-				if run.interruptedByShutdown(ctx, scanCtx) {
-					scan.Error = ScanInterruptedMessage
-					scan.Interrupted = true
-				}
-			} else if errors.Is(scanCtx.Err(), context.DeadlineExceeded) || errors.Is(scanErr, context.DeadlineExceeded) {
-				scan.Status = "timed_out"
-				scan.Error = "scan timed out"
-			} else {
-				scan.Status = "failed"
-				scan.Error = scanErr.Error()
-			}
-		}
-	} else if !resumableRun {
-		scan.Status = "success"
-	}
-	if scanErr == nil {
-		// Preserve reachable evidence from a partial discovery pass while making
-		// the terminal result explicit. The engine will compare only complete
-		// target scopes and will not advance a baseline from this scan.
-		engine.MarkIncompleteScan(&scan)
-	}
-	a.beginActiveFinalization(scan.ID)
-	persistTimeout := scanPersistenceTimeout(len(scan.Snapshot.Hosts))
-	if a.persistenceBudget != nil {
-		persistTimeout = a.persistenceBudget(len(scan.Snapshot.Hosts))
-	}
-	if a.Logger != nil {
-		a.Logger.Debug("persisting scan result", "scan_id", scan.ID, "hosts", len(scan.Snapshot.Hosts), "timeout", persistTimeout)
-	}
-	// The result is persisted even when the run was canceled, so the
-	// persistence context keeps ctx's values but not its cancellation.
-	persistCtx := context.WithoutCancel(ctx)
-	destinationCtx, destinationCancel := context.WithTimeout(persistCtx, scanPersistenceWriterWaitTimeout)
-	var destinations []string
-	var destinationErr error
-	notifier := a.Notifier.Tenant(ts)
-	if legacySelectionCaptured {
-		destinations, destinationErr = notifier.QueueDestinationsForSelection(destinationCtx, legacyNotificationSelection)
-	} else {
-		destinations, destinationErr = notifier.QueueDestinationsForJob(destinationCtx, job)
-	}
-	destinationCancel()
-	if destinationErr != nil {
-		if completedCycleResult(scan) {
-			// The merged result of a completed resumable cycle stays in its
-			// checkpoints until a scan promotes it. Saving it now as not
-			// compared would discard the whole cycle's comparison; leaving the
-			// cycle unpromoted lets the next trigger promote and compare it,
-			// as after a crash in this window.
-			if a.Logger != nil {
-				a.Logger.Warn("notification destinations unavailable; the completed scan cycle is compared on the next run", "job", job.Name, "scan_id", scan.ID, "cycle_id", scan.CycleID, "error", destinationErr)
-			}
-			lifecycleExitMessage = "Scan attempt could not be finalized because notification destinations were unavailable; the completed cycle is compared on the next run"
-			return scan, nil, destinationErr
-		}
-		// Preserve the completed scan even when notification configuration
-		// cannot be read. Runtime state is deliberately left unchanged,
-		// matching the pre-transaction behavior, so the scan is recorded as
-		// not compared.
-		scan.Comparison = model.ScanComparisonNotCompared
-		saveCtx, saveCancel := context.WithTimeout(persistCtx, scanPersistenceWriterWaitTimeout+persistTimeout)
-		defer saveCancel()
-		if saveErr := system.SaveScan(saveCtx, scan); saveErr != nil {
-			lifecycleExitMessage = "Scan attempt could not be finalized because its result could not be saved"
-			return scan, nil, saveErr
-		}
-		lifecycleExitMessage = "Scan attempt could not be finalized because notification destinations were unavailable"
-		return scan, nil, destinationErr
-	}
-	// Renew and release the lease inside the finalization transaction. Its
-	// writer wait has a separate bound; the size-based work deadline begins only
-	// after SQLite grants this transaction the writer lock.
-	// A daemon's finalization also renews the daemon lease for its work
-	// budget when it takes the writer, because the heartbeat cannot write
-	// while it holds SQLite's only writer.
-	finalizeOptions := store.ManagedScanFinalizationOptions{
-		WriterWaitTimeout: scanPersistenceWriterWaitTimeout,
-		WorkTimeout:       persistTimeout,
-		LeaseOwner:        leaseOwner,
-		LeaseUntil:        time.Now().UTC().Add(scanPersistenceWriterWaitTimeout + persistTimeout + time.Minute),
-		DaemonOwner:       a.currentDaemonOwner(),
-	}
-	events, finalizeErr := a.Engine.FinalizeManagedScanWithOptions(persistCtx, jobID, job, &scan, destinations, finalizeOptions)
-	if errors.Is(finalizeErr, store.ErrJobRevisionChanged) {
-		// Keep the scan in immutable history, but do not let a result from a
-		// superseded security scope seed or mutate the current baseline. A
-		// lifecycle-only revision retains the same hash and is still accepted.
-		a.Logger.Info("scan completed for superseded security scope; runtime state unchanged", "job", job.Name, "scan_id", scan.ID)
-		events, finalizeErr = nil, nil
-		leaseReleased = true
-	}
-	if errors.Is(finalizeErr, store.ErrTenantNotActive) {
-		// The job's business unit was paused while the scan ran, whether this
-		// process cancelled the scan or another one, such as a host command,
-		// ran it. The store recorded the scan as the pause cancelled it and
-		// changed no baseline, incident or alert, so there are no events.
-		leaseReleased = true
-		a.Logger.Info("scan finished after its business unit was paused; runtime state unchanged", "job", job.Name, "scan_id", scan.ID, "status", scan.Status)
-		publishCompletion("Scan " + scan.Status)
-		return scan, nil, errors.Join(finalizeErr, scanErr)
-	}
-	if errors.Is(finalizeErr, store.ErrCycleNotResumable) {
-		// The store retained this result as immutable history but deliberately
-		// skipped runtime comparison because the cycle was discarded or expired.
-		leaseReleased = true
-		publishCompletion("Scan " + scan.Status)
-		return scan, nil, finalizeErr
-	}
-	if finalizeErr != nil {
-		if a.Logger != nil {
-			a.Logger.Error("scan result finalization failed", "job", job.Name, "scan_id", scan.ID, "error", finalizeErr)
-		}
-		failureScan := scan
-		failureScan.Status = "failed"
-		failureScan.Error = "scan result could not be finalized; inspect the EdgeWatch server log"
-		failureScan.Snapshot = model.Snapshot{
-			Scopes:         append([]model.Scope(nil), scan.Snapshot.Scopes...),
-			TargetFailures: append([]model.TargetCoverageFailure(nil), scan.Snapshot.TargetFailures...),
-		}
-		failureScan.Changes = nil
-		failureOptions := finalizeOptions
-		if failureOptions.WorkTimeout < scanPersistenceTimeoutFloor {
-			failureOptions.WorkTimeout = scanPersistenceTimeoutFloor
-		}
-		failureOptions.LeaseUntil = time.Now().UTC().Add(scanPersistenceWriterWaitTimeout + persistTimeout + time.Minute)
-		failureEvents, failureErr := a.Engine.FinalizeManagedScanWithOptions(persistCtx, jobID, job, &failureScan, destinations, failureOptions)
-		scan = failureScan
-		if failureErr == nil {
-			leaseReleased = true
-			events = failureEvents
-			a.emitTenantEvents(scope, events)
-			a.wakeDelivery()
-		} else if a.Logger != nil {
-			a.Logger.Error("failed to persist scan finalization failure", "job", job.Name, "scan_id", scan.ID, "error", failureErr)
-		}
-		lifecycleExitMessage = "Scan failed because its result could not be finalized"
-		publishCompletion(lifecycleExitMessage)
-		return scan, events, errors.Join(finalizeErr, failureErr)
-	}
-	leaseReleased = true
-	a.emitTenantEvents(scope, events)
-	publishCompletion("Scan " + scan.Status)
-	a.wakeDelivery()
-	if scanErr != nil {
-		return scan, events, scanErr
-	}
-	return scan, events, nil
-}
-
-// completedCycleResult reports whether scan carries the merged result of a
-// resumable cycle that completed, which only its promotion compares with the
-// baseline.
-func completedCycleResult(scan model.Scan) bool {
-	return scan.Resumable && scan.CycleID != "" && scan.CycleStatus == "completed" && (scan.Status == "success" || scan.Status == "incomplete")
-}
-
 // ActiveScans returns a stable snapshot of the scans of the tenant of scope
 // that are currently executing. A scan only enters this set after its
 // database lease is acquired, so a queued or rejected request is not
@@ -1226,12 +839,11 @@ func completedCycleResult(scan model.Scan) bool {
 // without a tenant lists none.
 func (a *App) ActiveScans(scope store.TenantScope) []model.ActiveScan {
 	var scans []model.ActiveScan
-	a.running.Range(func(_, value any) bool {
-		if run, ok := value.(*activeRun); ok && run.inTenant(scope) {
+	for _, run := range a.runs.activeRuns() {
+		if run.inTenant(scope) {
 			scans = append(scans, run.snapshot())
 		}
-		return true
-	})
+	}
 	sort.Slice(scans, func(i, j int) bool {
 		if scans[i].StartedAt.Equal(scans[j].StartedAt) {
 			return scans[i].ID < scans[j].ID
@@ -1246,12 +858,11 @@ func (a *App) ActiveScans(scope store.TenantScope) []model.ActiveScan {
 // time so callers can present a stable queue.
 func (a *App) QueuedRuns(scope store.TenantScope) []model.QueuedRun {
 	var queued []model.QueuedRun
-	a.queuedRuns.Range(func(_, value any) bool {
-		if entry, ok := value.(*queuedRun); ok && entry.run.TenantID == scope.ID() {
+	for _, entry := range a.runs.queuedRuns() {
+		if entry.run.TenantID == scope.ID() {
 			queued = append(queued, entry.run)
 		}
-		return true
-	})
+	}
 	sort.Slice(queued, func(i, j int) bool {
 		if queued[i].QueuedAt.Equal(queued[j].QueuedAt) {
 			return queued[i].JobID < queued[j].JobID
@@ -1266,11 +877,7 @@ func (a *App) QueuedRuns(scope store.TenantScope) []model.QueuedRun {
 // skipped. A job of another tenant, or one without a queued run, is
 // ErrRunNotQueued, exactly as a run that has already taken its slot.
 func (a *App) CancelQueuedRun(scope store.TenantScope, jobID string) error {
-	value, ok := a.queuedRuns.Load(jobID)
-	if !ok {
-		return ErrRunNotQueued
-	}
-	entry, ok := value.(*queuedRun)
+	entry, ok := a.runs.queuedRun(jobID)
 	if !ok || !scope.Valid() || entry.run.TenantID != scope.ID() {
 		return ErrRunNotQueued
 	}
@@ -1289,11 +896,7 @@ func (a *App) CancelQueuedRun(scope store.TenantScope, jobID string) error {
 // record without mutating baseline or incident state. Another tenant's scan
 // is store.ErrNotFound, exactly as an unknown one, and keeps running.
 func (a *App) CancelScan(scope store.TenantScope, id string) error {
-	value, ok := a.running.Load(id)
-	if !ok {
-		return store.ErrNotFound
-	}
-	run, ok := value.(*activeRun)
+	run, ok := a.runs.scan(id)
 	if !ok || !run.inTenant(scope) {
 		return store.ErrNotFound
 	}
@@ -1310,11 +913,7 @@ func (a *App) CancelScan(scope store.TenantScope, id string) error {
 }
 
 func (a *App) updateActiveProgress(id string, progress scanner.Progress) {
-	value, ok := a.running.Load(id)
-	if !ok {
-		return
-	}
-	run, ok := value.(*activeRun)
+	run, ok := a.runs.scan(id)
 	if !ok {
 		return
 	}
@@ -1386,11 +985,7 @@ func (a *App) updateActiveProgress(id string, progress scanner.Progress) {
 // beginActiveFinalization reports the finalizing phase and refuses later
 // cancellation requests, which could no longer change the result.
 func (a *App) beginActiveFinalization(id string) {
-	value, ok := a.running.Load(id)
-	if !ok {
-		return
-	}
-	run, ok := value.(*activeRun)
+	run, ok := a.runs.scan(id)
 	if !ok {
 		return
 	}

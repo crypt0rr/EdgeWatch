@@ -506,7 +506,7 @@ func TestManagedRunReleaseKeepsNewerReservation(t *testing.T) {
 	a, _, record := newManagedRunTestApp(t, blocking)
 	seen := make(chan any, 1)
 	if err := a.StartManagedRun(defaultTenant(a.Store), record.ID, func(model.Scan, []model.Event, error) {
-		value, _ := a.managedReservations.Load(record.ID)
+		value, _ := a.runs.reservationOf(record.ID)
 		seen <- value
 	}); err != nil {
 		t.Fatal(err)
@@ -516,7 +516,7 @@ func TestManagedRunReleaseKeepsNewerReservation(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("managed scan did not start")
 	}
-	a.managedReservations.Store(record.ID, "newer-reservation")
+	a.runs.replaceReservation(record.ID, "newer-reservation")
 	close(blocking.release)
 	select {
 	case value := <-seen:
@@ -528,7 +528,7 @@ func TestManagedRunReleaseKeepsNewerReservation(t *testing.T) {
 	}
 	// StopRun waits for the earlier goroutine, including its deferred release.
 	a.StopRun()
-	if value, ok := a.managedReservations.Load(record.ID); !ok || value != "newer-reservation" {
+	if value, ok := a.runs.reservationOf(record.ID); !ok || value != "newer-reservation" {
 		t.Fatalf("reservation after the earlier run returned = %v, %v; want the newer reservation", value, ok)
 	}
 }
@@ -550,7 +550,7 @@ func TestManagedRunReleasesReservationAfterPanic(t *testing.T) {
 		t.Fatal("managed scan did not start")
 	}
 	a.StopRun()
-	if value, ok := a.managedReservations.Load(record.ID); ok {
+	if value, ok := a.runs.reservationOf(record.ID); ok {
 		t.Fatalf("reservation after a panicking run = %v, want released", value)
 	}
 }

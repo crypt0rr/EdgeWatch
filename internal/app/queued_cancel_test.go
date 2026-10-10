@@ -85,7 +85,7 @@ func TestCancelQueuedRunRefusesARunThatTookItsSlot(t *testing.T) {
 	scope := store.DefaultTenantScope()
 	canceled := false
 	entry := &queuedRun{run: model.QueuedRun{JobID: "job", TenantID: scope.ID()}, cancel: func(error) { canceled = true }}
-	a.queuedRuns.Store("job", entry)
+	a.runs.enqueue("job", entry)
 	if !entry.start() {
 		t.Fatal("an uncanceled run could not start")
 	}
@@ -96,13 +96,13 @@ func TestCancelQueuedRunRefusesARunThatTookItsSlot(t *testing.T) {
 		t.Fatalf("cancel of a job without a queued run = %v", err)
 	}
 	foreign := &queuedRun{run: model.QueuedRun{JobID: "foreign", TenantID: "another-unit"}, cancel: func(error) { canceled = true }}
-	a.queuedRuns.Store("foreign", foreign)
+	a.runs.enqueue("foreign", foreign)
 	if err := a.CancelQueuedRun(scope, "foreign"); !errors.Is(err, ErrRunNotQueued) || canceled {
 		t.Fatalf("cancel of another unit's run = %v (canceled %v), want ErrRunNotQueued", err, canceled)
 	}
 
 	late := &queuedRun{run: model.QueuedRun{JobID: "late", TenantID: scope.ID()}, cancel: func(error) {}}
-	a.queuedRuns.Store("late", late)
+	a.runs.enqueue("late", late)
 	if err := a.CancelQueuedRun(scope, "late"); err != nil {
 		t.Fatal(err)
 	}

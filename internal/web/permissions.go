@@ -14,17 +14,18 @@ func isMutation(method string) bool {
 type routeAccess int
 
 const (
-	// routeSession routes pass session authentication, the CSRF check for
-	// mutations, and the requestPermission gate in Server.api.
+	// routeSession routes pass the gate in serveRoute: session
+	// authentication, the CSRF check for mutations, and the route's
+	// Permission.
 	routeSession routeAccess = iota
-	// routeUnauthenticated routes are dispatched by Server.api before the
-	// session gate. requiredPermission returns "" for them, which the gate
-	// itself would reject, so they can only be served by that early dispatch.
-	// Their state-changing requests are protected by validateBrowserOrigin.
+	// routeUnauthenticated routes are served by serveRoute before the
+	// session gate. They have no Permission, which the session gate would
+	// refuse. Their state-changing requests are protected by
+	// validateBrowserOrigin.
 	routeUnauthenticated
 	// routePublic routes are served by Server.publicAPI under
-	// publicAPIBase. They never consult requiredPermission and may only
-	// return explicitly published data.
+	// publicAPIBase, without a session or a permission, and may only return
+	// explicitly published data.
 	routePublic
 )
 
@@ -66,13 +67,14 @@ type apiRoute struct {
 	NoHandler bool
 }
 
-// apiRoutes is the route inventory: every method and path that the API
-// handlers serve, with the capability requiredPermission assigns to it.
-// Tests parse the routing functions and fail when a routed path is missing
-// here, and drive the permission matrix from this table, so a new route
-// cannot skip authorization tests. Paths that are not listed fail closed.
+// apiRoutes is the route inventory and the router: every method and path
+// that the APIs serve, with the capability the gate requires and the handler
+// that serves it. consoleRoutes and publicRoutes register these entries, and
+// nothing else in the package dispatches an API path. Tests drive the
+// permission and isolation matrices from this table, so a new route cannot
+// skip authorization tests. Paths that are not listed fail closed.
 var apiRoutes = []apiRoute{
-	// Entry points dispatched before the session gate.
+	// Entry points served before the session gate.
 	{Method: http.MethodGet, Template: "/setup/status", Example: "/setup/status", Access: routeUnauthenticated, Handle: requestHandler((*Server).setupStatus)},
 	{Method: http.MethodPost, Template: "/setup", Mutates: true, Example: "/setup", Access: routeUnauthenticated, Handle: requestHandler((*Server).setup)},
 	// The platform setup redeems the host's platform setup token.
@@ -346,8 +348,8 @@ var apiRoutes = []apiRoute{
 	{Method: http.MethodGet, Template: "/platform/status", Permission: auth.PermissionPlatformStatusRead, Example: "/platform/status", TrailingSlash: true, Handle: platformHandler(requestHandler((*Server).platformStatus))},
 
 	// Unauthenticated public status projection, relative to publicAPIBase:
-	// the default business unit's page, and a unit's page by its slug.
-	// Server.publicAPI also accepts one trailing slash.
-	{Method: http.MethodGet, Template: "/dashboard", Example: "/dashboard", Access: routePublic, TrailingSlash: true},
-	{Method: http.MethodGet, Template: "/dashboard/{slug...}", Example: "/dashboard/default", Access: routePublic, TrailingSlash: true},
+	// the default business unit's page, and a unit's page by its slug,
+	// which is the rest of the path.
+	{Method: http.MethodGet, Template: "/dashboard", Example: "/dashboard", Access: routePublic, TrailingSlash: true, Handle: requestHandler((*Server).defaultPublicPage)},
+	{Method: http.MethodGet, Template: "/dashboard/{slug...}", Example: "/dashboard/default", Access: routePublic, TrailingSlash: true, Handle: requestHandler((*Server).slugPublicPage)},
 }

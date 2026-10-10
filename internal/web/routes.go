@@ -12,9 +12,10 @@ import (
 
 // The console API and the public API are served from apiRoutes. Each API's
 // routeTable registers the method and path pattern of every route on a
-// ServeMux, which finds the route of a request; Server.api then admits the
-// request through the gate with that route's access and permission, and the
-// route's handler serves it.
+// ServeMux, which finds the route of a request. Server.api admits a console
+// request through the gate in serveRoute, with that route's access and
+// permission, and Server.publicAPI serves a public route without one; the
+// route's handler then serves the request.
 //
 // The ServeMux only matches: the tables look a request up with
 // ServeMux.Handler and never let it answer one, so its path-cleaning

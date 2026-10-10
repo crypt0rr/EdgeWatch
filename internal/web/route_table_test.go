@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -67,6 +68,9 @@ func TestRouteTablesRegisterEveryRouteOnce(t *testing.T) {
 		if registered[route] != 1 {
 			t.Errorf("%s is registered %d times, want once", name, registered[route])
 		}
+		if (route.Handle == nil) != route.NoHandler {
+			t.Errorf("%s has a handler %t but NoHandler %t; every route but a NoHandler one needs its handler", name, route.Handle != nil, route.NoHandler)
+		}
 		table := routeTableOf(*route)
 		target := table.base + route.Example
 		if route.Query != "" {
@@ -86,6 +90,42 @@ func TestRouteTablesRegisterEveryRouteOnce(t *testing.T) {
 		case !route.TrailingSlash && got != nil:
 			t.Errorf("%s %s reaches %s, want no route", route.Method, slashed, describeRoute(got))
 		}
+	}
+}
+
+// trailingSlashFamilies are the routes that accept one trailing slash: the
+// ones that the sub-routers served, which trimmed the slashes off the rest
+// of the path, and the public pages. The scan routes are not among them:
+// the old gate admitted a trailing slash there, but no handler ever served
+// one.
+var trailingSlashFamilies = []string{"/scanner-profiles", "/scanner/profiles", "/users", "/notifications/destinations/{id}", "/jobs/{id}", "/platform/", "/dashboard"}
+
+func TestRouteTrailingSlashesFollowTheSubRouters(t *testing.T) {
+	t.Parallel()
+	for _, route := range apiRoutes {
+		want := false
+		for _, family := range trailingSlashFamilies {
+			want = want || route.Template == strings.TrimSuffix(family, "/") || strings.HasPrefix(route.Template, strings.TrimSuffix(family, "/")+"/")
+		}
+		if route.TrailingSlash != want {
+			t.Errorf("%s TrailingSlash = %t, want %t", routeInventoryName(route), route.TrailingSlash, want)
+		}
+	}
+}
+
+// Only signing out and recording activity take no tenant store, so they
+// work for an account whose unit is paused; every other session route
+// resolves the session's tenant.
+func TestOnlyAccountRoutesTakeNoTenant(t *testing.T) {
+	t.Parallel()
+	var untenanted []string
+	for _, route := range apiRoutes {
+		if route.NoTenant {
+			untenanted = append(untenanted, routeInventoryName(route))
+		}
+	}
+	if want := []string{"POST /auth/activity", "POST /auth/logout"}; strings.Join(untenanted, ",") != strings.Join(want, ",") {
+		t.Fatalf("routes without a tenant = %q, want %q", untenanted, want)
 	}
 }
 
@@ -332,6 +372,43 @@ func TestHandlerFailsClosedOutsideTheRouteTable(t *testing.T) {
 		}
 		if allow := recorder.Header().Get("Allow"); allow != "" {
 			t.Errorf("%s %s answered with Allow %q", test.method, test.target, allow)
+		}
+	}
+}
+
+// The public API answers what no route serves with 404 not_found, as it
+// always did, and never lets ServeMux redirect or answer 405 with Allow. A
+// route of the table is served: without a published page, every page is
+// 404 public_disabled.
+func TestPublicAPIFailsClosedOutsideTheRouteTable(t *testing.T) {
+	t.Parallel()
+	server, _ := newRouteMatrixSessions(t)
+	for index, test := range []struct {
+		method, target, code string
+	}{
+		{http.MethodGet, "/api/public/v1/dashboard", "public_disabled"},
+		{http.MethodGet, "/api/public/v1/dashboard/", "public_disabled"},
+		{http.MethodGet, "/api/public/v1/dashboard/unit-slug/", "public_disabled"},
+		{http.MethodGet, "/api/public/v1/dashboard/a/b", "public_disabled"},
+		{http.MethodGet, "/api/public/v1/dashboard//", "not_found"},
+		{http.MethodGet, "/api/public/v1/dashboard/a%2F%2Fb", "not_found"},
+		{http.MethodGet, "/api/public/v1/dashboard/./x", "public_disabled"},
+		{http.MethodGet, "/api/public/v1/dashboard/../x", "public_disabled"},
+		{http.MethodHead, "/api/public/v1/dashboard", "not_found"},
+		{http.MethodPost, "/api/public/v1/dashboard", "not_found"},
+		{http.MethodOptions, "/api/public/v1/dashboard/unit-slug", "not_found"},
+		{http.MethodGet, "/api/public/v1/", "not_found"},
+		{http.MethodGet, "/api/public/v1/status", "not_found"},
+	} {
+		request := httptest.NewRequest(test.method, test.target, nil)
+		request.RemoteAddr = fmt.Sprintf("198.51.100.%d:1000", 100+index)
+		recorder := httptest.NewRecorder()
+		server.publicAPI(recorder, request)
+		if recorder.Code != http.StatusNotFound || !strings.Contains(recorder.Body.String(), `"code":"`+test.code+`"`) {
+			t.Errorf("%s %s = %d %s, want 404 %s", test.method, test.target, recorder.Code, recorder.Body.String(), test.code)
+		}
+		if location, allow := recorder.Header().Get("Location"), recorder.Header().Get("Allow"); location != "" || allow != "" {
+			t.Errorf("%s %s answered with Location %q and Allow %q", test.method, test.target, location, allow)
 		}
 	}
 }

@@ -41,7 +41,7 @@ func TestRequiredPermissionAndMutationMatrix(t *testing.T) {
 			// The query selects a different action than the plain route, so
 			// the path alone must not carry the query's capability.
 			if got := routePermission(route.Example, route.Method); got == route.Permission {
-				t.Errorf("%s: requiredPermission without the query = %q, want a different capability", name, got)
+				t.Errorf("%s: routePermission without the query = %q, want a different capability", name, got)
 			}
 			continue
 		}

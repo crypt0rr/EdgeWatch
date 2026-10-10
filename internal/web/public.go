@@ -87,26 +87,35 @@ const publicDashboardRateLimit = "public-dashboard"
 
 // publicAPI is intentionally separate from /api/v1. It has no session
 // middleware and exposes one fixed, sanitized projection without resource
-// selectors that could be used to enumerate jobs or hosts. The legacy URL
-// serves the default tenant's page, and /api/public/v1/dashboard/<slug> the
-// page of the business unit with that slug. Both accept one trailing slash.
+// selectors that could be used to enumerate jobs or hosts. It serves the
+// public routes of apiRoutes from publicRoutes: the legacy URL serves the
+// default tenant's page, and /api/public/v1/dashboard/<slug> the page of the
+// business unit with that slug. Both accept one trailing slash. Any other
+// method or path is not found.
 func (s *Server) publicAPI(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimSuffix(r.URL.Path, "/")
-	if r.Method == http.MethodGet && path == "/api/public/v1/dashboard" {
-		s.servePublicPage(w, r, publicDashboardRateLimit, func(context.Context) (store.PublicScope, error) {
-			return store.DefaultPublicScope(), nil
-		})
+	if route := publicRoutes.match(r); route != nil {
+		route.Handle(s, w, r, routeCall{})
 		return
 	}
-	if r.Method == http.MethodGet && strings.HasPrefix(path, "/api/public/v1/dashboard/") {
-		if slug := strings.TrimPrefix(path, "/api/public/v1/dashboard/"); slug != "" {
-			s.servePublicPage(w, r, publicPageRateLimit(slug), func(ctx context.Context) (store.PublicScope, error) {
-				return s.publicScopeForSlug(ctx, slug)
-			})
-			return
-		}
-	}
 	writeError(w, http.StatusNotFound, "not_found", "endpoint not found", nil)
+}
+
+// defaultPublicPage serves GET /api/public/v1/dashboard, the default
+// tenant's page.
+func (s *Server) defaultPublicPage(w http.ResponseWriter, r *http.Request) {
+	s.servePublicPage(w, r, publicDashboardRateLimit, func(context.Context) (store.PublicScope, error) {
+		return store.DefaultPublicScope(), nil
+	})
+}
+
+// slugPublicPage serves GET /api/public/v1/dashboard/{slug...}. The slug is
+// the rest of the path, which can hold more than one segment; such a slug
+// names no unit and is answered like any other slug without a page.
+func (s *Server) slugPublicPage(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("slug")
+	s.servePublicPage(w, r, publicPageRateLimit(slug), func(ctx context.Context) (store.PublicScope, error) {
+		return s.publicScopeForSlug(ctx, slug)
+	})
 }
 
 // publicSlugWellFormed reports whether slug can name a business unit: it

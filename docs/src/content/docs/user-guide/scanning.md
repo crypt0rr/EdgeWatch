@@ -40,7 +40,8 @@ default). With SYN host discovery, Naabu cannot tell a down address from one
 without open ports, so that address stays incomplete. With **Nmap only** and
 host discovery enabled (`assume_alive: false`), EdgeWatch adds Nmap verbosity
 level 1 (`-v`) so explicit down hosts appear in Nmap's XML output. Those results
-are tracked as host-state changes, not as sets of closed ports. During Naabu
+are tracked as host-state changes, not as sets of closed ports, and the
+incidents of a down host's ports do not recover while it is down. During Naabu
 enrichment, each address has already been discovered, so Nmap uses `-Pn` to
 confirm discovered ports without a second host-discovery pass or a verbose
 down-host signal. Omitted Nmap hosts and timed-out probes remain incomplete.

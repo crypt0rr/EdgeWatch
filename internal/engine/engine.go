@@ -231,11 +231,14 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		}
 		changes = filtered
 	}
+	// A host that is down shows none of its ports, so its port and service
+	// findings were not observed and keep their state for a later scan.
+	downHostKeys := downHostChangeKeys(state, scan.Snapshot, changes, job)
 	// A service fingerprint is meaningful only while its port is positively
 	// observed. Diff intentionally reports a port closure without also emitting
 	// a service removal; retire any existing service finding for that port here
 	// so applyChanges cannot mislabel the missing service key as a recovery.
-	retireClosedPortServiceChanges(state, scan.Snapshot)
+	retireClosedPortServiceChangesExcept(state, scan.Snapshot, downHostKeys)
 	// The same holds for a port's exposure on one address of a DNS target:
 	// a finding that this scan could not compare is retired, not recovered.
 	retireUncomparedPortAddressChanges(state, scan.Snapshot, scopeChanged, job)
@@ -249,7 +252,7 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 			previous[key] = incident
 		}
 	}
-	events := applyChanges(state, job.Name, scan.ID, changes, job.Change.Confirmations, now)
+	events := applyChangesWithIncomplete(state, job.Name, scan.ID, changes, job.Change.Confirmations, now, downHostKeys)
 	if sendRemindersNow {
 		var reminded []model.Change
 		for _, change := range changes {
@@ -433,6 +436,11 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 		// Unlike a complete scan, an incomplete one does not retire a
 		// per-address finding it could not compare; the finding waits.
 		for key := range uncomparedPortAddressKeys(state, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash, job) {
+			protectedKeys[key] = true
+		}
+		// Ports on a host that completed discovery down were not observed
+		// either, as in a complete scan.
+		for key := range downHostChangeKeys(state, scan.Snapshot, changes, job) {
 			protectedKeys[key] = true
 		}
 		events = append(events, applyChangesWithIncomplete(state, job.Name, scan.ID, changes, job.Change.Confirmations, scan.FinishedAt, protectedKeys)...)
@@ -1770,35 +1778,7 @@ func missingPositivePortExplainedByDown(old model.Snapshot, value item, downByPr
 	if len(downByProtocol) == 0 {
 		return false
 	}
-	addresses := map[string]struct{}{}
-	found := false
-	for _, unit := range old.Units {
-		if unit.Target != value.Target || !strings.EqualFold(unit.Protocol, value.Protocol) {
-			continue
-		}
-		for _, port := range unit.Ports {
-			if port.Port != value.Port || !isPositivePortState(port.State) {
-				continue
-			}
-			found = true
-			portAddresses := port.Evidence
-			if len(portAddresses) == 0 {
-				portAddresses = unit.Addresses
-			}
-			if len(portAddresses) == 0 {
-				portAddresses = old.DNS[unit.Target]
-			}
-			if len(portAddresses) == 0 && net.ParseIP(strings.TrimSpace(unit.Target)) != nil {
-				portAddresses = []string{unit.Target}
-			}
-			if len(portAddresses) == 0 {
-				return false
-			}
-			for _, address := range portAddresses {
-				addresses[strings.TrimSpace(address)] = struct{}{}
-			}
-		}
-	}
+	addresses, found := positivePortAddresses(old, value.Target, value.Protocol, value.Port)
 	if !found || len(addresses) == 0 {
 		return false
 	}
@@ -1811,6 +1791,177 @@ func missingPositivePortExplainedByDown(old model.Snapshot, value item, downByPr
 		}
 	}
 	return true
+}
+
+// positivePortAddresses returns the effective addresses that exposed a
+// positive port of snapshot: the port's evidence, or else its unit's
+// addresses, the target's DNS answer, or the IP literal target. found
+// reports whether the snapshot has the port as positive at all. The address
+// set is nil when a matching port has no address that can be determined.
+func positivePortAddresses(snapshot model.Snapshot, target, protocol string, port int) (map[string]struct{}, bool) {
+	addresses := map[string]struct{}{}
+	found := false
+	for _, unit := range snapshot.Units {
+		if unit.Target != target || !strings.EqualFold(unit.Protocol, protocol) {
+			continue
+		}
+		for _, value := range unit.Ports {
+			if value.Port != port || !isPositivePortState(value.State) {
+				continue
+			}
+			found = true
+			portAddresses := value.Evidence
+			if len(portAddresses) == 0 {
+				portAddresses = unit.Addresses
+			}
+			if len(portAddresses) == 0 {
+				portAddresses = snapshot.DNS[unit.Target]
+			}
+			if len(portAddresses) == 0 && net.ParseIP(strings.TrimSpace(unit.Target)) != nil {
+				portAddresses = []string{unit.Target}
+			}
+			if len(portAddresses) == 0 {
+				return nil, true
+			}
+			for _, address := range portAddresses {
+				addresses[strings.TrimSpace(address)] = struct{}{}
+			}
+		}
+	}
+	return addresses, found
+}
+
+// targetAddresses returns the effective addresses that a scan examined for
+// a target and protocol: its unit's addresses, or else the target's DNS
+// answer or the IP literal target.
+func targetAddresses(snapshot model.Snapshot, target, protocol string) []string {
+	for _, unit := range snapshot.Units {
+		if unit.Target == target && strings.EqualFold(unit.Protocol, protocol) && len(unit.Addresses) > 0 {
+			return unit.Addresses
+		}
+	}
+	if addresses := snapshot.DNS[target]; len(addresses) > 0 {
+		return addresses
+	}
+	if net.ParseIP(strings.TrimSpace(target)) != nil {
+		return []string{target}
+	}
+	return nil
+}
+
+// downHostChangeKeys returns the tracked port and service findings that this
+// complete or incomplete scan could not observe because the host that would
+// show their port was discovered down. A host that is down shows no ports,
+// so a missing change for such a finding is not evidence that the port
+// returned to its baseline state. The findings keep their state: they do
+// not recover, keep their pending confirmation, and keep their suppression,
+// until a scan observes the port again. A finding whose change this scan
+// reported, or whose port it observed as positive, was observed.
+//
+// A port of the baseline names the addresses that exposed it, and is not
+// observed when all of them are down, as Diff decides when it leaves out its
+// closure. Any other port, such as one that opened unexpectedly, may have
+// been on any address of its target, so one address that is down is enough.
+func downHostChangeKeys(state *model.JobState, current model.Snapshot, changes []model.Change, job config.Job) map[string]bool {
+	protected := map[string]bool{}
+	if state.Baseline == nil {
+		return protected
+	}
+	downByProtocol := completedDownAddressesByProtocolForJob(*state.Baseline, current, job)
+	if len(downByProtocol) == 0 {
+		return protected
+	}
+	reported := make(map[string]struct{}, len(changes))
+	for _, change := range changes {
+		reported[change.Key] = struct{}{}
+	}
+	positive := positivePortKeys(current)
+	mark := func(key string, change model.Change) {
+		if change.Kind != "port" && change.Kind != "service" {
+			return
+		}
+		if _, ok := reported[key]; ok {
+			return
+		}
+		if _, ok := positive[portChangeKey(change.Target, change.Protocol, change.Port)]; ok {
+			return
+		}
+		if portHiddenByDownHost(*state.Baseline, current, change.Target, change.Protocol, change.Port, downByProtocol) {
+			protected[key] = true
+		}
+	}
+	for key, pending := range state.Pending {
+		mark(key, pending.Change)
+	}
+	for key, incident := range state.Incidents {
+		mark(key, incident.Change)
+	}
+	for key, change := range state.SuppressedChanges {
+		mark(key, change)
+	}
+	// State can hold a suppression without its change; its key still names
+	// the port.
+	for key := range state.Suppressed {
+		if _, ok := state.SuppressedChanges[key]; ok {
+			continue
+		}
+		if change, ok := portChangeFromKey(key); ok {
+			mark(key, change)
+		}
+	}
+	return protected
+}
+
+// portHiddenByDownHost reports whether a port that the current scan does not
+// show as positive was on a host that the scan discovered down.
+func portHiddenByDownHost(baseline, current model.Snapshot, target, protocol string, port int, downByProtocol map[string]map[string]struct{}) bool {
+	if addresses, expected := positivePortAddresses(baseline, target, protocol, port); expected {
+		if len(addresses) == 0 {
+			return false
+		}
+		for address := range addresses {
+			if !explicitlyDownForProtocol(downByProtocol, protocol, address) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, address := range targetAddresses(current, target, protocol) {
+		if explicitlyDownForProtocol(downByProtocol, protocol, address) {
+			return true
+		}
+	}
+	return false
+}
+
+func portChangeKey(target, protocol string, port int) string {
+	return fmt.Sprintf("port|%s|%s|%d", target, protocol, port)
+}
+
+func positivePortKeys(snapshot model.Snapshot) map[string]struct{} {
+	positive := make(map[string]struct{})
+	for _, unit := range snapshot.Units {
+		for _, port := range unit.Ports {
+			if isPositivePortState(port.State) {
+				positive[portChangeKey(unit.Target, unit.Protocol, port.Port)] = struct{}{}
+			}
+		}
+	}
+	return positive
+}
+
+// portChangeFromKey reads the kind, target, protocol and port from the key
+// of a port or service change.
+func portChangeFromKey(key string) (model.Change, bool) {
+	parts := strings.Split(key, "|")
+	if len(parts) < 4 || (parts[0] != "port" && parts[0] != "service") {
+		return model.Change{}, false
+	}
+	port, err := strconv.Atoi(parts[len(parts)-1])
+	if err != nil {
+		return model.Change{}, false
+	}
+	return model.Change{Key: key, Kind: parts[0], Target: strings.Join(parts[1:len(parts)-2], "|"), Protocol: parts[len(parts)-2], Port: port}, true
 }
 
 // completedDownAddressesByProtocol includes protocol-specific Nmap discovery
@@ -1902,16 +2053,16 @@ func applyChanges(state *model.JobState, job, scanID string, current []model.Cha
 // Incomplete scans return earlier in processSuccessWithReminderSettings and
 // must not use absence as evidence to retire findings.
 func retireClosedPortServiceChanges(state *model.JobState, snapshot model.Snapshot) {
-	positivePorts := make(map[string]struct{})
-	for _, unit := range snapshot.Units {
-		for _, port := range unit.Ports {
-			if isPositivePortState(port.State) {
-				positivePorts[fmt.Sprintf("port|%s|%s|%d", unit.Target, unit.Protocol, port.Port)] = struct{}{}
-			}
-		}
-	}
+	retireClosedPortServiceChangesExcept(state, snapshot, nil)
+}
+
+// retireClosedPortServiceChangesExcept is retireClosedPortServiceChanges
+// for a scan that did not observe the findings in kept, such as those whose
+// port is on a host that is down. They stay.
+func retireClosedPortServiceChangesExcept(state *model.JobState, snapshot model.Snapshot, kept map[string]bool) {
+	positivePorts := positivePortKeys(snapshot)
 	retire := func(key string, change model.Change) {
-		if change.Kind != "service" {
+		if change.Kind != "service" || kept[key] {
 			return
 		}
 		portKey := fmt.Sprintf("port|%s|%s|%d", change.Target, change.Protocol, change.Port)
@@ -1936,7 +2087,7 @@ func retireClosedPortServiceChanges(state *model.JobState, snapshot model.Snapsh
 	// change-key format still lets us expire that stale suppression when the
 	// port is gone.
 	for key := range state.Suppressed {
-		if !strings.HasPrefix(key, "service|") {
+		if !strings.HasPrefix(key, "service|") || kept[key] {
 			continue
 		}
 		portKey := "port|" + strings.TrimPrefix(key, "service|")

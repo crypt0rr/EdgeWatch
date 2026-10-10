@@ -52,7 +52,18 @@ schedule-offset suggestion when another active job is nearby; the administrator
 can keep concurrent times.
 
 Choose how many successful samples establish a baseline and how many matching
-changes confirm an incident. When a security-impacting job setting changes,
+changes confirm an incident. The same number of scans in a row must observe
+the expected state again before an open incident recovers.
+
+A host that host discovery reports down shows none of its ports, so its state
+change is reported instead. The incidents, pending changes, and one-scan
+suppressions of its ports and services stay as they are until a scan observes
+the host up again. A port that is still changed when its host returns keeps
+its incident, without a recovery or a new alert. For a DNS name in
+**Address-sensitive** mode, a port that opened outside the baseline waits
+while any of the name's addresses is down.
+
+When a security-impacting job setting changes,
 EdgeWatch shows the affected scope and asks for explicit rebaselining. Schedule
 and execution-tuning changes do not reset the baseline. A run that waits for a
 free scan slot uses the job's settings when it starts; if the job is paused or

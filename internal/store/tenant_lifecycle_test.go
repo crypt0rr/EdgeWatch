@@ -378,7 +378,7 @@ func TestCreateTenantStartsWithUpdateAlertsOff(t *testing.T) {
 // whatever its status, those of archived jobs and, for the default tenant,
 // those without a job ID included, and never another tenant's, although the
 // two tenants' jobs and scans look alike. A new tenant has none. The count
-// reads the tenant's entries of the scans_tenant_id_time index.
+// reads the tenant's entries of the scans_tenant_history index.
 func TestTenantRecordsCountStoredScans(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -446,8 +446,8 @@ func TestTenantRecordsCountStoredScans(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(plan, "SEARCH s USING COVERING INDEX scans_tenant_id_time (tenant_id=?)") {
-		t.Fatalf("the tenant list's plan = %q, want the stored scans counted from scans_tenant_id_time", plan)
+	if !slices.Contains(plan, "SEARCH s USING COVERING INDEX scans_tenant_history (tenant_id=?)") {
+		t.Fatalf("the tenant list's plan = %q, want the stored scans counted from scans_tenant_history", plan)
 	}
 }
 

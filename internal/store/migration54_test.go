@@ -32,10 +32,11 @@ var latestScanHostsColumnList = strings.Split(latestScanHostsCopyColumns, ",")
 var latestScanHostsStableColumnList = strings.Split(strings.TrimSuffix(latestScanHostsCopyColumns, ",search_text"), ",")
 
 // schema53FixtureStatements turn a current database into the schema-53
-// shape: latest_scan_hosts goes back to the address key with the schema 53
-// indexes and search triggers, each row keeping its rowid, and the schema 54
-// guard triggers and checkpoint are removed.
-var schema53FixtureStatements = slices.Concat([]string{
+// shape. They first undo schema 66, see schema66UndoStatements. Then
+// latest_scan_hosts goes back to the address key with the schema 53 indexes
+// and search triggers, each row keeping its rowid, and the schema 54 guard
+// triggers and checkpoint are removed.
+var schema53FixtureStatements = slices.Concat(schema66UndoStatements, []string{
 	"DROP TRIGGER " + latestScanHostsTenantInsertTrigger,
 	"DROP TRIGGER " + latestScanHostsTenantUpdateTrigger,
 	"DROP TRIGGER latest_scan_hosts_search_ai",
@@ -382,6 +383,14 @@ func assertLatestHostsRekeyed(t *testing.T, s *Store, before latestHostsBefore) 
 	for _, trigger := range slices.Concat(latestHostSearchTriggerNames, schema54Triggers) {
 		if got := countRows(t, s.DB, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=? AND tbl_name='latest_scan_hosts'`, trigger); got != 1 {
 			t.Fatalf("trigger %s is missing", trigger)
+		}
+	}
+	// Schema 66 leaves the guard triggers to the copy, which installs them
+	// in their schema 66 form once the row whose scan retention removed has
+	// been copied; installed before, they would refuse that row.
+	for _, trigger := range schema54Triggers {
+		if got := countRows(t, s.DB, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=? AND instr(sql,?)>0`, trigger, latestScanHostScanTenantSQL); got != 1 {
+			t.Fatalf("trigger %s does not check the scan through its tenant", trigger)
 		}
 	}
 	for _, name := range append(slices.Clone(schema54RekeyTriggers), latestScanHostsPreTenantTable) {
@@ -980,7 +989,7 @@ func TestLatestScanHostRepairFollowsTheAddressIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	deleteSQL, insertSQL, args := latestScanHostRepairQueries([]latestScanHostKey{{DefaultTenantID, fixtureHost(1).Address}, {DefaultTenantID, fixtureHost(2).Address}})
-	if plan := queryPlan(t, s.DB, insertSQL, args...); !strings.Contains(plan, "SEARCH h USING INDEX scan_hosts_address (address=?)") || strings.Contains(plan, "SCAN s") || strings.Contains(plan, "scans_tenant_id_time") {
+	if plan := queryPlan(t, s.DB, insertSQL, args...); !strings.Contains(plan, "SEARCH h USING INDEX scan_hosts_address (address=?)") || strings.Contains(plan, "SCAN s") || !strings.Contains(plan, "SEARCH s USING COVERING INDEX "+scansIdentityIndex) {
 		t.Fatalf("repair insert plan = %q", plan)
 	}
 	if plan := queryPlan(t, s.DB, deleteSQL, args...); !strings.Contains(plan, "sqlite_autoindex_latest_scan_hosts_1 (tenant_id=? AND address=?)") {

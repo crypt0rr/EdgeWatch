@@ -1092,8 +1092,8 @@ func (ss *SystemStore) StartScanCycleAttempt(ctx context.Context, id string) (Sc
 			return ScanCycleRecord{}, err
 		}
 		// Cleanup is best effort here: the terminal state is already durable and
-		// the regular retention pass retries any payloads left behind by a canceled
-		// context or a transient database error.
+		// the regular retention pass empties any payloads of an expired cycle
+		// left behind by a canceled context or a transient database error.
 		_ = ss.clearExpiredCyclePayloads(ctx, []string{id})
 		return ScanCycleRecord{}, ErrCycleNotResumable
 	}
@@ -1162,11 +1162,13 @@ func (ss *SystemStore) ClaimScanCycleUnit(ctx context.Context, cycleID string, s
 		}
 		// A deadline can pass between NextScanCycleUnit and the atomic claim.
 		// Expire it before reporting the refusal so a retry cannot consume an
-		// attempt budget after the resume window has closed.
+		// attempt budget after the resume window has closed. The claiming
+		// scan holds its job's lease, which ExpireScanCycles respects, so the
+		// cycle is expired on its own, as the scan's start does.
 		var expires string
 		if expiryErr := ss.store.reader().QueryRowContext(ctx, `SELECT expires_at FROM scan_cycles WHERE id=? AND status='running'`, cycleID).Scan(&expires); expiryErr == nil {
 			if deadline, parseErr := time.Parse(time.RFC3339Nano, expires); parseErr == nil && !deadline.IsZero() && !now.Before(deadline) {
-				_, _ = ss.ExpireScanCycles(ctx, now)
+				_, _ = ss.ExpireScanCycle(ctx, cycleID, now)
 				return ScanCycleUnit{}, ErrCycleNotResumable
 			}
 		}
@@ -1547,7 +1549,7 @@ func (ss *SystemStore) ExpireScanCycle(ctx context.Context, cycleID string, now 
 	}
 	if changed, _ := result.RowsAffected(); changed == 1 {
 		// The terminal state is already durable. As in StartScanCycleAttempt,
-		// payload cleanup is best effort and the retention pass retries it.
+		// payload cleanup is best effort and the retention pass finishes it.
 		_ = ss.clearExpiredCyclePayloads(ctx, []string{cycleID})
 	}
 	return ss.scanCycle(ctx, cycleID)

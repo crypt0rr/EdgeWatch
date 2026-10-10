@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 65
+const schemaVersion = 66
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -78,6 +78,9 @@ var conditionalMigrationStatements = map[int]func(*sql.Tx) ([]string, error){
 	// Schema 65's comparison column may already exist in a reconstructed
 	// test DB.
 	65: migration65ConditionalStatements,
+	// Schema 66 replaces the latest-host guard triggers only where the
+	// schema 54 copy has installed them.
+	66: migration66ConditionalStatements,
 }
 
 // newerSchemaError is the refusal for a database that a newer release has
@@ -1281,6 +1284,10 @@ ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=
 		// samples are no longer reported as failed or diffed against a later
 		// baseline. See migration65.go.
 		65: {},
+		// The scan history indexes hold the tenant, job and cycle outcome
+		// that history reads test, and the legacy host index backfill
+		// records its completion. See migration66.go.
+		66: migration66Statements(),
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL
 	// steps. FTS and other resumable backfills can be the longest part of an

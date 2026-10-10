@@ -203,3 +203,38 @@ func TestIndeterminateDeliveryTerminalDeferralsAreDurable(t *testing.T) {
 		t.Fatalf("terminal indeterminate delivery remained claimable: %#v, %v", due, err)
 	}
 }
+
+// A claim that finds the resume window closed expires the cycle, although
+// the claiming scan holds its job's lease, which keeps ExpireScanCycles
+// from expiring it. The cycle is not left running for the next trigger or
+// the daily housekeeping to expire and report again.
+func TestClaimPastTheDeadlineExpiresTheCycleOfTheLeaseHolder(t *testing.T) {
+	t.Parallel()
+	ctx, s, job, plan := cycleFixture(t)
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.System().AcquireJobLease(ctx, job.ID, "daemon/claim/scan", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET expires_at=? WHERE id=?`, sqliteTimestamp(time.Now().Add(-time.Minute)), cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if expired, err := s.System().ExpireScanCycles(ctx, time.Now()); err != nil || expired != 0 {
+		t.Fatalf("housekeeping expired %d cycles, %v; want the leased cycle left to its scan", expired, err)
+	}
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); !errors.Is(err, ErrCycleNotResumable) {
+		t.Fatalf("claim past the deadline = %v, want %v", err, ErrCycleNotResumable)
+	}
+	if expired, err := defaultTenant(s).GetScanCycle(ctx, cycle.ID); err != nil || expired.Status != "expired" {
+		t.Fatalf("cycle status after the refused claim = %q, %v; want expired", expired.Status, err)
+	}
+}

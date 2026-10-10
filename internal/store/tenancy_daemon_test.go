@@ -273,7 +273,7 @@ func TestRetentionLeavesATenantBeingDeletedToThePurge(t *testing.T) {
 	beforeA, beforeB := retentionRows(t, f.store, f.a), retentionRows(t, f.store, f.b)
 	// The checkpoint of a promoted cycle is cleared for the active tenant
 	// only.
-	if err := system.clearCompletedCyclePayloads(ctx); err != nil {
+	if err := system.clearFinishedCyclePayloads(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if got := checkpoint(cyclesOf(f, f.a).promoted); got != "{}" {

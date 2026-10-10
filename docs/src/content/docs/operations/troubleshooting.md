@@ -112,7 +112,9 @@ window; partial or failed observations cannot change the baseline.
 
 A stalled cycle holds scheduled runs until it is retried, discarded, or its
 resume window ends. The first scheduled run after expiry records the expiry;
-the next starts a fresh cycle. Read [Scanning and profiles](/user-guide/scanning/)
+the next starts a fresh cycle. When the window ends while a run is working on
+the cycle, that run records the expiry as timed out, once, and the next run
+starts a fresh cycle. Read [Scanning and profiles](/user-guide/scanning/)
 and [Host commands](/reference/cli/) before changing scan scope or retrying.
 
 ## Destinations are locked or delivery fails

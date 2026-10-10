@@ -44,6 +44,7 @@ var defaultLegacyHostBackfillLimits = legacyHostBackfillLimits{
 
 type legacyHostBackfillScan struct {
 	id            string
+	tenantID      string
 	jobID         string
 	job           string
 	finishedAt    time.Time
@@ -90,6 +91,20 @@ func backfillLegacyScanHostsContextWithLoggerAndProgress(ctx context.Context, db
 	if err := awaitLatestScanHostsTenantRekeyContext(ctx, db); err != nil {
 		return err
 	}
+	// Once a backfill has found no scan left, there is none to find: the
+	// scans saved since then were indexed or checkpointed when they were
+	// saved. An upgrade from before schema 66, or a scan saved with units
+	// only, sets the marker back to pending.
+	complete, err := legacyScanHostIndexComplete(ctx, db)
+	if err != nil {
+		return err
+	}
+	if complete {
+		if progress != nil {
+			progress(0, 0)
+		}
+		return nil
+	}
 	total, err := countLegacyHostBackfillCandidates(ctx, db)
 	if err != nil {
 		return err
@@ -106,7 +121,7 @@ func backfillLegacyScanHostsContextWithLoggerAndProgress(ctx context.Context, db
 		if err != nil {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT s.id,COALESCE(s.job_id,''),s.job,s.finished_at,COALESCE(length(s.snapshot_json),0)
+		rows, err := tx.QueryContext(ctx, `SELECT s.id,s.tenant_id,COALESCE(s.job_id,''),s.job,s.finished_at,COALESCE(length(s.snapshot_json),0)
 FROM scans s
 WHERE s.status='success'
   AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
@@ -123,10 +138,11 @@ ORDER BY s.finished_at,s.id LIMIT ?`, limits.maxScans)
 			return readErr
 		}
 		if len(batch) == 0 {
-			if err := tx.Commit(); err != nil {
+			if err := markLegacyScanHostIndexCompleteTx(ctx, tx); err != nil {
+				_ = tx.Rollback()
 				return err
 			}
-			return nil
+			return tx.Commit()
 		}
 		var batchBytes int64
 		batchHostRows := 0
@@ -206,7 +222,7 @@ func readLegacyHostBackfillBatch(rows *sql.Rows) ([]legacyHostBackfillScan, erro
 	for rows.Next() {
 		var item legacyHostBackfillScan
 		var finished string
-		if err := rows.Scan(&item.id, &item.jobID, &item.job, &finished, &item.snapshotBytes); err != nil {
+		if err := rows.Scan(&item.id, &item.tenantID, &item.jobID, &item.job, &finished, &item.snapshotBytes); err != nil {
 			return nil, err
 		}
 		item.finishedAt = scanTime(finished)
@@ -234,7 +250,7 @@ func indexLegacyScanTx(ctx context.Context, tx *sql.Tx, item legacyHostBackfillS
 func indexLegacyScanHostsTx(ctx context.Context, tx *sql.Tx, item legacyHostBackfillScan, hosts []model.HostObservation) error {
 	if len(hosts) > 0 {
 		scan := model.Scan{ID: item.id, JobID: item.jobID, Job: item.job, FinishedAt: item.finishedAt, Status: "success", Snapshot: model.Snapshot{Hosts: hosts}}
-		if err := saveScanHostsExec(ctx, tx, scan); err != nil {
+		if _, err := writeScanHostsExec(ctx, tx, scan, item.tenantID); err != nil {
 			return err
 		}
 		// These observations were reconstructed from a legacy snapshot, so
@@ -282,6 +298,32 @@ WHERE s.status='success'
   AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=s.id)
   AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)`).Scan(&total)
 	return total, err
+}
+
+// legacyScanHostIndexComplete reports whether the legacy host index
+// backfill has found no successful scan left without host rows or a
+// checkpoint. It is false while the checkpoint is pending or missing.
+func legacyScanHostIndexComplete(ctx context.Context, queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) (bool, error) {
+	var complete bool
+	err := queryer.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fts_backfill_state WHERE table_name=? AND complete=1)`, legacyScanHostIndexState).Scan(&complete)
+	return complete, err
+}
+
+// markLegacyScanHostIndexCompleteTx records that the backfill found no scan
+// left, in the transaction that found none.
+func markLegacyScanHostIndexCompleteTx(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO fts_backfill_state(table_name,initialized,complete,updated_at) VALUES(?,1,1,?)
+ON CONFLICT(table_name) DO UPDATE SET initialized=1,complete=1,updated_at=excluded.updated_at`, legacyScanHostIndexState, sqliteTimestamp(time.Now()))
+	return err
+}
+
+// markLegacyScanHostIndexPendingTx records that a successful scan without
+// host rows is waiting for the backfill.
+func markLegacyScanHostIndexPendingTx(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `UPDATE fts_backfill_state SET complete=0,updated_at=? WHERE table_name=? AND complete<>0`, sqliteTimestamp(time.Now()), legacyScanHostIndexState)
+	return err
 }
 
 func checkpointLegacyScanTx(ctx context.Context, tx *sql.Tx, scanID string) error {

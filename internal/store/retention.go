@@ -29,8 +29,32 @@ type PruneStats struct {
 // retentionBatchSize bounds both lock duration and rollback cost. Retention
 // is maintenance work and may be resumed safely after cancellation or a
 // process restart; one very large transaction must not monopolize SQLite's
-// writer connection for the lifetime of the deployment.
+// writer connection for the lifetime of the deployment. A transaction
+// deletes at most this many rows of one table, and the rows that their
+// foreign keys cascade into stay within the same bound: the host rows of
+// expired scans and the units and discovery checkpoints of expired cycles
+// are deleted before their parents, and a scan has at most one backfill
+// checkpoint.
 const retentionBatchSize = 500
+
+// retentionOptions bound the transactions that delete expired scans and
+// cycles with their child rows.
+type retentionOptions struct {
+	// parentBatchSize bounds the scans, or the cycles, that one transaction
+	// deletes.
+	parentBatchSize int
+	// childBatchSize bounds the child rows that one transaction deletes: a
+	// scan's host rows, each with its search row, or a cycle's units or
+	// discovery checkpoints.
+	childBatchSize int
+	// afterBatch runs after each committed transaction that deletes
+	// expired scans, cycles or their child rows, with the table it deleted
+	// from. Tests use it to measure each transaction and to prove that
+	// other writers make progress between them.
+	afterBatch func(ctx context.Context, table string) error
+}
+
+var defaultRetentionOptions = retentionOptions{parentBatchSize: retentionBatchSize, childBatchSize: retentionBatchSize}
 
 // ftsMaintenanceBudget keeps maintenance from monopolizing the single
 // writable SQLite connection. A later retention pass can retry if a large FTS
@@ -53,6 +77,16 @@ const ftsMergePageLimit = 128
 // performs an indexed lookup rather than repeatedly decoding each job's
 // runtime JSON while SQLite's writer is held.
 const retentionProtectedScans = "edgewatch_retention_protected_scans"
+
+// retentionExpiredScans is a connection-local temporary list of the expired
+// scans that one batch deletes. Their host rows are deleted first, in
+// transactions of their own, so the transaction that deletes the scans
+// cascades only into their legacy backfill checkpoints, at most one each.
+const retentionExpiredScans = "edgewatch_retention_expired_scans"
+
+// retentionExpiredCycles is the same list for expired cycles, whose units
+// and discovery checkpoints are deleted before the cycles.
+const retentionExpiredCycles = "edgewatch_retention_expired_cycles"
 
 // purgedTenantStates is the SQL list of the tenant states in which retention
 // leaves a tenant's rows to the tenant purge: a tenant that is being deleted,
@@ -82,6 +116,10 @@ func (p PruneStats) Total() int64 {
 // scans. Events and deliveries without a tenant belong to the platform and
 // are pruned as before.
 func (ss *SystemStore) PruneWithStats(ctx context.Context, before time.Time) (PruneStats, error) {
+	return ss.pruneWithStats(ctx, before, defaultRetentionOptions)
+}
+
+func (ss *SystemStore) pruneWithStats(ctx context.Context, before time.Time, options retentionOptions) (PruneStats, error) {
 	var stats PruneStats
 	// Retained timestamps are stored with sqliteTimestamp's fixed-width
 	// fractional seconds. Keep the cutoff in that same representation so
@@ -92,7 +130,7 @@ func (ss *SystemStore) PruneWithStats(ctx context.Context, before time.Time) (Pr
 	// NOT EXISTS avoids SQL's NULL semantics: most state rows do not yet have a
 	// baseline_scan_id, and a NOT IN subquery containing NULL would protect every
 	// old scan from pruning.
-	deletedScans, err := ss.deleteScanRetentionBatches(ctx, cutoff)
+	deletedScans, err := ss.deleteScanRetentionBatches(ctx, cutoff, options)
 	if err != nil {
 		return stats, err
 	}
@@ -129,9 +167,10 @@ func (ss *SystemStore) PruneWithStats(ctx context.Context, before time.Time) (Pr
 
 	// Older releases kept completed cycle payloads until the cycle itself was
 	// pruned. Once a merged scan already references a completed cycle, those
-	// per-unit snapshots are no longer needed for crash recovery; reclaim them
-	// during the regular retention pass while preserving unit metadata.
-	if err := ss.clearCompletedCyclePayloads(ctx); err != nil {
+	// per-unit snapshots are no longer needed for crash recovery, and an
+	// expired or discarded cycle never resumes; reclaim them during the
+	// regular retention pass while preserving unit metadata.
+	if err := ss.clearFinishedCyclePayloads(ctx); err != nil {
 		return stats, err
 	}
 
@@ -150,14 +189,10 @@ func (ss *SystemStore) PruneWithStats(ctx context.Context, before time.Time) (Pr
 	// Cycle metadata is part of the resumable execution history. Keep active
 	// cycles indefinitely (their finished_at is empty) and keep terminal cycles
 	// while a retained scan still points at them. Once both the cycle and any
-	// referencing scan fall outside retention, the unit checkpoints can be
-	// removed through the foreign-key cascade without leaving unbounded plan
-	// metadata behind.
-	stats.Cycles, err = ss.deleteRetentionBatches(ctx, `DELETE FROM scan_cycles AS cycle WHERE cycle.rowid IN (SELECT candidate.rowid FROM scan_cycles AS candidate
-		WHERE candidate.finished_at <> '' AND candidate.finished_at < ?
-		AND candidate.status IN ('completed','discarded','expired')
-		AND NOT EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id = candidate.id)
-		AND NOT EXISTS (SELECT 1 FROM jobs AS owner JOIN tenants ON tenants.id = owner.tenant_id WHERE owner.id = candidate.job_id AND tenants.state IN `+purgedTenantStates+`) ORDER BY candidate.finished_at,candidate.rowid LIMIT ?)`, cutoff)
+	// referencing scan fall outside retention, the cycle goes with its units
+	// and discovery checkpoints, which are deleted first, in bounded
+	// transactions, rather than through the foreign-key cascade.
+	stats.Cycles, err = ss.deleteCycleRetentionBatches(ctx, cutoff, options)
 	if err != nil {
 		return stats, err
 	}
@@ -259,7 +294,15 @@ func maintenanceError(ctx, maintenanceCtx context.Context, stats *searchMaintena
 // still empty).  Incident references are likewise expanded once, before the
 // retention loop, rather than once per candidate batch. The scans of a tenant
 // that the purge owns are never candidates.
-func (ss *SystemStore) deleteScanRetentionBatches(ctx context.Context, cutoff string) (int64, error) {
+//
+// Each batch lists the oldest expired scans that are not protected, deletes
+// their host rows in transactions of options.childBatchSize rows, and then
+// deletes the scans in one more transaction, which checks each scan again. A
+// scan's host rows, and the search rows that their trigger deletes, would
+// otherwise cascade from the scan's deletion, so a batch of broad scans held
+// the writer for every host they had. An interrupted batch leaves expired
+// scans without host rows, which the next pass deletes.
+func (ss *SystemStore) deleteScanRetentionBatches(ctx context.Context, cutoff string, options retentionOptions) (int64, error) {
 	if _, err := ss.store.DB.ExecContext(ctx, "CREATE TEMP TABLE IF NOT EXISTS "+retentionProtectedScans+" (scan_id TEXT PRIMARY KEY); DELETE FROM "+retentionProtectedScans); err != nil {
 		return 0, fmt.Errorf("prepare retention protection: %w", err)
 	}
@@ -278,29 +321,166 @@ func (ss *SystemStore) deleteScanRetentionBatches(ctx context.Context, cutoff st
 		// Keep one successful history entry per logical job even when no
 		// baseline or open incident references it. This preserves the scan that
 		// drives the Hosts page and published status view for paused/archived jobs.
-		`INSERT OR IGNORE INTO ` + retentionProtectedScans + `(scan_id)
-		SELECT current.id FROM scans AS current
-		WHERE current.status='success'
-		AND current.tenant_id IN (SELECT id FROM tenants WHERE state IN ('active','disabled'))
-		AND (
-			(COALESCE(current.job_id,'')<>'' AND NOT EXISTS (
-				SELECT 1 FROM scans AS newer WHERE newer.tenant_id=current.tenant_id AND newer.job_id=current.job_id AND newer.status='success'
-				AND (newer.finished_at>current.finished_at OR (newer.finished_at=current.finished_at AND newer.id>current.id))
-			))
-			OR (COALESCE(current.job_id,'')='' AND NOT EXISTS (
-				SELECT 1 FROM scans AS newer WHERE newer.tenant_id=current.tenant_id AND COALESCE(newer.job_id,'')='' AND newer.job=current.job AND newer.status='success'
-				AND (newer.finished_at>current.finished_at OR (newer.finished_at=current.finished_at AND newer.id>current.id))
-			))
-		)`,
+		retentionNewestJobScanSQL,
+		retentionNewestUnmanagedScanSQL,
 	}
 	for _, query := range protectionQueries {
 		if _, err := ss.store.DB.ExecContext(ctx, query); err != nil {
 			return 0, fmt.Errorf("populate retention protection: %w", err)
 		}
 	}
-	return ss.deleteRetentionBatches(ctx, `DELETE FROM scans AS scan WHERE scan.id IN (SELECT candidate.id FROM scans AS candidate WHERE candidate.finished_at < ?
-		AND NOT EXISTS (SELECT 1 FROM `+retentionProtectedScans+` AS protected WHERE protected.scan_id = candidate.id)
-		AND NOT EXISTS (SELECT 1 FROM tenants WHERE tenants.id = candidate.tenant_id AND tenants.state IN `+purgedTenantStates+`) ORDER BY candidate.finished_at,candidate.id LIMIT ? )`, cutoff)
+	if _, err := ss.store.DB.ExecContext(ctx, "CREATE TEMP TABLE IF NOT EXISTS "+retentionExpiredScans+" (scan_id TEXT PRIMARY KEY)"); err != nil {
+		return 0, fmt.Errorf("prepare retention batch: %w", err)
+	}
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		if _, err := ss.store.DB.ExecContext(ctx, "DELETE FROM "+retentionExpiredScans); err != nil {
+			return total, fmt.Errorf("prepare retention batch: %w", err)
+		}
+		// The list is a temporary table, so selecting it holds no lock on the
+		// database. A scan's tenant_id is read for the scans that are about to
+		// be deleted, whose rows the deletion reads anyway.
+		listed, err := ss.store.DB.ExecContext(ctx, `INSERT INTO `+retentionExpiredScans+`(scan_id) SELECT candidate.id FROM scans AS candidate WHERE `+retentionExpiredScanSQL+` ORDER BY candidate.finished_at,candidate.id LIMIT ?`, cutoff, options.parentBatchSize)
+		if err != nil {
+			return total, fmt.Errorf("retention batch: %w", err)
+		}
+		if count, err := listed.RowsAffected(); err != nil || count == 0 {
+			return total, err
+		}
+		if _, err := ss.retentionBatches(ctx, options, "scan_hosts", `DELETE FROM scan_hosts WHERE rowid IN (SELECT host.rowid FROM `+retentionExpiredScans+` AS expired JOIN scan_hosts AS host ON host.scan_id=expired.scan_id LIMIT ?)`, options.childBatchSize); err != nil {
+			return total, err
+		}
+		// The scans' host rows are gone, so this transaction deletes at most
+		// parentBatchSize scans and their backfill checkpoints. It checks each
+		// scan again, so a tenant whose deletion began meanwhile keeps its
+		// scans for the purge.
+		deleted, err := ss.retentionBatch(ctx, options, "scans", `DELETE FROM scans AS candidate WHERE candidate.id IN (SELECT scan_id FROM `+retentionExpiredScans+`) AND `+retentionExpiredScanSQL, cutoff)
+		total += deleted
+		if err != nil || deleted == 0 {
+			return total, err
+		}
+	}
+}
+
+// deleteCycleRetentionBatches deletes the terminal cycles that retention no
+// longer keeps, as deleteScanRetentionBatches deletes scans: each batch lists
+// the oldest of them, deletes their discovery checkpoints and units in
+// transactions of options.childBatchSize rows, and then deletes the cycles
+// in one more transaction, which checks each cycle again. A broad cycle has
+// a unit for every slice of its plan, which the cycle's deletion would
+// otherwise cascade into in one transaction.
+func (ss *SystemStore) deleteCycleRetentionBatches(ctx context.Context, cutoff string, options retentionOptions) (int64, error) {
+	if _, err := ss.store.DB.ExecContext(ctx, "CREATE TEMP TABLE IF NOT EXISTS "+retentionExpiredCycles+" (cycle_id TEXT PRIMARY KEY)"); err != nil {
+		return 0, fmt.Errorf("prepare retention batch: %w", err)
+	}
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		if _, err := ss.store.DB.ExecContext(ctx, "DELETE FROM "+retentionExpiredCycles); err != nil {
+			return total, fmt.Errorf("prepare retention batch: %w", err)
+		}
+		listed, err := ss.store.DB.ExecContext(ctx, `INSERT INTO `+retentionExpiredCycles+`(cycle_id) SELECT candidate.id FROM scan_cycles AS candidate WHERE `+retentionExpiredCycleSQL+` ORDER BY candidate.finished_at,candidate.rowid LIMIT ?`, cutoff, options.parentBatchSize)
+		if err != nil {
+			return total, fmt.Errorf("retention batch: %w", err)
+		}
+		if count, err := listed.RowsAffected(); err != nil || count == 0 {
+			return total, err
+		}
+		for _, child := range []string{"scan_cycle_discovery_checkpoints", "scan_cycle_units"} {
+			if _, err := ss.retentionBatches(ctx, options, child, `DELETE FROM `+child+` WHERE rowid IN (SELECT child.rowid FROM `+retentionExpiredCycles+` AS expired JOIN `+child+` AS child ON child.cycle_id=expired.cycle_id LIMIT ?)`, options.childBatchSize); err != nil {
+				return total, err
+			}
+		}
+		deleted, err := ss.retentionBatch(ctx, options, "scan_cycles", `DELETE FROM scan_cycles AS candidate WHERE candidate.id IN (SELECT cycle_id FROM `+retentionExpiredCycles+`) AND `+retentionExpiredCycleSQL, cutoff)
+		total += deleted
+		if err != nil || deleted == 0 {
+			return total, err
+		}
+	}
+}
+
+// retentionExpiredCycleSQL is the predicate of a cycle that retention
+// deletes, on the alias candidate; its argument is the cutoff. The cycle
+// ended before the cutoff, is completed, discarded or expired, has no
+// retained scan, and is not of a tenant that the purge owns.
+const retentionExpiredCycleSQL = `candidate.finished_at <> '' AND candidate.finished_at < ?
+		AND candidate.status IN ('completed','discarded','expired')
+		AND NOT EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id = candidate.id)
+		AND NOT EXISTS (SELECT 1 FROM jobs AS owner JOIN tenants ON tenants.id = owner.tenant_id WHERE owner.id = candidate.job_id AND tenants.state IN ` + purgedTenantStates + `)`
+
+// retentionExpiredScanSQL is the predicate of an expired scan that retention
+// deletes, on the alias candidate; its argument is the cutoff. The scan is
+// older than the cutoff, not protected, and not of a tenant that the purge
+// owns.
+const retentionExpiredScanSQL = `candidate.finished_at < ?
+		AND NOT EXISTS (SELECT 1 FROM ` + retentionProtectedScans + ` AS protected WHERE protected.scan_id = candidate.id)
+		AND NOT EXISTS (SELECT 1 FROM tenants WHERE tenants.id = candidate.tenant_id AND tenants.state IN ` + purgedTenantStates + `)`
+
+// retentionNewestJobScanSQL protects the newest successful scan of each
+// job. A job's scans all belong to the job's tenant, which neither can
+// change, so the newest scan of a job ID is the newest of the job in its
+// tenant. The window reads scans_job_id_history in its order, and nothing
+// else, so the pass leaves every snapshot unread.
+const retentionNewestJobScanSQL = `INSERT OR IGNORE INTO ` + retentionProtectedScans + `(scan_id)
+		SELECT id FROM (SELECT id,tenant_id,ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY finished_at DESC,id DESC) AS newest FROM scans WHERE job_id>'' AND status='success')
+		WHERE newest=1 AND tenant_id IN (SELECT id FROM tenants WHERE state IN ('active','disabled'))`
+
+// retentionNewestUnmanagedScanSQL protects the newest successful scan of
+// each job name among the scans without a job ID, which config.yaml jobs
+// of earlier releases saved. It reads them from a covering index too.
+const retentionNewestUnmanagedScanSQL = `INSERT OR IGNORE INTO ` + retentionProtectedScans + `(scan_id)
+		SELECT id FROM (SELECT id,tenant_id,ROW_NUMBER() OVER (PARTITION BY tenant_id,job ORDER BY finished_at DESC,id DESC) AS newest FROM scans WHERE COALESCE(job_id,'')='' AND status='success')
+		WHERE newest=1 AND tenant_id IN (SELECT id FROM tenants WHERE state IN ('active','disabled'))`
+
+// retentionBatches repeats the bounded statement of retentionBatch until a
+// transaction affects fewer rows than limit, and returns how many rows the
+// transactions affected.
+func (ss *SystemStore) retentionBatches(ctx context.Context, options retentionOptions, table, statement string, limit int) (int64, error) {
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		count, err := ss.retentionBatch(ctx, options, table, statement, limit)
+		total += count
+		if err != nil || count < int64(limit) {
+			return total, err
+		}
+	}
+}
+
+// retentionBatch runs one statement of the scan retention in a transaction
+// of its own and returns how many rows it affected. options.afterBatch runs
+// after the commit.
+func (ss *SystemStore) retentionBatch(ctx context.Context, options retentionOptions, table, statement string, args ...any) (int64, error) {
+	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, statement, args...)
+	if err != nil {
+		// Like deleteRetentionBatches, keep the statement out of the error.
+		return 0, fmt.Errorf("retention batch: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if options.afterBatch != nil {
+		if err := options.afterBatch(ctx, table); err != nil {
+			return count, err
+		}
+	}
+	return count, nil
 }
 
 // deleteRetentionBatches repeatedly executes one bounded DELETE transaction.
@@ -449,13 +629,28 @@ func danglingLatestScanHostKeys(ctx context.Context, tx *sql.Tx) ([]latestScanHo
 	return keys, rows.Err()
 }
 
-// clearCompletedCyclePayloads empties the unit checkpoints of completed
-// cycles whose merged scan was saved. A tenant that the purge owns keeps its
-// checkpoints for the purge.
-func (ss *SystemStore) clearCompletedCyclePayloads(ctx context.Context) error {
-	_, err := ss.deleteRetentionBatches(ctx, `UPDATE scan_cycle_units SET snapshot_json='{}' WHERE rowid IN (SELECT unit.rowid FROM scan_cycle_units AS unit WHERE unit.snapshot_json <> '{}' AND unit.cycle_id IN (SELECT cycle.id FROM scan_cycles AS cycle WHERE cycle.status='completed' AND EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id=cycle.id AND scans.cycle_status='completed' AND scans.status IN ('success','incomplete'))
-		AND NOT EXISTS (SELECT 1 FROM jobs AS owner JOIN tenants ON tenants.id=owner.tenant_id WHERE owner.id=cycle.job_id AND tenants.state IN `+purgedTenantStates+`)) ORDER BY unit.rowid LIMIT ?)`)
-	return err
+// clearFinishedCyclePayloads empties the unit checkpoints that no cycle
+// needs any more: those of completed cycles whose merged scan was saved, and
+// those of expired and discarded cycles, which never resume. An expiry
+// empties its cycle's checkpoints itself once it has committed, but leaves
+// them when that cleanup fails or is canceled; this pass finishes it, with
+// the same last error. A tenant that the purge owns keeps its checkpoints
+// for the purge.
+func (ss *SystemStore) clearFinishedCyclePayloads(ctx context.Context) error {
+	const notPurged = `AND NOT EXISTS (SELECT 1 FROM jobs AS owner JOIN tenants ON tenants.id=owner.tenant_id WHERE owner.id=cycle.job_id AND tenants.state IN ` + purgedTenantStates + `)`
+	for _, statement := range []string{
+		`UPDATE scan_cycle_units SET snapshot_json='{}' WHERE rowid IN (SELECT unit.rowid FROM scan_cycle_units AS unit WHERE unit.snapshot_json <> '{}' AND unit.cycle_id IN (SELECT cycle.id FROM scan_cycles AS cycle WHERE cycle.status='completed' AND EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id=cycle.id AND scans.cycle_status='completed' AND scans.status IN ('success','incomplete'))
+		` + notPurged + `) ORDER BY unit.rowid LIMIT ?)`,
+		`UPDATE scan_cycle_units SET snapshot_json='{}',last_error='cycle expired' WHERE rowid IN (SELECT unit.rowid FROM scan_cycle_units AS unit WHERE unit.snapshot_json <> '{}' AND unit.cycle_id IN (SELECT cycle.id FROM scan_cycles AS cycle WHERE cycle.status='expired'
+		` + notPurged + `) ORDER BY unit.rowid LIMIT ?)`,
+		`UPDATE scan_cycle_units SET snapshot_json='{}' WHERE rowid IN (SELECT unit.rowid FROM scan_cycle_units AS unit WHERE unit.snapshot_json <> '{}' AND unit.cycle_id IN (SELECT cycle.id FROM scan_cycles AS cycle WHERE cycle.status='discarded'
+		` + notPurged + `) ORDER BY unit.rowid LIMIT ?)`,
+	} {
+		if _, err := ss.deleteRetentionBatches(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // rebuildLatestScanHostsTx recreates the projection from the retained

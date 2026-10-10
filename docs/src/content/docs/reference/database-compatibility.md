@@ -5,7 +5,7 @@ description: Understand the current SQLite schema, forward-only migrations, and 
 
 ## Current schema and rollback
 
-The current schema is version 65. Schema 31 records terminal notification
+The current schema is version 66. Schema 31 records terminal notification
 deliveries and marks rows that had already exhausted the original eight
 attempts. Schema 63 repairs databases that had already passed schema 31 by
 marking still-unsent rows with at least eight attempts and a scheduled retry
@@ -14,7 +14,8 @@ on or after that release remain eligible, so upgrading does not replay
 deliveries that were still retrying. Schema 64 adds an index for pruning old
 restore-quarantine records; it does not rewrite delivery history. Schema 65
 records how each new scan was compared with its job's baseline; it does not
-change existing scans. Database migrations are forward-only. An older image
+change existing scans. Schema 66 replaces scan history indexes; it does not
+change scans either. Database migrations are forward-only. An older image
 must not be pointed at a database already upgraded by a newer image; restore
 the matching pre-upgrade `./data` backup if a rollback is required. The daemon
 and the commands that write to the database (admin, scan, notify test,
@@ -34,6 +35,31 @@ Schema 58 rebuilds the bounded host-search indexes from retained scan and
 baseline evidence in restartable batches. Service names and products are
 prioritized so services on late ports remain searchable even when a host has
 many positive ports. The rebuild does not change scan results or baselines.
+
+## Schema 66
+
+Schema 66, introduced in v0.36.0, replaces four indexes of the scan history
+with indexes that also hold each scan's business unit, job, outcome, and cycle
+outcome: `scans_job_id_history`, `scans_tenant_history`, `scans_identity`, and
+`scans_cycle_outcome` take the place of `scans_job_id_time`,
+`scans_tenant_id_time`, `scans_job_time`, and `scans_cycle_id`. A scan's row
+stores those values after its result, so reading them from the row read the
+whole result too. With the new indexes, a job's scan history, the scan list,
+the Hosts view, saving a successful scan, deleting a job, and the retention
+pass no longer read the stored results of the scans they skip or count, so
+their cost no longer grows with the size of the retained results. Saving a
+successful scan no longer grows with the square of its host count. The
+upgrade changes no scan or result. It builds the four indexes in one
+transaction at startup, which reads every stored scan once for each index, so
+on a large history it can take a while. Back up `./data` before upgrading.
+
+Schema 66 also records the completion of the backfill that indexes the hosts
+of scans saved before the host index existed. The daemon completes it at the
+first start after the upgrade, once it finds no such scan; until then
+`edgewatch verify` lists its `legacy_scan_host_index` checkpoint as not
+complete. Later starts and Hosts requests then skip the search for such scans
+over the whole history. An older release refuses the upgraded database, so a
+rollback means restoring the pre-upgrade `./data` backup.
 
 ## Schema 65
 

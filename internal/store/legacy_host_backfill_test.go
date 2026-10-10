@@ -318,7 +318,7 @@ func TestLegacyHostBackfillStorageFailureIsFatal(t *testing.T) {
 	if _, err := store.DB.ExecContext(ctx, `UPDATE scans SET snapshot_json=? WHERE id=?`, snapshot, scan.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DB.ExecContext(ctx, `DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill`); err != nil {
+	if _, err := store.DB.ExecContext(ctx, `DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill; `+pendingLegacyScanHostIndexSQL); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.DB.ExecContext(ctx, `CREATE TRIGGER fail_legacy_host_projection BEFORE INSERT ON scan_hosts BEGIN SELECT RAISE(ABORT, 'injected projection failure'); END`); err != nil {
@@ -368,7 +368,7 @@ func TestLegacyHostBackfillFailureBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer broken.Close()
-	if _, err := broken.DB.ExecContext(context.Background(), `DROP TABLE legacy_scan_host_backfill`); err != nil {
+	if _, err := broken.DB.ExecContext(context.Background(), `DROP TABLE legacy_scan_host_backfill; `+pendingLegacyScanHostIndexSQL); err != nil {
 		t.Fatal(err)
 	}
 	if err := backfillLegacyScanHostsContext(context.Background(), broken.DB); err == nil {
@@ -722,9 +722,127 @@ func seedLegacyHostBackfillScans(ctx context.Context, t *testing.T, count int) (
 		}
 		scans = append(scans, scan)
 	}
-	if _, err := store.DB.ExecContext(ctx, `DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill`); err != nil {
+	if _, err := store.DB.ExecContext(ctx, `DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill; `+pendingLegacyScanHostIndexSQL); err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
 	return store, scans
+}
+
+// Once the legacy host backfill has found no scan left, the Hosts view and
+// the daemon start take their answer from its marker and search no scan, so
+// the cost of a Hosts request and of a start no longer grows with the
+// retained history. The scan below has neither host rows nor a checkpoint,
+// which no saved scan lacks, so only the marker can hide it. An upgrade from
+// before schema 66 sets the marker back to pending, and the backfill then
+// finds such a scan again.
+func TestLegacyHostIndexMarkerAnswersOnceTheBackfillCompleted(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	if got := legacyScanHostIndexMarker(t, s.DB); got != 1 {
+		t.Fatalf("legacy host index checkpoint of a migrated database = %d, want complete", got)
+	}
+	when := time.Now().UTC().Add(-time.Hour)
+	legacy := model.Scan{ID: "unmarked-legacy", Job: "legacy-job", StartedAt: when, FinishedAt: when, Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "192.0.2.77", Status: "up"}}}}
+	if err := s.System().SaveScan(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{`DELETE FROM scan_hosts WHERE scan_id=?`, `DELETE FROM latest_scan_hosts WHERE scan_id=?`} {
+		if _, err := s.DB.ExecContext(ctx, statement, legacy.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tenant := defaultTenant(s)
+	check := func(want bool) {
+		t.Helper()
+		if exists, err := tenant.LegacySuccessfulScanExists(ctx); err != nil || exists != want {
+			t.Fatalf("legacy successful scan = %v, %v; want %v", exists, err, want)
+		}
+		page, err := tenant.ListLegacySuccessfulScanSnapshotsPage(ctx, 50, 0)
+		if err != nil || (page.Total == 1 && len(page.Items) == 1) != want || (!want && page.Total != 0) {
+			t.Fatalf("legacy snapshots = %+v, %v; want listed %v", page, err, want)
+		}
+	}
+	check(false)
+	var progress [][2]int64
+	record := func(processed, total int64) { progress = append(progress, [2]int64{processed, total}) }
+	if err := backfillLegacyScanHostsContextWithLoggerAndProgress(ctx, s.DB, nil, record, defaultLegacyHostBackfillLimits); err != nil {
+		t.Fatal(err)
+	}
+	if len(progress) != 1 || progress[0] != [2]int64{0, 0} || countRows(t, s.DB, `SELECT COUNT(*) FROM legacy_scan_host_backfill WHERE scan_id=?`, legacy.ID) != 0 {
+		t.Fatalf("completed backfill progress = %v; want no search", progress)
+	}
+
+	if _, err := s.DB.ExecContext(ctx, pendingLegacyScanHostIndexSQL); err != nil {
+		t.Fatal(err)
+	}
+	check(true)
+	progress = nil
+	if err := backfillLegacyScanHostsContextWithLoggerAndProgress(ctx, s.DB, nil, record, defaultLegacyHostBackfillLimits); err != nil {
+		t.Fatal(err)
+	}
+	if len(progress) < 2 || progress[0] != [2]int64{0, 1} || progress[len(progress)-1] != [2]int64{1, 1} {
+		t.Fatalf("pending backfill progress = %v, want the scan found and indexed", progress)
+	}
+	if got := countRows(t, s.DB, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id=? AND data_quality='legacy'`, legacy.ID); got != 1 {
+		t.Fatalf("backfilled host rows = %d, want 1", got)
+	}
+	if got := legacyScanHostIndexMarker(t, s.DB); got != 1 {
+		t.Fatalf("legacy host index checkpoint after the backfill = %d, want complete", got)
+	}
+	check(false)
+}
+
+// A successful scan saved without a host row keeps the marker accurate. A
+// scan with nothing to index, such as one that found no host, gets the
+// backfill's checkpoint at once. A scan whose snapshot has units without
+// host observations, as releases before the host index recorded, sets the
+// marker back to pending, so the Hosts view reads it through the
+// compatibility path until the next start indexes it. A scan that did not
+// succeed is not one the backfill looks for.
+func TestSavedScanWithoutHostRowsKeepsTheLegacyMarkerAccurate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	insertJobRows(t, s, "marker-job")
+	tenant := defaultTenant(s)
+	when := time.Now().UTC().Add(-time.Hour)
+	save := func(id, status string, snapshot model.Snapshot) {
+		t.Helper()
+		if err := s.System().SaveScan(ctx, model.Scan{ID: id, JobID: "marker-job", Job: "marker-job", StartedAt: when, FinishedAt: when, Status: status, Snapshot: snapshot}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save("found-nothing", "success", model.Snapshot{Units: []model.Unit{{Target: "unresolved.example", Protocol: "tcp"}}})
+	save("invalid-address", "success", model.Snapshot{Hosts: []model.HostObservation{{Address: "not-an-address"}}})
+	save("failed-empty", "failed", model.Snapshot{})
+	for id, want := range map[string]int{"found-nothing": 1, "invalid-address": 1, "failed-empty": 0} {
+		if got := countRows(t, s.DB, `SELECT COUNT(*) FROM legacy_scan_host_backfill WHERE scan_id=? AND status='complete'`, id); got != want {
+			t.Errorf("checkpoints of %s = %d, want %d", id, got, want)
+		}
+	}
+	if got := legacyScanHostIndexMarker(t, s.DB); got != 1 {
+		t.Fatalf("marker after scans with nothing to index = %d, want complete", got)
+	}
+	if exists, err := tenant.LegacySuccessfulScanExists(ctx); err != nil || exists {
+		t.Fatalf("legacy successful scan = %v, %v; want none", exists, err)
+	}
+
+	save("units-only", "success", model.Snapshot{Units: []model.Unit{{Target: "192.0.2.80", Protocol: "tcp", Addresses: []string{"192.0.2.80"}, Ports: []model.PortState{{Port: 443, State: "open"}}}}})
+	if got := legacyScanHostIndexMarker(t, s.DB); got != 0 {
+		t.Fatalf("marker after a scan with units only = %d, want pending", got)
+	}
+	if exists, err := tenant.LegacySuccessfulScanExists(ctx); err != nil || !exists {
+		t.Fatalf("legacy successful scan = %v, %v; want the scan with units only", exists, err)
+	}
+	if err := backfillLegacyScanHostsContext(ctx, s.DB); err != nil {
+		t.Fatal(err)
+	}
+	if got := countRows(t, s.DB, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id='units-only' AND data_quality='legacy'`); got != 1 {
+		t.Fatalf("host rows of the scan with units only after the backfill = %d, want 1", got)
+	}
+	if got := legacyScanHostIndexMarker(t, s.DB); got != 1 {
+		t.Fatalf("marker after the backfill = %d, want complete", got)
+	}
 }

@@ -378,8 +378,10 @@ func TestMigration53AttributesHistoryToTheDefaultTenant(t *testing.T) {
 	}
 	open = true
 
+	// Schema 66 replaced scans_tenant_id_time with an index that has its
+	// keys first.
 	for index, want := range map[string]string{
-		"scans_tenant_id_time":  "tenant_id,finished_at DESC,id DESC",
+		scansTenantHistoryIndex: schema66ScanIndexes[scansTenantHistoryIndex],
 		"events_tenant_id_time": "tenant_id,created_at DESC,id DESC",
 	} {
 		if got := indexKeys(t, s.DB, index); got != want {
@@ -397,8 +399,8 @@ func TestMigration53AttributesHistoryToTheDefaultTenant(t *testing.T) {
 		query string
 		index string
 	}{
-		{`SELECT id,job_id,job,started_at,finished_at,status FROM scans WHERE tenant_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, "scans_tenant_id_time"},
-		{`SELECT COUNT(*) FROM scans WHERE tenant_id=?`, "scans_tenant_id_time"},
+		{`SELECT id,job_id,job,started_at,finished_at,status FROM scans WHERE tenant_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, scansTenantHistoryIndex},
+		{`SELECT COUNT(*) FROM scans WHERE tenant_id=?`, scansTenantHistoryIndex},
 		{`SELECT payload_json FROM events WHERE tenant_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, "events_tenant_id_time"},
 	} {
 		args := []any{DefaultTenantID, 50, 0}[:strings.Count(check.query, "?")]

@@ -659,3 +659,81 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 	defer w.mu.Unlock()
 	return w.w.Write(p)
 }
+
+// windowClosingScanner is a resumable scanner whose first unit, on its first
+// call, moves the running cycle's resume window into the past, so the
+// claim of the next unit finds the deadline passed. Every unit succeeds.
+type windowClosingScanner struct {
+	lifecycleScanner
+	db       *store.Store
+	expireAt sync.Once
+}
+
+func (s *windowClosingScanner) ScanWorkUnit(ctx context.Context, job config.Job, unit scanner.WorkUnit, _ scanner.ProgressReporter) (model.Snapshot, error) {
+	var err error
+	s.expireAt.Do(func() {
+		_, err = s.db.DB.ExecContext(ctx, `UPDATE scan_cycles SET expires_at=? WHERE status='running'`, time.Now().UTC().Add(-time.Minute).Format("2006-01-02T15:04:05.000000000Z07:00"))
+	})
+	if err != nil {
+		return model.Snapshot{}, err
+	}
+	port, err := strconv.Atoi(unit.Ports)
+	if err != nil {
+		return model.Snapshot{}, err
+	}
+	return model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Addresses: unit.Addresses, Ports: []model.PortState{{Port: port, State: "open"}}}}}, nil
+}
+
+// When the resume window closes between two units of an attempt, the claim
+// of the next unit expires the cycle although the attempt holds the job's
+// lease. The attempt is recorded once, as timed out with the expiry
+// message, and the next trigger starts a fresh cycle instead of reporting
+// the expiry a second time.
+func TestResumeWindowClosingBetweenUnitsReportsTheExpiryOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	probe := &windowClosingScanner{}
+	a, db := newLifecycleTestApp(t, probe, nil)
+	probe.db = db
+	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("deadline-between-units"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, events, attemptErr := a.runJobRecord(ctx, record, false)
+	if attemptErr == nil || attempt.Status != "timed_out" || attempt.CycleStatus != "expired" || attempt.Error != "scan cycle expired; a future trigger will start a fresh scan" {
+		t.Fatalf("attempt with the window closing between units = status %q, cycle %q, error %q, %v", attempt.Status, attempt.CycleStatus, attempt.Error, attemptErr)
+	}
+	failures := 0
+	for _, event := range events {
+		if event.Type == "scan-failure" {
+			failures++
+		}
+	}
+	if failures != 1 {
+		t.Fatalf("attempt reported %d failures, want 1: %#v", failures, events)
+	}
+	if cycle, err := defaultTenant(db).GetScanCycle(ctx, attempt.CycleID); err != nil || cycle.Status != "expired" {
+		t.Fatalf("cycle after the attempt = %q, %v; want expired", cycle.Status, err)
+	}
+
+	fresh, events, freshErr := a.runJobRecord(ctx, record, false)
+	if freshErr != nil || fresh.Status != "success" || fresh.CycleID == attempt.CycleID {
+		t.Fatalf("next trigger = status %q, cycle %s, %v; want a successful fresh cycle", fresh.Status, fresh.CycleID, freshErr)
+	}
+	if hasEventType(events, "scan-failure") {
+		t.Fatalf("next trigger reported the expiry again: %#v", events)
+	}
+	scans, err := defaultTenant(db).ListJobScans(ctx, record.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiryRecords := 0
+	for _, scan := range scans {
+		if scan.CycleID == attempt.CycleID {
+			expiryRecords++
+		}
+	}
+	if expiryRecords != 1 {
+		t.Fatalf("scans of the expired cycle = %d, want 1", expiryRecords)
+	}
+}

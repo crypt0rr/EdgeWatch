@@ -4,11 +4,19 @@ name: Release
 #
 # Use "Re-run failed jobs" on the failed run; do not push the tag again. A
 # partial re-run repeats only the failed jobs and the jobs that need them, and
-# the smoke and promote-semver jobs read the candidate image from the output of
-# the image job, which GitHub keeps from the attempt that built it. The re-run
-# therefore continues with the image that was built and verified before:
-# - smoke failed: the re-run verifies the same draft release and candidate
-#   image, then publishes the release and promotes the image;
+# the scan, smoke, smoke-arm64, and promote-semver jobs read the candidate
+# image from the output of the image job, which GitHub keeps from the attempt
+# that built it. The re-run therefore continues with the image that was built
+# and verified before:
+# - verify refused a tag that is not on main: nothing was published. Delete
+#   the tag and tag a commit of main instead;
+# - ci-status found no passing CI run of the tagged commit, for example
+#   because a later push to main cancelled it: re-run that CI run, or run CI
+#   on the tag with `gh workflow run ci.yml --ref <tag>`, and re-run the
+#   release once CI has passed;
+# - scan, smoke, or smoke-arm64 failed: the re-run verifies the same draft
+#   release and candidate image, then publishes the release and promotes the
+#   image;
 # - publish-release failed: the re-run publishes the draft and promotes the
 #   image;
 # - promote-semver failed after the release was published: the re-run creates
@@ -31,6 +39,14 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Supply-chain rules that scripts/release-workflow.test.mjs enforces:
+# - a job that holds a write scope runs no npm packages, which execute
+#   third-party code; npm runs only in jobs that can read and pass artifacts;
+# - no checkout keeps the job token in the Git configuration;
+# - no job restores a cache that a run outside this release wrote: Go and
+#   Node run without Actions caches, and the image builds without cache
+#   imports, so the candidate comes from the tagged source and pinned inputs;
+# - the QEMU, BuildKit, and SBOM generator images are pinned by digest.
 permissions:
   contents: read
 
@@ -55,7 +71,6 @@ jobs:
     timeout-minutes: 40
     permissions:
       contents: read
-      actions: write
     steps:
       - name: Validate release tag
         env:
@@ -71,11 +86,25 @@ jobs:
           # Release verification runs the same complete-change security gate
           # as pull requests; retain history so the merge base is available.
           fetch-depth: 0
+          persist-credentials: false
+      - name: Require the tagged commit to be on main
+        run: |
+          set -euo pipefail
+          # Commits reach main only through a reviewed pull request and its
+          # required checks. A full-history checkout fetches every branch.
+          if ! git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
+            echo "the checkout did not fetch main" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "$GITHUB_REF_NAME points to $GITHUB_SHA, which is not on main; delete the tag and tag a commit of main" >&2
+            exit 1
+          fi
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
       - name: Verify dependencies
         run: go mod verify
       - name: Verify schema documentation
@@ -86,7 +115,7 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
+          package-manager-cache: false
       - name: Install frontend dependencies and lint
         run: npm ci && npm run lint
       - name: Build frontend assets
@@ -211,9 +240,85 @@ jobs:
             internal/webui/dist
             release-binaries
 
+  # Verification repeats most of CI but not all of it: the Compose policy,
+  # the image smoke tests and vulnerability scans of the container job, and
+  # the ARM64 sandbox tests run only in CI. Nothing is staged until a CI run
+  # of the tagged commit has passed. CI on main cancels the run of a commit
+  # when a newer one arrives; see the re-run notes above.
+  ci-status:
+    name: Require passing CI for the tagged commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      actions: read
+    steps:
+      - name: Wait for a passing CI run of the tagged commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Pushes to main and manual runs test the exact commit; pull
+          # request runs test a merge with their base and do not count.
+          deadline=$((SECONDS + 45 * 60))
+          appear_by=$((SECONDS + 5 * 60))
+          while :; do
+            if ! runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&per_page=100" \
+              --jq '.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch") | [.html_url, .status, (.conclusion // "")] | @tsv')"; then
+              runs=""
+              echo "could not list the CI runs of $GITHUB_SHA; retrying"
+            elif awk -F'\t' '$2 == "completed" && $3 == "success" { found = 1 } END { exit !found }' <<<"$runs"; then
+              echo "CI passed for $GITHUB_SHA:"
+              awk -F'\t' '$2 == "completed" && $3 == "success" { print "  " $1 }' <<<"$runs"
+              exit 0
+            elif [ -n "$runs" ] && ! awk -F'\t' '$2 != "completed" { found = 1 } END { exit !found }' <<<"$runs"; then
+              echo "no CI run of $GITHUB_SHA passed:" >&2
+              awk -F'\t' '{ print "  " $1 " " $3 }' <<<"$runs" >&2
+              echo "re-run that CI run, or run CI on the tag with 'gh workflow run ci.yml --ref $GITHUB_REF_NAME', then re-run the failed jobs of this release" >&2
+              exit 1
+            elif [ -z "$runs" ] && [ "$SECONDS" -ge "$appear_by" ]; then
+              echo "CI has not run for $GITHUB_SHA; run it with 'gh workflow run ci.yml --ref $GITHUB_REF_NAME', then re-run the failed jobs of this release" >&2
+              exit 1
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "CI did not finish for $GITHUB_SHA within 45 minutes; re-run the failed jobs of this release once it has passed" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+
+  # The smoke job compares the published release manifest with a fresh build
+  # of the frontend. That build runs npm packages, so it runs here, without
+  # the write scope that smoke needs to read the draft release.
+  frontend-rebuild:
+    name: Rebuild frontend for manifest verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Rebuild frontend
+        run: npm ci && npm run build
+      - name: Upload rebuilt frontend
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-frontend-rebuild
+          if-no-files-found: error
+          # Only the smoke job of this run reads it, also when re-run.
+          retention-days: 7
+          path: internal/webui/dist
+
   binaries:
     name: Stage draft GitHub release
-    needs: verify
+    needs: [verify, ci-status]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -226,6 +331,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Download release candidate
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -275,7 +381,7 @@ jobs:
 
   image:
     name: Publish candidate GHCR image
-    needs: verify
+    needs: [verify, ci-status]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -298,6 +404,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Download release candidate
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -305,10 +413,19 @@ jobs:
           path: .
       - name: Verify downloaded candidate
         run: ./scripts/verify-release-artifacts.sh dist dist/release-manifest.json "$GITHUB_REF_NAME" "$GITHUB_SHA"
+      # The binfmt installer runs privileged, and BuildKit builds and pushes
+      # the attested image with the registry credentials. Pin both instead of
+      # the actions' floating defaults, and pull binfmt from the registry
+      # instead of an Actions cache that any run of the repository can write.
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          image: docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          cache-image: false
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=docker.io/moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -334,49 +451,29 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.ref_name }}
       # The release candidate contains versioned Go binaries and generated
-      # frontend assets. Refresh the release-only registry cache with these
-      # exact inputs, then let the publishing build reuse this builder's cache.
-      # Keep tag writes separate from main's cache and never write GHA caches.
-      - name: Warm registry cache for the release candidate
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          push: false
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ env.CANDIDATE_IMAGE }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            VERSION=v0.0.0-ci
-            PREBUILT_FRONTEND=1
-            PREBUILT_EDGEWATCH=1
-          cache-from: |
-            type=registry,ref=ghcr.io/crypt0rr/edgewatch:buildcache
-            type=registry,ref=ghcr.io/crypt0rr/edgewatch:releasecache
-          cache-to: type=registry,ref=ghcr.io/crypt0rr/edgewatch:releasecache,mode=max
-          provenance: mode=max
-          sbom: true
+      # frontend assets. The image around them is built from scratch on the
+      # fresh builder of this job: BuildKit reuses a cached layer, such as the
+      # Naabu build or the Alpine packages, without rebuilding it, and a
+      # registry or Actions cache can be written outside this release.
       - name: Build and push image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         id: push
         with:
           context: .
           push: true
+          no-cache: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ env.CANDIDATE_IMAGE }}
           labels: ${{ steps.meta.outputs.labels }}
-          # The prebuilt binary and image labels carry the release version.
-          # Keep the unused Dockerfile fallback arg aligned with CI's cache.
+          # The prebuilt binary and image labels carry the release version;
+          # the Dockerfile's VERSION fallback is unused.
           build-args: |
             VERSION=v0.0.0-ci
             PREBUILT_FRONTEND=1
             PREBUILT_EDGEWATCH=1
-          # GitHub Actions caches are ref-isolated, so release tags restore
-          # the main and release caches from GHCR instead of tag-scoped GHA.
-          cache-from: |
-            type=registry,ref=ghcr.io/crypt0rr/edgewatch:buildcache
-            type=registry,ref=ghcr.io/crypt0rr/edgewatch:releasecache
           provenance: mode=max
-          sbom: true
+          # BuildKit otherwise pulls the SBOM generator by a floating tag.
+          sbom: generator=docker.io/docker/buildkit-syft-scanner:1.12.0@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9
       - name: Record the pushed candidate
         id: candidate
         env:
@@ -398,9 +495,55 @@ jobs:
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
+  # The image job builds Naabu and installs the Alpine packages afresh, so
+  # scan the pushed candidate for both platforms. The scanners are third-party
+  # code and run here, without a write scope.
+  scan:
+    name: Scan candidate image for known vulnerabilities
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out source for the scan policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go for govulncheck
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Log in to GHCR for the candidate image
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Scan both platforms of the candidate
+        env:
+          CANDIDATE: ${{ needs.image.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          digest="${CANDIDATE#"$REGISTRY_IMAGE@"}"
+          if [ "$digest" = "$CANDIDATE" ] || [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "the image job did not provide a digest-pinned candidate: '$CANDIDATE'" >&2
+            exit 1
+          fi
+          # Both scans share one copy of Grype's vulnerability database.
+          export GRYPE_DB_CACHE_DIR="$RUNNER_TEMP/grype-db"
+          status=0
+          for platform in linux/amd64 linux/arm64; do
+            docker pull --platform "$platform" "$CANDIDATE"
+            ./scripts/scan-image-vulnerabilities.sh "$CANDIDATE" "$platform" || status=1
+          done
+          exit "$status"
+
   smoke:
     name: Verify published release
-    needs: [binaries, image]
+    needs: [binaries, image, frontend-rebuild]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -422,16 +565,17 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Set up Node for frontend manifest verification
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+          persist-credentials: false
+      - name: Download rebuilt frontend for manifest verification
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-      - name: Rebuild frontend for manifest verification
-        run: npm ci && npm run build
+          name: release-frontend-rebuild
+          path: rebuilt-frontend
       - name: Verify release archive versions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Compare the published manifest with the fresh frontend build.
+          FRONTEND_DIST: rebuilt-frontend
         run: |
           archive_dir="$(mktemp -d)"
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern '*.tar.gz' --pattern checksums.txt --pattern release-manifest.json --dir "$archive_dir"
@@ -447,7 +591,8 @@ jobs:
             test -n "$binary"
             # The release contains both AMD64 and ARM64 archives, while the
             # smoke runner is AMD64. Execute the native archive and inspect
-            # the embedded version string for the non-native binary.
+            # the embedded version string for the non-native binary, which
+            # smoke-arm64 runs natively.
             if file -b "$binary" | grep -q 'x86-64'; then
               test "$("$binary" version)" = "$expected"
             else
@@ -555,63 +700,81 @@ jobs:
           docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml
           docker exec "$container" /bin/sh -c 'test -s /var/lib/edgewatch/edgewatch.db'
       - name: Verify disposable Compose deployment
+        # Starts the bundled compose.yaml with only the image replaced, and
+        # requires both sandboxes to be enforced.
+        run: ./scripts/verify-compose-deployment.sh "$IMAGE"
+
+  # The smoke job runs on AMD64, where only the AMD64 image and archive run.
+  # The seccomp filter numbers the system calls differently on ARM64, and
+  # Landlock runs on another kernel, so run the ARM64 candidate and archive
+  # natively before anything is published.
+  smoke-arm64:
+    name: Verify ARM64 release candidate
+    needs: [verify, image]
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out source for verification scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download release candidate
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-candidate
+          path: .
+      - name: Verify downloaded candidate
+        run: ./scripts/verify-release-artifacts.sh dist dist/release-manifest.json "$GITHUB_REF_NAME" "$GITHUB_SHA"
+      - name: Run the ARM64 release archive natively
         run: |
-          smoke_dir="$(mktemp -d)"
-          mkdir -p "$smoke_dir/data"
-          ./scripts/prepare-container-smoke-data.sh "$IMAGE" "$smoke_dir/data"
-          printf '%s\n' \
-            'database: /var/lib/edgewatch/edgewatch.db' \
-            'retention: 24h' \
-            'web:' \
-            '  listen: 127.0.0.1:18080' \
-            'scheduler:' \
-            '  max_concurrent_scans: 1' \
-            '  max_probe_count: 1000' \
-            'notifications:' \
-            '  urls: []' > "$smoke_dir/config.yaml"
-          printf '%s\n' \
-            'services:' \
-            '  edgewatch:' \
-            "    image: $IMAGE" \
-            '    network_mode: host' \
-            '    cap_drop:' \
-            '      - ALL' \
-            '    cap_add:' \
-            '      - NET_RAW' \
-            '    security_opt:' \
-            '      - no-new-privileges:true' \
-            '    read_only: true' \
-            '    tmpfs:' \
-            '      - /tmp:size=32m,mode=1777' \
-            '    volumes:' \
-            "      - $smoke_dir/config.yaml:/etc/edgewatch/config.yaml:ro" \
-            "      - $smoke_dir/data:/var/lib/edgewatch:rw" > "$smoke_dir/compose.yaml"
-          project="edgewatch-smoke-${GITHUB_RUN_ID}"
-          cleanup() {
-            docker compose -p "$project" -f "$smoke_dir/compose.yaml" down --volumes --remove-orphans >/dev/null 2>&1 || true
-            docker run --rm --volume "$smoke_dir/data:/data" --entrypoint /bin/sh "$IMAGE" -c 'rm -rf /data/* /data/.[!.]* /data/..?*' >/dev/null 2>&1 || true
-            rm -rf "$smoke_dir"
-          }
-          trap cleanup EXIT
-          docker compose -p "$project" -f "$smoke_dir/compose.yaml" up -d --quiet-pull
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent --max-time 2 http://127.0.0.1:18080/ | grep -q 'EdgeWatch'; then
-              break
-            fi
-            sleep 2
-            if [ "$attempt" = 30 ]; then
-              docker compose -p "$project" -f "$smoke_dir/compose.yaml" logs
-              exit 1
-            fi
-          done
-          docker compose -p "$project" -f "$smoke_dir/compose.yaml" exec -T edgewatch edgewatch health --config /etc/edgewatch/config.yaml
-          docker compose -p "$project" -f "$smoke_dir/compose.yaml" exec -T edgewatch /bin/sh -c "test -s /var/lib/edgewatch/edgewatch.db"
-          cleanup
-          trap - EXIT
+          set -euo pipefail
+          archives=(dist/*_linux_arm64.tar.gz)
+          test "${#archives[@]}" -eq 1
+          test -f "${archives[0]}"
+          extract_dir="$(mktemp -d)"
+          tar -xzf "${archives[0]}" -C "$extract_dir"
+          binary="$(find "$extract_dir" -type f -name edgewatch -print -quit)"
+          test -n "$binary"
+          # The ELF machine field of an ARM64 executable is 183 (EM_AARCH64).
+          test "$(od -An -t u2 -j 18 -N 2 "$binary" | tr -d ' ')" = 183
+          test "$("$binary" version)" = "EdgeWatch ${GITHUB_REF_NAME#v}"
+      - name: Log in to GHCR for immutable image verification
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull and inspect the ARM64 candidate image
+        env:
+          CANDIDATE: ${{ needs.image.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          digest="${CANDIDATE#"$REGISTRY_IMAGE@"}"
+          if [ "$digest" = "$CANDIDATE" ] || [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "the image job did not provide a digest-pinned candidate: '$CANDIDATE'" >&2
+            exit 1
+          fi
+          image="$CANDIDATE"
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+          docker pull --platform linux/arm64 "$image"
+          test "$(docker run --rm --platform linux/arm64 --entrypoint /bin/uname "$image" -m)" = aarch64
+          test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+          test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$GITHUB_REF_NAME"
+      - name: Verify the ARM64 image
+        run: bash ./scripts/test-prebuilt-image.sh "$IMAGE" linux/arm64 "${GITHUB_REF_NAME#v}"
+      - name: Verify container runtime capability matrix
+        run: ./scripts/verify-container-runtime.sh "$IMAGE"
+      - name: Verify scanner sandbox with real scans
+        run: ./scripts/verify-scanner-sandbox.sh "$IMAGE"
+      - name: Verify disposable Compose deployment
+        run: ./scripts/verify-compose-deployment.sh "$IMAGE"
 
   publish-release:
     name: Publish verified GitHub release
-    needs: [binaries, image, smoke]
+    needs: [binaries, image, scan, smoke, smoke-arm64]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -651,8 +814,8 @@ jobs:
 
   promote-semver:
     name: Promote verified image to semver
-    needs: [image, smoke, publish-release]
-    if: ${{ needs.smoke.result == 'success' && needs.publish-release.result == 'success' }}
+    needs: [image, scan, smoke, smoke-arm64, publish-release]
+    if: ${{ needs.scan.result == 'success' && needs.smoke.result == 'success' && needs.smoke-arm64.result == 'success' && needs.publish-release.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -660,6 +823,8 @@ jobs:
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=docker.io/moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -703,6 +868,8 @@ jobs:
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=docker.io/moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:

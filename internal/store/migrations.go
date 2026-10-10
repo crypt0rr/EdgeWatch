@@ -79,11 +79,13 @@ func (e schemaUpgradePendingError) Is(target error) bool {
 }
 
 // olderSchemaError is the refusal of an open that does not migrate for a
-// database with an older schema: the daemon migrates it at its next start,
-// unless the schema is older than this release upgrades.
-func olderSchemaError(version int) error {
-	if version < minimumUpgradeSchema {
-		return schemaBelowUpgradeFloorError{version: version}
+// database whose schema, version, is older than this release's: the daemon
+// migrates it at its next start, unless the schema is older than this
+// release upgrades. An empty database, whose schema no daemon has created
+// yet, waits for the daemon too.
+func olderSchemaError(ctx context.Context, queryer rowQueryer, version int) error {
+	if _, err := checkUpgradableSchemaContext(ctx, queryer); err != nil {
+		return err
 	}
 	return schemaUpgradePendingError{version: version}
 }

@@ -44,25 +44,23 @@ func (e schemaBelowUpgradeFloorError) Is(target error) bool {
 // marker that already holds tables. It only reads. startup_state is not
 // counted, because the first start of a new database creates it before the
 // baseline, which commits in one transaction.
+//
+// One statement reads the marker and the tables, so both come from the same
+// snapshot: read one after the other, a baseline that another process
+// commits in between would make a new database look like one with tables
+// and no marker.
 func checkUpgradableSchemaContext(ctx context.Context, queryer rowQueryer) (int, error) {
-	var version int
-	if err := queryer.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+	var version, tables int
+	if err := queryer.QueryRowContext(ctx, `SELECT (SELECT user_version FROM pragma_user_version),
+ (SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'startup_state')`).Scan(&version, &tables); err != nil {
 		return 0, err
 	}
-	if version > schemaVersion {
+	switch {
+	case version > schemaVersion:
 		return version, newerSchemaError(version)
-	}
-	if version >= minimumUpgradeSchema {
+	case version >= minimumUpgradeSchema:
 		return version, nil
-	}
-	if version > 0 {
-		return version, schemaBelowUpgradeFloorError{version: version}
-	}
-	var tables int
-	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'startup_state'`).Scan(&tables); err != nil {
-		return version, err
-	}
-	if tables > 0 {
+	case version > 0 || tables > 0:
 		return version, schemaBelowUpgradeFloorError{version: version}
 	}
 	return version, nil

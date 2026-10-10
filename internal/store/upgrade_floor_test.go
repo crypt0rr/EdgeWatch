@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -78,8 +79,10 @@ func TestOpenRefusesASchemaBelowTheUpgradeFloor(t *testing.T) {
 			}
 
 			// The host commands get the same refusal, not the advice to let
-			// the daemon upgrade the database.
+			// the daemon upgrade the database, and backup, which opens with
+			// OpenExisting, writes no audit record to it.
 			for name, open := range map[string]func(string) (*Store, error){
+				"OpenExisting":                 OpenExisting,
 				"OpenExistingUpgraded":         OpenExistingUpgraded,
 				"OpenReadOnlyExistingUpgraded": OpenReadOnlyExistingUpgraded,
 			} {
@@ -148,6 +151,96 @@ CREATE TABLE job_states (job TEXT PRIMARY KEY, state_json BLOB NOT NULL, updated
 	defer reader.Close()
 	if tables := templateTestTables(t, reader.DB); !slices.Equal(tables, []string{"job_states", "scans"}) {
 		t.Fatalf("tables after the refused open = %v", tables)
+	}
+}
+
+// An empty database file, such as one that a daemon created but did not
+// get to migrate, has no schema marker and no table. The host commands that
+// need the upgraded schema advise starting the daemon, not upgrading through
+// an older release, and the other opens accept it.
+func TestHostOpensOfAnEmptyDatabaseWaitForTheDaemon(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "edgewatch.db")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("database schema version 0 has not been upgraded to version %d yet", schemaVersion)
+	for name, open := range map[string]func(string) (*Store, error){
+		"OpenExistingUpgraded":         OpenExistingUpgraded,
+		"OpenReadOnlyExistingUpgraded": OpenReadOnlyExistingUpgraded,
+	} {
+		s, err := open(path)
+		if err == nil {
+			s.Close()
+			t.Fatalf("%s opened an empty database", name)
+		}
+		if !errors.Is(err, ErrSchemaUpgradePending) || errors.Is(err, ErrSchemaBelowUpgradeFloor) || err.Error() != want {
+			t.Fatalf("%s error = %v, want %q", name, err, want)
+		}
+	}
+	for name, open := range map[string]func(string) (*Store, error){
+		"OpenExisting":         OpenExisting,
+		"OpenReadOnlyExisting": OpenReadOnlyExisting,
+	} {
+		s, err := open(path)
+		if err != nil {
+			t.Fatalf("%s on an empty database: %v", name, err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The daemon refuses a schema that it does not migrate before it switches
+// the database to WAL, so a rollback-journal database, such as a restored
+// backup, keeps its file header and gets no WAL or shared-memory file.
+func TestOpenRefusesAnUnsupportedSchemaBeforeTheJournalModeChanges(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		version int
+		target  error
+		want    string
+	}{
+		{version: minimumUpgradeSchema - 1, target: ErrSchemaBelowUpgradeFloor, want: upgradeFloorRefusal(minimumUpgradeSchema - 1)},
+		{version: schemaVersion + 1, want: fmt.Sprintf("database schema version %d is newer than supported version %d", schemaVersion+1, schemaVersion)},
+	} {
+		t.Run(fmt.Sprint(test.version), func(t *testing.T) {
+			t.Parallel()
+			path := freshTestDatabasePath(t)
+			raw, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var mode string
+			if err := raw.QueryRow(fmt.Sprintf(`PRAGMA user_version=%d; PRAGMA journal_mode=DELETE`, test.version)).Scan(&mode); err != nil || mode != "delete" {
+				raw.Close()
+				t.Fatalf("journal mode = %q, %v", mode, err)
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			before, err := fileDigest(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s, err := Open(path)
+			if err == nil {
+				s.Close()
+				t.Fatalf("schema %d was migrated", test.version)
+			}
+			if err.Error() != test.want || (test.target != nil && !errors.Is(err, test.target)) {
+				t.Fatalf("Open error = %v, want %q", err, test.want)
+			}
+			if after, err := fileDigest(path); err != nil || after != before {
+				t.Fatalf("the refused open changed the database file (%v)", err)
+			}
+			for _, sidecar := range []string{"-wal", "-shm", "-journal"} {
+				if _, err := os.Stat(path + sidecar); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("the refused open left %s: %v", sidecar, err)
+				}
+			}
+		})
 	}
 }
 

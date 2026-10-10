@@ -174,8 +174,8 @@ to the five-second busy timeout, instead of failing the daemon's start.
 
 ## Schemas 48 to 54
 
-This release no longer runs the migrations to schema 54 or earlier: v0.35.0
-runs them when it upgrades an older database, as described under
+From v0.36.0, EdgeWatch no longer runs the migrations to schema 54 or
+earlier: v0.35.0 runs them when it upgrades an older database, as described under
 [Upgrade floor](#upgrade-floor), and the sections below describe what those
 upgrades do. The startup copy of schema 54 still runs when an earlier release
 upgraded a database to schema 54 but the copy has not finished.

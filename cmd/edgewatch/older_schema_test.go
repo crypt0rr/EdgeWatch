@@ -256,8 +256,9 @@ const belowFloorSchemaVersion = 50
 
 // A database older than schema 54 is refused by every command with the
 // release to upgrade through, and nothing writes to it: the daemon does not
-// migrate it, health and verify report it, a restore of it as a backup is
-// refused, and the host commands do not advise starting the daemon.
+// migrate it, health and verify report it, backup neither copies it nor
+// audits the attempt in it, a restore of it as a backup is refused, and the
+// host commands do not advise starting the daemon.
 func TestCommandsRefuseASchemaBelowTheUpgradeFloor(t *testing.T) {
 	want := fmt.Sprintf("database schema version %d is older than schema 54, the oldest that this release upgrades; upgrade through v0.35.0 first", belowFloorSchemaVersion)
 	fixture := storetest.FreshPath(t)
@@ -275,6 +276,7 @@ func TestCommandsRefuseASchemaBelowTheUpgradeFloor(t *testing.T) {
 		{name: "verify", args: []string{"verify"}},
 		{name: "status", args: []string{"status"}},
 		{name: "admin setup-token", args: []string{"admin", "setup-token", "--force"}},
+		{name: "backup", args: []string{"backup", "--out", "BACKUP"}},
 		{name: "restore", args: []string{"restore", "--from", "BACKUP"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -324,6 +326,11 @@ func TestCommandsRefuseASchemaBelowTheUpgradeFloor(t *testing.T) {
 			}
 			if string(after) != string(before) {
 				t.Fatal("the refused command changed the database")
+			}
+			if tc.name == "backup" {
+				if _, err := os.Stat(backup); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("the refused backup wrote %s: %v", backup, err)
+				}
 			}
 		})
 	}

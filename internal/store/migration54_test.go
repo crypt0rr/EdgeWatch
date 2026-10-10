@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"modernc.org/sqlite"
 )
 
 // latestHostSearchTriggerNames are the search triggers of latest_scan_hosts.
@@ -977,33 +978,38 @@ func BenchmarkMigration54Rekey(b *testing.B) {
 	for range b.N {
 		b.StopTimer()
 		path := newRekeyBenchmarkFixture(b)
-		s, err := OpenExisting(path)
+		// Every host open refuses schema 53, which is below the upgrade
+		// floor, so the benchmark writes through the production connector
+		// directly.
+		connector, err := sqlite.NewConnector(path)
 		if err != nil {
 			b.Fatal(err)
 		}
+		db := sql.OpenDB(sqlitePragmaConnector{Connector: connector})
+		db.SetMaxOpenConns(1)
 		b.StartTimer()
 		started := time.Now()
 		for _, statement := range schema54SwapStatements {
-			if _, err := s.DB.Exec(statement); err != nil {
+			if _, err := db.Exec(statement); err != nil {
 				b.Fatal(err)
 			}
 		}
-		if err := rekeyLatestScanHostsByTenantContext(ctx, s.DB, nil); err != nil {
+		if err := rekeyLatestScanHostsByTenantContext(ctx, db, nil); err != nil {
 			b.Fatal(err)
 		}
 		elapsed := time.Since(started)
 		b.StopTimer()
 		var rows int
-		if err := s.DB.QueryRow(`SELECT COUNT(*) FROM latest_scan_hosts`).Scan(&rows); err != nil || rows != benchmarkRekeyHosts {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM latest_scan_hosts`).Scan(&rows); err != nil || rows != benchmarkRekeyHosts {
 			b.Fatalf("copied rows = %d, %v", rows, err)
 		}
 		var pages, pageSize int64
-		if err := s.DB.QueryRow(`SELECT page_count,page_size FROM pragma_page_count, pragma_page_size`).Scan(&pages, &pageSize); err != nil {
+		if err := db.QueryRow(`SELECT page_count,page_size FROM pragma_page_count, pragma_page_size`).Scan(&pages, &pageSize); err != nil {
 			b.Fatal(err)
 		}
 		b.ReportMetric(float64(benchmarkRekeyHosts)/elapsed.Seconds(), "rows/s")
 		b.ReportMetric(float64(pages*pageSize)/(1<<20), "MiB")
-		if err := s.Close(); err != nil {
+		if err := db.Close(); err != nil {
 			b.Fatal(err)
 		}
 	}

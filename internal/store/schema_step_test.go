@@ -161,7 +161,10 @@ func TestConcurrentOpensMigrateEachStepOnce(t *testing.T) {
 
 // Without the guard, as on a file system that cannot lock the directory, the
 // schema marker check of each step still keeps two migrations from running
-// a step twice: the one that finds the marker moved fails.
+// a step twice: the one that finds the marker moved fails. A migration that
+// waits for the write lock while another one commits transaction after
+// transaction can also run out of busy_timeout, which under the race
+// detector takes a few seconds; that refusal runs no step either.
 func TestConcurrentMigrationsWithoutTheGuardRunEachStepOnce(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -196,8 +199,9 @@ func TestConcurrentMigrationsWithoutTheGuardRunEachStepOnce(t *testing.T) {
 		case err == nil:
 			succeeded++
 		case strings.Contains(err.Error(), "another process is migrating it"):
+		case isSQLiteWriterBusy(err):
 		default:
-			t.Errorf("migration error = %v, want success or the moved schema marker", err)
+			t.Errorf("migration error = %v, want success, the moved schema marker, or SQLITE_BUSY", err)
 		}
 	}
 	if succeeded == 0 {

@@ -16,7 +16,9 @@ import (
 // upgrade commits in one transaction; callers receive any decryption,
 // encryption, SQL, or commit failure.
 func (s *Store) MigrateAdminCompatibility(ctx context.Context) error {
-	tx, err := s.DB.BeginTx(ctx, nil)
+	// The upgrade reads the secret before it rewrites it, so it takes the
+	// write lock first, as the startup phases of the migration do.
+	tx, err := beginWriteTx(ctx, s.DB)
 	if err != nil {
 		return fmt.Errorf("begin administrator compatibility migration: %w", err)
 	}

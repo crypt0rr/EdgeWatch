@@ -3,11 +3,9 @@ package store
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -707,52 +705,6 @@ func TestTenantActionsAuditInTheActingTenant(t *testing.T) {
 	}
 	if got, want := lastAudit(t, f.store, "job.created"), (auditRecord{DefaultTenantID, AuditActorSystem}); got != want {
 		t.Fatalf("tenant A's job.created audit record = %+v, want %+v", got, want)
-	}
-}
-
-// A host command may write an audit record to a database from before
-// schema 52, whose accounts have no tenant yet. The record falls back to the
-// default tenant, or the tenant the entry names, with the entry's actor kind,
-// or unit for an entry with an actor and system without one.
-func TestAuditEntryBeforeSchema52UsesTheDefaultTenant(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "schema51.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	for _, statement := range []string{
-		`CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT NOT NULL, role TEXT NOT NULL)`,
-		`CREATE TABLE security_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', actor_user_id TEXT NOT NULL DEFAULT '', actor_username TEXT NOT NULL DEFAULT '', source_ip TEXT NOT NULL DEFAULT '', request_id TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, tenant_id TEXT DEFAULT '` + DefaultTenantID + `', actor_kind TEXT NOT NULL DEFAULT '')`,
-		`INSERT INTO users(id,username,role) VALUES('` + accountAdminA + `','admin','administrator')`,
-	} {
-		if _, err := db.ExecContext(ctx, statement); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if schema, err := auditSchemaOf(ctx, db); err != nil || schema != auditSchemaBefore52 {
-		t.Fatalf("audit schema = %d, %v; want before schema 52", schema, err)
-	}
-	for _, check := range []struct {
-		entry        AuditEntry
-		tenant, kind string
-	}{
-		{AuditEntry{Action: "user.login", ActorUserID: accountAdminA}, DefaultTenantID, AuditActorUnit},
-		{AuditEntry{Action: "notifications.pending_discarded"}, DefaultTenantID, AuditActorSystem},
-		{AuditEntry{Action: "database.restore", ActorKind: AuditActorHost, TenantID: secondTenantID}, secondTenantID, AuditActorHost},
-		{AuditEntry{Action: "platform_admin.setup_token_issued", ActorKind: AuditActorHost, TenantID: secondTenantID, platform: true}, "<null>", AuditActorHost},
-	} {
-		if err := insertAuditEntryExec(ctx, db, check.entry, time.Now().UTC()); err != nil {
-			t.Fatalf("%s: %v", check.entry.Action, err)
-		}
-		var tenant, kind, category string
-		if err := db.QueryRowContext(ctx, `SELECT COALESCE(tenant_id,'<null>'),actor_kind,category FROM security_audit WHERE action=?`, check.entry.Action).Scan(&tenant, &kind, &category); err != nil {
-			t.Fatal(err)
-		}
-		if tenant != check.tenant || kind != check.kind || category != auditCategory(check.entry.Action) {
-			t.Errorf("%s audit record = %s/%s/%s, want %s/%s/%s", check.entry.Action, tenant, kind, category, check.tenant, check.kind, auditCategory(check.entry.Action))
-		}
 	}
 }
 

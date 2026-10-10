@@ -158,6 +158,24 @@ func TestStartupPhasesWaitForAConcurrentWriter(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "administrator compatibility",
+			prepare: func(t *testing.T, s *Store) {
+				now := time.Now().UTC()
+				if err := s.SaveAdmin(context.Background(), Admin{Username: "admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}); err != nil {
+					t.Fatal(err)
+				}
+				execStoreStatements(t, s, `UPDATE users SET totp_secret='JBSWY3DPEHPK3PXP',totp_enabled=1 WHERE id='`+LegacyAdminUserID+`'`)
+			},
+			run: func(ctx context.Context, s *Store) error {
+				return s.MigrateAdminCompatibility(ctx)
+			},
+			check: func(t *testing.T, s *Store) {
+				if got := queryStrings(t, s.DB, `SELECT substr(totp_secret,1,?) FROM users WHERE id=?`, len(authCiphertextV2), LegacyAdminUserID); len(got) != 1 || got[0] != authCiphertextV2 {
+					t.Fatalf("administrator secret = %v, want the sealed form", got)
+				}
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()

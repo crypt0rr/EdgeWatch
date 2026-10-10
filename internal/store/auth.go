@@ -953,74 +953,9 @@ func insertAuditEntryExec(ctx context.Context, execer contextExecer, entry Audit
 	createdAt := now.UTC().Format(time.RFC3339Nano)
 	_, err := execer.ExecContext(ctx, auditInsertSQL, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, auditCategory(entry.Action), createdAt, entry.TenantID, entry.ActorKind, entry.ActorUserID, boolInt(entry.platform))
 	if err != nil {
-		// Host commands open the database without migrating it, for example
-		// the restored copy of an older backup, so the record may have to
-		// fit an older schema.
-		switch schema, checkErr := auditSchemaOf(ctx, execer); {
-		case checkErr != nil:
-		case schema == auditSchemaBefore51:
-			// The table has no category, tenant_id, or actor_kind column;
-			// record the entry without them, and the migration categorizes
-			// and attributes it later.
-			_, err = execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,source_ip,request_id,created_at) VALUES(?,?,?,?,?,?,?)`, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, createdAt)
-		case schema == auditSchemaBefore52:
-			// Accounts have no tenant before schema 52: each one belongs
-			// to the default tenant, and none is a platform administrator.
-			var tenant any = entry.TenantID
-			kind := entry.ActorKind
-			switch {
-			case entry.platform:
-				tenant = nil
-			case entry.TenantID == "":
-				tenant = DefaultTenantID
-			}
-			if kind == "" {
-				kind = AuditActorSystem
-				if entry.ActorUserID != "" {
-					kind = AuditActorUnit
-				}
-			}
-			_, err = execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,source_ip,request_id,category,created_at,tenant_id,actor_kind) VALUES(?,?,?,?,?,?,?,?,?,?)`, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, auditCategory(entry.Action), createdAt, tenant, kind)
-		}
-	}
-	if err != nil {
 		return fmt.Errorf("%w: %v", ErrAuditUnavailable, err)
 	}
 	return nil
-}
-
-// The schemas an audit record may have to fit, from auditSchemaOf.
-const (
-	// auditSchemaCurrent is schema 52 or later.
-	auditSchemaCurrent = iota
-	// auditSchemaBefore51 has no category, tenant_id, or actor_kind column
-	// in security_audit.
-	auditSchemaBefore51
-	// auditSchemaBefore52 has those columns, but its accounts have no
-	// tenant.
-	auditSchemaBefore52
-)
-
-// auditSchemaOf reports which schema the audit table and the accounts
-// have. An execer that cannot query reports the current schema.
-func auditSchemaOf(ctx context.Context, execer contextExecer) (int, error) {
-	queryer, ok := execer.(interface {
-		QueryRowContext(context.Context, string, ...any) *sql.Row
-	})
-	if !ok {
-		return auditSchemaCurrent, nil
-	}
-	var columns, categories, accountTenants int
-	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(name='category'),0),(SELECT COUNT(*) FROM pragma_table_info('users') WHERE name='tenant_id') FROM pragma_table_info('security_audit')`).Scan(&columns, &categories, &accountTenants); err != nil {
-		return auditSchemaCurrent, err
-	}
-	switch {
-	case columns > 0 && categories == 0:
-		return auditSchemaBefore51, nil
-	case columns > 0 && accountTenants == 0:
-		return auditSchemaBefore52, nil
-	}
-	return auditSchemaCurrent, nil
 }
 
 // insertAuditEntries writes the entries that have an action. A TenantStore

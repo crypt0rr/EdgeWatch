@@ -53,8 +53,10 @@ a large database. The output reports the backup's `path`, `bytes`, and
 `schema_version`, the `check` it passed with its `integrity_check` result, and
 `foreign_key_violations`. A database that fails a check, for example because a
 row breaks a foreign key, fails the backup and leaves nothing at `--out`. A
-supported schema is one from schema 54, of v0.20.0, to the current one, so
-back up a database of an older release with v0.35.0; see
+supported schema is one from schema 54, of v0.20.0, to the current one. From
+v0.36.0, `backup` refuses a database with an older schema before it copies it
+or records the attempt in its audit log, so back up a database of an older
+release with v0.35.0; see
 [Restore a backup of an older release](#restore-a-backup-of-an-older-release). The
 backup sets its private file mode on its temporary file before it is
 published, and never changes another file in the output directory, such as a

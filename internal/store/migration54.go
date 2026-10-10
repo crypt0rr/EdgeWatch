@@ -60,6 +60,15 @@ END`,
 END`,
 }
 
+// latestScanHostScanTenantSQL is the condition of the guard triggers that
+// the row's scan belongs to the row's tenant. It joins the tenant, so SQLite
+// finds the scan through scans_identity, which holds the scan's tenant: a
+// lookup through the scan's primary key reads the tenant from the scan row,
+// past its snapshot, once for every host row that a scan writes. A tenant's
+// row outlives its scans, so the join finds every scan. Schema 66 installed
+// this form; earlier schemas compared the row's tenant with the scan row's.
+const latestScanHostScanTenantSQL = `EXISTS (SELECT 1 FROM tenants JOIN scans ON scans.tenant_id=tenants.id WHERE tenants.id=NEW.tenant_id AND scans.id=NEW.scan_id)`
+
 // latestScanHostsTenantTriggerSQL are the guard triggers of the projection.
 // A row must belong to the tenant of its scan, and that tenant must be
 // active or disabled, so no row is written for a tenant that is being
@@ -72,13 +81,13 @@ END`,
 var latestScanHostsTenantTriggerSQL = []string{
 	`CREATE TRIGGER IF NOT EXISTS ` + latestScanHostsTenantInsertTrigger + ` BEFORE INSERT ON latest_scan_hosts BEGIN
  SELECT RAISE(ABORT, 'latest_scan_hosts.tenant_id must be the tenant of the row''s scan')
- WHERE NEW.tenant_id IS NOT (SELECT scans.tenant_id FROM scans WHERE scans.id=NEW.scan_id);
+ WHERE NOT ` + latestScanHostScanTenantSQL + `;
  SELECT RAISE(ABORT, 'latest_scan_hosts.tenant_id must name an active or disabled tenant')
  WHERE NOT EXISTS (SELECT 1 FROM tenants WHERE tenants.id=NEW.tenant_id AND tenants.state IN ('active','disabled'));
 END`,
 	`CREATE TRIGGER IF NOT EXISTS ` + latestScanHostsTenantUpdateTrigger + ` BEFORE UPDATE OF tenant_id, scan_id ON latest_scan_hosts BEGIN
  SELECT RAISE(ABORT, 'latest_scan_hosts.tenant_id must be the tenant of the row''s scan')
- WHERE NEW.tenant_id IS NOT (SELECT scans.tenant_id FROM scans WHERE scans.id=NEW.scan_id);
+ WHERE NOT ` + latestScanHostScanTenantSQL + `;
  SELECT RAISE(ABORT, 'latest_scan_hosts.tenant_id must name an active or disabled tenant')
  WHERE NOT EXISTS (SELECT 1 FROM tenants WHERE tenants.id=NEW.tenant_id AND tenants.state IN ('active','disabled'));
 END`,

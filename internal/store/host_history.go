@@ -78,19 +78,43 @@ type scanPageQueries struct {
 	pageArg  []any
 }
 
-// jobScansPageQueries lists the scans of one of the tenant's jobs. The reads
-// of a job's scans put the tenant predicate on the job instead of on
-// scans.tenant_id. The two agree: the schema 53 guard trigger requires a scan
-// to belong to its job's tenant, and neither tenant can change. Schema 53
-// appended scans.tenant_id to the scan row, after the snapshot, so testing it
-// would read the snapshot pages of every scan that a count or an offset
-// passes, which an index on job_id otherwise answers alone.
+// jobScansFromSQL selects the scans of one of the tenant's jobs; its
+// arguments are the tenant ID and the job ID. The reads of a job's scans put
+// the tenant predicate, and the check that a permanent deletion of the job is
+// not erasing its history, on the job row instead of on scans.tenant_id and
+// scans.job_id. The two agree: the schema 53 guard trigger requires a scan to
+// belong to its job's tenant, and neither tenant can change. The scan row
+// stores tenant_id and job_id after the snapshot, so testing them there would
+// read the snapshot pages of every scan that a count or an offset passes,
+// which an index on job_id otherwise answers alone.
+const jobScansFromSQL = ` FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`
+
+// scanSummaryColumnsSQL are the metadata columns of a scan, without its
+// snapshot and change list, qualified with the alias s.
+const scanSummaryColumnsSQL = `s.id,s.job_id,s.job_revision,s.job,s.started_at,s.finished_at,s.status,s.error,s.nmap_version,s.scanner_engine,s.scanner_profile_id,s.scanner_profile_revision,s.naabu_version,s.discovery_ports,s.confirmed_ports,s.discovery_duration_ms,s.enrichment_duration_ms,s.config_hash,s.cycle_id,s.cycle_attempt,s.cycle_status,s.resumable,s.completed_probes,s.total_probes,s.completed_units,s.total_units,s.no_progress_attempts,s.baseline_scan_id,s.baseline_config_hash,s.comparison`
+
+// jobScansPageQueries lists the scans of one of the tenant's jobs with their
+// change lists and snapshots, newest first.
 func jobScansPageQueries(tenantID, jobID string, limit, offset int) scanPageQueries {
+	return jobHistoryPageQueries(tenantID, jobID, scanSummaryColumnsSQL+`,s.changes_json,s.snapshot_json`, limit, offset)
+}
+
+// jobScanSummariesPageQueries lists the metadata of the scans of one of the
+// tenant's jobs, newest first.
+func jobScanSummariesPageQueries(tenantID, jobID string, limit, offset int) scanPageQueries {
+	return jobHistoryPageQueries(tenantID, jobID, scanSummaryColumnsSQL, limit, offset)
+}
+
+// jobHistoryPageQueries counts the scans of one of the tenant's jobs and
+// selects the columns of one page of them, newest first. The count and the
+// rows that the offset skips read scans_job_id_history alone; only the rows
+// of the page read the scan row.
+func jobHistoryPageQueries(tenantID, jobID, columns string, limit, offset int) scanPageQueries {
 	limit, offset = normalizePage(limit, offset)
 	return scanPageQueries{
-		countSQL: `SELECT COUNT(*) FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)`,
+		countSQL: `SELECT COUNT(*)` + jobScansFromSQL,
 		countArg: []any{tenantID, jobID},
-		pageSQL:  `SELECT s.id,s.job_id,s.job_revision,s.job,s.started_at,s.finished_at,s.status,s.error,s.nmap_version,s.scanner_engine,s.scanner_profile_id,s.scanner_profile_revision,s.naabu_version,s.discovery_ports,s.confirmed_ports,s.discovery_duration_ms,s.enrichment_duration_ms,s.config_hash,s.cycle_id,s.cycle_attempt,s.cycle_status,s.resumable,s.completed_probes,s.total_probes,s.completed_units,s.total_units,s.no_progress_attempts,s.baseline_scan_id,s.baseline_config_hash,s.comparison,s.changes_json,s.snapshot_json FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id) ORDER BY s.finished_at DESC,s.id DESC LIMIT ? OFFSET ?`,
+		pageSQL:  `SELECT ` + columns + jobScansFromSQL + ` ORDER BY s.finished_at DESC,s.id DESC LIMIT ? OFFSET ?`,
 		pageArg:  []any{tenantID, jobID, limit, offset},
 	}
 }
@@ -331,18 +355,18 @@ func (ts *TenantStore) ListJobScansPage(ctx context.Context, jobID string, limit
 // ListJobScanSummariesPage returns only the metadata needed by a paginated
 // history view of one of the tenant's jobs; a job of another tenant has no
 // scans. Full snapshots are intentionally left to GetScan/results. The
-// tenant predicate is on the job, as jobScansPageQueries explains.
+// tenant predicate is on the job, as jobScansFromSQL explains.
 func (ts *TenantStore) ListJobScanSummariesPage(ctx context.Context, jobID string, limit, offset int) (Page[model.ScanSummary], error) {
 	if err := ts.ready(); err != nil {
 		return Page[model.ScanSummary]{}, err
 	}
-	limit, offset = normalizePage(limit, offset)
+	queries := jobScanSummariesPageQueries(ts.scope.id, jobID, limit, offset)
 	var page Page[model.ScanSummary]
 	readDB := ts.store.reader()
-	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)`, ts.scope.id, jobID).Scan(&page.Total); err != nil {
+	if err := readDB.QueryRowContext(ctx, queries.countSQL, queries.countArg...).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := readDB.QueryContext(ctx, `SELECT s.id,s.job_id,s.job_revision,s.job,s.started_at,s.finished_at,s.status,s.error,s.nmap_version,s.scanner_engine,s.scanner_profile_id,s.scanner_profile_revision,s.naabu_version,s.discovery_ports,s.confirmed_ports,s.discovery_duration_ms,s.enrichment_duration_ms,s.config_hash,s.cycle_id,s.cycle_attempt,s.cycle_status,s.resumable,s.completed_probes,s.total_probes,s.completed_units,s.total_units,s.no_progress_attempts,s.baseline_scan_id,s.baseline_config_hash,s.comparison FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id) ORDER BY s.finished_at DESC,s.id DESC LIMIT ? OFFSET ?`, ts.scope.id, jobID, limit, offset)
+	rows, err := readDB.QueryContext(ctx, queries.pageSQL, queries.pageArg...)
 	if err != nil {
 		return page, err
 	}

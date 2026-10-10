@@ -271,12 +271,13 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 	}},
 	"LegacySuccessfulScanExists": {writes: true, run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
-		// A successful scan without host observations has no host index,
-		// like a scan from before the index existed. Only tenant A has one.
+		// A successful scan without a host index or a backfill checkpoint
+		// is a scan from before the index existed. Only tenant A has one.
 		legacy := fixtureScan("legacy-tenant-a", f.jobA, "edge", time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC), nil)
 		if err := f.store.System().SaveScan(ctx, legacy); err != nil {
 			t.Fatal(err)
 		}
+		rewindToLegacyScans(t, f.store.DB, legacy.ID)
 		for scope, want := range map[TenantScope]bool{f.a: true, f.b: false} {
 			if exists, err := f.store.Tenant(scope).LegacySuccessfulScanExists(ctx); err != nil || exists != want {
 				t.Errorf("tenant %s: legacy successful scan = %v, %v; want %v", scope.ID(), exists, err, want)
@@ -293,6 +294,7 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 			if err := f.store.System().SaveScan(ctx, fixtureScan(own[scope], job, "edge", finished, nil)); err != nil {
 				t.Fatal(err)
 			}
+			rewindToLegacyScans(t, f.store.DB, own[scope])
 		}
 		for scope, want := range own {
 			page, err := f.store.Tenant(scope).ListLegacySuccessfulScanSnapshotsPage(ctx, 50, 0)

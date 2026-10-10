@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -279,10 +280,11 @@ func schema52RowSnapshot(t *testing.T, db *sql.DB) string {
 }
 
 // schemaObjectsSnapshot renders every schema object that is not one of the
-// rebuilt tables or their indexes. It also leaves out what schemas 53 and 54
-// change next: the definitions of the tables that gain tenant_id, the tenant
-// indexes and guard triggers, and latest_scan_hosts with its indexes and
-// triggers. migration53_test.go and migration54_test.go check those.
+// rebuilt tables or their indexes. It also leaves out what schemas 53, 54
+// and 66 change next: the definitions of the tables that gain tenant_id, the
+// tenant indexes and guard triggers, latest_scan_hosts with its indexes and
+// triggers, and the scan history indexes. migration53_test.go,
+// migration54_test.go and migration66_test.go check those.
 func schemaObjectsSnapshot(t *testing.T, db *sql.DB) string {
 	t.Helper()
 	// These payload indexes are added by schema 62. The schema-52 fixture
@@ -291,7 +293,7 @@ func schemaObjectsSnapshot(t *testing.T, db *sql.DB) string {
 	schema53Objects := slices.Concat(schema53Tables, schema53Triggers, []string{
 		"scans_tenant_id_time", "events_tenant_id_time",
 		"outbox_job_purge", "restore_quarantined_job_purge",
-	})
+	}, slices.Collect(maps.Keys(schema65ScanIndexes)), slices.Collect(maps.Keys(schema66ScanIndexes)))
 	var out strings.Builder
 	if err := snapshotRows(db, `SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_master WHERE tbl_name NOT IN ('users','jobs','scanner_profiles','managed_notifications','latest_scan_hosts') AND name NOT IN ('`+strings.Join(schema53Objects, "','")+`') ORDER BY type,name`, &out); err != nil {
 		t.Fatal(err)

@@ -340,6 +340,11 @@ func TestHostRoutesCoverNestedStoreFailureBranches(t *testing.T) {
 	drop(t, db, "scan_hosts")
 	call(t, "hosts-index", server, func(w http.ResponseWriter, r *http.Request) { server.listHosts(w, r, defaultTenantStore(server)) }, http.StatusInternalServerError)
 	server, db, _ = newCase(t)
+	// The legacy check reads the checkpoints only while the backfill that
+	// writes them is pending, as after an upgrade.
+	if _, err := db.DB.Exec(`UPDATE fts_backfill_state SET complete=0 WHERE table_name='legacy_scan_host_index'`); err != nil {
+		t.Fatal(err)
+	}
 	drop(t, db, "legacy_scan_host_backfill")
 	call(t, "hosts-legacy-checkpoint", server, func(w http.ResponseWriter, r *http.Request) { server.listHosts(w, r, defaultTenantStore(server)) }, http.StatusInternalServerError)
 	server, db, record := newCase(t)

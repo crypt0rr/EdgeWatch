@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"strings"
 	"testing"
 )
 
@@ -11,75 +10,65 @@ func TestScanHistoryIndexesSupportManagedQueries(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 
-	// Exercise the actual 20 -> 22 upgrade path rather than only checking a
-	// fresh database. This also catches a future migration that forgets to add
-	// an index when an operator upgrades an existing installation.
-	if _, err := s.DB.ExecContext(ctx, `DROP INDEX IF EXISTS scans_job_id_time;
+	// Exercise the upgrade path from schema 20 rather than only checking a
+	// fresh database: schema 22 adds the job and cycle indexes, and schema
+	// 66 replaces them with indexes that hold the columns the history reads
+	// test. This also catches a future migration that forgets an index when
+	// an operator upgrades an existing installation.
+	if _, err := s.DB.ExecContext(ctx, `DROP INDEX IF EXISTS scans_job_id_history;
+DROP INDEX IF EXISTS scans_tenant_history;
+DROP INDEX IF EXISTS scans_identity;
+DROP INDEX IF EXISTS scans_cycle_outcome;
 DROP INDEX IF EXISTS scans_job_id_revision;
 DROP INDEX IF EXISTS scans_finished_at;
-DROP INDEX IF EXISTS scans_cycle_id;
 PRAGMA user_version = 20;`); err != nil {
 		t.Fatal(err)
 	}
 	if err := migrate(s.DB); err != nil {
-		t.Fatalf("reapply schema 22 migration: %v", err)
+		t.Fatalf("reapply migrations from schema 20: %v", err)
 	}
 
 	want := map[string]bool{
-		"scans_job_id_time":     false,
-		"scans_job_id_revision": false,
-		"scans_finished_at":     false,
-		"scans_cycle_id":        false,
+		"scans_job_id_revision": true,
+		"scans_finished_at":     true,
+	}
+	for index := range schema66ScanIndexes {
+		want[index] = true
+	}
+	for index := range schema65ScanIndexes {
+		want[index] = false
 	}
 	rows, err := s.DB.QueryContext(ctx, `SELECT name FROM pragma_index_list('scans')`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rows.Close()
+	found := map[string]bool{}
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := want[name]; ok {
-			want[name] = true
-		}
+		found[name] = true
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	for name, found := range want {
-		if !found {
-			t.Errorf("missing scan index %s", name)
+	for name, present := range want {
+		if found[name] != present {
+			t.Errorf("scan index %s present = %t, want %t", name, found[name], present)
 		}
 	}
-
-	assertPlanUses := func(label, query, expected string, args ...any) {
-		t.Helper()
-		planRows, err := s.DB.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query, args...)
-		if err != nil {
-			t.Fatalf("%s explain: %v", label, err)
-		}
-		defer planRows.Close()
-		var details []string
-		for planRows.Next() {
-			var id, parent, notUsed int
-			var detail string
-			if err := planRows.Scan(&id, &parent, &notUsed, &detail); err != nil {
-				t.Fatalf("%s explain scan: %v", label, err)
-			}
-			details = append(details, detail)
-		}
-		if err := planRows.Err(); err != nil {
-			t.Fatalf("%s explain rows: %v", label, err)
-		}
-		if !strings.Contains(strings.Join(details, " | "), expected) {
-			t.Fatalf("%s plan = %v, want %q", label, details, expected)
+	for index, keys := range schema66ScanIndexes {
+		if got := indexKeys(t, s.DB, index); got != keys {
+			t.Errorf("%s keys = %q, want %q", index, got, keys)
 		}
 	}
 
 	jobQueries := jobScansPageQueries(DefaultTenantID, "job-id", 50, 0)
-	assertPlanUses("job count", jobQueries.countSQL, "scans_job_id_", jobQueries.countArg...)
-	assertPlanUses("job history", jobQueries.pageSQL, "scans_job_id_time", jobQueries.pageArg...)
-	assertPlanUses("cycle lookup", scanCycleHasScanQuery, "scans_cycle_id", "cycle-id", DefaultTenantID)
+	assertScanPlans(t, s.DB, []planCase{
+		{label: "job count", statement: jobQueries.countSQL, args: jobQueries.countArg, aliases: []string{"s"}},
+		{label: "job history", statement: jobQueries.pageSQL, args: jobQueries.pageArg, aliases: []string{"s"}, index: scansJobHistoryIndex, pageRows: true},
+		{label: "cycle lookup", statement: scanCycleHasScanQuery, args: []any{"cycle-id", DefaultTenantID}, index: scansCycleOutcomeIndex},
+	})
 }

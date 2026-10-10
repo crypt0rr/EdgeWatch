@@ -27,7 +27,9 @@ type LegacyScanSnapshot struct {
 // first so callers can select the latest effective address without reading
 // indexed scans. The query remains paginated, but callers may walk every page
 // when correctness requires a complete legacy projection. Another tenant's
-// scans are not listed, and neither count towards the total.
+// scans are not listed, and neither count towards the total. Once the
+// legacy host backfill has completed, no such scan is left and the page is
+// empty without a search.
 func (ts *TenantStore) ListLegacySuccessfulScanSnapshotsPage(ctx context.Context, limit, offset int) (Page[LegacyScanSnapshot], error) {
 	if err := ts.ready(); err != nil {
 		return Page[LegacyScanSnapshot]{}, err
@@ -35,6 +37,9 @@ func (ts *TenantStore) ListLegacySuccessfulScanSnapshotsPage(ctx context.Context
 	limit, offset = normalizePage(limit, offset)
 	var page Page[LegacyScanSnapshot]
 	reader := ts.store.reader()
+	if complete, err := legacyScanHostIndexComplete(ctx, reader); err != nil || complete {
+		return page, err
+	}
 	// A completed backfill checkpoint also excludes snapshots that were
 	// malformed or empty. Retrying those on every request would recreate the
 	// history-wide decode cost the migration is designed to remove.
@@ -118,25 +123,13 @@ func (ts *TenantStore) ListScansPage(ctx context.Context, job string, limit, off
 	if err := ts.ready(); err != nil {
 		return Page[model.Scan]{}, err
 	}
-	limit, offset = normalizePage(limit, offset)
+	queries := tenantScansPageQueries(ts.scope.id, job, scanSummaryColumnsSQL+`,s.changes_json,s.snapshot_json`, limit, offset)
 	var page Page[model.Scan]
 	readDB := ts.store.reader()
-	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,comparison,changes_json,snapshot_json FROM scans WHERE tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`
-	countQuery := `SELECT COUNT(*) FROM scans WHERE tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`
-	args := []any{ts.scope.id}
-	countArgs := []any{ts.scope.id}
-	if job != "" {
-		query += ` AND job=?`
-		args = append(args, job)
-		countQuery += ` AND job=?`
-		countArgs = append(countArgs, job)
-	}
-	if err := readDB.QueryRowContext(ctx, countQuery, countArgs...).Scan(&page.Total); err != nil {
+	if err := readDB.QueryRowContext(ctx, queries.countSQL, queries.countArg...).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	query += ` ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`
-	args = append(args, limit, offset)
-	rows, err := readDB.QueryContext(ctx, query, args...)
+	rows, err := readDB.QueryContext(ctx, queries.pageSQL, queries.pageArg...)
 	if err != nil {
 		return page, err
 	}
@@ -175,6 +168,28 @@ func (ts *TenantStore) ListScansPage(ctx context.Context, job string, limit, off
 	return page, rows.Err()
 }
 
+// tenantScansPageQueries counts the tenant's scans, of every job or of the
+// job with the given name, and selects the columns of one page of them,
+// newest first. The columns are qualified with the alias s. The tenant, the
+// job name and the purge check read scans_tenant_history, which holds the job
+// ID and name after its order columns, so the count and the rows that the
+// offset skips leave the scan rows, and their snapshots, alone.
+func tenantScansPageQueries(tenantID, job, columns string, limit, offset int) scanPageQueries {
+	limit, offset = normalizePage(limit, offset)
+	from := ` FROM scans s WHERE s.tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)`
+	args := []any{tenantID}
+	if job != "" {
+		from += ` AND s.job=?`
+		args = append(args, job)
+	}
+	return scanPageQueries{
+		countSQL: `SELECT COUNT(*)` + from,
+		countArg: args,
+		pageSQL:  `SELECT ` + columns + from + ` ORDER BY s.finished_at DESC,s.id DESC LIMIT ? OFFSET ?`,
+		pageArg:  append(append([]any(nil), args...), limit, offset),
+	}
+}
+
 // ListScanSummariesPage is the metadata-only counterpart to ListScansPage.
 // Filtering remains name-based for compatibility with legacy CLI callers,
 // and stays within the tenant: another tenant's job of the same name is
@@ -183,25 +198,13 @@ func (ts *TenantStore) ListScanSummariesPage(ctx context.Context, job string, li
 	if err := ts.ready(); err != nil {
 		return Page[model.ScanSummary]{}, err
 	}
-	limit, offset = normalizePage(limit, offset)
+	queries := tenantScansPageQueries(ts.scope.id, job, scanSummaryColumnsSQL, limit, offset)
 	var page Page[model.ScanSummary]
 	readDB := ts.store.reader()
-	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,comparison FROM scans WHERE tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`
-	countQuery := `SELECT COUNT(*) FROM scans WHERE tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`
-	args := []any{ts.scope.id}
-	countArgs := []any{ts.scope.id}
-	if job != "" {
-		query += ` AND job=?`
-		args = append(args, job)
-		countQuery += ` AND job=?`
-		countArgs = append(countArgs, job)
-	}
-	if err := readDB.QueryRowContext(ctx, countQuery, countArgs...).Scan(&page.Total); err != nil {
+	if err := readDB.QueryRowContext(ctx, queries.countSQL, queries.countArg...).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	query += ` ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`
-	args = append(args, limit, offset)
-	rows, err := readDB.QueryContext(ctx, query, args...)
+	rows, err := readDB.QueryContext(ctx, queries.pageSQL, queries.pageArg...)
 	if err != nil {
 		return page, err
 	}

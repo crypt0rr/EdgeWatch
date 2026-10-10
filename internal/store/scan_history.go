@@ -64,7 +64,7 @@ func clearCompletedScanCycleCheckpointsTx(ctx context.Context, tx *sql.Tx, cycle
 	return err
 }
 
-func saveScanExec(ctx context.Context, execer contextExecer, scan model.Scan) error {
+func saveScanExec(ctx context.Context, tx *sql.Tx, scan model.Scan) error {
 	snapshot, err := json.Marshal(scan.Snapshot)
 	if err != nil {
 		return err
@@ -78,23 +78,52 @@ func saveScanExec(ctx context.Context, execer contextExecer, scan model.Scan) er
 		return err
 	}
 	// The scan belongs to its job's tenant, read in the same transaction.
-	_, err = execer.ExecContext(ctx, `INSERT INTO scans(id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,comparison,changes_json,snapshot_json,tenant_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,`+jobTenantSQL+`)`,
-		scan.ID, nullString(scan.JobID), nullInt64(scan.JobRevision), scan.Job, sqliteTimestamp(scan.StartedAt), sqliteTimestamp(scan.FinishedAt), scan.Status, scan.Error, scan.NmapVersion, scan.ScannerEngine, scan.ScannerProfileID, scan.ScannerProfileRevision, scan.NaabuVersion, scan.DiscoveryPorts, scan.ConfirmedPorts, scan.DiscoveryDurationMS, scan.EnrichmentDurationMS, scan.ConfigHash, scan.CycleID, scan.CycleAttempt, scan.CycleStatus, boolInt(scan.Resumable), scan.CompletedProbes, scan.TotalProbes, scan.CompletedUnits, scan.TotalUnits, scan.NoProgressTries, scan.BaselineScanID, scan.BaselineConfigHash, scan.Comparison, changesJSON, snapshot, scan.JobID)
+	// The insert returns it, so the host rows take it from here rather than
+	// from the scan row, which stores it after the snapshot.
+	var tenantID string
+	err = tx.QueryRowContext(ctx, `INSERT INTO scans(id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,comparison,changes_json,snapshot_json,tenant_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,`+jobTenantSQL+`) RETURNING tenant_id`,
+		scan.ID, nullString(scan.JobID), nullInt64(scan.JobRevision), scan.Job, sqliteTimestamp(scan.StartedAt), sqliteTimestamp(scan.FinishedAt), scan.Status, scan.Error, scan.NmapVersion, scan.ScannerEngine, scan.ScannerProfileID, scan.ScannerProfileRevision, scan.NaabuVersion, scan.DiscoveryPorts, scan.ConfirmedPorts, scan.DiscoveryDurationMS, scan.EnrichmentDurationMS, scan.ConfigHash, scan.CycleID, scan.CycleAttempt, scan.CycleStatus, boolInt(scan.Resumable), scan.CompletedProbes, scan.TotalProbes, scan.CompletedUnits, scan.TotalUnits, scan.NoProgressTries, scan.BaselineScanID, scan.BaselineConfigHash, scan.Comparison, changesJSON, snapshot, scan.JobID).Scan(&tenantID)
 	if err != nil {
 		return err
 	}
-	return saveScanHostsExec(ctx, execer, scan)
+	return saveScanHostsExec(ctx, tx, scan, tenantID)
 }
 
-func saveScanHostsExec(ctx context.Context, execer contextExecer, scan model.Scan) error {
+// saveScanHostsExec writes the host rows of a scan that the transaction has
+// just saved for the tenant. A successful scan without a host row is one
+// that the legacy host backfill looks for. When its snapshot holds nothing
+// that the backfill could index, it gets the backfill's checkpoint now, so
+// the backfill's completion marker, which lets the Hosts view and the
+// daemon start skip that search, stays accurate. A snapshot of units
+// without host observations, as releases before scan_hosts recorded, is
+// left to the backfill and the compatibility readers, and the marker goes
+// back to pending until the next start indexes it.
+func saveScanHostsExec(ctx context.Context, tx *sql.Tx, scan model.Scan, tenantID string) error {
+	written, err := writeScanHostsExec(ctx, tx, scan, tenantID)
+	if err != nil || written > 0 || scan.Status != "success" {
+		return err
+	}
+	for _, host := range legacyHostObservations(scan.Snapshot) {
+		if net.ParseIP(strings.TrimSpace(host.Address)) != nil {
+			return markLegacyScanHostIndexPendingTx(ctx, tx)
+		}
+	}
+	return checkpointLegacyScanTx(ctx, tx, scan.ID)
+}
+
+// writeScanHostsExec writes a host row for each host of the scan with a
+// valid address, and for a successful scan the tenant's latest observation
+// of that address, and returns how many host rows it wrote.
+func writeScanHostsExec(ctx context.Context, execer contextExecer, scan model.Scan, tenantID string) (int, error) {
 	if len(scan.Snapshot.Hosts) == 0 {
-		return nil
+		return 0, nil
 	}
 	// Normalize a copy so the indexed payload has stable ordering without
 	// mutating the immutable snapshot that the caller may still hold.
 	hosts := append([]model.HostObservation(nil), scan.Snapshot.Hosts...)
 	hostSnapshot := model.Snapshot{Hosts: hosts}
 	hostSnapshot.Normalize()
+	written := 0
 	for _, host := range hostSnapshot.Hosts {
 		address := strings.TrimSpace(host.Address)
 		if net.ParseIP(address) == nil {
@@ -102,29 +131,30 @@ func saveScanHostsExec(ctx context.Context, execer contextExecer, scan model.Sca
 		}
 		hostJSON, err := json.Marshal(host)
 		if err != nil {
-			return err
+			return written, err
 		}
 		sourceTargets, err := json.Marshal(host.SourceTargets)
 		if err != nil {
-			return err
+			return written, err
 		}
 		dnsNames, err := json.Marshal(host.DNSNames)
 		if err != nil {
-			return err
+			return written, err
 		}
 		searchText := hostSearchContent(scan.Job, host)
 		open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered := scanHostStats(host)
 		if _, err := execer.ExecContext(ctx, `INSERT INTO scan_hosts(scan_id,address,job,address_family,source_targets_json,dns_names_json,host_json,search_text,data_quality,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			scan.ID, address, scan.Job, host.AddressFamily, sourceTargets, dnsNames, hostJSON, searchText, "detailed", open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered); err != nil {
-			return err
+			return written, err
 		}
+		written++
 		if scan.Status == "success" {
-			if err := upsertLatestScanHostExec(ctx, execer, scan, address, host.AddressFamily, sourceTargets, dnsNames, hostJSON, searchText, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered); err != nil {
-				return err
+			if err := upsertLatestScanHostExec(ctx, execer, scan, tenantID, address, host.AddressFamily, sourceTargets, dnsNames, hostJSON, searchText, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered); err != nil {
+				return written, err
 			}
 		}
 	}
-	return nil
+	return written, nil
 }
 
 const (
@@ -196,15 +226,13 @@ func hostSearchContent(_ string, host model.HostObservation) string {
 	return strings.TrimSpace(builder.String())
 }
 
-// upsertLatestScanHostExec maintains the exact latest successful observation
-// for one effective address of the scan's tenant. The finished-at/id ordering
-// mirrors the historical ranking query, including deterministic ties between
-// scans with equal times. The tenant is read from the scan row, which the
-// caller has written in the same transaction.
-func upsertLatestScanHostExec(ctx context.Context, execer contextExecer, scan model.Scan, address, addressFamily string, sourceTargets, dnsNames, hostJSON []byte, searchText string, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered int) error {
-	finishedAt := sqliteTimestamp(scan.FinishedAt)
-	_, err := execer.ExecContext(ctx, `INSERT INTO latest_scan_hosts(tenant_id,address,scan_id,job_id,job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,search_text,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports)
-VALUES((SELECT tenant_id FROM scans WHERE id=?),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+// upsertLatestScanHostSQL writes the tenant's latest successful observation
+// of an address, in the argument order of upsertLatestScanHostExec. The
+// tenant is an argument: reading it from the scan row for each host would
+// read the scan's snapshot each time, which made finalizing a broad scan
+// grow with the square of its hosts. The plan test explains it verbatim.
+const upsertLatestScanHostSQL = `INSERT INTO latest_scan_hosts(tenant_id,address,scan_id,job_id,job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,search_text,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(tenant_id,address) DO UPDATE SET
  scan_id=excluded.scan_id,
  job_id=excluded.job_id,
@@ -213,10 +241,10 @@ ON CONFLICT(tenant_id,address) DO UPDATE SET
  data_quality=excluded.data_quality,
  address_family=excluded.address_family,
  source_targets_json=excluded.source_targets_json,
-	dns_names_json=excluded.dns_names_json,
-	host_json=excluded.host_json,
-	search_text=excluded.search_text,
-	open_ports=excluded.open_ports,
+ dns_names_json=excluded.dns_names_json,
+ host_json=excluded.host_json,
+ search_text=excluded.search_text,
+ open_ports=excluded.open_ports,
  open_filtered_ports=excluded.open_filtered_ports,
  tcp_present=excluded.tcp_present,
  udp_present=excluded.udp_present,
@@ -225,8 +253,18 @@ ON CONFLICT(tenant_id,address) DO UPDATE SET
  udp_open_ports=excluded.udp_open_ports,
  udp_open_filtered_ports=excluded.udp_open_filtered_ports
 WHERE excluded.finished_at > latest_scan_hosts.finished_at
-   OR (excluded.finished_at = latest_scan_hosts.finished_at AND excluded.scan_id > latest_scan_hosts.scan_id)`,
-		scan.ID, address, scan.ID, scan.JobID, scan.Job, finishedAt, "detailed", addressFamily, sourceTargets, dnsNames, hostJSON, searchText, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered)
+   OR (excluded.finished_at = latest_scan_hosts.finished_at AND excluded.scan_id > latest_scan_hosts.scan_id)`
+
+// upsertLatestScanHostExec maintains the exact latest successful observation
+// for one effective address of the scan's tenant. The finished-at/id ordering
+// mirrors the historical ranking query, including deterministic ties between
+// scans with equal times. The caller passes the tenant of the scan row that
+// it has written in the same transaction, as upsertLatestScanHostSQL
+// explains. The guard trigger still refuses a tenant that is not the scan's.
+func upsertLatestScanHostExec(ctx context.Context, execer contextExecer, scan model.Scan, tenantID, address, addressFamily string, sourceTargets, dnsNames, hostJSON []byte, searchText string, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered int) error {
+	finishedAt := sqliteTimestamp(scan.FinishedAt)
+	_, err := execer.ExecContext(ctx, upsertLatestScanHostSQL,
+		tenantID, address, scan.ID, scan.JobID, scan.Job, finishedAt, "detailed", addressFamily, sourceTargets, dnsNames, hostJSON, searchText, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered)
 	return err
 }
 
@@ -445,13 +483,19 @@ func (ts *TenantStore) latestScanHostSegment(ctx context.Context, queries latest
 // successful scans has no derived host index or completed backfill
 // checkpoint. Such rows are expected in databases upgraded from a release
 // predating scan_hosts and require the bounded compatibility merge in the
-// Hosts endpoint.
+// Hosts endpoint. Once the legacy host backfill has completed, no such scan
+// is left, and the answer comes from its marker: the search would otherwise
+// read every successful scan of the tenant on each Hosts request.
 func (ts *TenantStore) LegacySuccessfulScanExists(ctx context.Context) (bool, error) {
 	if err := ts.ready(); err != nil {
 		return false, err
 	}
+	reader := ts.store.reader()
+	if complete, err := legacyScanHostIndexComplete(ctx, reader); err != nil || complete {
+		return false, err
+	}
 	var exists bool
-	err := ts.store.reader().QueryRowContext(ctx, `SELECT EXISTS(
+	err := reader.QueryRowContext(ctx, `SELECT EXISTS(
 	SELECT 1 FROM scans s
 	WHERE s.tenant_id=? AND s.status='success'
 	  AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
@@ -596,9 +640,10 @@ func (ts *TenantStore) GetScanSummary(ctx context.Context, id string) (model.Sca
 // GetLatestSuccessfulJobScanSummary returns the newest fully successful scan
 // of one of the tenant's jobs without loading its snapshot or change payload.
 // The ordering is deterministic for scans that finish at the same instant
-// and is backed by the scans_job_id_time index. A job with no successful
-// scan, or a job of another tenant, returns a nil summary and a nil error.
-// The tenant predicate is on the job, as jobScansPageQueries explains.
+// and is backed by the scans_job_id_history index, which also holds each
+// scan's outcome. A job with no successful scan, or a job of another tenant,
+// returns a nil summary and a nil error. The tenant predicate is on the job,
+// as jobScansFromSQL explains.
 func (ts *TenantStore) GetLatestSuccessfulJobScanSummary(ctx context.Context, jobID string) (*model.ScanSummary, error) {
 	if err := ts.ready(); err != nil {
 		return nil, err
@@ -608,7 +653,7 @@ func (ts *TenantStore) GetLatestSuccessfulJobScanSummary(ctx context.Context, jo
 	var jid sql.NullString
 	var revision sql.NullInt64
 	var resumable int
-	err := ts.store.reader().QueryRowContext(ctx, `SELECT s.id,s.job_id,s.job_revision,s.job,s.started_at,s.finished_at,s.status,s.error,s.nmap_version,s.scanner_engine,s.scanner_profile_id,s.scanner_profile_revision,s.naabu_version,s.discovery_ports,s.confirmed_ports,s.discovery_duration_ms,s.enrichment_duration_ms,s.config_hash,s.cycle_id,s.cycle_attempt,s.cycle_status,s.resumable,s.completed_probes,s.total_probes,s.completed_units,s.total_units,s.no_progress_attempts,s.baseline_scan_id,s.baseline_config_hash,s.comparison FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? AND s.status='success' AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id) ORDER BY s.finished_at DESC,s.id DESC LIMIT 1`, ts.scope.id, jobID).
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT `+scanSummaryColumnsSQL+jobScansFromSQL+` AND s.status='success' ORDER BY s.finished_at DESC,s.id DESC LIMIT 1`, ts.scope.id, jobID).
 		Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash, &v.Comparison)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

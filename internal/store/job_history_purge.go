@@ -70,9 +70,13 @@ var jobHistoryPurgeSteps = []jobHistoryPurgeStep{
 	{jobPurgePhaseRuntimeMeta, "job_runtime_meta", `SELECT rowid FROM job_runtime_meta WHERE job_id=?2 ORDER BY rowid`},
 	{jobPurgePhaseSilence, "job_silence_state", `SELECT rowid FROM job_silence_state WHERE job_id=?2 ORDER BY rowid`},
 	{jobPurgePhaseRevisions, "job_revisions", `SELECT rowid FROM job_revisions WHERE job_id=?2 ORDER BY rowid`},
-	{jobPurgePhaseScanBackfill, "legacy_scan_host_backfill", `SELECT rowid FROM legacy_scan_host_backfill WHERE scan_id IN (SELECT id FROM scans WHERE tenant_id=?1 AND job_id=?2) ORDER BY rowid`},
-	{jobPurgePhaseScanHosts, "scan_hosts", `SELECT h.rowid FROM scan_hosts AS h JOIN scans AS s ON s.id=h.scan_id WHERE s.tenant_id=?1 AND s.job_id=?2 ORDER BY h.rowid`},
-	{jobPurgePhaseScans, "scans", `SELECT rowid FROM scans WHERE tenant_id=?1 AND job_id=?2 ORDER BY rowid`},
+	// The unary plus keeps SQLite from choosing the tenant's index for the
+	// job's scans: both scans_tenant_history and scans_job_id_history hold
+	// the tenant and the job, but only the job's index reads the job's scans
+	// alone.
+	{jobPurgePhaseScanBackfill, "legacy_scan_host_backfill", `SELECT rowid FROM legacy_scan_host_backfill WHERE scan_id IN (SELECT id FROM scans WHERE +tenant_id=?1 AND job_id=?2) ORDER BY rowid`},
+	{jobPurgePhaseScanHosts, "scan_hosts", `SELECT h.rowid FROM scan_hosts AS h JOIN scans AS s ON s.id=h.scan_id WHERE +s.tenant_id=?1 AND s.job_id=?2 ORDER BY h.rowid`},
+	{jobPurgePhaseScans, "scans", `SELECT rowid FROM scans WHERE +tenant_id=?1 AND job_id=?2 ORDER BY rowid`},
 	{jobPurgePhaseEvents, "events", `SELECT rowid FROM events WHERE tenant_id=?1 AND job_id=?2 ORDER BY rowid`},
 	{jobPurgePhaseOutbox, "outbox", `SELECT rowid FROM outbox WHERE tenant_id=?1 AND json_valid(CAST(payload_json AS TEXT)) AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?2 ORDER BY rowid`},
 	{jobPurgePhaseQuarantine, "restore_quarantined_deliveries", `SELECT rowid FROM restore_quarantined_deliveries WHERE tenant_id=?1 AND json_valid(CAST(payload_json AS TEXT)) AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?2 ORDER BY rowid`},

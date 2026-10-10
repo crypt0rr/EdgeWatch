@@ -65,6 +65,9 @@ func TestMigrationBackfillsRefreshStartupHeartbeat(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_identity_backfill SET complete=0 WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.DB.ExecContext(ctx, pendingLegacyScanHostIndexSQL); err != nil {
+		t.Fatal(err)
+	}
 	const oldHeartbeat = "2000-01-01T00:00:00.000000000Z"
 	if _, err := s.DB.ExecContext(ctx, `UPDATE startup_state SET state='migrating',updated_at=?,last_error='' WHERE id=1`, oldHeartbeat); err != nil {
 		t.Fatal(err)

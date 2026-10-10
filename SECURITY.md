@@ -596,7 +596,7 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 65 must not be opened by an older EdgeWatch
+database upgraded to schema 66 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
@@ -606,7 +606,11 @@ and a retry scheduled before v0.22.1 as terminal; deliveries still retrying
 under the newer fifteen-attempt policy remain eligible. Schema 64 adds an
 index for pruning old restore-quarantine records without rewriting delivery
 history. Schema 65 records how each new scan was compared with its job's
-baseline; existing scans and their results are not changed.
+baseline; existing scans and their results are not changed. Schema 66
+replaces scan history indexes with ones that hold each scan's tenant, job,
+and outcome, and records when the backfill of the host index of pre-index
+scans has completed; scans, their results, and the guard that keeps a
+latest-host row in its scan's tenant are unchanged.
 Only the daemon migrates. The host commands that act on business units or
 accounts (`admin`, `scan`, `status`, `history`, `baseline`, and `notify
 test`) refuse a schema that the daemon has not upgraded yet, such as a
@@ -755,3 +759,9 @@ Retention pruning deliberately keeps the security audit log indefinitely.
 Only completed scans, historical events, sent or terminally failed outbox
 deliveries, and superseded job revisions are eligible for automatic removal;
 active baselines, current revisions, and pending deliveries are protected.
+Each retention transaction deletes at most 500 rows of one kind: the host rows
+and search entries of expired scans, and the units and discovery checkpoints of
+expired scan cycles, are deleted in their own transactions before the scans
+and cycles, so other writers are not held behind a broad scan's history.
+The pass also empties the saved progress of resumable scan cycles that expired
+or were discarded, which never resume.

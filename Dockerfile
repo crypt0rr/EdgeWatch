@@ -32,7 +32,22 @@ RUN git init . \
     && git fetch --depth 1 origin refs/tags/${NAABU_VERSION}:refs/tags/${NAABU_VERSION} \
     && test "$(git rev-parse ${NAABU_VERSION}^{commit})" = "${NAABU_COMMIT}" \
     && git checkout --detach ${NAABU_COMMIT}
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/naabu ./cmd/naabu
+# Naabu's dependencies import symbols dynamically even without cgo, so the
+# binary needs an ELF interpreter. Go names the build host's loader, which for
+# a cross-compiled architecture is glibc's; gcompat would then re-execute it
+# through ld-musl under another process name. Name the target's musl loader,
+# as a native build does, and refuse any other.
+RUN case "${TARGETARCH}" in \
+      amd64) loader=/lib/ld-musl-x86_64.so.1 ;; \
+      arm64) loader=/lib/ld-musl-aarch64.so.1 ;; \
+      *) echo "no musl loader known for ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -I ${loader}" -o /out/naabu ./cmd/naabu \
+    && printf '%s\n' 'package main' 'import ("debug/elf"; "fmt"; "os")' \
+      'func main() { f, err := elf.Open(os.Args[1]); if err != nil { panic(err) }; for _, p := range f.Progs { if p.Type == elf.PT_INTERP { b := make([]byte, p.Filesz); if _, err := p.ReadAt(b, 0); err != nil { panic(err) }; fmt.Print(string(b[:len(b)-1])) } } }' \
+      >/tmp/interp.go \
+    && interp="$(go run /tmp/interp.go /out/naabu)" \
+    && if [ -n "${interp}" ] && [ "${interp}" != "${loader}" ]; then echo "naabu names ${interp}, not ${loader}" >&2; exit 1; fi
 
 FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine3.24@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673 AS build
 WORKDIR /src

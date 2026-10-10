@@ -19,7 +19,7 @@ import {
   scanResults,
 } from '../api'
 import type { Job } from '../types'
-import type { ScanSummary, Snapshot } from '../generated/api-types'
+import type { ScanSummary } from '../generated/api-types'
 import { JobDetail } from './JobDetail'
 import { defaultUnitScope } from '../test/test-utils'
 
@@ -95,10 +95,8 @@ const latestResultsResponse = {
   results: [{ target: 'router.example', protocol: 'tcp', addresses: ['198.51.100.10'], ports: [{ port: 443, state: 'open', service: 'https' }] }],
   pagination,
 }
-// A scan's detail carries the scan with its snapshot.
-const snapshot: Snapshot = { units: [], scopes: [] }
 const detailResponse = {
-  scan: { ...summary, snapshot },
+  scan: summary,
   changes: [],
   changes_pagination: pagination,
   current_security_hash: 'scope',
@@ -413,7 +411,7 @@ describe('job surface overview', () => {
 
   it('keeps direct links to scans outside the current history page usable', async () => {
     const deepLinkedScan: ScanSummary = { ...summary, id: 'scan-old' }
-    vi.mocked(scanDetail).mockResolvedValue({ ...detailResponse, scan: { ...deepLinkedScan, snapshot } })
+    vi.mocked(scanDetail).mockResolvedValue({ ...detailResponse, scan: deepLinkedScan })
     await renderPage('/jobs/job-1/scans/scan-old')
     await vi.waitFor(() => expect(container.querySelector('.scan-detail-inline')).not.toBeNull(), { timeout: 1000 })
 

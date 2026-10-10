@@ -1039,7 +1039,8 @@ func (c Config) ValidateDeployment() error {
 	if c.Retention.Value() < 24*time.Hour {
 		return fmt.Errorf("retention must be at least 24h")
 	}
-	if _, err := c.Location(); err != nil {
+	location, err := c.Location()
+	if err != nil {
 		return err
 	}
 	if c.Scheduler.MaxConcurrent < 1 || c.Scheduler.MaxConcurrent > 64 {
@@ -1094,7 +1095,7 @@ func (c Config) ValidateDeployment() error {
 	default:
 		return fmt.Errorf("notifications.sandbox must be auto, required, or off")
 	}
-	if err := c.Backup.validate(); err != nil {
+	if err := c.Backup.validate(location); err != nil {
 		return err
 	}
 	if level := strings.ToLower(strings.TrimSpace(c.Log.Level)); level != "" && level != "debug" && level != "info" && level != "warn" && level != "error" {

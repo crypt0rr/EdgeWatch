@@ -380,6 +380,33 @@ func TestBackupWorkerStartsOnlyWithAValidSchedule(t *testing.T) {
 	}
 }
 
+// A schedule that never fires, such as February 30, has no next time. The
+// worker stops with an error instead of taking backups back to back.
+func TestBackupWorkerStopsWhenTheScheduleNeverFires(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	a, dir, _ := backupTestApp(t, 1, &logs)
+	waits := 0
+	a.backupWait = func(context.Context, time.Time) bool { waits++; return waits < 3 }
+	for _, schedule := range []string{"0 3 30 2 *", "0 3 31 4 *"} {
+		a.Config.Backup.Schedule = schedule
+		select {
+		case <-a.startBackupWorker(context.Background()):
+		case <-time.After(time.Minute):
+			t.Fatalf("the backup worker with %q did not stop", schedule)
+		}
+	}
+	if waits != 0 {
+		t.Fatalf("the worker waited %d times for a schedule that never fires", waits)
+	}
+	if names := directoryNames(t, dir); len(names) != 0 {
+		t.Fatalf("the worker wrote %v for a schedule that never fires", names)
+	}
+	if strings.Count(logs.String(), "scheduled backups stopped: backup.schedule never fires") != 2 {
+		t.Fatalf("the stop was not logged: %s", logs.String())
+	}
+}
+
 func TestWaitUntilStopsWithTheDaemon(t *testing.T) {
 	t.Parallel()
 	if !waitUntil(context.Background(), time.Now().Add(-time.Second)) {

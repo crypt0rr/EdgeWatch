@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/robfig/cron/v3"
 )
@@ -29,7 +30,8 @@ type Backup struct {
 	// existing directory; the daemon does not create it.
 	Directory string `yaml:"directory"`
 	// Schedule is a five-field cron expression, in the deployment timezone
-	// when one is set and UTC otherwise. It defaults to
+	// when one is set and UTC otherwise, that fires. A TZ= or CRON_TZ=
+	// prefix is refused, as in a job's schedule. It defaults to
 	// DefaultBackupSchedule.
 	Schedule string `yaml:"schedule"`
 	// Keep is the number of scheduled backups kept, from 1 to MaxBackupKeep.
@@ -63,8 +65,9 @@ func ParseBackupSchedule(spec string) (cron.Schedule, error) {
 	return cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow).Parse(spec)
 }
 
-// validate checks the backup settings.
-func (b Backup) validate() error {
+// validate checks the backup settings. The schedule is checked in location,
+// the deployment timezone, or UTC when it is nil.
+func (b Backup) validate(location *time.Location) error {
 	if !b.Enabled() {
 		if strings.TrimSpace(b.Schedule) != "" || b.Keep != 0 {
 			return errors.New("backup.schedule and backup.keep require backup.directory")
@@ -77,8 +80,23 @@ func (b Backup) validate() error {
 	if b.Directory == string(filepath.Separator) {
 		return errors.New("backup.directory must not be the root directory")
 	}
-	if _, err := ParseBackupSchedule(b.Schedule); err != nil {
+	// A prefix would override the deployment timezone that the schedule is
+	// documented to follow, so it is refused as in a job's schedule.
+	schedule := strings.TrimSpace(b.Schedule)
+	if strings.HasPrefix(schedule, "TZ=") || strings.HasPrefix(schedule, "CRON_TZ=") {
+		return errors.New("backup.schedule must contain five cron fields; set the deployment timezone in timezone")
+	}
+	parsed, err := ParseBackupSchedule(schedule)
+	if err != nil {
 		return fmt.Errorf("backup.schedule must be a five-field cron expression: %w", err)
+	}
+	if location == nil {
+		location = time.UTC
+	}
+	// A schedule such as February 30 parses but never fires: the daemon
+	// would have no next backup to wait for.
+	if parsed.Next(time.Now().UTC().In(location)).IsZero() {
+		return errors.New("backup.schedule never fires")
 	}
 	if b.Keep < 1 || b.Keep > MaxBackupKeep {
 		return fmt.Errorf("backup.keep must be between 1 and %d", MaxBackupKeep)

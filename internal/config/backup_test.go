@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func loadBackupConfig(t *testing.T, section string) (*Config, error) {
@@ -59,14 +60,34 @@ func TestBackupValidationRefusesUnusableSettings(t *testing.T) {
 		"backup:\n  directory: /backups\n  schedule: \"0 0 3 * * *\"\n": "five-field cron expression",
 		"backup:\n  directory: /backups\n  keep: -1\n":                  "between 1 and 1000",
 		"backup:\n  directory: /backups\n  keep: 1001\n":                "between 1 and 1000",
+		// A schedule that parses but never fires would leave the daemon
+		// without a next backup, and a prefix would override the
+		// deployment timezone.
+		"backup:\n  directory: /backups\n  schedule: \"0 3 30 2 *\"\n":                         "backup.schedule never fires",
+		"backup:\n  directory: /backups\n  schedule: \"0 3 31 4 *\"\n":                         "backup.schedule never fires",
+		"backup:\n  directory: /backups\n  schedule: \"TZ=UTC 0 3 * * *\"\n":                   "set the deployment timezone in timezone",
+		"backup:\n  directory: /backups\n  schedule: \"CRON_TZ=Europe/Amsterdam 0 3 * * *\"\n": "set the deployment timezone in timezone",
 	} {
 		if _, err := loadBackupConfig(t, section); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: error = %v, want %q", section, err, want)
 		}
 	}
 	// A configuration built in code is validated the same way.
-	if err := (Backup{Schedule: " "}).validate(); err != nil {
+	if err := (Backup{Schedule: " "}).validate(nil); err != nil {
 		t.Fatalf("blank schedule without a directory: %v", err)
+	}
+	amsterdam, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (Backup{Directory: "/backups", Schedule: "0 3 29 2 *", Keep: 1}).validate(amsterdam); err != nil {
+		t.Fatalf("a schedule that fires in leap years: %v", err)
+	}
+	if err := (Backup{Directory: "/backups", Schedule: "0 3 30 2 *", Keep: 1}).validate(amsterdam); err == nil || !strings.Contains(err.Error(), "never fires") {
+		t.Fatalf("a schedule that never fires in the deployment timezone = %v", err)
+	}
+	if _, err := loadBackupConfig(t, "timezone: Europe/Amsterdam\nbackup:\n  directory: /backups\n  schedule: \"30 2 * * *\"\n"); err != nil {
+		t.Fatalf("a schedule in the deployment timezone: %v", err)
 	}
 	if _, err := ParseBackupSchedule(DefaultBackupSchedule); err != nil {
 		t.Fatalf("default schedule: %v", err)

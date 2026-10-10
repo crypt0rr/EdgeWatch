@@ -54,7 +54,7 @@ recreated and reviewed explicitly in the console.
 | `web.max_live_streams` | `256` | 1 to 4096; `0` is rejected. |
 | `web.max_live_streams_per_unit` | `64`, or `web.max_live_streams` when that is lower | 1 to `web.max_live_streams`; `0` is rejected. |
 | `backup.directory` | Not set: no scheduled backups | The absolute path of an existing directory, other than `/`. |
-| `backup.schedule` | `0 3 * * *` (daily at 03:00) | A five-field cron expression, in `timezone` when it is set and UTC otherwise. Requires `backup.directory`. |
+| `backup.schedule` | `0 3 * * *` (daily at 03:00) | A five-field cron expression that fires, in `timezone` when it is set and UTC otherwise, without a `TZ=` or `CRON_TZ=` prefix. Requires `backup.directory`. |
 | `backup.keep` | `7` | 1 to 1000 scheduled backups. Requires `backup.directory`. |
 
 Jobs are configured in the console, which enforces these limits:

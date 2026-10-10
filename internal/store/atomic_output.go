@@ -16,10 +16,14 @@ import (
 // initial existence check and publication, so it is deliberately not used.
 // The parent directory is synced so the directory entry survives a host crash.
 //
-// afterRename is optional and is run after the destination becomes visible.
-// It is useful for format-specific companion-artifact checks (for example,
-// SQLite mode enforcement) while retaining the common destination-safety and
-// rename sequence for every export/backup writer.
+// afterRename is optional and runs after the destination becomes visible; when
+// it fails, the published file is removed unless another file has replaced
+// it. It may only inspect the published file. It must never chmod, remove, or
+// otherwise change the published path or any other pathname next to it, such
+// as names that look like SQLite companions of the output: those belong to
+// whatever else uses the directory, and a pathname operation after
+// publication races with a replacement of the file. Private modes and other
+// changes belong on the temporary payload, inside the writer.
 func AtomicWriteFile(path, tempPrefix string, writer func(string) error, afterRename func(string) error) (string, error) {
 	if writer == nil {
 		return "", errors.New("atomic writer is required")

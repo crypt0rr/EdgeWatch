@@ -299,7 +299,15 @@ func (a *App) startBackupWorker(ctx context.Context) <-chan struct{} {
 		defer close(done)
 		defer a.recoverBackgroundPanic("scheduled-backup-worker")
 		for {
-			status.NextRunAt = schedule.Next(a.nowUTC().In(location)).UTC()
+			next := schedule.Next(a.nowUTC().In(location))
+			if next.IsZero() {
+				// Configuration validation refuses a schedule that never
+				// fires. Without this stop, a library caller's would run
+				// backups back to back.
+				logger.Error("scheduled backups stopped: backup.schedule never fires", "schedule", settings.Schedule)
+				return
+			}
+			status.NextRunAt = next.UTC()
 			a.recordBackupStatus(status)
 			if !wait(ctx, status.NextRunAt) {
 				return

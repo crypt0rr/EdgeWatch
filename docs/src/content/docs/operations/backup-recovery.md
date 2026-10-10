@@ -113,7 +113,9 @@ backup:
 ```
 
 `schedule` is a five-field cron expression in the deployment `timezone`, or
-UTC when none is set; it defaults to `0 3 * * *`, daily at 03:00. `keep`
+UTC when none is set; it defaults to `0 3 * * *`, daily at 03:00. As for a
+job's schedule, a `TZ=` or `CRON_TZ=` prefix and a schedule that never fires,
+such as February 30, are refused. `keep`
 defaults to 7 and accepts 1 to 1000. The directory must exist; create it as
 shown above. The bundled Compose file mounts `./data` at `/var/lib/edgewatch`,
 so `/var/lib/edgewatch/backups` is `./data/backups` on the host and needs no

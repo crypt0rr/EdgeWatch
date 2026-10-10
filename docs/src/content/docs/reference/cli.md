@@ -79,8 +79,9 @@ without group or other permissions that holds 32 to 1024 printable
 characters without spaces), and the syntax of each notification URL in
 `notifications.urls` and `notifications.urls_file`. It
 prints the normalized configuration with `"valid": true`, or `"valid": false`
-with the reason and exits non-zero. An invalid URL is named by a digest
-prefix, never by the URL. The daemon runs the same checks before it opens the
+with the reason and exits non-zero. An invalid URL is named only by its
+position, as in `configured notification URL 2 of 3`, never by the URL or a
+digest of it. The daemon runs the same checks before it opens the
 database, so a start that they refuse leaves the database as it was.
 
 ## Backups and their verification

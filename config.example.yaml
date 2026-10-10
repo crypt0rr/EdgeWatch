@@ -103,7 +103,7 @@ scanner:
   # in every unit. A scan keeps every address in the daemon's memory: a /16
   # (65536, the default) peaked at about 344 MB of compose.yaml's 512 MiB, so
   # raise it only with matching memory. 1 to 1000000.
-  max_job_hosts: 65536
+  # max_job_hosts: 65536
 
 # Check the latest stable GitHub release at startup and every three hours.
 # Set enabled: false for offline or privacy-sensitive deployments. A check

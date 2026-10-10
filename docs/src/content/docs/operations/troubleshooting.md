@@ -117,6 +117,14 @@ the cycle, that run records the expiry as timed out, once, and the next run
 starts a fresh cycle. Read [Scanning and profiles](/user-guide/scanning/)
 and [Host commands](/reference/cli/) before changing scan scope or retrying.
 
+A scan that fails with `expanded targets exceed scanner.max_job_hosts=65536`
+covers more addresses than one job may scan; split its targets into several
+jobs, or raise `scanner.max_job_hosts` together with the container's memory.
+A scan that fails because a scanner `left a process holding its output open`
+or `holding its terminal open` ran a scanner that started a process outside
+its process group; check that `/usr/bin/nmap` and `/usr/local/bin/naabu` are
+the image's own.
+
 ## Destinations are locked or delivery fails
 
 Inspect the destination's health on **Notifications**. After restoring a key,

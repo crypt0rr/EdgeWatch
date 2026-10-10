@@ -7,7 +7,7 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { APIError, BUILTIN_NAABU_PROFILE_ID, createJob, getJob, getSession, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
 import type { Job, Protocol } from '../types'
 import type { ScannerCapabilities, ScannerProfile } from '../api'
-import { cidrWarning, duplicateTarget, targetKind } from '../target'
+import { cidrWarning, duplicateTarget, hostCeilingWarning, targetKind } from '../target'
 import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { editableDuration, formatDateTime, getDisplayTimeZone } from '../format'
@@ -415,6 +415,7 @@ export function JobEditor() {
               </div>
               <button type="button" className="text-button add-target" onClick={() => { setDraftDirty(true); setTargets((items) => [...items, '']) }}><Plus size={15} /> Add target</button>
               {targets.some((target) => cidrWarning(target)) && <div className="notice warning"><TriangleAlert size={16} /><span>{targets.map(cidrWarning).find(Boolean)}</span></div>}
+              {hostCeilingWarning(targets, scannerCapabilityState.data?.max_job_hosts) && <div className="notice warning" role="status"><TriangleAlert size={16} /><span>{hostCeilingWarning(targets, scannerCapabilityState.data?.max_job_hosts)}</span></div>}
               {(fieldErrors.targets || fieldErrors.target) && <small className="field-error">{fieldErrors.targets || fieldErrors.target}</small>}
             </div>
             <div className="field-section">

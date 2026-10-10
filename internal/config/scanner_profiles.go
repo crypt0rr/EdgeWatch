@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -83,6 +84,21 @@ func NormalizeScannerProfile(profile ScannerProfile) ScannerProfile {
 		profile.EnrichmentArgs = []string{}
 	}
 	return profile
+}
+
+// ValidateNewScannerProfile is ValidateScannerProfile for a definition that
+// an administrator creates or changes. Its NSE arguments must also be
+// arguments of the selected script's own, with values that cannot add another
+// argument; see ValidateNSEArguments. Existing revisions only need to pass
+// ValidateScannerProfile, so the jobs pinned to them keep scanning.
+func ValidateNewScannerProfile(profile ScannerProfile) error {
+	if err := ValidateScannerProfile(profile); err != nil {
+		return err
+	}
+	if err := ValidateNSEArguments(profile.NSEProfile, profile.NSEArgs); err != nil {
+		return NewFieldValidationError("nse_args", err)
+	}
+	return nil
 }
 
 // ValidateScannerProfile enforces the fixed executable and argv-only command
@@ -400,7 +416,7 @@ func validateNSEName(value string) error {
 	if strings.ContainsAny(value, "/\\*@?[]{}()!|;&$<>`\x00\n\r\t ") {
 		return fmt.Errorf("nse_profile must be an approved profile name")
 	}
-	if _, ok := approvedNSEProfiles[value]; !ok {
+	if _, ok := approvedNSEArguments[value]; !ok {
 		return fmt.Errorf("nse_profile %q is not installed or approved", value)
 	}
 	return nil
@@ -424,12 +440,63 @@ func validateNSEArgs(values map[string]string) error {
 	return nil
 }
 
-// Only a small, non-invasive catalog is exposed. The catalog is kept in the
-// application rather than accepting Nmap categories/expressions so profile
-// input cannot expand into arbitrary scripts or filesystem paths.
-var approvedNSEProfiles = map[string]struct{}{
-	"banner": {}, "dns-recursion": {}, "http-headers": {}, "http-title": {},
-	"ssl-cert": {}, "ssh-hostkey": {},
+// approvedNSEArguments is the catalog of approved NSE scripts, each with the
+// arguments of its own that it reads. Only a small, non-invasive catalog is
+// exposed. The catalog is kept in the application rather than accepting Nmap
+// categories/expressions so profile input cannot expand into arbitrary
+// scripts or filesystem paths. A script reads an argument of the NSE
+// libraries, or of another script, as well as its own: newtargets lets a
+// script add scan targets that scanner.target_exclusions and the probe
+// budgets never see, for example. So a profile may set only the arguments
+// listed for its script. ssh-hostkey's known-hosts arguments are not listed,
+// because they make it read a file.
+var approvedNSEArguments = map[string][]string{
+	"banner":        {"banner.ports", "banner.timeout"},
+	"dns-recursion": nil,
+	"http-headers":  {"http-headers.path", "http-headers.useget"},
+	"http-title":    {"http-title.url"},
+	"ssl-cert":      nil,
+	"ssh-hostkey":   {"ssh_hostkey"},
+}
+
+// ValidateNSEArguments checks that every NSE argument is an argument of
+// script's own, and that no value holds a comma or a quote. EdgeWatch joins
+// the arguments into one --script-args list, where a comma would start
+// another argument, such as a bare newtargets, and a quote would let a value
+// run into the next.
+func ValidateNSEArguments(script string, values map[string]string) error {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if !slices.Contains(approvedNSEArguments[script], strings.TrimSpace(key)) {
+			allowed := approvedNSEArguments[script]
+			if len(allowed) == 0 {
+				return fmt.Errorf("nse argument %q is not an argument of %s, which takes none", key, script)
+			}
+			return fmt.Errorf("nse argument %q is not an argument of %s; use %s", key, script, strings.Join(allowed, ", "))
+		}
+		if strings.ContainsAny(values[key], `,'"`) {
+			return fmt.Errorf("nse argument %q contains a comma or a quote", key)
+		}
+	}
+	return nil
+}
+
+// NSEArgumentsOutsideScript returns the keys of the NSE arguments that
+// ValidateNSEArguments would refuse, sorted, so that the daemon can warn about
+// an existing profile revision that still passes them.
+func NSEArgumentsOutsideScript(script string, values map[string]string) []string {
+	var keys []string
+	for key, value := range values {
+		if ValidateNSEArguments(script, map[string]string{key: value}) != nil {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func requirePlaceholders(args []string, label string, required ...string) error {

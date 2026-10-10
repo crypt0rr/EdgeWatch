@@ -40,6 +40,18 @@ describe('job editor workflow coverage', () => {
     window.history.replaceState(null, '', '/')
   })
 
+  it('warns when the targets expand beyond the deployment host ceiling', async () => {
+    vi.mocked(scannerCapabilities).mockResolvedValue({ ...capabilities, max_job_hosts: 1024 } as never)
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: '198.51.100.0/24' } })
+    expect(screen.queryByText(/that one job may scan in this deployment/)).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: '198.51.0.0/16' } })
+    await waitFor(() => expect(screen.getByText(/more than the 1,024 hosts that one job may scan in this deployment \(scanner\.max_job_hosts\)/)).toBeInTheDocument())
+    // The job's own limit stays an ordinary field.
+    expect(screen.getByLabelText(/^Maximum expanded hosts/)).toHaveAttribute('max', '1000000')
+  })
+
   it('retries notification-destination loading without changing the new-job form', async () => {
     vi.mocked(listNotificationDestinations).mockRejectedValueOnce(new Error('notification store unavailable'))
     renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })

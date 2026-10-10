@@ -248,3 +248,40 @@ func TestListScannerProfilesReportIsolatesInvalidDefinitions(t *testing.T) {
 		t.Fatalf("invalid profile error was not bounded: %#v", result.Invalid[0])
 	}
 }
+
+// A new or changed profile may pass only its NSE script's own arguments. A
+// revision stored before that limit keeps reading, so the jobs pinned to it
+// keep scanning, until an administrator saves the profile again.
+func TestScannerProfileWritesLimitNSEArgumentsToTheScript(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	defer s.Close()
+	tenant := defaultTenant(s)
+	own := config.ScannerProfile{Engine: config.EngineNmap, NSEProfile: "banner", NSEArgs: map[string]string{"banner.timeout": "5s"}}
+	created, err := tenant.CreateScannerProfile(ctx, "Banner", "", own, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	library := config.ScannerProfile{Engine: config.EngineNmap, NSEProfile: "banner", NSEArgs: map[string]string{"newtargets": "1"}}
+	if _, err := tenant.CreateScannerProfile(ctx, "Targets", "", library, "admin"); !errors.Is(err, ErrValidation) || !strings.Contains(err.Error(), "not an argument of banner") {
+		t.Fatalf("a profile with a library argument = %v", err)
+	}
+	legacyRaw, err := json.Marshal(config.NormalizeScannerProfile(library))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scanner_profiles SET definition_json=? WHERE id=?`, legacyRaw, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := tenant.GetScannerProfile(ctx, created.ID)
+	if err != nil || stored.Definition.NSEArgs["newtargets"] != "1" {
+		t.Fatalf("the stored revision = %#v, %v; want it still readable", stored.Definition, err)
+	}
+	if _, err := tenant.UpdateScannerProfile(ctx, created.ID, stored.Revision, "Banner", "", stored.Definition, "admin"); !errors.Is(err, ErrValidation) {
+		t.Fatalf("saving the profile again with the library argument = %v", err)
+	}
+	if _, err := tenant.UpdateScannerProfile(ctx, created.ID, stored.Revision, "Banner", "", own, "admin"); err != nil {
+		t.Fatalf("saving the profile with its own arguments = %v", err)
+	}
+}

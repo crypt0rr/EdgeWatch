@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -105,6 +106,29 @@ func hardenLinux() error {
 		return fmt.Errorf("make the process non-dumpable: %w", err)
 	}
 	return nil
+}
+
+// limitScannerResources makes the kernel's out-of-memory killer choose the
+// calling scanner process before any other EdgeWatch process, and lowers its
+// open file limits to ScannerMaxOpenFiles. It is best effort: a runtime that
+// refuses oom_score_adj still runs the scanner restricted. A process may
+// write its oom_score_adj only while it owns its /proc entries, which a
+// non-dumpable process does not, so it becomes dumpable again first. The
+// scanner it executes is dumpable anyway, because execve resets the flag, and
+// the zero core file size limit it inherits still keeps it from dumping core.
+func limitScannerResources() {
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 1, 0, 0, 0); err == nil {
+		if file, err := os.OpenFile("/proc/self/oom_score_adj", os.O_WRONLY, 0); err == nil {
+			_, _ = file.WriteString(strconv.Itoa(ScannerOOMScoreAdj))
+			_ = file.Close()
+		}
+	}
+	var limit unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &limit); err == nil {
+		limit.Max = min(limit.Max, ScannerMaxOpenFiles)
+		limit.Cur = min(limit.Cur, limit.Max)
+		_ = unix.Setrlimit(unix.RLIMIT_NOFILE, &limit)
+	}
 }
 
 func detect(options Options, env environment) *Policy {

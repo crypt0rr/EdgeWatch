@@ -18,9 +18,12 @@ import (
 // BPF programs, the kernel keyring, loading kernels and modules, mounts and
 // namespaces, a new root directory, and the host's swap, reboot, accounting,
 // quota, file handle, and log controls. Docker's default profile refuses most
-// of them already; the filter keeps them refused where it does not.
+// of them already; the filter keeps them refused where it does not. Leaving
+// the process group or session that the daemon started the process in is
+// refused too: the daemon stops a scanner by killing its process group, which
+// then reaches every process the scanner started.
 var seccompDenied = []string{
-	"ptrace", "process_vm_readv", "process_vm_writev", "kcmp",
+	"ptrace", "process_vm_readv", "process_vm_writev", "kcmp", "setsid", "setpgid",
 	"io_uring_setup", "io_uring_enter", "io_uring_register",
 	"userfaultfd", "perf_event_open", "bpf",
 	"keyctl", "add_key", "request_key",
@@ -59,7 +62,7 @@ type seccompArchitecture struct {
 // compares them.
 var seccompArchitectures = map[string]seccompArchitecture{
 	"amd64": {audit: unix.AUDIT_ARCH_X86_64, x32: true, numbers: map[string]uint32{
-		"ptrace": 101, "process_vm_readv": 310, "process_vm_writev": 311, "kcmp": 312,
+		"ptrace": 101, "process_vm_readv": 310, "process_vm_writev": 311, "kcmp": 312, "setsid": 112, "setpgid": 109,
 		"io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
 		"userfaultfd": 323, "perf_event_open": 298, "bpf": 321,
 		"keyctl": 250, "add_key": 248, "request_key": 249,
@@ -72,7 +75,7 @@ var seccompArchitectures = map[string]seccompArchitecture{
 		"clone": 56, "clone3": 435,
 	}},
 	"arm64": {audit: unix.AUDIT_ARCH_AARCH64, numbers: map[string]uint32{
-		"ptrace": 117, "process_vm_readv": 270, "process_vm_writev": 271, "kcmp": 272,
+		"ptrace": 117, "process_vm_readv": 270, "process_vm_writev": 271, "kcmp": 272, "setsid": 157, "setpgid": 154,
 		"io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
 		"userfaultfd": 282, "perf_event_open": 241, "bpf": 280,
 		"keyctl": 219, "add_key": 217, "request_key": 218,

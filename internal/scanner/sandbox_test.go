@@ -64,7 +64,7 @@ func TestConfinedNmapGetsPrivilegedAndAnInheritedXMLFile(t *testing.T) {
 	n.SetSandbox(policy)
 	args := []string{"-n", "-oX", "-", "-p", "22", "192.0.2.1"}
 	cmd := exec.Command(n.Path, args...)
-	path, release, err := prepareNmapXMLOutput(cmd, policy)
+	path, release, err := prepareNmapXMLOutput(cmd, policy, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestUnconfinedNmapKeepsItsArguments(t *testing.T) {
 	t.Parallel()
 	n := New("/usr/bin/nmap")
 	cmd := exec.Command(n.Path, "-n", "-oX", "-", "192.0.2.1")
-	path, release, err := prepareNmapXMLOutput(cmd, nil)
+	path, release, err := prepareNmapXMLOutput(cmd, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestRestrictedNmapStartsThroughSandboxExecWithItsXMLFile(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			cmd := exec.Command(nmap, "-n", "-oX", "-", "192.0.2.1")
-			path, release, err := prepareNmapXMLOutput(cmd, test.policy)
+			path, release, err := prepareNmapXMLOutput(cmd, test.policy, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -195,7 +195,7 @@ done
 `)
 	policy := (*sandbox.Policy)(nil).WithLandlock(helper, 6)
 	cmd := exec.CommandContext(context.Background(), writeFakeScanner(t, "nmap"), "-n", "-oX", "-", "192.0.2.1")
-	stdout, stderr, err := runNmapInvocation(context.Background(), cmd, policy, nil, nil)
+	stdout, stderr, err := runNmapInvocation(context.Background(), cmd, policy, "", nil, nil)
 	if err != nil {
 		t.Fatalf("restricted invocation = %v (stderr %q)", err, stderr)
 	}
@@ -223,7 +223,7 @@ func TestRestrictedNaabuReadsTargetsThroughSandboxExec(t *testing.T) {
 		t.Fatalf("results = %#v", results)
 	}
 	args, err := os.ReadFile(filepath.Join(dir, "args"))
-	if err != nil || !strings.HasPrefix(string(args), sandbox.ExecCommand+"\n--profile\nscanner\n--files\n1\n--\n"+naabu+"\n-list\n/dev/fd/3\n") {
+	if err != nil || !strings.HasPrefix(string(args), sandbox.ExecCommand+"\n--profile\nscanner\n--files\n1\n--tmp\n--\n"+naabu+"\n-list\n/dev/fd/3\n") {
 		t.Fatalf("sandbox-exec arguments = %q, %v", args, err)
 	}
 	if targets, err := os.ReadFile(filepath.Join(dir, "targets")); err != nil || string(targets) != "192.0.2.1\n" {
@@ -240,7 +240,7 @@ func TestRestrictedScannerThatIsMissingIsAConfigurationError(t *testing.T) {
 		t.Fatalf("missing restricted Naabu = %v, want a configuration error", err)
 	}
 	cmd := exec.Command(filepath.Join(t.TempDir(), "nmap"), "-n", "-oX", "-", "192.0.2.1")
-	if _, _, err := runNmapInvocation(context.Background(), cmd, (*sandbox.Policy)(nil).WithLandlock("/usr/local/bin/edgewatch", 6), nil, nil); !IsConfigurationError(err) {
+	if _, _, err := runNmapInvocation(context.Background(), cmd, (*sandbox.Policy)(nil).WithLandlock("/usr/local/bin/edgewatch", 6), "", nil, nil); !IsConfigurationError(err) {
 		t.Fatalf("missing restricted Nmap = %v, want a configuration error", err)
 	}
 }

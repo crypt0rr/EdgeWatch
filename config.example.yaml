@@ -83,10 +83,19 @@ scanner:
   # uses it, nor Landlock.
   sandbox: auto
   # Landlock limits Nmap and Naabu, whatever their UID, to the system files a
-  # scan reads, the files EdgeWatch passes to them, and /tmp. auto (the
+  # scan reads and the files EdgeWatch passes to them; only Naabu may also
+  # create files, below /tmp. It also gives them a seccomp filter and makes
+  # the out-of-memory killer stop a scanner before the daemon. auto (the
   # default) applies it when the kernel provides Landlock; required refuses
-  # to scan without it; off never applies it.
+  # to scan without it; off never applies it. EdgeWatch keeps the files it
+  # passes to scanners in tmp/scanner beside the database, whatever TMPDIR
+  # names.
   landlock: auto
+  # The most addresses the targets of one job may expand to when it scans,
+  # in every unit. A scan keeps every address in the daemon's memory: a /16
+  # (65536, the default) peaked at about 344 MB of compose.yaml's 512 MiB, so
+  # raise it only with matching memory. 1 to 1000000.
+  max_job_hosts: 65536
 
 # Check the latest stable GitHub release at startup and every three hours.
 # Set enabled: false for offline or privacy-sensitive deployments. A check

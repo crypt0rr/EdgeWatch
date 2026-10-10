@@ -54,7 +54,7 @@ func TestSandboxExecIsHandledBeforeFlagParsing(t *testing.T) {
 	// The scanner's own flags must reach sandbox-exec untouched; flag
 	// parsing would reject them. Malformed arguments get its usage.
 	err := run([]string{sandbox.ExecCommand, "--config", "x", "-oX", "-"})
-	if err == nil || !strings.Contains(err.Error(), "usage: sandbox-exec --profile scanner|notifier --files N [--seccomp] -- PROGRAM") {
+	if err == nil || !strings.Contains(err.Error(), "usage: sandbox-exec --profile scanner|notifier --files N [--tmp] [--seccomp] -- PROGRAM") {
 		t.Fatalf("sandbox-exec = %v, want its usage", err)
 	}
 }

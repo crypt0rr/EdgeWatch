@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -325,7 +326,11 @@ func run(args []string) error {
 		// Only the daemon imports notification URLs from config.yaml, after
 		// the migrations above and before its notifier and delivery worker
 		// start. Host commands keep using the configured URLs until then.
-		application, err = app.NewWithOptions(cfg, s, *nmapPath, logger, app.Options{ImportNotificationURLs: cmd == "daemon", Sandbox: scannerSandbox, NotificationSandbox: notificationSandbox})
+		options := app.Options{ImportNotificationURLs: cmd == "daemon", Sandbox: scannerSandbox, NotificationSandbox: notificationSandbox}
+		if cmd == "daemon" || cmd == "scan" {
+			options.ScannerTemporaryDirectory = scannerTemporaryDirectory(s)
+		}
+		application, err = app.NewWithOptions(cfg, s, *nmapPath, logger, options)
 		if err != nil {
 			return err
 		}
@@ -415,6 +420,13 @@ func run(args []string) error {
 		notificationSandbox := sandbox.Detect(notificationSandboxOptions(cfg)).Status()
 		health.Warnings = append(health.Warnings, scannerSandboxWarnings(scannerSandbox)...)
 		health.Warnings = append(health.Warnings, notificationSandboxWarnings(notificationSandbox)...)
+		// A database of an older schema cannot list its jobs by unit yet; the
+		// daemon checks the jobs once it has upgraded it.
+		if beyond, beyondErr := app.JobsBeyondHostCeiling(ctx, s, cfg.Scanner.MaxJobHostsValue()); beyondErr == nil {
+			if warning := app.HostCeilingWarning(beyond, cfg.Scanner.MaxJobHostsValue()); warning != "" {
+				health.Warnings = append(health.Warnings, warning)
+			}
+		}
 		// The daemon records the outcome of its scheduled backups beside the
 		// database. A failed backup is a warning: monitoring keeps running.
 		backups, backupErr := app.ReadBackupStatus(cfg, time.Now().UTC())
@@ -725,13 +737,25 @@ func runComponent(errCh chan<- error, logger *slog.Logger, name string, fn func(
 	errCh <- fn()
 }
 
+// terminationSignals are the signals that stop a command. A hangup counts:
+// a scan command whose terminal goes away cancels its scan, which stops the
+// scanner's process group, rather than leaving the scanner probing. A process
+// started with hangups ignored, such as by nohup, keeps ignoring them.
+func terminationSignals() []os.Signal {
+	signals := []os.Signal{os.Interrupt, syscall.SIGTERM}
+	if !signal.Ignored(syscall.SIGHUP) {
+		signals = append(signals, syscall.SIGHUP)
+	}
+	return signals
+}
+
 // contextWithSignals cancels on the first termination signal and reserves a
 // second signal for an immediate process exit. The watcher is explicitly
 // stoppable so commands that finish without a signal do not leak a goroutine.
 func contextWithSignals(parent context.Context) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(parent)
 	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(signals, terminationSignals()...)
 	stop := make(chan struct{})
 	watcherDone := make(chan struct{})
 	var stopOnce sync.Once
@@ -789,6 +813,18 @@ type healthReport struct {
 	ScannerSandbox      sandbox.Status    `json:"scanner_sandbox"`
 	NotificationSandbox sandbox.Status    `json:"notification_sandbox"`
 	Backups             *app.BackupStatus `json:"backups,omitempty"`
+}
+
+// scannerTemporaryDirectory is where the daemon and the scan command keep the
+// private files of scans: tmp/scanner beside the database, in the data
+// directory that no confined scanner can reach, whatever TMPDIR names. An
+// in-memory database has no directory, so its scans use the system's
+// temporary directory.
+func scannerTemporaryDirectory(s *store.Store) string {
+	if s.FilePath() == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(s.FilePath()), "tmp", "scanner")
 }
 
 // scannerSandboxOptions describes the configured sandbox and the scanner

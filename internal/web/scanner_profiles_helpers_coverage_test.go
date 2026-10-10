@@ -61,9 +61,19 @@ func TestScannerProfileJSONShapesAndCapabilities(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &capabilities); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := capabilities["engines"]; !ok {
+	if _, ok := capabilities["engines"]; !ok || capabilities["max_job_hosts"] != float64(config.DefaultMaxJobHosts) {
 		t.Fatalf("capabilities response = %#v", capabilities)
 	}
+	// The deployment's scanner.max_job_hosts is reported for the editor's
+	// warning.
+	ceiling := 1024
+	server.App.Config.Scanner.MaxJobHosts = &ceiling
+	recorder = httptest.NewRecorder()
+	server.scannerCapabilities(recorder, request)
+	if err := json.Unmarshal(recorder.Body.Bytes(), &capabilities); err != nil || capabilities["max_job_hosts"] != float64(1024) {
+		t.Fatalf("capabilities with a ceiling = %#v, %v", capabilities, err)
+	}
+	server.App.Config.Scanner.MaxJobHosts = nil
 	// The route accepts the session argument for symmetry with other scanner
 	// profile handlers; ensure a real profile listing can be serialized too.
 	list := httptest.NewRecorder()

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os/signal"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -43,4 +45,17 @@ func TestContextWithSignalsCleanupStopsWatcher(t *testing.T) {
 		t.Fatal("context was not cancelled")
 	}
 	cleanup()
+}
+
+func TestTerminationSignalsIncludeAHangupUnlessIgnored(t *testing.T) {
+	t.Parallel()
+	hangup := false
+	for _, received := range terminationSignals() {
+		if received == syscall.SIGHUP {
+			hangup = true
+		}
+	}
+	if hangup == signal.Ignored(syscall.SIGHUP) {
+		t.Fatalf("termination signals %v include a hangup = %v, while hangups are ignored = %v", terminationSignals(), hangup, signal.Ignored(syscall.SIGHUP))
+	}
 }

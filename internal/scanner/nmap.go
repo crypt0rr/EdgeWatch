@@ -44,6 +44,27 @@ type Nmap struct {
 	targetExclusions []*net.IPNet
 	// sandbox confines scan processes. Nil starts them unconfined.
 	sandbox *sandbox.Policy
+	// workDir holds the private files of scans, and workDirLock keeps it
+	// from being removed as stale. Empty uses the system's temporary
+	// directory.
+	workDir     string
+	workDirLock *os.File
+	// maxJobHosts is scanner.max_job_hosts; see SetMaxJobHosts.
+	maxJobHosts int
+}
+
+// SetMaxJobHosts installs scanner.max_job_hosts, the most addresses the
+// targets of one job may expand to whatever the job allows. Zero, the
+// default, is config.DefaultMaxJobHosts.
+func (n *Nmap) SetMaxJobHosts(limit int) {
+	n.maxJobHosts = limit
+}
+
+func (n *Nmap) jobHostCeiling() int {
+	if n.maxJobHosts > 0 {
+		return n.maxJobHosts
+	}
+	return config.DefaultMaxJobHosts
 }
 
 // SetSandbox installs the policy that confines Nmap and Naabu scan
@@ -225,6 +246,11 @@ type resolvedTarget struct {
 	Addresses        []string
 	Aggregate        bool
 	Hostname         bool
+	// network marks a target that stands for one literal target per
+	// address, named by the address: every address of the CIDR that
+	// ConfiguredTarget and Name hold. A scan of the network target's
+	// addresses observes them exactly as it observes those literal targets.
+	network bool
 }
 
 // nmapBatchSize bounds one command's target list while avoiding one process
@@ -301,18 +327,22 @@ const maxVersionProbeOutput = 64 << 10
 func runScannerVersionProbe(ctx context.Context, path string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = append([]string(nil), scannerProbeEnv...)
+	startInProcessGroup(cmd, false)
 	var stdout, stderr cappedBuffer
 	var exceeded atomic.Bool
 	kill := func() {
-		if exceeded.CompareAndSwap(false, true) && cmd.Process != nil {
-			_ = cmd.Process.Kill()
+		if exceeded.CompareAndSwap(false, true) {
+			_ = stopProcessGroup(cmd)
 		}
 	}
 	stdout = cappedBuffer{limit: maxVersionProbeOutput, onExceeded: kill}
 	stderr = cappedBuffer{limit: maxVersionProbeOutput, onExceeded: kill}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err := cmd.Start()
+	if err == nil {
+		err = waitProcessGroup(cmd)
+	}
 	if exceeded.Load() || stdout.exceeded || stderr.exceeded {
 		return nil, fmt.Errorf("scanner version output exceeded %d bytes", maxVersionProbeOutput)
 	}
@@ -603,9 +633,22 @@ func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, e
 // when at least one configured target still resolves; exclusions, expansion
 // limits, and cancellation remain fatal.
 func (n *Nmap) resolvePartial(ctx context.Context, job config.Job) ([]resolvedTarget, []targetResolutionFailure, error) {
+	return n.resolveTargets(ctx, job, false)
+}
+
+// resolveTargets is resolvePartial. With groupNetworks, it pins a CIDR as one
+// network target that holds every address of the CIDR, rather than as one
+// target per address, which takes a third of the memory.
+func (n *Nmap) resolveTargets(ctx context.Context, job config.Job, groupNetworks bool) ([]resolvedTarget, []targetResolutionFailure, error) {
 	var out []resolvedTarget
 	var failures []targetResolutionFailure
 	count := 0
+	// The deployment's scanner.max_job_hosts caps every job, whatever its
+	// own max_expanded_hosts allows.
+	limit, setting := job.MaxExpandedHosts, fmt.Sprintf("max_expanded_hosts=%d", job.MaxExpandedHosts)
+	if ceiling := n.jobHostCeiling(); limit > ceiling {
+		limit, setting = ceiling, fmt.Sprintf("scanner.max_job_hosts=%d", ceiling)
+	}
 	for _, input := range job.Targets {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
@@ -616,13 +659,17 @@ func (n *Nmap) resolvePartial(ctx context.Context, job config.Job) ([]resolvedTa
 				return nil, nil, ConfigurationError(fmt.Errorf("target %s is excluded by scanner.target_exclusions (%s)", raw, exclusion))
 			}
 			count++
-			if count > job.MaxExpandedHosts {
-				return nil, nil, ConfigurationError(fmt.Errorf("expanded targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts))
+			if count > limit {
+				return nil, nil, ConfigurationError(fmt.Errorf("expanded targets exceed %s", setting))
 			}
 			out = append(out, resolvedTarget{Name: ip.String(), ConfiguredTarget: raw, Addresses: []string{ip.String()}})
 			continue
 		}
 		if ip, network, err := net.ParseCIDR(raw); err == nil {
+			group := len(out)
+			if groupNetworks {
+				out = append(out, resolvedTarget{Name: raw, ConfiguredTarget: raw, network: true})
+			}
 			for current := ip.Mask(network.Mask); network.Contains(current); incrementIP(current) {
 				if err := ctx.Err(); err != nil {
 					return nil, nil, err
@@ -631,10 +678,14 @@ func (n *Nmap) resolvePartial(ctx context.Context, job config.Job) ([]resolvedTa
 					return nil, nil, ConfigurationError(fmt.Errorf("target %s includes excluded address %s (%s)", raw, current.String(), exclusion))
 				}
 				count++
-				if count > job.MaxExpandedHosts {
-					return nil, nil, ConfigurationError(fmt.Errorf("expanded targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts))
+				if count > limit {
+					return nil, nil, ConfigurationError(fmt.Errorf("expanded targets exceed %s", setting))
 				}
 				value := current.String()
+				if groupNetworks {
+					out[group].Addresses = append(out[group].Addresses, value)
+					continue
+				}
 				out = append(out, resolvedTarget{Name: value, ConfiguredTarget: raw, Addresses: []string{value}})
 			}
 			continue
@@ -671,8 +722,8 @@ func (n *Nmap) resolvePartial(ctx context.Context, job config.Job) ([]resolvedTa
 			continue
 		}
 		count += len(addresses)
-		if count > job.MaxExpandedHosts {
-			return nil, nil, ConfigurationError(fmt.Errorf("resolved targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts))
+		if count > limit {
+			return nil, nil, ConfigurationError(fmt.Errorf("resolved targets exceed %s", setting))
 		}
 		sort.Strings(addresses)
 		out = append(out, resolvedTarget{Name: strings.ToLower(raw), ConfiguredTarget: strings.ToLower(raw), Addresses: addresses, Aggregate: true, Hostname: true})
@@ -845,7 +896,7 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 			}
 			var lastOutput string
 			lastFraction := 0.0
-			stdout, stderr, err := runNmapInvocation(ctx, cmd, n.sandbox, func(line string, fraction float64) {
+			stdout, stderr, err := runNmapInvocation(ctx, cmd, n.sandbox, n.workDir, func(line string, fraction float64) {
 				lastOutput = line
 				if fraction > lastFraction {
 					lastFraction = fraction
@@ -1219,9 +1270,15 @@ func sanitizeStderr(v string) string {
 // emits its periodic status stream when stdout is a terminal, even when
 // --stats-every is supplied. Run the fixed child under a private pseudo-terminal
 // so the daemon receives the same supported progress stream as an interactive
-// operator, while XML remains file-backed and bounded.
-func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, policy *sandbox.Policy, onOutput func(string, float64), onHeartbeat func()) ([]byte, string, error) {
-	xmlPath, releaseXML, err := prepareNmapXMLOutput(cmd, policy)
+// operator, while XML remains file-backed and bounded. The XML file is created
+// in dir, or in the system's temporary directory when dir is empty.
+//
+// The child leads a process group of its own. Cancellation, an exceeded
+// output bound, and the child's own exit stop every process in that group,
+// and the invocation then waits at most scannerWaitDelay for the child's
+// stderr and terminal to close, and fails when either is still held.
+func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, policy *sandbox.Policy, dir string, onOutput func(string, float64), onHeartbeat func()) ([]byte, string, error) {
+	xmlPath, releaseXML, err := prepareNmapXMLOutput(cmd, policy, dir)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1253,57 +1310,71 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, policy *sandbox.Polic
 		defer callbackMu.Unlock()
 		onHeartbeat()
 	}
-	var outputExceeded atomic.Bool
-	killOnOutputLimit := func() {
-		if outputExceeded.CompareAndSwap(false, true) && cmd.Process != nil {
-			_ = cmd.Process.Kill()
+	// xmlExceeded records that the XML, in its file or on stdout, exceeded
+	// maxNmapOutput, and stops the child.
+	var xmlExceeded atomic.Bool
+	stopForXML := func() {
+		if xmlExceeded.CompareAndSwap(false, true) {
+			_ = stopProcessGroup(cmd)
 		}
 	}
-	// The terminal stream is diagnostic output, not the structured result. Keep
-	// it bounded for the fallback path used by older/test scanner binaries and
-	// emit only human-readable lines; XML fragments printed by a compatibility
-	// binary must never replace the last useful progress detail.
-	stdout := &progressOutputWriter{limit: maxProgressOutput, onExceeded: killOnOutputLimit, emit: func(line string) {
+	// While Nmap writes its XML to the file, the terminal stream is only a
+	// progress hint, and it grows with the scan's duration: it has no
+	// cumulative bound. The writer keeps the start of the stream, for
+	// compatibility binaries that print their XML instead of writing the file,
+	// drops it once it exceeds maxProgressOutput, and keeps passing complete
+	// lines on. Without the file the stream is the XML, bounded like the file.
+	// Only human-readable lines reach the progress callback; XML fragments
+	// printed by a compatibility binary must never replace the last useful
+	// progress detail.
+	stdout := &progressOutputWriter{limit: maxProgressOutput, streaming: true, emit: func(line string) {
 		if looksLikeNmapXML(line) {
 			return
 		}
 		fraction, _ := parseNmapProgress(line)
 		emitOutput(line, fraction)
 	}}
-	stderr := &progressOutputWriter{limit: maxProgressOutput, onExceeded: killOnOutputLimit, emit: func(line string) {
+	if xmlPath == "" {
+		stdout.limit, stdout.streaming, stdout.onExceeded = maxNmapOutput, false, stopForXML
+	}
+	// Diagnostic output is not expected to grow with a scan's duration, so it
+	// keeps its cumulative bound and stops the child once it exceeds it.
+	stderr := &progressOutputWriter{limit: maxProgressOutput, onExceeded: func() { _ = stopProcessGroup(cmd) }, emit: func(line string) {
 		fraction, _ := parseNmapProgress(line)
 		emitOutput(line, fraction)
 	}}
 	cmd.Stderr = stderr
-	// pty.Start assigns the slave to stdin/stdout and sets it as the child's
-	// controlling terminal. Stderr intentionally remains our bounded writer so
-	// error diagnostics stay separate. If a non-Unix build cannot provide a
-	// pseudo-terminal, fall back to the existing pipe-based execution; the
-	// heartbeat still reports truthful liveness there.
-	originalStdin, originalSysProcAttr := cmd.Stdin, cmd.SysProcAttr
-	// Keep status records on one line so the parser receives a useful update
-	// even when a terminal implementation would otherwise report a zero-sized
-	// window (common in containers).
-	ptyMaster, ptyErr := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 256})
-	if ptyErr != nil {
-		// pty.Start may have populated the command's terminal fields before a
-		// platform-specific start error. Restore them before the compatibility
-		// path so a failed terminal setup cannot poison a normal invocation.
+	// The pseudo-terminal becomes the child's stdin, stdout, and controlling
+	// terminal. Stderr intentionally remains our bounded writer so error
+	// diagnostics stay separate. When no pseudo-terminal can be opened, such as
+	// without /dev/pts or once the system's terminals are used up, the child
+	// writes to the stdout writer through a pipe instead; the heartbeat still
+	// reports truthful liveness there. Keep status records on one line so the
+	// parser receives a useful update even when a terminal implementation would
+	// otherwise report a zero-sized window (common in containers).
+	master, terminal, terminalErr := openTerminal(&pty.Winsize{Rows: 24, Cols: 256})
+	if terminalErr == nil {
+		cmd.Stdin, cmd.Stdout = terminal, terminal
+	} else {
 		cmd.Stdout = stdout
-		cmd.Stdin = originalStdin
-		cmd.SysProcAttr = originalSysProcAttr
-		if startErr := ExecutableStartError(cmd.Path, ptyErr); IsConfigurationError(startErr) {
-			return nil, "", startErr
+	}
+	startInProcessGroup(cmd, terminalErr == nil)
+	startErr := cmd.Start()
+	if terminal != nil {
+		// The child has its own descriptor; the daemon reads the master only.
+		_ = terminal.Close()
+	}
+	if startErr != nil {
+		if master != nil {
+			_ = master.Close()
 		}
-		if err := cmd.Start(); err != nil {
-			return nil, "", ExecutableStartError(cmd.Path, err)
-		}
+		return nil, "", ExecutableStartError(cmd.Path, startErr)
 	}
 
 	terminalDone := make(chan struct{})
-	if ptyMaster != nil {
+	if master != nil {
 		go func() {
-			_, _ = io.Copy(stdout, ptyMaster)
+			_, _ = io.Copy(stdout, master)
 			close(terminalDone)
 		}()
 	} else {
@@ -1324,18 +1395,14 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, policy *sandbox.Polic
 				return
 			}
 			if exceeded, err := nmapXMLOutputExceeded(xmlPath, maxNmapOutput); err == nil && exceeded {
-				if outputExceeded.CompareAndSwap(false, true) && cmd.Process != nil {
-					// Stop the child before it can fill the container's tmpfs. The
-					// terminal path below reports a stable size-limit error rather
-					// than exposing a platform-specific ENOSPC message.
-					_ = cmd.Process.Kill()
-				}
+				// Stop the child before it can fill the scanner's temporary
+				// storage. The result below reports a stable size-limit error
+				// rather than exposing a platform-specific ENOSPC message.
+				stopForXML()
 				return
 			}
 			if err := pollNmapXMLProgress(xmlPath, progressParser, emitOutput); errors.Is(err, errNmapProgressOutputExceeded) {
-				if outputExceeded.CompareAndSwap(false, true) && cmd.Process != nil {
-					_ = cmd.Process.Kill()
-				}
+				stopForXML()
 			}
 		}
 		poll()
@@ -1353,14 +1420,26 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, policy *sandbox.Polic
 		}
 	}()
 
-	waitErr := cmd.Wait()
-	if ptyMaster != nil {
-		// Once the child closes the slave, Linux completes the master read with
-		// EIO. Drain that final terminal buffer before closing the master so XML
-		// fallback output from compatibility binaries cannot be lost.
-		<-terminalDone
-		_ = ptyMaster.Close()
-	} else {
+	outputDeadline, waitErr := waitProcessGroupUntil(cmd)
+	terminalHeld := false
+	if master != nil {
+		// Once every process holding the terminal has exited, Linux completes the
+		// master read with EIO. Drain that final terminal buffer before closing
+		// the master so XML fallback output from compatibility binaries cannot be
+		// lost. A process that left the child's process group can keep the
+		// terminal open, so stop reading at the deadline the child's stderr had.
+		drained := time.NewTimer(time.Until(outputDeadline))
+		select {
+		case <-terminalDone:
+		case <-drained.C:
+			select {
+			case <-terminalDone:
+			default:
+				terminalHeld = true
+			}
+		}
+		drained.Stop()
+		_ = master.Close()
 		<-terminalDone
 	}
 	close(progressStop)
@@ -1371,35 +1450,59 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, policy *sandbox.Polic
 	// as the child exited.
 	<-progressDone
 	structured := stdout.Bytes()
-	structuredExceeded := stdout.exceeded
+	terminalDropped := false
 	if xmlPath != "" {
 		if exceeded, err := nmapXMLOutputExceeded(xmlPath, maxNmapOutput); err == nil && exceeded {
-			outputExceeded.Store(true)
+			xmlExceeded.Store(true)
 		}
 		if err := pollNmapXMLProgress(xmlPath, progressParser, emitOutput); errors.Is(err, errNmapProgressOutputExceeded) {
-			outputExceeded.Store(true)
+			xmlExceeded.Store(true)
 		}
 		if data, exceeded, readErr := readCappedFile(xmlPath, maxNmapOutput); readErr == nil && len(data) > 0 {
 			structured = data
-			structuredExceeded = exceeded
+			if exceeded {
+				xmlExceeded.Store(true)
+			}
+		} else {
+			// Without an XML file only a compatibility binary's terminal output
+			// can carry the result, and none is left once it was dropped.
+			terminalDropped = stdout.overflowed()
 		}
 	}
-	if outputExceeded.Load() {
-		structuredExceeded = true
+	diagnostic := stderr.String()
+	waitErr = scannerWaitError("nmap", waitErr)
+	if stderr.overflowed() {
+		return structured, diagnostic, withWaitError(waitErr, fmt.Errorf("nmap diagnostic output exceeded %d bytes", maxProgressOutput))
 	}
-	if stderr.exceeded {
-		if waitErr != nil {
-			return structured, stderr.String(), fmt.Errorf("%w; nmap diagnostic output exceeded %d bytes", waitErr, maxProgressOutput)
-		}
-		return structured, stderr.String(), fmt.Errorf("nmap diagnostic output exceeded %d bytes", maxProgressOutput)
+	if xmlExceeded.Load() {
+		return structured, diagnostic, withWaitError(waitErr, fmt.Errorf("nmap XML output exceeded %d bytes", maxNmapOutput))
 	}
-	if structuredExceeded {
-		if waitErr != nil {
-			return structured, stderr.String(), fmt.Errorf("%w; nmap XML output exceeded %d bytes", waitErr, maxNmapOutput)
-		}
-		return structured, stderr.String(), fmt.Errorf("nmap XML output exceeded %d bytes", maxNmapOutput)
+	if terminalDropped {
+		return nil, diagnostic, withWaitError(waitErr, fmt.Errorf("nmap wrote no XML file, and its terminal output exceeded %d bytes", maxProgressOutput))
 	}
-	return structured, stderr.String(), scannerStorageError(waitErrWithContext(ctx, waitErr), stderr.String())
+	if terminalHeld && ctx.Err() == nil && waitErr == nil {
+		return structured, diagnostic, errors.New("nmap left a process holding its terminal open after it exited")
+	}
+	return structured, diagnostic, scannerStorageError(waitErrWithContext(ctx, waitErr), diagnostic)
+}
+
+// withWaitError reports err, which explains why the scanner was stopped,
+// after the wait error, which then only reports the signal.
+func withWaitError(waitErr, err error) error {
+	if waitErr != nil {
+		return fmt.Errorf("%w; %w", waitErr, err)
+	}
+	return err
+}
+
+// scannerWaitError explains exec.ErrWaitDelay, which a scanner that exited
+// normally reports when a process that left its process group still held its
+// output scannerWaitDelay later.
+func scannerWaitError(scanner string, err error) error {
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return fmt.Errorf("%s left a process holding its output open after it exited: %w", scanner, err)
+	}
+	return err
 }
 
 // scannerStorageError turns the platform-specific ENOSPC/diagnostic outcome
@@ -1428,19 +1531,20 @@ func nmapXMLOutputExceeded(path string, limit int) (bool, error) {
 }
 
 // prepareNmapXMLOutput redirects the internal "-oX -" destination emitted by
-// EdgeWatch's validated templates to a private file. User-defined argument
+// EdgeWatch's validated templates to a private file in dir, or in the
+// system's temporary directory when dir is empty. User-defined argument
 // arrays cannot provide alternate output destinations, so rewriting this
 // exact pair cannot broaden the scanner's command surface. It returns the
 // file's path, which the daemon reads, and a release function to call once
 // the process has exited. A confined Nmap cannot reach the temporary
 // directory, so it writes the file through an inherited write-only
 // descriptor.
-func prepareNmapXMLOutput(cmd *exec.Cmd, policy *sandbox.Policy) (string, func(), error) {
+func prepareNmapXMLOutput(cmd *exec.Cmd, policy *sandbox.Policy, dir string) (string, func(), error) {
 	for index := 0; index+1 < len(cmd.Args); index++ {
 		if cmd.Args[index] != "-oX" || cmd.Args[index+1] != "-" {
 			continue
 		}
-		file, err := os.CreateTemp("", "edgewatch-nmap-*.xml")
+		file, err := os.CreateTemp(dir, "edgewatch-nmap-*.xml")
 		if err != nil {
 			return "", nil, fmt.Errorf("create nmap progress file: %w", err)
 		}
@@ -1609,39 +1713,47 @@ func pollNmapXMLProgress(path string, parser *nmapXMLProgressParser, emit func(s
 // lifecycle while still exposing complete diagnostic lines to the progress
 // callback. It accepts both newline-delimited pipe output and carriage-return
 // terminal updates, which Nmap uses when refreshing an interactive status line.
+// It retains at most limit bytes of the stream. Once the stream exceeds limit,
+// the writer stops retaining and passing on anything, unless streaming is
+// set: then it drops what it retained and keeps passing complete lines on.
 type progressOutputWriter struct {
 	mu         sync.Mutex
 	all        strings.Builder
 	pending    strings.Builder
 	limit      int
+	streaming  bool
 	exceeded   bool
 	onExceeded func()
 	exceedOnce sync.Once
 	emit       func(string)
 }
 
+// maxProgressLine bounds the unterminated line a progressOutputWriter keeps
+// while it waits for the line's end; a longer line is passed on as it is.
+const maxProgressLine = 64 << 10
+
 func (w *progressOutputWriter) Write(data []byte) (int, error) {
 	trigger := false
 	w.mu.Lock()
 	accepted := data
-	if w.limit > 0 {
+	if w.limit > 0 && (!w.streaming || !w.exceeded) {
 		remaining := w.limit - w.all.Len()
-		if remaining <= 0 {
-			accepted = nil
+		if remaining <= 0 || len(accepted) > remaining {
 			if !w.exceeded {
 				trigger = true
 			}
 			w.exceeded = true
-		} else if len(accepted) > remaining {
-			accepted = accepted[:remaining]
-			if !w.exceeded {
-				trigger = true
+			if w.streaming {
+				w.all.Reset()
+			} else {
+				accepted = accepted[:max(remaining, 0)]
 			}
-			w.exceeded = true
 		}
 	}
 	if len(accepted) > 0 {
-		_, _ = w.all.Write(accepted)
+		if !w.exceeded || !w.streaming {
+			_, _ = w.all.Write(accepted)
+		}
 		_, _ = w.pending.Write(accepted)
 	}
 	lines := w.takeLinesLocked()
@@ -1655,6 +1767,13 @@ func (w *progressOutputWriter) Write(data []byte) (int, error) {
 		}
 	}
 	return len(data), nil
+}
+
+// overflowed reports whether the stream exceeded the writer's limit.
+func (w *progressOutputWriter) overflowed() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.exceeded
 }
 
 func (w *progressOutputWriter) Flush() {
@@ -1698,6 +1817,10 @@ func (w *progressOutputWriter) takeLinesLocked() []string {
 		if delimiter == '\r' && strings.HasPrefix(value, "\n") {
 			value = value[1:]
 		}
+	}
+	if w.pending.Len() > maxProgressLine {
+		lines = append(lines, w.pending.String())
+		w.pending.Reset()
 	}
 	return lines
 }

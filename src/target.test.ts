@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { cidrWarning, duplicateTarget, targetKind } from './target'
+import { cidrWarning, duplicateTarget, hostCeilingWarning, targetHosts, targetKind } from './target'
 
 describe('target helpers', () => {
   it('detects IP, CIDR, and DNS rows', () => {
@@ -23,6 +23,22 @@ describe('target helpers', () => {
     expect(cidrWarning('10.0.0.0/8')).toContain('many hosts')
     expect(cidrWarning('10.0.0.0/not-a-prefix')).toContain('Check the CIDR')
     expect(cidrWarning('10.0.0.1')).toBe('')
+  })
+
+  it('counts the hosts a target expands to', () => {
+    expect(targetHosts('10.0.0.0/16')).toBe(65_536)
+    expect(targetHosts('2001:db8::/120')).toBe(256)
+    expect(targetHosts('192.0.2.1')).toBe(1)
+    expect(targetHosts('router.example.com')).toBe(1)
+    expect(targetHosts('10.0.0.0/not-a-prefix')).toBe(0)
+    expect(targetHosts('10.0.0.0/33')).toBe(0)
+    expect(targetHosts('not a target')).toBe(0)
+  })
+
+  it('warns when targets expand beyond the deployment host ceiling', () => {
+    expect(hostCeilingWarning(['10.0.0.0/16'], 65_536)).toBe('')
+    expect(hostCeilingWarning(['10.0.0.0/16', '192.0.2.1'], 65_536)).toContain('more than the 65,536 hosts that one job may scan in this deployment (scanner.max_job_hosts)')
+    expect(hostCeilingWarning(['10.0.0.0/8'], undefined)).toBe('')
   })
 
   it('finds case-insensitive duplicate rows', () => {

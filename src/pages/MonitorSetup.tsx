@@ -8,7 +8,7 @@ import type { Job, JobForm, JobPreview, Protocol } from '../types'
 import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { NotificationDestinationCreateForm } from '../components/NotificationDestinationCreateForm'
-import { cidrWarning, duplicateTarget, targetKind } from '../target'
+import { cidrWarning, duplicateTarget, hostCeilingWarning, targetKind } from '../target'
 import { formatDateTime, getDisplayTimeZone } from '../format'
 import { cloneProtocol, defaultTCP, defaultUDP, payloadFromCreationDraft, presetFor } from '../job-form'
 import { useJobCreationDraft } from '../job-creation-draft'
@@ -411,6 +411,7 @@ export function MonitorSetup() {
           </div>)}</div>
           <button type="button" className="text-button add-target" onClick={() => updateTargets([...draft.targets, ''])}>＋ Add target</button>
           {draft.targets.some(value => cidrWarning(value)) && <div className="notice warning"><TriangleAlert size={16} /><span>{draft.targets.map(cidrWarning).find(Boolean)}</span></div>}
+          {hostCeilingWarning(draft.targets, capabilities.data?.max_job_hosts) && <div className="notice warning" role="status"><TriangleAlert size={16} /><span>{hostCeilingWarning(draft.targets, capabilities.data?.max_job_hosts)}</span></div>}
           {fieldError && (fieldError.includes('Target') || fieldError.startsWith('Add at least')) && <small className="field-error" role="alert">{fieldError}</small>}
         </div>
         <label className="inline-field">Maximum expanded hosts <span className="input-suffix"><input type="number" min={1} max={1000000} value={draft.fields.max_expanded_hosts} onChange={event => updateFields({ max_expanded_hosts: Number(event.currentTarget.value) })} /><em>hosts</em></span><small className="helper">This limit protects the host from accidentally wide CIDR ranges.</small></label>

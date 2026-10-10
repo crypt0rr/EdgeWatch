@@ -82,6 +82,13 @@ func TestScannerProfilesRouteLifecycleAndValidationBranches(t *testing.T) {
 	if got := scannerProfileRequest(server, admin, http.MethodPost, "validate", `{"engine":"invalid"}`); got.Code != http.StatusBadRequest {
 		t.Fatalf("invalid validate status = %d", got.Code)
 	}
+	// Validating a definition applies the rules of a new profile: NSE
+	// arguments must be the script's own.
+	for _, endpoint := range []string{"validate", createdJSON.ID + "/validate"} {
+		if got := scannerProfileRequest(server, admin, http.MethodPost, endpoint, `{"engine":"nmap","nse_profile":"banner","nse_args":{"newtargets":"1"}}`); got.Code != http.StatusBadRequest || !strings.Contains(got.Body.String(), "nse_args") {
+			t.Fatalf("%s with a library NSE argument = %d: %s", endpoint, got.Code, got.Body.String())
+		}
+	}
 
 	if got := scannerProfileRequest(server, admin, http.MethodPut, createdJSON.ID, `{"name":"missing revision","engine":"nmap","password":"administrator password"}`); got.Code != http.StatusBadRequest {
 		t.Fatalf("missing revision status = %d", got.Code)

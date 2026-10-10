@@ -212,6 +212,21 @@ Providing either replaces them. Responses remain write-only and contain
 provider metadata, never the URL or fields. Existing clients can continue to
 send `url` unchanged.
 
+## Job and scanner profile limits
+
+`GET /api/v1/scanner/capabilities` includes `max_job_hosts` from v0.36.0: the
+deployment's `scanner.max_job_hosts`, the most addresses the targets of one
+job may expand to when it scans. The console warns while editing targets that
+expand to more. A job's `max_expanded_hosts` keeps its range of 1 to
+1,000,000; a scan of a job whose targets expand beyond `max_job_hosts` fails;
+see [Scanning](/user-guide/scanning/#nmap-or-naabu-to-nmap).
+
+From v0.36.0, creating, updating, or validating a scanner profile refuses
+`nse_args` keys other than the selected script's own and values with a comma
+or a quote, with an `nse_args` field error; see
+[NSE scripts](/user-guide/scanning/#nse-scripts). Reading a profile, its
+revisions, or a job pinned to an existing revision is unchanged.
+
 ## Session capabilities
 
 `POST /api/v1/auth/login` and `GET /api/v1/auth/session` include

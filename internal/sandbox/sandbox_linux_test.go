@@ -64,7 +64,7 @@ func TestDetectEnforcesWithTheContainerNetworkCapabilities(t *testing.T) {
 	if !policy.Enforced() || !policy.Restricted() {
 		t.Fatalf("policy = %+v, want enforced", policy.Status())
 	}
-	want := Status{Mode: ModeAuto, State: StateEnforced, UID: UID, GID: GID, ProcessUID: UID, Capabilities: []string{"NET_RAW"}, NoNewPrivileges: true, Landlock: enforcedLandlock, Seccomp: SeccompStatus{State: StateEnforced}}
+	want := Status{Mode: ModeAuto, State: StateEnforced, UID: UID, GID: GID, ProcessUID: UID, Capabilities: []string{"NET_RAW"}, NoNewPrivileges: true, Landlock: enforcedLandlock, Seccomp: SeccompStatus{State: StateEnforced}, Limits: &ProcessLimits{OOMScoreAdj: ScannerOOMScoreAdj, MaxOpenFiles: ScannerMaxOpenFiles}}
 	if got := policy.Status(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("status = %+v, want %+v", got, want)
 	}
@@ -372,6 +372,24 @@ func TestConfineStartsTheProgramThroughSandboxExec(t *testing.T) {
 		t.Fatalf("notification process = %q, want %q", notifier.Args, want)
 	}
 
+	// A scanner that keeps temporary files, Naabu, may create them below
+	// /tmp; the notification process never may.
+	naabu := exec.Command("/bin/true", "-list", "/dev/fd/3")
+	NewEnforced(unix.CAP_NET_RAW).WithLandlock(helper, 6).WithSeccomp().ConfineWithTemporaryFiles(naabu)
+	if want := []string{helper, ExecCommand, "--profile", "scanner", "--files", "0", "--tmp", "--seccomp", "--", "/bin/true", "-list", "/dev/fd/3"}; !reflect.DeepEqual(naabu.Args, want) {
+		t.Fatalf("scanner with temporary files = %q, want %q", naabu.Args, want)
+	}
+	notifierTemporary := exec.Command("/bin/true", "notify-send")
+	NewEnforcedFor(Notifier).WithLandlock(helper, 6).ConfineWithTemporaryFiles(notifierTemporary)
+	if want := []string{helper, ExecCommand, "--profile", "notifier", "--files", "0", "--", "/bin/true", "notify-send"}; !reflect.DeepEqual(notifierTemporary.Args, want) {
+		t.Fatalf("notification process with temporary files = %q, want %q", notifierTemporary.Args, want)
+	}
+	identityOnly := exec.Command("/bin/true")
+	NewEnforced(unix.CAP_NET_RAW).ConfineWithTemporaryFiles(identityOnly)
+	if identityOnly.Path != "/bin/true" || identityOnly.SysProcAttr == nil || identityOnly.SysProcAttr.Credential.Uid != UID {
+		t.Fatalf("identity-only scanner with temporary files = %q %+v", identityOnly.Args, identityOnly.SysProcAttr)
+	}
+
 	// Without the confined identity, Landlock alone restricts the process.
 	alone := exec.Command("/bin/true")
 	(*Policy)(nil).WithLandlock(helper, 6).Confine(alone)
@@ -391,6 +409,37 @@ func TestConfineStartsTheProgramThroughSandboxExec(t *testing.T) {
 	policy.Confine(failed)
 	if failed.Path == helper {
 		t.Fatal("a command that cannot start was wrapped")
+	}
+}
+
+func TestLandlockReportsTheScannerLimits(t *testing.T) {
+	t.Parallel()
+	want := ProcessLimits{OOMScoreAdj: ScannerOOMScoreAdj, MaxOpenFiles: ScannerMaxOpenFiles}
+	for name, policy := range map[string]*Policy{
+		"identity and Landlock": NewEnforced(unix.CAP_NET_RAW).WithLandlock("/usr/local/bin/edgewatch", 6),
+		"Landlock only":         (*Policy)(nil).WithLandlock("/usr/local/bin/edgewatch", 6),
+		"with seccomp":          NewEnforced().WithLandlock("/usr/local/bin/edgewatch", 6).WithSeccomp(),
+	} {
+		status := policy.Status()
+		if status.Limits == nil || *status.Limits != want {
+			t.Fatalf("%s: limits = %+v, want %+v", name, status.Limits, want)
+		}
+		// The status is a copy.
+		status.Limits.OOMScoreAdj = 0
+		if policy.Status().Limits.OOMScoreAdj != ScannerOOMScoreAdj {
+			t.Fatalf("%s: changing a status changed the policy", name)
+		}
+	}
+	// Without Landlock nothing sets them, and the notification process keeps
+	// its own.
+	for name, policy := range map[string]*Policy{
+		"identity only": NewEnforced(unix.CAP_NET_RAW),
+		"notifier":      NewEnforcedFor(Notifier).WithLandlock("/usr/local/bin/edgewatch", 6),
+		"nil":           nil,
+	} {
+		if limits := policy.Status().Limits; limits != nil {
+			t.Fatalf("%s: limits = %+v, want none", name, limits)
+		}
 	}
 }
 

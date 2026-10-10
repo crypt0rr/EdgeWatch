@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -99,13 +100,32 @@ func (e *VerificationError) Error() string {
 	return strings.Join(parts, "; ")
 }
 
+// The SQLite consistency checks that verification runs. integrity_check
+// reads every page and checks every index; quick_check skips the comparison
+// of each index with its table, which makes it much faster on a large
+// database while still finding damaged pages.
+const (
+	IntegrityCheck = "integrity_check"
+	QuickCheck     = "quick_check"
+)
+
 // Verify runs SQLite's full integrity and foreign-key checks against the
 // read-only connection. It intentionally does not mutate the database, making
 // it safe to use against a live daemon or immediately after restoring a
 // backup. Using the reader also prevents a diagnostic command from consuming
 // the single writer connection while a scan is committing.
 func (s *Store) Verify(ctx context.Context) (DatabaseVerification, error) {
+	return s.verify(ctx, IntegrityCheck)
+}
+
+// verify is Verify with the consistency check to run, IntegrityCheck or
+// QuickCheck. Both put their result in IntegrityCheck, which is "ok" for a
+// database without damage.
+func (s *Store) verify(ctx context.Context, check string) (DatabaseVerification, error) {
 	result := DatabaseVerification{ForeignKeyViolations: []ForeignKeyViolation{}, FTSBackfill: []FTSBackfillProgress{}}
+	if check != IntegrityCheck && check != QuickCheck {
+		return result, fmt.Errorf("unknown database check %q", check)
+	}
 	if s == nil || s.DB == nil {
 		return result, errors.New("database is not open")
 	}
@@ -122,7 +142,7 @@ func (s *Store) Verify(ctx context.Context) (DatabaseVerification, error) {
 		return result, err
 	}
 	result.AutoVacuum = autoVacuumModeName(autoVacuum)
-	if err := reader.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&result.IntegrityCheck); err != nil {
+	if err := reader.QueryRowContext(ctx, `PRAGMA `+check).Scan(&result.IntegrityCheck); err != nil {
 		return result, err
 	}
 	rows, err := reader.QueryContext(ctx, `PRAGMA foreign_key_check`)
@@ -209,37 +229,71 @@ func detectEdgeWatchSchema(ctx context.Context, queryer interface {
 	return valid != 0
 }
 
-// Backup creates a consistent single-file SQLite snapshot while the store is
-// live. VACUUM INTO reads one SQLite snapshot (including WAL content), writes
-// to a private temporary directory, and atomically renames the completed file
-// into place. Existing destination files are refused to avoid accidental
-// overwrites; operators can choose a new timestamped path instead.
+// BackupOptions selects the check that a backup passes before it is
+// published.
+type BackupOptions struct {
+	// FullIntegrityCheck runs SQLite's integrity_check on the new file
+	// instead of the faster quick_check. Its time grows with the size of the
+	// database.
+	FullIntegrityCheck bool
+}
+
+// BackupResult describes a published backup and the checks that it passed:
+// the SQLite consistency check named by Check, the foreign-key check, and the
+// EdgeWatch schema detection that a restore also runs.
+type BackupResult struct {
+	Path          string `json:"path"`
+	Bytes         int64  `json:"bytes"`
+	SchemaVersion int    `json:"schema_version"`
+	// Check is the consistency check that the backup passed, QuickCheck or
+	// IntegrityCheck, and IntegrityCheck its result, which is always "ok".
+	Check                string `json:"check"`
+	IntegrityCheck       string `json:"integrity_check"`
+	ForeignKeyViolations int    `json:"foreign_key_violations"`
+}
+
+// Backup creates a verified backup with BackupWithOptions and its default
+// quick_check, and returns the published path.
 func (s *Store) Backup(ctx context.Context, output string) (string, error) {
+	result, err := s.BackupWithOptions(ctx, output, BackupOptions{})
+	return result.Path, err
+}
+
+// BackupWithOptions creates a consistent single-file SQLite snapshot while
+// the store is live. VACUUM INTO reads one SQLite snapshot (including WAL
+// content) and writes it to a private temporary directory. The new file is
+// then checked as a restore would check it: a SQLite consistency check, the
+// foreign-key check, and the schema detection. Only a file that passes is
+// published, atomically, under output, so a failed check leaves nothing
+// there. Existing destination files are refused to avoid accidental
+// overwrites; operators can choose a new timestamped path instead.
+func (s *Store) BackupWithOptions(ctx context.Context, output string, options BackupOptions) (BackupResult, error) {
+	var result BackupResult
 	if s == nil || s.DB == nil {
-		return "", errors.New("database is not open")
+		return result, errors.New("database is not open")
 	}
 	path, err := filepath.Abs(filepath.Clean(strings.TrimSpace(output)))
 	if err != nil {
-		return "", err
+		return result, err
 	}
 	if strings.TrimSpace(output) == "" || path == "." {
-		return "", errors.New("backup output path is required")
+		return result, errors.New("backup output path is required")
 	}
 	current := ""
 	if !isSQLiteMemoryPath(s.Path) {
 		current, err = sqliteArtifactPath(s.Path)
 		if err != nil {
-			return "", err
+			return result, err
 		}
 		current, err = filepath.Abs(filepath.Clean(current))
 		if err != nil {
-			return "", err
+			return result, err
 		}
 	}
 	// Refuse the database and all SQLite sidecars. A sidecar destination could
 	// otherwise corrupt a live database even though VACUUM INTO itself is safe.
 	if current != "" && (path == current || strings.HasPrefix(path, current+"-")) {
-		return "", errors.New("backup output must be different from the SQLite database and its sidecars")
+		return result, errors.New("backup output must be different from the SQLite database and its sidecars")
 	}
 	// VACUUM INTO obtains a consistent snapshot, but it still holds a read
 	// transaction for the duration of the copy. Run it through an independent
@@ -251,17 +305,162 @@ func (s *Store) Backup(ctx context.Context, output string) (string, error) {
 	if !isSQLiteMemoryPath(s.Path) {
 		sourceStore, err = OpenExistingContext(ctx, s.Path)
 		if err != nil {
-			return "", fmt.Errorf("open SQLite backup source: %w", err)
+			return result, fmt.Errorf("open SQLite backup source: %w", err)
 		}
 		backupSource = sourceStore
 		defer sourceStore.Close()
 	}
-	return AtomicWriteFile(path, ".edgewatch-backup-", func(tempPath string) error {
+	check := QuickCheck
+	if options.FullIntegrityCheck {
+		check = IntegrityCheck
+	}
+	// The private modes are set, and the checks run, on the temporary file
+	// inside the private directory, before it is published. Nothing is done
+	// to the published path afterwards: SQLite sidecar names next to it
+	// belong to whatever else uses that directory, never to this backup.
+	path, err = AtomicWriteFile(path, ".edgewatch-backup-", func(tempPath string) error {
 		if _, err := backupSource.DB.ExecContext(ctx, `VACUUM INTO ?`, tempPath); err != nil {
 			return fmt.Errorf("create SQLite backup: %w", err)
 		}
-		return enforcePrivateSQLiteArtifacts(tempPath)
-	}, func(finalPath string) error {
-		return enforcePrivateSQLiteArtifacts(finalPath)
-	})
+		if err := enforcePrivateSQLiteArtifacts(tempPath); err != nil {
+			return err
+		}
+		verification, err := verifyDatabaseFile(ctx, tempPath, check)
+		result.SchemaVersion = verification.SchemaVersion
+		if err != nil {
+			return fmt.Errorf("verify SQLite backup: %w", err)
+		}
+		info, err := os.Stat(tempPath)
+		if err != nil {
+			return err
+		}
+		result.Bytes = info.Size()
+		result.Check, result.IntegrityCheck = check, verification.IntegrityCheck
+		result.ForeignKeyViolations = len(verification.ForeignKeyViolations)
+		return nil
+	}, nil)
+	if err != nil {
+		return BackupResult{SchemaVersion: result.SchemaVersion}, err
+	}
+	result.Path = path
+	return result, nil
+}
+
+// verifyDatabaseFile opens the database file at path read-only and runs the
+// verification checks with the consistency check named by check.
+func verifyDatabaseFile(ctx context.Context, path, check string) (DatabaseVerification, error) {
+	reader, err := OpenReadOnlyExistingContext(ctx, path)
+	if err != nil {
+		return DatabaseVerification{ForeignKeyViolations: []ForeignKeyViolation{}, FTSBackfill: []FTSBackfillProgress{}}, err
+	}
+	verification, err := reader.verify(ctx, check)
+	return verification, errors.Join(err, reader.Close())
+}
+
+// BackupFileOptions controls VerifyBackupFile.
+type BackupFileOptions struct {
+	// LiveDatabase is the configured database, which VerifyBackupFile
+	// refuses to copy: the live file and its sidecars change while the
+	// daemon runs, and Verify checks it in place.
+	LiveDatabase string
+	// InspectStaged and AllowKeyMismatch check the configured keys against
+	// the private copy as a restore does; see RestoreOptions.
+	InspectStaged    StagedInspection
+	AllowKeyMismatch bool
+}
+
+// BackupFileVerification is the report of VerifyBackupFile. Valid reports
+// whether the file passed every check that a restore runs on its source:
+// the SQLite header, no sidecars, the consistency and foreign-key checks,
+// a supported EdgeWatch schema, and, when requested, the key check. The
+// checks of the restore destination, such as its daemon lease, do not
+// apply. Error is the reason of a failed check.
+type BackupFileVerification struct {
+	SourcePath     string           `json:"source_path"`
+	Bytes          int64            `json:"bytes"`
+	SourceSidecars []RestoreSidecar `json:"source_sidecars"`
+	DatabaseVerification
+	KeyCheck *RestoreKeyCheck `json:"key_check,omitempty"`
+	Valid    bool             `json:"valid"`
+	Error    string           `json:"error,omitempty"`
+}
+
+// VerifyBackupFile checks a backup file without opening the live database or
+// reading its daemon lease, so it works while the daemon runs. It reads the
+// source once, into a private directory below the system temporary
+// directory (TMPDIR), and checks that copy, so SQLite never opens the source
+// and no sidecar is created next to it. The report is filled in as far as
+// the checks progressed, and the returned error is the first failed check.
+func VerifyBackupFile(ctx context.Context, source string, options BackupFileOptions) (BackupFileVerification, error) {
+	report, err := verifyBackupFile(ctx, source, options)
+	report.Valid = err == nil
+	if err != nil {
+		report.Error = err.Error()
+	}
+	return report, err
+}
+
+func verifyBackupFile(ctx context.Context, source string, options BackupFileOptions) (BackupFileVerification, error) {
+	report := BackupFileVerification{
+		SourceSidecars:       []RestoreSidecar{},
+		DatabaseVerification: DatabaseVerification{ForeignKeyViolations: []ForeignKeyViolation{}, FTSBackfill: []FTSBackfillProgress{}},
+	}
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	sourcePath, err := restorePath(source)
+	if err != nil {
+		return report, fmt.Errorf("backup file: %w", err)
+	}
+	report.SourcePath = sourcePath
+	if strings.TrimSpace(options.LiveDatabase) != "" {
+		live, err := restorePath(options.LiveDatabase)
+		if err != nil {
+			return report, fmt.Errorf("configured database: %w", err)
+		}
+		if live == sourcePath {
+			return report, errors.New("the backup file is the configured database; run verify without --from to check it in place")
+		}
+	}
+	info, err := regularFileInfo(sourcePath, true)
+	if err != nil {
+		return report, fmt.Errorf("backup file: %w", err)
+	}
+	report.Bytes = info.Size()
+	if err := validateSQLiteRestoreSource(sourcePath); err != nil {
+		return report, err
+	}
+	// A backup written by the backup command has no sidecars. A file with
+	// them is a raw copy, whose transactions may sit in its WAL; a restore
+	// refuses it unless sidecar replay is allowed, so it is not valid here.
+	report.SourceSidecars, err = inspectRestoreSidecars(sourcePath, info)
+	if err != nil {
+		return report, fmt.Errorf("backup file sidecars: %w", err)
+	}
+	if len(report.SourceSidecars) > 0 {
+		paths := make([]string, 0, len(report.SourceSidecars))
+		for _, sidecar := range report.SourceSidecars {
+			paths = append(paths, sidecar.Path)
+		}
+		return report, &RestoreSidecarError{Paths: paths}
+	}
+	dir, err := os.MkdirTemp("", ".edgewatch-verify-")
+	if err != nil {
+		return report, fmt.Errorf("create backup verification directory: %w", err)
+	}
+	defer os.RemoveAll(dir)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return report, err
+	}
+	staged := filepath.Join(dir, "payload")
+	if _, err := copyRestoreFile(ctx, sourcePath, staged); err != nil {
+		return report, err
+	}
+	verification, err := verifyDatabaseFile(ctx, staged, IntegrityCheck)
+	report.DatabaseVerification = verification
+	if err != nil {
+		return report, fmt.Errorf("verify backup file: %w", err)
+	}
+	report.KeyCheck, err = checkStagedKeys(ctx, staged, options.InspectStaged, options.AllowKeyMismatch)
+	return report, err
 }

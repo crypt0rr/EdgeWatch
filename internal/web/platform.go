@@ -1105,7 +1105,8 @@ func (s *Server) togglePlatformNotificationRouting(w http.ResponseWriter, r *htt
 
 // platformStatus reports the deployment as numbers: the units by state,
 // their accounts, jobs and stored scans, the platform administrators, the
-// scan capacity and its use, and the version and update status.
+// scan capacity and its use, the version and update status, and the
+// outcome of the scheduled backups when they are on.
 func (s *Server) platformStatus(w http.ResponseWriter, r *http.Request) {
 	platform := s.Store.Platform()
 	records, err := platform.ListTenants(r.Context())
@@ -1149,6 +1150,9 @@ func (s *Server) platformStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if proxy, seen := s.Auth.UntrustedProxy(); seen {
 		status["untrusted_proxy"] = proxy
+	}
+	if backups := s.App.BackupStatus(); backups != nil {
+		status["backups"] = backups
 	}
 	s.addVersionReleaseURL(status)
 	writeJSON(w, http.StatusOK, status)

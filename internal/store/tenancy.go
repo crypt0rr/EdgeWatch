@@ -145,7 +145,9 @@ var globalStoreMethods = map[string]string{
 	"PublicScopeBySlug":     globalScopes,
 
 	"Backup":                    globalMaintenance,
+	"BackupWithOptions":         globalMaintenance,
 	"Verify":                    globalMaintenance,
+	"verify":                    globalMaintenance,
 	"MigrateAdminCompatibility": globalMaintenance,
 	"maintainSearchIndexes":     globalMaintenance,
 	"rebuildLatestScanHosts":    globalMaintenance,

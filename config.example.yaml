@@ -126,6 +126,24 @@ notifications:
   # uses it.
   sandbox: auto
 
+# Optional backups that the daemon takes on a schedule. They are off unless
+# directory is set, an absolute path to an existing directory that EdgeWatch
+# does not create. Each backup is checked as the backup command checks its
+# output (quick_check, foreign_key_check, and the schema) before it is
+# published as edgewatch-scheduled-YYYYMMDDTHHMMSSZ.db, and the daemon keeps
+# the newest keep of those files, removing older ones; it never removes any
+# other file there. schedule is a five-field cron expression in the timezone
+# above, or UTC, without a TZ= prefix; it defaults to "0 3 * * *", and keep
+# to 7 (1 to 1000).
+# edgewatch health and the console report the newest good backup and any
+# failure. A backup holds every business unit's data; keep the directory as
+# private as ./data and copy the backups, with notification.key and auth.key,
+# off the host.
+# backup:
+#   directory: /var/lib/edgewatch/backups
+#   schedule: "0 3 * * *"
+#   keep: 7
+
 # Jobs are created and scheduled from the web interface. YAML jobs from older
 # releases are intentionally not imported; they remain inactive with a
 # startup warning so they can be recreated and reviewed explicitly.

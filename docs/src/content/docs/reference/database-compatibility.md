@@ -87,7 +87,8 @@ with no background phase.
 Only the daemon migrates the database, when it starts. A restored backup of an
 older release keeps its schema until then. On such a database, `restore`,
 `verify`, `health`, and `backup` work as usual, so the restored copy can be
-checked and backed up first. The commands that act on business units or
+checked and backed up first, and `verify --from` checks a backup file of an
+older release in the same way. The commands that act on business units or
 accounts need the upgraded schema, whether they only read (`status`,
 `history`, and `baseline export`) or also write (`admin`, `scan`, `baseline
 approve` and `reset`, and `notify test`). They change nothing and stop with

@@ -54,9 +54,9 @@ defaults.
 | `baseline approve` | `--job NAME`, `--scan-id ID` (required: a scan of the job's current configuration whose result becomes the baseline), `--tenant` |
 | `baseline reset` | `--job NAME`, `--tenant` |
 | `baseline export` | `--job NAME`, `--out FILE`, `--tenant` |
-| `backup` | `--out FILE` (must not exist yet) |
-| `restore` | `--from FILE`, `--dry-run`, `--pending-deliveries quarantine\|discard\|preserve` (default `quarantine`), and the [emergency overrides](/operations/backup-recovery/#emergency-restore-overrides) |
-| `verify` | none |
+| `backup` | `--out FILE` (must not exist yet), `--full-check` (SQLite's `integrity_check` instead of `quick_check`) |
+| `restore` | `--from FILE`, `--dry-run`, `--pending-deliveries quarantine\|discard\|preserve` (default `quarantine`), and the [emergency overrides](/operations/backup-recovery/#emergency-restore-overrides), including `--allow-key-mismatch` |
+| `verify` | `--from FILE` (check a backup file instead of the configured database), `--allow-key-mismatch` (with `--from` only) |
 | `health` | none |
 | `notify test` | `--tenant` |
 | `admin setup-token` | `--force` (required, because it replaces the current token); `admin reissue-setup-token` is the same command |
@@ -79,6 +79,24 @@ prints the normalized configuration with `"valid": true`, or `"valid": false`
 with the reason and exits non-zero. An invalid URL is named by a digest
 prefix, never by the URL. The daemon runs the same checks before it opens the
 database, so a start that they refuse leaves the database as it was.
+
+## Backups and their verification
+
+`backup` checks the new file before it publishes it: SQLite's `quick_check`,
+or `integrity_check` with `--full-check`, the foreign-key check, and a
+supported EdgeWatch schema. It prints `path`, `bytes`, `schema_version`,
+`check`, `integrity_check`, and `foreign_key_violations`, and a backup that
+fails a check leaves no file. `verify --from FILE` checks a backup file on a
+private copy below `TMPDIR`, without opening the configured database or its
+lease, so it works while the daemon runs and leaves the file unchanged. It
+prints one JSON document with the checks, `key_check` with the number of
+web-managed destinations and TOTP seeds that the configured keys cannot open,
+and `valid`, and exits non-zero when the file is not valid; with
+`--allow-key-mismatch`, locked secrets are reported without failing. `restore`
+and `restore --dry-run` run the same key check on the staged copy, print
+`key_check`, and refuse a backup with locked secrets unless
+`--allow-key-mismatch` is given. See
+[Backup and recovery](/operations/backup-recovery/#verify-a-backup).
 
 ## Business-unit selection and recovery
 
@@ -124,8 +142,15 @@ reports the seccomp filter with its `state` and `reason`. See
 [the scanner sandbox](/deployment/container-hardening/#scanner-sandbox).
 `notification_sandbox` reports the process that delivers notifications in the
 same form; see
-[the notification sandbox](/deployment/container-hardening/#notification-sandbox). A database that cannot be opened at all, for example one
-with a newer schema, still fails before any document is printed.
+[the notification sandbox](/deployment/container-hardening/#notification-sandbox).
+When `backup.directory` turns scheduled backups on, `backups` reports their
+outcome: the newest good backup with `last_success_at` and
+`last_success_age_seconds`, and the latest failure with `last_error` and
+`consecutive_failures`. A failed scheduled backup adds a warning without
+making the daemon unhealthy; see
+[Scheduled backups](/operations/backup-recovery/#scheduled-backups). A
+database that cannot be opened at all, for example one with a newer schema,
+still fails before any document is printed.
 
 ## Notification tests
 

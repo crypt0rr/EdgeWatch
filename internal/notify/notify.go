@@ -1130,6 +1130,30 @@ func (n *Notifier) LockedDestinations(ctx context.Context) (int, error) {
 	return 0, nil
 }
 
+// CheckKey opens every web-managed destination stored in the database of s,
+// of every tenant and of the platform, paused or not, with the notification
+// key at keyPath, as Reload would, and returns how many destinations there
+// are and how many the key cannot open. A missing, unreadable, or invalid
+// key locks every destination. It reads the database only, never creates a
+// key, and reports counts only, so a restore can check a backup copy against
+// the configured key before it replaces the database.
+func CheckKey(ctx context.Context, s *store.Store, keyPath string) (destinations, locked int, err error) {
+	if s == nil {
+		return 0, 0, errors.New("database is not open")
+	}
+	records, err := s.System().SealedManagedNotifications(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	managed, _ := (&Notifier{keyPath: keyPath}).openManaged(records)
+	for _, entry := range managed {
+		if entry.locked {
+			locked++
+		}
+	}
+	return len(records), locked, nil
+}
+
 // testSet sends one test message to each enabled destination of the set and
 // reports the counts. An enabled managed destination that is locked by a
 // missing, replaced, or unreadable key fails the test with

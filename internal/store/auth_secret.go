@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -45,6 +46,18 @@ func defaultAuthKeyPath(database string) string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(database), "auth.key")
+}
+
+// DefaultAuthKeyPath returns the authentication key that a store opened on
+// database uses unless SetAuthKeyPath selects another one: auth.key beside
+// the database file, also when database is a file: URI. An in-memory
+// database has none.
+func DefaultAuthKeyPath(database string) string {
+	path, err := DatabaseFilePath(database)
+	if err != nil {
+		return ""
+	}
+	return defaultAuthKeyPath(path)
 }
 
 func loadAuthKey(path string) ([]byte, error) {
@@ -298,4 +311,41 @@ func (s *Store) openTOTPSecretForOwner(owner, stored string) (string, bool, erro
 		return "", false, fmt.Errorf("%w: authentication failed", ErrTOTPSecretLocked)
 	}
 	return string(plain), legacy, nil
+}
+
+// TOTPKeyCheck counts the accounts of every tenant and of the platform that
+// have a stored TOTP seed, and the seeds that the store's authentication key
+// cannot open, for a check of the key against a backup. A database from
+// before the users table keeps the original administrator's seed in admins.
+// It reads only and never creates a key.
+func (ss *SystemStore) TOTPKeyCheck(ctx context.Context) (seeds, unreadable int, err error) {
+	reader := ss.store.reader()
+	query := `SELECT id,totp_secret FROM users WHERE totp_secret<>''`
+	if exists, err := readerTableExists(ctx, reader, "users"); err != nil {
+		return 0, 0, err
+	} else if !exists {
+		if exists, err := readerTableExists(ctx, reader, "admins"); err != nil || !exists {
+			return 0, 0, err
+		}
+		query = `SELECT '` + LegacyAdminUserID + `',totp_secret FROM admins WHERE totp_secret<>''`
+	}
+	rows, err := reader.QueryContext(ctx, query)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var owner, stored string
+		if err := rows.Scan(&owner, &stored); err != nil {
+			return 0, 0, err
+		}
+		seeds++
+		if _, _, openErr := ss.store.openTOTPSecretForOwner(owner, stored); openErr != nil {
+			unreadable++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, err
+	}
+	return seeds, unreadable, nil
 }

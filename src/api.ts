@@ -182,13 +182,19 @@ export type SessionUser = { user_id: string; username: string; display_name?: st
  * the proxy's address for the sign-in limits and the audit.
  */
 export type UntrustedProxy = { peer: string; header: string; last_seen_at: string }
-// untrusted_proxy is present for the administrators of a deployment with one
-// unit; with more, only the platform status has it.
+/**
+ * The outcome of the daemon's scheduled backups, which backup.directory in
+ * config.yaml turns on. consecutive_failures counts the failed backups since
+ * the newest good one, last_backup, which is last_success_age_seconds old.
+ */
+export type ScheduledBackupStatus = { directory: string; schedule: string; keep: number; next_run_at?: string; last_success_at?: string; last_backup?: string; last_backup_bytes?: number; last_backup_schema_version?: number; last_success_age_seconds?: number; last_failure_at?: string; last_error?: string; consecutive_failures: number }
+// untrusted_proxy and backups are present for the administrators of a
+// deployment with one unit; with more, only the platform status has them.
 // How the scanner's Nmap and Naabu processes start. A confined process runs
 // as process_uid 65532 with only the listed capabilities.
 export type ScannerLandlockStatus = { mode: 'auto' | 'required' | 'off' | string; state: 'enforced' | 'disabled' | 'unavailable' | string; abi?: number; reason?: string }
 export type ScannerSandboxStatus = { mode: 'auto' | 'required' | 'off' | string; state: 'enforced' | 'disabled' | 'unavailable' | string; uid?: number; gid?: number; process_uid: number; capabilities?: string[]; no_new_privileges?: boolean; reason?: string; landlock?: ScannerLandlockStatus; seccomp?: { state: 'enforced' | 'disabled' | 'unavailable' | string; reason?: string } }
-export type AdminStatus = { configured?: boolean; username?: string; display_name?: string; role?: Role; permissions?: string[]; version: string; version_release_url?: string; legacy_yaml_jobs?: string[]; notification_destinations?: number; notifications?: NotificationStatus; retention?: string; max_concurrent_scans?: number; max_probe_count?: number; max_naabu_probe_count?: number; rdap_enabled?: boolean; public_dashboard_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number }; updates?: ApplicationUpdateStatus; telemetry?: DeploymentTelemetry; untrusted_proxy?: UntrustedProxy; scanner_sandbox?: ScannerSandboxStatus; notification_sandbox?: ScannerSandboxStatus }
+export type AdminStatus = { configured?: boolean; username?: string; display_name?: string; role?: Role; permissions?: string[]; version: string; version_release_url?: string; legacy_yaml_jobs?: string[]; notification_destinations?: number; notifications?: NotificationStatus; retention?: string; max_concurrent_scans?: number; max_probe_count?: number; max_naabu_probe_count?: number; rdap_enabled?: boolean; public_dashboard_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number }; updates?: ApplicationUpdateStatus; telemetry?: DeploymentTelemetry; untrusted_proxy?: UntrustedProxy; backups?: ScheduledBackupStatus; scanner_sandbox?: ScannerSandboxStatus; notification_sandbox?: ScannerSandboxStatus }
 // platform_setup_available is present once the first administrator exists,
 // and true while the host's platform setup token can create the first
 // platform administrator.
@@ -371,7 +377,7 @@ export type UnitAccount = Omit<UserSummary, 'role'> & { role: UnitRole }
 export type AccountInvitation<T> = { user: T; activation_token: string; activation_path: string }
 /** totp_enrolled tells whether the account keeps its authenticator after the reset. */
 export type PasswordResetLink = { activation_token: string; activation_path: string; expires_at: string; totp_enrolled: boolean }
-export type PlatformStatus = { version: string; version_release_url?: string; updates?: ApplicationUpdateStatus; units: { total: number; active: number; disabled: number; deleting: number }; accounts: number; jobs: number; stored_scans: number; platform_admins: { total: number; enabled: number }; capacity: { limits: DeploymentLimits; slots: { capacity: number; in_use: number; queued: number } }; untrusted_proxy?: UntrustedProxy }
+export type PlatformStatus = { version: string; version_release_url?: string; updates?: ApplicationUpdateStatus; units: { total: number; active: number; disabled: number; deleting: number }; accounts: number; jobs: number; stored_scans: number; platform_admins: { total: number; enabled: number }; capacity: { limits: DeploymentLimits; slots: { capacity: number; in_use: number; queued: number } }; untrusted_proxy?: UntrustedProxy; backups?: ScheduledBackupStatus }
 /** Who acted: a unit's account, a platform administrator, the host command line, or EdgeWatch itself. Records from before business units have no kind. */
 export type AuditActorKind = 'unit' | 'platform' | 'host' | 'system' | ''
 export type AuditEntry = { id: number; created_at: string; action: string; category: string; actor: { kind: AuditActorKind; user_id?: string; username?: string; display_name?: string }; detail: string; request_id?: string; source_ip?: string; unit?: UnitRef }

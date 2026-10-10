@@ -326,6 +326,19 @@ describe('dashboard', () => {
     expect(banner?.textContent).toContain('If 10.0.0.5 is a proxy that you run, add it to web.trusted_proxies in config.yaml')
   })
 
+  it('warns about failing scheduled backups only when the status reports them', async () => {
+    await renderDashboard()
+    expect(container.textContent).not.toContain('Scheduled backups are failing.')
+    act(() => root.unmount())
+    queryClient.clear()
+    root = createRoot(container)
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, backups: { directory: '/var/lib/edgewatch/backups', schedule: '0 3 * * *', keep: 7, last_failure_at: '2026-10-02T03:00:00Z', last_error: 'disk full', consecutive_failures: 2 } })
+    await renderDashboard()
+    await vi.waitFor(() => expect(container.textContent).toContain('Scheduled backups are failing.'), { timeout: 1000 })
+    expect(container.textContent).toContain('The last 2 scheduled backups failed')
+    expect(container.textContent).toContain(': disk full.')
+  })
+
   it('hides operational controls and incident metrics for viewers', async () => {
     vi.mocked(getSession).mockResolvedValue(session('viewer'))
     await act(async () => {

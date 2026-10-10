@@ -122,6 +122,46 @@ func (ss *SystemStore) ListManagedNotifications(ctx context.Context) ([]ManagedN
 	return out, nil
 }
 
+// SealedManagedNotifications returns the ID, the encrypted URL, and the
+// enabled flag of every web-managed destination of every tenant and of the
+// platform, paused or not, for a check of the notification key against a
+// backup. It reads only columns that every schema since managed destinations
+// has, so a backup of an older release can be checked; a database from before
+// them has none.
+func (ss *SystemStore) SealedManagedNotifications(ctx context.Context) ([]ManagedNotification, error) {
+	reader := ss.store.reader()
+	if exists, err := readerTableExists(ctx, reader, "managed_notifications"); err != nil || !exists {
+		return nil, err
+	}
+	rows, err := reader.QueryContext(ctx, `SELECT id,nonce,ciphertext,enabled FROM managed_notifications ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ManagedNotification
+	for rows.Next() {
+		var destination ManagedNotification
+		var enabled int
+		if err := rows.Scan(&destination.ID, &destination.Nonce, &destination.Ciphertext, &enabled); err != nil {
+			return nil, err
+		}
+		destination.Enabled = enabled != 0
+		out = append(out, destination)
+	}
+	return out, rows.Err()
+}
+
+// readerTableExists reports whether the database has the table.
+func readerTableExists(ctx context.Context, reader interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, table string) (bool, error) {
+	var count int
+	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
+		return false, fmt.Errorf("inspect %s table: %w", table, err)
+	}
+	return count > 0, nil
+}
+
 // GetManagedNotification returns one managed destination, regardless of
 // whether it belongs to a tenant or the platform. It is intended for the
 // delivery worker, which must revalidate the exact destination before send

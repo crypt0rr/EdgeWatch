@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // The default notification key belongs next to the database file for every
@@ -94,5 +95,59 @@ func TestDefaultNotificationKeyPathIgnoresMemoryDatabases(t *testing.T) {
 	}
 	if notifier.keyPath != "" {
 		t.Fatalf("memory store selected notification key path %q", notifier.keyPath)
+	}
+}
+
+// CheckKey opens every web-managed destination with the key at a path, paused
+// destinations included, without creating a key: the right key opens them
+// all, and a missing or other key locks them all.
+func TestCheckKeyCountsTheDestinationsTheKeyCannotOpen(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database := storetest.FreshPath(t)
+	dir := filepath.Dir(database)
+	db, err := store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if destinations, locked, err := CheckKey(ctx, db, filepath.Join(dir, "missing.key")); err != nil || destinations != 0 || locked != 0 {
+		t.Fatalf("key check without destinations = %d, %d, %v", destinations, locked, err)
+	}
+	notifier, err := New(db, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant := notifier.Tenant(db.Tenant(store.DefaultTenantScope()))
+	if _, err := tenant.CreateManagedWithAudit(ctx, "Ops", "generic://127.0.0.1:9/ops?disabletls=yes", true, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tenant.CreateManagedWithAudit(ctx, "Paused", "generic://127.0.0.1:9/paused?disabletls=yes", false, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(dir, "notification.key")
+	if destinations, locked, err := CheckKey(ctx, db, key); err != nil || destinations != 2 || locked != 0 {
+		t.Fatalf("key check with the right key = %d, %d, %v", destinations, locked, err)
+	}
+	other := filepath.Join(t.TempDir(), "other.key")
+	if err := os.WriteFile(other, []byte(strings.Repeat("ab", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing.key")
+	for _, path := range []string{other, missing} {
+		if destinations, locked, err := CheckKey(ctx, db, path); err != nil || destinations != 2 || locked != 2 {
+			t.Fatalf("key check with %s = %d, %d, %v", filepath.Base(path), destinations, locked, err)
+		}
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("the key check created a key: %v", err)
+	}
+	if _, _, err := CheckKey(ctx, nil, key); err == nil {
+		t.Fatal("a key check without a database succeeded")
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, _, err := CheckKey(canceled, db, key); err == nil {
+		t.Fatal("a canceled key check succeeded")
 	}
 }

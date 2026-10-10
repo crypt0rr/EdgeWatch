@@ -543,6 +543,13 @@ describe('platform status', () => {
     expect(screen.getByRole('status')).toHaveTextContent('192.168.10.4 sends Forwarded, but web.trusted_proxies does not list it')
   })
 
+  it('warns about failing scheduled backups', async () => {
+    vi.mocked(platformStatus).mockResolvedValue({ version: 'v0.19.0', units: { total: 2, active: 2, disabled: 0, deleting: 0 }, accounts: 4, jobs: 1, stored_scans: 0, platform_admins: { total: 1, enabled: 1 }, capacity: { limits, slots: { capacity: 2, in_use: 0, queued: 0 } }, backups: { directory: '/var/lib/edgewatch/backups', schedule: '0 3 * * *', keep: 7, last_success_at: '2026-10-01T03:00:00Z', last_backup: 'edgewatch-scheduled-20261001T030000Z.db', last_failure_at: '2026-10-02T03:00:00Z', last_error: 'disk full', consecutive_failures: 1 } })
+    renderWithProviders(<PlatformStatusPage />)
+    expect(await screen.findByText('Scheduled backups are failing.')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('The newest good backup, edgewatch-scheduled-20261001T030000Z.db, is from')
+  })
+
   it('reports a status that cannot be loaded and describes each release state', async () => {
     vi.mocked(platformStatus).mockRejectedValueOnce(new Error('offline'))
     renderWithProviders(<PlatformStatusPage />)

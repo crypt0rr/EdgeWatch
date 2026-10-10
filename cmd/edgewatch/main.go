@@ -88,10 +88,12 @@ func run(args []string) error {
 	configPath := fs.String("config", "/etc/edgewatch/config.yaml", "configuration file")
 	output := fs.String("output", "text", "text or json")
 	outPath := fs.String("out", "", "output file for backup or baseline export")
-	fromPath := fs.String("from", "", "source database file for restore")
+	fromPath := fs.String("from", "", "backup file to restore, or for verify to check instead of the configured database")
 	allowSidecarReplay := fs.Bool("allow-sidecar-replay", false, "allow existing SQLite sidecars during an intentional crash-recovery restore")
 	allowActiveDaemon := fs.Bool("allow-active-daemon", false, "allow restore when the destination daemon heartbeat is still active (emergency recovery only)")
 	allowUnreadableDestination := fs.Bool("allow-unreadable-destination", false, "allow restore over a destination that cannot be inspected after EdgeWatch has been stopped")
+	allowKeyMismatch := fs.Bool("allow-key-mismatch", false, "accept a backup whose notification destinations or TOTP seeds the configured keys cannot open")
+	fullCheck := fs.Bool("full-check", false, "check the new backup with SQLite's full integrity_check instead of quick_check")
 	pendingDeliveries := fs.String("pending-deliveries", string(store.PendingDeliveriesQuarantine), "restore pending notification policy: quarantine, discard, or preserve")
 	dryRun := fs.Bool("dry-run", false, "inspect a restore without replacing the destination")
 	jobName := fs.String("job", "", "job name")
@@ -179,6 +181,15 @@ func run(args []string) error {
 	}
 	ctx, stop := contextWithSignals(context.Background())
 	defer stop()
+	if cmd == "verify" && *fromPath != "" {
+		// A backup file is checked on a private copy, without opening the
+		// configured database or reading its lease, so it works while the
+		// daemon runs.
+		return verifyBackupFile(ctx, cfg, *fromPath, *allowKeyMismatch, *output)
+	}
+	if cmd == "verify" && *allowKeyMismatch {
+		return errors.New("--allow-key-mismatch applies to verify only with --from")
+	}
 	if cmd == "restore" {
 		if *fromPath == "" {
 			return errors.New("--from is required")
@@ -190,7 +201,10 @@ func run(args []string) error {
 		if *dryRun && *allowSidecarReplay {
 			return errors.New("--allow-sidecar-replay cannot be combined with --dry-run")
 		}
-		options := store.RestoreOptions{AllowSidecarReplay: *allowSidecarReplay, AllowActiveDaemon: *allowActiveDaemon, AllowUnreadableDestination: *allowUnreadableDestination, PendingDeliveries: policy}
+		// The staged copy is opened with the configured keys before it can
+		// replace the database, so a backup whose destinations or TOTP seeds
+		// they cannot open is refused unless the mismatch is allowed.
+		options := store.RestoreOptions{AllowSidecarReplay: *allowSidecarReplay, AllowActiveDaemon: *allowActiveDaemon, AllowUnreadableDestination: *allowUnreadableDestination, PendingDeliveries: policy, InspectStaged: stagedKeyCheck(cfg), AllowKeyMismatch: *allowKeyMismatch}
 		if *dryRun {
 			// The dry run goes through the same refusal checks as the restore
 			// below. It prints its report either way and exits non-zero when the
@@ -200,7 +214,7 @@ func run(args []string) error {
 				return err
 			}
 			if refusal != nil {
-				return fmt.Errorf("restore dry run: %w", refusal)
+				return fmt.Errorf("restore dry run: %w", keyMismatchHint(refusal))
 			}
 			return nil
 		}
@@ -209,7 +223,7 @@ func run(args []string) error {
 			// Do not open the destination to audit a refused restore: doing so
 			// could itself cause SQLite to inspect, checkpoint, or remove the
 			// very sidecar that made the restore unsafe.
-			return err
+			return keyMismatchHint(err)
 		}
 		auditHostCommandOnExisting(context.Background(), cfg.Database, store.AuditEntry{Action: "database.restore", Detail: hostAuditDetail("source", *fromPath, err)})
 		return printValue(*output, result)
@@ -387,7 +401,7 @@ func run(args []string) error {
 		if *outPath == "" {
 			return errors.New("--out is required")
 		}
-		err := backup(ctx, s, *outPath, *output)
+		err := backup(ctx, s, *outPath, *output, *fullCheck)
 		auditHostCommand(ctx, s, store.AuditEntry{Action: "database.backup", Detail: hostAuditDetail("output", *outPath, err)})
 		return err
 	case "verify":
@@ -401,17 +415,24 @@ func run(args []string) error {
 		notificationSandbox := sandbox.Detect(notificationSandboxOptions(cfg)).Status()
 		health.Warnings = append(health.Warnings, scannerSandboxWarnings(scannerSandbox)...)
 		health.Warnings = append(health.Warnings, notificationSandboxWarnings(notificationSandbox)...)
+		// The daemon records the outcome of its scheduled backups beside the
+		// database. A failed backup is a warning: monitoring keeps running.
+		backups, backupErr := app.ReadBackupStatus(cfg, time.Now().UTC())
+		if backupErr != nil {
+			health.Warnings = append(health.Warnings, backupErr.Error())
+		}
+		health.Warnings = append(health.Warnings, backups.Warnings()...)
 		if err != nil {
 			if *output == "json" {
 				// Keep stdout parseable for monitoring: report the failure
 				// as a document, then exit non-zero with the reason on stderr.
-				if printErr := printValue(*output, unhealthyStatus{HealthStatus: health, ScannerSandbox: scannerSandbox, NotificationSandbox: notificationSandbox, Status: "unhealthy", Error: err.Error()}); printErr != nil {
+				if printErr := printValue(*output, unhealthyStatus{HealthStatus: health, ScannerSandbox: scannerSandbox, NotificationSandbox: notificationSandbox, Backups: backups, Status: "unhealthy", Error: err.Error()}); printErr != nil {
 					return printErr
 				}
 			}
 			return err
 		}
-		return printValue(*output, healthReport{HealthStatus: health, ScannerSandbox: scannerSandbox, NotificationSandbox: notificationSandbox})
+		return printValue(*output, healthReport{HealthStatus: health, ScannerSandbox: scannerSandbox, NotificationSandbox: notificationSandbox, Backups: backups})
 	default:
 		return usage()
 	}
@@ -753,18 +774,21 @@ type notifyTestResult struct {
 // healthy. Its status field replaces the embedded one.
 type unhealthyStatus struct {
 	store.HealthStatus
-	ScannerSandbox      sandbox.Status `json:"scanner_sandbox"`
-	NotificationSandbox sandbox.Status `json:"notification_sandbox"`
-	Status              string         `json:"status"`
-	Error               string         `json:"error"`
+	ScannerSandbox      sandbox.Status    `json:"scanner_sandbox"`
+	NotificationSandbox sandbox.Status    `json:"notification_sandbox"`
+	Backups             *app.BackupStatus `json:"backups,omitempty"`
+	Status              string            `json:"status"`
+	Error               string            `json:"error"`
 }
 
-// healthReport is the health command's document: the daemon's health and how
-// scanner and notification processes start in this container.
+// healthReport is the health command's document: the daemon's health, how
+// scanner and notification processes start in this container, and, when
+// they are on, the outcome of the scheduled backups.
 type healthReport struct {
 	store.HealthStatus
-	ScannerSandbox      sandbox.Status `json:"scanner_sandbox"`
-	NotificationSandbox sandbox.Status `json:"notification_sandbox"`
+	ScannerSandbox      sandbox.Status    `json:"scanner_sandbox"`
+	NotificationSandbox sandbox.Status    `json:"notification_sandbox"`
+	Backups             *app.BackupStatus `json:"backups,omitempty"`
 }
 
 // scannerSandboxOptions describes the configured sandbox and the scanner
@@ -932,7 +956,11 @@ func normalizedConfig(cfg *config.Config) map[string]any {
 	for _, j := range cfg.Jobs {
 		jobs = append(jobs, map[string]any{"name": j.Name, "schedule": j.Schedule, "timezone": j.Timezone, "targets": j.Targets, "security_hash": j.SecurityHash()})
 	}
-	return map[string]any{"valid": true, "version": cfg.Version, "database": cfg.Database, "timezone": cfg.Timezone, "web_listen": cfg.Web.Listen, "log_level": cfg.LogLevel(), "max_probe_count": cfg.Scheduler.MaxProbeCount, "max_naabu_probe_count": cfg.Scheduler.MaxNaabuProbeCount, "target_exclusions": append([]string(nil), cfg.Scanner.TargetExclusions...), "rdap_enabled": cfg.RDAPEnabled(), "updates_enabled": cfg.UpdatesEnabled(), "jobs": jobs, "legacy_jobs_inactive": len(jobs) > 0, "notification_destinations": len(cfg.Notifications.URLs)}
+	normalized := map[string]any{"valid": true, "version": cfg.Version, "database": cfg.Database, "timezone": cfg.Timezone, "web_listen": cfg.Web.Listen, "log_level": cfg.LogLevel(), "max_probe_count": cfg.Scheduler.MaxProbeCount, "max_naabu_probe_count": cfg.Scheduler.MaxNaabuProbeCount, "target_exclusions": append([]string(nil), cfg.Scanner.TargetExclusions...), "rdap_enabled": cfg.RDAPEnabled(), "updates_enabled": cfg.UpdatesEnabled(), "jobs": jobs, "legacy_jobs_inactive": len(jobs) > 0, "notification_destinations": len(cfg.Notifications.URLs)}
+	if cfg.Backup.Enabled() {
+		normalized["backup"] = map[string]any{"directory": cfg.Backup.Directory, "schedule": cfg.Backup.Schedule, "keep": cfg.Backup.Keep}
+	}
+	return normalized
 }
 
 // status reports the managed jobs of the tenant of ts, whose state is

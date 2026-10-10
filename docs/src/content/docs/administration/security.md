@@ -57,7 +57,11 @@ file mounts from the deployment. Rotate credentials through the console.
 
 [Restore](/operations/backup-recovery/) onto a stopped service. Restores end
 copied sessions and one-time links, clear copied leases, and quarantine pending
-notifications by default. Check [database compatibility](/reference/database-compatibility/)
+notifications by default. They refuse a backup whose destinations or TOTP
+seeds the configured keys cannot open unless `--allow-key-mismatch` is given;
+`verify --from` runs the same check on a backup file while EdgeWatch runs.
+Scheduled backups and backups taken with the backup command hold every unit's
+data: keep them, and the keys, as private as `./data`. Check [database compatibility](/reference/database-compatibility/)
 before upgrading or restoring an older backup.
 
 ## Business-unit boundaries

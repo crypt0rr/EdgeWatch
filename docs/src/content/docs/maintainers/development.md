@@ -78,6 +78,47 @@ is not listed. `go test ./internal/web/` checks the tags of every listed
 struct, and `go test ./scripts/gen-api-types/` and CI's `go-checks` job fail
 when the committed file differs from what the command writes.
 
+## API routes
+
+`apiRoutes` in `internal/web/permissions.go` is the route table of the
+console API under `/api/v1` and the public API under `/api/public/v1`. Each
+entry lists a route's method, its path template, which with the method and
+the API base is its `net/http` ServeMux pattern, the capability that it
+requires, an example path for the tests, and its handler. Nothing else
+routes a request. `internal/web/routes.go` registers the entries and runs
+the gate: an unauthenticated route is served after the browser origin check
+for a state-changing request; any other console request needs a session, a
+CSRF token when it changes state, and the entry's permission, which also
+holds a session that must enroll TOTP to its own account. The gate resolves
+the session's unit store once and hands it to the handler.
+
+To add a route:
+
+- Add an entry with `Method`, `Template`, `Permission`, `Mutates`,
+  `Example`, and `Handle`. A `{name}` segment matches one path segment,
+  which the handler reads with `r.PathValue("name")`; a `{name...}` segment,
+  the last, matches the rest of the path. The adapters in `routes.go`, such
+  as `tenantHandler` and `sessionTenantIDHandler`, pass a handler the
+  session, the unit's store, or the `{id}` value.
+- Give an action that a query selects on the same method and path its own
+  entry with `Query`, as `DELETE /jobs/{id}?permanent=true` has, with its
+  own permission and handler.
+- Set `TrailingSlash` only where the route's family accepts one trailing
+  slash.
+- Teach `TestIsolationMatrix` a new path placeholder, and follow the tenancy
+  rules in the repository's `AGENTS.md`.
+
+The route table uses the ServeMux only to find a request's route, so the
+ServeMux never redirects or answers `405`. A request that no route serves
+gets `401` without a session, `403 csrf` for a mutation without the CSRF
+token, and otherwise `403` with the permission `route`; the public API
+answers it with `404 not_found`. `go test ./internal/web/` checks that every
+entry is registered once, has its handler, and is reached by its example;
+that the table refuses ambiguous patterns; these fail-closed answers; that no
+other function reads the request path or registers a ServeMux pattern; and
+that a handler reads only the path values of its template.
+`TestRouteInventoryGateMatrix` sends every entry as each role.
+
 ## Validate changes
 
 | Change | Checks |

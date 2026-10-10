@@ -223,14 +223,17 @@ read and change every unit's data: host commands reach any unit with
 deployments for parties that must not trust each other or the operators.
 
 Every API request passes its route's permission check before the handler
-runs, and the handler reads and writes through a store bound to the
-session's unit; the platform console's handlers use the platform's store and
-never a unit's. An ID of another unit's job, scan, host, account, scanner
-profile, or notification destination gets a response byte-identical to an
-unknown ID's. That is a 404, except where both get another answer:
-cancelling a scan answers any scan that is not running in the unit with 409
-`scan_not_active`, and validating or previewing a scanner profile checks only
-the submitted definition.
+runs. One route table lists each route's method, path, and permission with
+its handler, and a request that matches no route is refused before any
+handler runs: `401` without a session, and `403` otherwise. The handler
+reads and writes through a store bound to the session's unit; the platform
+console's handlers use the platform's store and never a unit's. An ID of
+another unit's job, scan, host, account, scanner profile, or notification
+destination gets a response byte-identical to an unknown ID's. That is a
+404, except where both get another answer: cancelling a scan answers any
+scan that is not running in the unit with 409 `scan_not_active`, and
+validating or previewing a scanner profile checks only the submitted
+definition.
 
 ### The platform administrator
 

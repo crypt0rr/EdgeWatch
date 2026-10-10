@@ -7,10 +7,10 @@ import (
 )
 
 const (
-	// PermissionDenied is returned by the web route matrix for paths that are
-	// not explicitly known. It is deliberately not granted to any role; the
-	// API treats it as a hard authorization failure instead of falling through
-	// to an unauthenticated/empty permission result.
+	// PermissionDenied is what the web gate requires of a request that no
+	// route serves. It is deliberately not granted to any role; the API
+	// treats it as a hard authorization failure instead of falling through to
+	// an unauthenticated/empty permission result.
 	PermissionDenied              = "__edgewatch_permission_denied__"
 	PermissionOverviewRead        = "overview.read"
 	PermissionJobsRead            = "jobs.read"

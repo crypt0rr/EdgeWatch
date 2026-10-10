@@ -29,7 +29,7 @@ func TestApplicationUpdateStatusIsAuthenticatedAndRedactsSetupState(t *testing.T
 		t.Fatal(err)
 	}
 	status := server.applicationUpdateStatus(ctx)
-	if status["status"] != "update_available" || status["available"] != true || status["latest_version"] != "v1.1.0" {
+	if status.Status != "update_available" || !status.Available || status.LatestVersion != "v1.1.0" {
 		t.Fatalf("application update status=%#v", status)
 	}
 	private := httptest.NewRecorder()
@@ -45,7 +45,7 @@ func TestApplicationUpdateStatusIsAuthenticatedAndRedactsSetupState(t *testing.T
 	enabled := false
 	server.App.Config.Updates.Enabled = &enabled
 	disabled := server.applicationUpdateStatus(ctx)
-	if disabled["status"] != "disabled" || disabled["enabled"] != false {
+	if disabled.Status != "disabled" || disabled.Enabled {
 		t.Fatalf("disabled update status=%#v", disabled)
 	}
 }
@@ -159,13 +159,13 @@ func TestApplicationUpdateStatusCoversVersionStateMatrix(t *testing.T) {
 				}
 			}
 			status := server.applicationUpdateStatus(ctx)
-			if status["status"] != tc.want {
+			if status.Status != tc.want {
 				t.Fatalf("status = %#v, want %q", status, tc.want)
 			}
 		})
 	}
 	server.Version = "dev"
-	if status := server.applicationUpdateStatus(ctx); status["status"] != "development_build" {
+	if status := server.applicationUpdateStatus(ctx); status.Status != "development_build" {
 		t.Fatalf("development status = %#v", status)
 	}
 }

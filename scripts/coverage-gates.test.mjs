@@ -43,6 +43,7 @@ const frontendReport = (overrides = {}) => {
     'src/components/UntrustedProxyBanner.tsx',
     'src/format.ts',
     'src/firstScanIntent.ts',
+    'src/generated/api-types.ts',
     'src/hostSearch.ts',
     'src/job-creation-draft.tsx',
     'src/job-form.ts',

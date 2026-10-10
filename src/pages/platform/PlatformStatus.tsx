@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Activity, ArrowUp } from 'lucide-react'
 import { platformStatus } from '../../api'
-import type { ApplicationUpdateStatus } from '../../api'
+import type { ApplicationUpdateStatus } from '../../generated/api-types'
 import { UntrustedProxyBanner } from '../../components/UntrustedProxyBanner'
 import { ScheduledBackupBanner } from '../../components/ScheduledBackupBanner'
 import { ErrorNotice } from '../../components/ErrorNotice'

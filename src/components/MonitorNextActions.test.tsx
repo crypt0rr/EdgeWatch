@@ -5,7 +5,8 @@ import type { ComponentProps } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { ScheduleSuggestion } from '../api'
 import { renderWithProviders } from '../test/test-utils'
-import type { Job, ScanSummary } from '../types'
+import type { Job } from '../types'
+import type { ScanSummary } from '../generated/api-types'
 import { MonitorNextActions } from './MonitorNextActions'
 
 const baseJob: Job = {

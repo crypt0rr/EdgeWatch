@@ -52,13 +52,12 @@ func TestDeletedDestinationsOfOtherOwnersLeaveTheDefaultTotals(t *testing.T) {
 	ctx := context.Background()
 	notifier, db, _, other := twoTenantNotifier(t)
 	audit := addPlatformAdmin(t, db)
-	totals := func() [4]any {
+	totals := func() [4]int {
 		t.Helper()
-		status := defaultStatus(t, notifier)
-		return [4]any{status["delivery_pending"], status["delivery_retrying"], status["delivery_deferrals"], status["delivery_terminal_failures"]}
+		return deliveryTotals(defaultStatus(t, notifier))
 	}
 	want := totals()
-	if want != [4]any{0, 0, 0, 0} {
+	if want != [4]int{0, 0, 0, 0} {
 		t.Fatalf("default totals before = %v", want)
 	}
 
@@ -68,7 +67,7 @@ func TestDeletedDestinationsOfOtherOwnersLeaveTheDefaultTotals(t *testing.T) {
 		t.Fatal(err)
 	}
 	failTerminally(t, db, unitDestination, model.Event{Type: "application-update-available", LatestVersion: "9.9.9", TenantID: otherTenantID, CreatedAt: time.Now().UTC()})
-	if status, err := unit.Status(ctx); err != nil || status["delivery_terminal_failures"] != 1 {
+	if status, err := unit.Status(ctx); err != nil || deliveryTotals(status)[3] != 1 {
 		t.Fatalf("unit B totals = %v, %v; want its terminal failure", status, err)
 	}
 	if _, err := unit.DeleteManagedWithAudit(ctx, unitDestination.ID, unitDestination.Revision, store.AuditEntry{}); err != nil {
@@ -164,10 +163,8 @@ func TestPlatformDestinationsReportTheirDeliveryHealth(t *testing.T) {
 	if quietView := byID[quiet.ID]; quietView.TerminalFailures != 0 || quietView.Pending != 0 || quietView.LastFailureAt != "" {
 		t.Fatalf("quiet platform destination = %+v; want no delivery health", quietView)
 	}
-	for key, want := range map[string]int{"delivery_pending": 1, "delivery_retrying": 0, "delivery_deferrals": 0, "delivery_terminal_failures": 1} {
-		if status[key] != want {
-			t.Errorf("platform status %s = %v, want %d (status %v)", key, status[key], want, status)
-		}
+	if got := deliveryTotals(status); got != [4]int{1, 0, 0, 1} {
+		t.Errorf("platform status delivery totals = %v, want one pending alert and one terminal failure (status %+v)", got, status)
 	}
 
 	// Each unit counts only its own destination.
@@ -176,8 +173,8 @@ func TestPlatformDestinationsReportTheirDeliveryHealth(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if unitStatus["delivery_pending"] != 1 || unitStatus["delivery_terminal_failures"] != 1 {
-			t.Errorf("unit status = %v; want only its own destination's pending alert and terminal failure", unitStatus)
+		if totals := deliveryTotals(unitStatus); totals[0] != 1 || totals[3] != 1 {
+			t.Errorf("unit status = %+v; want only its own destination's pending alert and terminal failure", unitStatus)
 		}
 		unitViews, err := notifier.Tenant(ts).Destinations(ctx)
 		if err != nil {

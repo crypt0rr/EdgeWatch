@@ -18,7 +18,8 @@ import {
   scanHosts,
   scanResults,
 } from '../api'
-import type { Job, ScanSummary } from '../types'
+import type { Job } from '../types'
+import type { ScanSummary, Snapshot } from '../generated/api-types'
 import { JobDetail } from './JobDetail'
 import { defaultUnitScope } from '../test/test-utils'
 
@@ -94,8 +95,10 @@ const latestResultsResponse = {
   results: [{ target: 'router.example', protocol: 'tcp', addresses: ['198.51.100.10'], ports: [{ port: 443, state: 'open', service: 'https' }] }],
   pagination,
 }
+// A scan's detail carries the scan with its snapshot.
+const snapshot: Snapshot = { units: [], scopes: [] }
 const detailResponse = {
-  scan: summary,
+  scan: { ...summary, snapshot },
   changes: [],
   changes_pagination: pagination,
   current_security_hash: 'scope',
@@ -263,7 +266,7 @@ describe('job surface overview', () => {
     vi.mocked(getJob).mockResolvedValue({ ...job, baseline: { ...job.baseline, pending: 12 } })
     let remaining = Array.from({ length: 12 }, (_, index) => ({
       key: `port|router.example|tcp|${1000 + index}`,
-      change: { kind: 'port' as const, target: 'router.example', protocol: 'tcp' as const, port: 1000 + index, old: 'not-open', new: 'open', severity: 'critical' as const },
+      change: { key: `port|router.example|tcp|${1000 + index}`, kind: 'port' as const, target: 'router.example', protocol: 'tcp' as const, port: 1000 + index, old: 'not-open', new: 'open', severity: 'critical' as const },
       count: 1,
     }))
     vi.mocked(jobPendingChanges).mockImplementation(async (_jobID, offset = 0, limit = 10) => {
@@ -410,7 +413,7 @@ describe('job surface overview', () => {
 
   it('keeps direct links to scans outside the current history page usable', async () => {
     const deepLinkedScan: ScanSummary = { ...summary, id: 'scan-old' }
-    vi.mocked(scanDetail).mockResolvedValue({ ...detailResponse, scan: deepLinkedScan })
+    vi.mocked(scanDetail).mockResolvedValue({ ...detailResponse, scan: { ...deepLinkedScan, snapshot } })
     await renderPage('/jobs/job-1/scans/scan-old')
     await vi.waitFor(() => expect(container.querySelector('.scan-detail-inline')).not.toBeNull(), { timeout: 1000 })
 

@@ -132,7 +132,16 @@ jobs:
           GOLANGCI_LINT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: make security
       - name: Check formatting
-        run: test -z "$(gofmt -l cmd internal)"
+        run: test -z "$(gofmt -l cmd internal scripts)"
+      # src/generated/api-types.ts is committed source written from the Go
+      # response structs; a struct change must regenerate it.
+      - name: Verify generated API types
+        run: |
+          go run ./scripts/gen-api-types
+          if ! git diff --exit-code -- src/generated || [ -n "$(git status --porcelain -- src/generated)" ]; then
+            echo "src/generated is out of date: run go run ./scripts/gen-api-types and commit the result" >&2
+            exit 1
+          fi
       - name: Verify schema documentation
         run: ./scripts/check-schema-docs.sh
       - name: Vet

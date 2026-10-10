@@ -855,7 +855,7 @@ func TestManagedNotificationWrongKeyIsReportedAsDecryptFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	status := defaultStatus(t, locked)
-	if status["key_state"] != "decrypt_failed" || status["locked"] != 1 {
+	if status.KeyState != "decrypt_failed" || status.Locked != 1 {
 		t.Fatalf("wrong key status = %#v", status)
 	}
 }
@@ -886,7 +886,7 @@ func TestNotifierDoesNotReplaceInvalidKeyWhenManagedDestinationsExist(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status := defaultStatus(t, locked); status["key_state"] != "key_invalid" || status["locked"] != 1 {
+	if status := defaultStatus(t, locked); status.KeyState != "key_invalid" || status.Locked != 1 {
 		t.Fatalf("invalid-key status = %#v", status)
 	}
 	canceled, cancel := context.WithCancel(ctx)

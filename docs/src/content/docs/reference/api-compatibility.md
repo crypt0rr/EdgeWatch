@@ -254,6 +254,21 @@ are sent to the destination's current URL. A redelivery that queues any is
 recorded in the unit's audit as `notifications.redelivered`, and a kept
 replacement as `notifications.pending_kept`.
 
+## Generated response types
+
+From v0.36.0, the TypeScript types of these responses are generated from the
+Go structs that write them, in
+[`src/generated/api-types.ts`](https://github.com/crypt0rr/EdgeWatch/blob/main/src/generated/api-types.ts):
+the console status (`GET /api/v1/status`), the platform status
+(`GET /api/v1/platform/status`), the notification `status` of the destination
+lists, and scans with their summaries, changes, and snapshots. The status
+responses were built as maps before; their JSON is unchanged, byte for byte,
+for every role and number of units. An optional property (`?`) is a key that
+the response can leave out, such as the operational keys that a viewer's
+status lacks, and a property typed `| null` can be `null`. The full scan
+response of a scan that an older release recorded can still lack keys, as
+[Scan history](#scan-history) describes.
+
 ## Business units
 
 v0.20.0 adds business units to every installation. The routes and response

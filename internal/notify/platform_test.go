@@ -56,7 +56,7 @@ func TestPlatformNotifierManagesOnlyPlatformDestinations(t *testing.T) {
 		t.Fatalf("created platform destination = %+v, %v", created, err)
 	}
 	views, status, err := platform.Destinations(ctx)
-	if err != nil || len(views) != 1 || views[0].ID != created.ID || status["managed"] != 1 || status["active"] != 1 || status["deployment"] != 0 {
+	if err != nil || len(views) != 1 || views[0].ID != created.ID || status.Managed != 1 || status.Active != 1 || status.Deployment != 0 {
 		t.Fatalf("platform destinations = %+v, status %v, %v", views, status, err)
 	}
 	for _, view := range views {

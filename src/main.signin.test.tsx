@@ -9,6 +9,7 @@ import type { SessionUser } from './api'
 import { App, createQueryClient } from './main'
 import { signInReturnPath } from './pages/Auth'
 import { defaultUnitScope } from './test/test-utils'
+import { developmentBuildUpdates } from './test/status-fixtures'
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api')
@@ -68,7 +69,7 @@ describe('returning to the requested page after signing in', () => {
       session = username === 'taylor' ? account({ user_id: 'acct-taylor', username: 'taylor', display_name: 'Taylor Brandt', role: 'viewer', permissions: viewerPermissions }) : account()
       return { username: session.username, display_name: session.display_name, role: session.role, permissions: session.permissions, csrf_token: 'csrf', totp_required: false }
     })
-    vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.19.0' })
+    vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.19.0', updates: developmentBuildUpdates })
     vi.mocked(listIncidents).mockResolvedValue(noIncidents)
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] })
     vi.mocked(listScans).mockResolvedValue({ scans: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null } })

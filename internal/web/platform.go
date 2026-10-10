@@ -1116,41 +1116,34 @@ func (s *Server) platformStatus(w http.ResponseWriter, r *http.Request) {
 		s.writeInternalError(w, r, "store", err)
 		return
 	}
-	units := map[string]int{"total": len(records), store.TenantStateActive: 0, store.TenantStateDisabled: 0, store.TenantStateDeleting: 0}
-	var accounts, jobs int
-	var storedScans int64
+	status := platformStatusView{Version: s.Version, VersionReleaseURL: s.versionReleaseURL(), Updates: s.applicationUpdateStatus(r.Context())}
+	// ListTenants leaves out the deleted units, so each one is active,
+	// disabled, or being deleted.
+	status.Units.Total = len(records)
 	for _, record := range records {
-		units[record.State]++
-		accounts += record.Accounts
-		jobs += record.Jobs
-		storedScans += record.StoredScans
+		switch record.State {
+		case store.TenantStateActive:
+			status.Units.Active++
+		case store.TenantStateDisabled:
+			status.Units.Disabled++
+		case store.TenantStateDeleting:
+			status.Units.Deleting++
+		}
+		status.Accounts += record.Accounts
+		status.Jobs += record.Jobs
+		status.StoredScans += record.StoredScans
 	}
-	enabledAdmins := 0
+	status.PlatformAdmins.Total = len(admins)
 	for _, admin := range admins {
 		if admin.Enabled {
-			enabledAdmins++
+			status.PlatformAdmins.Enabled++
 		}
 	}
 	usage := s.App.SlotUsage()
-	status := map[string]any{
-		"version":         s.Version,
-		"updates":         s.applicationUpdateStatus(r.Context()),
-		"units":           units,
-		"accounts":        accounts,
-		"jobs":            jobs,
-		"stored_scans":    storedScans,
-		"platform_admins": map[string]int{"total": len(admins), "enabled": enabledAdmins},
-		"capacity": map[string]any{
-			"limits": s.platformLimits(),
-			"slots":  map[string]int{"capacity": usage.Capacity, "in_use": usage.InUse, "queued": usage.Queued},
-		},
-	}
+	status.Capacity = platformCapacityStatusView{Limits: s.platformLimits(), Slots: platformDeploymentSlotsView{Capacity: usage.Capacity, InUse: usage.InUse, Queued: usage.Queued}}
 	if proxy, seen := s.Auth.UntrustedProxy(); seen {
-		status["untrusted_proxy"] = proxy
+		status.UntrustedProxy = &proxy
 	}
-	if backups := s.App.BackupStatus(); backups != nil {
-		status["backups"] = backups
-	}
-	s.addVersionReleaseURL(status)
+	status.Backups = s.App.BackupStatus()
 	writeJSON(w, http.StatusOK, status)
 }

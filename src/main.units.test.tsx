@@ -10,6 +10,7 @@ import { AppContent, createQueryClient, ProtectedApp } from './main'
 import type { Job } from './types'
 import { businessUnit, deploymentLimits, platformSession, unitCapacity } from './test/platform-fixtures'
 import { renderWithProviders } from './test/test-utils'
+import { developmentBuildUpdates } from './test/status-fixtures'
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api')
@@ -48,7 +49,7 @@ function renderApp(route: string) {
 describe('business units in the console', () => {
   beforeEach(() => {
     vi.mocked(setupStatus).mockResolvedValue({ configured: true, password_requirements: { minimum_length: 12 } })
-    vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.19.0' })
+    vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.19.0', updates: developmentBuildUpdates })
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] })
     vi.mocked(listUnits).mockResolvedValue({ limits: deploymentLimits, units: [] })

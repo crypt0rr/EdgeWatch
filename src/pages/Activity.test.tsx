@@ -21,16 +21,16 @@ const job: Job = {
 }
 const archivedJob: Job = { ...job, id: 'job-archived', archived: true, job: { ...job.job, name: 'Archived job' } }
 const events: ActivityEvent[] = [
-  { type: 'incident-accepted', job_id: 'job-1', job: 'Production', scan_id: 'scan-2', message: 'A service change was accepted', changes: [{ kind: 'service', target: '192.0.2.1', protocol: 'tcp', port: 443, old: 'unknown', new: 'https', severity: 'info' }], created_at: '2026-09-20T10:00:00Z' },
-  { type: 'changes-recovered', job_id: 'job-1', job: 'Production', scan_id: 'scan-1', message: 'A port change recovered', changes: [{ kind: 'port', target: '192.0.2.1', protocol: 'tcp', port: 22, old: 'open', new: 'not-open', severity: 'critical' }], created_at: '2026-09-20T09:00:00Z' },
+  { type: 'incident-accepted', job_id: 'job-1', job: 'Production', scan_id: 'scan-2', message: 'A service change was accepted', changes: [{ key: 'service|192.0.2.1|tcp|443', kind: 'service', target: '192.0.2.1', protocol: 'tcp', port: 443, old: 'unknown', new: 'https', severity: 'info' }], created_at: '2026-09-20T10:00:00Z' },
+  { type: 'changes-recovered', job_id: 'job-1', job: 'Production', scan_id: 'scan-1', message: 'A port change recovered', changes: [{ key: 'port|192.0.2.1|tcp|22', kind: 'port', target: '192.0.2.1', protocol: 'tcp', port: 22, old: 'open', new: 'not-open', severity: 'critical' }], created_at: '2026-09-20T09:00:00Z' },
 ]
 
 describe('activity history', () => {
   beforeEach(() => {
     vi.mocked(listEvents).mockResolvedValue({ events, pagination: page })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [job, archivedJob] })
-    vi.mocked(listIncidents).mockResolvedValue({ incidents: [{ job_id: 'job-1', job: 'Production', incident: { change: { kind: 'port', target: '192.0.2.1', protocol: 'tcp', port: 80, old: 'not-open', new: 'open', severity: 'critical' }, scan_id: 'scan-2', opened_at: '2026-09-20T08:00:00Z', last_seen_at: '2026-09-20T10:00:00Z' } }], pagination: { ...page, total: 1 } })
-    vi.mocked(jobPendingChanges).mockResolvedValue({ job_id: 'job-1', job: 'Production', pending_changes: [{ key: 'service|192.0.2.1|tcp|443', change: { kind: 'service', target: '192.0.2.1', protocol: 'tcp', port: 443, old: 'unknown', new: 'https', severity: 'info' }, count: 1 }], pagination: { limit: 10, offset: 0, total: 1, has_more: false, next_offset: null } })
+    vi.mocked(listIncidents).mockResolvedValue({ incidents: [{ job_id: 'job-1', job: 'Production', incident: { change: { key: 'port|192.0.2.1|tcp|80', kind: 'port', target: '192.0.2.1', protocol: 'tcp', port: 80, old: 'not-open', new: 'open', severity: 'critical' }, scan_id: 'scan-2', opened_at: '2026-09-20T08:00:00Z', last_seen_at: '2026-09-20T10:00:00Z' } }], pagination: { ...page, total: 1 } })
+    vi.mocked(jobPendingChanges).mockResolvedValue({ job_id: 'job-1', job: 'Production', pending_changes: [{ key: 'service|192.0.2.1|tcp|443', change: { key: 'service|192.0.2.1|tcp|443', kind: 'service', target: '192.0.2.1', protocol: 'tcp', port: 443, old: 'unknown', new: 'https', severity: 'info' }, count: 1 }], pagination: { limit: 10, offset: 0, total: 1, has_more: false, next_offset: null } })
   })
 
   it('shows active, pending, accepted, and recovered change history with contextual links', async () => {
@@ -103,7 +103,7 @@ describe('activity history', () => {
   it('keeps a working Previous control when pending changes shrink below the selected page', async () => {
     let remaining = Array.from({ length: 12 }, (_, index) => ({
       key: `port|192.0.2.1|tcp|${440 + index}`,
-      change: { kind: 'port' as const, target: '192.0.2.1', protocol: 'tcp' as const, port: 440 + index, old: 'not-open', new: 'open', severity: 'info' as const },
+      change: { key: `port|192.0.2.1|tcp|${440 + index}`, kind: 'port' as const, target: '192.0.2.1', protocol: 'tcp' as const, port: 440 + index, old: 'not-open', new: 'open', severity: 'info' as const },
       count: 1,
     }))
     vi.mocked(listJobs).mockResolvedValue({ jobs: [{ ...job, baseline: { ...job.baseline, pending: 12 } }] })

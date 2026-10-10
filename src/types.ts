@@ -1,3 +1,5 @@
+import type { Change, HostObservation, ScanSummary } from './generated/api-types'
+
 export type NaabuOptions = { scan_type?: 'connect' | 'syn' | string; rate?: number; workers?: number; retries?: number; timeout_ms?: number; warm_up_seconds?: number; verify?: boolean; address_batch_size?: number }
 export type Protocol = { ports: string; mode?: string; service_detection: boolean; engine?: 'nmap' | 'naabu_nmap' | string; profile_id?: string; profile_revision?: number; profile_update_available?: boolean; profile_latest_revision?: number; naabu?: NaabuOptions; naabu_args?: string[]; nmap_args?: string[]; enrichment_args?: string[]; nse_profile?: string; nse_args?: Record<string, string> }
 export type Pagination = { limit: number; offset: number; total: number; has_more: boolean; next_offset: number | null }
@@ -16,11 +18,10 @@ export type Job = { id: string; revision: number; enabled: boolean; archived: bo
 // budget; a scheduled run that does not fit is skipped before it starts.
 export type ScanBudget = { exceeded: boolean; estimated_probes?: number; limit?: number; approval_would_fit?: boolean }
 // ScanComparison is how a scan was compared with its job's baseline when it
-// finished. A scan's `comparison` is absent when it was recorded before
-// EdgeWatch stored the outcome.
+// finished: the values of the `comparison` of a Scan or ScanSummary. A scan's
+// `comparison` is absent when it was recorded before EdgeWatch stored the
+// outcome.
 export type ScanComparison = 'compared' | 'baseline_sample' | 'baseline_established' | 'not_compared'
-export type Scan = { id: string; job_id?: string; job: string; job_revision?: number; started_at: string; finished_at: string; status: string; error?: string; nmap_version?: string; scanner_engine?: string; scanner_profile_id?: string; scanner_profile_revision?: number; naabu_version?: string; discovery_ports?: number; confirmed_ports?: number; discovery_duration_ms?: number; enrichment_duration_ms?: number; config_hash: string; cycle_id?: string; cycle_attempt?: number; cycle_status?: string; resumable?: boolean; completed_probes?: number; total_probes?: number; completed_units?: number; total_units?: number; no_progress_attempts?: number; baseline_scan_id?: string; baseline_config_hash?: string; comparison?: ScanComparison; snapshot?: { units: Unit[]; scopes: Scope[]; dns?: Record<string, string[]>; hosts?: HostObservation[] } }
-export type ScanSummary = { id: string; job_id?: string; job: string; job_revision?: number; started_at: string; finished_at: string; status: string; error?: string; nmap_version?: string; scanner_engine?: string; scanner_profile_id?: string; scanner_profile_revision?: number; naabu_version?: string; discovery_ports?: number; confirmed_ports?: number; discovery_duration_ms?: number; enrichment_duration_ms?: number; config_hash: string; cycle_id?: string; cycle_attempt?: number; cycle_status?: string; resumable?: boolean; completed_probes?: number; total_probes?: number; completed_units?: number; total_units?: number; no_progress_attempts?: number; baseline_scan_id?: string; baseline_config_hash?: string; comparison?: ScanComparison }
 export type ActiveScan = {
   id: string; job_id?: string; job: string; job_revision?: number; started_at: string
   estimated_probes?: number; nmap_invocations?: number; estimated_seconds?: number
@@ -36,14 +37,7 @@ export type ActiveScan = {
 export type QueuedRun = { job_id: string; job: string; queued_at: string; trigger: 'manual' | 'scheduled' | string }
 export type ScanCycleUnit = { cycle_id: string; sequence: number; engine?: string; phase?: string; protocol: string; family: number; ports: string; port_count: number; addresses: number; probes: number; status: string; attempts: number; started_at?: string; finished_at?: string; last_error?: string }
 export type ScanCycle = { id: string; job_id: string; job_revision: number; status: string; attempt_count: number; no_progress_attempts: number; total_units: number; completed_units: number; total_probes: number; completed_probes: number; started_at: string; updated_at: string; expires_at: string; finished_at?: string; last_error?: string; units?: ScanCycleUnit[] }
-// Port evidence is serialized as `addresses` by the Go model. These are the
-// effective addresses on which the positive port was observed.
-export type Unit = { target: string; protocol: string; addresses?: string[]; ports?: { port: number; state: string; service?: string; addresses?: string[] }[] }
-export type Scope = { target: string; protocol: string; ports: string; service_detection: boolean }
-export type Incident = { job_id: string; job: string; incident: { change: { key?: string; kind: string; target: string; protocol?: string; port?: number; address?: string; old?: string; new?: string; severity: string }; scan_id?: string; opened_at: string; last_seen_at: string; recovery_count?: number } }
-// `address` names the resolved address of a DNS target on which a port opened
-// or closed (kind `port-address`); `target` stays the configured name.
-export type Change = { key?: string; kind: string; target: string; protocol?: string; port?: number; address?: string; old?: string; new?: string; severity: string }
+export type Incident = { job_id: string; job: string; incident: { change: Change; scan_id?: string; opened_at: string; last_seen_at: string; recovery_count?: number } }
 export type ActivityEvent = {
   type: string
   job_id?: string
@@ -61,25 +55,6 @@ export type ActivityEvent = {
 }
 export type PendingChange = { key: string; change: Change; count: number }
 
-export type StateReason = { reason: string; count: number }
-export type StateSummary = { state: string; count: number; reasons?: StateReason[] }
-export type ServiceObservation = {
-  name?: string; product?: string; version?: string; extra_info?: string; method?: string
-  confidence?: number; tunnel?: string; os_type?: string; device_type?: string; cpes?: string[]
-}
-export type PortObservation = { port: number; state: string; reason?: string; reason_ttl?: number; verification?: 'discovered' | 'confirmed' | 'unconfirmed' | string; service?: ServiceObservation }
-export type ProtocolObservation = {
-  protocol: string; status?: string; status_reason?: string; scan_type?: string; scanned_ports: string; scanned_port_count: number
-  service_detection: boolean; discovery_engine?: string; discovered_ports?: PortObservation[]; unconfirmed_ports?: PortObservation[]
-  ports?: PortObservation[]; state_summaries?: StateSummary[]; nse_profile?: string; nse_args?: Record<string, string>
-  nse_output?: string[]; command_fingerprint?: string
-}
-export type HostObservation = {
-  address: string; source_targets?: string[]; dns_names?: string[]; address_family?: string; status?: string
-  status_reason?: string; reason_ttl?: number; latency_ms?: number
-  link_addresses?: { address: string; type?: string; vendor?: string }[]
-  hostnames?: { name: string; type?: string }[]; protocols?: ProtocolObservation[]
-}
 export type HostProtocolSummary = {
   protocol: string; scan_type?: string; scanned_ports: string; scanned_port_count: number
   service_detection: boolean; open_ports: number; open_filtered_ports: number

@@ -59,7 +59,7 @@ func defaultDestinations(t *testing.T, n *Notifier) []DestinationView {
 }
 
 // defaultStatus returns the default tenant's notification status.
-func defaultStatus(t *testing.T, n *Notifier) map[string]any {
+func defaultStatus(t *testing.T, n *Notifier) Status {
 	t.Helper()
 	status, err := defaultNotifier(n).Status(context.Background())
 	if err != nil {
@@ -72,11 +72,20 @@ func defaultStatus(t *testing.T, n *Notifier) map[string]any {
 // destinations that can deliver now.
 func defaultActiveCount(t *testing.T, n *Notifier) int {
 	t.Helper()
-	active, ok := defaultStatus(t, n)["active"].(int)
-	if !ok {
-		t.Fatal("the status has no active count")
+	return defaultStatus(t, n).Active
+}
+
+// deliveryTotals returns the delivery totals of the status: pending,
+// retrying, deferrals, and terminal failures, with -1 for a total that the
+// status leaves out.
+func deliveryTotals(status Status) [4]int {
+	totals := [4]int{-1, -1, -1, -1}
+	for i, total := range []*int{status.DeliveryPending, status.DeliveryRetrying, status.DeliveryDeferrals, status.DeliveryTerminalFailures} {
+		if total != nil {
+			totals[i] = *total
+		}
 	}
-	return active
+	return totals
 }
 
 // defaultLegacySelection returns the default tenant's legacy selection.
@@ -150,7 +159,7 @@ func TestTenantNotifierKeepsEachTenantToItsDestinations(t *testing.T) {
 			t.Fatalf("destinations = %+v, %v; want only %s", views, err, want)
 		}
 		status, err := tenant.Status(ctx)
-		if err != nil || status["managed"] != 1 || status["active"] != 1 {
+		if err != nil || status.Managed != 1 || status.Active != 1 {
 			t.Fatalf("status = %v, %v", status, err)
 		}
 		legacy, err := tenant.LegacySelection(ctx)

@@ -38,16 +38,16 @@ func (pn *PlatformNotifier) destinations(ctx context.Context) (destinationSet, e
 // platform's destinations, sorted for display, and their counts, key state,
 // and delivery totals, as a tenant's list and status report them. The
 // health of a tenant's destinations is never read.
-func (pn *PlatformNotifier) Destinations(ctx context.Context) ([]DestinationView, map[string]any, error) {
+func (pn *PlatformNotifier) Destinations(ctx context.Context) ([]DestinationView, Status, error) {
 	set, err := pn.destinations(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, Status{}, err
 	}
 	status := set.status()
 	var health map[string]store.DeliveryHealth
 	if current, err := pn.ps.ListDeliveryHealth(ctx); err == nil {
 		health = current
-		addDeliveryTotals(status, health)
+		addDeliveryTotals(&status, health)
 	}
 	return finishViews(set.views(), health), status, nil
 }

@@ -277,6 +277,7 @@ func forbiddenRoute(w http.ResponseWriter) {
 func (s *Server) writePlatformError(w http.ResponseWriter, r *http.Request, err error, action, notFound string) {
 	switch {
 	case s.writeAuditUnavailable(w, err, action):
+	case writeUserDisabled(w, err):
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", notFound, nil)
 	case errors.Is(err, store.ErrConflict):
@@ -725,10 +726,6 @@ func (s *Server) resetPlatformUnitAdmin(w http.ResponseWriter, r *http.Request, 
 	}
 	if account.Role != store.RoleAdministrator {
 		writeError(w, http.StatusForbidden, "not_permitted", "a platform administrator resets only unit administrators", nil)
-		return
-	}
-	if !account.Enabled && !account.Pending {
-		writeError(w, http.StatusConflict, "user_disabled", "disabled users cannot receive activation or password-reset links", map[string]string{"enabled": "enable the account before issuing an activation or password-reset link"})
 		return
 	}
 	plain, digest, err := auth.NewOpaqueToken()

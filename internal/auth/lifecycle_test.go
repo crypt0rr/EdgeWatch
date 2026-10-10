@@ -97,7 +97,7 @@ func TestActivateRequestConsumesInviteOnceAndEnforcesPasswordLength(t *testing.T
 		t.Fatal(err)
 	}
 	created := time.Now().UTC()
-	admin, err := db.Tenant(store.DefaultTenantScope()).CreateUser(ctx, store.User{Username: "admin", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	admin, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: "admin", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestActivationRedeemsTheTokenItChecks(t *testing.T) {
 	defer db.Close()
 	m := NewManager(db)
 	unit := db.Tenant(store.DefaultTenantScope())
-	admin, err := unit.CreateUser(ctx, store.User{Username: "admin", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	admin, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: "admin", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}

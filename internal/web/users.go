@@ -69,6 +69,19 @@ func writeAdministratorRefused(w http.ResponseWriter, err error) bool {
 	return false
 }
 
+// writeUserDisabled answers a link for an account that is disabled and not
+// pending, which the store refuses with ErrAccountDisabled when it writes the
+// link, also when the account was disabled after the request read it. A
+// pending invitee is disabled until it redeems its activation link, and
+// receives one. It reports whether err was such a refusal.
+func writeUserDisabled(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, store.ErrAccountDisabled) {
+		return false
+	}
+	writeError(w, http.StatusConflict, "user_disabled", "disabled users cannot receive activation or password-reset links", map[string]string{"enabled": "enable the account before issuing an activation or password-reset link"})
+	return true
+}
+
 func decodeUserPassword(w http.ResponseWriter, r *http.Request) (string, bool) {
 	var input userPasswordPayload
 	if !decodeJSON(w, r, &input) {
@@ -363,14 +376,6 @@ func (s *Server) issueAccountLink(w http.ResponseWriter, r *http.Request, actor 
 		writeError(w, http.StatusInternalServerError, "store", "user could not be loaded", nil)
 		return
 	}
-	// A password-reset link for an explicitly disabled account can never be
-	// redeemed and should not be issued. Pending invitees are the one
-	// intentional exception: they start disabled with the !pending sentinel
-	// and use the activation endpoint to set their first password.
-	if !user.Enabled && !strings.HasPrefix(user.PasswordHash, "!pending") {
-		writeError(w, http.StatusConflict, "user_disabled", "disabled users cannot receive activation or password-reset links", map[string]string{"enabled": "enable the account before issuing an activation or password-reset link"})
-		return
-	}
 	plain, digest, err := auth.NewOpaqueToken()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "invite_failed", "activation token could not be generated", nil)
@@ -384,7 +389,7 @@ func (s *Server) issueAccountLink(w http.ResponseWriter, r *http.Request, actor 
 		detail = fmt.Sprintf("activation issued for %s", user.Username)
 	}
 	if err := ts.CreateUserInviteWithAudit(r.Context(), digest, user.ID, createdAt, createdAt.Add(30*time.Minute), store.AuditEntry{Action: action, Detail: detail, ActorUserID: actor.UserID, ActorUsername: actor.Username}); err != nil {
-		if writeAdministratorRefused(w, err) {
+		if writeAdministratorRefused(w, err) || writeUserDisabled(w, err) {
 			return
 		}
 		if errors.Is(err, store.ErrAuditUnavailable) {

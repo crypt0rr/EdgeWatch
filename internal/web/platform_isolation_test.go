@@ -15,6 +15,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // isolationIDs are the values that the isolation matrix puts in a route's
@@ -452,7 +453,7 @@ func TestLegacyYAMLJobsAreOnlyInTheDefaultUnitStatus(t *testing.T) {
 	// The fixture's unit B has an administrator and a viewer; add an
 	// operator, and sign in the two accounts the fixture leaves signed out.
 	const operatorB, viewerB = "unit B operator", "unit B viewer"
-	operator, err := f.b.CreateUser(context.Background(), store.User{Username: "bravo-operator", DisplayName: "bravo-operator", Role: store.RoleOperator, PasswordHash: cheapPasswordHash(platformFixturePassword), Enabled: true}, store.AuditEntry{})
+	operator, err := storetest.CreateUser(context.Background(), f.db, f.scopeB, store.User{Username: "bravo-operator", DisplayName: "bravo-operator", Role: store.RoleOperator, PasswordHash: cheapPasswordHash(platformFixturePassword), Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}

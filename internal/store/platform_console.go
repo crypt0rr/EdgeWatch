@@ -255,7 +255,9 @@ func (ps *PlatformStore) InvitePlatformAdmin(ctx context.Context, u User, idHash
 // DeletePendingPlatformAdmin removes the account. The last enabled
 // platform administrator cannot be disabled (ErrLastPlatformAdmin).
 // Disabling ends the account's sessions and revokes the links it issued and
-// those issued for it, in the same transaction. A change that alters nothing
+// those issued for it, in the same transaction, which records each link
+// that could still have been redeemed in the scope of its account (see
+// applyAccountTransitionTx). A change that alters nothing
 // records nothing. A tenant's account is ErrNotFound, as an unknown ID is.
 // The record belongs to the platform.
 func (ps *PlatformStore) SetPlatformAdminEnabled(ctx context.Context, id string, expectedRevision int64, enabled bool, audit AuditEntry) (UserSummary, error) {
@@ -299,21 +301,26 @@ func (ps *PlatformStore) SetPlatformAdminEnabled(ctx context.Context, id string,
 	if updated != 1 {
 		return UserSummary{}, ErrConflict
 	}
-	if !enabled {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=`+platformAdminSQL, id, RolePlatformAdmin); err != nil {
-			return UserSummary{}, err
-		}
-		// The links the account issued must not outlive its privilege, and
-		// a link issued for it must not enable it again.
-		if _, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=?1 WHERE used_at IS NULL AND (issuer_user_id IN (SELECT id FROM users WHERE id=?2 AND role=?3 AND tenant_id IS NULL) OR user_id IN (SELECT id FROM users WHERE id=?2 AND role=?3 AND tenant_id IS NULL))`, stamp, id, RolePlatformAdmin); err != nil {
-			return UserSummary{}, err
-		}
-	}
 	audit.Action, audit.ActorKind = auditPlatformAdminUpdated, AuditActorPlatform
 	if strings.TrimSpace(audit.Detail) == "" {
 		audit.Detail = fmt.Sprintf("platform administrator %s updated enabled=%t->%t", current.Username, current.Enabled, enabled)
 	}
+	// Disabling ends the account's sessions, the links issued for it, which
+	// must not enable it again, and the links it issued, which must not
+	// outlive its privilege.
+	records, err := applyAccountTransitionTx(ctx, tx, accountTransition{
+		userID: id, username: current.Username,
+		before: accountState{role: RolePlatformAdmin, enabled: current.Enabled},
+		after:  accountState{role: RolePlatformAdmin, enabled: enabled},
+		at:     now, audit: audit,
+	})
+	if err != nil {
+		return UserSummary{}, err
+	}
 	if err := insertPlatformAuditEntry(ctx, tx, audit, now); err != nil {
+		return UserSummary{}, err
+	}
+	if err := insertAuditEntries(ctx, tx, records, now); err != nil {
 		return UserSummary{}, err
 	}
 	admin, err := platformAdminSummary(ctx, tx, id)

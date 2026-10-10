@@ -67,7 +67,12 @@ the link expires after 30 minutes. For a pending account, **Renew
 invitation** shows a new link once and stops every earlier one, which
 recovers an invitation that expired or was revoked. **Revoke invitation**
 stops the link, and **Remove** deletes the pending account so its username
-can be invited again. Each needs your password.
+can be invited again. Each needs your password. Disabling a platform
+administrator ends its sessions, its own links, and the links it issued: each
+unit administrator's activation or password-reset link that could still have
+been used is recorded as `user.activation_revoked` in that unit's audit, and
+each platform administrator's as `platform_admin.activation_revoked` in the
+platform audit.
 
 ## Units and their accounts
 
@@ -153,7 +158,9 @@ account then enrolls again.
   high-cost behavior from before business units.
 - **Audit:** a unit's administrators read its security audit on **Audit**,
   including a platform administrator's actions on the unit's accounts and
-  capacity, without the platform administrator's source address. The platform
+  capacity, such as the links that stopped working because the platform
+  administrator who issued them was disabled, without the platform
+  administrator's source address. The platform
   audit shows the records that belong to no unit, such as each unit's
   creation, rename, disabling, enabling, and deletion, and every unit's
   account records, never its data records. A failed redemption of an

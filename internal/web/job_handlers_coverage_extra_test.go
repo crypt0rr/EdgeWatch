@@ -15,6 +15,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestJobUpdateRebaselineAndLifecycleErrors(t *testing.T) {
@@ -170,7 +171,7 @@ func TestJobListAndAPIDispatchCoverage(t *testing.T) {
 
 	raw := "dispatch-api-session"
 	now := time.Now().UTC()
-	if err := db.CreateSessionForUserWithAudit(ctx, admin.UserID, digest(raw), "dispatch-csrf", now, now.Add(time.Hour), "", ""); err != nil {
+	if err := storetest.CreateSession(ctx, db, admin.UserID, digest(raw), "dispatch-csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	callAPI := func(method, path, body string) *httptest.ResponseRecorder {

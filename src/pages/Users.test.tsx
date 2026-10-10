@@ -3,14 +3,14 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { APIError, createUser, getSession, issueUserActivation, issueUserPasswordReset, listUsers, revokeUserActivation, updateUser } from '../api'
+import { APIError, createUser, getSession, issueUserActivation, issueUserPasswordReset, listUsers, revokeUserActivation, revokeUserSessions, updateUser } from '../api'
 import type { SessionUser } from '../api'
 import { defaultUnitScope, renderWithProviders } from '../test/test-utils'
 import { Users } from './Users'
 
 vi.mock('../api', async () => {
   const actual = await vi.importActual<typeof import('../api')>('../api')
-  return { ...actual, createUser: vi.fn(), getSession: vi.fn(), issueUserActivation: vi.fn(), issueUserPasswordReset: vi.fn(), listUsers: vi.fn(), revokeUserActivation: vi.fn(), updateUser: vi.fn() }
+  return { ...actual, createUser: vi.fn(), getSession: vi.fn(), issueUserActivation: vi.fn(), issueUserPasswordReset: vi.fn(), listUsers: vi.fn(), revokeUserActivation: vi.fn(), revokeUserSessions: vi.fn(), updateUser: vi.fn() }
 })
 
 const user = { id: 'user-2', username: 'operator', display_name: 'Operator', role: 'operator' as const, enabled: true, pending: false, has_active_link: true, totp_enabled: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', revision: 4 }
@@ -38,6 +38,7 @@ describe('user administration', () => {
     vi.mocked(issueUserActivation).mockResolvedValue({ activation_token: 'renewed-token', activation_path: '/activate#token=renewed-token', expires_at: '2026-01-01T01:00:00Z' })
     vi.mocked(issueUserPasswordReset).mockResolvedValue({ activation_token: 'reset-token', activation_path: '/activate#token=reset-token', expires_at: '2026-01-01T01:00:00Z' })
     vi.mocked(revokeUserActivation).mockResolvedValue(undefined)
+    vi.mocked(revokeUserSessions).mockResolvedValue(undefined)
     vi.mocked(updateUser).mockResolvedValue({ ...user, enabled: false, revision: 5 })
   })
   afterEach(() => vi.resetAllMocks())
@@ -170,11 +171,12 @@ describe('user administration', () => {
     vi.mocked(listUsers).mockResolvedValue({ users: [self, user, disabled, pending] })
     renderWithProviders(<Users />)
     await waitFor(() => expect(screen.getByText('Former Viewer')).toBeInTheDocument())
-    // An administrator cannot disable its own account, and a disabled
-    // account receives no link until it is enabled again, so it has none to
-    // revoke either.
+    // An administrator cannot disable its own account and ends its own
+    // sessions from Security, and a disabled account has no sessions and
+    // receives no link until it is enabled again, so it has none to revoke
+    // either. A pending account has never signed in.
     await waitFor(() => expect(actions('Site Admin')).toEqual(['Create password reset link', 'Revoke password reset link', 'Edit account']))
-    expect(actions('Operator')).toEqual(['Disable', 'Create password reset link', 'Revoke password reset link', 'Edit account'])
+    expect(actions('Operator')).toEqual(['Disable', 'Revoke sessions', 'Create password reset link', 'Revoke password reset link', 'Edit account'])
     expect(actions('Former Viewer')).toEqual(['Enable', 'Edit account'])
     expect(actions('New User')).toEqual(['Renew activation link', 'Revoke activation link', 'Edit account'])
   })
@@ -195,6 +197,39 @@ describe('user administration', () => {
     await waitFor(() => expect(screen.getByText('Former Viewer')).toBeInTheDocument())
     expect(actions('Site Admin')).toEqual(['Create password reset link', 'Revoke password reset link', 'Edit account'])
     expect(actions('Former Viewer')).toEqual(['Enable', 'Edit account'])
+  })
+
+  it('revokes another account\'s sessions after the administrator confirms with its password', async () => {
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Revoke sessions' }))
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveTextContent('Revoke all sessions of operator?')
+    expect(dialog).toHaveTextContent('operator is signed out on every device. Its password, authenticator, and links do not change.')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(revokeUserSessions).not.toHaveBeenCalled()
+
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Revoke sessions' }))
+    fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Revoke sessions' }))
+    await waitFor(() => expect(revokeUserSessions).toHaveBeenCalledWith('user-2', 'administrator-password'))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(screen.getByRole('status')).toHaveTextContent('operator was signed out of every session.')
+  })
+
+  it.each([
+    { status: 'forbidden', error: new APIError('you do not have permission to perform this action', 'forbidden') },
+    { status: 'not found', error: new APIError('user not found', 'not_found') },
+  ])('keeps the session revocation dialog open with the server\'s answer when it is $status', async ({ error }) => {
+    vi.mocked(revokeUserSessions).mockRejectedValueOnce(error)
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Revoke sessions' }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Revoke sessions' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(error.message)
+    expect(screen.queryByText('operator was signed out of every session.')).not.toBeInTheDocument()
   })
 
   it('revokes a password-reset link from the account row that the notice points to', async () => {

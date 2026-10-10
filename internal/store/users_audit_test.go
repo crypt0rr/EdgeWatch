@@ -9,7 +9,7 @@ func TestUpdateUserAuditsEveryPersistedChangeButNotNoOps(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
-	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "renamed-operator", DisplayName: "Before", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{})
+	user, err := createTestUser(ctx, defaultTenant(s), User{Username: "renamed-operator", DisplayName: "Before", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}

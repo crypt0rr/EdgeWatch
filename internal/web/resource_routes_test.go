@@ -20,6 +20,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // resourceLookups counts the read-pool statements behind Store.GetJob,
@@ -248,7 +249,7 @@ func newResourceRouteFixture(t *testing.T) *resourceRouteFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{}); err != nil {
+	if _, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: "operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	for username, password := range map[string]string{"admin": "administrator password", "operator": "operator account password"} {

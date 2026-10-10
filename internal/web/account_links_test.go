@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // activateLink redeems an activation or password-reset link through the
@@ -81,7 +82,7 @@ func TestUnitRoleChangeRevokesThePlatformAdministratorsResetLink(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	f := newPlatformFixture(t)
-	second, err := f.b.CreateUser(ctx, store.User{Username: "bravo-admin-two", DisplayName: "bravo-admin-two", Role: store.RoleAdministrator, PasswordHash: cheapPasswordHash(platformFixturePassword), Enabled: true}, store.AuditEntry{})
+	second, err := storetest.CreateUser(ctx, f.db, f.scopeB, store.User{Username: "bravo-admin-two", DisplayName: "bravo-admin-two", Role: store.RoleAdministrator, PasswordHash: cheapPasswordHash(platformFixturePassword), Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}

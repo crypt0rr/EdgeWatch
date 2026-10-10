@@ -249,7 +249,7 @@ test('the users and notifications pages fit a phone, with every account action o
   // An enabled account that is not the signed-in one offers each management action.
   const actions = page.locator('.user-row').filter({ hasText: 'Operator' }).getByRole('button')
   // This fixture has no outstanding reset link, so revoke is correctly absent.
-  await expect(actions).toHaveText(['Disable', 'Create password reset link', 'Edit account'])
+  await expect(actions).toHaveText(['Disable', 'Revoke sessions', 'Create password reset link', 'Edit account'])
   const width = await page.evaluate(() => document.documentElement.clientWidth)
   for (const action of await actions.all()) {
     const box = await action.boundingBox()

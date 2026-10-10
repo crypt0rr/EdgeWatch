@@ -12,6 +12,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // The job writes reach the job named in the path only within the session's
@@ -45,7 +46,7 @@ func TestJobWritesUseTheSessionTenant(t *testing.T) {
 	if _, err := db.DB.ExecContext(ctx, `INSERT INTO tenants(id,name,slug,created_at,updated_at) VALUES(?,'Other','other',?,?)`, otherTenantID, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
-	other, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	other, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +56,7 @@ func TestJobWritesUseTheSessionTenant(t *testing.T) {
 	cookies := map[string]string{}
 	for name, userID := range map[string]string{"own": admin.UserID, "other": other.ID} {
 		raw := "tenant-write-" + name
-		if err := db.CreateSessionForUserWithAudit(ctx, userID, digest(raw), "csrf-"+name, now, now.Add(time.Hour), "", ""); err != nil {
+		if err := storetest.CreateSession(ctx, db, userID, digest(raw), "csrf-"+name, now, now.Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 		cookies[name] = raw

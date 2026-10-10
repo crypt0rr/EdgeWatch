@@ -33,10 +33,30 @@ An account has one usable link at a time: issuing a new link invalidates older l
 link also stops working when the account's password changes in any other way
 (the account's own change, `edgewatch admin reset-password` on the host, or
 redeeming another link), when the account's role changes, and when the account
-is disabled. A role change stops a pending account's activation link too, so
+is disabled. The links that an administrator issued, such as a pending
+account's activation link, stop working when that administrator is demoted or
+disabled. A role change stops a pending account's activation link too, so
 issue a new link after changing the role of an account that has not activated
 yet. Each stopped link that could still have been used is recorded in the
-security audit as `user.activation_revoked`, with the account's name.
+security audit as `user.activation_revoked`, with the name of the account
+whose link stopped and the reason, by whoever made the change. A link that
+had already expired is not recorded.
+
+A disabled account gets no new activation or password-reset link until it is
+enabled again; the request is refused with `409 user_disabled`. That also
+holds for a request that was already on its way when the account was
+disabled, so enabling the account again never revives a link. A pending
+account, which stays disabled until it activates, can always get a new
+activation link.
+
+To sign another account out of every browser, for example when you suspect
+that someone else holds its session, choose **Revoke sessions** on its row
+in **Users** and confirm with your password. The account's password,
+authenticator, and links do not change, and it can sign in again. The unit's
+audit records the action as `user.sessions_revoked`. The action is offered
+for enabled accounts that have activated; disabling an account already ended
+its sessions. To end your own sessions, use **Log out all sessions** on
+**Security**.
 
 ## Roles
 

@@ -524,7 +524,7 @@ func TestAdminRecoveryWithTenant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := s.Tenant(scope).CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "hash", Enabled: true}, store.AuditEntry{})
+	other, err := storetest.CreateUser(ctx, s, scope, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "hash", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -631,7 +631,7 @@ func TestHostRecoveryRecordsNameTheAccount(t *testing.T) {
 		{"bob", store.RoleOperator, store.DefaultTenantScope(), true},
 		{"carol", store.RoleAdministrator, otherScope, true},
 	} {
-		created, err := s.Tenant(account.unit).CreateUser(ctx, store.User{Username: account.username, Role: account.role, PasswordHash: "hash", Enabled: true}, store.AuditEntry{})
+		created, err := storetest.CreateUser(ctx, s, account.unit, store.User{Username: account.username, Role: account.role, PasswordHash: "hash", Enabled: true})
 		if err != nil {
 			t.Fatal(err)
 		}

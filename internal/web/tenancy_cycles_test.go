@@ -13,6 +13,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // The scan cycle routes read and discard cycles through the session's
@@ -61,7 +62,7 @@ func TestScanCycleRoutesUseTheSessionTenant(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	other, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "other-cycle-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	other, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: "other-cycle-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +72,7 @@ func TestScanCycleRoutesUseTheSessionTenant(t *testing.T) {
 	cookies := map[string]string{}
 	for name, userID := range map[string]string{"a": admin.UserID, "b": other.ID} {
 		raw := "tenant-cycle-" + name
-		if err := db.CreateSessionForUserWithAudit(ctx, userID, digest(raw), "csrf-"+name, now, now.Add(time.Hour), "", ""); err != nil {
+		if err := storetest.CreateSession(ctx, db, userID, digest(raw), "csrf-"+name, now, now.Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 		cookies[name] = raw

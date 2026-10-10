@@ -56,7 +56,9 @@ func TestConfirmTOTPForUserConsumesCurrentFactor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SaveRecoveryCodes(ctx, hashes); err != nil {
+	if current, err := db.GetAdmin(ctx); err != nil {
+		t.Fatal(err)
+	} else if err := db.SaveAdminSecurity(ctx, current, hashes, true, false, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.ConfirmTOTPForUser(ctx, request, store.LegacyAdminUserID, "", plain[0]); err != nil {
@@ -149,7 +151,9 @@ func TestScopedAdmissionReservationsAndTOTPLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SaveRecoveryCodes(ctx, hashes); err != nil {
+	if current, err := db.GetAdmin(ctx); err != nil {
+		t.Fatal(err)
+	} else if err := db.SaveAdminSecurity(ctx, current, hashes, true, false, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := manager.LoginAs(ctx, request, "admin", "administrator password", "000000", plain[0]); err != nil {
@@ -197,7 +201,7 @@ func TestRequestWrappersMapTokenStoreErrorsAndDisabledAccounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Tenant(store.DefaultTenantScope()).CreateUser(ctx, store.User{Username: "disabled", DisplayName: "Disabled", Role: store.RoleViewer, PasswordHash: hash, Enabled: false}, store.AuditEntry{}); err != nil {
+	if _, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: "disabled", DisplayName: "Disabled", Role: store.RoleViewer, PasswordHash: hash, Enabled: false}); err != nil {
 		t.Fatal(err)
 	}
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)

@@ -154,7 +154,7 @@ func newSchema50Fixture(t *testing.T, routing func(destinations []ManagedNotific
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO security_audit(action,detail,created_at) VALUES('auth.legacy_recovery_codes_retired','retired=1',datetime('now'))`); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Platform().PutSetupToken(ctx, "setup-token-hash", time.Now().Add(time.Hour)); err != nil {
+	if err := s.Platform().PutSetupTokenAt(ctx, "setup-token-hash", time.Now().Add(time.Hour), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -526,7 +526,7 @@ func TestMigration51UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
 			if err != nil || dashboard.Title != "Recovered" || len(dashboard.Hosts) != 1 {
 				t.Fatalf("recovered public dashboard = %#v, %v", dashboard, err)
 			}
-			if err := s.Platform().PutSetupToken(ctx, "recovered-token", time.Now().Add(time.Hour)); err != nil {
+			if err := s.Platform().PutSetupTokenAt(ctx, "recovered-token", time.Now().Add(time.Hour), time.Now()); err != nil {
 				t.Fatal(err)
 			}
 			var purpose, category, tenant string

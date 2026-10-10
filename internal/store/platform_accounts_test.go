@@ -70,9 +70,6 @@ func TestPlatformSetupTokenLifecycle(t *testing.T) {
 	if err := ps.CompleteSetup(ctx, "platform-hash", Admin{Username: "second-admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}, now); err == nil || !strings.Contains(err.Error(), "invalid setup token") {
 		t.Fatalf("first setup with a platform token = %v", err)
 	}
-	if err := ps.ConsumeSetupToken(ctx, "platform-hash", now); err == nil {
-		t.Fatal("an initial-token consumer used the platform token")
-	}
 
 	// Within a minute nothing is issued, not even to replace the token.
 	if err := ps.IssuePlatformSetupToken(ctx, "second-hash", now.Add(16*time.Minute), now.Add(30*time.Second), true); !errors.Is(err, ErrSetupTokenRateLimited) {

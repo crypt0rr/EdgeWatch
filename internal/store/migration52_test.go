@@ -154,7 +154,7 @@ func newSchema51Fixture(t *testing.T) schema51Fixture {
 	if err := s.Platform().CompleteSetup(ctx, "setup-hash", Admin{Username: "admin", DisplayName: "Administrator", PasswordHash: "admin-hash", TOTPSecret: "JBSWY3DPEHPK3PXP", TOTPEnabled: true, CreatedAt: now, UpdatedAt: now}, now); err != nil {
 		t.Fatal(err)
 	}
-	operator, err := defaultTenant(s).CreateUser(ctx, User{Username: "operator", Role: RoleOperator, PasswordHash: "operator-hash", Enabled: true, CreatedAt: now}, AuditEntry{})
+	operator, err := createTestUser(ctx, defaultTenant(s), User{Username: "operator", Role: RoleOperator, PasswordHash: "operator-hash", Enabled: true, CreatedAt: now}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,10 +167,10 @@ func newSchema51Fixture(t *testing.T) schema51Fixture {
 			t.Fatal(err)
 		}
 	}
-	if err := s.SaveRecoveryCodesForUser(ctx, operator.ID, []string{"v2$first", "v2$second"}); err != nil {
+	if err := saveTestRecoveryCodes(ctx, s, operator.ID, []string{"v2$first", "v2$second"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateSessionForUserWithAudit(ctx, operator.ID, "session-hash", "csrf", now, now.Add(time.Hour), "", ""); err != nil {
+	if err := createTestSession(ctx, s, operator.ID, "session-hash", "csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -638,7 +638,7 @@ func TestMigration52UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			user, err := defaultTenant(s).CreateUser(ctx, User{Username: "recovered", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{})
+			user, err := createTestUser(ctx, defaultTenant(s), User{Username: "recovered", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -811,7 +811,7 @@ func TestRootTableWritersNameTheDefaultTenant(t *testing.T) {
 	if err := s.Platform().CompleteSetup(ctx, "setup-hash", Admin{Username: "admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := defaultTenant(s).CreateUser(ctx, User{Username: "operator", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{}); err != nil {
+	if _, err := createTestUser(ctx, defaultTenant(s), User{Username: "operator", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := defaultTenant(s).CreateUserWithInvite(ctx, User{Username: "invited", Role: RoleViewer, PasswordHash: "!pending"}, "invite-hash", now, now.Add(time.Hour), AuditEntry{ActorUserID: LegacyAdminUserID}); err != nil {

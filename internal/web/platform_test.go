@@ -16,6 +16,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // expectResponse fails the test unless the response has the status, and
@@ -1443,7 +1444,7 @@ func TestPlatformHandlersReportRefusalsAndFailures(t *testing.T) {
 	ctx := context.Background()
 	f := newPlatformFixture(t)
 	accountsPath := "/platform/units/" + f.unitB + "/accounts"
-	disabled, err := f.b.CreateUser(ctx, store.User{Username: "bravo-disabled", Role: store.RoleAdministrator, PasswordHash: cheapPasswordHash(platformFixturePassword), Enabled: false}, store.AuditEntry{})
+	disabled, err := storetest.CreateUser(ctx, f.db, f.scopeB, store.User{Username: "bravo-disabled", Role: store.RoleAdministrator, PasswordHash: cheapPasswordHash(platformFixturePassword), Enabled: false})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -699,7 +699,8 @@ func TestAuditViewsShowNoSecretMaterial(t *testing.T) {
 	if _, err := b.CreateUserWithInvite(ctx, User{Username: "invited-b", DisplayName: "Invited B", Role: RoleViewer}, "invite-token-hash-secret", now, now.Add(time.Hour), byAdminB("user.created", "user invited-b created by admin-b")); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.store.CreateSessionForUserWithAuditEntry(ctx, accountOperatorB, "session-token-hash-secret", "csrf-token-secret", now, now.Add(time.Hour), AuditEntry{Action: "user.login", Detail: "signed in", ActorUserID: accountOperatorB, ActorUsername: "operator-b"}); err != nil {
+	operatorB := fixtureAccount(t, f, accountOperatorB)
+	if err := f.store.CreateSignInSession(ctx, SignInSession{UserID: accountOperatorB, PasswordHash: operatorB.PasswordHash, Revision: operatorB.Revision, TOTPEnabled: operatorB.TOTPEnabled, Factor: NoSignInFactor, IDHash: "session-token-hash-secret", CSRF: "csrf-token-secret", Created: now, Expires: now.Add(time.Hour), Audit: AuditEntry{Action: "user.login", Detail: "signed in", ActorUserID: accountOperatorB, ActorUsername: "operator-b"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := ps.IssuePlatformSetupToken(ctx, "setup-token-hash-secret", now.Add(time.Hour), now, false); err != nil {

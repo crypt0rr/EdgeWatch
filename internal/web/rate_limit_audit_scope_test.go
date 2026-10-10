@@ -10,6 +10,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // Once a client with its own address has used its sign-in budget, here with
@@ -21,7 +22,7 @@ import (
 func TestThrottledSignInAnswerIsTheSameForEveryUsername(t *testing.T) {
 	t.Parallel()
 	f := newPlatformFixture(t)
-	if _, err := f.a.CreateUser(context.Background(), store.User{Username: "alpha-disabled", Role: store.RoleViewer, PasswordHash: cheapPasswordHash(platformFixturePassword), Enabled: false}, store.AuditEntry{}); err != nil {
+	if _, err := storetest.CreateUser(context.Background(), f.db, store.DefaultTenantScope(), store.User{Username: "alpha-disabled", Role: store.RoleViewer, PasswordHash: cheapPasswordHash(platformFixturePassword), Enabled: false}); err != nil {
 		t.Fatal(err)
 	}
 	type answer struct {
@@ -65,7 +66,7 @@ func TestThrottledSignInAnswerIsTheSameForEveryUsername(t *testing.T) {
 func TestSignInBudgetDoesNotDependOnWhichUsernamesExist(t *testing.T) {
 	t.Parallel()
 	f := newPlatformFixture(t)
-	if _, err := f.a.CreateUser(context.Background(), store.User{Username: "alpha-disabled", Role: store.RoleViewer, PasswordHash: cheapPasswordHash(platformFixturePassword), Enabled: false}, store.AuditEntry{}); err != nil {
+	if _, err := storetest.CreateUser(context.Background(), f.db, store.DefaultTenantScope(), store.User{Username: "alpha-disabled", Role: store.RoleViewer, PasswordHash: cheapPasswordHash(platformFixturePassword), Enabled: false}); err != nil {
 		t.Fatal(err)
 	}
 	type answer struct {

@@ -69,7 +69,7 @@ func TestRateLimitRecordsBelongToTheAccountsScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	const password = "unit b administrator password"
-	adminB, err := s.Tenant(scope).CreateUser(ctx, store.User{Username: "bravo-admin", Role: store.RoleAdministrator, PasswordHash: cheapHash(password), Enabled: true}, store.AuditEntry{})
+	adminB, err := storetest.CreateUser(ctx, s, scope, store.User{Username: "bravo-admin", Role: store.RoleAdministrator, PasswordHash: cheapHash(password), Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestRateLimitRecordsFromOneClientReachEveryScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	adminB, err := s.Tenant(scope).CreateUser(ctx, store.User{Username: "bravo-admin", Role: store.RoleAdministrator, PasswordHash: cheapHash("unit b administrator password"), Enabled: true}, store.AuditEntry{})
+	adminB, err := storetest.CreateUser(ctx, s, scope, store.User{Username: "bravo-admin", Role: store.RoleAdministrator, PasswordHash: cheapHash("unit b administrator password"), Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}

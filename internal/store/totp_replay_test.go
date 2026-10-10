@@ -12,7 +12,7 @@ func TestConsumeTOTPStepRejectsReplayAndOlderStep(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "totp-replay", DisplayName: "TOTP replay", Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	user, err := createTestUser(ctx, defaultTenant(s), User{Username: "totp-replay", DisplayName: "TOTP replay", Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestTOTPEnrolmentRecordsTheConfirmingStep(t *testing.T) {
 	if err := s.SaveAdmin(ctx, Admin{Username: "admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	unit, err := defaultTenant(s).CreateUser(ctx, User{Username: "totp-enrolment", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{})
+	unit, err := createTestUser(ctx, defaultTenant(s), User{Username: "totp-enrolment", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}

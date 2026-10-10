@@ -795,10 +795,10 @@ func TestDeleteExpiredSessionsKeepsActiveSessions(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	if err := s.CreateSession(ctx, "expired", "csrf-expired", now.Add(-2*time.Hour), now.Add(-time.Minute)); err != nil {
+	if err := createTestSession(ctx, s, LegacyAdminUserID, "expired", "csrf-expired", now.Add(-2*time.Hour), now.Add(-time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateSession(ctx, "active", "csrf-active", now.Add(-time.Minute), now.Add(time.Hour)); err != nil {
+	if err := createTestSession(ctx, s, LegacyAdminUserID, "active", "csrf-active", now.Add(-time.Minute), now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	removed, err := s.DeleteExpiredSessions(ctx, now)
@@ -853,10 +853,18 @@ func TestSessionAuditFailureRollsBackAuthenticationMutation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
+	now := time.Now().UTC()
+	if err := s.SaveAdmin(ctx, Admin{Username: "admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := s.GetAdmin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.DB.Exec(`CREATE TRIGGER fail_session_audit BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
 		t.Fatal(err)
 	}
-	err := s.CreateSessionWithAudit(ctx, "session", "csrf", time.Now().UTC(), time.Now().UTC().Add(time.Hour), "admin.login", "successful login")
+	err = s.CreateSignInSession(ctx, SignInSession{UserID: LegacyAdminUserID, PasswordHash: admin.PasswordHash, Revision: admin.Revision, Factor: NoSignInFactor, IDHash: "session", CSRF: "csrf", Created: now, Expires: now.Add(time.Hour), Audit: AuditEntry{Action: "admin.login", Detail: "successful login", ActorUserID: LegacyAdminUserID}})
 	if !errors.Is(err, ErrAuditUnavailable) {
 		t.Fatalf("expected audit failure, got %v", err)
 	}
@@ -1014,7 +1022,7 @@ func TestSaveAdminSecurityRollsBackCredentialAndSessionsTogether(t *testing.T) {
 	if err := s.SaveAdmin(ctx, admin); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateSession(ctx, "session-hash", "csrf", now, now.Add(time.Hour)); err != nil {
+	if err := createTestSession(ctx, s, LegacyAdminUserID, "session-hash", "csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.Exec(`CREATE TRIGGER fail_security_audit BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
@@ -1064,11 +1072,7 @@ func TestSaveAdminSecurityRollsBackTOTPWhenRecoveryCodesFail(t *testing.T) {
 	if got.TOTPEnabled || got.TOTPSecret != "" {
 		t.Fatalf("TOTP state changed despite transaction rollback: %#v", got)
 	}
-	count, err := s.RecoveryCodeCount(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if count != 0 {
+	if count := countRows(t, s.DB, `SELECT COUNT(*) FROM recovery_codes WHERE used_at IS NULL`); count != 0 {
 		t.Fatalf("recovery codes changed despite transaction rollback: %d", count)
 	}
 }
@@ -1082,7 +1086,7 @@ func TestSaveAdminSecurityRevokesSessionsOnSuccessfulTOTPChange(t *testing.T) {
 	if err := s.SaveAdmin(ctx, admin); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateSession(ctx, "session-hash", "csrf", now, now.Add(time.Hour)); err != nil {
+	if err := createTestSession(ctx, s, LegacyAdminUserID, "session-hash", "csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	admin.TOTPSecret, admin.TOTPEnabled, admin.UpdatedAt = "JBSWY3DPEHPK3PXP", true, now.Add(time.Minute)
@@ -1092,8 +1096,8 @@ func TestSaveAdminSecurityRevokesSessionsOnSuccessfulTOTPChange(t *testing.T) {
 	if _, err := s.GetSession(ctx, "session-hash"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("session remained after TOTP change: %v", err)
 	}
-	if count, err := s.RecoveryCodeCount(ctx); err != nil || count != 1 {
-		t.Fatalf("recovery code count = %d, err=%v", count, err)
+	if count := countRows(t, s.DB, `SELECT COUNT(*) FROM recovery_codes WHERE used_at IS NULL`); count != 1 {
+		t.Fatalf("recovery code count = %d", count)
 	}
 	rows, err := s.DB.QueryContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE action=?`, "admin.totp_enabled")
 	if err != nil {

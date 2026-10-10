@@ -15,6 +15,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestLogoutHandlerClearsCookieAndRevokesSession(t *testing.T) {
@@ -22,7 +23,7 @@ func TestLogoutHandlerClearsCookieAndRevokesSession(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	now := time.Now().UTC()
-	if err := db.CreateSessionForUserWithAudit(ctx, admin.UserID, digest("logout-session"), "csrf", now, now.Add(time.Hour), "", ""); err != nil {
+	if err := storetest.CreateSession(ctx, db, admin.UserID, digest("logout-session"), "csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
@@ -169,7 +170,7 @@ func TestPasswordAndTOTPHandlersValidateCredentialsAndSessionCookie(t *testing.T
 	if shortRecorder.Code != http.StatusBadRequest {
 		t.Fatalf("short password status = %d", shortRecorder.Code)
 	}
-	if err := db.CreateSessionForUserWithAudit(ctx, admin.UserID, "password-session", "csrf", time.Now().UTC(), time.Now().UTC().Add(time.Hour), "", ""); err != nil {
+	if err := storetest.CreateSession(ctx, db, admin.UserID, "password-session", "csrf", time.Now().UTC(), time.Now().UTC().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	change := httptest.NewRequest(http.MethodPut, "/api/v1/auth/password", strings.NewReader(`{"current_password":"administrator password","new_password":"new administrator password"}`))
@@ -233,10 +234,10 @@ func TestTOTPEnablePreservesActingSessionForRecoveryCodes(t *testing.T) {
 	now := time.Now().UTC()
 	actingCookie := "totp-acting-session"
 	otherCookie := "totp-other-session"
-	if err := db.CreateSessionForUserWithAuditEntry(ctx, admin.UserID, digest(actingCookie), "acting-csrf", now, now.Add(time.Hour), store.AuditEntry{}); err != nil {
+	if err := storetest.CreateSession(ctx, db, admin.UserID, digest(actingCookie), "acting-csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.CreateSessionForUserWithAuditEntry(ctx, admin.UserID, digest(otherCookie), "other-csrf", now, now.Add(time.Hour), store.AuditEntry{}); err != nil {
+	if err := storetest.CreateSession(ctx, db, admin.UserID, digest(otherCookie), "other-csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -286,7 +287,7 @@ func TestTOTPRecoveryCodeRotationRequiresCurrentFactorAndPreservesSession(t *tes
 		t.Fatal(err)
 	}
 	cookieValue := "recovery-rotation-session"
-	if err := db.CreateSessionForUserWithAuditEntry(ctx, session.UserID, digest(cookieValue), "csrf", now, now.Add(time.Hour), store.AuditEntry{}); err != nil {
+	if err := storetest.CreateSession(ctx, db, session.UserID, digest(cookieValue), "csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	code := coverageTOTPCode(admin.TOTPSecret, now.Unix()/30)
@@ -410,7 +411,7 @@ func TestPendingTOTPEnrolmentsExpireAndRemainBounded(t *testing.T) {
 func startTOTPEnrolment(t *testing.T, server *Server, db *store.Store, session store.Session, cookieValue string) string {
 	t.Helper()
 	now := time.Now().UTC()
-	if err := db.CreateSessionForUserWithAuditEntry(context.Background(), session.UserID, digest(cookieValue), "csrf", now, now.Add(time.Hour), store.AuditEntry{}); err != nil {
+	if err := storetest.CreateSession(context.Background(), db, session.UserID, digest(cookieValue), "csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/setup", strings.NewReader(`{"password":"administrator password"}`))
@@ -604,7 +605,7 @@ func newTOTPReplayFixture(t *testing.T, account totpReplayAccount) *totpReplayFi
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := defaultTenant(db).CreateUser(context.Background(), store.User{Username: account.username, Role: account.role, PasswordHash: hash, Enabled: true}, store.AuditEntry{}); err != nil {
+		if _, err := storetest.CreateUser(context.Background(), db, store.DefaultTenantScope(), store.User{Username: account.username, Role: account.role, PasswordHash: hash, Enabled: true}); err != nil {
 			t.Fatal(err)
 		}
 	case store.RolePlatformAdmin:

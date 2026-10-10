@@ -38,12 +38,11 @@ func platformTestStore(t *testing.T) (*store.Store, store.User, store.User) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	unit := s.Tenant(store.DefaultTenantScope())
-	admin, err := unit.CreateUser(context.Background(), store.User{Username: "unit-admin", Role: store.RoleAdministrator, PasswordHash: cheapHash("unit administrator password"), Enabled: true}, store.AuditEntry{})
+	admin, err := storetest.CreateUser(context.Background(), s, store.DefaultTenantScope(), store.User{Username: "unit-admin", Role: store.RoleAdministrator, PasswordHash: cheapHash("unit administrator password"), Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	operator, err := unit.CreateUser(context.Background(), store.User{Username: "unit-operator", Role: store.RoleOperator, PasswordHash: cheapHash("unit operator password"), Enabled: true}, store.AuditEntry{})
+	operator, err := storetest.CreateUser(context.Background(), s, store.DefaultTenantScope(), store.User{Username: "unit-operator", Role: store.RoleOperator, PasswordHash: cheapHash("unit operator password"), Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +81,7 @@ func authenticateAs(t *testing.T, m *Manager, user store.User, raw string) store
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now().UTC()
-	if err := m.Store.CreateSessionForUserWithAuditEntry(ctx, user.ID, digest(raw), "csrf-"+raw, now, now.Add(time.Hour), store.AuditEntry{}); err != nil {
+	if err := storetest.CreateSession(ctx, m.Store, user.ID, digest(raw), "csrf-"+raw, now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
@@ -416,7 +415,7 @@ func TestFailedLinkRedemptionsBelongToTheLinksAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	adminB, err := s.Tenant(scopeB).CreateUser(ctx, store.User{Username: "bravo-admin", Role: store.RoleAdministrator, PasswordHash: cheapHash("bravo administrator password"), Enabled: true}, store.AuditEntry{})
+	adminB, err := storetest.CreateUser(ctx, s, scopeB, store.User{Username: "bravo-admin", Role: store.RoleAdministrator, PasswordHash: cheapHash("bravo administrator password"), Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}

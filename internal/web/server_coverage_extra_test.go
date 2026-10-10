@@ -329,7 +329,7 @@ func TestServerAuthenticationAndAuditFailureResponses(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := db.CreateSessionForUserWithAudit(context.Background(), admin.UserID, "logout-failure", "csrf", now, now.Add(time.Hour), "", ""); err != nil {
+	if err := storetest.CreateSession(context.Background(), db, admin.UserID, "logout-failure", "csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.DB.ExecContext(context.Background(), `CREATE TRIGGER fail_web_logout BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {

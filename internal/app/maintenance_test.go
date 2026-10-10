@@ -14,6 +14,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestDaemonRetentionMaintenanceKeepsHeartbeatAndScheduleResponsive(t *testing.T) {
@@ -112,7 +113,7 @@ func TestRunMaintenancePassLogsSuccessfulCleanup(t *testing.T) {
 	a, db := newLifecycleTestApp(t, schedulerFake{}, io.Discard)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	if err := db.CreateSession(ctx, "expired-maintenance-session", "csrf", now.Add(-time.Hour), now.Add(-time.Minute)); err != nil {
+	if err := storetest.CreateSession(ctx, db, store.LegacyAdminUserID, "expired-maintenance-session", "csrf", now.Add(-time.Hour), now.Add(-time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	job, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("expired-maintenance-cycle"))

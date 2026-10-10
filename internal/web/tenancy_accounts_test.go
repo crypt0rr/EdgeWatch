@@ -81,7 +81,11 @@ func newTenantAccountsFixture(t *testing.T) tenantAccountsFixture {
 	hash := cheapPasswordHash(tenantAccountsPassword)
 	create := func(ts *store.TenantStore, username, role, passwordHash string) store.User {
 		t.Helper()
-		user, err := ts.CreateUser(ctx, store.User{Username: username, Role: role, PasswordHash: passwordHash, Enabled: true}, store.AuditEntry{})
+		scope, err := ts.Scope()
+		if err != nil {
+			t.Fatal(err)
+		}
+		user, err := storetest.CreateUser(ctx, db, scope, store.User{Username: username, Role: role, PasswordHash: passwordHash, Enabled: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -93,7 +97,7 @@ func newTenantAccountsFixture(t *testing.T) tenantAccountsFixture {
 	f.viewerB = create(f.other, "viewer-b", store.RoleViewer, "unused-hash")
 	for name, userID := range map[string]string{"own": f.adminA.ID, "other": f.adminB.ID, "operator": f.operatorA.ID} {
 		raw := "tenant-accounts-" + name
-		if err := db.CreateSessionForUserWithAudit(ctx, userID, digest(raw), "csrf-"+name, now, now.Add(time.Hour), "", ""); err != nil {
+		if err := storetest.CreateSession(ctx, db, userID, digest(raw), "csrf-"+name, now, now.Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 		f.cookies[name] = raw
@@ -131,7 +135,7 @@ func TestUserRoutesUseTheSessionTenant(t *testing.T) {
 	const unknownUserID = "00000000-0000-0000-0000-00000000dead"
 	password := tenantAccountsPassword
 	now := time.Now().UTC()
-	if err := own.CreateUserInvite(ctx, "invite-operator-a", operatorA.ID, now, now.Add(time.Hour)); err != nil {
+	if _, err := db.DB.ExecContext(ctx, `INSERT INTO user_invites(id_hash,user_id,issuer_user_id,created_at,expires_at) VALUES('invite-operator-a',?,'',?,?)`, operatorA.ID, now.Format(time.RFC3339Nano), now.Add(time.Hour).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 	count := func(query string, args ...any) int {

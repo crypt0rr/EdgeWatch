@@ -41,8 +41,8 @@ func TestUserStoreValidationAndInviteBoundaries(t *testing.T) {
 			_, err := s.ActivateUser(ctx, "", "", now, AuditEntry{})
 			return err
 		}},
-		{"invalid consume token", func() error {
-			_, err := s.ConsumeUserInvite(ctx, "missing", now)
+		{"unknown activation token", func() error {
+			_, err := s.ActivateUser(ctx, "missing", "hash", now, AuditEntry{})
 			return err
 		}},
 	} {
@@ -53,17 +53,17 @@ func TestUserStoreValidationAndInviteBoundaries(t *testing.T) {
 		})
 	}
 
-	if _, err := defaultTenant(s).CreateUser(ctx, User{ID: "not-a-uuid", Username: "bad-id", Role: RoleViewer, PasswordHash: "hash"}, AuditEntry{}); err == nil {
+	if _, err := createTestUser(ctx, defaultTenant(s), User{ID: "not-a-uuid", Username: "bad-id", Role: RoleViewer, PasswordHash: "hash"}, AuditEntry{}); err == nil {
 		t.Fatal("invalid user UUID was accepted")
 	}
-	if _, err := defaultTenant(s).CreateUser(ctx, User{Username: strings.Repeat("x", 81), Role: RoleViewer, PasswordHash: "hash"}, AuditEntry{}); err == nil {
+	if _, err := createTestUser(ctx, defaultTenant(s), User{Username: strings.Repeat("x", 81), Role: RoleViewer, PasswordHash: "hash"}, AuditEntry{}); err == nil {
 		t.Fatal("long username was accepted")
 	}
 	if _, err := s.GetUserByUsername(ctx, "bad/name"); err == nil {
 		t.Fatal("invalid lookup username was accepted")
 	}
 
-	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "blank-display", DisplayName: "Stored", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{})
+	user, err := createTestUser(ctx, defaultTenant(s), User{Username: "blank-display", DisplayName: "Stored", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestUserStoreValidationAndInviteBoundaries(t *testing.T) {
 		t.Fatal("invalid security UUID was accepted")
 	}
 
-	locked, err := defaultTenant(s).CreateUser(ctx, User{Username: "locked", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{})
+	locked, err := createTestUser(ctx, defaultTenant(s), User{Username: "locked", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,11 +100,11 @@ func TestUserStoreValidationAndInviteBoundaries(t *testing.T) {
 		t.Fatalf("locked TOTP secret error = %v", err)
 	}
 
-	admin1, err := defaultTenant(s).CreateUser(ctx, User{Username: "admin-one", Role: RoleAdministrator, PasswordHash: "hash", Enabled: true}, AuditEntry{})
+	admin1, err := createTestUser(ctx, defaultTenant(s), User{Username: "admin-one", Role: RoleAdministrator, PasswordHash: "hash", Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := defaultTenant(s).CreateUser(ctx, User{Username: "admin-two", Role: RoleAdministrator, PasswordHash: "hash", Enabled: true}, AuditEntry{}); err != nil {
+	if _, err := createTestUser(ctx, defaultTenant(s), User{Username: "admin-two", Role: RoleAdministrator, PasswordHash: "hash", Enabled: true}, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	admin1.Role = RoleOperator
@@ -112,14 +112,14 @@ func TestUserStoreValidationAndInviteBoundaries(t *testing.T) {
 		t.Fatalf("demotion with another administrator = %v", err)
 	}
 
-	expired, err := defaultTenant(s).CreateUser(ctx, User{Username: "expired-invite", Role: RoleViewer, PasswordHash: "!pending"}, AuditEntry{})
+	expired, err := createTestUser(ctx, defaultTenant(s), User{Username: "expired-invite", Role: RoleViewer, PasswordHash: "!pending"}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := defaultTenant(s).CreateUserInvite(ctx, "expired-hash", expired.ID, now.Add(-2*time.Hour), now.Add(-time.Hour)); err != nil {
+	if err := createTestLink(ctx, defaultTenant(s), "expired-hash", expired.ID, now.Add(-2*time.Hour), now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ConsumeUserInvite(ctx, "expired-hash", now); err == nil {
+	if _, err := s.ActivateUser(ctx, "expired-hash", "hash", now, AuditEntry{}); err == nil {
 		t.Fatal("expired invite was accepted")
 	}
 }

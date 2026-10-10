@@ -13,6 +13,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // gatedBody is a request body whose first Read tells the test that the
@@ -196,11 +197,11 @@ func TestAccountWritesStopWhenTheAdministratorIsDemoted(t *testing.T) {
 				ctx := context.Background()
 				f := newPlatformFixture(t)
 				hash := cheapPasswordHash(platformFixturePassword)
-				second, err := f.a.CreateUser(ctx, store.User{Username: "alpha-second-admin", Role: store.RoleAdministrator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+				second, err := storetest.CreateUser(ctx, f.db, store.DefaultTenantScope(), store.User{Username: "alpha-second-admin", Role: store.RoleAdministrator, PasswordHash: hash, Enabled: true})
 				if err != nil {
 					t.Fatal(err)
 				}
-				pending, err := f.a.CreateUser(ctx, store.User{Username: "alpha-pending", Role: store.RoleViewer, PasswordHash: "!pending"}, store.AuditEntry{})
+				pending, err := storetest.CreateUser(ctx, f.db, store.DefaultTenantScope(), store.User{Username: "alpha-pending", Role: store.RoleViewer, PasswordHash: "!pending"})
 				if err != nil {
 					t.Fatal(err)
 				}

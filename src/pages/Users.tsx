@@ -1,7 +1,7 @@
 import { FormEvent, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { KeyRound, ShieldCheck, UserPlus, Users as UsersIcon } from 'lucide-react'
-import { APIError, createUser, getSession, issueUserActivation, issueUserPasswordReset, listUsers, revokeUserActivation, Role, updateUser } from '../api'
+import { KeyRound, LogOut, ShieldCheck, UserPlus, Users as UsersIcon } from 'lucide-react'
+import { APIError, createUser, getSession, issueUserActivation, issueUserPasswordReset, listUsers, revokeUserActivation, revokeUserSessions, Role, updateUser } from '../api'
 import type { UserSummary } from '../api'
 import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
@@ -26,24 +26,29 @@ export function usernameProblem(value: string) {
  * account receives no activation or password-reset link until it is enabled
  * again, and disabling it revoked its links, so it has none to revoke. Any
  * other account can get a new link, which replaces its older ones, and have
- * an active link revoked when one is reported by the server.
+ * an active link revoked when one is reported by the server. Another enabled
+ * account that has signed up can have its sessions revoked; a pending or
+ * disabled account has none, and the administrator ends its own from the
+ * Security page.
  */
 function userActions(user: UserSummary, sessionUserID: string | undefined) {
   const linkable = user.pending || user.enabled
+  const other = sessionUserID !== undefined && user.id !== sessionUserID
   return {
-    toggle: !user.pending && (!user.enabled || (sessionUserID !== undefined && user.id !== sessionUserID)),
+    toggle: !user.pending && (!user.enabled || other),
+    revokeSessions: !user.pending && user.enabled && other,
     issueLink: linkable,
     revokeLink: linkable && user.has_active_link === true,
   }
 }
 
 export function Users() {
-  type Prompt = { action: 'toggle' | 'renew' | 'revoke' | 'edit'; userID: string; username: string; label: string; targetEnabled?: boolean; revision?: number; linkKind?: 'activation' | 'password-reset' }
+  type Prompt = { action: 'toggle' | 'renew' | 'revoke' | 'sessions' | 'edit'; userID: string; username: string; label: string; targetEnabled?: boolean; revision?: number; linkKind?: 'activation' | 'password-reset' }
   const client = useQueryClient(); const users = useQuery({ queryKey: ['users'], queryFn: listUsers }); const session = useQuery({ queryKey: ['session'], queryFn: getSession }); const [username, setUsername] = useState(''); const [displayName, setDisplayName] = useState(''); const [role, setRole] = useState<Role>('viewer'); const [password, setPassword] = useState(''); const [message, setMessage] = useState(''); const [error, setError] = useState(''); const [issued, setIssued] = useState<{ path: string; username: string; userID: string; kind: 'activation' | 'password-reset' } | null>(null); const [prompt, setPrompt] = useState<Prompt | null>(null); const [editDraft, setEditDraft] = useState<{ userID: string; username: string; displayName: string; originalDisplayName: string; role: Role; originalRole: Role; pending: boolean; revision: number } | null>(null)
   const create = useMutation({ mutationFn: () => createUser(username, displayName, role, password), onSuccess: value => { setUsername(''); setDisplayName(''); setPassword(''); setIssued({ path: value.activation_path, username: value.user.username, userID: value.user.id, kind: 'activation' }); setMessage(`Created ${value.user.username}. Share the one-time activation link before leaving this page.`); void client.invalidateQueries({ queryKey: ['users'] }) }, onError: err => setError(err instanceof Error ? err.message : 'Could not create user') })
   async function submit(event: FormEvent) { event.preventDefault(); setMessage(''); setError(''); const problem = usernameProblem(username); if (problem) { setError(problem); return } create.mutate() }
   type Account = Awaited<ReturnType<typeof listUsers>>['users'][number]
-  function openPrompt(action: 'toggle' | 'renew' | 'revoke' | 'edit', user: Account, label: string) { setError(''); setMessage(''); setPrompt({ action, userID: user.id, username: user.username, label }) }
+  function openPrompt(action: 'toggle' | 'renew' | 'revoke' | 'sessions' | 'edit', user: Account, label: string) { setError(''); setMessage(''); setPrompt({ action, userID: user.id, username: user.username, label }) }
   function toggle(user: Account) {
     setError('')
     setMessage('')
@@ -55,6 +60,7 @@ export function Users() {
     setPrompt({ action: 'renew', userID: user.id, username: user.username, label: user.pending ? `Renew activation link for ${user.username}` : `Create password reset link for ${user.username}`, linkKind: user.pending ? 'activation' : 'password-reset' })
   }
   function revoke(user: Account) { openPrompt('revoke', user, `Revoke ${user.pending ? 'activation' : 'password reset'} link for ${user.username}`) }
+  function revokeSessions(user: Account) { openPrompt('sessions', user, `Revoke all sessions of ${user.username}?`) }
   function edit(user: Account) {
     setError('')
     setMessage('')
@@ -97,6 +103,9 @@ export function Users() {
         await revokeUserActivation(prompt.userID, secret)
         dropToken(prompt.userID)
         setMessage(`The link for ${prompt.username} was revoked.`)
+      } else if (prompt.action === 'sessions') {
+        await revokeUserSessions(prompt.userID, secret)
+        setMessage(`${prompt.username} was signed out of every session.`)
       } else {
         const draft = editDraft
         if (!draft || draft.userID !== prompt.userID) return
@@ -162,7 +171,9 @@ export function Users() {
       ? `Confirm the account change for ${prompt.username}. Enter your administrator password to authorize it.`
       : prompt?.action === 'renew'
         ? `Generate a one-time activation or password reset link for ${prompt.username}. The link expires in 30 minutes.`
-        : `Revoke the outstanding activation or password reset link for ${prompt?.username ?? 'this account'}. Enter your administrator password to authorize the change.`
+        : prompt?.action === 'sessions'
+          ? `${prompt.username} is signed out on every device. Its password, authenticator, and links do not change. Enter your administrator password to authorize it.`
+          : `Revoke the outstanding activation or password reset link for ${prompt?.username ?? 'this account'}. Enter your administrator password to authorize the change.`
   function cancelPrompt() { setPrompt(null); setEditDraft(null); setError('') }
   return <section className="page">
     <div className="page-heading"><div><p className="eyebrow">Administration</p><h1>Users</h1><p className="muted">Invite operators and viewers without sharing passwords.</p></div><UsersIcon className="muted-icon" size={24} /></div>
@@ -189,6 +200,7 @@ export function Users() {
             <span className={user.pending ? 'pill amber' : user.enabled ? 'pill green' : 'pill gray'}>{user.pending ? 'Pending activation' : user.enabled ? 'Enabled' : 'Disabled'}</span>
             <div className="user-row-actions">
               {offered.toggle && <button type="button" className={`button ghost${user.enabled ? ' danger-text' : ''}`} onClick={() => toggle(user)}>{user.enabled ? 'Disable' : 'Enable'}</button>}
+              {offered.revokeSessions && <button type="button" className="button ghost danger-text" onClick={() => revokeSessions(user)}><LogOut size={14} /> Revoke sessions</button>}
               {offered.issueLink && <button type="button" className="button ghost" onClick={() => renew(user)}><KeyRound size={14} /> {user.pending ? 'Renew activation link' : 'Create password reset link'}</button>}
               {offered.revokeLink && <button type="button" className="button ghost danger-text" onClick={() => revoke(user)}>{user.pending ? 'Revoke activation link' : 'Revoke password reset link'}</button>}
               <button type="button" className="button ghost" onClick={() => edit(user)}>Edit account</button>
@@ -199,6 +211,6 @@ export function Users() {
         })}</div> : <div className="inline-empty">No users have been configured yet.</div>}
       </div>
     </div>
-    {prompt && <ActionDialog title={prompt.label} description={promptDescription} confirmLabel={prompt.action === 'edit' ? 'Save changes' : 'Confirm'} valueLabel={prompt.action === 'edit' ? roleChangeNeedsPassword ? 'Administrator password' : undefined : 'Administrator password'} valueType="password" valueRequired={prompt.action !== 'edit' || !!roleChangeNeedsPassword} autoComplete="current-password" destructive={prompt.action === 'revoke' || prompt.label.startsWith('Disable ')} restoreFocus={prompt.action !== 'renew'} onConfirm={confirmAction} onCancel={cancelPrompt} error={error}>{prompt.action === 'edit' && editDraft && <><label>Display name<input value={editDraft.displayName} maxLength={80} onChange={event => setEditDraft(value => value ? { ...value, displayName: event.target.value } : value)} /></label><label>Role<select value={editDraft.role} onChange={event => setEditDraft(value => value ? { ...value, role: event.target.value as Role } : value)}><option value="viewer" disabled={editDraft.userID === session.data?.user_id}>Viewer · read only</option><option value="operator" disabled={editDraft.userID === session.data?.user_id}>Operator · manage scans</option><option value="administrator">Administrator · full access</option></select>{editDraft.userID === session.data?.user_id && <small>You cannot change your own administrator role.</small>}</label></>}</ActionDialog>}
+    {prompt && <ActionDialog title={prompt.label} description={promptDescription} confirmLabel={prompt.action === 'edit' ? 'Save changes' : prompt.action === 'sessions' ? 'Revoke sessions' : 'Confirm'} valueLabel={prompt.action === 'edit' ? roleChangeNeedsPassword ? 'Administrator password' : undefined : 'Administrator password'} valueType="password" valueRequired={prompt.action !== 'edit' || !!roleChangeNeedsPassword} autoComplete="current-password" destructive={prompt.action === 'revoke' || prompt.action === 'sessions' || prompt.label.startsWith('Disable ')} restoreFocus={prompt.action !== 'renew'} onConfirm={confirmAction} onCancel={cancelPrompt} error={error}>{prompt.action === 'edit' && editDraft && <><label>Display name<input value={editDraft.displayName} maxLength={80} onChange={event => setEditDraft(value => value ? { ...value, displayName: event.target.value } : value)} /></label><label>Role<select value={editDraft.role} onChange={event => setEditDraft(value => value ? { ...value, role: event.target.value as Role } : value)}><option value="viewer" disabled={editDraft.userID === session.data?.user_id}>Viewer · read only</option><option value="operator" disabled={editDraft.userID === session.data?.user_id}>Operator · manage scans</option><option value="administrator">Administrator · full access</option></select>{editDraft.userID === session.data?.user_id && <small>You cannot change your own administrator role.</small>}</label></>}</ActionDialog>}
   </section>
 }

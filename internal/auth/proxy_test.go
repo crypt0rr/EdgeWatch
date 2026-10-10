@@ -263,14 +263,14 @@ func TestThrottledSignInAnswerDoesNotDependOnTheUsername(t *testing.T) {
 	ctx := context.Background()
 	s, admin, _ := platformTestStore(t)
 	addSecondUnit(t, s)
-	if _, err := s.Tenant(store.DefaultTenantScope()).CreateUser(ctx, store.User{Username: "unit-disabled", Role: store.RoleViewer, PasswordHash: cheapHash("disabled viewer password"), Enabled: false}, store.AuditEntry{}); err != nil {
+	if _, err := storetest.CreateUser(ctx, s, store.DefaultTenantScope(), store.User{Username: "unit-disabled", Role: store.RoleViewer, PasswordHash: cheapHash("disabled viewer password"), Enabled: false}); err != nil {
 		t.Fatal(err)
 	}
 	scope, err := s.TenantScopeByID(ctx, platformTestTenantID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Tenant(scope).CreateUser(ctx, store.User{Username: "bravo-viewer", Role: store.RoleViewer, PasswordHash: cheapHash("unit b viewer password"), Enabled: true}, store.AuditEntry{}); err != nil {
+	if _, err := storetest.CreateUser(ctx, s, scope, store.User{Username: "bravo-viewer", Role: store.RoleViewer, PasswordHash: cheapHash("unit b viewer password"), Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
@@ -359,7 +359,7 @@ func clientBudgetStore(t *testing.T, now time.Time) (*store.Store, string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		user, err := s.Tenant(scope).CreateUser(ctx, store.User{Username: username, Role: role, PasswordHash: cheapHash(username + " password"), Enabled: enabled}, store.AuditEntry{})
+		user, err := storetest.CreateUser(ctx, s, scope, store.User{Username: username, Role: role, PasswordHash: cheapHash(username + " password"), Enabled: enabled})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -889,7 +889,7 @@ func TestLoopbackConfirmationFailuresCountAgainstTheirAccountOnly(t *testing.T) 
 				var bravo []store.User
 				for i := 0; i < authSourceFailureThreshold/authFailureThreshold; i++ {
 					user := store.User{Username: fmt.Sprintf("bravo-%02d", i), Role: store.RoleViewer, PasswordHash: cheapHash(fmt.Sprintf("bravo-%02d password", i)), Enabled: true}
-					created, err := s.Tenant(scope).CreateUser(ctx, user, store.AuditEntry{})
+					created, err := storetest.CreateUser(ctx, s, scope, user)
 					if err != nil {
 						t.Fatal(err)
 					}

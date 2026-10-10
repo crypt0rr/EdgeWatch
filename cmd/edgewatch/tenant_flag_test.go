@@ -43,7 +43,10 @@ func newTenantFlagFixture(t *testing.T) tenantFlagFixture {
 		extra string
 	}{{&f.config, "config.yaml", ""}, {&f.preview, "preview.yaml", "experimental:\n  business_units: true\n"}} {
 		*config.path = filepath.Join(dir, config.name)
-		if err := os.WriteFile(*config.path, []byte("database: "+database+"\n"+config.extra+legacyCLIJobsYAML), 0o600); err != nil {
+		// The units' destinations deliver to a webhook on the loopback
+		// address, which only the explicit override of the target
+		// exclusions allows a unit's destination to use.
+		if err := os.WriteFile(*config.path, []byte("database: "+database+"\nscanner:\n  target_exclusions: []\n"+config.extra+legacyCLIJobsYAML), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

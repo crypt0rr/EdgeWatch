@@ -25,6 +25,9 @@ type destinationSet struct {
 	// destinations, and with them the config.yaml import state.
 	deployment bool
 	keyErr     error
+	// policy is the address policy of the set's managed destinations, which
+	// a tenant owns; the platform's set has none.
+	policy *destinationPolicy
 }
 
 // defaultSetLocked returns the default tenant's destinations as the last
@@ -103,7 +106,7 @@ func (n *Notifier) tenantSet(ctx context.Context, ts *store.TenantStore) (destin
 		return destinationSet{}, err
 	}
 	managed, keyErr := n.openManaged(records)
-	set := destinationSet{managed: managed, fileURLs: map[string]string{}, fileLegacy: map[string]string{}, deployment: deployment, keyErr: keyErr}
+	set := destinationSet{managed: managed, fileURLs: map[string]string{}, fileLegacy: map[string]string{}, deployment: deployment, keyErr: keyErr, policy: n.destinationPolicy()}
 	if deployment {
 		n.mu.RLock()
 		set.fileURLs, set.fileLegacy = cloneStrings(n.fileURLs), cloneStrings(n.fileLegacy)
@@ -365,17 +368,26 @@ func (set destinationSet) canonical(selection []string) (canonical, missing []st
 	return canonical, missing
 }
 
-// testTargets returns one URL per enabled, usable destination and the
+// testTarget is one destination that a test sends to. checked marks a
+// managed destination, whose address the set's policy checks first; a
+// deployment destination from config.yaml, and one imported from it that
+// keeps its URL, is the host operator's.
+type testTarget struct {
+	url     string
+	checked bool
+}
+
+// testTargets returns one target per enabled, usable destination and the
 // enabled managed destinations that are locked. It deliberately reads
 // fileURLs rather than a delivery snapshot: the delivery snapshot also
 // carries the legacy digest alias of each deployment URL, which exists only
 // to route outbox rows created before opaque IDs and must not add a second
 // test message. URLs are not merged, so a managed destination that shares a
 // deployment URL is still tested.
-func (set destinationSet) testTargets() (urls []string, locked []managedDestination) {
-	urls = make([]string, 0, len(set.fileURLs)+len(set.managed))
+func (set destinationSet) testTargets() (targets []testTarget, locked []managedDestination) {
+	targets = make([]testTarget, 0, len(set.fileURLs)+len(set.managed))
 	for _, raw := range set.fileURLs {
-		urls = append(urls, raw)
+		targets = append(targets, testTarget{url: raw})
 	}
 	for _, entry := range set.managed {
 		if !entry.record.Enabled {
@@ -385,11 +397,11 @@ func (set destinationSet) testTargets() (urls []string, locked []managedDestinat
 			locked = append(locked, entry)
 			continue
 		}
-		urls = append(urls, entry.url)
+		targets = append(targets, testTarget{url: entry.url, checked: !entry.record.ConfigImported})
 	}
-	sort.Strings(urls)
+	sort.Slice(targets, func(i, j int) bool { return targets[i].url < targets[j].url })
 	sort.Slice(locked, func(i, j int) bool { return locked[i].record.ID < locked[j].record.ID })
-	return urls, locked
+	return targets, locked
 }
 
 // testDestination sends a test message to one managed destination of the
@@ -401,6 +413,11 @@ func (set destinationSet) testDestination(ctx context.Context, id string) error 
 	}
 	if entry.locked {
 		return ErrManagedNotificationLocked
+	}
+	if !entry.record.ConfigImported {
+		if err := set.policy.check(ctx, entry.url); err != nil {
+			return err
+		}
 	}
 	return safeSendContext(ctx, entry.url, "EdgeWatch notification test")
 }
@@ -586,6 +603,9 @@ func (tn *TenantNotifier) createManaged(ctx context.Context, name, rawURL string
 	if err != nil {
 		return DestinationView{}, err
 	}
+	if err := tn.n.destinationPolicy().check(ctx, rawURL); err != nil {
+		return DestinationView{}, err
+	}
 	// Snapshot the tenant's destinations that exist before this endpoint is
 	// inserted. The tenant's jobs with no saved routing selection are frozen
 	// to this snapshot transactionally, so the newly created endpoint
@@ -623,10 +643,23 @@ func (tn *TenantNotifier) createManaged(ctx context.Context, name, rawURL string
 // records a redacted security event. Another tenant's destination is
 // store.ErrNotFound, and nothing changes.
 func (tn *TenantNotifier) UpdateManagedWithAudit(ctx context.Context, id string, expectedRevision int64, name string, rawURL *string, enabled *bool, audit store.AuditEntry) (DestinationView, error) {
-	return tn.updateManaged(ctx, id, expectedRevision, name, rawURL, enabled, &audit)
+	return tn.updateManagedKeeping(ctx, id, expectedRevision, name, rawURL, enabled, false, &audit)
+}
+
+// UpdateManagedKeepingPendingWithAudit is UpdateManagedWithAudit for an
+// administrator who chose to keep the destination's alerts when replacing
+// its URL: the store moves them to the new credentials instead of
+// discarding them, as TenantStore.UpdateManagedNotificationKeepingPendingWithAudit
+// describes.
+func (tn *TenantNotifier) UpdateManagedKeepingPendingWithAudit(ctx context.Context, id string, expectedRevision int64, name string, rawURL *string, enabled *bool, audit store.AuditEntry) (DestinationView, error) {
+	return tn.updateManagedKeeping(ctx, id, expectedRevision, name, rawURL, enabled, true, &audit)
 }
 
 func (tn *TenantNotifier) updateManaged(ctx context.Context, id string, expectedRevision int64, name string, rawURL *string, enabled *bool, audit *store.AuditEntry) (DestinationView, error) {
+	return tn.updateManagedKeeping(ctx, id, expectedRevision, name, rawURL, enabled, false, audit)
+}
+
+func (tn *TenantNotifier) updateManagedKeeping(ctx context.Context, id string, expectedRevision int64, name string, rawURL *string, enabled *bool, keepPending bool, audit *store.AuditEntry) (DestinationView, error) {
 	n := tn.n
 	name = strings.TrimSpace(name)
 	if err := validateName(name); err != nil {
@@ -659,6 +692,9 @@ func (tn *TenantNotifier) updateManaged(ctx context.Context, id string, expected
 		if err != nil {
 			return DestinationView{}, err
 		}
+		if err := n.destinationPolicy().check(ctx, *rawURL); err != nil {
+			return DestinationView{}, err
+		}
 		key, keyErr := n.ensureKey(ctx)
 		if keyErr != nil {
 			return DestinationView{}, keyErr
@@ -673,9 +709,12 @@ func (tn *TenantNotifier) updateManaged(ctx context.Context, id string, expected
 		nextEnabled = *enabled
 	}
 	var updated store.ManagedNotification
-	if audit == nil {
+	switch {
+	case audit == nil:
 		updated, err = tn.ts.UpdateManagedNotification(ctx, id, expectedRevision, name, provider, ciphertext, nonce, nextEnabled)
-	} else {
+	case keepPending:
+		updated, err = tn.ts.UpdateManagedNotificationKeepingPendingWithAudit(ctx, id, expectedRevision, name, provider, ciphertext, nonce, nextEnabled, *audit)
+	default:
 		updated, err = tn.ts.UpdateManagedNotificationWithAudit(ctx, id, expectedRevision, name, provider, ciphertext, nonce, nextEnabled, *audit)
 	}
 	if err != nil {
@@ -700,4 +739,23 @@ func (tn *TenantNotifier) DeleteManagedWithAudit(ctx context.Context, id string,
 	}
 	tn.loaded = false
 	return changedJobs, tn.n.Reload(ctx)
+}
+
+// TerminalDeliveries lists, newest first, the alerts that one of the
+// tenant's managed destinations dropped for good and that a redelivery
+// would queue again, as TenantStore.ListTerminalDeliveries does: metadata
+// only, never a message, URL, or provider text. Another tenant's destination
+// is store.ErrNotFound, as an unknown one is.
+func (tn *TenantNotifier) TerminalDeliveries(ctx context.Context, id string, before int64, limit int) ([]store.TerminalDelivery, error) {
+	return tn.ts.ListTerminalDeliveries(ctx, id, before, limit)
+}
+
+// RedeliverTerminalDeliveries queues again the alerts that one of the
+// tenant's managed destinations dropped for good, or those of them that ids
+// names, with an audit entry in the same transaction, and returns how many
+// it queued. The next delivery pass sends them to the destination's current
+// URL. Another tenant's destination is store.ErrNotFound, and nothing
+// changes.
+func (tn *TenantNotifier) RedeliverTerminalDeliveries(ctx context.Context, id string, ids []int64, audit store.AuditEntry) (int, error) {
+	return tn.ts.RedeliverTerminalDeliveries(ctx, id, ids, audit)
 }

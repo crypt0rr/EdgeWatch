@@ -88,3 +88,22 @@ func mustURLForCoverage(t *testing.T, raw string) *url.URL {
 	}
 	return parsed
 }
+
+// RDAP lookups ignore the proxy environment, so the daemon names the proxy
+// variables that are set while RDAP is enabled, and only then.
+func TestIgnoredProxyVariablesOnlyWhileRDAPIsEnabled(t *testing.T) {
+	for _, name := range proxyVariables {
+		t.Setenv(name, "")
+	}
+	if got := IgnoredProxyVariables(true); len(got) != 0 {
+		t.Fatalf("without proxy variables = %v", got)
+	}
+	t.Setenv("HTTPS_PROXY", "http://proxy.example:3128")
+	t.Setenv("no_proxy", "localhost")
+	if got := IgnoredProxyVariables(true); len(got) != 1 || got[0] != "HTTPS_PROXY" {
+		t.Fatalf("with HTTPS_PROXY = %v", got)
+	}
+	if got := IgnoredProxyVariables(false); got != nil {
+		t.Fatalf("with RDAP disabled = %v", got)
+	}
+}

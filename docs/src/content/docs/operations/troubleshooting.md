@@ -1,6 +1,6 @@
 ---
 title: Troubleshooting
-description: Diagnose storage permissions, proxy rejection, incomplete scans, notification failures, and upgrade progress.
+description: Diagnose storage permissions, proxy rejection, incomplete scans, notification failures, RDAP behind a proxy, and upgrade progress.
 ---
 
 Start with a bounded log summary and the host health report:
@@ -124,9 +124,23 @@ without printing URLs. Console tests cover only the current unit's destinations.
 
 Restore the original database and notification key together. A missing key
 cannot be recovered from the database alone. Paused destinations retain their
-queue without consuming retries; URL replacement discards queued alerts.
-See [Notifications](/user-guide/notifications/) for retries, terminal failures,
-and legacy-import warnings.
+queue without consuming retries; URL replacement discards queued alerts unless
+you select **Keep queued alerts**. After an outage, an administrator can
+redeliver a destination's alerts that ran out of retries from its **Failed
+alerts**. The error code `destination_excluded` means the destination's host
+resolves to an address that `scanner.target_exclusions` or the loopback and
+link-local rules refuse, and `provider_timeout` that the provider did not
+answer within 15 seconds. See [Notifications](/user-guide/notifications/) for
+retries, terminal failures, destination addresses, and legacy-import warnings.
+
+## RDAP is unavailable behind a proxy
+
+RDAP lookups ignore `HTTPS_PROXY` and the other proxy variables and need
+direct HTTPS egress to IANA and the regional registries. When only a proxy
+reaches the internet, host pages show RDAP as unavailable and the daemon logs
+"RDAP lookups ignore the proxy environment" at startup. Set
+`enrichment.rdap.enabled: false` in
+[deployment configuration](/reference/configuration/).
 
 ## Upgrade or restore needs migration
 

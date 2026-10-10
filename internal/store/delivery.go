@@ -166,11 +166,21 @@ var ErrDeliveryHeld = errors.New("notification delivery is held")
 var (
 	ErrDeliveryDestinationLocked  = errors.New("notification destination is locked")
 	ErrDeliveryDestinationMissing = errors.New("notification destination is missing")
-	ErrDeliveryProvider           = errors.New("notification provider failed")
-	ErrDeliveryProviderPanic      = errors.New("notification provider panicked")
-	ErrDeliveryIndeterminate      = errors.New("notification send outcome is indeterminate")
-	ErrDeliveryWorkerPanic        = errors.New("notification delivery worker panicked")
-	ErrDeliveryPayloadInvalid     = errors.New("notification delivery payload is invalid")
+	// ErrDeliveryDestinationExcluded reports a unit's destination whose host
+	// is an address that the deployment's target policy refuses.
+	ErrDeliveryDestinationExcluded = errors.New("notification destination address is not allowed")
+	ErrDeliveryProvider            = errors.New("notification provider failed")
+	ErrDeliveryProviderPanic       = errors.New("notification provider panicked")
+	ErrDeliveryIndeterminate       = errors.New("notification send outcome is indeterminate")
+	// ErrDeliveryProviderTimeout reports a provider that did not answer
+	// within its timeout. It is indeterminate, because the provider may have
+	// accepted the message, but it is the provider's failure, not the
+	// daemon's: it is retried as a provider attempt, no sooner than a claim
+	// lease later, so a provider outage that shows up as hangs keeps the
+	// alert for the whole retry schedule.
+	ErrDeliveryProviderTimeout = fmt.Errorf("%w: the provider did not answer in time", ErrDeliveryIndeterminate)
+	ErrDeliveryWorkerPanic     = errors.New("notification delivery worker panicked")
+	ErrDeliveryPayloadInvalid  = errors.New("notification delivery payload is invalid")
 )
 
 const (
@@ -565,12 +575,13 @@ func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim 
 		}
 		return tx.Commit()
 	}
-	// A transport timeout or cancellation after bytes may have left the
-	// provider in an unknown state. Treat it as a durable deferral, not a
-	// provider attempt: the request may already have been accepted and retrying
-	// against the ordinary attempt budget could both duplicate the notification
-	// and exhaust retries while the daemon is repeatedly restarted.
-	if errors.Is(sendErr, ErrDeliveryIndeterminate) {
+	// A cancellation after bytes may have left the provider in an unknown
+	// state. Treat it as a durable deferral, not a provider attempt: the
+	// request may already have been accepted and retrying against the
+	// ordinary attempt budget could both duplicate the notification and
+	// exhaust retries while the daemon is repeatedly restarted. A provider
+	// that did not answer in time is the provider's failure and an attempt.
+	if errors.Is(sendErr, ErrDeliveryIndeterminate) && !errors.Is(sendErr, ErrDeliveryProviderTimeout) {
 		deferrals++
 		terminal := deferrals >= deliveryMaxDeferrals
 		terminalAt := ""
@@ -597,6 +608,11 @@ func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim 
 	attempts++
 	terminal := attempts >= deliveryMaxAttempts
 	delay := deliveryRetryDelay(attempts)
+	if errors.Is(sendErr, ErrDeliveryProviderTimeout) && delay < deliveryClaimLease {
+		// The provider may have accepted the message without answering, so
+		// it is not sent again sooner than an indeterminate send would be.
+		delay = deliveryClaimLease
+	}
 	terminalAt := ""
 	if terminal {
 		terminalAt = now.Format(time.RFC3339Nano)

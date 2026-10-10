@@ -220,6 +220,40 @@ job (`allow_high_cost`); the key is absent otherwise. Today that is an
 administrator of a unit. The console shows the approval control only to such a
 session, and the job API still enforces the rule.
 
+## Notification delivery outcomes
+
+v0.34.0 changes these notification destination responses and adds two
+routes for a unit's destinations:
+
+| Endpoint | Change |
+| --- | --- |
+| `POST /api/v1/notifications/destinations/{id}/test` | A provider that does not answer within 15 seconds gets `504 notification_timeout`, "the destination did not answer in time; the message may still arrive", instead of `500 notification_failed`. Nothing was saved. |
+| `POST /api/v1/notifications/destinations`, `PUT /api/v1/notifications/destinations/{id}`, and the destination test | A destination whose host is, or resolves to, an address in `scanner.target_exclusions` or an unspecified, loopback, or link-local address gets `400 validation_failed` with `details.url`. The message is fixed and repeats neither the URL nor the address. Platform destinations and a destination imported from `config.yaml`, until its URL is replaced, are not checked. |
+| `PUT /api/v1/notifications/destinations/{id}` | Accepts `keep_pending: true`. When the update replaces the credentials, the destination's queued alerts move to the new credentials instead of being discarded. It is ignored when the update keeps the credentials. |
+| `last_error_code` in destination responses | Can be `provider_timeout`, for a provider that did not answer in time, and `destination_excluded`. |
+| `last_error_fingerprint` in destination responses | Identifies the kind of failure: its error code and class only, the same for every destination. A fingerprint stored by an earlier release, which the destination URL determined, is left out. |
+
+`GET /api/v1/notifications/destinations/{id}/deliveries` and
+`POST /api/v1/notifications/destinations/{id}/deliveries/redeliver` need
+`notifications.manage`, so only a unit's administrators can use them; an
+operator or viewer gets `403`. Another unit's destination, a platform or
+deployment destination, and an unknown ID get the same `404`.
+
+The list returns `{deliveries, next_before}`, newest first: the alerts that
+the destination dropped after their retries ran out and that a redelivery
+would send. Each has `id`, `event_type`, `job` when the alert has one,
+`event_at`, `terminal_at`, `attempts`, `deferrals`, and `error_code`, never
+the alert's message, the URL, or provider text. `state` may only be
+`terminal`, the default; `limit` is 1 to 100, default 50; pass `next_before`
+as `before` for the next page, and it is `null` on the last page.
+
+The redelivery takes `{}` to queue every listed alert again or
+`{"delivery_ids": [...]}`, with 1 to 100 IDs, to queue those of them, and
+returns `{redelivered}`. The alerts are due at once with fresh retries and
+are sent to the destination's current URL. A redelivery that queues any is
+recorded in the unit's audit as `notifications.redelivered`, and a kept
+replacement as `notifications.pending_kept`.
+
 ## Business units
 
 v0.20.0 adds business units to every installation. The routes and response

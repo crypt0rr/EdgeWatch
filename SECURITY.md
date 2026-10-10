@@ -523,12 +523,41 @@ while either key is set.
 
 Notification delivery health is exposed only as named-destination counts and
 timestamps. A unit sees the health of its own destinations only, and the
-platform console that of the platform's own destinations only. Terminal drops
-store a stable destination/error fingerprint and a bounded error code; raw
-provider responses, URLs, and credentials are not included in API responses,
-logs, or system events. Once a destination's URL replacement is saved, an
+platform console that of the platform's own destinations only. Failed
+deliveries store a bounded error code and an error fingerprint derived only
+from that code and the class of failure that the notification process reports
+through its exit status, such as a DNS, connection, TLS, or timeout failure.
+The fingerprint is the same for every destination that fails the same way, so
+it cannot confirm a guessed URL. Earlier releases derived it from the error
+text, which held a digest of the URL; such stored fingerprints are no longer
+returned, and drop events recorded before the upgrade keep theirs in the
+activity history until retention removes them. Raw provider responses, URLs,
+their digests, and credentials are not included in API responses, logs, or
+system events. A unit administrator can list a destination's terminally
+failed alerts, by event, job, time, attempts, and error code only, and
+redeliver those queued for its current credentials; each redelivery is
+audited with a count. Once a destination's URL replacement is saved, an
 alert raised afterwards is sent only to the new URL, even while a delivery
-worker is still reading the destinations from before the replacement.
+worker is still reading the destinations from before the replacement. An
+administrator who repairs a URL can choose to keep the alerts queued for the
+old credentials and send them with the new ones; the choice and its counts
+are audited, and without it they are discarded.
+
+A unit's destinations cannot reach the addresses that the scanner refuses.
+The daemon refuses a unit destination whose host is, or resolves to, an
+address in `scanner.target_exclusions` or an unspecified, loopback, or
+link-local address, with an error that names neither the URL nor the
+address. It checks the host when the destination is saved and again, with
+the daemon's resolver, before each delivery and test, so a unit
+administrator cannot direct delivery traffic to the host's own services or to
+a link-local metadata endpoint, even with a name whose DNS answer changes
+later. An explicitly empty `scanner.target_exclusions` is the one override,
+as it is for scans. Platform destinations, URLs that config.yaml lists, and a
+destination imported from config.yaml until a unit administrator replaces
+its URL are not checked, because platform administrators and the host
+operator configure them. The check does not follow provider redirects, and a DNS answer that
+changes between the check and the notification process's own lookup is not
+seen.
 
 Optional TOTP seeds are encrypted independently with AES-256-GCM. The default
 authentication key is `./data/auth.key`; set `web.auth_key_file` for a separate
@@ -665,7 +694,11 @@ Images tagged `candidate-<run>-<attempt>` are unverified staging images.
 By default, EdgeWatch checks the latest stable release on GitHub at startup and
 every three hours. This outbound request reveals the Docker host's public IP
 and the EdgeWatch user agent to GitHub; set `updates.enabled: false` for
-isolated or privacy-sensitive deployments.
+isolated or privacy-sensitive deployments. Update checks and notifications
+use the daemon's proxy variables. RDAP lookups ignore them and connect
+directly to IANA and the regional registries, to the addresses they resolved
+and checked, so a proxy cannot carry a lookup past the refusal of private and
+special-use addresses; disable RDAP where only a proxy reaches the internet.
 
 Retention pruning deliberately keeps the security audit log indefinitely.
 Only completed scans, historical events, sent or terminally failed outbox

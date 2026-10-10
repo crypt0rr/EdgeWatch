@@ -7,26 +7,9 @@ import { ErrorNotice } from '../components/ErrorNotice'
 import { Pagination } from '../components/Pagination'
 import type { ActivityEvent, Change, Job } from '../types'
 import { formatDateTime } from '../format'
-import { changeKindLabel, changeTargetLabel, severityLabel, severityTone } from '../status'
+import { changeKindLabel, changeTargetLabel, eventTypeLabel, severityLabel, severityTone } from '../status'
 
 const pageSize = 20
-
-const eventLabels: Record<string, string> = {
-  'changes-detected': 'Incident opened',
-  'changes-reminder': 'Incident reminder',
-  'changes-recovered': 'Incident recovered',
-  'incident-accepted': 'Change accepted',
-  'incident-suppressed': 'Incident suppressed',
-  'scan-incomplete': 'Scan incomplete',
-  'scan-failure': 'Scan failed',
-  'scan-canceled': 'Scan canceled',
-  'scan-interrupted': 'Scan interrupted',
-  'scan-anomaly': 'Scan anomaly',
-  'scan-budget-exceeded': 'Scheduled scan skipped',
-  'application-update-available': 'Update available',
-  'application-updated': 'Application updated',
-  'job-silent': 'Job notification warning',
-}
 
 function eventTone(type: string) {
   if (type === 'changes-recovered' || type === 'incident-accepted') return 'recovered'
@@ -50,7 +33,7 @@ function ActivityChange({ change }: { change: Change }) {
 }
 
 function ActivityEventRow({ event }: { event: ActivityEvent }) {
-  const title = eventLabels[event.type] ?? event.type.replace(/[-_.]+/g, ' ')
+  const title = eventTypeLabel(event.type)
   const destination = event.job_id
     ? event.scan_id
       ? `/jobs/${encodeURIComponent(event.job_id)}/scans/${encodeURIComponent(event.scan_id)}`

@@ -543,8 +543,11 @@ func TestInvalidURLDoesNotLeakSecret(t *testing.T) {
 	if err == nil {
 		t.Fatal("invalid URL accepted")
 	}
-	if strings.Contains(err.Error(), "super-secret") {
-		t.Fatalf("secret leaked in error: %v", err)
+	if strings.Contains(err.Error(), "super-secret") || strings.Contains(err.Error(), hashURL("unknown://super-secret@example.invalid/path")[:8]) {
+		t.Fatalf("secret or URL digest leaked in error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "configured notification URL 1 of 1") {
+		t.Fatalf("the error does not name the URL's position: %v", err)
 	}
 }
 
@@ -558,8 +561,14 @@ func TestSafeSendRedactsProviderErrors(t *testing.T) {
 	if strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), rawURL) {
 		t.Fatalf("provider error leaked destination: %v", err)
 	}
-	if !strings.Contains(err.Error(), hashURL(rawURL)[:12]) {
-		t.Fatalf("redacted error omitted destination fingerprint: %v", err)
+	// The error keeps only its category and class: no digest of the URL,
+	// which would let a reader confirm a guessed URL.
+	if digest := hashURL(rawURL); strings.Contains(err.Error(), digest[:8]) {
+		t.Fatalf("redacted error holds a digest of the destination URL: %v", err)
+	}
+	var failure *store.DeliveryFailure
+	if !errors.As(err, &failure) || !errors.Is(err, store.ErrDeliveryProvider) || failure.Class != store.DeliveryClassProvider {
+		t.Fatalf("redacted error = %#v, want a provider failure of class provider", err)
 	}
 }
 
@@ -573,7 +582,7 @@ func TestSafeSendRedactsProviderPanics(t *testing.T) {
 	if !errors.Is(err, store.ErrDeliveryProviderPanic) {
 		t.Fatalf("panic error = %v, want provider panic", err)
 	}
-	if strings.Contains(err.Error(), rawURL) || strings.Contains(err.Error(), "secret-token") || !strings.Contains(err.Error(), hashURL(rawURL)[:12]) {
+	if strings.Contains(err.Error(), rawURL) || strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), hashURL(rawURL)[:8]) {
 		t.Fatalf("provider panic was not safely redacted: %v", err)
 	}
 }
@@ -617,9 +626,9 @@ func TestSafeSendContextWaitsForInFlightSendAfterCancellation(t *testing.T) {
 }
 
 func TestSafeSendContextBoundsProviderThatIgnoresCancellation(t *testing.T) {
-	oldTimeout := notificationProviderTimeout
+	oldTimeout, oldMargin := notificationProviderTimeout, notificationProcessMargin
 	oldSend := notificationProviderSend
-	notificationProviderTimeout = 10 * time.Millisecond
+	notificationProviderTimeout, notificationProcessMargin = 10*time.Millisecond, 10*time.Millisecond
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	notificationProviderSend = func(context.Context, string, string) error {
@@ -628,7 +637,7 @@ func TestSafeSendContextBoundsProviderThatIgnoresCancellation(t *testing.T) {
 		return nil
 	}
 	defer func() {
-		notificationProviderTimeout = oldTimeout
+		notificationProviderTimeout, notificationProcessMargin = oldTimeout, oldMargin
 		notificationProviderSend = oldSend
 		close(release)
 	}()
@@ -642,8 +651,10 @@ func TestSafeSendContextBoundsProviderThatIgnoresCancellation(t *testing.T) {
 	}
 	select {
 	case err := <-done:
-		if !errors.Is(err, ErrNotificationSendIndeterminate) {
-			t.Fatalf("bounded provider error = %v, want indeterminate", err)
+		// The bound reports a provider timeout, which is also
+		// indeterminate: the provider may have accepted the message.
+		if !errors.Is(err, ErrNotificationSendIndeterminate) || !errors.Is(err, ErrNotificationProviderTimeout) {
+			t.Fatalf("bounded provider error = %v, want an indeterminate provider timeout", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("provider timeout did not return")

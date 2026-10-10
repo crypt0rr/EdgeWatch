@@ -72,15 +72,15 @@ type configuredURL struct {
 }
 
 // configuredURLs validates the configured URLs exactly as the notifier does and
-// returns them once each, in configuration order. The error names only a short
-// digest prefix, never the URL.
+// returns them once each, in configuration order. The error names only the
+// position of the URL, never the URL or a digest of it.
 func configuredURLs(urls []string) ([]configuredURL, error) {
 	seen := make(map[string]struct{}, len(urls))
 	out := make([]configuredURL, 0, len(urls))
-	for _, raw := range urls {
+	for index, raw := range urls {
 		digest := hashURL(raw)
 		if _, err := validateManagedURL(raw); err != nil {
-			return nil, fmt.Errorf("invalid Shoutrrr destination %s", digest[:12])
+			return nil, fmt.Errorf("invalid Shoutrrr destination: configured notification URL %d of %d", index+1, len(urls))
 		}
 		if _, duplicate := seen[digest]; duplicate {
 			continue

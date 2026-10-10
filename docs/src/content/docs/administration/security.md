@@ -79,4 +79,12 @@ Publish only intended hosts on each unit's public status page. The public
 projection excludes raw scan evidence, private fingerprints, and credentials.
 RDAP uses public registry data only; update checks contact GitHub and disclose
 the host's public address and EdgeWatch user agent. Disable either feature in
-[deployment configuration](/reference/configuration/) when required.
+[deployment configuration](/reference/configuration/) when required. Update
+checks and notifications use the daemon's proxy variables, but RDAP lookups
+connect directly, so disable RDAP where only a proxy reaches the internet.
+
+A unit's notification destinations cannot use the addresses that
+`scanner.target_exclusions` refuses, or loopback, link-local, and unspecified
+addresses, so a unit administrator cannot make the daemon send requests to the
+host's own services or to a cloud metadata endpoint; see
+[destination addresses](/user-guide/notifications/#destination-addresses).

@@ -14,6 +14,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
@@ -898,5 +899,24 @@ func TestCommandHelpListsOnlyTheCommandOptions(t *testing.T) {
 	stdout, _, err = captureCLIOutput(t, func() error { return run([]string{"--help"}) })
 	if err != nil || !strings.Contains(stdout, "reissue-setup-token") {
 		t.Fatalf("--help = %v, output %q; want the full command list on stdout", err, stdout)
+	}
+}
+
+// The notification child exits with the status of the class of a failed
+// send, so the daemon learns the class without reading provider text. Every
+// other failure exits with 1.
+func TestExitStatusReportsTheNotificationChildFailureClass(t *testing.T) {
+	t.Parallel()
+	err := run([]string{"notify-send"})
+	if err == nil || exitStatus(err) != 1 {
+		t.Fatalf("a malformed child request exits with %d: %v", exitStatus(err), err)
+	}
+	childErr := notify.RunSendChild(strings.NewReader(`{"url":"generic://127.0.0.1:1/hook?disabletls=yes","message":"test"}`))
+	var coded *notify.ChildExitError
+	if !errors.As(childErr, &coded) || exitStatus(childErr) != coded.ExitCode() || exitStatus(childErr) == 1 {
+		t.Fatalf("a refused connection exits with %d: %v", exitStatus(childErr), childErr)
+	}
+	if exitStatus(errors.New("any other failure")) != 1 {
+		t.Fatal("an ordinary failure does not exit with 1")
 	}
 }

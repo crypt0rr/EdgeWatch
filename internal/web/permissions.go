@@ -235,6 +235,12 @@ func requiredNotificationDestinationPermission(path, method string) string {
 	if len(parts) == 2 && parts[1] == "test" && method == http.MethodPost {
 		return auth.PermissionNotificationsManage
 	}
+	if len(parts) == 2 && parts[1] == "deliveries" && method == http.MethodGet {
+		return auth.PermissionNotificationsManage
+	}
+	if len(parts) == 3 && parts[1] == "deliveries" && parts[2] == "redeliver" && method == http.MethodPost {
+		return auth.PermissionNotificationsManage
+	}
 	return auth.PermissionDenied
 }
 
@@ -536,6 +542,8 @@ var apiRoutes = []apiRoute{
 	{Method: http.MethodPut, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1"},
 	{Method: http.MethodDelete, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1"},
 	{Method: http.MethodPost, Template: "/notifications/destinations/{id}/test", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1/test"},
+	{Method: http.MethodGet, Template: "/notifications/destinations/{id}/deliveries", Permission: auth.PermissionNotificationsManage, Example: "/notifications/destinations/destination-1/deliveries"},
+	{Method: http.MethodPost, Template: "/notifications/destinations/{id}/deliveries/redeliver", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1/deliveries/redeliver"},
 
 	// Global inventories.
 	{Method: http.MethodGet, Template: "/hosts", Permission: auth.PermissionHostsRead, Example: "/hosts"},

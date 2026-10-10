@@ -121,6 +121,8 @@ var auditActionCategories = map[string]string{
 	"notifications.created":                    auditCategoryData,
 	"notifications.deleted":                    auditCategoryData,
 	"notifications.pending_discarded":          auditCategoryData,
+	"notifications.pending_kept":               auditCategoryData,
+	"notifications.redelivered":                auditCategoryData,
 	"notifications.test":                       auditCategoryData,
 	"notifications.test_failed":                auditCategoryData,
 	"notifications.update_routing":             auditCategoryData,

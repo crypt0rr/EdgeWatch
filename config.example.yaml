@@ -66,7 +66,9 @@ log:
 # uses, such as fd00:ec2::254/128 (AWS IPv6 instance metadata) or
 # 100.100.100.200/32 (Alibaba Cloud). An explicit list replaces the defaults.
 # Set target_exclusions: [] only when an administrator has deliberately
-# accepted the risk and needs to monitor the host's own local surface.
+# accepted the risk and needs to monitor the host's own local surface. The
+# list also keeps the notification destinations of business units away from
+# these addresses, and [] allows every address for them too.
 scanner:
   target_exclusions:
     - 127.0.0.0/8
@@ -93,7 +95,9 @@ updates:
   enabled: true
 
 # Opening a public host in the console performs an on-demand RDAP lookup.
-# Set enabled: false for isolated or privacy-sensitive deployments.
+# Set enabled: false for isolated or privacy-sensitive deployments. Lookups
+# need direct HTTPS egress and ignore HTTPS_PROXY, so also set enabled: false
+# where only a proxy reaches the internet.
 enrichment:
   rdap:
     enabled: true

@@ -181,6 +181,9 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	rdapClient.OnCacheWriteError = func(err error) {
 		logger.Warn("rdap cache write failed", "error", err)
 	}
+	if variables := rdap.IgnoredProxyVariables(rdapEnabled); len(variables) > 0 {
+		logger.Warn("RDAP lookups ignore the proxy environment and need direct HTTPS egress to the registries; set enrichment.rdap.enabled: false where only a proxy reaches the internet", "variables", variables)
+	}
 	sourceURL := updatecheck.BuildSourceTreeURL(buildVersion)
 	if sourceURL == "" {
 		sourceURL = "https://github.com/crypt0rr/EdgeWatch"

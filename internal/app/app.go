@@ -456,6 +456,11 @@ func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logg
 	if err != nil {
 		return nil, err
 	}
+	// The destinations that units own stay away from the addresses that the
+	// scanner refuses, with the same override.
+	if err := n.SetTargetExclusions(cfg.Scanner.TargetExclusions); err != nil {
+		return nil, fmt.Errorf("configure notification target exclusions: %w", err)
+	}
 	// Jobs created before per-job routing was introduced have a nil selection
 	// and historically followed every globally enabled destination. Materialize
 	// that snapshot at startup so a destination added later cannot silently
@@ -1739,7 +1744,14 @@ func (a *App) startDeliveryWorker(ctx context.Context) <-chan struct{} {
 			// timeout, so a slow but healthy provider is never killed by the
 			// window and charged an indeterminate 30-minute deferral. Shutdown
 			// still cancels in-flight sends.
-			if err := a.Notifier.DrainWithin(ctx, deliveryPassWindow); err != nil && !errors.Is(err, context.Canceled) {
+			err := a.Notifier.DrainWithin(ctx, deliveryPassWindow)
+			switch {
+			case errors.Is(err, notify.ErrDeliveryResultNotRecorded):
+				// The alert reached its provider, but the claim keeps it
+				// until the lease ends or the daemon restarts, when it is
+				// sent again.
+				a.Logger.Warn("notification sent but its delivery could not be recorded; it may be sent again", "error", err)
+			case err != nil && !errors.Is(err, context.Canceled):
 				a.Logger.Warn("notification delivery deferred for retry", "error", err)
 			}
 		}

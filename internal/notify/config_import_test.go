@@ -326,8 +326,11 @@ func TestImportConfiguredURLsRejectsInvalidURLWithoutLeakingIt(t *testing.T) {
 	if err == nil || errors.As(err, &importErr) {
 		t.Fatalf("invalid URL error = %v, want a configuration error", err)
 	}
-	if strings.Contains(err.Error(), "secret-token") || !strings.Contains(err.Error(), "invalid Shoutrrr destination") {
+	if strings.Contains(err.Error(), "secret-token") || !strings.Contains(err.Error(), "invalid Shoutrrr destination: configured notification URL 1 of 1") {
 		t.Fatalf("invalid URL error = %q", err)
+	}
+	if strings.Contains(err.Error(), hashURL("unknown-service://secret-token@example.invalid/path")[:8]) {
+		t.Fatalf("invalid URL error names a digest of the URL: %q", err)
 	}
 	if got := managedCount(t, db); got != 0 {
 		t.Fatalf("invalid configuration imported %d destinations", got)

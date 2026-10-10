@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,10 @@ type notificationPayload struct {
 	Password string                 `json:"password"`
 	Enabled  *bool                  `json:"enabled"`
 	Revision *int64                 `json:"revision"`
+	// KeepPending moves the destination's queued alerts to the replacement
+	// credentials instead of discarding them. It applies only to an update
+	// that replaces the credentials.
+	KeepPending bool `json:"keep_pending"`
 }
 
 func notificationDestinationURL(rawURL *string, providerConfig *notify.ProviderConfig, required bool) (*string, error) {
@@ -355,6 +360,14 @@ func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusOK, map[string]any{"sent": 1})
 		return
 	}
+	if len(parts) == 2 && parts[1] == "deliveries" && r.Method == http.MethodGet {
+		s.listTerminalDeliveries(w, r, ts, id)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "deliveries" && parts[2] == "redeliver" && r.Method == http.MethodPost {
+		s.redeliverTerminalDeliveries(w, r, session, ts, id)
+		return
+	}
 	if len(parts) != 1 {
 		writeError(w, http.StatusNotFound, "not_found", "notification destination endpoint not found", nil)
 		return
@@ -400,7 +413,14 @@ func (s *Server) updateNotificationDestination(w http.ResponseWriter, r *http.Re
 		s.writeNotificationError(w, err)
 		return
 	}
-	view, err := s.App.Notifier.Tenant(ts).UpdateManagedWithAudit(r.Context(), id, *input.Revision, input.Name, rawURL, input.Enabled, store.AuditEntry{Action: "notifications.updated", Detail: "managed notification updated: " + id, ActorUserID: session.UserID, ActorUsername: session.Username})
+	audit := store.AuditEntry{Action: "notifications.updated", Detail: "managed notification updated: " + id, ActorUserID: session.UserID, ActorUsername: session.Username}
+	notifier := s.App.Notifier.Tenant(ts)
+	var view notify.DestinationView
+	if input.KeepPending {
+		view, err = notifier.UpdateManagedKeepingPendingWithAudit(r.Context(), id, *input.Revision, input.Name, rawURL, input.Enabled, audit)
+	} else {
+		view, err = notifier.UpdateManagedWithAudit(r.Context(), id, *input.Revision, input.Name, rawURL, input.Enabled, audit)
+	}
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "notifications.updated") {
 			return
@@ -409,7 +429,109 @@ func (s *Server) updateNotificationDestination(w http.ResponseWriter, r *http.Re
 		return
 	}
 	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "notification.changed", "notification_id": id})
+	if input.KeepPending && rawURL != nil {
+		// The kept alerts are due at once.
+		s.App.WakeDelivery()
+	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+// terminalDeliveryPageSize is the default page of the terminal delivery list.
+const terminalDeliveryPageSize = 50
+
+// listTerminalDeliveries lists, newest first, the alerts that one of the
+// unit's destinations dropped for good and that a redelivery would send
+// again: their metadata only, never a message, URL, or provider text. Pass
+// next_before as before for the next page. Another unit's destination is
+// 404, as an unknown one is.
+func (s *Server) listTerminalDeliveries(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string) {
+	w.Header().Set("Cache-Control", "no-store")
+	query := r.URL.Query()
+	if state := query.Get("state"); state != "" && state != "terminal" {
+		writeError(w, http.StatusBadRequest, "validation_failed", "only terminal deliveries can be listed", map[string]string{"state": "use terminal"})
+		return
+	}
+	limit := terminalDeliveryPageSize
+	if raw := query.Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > store.MaxTerminalDeliveriesPage {
+			writeError(w, http.StatusBadRequest, "validation_failed", "limit must be between 1 and 100", map[string]string{"limit": "use 1 to 100"})
+			return
+		}
+		limit = parsed
+	}
+	var before int64
+	if raw := query.Get("before"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed < 1 {
+			writeError(w, http.StatusBadRequest, "validation_failed", "before must be a delivery ID", map[string]string{"before": "use next_before from the previous page"})
+			return
+		}
+		before = parsed
+	}
+	// One more than the page shows whether another page follows.
+	deliveries, err := s.App.Notifier.Tenant(ts).TerminalDeliveries(r.Context(), id, before, limit+1)
+	if err != nil {
+		s.writeNotificationError(w, err)
+		return
+	}
+	var next any
+	if len(deliveries) > limit {
+		deliveries = deliveries[:limit]
+		next = deliveries[limit-1].ID
+	}
+	items := make([]map[string]any, 0, len(deliveries))
+	for _, delivery := range deliveries {
+		item := map[string]any{"id": delivery.ID, "event_type": delivery.EventType, "attempts": delivery.Attempts, "deferrals": delivery.Deferrals, "error_code": delivery.ErrorCode, "terminal_at": delivery.TerminalAt.UTC().Format(time.RFC3339Nano)}
+		if delivery.Job != "" {
+			item["job"] = delivery.Job
+		}
+		if !delivery.EventAt.IsZero() {
+			item["event_at"] = delivery.EventAt.UTC().Format(time.RFC3339Nano)
+		}
+		items = append(items, item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deliveries": items, "next_before": next})
+}
+
+type redeliverPayload struct {
+	// DeliveryIDs names the deliveries to queue again; omitted, every
+	// terminal delivery of the destination is.
+	DeliveryIDs []int64 `json:"delivery_ids"`
+}
+
+// redeliverTerminalDeliveries queues again the alerts that one of the unit's
+// destinations dropped for good, or those of them that delivery_ids names,
+// for the destination's current URL, and records the count in the unit's
+// audit. Another unit's destination is 404, as an unknown one is, and
+// nothing changes.
+func (s *Server) redeliverTerminalDeliveries(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, id string) {
+	w.Header().Set("Cache-Control", "no-store")
+	var input redeliverPayload
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.DeliveryIDs != nil && len(input.DeliveryIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "validation_failed", "delivery_ids must name at least one delivery", map[string]string{"delivery_ids": "omit delivery_ids to redeliver every failed alert"})
+		return
+	}
+	if len(input.DeliveryIDs) > store.MaxTerminalDeliveriesPage {
+		writeError(w, http.StatusBadRequest, "validation_failed", "delivery_ids may name at most 100 deliveries", map[string]string{"delivery_ids": "redeliver at most 100 deliveries at once"})
+		return
+	}
+	count, err := s.App.Notifier.Tenant(ts).RedeliverTerminalDeliveries(r.Context(), id, input.DeliveryIDs, store.AuditEntry{Action: "notifications.redelivered", ActorUserID: session.UserID, ActorUsername: session.Username})
+	if err != nil {
+		if s.writeAuditUnavailable(w, err, "notifications.redelivered") {
+			return
+		}
+		s.writeNotificationError(w, err)
+		return
+	}
+	if count > 0 {
+		s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "notification.changed", "notification_id": id})
+		s.App.WakeDelivery()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"redelivered": count})
 }
 
 func (s *Server) deleteNotificationDestination(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, id string) {
@@ -476,6 +598,14 @@ func (s *Server) writeNotificationError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "not_found", "notification destination not found", nil)
 	case errors.Is(err, notify.ErrManagedNotificationLocked), errors.Is(err, notify.ErrKeyUnavailable), errors.Is(err, notify.ErrKeyInvalid), errors.Is(err, notify.ErrKeyPermissions):
 		writeError(w, http.StatusServiceUnavailable, "notification_key_unavailable", "managed notification credentials are unavailable; restore the encryption key before replacing or enabling this destination", nil)
+	case errors.Is(err, notify.ErrDestinationExcluded):
+		// The message is fixed: it names neither the URL nor the address.
+		const message = "notification URL points to an address that this deployment does not allow"
+		writeError(w, http.StatusBadRequest, "validation_failed", message, map[string]string{"url": "use a destination outside scanner.target_exclusions and the loopback, link-local, and unspecified addresses"})
+	case errors.Is(err, notify.ErrNotificationSendIndeterminate), errors.Is(err, context.DeadlineExceeded):
+		// A test that the provider did not answer in time saved nothing,
+		// and the provider may still deliver the message.
+		writeError(w, http.StatusGatewayTimeout, "notification_timeout", "the destination did not answer in time; the message may still arrive", nil)
 	case isUnique(err):
 		writeError(w, http.StatusConflict, "conflict", "notification name is already in use", map[string]string{"name": "notification name is already in use"})
 	case errors.Is(err, store.ErrDeliveryProvider), strings.Contains(lower, "notification delivery failed"):

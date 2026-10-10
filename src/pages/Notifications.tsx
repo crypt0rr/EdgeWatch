@@ -1,11 +1,13 @@
 import { FormEvent, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, Bell, Check, KeyRound, LockKeyhole, Pencil, Plug, RefreshCw, Send, ShieldCheck, Trash2 } from 'lucide-react'
+import { AlertTriangle, Bell, Check, History, KeyRound, LockKeyhole, Pencil, Plug, RefreshCw, Send, ShieldCheck, Trash2 } from 'lucide-react'
 import {
   APIError,
   createNotificationDestination,
   deleteNotificationDestination,
   listNotificationDestinations,
+  listTerminalDeliveries,
+  redeliverTerminalDeliveries,
   NotificationDestination,
   type NotificationDestinationsResponse,
   type NotificationProviderConfig,
@@ -21,6 +23,7 @@ import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { credentialsFromNotificationDraft, NotificationDestinationConfig, type NotificationConfigDraft } from '../components/NotificationDestinationConfig'
 import { NotificationDestinationCreateForm } from '../components/NotificationDestinationCreateForm'
+import { NotificationFailedAlerts, type FailedAlertsSource } from '../components/NotificationFailedAlerts'
 import { formatDateTime } from '../format'
 
 type EditState = {
@@ -29,6 +32,8 @@ type EditState = {
   configuration: NotificationConfigDraft
   enabled: boolean
   revision?: number
+  /** Keep the alerts queued for the previous credentials when they are replaced. */
+  keepPending: boolean
 }
 
 type PasswordPromptState = {
@@ -49,10 +54,14 @@ export type NotificationScope = {
   queryKey: readonly unknown[]
   list: () => Promise<NotificationDestinationsResponse>
   create: (name: string, credentials: string | NotificationProviderConfig, password: string, enabled: boolean) => Promise<NotificationDestination>
-  update: (id: string, revision: number, name: string, password: string, options: { url?: string; config?: NotificationProviderConfig; enabled?: boolean }) => Promise<unknown>
+  update: (id: string, revision: number, name: string, password: string, options: { url?: string; config?: NotificationProviderConfig; enabled?: boolean; keep_pending?: boolean }) => Promise<unknown>
   remove: (id: string, revision: number, password: string) => Promise<unknown>
   /** Sends a test message; the platform's destinations have none. */
   test?: (id: string) => Promise<unknown>
+  /** Lists and redelivers a destination's failed alerts; the platform's destinations have none. */
+  failedAlerts?: FailedAlertsSource
+  /** Whether replacing credentials can keep the alerts queued for the previous ones. */
+  keepPendingOnReplace?: boolean
   toggleRouting: (destinationID: string, enabled: boolean, password: string) => Promise<NotificationUpdateRouting>
   /** Whether unsaved legacy routing selects all existing destinations. */
   routingDefaultsToAllDestinations: boolean
@@ -74,6 +83,8 @@ const unitNotifications: NotificationScope = {
   update: (id, revision, name, password, options) => updateNotificationDestination(id, revision, name, password, options),
   remove: (id, revision, password) => deleteNotificationDestination(id, revision, password),
   test: id => testNotificationDestination(id),
+  failedAlerts: { list: (id, before) => listTerminalDeliveries(id, before), redeliver: (id, deliveryIDs) => redeliverTerminalDeliveries(id, deliveryIDs) },
+  keepPendingOnReplace: true,
   toggleRouting: (destinationID, enabled, password) => toggleNotificationUpdateAlert(destinationID, enabled, password),
   routingDefaultsToAllDestinations: true,
   configImport: true,
@@ -127,7 +138,7 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
 
   function beginEdit(destination: NotificationDestination) {
     clearRowFeedback(destination.id)
-    setEdit({ id: destination.id, name: destination.name, configuration: { provider: 'url', fields: {} }, enabled: destination.enabled, revision: destination.revision })
+    setEdit({ id: destination.id, name: destination.name, configuration: { provider: 'url', fields: {} }, enabled: destination.enabled, revision: destination.revision, keepPending: false })
   }
 
   function askPassword(title: string, description: string, confirmLabel: string) {
@@ -154,17 +165,18 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
     if (confirmation === null) return
     setBusy(edit.id)
     try {
-      const options: { url?: string; config?: NotificationProviderConfig; enabled?: boolean } = { enabled: edit.enabled }
+      const options: { url?: string; config?: NotificationProviderConfig; enabled?: boolean; keep_pending?: boolean } = { enabled: edit.enabled }
       const credentials = credentialsFromNotificationDraft(edit.configuration)
       if (credentials) {
         if ('url' in credentials) options.url = credentials.url
         else options.config = credentials.config
+        if (scope.keepPendingOnReplace && edit.keepPending) options.keep_pending = true
       }
       await scope.update(edit.id, edit.revision, edit.name.trim(), confirmation, options)
       setEdit(null)
-      // Only replacement credentials discard queued alerts; a rename or a
-      // pause keeps them for delivery.
-      reportRowMessage(edit.id, options.url || options.config ? 'Notification destination updated. Alerts queued for the previous credentials were discarded.' : 'Notification destination updated.')
+      // Only replacement credentials discard queued alerts, unless the
+      // administrator chose to keep them; a rename or a pause keeps them.
+      reportRowMessage(edit.id, !credentials ? 'Notification destination updated.' : options.keep_pending ? 'Notification destination updated. Alerts queued for the previous credentials will be sent with the new ones.' : 'Notification destination updated. Alerts queued for the previous credentials were discarded.')
       await client.invalidateQueries({ queryKey: scope.queryKey })
     } catch (err) {
       if (err instanceof APIError && err.code === 'conflict') {
@@ -177,7 +189,7 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
             const conflictMessage = latest ? 'This destination is no longer available for editing.' : 'This destination was removed in another session.'
             reportRowError(edit.id, new Error(conflictMessage), conflictMessage)
           } else {
-            setEdit({ id: latest.id, name: latest.name, configuration: { provider: 'url', fields: {} }, enabled: latest.enabled, revision: latest.revision })
+            setEdit({ id: latest.id, name: latest.name, configuration: { provider: 'url', fields: {} }, enabled: latest.enabled, revision: latest.revision, keepPending: edit.keepPending })
             const conflictMessage = 'This destination changed in another session. The latest values are loaded; review them and save again.'
             reportRowError(edit.id, new Error(conflictMessage), conflictMessage)
           }
@@ -237,7 +249,12 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
       await scope.test(destination.id)
       reportRowMessage(destination.id, `Test send completed for ${destination.name}. Check that the message arrived.`)
     } catch (err) {
-      reportRowError(destination.id, err, 'Notification test failed.')
+      if (err instanceof APIError && err.code === 'notification_timeout') {
+        const text = `${destination.name} did not answer in time. The test message may still arrive; check the recipient before testing again.`
+        reportRowError(destination.id, new Error(text), text)
+      } else {
+        reportRowError(destination.id, err, 'Notification test failed.')
+      }
     } finally {
       setBusy('')
     }
@@ -348,7 +365,7 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
       <div className="panel-heading"><div><h2>Configured destinations</h2><p className="muted">{scope.listDescription}</p></div><span className="pill blue">{status?.active ?? 0} active</span></div>
       {listFeedback && <div className="success-banner notification-panel-feedback" role="status"><Check size={17} />{listFeedback}</div>}
       {!canManage && <div className="notice notification-read-only" role="status"><LockKeyhole size={16} /><span>Notification destinations are managed by an administrator. You can review their availability and select them for jobs where permitted.</span></div>}
-      {destinations.isLoading ? <div className="loading"><span className="spinner" />Loading destinations…</div> : destinations.error ? <ErrorNotice message="Could not load notification destinations." onRetry={() => destinations.refetch()} /> : destinations.data?.destinations.length ? <div className="notification-list">{destinations.data.destinations.map(destination => <DestinationRow key={destination.id} destination={destination} editing={canManage && edit?.id === destination.id ? edit : null} busy={busy} canManage={canManage} updateAlertSelected={selectedUpdateDestinations.includes(destination.id)} updateAlertsBusy={updateRoutingBusy} feedback={rowFeedback[destination.id]} onToggleUpdateAlerts={toggleUpdateRouting} onEdit={beginEdit} onCancel={() => setEdit(null)} onSave={saveEdit} onChange={setEdit} onToggle={toggle} onDelete={remove} onTest={scope.test ? test : undefined} />)}</div> : <div className="inline-empty">No notification destinations are configured.</div>}
+      {destinations.isLoading ? <div className="loading"><span className="spinner" />Loading destinations…</div> : destinations.error ? <ErrorNotice message="Could not load notification destinations." onRetry={() => destinations.refetch()} /> : destinations.data?.destinations.length ? <div className="notification-list">{destinations.data.destinations.map(destination => <DestinationRow key={destination.id} destination={destination} editing={canManage && edit?.id === destination.id ? edit : null} busy={busy} canManage={canManage} scope={scope} onRedelivered={() => client.invalidateQueries({ queryKey: scope.queryKey })} updateAlertSelected={selectedUpdateDestinations.includes(destination.id)} updateAlertsBusy={updateRoutingBusy} feedback={rowFeedback[destination.id]} onToggleUpdateAlerts={toggleUpdateRouting} onEdit={beginEdit} onCancel={() => setEdit(null)} onSave={saveEdit} onChange={setEdit} onToggle={toggle} onDelete={remove} onTest={scope.test ? test : undefined} />)}</div> : <div className="inline-empty">No notification destinations are configured.</div>}
     </div>
     <p className="helper notification-footnote"><LockKeyhole size={13} /><span>URLs containing credentials are encrypted with the local notification key. Back up <code>notification.key</code> with <code>edgewatch.db</code>; losing it locks web-managed destinations until the key is restored (or a destination is deleted and recreated).</span></p>
     {passwordPrompt && <ActionDialog title={passwordPrompt.title} description={passwordPrompt.description} confirmLabel={passwordPrompt.confirmLabel} valueLabel="Account password" valueType="password" valueRequired autoComplete="current-password" onConfirm={value => resolvePassword(value)} onCancel={() => resolvePassword(null)} />}
@@ -377,8 +394,11 @@ function selectedUpdateDestinationIds(data: NotificationDestinationsResponse | u
   return routing.destinations.filter(id => available.has(id))
 }
 
-function DestinationRow({ destination, editing, busy, canManage, updateAlertSelected, updateAlertsBusy, feedback, onToggleUpdateAlerts, onEdit, onCancel, onSave, onChange, onToggle, onDelete, onTest }: { destination: NotificationDestination; editing: EditState | null; busy: string; canManage: boolean; updateAlertSelected: boolean; updateAlertsBusy: boolean; feedback?: DestinationFeedback; onToggleUpdateAlerts: (destination: NotificationDestination, checked: boolean) => void; onEdit: (destination: NotificationDestination) => void; onCancel: () => void; onSave: (event: FormEvent) => void; onChange: (next: EditState | null) => void; onToggle: (destination: NotificationDestination) => void; onDelete: (destination: NotificationDestination) => void; onTest?: (destination: NotificationDestination) => void }) {
+function DestinationRow({ destination, editing, busy, canManage, scope, onRedelivered, updateAlertSelected, updateAlertsBusy, feedback, onToggleUpdateAlerts, onEdit, onCancel, onSave, onChange, onToggle, onDelete, onTest }: { destination: NotificationDestination; editing: EditState | null; busy: string; canManage: boolean; scope: NotificationScope; onRedelivered: () => void; updateAlertSelected: boolean; updateAlertsBusy: boolean; feedback?: DestinationFeedback; onToggleUpdateAlerts: (destination: NotificationDestination, checked: boolean) => void; onEdit: (destination: NotificationDestination) => void; onCancel: () => void; onSave: (event: FormEvent) => void; onChange: (next: EditState | null) => void; onToggle: (destination: NotificationDestination) => void; onDelete: (destination: NotificationDestination) => void; onTest?: (destination: NotificationDestination) => void }) {
   const deployment = destination.read_only || destination.source === 'deployment'
+  const [failedAlertsOpen, setFailedAlertsOpen] = useState(false)
+  const failedAlerts = canManage && !deployment && scope.failedAlerts && (destination.terminal_failures ?? 0) > 0 ? scope.failedAlerts : undefined
+  const replacingCredentials = editing ? credentialsFromNotificationDraft(editing.configuration) !== null : false
   return <div className={destination.locked ? 'notification-row locked' : 'notification-row'}>
     <div className="notification-row-main"><span className={deployment ? 'notification-icon deployment' : 'notification-icon'}>{deployment ? <Plug size={16} /> : <Send size={16} />}</span><div className="notification-meta"><strong title={destination.name}>{destination.name}</strong><span>{destination.provider || 'unknown provider'} · {deployment ? 'deployment configuration' : `revision ${destination.revision}`}</span></div>{canManage && <label className="notification-update-toggle"><input type="checkbox" checked={updateAlertSelected} disabled={updateAlertsBusy} onChange={event => onToggleUpdateAlerts(destination, event.currentTarget.checked)} aria-label={`${updateAlertSelected ? 'Disable' : 'Enable'} update alerts for ${destination.name}`} /><span><strong>Update alerts</strong><small title={`Release and upgrade alerts ${updateAlertSelected ? 'on' : 'off'}`}>{updateAlertSelected ? 'Alerts on' : 'Alerts off'}</small></span></label>}<div className="notification-state">{destination.locked ? <span className="pill amber"><LockKeyhole size={11} /> Locked</span> : deployment ? <span className="pill gray">Read-only</span> : <span className={destination.enabled ? 'pill green' : 'pill gray'}>{destination.enabled ? 'Enabled' : 'Paused'}</span>}</div></div>
     {destination.locked && <div className="notification-lock"><AlertTriangle size={14} /> Credentials cannot be decrypted ({destination.error_code ?? 'key unavailable'}). Restore the key before editing or enabling it; if it cannot be recovered, remove and recreate this destination.</div>}
@@ -387,10 +407,12 @@ function DestinationRow({ destination, editing, busy, canManage, updateAlertSele
       <label>Name<input value={editing.name} onChange={event => onChange({ ...editing, name: event.target.value })} maxLength={100} required /></label>
       <NotificationDestinationConfig idPrefix={`edit-${destination.id}`} draft={editing.configuration} onChange={configuration => onChange({ ...editing, configuration })} allowBlankURL />
       <p className="helper">Leave the advanced URL blank to keep the encrypted credentials. Choosing a provider and filling its fields replaces them completely.</p>
+      {scope.keepPendingOnReplace && replacingCredentials && <label className="switch-row notification-check"><input type="checkbox" checked={editing.keepPending} onChange={event => onChange({ ...editing, keepPending: event.target.checked })} /><span><strong>Keep queued alerts</strong><small>Send the alerts queued or failed for the previous credentials with the new ones. Use this to repair a broken URL, not to change the recipient.</small></span></label>}
       <label className="switch-row notification-check"><input type="checkbox" checked={editing.enabled} onChange={event => onChange({ ...editing, enabled: event.target.checked })} /><span><strong>{editing.enabled ? 'Enabled' : 'Paused'}</strong><small>Saving creates a new destination revision.</small></span></label>
       <div className="notification-edit-actions"><button className="button primary" type="submit" disabled={busy === destination.id}>Save changes</button><button className="button ghost" type="button" onClick={onCancel}>Cancel</button></div>
     </form>}
-    {canManage && !deployment && !editing && <div className="notification-actions">{onTest && <button className="button ghost" type="button" onClick={() => onTest(destination)} disabled={destination.locked || busy === `test:${destination.id}`}><Send size={14} />{busy === `test:${destination.id}` ? 'Sending…' : 'Test'}</button>}<button className="button ghost" type="button" onClick={() => onToggle(destination)} disabled={destination.locked || busy === destination.id}>{destination.enabled ? 'Pause' : 'Enable'}</button><button className="button ghost" type="button" onClick={() => onEdit(destination)} disabled={destination.locked || busy === destination.id}><Pencil size={14} />Edit</button><button className="button ghost danger-text" type="button" onClick={() => onDelete(destination)} disabled={busy === destination.id}><Trash2 size={14} />Remove</button></div>}
+    {canManage && !deployment && !editing && <div className="notification-actions">{onTest && <button className="button ghost" type="button" onClick={() => onTest(destination)} disabled={destination.locked || busy === `test:${destination.id}`}><Send size={14} />{busy === `test:${destination.id}` ? 'Sending…' : 'Test'}</button>}<button className="button ghost" type="button" onClick={() => onToggle(destination)} disabled={destination.locked || busy === destination.id}>{destination.enabled ? 'Pause' : 'Enable'}</button><button className="button ghost" type="button" onClick={() => onEdit(destination)} disabled={destination.locked || busy === destination.id}><Pencil size={14} />Edit</button>{failedAlerts && <button className="button ghost" type="button" onClick={() => setFailedAlertsOpen(open => !open)} aria-expanded={failedAlertsOpen}><History size={14} />{failedAlertsOpen ? 'Hide failed alerts' : 'Failed alerts'}</button>}<button className="button ghost danger-text" type="button" onClick={() => onDelete(destination)} disabled={busy === destination.id}><Trash2 size={14} />Remove</button></div>}
+    {failedAlerts && failedAlertsOpen && !editing && <NotificationFailedAlerts destinationID={destination.id} destinationName={destination.name} source={failedAlerts} queryKey={scope.queryKey} onRedelivered={onRedelivered} />}
     {feedback?.message && <div className="success-banner destination-feedback save-feedback" role="status">{feedback.message}</div>}
     {feedback?.error && <div className="form-error destination-feedback save-feedback" role="alert">{feedback.error}</div>}
   </div>

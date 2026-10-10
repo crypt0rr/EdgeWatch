@@ -53,6 +53,7 @@ var knownAuditActions = map[string][]string{
 		"job.notification_destination_removed", "job.notification_destination_replaced",
 		"job.paused", "job.rebaseline_requested", "job.restored", "job.resumed", "job.updated",
 		"notifications.created", "notifications.deleted", "notifications.pending_discarded",
+		"notifications.pending_kept", "notifications.redelivered",
 		"notifications.test", "notifications.test_failed", "notifications.update_routing",
 		"notifications.updated", "notifications.incident_reminders_changed",
 		"public_dashboard.updated",

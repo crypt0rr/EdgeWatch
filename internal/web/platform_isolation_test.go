@@ -114,6 +114,8 @@ func isolationBody(route apiRoute) string {
 		return `{"name":"renamed","engine":"nmap"}`
 	case "PUT /notifications/destinations/{id}":
 		return confirmBody(`"name":"renamed","revision":1`)
+	case "POST /notifications/destinations/{id}/deliveries/redeliver":
+		return `{}`
 	}
 	switch {
 	case strings.HasPrefix(route.Template, "/jobs/"):

@@ -87,3 +87,25 @@ function humanize(value: string) {
   const words = value.trim().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ')
   return words ? words[0].toUpperCase() + words.slice(1) : value
 }
+
+const eventLabels: Record<string, string> = {
+  'changes-detected': 'Incident opened',
+  'changes-reminder': 'Incident reminder',
+  'changes-recovered': 'Incident recovered',
+  'incident-accepted': 'Change accepted',
+  'incident-suppressed': 'Incident suppressed',
+  'scan-incomplete': 'Scan incomplete',
+  'scan-failure': 'Scan failed',
+  'scan-canceled': 'Scan canceled',
+  'scan-interrupted': 'Scan interrupted',
+  'scan-anomaly': 'Scan anomaly',
+  'scan-budget-exceeded': 'Scheduled scan skipped',
+  'application-update-available': 'Update available',
+  'application-updated': 'Application updated',
+  'job-silent': 'Job notification warning',
+}
+
+/** The display name of an event type; an unknown type is shown in words. */
+export function eventTypeLabel(type: string) {
+  return eventLabels[type] ?? type.replace(/[-_.]+/g, ' ')
+}

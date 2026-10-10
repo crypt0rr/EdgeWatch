@@ -37,6 +37,17 @@ var ErrInvalidDestinationSelection = store.ErrInvalidDestinationSelection
 // accepted the request just as the daemon stopped waiting.
 var ErrNotificationSendIndeterminate = store.ErrDeliveryIndeterminate
 
+// ErrNotificationProviderTimeout means the provider did not answer within
+// the provider timeout. It is also ErrNotificationSendIndeterminate, as the
+// provider may have accepted the message, and a delivery retries it as a
+// provider attempt no sooner than a claim lease later.
+var ErrNotificationProviderTimeout = store.ErrDeliveryProviderTimeout
+
+// ErrDeliveryResultNotRecorded means a delivery was sent but its result
+// could not be recorded, so the delivery may be sent again once its claim
+// expires or the daemon restarts.
+var ErrDeliveryResultNotRecorded = errors.New("notification was sent but its delivery could not be recorded")
+
 const (
 	notificationWorkers   = 4
 	notificationBatchSize = 16
@@ -47,17 +58,51 @@ const (
 	// caller is canceled first, wait briefly for a definitive result before
 	// treating the delivery as indeterminate and deferring it.
 	notificationSendCancellationGrace = 2 * time.Second
-	// Keep the caller-side bound independent from third-party provider code. A
-	// provider that ignores its own timeout must not leave the delivery worker
-	// waiting forever; the outcome is indeterminate and the claim is deferred.
-	// Match the store's claim lease so an uncertain provider outcome cannot be
-	// retried while the original request may still complete.
+	// A send that the caller canceled is deferred, as its outcome is
+	// indeterminate. Match the store's claim lease so an uncertain provider
+	// outcome cannot be retried while the original request may still
+	// complete.
 	notificationIndeterminateDelay = 30 * time.Minute
+	// lateAlertAge is how old an alert is when its message starts to name
+	// the time it was raised, as after a provider outage or a redelivery.
+	lateAlertAge = 10 * time.Minute
 )
 
-// Kept as a variable so deterministic provider-timeout tests can use a short
-// bound without waiting for the production timeout.
-var notificationProviderTimeout = 15 * time.Second
+// Kept as variables so deterministic provider-timeout tests can use a short
+// bound without waiting for the production timeout. The provider timeout
+// bounds a send in the notification child, which reports a provider that did
+// not answer by then. The caller's hard bound is longer by the process
+// margin, which covers the child's start and its sandbox, so the child's own
+// timeout fires first; the bound still ends a child that ignores it.
+var (
+	notificationProviderTimeout = 15 * time.Second
+	notificationProcessMargin   = 5 * time.Second
+)
+
+// notificationSendBound is the caller's hard bound on one send.
+func notificationSendBound() time.Duration {
+	return notificationProviderTimeout + notificationProcessMargin
+}
+
+// errProviderTimeout is the error of a provider that did not answer within
+// the provider timeout.
+var errProviderTimeout = errors.New("the notification provider did not answer in time")
+
+// providerTimeoutFailure is the redacted failure of a provider that did not
+// answer in time.
+func providerTimeoutFailure() error {
+	return &store.DeliveryFailure{Err: store.ErrDeliveryProviderTimeout, Class: store.DeliveryClassTimeout}
+}
+
+// Kept as variables so the result-write tests can hold the writer briefly.
+// A result write that fails, for example while another transaction holds the
+// single writer connection for longer than deliveryResultTimeout, is
+// retried with a doubling delay for up to deliveryResultRetryWindow.
+var (
+	deliveryResultTimeout     = 5 * time.Second
+	deliveryResultRetryDelay  = 250 * time.Millisecond
+	deliveryResultRetryWindow = time.Minute
+)
 
 // DestinationView is a destination's redacted metadata. A deployment
 // destination from config.yaml has no stored times, so its JSON leaves
@@ -114,6 +159,9 @@ type Notifier struct {
 	// installed is guarded by mu.
 	reloads   atomic.Uint64
 	installed uint64
+	// policy is the address policy of the destinations that units own; see
+	// SetTargetExclusions.
+	policy atomic.Pointer[destinationPolicy]
 }
 
 func New(s *store.Store, urls []string) (*Notifier, error) {
@@ -133,10 +181,11 @@ func NewWithKeyFile(s *store.Store, urls []string, keyPath string) (*Notifier, e
 func newWithKeyFile(s *store.Store, urls []string, keyPath string, autoCreateKey bool) (*Notifier, error) {
 	n := &Notifier{Store: s, fileURLs: map[string]string{}, fileLegacy: map[string]string{}, managed: map[string]managedDestination{}, keyPath: keyPath, autoCreateKey: autoCreateKey}
 	legacyURLs := make(map[string]string, len(urls))
-	for _, raw := range urls {
+	for index, raw := range urls {
 		if _, err := shoutrrr.CreateSender(raw); err != nil {
-			id := hashURL(raw)
-			return nil, fmt.Errorf("invalid Shoutrrr destination %s", id[:12])
+			// Name the position only: a digest of the URL would let a reader
+			// of the log confirm a guessed URL.
+			return nil, fmt.Errorf("invalid Shoutrrr destination: configured notification URL %d of %d", index+1, len(urls))
 		}
 		legacyURLs[hashURL(raw)] = raw
 	}
@@ -808,23 +857,76 @@ func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, dest
 		ok = state == managedReady
 	}
 	var sendErr error
-	if !ok {
+	switch {
+	case !ok:
 		sendErr = store.ErrDeliveryDestinationMissing
-	} else {
-		sendErr = safeSendContext(ctx, raw, engine.FormatEvent(delivery.Event))
+	case managedDestination && n.addressChecked(strings.SplitN(delivery.Destination, ":", 3)[1]):
+		// A unit's destination is checked again just before the send, so a
+		// name whose answer changed since it was saved is not reached.
+		sendErr = n.destinationPolicy().check(ctx, raw)
 	}
-	if errors.Is(sendErr, ErrNotificationSendIndeterminate) {
+	if ok && sendErr == nil {
+		sendErr = safeSendContext(ctx, raw, alertMessage(delivery.Event, time.Now()))
+	}
+	if errors.Is(sendErr, ErrNotificationSendIndeterminate) && !errors.Is(sendErr, ErrNotificationProviderTimeout) {
 		// The provider outcome is unknown after the cancellation grace period.
 		// Keep the safety delay and bounded deferral budget for this genuine
 		// indeterminate send; unlike a claim cancelled before dispatch, it may
-		// already have been accepted by the provider.
+		// already have been accepted by the provider. A provider that did not
+		// answer in time is recorded as a provider attempt instead.
 		deferErr := n.releaseClaim(ctx, delivery, store.ErrDeliveryIndeterminate, notificationIndeterminateDelay)
 		return errors.Join(sendErr, deferErr)
 	}
-	resultCtx, cancel := deliveryResultContext(ctx)
-	defer cancel()
-	resultErr := n.Store.System().DeliveryResultClaim(resultCtx, delivery.ID, delivery.ClaimToken, sendErr)
-	return errors.Join(sendErr, resultErr)
+	return errors.Join(sendErr, n.recordResult(ctx, delivery, sendErr))
+}
+
+// alertMessage formats the message of an alert. An alert that is delivered
+// late, after a provider outage or a redelivery, names when it was raised,
+// so its recipients do not take it for a new one.
+func alertMessage(event model.Event, now time.Time) string {
+	message := engine.FormatEvent(event)
+	if !event.CreatedAt.IsZero() && now.Sub(event.CreatedAt) > lateAlertAge {
+		message += "\nRaised at " + event.CreatedAt.UTC().Format("2006-01-02 15:04 UTC")
+	}
+	return message
+}
+
+// recordResult records the outcome of a send. The result write gets a fresh
+// bound on each try, and a write that fails is retried with a doubling delay
+// for up to deliveryResultRetryWindow: a sent alert whose result is not
+// recorded keeps its claim and is sent again once the claim lease ends or the
+// daemon restarts. The claim token makes a retry idempotent, and a lost
+// claim is not retried. A sent alert that still cannot be recorded is
+// reported as ErrDeliveryResultNotRecorded.
+func (n *Notifier) recordResult(ctx context.Context, delivery store.Delivery, sendErr error) error {
+	delay := deliveryResultRetryDelay
+	deadline := time.Now().Add(deliveryResultRetryWindow)
+	for {
+		resultCtx, cancel := deliveryResultContext(ctx)
+		err := n.Store.System().DeliveryResultClaim(resultCtx, delivery.ID, delivery.ClaimToken, sendErr)
+		cancel()
+		if err == nil || errors.Is(err, store.ErrDeliveryClaimLost) {
+			return err
+		}
+		if !time.Now().Add(delay).Before(deadline) {
+			if sendErr == nil {
+				return fmt.Errorf("%w: %w", ErrDeliveryResultNotRecorded, err)
+			}
+			return err
+		}
+		time.Sleep(delay)
+		delay = min(2*delay, 5*time.Second)
+	}
+}
+
+// addressChecked reports whether the address policy applies to the managed
+// destination with the given ID: a unit's destination, unless the host
+// operator configured its URL in config.yaml and no one has replaced it since.
+func (n *Notifier) addressChecked(id string) bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	entry, ok := n.managed[id]
+	return ok && entry.record.TenantID != "" && !entry.record.ConfigImported
 }
 
 func (n *Notifier) releaseClaim(ctx context.Context, delivery store.Delivery, reason error, delay time.Duration) error {
@@ -845,7 +947,7 @@ func deliveryResultContext(ctx context.Context) (context.Context, context.Cancel
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	return context.WithTimeout(context.WithoutCancel(ctx), deliveryResultTimeout)
 }
 
 type notificationSendFunc func(context.Context, string, string) error
@@ -860,14 +962,27 @@ func send(ctx context.Context, rawURL, message string) error {
 var notificationIsTestBinary = isTestBinary
 var notificationProcessRunner notificationSendFunc = runNotificationProcess
 
+// sendInProcess sends with the provider code in this process and returns
+// errProviderTimeout when the provider does not answer within the provider
+// timeout.
 func sendInProcess(rawURL, message string) error {
 	sender, err := shoutrrr.CreateSender(rawURL)
 	if err != nil {
 		return err
 	}
-	sender.Timeout = notificationProviderTimeout
-	errs := sender.Send(message, &types.Params{"title": "EdgeWatch"})
-	return errors.Join(errs...)
+	// The router's own timer reports a timeout only as text. It gets longer,
+	// so the timer below ends a slow send and reports it as a timeout.
+	sender.Timeout = notificationProviderTimeout + time.Second
+	result := make(chan error, 1)
+	go func() { result <- errors.Join(sender.Send(message, &types.Params{"title": "EdgeWatch"})...) }()
+	timer := time.NewTimer(notificationProviderTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-result:
+		return err
+	case <-timer.C:
+		return errProviderTimeout
+	}
 }
 
 // notificationProviderSend is isolated behind one function so timeout and
@@ -877,8 +992,9 @@ var notificationProviderSend notificationSendFunc = send
 
 // safeSend deliberately strips provider errors before they reach logs, the
 // outbox, or the CLI. Shoutrrr providers may echo a destination URL (and its
-// credentials) in their error text, so a short destination fingerprint is the
-// most useful diagnostic that can be retained safely.
+// credentials) in their error text, so a failure keeps only its category and
+// class, which name no destination; the delivery's own selector identifies
+// the destination.
 func safeSend(rawURL, message string) error {
 	return safeSendContext(context.Background(), rawURL, message)
 }
@@ -888,15 +1004,36 @@ func safeSendContext(ctx context.Context, rawURL, message string) error {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrNotificationSendIndeterminate) {
 			return err
 		}
-		id := hashURL(rawURL)
-		if errors.Is(err, store.ErrDeliveryProviderPanic) {
-			return fmt.Errorf("%w: notification delivery failed (%s)", store.ErrDeliveryProviderPanic, id[:12])
-		}
-		return fmt.Errorf("%w: notification delivery failed (%s)", store.ErrDeliveryProvider, id[:12])
+		return redactedFailure(err)
 	}
 	return nil
 }
 
+// redactedFailure keeps only the category and class of a send failure. The
+// notification child reports them through its exit status; a send in this
+// process is classified by the type of its error.
+func redactedFailure(err error) error {
+	var failure *store.DeliveryFailure
+	switch {
+	case errors.As(err, &failure):
+		return &store.DeliveryFailure{Err: failure.Err, Class: failure.Class}
+	case errors.Is(err, store.ErrDeliveryProviderPanic):
+		return &store.DeliveryFailure{Err: store.ErrDeliveryProviderPanic}
+	}
+	class := failureClass(err)
+	if class == store.DeliveryClassTimeout {
+		return providerTimeoutFailure()
+	}
+	return &store.DeliveryFailure{Err: store.ErrDeliveryProvider, Class: class}
+}
+
+// sendContext sends one message under the caller's hard bound. The send does
+// not stop when ctx is canceled: the caller then waits up to the
+// cancellation grace for the outcome, so a send that is about to finish when
+// the daemon stops, or when a console client goes away, still records it,
+// and only a send that is still running after the grace is ended and
+// reported as indeterminate. A send that runs past the bound is a provider
+// timeout.
 func sendContext(ctx context.Context, rawURL, message string) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -904,7 +1041,7 @@ func sendContext(ctx context.Context, rawURL, message string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	providerCtx, cancelProvider := context.WithTimeout(ctx, notificationProviderTimeout)
+	providerCtx, cancelProvider := context.WithTimeout(context.WithoutCancel(ctx), notificationSendBound())
 	defer cancelProvider()
 	result := make(chan error, 1)
 	go func() {
@@ -920,22 +1057,35 @@ func sendContext(ctx context.Context, rawURL, message string) error {
 	}()
 	select {
 	case err := <-result:
-		return err
+		return boundedResult(providerCtx, err)
 	case <-ctx.Done():
 		timer := time.NewTimer(notificationSendCancellationGrace)
 		defer timer.Stop()
 		select {
 		case err := <-result:
-			return err
+			return boundedResult(providerCtx, err)
+		case <-providerCtx.Done():
+			return providerTimeoutFailure()
 		case <-timer.C:
+			// Returning cancels providerCtx, which ends the child.
 			return ErrNotificationSendIndeterminate
 		}
 	case <-providerCtx.Done():
 		// The provider has not reported a definitive result within the hard
 		// bound. Do not immediately retry: an external provider may already
 		// have accepted the request even while its child is being terminated.
-		return ErrNotificationSendIndeterminate
+		return providerTimeoutFailure()
 	}
+}
+
+// boundedResult reports a send that its hard bound ended as a provider
+// timeout, as the bound's own case does: the result of the ended child may
+// arrive first.
+func boundedResult(providerCtx context.Context, err error) error {
+	if errors.Is(err, ErrNotificationSendIndeterminate) && errors.Is(providerCtx.Err(), context.DeadlineExceeded) {
+		return providerTimeoutFailure()
+	}
+	return err
 }
 
 // TestSummary reports the outcome of a global notification test by count
@@ -987,36 +1137,44 @@ func (n *Notifier) LockedDestinations(ctx context.Context) (int, error) {
 // as a successful verification. Paused destinations are not tested, and an
 // empty set succeeds with nothing tested.
 func testSet(ctx context.Context, set destinationSet) (TestSummary, error) {
-	urls, locked := set.testTargets()
-	summary := TestSummary{Tested: len(urls), Locked: len(locked)}
+	targets, locked := set.testTargets()
+	summary := TestSummary{Tested: len(targets), Locked: len(locked)}
 	all := make([]error, 0, len(locked))
 	for _, entry := range locked {
 		all = append(all, fmt.Errorf("%w: destination %s (%s)", ErrManagedNotificationLocked, entry.record.ID, entry.code))
 	}
 	workers := notificationWorkers
-	if len(urls) < workers {
-		workers = len(urls)
+	if len(targets) < workers {
+		workers = len(targets)
 	}
 	if workers == 0 {
 		return summary, errors.Join(all...)
 	}
 	testCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	jobs := make(chan string)
-	results := make(chan error, len(urls))
+	jobs := make(chan testTarget)
+	results := make(chan error, len(targets))
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for rawURL := range jobs {
-				results <- safeSendContext(testCtx, rawURL, "EdgeWatch notification test")
+			for target := range jobs {
+				if target.checked {
+					// A unit's destination whose address the policy refuses
+					// fails the test without being contacted.
+					if err := set.policy.check(testCtx, target.url); err != nil {
+						results <- err
+						continue
+					}
+				}
+				results <- safeSendContext(testCtx, target.url, "EdgeWatch notification test")
 			}
 		}()
 	}
-	for _, rawURL := range urls {
+	for _, target := range targets {
 		select {
-		case jobs <- rawURL:
+		case jobs <- target:
 		case <-testCtx.Done():
 			// A destination that was never reached is a failed test, not a
 			// silently skipped one.

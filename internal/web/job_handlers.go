@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -157,20 +156,17 @@ func parseDuration(raw string) (time.Duration, error) {
 	return duration, nil
 }
 
-func jobJSON(record store.JobRecord, state model.JobState) map[string]any {
-	p := fromConfig(record.Job)
-	estimate, _ := config.EstimateJobWork(record.Job)
-	return map[string]any{"id": record.ID, "revision": record.Revision, "enabled": record.Enabled, "archived": record.Archived, "created_at": record.CreatedAt, "updated_at": record.UpdatedAt, "security_hash": record.Job.SecurityHash(), "job": p, "baseline": baselineJSON(state, record.Job.SecurityHash()), "scan_estimate": estimate}
-}
-
 func jobJSONFromStateSummary(record store.JobRecord, summary store.RuntimeStateSummary) map[string]any {
 	p := fromConfig(record.Job)
 	estimate, _ := config.EstimateJobWork(record.Job)
 	return map[string]any{"id": record.ID, "revision": record.Revision, "enabled": record.Enabled, "archived": record.Archived, "created_at": record.CreatedAt, "updated_at": record.UpdatedAt, "security_hash": record.Job.SecurityHash(), "job": p, "baseline": baselineJSONFromSummary(summary, record.Job.SecurityHash()), "scan_estimate": estimate}
 }
 
-func (s *Server) jobJSONWithCycle(ctx context.Context, ts *store.TenantStore, record store.JobRecord, state model.JobState) map[string]any {
-	value := s.addNotificationRouting(ctx, s.tenantNotifier(ts), jobJSON(record, state))
+// jobJSONWithCycle builds the job detail response from the bounded runtime
+// summary, so a job page costs the same whatever the size of the job's
+// baseline and candidate snapshots.
+func (s *Server) jobJSONWithCycle(ctx context.Context, ts *store.TenantStore, record store.JobRecord, summary store.RuntimeStateSummary) map[string]any {
+	value := s.addNotificationRouting(ctx, s.tenantNotifier(ts), jobJSONFromStateSummary(record, summary))
 	value = s.addJobCycleAndProfile(ctx, ts, record, value)
 	if budget, ok := s.jobScanBudget(ctx, ts, record.Job); ok {
 		value["scan_budget"] = budget
@@ -244,49 +240,29 @@ type pendingChangeView struct {
 	Count  int          `json:"count"`
 }
 
-func pendingChangeViews(pending map[string]model.Pending) []pendingChangeView {
-	items := make([]pendingChangeView, 0, len(pending))
-	for key, item := range pending {
-		items = append(items, pendingChangeView{Key: key, Change: item.Change, Count: item.Count})
-	}
-	sort.Slice(items, func(i, j int) bool {
-		a, b := items[i], items[j]
-		if a.Change.Target != b.Change.Target {
-			return a.Change.Target < b.Change.Target
-		}
-		if a.Change.Protocol != b.Change.Protocol {
-			return a.Change.Protocol < b.Change.Protocol
-		}
-		if a.Change.Port != b.Change.Port {
-			return a.Change.Port < b.Change.Port
-		}
-		if a.Change.Kind != b.Change.Kind {
-			return a.Change.Kind < b.Change.Kind
-		}
-		return a.Key < b.Key
-	})
-	return items
-}
-
+// jobPendingChanges pages the job's unconfirmed changes, ordered by target,
+// protocol, port, kind and key. The store decodes only the pending changes
+// of the runtime state, not its baseline or candidate snapshots.
 func (s *Server) jobPendingChanges(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord) {
 	offset, ok := requestOffset(w, r)
 	if !ok {
 		return
 	}
 	limit := queryLimit(r)
-	state, err := ts.RuntimeState(r.Context(), record.ID)
+	page, err := ts.RuntimePendingChangesPage(r.Context(), record.ID, limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
 	}
-	items := pendingChangeViews(state.Pending)
-	start := min(offset, len(items))
-	end := min(start+limit, len(items))
+	items := make([]pendingChangeView, 0, len(page.Items))
+	for _, item := range page.Items {
+		items = append(items, pendingChangeView{Key: item.Key, Change: item.Change, Count: item.Count})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"job_id":          record.ID,
 		"job":             record.Job.Name,
-		"pending_changes": items[start:end],
-		"pagination":      paginationJSON(offset, limit, len(items)),
+		"pending_changes": items,
+		"pagination":      paginationJSON(offset, limit, page.Total),
 	})
 }
 
@@ -394,19 +370,6 @@ func fromConfig(j config.Job) jobPayload {
 	return p
 }
 
-func baselineJSON(state model.JobState, currentHash string) map[string]any {
-	summary := store.RuntimeStateSummary{HasBaseline: state.Baseline != nil, BaselineScanID: state.BaselineScanID, BaselineConfigHash: state.BaselineConfigHash, BaselineModified: state.BaselineModified, CandidateCount: state.CandidateCount, CandidateAttempts: state.CandidateAttempts, IncompleteCandidateAttempts: state.IncompleteCandidateAttempts, IncidentCount: len(state.Incidents), PendingCount: len(state.Pending)}
-	if state.Baseline != nil {
-		summary.BaselineHostCount = len(state.Baseline.Hosts)
-		if summary.BaselineHostCount == 0 && len(state.Baseline.Units) > 0 {
-			if page, err := observationsForSnapshot(*state.Baseline); err == nil {
-				summary.BaselineHostCount = len(page.Items)
-			}
-		}
-	}
-	return baselineJSONFromSummary(summary, currentHash)
-}
-
 func baselineJSONFromSummary(summary store.RuntimeStateSummary, currentHash string) map[string]any {
 	if !summary.HasBaseline {
 		status := "collecting"
@@ -492,9 +455,9 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store
 		return
 	}
 	s.App.RefreshSchedules()
-	state, _ := ts.RuntimeState(r.Context(), record.ID)
+	summary, _ := ts.RuntimeStateSummary(r.Context(), record.ID)
 	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "job.created", "job_id": record.ID})
-	writeJSON(w, http.StatusCreated, s.jobJSONWithCycle(r.Context(), ts, record, state))
+	writeJSON(w, http.StatusCreated, s.jobJSONWithCycle(r.Context(), ts, record, summary))
 }
 
 // prepareNewJob centralizes the new-job defaults and policy checks shared by

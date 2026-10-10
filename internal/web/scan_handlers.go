@@ -78,12 +78,12 @@ func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request, session stor
 }
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord) {
-	state, err := ts.RuntimeState(r.Context(), record.ID)
+	summary, err := ts.RuntimeStateSummary(r.Context(), record.ID)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
 	}
-	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), ts, record, state))
+	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), ts, record, summary))
 }
 
 // latestSuccessfulScan returns only the newest completed scan summary. The
@@ -248,9 +248,9 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		s.App.WakeDelivery()
 	}
 	s.App.RefreshSchedules()
-	state, _ := ts.RuntimeState(r.Context(), id)
+	summary, _ := ts.RuntimeStateSummary(r.Context(), id)
 	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "job.updated", "job_id": id})
-	response := s.jobJSONWithCycle(r.Context(), ts, record, state)
+	response := s.jobJSONWithCycle(r.Context(), ts, record, summary)
 	if approvalCleared {
 		response["high_cost_approval_cleared"] = true
 	}
@@ -1064,7 +1064,10 @@ func (s *Server) broadcastIncidentEvents(ctx context.Context, audience sseAudien
 // jobBaseline exposes the current comparison state without requiring clients
 // to fetch the full job record. Baseline units are paginated because a broad
 // CIDR can produce a large snapshot; the scope metadata remains intact on
-// every page.
+// every page. Host observations and host states grow with every address in
+// the scope, so no page carries them: the dedicated, filtered baseline host
+// endpoints serve the observations. The store decodes only the units on the
+// page and the scope metadata.
 func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord) {
 	id := record.ID
 	offset, ok := requestOffset(w, r)
@@ -1072,7 +1075,7 @@ func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, ts *store.T
 		return
 	}
 	limit := queryLimit(r)
-	state, err := ts.RuntimeState(r.Context(), id)
+	summary, err := ts.RuntimeStateSummary(r.Context(), id)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -1082,22 +1085,22 @@ func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, ts *store.T
 		"job":           record.Job.Name,
 		"revision":      record.Revision,
 		"security_hash": record.Job.SecurityHash(),
-		"baseline":      baselineJSON(state, record.Job.SecurityHash()),
+		"baseline":      baselineJSONFromSummary(summary, record.Job.SecurityHash()),
+		"snapshot":      nil,
+		"pagination":    paginationJSON(offset, limit, 0),
 	}
-	if state.Baseline == nil {
-		value["snapshot"] = nil
-		value["pagination"] = paginationJSON(offset, limit, 0)
+	if !summary.HasBaseline {
 		writeJSON(w, http.StatusOK, value)
 		return
 	}
-	units, page := pageSlice(state.Baseline.Units, offset, limit)
-	snapshot := *state.Baseline
-	snapshot.Units = units
-	// Host observations are served by the dedicated, filtered host endpoints.
-	// Do not copy the complete evidence array into every paginated baseline
-	// response; a large CIDR baseline would otherwise defeat pagination.
-	snapshot.Hosts = nil
-	value["snapshot"], value["pagination"] = snapshot, page
+	page, err := ts.RuntimeBaselinePage(r.Context(), id, limit, offset)
+	if err != nil {
+		s.writeInternalError(w, r, "store", err)
+		return
+	}
+	if page.Present {
+		value["snapshot"], value["pagination"] = page.Snapshot, paginationJSON(offset, limit, page.Total)
+	}
 	writeJSON(w, http.StatusOK, value)
 }
 

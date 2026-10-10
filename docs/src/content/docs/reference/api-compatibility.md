@@ -127,6 +127,21 @@ that only need scan metadata should use `/summary`, then request paginated
 results or host evidence separately when needed. This avoids loading large
 snapshots just to show scan status and timestamps.
 
+## Job baseline pages
+
+`GET /api/v1/jobs/{jobID}/baseline` returns the job's baseline summary and
+one page of its logical units in `snapshot.units`, with the baseline's
+`scopes`, `dns`, and `target_failures` on every page. A page carries neither
+the host observations (`hosts`) nor, since the release after v0.34.0, the
+per-address `host_states`: both grow with every address in the scope, so a
+page of a broad baseline would otherwise grow without bound. Request host
+evidence from `GET /api/v1/jobs/{jobID}/baseline/hosts`, which is paginated
+and filtered.
+
+The `baseline` object of `GET /api/v1/jobs/{jobID}`, of the job create and
+update responses, and of `GET /api/v1/jobs` is built from the same compact
+runtime summary, so its `host_count` is the same in all of them.
+
 ## Per-address port changes
 
 A change in scan `changes`, an incident, a pending change, or an event can

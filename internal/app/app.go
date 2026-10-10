@@ -74,6 +74,8 @@ type App struct {
 	clock               func() time.Time
 	// pruneHistory overrides the system retention pass in deterministic tests.
 	pruneHistory func(context.Context, time.Time) (store.PruneStats, error)
+	// maintenanceRetry overrides maintenanceRetryDelay in tests.
+	maintenanceRetry time.Duration
 	// persistenceBudget overrides the size-based scan-finalization work budget
 	// in deterministic tests. Production leaves it nil and uses
 	// scanPersistenceTimeout.

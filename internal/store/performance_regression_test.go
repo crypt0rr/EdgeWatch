@@ -73,8 +73,8 @@ func TestSeededPerformanceRegressionInvariants(t *testing.T) {
 	// Explain the exact page statement used by ListLatestScanHostsPage. The
 	// maintained projection must answer inventory requests without joining or
 	// ranking the retained scans/host-history tables.
-	queries := latestScanHostsPageQueries(DefaultTenantID, "", "tcp", &hasOpen, 50, 0)
-	rows, err := s.DB.QueryContext(ctx, `EXPLAIN QUERY PLAN `+queries.pageSQL, queries.pageArg...)
+	statement, args := latestScanHostsPageQueries(DefaultTenantID, "", "tcp", &hasOpen).segment(false, 50, 0)
+	rows, err := s.DB.QueryContext(ctx, `EXPLAIN QUERY PLAN `+statement, args...)
 	if err != nil {
 		t.Fatal(err)
 	}

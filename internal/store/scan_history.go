@@ -352,10 +352,11 @@ func (ts *TenantStore) GetScanHost(ctx context.Context, scanID, address string) 
 }
 
 // ListLatestScanHostsPage returns the maintained newest successful
-// observation for each effective address across all jobs of the tenant.
-// Another tenant's observation of the same address is a row of its own and
-// never matches. The projection is updated in the same transaction as a
-// successful scan and rebuilt after retention deletes.
+// observation for each effective address across all jobs of the tenant:
+// the hosts of jobs that are not archived first, then those of archived
+// jobs, each by address. Another tenant's observation of the same address is
+// a row of its own and never matches. The projection is updated in the same
+// transaction as a successful scan and rebuilt after retention deletes.
 func (ts *TenantStore) ListLatestScanHostsPage(ctx context.Context, query, protocol string, hasOpen *bool, limit, offset int) (Page[LatestScanHost], error) {
 	if err := ts.ready(); err != nil {
 		return Page[LatestScanHost]{}, err
@@ -364,55 +365,80 @@ func (ts *TenantStore) ListLatestScanHostsPage(ctx context.Context, query, proto
 	if err := ValidateHostSearchQuery(query); err != nil {
 		return Page[LatestScanHost]{}, err
 	}
-	queries := latestScanHostsPageQueries(ts.scope.id, query, protocol, hasOpen, limit, offset)
+	limit, offset = normalizePage(limit, offset)
+	queries := latestScanHostsPageQueries(ts.scope.id, query, protocol, hasOpen)
 	var page Page[LatestScanHost]
-	reader := ts.store.reader()
-	if err := reader.QueryRowContext(ctx, queries.countSQL, queries.countArg...).Scan(&page.Total); err != nil {
+	var current int
+	if err := ts.store.reader().QueryRowContext(ctx, queries.countSQL, queries.countArg...).Scan(&page.Total, &current); err != nil {
 		return page, err
 	}
-	rows, err := reader.QueryContext(ctx, queries.pageSQL, queries.pageArg...)
+	// The page starts in the segment of jobs that are not archived and
+	// continues into the archived one when it reaches its end.
+	if offset < current {
+		items, err := ts.latestScanHostSegment(ctx, queries, false, limit, offset)
+		if err != nil {
+			return page, err
+		}
+		page.Items = items
+		limit -= len(items)
+		offset = current
+	}
+	if limit > 0 && offset < page.Total {
+		items, err := ts.latestScanHostSegment(ctx, queries, true, limit, offset-current)
+		if err != nil {
+			return page, err
+		}
+		page.Items = append(page.Items, items...)
+	}
+	return page, nil
+}
+
+// ListLatestScanHosts returns the tenant's complete maintained projection.
+// It is used only when the tenant's history still contains legacy successful
+// snapshots that cannot be represented by latest_scan_hosts; the normal Hosts
+// endpoint stays on the filtered, paginated query above. Each segment is
+// read once, in index order.
+func (ts *TenantStore) ListLatestScanHosts(ctx context.Context) ([]LatestScanHost, error) {
+	if err := ts.ready(); err != nil {
+		return nil, err
+	}
+	queries := latestScanHostsPageQueries(ts.scope.id, "", "", nil)
+	var result []LatestScanHost
+	for _, archived := range []bool{false, true} {
+		items, err := ts.latestScanHostSegment(ctx, queries, archived, -1, 0)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, items...)
+	}
+	return result, nil
+}
+
+// latestScanHostSegment reads limit hosts from offset of one segment of the
+// tenant's host inventory; a negative limit reads the rest of it.
+func (ts *TenantStore) latestScanHostSegment(ctx context.Context, queries latestHostPageQueries, archived bool, limit, offset int) ([]LatestScanHost, error) {
+	statement, args := queries.segment(archived, limit, offset)
+	rows, err := ts.store.reader().QueryContext(ctx, statement, args...)
 	if err != nil {
-		return page, err
+		return nil, err
 	}
 	defer rows.Close()
+	var items []LatestScanHost
 	for rows.Next() {
 		var scanID, address, dataQuality, job, finished string
 		var jobID sql.NullString
 		var archived int
 		var raw []byte
 		if err := rows.Scan(&scanID, &address, &dataQuality, &raw, &jobID, &job, &finished, &archived); err != nil {
-			return page, err
+			return nil, err
 		}
 		item, err := decodeScanHost(address, dataQuality, raw)
 		if err != nil {
-			return page, err
-		}
-		parsed := scanTime(finished)
-		page.Items = append(page.Items, LatestScanHost{ScanHost: ScanHost{ScanID: scanID, DataQuality: dataQuality, Host: item.Host}, JobID: jobID.String, Job: job, Archived: archived != 0, ScannedAt: parsed})
-	}
-	return page, rows.Err()
-}
-
-// ListLatestScanHosts returns the tenant's complete maintained projection.
-// It is used only when the tenant's history still contains legacy successful
-// snapshots that cannot be represented by latest_scan_hosts; the normal Hosts
-// endpoint stays on the filtered, paginated query above.
-func (ts *TenantStore) ListLatestScanHosts(ctx context.Context) ([]LatestScanHost, error) {
-	if err := ts.ready(); err != nil {
-		return nil, err
-	}
-	const pageSize = 1000
-	var result []LatestScanHost
-	for offset := 0; ; offset += pageSize {
-		page, err := ts.ListLatestScanHostsPage(ctx, "", "", nil, pageSize, offset)
-		if err != nil {
 			return nil, err
 		}
-		result = append(result, page.Items...)
-		if len(page.Items) == 0 || offset+len(page.Items) >= page.Total {
-			return result, nil
-		}
+		items = append(items, LatestScanHost{ScanHost: ScanHost{ScanID: scanID, DataQuality: dataQuality, Host: item.Host}, JobID: jobID.String, Job: job, Archived: archived != 0, ScannedAt: scanTime(finished)})
 	}
+	return items, rows.Err()
 }
 
 // LegacySuccessfulScanExists reports whether at least one of the tenant's

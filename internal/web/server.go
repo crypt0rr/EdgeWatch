@@ -532,36 +532,6 @@ func (s *Server) legacyAPI(w http.ResponseWriter, r *http.Request) {
 		s.previewJob(w, r, session, ts)
 	case path == "/jobs/schedule-suggestion" && r.Method == http.MethodGet:
 		s.scheduleSuggestion(w, r, ts)
-	case path == "/scans" && r.Method == http.MethodGet:
-		s.listScans(w, r, ts)
-	case path == "/hosts" && r.Method == http.MethodGet:
-		s.listHosts(w, r, ts)
-	case path == "/scans/active" && r.Method == http.MethodGet:
-		s.activeScans(w, r, ts)
-	case strings.HasPrefix(path, "/scans/") && strings.HasSuffix(path, "/cancel") && r.Method == http.MethodPost:
-		s.cancelScan(w, r, session, ts, strings.TrimSuffix(strings.TrimPrefix(path, "/scans/"), "/cancel"))
-	case strings.HasPrefix(path, "/scans/") && strings.HasSuffix(path, "/hosts") && r.Method == http.MethodGet:
-		s.scanHostsRoute(w, r, ts, strings.TrimSuffix(strings.TrimPrefix(path, "/scans/"), "/hosts"))
-	case strings.HasPrefix(path, "/scans/") && strings.Contains(strings.TrimPrefix(path, "/scans/"), "/hosts/") && r.Method == http.MethodGet:
-		if strings.HasSuffix(path, "/rdap") {
-			value := strings.TrimPrefix(path, "/scans/")
-			parts := strings.SplitN(value, "/hosts/", 2)
-			s.scanHostRDAPRoute(w, r, ts, parts[0], strings.TrimSuffix(parts[1], "/rdap"))
-			break
-		}
-		value := strings.TrimPrefix(path, "/scans/")
-		parts := strings.SplitN(value, "/hosts/", 2)
-		s.scanHostRoute(w, r, ts, parts[0], parts[1])
-	case strings.HasPrefix(path, "/scans/") && strings.HasSuffix(path, "/summary") && r.Method == http.MethodGet:
-		s.getScanSummary(w, r, ts, strings.TrimSuffix(strings.TrimPrefix(path, "/scans/"), "/summary"))
-	case strings.HasPrefix(path, "/scans/") && r.Method == http.MethodGet:
-		s.getScan(w, r, ts, strings.TrimPrefix(path, "/scans/"))
-	case path == "/incidents" && r.Method == http.MethodGet:
-		s.listIncidents(w, r, ts)
-	case path == "/events" && r.Method == http.MethodGet:
-		s.listEvents(w, r, ts, r.URL.Query().Get("job"))
-	case path == "/audit" && r.Method == http.MethodGet:
-		s.unitAudit(w, r, ts)
 	case strings.HasPrefix(path, "/platform/"):
 		s.platformRoute(w, r, session, strings.TrimPrefix(path, "/platform/"))
 	case strings.HasPrefix(path, "/jobs/"):

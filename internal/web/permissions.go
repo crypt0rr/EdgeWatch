@@ -14,24 +14,6 @@ import (
 // against that table.
 func requiredPermission(path, method string) string {
 	switch {
-	case path == "/scans" || path == "/scans/active" || strings.HasPrefix(path, "/scans/"):
-		return requiredScanPermission(path, method)
-	case path == "/hosts":
-		if method == http.MethodGet {
-			return auth.PermissionHostsRead
-		}
-	case path == "/incidents":
-		if method == http.MethodGet {
-			return auth.PermissionIncidentsRead
-		}
-	case path == "/events":
-		if method == http.MethodGet {
-			return auth.PermissionScansRead
-		}
-	case path == "/audit":
-		if method == http.MethodGet {
-			return auth.PermissionAuditRead
-		}
 	case strings.HasPrefix(path, "/platform/"):
 		return requiredPlatformPermission(path, method)
 	case path == "/jobs":
@@ -59,55 +41,6 @@ func routeParts(path, prefix string) ([]string, bool) {
 		return nil, true
 	}
 	return strings.Split(rest, "/"), true
-}
-
-func requiredScanPermission(path, method string) string {
-	switch path {
-	case "/scans":
-		switch method {
-		case http.MethodGet:
-			return auth.PermissionScansRead
-		case http.MethodPost:
-			// Retain the historical capability mapping for API clients even
-			// though the current router has no POST /scans handler.
-			return auth.PermissionJobsRun
-		}
-		return auth.PermissionDenied
-	case "/scans/active":
-		if method == http.MethodGet {
-			return auth.PermissionScansRead
-		}
-		return auth.PermissionDenied
-	}
-	parts, ok := routeParts(path, "/scans")
-	if !ok || len(parts) == 0 {
-		return auth.PermissionDenied
-	}
-	switch len(parts) {
-	case 1:
-		if method == http.MethodGet {
-			return auth.PermissionScansRead
-		}
-	case 2:
-		if parts[1] == "cancel" && method == http.MethodPost {
-			return auth.PermissionJobsRun
-		}
-		if parts[1] == "summary" && method == http.MethodGet {
-			return auth.PermissionScansRead
-		}
-		if parts[1] == "hosts" && method == http.MethodGet {
-			return auth.PermissionHostsRead
-		}
-	case 3:
-		if parts[1] == "hosts" && method == http.MethodGet {
-			return auth.PermissionHostsRead
-		}
-	case 4:
-		if parts[1] == "hosts" && parts[3] == "rdap" && method == http.MethodGet {
-			return auth.PermissionHostsRead
-		}
-	}
-	return auth.PermissionDenied
 }
 
 // requiredJobPermission mirrors the explicit grammar in jobRoute. Keeping
@@ -418,20 +351,34 @@ var apiRoutes = []apiRoute{
 	}},
 
 	// Global inventories.
-	{Method: http.MethodGet, Template: "/hosts", Permission: auth.PermissionHostsRead, Example: "/hosts"},
-	{Method: http.MethodGet, Template: "/incidents", Permission: auth.PermissionIncidentsRead, Example: "/incidents"},
-	{Method: http.MethodGet, Template: "/events", Permission: auth.PermissionScansRead, Example: "/events"},
+	{Method: http.MethodGet, Template: "/hosts", Permission: auth.PermissionHostsRead, Example: "/hosts", Handle: tenantHandler((*Server).listHosts)},
+	{Method: http.MethodGet, Template: "/incidents", Permission: auth.PermissionIncidentsRead, Example: "/incidents", Handle: tenantHandler((*Server).listIncidents)},
+	{Method: http.MethodGet, Template: "/events", Permission: auth.PermissionScansRead, Example: "/events", Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.listEvents(w, r, c.tenant, r.URL.Query().Get("job"))
+	}},
 
 	// Scans.
-	{Method: http.MethodGet, Template: "/scans", Permission: auth.PermissionScansRead, Example: "/scans"},
+	{Method: http.MethodGet, Template: "/scans", Permission: auth.PermissionScansRead, Example: "/scans", Handle: tenantHandler((*Server).listScans)},
 	{Method: http.MethodPost, Template: "/scans", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/scans", NoHandler: true},
-	{Method: http.MethodGet, Template: "/scans/active", Permission: auth.PermissionScansRead, Example: "/scans/active"},
-	{Method: http.MethodGet, Template: "/scans/{id}", Permission: auth.PermissionScansRead, Example: "/scans/scan-1"},
-	{Method: http.MethodGet, Template: "/scans/{id}/summary", Permission: auth.PermissionScansRead, Example: "/scans/scan-1/summary"},
-	{Method: http.MethodPost, Template: "/scans/{id}/cancel", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/scans/scan-1/cancel"},
-	{Method: http.MethodGet, Template: "/scans/{id}/hosts", Permission: auth.PermissionHostsRead, Example: "/scans/scan-1/hosts"},
-	{Method: http.MethodGet, Template: "/scans/{id}/hosts/{address}", Permission: auth.PermissionHostsRead, Example: "/scans/scan-1/hosts/198.51.100.10"},
-	{Method: http.MethodGet, Template: "/scans/{id}/hosts/{address}/rdap", Permission: auth.PermissionHostsRead, Example: "/scans/scan-1/hosts/198.51.100.10/rdap"},
+	{Method: http.MethodGet, Template: "/scans/active", Permission: auth.PermissionScansRead, Example: "/scans/active", Handle: tenantHandler((*Server).activeScans)},
+	{Method: http.MethodGet, Template: "/scans/{id}", Permission: auth.PermissionScansRead, Example: "/scans/scan-1", Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.getScan(w, r, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodGet, Template: "/scans/{id}/summary", Permission: auth.PermissionScansRead, Example: "/scans/scan-1/summary", Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.getScanSummary(w, r, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodPost, Template: "/scans/{id}/cancel", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/scans/scan-1/cancel", Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.cancelScan(w, r, c.session, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodGet, Template: "/scans/{id}/hosts", Permission: auth.PermissionHostsRead, Example: "/scans/scan-1/hosts", Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.scanHostsRoute(w, r, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodGet, Template: "/scans/{id}/hosts/{address}", Permission: auth.PermissionHostsRead, Example: "/scans/scan-1/hosts/198.51.100.10", Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.scanHostRoute(w, r, c.tenant, r.PathValue("id"), r.PathValue("address"))
+	}},
+	{Method: http.MethodGet, Template: "/scans/{id}/hosts/{address}/rdap", Permission: auth.PermissionHostsRead, Example: "/scans/scan-1/hosts/198.51.100.10/rdap", Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.scanHostRDAPRoute(w, r, c.tenant, r.PathValue("id"), r.PathValue("address"))
+	}},
 
 	// Jobs.
 	{Method: http.MethodGet, Template: "/jobs", Permission: auth.PermissionJobsRead, Example: "/jobs"},
@@ -471,7 +418,7 @@ var apiRoutes = []apiRoute{
 	{Method: http.MethodGet, Template: "/jobs/{id}/events", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/events"},
 
 	// The unit's security audit, for its administrators.
-	{Method: http.MethodGet, Template: "/audit", Permission: auth.PermissionAuditRead, Example: "/audit"},
+	{Method: http.MethodGet, Template: "/audit", Permission: auth.PermissionAuditRead, Example: "/audit", Handle: tenantHandler((*Server).unitAudit)},
 
 	// The platform console, for platform administrators: the business
 	// units, their administrators and capacity, the platform

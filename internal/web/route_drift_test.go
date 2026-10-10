@@ -1025,13 +1025,9 @@ func TestRouteInventoryDriftDetectsRemovedEntries(t *testing.T) {
 	t.Parallel()
 	fset, files := parseWebPackageSource(t)
 	for _, removed := range []string{
-		"GET /scans/{id}/summary",
-		"POST /scans/{id}/cancel",
-		"GET /scans/{id}/hosts/{address}/rdap",
 		"POST /jobs/{id}/run",
 		"DELETE /jobs/{id}?permanent=true",
 		"GET /jobs/{id}/baseline/hosts/{address}/rdap",
-		"GET /audit",
 		"PATCH /platform/units/{id}/capacity",
 		"DELETE /platform/units/{id}/accounts/{uid}/sessions",
 		"PUT /platform/notifications/update-routing",
@@ -1064,13 +1060,13 @@ func TestRouteInventoryDriftDetectsRemovedEntries(t *testing.T) {
 	var flips int
 	for index, route := range flipped {
 		switch routeInventoryName(route) {
-		case "GET /scans", "POST /scans":
+		case "GET /jobs", "POST /scans":
 			flipped[index].NoHandler = !route.NoHandler
 			flips++
 		}
 	}
 	if flips != 2 {
-		t.Fatalf("flipped %d scan list entries, want 2", flips)
+		t.Fatalf("flipped %d entries, want 2", flips)
 	}
 	var stale []string
 	for _, finding := range analyzeRouteDrift(fset, files, flipped) {
@@ -1078,7 +1074,7 @@ func TestRouteInventoryDriftDetectsRemovedEntries(t *testing.T) {
 			stale = append(stale, finding.message)
 		}
 	}
-	if len(stale) != 2 || !strings.Contains(strings.Join(stale, "\n"), "GET /scans is marked NoHandler") || !strings.Contains(strings.Join(stale, "\n"), "POST /scans is in the route inventory") {
+	if len(stale) != 2 || !strings.Contains(strings.Join(stale, "\n"), "GET /jobs is marked NoHandler") || !strings.Contains(strings.Join(stale, "\n"), "POST /scans is in the route inventory") {
 		t.Fatalf("stale NoHandler findings = %q", stale)
 	}
 }

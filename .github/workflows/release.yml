@@ -536,8 +536,20 @@ jobs:
           export GRYPE_DB_CACHE_DIR="$RUNNER_TEMP/grype-db"
           status=0
           for platform in linux/amd64 linux/arm64; do
-            docker pull --platform "$platform" "$CANDIDATE"
-            ./scripts/scan-image-vulnerabilities.sh "$CANDIDATE" "$platform" || status=1
+            # Scan each platform by its own manifest digest from the
+            # candidate's index. Docker keeps one local image per digest
+            # reference, so pulling the index digest for a second platform
+            # fails with "cannot overwrite digest".
+            platform_digest="$(docker buildx imagetools inspect --raw "$CANDIDATE" \
+              | jq -r --arg os "${platform%/*}" --arg arch "${platform#*/}" \
+                '[.manifests[] | select(.platform.os == $os and .platform.architecture == $arch)] | if length == 1 then .[0].digest else empty end')"
+            if [[ ! "$platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "the candidate index has no single $platform manifest" >&2
+              exit 1
+            fi
+            platform_image="$REGISTRY_IMAGE@$platform_digest"
+            docker pull "$platform_image"
+            ./scripts/scan-image-vulnerabilities.sh "$platform_image" "$platform" || status=1
           done
           exit "$status"
 

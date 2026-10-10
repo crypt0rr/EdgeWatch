@@ -182,6 +182,11 @@ func (ss *SystemStore) HealthStatus(ctx context.Context) (HealthStatus, error) {
 		return status, fmt.Errorf("daemon heartbeat is stale: %s", heartbeat)
 	}
 	status.Status = "ready"
+	// A scan finalization renews the lease ahead for its work budget, which
+	// is reported as a heartbeat now.
+	if now := time.Now().UTC(); heartbeat.After(now) {
+		heartbeat = now
+	}
 	status.UpdatedAt = heartbeat.UTC()
 	// The import outcome is advisory: a failed import keeps delivering from
 	// config.yaml, so it is reported without failing the health check.

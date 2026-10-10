@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -217,5 +218,70 @@ func TestManagedFinalizationRetryHelpers(t *testing.T) {
 	_, err := s.DB.ExecContext(t.Context(), "THIS IS NOT SQL")
 	if err == nil || isSQLiteWriterBusy(err) {
 		t.Fatalf("non-contention SQLite error classification = %v", err)
+	}
+}
+
+// A finalization holds the only writer for its work budget, so the daemon
+// cannot renew its lease meanwhile, and a change inside the transaction is
+// invisible until the commit. A daemon's finalization renews the lease in
+// its own write first, so the health check and another daemon see a fresh
+// lease for the whole budget. Another daemon's lease is left as it is.
+func TestFinalizeManagedScanWithOptionsRenewsTheDaemonLeaseBeforeItsWork(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := openTestStore(t)
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("managed-options-daemon-lease"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const owner = "daemon-owner"
+	if err := s.System().AcquireLease(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().UTC().Add(-3 * time.Minute).Format(time.RFC3339Nano)
+	for _, test := range []struct {
+		name, daemonOwner string
+		renewed           bool
+	}{
+		{name: "lease owner", daemonOwner: owner, renewed: true},
+		{name: "another owner", daemonOwner: "other-daemon"},
+		{name: "no daemon"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := s.DB.ExecContext(ctx, `UPDATE daemon_lease SET heartbeat=? WHERE id=1`, stale); err != nil {
+				t.Fatal(err)
+			}
+			const work = 10 * time.Minute
+			scan := managedFinalizationScan(record, "managed-options-daemon-lease-"+strings.ReplaceAll(test.name, " ", "-"))
+			started := time.Now().UTC()
+			_, err := s.System().FinalizeManagedScanWithOptions(ctx, &scan, record.ID, scan.ConfigHash, nil, ManagedScanFinalizationOptions{
+				WriterWaitTimeout: time.Second, WorkTimeout: work, DaemonOwner: test.daemonOwner,
+			}, func(*model.JobState, *model.Scan, IncidentReminderSettings) ([]model.Event, error) {
+				lease, err := s.System().DaemonLeaseStatus(ctx)
+				if err != nil {
+					return nil, err
+				}
+				_, healthErr := s.System().HealthStatus(ctx)
+				if test.renewed {
+					if lease.Owner != owner || !lease.Active || lease.Heartbeat.Before(started.Add(work)) || healthErr != nil {
+						t.Errorf("lease during the finalization = %#v, health %v; want renewed for the work budget", lease, healthErr)
+					}
+				} else if lease.Active || healthErr == nil || !strings.Contains(healthErr.Error(), "stale") {
+					t.Errorf("lease during the finalization = %#v, health %v; want the stale lease unchanged", lease, healthErr)
+				}
+				return nil, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	// The health check reports a lease renewed ahead as a heartbeat now.
+	if _, err := s.DB.ExecContext(ctx, `UPDATE daemon_lease SET heartbeat=? WHERE id=1`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	health, err := s.System().HealthStatus(ctx)
+	if err != nil || health.UpdatedAt.After(time.Now().UTC()) {
+		t.Fatalf("health with a lease renewed ahead = %#v, %v", health, err)
 	}
 }

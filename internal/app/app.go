@@ -76,6 +76,8 @@ type App struct {
 	pruneHistory func(context.Context, time.Time) (store.PruneStats, error)
 	// maintenanceRetry overrides maintenanceRetryDelay in tests.
 	maintenanceRetry time.Duration
+	// heartbeatTimeout overrides daemonHeartbeatTimeout in tests.
+	heartbeatTimeout time.Duration
 	// persistenceBudget overrides the size-based scan-finalization work budget
 	// in deterministic tests. Production leaves it nil and uses
 	// scanPersistenceTimeout.
@@ -1133,11 +1135,15 @@ func (a *App) runJobWithQueueMarker(ctx context.Context, scope store.TenantScope
 	// Renew and release the lease inside the finalization transaction. Its
 	// writer wait has a separate bound; the size-based work deadline begins only
 	// after SQLite grants this transaction the writer lock.
+	// A daemon's finalization also renews the daemon lease for its work
+	// budget when it takes the writer, because the heartbeat cannot write
+	// while it holds SQLite's only writer.
 	finalizeOptions := store.ManagedScanFinalizationOptions{
 		WriterWaitTimeout: scanPersistenceWriterWaitTimeout,
 		WorkTimeout:       persistTimeout,
 		LeaseOwner:        leaseOwner,
 		LeaseUntil:        time.Now().UTC().Add(scanPersistenceWriterWaitTimeout + persistTimeout + time.Minute),
+		DaemonOwner:       a.currentDaemonOwner(),
 	}
 	events, finalizeErr := a.Engine.FinalizeManagedScanWithOptions(persistCtx, jobID, job, &scan, destinations, finalizeOptions)
 	if errors.Is(finalizeErr, store.ErrJobRevisionChanged) {
@@ -1575,9 +1581,17 @@ func (a *App) Daemon(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-heartbeat.C:
-			if err := system.Heartbeat(ctx, owner); err != nil {
+			if err := a.heartbeat(ctx, system, owner); err != nil {
 				if errors.Is(err, store.ErrLeaseLost) {
 					return err
+				}
+				if errors.Is(err, errHeartbeatTimedOut) {
+					// The heartbeat waited for SQLite's writer. A scan
+					// finalization can hold it for minutes, and renewed this
+					// lease for that work when it took it, so the wait is not
+					// a missed heartbeat; the next tick tries again.
+					a.logHeartbeatWait(ctx, system, owner)
+					continue
 				}
 				missedHeartbeats++
 				a.Logger.Error("daemon lease heartbeat failed", "error", err, "consecutive", missedHeartbeats)
@@ -1600,6 +1614,42 @@ func (a *App) Daemon(ctx context.Context) error {
 			a.runUpdateCheck(ctx)
 		}
 	}
+}
+
+// daemonHeartbeatTimeout bounds one renewal of the daemon lease, so a
+// renewal that waits for SQLite's writer never stops the daemon loop from
+// reconciling schedules and checking for updates and silent jobs.
+const daemonHeartbeatTimeout = 10 * time.Second
+
+// errHeartbeatTimedOut wraps the error of a heartbeat that did not finish
+// within its timeout.
+var errHeartbeatTimedOut = errors.New("daemon heartbeat timed out")
+
+// heartbeat renews the daemon lease of owner within the heartbeat timeout.
+func (a *App) heartbeat(ctx context.Context, system *store.SystemStore, owner string) error {
+	timeout := a.heartbeatTimeout
+	if timeout <= 0 {
+		timeout = daemonHeartbeatTimeout
+	}
+	heartbeatCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	err := system.Heartbeat(heartbeatCtx, owner)
+	if err != nil && ctx.Err() == nil && errors.Is(heartbeatCtx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %w", errHeartbeatTimedOut, err)
+	}
+	return err
+}
+
+// logHeartbeatWait reports a heartbeat that timed out waiting for the
+// writer. It is expected while a scan finalization holds the writer and has
+// renewed the lease ahead; otherwise the lease goes stale if the wait lasts,
+// which is worth a warning.
+func (a *App) logHeartbeatWait(ctx context.Context, system *store.SystemStore, owner string) {
+	if lease, err := system.DaemonLeaseStatus(ctx); err == nil && lease.Owner == owner && lease.Heartbeat.After(time.Now().UTC()) {
+		a.Logger.Debug("daemon heartbeat waits while a scan finalization holds the database writer", "lease_renewed_until", lease.Heartbeat)
+		return
+	}
+	a.Logger.Warn("daemon heartbeat timed out waiting for the database writer; retrying on the next heartbeat")
 }
 
 // updateAlertRoutes resolves where an update alert goes. The update check is

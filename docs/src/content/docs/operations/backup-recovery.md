@@ -120,7 +120,7 @@ options to the restore command:
 | Option | Use it when | Risk |
 | --- | --- | --- |
 | `--allow-sidecar-replay` | The backup is a raw copy of a stopped or crashed database whose `-wal`, `-shm`, or `-journal` companions sit next to it, or the destination still has companions after a crash. The companions are copied with the backup so that transactions only in the WAL are kept. | Companions from another database, or from a database that was still open, can corrupt the restored copy. Not available with `--dry-run`. |
-| `--allow-active-daemon` | The daemon is stopped or isolated, but its heartbeat in the database being replaced is less than two minutes old. | If a daemon is still running against the destination, it keeps writing to the replaced file. |
+| `--allow-active-daemon` | The daemon is stopped or isolated, but its heartbeat in the database being replaced is less than two minutes old, or was renewed ahead by a scan that was saving its result when the daemon stopped. | If a daemon is still running against the destination, it keeps writing to the replaced file. |
 | `--allow-unreadable-destination` | The destination is damaged and cannot be opened to read its daemon lease. The backup and its staged copy are still validated. | The active-daemon check is skipped for that destination. |
 
 Stop the service first in every case:

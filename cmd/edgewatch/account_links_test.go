@@ -28,7 +28,7 @@ func TestHostPasswordResetRevokesTheAccountsLinks(t *testing.T) {
 	unit := s.Tenant(store.DefaultTenantScope())
 	ids := map[string]string{"admin": store.LegacyAdminUserID}
 	for _, account := range []struct{ username, role string }{{"bob", store.RoleAdministrator}, {"alice", store.RoleOperator}, {"carol", store.RoleViewer}} {
-		created, err := unit.CreateUser(ctx, store.User{Username: account.username, Role: account.role, PasswordHash: "hash", Enabled: true}, store.AuditEntry{})
+		created, err := storetest.CreateUser(ctx, s, store.DefaultTenantScope(), store.User{Username: account.username, Role: account.role, PasswordHash: "hash", Enabled: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -87,12 +87,12 @@ func TestRestoreRevokesTheBackupsLinksAndSetupToken(t *testing.T) {
 		backup.Close()
 		t.Fatal(err)
 	}
-	invitee, err := backup.Tenant(store.DefaultTenantScope()).CreateUser(ctx, store.User{Username: "invitee", Role: store.RoleViewer, PasswordHash: "!pending"}, store.AuditEntry{})
+	invitee, err := storetest.CreateUser(ctx, backup, store.DefaultTenantScope(), store.User{Username: "invitee", Role: store.RoleViewer, PasswordHash: "!pending"})
 	if err != nil {
 		backup.Close()
 		t.Fatal(err)
 	}
-	if err := backup.Tenant(store.DefaultTenantScope()).CreateUserInvite(ctx, "backup-invite", invitee.ID, now, now.Add(30*time.Minute)); err != nil {
+	if _, err := backup.DB.ExecContext(ctx, `INSERT INTO user_invites(id_hash,user_id,issuer_user_id,created_at,expires_at) VALUES('backup-invite',?,'',?,?)`, invitee.ID, now.Format(time.RFC3339Nano), now.Add(30*time.Minute).Format(time.RFC3339Nano)); err != nil {
 		backup.Close()
 		t.Fatal(err)
 	}

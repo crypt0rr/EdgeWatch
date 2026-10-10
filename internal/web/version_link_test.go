@@ -8,13 +8,14 @@ import (
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 	"github.com/crypt0rr/edgewatch/internal/updatecheck"
 )
 
 func TestStatusLinksRunningVersionToItsRelease(t *testing.T) {
 	t.Parallel()
 	server, db, admin := newUsersTestServer(t)
-	viewerUser, err := defaultTenant(db).CreateUser(context.Background(), store.User{Username: "viewer", DisplayName: "Read only", Role: store.RoleViewer, PasswordHash: "hash", Enabled: true}, store.AuditEntry{})
+	viewerUser, err := storetest.CreateUser(context.Background(), db, store.DefaultTenantScope(), store.User{Username: "viewer", DisplayName: "Read only", Role: store.RoleViewer, PasswordHash: "hash", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // defaultTenantStore returns the store of the default tenant, the tenant
@@ -135,7 +136,7 @@ func TestRequestTenant(t *testing.T) {
 	}
 	sessions := map[string]store.Session{store.RoleAdministrator: admin}
 	for _, role := range []string{store.RoleOperator, store.RoleViewer} {
-		user, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "tenant-" + role, DisplayName: role, Role: role, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+		user, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: "tenant-" + role, DisplayName: role, Role: role, PasswordHash: "unused-hash", Enabled: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -154,7 +155,7 @@ func TestRequestTenant(t *testing.T) {
 
 	raw := "tenant-api-session"
 	now := time.Now().UTC()
-	if err := db.CreateSessionForUserWithAudit(ctx, admin.UserID, digest(raw), "tenant-csrf", now, now.Add(time.Hour), "", ""); err != nil {
+	if err := storetest.CreateSession(ctx, db, admin.UserID, digest(raw), "tenant-csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	call := func(method, path string) *httptest.ResponseRecorder {
@@ -212,7 +213,7 @@ func TestJobRoutesUseTheSessionTenant(t *testing.T) {
 	if _, err := db.DB.ExecContext(ctx, `INSERT INTO tenants(id,name,slug,created_at,updated_at) VALUES(?,'Other','other',?,?)`, otherTenantID, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
-	other, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	other, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +223,7 @@ func TestJobRoutesUseTheSessionTenant(t *testing.T) {
 	cookies := map[string]string{}
 	for name, userID := range map[string]string{"own": admin.UserID, "other": other.ID} {
 		raw := "tenant-route-" + name
-		if err := db.CreateSessionForUserWithAudit(ctx, userID, digest(raw), "csrf-"+name, now, now.Add(time.Hour), "", ""); err != nil {
+		if err := storetest.CreateSession(ctx, db, userID, digest(raw), "csrf-"+name, now, now.Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 		cookies[name] = raw

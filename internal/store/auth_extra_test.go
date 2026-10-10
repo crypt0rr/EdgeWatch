@@ -22,21 +22,14 @@ func TestSetupTokenAndAdministratorCompatibilityLifecycle(t *testing.T) {
 	if err != nil || token.Used || !token.ExpiresAt.Equal(now.Add(time.Hour)) || !token.IssuedAt.Equal(now) {
 		t.Fatalf("setup token = %#v, %v", token, err)
 	}
-	if err := s.Platform().ConsumeSetupToken(ctx, "setup-hash", now.Add(time.Minute)); err != nil {
+	if usable, err := s.Platform().SetupTokenUsable(ctx, "setup-hash", now.Add(time.Minute)); err != nil || !usable {
+		t.Fatalf("setup token usable = %v, %v", usable, err)
+	}
+	if err := s.Platform().PutSetupTokenAt(ctx, "expired-hash", now.Add(-time.Minute), now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	token, err = s.Platform().GetSetupToken(ctx)
-	if err != nil || !token.Used {
-		t.Fatalf("consumed setup token = %#v, %v", token, err)
-	}
-	if err := s.Platform().ConsumeSetupToken(ctx, "setup-hash", now.Add(2*time.Minute)); err == nil {
-		t.Fatal("setup token was consumed twice")
-	}
-	if err := s.Platform().PutSetupToken(ctx, "expired-hash", now.Add(-time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Platform().ConsumeSetupToken(ctx, "expired-hash", now); err == nil {
-		t.Fatal("expired setup token was accepted")
+	if usable, err := s.Platform().SetupTokenUsable(ctx, "expired-hash", now); err != nil || usable {
+		t.Fatalf("expired setup token usable = %v, %v", usable, err)
 	}
 	if configured, err := s.Platform().HasAdministrator(ctx); err != nil || configured {
 		t.Fatalf("empty administrator state = %v, %v", configured, err)
@@ -60,7 +53,7 @@ func TestTouchSessionIfStaleCoalescesActivity(t *testing.T) {
 	s := openTestStore(t)
 	created := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 	expires := created.Add(30 * 24 * time.Hour)
-	if err := s.CreateSession(ctx, "activity-session", "csrf", created, expires); err != nil {
+	if err := createTestSession(ctx, s, LegacyAdminUserID, "activity-session", "csrf", created, expires); err != nil {
 		t.Fatal(err)
 	}
 	refreshed := created.Add(6 * time.Minute)
@@ -155,7 +148,7 @@ func TestSessionAndRecoveryCodeStoreLifecycle(t *testing.T) {
 	if err := s.SaveAdmin(ctx, Admin{Username: "admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateSession(ctx, "legacy-session", "csrf", now, now.Add(time.Hour)); err != nil {
+	if err := createTestSession(ctx, s, LegacyAdminUserID, "legacy-session", "csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	session, err := s.GetSession(ctx, "legacy-session")
@@ -176,30 +169,9 @@ func TestSessionAndRecoveryCodeStoreLifecycle(t *testing.T) {
 		t.Fatalf("deleted session = %v", err)
 	}
 
-	if err := s.SaveRecoveryCodes(ctx, []string{"legacy-code"}); err != nil {
-		t.Fatal(err)
-	}
-	if count, err := s.RecoveryCodeCount(ctx); err != nil || count != 1 {
-		t.Fatalf("recovery count = %d, %v", count, err)
-	}
-	if ok, err := s.ConsumeRecoveryCode(ctx, "legacy-code", now); err != nil || !ok {
-		t.Fatalf("legacy recovery consume = %v, %v", ok, err)
-	}
-	if ok, err := s.ConsumeRecoveryCode(ctx, "legacy-code", now.Add(time.Second)); err != nil || ok {
-		t.Fatalf("reused legacy recovery code = %v, %v", ok, err)
-	}
-	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "operator", DisplayName: "Operator", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{})
+	user, err := createTestUser(ctx, defaultTenant(s), User{Username: "operator", DisplayName: "Operator", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if err := s.SaveRecoveryCodesForUser(ctx, user.ID, []string{"user-code"}); err != nil {
-		t.Fatal(err)
-	}
-	if ok, err := s.ConsumeRecoveryCodeForUser(ctx, LegacyAdminUserID, "user-code", now); err != nil || ok {
-		t.Fatalf("wrong-user recovery consume = %v, %v", ok, err)
-	}
-	if ok, err := s.ConsumeRecoveryCodeForUser(ctx, user.ID, "user-code", now); err != nil || !ok {
-		t.Fatalf("user recovery consume = %v, %v", ok, err)
 	}
 	if err := s.Audit(ctx, "test.audit", "detail"); err != nil {
 		t.Fatal(err)
@@ -210,25 +182,16 @@ func TestSessionAndRecoveryCodeStoreLifecycle(t *testing.T) {
 	if err := s.AuditEntry(ctx, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateSession(ctx, "expired-session", "csrf", now.Add(-2*time.Hour), now.Add(-time.Hour)); err != nil {
+	if err := createTestSession(ctx, s, LegacyAdminUserID, "expired-session", "csrf", now.Add(-2*time.Hour), now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if deleted, err := s.DeleteExpiredSessions(ctx, now); err != nil || deleted != 1 {
 		t.Fatalf("expired session deletion = %d, %v", deleted, err)
 	}
-	if err := s.DeleteAllSessionsWithAudit(ctx, "admin.sessions_revoked", "test"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.CreateSession(ctx, "delete-wrapper", "csrf", now, now.Add(time.Hour)); err != nil {
+	if err := createTestSession(ctx, s, LegacyAdminUserID, "delete-wrapper", "csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.DeleteSession(ctx, "delete-wrapper"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.CreateSession(ctx, "delete-all-wrapper", "csrf", now, now.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.DeleteAllSessions(ctx); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -238,7 +201,7 @@ func TestSessionRevocationRemainsEffectiveWhenAuditInsertFails(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	if err := s.CreateSession(ctx, "delete-one", "csrf", now, now.Add(time.Hour)); err != nil {
+	if err := createTestSession(ctx, s, LegacyAdminUserID, "delete-one", "csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.Exec(`CREATE TRIGGER fail_revocation_audit BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
@@ -250,20 +213,11 @@ func TestSessionRevocationRemainsEffectiveWhenAuditInsertFails(t *testing.T) {
 	if _, err := s.GetSession(ctx, "delete-one"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("single session survived audit failure: %v", err)
 	}
-	if err := s.CreateSession(ctx, "delete-all", "csrf", now, now.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.DeleteAllSessionsWithAudit(ctx, "sessions.revoked", "test"); !errors.Is(err, ErrAuditUnavailable) {
-		t.Fatalf("all-session audit error = %v", err)
-	}
-	if _, err := s.GetSession(ctx, "delete-all"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("all sessions survived audit failure: %v", err)
-	}
-	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "revoked-user", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{})
+	user, err := createTestUser(ctx, defaultTenant(s), User{Username: "revoked-user", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateSessionForUserWithAuditEntry(ctx, user.ID, "delete-user", "csrf", now, now.Add(time.Hour), AuditEntry{}); err != nil {
+	if err := createTestSession(ctx, s, user.ID, "delete-user", "csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err := defaultTenant(s).DeleteUserSessionsWithAudit(ctx, user.ID, AuditEntry{Action: "user.sessions_revoked", Detail: "test"}); !errors.Is(err, ErrAuditUnavailable) {

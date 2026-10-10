@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestIncidentReminderSettingRequiresAdministratorPassword(t *testing.T) {
@@ -96,7 +97,7 @@ func TestIncidentReminderSettingAPIIsRouted(t *testing.T) {
 	ctx := context.Background()
 	const raw, csrf = "incident-reminder-route-session", "incident-reminder-route-csrf"
 	now := time.Now().UTC()
-	if err := db.CreateSessionForUserWithAudit(ctx, admin.UserID, digest(raw), csrf, now, now.Add(time.Hour), "", ""); err != nil {
+	if err := storetest.CreateSession(ctx, db, admin.UserID, digest(raw), csrf, now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodPut, "/api/v1/notifications/incident-reminders", strings.NewReader(`{"enabled":false,"password":"administrator password"}`))

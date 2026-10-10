@@ -1015,7 +1015,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		if spent(err) {
 			return factorSpent()
 		}
-		if !errors.Is(err, store.ErrSessionCredentialsChanged) && !errors.Is(err, store.ErrPasswordChangedDuringLogin) {
+		if !errors.Is(err, store.ErrSessionCredentialsChanged) {
 			return "", user, err
 		}
 		// Credential state changed after the initial password/TOTP checks. Re-read

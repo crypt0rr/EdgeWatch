@@ -396,8 +396,9 @@ func (pa *PlatformAccountStore) SaveUserSecurityPreservingSession(ctx context.Co
 }
 
 // save writes the platform administrator's account in one transaction with
-// its recovery codes, session revocation, the TOTP time step of an
-// enrolment, and audit record. rename writes the username too, and drops
+// its recovery codes, the TOTP time step of an enrolment, the sessions and
+// links that the change ends (see applyAccountTransitionTx), and the audit
+// records. rename writes the username too, and drops
 // the audit entry of a change that alters nothing, as TenantStore.UpdateUser
 // does.
 func (pa *PlatformAccountStore) save(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry, preserveSessionHash string, totpStep int64, rename bool) error {
@@ -476,40 +477,23 @@ func (pa *PlatformAccountStore) save(ctx context.Context, u User, recoveryCodes 
 			}
 		}
 	}
-	// Disabling the account is a security transition, which signs it out
-	// even when the caller did not ask, as it does for a tenant's account.
-	if revokeSessions || disabling {
-		if preserveSessionHash = strings.TrimSpace(preserveSessionHash); preserveSessionHash == "" || disabling {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=`+platformAdminSQL, u.ID, RolePlatformAdmin); err != nil {
-				return err
-			}
-		} else if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=`+platformAdminSQL+` AND id_hash<>?`, u.ID, RolePlatformAdmin, preserveSessionHash); err != nil {
-			return err
-		}
+	// Disabling the account and changing its password end what they end for
+	// a tenant's account, even when the caller did not ask: its sessions,
+	// its links, and, on a disable, the links it issued.
+	records, err := applyAccountTransitionTx(ctx, tx, accountTransition{
+		userID: u.ID, username: u.Username,
+		before:         accountState{role: RolePlatformAdmin, enabled: currentEnabled != 0, passwordHash: currentPasswordHash},
+		after:          accountState{role: RolePlatformAdmin, enabled: u.Enabled, passwordHash: u.PasswordHash},
+		revokeSessions: revokeSessions, preserveSessionHash: preserveSessionHash, at: u.UpdatedAt, audit: audit,
+	})
+	if err != nil {
+		return err
 	}
-	if disabling {
-		// The links that the account issued must not outlive its
-		// privilege, as for a tenant's administrator.
-		if _, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE issuer_user_id=`+platformAdminSQL+` AND used_at IS NULL`, u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID, RolePlatformAdmin); err != nil {
-			return err
-		}
+	if err := insertPlatformAuditEntry(ctx, tx, audit, time.Now().UTC()); err != nil {
+		return err
 	}
-	// A new password ends every unused link for the account, as it does
-	// for a tenant's account.
-	records := []AuditEntry{audit}
-	if currentPasswordHash != u.PasswordHash {
-		revoked, err := revokeAccountLinksTx(ctx, tx, u.UpdatedAt, platformAdminSQL, u.ID, RolePlatformAdmin)
-		if err != nil {
-			return err
-		}
-		if revoked > 0 {
-			records = append(records, linksRevokedAudit(audit, auditPlatformAdminActivationRevoked, u.Username, linksRevokedPasswordChanged))
-		}
-	}
-	for _, record := range records {
-		if err := insertPlatformAuditEntry(ctx, tx, record, time.Now().UTC()); err != nil {
-			return err
-		}
+	if err := insertAuditEntries(ctx, tx, records, time.Now().UTC()); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

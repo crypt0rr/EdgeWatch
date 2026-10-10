@@ -1,5 +1,6 @@
 // Package storetest gives tests a fresh, fully migrated EdgeWatch database
-// without running every migration for each test.
+// without running every migration for each test, and the account and
+// session fixtures that other packages' tests add to it.
 //
 // Opening a new database runs every schema migration, table rebuild and
 // startup phase, which takes seconds under the race detector. This package

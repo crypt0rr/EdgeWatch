@@ -35,7 +35,7 @@ func TestThrottledSignInDoesNotWaitForTheAuditWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Tenant(scope).CreateUser(ctx, store.User{Username: "bravo-viewer", Role: store.RoleViewer, PasswordHash: cheapHash("unit b viewer password"), Enabled: true}, store.AuditEntry{}); err != nil {
+	if _, err := storetest.CreateUser(ctx, s, scope, store.User{Username: "bravo-viewer", Role: store.RoleViewer, PasswordHash: cheapHash("unit b viewer password"), Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
@@ -202,7 +202,7 @@ func newFactorFixture(t *testing.T) *factorFixture {
 	unit := s.Tenant(store.DefaultTenantScope())
 	// The account's password hash is older than the current policy, so a
 	// sign-in upgrades it.
-	user, err := unit.CreateUser(ctx, store.User{Username: "totp-operator", Role: store.RoleOperator, PasswordHash: cheapHash(factorFixturePassword), Enabled: true}, store.AuditEntry{})
+	user, err := storetest.CreateUser(ctx, s, store.DefaultTenantScope(), store.User{Username: "totp-operator", Role: store.RoleOperator, PasswordHash: cheapHash(factorFixturePassword), Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +471,7 @@ func TestSignInEndsTheLeastRecentlyUsedSessionOverTheCap(t *testing.T) {
 	for i := range raws {
 		now = now.Add(time.Second)
 		raws[i] = "existing-session-" + strconv.Itoa(i)
-		if err := s.CreateSessionForUserWithAuditEntry(ctx, operator.ID, digest(raws[i]), "csrf", now, now.Add(SessionTTL), store.AuditEntry{}); err != nil {
+		if err := storetest.CreateSession(ctx, s, operator.ID, digest(raws[i]), "csrf", now, now.Add(SessionTTL)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -531,7 +531,7 @@ func tokenRedemptions() []tokenRedemption {
 		{"activation", func(t *testing.T, m *Manager, now *time.Time) string {
 			t.Helper()
 			unit := m.Store.Tenant(store.DefaultTenantScope())
-			admin, err := unit.CreateUser(ctx, store.User{Username: "admin", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+			admin, err := storetest.CreateUser(ctx, m.Store, store.DefaultTenantScope(), store.User{Username: "admin", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true})
 			if err != nil {
 				t.Fatal(err)
 			}

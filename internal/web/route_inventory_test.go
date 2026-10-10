@@ -11,6 +11,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func routeInventoryName(route apiRoute) string {
@@ -142,7 +143,7 @@ func newRouteMatrixSessions(t *testing.T) (*Server, []routeMatrixSession) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := defaultTenant(db).CreateUser(ctx, store.User{Username: username, DisplayName: username, Role: account.role, PasswordHash: hash, Enabled: true}, store.AuditEntry{}); err != nil {
+			if _, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: username, DisplayName: username, Role: account.role, PasswordHash: hash, Enabled: true}); err != nil {
 				t.Fatal(err)
 			}
 		}

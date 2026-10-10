@@ -220,11 +220,6 @@ var accountLeakCases = map[string]tenantLeakCase{
 			}
 		}
 	}},
-	"CreateUser": {writes: true, run: func(t *testing.T, f tenantFixture) {
-		checkTenantAccountCreate(t, f, "user.created", func(ts *TenantStore, user User) (User, error) {
-			return ts.CreateUser(context.Background(), user, accountAudit("user.created"))
-		})
-	}},
 	"CreateUserWithInvite": {writes: true, run: func(t *testing.T, f tenantFixture) {
 		now := time.Now().UTC()
 		checkTenantAccountCreate(t, f, "user.created", func(ts *TenantStore, user User) (User, error) {
@@ -318,15 +313,6 @@ var accountLeakCases = map[string]tenantLeakCase{
 			if got := countRows(t, f.store.DB, `SELECT COUNT(*) FROM sessions WHERE user_id=?`, user); got != want {
 				t.Errorf("sessions of %s = %d, want %d", user, got, want)
 			}
-		}
-	}},
-	"CreateUserInvite": {writes: true, run: func(t *testing.T, f tenantFixture) {
-		now := time.Now().UTC()
-		assertTenantWritesOnlyItsAccounts(t, f, func(ts *TenantStore, id string) error {
-			return ts.CreateUserInvite(context.Background(), "link-"+id, id, now, now.Add(time.Hour))
-		}, accountOperatorB, "")
-		if got := countRows(t, f.store.DB, `SELECT COUNT(*) FROM user_invites WHERE id_hash LIKE 'link-%'`); got != 1 {
-			t.Fatalf("links stored = %d, want tenant B's one", got)
 		}
 	}},
 	"CreateUserInviteWithAudit": {writes: true, run: func(t *testing.T, f tenantFixture) {
@@ -508,10 +494,10 @@ func TestAccountGlobalPathsCarryTheTenant(t *testing.T) {
 	if ok, err := f.store.ConsumeTOTPStep(ctx, accountAdminB, 7, now); err != nil || ok {
 		t.Fatalf("tenant B's replayed one-time code = %v, %v", ok, err)
 	}
-	if ok, err := f.store.ConsumeRecoveryCodeForUser(ctx, accountAdminB, "recovery-admin-b", now); err != nil || !ok {
-		t.Fatalf("tenant B's recovery code = %v, %v", ok, err)
-	}
 	admin := fixtureAccount(t, f, accountAdminB)
+	if err := f.store.CreateSignInSession(ctx, SignInSession{UserID: accountAdminB, PasswordHash: admin.PasswordHash, Revision: admin.Revision, Factor: SignInFactor{TOTPStep: NoTOTPStep, RecoveryCodeHash: "recovery-admin-b"}, IDHash: "recovery-login-b", CSRF: "csrf", Created: now, Expires: now.Add(time.Hour)}); err != nil {
+		t.Fatalf("tenant B's recovery code = %v", err)
+	}
 	login := AuditEntry{Action: "admin.login", ActorUserID: accountAdminB, ActorUsername: "admin-b"}
 	if err := f.store.CreateSessionForUserIfCurrent(ctx, accountAdminB, admin.PasswordHash, admin.Revision, false, "login-b", "csrf", now, now.Add(time.Hour), login); err != nil {
 		t.Fatal(err)
@@ -537,14 +523,8 @@ func TestAccountGlobalPathsCarryTheTenant(t *testing.T) {
 	if got, want := lastAudit(t, f.store, "user.activated"), (auditRecord{secondTenantID, AuditActorUnit}); got != want {
 		t.Fatalf("tenant B's activation audit record = %+v, want %+v", got, want)
 	}
-	if err := f.store.Tenant(f.b).CreateUserInvite(ctx, "consume-b", accountOperatorB, now, now.Add(time.Hour)); err != nil {
+	if err := createTestLink(ctx, f.store.Tenant(f.b), "paused-b", accountOperatorB, now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
-	}
-	if err := f.store.Tenant(f.b).CreateUserInvite(ctx, "paused-b", accountOperatorB, now, now.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if user, err := f.store.ConsumeUserInvite(ctx, "consume-b", now); err != nil || user.TenantID != secondTenantID {
-		t.Fatalf("tenant B's consumed link = %+v, %v", user, err)
 	}
 
 	// A tenant that is not active stops sign-in and link redemption, and
@@ -563,18 +543,8 @@ func TestAccountGlobalPathsCarryTheTenant(t *testing.T) {
 			"sign-in with a password upgrade": func() error {
 				return f.store.CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx, accountAdminB, admin.PasswordHash, "hash-upgraded", admin.Revision, false, "paused-login", "csrf", now, now.Add(time.Hour), login)
 			},
-			"legacy password upgrade": func() error {
-				return f.store.CreateSessionForUserWithPasswordUpgrade(ctx, accountAdminB, admin.PasswordHash, "hash-upgraded", "paused-login", "csrf", now, now.Add(time.Hour), login)
-			},
-			"session": func() error {
-				return f.store.CreateSessionForUserWithAuditEntry(ctx, accountAdminB, "paused-login", "csrf", now, now.Add(time.Hour), login)
-			},
 			"activation": func() error {
 				_, err := f.store.ActivateUser(ctx, "paused-b", "hash-paused", now, AuditEntry{Action: "user.activated"})
-				return err
-			},
-			"invite": func() error {
-				_, err := f.store.ConsumeUserInvite(ctx, "paused-b", now)
 				return err
 			},
 		} {

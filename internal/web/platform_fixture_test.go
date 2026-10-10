@@ -46,6 +46,7 @@ type platformFixture struct {
 	server   *Server
 	db       *store.Store
 	unitB    string
+	scopeB   store.TenantScope
 	a, b     *store.TenantStore
 	users    map[string]store.User
 	sessions map[string]routeMatrixSession
@@ -81,7 +82,11 @@ func newPlatformFixture(t *testing.T) *platformFixture {
 	hash := cheapPasswordHash(platformFixturePassword)
 	create := func(ts *store.TenantStore, actor, username, role string) store.User {
 		t.Helper()
-		user, err := ts.CreateUser(ctx, store.User{Username: username, DisplayName: username, Role: role, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+		scope, err := ts.Scope()
+		if err != nil {
+			t.Fatal(err)
+		}
+		user, err := storetest.CreateUser(ctx, db, scope, store.User{Username: username, DisplayName: username, Role: role, PasswordHash: hash, Enabled: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -103,7 +108,7 @@ func newPlatformFixture(t *testing.T) *platformFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.b = db.Tenant(scope)
+	f.scopeB, f.b = scope, db.Tenant(scope)
 	create(f.b, actorAdminB, "bravo-admin", store.RoleAdministrator)
 	f.viewerB = create(f.b, "unit B viewer", "bravo-viewer", store.RoleViewer).ID
 
@@ -197,7 +202,7 @@ func (f *platformFixture) signIn(t *testing.T, actor string) routeMatrixSession 
 	user := f.users[actor]
 	now := time.Now().UTC()
 	raw, csrf := "platform-fixture-"+digest(actor + now.String())[:24], "csrf-"+digest(actor)[:16]
-	if err := f.db.CreateSessionForUserWithAudit(ctx, user.ID, digest(raw), csrf, now, now.Add(time.Hour), "", ""); err != nil {
+	if err := storetest.CreateSession(ctx, f.db, user.ID, digest(raw), csrf, now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	probe := httptest.NewRequest(http.MethodGet, consoleAPIBase+"/auth/session", nil)

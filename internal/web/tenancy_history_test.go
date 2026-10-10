@@ -12,6 +12,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // The history routes and incident actions use the session's tenant. Both
@@ -57,7 +58,7 @@ func TestHistoryRoutesUseTheSessionTenant(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	other, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	other, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +68,7 @@ func TestHistoryRoutesUseTheSessionTenant(t *testing.T) {
 	cookies := map[string]string{}
 	for name, userID := range map[string]string{"a": admin.UserID, "b": other.ID} {
 		raw := "tenant-history-" + name
-		if err := db.CreateSessionForUserWithAudit(ctx, userID, digest(raw), "csrf-"+name, now, now.Add(time.Hour), "", ""); err != nil {
+		if err := storetest.CreateSession(ctx, db, userID, digest(raw), "csrf-"+name, now, now.Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 		cookies[name] = raw

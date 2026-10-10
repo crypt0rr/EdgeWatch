@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // publicTenantBPage is tenant B's page in the public tenant fixture: the
@@ -191,7 +192,7 @@ func TestPublicSlugPagesHaveTheirOwnRateLimit(t *testing.T) {
 func publicUnitAdministrators(t *testing.T, f publicTenantFixture) func(account, method, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	ctx := context.Background()
-	other, err := defaultTenant(f.db).CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	other, err := storetest.CreateUser(ctx, f.db, store.DefaultTenantScope(), store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +201,7 @@ func publicUnitAdministrators(t *testing.T, f publicTenantFixture) func(account,
 	}
 	now := time.Now().UTC()
 	for name, userID := range map[string]string{"own": f.admin.UserID, "other": other.ID} {
-		if err := f.db.CreateSessionForUserWithAudit(ctx, userID, digest("unit-public-"+name), "csrf-"+name, now, now.Add(time.Hour), "", ""); err != nil {
+		if err := storetest.CreateSession(ctx, f.db, userID, digest("unit-public-"+name), "csrf-"+name, now, now.Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 	}

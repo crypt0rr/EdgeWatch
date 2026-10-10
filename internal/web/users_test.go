@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -227,11 +228,11 @@ func TestUsersRouteValidationAndSessionRevocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	operator, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "session-user", DisplayName: "Session user", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+	operator, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: "session-user", DisplayName: "Session user", Role: store.RoleOperator, PasswordHash: hash, Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.CreateSessionForUserWithAudit(ctx, operator.ID, "session-digest", "csrf", time.Now().UTC(), time.Now().UTC().Add(time.Hour), "", ""); err != nil {
+	if err := storetest.CreateSession(ctx, db, operator.ID, "session-digest", "csrf", time.Now().UTC(), time.Now().UTC().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	revoked := call(http.MethodDelete, "/"+operator.ID+"/sessions", `{"password":"administrator password"}`)
@@ -248,7 +249,7 @@ func TestUsersAPIEnforcesAuthenticationCSRFAndRolePermissions(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	now := time.Now().UTC()
-	if err := db.CreateSessionForUserWithAudit(ctx, admin.UserID, digest("admin-api-session"), "admin-csrf", now, now.Add(time.Hour), "", ""); err != nil {
+	if err := storetest.CreateSession(ctx, db, admin.UserID, digest("admin-api-session"), "admin-csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	httpServer := httptest.NewServer(server.Handler())
@@ -303,11 +304,11 @@ func TestUsersAPIEnforcesAuthenticationCSRFAndRolePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	operator, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "api-operator", DisplayName: "API operator", Role: store.RoleOperator, PasswordHash: operatorHash, Enabled: true}, store.AuditEntry{})
+	operator, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: "api-operator", DisplayName: "API operator", Role: store.RoleOperator, PasswordHash: operatorHash, Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.CreateSessionForUserWithAudit(ctx, operator.ID, digest("operator-api-session"), "operator-csrf", now, now.Add(time.Hour), "", ""); err != nil {
+	if err := storetest.CreateSession(ctx, db, operator.ID, digest("operator-api-session"), "operator-csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	operatorRead := request("operator-api-session", "operator-csrf", http.MethodGet, "/api/v1/users", "")
@@ -316,4 +317,85 @@ func TestUsersAPIEnforcesAuthenticationCSRFAndRolePermissions(t *testing.T) {
 		t.Fatalf("operator users status = %d", operatorRead.StatusCode)
 	}
 	operatorRead.Body.Close()
+}
+
+// A unit's administrator ends another account's sessions from Users after
+// confirming its password: the account is signed out everywhere, the
+// administrator stays signed in, and the unit's audit records the
+// revocation with the administrator as its actor. The unit's operator and
+// viewer and the platform administrator are refused, another unit's
+// administrator gets the answer of an unknown account, and a wrong password
+// is refused; none of them ends a session or writes a record.
+func TestUnitAdministratorRevokesAnotherAccountsSessions(t *testing.T) {
+	t.Parallel()
+	f := newPlatformFixture(t)
+	operator := f.users[actorOperatorA]
+	path := "/users/" + operator.ID + "/sessions"
+	sessions := func() int {
+		t.Helper()
+		var count int
+		if err := f.db.DB.QueryRow(`SELECT COUNT(*) FROM sessions WHERE user_id=?`, operator.ID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	records := func() []string {
+		t.Helper()
+		rows, err := f.db.DB.Query(`SELECT COALESCE(tenant_id,'<null>')||'|'||actor_user_id||'|'||actor_kind||'|'||detail FROM security_audit WHERE action='user.sessions_revoked' ORDER BY id`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var values []string
+		for rows.Next() {
+			var value string
+			if err := rows.Scan(&value); err != nil {
+				t.Fatal(err)
+			}
+			values = append(values, value)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return values
+	}
+	if sessions() != 1 || len(records()) != 0 {
+		t.Fatalf("before the revocation: %d sessions, records %v", sessions(), records())
+	}
+	for _, refused := range []struct {
+		actor, path, body string
+		status            int
+		code              string
+	}{
+		{actorOperatorA, path, confirmBody(""), http.StatusForbidden, "forbidden"},
+		{actorViewerA, path, confirmBody(""), http.StatusForbidden, "forbidden"},
+		{actorPlatform, path, confirmBody(""), http.StatusForbidden, "forbidden"},
+		{actorAdminB, path, confirmBody(""), http.StatusNotFound, "not_found"},
+		{actorAdminA, path, `{"password":"wrong password"}`, http.StatusUnauthorized, "invalid_password"},
+		{actorAdminA, path, `{}`, http.StatusBadRequest, "password_required"},
+	} {
+		expectError(t, f.call(t, refused.actor, http.MethodDelete, refused.path, refused.body), refused.status, refused.code, refused.actor+" revokes unit A's operator's sessions")
+	}
+	unknown := f.call(t, actorAdminB, http.MethodDelete, "/users/00000000-0000-0000-0000-00000000dead/sessions", confirmBody(""))
+	if other := f.call(t, actorAdminB, http.MethodDelete, path, confirmBody("")); other.Code != unknown.Code || other.Body.String() != unknown.Body.String() {
+		t.Fatalf("another unit's account = %d %s, an unknown account = %d %s", other.Code, other.Body.String(), unknown.Code, unknown.Body.String())
+	}
+	if sessions() != 1 || len(records()) != 0 {
+		t.Fatalf("after the refused revocations: %d sessions, records %v", sessions(), records())
+	}
+
+	if response := f.call(t, actorAdminA, http.MethodDelete, path, confirmBody("")); response.Code != http.StatusNoContent {
+		t.Fatalf("the unit administrator's revocation = %d: %s", response.Code, response.Body.String())
+	}
+	if got := sessions(); got != 0 {
+		t.Fatalf("the operator kept %d sessions", got)
+	}
+	if response := f.call(t, actorAdminA, http.MethodGet, "/auth/session", ""); response.Code != http.StatusOK {
+		t.Fatalf("the administrator's own session after the revocation = %d", response.Code)
+	}
+	admin := f.users[actorAdminA]
+	want := []string{store.DefaultTenantID + "|" + admin.ID + "|" + store.AuditActorUnit + "|sessions of " + operator.Username + " revoked by " + admin.Username}
+	if got := records(); !slices.Equal(got, want) {
+		t.Fatalf("revocation records = %v, want %v", got, want)
+	}
 }

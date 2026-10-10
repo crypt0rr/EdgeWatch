@@ -16,6 +16,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
@@ -92,11 +93,11 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	operator, err := defaultTenant(db).CreateUser(context.Background(), store.User{Username: "handler-operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+	operator, err := storetest.CreateUser(context.Background(), db, store.DefaultTenantScope(), store.User{Username: "handler-operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.CreateSessionForUserWithAudit(context.Background(), operator.ID, "idempotent-user-update", "csrf", time.Now().UTC(), time.Now().UTC().Add(time.Hour), "", ""); err != nil {
+	if err := storetest.CreateSession(context.Background(), db, operator.ID, "idempotent-user-update", "csrf", time.Now().UTC(), time.Now().UTC().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	// Supplying an unchanged role is not a security transition and must not
@@ -132,7 +133,7 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 		t.Fatalf("invalid activation token was echoed: %s", badToken.Body.String())
 	}
 
-	disabled, err := defaultTenant(db).CreateUser(context.Background(), store.User{Username: "disabled-user", DisplayName: "Disabled", Role: store.RoleViewer, PasswordHash: hash, Enabled: false}, store.AuditEntry{})
+	disabled, err := storetest.CreateUser(context.Background(), db, store.DefaultTenantScope(), store.User{Username: "disabled-user", DisplayName: "Disabled", Role: store.RoleViewer, PasswordHash: hash, Enabled: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +144,7 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 		}
 	}
 
-	locked, err := defaultTenant(db).CreateUser(context.Background(), store.User{Username: "locked-totp", DisplayName: "Locked TOTP", Role: store.RoleViewer, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+	locked, err := storetest.CreateUser(context.Background(), db, store.DefaultTenantScope(), store.User{Username: "locked-totp", DisplayName: "Locked TOTP", Role: store.RoleViewer, PasswordHash: hash, Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +193,7 @@ func TestUserSecurityHandlersCoverOperatorAndTOTPSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	operator, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "security-operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+	operator, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: "security-operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}

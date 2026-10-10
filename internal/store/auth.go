@@ -281,10 +281,14 @@ func (s *Store) SaveAdminSecurityWithAuditPreservingSession(ctx context.Context,
 		return err
 	}
 	defer tx.Rollback()
-	// The current password hash tells whether the save changes the
-	// password; a missing account, which the save creates, has no links.
-	var currentPasswordHash string
-	if err := tx.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id=? AND tenant_id=?`, LegacyAdminUserID, DefaultTenantID).Scan(&currentPasswordHash); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	// The current state tells what the save changes. The save writes neither
+	// the role nor the enabled state, and a missing account, which the save
+	// creates, changes nothing that it had.
+	current := accountState{role: RoleAdministrator, enabled: true, passwordHash: a.PasswordHash}
+	var currentEnabled int
+	if err := tx.QueryRowContext(ctx, `SELECT role,enabled,password_hash FROM users WHERE id=? AND tenant_id=?`, LegacyAdminUserID, DefaultTenantID).Scan(&current.role, &currentEnabled, &current.passwordHash); err == nil {
+		current.enabled = currentEnabled != 0
+	} else if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	if err := saveAdminExec(ctx, tx, a, stored); err != nil {
@@ -303,37 +307,24 @@ func (s *Store) SaveAdminSecurityWithAuditPreservingSession(ctx context.Context,
 			}
 		}
 	}
-	if revokeSessions {
-		// Password/TOTP changes for the compatibility administrator must not
-		// sign out unrelated operator/viewer accounts now that sessions are
-		// user-scoped. Older databases have their sessions attributed to the
-		// stable legacy administrator ID by migration 12.
-		if preserveSessionHash = strings.TrimSpace(preserveSessionHash); preserveSessionHash == "" {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=? OR user_id=''`, LegacyAdminUserID); err != nil {
-				return err
-			}
-		} else if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE (user_id=? OR user_id='') AND id_hash<>?`, LegacyAdminUserID, preserveSessionHash); err != nil {
-			return err
-		}
-	}
 	// The records belong to the account's tenant, the default tenant.
 	audit.TenantID = DefaultTenantID
-	records := []AuditEntry{audit}
-	// A new password ends every unused link for the account, as it does
-	// for any other account.
-	if currentPasswordHash != a.PasswordHash {
-		revoked, err := revokeAccountLinksTx(ctx, tx, time.Now().UTC(), tenantUserSQL, LegacyAdminUserID, DefaultTenantID)
-		if err != nil {
-			return err
-		}
-		if revoked > 0 {
-			records = append(records, linksRevokedAudit(audit, "user.activation_revoked", a.Username, linksRevokedPasswordChanged))
-		}
+	// Password and TOTP changes for the compatibility administrator end its
+	// own sessions, not those of unrelated operator and viewer accounts.
+	// Older databases have its sessions attributed to the stable legacy
+	// administrator ID by migration 12, or to no account.
+	after := current
+	after.passwordHash = a.PasswordHash
+	records, err := applyAccountTransitionTx(ctx, tx, accountTransition{
+		userID: LegacyAdminUserID, username: a.Username, tenantID: DefaultTenantID,
+		before: current, after: after,
+		revokeSessions: revokeSessions, preserveSessionHash: preserveSessionHash, at: time.Now().UTC(), audit: audit,
+	})
+	if err != nil {
+		return err
 	}
-	for _, record := range records {
-		if err := insertAuditEntryExec(ctx, tx, record, time.Now().UTC()); err != nil {
-			return err
-		}
+	if err := insertAuditEntries(ctx, tx, append([]AuditEntry{audit}, records...), time.Now().UTC()); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -349,13 +340,6 @@ func (s *Store) adminTOTPForSave(a Admin) (string, error) {
 		return "", nil
 	}
 	return s.sealTOTPSecretForOwner(LegacyAdminUserID, a.TOTPSecret)
-}
-
-// PutSetupToken stores a fresh setup token issued now. The setup token is
-// the installation's one-time credential for creating the first
-// administrator, so it belongs to the platform.
-func (ps *PlatformStore) PutSetupToken(ctx context.Context, hash string, expires time.Time) error {
-	return ps.PutSetupTokenAt(ctx, hash, expires, time.Now().UTC())
 }
 
 // PutSetupTokenAt stores a fresh setup token and records when it was issued.
@@ -489,53 +473,6 @@ func (ps *PlatformStore) CompleteSetup(ctx context.Context, tokenHash string, ad
 	return tx.Commit()
 }
 
-// ConsumeSetupToken marks a valid, unexpired initial setup token used.
-func (ps *PlatformStore) ConsumeSetupToken(ctx context.Context, hash string, now time.Time) error {
-	tx, err := ps.store.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var expires string
-	var used sql.NullString
-	if err = tx.QueryRowContext(ctx, `SELECT expires_at,used_at FROM setup_tokens WHERE id=1 AND token_hash=? AND purpose=?`, hash, SetupTokenPurposeInitial).Scan(&expires, &used); errors.Is(err, sql.ErrNoRows) {
-		return errors.New("invalid setup token")
-	} else if err != nil {
-		return err
-	}
-	if used.Valid || !now.Before(scanTime(expires)) {
-		return errors.New("setup token expired or already used")
-	}
-	result, err := tx.ExecContext(ctx, `UPDATE setup_tokens SET used_at=? WHERE id=1 AND used_at IS NULL AND purpose=?`, now.UTC().Format(time.RFC3339Nano), SetupTokenPurposeInitial)
-	if err != nil {
-		return err
-	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
-		return errors.New("setup token expired or already used")
-	}
-	return tx.Commit()
-}
-
-func (s *Store) CreateSession(ctx context.Context, idHash, csrf string, created, expires time.Time) error {
-	// Keep the compatibility entry point on the same transactional primitive as
-	// user-scoped sessions. It intentionally omits an audit row for callers that
-	// predate the audited login API, but it can no longer bypass user attribution
-	// or the session schema safeguards.
-	return s.CreateSessionForUserWithAuditEntry(ctx, LegacyAdminUserID, idHash, csrf, created, expires, AuditEntry{})
-}
-
-// CreateSessionWithAudit creates a login session and its audit record in one
-// transaction, so a successful login can never be returned without evidence.
-func (s *Store) CreateSessionWithAudit(ctx context.Context, idHash, csrf string, created, expires time.Time, action, detail string) error {
-	return s.CreateSessionForUserWithAudit(ctx, LegacyAdminUserID, idHash, csrf, created, expires, action, detail)
-}
-
-// CreateSessionForUserWithAudit creates a session tied to a concrete user and
-// records the login audit atomically.
-func (s *Store) CreateSessionForUserWithAudit(ctx context.Context, userID, idHash, csrf string, created, expires time.Time, action, detail string) error {
-	return s.CreateSessionForUserWithAuditEntry(ctx, userID, idHash, csrf, created, expires, AuditEntry{Action: action, Detail: detail, ActorUserID: userID})
-}
-
 // ErrTenantNotActive reports that an account or a job belongs to a tenant
 // that is not active. A tenant that is disabled or being deleted stops
 // sign-in, the redemption of its activation links, and the start of its
@@ -593,29 +530,6 @@ func insertSessionTx(ctx context.Context, tx *sql.Tx, idHash, userID, csrf strin
 	}
 	_, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=? AND id_hash IN (SELECT id_hash FROM sessions WHERE user_id=? AND id_hash<>? ORDER BY julianday(last_seen_at) DESC, julianday(created_at) DESC, id_hash DESC LIMIT -1 OFFSET ?)`, userID, userID, idHash, MaxSessionsPerAccount-1)
 	return err
-}
-
-// CreateSessionForUserWithAuditEntry is the actor-aware login primitive. The
-// session and its authentication audit record are committed together so a
-// successful login cannot be returned without evidence.
-func (s *Store) CreateSessionForUserWithAuditEntry(ctx context.Context, userID, idHash, csrf string, created, expires time.Time, audit AuditEntry) error {
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if err := requireActiveAccountTenantTx(ctx, tx, userID); err != nil {
-		return err
-	}
-	if err := insertSessionTx(ctx, tx, idHash, userID, csrf, created, expires); err != nil {
-		return err
-	}
-	if audit.Action != "" {
-		if err := insertAuditEntryExec(ctx, tx, audit, created.UTC()); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
 }
 
 // ErrRecoveryCodeUsed reports that the recovery code a sign-in presented was
@@ -774,42 +688,6 @@ func (s *Store) CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx context.Con
 	return s.CreateSignInSession(ctx, SignInSession{UserID: userID, PasswordHash: previousHash, UpgradedPasswordHash: upgradedHash, Revision: expectedRevision, TOTPEnabled: expectedTOTPEnabled, Factor: NoSignInFactor, IDHash: idHash, CSRF: csrf, Created: created, Expires: expires, Audit: audit})
 }
 
-// CreateSessionForUserWithPasswordUpgrade atomically upgrades a verified
-// password hash with the login session and its audit record. The conditional
-// update protects against overwriting a password changed concurrently while
-// the login was in progress.
-func (s *Store) CreateSessionForUserWithPasswordUpgrade(ctx context.Context, userID, previousHash, upgradedHash, idHash, csrf string, created, expires time.Time, audit AuditEntry) error {
-	if strings.TrimSpace(upgradedHash) == "" {
-		return errors.New("upgraded password hash is required")
-	}
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if err := requireActiveAccountTenantTx(ctx, tx, userID); err != nil {
-		return err
-	}
-
-	stamp := created.UTC().Format(time.RFC3339Nano)
-	result, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,last_login_at=?,updated_at=?,revision=revision+1 WHERE id=? AND password_hash=?`, upgradedHash, stamp, stamp, userID, previousHash)
-	if err != nil {
-		return err
-	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
-		return ErrPasswordChangedDuringLogin
-	}
-	if err := insertSessionTx(ctx, tx, idHash, userID, csrf, created, expires); err != nil {
-		return err
-	}
-	if audit.Action != "" {
-		if err := insertAuditEntryExec(ctx, tx, audit, created.UTC()); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
 // GetSession returns the session with the given hash, with the tenant of
 // its account. It stays global: authentication reads it before any tenant
 // scope exists. The tenant comes from users, as TenantScopeForSession reads
@@ -889,34 +767,6 @@ func (s *Store) deleteSessionWithoutAudit(ctx context.Context, idHash string) er
 	return err
 }
 
-func (s *Store) DeleteAllSessions(ctx context.Context) error {
-	return s.DeleteAllSessionsWithAudit(ctx, "", "")
-}
-
-func (s *Store) DeleteAllSessionsWithAudit(ctx context.Context, action, detail string) error {
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions`); err != nil {
-		return err
-	}
-	if action != "" {
-		if err := insertAuditExec(ctx, tx, action, detail, time.Now().UTC()); err != nil {
-			_ = tx.Rollback()
-			persistCtx, cancel := auditPersistenceContext(ctx)
-			_, revokeErr := s.DB.ExecContext(persistCtx, `DELETE FROM sessions`)
-			cancel()
-			if revokeErr != nil {
-				return errors.Join(err, revokeErr)
-			}
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
 // DeleteExpiredSessions removes sessions past their absolute expiry and
 // sessions idle for longer than SessionIdleTimeout, which authentication
 // already refuses. It is safe to run during maintenance because the
@@ -928,40 +778,6 @@ func (s *Store) DeleteExpiredSessions(ctx context.Context, now time.Time) (int64
 		return 0, err
 	}
 	return result.RowsAffected()
-}
-
-func (s *Store) SaveRecoveryCodes(ctx context.Context, hashes []string) error {
-	return s.SaveRecoveryCodesForUser(ctx, LegacyAdminUserID, hashes)
-}
-
-func (s *Store) SaveRecoveryCodesForUser(ctx context.Context, userID string, hashes []string) error {
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id=?`, userID); err != nil {
-		return err
-	}
-	for _, hash := range hashes {
-		if _, err = tx.ExecContext(ctx, `INSERT INTO recovery_codes(id_hash,user_id) VALUES(?,?)`, hash, userID); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-func (s *Store) ConsumeRecoveryCode(ctx context.Context, hash string, now time.Time) (bool, error) {
-	return s.ConsumeRecoveryCodeForUser(ctx, LegacyAdminUserID, hash, now)
-}
-
-func (s *Store) ConsumeRecoveryCodeForUser(ctx context.Context, userID, hash string, now time.Time) (bool, error) {
-	r, err := s.DB.ExecContext(ctx, `UPDATE recovery_codes SET used_at=? WHERE id_hash=? AND user_id=? AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano), hash, userID)
-	if err != nil {
-		return false, err
-	}
-	n, err := r.RowsAffected()
-	return n == 1, err
 }
 
 // ConsumeRecoveryCodeTextForUser verifies a presented recovery code against
@@ -1220,10 +1036,4 @@ func insertAuditEntries(ctx context.Context, execer contextExecer, entries []Aud
 		}
 	}
 	return nil
-}
-
-func (s *Store) RecoveryCodeCount(ctx context.Context) (int, error) {
-	var n int
-	err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM recovery_codes WHERE used_at IS NULL`).Scan(&n)
-	return n, err
 }

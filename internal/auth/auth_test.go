@@ -553,7 +553,9 @@ func TestRecoveryCodeIsCaseInsensitiveAndSingleUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveRecoveryCodes(ctx, hashes); err != nil {
+	if current, err := s.GetAdmin(ctx); err != nil {
+		t.Fatal(err)
+	} else if err := s.SaveAdminSecurity(ctx, current, hashes, true, false, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
@@ -638,7 +640,7 @@ func TestLoginAsUserAndPasswordConfirmationAreScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	operator, err := s.Tenant(store.DefaultTenantScope()).CreateUser(ctx, store.User{Username: "operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: operatorHash, Enabled: true}, store.AuditEntry{})
+	operator, err := storetest.CreateUser(ctx, s, store.DefaultTenantScope(), store.User{Username: "operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: operatorHash, Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -698,7 +700,7 @@ func TestLoginFailuresDoNotLockOutAnotherClientBehindTheSameProxy(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	operator, err := s.Tenant(store.DefaultTenantScope()).CreateUser(ctx, store.User{Username: "operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+	operator, err := storetest.CreateUser(ctx, s, store.DefaultTenantScope(), store.User{Username: "operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -833,7 +835,7 @@ func TestEnsureSetupTokenHonorsAuthoritativeAdministratorUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Tenant(store.DefaultTenantScope()).CreateUser(ctx, store.User{Username: "managed-admin", DisplayName: "Managed Admin", Role: store.RoleAdministrator, PasswordHash: hash, Enabled: true}, store.AuditEntry{}); err != nil {
+	if _, err := storetest.CreateUser(ctx, s, store.DefaultTenantScope(), store.User{Username: "managed-admin", DisplayName: "Managed Admin", Role: store.RoleAdministrator, PasswordHash: hash, Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	token, err := NewManager(s).EnsureSetupToken(ctx)

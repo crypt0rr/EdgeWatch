@@ -38,7 +38,7 @@ func TestRBACSeparatesViewerReadsAndOperatorNotificationManagement(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	viewer, err := defaultTenant(s).CreateUser(ctx, store.User{Username: "viewer", DisplayName: "Read only", Role: store.RoleViewer, PasswordHash: viewerHash, Enabled: true}, store.AuditEntry{})
+	viewer, err := storetest.CreateUser(ctx, s, store.DefaultTenantScope(), store.User{Username: "viewer", DisplayName: "Read only", Role: store.RoleViewer, PasswordHash: viewerHash, Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestRBACSeparatesViewerReadsAndOperatorNotificationManagement(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	operator, err := defaultTenant(s).CreateUser(ctx, store.User{Username: "operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: operatorHash, Enabled: true}, store.AuditEntry{})
+	operator, err := storetest.CreateUser(ctx, s, store.DefaultTenantScope(), store.User{Username: "operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: operatorHash, Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}

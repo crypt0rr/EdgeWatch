@@ -550,7 +550,11 @@ func TestDisableAndEnableTenant(t *testing.T) {
 		t.Fatalf("disable audit = %+v", got)
 	}
 	now := time.Now().UTC()
-	if err := f.store.CreateSessionForUserWithAuditEntry(ctx, accountAdminB, "session-refused", "csrf", now, now.Add(time.Hour), AuditEntry{Action: "user.login", ActorUserID: accountAdminB}); !errors.Is(err, ErrTenantNotActive) {
+	adminB := fixtureAccount(t, f, accountAdminB)
+	signIn := func(idHash string) error {
+		return f.store.CreateSignInSession(ctx, SignInSession{UserID: accountAdminB, PasswordHash: adminB.PasswordHash, Revision: adminB.Revision, Factor: NoSignInFactor, IDHash: idHash, CSRF: "csrf", Created: now, Expires: now.Add(time.Hour), Audit: AuditEntry{Action: "user.login", ActorUserID: accountAdminB}})
+	}
+	if err := signIn("session-refused"); !errors.Is(err, ErrTenantNotActive) {
 		t.Fatalf("sign-in to a disabled tenant = %v, want %v", err, ErrTenantNotActive)
 	}
 	if _, err := platform.DisableTenant(ctx, secondTenantID, disabled.Revision, AuditEntry{}); !errors.Is(err, ErrTenantStateChange) {
@@ -600,7 +604,7 @@ func TestDisableAndEnableTenant(t *testing.T) {
 	if reset != 1 || untouched != 2 {
 		t.Fatalf("silence state after enabling: %d reset, %d untouched; want 1 and 2", reset, untouched)
 	}
-	if err := f.store.CreateSessionForUserWithAuditEntry(ctx, accountAdminB, "session-allowed", "csrf", now, now.Add(time.Hour), AuditEntry{Action: "user.login", ActorUserID: accountAdminB}); err != nil {
+	if err := signIn("session-allowed"); err != nil {
 		t.Fatalf("sign-in after the tenant was enabled: %v", err)
 	}
 }

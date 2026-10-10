@@ -229,14 +229,6 @@ FROM users WHERE users.tenant_id=? ORDER BY users.username COLLATE NOCASE`, sqli
 	return result, rows.Err()
 }
 
-// CreateUser creates an account in the tenant, with its audit record.
-func (ts *TenantStore) CreateUser(ctx context.Context, u User, audit AuditEntry) (User, error) {
-	if err := ts.ready(); err != nil {
-		return User{}, err
-	}
-	return ts.createUser(ctx, u, nil, audit, nil)
-}
-
 type userInviteRecord struct {
 	idHash  string
 	created time.Time
@@ -481,45 +473,23 @@ func (ts *TenantStore) updateUser(ctx context.Context, u User, revokeSessions bo
 	if count, _ := result.RowsAffected(); count != 1 {
 		return ErrConflict
 	}
-	// Security transitions are session-invalidating even when a trusted caller
-	// forgets to set revokeSessions. Keeping this policy at the transactional
-	// store boundary makes API, CLI, and future callers behave consistently;
-	// display-name-only edits remain session preserving.
-	securityTransition := currentRole != u.Role || (currentEnabled != 0) != u.Enabled
-	if revokeSessions || securityTransition {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=`+tenantUserSQL, u.ID, ts.scope.id); err != nil {
-			return err
-		}
-	}
-	// A disabled account must not retain an activation or password-reset link.
-	// Otherwise a link issued before the disable could silently re-enable the
-	// account when redeemed later. Keep this revocation in the same transaction
-	// as the user-state change so there is no race window.
-	// Revocation is a transition, not a property of the resulting row. Pending
-	// invitees are intentionally disabled while their password hash carries a
-	// sentinel; editing their display name must not kill the invite.
-	if err := ts.revokeUserInvitesOnDisableTx(ctx, tx, u.ID, currentEnabled != 0, currentPasswordHash, u.Enabled, u.UpdatedAt); err != nil {
-		return err
-	}
-	// A new password, or a new role, ends every unused link for the account,
-	// whoever issued it: a link issued before the change must not set the
-	// password afterwards, and a link that its issuer could issue only for
-	// the former role, such as a platform administrator's reset link for a
-	// unit administrator, must not outlive that role. This holds for a
-	// pending account too, which then needs a new activation link.
-	revokedLinks, err := ts.revokeTenantAccountLinksTx(ctx, tx, u.ID, u.Username, accountLinkChange(currentPasswordHash, u.PasswordHash, currentRole, u.Role), u.UpdatedAt, audit)
+	// The sessions and links that a change of the role, the enabled state, or
+	// the password ends, even when a trusted caller forgets to set
+	// revokeSessions: keeping the rule at the transactional store boundary
+	// makes the API, the host CLI, and future callers behave alike, and
+	// leaves a display-name edit session preserving. A pending invitee is
+	// disabled from the start, so editing its display name keeps its
+	// activation link.
+	records, err := applyAccountTransitionTx(ctx, tx, accountTransition{
+		userID: u.ID, username: u.Username, tenantID: ts.scope.id,
+		before:         accountState{role: currentRole, enabled: currentEnabled != 0, passwordHash: currentPasswordHash},
+		after:          accountState{role: u.Role, enabled: u.Enabled, passwordHash: u.PasswordHash},
+		revokeSessions: revokeSessions, at: u.UpdatedAt, audit: audit,
+	})
 	if err != nil {
 		return err
 	}
-	// Invitations issued by an administrator must not outlive the issuer's
-	// administrative privilege. Revoke them on demotion or disablement, while
-	// retaining the issuer identity for audit and recovery diagnostics.
-	if currentRole == RoleAdministrator && (u.Role != RoleAdministrator || !u.Enabled) {
-		if _, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE issuer_user_id=`+tenantUserSQL+` AND used_at IS NULL`, u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID, ts.scope.id); err != nil {
-			return err
-		}
-	}
-	if err := ts.insertAuditEntries(ctx, tx, []AuditEntry{audit, revokedLinks}, time.Now().UTC()); err != nil {
+	if err := ts.insertAuditEntries(ctx, tx, append([]AuditEntry{audit}, records...), time.Now().UTC()); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -553,7 +523,9 @@ func (ts *TenantStore) SaveUserSecurity(ctx context.Context, u User, recoveryCod
 // SaveUserSecurityPreservingSession is the actor-aware security mutation used
 // by TOTP enrollment. It revokes every other session while optionally keeping
 // the browser that is receiving the one-time recovery-code response alive.
-// Passing an empty hash preserves the original revoke-all behavior. A TOTP
+// Passing an empty hash preserves the original revoke-all behavior, and a
+// save that changes the role, the enabled state, or the password ends every
+// session and link as updateUser does (see applyAccountTransitionTx). A TOTP
 // enrolment passes the time step of the code that confirmed the new secret
 // as totpStep, which is recorded as used in the same transaction, so that
 // code is not accepted again; any other save passes NoTOTPStep. Another
@@ -624,30 +596,19 @@ func (ts *TenantStore) SaveUserSecurityPreservingSession(ctx context.Context, u 
 			}
 		}
 	}
-	securityTransition := currentRole != u.Role || (currentEnabled != 0) != u.Enabled
-	if revokeSessions || securityTransition {
-		if preserveSessionHash = strings.TrimSpace(preserveSessionHash); preserveSessionHash == "" {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=`+tenantUserSQL, u.ID, ts.scope.id); err != nil {
-				return err
-			}
-		} else if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=`+tenantUserSQL+` AND id_hash<>?`, u.ID, ts.scope.id, preserveSessionHash); err != nil {
-			return err
-		}
-	}
-	// Disabling an already-configured account must invalidate every outstanding
-	// activation or password-reset link in the same transaction. Pending
-	// invitees intentionally remain eligible to redeem their first activation
-	// link even though their account starts disabled.
-	if err := ts.revokeUserInvitesOnDisableTx(ctx, tx, u.ID, currentEnabled != 0, currentPasswordHash, u.Enabled, u.UpdatedAt); err != nil {
-		return err
-	}
-	// A password that the host resets ends the account's unused links, as
-	// a password change in updateUser does.
-	revokedLinks, err := ts.revokeTenantAccountLinksTx(ctx, tx, u.ID, currentUsername, accountLinkChange(currentPasswordHash, u.PasswordHash, currentRole, u.Role), u.UpdatedAt, audit)
+	// A security save that changes the role, the enabled state, or the
+	// password ends what the same change through updateUser ends; a TOTP
+	// change keeps the session that asked to be preserved.
+	records, err := applyAccountTransitionTx(ctx, tx, accountTransition{
+		userID: u.ID, username: currentUsername, tenantID: ts.scope.id,
+		before:         accountState{role: currentRole, enabled: currentEnabled != 0, passwordHash: currentPasswordHash},
+		after:          accountState{role: u.Role, enabled: u.Enabled, passwordHash: u.PasswordHash},
+		revokeSessions: revokeSessions, preserveSessionHash: preserveSessionHash, at: u.UpdatedAt, audit: audit,
+	})
 	if err != nil {
 		return err
 	}
-	if err := ts.insertAuditEntries(ctx, tx, []AuditEntry{audit, revokedLinks}, time.Now().UTC()); err != nil {
+	if err := ts.insertAuditEntries(ctx, tx, append([]AuditEntry{audit}, records...), time.Now().UTC()); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -670,93 +631,6 @@ func (ts *TenantStore) ensureLastAdministratorTx(ctx context.Context, tx *sql.Tx
 		return ErrLastAdministrator
 	}
 	return nil
-}
-
-// revokeUserInvitesOnDisableTx is the single transactional rule for
-// invalidating outstanding activation and password-reset links. Pending
-// invitees intentionally remain eligible for their first activation while an
-// already configured account must lose every outstanding link when disabled.
-func (ts *TenantStore) revokeUserInvitesOnDisableTx(ctx context.Context, tx *sql.Tx, userID string, currentEnabled bool, currentPasswordHash string, nextEnabled bool, at time.Time) error {
-	if !currentEnabled || nextEnabled || strings.HasPrefix(currentPasswordHash, "!pending") {
-		return nil
-	}
-	_, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=`+tenantUserSQL+` AND used_at IS NULL`, at.UTC().Format(time.RFC3339Nano), userID, ts.scope.id)
-	return err
-}
-
-// Why revokeAccountLinksTx revoked an account's links, as its audit record
-// says.
-const (
-	linksRevokedPasswordChanged = "its password changed"
-	linksRevokedRoleChanged     = "its role changed"
-)
-
-// revokeAccountLinksTx marks every unused activation and password-reset
-// link of one account as used at the time at, whoever issued it, so that
-// none of them can set the account's password afterwards. accountSQL names
-// the account with its arguments: tenantUserSQL or platformAdminSQL, or a
-// plain placeholder for an account the transaction already found. It
-// returns the number of revoked links that were still redeemable, unexpired
-// at that time; a link that had expired was already unusable, so it needs
-// no audit record.
-func revokeAccountLinksTx(ctx context.Context, tx *sql.Tx, at time.Time, accountSQL string, accountArgs ...any) (int, error) {
-	args := append([]any{at.UTC().Format(time.RFC3339Nano)}, accountArgs...)
-	rows, err := tx.QueryContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=`+accountSQL+` AND used_at IS NULL RETURNING expires_at`, args...)
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
-	redeemable := 0
-	for rows.Next() {
-		var expires string
-		if err := rows.Scan(&expires); err != nil {
-			return 0, err
-		}
-		if at.Before(scanTime(expires)) {
-			redeemable++
-		}
-	}
-	return redeemable, rows.Err()
-}
-
-// linksRevokedAudit is the record of the links that revokeAccountLinksTx
-// revoked when an account's password or role changed. It has the actor of
-// the change's own record, entry, and names the account. The record is
-// written only with the change's record: an entry without an action gives
-// none.
-func linksRevokedAudit(entry AuditEntry, action, username, reason string) AuditEntry {
-	if strings.TrimSpace(entry.Action) == "" {
-		return AuditEntry{}
-	}
-	entry.Action, entry.Detail = action, fmt.Sprintf("activation links revoked for %s because %s", username, reason)
-	return entry
-}
-
-// accountLinkChange is the reason to revoke an account's unused links when
-// a write changes its password hash or role, or "" when it changes neither.
-func accountLinkChange(currentPasswordHash, nextPasswordHash, currentRole, nextRole string) string {
-	switch {
-	case currentPasswordHash != nextPasswordHash:
-		return linksRevokedPasswordChanged
-	case currentRole != nextRole:
-		return linksRevokedRoleChanged
-	}
-	return ""
-}
-
-// revokeTenantAccountLinksTx revokes the unused links of the tenant's
-// account when a write changes its password or role (see
-// accountLinkChange), and returns the audit record of the revocation, which
-// has no action when no link was still redeemable.
-func (ts *TenantStore) revokeTenantAccountLinksTx(ctx context.Context, tx *sql.Tx, userID, username, reason string, at time.Time, audit AuditEntry) (AuditEntry, error) {
-	if reason == "" {
-		return AuditEntry{}, nil
-	}
-	revoked, err := revokeAccountLinksTx(ctx, tx, at, tenantUserSQL, userID, ts.scope.id)
-	if err != nil || revoked == 0 {
-		return AuditEntry{}, err
-	}
-	return linksRevokedAudit(audit, "user.activation_revoked", username, reason), nil
 }
 
 func (s *Store) userTOTPForSave(u User) (string, error) {
@@ -789,6 +663,30 @@ func (ts *TenantStore) requireTenantUserTx(ctx context.Context, tx *sql.Tx, user
 		return ErrNotFound
 	} else if err != nil {
 		return err
+	}
+	return nil
+}
+
+// ErrAccountDisabled reports a link for an account that an administrator
+// disabled after it redeemed its activation link. Such an account cannot
+// redeem a link, and a link stored for it would work again once the account
+// is enabled. A pending account, which is disabled until it redeems its
+// activation link, receives one.
+var ErrAccountDisabled = errors.New("disabled accounts cannot receive activation or password-reset links")
+
+// requireLinkableUserTx returns ErrNotFound unless the tenant has the
+// account, and ErrAccountDisabled when the account is disabled and not
+// pending.
+func (ts *TenantStore) requireLinkableUserTx(ctx context.Context, tx *sql.Tx, userID string) error {
+	var enabled int
+	var passwordHash string
+	if err := tx.QueryRowContext(ctx, `SELECT enabled,password_hash FROM users WHERE id=? AND tenant_id=?`, userID, ts.scope.id).Scan(&enabled, &passwordHash); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	if enabled == 0 && !strings.HasPrefix(passwordHash, "!pending") {
+		return ErrAccountDisabled
 	}
 	return nil
 }
@@ -853,31 +751,14 @@ func (ts *TenantStore) deleteUserSessionsWithAudit(ctx context.Context, userID s
 	return tx.Commit()
 }
 
-// CreateUserInvite stores an activation or password-reset link, by the hash
-// of its token, for the tenant's account. Another tenant's account is
-// ErrNotFound, and no link is stored.
-func (ts *TenantStore) CreateUserInvite(ctx context.Context, idHash, userID string, created, expires time.Time) error {
-	if err := ts.ready(); err != nil {
-		return err
-	}
-	result, err := ts.store.DB.ExecContext(ctx, `INSERT INTO user_invites(id_hash,user_id,issuer_user_id,created_at,expires_at,used_at) SELECT ?,id,'',?,?,NULL FROM users WHERE id=? AND tenant_id=?`, idHash, created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano), userID, ts.scope.id)
-	if err != nil {
-		return err
-	}
-	if affected, err := result.RowsAffected(); err != nil {
-		return err
-	} else if affected != 1 {
-		return ErrNotFound
-	}
-	return nil
-}
-
 // CreateUserInviteWithAudit stores a replacement activation/password-reset
 // token and its audit record atomically. The clear token never reaches this
 // method; only its SHA-256 digest is persisted. Another tenant's account is
-// ErrNotFound, and its links stay as they are. The actor,
-// audit.ActorUserID, must still be an enabled administrator of the tenant,
-// and the tenant must still be active (see requireAdministratorActorTx).
+// ErrNotFound, and its links stay as they are. An account that is disabled
+// after it redeemed its activation link is ErrAccountDisabled, and nothing
+// is written. The actor, audit.ActorUserID, must still be an enabled
+// administrator of the tenant, and the tenant must still be active (see
+// requireAdministratorActorTx).
 func (ts *TenantStore) CreateUserInviteWithAudit(ctx context.Context, idHash, userID string, created, expires time.Time, audit AuditEntry) error {
 	if err := ts.ready(); err != nil {
 		return err
@@ -887,7 +768,9 @@ func (ts *TenantStore) CreateUserInviteWithAudit(ctx context.Context, idHash, us
 
 // createUserInviteWithAudit is CreateUserInviteWithAudit with a policy check
 // that runs first in the transaction; its error stops the write. The
-// account must still belong to the tenant.
+// account must still belong to the tenant and be enabled or pending when the
+// link is written, so a link raced past a disable that committed first is
+// refused, rather than kept until the account is enabled again.
 func (ts *TenantStore) createUserInviteWithAudit(ctx context.Context, idHash, userID string, created, expires time.Time, audit AuditEntry, check userWriteCheck) error {
 	if strings.TrimSpace(idHash) == "" || strings.TrimSpace(userID) == "" {
 		return errors.New("activation token and user are required")
@@ -905,7 +788,7 @@ func (ts *TenantStore) createUserInviteWithAudit(ctx context.Context, idHash, us
 			return err
 		}
 	}
-	if err := ts.requireTenantUserTx(ctx, tx, userID); err != nil {
+	if err := ts.requireLinkableUserTx(ctx, tx, userID); err != nil {
 		return err
 	}
 	// Issuing a new activation/password-reset link invalidates any older
@@ -1028,20 +911,6 @@ func (s *Store) ActivateUser(ctx context.Context, idHash, passwordHash string, n
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return User{}, ErrNotFound
 	}
-	// Activation also serves as the administrator-issued password-reset path.
-	// Any browser sessions created with the previous password must be revoked
-	// before the new credential becomes usable, otherwise a reset would leave
-	// already authenticated clients active.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, userID); err != nil {
-		return User{}, err
-	}
-	// The new password also ends every other unused link for the account,
-	// as any other password change does, so an older link cannot replace
-	// the password that this one set.
-	revokedLinks, err := revokeAccountLinksTx(ctx, tx, now, "?", userID)
-	if err != nil {
-		return User{}, err
-	}
 	u, err := scanUser(tx.QueryRowContext(ctx, `SELECT `+userColumns+` FROM users WHERE id=?`, userID))
 	if err != nil {
 		return User{}, err
@@ -1056,56 +925,24 @@ func (s *Store) ActivateUser(ctx context.Context, idHash, passwordHash string, n
 	// entry names; a platform administrator's has none, so its records
 	// take the actor's, the platform.
 	audit.TenantID = tenantID
-	records := []AuditEntry{audit}
-	if revokedLinks > 0 {
-		action := "user.activation_revoked"
-		if u.Role == RolePlatformAdmin {
-			action = auditPlatformAdminActivationRevoked
-		}
-		records = append(records, linksRevokedAudit(audit, action, u.Username, linksRevokedPasswordChanged))
-	}
-	for _, record := range records {
-		if err := insertAuditEntryExec(ctx, tx, record, now.UTC()); err != nil {
-			return User{}, err
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return User{}, err
-	}
-	return u, nil
-}
-
-// ConsumeUserInvite marks a valid invite used and returns its account, with
-// the account's tenant. It stays global, as ActivateUser does, and an
-// account whose tenant is not active cannot consume a link.
-func (s *Store) ConsumeUserInvite(ctx context.Context, idHash string, now time.Time) (User, error) {
-	tx, err := s.DB.BeginTx(ctx, nil)
+	// Activation also serves as the administrator-issued password-reset
+	// path. The new password ends the sessions created with the previous
+	// one before it becomes usable, otherwise a reset would leave already
+	// authenticated clients active, and it ends every other unused link of
+	// the account, as any other password change does, so an older link
+	// cannot replace the password that this one set.
+	revoked, err := applyAccountTransitionTx(ctx, tx, accountTransition{
+		userID: userID, username: u.Username, tenantID: tenantID,
+		before: accountState{role: u.Role, enabled: currentEnabled != 0, passwordHash: currentPasswordHash},
+		after:  accountState{role: u.Role, enabled: true, passwordHash: passwordHash},
+		// A redeemed link always sets the password, so it always ends the
+		// sessions.
+		revokeSessions: true, at: now, audit: audit,
+	})
 	if err != nil {
 		return User{}, err
 	}
-	defer tx.Rollback()
-	var userID, expires, tenantID, tenantState string
-	var used sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT i.user_id,i.expires_at,i.used_at,COALESCE(u.tenant_id,''),COALESCE(t.state,'') FROM user_invites i JOIN users u ON u.id=i.user_id LEFT JOIN tenants t ON t.id=u.tenant_id WHERE i.id_hash=?`, idHash).Scan(&userID, &expires, &used, &tenantID, &tenantState); errors.Is(err, sql.ErrNoRows) {
-		return User{}, errors.New("invalid activation token")
-	} else if err != nil {
-		return User{}, err
-	}
-	if used.Valid || !now.Before(scanTime(expires)) {
-		return User{}, errors.New("activation token expired or already used")
-	}
-	if tenantID != "" && tenantState != TenantStateActive {
-		return User{}, ErrTenantNotActive
-	}
-	result, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE id_hash=? AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano), idHash)
-	if err != nil {
-		return User{}, err
-	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
-		return User{}, errors.New("activation token expired or already used")
-	}
-	u, err := scanUser(tx.QueryRowContext(ctx, `SELECT `+userColumns+` FROM users WHERE id=?`, userID))
-	if err != nil {
+	if err := insertAuditEntries(ctx, tx, append([]AuditEntry{audit}, revoked...), now.UTC()); err != nil {
 		return User{}, err
 	}
 	if err := tx.Commit(); err != nil {

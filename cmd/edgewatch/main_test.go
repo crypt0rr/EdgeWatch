@@ -12,6 +12,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestAdminRecoverySkipsMonitorInitialization(t *testing.T) {
@@ -69,7 +70,7 @@ jobs:
 	if !auth.VerifyPassword(admin.PasswordHash, "replacement administrator password") {
 		t.Fatal("replacement password was not persisted")
 	}
-	if err := s.CreateSession(context.Background(), "session-hash", "csrf", now, now.Add(time.Hour)); err != nil {
+	if err := storetest.CreateSession(context.Background(), s, store.LegacyAdminUserID, "session-hash", "csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err := run([]string{"admin", "disable-totp", "--config", configPath}); err != nil {

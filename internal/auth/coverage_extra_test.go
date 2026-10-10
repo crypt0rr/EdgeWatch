@@ -184,7 +184,7 @@ func TestLoginAfterAdminsRetirementAndAuthenticationFailureModes(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	if err := db.CreateSessionForUserWithAudit(ctx, store.LegacyAdminUserID, digest("expired-auth"), "csrf", now.Add(-2*time.Hour), now.Add(-time.Hour), "", ""); err != nil {
+	if err := storetest.CreateSession(ctx, db, store.LegacyAdminUserID, digest("expired-auth"), "csrf", now.Add(-2*time.Hour), now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	expired := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -193,7 +193,7 @@ func TestLoginAfterAdminsRetirementAndAuthenticationFailureModes(t *testing.T) {
 	if _, ok := m.Authenticate(ctx, expired); ok {
 		t.Fatal("expired session was accepted")
 	}
-	if err := db.CreateSessionForUserWithAudit(ctx, store.LegacyAdminUserID, digest("idle-auth"), "csrf", now.Add(-26*time.Hour), now.Add(time.Hour), "", ""); err != nil {
+	if err := storetest.CreateSession(ctx, db, store.LegacyAdminUserID, digest("idle-auth"), "csrf", now.Add(-26*time.Hour), now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	idle := httptest.NewRequest(http.MethodGet, "/", nil)

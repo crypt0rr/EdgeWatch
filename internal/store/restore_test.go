@@ -715,7 +715,7 @@ func TestRestoreInvalidatesSessionsCopiedFromBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sourceStore.CreateSession(context.Background(), "restored-session", "csrf", time.Now().UTC(), time.Now().UTC().Add(time.Hour)); err != nil {
+	if err := createTestSession(context.Background(), sourceStore, LegacyAdminUserID, "restored-session", "csrf", time.Now().UTC(), time.Now().UTC().Add(time.Hour)); err != nil {
 		sourceStore.Close()
 		t.Fatal(err)
 	}
@@ -762,12 +762,12 @@ func TestRestoreRevokesLinksAndSetupTokenCopiedFromBackup(t *testing.T) {
 		sourceStore.Close()
 		t.Fatal(err)
 	}
-	operator, err := defaultTenant(sourceStore).CreateUser(ctx, User{Username: "operator", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{})
+	operator, err := createTestUser(ctx, defaultTenant(sourceStore), User{Username: "operator", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{})
 	if err != nil {
 		sourceStore.Close()
 		t.Fatal(err)
 	}
-	if err := defaultTenant(sourceStore).CreateUserInvite(ctx, "backup-used-reset", operator.ID, now.Add(-time.Hour), now.Add(time.Hour)); err != nil {
+	if err := createTestLink(ctx, defaultTenant(sourceStore), "backup-used-reset", operator.ID, now.Add(-time.Hour), now.Add(time.Hour)); err != nil {
 		sourceStore.Close()
 		t.Fatal(err)
 	}

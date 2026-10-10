@@ -53,11 +53,11 @@ func TestRevokeUserInviteAndDisablePreventActivation(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "revokable", DisplayName: "Revokable", Role: RoleViewer, PasswordHash: "existing-password-hash", Enabled: true}, AuditEntry{})
+	user, err := createTestUser(ctx, defaultTenant(s), User{Username: "revokable", DisplayName: "Revokable", Role: RoleViewer, PasswordHash: "existing-password-hash", Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := defaultTenant(s).CreateUserInvite(ctx, "invite-to-revoke", user.ID, now, now.Add(time.Hour)); err != nil {
+	if err := createTestLink(ctx, defaultTenant(s), "invite-to-revoke", user.ID, now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	seedDefaultAdministrator(t, s)
@@ -69,7 +69,7 @@ func TestRevokeUserInviteAndDisablePreventActivation(t *testing.T) {
 		t.Fatal("revoked activation invite was accepted")
 	}
 
-	if err := defaultTenant(s).CreateUserInvite(ctx, "invite-before-disable", user.ID, now.Add(3*time.Minute), now.Add(time.Hour)); err != nil {
+	if err := createTestLink(ctx, defaultTenant(s), "invite-before-disable", user.ID, now.Add(3*time.Minute), now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := defaultTenant(s).GetUser(ctx, user.ID)
@@ -136,14 +136,14 @@ func TestUserInviteAuditFailureRollsBackAndOlderInviteIsInvalidated(t *testing.T
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "viewer", DisplayName: "Viewer", Role: RoleViewer, PasswordHash: "!pending", Enabled: true}, AuditEntry{})
+	user, err := createTestUser(ctx, defaultTenant(s), User{Username: "viewer", DisplayName: "Viewer", Role: RoleViewer, PasswordHash: "!pending", Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := defaultTenant(s).CreateUserInvite(ctx, "old-hash", user.ID, now, now.Add(time.Hour)); err != nil {
+	if err := createTestLink(ctx, defaultTenant(s), "old-hash", user.ID, now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateSessionForUserWithAuditEntry(ctx, user.ID, "session-before-reset", "csrf", now, now.Add(time.Hour), AuditEntry{}); err != nil {
+	if err := createTestSession(ctx, s, user.ID, "session-before-reset", "csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ActivateUser(ctx, "old-hash", "replacement-hash", now.Add(time.Minute), AuditEntry{}); err != nil {
@@ -154,7 +154,7 @@ func TestUserInviteAuditFailureRollsBackAndOlderInviteIsInvalidated(t *testing.T
 	}
 	// A replacement invite must still be tested independently below; the
 	// previous activation consumed the original token as expected.
-	if err := defaultTenant(s).CreateUserInvite(ctx, "old-hash-2", user.ID, now.Add(2*time.Minute), now.Add(time.Hour)); err != nil {
+	if err := createTestLink(ctx, defaultTenant(s), "old-hash-2", user.ID, now.Add(2*time.Minute), now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.Exec(`CREATE TRIGGER fail_user_invite_audit BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
@@ -177,14 +177,14 @@ func TestUserValidationRejectsPathAndControlCharacters(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	for _, username := range []string{"a/b", "a\\b", "a:b", "a\n b"} {
-		if _, err := defaultTenant(s).CreateUser(ctx, User{Username: username, Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{}); err == nil {
+		if _, err := createTestUser(ctx, defaultTenant(s), User{Username: username, Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{}); err == nil {
 			t.Fatalf("username %q accepted", username)
 		}
 	}
-	if _, err := defaultTenant(s).CreateUser(ctx, User{Username: "", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{}); err == nil {
+	if _, err := createTestUser(ctx, defaultTenant(s), User{Username: "", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{}); err == nil {
 		t.Fatal("empty username accepted")
 	}
-	if _, err := defaultTenant(s).CreateUser(ctx, User{Username: "viewer", Role: "unknown", PasswordHash: "hash", Enabled: true}, AuditEntry{}); err == nil {
+	if _, err := createTestUser(ctx, defaultTenant(s), User{Username: "viewer", Role: "unknown", PasswordHash: "hash", Enabled: true}, AuditEntry{}); err == nil {
 		t.Fatal("unknown role accepted")
 	}
 }
@@ -194,7 +194,7 @@ func TestUpdateUserKeepsLastEnabledAdministrator(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	admin, err := defaultTenant(s).CreateUser(ctx, User{Username: "admin", DisplayName: "Administrator", Role: RoleAdministrator, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	admin, err := createTestUser(ctx, defaultTenant(s), User{Username: "admin", DisplayName: "Administrator", Role: RoleAdministrator, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestSaveUserSecurityKeepsRoleValidationAndLastAdministratorInvariant(t *tes
 	s := openTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	admin, err := defaultTenant(s).CreateUser(ctx, User{Username: "admin", DisplayName: "Administrator", Role: RoleAdministrator, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	admin, err := createTestUser(ctx, defaultTenant(s), User{Username: "admin", DisplayName: "Administrator", Role: RoleAdministrator, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestUserMutationsRejectStaleRevision(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	created, err := defaultTenant(s).CreateUser(ctx, User{Username: "concurrent", DisplayName: "Concurrent", Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	created, err := createTestUser(ctx, defaultTenant(s), User{Username: "concurrent", DisplayName: "Concurrent", Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}

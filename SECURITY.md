@@ -166,9 +166,18 @@ too, so a link issued for one role, such as a platform administrator's reset
 link for a unit administrator, never sets the password of the account in
 another role; the account then needs a new link. Each stopped link that could
 still have been used is recorded, in the same transaction as the change and
-with its actor, as `user.activation_revoked`, or
-`platform_admin.activation_revoked` for a platform administrator, naming the
-account. A browser that holds a session never redeems a link with it: the
+with its actor, as `user.activation_revoked` in the account's unit, or
+`platform_admin.activation_revoked` in platform scope for a platform
+administrator, naming the account whose link stopped and why; that includes
+the links an issuer's demotion or disable stops, so a platform
+administrator's disable is recorded in each unit whose administrator's link
+it stopped. A link that had already expired gets no record. Every writer of
+an account's role, enabled state, or password ends the same sessions and
+links through one transactional rule. An account that was disabled after it
+activated gets no new link: the write is refused with `409 user_disabled` in
+the transaction that would store the link, so a link requested while the
+account is being disabled is never stored, and enabling the account again
+revives none. A browser that holds a session never redeems a link with it: the
 console asks the visitor to sign out first and keeps the link until then.
 
 ## Business units and the platform administrator
@@ -430,7 +439,11 @@ account are independent: revoking one session does not grant, revoke, or close
 the other. Disabling an account, changing its role, changing its password
 (including by redeeming an administrator-issued password-reset link), or
 changing its TOTP settings revokes the affected sessions, and a stream stops
-delivering once its next authorization check observes that revocation.
+delivering once its next authorization check observes that revocation. A
+unit's administrator can also end another account's sessions from Users,
+after confirming its password; the unit's audit records it as
+`user.sessions_revoked`, and the account's password, TOTP, and links stay as
+they were.
 
 The stream rechecks its session before the initial response, before delivering
 events, and on its 25-second heartbeat. To avoid a database lookup for every

@@ -12,6 +12,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // blockFirstPublicBuild makes the first shared cache fill wait for release,
@@ -240,12 +241,12 @@ func TestPublicDashboardSaveStaysAdministratorOnly(t *testing.T) {
 	token := publicDashboardToken(t, server, store.Session{UserID: store.LegacyAdminUserID, Username: "admin", Role: store.RoleAdministrator})
 	now := time.Now().UTC()
 	for _, role := range []string{store.RoleOperator, store.RoleViewer} {
-		user, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "public-" + role, DisplayName: role, Role: role, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+		user, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: "public-" + role, DisplayName: role, Role: role, PasswordHash: "unused-hash", Enabled: true})
 		if err != nil {
 			t.Fatal(err)
 		}
 		raw := "public-dashboard-" + role
-		if err := db.CreateSessionForUserWithAudit(ctx, user.ID, digest(raw), "csrf-"+role, now, now.Add(time.Hour), "", ""); err != nil {
+		if err := storetest.CreateSession(ctx, db, user.ID, digest(raw), "csrf-"+role, now, now.Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 		request, err := http.NewRequest(http.MethodPut, httpServer.URL+"/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status","hosts":[],"updated_at":"`+token+`"}`))

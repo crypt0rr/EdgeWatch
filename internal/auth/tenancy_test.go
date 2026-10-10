@@ -44,7 +44,7 @@ func TestSignInCarriesTheAccountTenant(t *testing.T) {
 	salt := []byte("0123456789abcdef")
 	key := argon2.IDKey([]byte(password), salt, 1, 8, 1, 32)
 	hash := fmt.Sprintf("$ew$argon2id$v=19$m=8,t=1,p=1$%s$%s", base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(key))
-	user, err := s.Tenant(scope).CreateUser(ctx, store.User{Username: "other-operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+	user, err := storetest.CreateUser(ctx, s, scope, store.User{Username: "other-operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestSignInCarriesTheAccountTenant(t *testing.T) {
 	}
 
 	// A session of the account authenticates with the account's tenant.
-	if err := s.CreateSessionForUserWithAuditEntry(ctx, user.ID, digest("other-session"), "csrf", now, now.Add(time.Hour), store.AuditEntry{}); err != nil {
+	if err := storetest.CreateSession(ctx, s, user.ID, digest("other-session"), "csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	authenticated := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil)
@@ -126,7 +126,7 @@ func TestSignInToAnInactiveUnitSpendsNoOneTimeFactor(t *testing.T) {
 	}
 	unit := s.Tenant(scope)
 	const password = "b operator password"
-	operator, err := unit.CreateUser(ctx, store.User{Username: "b-operator", Role: store.RoleOperator, PasswordHash: cheapHash(password), Enabled: true}, store.AuditEntry{})
+	operator, err := storetest.CreateUser(ctx, s, scope, store.User{Username: "b-operator", Role: store.RoleOperator, PasswordHash: cheapHash(password), Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -570,7 +570,7 @@ func TestSSEStopsDeliveringAfterSessionRevocation(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("stream status = %d", response.StatusCode)
 	}
-	if err := db.DeleteAllSessions(ctx); err != nil {
+	if _, err := db.DB.ExecContext(ctx, `DELETE FROM sessions`); err != nil {
 		t.Fatal(err)
 	}
 	// Stream authorization is cached briefly to avoid a storage lookup for

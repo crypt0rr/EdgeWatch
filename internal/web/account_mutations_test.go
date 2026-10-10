@@ -10,6 +10,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestCreateUserRejectsUsernamesTheStoreRejectsAsFieldErrors(t *testing.T) {
@@ -65,7 +66,7 @@ func TestPasswordResetActivationClosesTheAccountsStreams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	operator, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "streaming-operator", DisplayName: "Streaming operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+	operator, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: "streaming-operator", DisplayName: "Streaming operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +193,7 @@ func TestDisplayNameChangesAreAuditedForEveryAccount(t *testing.T) {
 	}
 
 	for _, role := range []string{store.RoleOperator, store.RoleViewer} {
-		user, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "rename-" + role, DisplayName: "Before", Role: role, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+		user, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: "rename-" + role, DisplayName: "Before", Role: role, PasswordHash: "unused-hash", Enabled: true})
 		if err != nil {
 			t.Fatal(err)
 		}

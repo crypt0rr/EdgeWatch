@@ -21,14 +21,14 @@ func TestSignInSessionSpendsItsFactorWithTheSession(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "factor-user", Role: RoleViewer, PasswordHash: "current-hash", Enabled: true}, AuditEntry{})
+	user, err := createTestUser(ctx, defaultTenant(s), User{Username: "factor-user", Role: RoleViewer, PasswordHash: "current-hash", Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	salt := []byte("0123456789abcdef")
 	sum := sha256.Sum256(append(append([]byte{}, salt...), "RECOVERYCODE"...))
 	code := "v2$" + base64.RawStdEncoding.EncodeToString(salt) + "$" + hex.EncodeToString(sum[:])
-	if err := s.SaveRecoveryCodesForUser(ctx, user.ID, []string{code}); err != nil {
+	if err := saveTestRecoveryCodes(ctx, s, user.ID, []string{code}); err != nil {
 		t.Fatal(err)
 	}
 	sessionCount := func() int {
@@ -118,18 +118,18 @@ func TestSignInSessionSpendsItsFactorWithTheSession(t *testing.T) {
 
 // A sign-in session whose factor cannot be recorded is not created and
 // leaves the factor as it was, and the checks before the session report a
-// storage that cannot be read. The unconditional password-upgrade login
-// primitive creates its session through the capped insert.
+// storage that cannot be read. A sign-in that upgrades the password hash
+// creates its session through the capped insert.
 func TestSignInSessionStorageFailuresKeepTheFactor(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "factor-failures", Role: RoleViewer, PasswordHash: "current-hash", Enabled: true}, AuditEntry{})
+	user, err := createTestUser(ctx, defaultTenant(s), User{Username: "factor-failures", Role: RoleViewer, PasswordHash: "current-hash", Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveRecoveryCodesForUser(ctx, user.ID, []string{"stored-code"}); err != nil {
+	if err := saveTestRecoveryCodes(ctx, s, user.ID, []string{"stored-code"}); err != nil {
 		t.Fatal(err)
 	}
 	exec := func(statement string) {
@@ -173,7 +173,7 @@ func TestSignInSessionStorageFailuresKeepTheFactor(t *testing.T) {
 	}
 	exec(`ALTER TABLE recovery_codes_hidden RENAME TO recovery_codes`)
 
-	if err := s.CreateSessionForUserWithPasswordUpgrade(ctx, user.ID, "current-hash", "upgraded-hash", "upgraded-session", "csrf", now, now.Add(time.Hour), AuditEntry{}); err != nil {
+	if err := s.CreateSignInSession(ctx, SignInSession{UserID: user.ID, PasswordHash: "current-hash", UpgradedPasswordHash: "upgraded-hash", Revision: user.Revision, Factor: NoSignInFactor, IDHash: "upgraded-session", CSRF: "csrf", Created: now, Expires: now.Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.GetSession(ctx, "upgraded-session"); err != nil {
@@ -199,7 +199,7 @@ func TestDeleteExpiredSessionsRemovesIdleSessions(t *testing.T) {
 		{"recent", now.Add(-48 * time.Hour), now.Add(-SessionIdleTimeout + time.Minute), now.Add(28 * 24 * time.Hour)},
 		{"new", now.Add(-time.Minute), now.Add(-time.Minute), now.Add(30 * 24 * time.Hour)},
 	} {
-		if err := s.CreateSession(ctx, session.id, "csrf-"+session.id, session.created, session.expires); err != nil {
+		if err := createTestSession(ctx, s, LegacyAdminUserID, session.id, "csrf-"+session.id, session.created, session.expires); err != nil {
 			t.Fatal(err)
 		}
 		if err := s.TouchSession(ctx, session.id, session.lastSeen, session.expires); err != nil {
@@ -232,7 +232,7 @@ func TestSessionsPerAccountAreCapped(t *testing.T) {
 	unit := defaultTenant(s)
 	create := func(username string) User {
 		t.Helper()
-		user, err := unit.CreateUser(ctx, User{Username: username, Role: RoleViewer, PasswordHash: "unused-hash", Enabled: true}, AuditEntry{})
+		user, err := createTestUser(ctx, unit, User{Username: username, Role: RoleViewer, PasswordHash: "unused-hash", Enabled: true}, AuditEntry{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -242,7 +242,7 @@ func TestSessionsPerAccountAreCapped(t *testing.T) {
 	start := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
 	signIn := func(user User, id string, at time.Time) {
 		t.Helper()
-		if err := s.CreateSessionForUserWithAuditEntry(ctx, user.ID, id, "csrf", at, at.Add(30*24*time.Hour), AuditEntry{}); err != nil {
+		if err := createTestSession(ctx, s, user.ID, id, "csrf", at, at.Add(30*24*time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 	}

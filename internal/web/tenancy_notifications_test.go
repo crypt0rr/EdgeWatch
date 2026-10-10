@@ -13,6 +13,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // The notification routes resolve destinations and update routing through
@@ -37,7 +38,7 @@ func TestNotificationRoutesUseTheSessionTenant(t *testing.T) {
 	const jobB = "00000000-0000-0000-0000-000000000b01"
 	now := time.Now().UTC()
 	stamp := now.Format(time.RFC3339Nano)
-	other, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	other, err := storetest.CreateUser(ctx, db, store.DefaultTenantScope(), store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +59,7 @@ func TestNotificationRoutesUseTheSessionTenant(t *testing.T) {
 	cookies := map[string]string{}
 	for name, userID := range map[string]string{"own": admin.UserID, "other": other.ID} {
 		raw := "tenant-notification-" + name
-		if err := db.CreateSessionForUserWithAudit(ctx, userID, digest(raw), "csrf-"+name, now, now.Add(time.Hour), "", ""); err != nil {
+		if err := storetest.CreateSession(ctx, db, userID, digest(raw), "csrf-"+name, now, now.Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 		cookies[name] = raw

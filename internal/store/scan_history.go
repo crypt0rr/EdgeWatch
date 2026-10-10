@@ -483,9 +483,12 @@ func (ts *TenantStore) latestScanHostSegment(ctx context.Context, queries latest
 // successful scans has no derived host index or completed backfill
 // checkpoint. Such rows are expected in databases upgraded from a release
 // predating scan_hosts and require the bounded compatibility merge in the
-// Hosts endpoint. Once the legacy host backfill has completed, no such scan
-// is left, and the answer comes from its marker: the search would otherwise
-// read every successful scan of the tenant on each Hosts request.
+// Hosts endpoint. It reads the scans that the legacy host backfill indexes
+// (legacyHostBackfillCandidateSQL), so a tenant that is being deleted, whose
+// purge erases its host rows before its scans, has none. Once the legacy
+// host backfill has completed, no such scan is left, and the answer comes
+// from its marker: the search would otherwise read every successful scan of
+// the tenant on each Hosts request.
 func (ts *TenantStore) LegacySuccessfulScanExists(ctx context.Context) (bool, error) {
 	if err := ts.ready(); err != nil {
 		return false, err
@@ -495,13 +498,7 @@ func (ts *TenantStore) LegacySuccessfulScanExists(ctx context.Context) (bool, er
 		return false, err
 	}
 	var exists bool
-	err := reader.QueryRowContext(ctx, `SELECT EXISTS(
-	SELECT 1 FROM scans s
-	WHERE s.tenant_id=? AND s.status='success'
-	  AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
-	  AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)
-	  AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=s.id)
-)`, ts.scope.id).Scan(&exists)
+	err := reader.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scans s WHERE s.tenant_id=? AND `+legacyHostBackfillCandidateSQL+`)`, ts.scope.id).Scan(&exists)
 	return exists, err
 }
 

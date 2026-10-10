@@ -115,7 +115,10 @@ var tenantPurgeSteps = []tenantPurgeStep{
 	{table: "job_runtime_meta", rowids: `SELECT rowid FROM job_runtime_meta WHERE job_id IN (` + tenantJobsSQL + `)`},
 	{table: "job_silence_state", rowids: `SELECT rowid FROM job_silence_state WHERE job_id IN (` + tenantJobsSQL + `)`},
 	{table: "job_revisions", rowids: `SELECT rowid FROM job_revisions WHERE job_id IN (` + tenantJobsSQL + `)`},
-	// Scan history and the latest host of each address.
+	// Scan history and the latest host of each address. A purge that stops
+	// before the scans leaves scans without host rows or a checkpoint, which
+	// the legacy host backfill leaves to the purge (see
+	// legacyHostBackfillCandidateSQL).
 	{table: "latest_host_search", trigger: "latest_scan_hosts_search_ad"},
 	{table: "latest_scan_hosts", rowids: `SELECT rowid FROM latest_scan_hosts WHERE tenant_id=?1`},
 	{table: "scan_host_search", trigger: "scan_hosts_search_ad"},

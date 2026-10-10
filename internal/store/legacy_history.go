@@ -42,15 +42,15 @@ func (ts *TenantStore) ListLegacySuccessfulScanSnapshotsPage(ctx context.Context
 	}
 	// A completed backfill checkpoint also excludes snapshots that were
 	// malformed or empty. Retrying those on every request would recreate the
-	// history-wide decode cost the migration is designed to remove.
-	const legacyPredicate = `status='success' AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=scans.id) AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=scans.id) AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id)`
-	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE tenant_id=? AND `+legacyPredicate, ts.scope.id).Scan(&page.Total); err != nil {
+	// history-wide decode cost the migration is designed to remove. The
+	// page lists the scans that LegacySuccessfulScanExists finds.
+	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans s WHERE s.tenant_id=? AND `+legacyHostBackfillCandidateSQL, ts.scope.id).Scan(&page.Total); err != nil {
 		return Page[LegacyScanSnapshot]{}, err
 	}
-	rows, err := reader.QueryContext(ctx, `SELECT id,job_id,job,finished_at,snapshot_json
-FROM scans
-WHERE tenant_id=? AND `+legacyPredicate+`
-ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, ts.scope.id, limit, offset)
+	rows, err := reader.QueryContext(ctx, `SELECT s.id,s.job_id,s.job,s.finished_at,s.snapshot_json
+FROM scans s
+WHERE s.tenant_id=? AND `+legacyHostBackfillCandidateSQL+`
+ORDER BY s.finished_at DESC,s.id DESC LIMIT ? OFFSET ?`, ts.scope.id, limit, offset)
 	if err != nil {
 		return Page[LegacyScanSnapshot]{}, err
 	}

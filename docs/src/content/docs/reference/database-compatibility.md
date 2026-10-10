@@ -126,7 +126,10 @@ of scans saved before the host index existed. The daemon completes it at the
 first start after the upgrade, once it finds no such scan; until then
 `edgewatch verify` lists its `legacy_scan_host_index` checkpoint as not
 complete. Later starts and Hosts requests then skip the search for such scans
-over the whole history. An older release refuses the upgraded database, so a
+over the whole history. The backfill leaves the scans of a business unit that
+is being deleted to its purge, which erases their host rows before the scans,
+so a start while such a purge is unfinished does not index them again. An
+older release refuses the upgraded database, so a
 rollback means restoring the pre-upgrade `./data` backup.
 
 ## Schema 65

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
 // tenantPurgeOracle selects the rowids of a tenant's rows, with the tenant's
@@ -408,6 +410,102 @@ func TestTenantPurgeResumesAfterInterruption(t *testing.T) {
 	}
 	if results[0].TotalRows != erasable || results[0].Rows != erasable-interrupted.PurgeRows {
 		t.Fatalf("resumed purge counted %d rows in total and %d in this pass, want %d and %d", results[0].TotalRows, results[0].Rows, erasable, erasable-interrupted.PurgeRows)
+	}
+}
+
+// The purge erases a tenant's host rows and backfill checkpoints before its
+// scans, so a purge that stops in between leaves scans that look like scans
+// of a release before the host index. A start whose legacy host backfill is
+// pending, after an upgrade from before schema 66 or a scan saved with units
+// only, leaves them to the purge: indexing one would write a latest host of
+// a tenant that is being deleted, which the guard triggers refuse, so every
+// start would fail and the purge, which only the daemon runs, would never
+// finish. Another tenant's legacy scans are still indexed.
+func TestLegacyHostBackfillLeavesTheScansOfADeletingTenantToThePurge(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newTenantPurgeFixture(t)
+	// The fixture's history purge of each tenant's "edge" job keeps that
+	// job's scans from the backfill, so these scans of the archived jobs are
+	// the ones that show it. Each has host rows until it is rewound or
+	// purged.
+	finished := time.Date(2026, 9, 20, 14, 0, 0, 0, time.UTC)
+	for _, scan := range []model.Scan{
+		fixtureScan("scan-legacy-a", f.archivedA, "edge-archived", finished, fixtureHosts(0, 2)),
+		fixtureScan("scan-deleting-b-1", f.archivedB, "edge-archived", finished, fixtureHosts(0, 2)),
+		fixtureScan("scan-deleting-b-2", f.archivedB, "edge-archived", finished.Add(time.Hour), fixtureHosts(2, 4)),
+	} {
+		if err := f.store.System().SaveScan(ctx, scan); err != nil {
+			t.Fatal(err)
+		}
+	}
+	requestSecondTenantDeletion(t, f)
+	stop := errors.New("stop in the scans step")
+	if _, err := f.store.System().purgeDeletingTenants(ctx, tenantPurgeOptions{batchSize: 1, afterBatch: func(_ context.Context, _ *sql.Conn, phase string) error {
+		if phase == "scans" {
+			return stop
+		}
+		return nil
+	}}); !errors.Is(err, stop) {
+		t.Fatalf("purge = %v, want it stopped in the scans step", err)
+	}
+	if stopped, err := f.store.Platform().GetTenant(ctx, secondTenantID); err != nil || stopped.State != TenantStateDeleting || stopped.PurgePhase != "scans" {
+		t.Fatalf("tenant B after the stopped purge = %+v, %v", stopped, err)
+	}
+	const unindexedOfB = `SELECT COUNT(*) FROM scans s WHERE s.tenant_id=? AND s.status='success'
+  AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
+  AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=s.id)
+  AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id)`
+	if got := countRows(t, f.store.DB, unindexedOfB, secondTenantID); got == 0 {
+		t.Fatal("the stopped purge left no scan of tenant B without host rows or a checkpoint; the test shows nothing")
+	}
+	rewindToLegacyScans(t, f.store.DB, "scan-legacy-a")
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := Open(f.store.Path)
+	if err != nil {
+		t.Fatalf("start with a pending legacy host backfill while tenant B's purge is stopped in its scans step: %v", err)
+	}
+	t.Cleanup(func() { _ = restarted.Close() })
+	if got := legacyScanHostIndexMarker(t, restarted.DB); got != 1 {
+		t.Fatalf("legacy host index checkpoint after the start = %d, want complete", got)
+	}
+	if got := countRows(t, restarted.DB, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id='scan-legacy-a' AND data_quality='legacy'`); got != 2 {
+		t.Fatalf("tenant A's legacy scan has %d indexed host rows, want 2", got)
+	}
+	for _, query := range []string{
+		`SELECT COUNT(*) FROM scan_hosts AS h JOIN scans AS s ON s.id=h.scan_id WHERE s.tenant_id=?`,
+		`SELECT COUNT(*) FROM latest_scan_hosts WHERE tenant_id=?`,
+		`SELECT COUNT(*) FROM legacy_scan_host_backfill AS b JOIN scans AS s ON s.id=b.scan_id WHERE s.tenant_id=?`,
+	} {
+		if got := countRows(t, restarted.DB, query, secondTenantID); got != 0 {
+			t.Fatalf("the start indexed tenant B's scans: %s = %d", query, got)
+		}
+	}
+	// With the marker pending again, neither the backfill nor the Hosts
+	// view finds tenant B's scans.
+	if _, err := restarted.DB.ExecContext(ctx, pendingLegacyScanHostIndexSQL); err != nil {
+		t.Fatal(err)
+	}
+	if total, err := countLegacyHostBackfillCandidates(ctx, restarted.DB); err != nil || total != 0 {
+		t.Fatalf("legacy host backfill candidates = %d, %v; want none", total, err)
+	}
+	deleting := restarted.Tenant(f.b)
+	if exists, err := deleting.LegacySuccessfulScanExists(ctx); err != nil || exists {
+		t.Fatalf("tenant B's legacy successful scan = %v, %v; want none", exists, err)
+	}
+	if page, err := deleting.ListLegacySuccessfulScanSnapshotsPage(ctx, 50, 0); err != nil || page.Total != 0 || len(page.Items) != 0 {
+		t.Fatalf("tenant B's legacy snapshots = %+v, %v; want none", page, err)
+	}
+
+	results, err := restarted.System().PurgeDeletingTenants(ctx)
+	if err != nil || len(results) != 1 || !results[0].Complete || results[0].Phase != tenantPurgePhaseComplete {
+		t.Fatalf("purge after the start = %+v, %v; want tenant B complete", results, err)
+	}
+	if got := countRows(t, restarted.DB, `SELECT COUNT(*) FROM scans WHERE tenant_id=?`, secondTenantID); got != 0 {
+		t.Fatalf("tenant B has %d scans left after its purge", got)
 	}
 }
 

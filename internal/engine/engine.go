@@ -193,6 +193,12 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		hostChanges := filterDNSAggregateChanges(*state.Baseline, scan.Snapshot, hostStateChanges(*state.Baseline, scan.Snapshot, scopeChanged), job)
 		if len(hostChanges) > 0 {
 			protected := protectedNonHostChangeKeys(state)
+			hostsKept, hostsRetired := unobservedHostChangeKeys(state, scan.Snapshot, hostChanges)
+			for _, keys := range []map[string]bool{hostsKept, hostsRetired} {
+				for key := range keys {
+					protected[key] = true
+				}
+			}
 			events := append(event, applyChangesWithIncomplete(state, job.Name, scan.ID, hostChanges, job.Change.Confirmations, now, protected)...)
 			return events, hostChanges, nil
 		}
@@ -232,8 +238,19 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		changes = filtered
 	}
 	// A host that is down shows none of its ports, so its port and service
-	// findings were not observed and keep their state for a later scan.
+	// findings were not observed and keep their state for a later scan, as
+	// does the state of a host that the scan has no state for.
 	downHostKeys := downHostChangeKeys(state, scan.Snapshot, changes, job)
+	hostsKept, hostsRetired := unobservedHostChangeKeys(state, scan.Snapshot, changes)
+	for key := range hostsKept {
+		downHostKeys[key] = true
+	}
+	for key := range hostsRetired {
+		delete(state.Pending, key)
+		delete(state.Incidents, key)
+		delete(state.Suppressed, key)
+		delete(state.SuppressedChanges, key)
+	}
 	// A service fingerprint is meaningful only while its port is positively
 	// observed. Diff intentionally reports a port closure without also emitting
 	// a service removal; retire any existing service finding for that port here
@@ -439,9 +456,16 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 			protectedKeys[key] = true
 		}
 		// Ports on a host that completed discovery down were not observed
-		// either, as in a complete scan.
+		// either, as in a complete scan, nor was a host that the scan has no
+		// state for. An incomplete scan keeps such a host finding.
 		for key := range downHostChangeKeys(state, scan.Snapshot, changes, job) {
 			protectedKeys[key] = true
+		}
+		hostsKept, hostsRetired := unobservedHostChangeKeys(state, scan.Snapshot, changes)
+		for _, keys := range []map[string]bool{hostsKept, hostsRetired} {
+			for key := range keys {
+				protectedKeys[key] = true
+			}
 		}
 		events = append(events, applyChangesWithIncomplete(state, job.Name, scan.ID, changes, job.Change.Confirmations, scan.FinishedAt, protectedKeys)...)
 	}
@@ -1910,6 +1934,53 @@ func downHostChangeKeys(state *model.JobState, current model.Snapshot, changes [
 		}
 	}
 	return protected
+}
+
+// unobservedHostChangeKeys returns the tracked host-state findings that this
+// scan did not observe because it has no state for their address. A host
+// state recovers only when the scan observes the host in its baseline
+// state. An address that is no longer in the scan's scope, for example one
+// that left a DNS name's answer, cannot be compared any more, so its finding
+// is retired, as the address's per-address port findings are; the DNS
+// change reports the transition. Any other finding is kept.
+func unobservedHostChangeKeys(state *model.JobState, current model.Snapshot, changes []model.Change) (kept, retired map[string]bool) {
+	kept, retired = map[string]bool{}, map[string]bool{}
+	reported := make(map[string]struct{}, len(changes))
+	for _, change := range changes {
+		reported[change.Key] = struct{}{}
+	}
+	states := effectiveHostStates(current)
+	mark := func(key string, change model.Change) {
+		if change.Kind != "host" {
+			return
+		}
+		if _, ok := reported[key]; ok {
+			return
+		}
+		if _, ok := states[strings.TrimSpace(change.Target)]; ok {
+			return
+		}
+		if hostInScope(current, change.Target) {
+			kept[key] = true
+		} else {
+			retired[key] = true
+		}
+	}
+	for key, pending := range state.Pending {
+		mark(key, pending.Change)
+	}
+	for key, incident := range state.Incidents {
+		mark(key, incident.Change)
+	}
+	for key, change := range state.SuppressedChanges {
+		mark(key, change)
+	}
+	for key := range state.Suppressed {
+		if _, ok := state.SuppressedChanges[key]; !ok && strings.HasPrefix(key, "host|") {
+			mark(key, model.Change{Key: key, Kind: "host", Target: strings.TrimPrefix(key, "host|")})
+		}
+	}
+	return kept, retired
 }
 
 // portHiddenByDownHost reports whether a port that the current scan does not

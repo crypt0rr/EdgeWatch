@@ -483,8 +483,13 @@ test('the image is scanned for known vulnerabilities in CI and before publicatio
   assert.deepEqual(writeScopes(permissionsOf(scan, 4)), [])
   const step = stepBlock(scan, 'Scan both platforms of the candidate')
   assert.match(step, /for platform in linux\/amd64 linux\/arm64; do/)
-  assert.match(step, /docker pull --platform "\$platform" "\$CANDIDATE"/)
-  assert.match(step, /\.\/scripts\/scan-image-vulnerabilities\.sh "\$CANDIDATE" "\$platform" \|\| status=1/)
+  // Each platform is pulled and scanned by its own manifest digest: pulling
+  // the index digest a second time for another platform fails.
+  assert.match(step, /docker buildx imagetools inspect --raw "\$CANDIDATE"/)
+  assert.match(step, /platform_image="\$REGISTRY_IMAGE@\$platform_digest"/)
+  assert.match(step, /docker pull "\$platform_image"/)
+  assert.doesNotMatch(step, /docker pull --platform "\$platform" "\$CANDIDATE"/)
+  assert.match(step, /\.\/scripts\/scan-image-vulnerabilities\.sh "\$platform_image" "\$platform" \|\| status=1/)
 
   // govulncheck reads the symbols of the bundled Naabu, and Grype fails on a
   // fixed vulnerability of high or critical severity in the Alpine packages.

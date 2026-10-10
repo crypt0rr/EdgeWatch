@@ -82,7 +82,7 @@ const status: AdminStatus = {
   username: 'admin',
   display_name: 'Alice',
   role: 'administrator',
-  permissions: ['overview.read', 'jobs.read', 'jobs.write', 'scans.read', 'incidents.read', 'notifications.manage', 'users.manage'],
+  permissions: ['overview.read', 'jobs.read', 'jobs.write', 'jobs.run', 'scans.read', 'incidents.read', 'notifications.manage', 'users.manage'],
   version: 'v0.13.3',
   notification_destinations: 1,
   notifications: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' },
@@ -96,7 +96,7 @@ const session = (role: SessionUser['role']): SessionUser => ({
   username: 'admin',
   display_name: 'Alice',
   role,
-  permissions: role === 'administrator' ? ['overview.read', 'jobs.read', 'jobs.write', 'scans.read', 'incidents.read', 'notifications.manage', 'users.manage'] : [],
+  permissions: role === 'administrator' ? ['overview.read', 'jobs.read', 'jobs.write', 'jobs.run', 'scans.read', 'incidents.read', 'notifications.manage', 'users.manage'] : [],
   csrf_token: 'csrf',
   totp_enabled: false,
   password_requirements: { minimum_length: 12 },
@@ -342,12 +342,43 @@ describe('dashboard', () => {
   })
 
   it('allows operators to run jobs without exposing administrator notification controls', async () => {
-    vi.mocked(getSession).mockResolvedValue({ ...session('operator'), permissions: ['jobs.read', 'jobs.write', 'scans.read'] })
+    vi.mocked(getSession).mockResolvedValue({ ...session('operator'), permissions: ['jobs.read', 'jobs.write', 'jobs.run', 'scans.read'] })
     await renderDashboard()
     expect(container.querySelector('button[aria-label="Run demo"]')).toBeTruthy()
     expect(container.textContent).toContain('Set up a monitor')
     expect(container.textContent).not.toContain('Test notifications')
     expect(notificationTest).not.toHaveBeenCalled()
+  })
+
+  it('gates each control on the permission its endpoint checks', async () => {
+    // jobs.write without jobs.run: the job can be edited, but not run or cancelled.
+    vi.mocked(getSession).mockResolvedValue({ ...session('operator'), permissions: ['jobs.read', 'jobs.write', 'scans.read'] })
+    await renderDashboard()
+    expect(container.textContent).toContain('Scans in progress')
+    expect(container.querySelector('button[aria-label="Run demo"]')).toBeNull()
+    expect(Array.from(container.querySelectorAll('button')).some(button => button.textContent?.includes('Cancel scan'))).toBe(false)
+    expect(container.textContent).toContain('Set up a monitor')
+    expect(container.textContent).not.toContain('Open incidents')
+    act(() => root.unmount())
+    queryClient.clear()
+
+    // jobs.run and incidents.read without jobs.write; notifications.manage
+    // without users.manage still tests the destinations.
+    root = createRoot(container)
+    vi.mocked(getSession).mockResolvedValue({ ...session('operator'), permissions: ['jobs.read', 'jobs.run', 'scans.read', 'incidents.read', 'notifications.manage'] })
+    await renderDashboard()
+    expect(container.querySelector('button[aria-label="Run demo"]')).toBeTruthy()
+    expect(Array.from(container.querySelectorAll('button')).some(button => button.textContent?.includes('Cancel scan'))).toBe(true)
+    expect(container.textContent).not.toContain('Set up a monitor')
+    expect(container.textContent).toContain('Open incidents')
+    expect(container.textContent).toContain('Test notifications')
+  })
+
+  it('does not announce raw scanner output, which changes on every poll', async () => {
+    await renderDashboard()
+    expect(container.querySelector('.active-scan-output')).toBeTruthy()
+    expect(container.querySelector('.active-scan-output[aria-live]')).toBeNull()
+    expect(container.querySelector('.active-scan-detail-output[aria-live]')).toBeNull()
   })
 
   it('restores run, cancel, and notification actions after API failures', async () => {
@@ -550,14 +581,14 @@ describe('dashboard', () => {
   })
 
   it('does not show the scanner sandbox warning to an operator', async () => {
-    vi.mocked(getSession).mockResolvedValue({ ...session('operator'), permissions: ['overview.read', 'jobs.read', 'jobs.write', 'scans.read', 'incidents.read'] })
+    vi.mocked(getSession).mockResolvedValue({ ...session('operator'), permissions: ['overview.read', 'jobs.read', 'jobs.write', 'jobs.run', 'scans.read', 'incidents.read'] })
     vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'off', state: 'disabled', process_uid: 0 } })
     await renderDashboard()
     expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
   })
 
   it('tells an operator that an administrator configures notifications', async () => {
-    vi.mocked(getSession).mockResolvedValue({ ...session('operator'), permissions: ['overview.read', 'jobs.read', 'jobs.write', 'scans.read', 'incidents.read'] })
+    vi.mocked(getSession).mockResolvedValue({ ...session('operator'), permissions: ['overview.read', 'jobs.read', 'jobs.write', 'jobs.run', 'scans.read', 'incidents.read'] })
     vi.mocked(adminStatus).mockResolvedValue({ ...status, notification_destinations: 0 })
     await renderDashboard()
 

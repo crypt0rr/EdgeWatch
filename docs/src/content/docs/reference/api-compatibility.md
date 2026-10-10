@@ -186,6 +186,14 @@ Providing either replaces them. Responses remain write-only and contain
 provider metadata, never the URL or fields. Existing clients can continue to
 send `url` unchanged.
 
+## Session capabilities
+
+`POST /api/v1/auth/login` and `GET /api/v1/auth/session` include
+`high_cost_override: true` when the session may approve high-cost scans on a
+job (`allow_high_cost`); the key is absent otherwise. Today that is an
+administrator of a unit. The console shows the approval control only to such a
+session, and the job API still enforces the rule.
+
 ## Business units
 
 v0.20.0 adds business units to every installation. The routes and response

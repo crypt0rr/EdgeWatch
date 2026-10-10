@@ -65,10 +65,10 @@ export function JobEditor() {
   const timing = watch('timing')
   const allowHighCost = watch('allow_high_cost')
   const dnsComparisonMode = watch('dns_comparison_mode')
-  // Only administrators (users.manage) may turn high-cost approval on; the API
-  // rejects it for every other role. Operators may still keep or clear an
-  // approval that is already saved, which the API accepts.
-  const canApproveHighCost = session.data?.permissions.includes('users.manage') ?? false
+  // Only a session the API reports as high_cost_override may turn high-cost
+  // approval on; the API rejects it for every other session. Operators may
+  // still keep or clear an approval that is already saved, which it accepts.
+  const canApproveHighCost = session.data?.high_cost_override ?? false
   const highCostLocked = !canApproveHighCost && !allowHighCost && !existing.data?.job.allow_high_cost
 
   useEffect(() => {

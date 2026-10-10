@@ -60,5 +60,8 @@ Each business unit publishes its own page; see
 A public-status save applies only to the configuration the editor loaded. If
 another administrator saved in the meantime, EdgeWatch rejects the save with a
 conflict and the editor reloads the current settings, so an outdated editor
-cannot republish a withdrawn page. API clients send the `updated_at` value from
+cannot republish a withdrawn page. An editor with unsaved changes keeps them
+when the console refreshes in the background, and says when another
+administrator has saved; **Discard my changes and load theirs** reloads the
+current settings at once. API clients send the `updated_at` value from
 `GET /api/v1/public-dashboard` with each `PUT`.

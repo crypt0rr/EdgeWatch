@@ -97,6 +97,18 @@ export function ScannerProfiles() {
       // the confirmation after it so a successful save remains visible.
       setMessage('Scanner profile saved. Jobs keep their pinned revision until explicitly upgraded.')
     } catch (err) {
+      if (editing && err instanceof APIError && err.status === 409) {
+        // Another administrator saved this profile. Adopt its current
+        // revision, so the next save is checked against it, and keep the
+        // typed draft for the administrator to review before saving.
+        const refreshed = await client.fetchQuery({ queryKey: ['scanner-profiles', true], queryFn: () => listScannerProfiles(true), staleTime: 0 }).catch(() => undefined)
+        const current = refreshed?.profiles.find(profile => profile.id === editing.id)
+        if (current) {
+          setEditing(current)
+          setError(`This profile was saved elsewhere while you were editing (now revision ${current.revision}). Your changes are kept; review them and save again.`)
+          return
+        }
+      }
       setError(err instanceof APIError ? err.message : 'The scanner profile could not be saved.')
     } finally {
       setSaving(false)

@@ -404,16 +404,19 @@ func TestSessionDescribesTheBusinessUnit(t *testing.T) {
 	for actor, want := range map[string]struct {
 		scope string
 		unit  any
+		// highCost is high_cost_override: only a session that may approve
+		// high-cost scans carries it.
+		highCost any
 	}{
-		actorAdminA:   {"unit", map[string]any{"id": store.DefaultTenantID, "name": "Default", "slug": "default"}},
-		actorViewerA:  {"unit", map[string]any{"id": store.DefaultTenantID, "name": "Default", "slug": "default"}},
-		actorAdminB:   {"unit", map[string]any{"id": f.unitB, "name": "Bravo Unit", "slug": "bravo"}},
-		actorPlatform: {"platform", nil},
+		actorAdminA:   {"unit", map[string]any{"id": store.DefaultTenantID, "name": "Default", "slug": "default"}, true},
+		actorViewerA:  {"unit", map[string]any{"id": store.DefaultTenantID, "name": "Default", "slug": "default"}, nil},
+		actorAdminB:   {"unit", map[string]any{"id": f.unitB, "name": "Bravo Unit", "slug": "bravo"}, true},
+		actorPlatform: {"platform", nil, nil},
 	} {
 		response := f.call(t, actor, http.MethodGet, "/auth/session", "")
 		expectResponse(t, response, http.StatusOK, actor+" session", nil)
 		payload, _ := sessionKeys(t, response.Body.Bytes())
-		if payload["scope"] != want.scope || !reflect.DeepEqual(payload["unit"], want.unit) || payload["multi_unit"] != true {
+		if payload["scope"] != want.scope || !reflect.DeepEqual(payload["unit"], want.unit) || payload["multi_unit"] != true || payload["high_cost_override"] != want.highCost {
 			t.Errorf("%s session = %s", actor, response.Body.String())
 		}
 	}
@@ -494,7 +497,7 @@ func TestSingleUnitSessionResponses(t *testing.T) {
 	response := callAPI(t, server, admin, http.MethodGet, "/auth/session", "")
 	expectResponse(t, response, http.StatusOK, "session", nil)
 	payload, keys := sessionKeys(t, response.Body.Bytes())
-	if want := []string{"csrf_token", "display_name", "multi_unit", "password_requirements", "permissions", "role", "scope", "timezone", "totp_enabled", "unit", "user_id", "username"}; !reflect.DeepEqual(keys, want) {
+	if want := []string{"csrf_token", "display_name", "high_cost_override", "multi_unit", "password_requirements", "permissions", "role", "scope", "timezone", "totp_enabled", "unit", "user_id", "username"}; !reflect.DeepEqual(keys, want) {
 		t.Fatalf("session keys = %v, want %v", keys, want)
 	}
 	if payload["scope"] != "unit" || payload["multi_unit"] != false || !reflect.DeepEqual(payload["unit"], map[string]any{"id": store.DefaultTenantID, "name": "Default", "slug": "default"}) {
@@ -514,7 +517,7 @@ func TestSingleUnitSessionResponses(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	server.api(recorder, login)
 	loginPayload, loginKeys := sessionKeys(t, recorder.Body.Bytes())
-	if want := []string{"csrf_token", "display_name", "permissions", "role", "totp_required", "username"}; !reflect.DeepEqual(loginKeys, want) || !reflect.DeepEqual(loginPayload["permissions"], toAnySlice(full)) {
+	if want := []string{"csrf_token", "display_name", "high_cost_override", "permissions", "role", "totp_required", "username"}; !reflect.DeepEqual(loginKeys, want) || !reflect.DeepEqual(loginPayload["permissions"], toAnySlice(full)) {
 		t.Fatalf("login = %s", recorder.Body.String())
 	}
 }

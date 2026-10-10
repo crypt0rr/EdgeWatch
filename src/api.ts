@@ -163,7 +163,7 @@ export type UnitRef = { id: string; name: string; slug: string }
 // scope is "platform" for a platform administrator and "unit" otherwise,
 // unit is the account's business unit (null for the platform), and
 // multi_unit reports whether more than one unit exists.
-export type SessionUser = { user_id: string; username: string; display_name?: string; role: Role; permissions: string[]; csrf_token: string; totp_enabled: boolean; totp_enrollment_required?: boolean; password_requirements: { minimum_length: number }; timezone?: string; scope: 'unit' | 'platform'; unit: UnitRef | null; multi_unit: boolean }
+export type SessionUser = { user_id: string; username: string; display_name?: string; role: Role; permissions: string[]; csrf_token: string; totp_enabled: boolean; totp_enrollment_required?: boolean; high_cost_override?: boolean; password_requirements: { minimum_length: number }; timezone?: string; scope: 'unit' | 'platform'; unit: UnitRef | null; multi_unit: boolean }
 /**
  * The latest request from a proxy that web.trusted_proxies does not list but
  * that sent a client-address forwarding header. Every client behind it shares

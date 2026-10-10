@@ -107,6 +107,22 @@ describe('scanner profiles', () => {
     expect(screen.getByText(/Scanner profile restored/)).toBeInTheDocument()
   })
 
+  it('adopts the current revision after a save conflict and keeps the typed draft', async () => {
+    renderWithProviders(<ScannerProfiles />)
+    await waitFor(() => expect(screen.getByText('Managed connect')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Managed connect' }))
+    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'typed while another administrator saved' } })
+    fireEvent.change(screen.getByLabelText('Password confirmation'), { target: { value: 'administrator-password' } })
+    vi.mocked(updateScannerProfile).mockRejectedValueOnce(new APIError('scanner profile was modified; reload before saving', 'conflict', undefined, 409))
+    vi.mocked(listScannerProfiles).mockResolvedValue({ profiles: [{ ...profile, revision: 4, description: 'saved elsewhere' }] })
+    fireEvent.click(screen.getByRole('button', { name: 'Save revision' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('saved elsewhere while you were editing (now revision 4)'))
+    expect(screen.getByLabelText('Description')).toHaveValue('typed while another administrator saved')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save revision' }))
+    await waitFor(() => expect(updateScannerProfile).toHaveBeenLastCalledWith('profile-1', expect.objectContaining({ description: 'typed while another administrator saved' }), 4))
+  })
+
   it('surfaces validation and save failures while retaining the editor', async () => {
     vi.mocked(validateScannerProfile).mockRejectedValue(new Error('unsafe template'))
     vi.mocked(createScannerProfile).mockRejectedValue(new APIError('profile rejected', 'validation'))

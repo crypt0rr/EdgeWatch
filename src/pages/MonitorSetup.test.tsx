@@ -31,7 +31,7 @@ vi.mock('../api', async () => {
 })
 
 const destination: NotificationDestination = { id: 'destination-1', name: 'Operations', provider: 'smtp', source: 'web', enabled: true, locked: false, read_only: false, revision: 1 }
-const session = { role: 'administrator' as const, user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'jobs.read', 'users.manage', 'notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, scope: 'unit' as const, unit: { id: 'unit-1', name: 'Unit', slug: 'unit' }, multi_unit: false }
+const session = { role: 'administrator' as const, user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'jobs.read', 'users.manage', 'notifications.manage'], high_cost_override: true, csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, scope: 'unit' as const, unit: { id: 'unit-1', name: 'Unit', slug: 'unit' }, multi_unit: false }
 const profile = { id: 'profile-advanced', name: 'Tuned discovery', description: '', built_in: false, archived: false, revision: 7, definition: { engine: 'naabu_nmap', naabu: { scan_type: 'connect', rate: 1800, workers: 20, retries: 2, timeout_ms: 1200, warm_up_seconds: 2, verify: true, address_batch_size: 16 }, nmap_args: ['-sV'], naabu_args: [], enrichment_args: [] } }
 const capabilities = { engines: ['nmap', 'naabu_nmap'], nmap: { available: true, path: '/usr/bin/nmap', version: '7.99' }, naabu: { available: true, path: '/usr/bin/naabu', version: '2.6.1', syn_supported: false } }
 

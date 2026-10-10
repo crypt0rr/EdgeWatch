@@ -25,9 +25,11 @@ It uses a Go backend, SQLite storage, and a React/TypeScript web console.
 | `internal/store/` | SQLite queries, migrations, history, backup, and restore |
 | `internal/auth/` | Authentication and permissions |
 | `internal/web/` | HTTP handlers, authorization, public status, and live updates |
+| `internal/apitypes/` | TypeScript declarations of the API response structs that `ResponseTypes` in `internal/web/api_types.go` lists |
 | `internal/notify/` | Notification delivery and secret handling |
 | `internal/rdap/`, `internal/updatecheck/` | Network metadata and release checks |
 | `src/` | React pages, components, API client, types, and frontend tests |
+| `src/generated/` | API types that `go run ./scripts/gen-api-types` writes from the Go response structs; generated but committed |
 | `internal/webui/` | Embedded frontend assets |
 | `e2e/` | Playwright browser tests |
 | `scripts/`, `.github/workflows/` | Build, validation, and release automation |
@@ -55,6 +57,11 @@ Edit frontend source in `src/`.
 Do not edit generated files in `internal/webui/dist/` or commit build output.
 Preserve the tracked `.gitkeep` file.
 
+`src/generated/api-types.ts` is generated but committed source, unlike `internal/webui/dist/`.
+Do not edit it by hand: after changing a struct that `ResponseTypes` in `internal/web/api_types.go` lists, or adding one, run `go run ./scripts/gen-api-types` from the repository root and commit the result.
+Every exported field of a listed struct needs a `json` tag, and every named struct it contains must be listed too.
+Import these types from `src/generated/api-types` instead of declaring the same shape in `src/types.ts` or `src/api.ts`.
+
 ## Validation
 
 Choose checks that cover the changed behavior.
@@ -64,6 +71,7 @@ Documentation-only changes need a diff review and checks of referenced paths and
 | Change | Checks |
 | --- | --- |
 | Go code | Format changed Go files with `gofmt`; run `go vet ./...` and `go test -race -timeout=25m ./...` |
+| A struct that `ResponseTypes` lists | `go run ./scripts/gen-api-types`, commit `src/generated/`, then the frontend checks; CI fails when `git diff --exit-code src/generated` finds a difference after running the command |
 | Frontend code | `npm run lint`, `npm run build`, and `npm run test:coverage` |
 | Browser behavior | `npm run test:e2e` |
 | Documentation website | `npm --prefix docs ci`, `npm --prefix docs run build`, and browser review for visible changes |
@@ -134,7 +142,7 @@ For release changes, preserve the immutable candidate build implemented in
 ## Change scope and pull requests
 
 Follow the conventions in nearby code and keep each change focused on the requested behavior.
-Update API types and consumers together when response shapes change.
+Update API types and consumers together when response shapes change; regenerate `src/generated/api-types.ts` when a listed response struct changes.
 Documentation updates are mandatory whenever a change affects documented behavior, including new features, configuration, commands, APIs, permissions, deployment, or recovery.
 Update the affected guides in `docs/src/content/docs/` in the same change; the website is the canonical detailed documentation.
 Update the README quick start and `SECURITY.md` when their content is affected, and run `npm --prefix docs run build`.

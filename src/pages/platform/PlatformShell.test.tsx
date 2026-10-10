@@ -4,8 +4,9 @@ import { act, fireEvent, screen, waitFor } from '@testing-library/react'
 import { useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { activeScans, adminStatus, getSession, getUnitCapacity, listIncidents, listJobs, listScans, listUnits, platformAudit, platformStatus, recordActivity } from '../../api'
-import type { PlatformStatus } from '../../api'
+import type { PlatformStatus } from '../../generated/api-types'
 import { deploymentLimits as limits, platformPermissions, platformSession } from '../../test/platform-fixtures'
+import { developmentBuildUpdates } from '../../test/status-fixtures'
 import { renderWithProviders } from '../../test/test-utils'
 import { PlatformShell } from './PlatformShell'
 
@@ -14,7 +15,7 @@ vi.mock('../../api', async () => {
   return { ...actual, activeScans: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), getUnitCapacity: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listScans: vi.fn(), listUnits: vi.fn(), platformAudit: vi.fn(), platformStatus: vi.fn(), recordActivity: vi.fn() }
 })
 
-const status: PlatformStatus = { version: 'v0.19.0', units: { total: 2, active: 2, disabled: 0, deleting: 0 }, accounts: 5, jobs: 3, stored_scans: 12, platform_admins: { total: 1, enabled: 1 }, capacity: { limits, slots: { capacity: 4, in_use: 1, queued: 0 } } }
+const status: PlatformStatus = { version: 'v0.19.0', updates: developmentBuildUpdates, units: { total: 2, active: 2, disabled: 0, deleting: 0 }, accounts: 5, jobs: 3, stored_scans: 12, platform_admins: { total: 1, enabled: 1 }, capacity: { limits, slots: { capacity: 4, in_use: 1, queued: 0 } } }
 
 function Location() {
   return <output data-testid="location">{useLocation().pathname}</output>
@@ -88,7 +89,7 @@ describe('platform console shell', () => {
   })
 
   it('shows an accessible platform release indicator beside the installed version', async () => {
-    vi.mocked(platformStatus).mockResolvedValue({ ...status, version_release_url: 'https://example.test/releases/v0.20.0', updates: { enabled: true, status: 'update_available', available: true, current_version: 'v0.19.0', latest_version: 'v0.20.0', release_url: 'https://example.test/releases/v0.20.0' } })
+    vi.mocked(platformStatus).mockResolvedValue({ ...status, version_release_url: 'https://example.test/releases/v0.20.0', updates: { enabled: true, status: 'update_available', available: true, stale: false, current_version: 'v0.19.0', latest_version: 'v0.20.0', release_url: 'https://example.test/releases/v0.20.0' } })
     renderShell('/platform/status')
     const version = await screen.findByRole('link', { name: 'Release notes for EdgeWatch v0.19.0' })
     expect(version).toHaveAttribute('href', 'https://example.test/releases/v0.20.0')

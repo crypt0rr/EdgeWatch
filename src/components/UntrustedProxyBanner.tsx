@@ -1,5 +1,5 @@
 import { AlertTriangle } from 'lucide-react'
-import type { UntrustedProxy } from '../api'
+import type { UntrustedProxy } from '../generated/api-types'
 import { formatDateTime } from '../format'
 
 /**

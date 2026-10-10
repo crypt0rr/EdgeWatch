@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createPlatformNotification, createUser, getPublicDashboard, getScan, getScanSummary, historicalScanHost, issueUserActivation, issueUserPasswordReset, listHosts, listScans, listUsers, login, recordActivity, revokeUserSessions, scheduleSuggestion, setCSRF, setForbiddenHandler, setup, setupStatus, suppressIncident, updateNotificationDestination, updatePlatformNotification, updateUser } from './api'
 import * as apiRoutes from './api'
 import { getDisplayTimeZone, setDisplayTimeZone } from './format'
+import type { Scan, ScanSummary } from './generated/api-types'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -193,6 +194,20 @@ describe('historical scan API contract', () => {
 
     await expect(getScanSummary('large/scan')).resolves.toMatchObject({ scan: { id: 'large-scan', job: 'inventory' } })
     expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/scans/large%2Fscan/summary')
+  })
+
+  it('types the scan of a job scan detail as the summary that the server sends', async () => {
+    const pagination = { limit: 25, offset: 50, total: 0, has_more: false, next_offset: null }
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({ scan: { id: 'scan-1', job: 'inventory', status: 'success' }, changes: [], changes_pagination: pagination, current_security_hash: 'scope', comparison_source: 'scan_time', comparison_state: 'compared' }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const detail = await apiRoutes.scanDetail('job-1', 'scan-1', 50, 25)
+    // GET /jobs/{id}/scans/{scan} writes a ScanSummary, which has no snapshot;
+    // only the full scan from getScan carries one.
+    expectTypeOf(detail.scan).toEqualTypeOf<ScanSummary>()
+    expectTypeOf(getScan).returns.resolves.toEqualTypeOf<Scan>()
+    expect(detail).toMatchObject({ scan: { id: 'scan-1' }, changes_pagination: pagination, comparison_source: 'scan_time' })
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/jobs/job-1/scans/scan-1?limit=25&offset=50')
   })
 })
 

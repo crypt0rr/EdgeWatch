@@ -1,4 +1,4 @@
-import type { Unit } from '../types'
+import type { Unit } from '../generated/api-types'
 
 type SurfaceUnitListProps = {
   units: Unit[]

@@ -1,5 +1,5 @@
 import { AlertTriangle } from 'lucide-react'
-import type { ScheduledBackupStatus } from '../api'
+import type { ScheduledBackupStatus } from '../generated/api-types'
 import { formatDateTime } from '../format'
 
 /**

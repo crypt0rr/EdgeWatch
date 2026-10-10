@@ -142,7 +142,7 @@ func TestAuditedNotificationWrappersAndReadViews(t *testing.T) {
 	if err := defaultNotifier(notifier).ValidateDestinationSelection(ctx, []string{""}); !errors.Is(err, ErrInvalidDestinationSelection) {
 		t.Fatalf("empty selection error = %v", err)
 	}
-	if status := defaultStatus(t, notifier); status["managed"] != 1 || status["active"] != 1 || status["key_state"] != "ready" {
+	if status := defaultStatus(t, notifier); status.Managed != 1 || status.Active != 1 || status.KeyState != "ready" {
 		t.Fatalf("notification status = %#v", status)
 	}
 	if count := defaultActiveCount(t, notifier); count != 1 {

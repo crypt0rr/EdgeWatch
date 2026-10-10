@@ -10,6 +10,7 @@ import type { SessionUser } from './api'
 import { AppContent, createQueryClient } from './main'
 import type { Job } from './types'
 import { renderWithProviders } from './test/test-utils'
+import { developmentBuildUpdates } from './test/status-fixtures'
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api')
@@ -58,7 +59,7 @@ async function readAgainOnFocus(client: QueryClient, keys: string[][] = [['sessi
 describe('the console session', { timeout: 20_000 }, () => {
   beforeEach(() => {
     vi.mocked(setupStatus).mockResolvedValue(configured)
-    vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.20.7' })
+    vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.20.7', updates: developmentBuildUpdates })
     vi.mocked(listIncidents).mockResolvedValue(noIncidents)
     vi.mocked(listJobs).mockResolvedValue({ jobs: [retailJob] })
     vi.mocked(listScans).mockResolvedValue({ scans: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null } })

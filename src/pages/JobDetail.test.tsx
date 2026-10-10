@@ -18,7 +18,8 @@ import {
   scanHosts,
   scanResults,
 } from '../api'
-import type { Job, ScanSummary } from '../types'
+import type { Job } from '../types'
+import type { ScanSummary } from '../generated/api-types'
 import { JobDetail } from './JobDetail'
 import { defaultUnitScope } from '../test/test-utils'
 
@@ -263,7 +264,7 @@ describe('job surface overview', () => {
     vi.mocked(getJob).mockResolvedValue({ ...job, baseline: { ...job.baseline, pending: 12 } })
     let remaining = Array.from({ length: 12 }, (_, index) => ({
       key: `port|router.example|tcp|${1000 + index}`,
-      change: { kind: 'port' as const, target: 'router.example', protocol: 'tcp' as const, port: 1000 + index, old: 'not-open', new: 'open', severity: 'critical' as const },
+      change: { key: `port|router.example|tcp|${1000 + index}`, kind: 'port' as const, target: 'router.example', protocol: 'tcp' as const, port: 1000 + index, old: 'not-open', new: 'open', severity: 'critical' as const },
       count: 1,
     }))
     vi.mocked(jobPendingChanges).mockImplementation(async (_jobID, offset = 0, limit = 10) => {

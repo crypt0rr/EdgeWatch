@@ -117,7 +117,7 @@ func TestImportConfiguredURLsCreatesMissingDefaultKey(t *testing.T) {
 	if !urls[first] || !urls[second] {
 		t.Fatalf("imported destinations do not decrypt to the configured URLs")
 	}
-	if status := defaultStatus(t, notifier); status["deployment"] != 0 || status["managed"] != 2 || status["active"] != 2 {
+	if status := defaultStatus(t, notifier); status.Deployment != 0 || status.Managed != 2 || status.Active != 2 {
 		t.Fatalf("notifier status after import = %#v", status)
 	}
 }
@@ -384,21 +384,21 @@ func TestNotifierStatusReportsConfigImport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := defaultStatus(t, notifier)["config_import"]; ok {
+	if got := defaultStatus(t, notifier).ConfigImport; got != "" {
 		t.Fatal("status reports a config import before any daemon start")
 	}
 	for _, test := range []struct {
 		state store.NotificationConfigImport
-		want  any
+		want  string
 	}{
-		{store.NotificationConfigImport{Status: store.NotificationConfigImportNone}, nil},
+		{store.NotificationConfigImport{Status: store.NotificationConfigImportNone}, ""},
 		{store.NotificationConfigImport{Status: store.NotificationConfigImportImported, ConfiguredURLs: 1, ImportedURLs: 1}, "imported"},
 		{store.NotificationConfigImport{Status: store.NotificationConfigImportFailed, ConfiguredURLs: 1, ErrorCode: "key_unavailable"}, "failed"},
 	} {
 		if err := db.System().RecordNotificationConfigImport(ctx, test.state); err != nil {
 			t.Fatal(err)
 		}
-		if got := defaultStatus(t, notifier)["config_import"]; got != test.want {
+		if got := defaultStatus(t, notifier).ConfigImport; got != test.want {
 			t.Fatalf("config_import for %#v = %v, want %v", test.state, got, test.want)
 		}
 	}

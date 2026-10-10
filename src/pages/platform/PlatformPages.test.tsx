@@ -6,6 +6,7 @@ import { APIError, createPlatformNotification, deletePendingPlatformAdmin, delet
 import type { AuditEntry, NotificationDestination, UserSummary } from '../../api'
 import { formatDateTime, setDisplayTimeZone } from '../../format'
 import { businessUnit, deploymentLimits as limits, platformSession } from '../../test/platform-fixtures'
+import { developmentBuildUpdates, updateStatus } from '../../test/status-fixtures'
 import { renderWithProviders } from '../../test/test-utils'
 import { PlatformAdmins } from './PlatformAdmins'
 import { dayBound, PlatformAudit } from './PlatformAudit'
@@ -522,7 +523,7 @@ describe('platform audit', () => {
 
 describe('platform status', () => {
   it('shows the deployment as numbers and its release status', async () => {
-    vi.mocked(platformStatus).mockResolvedValue({ version: 'v0.19.0', version_release_url: 'https://example.test/v0.19.0', updates: { enabled: true, status: 'update_available', available: true, current_version: 'v0.19.0', latest_version: 'v0.20.0', release_url: 'https://example.test/v0.20.0' }, units: { total: 3, active: 2, disabled: 1, deleting: 0 }, accounts: 12, jobs: 9, stored_scans: 4321, platform_admins: { total: 2, enabled: 1 }, capacity: { limits, slots: { capacity: 4, in_use: 3, queued: 1 } } })
+    vi.mocked(platformStatus).mockResolvedValue({ version: 'v0.19.0', version_release_url: 'https://example.test/v0.19.0', updates: { enabled: true, status: 'update_available', available: true, stale: false, current_version: 'v0.19.0', latest_version: 'v0.20.0', release_url: 'https://example.test/v0.20.0' }, units: { total: 3, active: 2, disabled: 1, deleting: 0 }, accounts: 12, jobs: 9, stored_scans: 4321, platform_admins: { total: 2, enabled: 1 }, capacity: { limits, slots: { capacity: 4, in_use: 3, queued: 1 } } })
     renderWithProviders(<PlatformStatusPage />)
     expect(await screen.findByText('2 active · 1 disabled · 0 deleting')).toBeInTheDocument()
     expect(screen.getByText('9 jobs across all units')).toBeInTheDocument()
@@ -537,14 +538,14 @@ describe('platform status', () => {
   })
 
   it('warns about a proxy that web.trusted_proxies does not list', async () => {
-    vi.mocked(platformStatus).mockResolvedValue({ version: 'v0.19.0', units: { total: 2, active: 2, disabled: 0, deleting: 0 }, accounts: 4, jobs: 1, stored_scans: 0, platform_admins: { total: 1, enabled: 1 }, capacity: { limits, slots: { capacity: 2, in_use: 0, queued: 0 } }, untrusted_proxy: { peer: '192.168.10.4', header: 'Forwarded', last_seen_at: '2026-09-30T08:00:00Z' } })
+    vi.mocked(platformStatus).mockResolvedValue({ version: 'v0.19.0', updates: developmentBuildUpdates, units: { total: 2, active: 2, disabled: 0, deleting: 0 }, accounts: 4, jobs: 1, stored_scans: 0, platform_admins: { total: 1, enabled: 1 }, capacity: { limits, slots: { capacity: 2, in_use: 0, queued: 0 } }, untrusted_proxy: { peer: '192.168.10.4', header: 'Forwarded', last_seen_at: '2026-09-30T08:00:00Z' } })
     renderWithProviders(<PlatformStatusPage />)
     expect(await screen.findByText('Requests arrive through a proxy that EdgeWatch does not trust.')).toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent('192.168.10.4 sends Forwarded, but web.trusted_proxies does not list it')
   })
 
   it('warns about failing scheduled backups', async () => {
-    vi.mocked(platformStatus).mockResolvedValue({ version: 'v0.19.0', units: { total: 2, active: 2, disabled: 0, deleting: 0 }, accounts: 4, jobs: 1, stored_scans: 0, platform_admins: { total: 1, enabled: 1 }, capacity: { limits, slots: { capacity: 2, in_use: 0, queued: 0 } }, backups: { directory: '/var/lib/edgewatch/backups', schedule: '0 3 * * *', keep: 7, last_success_at: '2026-10-01T03:00:00Z', last_backup: 'edgewatch-scheduled-20261001T030000Z.db', last_failure_at: '2026-10-02T03:00:00Z', last_error: 'disk full', consecutive_failures: 1 } })
+    vi.mocked(platformStatus).mockResolvedValue({ version: 'v0.19.0', updates: developmentBuildUpdates, units: { total: 2, active: 2, disabled: 0, deleting: 0 }, accounts: 4, jobs: 1, stored_scans: 0, platform_admins: { total: 1, enabled: 1 }, capacity: { limits, slots: { capacity: 2, in_use: 0, queued: 0 } }, backups: { directory: '/var/lib/edgewatch/backups', schedule: '0 3 * * *', keep: 7, last_success_at: '2026-10-01T03:00:00Z', last_backup: 'edgewatch-scheduled-20261001T030000Z.db', last_failure_at: '2026-10-02T03:00:00Z', last_error: 'disk full', consecutive_failures: 1 } })
     renderWithProviders(<PlatformStatusPage />)
     expect(await screen.findByText('Scheduled backups are failing.')).toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent('The newest good backup, edgewatch-scheduled-20261001T030000Z.db, is from')
@@ -554,7 +555,7 @@ describe('platform status', () => {
     vi.mocked(platformStatus).mockRejectedValueOnce(new Error('offline'))
     renderWithProviders(<PlatformStatusPage />)
     expect(await screen.findByText('Could not load the platform status.')).toBeInTheDocument()
-    const status = (value: string) => ({ enabled: true, status: value, current_version: 'v1' })
+    const status = (value: string) => updateStatus({ status: value, current_version: 'v1' })
     expect(updateSummary(undefined)).toBe('Release checks are off.')
     expect(updateSummary(status('up_to_date'))).toBe('Up to date.')
     expect(updateSummary(status('check_failed'))).toBe('The last release check failed.')

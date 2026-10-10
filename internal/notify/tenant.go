@@ -164,9 +164,42 @@ func (set destinationSet) legacySelection() []string {
 	return selection
 }
 
+// Status is the state of one owner's notification destinations: their
+// counts, the state of the key that the web-managed ones need, and the totals
+// of their deliveries. It holds counts and codes only, never a URL or a
+// provider error. Its fields are in the order of their JSON names.
+type Status struct {
+	// Active counts the destinations that alerts go to: every deployment
+	// destination and the enabled web-managed ones that are not locked.
+	Active int `json:"active"`
+	// ConfigImport is imported while config.yaml still lists notification
+	// URLs that were imported, and failed while their import failed and they
+	// are still delivered from config.yaml. Only the tenant that owns the
+	// deployment destinations reports it.
+	ConfigImport string `json:"config_import,omitempty"`
+	// The delivery totals count the owner's queued, retrying, deferred, and
+	// dropped deliveries. They are left out when the deliveries could not be
+	// read.
+	DeliveryDeferrals        *int `json:"delivery_deferrals,omitempty"`
+	DeliveryPending          *int `json:"delivery_pending,omitempty"`
+	DeliveryRetrying         *int `json:"delivery_retrying,omitempty"`
+	DeliveryTerminalFailures *int `json:"delivery_terminal_failures,omitempty"`
+	// Deployment counts the destinations from config.yaml.
+	Deployment int `json:"deployment"`
+	// KeyState is not_required without web-managed destinations, the code
+	// of the key's error when the key cannot be loaded, decrypt_failed when
+	// some of them are locked, and ready otherwise.
+	KeyState string `json:"key_state"`
+	// Locked counts the web-managed destinations that cannot be used: the
+	// key cannot open them, or their URL is no longer valid.
+	Locked int `json:"locked"`
+	// Managed counts the web-managed destinations.
+	Managed int `json:"managed"`
+}
+
 // status counts the destinations and reports the state of the key that the
 // web-managed ones need.
-func (set destinationSet) status() map[string]any {
+func (set destinationSet) status() Status {
 	locked, activeManaged := 0, 0
 	for _, entry := range set.managed {
 		if entry.locked {
@@ -185,13 +218,13 @@ func (set destinationSet) status() map[string]any {
 			keyState = "decrypt_failed"
 		}
 	}
-	return map[string]any{"deployment": len(set.fileURLs), "managed": len(set.managed), "active": len(set.fileURLs) + activeManaged, "locked": locked, "key_state": keyState}
+	return Status{Deployment: len(set.fileURLs), Managed: len(set.managed), Active: len(set.fileURLs) + activeManaged, Locked: locked, KeyState: keyState}
 }
 
 // completeStatus adds the config.yaml import outcome, for the tenant that
 // owns the deployment destinations, and the delivery totals of the tenant
 // of ts. Only the outcome and counts are exposed, never a URL.
-func (n *Notifier) completeStatus(ctx context.Context, set destinationSet, ts *store.TenantStore) map[string]any {
+func (n *Notifier) completeStatus(ctx context.Context, set destinationSet, ts *store.TenantStore) Status {
 	status := set.status()
 	if n.Store == nil {
 		return status
@@ -203,21 +236,21 @@ func (n *Notifier) completeStatus(ctx context.Context, set destinationSet, ts *s
 		if state, err := n.Store.System().NotificationConfigImportState(ctx); err == nil {
 			switch {
 			case state.Status == store.NotificationConfigImportFailed:
-				status["config_import"] = store.NotificationConfigImportFailed
+				status.ConfigImport = store.NotificationConfigImportFailed
 			case state.ImportedURLs > 0:
-				status["config_import"] = store.NotificationConfigImportImported
+				status.ConfigImport = store.NotificationConfigImportImported
 			}
 		}
 	}
 	if health, err := ts.ListDeliveryHealth(ctx); err == nil {
-		addDeliveryTotals(status, health)
+		addDeliveryTotals(&status, health)
 	}
 	return status
 }
 
 // addDeliveryTotals adds the delivery totals of one owner's destinations to
 // its status: counts only, never a URL or a provider error.
-func addDeliveryTotals(status map[string]any, health map[string]store.DeliveryHealth) {
+func addDeliveryTotals(status *Status, health map[string]store.DeliveryHealth) {
 	pending, retrying, deferrals, terminal := 0, 0, 0, 0
 	for _, item := range health {
 		pending += item.Pending
@@ -225,10 +258,10 @@ func addDeliveryTotals(status map[string]any, health map[string]store.DeliveryHe
 		deferrals += item.Deferrals
 		terminal += item.TerminalFailures
 	}
-	status["delivery_pending"] = pending
-	status["delivery_retrying"] = retrying
-	status["delivery_deferrals"] = deferrals
-	status["delivery_terminal_failures"] = terminal
+	status.DeliveryPending = &pending
+	status.DeliveryRetrying = &retrying
+	status.DeliveryDeferrals = &deferrals
+	status.DeliveryTerminalFailures = &terminal
 }
 
 // keys returns the destinations that an alert with the legacy nil selection
@@ -493,10 +526,10 @@ func (tn *TenantNotifier) Destination(ctx context.Context, id string) (Destinati
 
 // Status returns the tenant's destination counts, key state, and delivery
 // totals.
-func (tn *TenantNotifier) Status(ctx context.Context) (map[string]any, error) {
+func (tn *TenantNotifier) Status(ctx context.Context) (Status, error) {
 	set, err := tn.destinations(ctx)
 	if err != nil {
-		return nil, err
+		return Status{}, err
 	}
 	return tn.n.completeStatus(ctx, set, tn.ts), nil
 }

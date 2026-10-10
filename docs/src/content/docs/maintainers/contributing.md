@@ -21,9 +21,11 @@ contains the detailed change rules and validation matrix.
 | `internal/store/` | SQLite queries, migrations, history, backup, and restore |
 | `internal/auth/` | Authentication and permissions |
 | `internal/web/` | HTTP handlers, authorization, public status, and live updates |
+| `internal/apitypes/` | TypeScript declarations of the API response structs |
 | `internal/notify/` | Notification delivery and secret handling |
 | `internal/rdap/`, `internal/updatecheck/` | Network metadata and release checks |
 | `src/` | Console pages, components, API client, types, and tests |
+| `src/generated/` | API types generated from the Go response structs, committed |
 | `internal/webui/` | Embedded console assets |
 | `e2e/` | Browser tests |
 | `scripts/`, `.github/workflows/` | Build, validation, and release automation |
@@ -50,7 +52,11 @@ contains the exact security and session-revocation guarantees.
 
 Inspect the working tree and preserve unrelated work. Follow nearby conventions,
 update API types and consumers together, and document visible behavior changes
-in the relevant guide. Add regression coverage for bugs and changed behavior.
+in the relevant guide. When a response struct that `src/generated/api-types.ts`
+is generated from changes, regenerate the file with
+`go run ./scripts/gen-api-types` and commit it; see
+[Generated API types](/maintainers/development/#generated-api-types).
+Add regression coverage for bugs and changed behavior.
 Run the checks appropriate to the change from [Local development](/maintainers/development/)
 and the agent guide.
 

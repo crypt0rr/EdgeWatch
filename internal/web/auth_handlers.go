@@ -84,27 +84,25 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 	if !auth.HasPermission(session, auth.PermissionOverviewRead) {
 		// Viewers are authenticated users too, but must not inherit operational
 		// overview data just to show the product version and release indicator.
-		viewerStatus := map[string]any{
-			"version": s.Version,
-			"updates": s.applicationUpdateStatus(r.Context()),
-		}
-		s.addVersionReleaseURL(viewerStatus)
-		writeJSON(w, http.StatusOK, viewerStatus)
+		writeJSON(w, http.StatusOK, adminStatusView{Version: s.Version, VersionReleaseURL: s.versionReleaseURL(), Updates: s.applicationUpdateStatus(r.Context())})
 		return
 	}
-	status := map[string]any{
-		"configured":   true,
-		"username":     user.Username,
-		"display_name": user.DisplayName,
-		"role":         user.Role,
-		"permissions":  auth.PermissionsForRole(user.Role),
-		"version":      s.Version,
-		"retention":    s.App.Config.Retention.Value().String(),
-		"rdap_enabled": s.App.Config.RDAPEnabled(),
-		// How scanner and notification processes start is deployment-wide
-		// and names no unit's data.
-		"scanner_sandbox":      s.App.ScannerSandbox(),
-		"notification_sandbox": s.App.NotificationSandbox(),
+	rdapEnabled := s.App.Config.RDAPEnabled()
+	// How scanner and notification processes start is deployment-wide and
+	// names no unit's data.
+	scannerSandbox, notificationSandbox := s.App.ScannerSandbox(), s.App.NotificationSandbox()
+	status := adminStatusView{
+		Configured:          true,
+		Username:            user.Username,
+		DisplayName:         &user.DisplayName,
+		Role:                user.Role,
+		Permissions:         auth.PermissionsForRole(user.Role),
+		Version:             s.Version,
+		VersionReleaseURL:   s.versionReleaseURL(),
+		Retention:           s.App.Config.Retention.Value().String(),
+		RDAPEnabled:         &rdapEnabled,
+		ScannerSandbox:      &scannerSandbox,
+		NotificationSandbox: &notificationSandbox,
 	}
 	// The scan capacity is the tenant's own, as the scheduler enforces it
 	// for its runs: the deployment's slots and probe budgets, lowered to the
@@ -113,9 +111,9 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 	if limits, limitsErr := s.App.TenantCapacityLimits(r.Context(), ts); limitsErr != nil {
 		s.Log.Warn("scan capacity could not be read", "error", limitsErr)
 	} else {
-		status["max_concurrent_scans"] = limits.MaxConcurrentScans
-		status["max_probe_count"] = limits.MaxProbeCount
-		status["max_naabu_probe_count"] = limits.MaxNaabuProbeCount
+		status.MaxConcurrentScans = &limits.MaxConcurrentScans
+		status.MaxProbeCount = &limits.MaxProbeCount
+		status.MaxNaabuProbeCount = &limits.MaxNaabuProbeCount
 	}
 	// The destination counts and delivery totals are the tenant's own. Like
 	// the telemetry below, they are left out when they cannot be read.
@@ -125,10 +123,9 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 	if notificationStatus, notificationErr := s.App.Notifier.Tenant(ts).Status(r.Context()); notificationErr != nil {
 		s.Log.Warn("notification status refresh failed", "error", notificationErr)
 	} else {
-		status["notification_destinations"] = notificationStatus["active"]
-		status["notifications"] = notificationStatus
+		status.NotificationDestinations = &notificationStatus.Active
+		status.Notifications = &notificationStatus
 	}
-	s.addVersionReleaseURL(status)
 	// The inactive config.yaml jobs predate business units and belong to the
 	// default unit, as the CLI status reports them, so another unit's status
 	// names none.
@@ -138,7 +135,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 		for _, job := range s.App.Config.Jobs {
 			legacy = append(legacy, job.Name)
 		}
-		status["legacy_yaml_jobs"] = legacy
+		status.LegacyYAMLJobs = legacy
 	}
 	// The live-update counters describe the whole deployment's stream, so
 	// once several business units exist they are left out: they would tell a
@@ -147,27 +144,27 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 	multiple, unitsErr := s.Store.Platform().HasMultipleTenants(r.Context())
 	if unitsErr == nil && !multiple {
 		s.mu.Lock()
-		status["live_updates"] = map[string]any{"history_size": len(s.history), "dropped_events": s.dropped}
+		status.LiveUpdates = &liveUpdateStatusView{HistorySize: len(s.history), DroppedEvents: s.dropped}
 		s.mu.Unlock()
 		// An untrusted proxy in front of the deployment is the host
 		// operator's to fix. With one unit, its administrators see it; with
 		// more, only the platform status reports it.
 		if proxy, seen := s.Auth.UntrustedProxy(); seen && session.Role == store.RoleAdministrator {
-			status["untrusted_proxy"] = proxy
+			status.UntrustedProxy = &proxy
 		}
 		// The scheduled backups cover the whole deployment and are the host
 		// operator's too, and their status names no unit's data. With one
 		// unit, its administrators see it; with more, only the platform
 		// status reports it.
 		if backups := s.App.BackupStatus(); backups != nil && session.Role == store.RoleAdministrator {
-			status["backups"] = backups
+			status.Backups = backups
 		}
 	}
-	status["updates"] = s.applicationUpdateStatus(r.Context())
+	status.Updates = s.applicationUpdateStatus(r.Context())
 	if telemetry, telemetryErr := s.cachedTenantTelemetry(r.Context(), ts); telemetryErr != nil {
 		s.Log.Warn("deployment telemetry refresh failed", "error", telemetryErr)
 	} else {
-		status["telemetry"] = telemetry
+		status.Telemetry = &telemetry
 	}
 	writeJSON(w, http.StatusOK, status)
 }
@@ -250,16 +247,14 @@ func (s *Server) cachedTenantTelemetry(ctx context.Context, ts *store.TenantStor
 	}
 }
 
-// addVersionReleaseURL links the running version to its release page. The URL
+// versionReleaseURL links the running version to its release page. The URL
 // is derived locally from the build version, so it needs no update check and
-// is omitted for development and other unpublished builds.
-func (s *Server) addVersionReleaseURL(status map[string]any) {
-	if releaseURL := updatecheck.BuildReleasePageURL(s.Version); releaseURL != "" {
-		status["version_release_url"] = releaseURL
-	}
+// is empty for development and other unpublished builds.
+func (s *Server) versionReleaseURL() string {
+	return updatecheck.BuildReleasePageURL(s.Version)
 }
 
-func (s *Server) applicationUpdateStatus(ctx context.Context) map[string]any {
+func (s *Server) applicationUpdateStatus(ctx context.Context) applicationUpdateStatusView {
 	enabled := true
 	if s.App != nil && s.App.Config != nil {
 		enabled = s.App.Config.UpdatesEnabled()
@@ -268,9 +263,9 @@ func (s *Server) applicationUpdateStatus(ctx context.Context) map[string]any {
 	if s.Version != "" {
 		current = s.Version
 	}
-	result := map[string]any{"enabled": enabled, "current_version": current, "status": "development_build", "stale": false, "available": false}
+	result := applicationUpdateStatusView{Enabled: enabled, CurrentVersion: current, Status: "development_build"}
 	if !enabled {
-		result["status"] = "disabled"
+		result.Status = "disabled"
 		return result
 	}
 	currentVersion := updatecheck.NormalizeVersion(current)
@@ -281,49 +276,33 @@ func (s *Server) applicationUpdateStatus(ctx context.Context) map[string]any {
 	// update routing it would also carry is not read here.
 	state, err := s.Store.Platform().GetApplicationUpdateState(ctx)
 	if err != nil {
-		result["status"] = "check_failed"
+		result.Status = "check_failed"
 		return result
 	}
-	if state.LatestVersion != "" {
-		result["latest_version"] = state.LatestVersion
-	}
-	if state.ReleaseURL != "" {
-		result["release_url"] = state.ReleaseURL
-	}
-	if state.ReleaseName != "" {
-		result["release_name"] = state.ReleaseName
-	}
-	if state.PublishedAt != "" {
-		result["published_at"] = state.PublishedAt
-	}
-	if !state.LastCheckedAt.IsZero() {
-		result["last_checked_at"] = state.LastCheckedAt
-	}
-	if !state.LastSuccessfulCheckAt.IsZero() {
-		result["last_successful_check_at"] = state.LastSuccessfulCheckAt
-	}
+	result.LatestVersion = state.LatestVersion
+	result.ReleaseURL = state.ReleaseURL
+	result.ReleaseName = state.ReleaseName
+	result.PublishedAt = state.PublishedAt
+	result.LastCheckedAt = state.LastCheckedAt
+	result.LastSuccessfulCheckAt = state.LastSuccessfulCheckAt
 	available := updatecheck.CompareVersions(state.LatestVersion, currentVersion) > 0
-	result["available"] = available
-	if available && result["release_url"] == nil {
-		if releaseURL := updatecheck.ReleasePageURL(state.LatestVersion); releaseURL != "" {
-			result["release_url"] = releaseURL
-		}
+	result.Available = available
+	if available && result.ReleaseURL == "" {
+		result.ReleaseURL = updatecheck.ReleasePageURL(state.LatestVersion)
 	}
 	switch {
 	case state.CheckStatus == "failed":
-		result["status"] = "check_failed"
-		result["stale"] = available || !state.LastSuccessfulCheckAt.IsZero()
-		if state.LastError != "" {
-			result["error"] = state.LastError
-		}
+		result.Status = "check_failed"
+		result.Stale = available || !state.LastSuccessfulCheckAt.IsZero()
+		result.Error = state.LastError
 	case available:
-		result["status"] = "update_available"
+		result.Status = "update_available"
 	case state.LatestVersion != "" && updatecheck.CompareVersions(currentVersion, state.LatestVersion) > 0:
-		result["status"] = "ahead"
+		result.Status = "ahead"
 	case state.CheckStatus == "ok":
-		result["status"] = "up_to_date"
+		result.Status = "up_to_date"
 	default:
-		result["status"] = "check_failed"
+		result.Status = "check_failed"
 	}
 	return result
 }

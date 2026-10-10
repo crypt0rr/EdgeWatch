@@ -2,7 +2,7 @@
 
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
-import type { ScheduledBackupStatus } from '../api'
+import type { ScheduledBackupStatus } from '../generated/api-types'
 import { ScheduledBackupBanner } from './ScheduledBackupBanner'
 
 const healthy: ScheduledBackupStatus = { directory: '/var/lib/edgewatch/backups', schedule: '0 3 * * *', keep: 7, last_success_at: '2026-10-01T03:00:00Z', last_backup: 'edgewatch-scheduled-20261001T030000Z.db', consecutive_failures: 0 }

@@ -6,7 +6,8 @@ import { baselineHost, baselineHostRDAP, historicalScanHost, historicalScanHostR
 import { ErrorNotice } from '../components/ErrorNotice'
 import { PortScopeDetails } from '../components/PortScopeDetails'
 import { useIsMobile } from '../components/navigation'
-import type { HostObservation, PortObservation, ProtocolObservation, RdapResult } from '../types'
+import type { RdapResult } from '../types'
+import type { HostObservation, PortObservation, ProtocolObservation } from '../generated/api-types'
 import { formatDate, formatDateTime } from '../format'
 import { hostStatusLabel } from '../status'
 

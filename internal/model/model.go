@@ -11,6 +11,9 @@ import (
 	"time"
 )
 
+// PortState is a port of a unit and its state. Evidence, which the JSON
+// calls addresses, lists the effective addresses on which a positive port
+// was observed.
 type PortState struct {
 	Port     int      `json:"port"`
 	State    string   `json:"state"`

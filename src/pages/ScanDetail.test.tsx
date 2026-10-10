@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getScanSummary, historicalScanHosts } from '../api'
-import type { Scan, ScanSummary } from '../types'
+import type { Scan, ScanSummary } from '../generated/api-types'
 import { ScanDetail } from './ScanDetail'
 
 vi.mock('../api', () => ({

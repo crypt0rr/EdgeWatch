@@ -70,7 +70,7 @@ func (s *Server) listNotificationDestinations(w http.ResponseWriter, r *http.Req
 		return
 	}
 	views, err := notifier.Destinations(r.Context())
-	var status map[string]any
+	var status notify.Status
 	if err == nil {
 		status, err = notifier.Status(r.Context())
 	}

@@ -1,4 +1,5 @@
-import type { ActiveScan, ActivityEvent, BaselineHostsResponse, Change, GlobalHostsResponse, HostDetailResponse, Incident, Job, JobForm, JobPreview, Pagination, PendingChange, QueuedRun, RdapResult, Scan, ScanComparison, ScanSummary, Unit, NaabuOptions } from './types'
+import type { ActiveScan, ActivityEvent, BaselineHostsResponse, GlobalHostsResponse, HostDetailResponse, Incident, Job, JobForm, JobPreview, Pagination, PendingChange, QueuedRun, RdapResult, ScanComparison, NaabuOptions } from './types'
+import type { AdminStatus, Change, DeploymentLimits, NotificationStatus, PlatformStatus, Scan, ScanSummary, Scope, Unit } from './generated/api-types'
 import { setDisplayTimeZone } from './format'
 
 export type NotificationDestination = {
@@ -40,19 +41,6 @@ export type NotificationProviderConfig = {
   provider: NotificationProvider
   fields: Record<string, string>
 }
-export type NotificationStatus = {
-  deployment: number
-  managed: number
-  active: number
-  locked: number
-  key_state: string
-  /** Set while config.yaml still lists imported notification URLs, or when their import failed. */
-  config_import?: 'imported' | 'failed' | string
-  delivery_pending?: number
-  delivery_retrying?: number
-  delivery_deferrals?: number
-  delivery_terminal_failures?: number
-}
 export type NotificationUpdateRouting = {
   configured: boolean
   destinations: string[]
@@ -64,34 +52,6 @@ export type NotificationDestinationsResponse = {
   update_routing?: NotificationUpdateRouting
   incident_reminders_enabled?: boolean
   incident_reminder_cadence?: IncidentReminderCadence
-}
-export type ApplicationUpdateStatus = {
-  enabled: boolean
-  status: 'up_to_date' | 'update_available' | 'ahead' | 'check_failed' | 'disabled' | 'development_build' | string
-  available?: boolean
-  current_version: string
-  latest_version?: string
-  release_url?: string
-  release_name?: string
-  published_at?: string
-  last_checked_at?: string
-  last_successful_check_at?: string
-  stale?: boolean
-  error?: string
-}
-export type DeploymentTelemetry = {
-  collected_at: string
-  /** The database size; with business units only the default unit reports it. */
-  database_bytes?: number
-  jobs: number
-  scans: number
-  host_observations: number
-  effective_hosts: number
-  events: number
-  scan_cycles: number
-  outbox_pending: number
-  outbox_retrying: number
-  outbox_failed: number
 }
 
 let csrf = ''
@@ -176,25 +136,6 @@ export type UnitRef = { id: string; name: string; slug: string }
 // unit is the account's business unit (null for the platform), and
 // multi_unit reports whether more than one unit exists.
 export type SessionUser = { user_id: string; username: string; display_name?: string; role: Role; permissions: string[]; csrf_token: string; totp_enabled: boolean; totp_enrollment_required?: boolean; high_cost_override?: boolean; password_requirements: { minimum_length: number }; timezone?: string; scope: 'unit' | 'platform'; unit: UnitRef | null; multi_unit: boolean }
-/**
- * The latest request from a proxy that web.trusted_proxies does not list but
- * that sent a client-address forwarding header. Every client behind it shares
- * the proxy's address for the sign-in limits and the audit.
- */
-export type UntrustedProxy = { peer: string; header: string; last_seen_at: string }
-/**
- * The outcome of the daemon's scheduled backups, which backup.directory in
- * config.yaml turns on. consecutive_failures counts the failed backups since
- * the newest good one, last_backup, which is last_success_age_seconds old.
- */
-export type ScheduledBackupStatus = { directory: string; schedule: string; keep: number; next_run_at?: string; last_success_at?: string; last_backup?: string; last_backup_bytes?: number; last_backup_schema_version?: number; last_success_age_seconds?: number; last_failure_at?: string; last_error?: string; consecutive_failures: number }
-// untrusted_proxy and backups are present for the administrators of a
-// deployment with one unit; with more, only the platform status has them.
-// How the scanner's Nmap and Naabu processes start. A confined process runs
-// as process_uid 65532 with only the listed capabilities.
-export type ScannerLandlockStatus = { mode: 'auto' | 'required' | 'off' | string; state: 'enforced' | 'disabled' | 'unavailable' | string; abi?: number; reason?: string }
-export type ScannerSandboxStatus = { mode: 'auto' | 'required' | 'off' | string; state: 'enforced' | 'disabled' | 'unavailable' | string; uid?: number; gid?: number; process_uid: number; capabilities?: string[]; no_new_privileges?: boolean; reason?: string; landlock?: ScannerLandlockStatus; seccomp?: { state: 'enforced' | 'disabled' | 'unavailable' | string; reason?: string } }
-export type AdminStatus = { configured?: boolean; username?: string; display_name?: string; role?: Role; permissions?: string[]; version: string; version_release_url?: string; legacy_yaml_jobs?: string[]; notification_destinations?: number; notifications?: NotificationStatus; retention?: string; max_concurrent_scans?: number; max_probe_count?: number; max_naabu_probe_count?: number; rdap_enabled?: boolean; public_dashboard_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number }; updates?: ApplicationUpdateStatus; telemetry?: DeploymentTelemetry; untrusted_proxy?: UntrustedProxy; backups?: ScheduledBackupStatus; scanner_sandbox?: ScannerSandboxStatus; notification_sandbox?: ScannerSandboxStatus }
 // platform_setup_available is present once the first administrator exists,
 // and true while the host's platform setup token can create the first
 // platform administrator.
@@ -246,7 +187,7 @@ export const resetBaseline = (id: string, expectedBaselineScanID = '', expectedB
 export const approveBaseline = (jobId: string, scanId: string, expectedBaselineScanID = '', expectedBaselineModified = false) => api(`/jobs/${jobId}/baseline/approve`, { method: 'POST', body: JSON.stringify({ scan_id: scanId, expected_baseline_scan_id: expectedBaselineScanID, expected_baseline_modified: expectedBaselineModified }) })
 export const jobScans = (id: string, offset = 0, limit = 20) => api<{ scans: ScanSummary[]; pagination: Pagination }>(`/jobs/${id}/scans?limit=${limit}&offset=${offset}`)
 export const latestSuccessfulScan = (id: string) => api<{ scan: ScanSummary | null }>(`/jobs/${id}/scans/latest-successful`)
-export const jobBaseline = (id: string, offset = 0, limit = 50) => api<{ job_id: string; job: string; revision: number; security_hash: string; baseline: Job['baseline']; snapshot: { units: Unit[]; scopes: { target: string; protocol: string; ports: string; service_detection: boolean }[]; dns?: Record<string, string[]> } | null; pagination: Pagination }>(`/jobs/${id}/baseline?limit=${limit}&offset=${offset}`)
+export const jobBaseline = (id: string, offset = 0, limit = 50) => api<{ job_id: string; job: string; revision: number; security_hash: string; baseline: Job['baseline']; snapshot: { units: Unit[]; scopes: Scope[]; dns?: Record<string, string[]> } | null; pagination: Pagination }>(`/jobs/${id}/baseline?limit=${limit}&offset=${offset}`)
 export type HostFilters = { q?: string; protocol?: string; has_open_ports?: boolean; limit?: number; offset?: number; signal?: AbortSignal }
 function hostQuery(filters: HostFilters = {}) {
   const params = new URLSearchParams()
@@ -280,7 +221,8 @@ export async function getScan(scanId: string): Promise<Scan> {
 }
 export const getScanSummary = (scanId: string) => api<{ scan: ScanSummary }>(`/scans/${encodeURIComponent(scanId)}/summary`)
 export const historicalScanHosts = (scanId: string, filters: HostFilters = {}) => api<{ job_id?: string; job: string; scan: ScanSummary; data_quality: string; hosts: import('./types').HostSummary[]; pagination: Pagination }>(`/scans/${encodeURIComponent(scanId)}/hosts?${hostQuery(filters)}`, filters.signal ? { signal: filters.signal } : undefined)
-export const scanDetail = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ scan: Scan; changes: Change[]; changes_pagination: Pagination; current_security_hash: string; comparison_source?: 'scan_time' | 'current_baseline_legacy' | 'none' | string; comparison_state?: ScanComparison | string; baseline_scan_id?: string }>(`/jobs/${jobId}/scans/${scanId}?limit=${limit}&offset=${offset}`)
+/** The scan in a job's scan detail is its summary, without the snapshot; getScan loads the snapshot. */
+export const scanDetail = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ scan: ScanSummary; changes: Change[]; changes_pagination: Pagination; current_security_hash: string; comparison_source?: 'scan_time' | 'current_baseline_legacy' | 'none' | string; comparison_state?: ScanComparison | string; baseline_scan_id?: string }>(`/jobs/${jobId}/scans/${scanId}?limit=${limit}&offset=${offset}`)
 export const scanResults = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ results: Unit[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${scanId}/results?limit=${limit}&offset=${offset}`)
 export const scanChanges = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ changes: Change[]; pagination: Pagination; comparison_source?: 'scan_time' | 'current_baseline_legacy' | 'none' | string; comparison_state?: ScanComparison | string; baseline_scan_id?: string }>(`/jobs/${jobId}/scans/${scanId}/changes?limit=${limit}&offset=${offset}`)
 export const listScans = (offset = 0, limit = 20) => api<{ scans: ScanSummary[]; pagination: Pagination }>(`/scans?limit=${limit}&offset=${offset}`)
@@ -359,7 +301,6 @@ export async function getPublicDashboard(slug?: string): Promise<PublicDashboard
 export type BusinessUnitStatus = 'active' | 'disabled' | 'deleting' | 'deleted'
 /** A unit's scan slots. limit is present only in a unit's capacity. */
 export type UnitSlots = { in_use: number; queued: number; limit?: number }
-export type DeploymentLimits = { max_concurrent_scans: number; max_probe_count: number; max_naabu_probe_count: number; max_probe_count_limit: number }
 /** jobs counts the jobs that are not archived; stored_scans counts every scan the unit's history holds, those of archived jobs included. */
 export type BusinessUnit = UnitRef & { status: BusinessUnitStatus; is_default: boolean; revision: number; created_at: string; updated_at: string; state_changed_at: string; accounts: number; administrators: number; jobs: number; stored_scans: number; slots: UnitSlots; purge?: { phase: string; rows: number } }
 /**
@@ -377,7 +318,6 @@ export type UnitAccount = Omit<UserSummary, 'role'> & { role: UnitRole }
 export type AccountInvitation<T> = { user: T; activation_token: string; activation_path: string }
 /** totp_enrolled tells whether the account keeps its authenticator after the reset. */
 export type PasswordResetLink = { activation_token: string; activation_path: string; expires_at: string; totp_enrolled: boolean }
-export type PlatformStatus = { version: string; version_release_url?: string; updates?: ApplicationUpdateStatus; units: { total: number; active: number; disabled: number; deleting: number }; accounts: number; jobs: number; stored_scans: number; platform_admins: { total: number; enabled: number }; capacity: { limits: DeploymentLimits; slots: { capacity: number; in_use: number; queued: number } }; untrusted_proxy?: UntrustedProxy; backups?: ScheduledBackupStatus }
 /** Who acted: a unit's account, a platform administrator, the host command line, or EdgeWatch itself. Records from before business units have no kind. */
 export type AuditActorKind = 'unit' | 'platform' | 'host' | 'system' | ''
 export type AuditEntry = { id: number; created_at: string; action: string; category: string; actor: { kind: AuditActorKind; user_id?: string; username?: string; display_name?: string }; detail: string; request_id?: string; source_ip?: string; unit?: UnitRef }

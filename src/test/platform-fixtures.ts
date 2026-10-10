@@ -1,4 +1,5 @@
-import type { BusinessUnit, DeploymentLimits, SessionUser, UnitAccount, UnitCapacity } from '../api'
+import type { BusinessUnit, SessionUser, UnitAccount, UnitCapacity } from '../api'
+import type { DeploymentLimits } from '../generated/api-types'
 
 // Fixtures for the business units console tests, shaped like the platform
 // API's responses.

@@ -2,7 +2,8 @@ import { Link } from 'react-router-dom'
 import type { ScheduleSuggestion } from '../api'
 import { baselinePresentation } from '../baseline'
 import { ErrorNotice } from './ErrorNotice'
-import type { ActiveScan, Job, Pagination, QueuedRun, ScanCycle, ScanSummary, Unit } from '../types'
+import type { ActiveScan, Job, Pagination, QueuedRun, ScanCycle } from '../types'
+import type { ScanSummary, Unit } from '../generated/api-types'
 
 type MonitorNextActionsProps = {
   job: Job

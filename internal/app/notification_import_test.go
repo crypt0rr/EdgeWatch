@@ -74,7 +74,7 @@ func importLogger() (*slog.Logger, *bytes.Buffer) {
 
 // notificationStatus returns the default tenant's notification status, as
 // the console shows it.
-func notificationStatus(t *testing.T, a *App) map[string]any {
+func notificationStatus(t *testing.T, a *App) notify.Status {
 	t.Helper()
 	status, err := a.Notifier.Tenant(defaultTenant(a.Store)).Status(context.Background())
 	if err != nil {
@@ -359,7 +359,7 @@ func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *test
 	if !slices.Equal(status.Warnings, []string{"notification URLs in config.yaml were imported; remove them from config.yaml"}) {
 		t.Fatalf("health warnings = %v", status.Warnings)
 	}
-	if got := notificationStatus(t, application)["config_import"]; got != "imported" {
+	if got := notificationStatus(t, application).ConfigImport; got != "imported" {
 		t.Fatalf("console notification status config_import = %v, want imported", got)
 	}
 
@@ -388,7 +388,7 @@ func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *test
 	if strings.Contains(secondLogs.String(), "imported notification URLs from config.yaml") || !strings.Contains(secondLogs.String(), "remove notifications.urls and notifications.urls_file from config.yaml") {
 		t.Fatalf("second start log = %s", secondLogs.String())
 	}
-	if deployment := notificationStatus(t, restarted)["deployment"]; deployment != 0 {
+	if deployment := notificationStatus(t, restarted).Deployment; deployment != 0 {
 		t.Fatalf("a second start registered %v deployment destinations", deployment)
 	}
 }
@@ -452,7 +452,7 @@ func TestDaemonImportFailureKeepsDeliveringFromConfig(t *testing.T) {
 		t.Fatalf("health warnings = %v", status.Warnings)
 	}
 	consoleStatus := notificationStatus(t, application)
-	if consoleStatus["config_import"] != "failed" || consoleStatus["deployment"] != 1 {
+	if consoleStatus.ConfigImport != "failed" || consoleStatus.Deployment != 1 {
 		t.Fatalf("notification status after a failed import = %#v", consoleStatus)
 	}
 	if err := application.Notifier.Queue(ctx, []model.Event{{Type: "scan_failed", Job: "after-failed-import", CreatedAt: time.Now().UTC()}}); err != nil {
@@ -486,7 +486,7 @@ func TestHostCommandsDoNotImportNotificationURLs(t *testing.T) {
 	if n := countRows(t, s, `SELECT COUNT(*) FROM managed_notifications`); n != 0 {
 		t.Fatalf("a host command imported %d destinations", n)
 	}
-	if deployment := notificationStatus(t, application)["deployment"]; deployment != 1 {
+	if deployment := notificationStatus(t, application).Deployment; deployment != 1 {
 		t.Fatalf("deployment destinations for a host command = %v, want 1", deployment)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "data", "notification.key")); !os.IsNotExist(err) {

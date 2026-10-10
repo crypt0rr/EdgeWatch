@@ -6,10 +6,12 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { activeScans, adminStatus, cancelQueuedRun, cancelScan, getSession, listIncidents, listJobs, listScans, notificationTest, runJob } from '../api'
-import type { AdminStatus, SessionUser } from '../api'
-import type { ActiveScan, Job, ScanSummary } from '../types'
+import type { SessionUser } from '../api'
+import type { ActiveScan, Job } from '../types'
+import type { AdminStatus, ScanSummary } from '../generated/api-types'
 import { Dashboard } from './Dashboard'
 import { defaultUnitScope } from '../test/test-utils'
+import { developmentBuildUpdates, sandboxWithoutLayers } from '../test/status-fixtures'
 
 vi.mock('../api', () => ({
   activeScans: vi.fn(),
@@ -84,6 +86,7 @@ const status: AdminStatus = {
   role: 'administrator',
   permissions: ['overview.read', 'jobs.read', 'jobs.write', 'jobs.run', 'scans.read', 'incidents.read', 'notifications.manage', 'users.manage'],
   version: 'v0.13.3',
+  updates: developmentBuildUpdates,
   notification_destinations: 1,
   notifications: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' },
   retention: '2160h',
@@ -510,7 +513,7 @@ describe('dashboard', () => {
   })
 
   it('shows the enforced scanner sandbox in the deployment footprint', async () => {
-    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'enforced', uid: 65532, gid: 65532, process_uid: 65532, capabilities: ['NET_RAW'], no_new_privileges: true } })
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: sandboxWithoutLayers({ mode: 'auto', state: 'enforced', uid: 65532, gid: 65532, process_uid: 65532, capabilities: ['NET_RAW'], no_new_privileges: true }) })
     await renderDashboard()
     await vi.waitFor(() => expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Enforced', tone: 'green', icon: true, layers: ['UID 65532: enforced'], reasons: [], keeps: 'Keeps NET_RAW' }), { timeout: 1000 })
     expect(isolationEntry(container, 'Notifications')).toBeUndefined()
@@ -518,7 +521,7 @@ describe('dashboard', () => {
   })
 
   it('shows the notification sandbox in the deployment footprint', async () => {
-    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'enforced', process_uid: 65532, capabilities: ['NET_RAW'] }, notification_sandbox: { mode: 'auto', state: 'enforced', uid: 65531, gid: 65531, process_uid: 65531, no_new_privileges: true, landlock: { mode: 'auto', state: 'enforced', abi: 6 } } })
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: sandboxWithoutLayers({ mode: 'auto', state: 'enforced', process_uid: 65532, capabilities: ['NET_RAW'] }), notification_sandbox: sandboxWithoutLayers({ mode: 'auto', state: 'enforced', uid: 65531, gid: 65531, process_uid: 65531, no_new_privileges: true, landlock: { mode: 'auto', state: 'enforced', abi: 6 } }) })
     await renderDashboard()
     await vi.waitFor(() => expect(isolationEntry(container, 'Notifications')).toEqual({ state: 'Enforced', tone: 'green', icon: true, layers: ['UID 65531: enforced', 'Landlock: enforced'], reasons: [], keeps: '' }), { timeout: 1000 })
     expect(isolationEntry(container, 'Scanners')).toMatchObject({ layers: ['UID 65532: enforced'], keeps: 'Keeps NET_RAW' })
@@ -532,28 +535,28 @@ describe('dashboard', () => {
   })
 
   it('warns an administrator when scanner processes run as UID 0 with only Landlock', async () => {
-    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'unavailable', process_uid: 0, reason: 'the container does not grant KILL', landlock: { mode: 'auto', state: 'enforced', abi: 6 } } })
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: sandboxWithoutLayers({ mode: 'auto', state: 'unavailable', process_uid: 0, reason: 'the container does not grant KILL', landlock: { mode: 'auto', state: 'enforced', abi: 6 } }) })
     await renderDashboard()
     await vi.waitFor(() => expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain('Scanner processes run as UID 0, restricted only by Landlock. the container does not grant KILL'), { timeout: 1000 })
     expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Partial', tone: 'amber', icon: true, layers: ['Identity: unavailable', 'Landlock: enforced'], reasons: ['Identity: The container does not grant KILL.'], keeps: '' })
   })
 
   it('warns an administrator when scanner processes run unconfined as UID 0', async () => {
-    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'unavailable', process_uid: 0, reason: 'the container does not grant KILL, which EdgeWatch needs to start and stop scanner processes as UID 65532; add them to cap_add', landlock: { mode: 'auto', state: 'unavailable', reason: 'the kernel does not provide Landlock' } } })
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: sandboxWithoutLayers({ mode: 'auto', state: 'unavailable', process_uid: 0, reason: 'the container does not grant KILL, which EdgeWatch needs to start and stop scanner processes as UID 65532; add them to cap_add', landlock: { mode: 'auto', state: 'unavailable', reason: 'the kernel does not provide Landlock' } }) })
     await renderDashboard()
     await vi.waitFor(() => expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain('Scanner processes run unconfined as UID 0. the container does not grant KILL'), { timeout: 1000 })
     expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Unavailable', tone: 'red', icon: true, layers: ['Identity: unavailable', 'Landlock: unavailable'], reasons: ['Identity: The container does not grant KILL, which EdgeWatch needs to start and stop scanner processes as UID 65532; add them to cap_add.', 'Landlock: The kernel does not provide Landlock.'], keeps: '' })
   })
 
   it('does not warn when scanner processes already run without root', async () => {
-    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'unavailable', process_uid: 1000, reason: 'EdgeWatch runs as UID 1000 rather than 0' } })
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: sandboxWithoutLayers({ mode: 'auto', state: 'unavailable', process_uid: 1000, reason: 'EdgeWatch runs as UID 1000 rather than 0' }) })
     await renderDashboard()
     await vi.waitFor(() => expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Unavailable', tone: 'red', icon: true, layers: ['Identity: unavailable'], reasons: ['Identity: EdgeWatch runs as UID 1000 rather than 0.'], keeps: '' }), { timeout: 1000 })
     expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
   })
 
   it('labels a scanner sandbox that is off', async () => {
-    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'off', state: 'disabled', process_uid: 0, reason: 'scanner.sandbox is off' } })
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: sandboxWithoutLayers({ mode: 'off', state: 'disabled', process_uid: 0, reason: 'scanner.sandbox is off' }) })
     await renderDashboard()
     await vi.waitFor(() => expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Off', tone: 'gray', icon: true, layers: ['Identity: off'], reasons: ['Identity: scanner.sandbox is off.'], keeps: '' }), { timeout: 1000 })
     expect(container.querySelector('.isolation-reasons code')?.textContent).toBe('scanner.sandbox')
@@ -595,7 +598,7 @@ describe('dashboard', () => {
 
   it('does not show the scanner sandbox warning to an operator', async () => {
     vi.mocked(getSession).mockResolvedValue({ ...session('operator'), permissions: ['overview.read', 'jobs.read', 'jobs.write', 'jobs.run', 'scans.read', 'incidents.read'] })
-    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'off', state: 'disabled', process_uid: 0 } })
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: sandboxWithoutLayers({ mode: 'off', state: 'disabled', process_uid: 0 }) })
     await renderDashboard()
     expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
   })

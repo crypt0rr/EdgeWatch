@@ -331,63 +331,41 @@ func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusCreated, view)
 }
 
-func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, rest string) {
-	parts := strings.Split(strings.Trim(rest, "/"), "/")
-	if len(parts) == 0 || parts[0] == "" {
-		writeError(w, http.StatusNotFound, "not_found", "notification destination not found", nil)
+// testNotificationDestination serves POST
+// /notifications/destinations/{id}/test: it sends a test notification
+// through the destination, within the notification test rate limit.
+func (s *Server) testNotificationDestination(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, id string) {
+	w.Header().Set("Cache-Control", "no-store")
+	if !s.allowNotificationTest(r) {
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "notification tests are temporarily rate limited", nil)
 		return
 	}
-	id := parts[0]
-	if len(parts) == 2 && parts[1] == "test" && r.Method == http.MethodPost {
-		w.Header().Set("Cache-Control", "no-store")
-		if !s.allowNotificationTest(r) {
-			w.Header().Set("Retry-After", "5")
-			writeError(w, http.StatusTooManyRequests, "rate_limited", "notification tests are temporarily rate limited", nil)
-			return
-		}
-		if err := s.App.Notifier.Tenant(ts).TestDestination(r.Context(), id); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				s.writeNotificationError(w, err)
-				return
-			}
-			s.auditOptionalEntry(r.Context(), ts, store.AuditEntry{Action: "notifications.test_failed", Detail: "managed notification test failed: " + id, ActorUserID: session.UserID, ActorUsername: session.Username})
+	if err := s.App.Notifier.Tenant(ts).TestDestination(r.Context(), id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
 			s.writeNotificationError(w, err)
 			return
 		}
-		if !s.requireAuditEntry(r.Context(), w, ts, store.AuditEntry{Action: "notifications.test", Detail: "managed notification tested: " + id, ActorUserID: session.UserID, ActorUsername: session.Username}) {
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"sent": 1})
+		s.auditOptionalEntry(r.Context(), ts, store.AuditEntry{Action: "notifications.test_failed", Detail: "managed notification test failed: " + id, ActorUserID: session.UserID, ActorUsername: session.Username})
+		s.writeNotificationError(w, err)
 		return
 	}
-	if len(parts) == 2 && parts[1] == "deliveries" && r.Method == http.MethodGet {
-		s.listTerminalDeliveries(w, r, ts, id)
+	if !s.requireAuditEntry(r.Context(), w, ts, store.AuditEntry{Action: "notifications.test", Detail: "managed notification tested: " + id, ActorUserID: session.UserID, ActorUsername: session.Username}) {
 		return
 	}
-	if len(parts) == 3 && parts[1] == "deliveries" && parts[2] == "redeliver" && r.Method == http.MethodPost {
-		s.redeliverTerminalDeliveries(w, r, session, ts, id)
+	writeJSON(w, http.StatusOK, map[string]any{"sent": 1})
+}
+
+// getNotificationDestination serves GET /notifications/destinations/{id},
+// the destination without its URL.
+func (s *Server) getNotificationDestination(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string) {
+	w.Header().Set("Cache-Control", "no-store")
+	view, err := s.App.Notifier.Tenant(ts).Destination(r.Context(), id)
+	if err != nil {
+		s.writeNotificationError(w, err)
 		return
 	}
-	if len(parts) != 1 {
-		writeError(w, http.StatusNotFound, "not_found", "notification destination endpoint not found", nil)
-		return
-	}
-	switch r.Method {
-	case http.MethodGet:
-		w.Header().Set("Cache-Control", "no-store")
-		view, err := s.App.Notifier.Tenant(ts).Destination(r.Context(), id)
-		if err != nil {
-			s.writeNotificationError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, view)
-	case http.MethodPut:
-		s.updateNotificationDestination(w, r, session, ts, id)
-	case http.MethodDelete:
-		s.deleteNotificationDestination(w, r, session, ts, id)
-	default:
-		writeError(w, http.StatusNotFound, "not_found", "notification destination endpoint not found", nil)
-	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (s *Server) updateNotificationDestination(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, id string) {

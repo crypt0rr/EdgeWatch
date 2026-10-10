@@ -55,3 +55,20 @@ func (s *Server) serveRouteAs(w http.ResponseWriter, r *http.Request, path strin
 func (s *Server) scannerProfilesRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, rest string) {
 	s.serveRouteAs(w, r, "/scanner-profiles/"+strings.TrimPrefix(rest, "/"), session, ts)
 }
+
+// usersRoute serves rest, the path after /users/, through serveRouteAs.
+func (s *Server) usersRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, rest string) {
+	s.serveRouteAs(w, r, "/users/"+strings.TrimPrefix(rest, "/"), session, ts)
+}
+
+// notificationDestinationRoute serves rest, the path after
+// /notifications/destinations/, through serveRouteAs.
+func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, rest string) {
+	s.serveRouteAs(w, r, "/notifications/destinations/"+rest, session, ts)
+}
+
+// publicDashboardRoute serves the request's method on /public-dashboard
+// through serveRouteAs.
+func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
+	s.serveRouteAs(w, r, "/public-dashboard", session, ts)
+}

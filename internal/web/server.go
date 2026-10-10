@@ -524,26 +524,6 @@ func (s *Server) legacyAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
-	case path == "/users" || strings.HasPrefix(path, "/users/"):
-		s.usersRoute(w, r, session, ts, strings.TrimPrefix(path, "/users"))
-	case path == "/public-dashboard" && (r.Method == http.MethodGet || r.Method == http.MethodPut):
-		s.publicDashboardRoute(w, r, session, ts)
-	case path == "/notifications/test" && r.Method == http.MethodPost:
-		s.notificationTest(w, r, session, ts)
-	case path == "/notifications/destinations" && r.Method == http.MethodGet:
-		s.listNotificationDestinations(w, r, ts)
-	case path == "/notifications/options" && r.Method == http.MethodGet:
-		s.listNotificationDestinations(w, r, ts)
-	case path == "/notifications/update-routing" && r.Method == http.MethodPut:
-		s.updateNotificationRouting(w, r, session, ts)
-	case path == "/notifications/update-routing" && r.Method == http.MethodPatch:
-		s.toggleNotificationUpdateRouting(w, r, session, ts)
-	case path == "/notifications/incident-reminders" && r.Method == http.MethodPut:
-		s.updateIncidentReminders(w, r, session, ts)
-	case path == "/notifications/destinations" && r.Method == http.MethodPost:
-		s.createNotificationDestination(w, r, session, ts)
-	case strings.HasPrefix(path, "/notifications/destinations/"):
-		s.notificationDestinationRoute(w, r, session, ts, strings.TrimPrefix(path, "/notifications/destinations/"))
 	case path == "/jobs" && r.Method == http.MethodGet:
 		s.listJobs(w, r, ts)
 	case path == "/jobs" && r.Method == http.MethodPost:

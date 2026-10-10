@@ -14,37 +14,6 @@ import (
 // against that table.
 func requiredPermission(path, method string) string {
 	switch {
-	case path == "/notifications/test":
-		if method == http.MethodPost {
-			return auth.PermissionNotificationsManage
-		}
-	case strings.HasPrefix(path, "/notifications/destinations/"):
-		return requiredNotificationDestinationPermission(path, method)
-	case path == "/notifications/destinations":
-		switch method {
-		case http.MethodGet:
-			return auth.PermissionNotificationOptions
-		case http.MethodPost:
-			return auth.PermissionNotificationsManage
-		}
-	case path == "/notifications/options":
-		if method == http.MethodGet {
-			return auth.PermissionNotificationOptions
-		}
-	case path == "/notifications/update-routing":
-		if method == http.MethodPut || method == http.MethodPatch {
-			return auth.PermissionNotificationsManage
-		}
-	case path == "/notifications/incident-reminders":
-		if method == http.MethodPut {
-			return auth.PermissionNotificationsManage
-		}
-	case isUsersPath(path):
-		return requiredUsersPermission(path, method)
-	case path == "/public-dashboard":
-		if method == http.MethodGet || method == http.MethodPut {
-			return auth.PermissionPublicManage
-		}
 	case path == "/scans" || path == "/scans/active" || strings.HasPrefix(path, "/scans/"):
 		return requiredScanPermission(path, method)
 	case path == "/hosts":
@@ -81,13 +50,6 @@ func requiredPermission(path, method string) string {
 	return auth.PermissionDenied
 }
 
-// isUsersPath keeps the route matrix in lockstep with the prefix handled by
-// legacyAPI. A prefix match alone is not sufficient: the corresponding
-// helper validates the rest of the path grammar.
-func isUsersPath(path string) bool {
-	return path == "/users" || strings.HasPrefix(path, "/users/")
-}
-
 func routeParts(path, prefix string) ([]string, bool) {
 	if path != prefix && !strings.HasPrefix(path, prefix+"/") {
 		return nil, false
@@ -97,64 +59,6 @@ func routeParts(path, prefix string) ([]string, bool) {
 		return nil, true
 	}
 	return strings.Split(rest, "/"), true
-}
-
-func requiredUsersPermission(path, method string) string {
-	parts, ok := routeParts(path, "/users")
-	if !ok {
-		return auth.PermissionDenied
-	}
-	switch len(parts) {
-	case 0:
-		if method == http.MethodGet || method == http.MethodPost {
-			return auth.PermissionUsersManage
-		}
-	case 1:
-		if method == http.MethodGet || method == http.MethodPatch {
-			return auth.PermissionUsersManage
-		}
-	case 2:
-		switch parts[1] {
-		case "activation":
-			if method == http.MethodPost || method == http.MethodDelete {
-				return auth.PermissionUsersManage
-			}
-		case "password-reset":
-			if method == http.MethodPost {
-				return auth.PermissionUsersManage
-			}
-		case "sessions":
-			if method == http.MethodDelete {
-				return auth.PermissionUsersManage
-			}
-		}
-	}
-	return auth.PermissionDenied
-}
-
-func requiredNotificationDestinationPermission(path, method string) string {
-	parts, ok := routeParts(path, "/notifications/destinations")
-	if !ok || len(parts) == 0 {
-		return auth.PermissionDenied
-	}
-	if len(parts) == 1 {
-		switch method {
-		case http.MethodGet:
-			return auth.PermissionNotificationOptions
-		case http.MethodPut, http.MethodDelete:
-			return auth.PermissionNotificationsManage
-		}
-	}
-	if len(parts) == 2 && parts[1] == "test" && method == http.MethodPost {
-		return auth.PermissionNotificationsManage
-	}
-	if len(parts) == 2 && parts[1] == "deliveries" && method == http.MethodGet {
-		return auth.PermissionNotificationsManage
-	}
-	if len(parts) == 3 && parts[1] == "deliveries" && parts[2] == "redeliver" && method == http.MethodPost {
-		return auth.PermissionNotificationsManage
-	}
-	return auth.PermissionDenied
 }
 
 func requiredScanPermission(path, method string) string {
@@ -461,33 +365,57 @@ var apiRoutes = []apiRoute{
 	{Method: http.MethodPost, Template: "/scanner/profiles/{id}/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1/preview", TrailingSlash: true, Handle: requestHandler((*Server).previewScannerProfile)},
 
 	// User administration.
-	{Method: http.MethodGet, Template: "/users", Permission: auth.PermissionUsersManage, Example: "/users"},
-	{Method: http.MethodPost, Template: "/users", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users"},
-	{Method: http.MethodGet, Template: "/users/{id}", Permission: auth.PermissionUsersManage, Example: "/users/user-1"},
-	{Method: http.MethodPatch, Template: "/users/{id}", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1"},
-	{Method: http.MethodPost, Template: "/users/{id}/activation", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/activation"},
-	{Method: http.MethodDelete, Template: "/users/{id}/activation", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/activation"},
-	{Method: http.MethodPost, Template: "/users/{id}/password-reset", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/password-reset"},
-	{Method: http.MethodDelete, Template: "/users/{id}/sessions", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/sessions"},
+	{Method: http.MethodGet, Template: "/users", Permission: auth.PermissionUsersManage, Example: "/users", TrailingSlash: true, Handle: tenantHandler((*Server).listUsers)},
+	{Method: http.MethodPost, Template: "/users", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users", TrailingSlash: true, Handle: sessionTenantHandler((*Server).createUser)},
+	{Method: http.MethodGet, Template: "/users/{id}", Permission: auth.PermissionUsersManage, Example: "/users/user-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.getUser(w, r, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodPatch, Template: "/users/{id}", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.updateUser(w, r, c.session, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodPost, Template: "/users/{id}/activation", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/activation", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.issueAccountLink(w, r, c.session, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodDelete, Template: "/users/{id}/activation", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/activation", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.revokeActivation(w, r, c.session, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodPost, Template: "/users/{id}/password-reset", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/password-reset", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.issueAccountLink(w, r, c.session, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodDelete, Template: "/users/{id}/sessions", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/sessions", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.revokeUserSessions(w, r, c.session, c.tenant, r.PathValue("id"))
+	}},
 
 	// Public status publication settings.
-	{Method: http.MethodGet, Template: "/public-dashboard", Permission: auth.PermissionPublicManage, Example: "/public-dashboard"},
-	{Method: http.MethodPut, Template: "/public-dashboard", Permission: auth.PermissionPublicManage, Mutates: true, Example: "/public-dashboard"},
+	{Method: http.MethodGet, Template: "/public-dashboard", Permission: auth.PermissionPublicManage, Example: "/public-dashboard", Handle: tenantHandler((*Server).getPublicDashboard)},
+	{Method: http.MethodPut, Template: "/public-dashboard", Permission: auth.PermissionPublicManage, Mutates: true, Example: "/public-dashboard", Handle: sessionTenantHandler((*Server).savePublicDashboard)},
 
 	// Notifications.
-	{Method: http.MethodPost, Template: "/notifications/test", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/test"},
-	{Method: http.MethodGet, Template: "/notifications/options", Permission: auth.PermissionNotificationOptions, Example: "/notifications/options"},
-	{Method: http.MethodPut, Template: "/notifications/update-routing", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/update-routing"},
-	{Method: http.MethodPatch, Template: "/notifications/update-routing", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/update-routing"},
-	{Method: http.MethodPut, Template: "/notifications/incident-reminders", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/incident-reminders"},
-	{Method: http.MethodGet, Template: "/notifications/destinations", Permission: auth.PermissionNotificationOptions, Example: "/notifications/destinations"},
-	{Method: http.MethodPost, Template: "/notifications/destinations", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations"},
-	{Method: http.MethodGet, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationOptions, Example: "/notifications/destinations/destination-1"},
-	{Method: http.MethodPut, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1"},
-	{Method: http.MethodDelete, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1"},
-	{Method: http.MethodPost, Template: "/notifications/destinations/{id}/test", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1/test"},
-	{Method: http.MethodGet, Template: "/notifications/destinations/{id}/deliveries", Permission: auth.PermissionNotificationsManage, Example: "/notifications/destinations/destination-1/deliveries"},
-	{Method: http.MethodPost, Template: "/notifications/destinations/{id}/deliveries/redeliver", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1/deliveries/redeliver"},
+	{Method: http.MethodPost, Template: "/notifications/test", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/test", Handle: sessionTenantHandler((*Server).notificationTest)},
+	{Method: http.MethodGet, Template: "/notifications/options", Permission: auth.PermissionNotificationOptions, Example: "/notifications/options", Handle: tenantHandler((*Server).listNotificationDestinations)},
+	{Method: http.MethodPut, Template: "/notifications/update-routing", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/update-routing", Handle: sessionTenantHandler((*Server).updateNotificationRouting)},
+	{Method: http.MethodPatch, Template: "/notifications/update-routing", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/update-routing", Handle: sessionTenantHandler((*Server).toggleNotificationUpdateRouting)},
+	{Method: http.MethodPut, Template: "/notifications/incident-reminders", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/incident-reminders", Handle: sessionTenantHandler((*Server).updateIncidentReminders)},
+	{Method: http.MethodGet, Template: "/notifications/destinations", Permission: auth.PermissionNotificationOptions, Example: "/notifications/destinations", Handle: tenantHandler((*Server).listNotificationDestinations)},
+	{Method: http.MethodPost, Template: "/notifications/destinations", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations", Handle: sessionTenantHandler((*Server).createNotificationDestination)},
+	{Method: http.MethodGet, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationOptions, Example: "/notifications/destinations/destination-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.getNotificationDestination(w, r, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodPut, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.updateNotificationDestination(w, r, c.session, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodDelete, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.deleteNotificationDestination(w, r, c.session, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodPost, Template: "/notifications/destinations/{id}/test", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1/test", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.testNotificationDestination(w, r, c.session, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodGet, Template: "/notifications/destinations/{id}/deliveries", Permission: auth.PermissionNotificationsManage, Example: "/notifications/destinations/destination-1/deliveries", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.listTerminalDeliveries(w, r, c.tenant, r.PathValue("id"))
+	}},
+	{Method: http.MethodPost, Template: "/notifications/destinations/{id}/deliveries/redeliver", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1/deliveries/redeliver", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.redeliverTerminalDeliveries(w, r, c.session, c.tenant, r.PathValue("id"))
+	}},
 
 	// Global inventories.
 	{Method: http.MethodGet, Template: "/hosts", Permission: auth.PermissionHostsRead, Example: "/hosts"},

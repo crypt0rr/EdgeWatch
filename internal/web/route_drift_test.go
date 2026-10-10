@@ -895,7 +895,7 @@ func TestRouteInventoryCoversRoutingSource(t *testing.T) {
 	// to cover, or an empty result would prove nothing.
 	analyzer := &routeDriftAnalyzer{fset: fset, consumed: map[token.Pos]bool{}}
 	methods := serverMethods(files)
-	for _, name := range []string{"legacyAPI", "publicAPI", "jobRoute", "usersRoute", "notificationDestinationRoute", "platformRoute"} {
+	for _, name := range []string{"legacyAPI", "publicAPI", "jobRoute", "platformRoute"} {
 		function, ok := methods[name]
 		if !ok {
 			t.Errorf("routing function %s was not found", name)
@@ -906,10 +906,8 @@ func TestRouteInventoryCoversRoutingSource(t *testing.T) {
 		}
 	}
 	for name, want := range map[string][]string{
-		"jobRoute":                     {"/jobs"},
-		"usersRoute":                   {"/users"},
-		"notificationDestinationRoute": {"/notifications/destinations"},
-		"platformRoute":                {"/platform"},
+		"jobRoute":      {"/jobs"},
+		"platformRoute": {"/platform"},
 	} {
 		if got := subRouterPrefixes(methods, name); !slices.Equal(got, want) {
 			t.Errorf("%s prefixes = %v, want %v", name, got, want)
@@ -1033,8 +1031,6 @@ func TestRouteInventoryDriftDetectsRemovedEntries(t *testing.T) {
 		"POST /jobs/{id}/run",
 		"DELETE /jobs/{id}?permanent=true",
 		"GET /jobs/{id}/baseline/hosts/{address}/rdap",
-		"PATCH /users/{id}",
-		"DELETE /notifications/destinations/{id}",
 		"GET /audit",
 		"PATCH /platform/units/{id}/capacity",
 		"DELETE /platform/units/{id}/accounts/{uid}/sessions",

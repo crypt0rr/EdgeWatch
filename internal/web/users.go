@@ -90,73 +90,40 @@ func decodeUserPassword(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return input.Password, true
 }
 
-func (s *Server) usersRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, rest string) {
-	parts := strings.Split(strings.Trim(rest, "/"), "/")
-	if len(parts) == 0 || parts[0] == "" {
-		if r.Method == http.MethodGet {
-			s.listUsers(w, r, ts)
+// revokeUserSessions serves DELETE /users/{id}/sessions: after the
+// administrator confirms with their password, it signs the account out
+// everywhere and ends its live-update streams.
+func (s *Server) revokeUserSessions(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, id string) {
+	password, ok := decodeUserPassword(w, r)
+	if !ok || !s.confirmUserMutation(w, r, session, password) {
+		return
+	}
+	target, err := ts.GetUser(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "user not found", nil)
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "store", "user could not be loaded", nil)
+		return
+	}
+	audit := store.AuditEntry{Action: "user.sessions_revoked", Detail: fmt.Sprintf("sessions of %s revoked by %s", target.Username, session.Username), ActorUserID: session.UserID, ActorUsername: session.Username}
+	if err := ts.DeleteUserSessionsByAdministrator(r.Context(), id, audit); err != nil {
+		if writeAdministratorRefused(w, err) {
 			return
 		}
-		if r.Method == http.MethodPost {
-			s.createUser(w, r, session, ts)
+		if s.writeAuditUnavailable(w, err, "user.sessions_revoked") {
+			s.revokeSSEUser(id)
 			return
 		}
-	}
-	id := parts[0]
-	if len(parts) == 1 && r.Method == http.MethodGet {
-		s.getUser(w, r, ts, id)
-		return
-	}
-	if len(parts) == 1 && r.Method == http.MethodPatch {
-		s.updateUser(w, r, session, ts, id)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "activation" && r.Method == http.MethodPost {
-		s.issueAccountLink(w, r, session, ts, id)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "activation" && r.Method == http.MethodDelete {
-		s.revokeActivation(w, r, session, ts, id)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "password-reset" && r.Method == http.MethodPost {
-		s.issueAccountLink(w, r, session, ts, id)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "sessions" && r.Method == http.MethodDelete {
-		password, ok := decodeUserPassword(w, r)
-		if !ok || !s.confirmUserMutation(w, r, session, password) {
-			return
-		}
-		target, err := ts.GetUser(r.Context(), id)
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "user not found", nil)
 			return
-		} else if err != nil {
-			writeError(w, http.StatusInternalServerError, "store", "user could not be loaded", nil)
-			return
 		}
-		audit := store.AuditEntry{Action: "user.sessions_revoked", Detail: fmt.Sprintf("sessions of %s revoked by %s", target.Username, session.Username), ActorUserID: session.UserID, ActorUsername: session.Username}
-		if err := ts.DeleteUserSessionsByAdministrator(r.Context(), id, audit); err != nil {
-			if writeAdministratorRefused(w, err) {
-				return
-			}
-			if s.writeAuditUnavailable(w, err, "user.sessions_revoked") {
-				s.revokeSSEUser(id)
-				return
-			}
-			if errors.Is(err, store.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "not_found", "user not found", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "store", "user sessions could not be revoked", nil)
-			return
-		}
-		s.revokeSSEUser(id)
-		writeJSON(w, http.StatusNoContent, nil)
+		writeError(w, http.StatusInternalServerError, "store", "user sessions could not be revoked", nil)
 		return
 	}
-	writeError(w, http.StatusNotFound, "not_found", "user not found", nil)
+	s.revokeSSEUser(id)
+	writeJSON(w, http.StatusNoContent, nil)
 }
 
 func (s *Server) listUsers(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {

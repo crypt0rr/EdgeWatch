@@ -462,21 +462,28 @@ func publicDashboardTextError(title, introduction string) (string, map[string]st
 	return strings.Join(reasons, "; "), details
 }
 
-// publicDashboardRoute reads and saves the public page of the session's
-// tenant. A selection is checked through that tenant's public scope, the
-// reads its public page renders with, so only a host of the tenant's own jobs
-// can be published.
-func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
+// getPublicDashboard reads the public page of the session's tenant, or the
+// page that it would publish when it has none.
+func (s *Server) getPublicDashboard(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	dashboard, err := ts.GetPublicDashboard(r.Context())
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) {
+		dashboard, err = store.PublicDashboard{Title: "EdgeWatch public status", Hosts: []store.PublicDashboardHost{}}, nil
+	}
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", "public dashboard could not be loaded", nil)
 		return
 	}
-	if r.Method == http.MethodGet {
-		if errors.Is(err, store.ErrNotFound) {
-			dashboard = store.PublicDashboard{Title: "EdgeWatch public status", Hosts: []store.PublicDashboardHost{}}
-		}
-		writeJSON(w, http.StatusOK, dashboard)
+	writeJSON(w, http.StatusOK, dashboard)
+}
+
+// savePublicDashboard saves the public page of the session's tenant. A
+// selection is checked through that tenant's public scope, the reads its
+// public page renders with, so only a host of the tenant's own jobs can be
+// published.
+func (s *Server) savePublicDashboard(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
+	dashboard, err := ts.GetPublicDashboard(r.Context())
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, "store", "public dashboard could not be loaded", nil)
 		return
 	}
 	var input publicDashboardPayload

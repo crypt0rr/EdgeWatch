@@ -285,7 +285,11 @@ func TestReadBackupStatusReportsTheRecordedOutcome(t *testing.T) {
 	if err := os.Chmod(path, 0o000); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(path, 0o700)
+	t.Cleanup(func() {
+		if err := os.Chmod(path, 0o700); err != nil {
+			t.Error(err)
+		}
+	})
 	if os.Geteuid() != 0 {
 		if _, err := readBackupStatusFile(filepath.Join(path, "status.json")); err == nil {
 			t.Fatal("an unreadable status file was read")

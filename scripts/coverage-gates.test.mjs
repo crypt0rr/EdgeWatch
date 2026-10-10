@@ -38,6 +38,7 @@ const frontendReport = (overrides = {}) => {
     'src/components/PageErrorBoundary.tsx',
     'src/components/Pagination.tsx',
     'src/components/PortScopeDetails.tsx',
+    'src/components/ScheduledBackupBanner.tsx',
     'src/components/SurfaceUnitList.tsx',
     'src/components/UntrustedProxyBanner.tsx',
     'src/format.ts',

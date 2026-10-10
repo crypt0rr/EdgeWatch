@@ -14,6 +14,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/app"
 	"github.com/crypt0rr/edgewatch/internal/auth"
+	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/rdap"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/updatecheck"
@@ -52,6 +53,7 @@ type Server struct {
 	sseSessionKey    map[chan sseMessage]string
 	sseUserKey       map[chan sseMessage]string
 	sseIdentity      map[chan sseMessage]sseSubscriber
+	sseUnitUse       map[sseSubscriber]int // open streams of each unit and the platform
 	sseAuthMu        sync.Mutex
 	sseAuthCache     map[string]sseAuthCacheEntry
 	sseAuthTTL       time.Duration
@@ -89,8 +91,9 @@ type Server struct {
 	// configurable only for deterministic server tests; production uses the
 	// default below.
 	sseWriteTimeout time.Duration
-	// These limits are configurable only for deterministic server tests;
-	// production uses the bounded defaults below.
+	// The stream limits: web.max_live_streams, the per-account limit, and
+	// web.max_live_streams_per_unit. NewServer sets the configured ones; a
+	// zero limit uses the default below.
 	sseMaxSubscribers        int
 	sseMaxSubscribersPerUser int
 	sseMaxSubscribersPerUnit int
@@ -141,9 +144,9 @@ const defaultHTTPWriteTimeout = 60 * time.Second
 const defaultSSEWriteTimeout = 30 * time.Second
 
 const (
-	defaultMaxSSESubscribers        = 256
+	defaultMaxSSESubscribers        = config.DefaultMaxLiveStreams
 	defaultMaxSSESubscribersPerUser = 4
-	defaultMaxSSESubscribersPerUnit = 64
+	defaultMaxSSESubscribersPerUnit = config.DefaultMaxLiveStreamsPerUnit
 	defaultSSEAuthCacheTTL          = 2 * time.Second
 	sseEventIDBlockSize             = uint64(1 << 20)
 	defaultSSEReservationRetry      = time.Second
@@ -185,7 +188,11 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	if a != nil && a.Config != nil && a.Config.Web.SourceURL != "" {
 		sourceURL = a.Config.Web.SourceURL
 	}
-	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, sourceURL: sourceURL, now: time.Now, subscribers: map[chan sseMessage]struct{}{}, shutdown: make(chan struct{}), sseCancels: map[chan sseMessage]context.CancelFunc{}, sseSessionKey: map[chan sseMessage]string{}, sseUserKey: map[chan sseMessage]string{}, sseAuthCache: map[string]sseAuthCacheEntry{}, sseAuthTTL: defaultSSEAuthCacheTTL, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}}
+	var maxStreams, maxUnitStreams int
+	if a != nil && a.Config != nil {
+		maxStreams, maxUnitStreams = a.Config.Web.LiveStreamLimits()
+	}
+	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, sourceURL: sourceURL, now: time.Now, subscribers: map[chan sseMessage]struct{}{}, shutdown: make(chan struct{}), sseCancels: map[chan sseMessage]context.CancelFunc{}, sseSessionKey: map[chan sseMessage]string{}, sseUserKey: map[chan sseMessage]string{}, sseAuthCache: map[string]sseAuthCacheEntry{}, sseAuthTTL: defaultSSEAuthCacheTTL, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}, sseMaxSubscribers: maxStreams, sseMaxSubscribersPerUnit: maxUnitStreams}
 	if s != nil {
 		if start, end, err := s.SSECursor().Reserve(context.Background(), sseEventIDBlockSize); err != nil {
 			logger.Warn("SSE event cursor could not be reserved", "error", err)

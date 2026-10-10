@@ -16,6 +16,7 @@ validated schema.
 | `web.ipv6_rate_limit_prefix` | YAML | Prefix length by which the rate limits group IPv6 client addresses. |
 | `web.auth_key_file` | YAML/secrets | Optional separate key for the encrypted TOTP seeds. |
 | `web.source_url` | YAML | Source of a modified or forked build, the target of the console's **Source code** link. |
+| `web.max_live_streams`, `web.max_live_streams_per_unit` | YAML | Live-update streams the deployment keeps open, and the most that one business unit may hold. |
 | `log.level` | YAML | Log verbosity: `debug`, `info`, `warn`, or `error`. |
 | `scheduler.*` | YAML | Concurrent scans and probe budgets. |
 | `scanner.target_exclusions` | YAML | Addresses that may never be scanned. |
@@ -49,6 +50,8 @@ recreated and reviewed explicitly in the console.
 | `notifications.encryption_key_file` | `notification.key` next to the database | A regular file of 32 raw bytes or 64 hexadecimal characters with mode `0400` or `0600`. |
 | `notifications.sandbox` | `auto` | `auto`, `required`, or `off`. |
 | `web.source_url` | The exact Git tag of an official build | An absolute HTTPS URL without credentials, a query, or a fragment, at most 2048 bytes. |
+| `web.max_live_streams` | `256` | 1 to 4096; `0` is rejected. |
+| `web.max_live_streams_per_unit` | `64`, or `web.max_live_streams` when that is lower | 1 to `web.max_live_streams`; `0` is rejected. |
 
 Jobs are configured in the console, which enforces these limits:
 
@@ -140,6 +143,14 @@ Jobs are configured in the console, which enforces these limits:
   account's owner sent the codes, someone else holds the account's password,
   so change it. The counts are kept in memory, so restarting the daemon
   starts them over.
+- Each open console holds one live-update stream, and one account at most
+  four. With more than one active business unit, each unit may hold an equal
+  share of `web.max_live_streams`, at least four and at most
+  `web.max_live_streams_per_unit`, so busy units cannot lock the others out
+  while the active units number at most a quarter of `web.max_live_streams`.
+  A stream over a limit is told to retry later and the console keeps
+  reconnecting. Raise `web.max_live_streams` for more than 64 active units or
+  many consoles per unit.
 - Sessions end after 24 hours without activity and 30 days after sign-in; the
   daemon removes ended sessions at startup and once a day. An account keeps
   at most 20 sessions: a new sign-in beyond that ends the account's least

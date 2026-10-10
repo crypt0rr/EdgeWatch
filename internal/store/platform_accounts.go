@@ -58,6 +58,14 @@ func (ps *PlatformStore) HasMultipleTenants(ctx context.Context) (bool, error) {
 	return count > 1, err
 }
 
+// ActiveTenantCount returns the number of active business units, whose
+// accounts can sign in and open live-update streams.
+func (ps *PlatformStore) ActiveTenantCount(ctx context.Context) (int, error) {
+	var count int
+	err := ps.store.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM tenants WHERE state=?`, TenantStateActive).Scan(&count)
+	return count, err
+}
+
 // AuditEntry records a security event in platform scope, outside a
 // transaction: the record has no tenant, whatever the entry names.
 // Authentication uses it for an event about a platform administrator's

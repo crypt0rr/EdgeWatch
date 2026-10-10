@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/app"
 	"github.com/crypt0rr/edgewatch/internal/auth"
+	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
@@ -366,5 +369,141 @@ func TestASingleUnitsStreamReceivesEveryLiveUpdate(t *testing.T) {
 	}
 	if strings.Contains(stream.body(), "platform copy") || !strings.Contains(stream.body(), "unit copy") {
 		t.Fatalf("single unit stream received the wrong update alert copy: %s", stream.body())
+	}
+}
+
+// With six active units, each unit's share is a sixth of the deployment's
+// streams. Four units holding their whole share leave units 5 and 6 room for
+// theirs, the deployment-wide limit still holds, and a unit over its share
+// is refused in band. When units are added, the smaller share applies to new
+// streams; the streams already open are kept.
+func TestLiveStreamSharesFitTheActiveUnits(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	server, db, _ := newUsersTestServer(t)
+	server.sseMaxSubscribers = 24
+	server.sseMaxSubscribersPerUser = 2
+	server.sseMaxSubscribersPerUnit = 10
+	units := []*store.TenantStore{defaultTenantStore(server)}
+	for index := 2; index <= 6; index++ {
+		record, err := db.Platform().CreateTenant(ctx, fmt.Sprintf("Unit %d", index), fmt.Sprintf("unit-%d", index), store.AuditEntry{ActorKind: store.AuditActorHost})
+		if err != nil {
+			t.Fatal(err)
+		}
+		scope, err := db.TenantScopeByID(ctx, record.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		units = append(units, db.Tenant(scope))
+	}
+	if got := server.sseUnitStreamLimit(ctx); got != 4 {
+		t.Fatalf("share of six units in 24 streams = %d, want 4", got)
+	}
+	opened := 0
+	var closers [][]func()
+	open := func(unit int, wantLimit string) {
+		t.Helper()
+		user := fmt.Sprintf("unit-%d-user-%d", unit, opened)
+		streamCtx, cancel := context.WithCancel(ctx)
+		writer := &deadlineTrackingWriter{header: make(http.Header)}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			server.stream(writer, httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(streamCtx), store.Session{IDHash: "session-" + user, UserID: user, Role: store.RoleViewer}, units[unit-1])
+		}()
+		closeStream := func() {
+			cancel()
+			<-done
+		}
+		t.Cleanup(closeStream)
+		if wantLimit != "" {
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("unit %d's stream over the limit stayed open", unit)
+			}
+			writer.mu.Lock()
+			body := writer.body.String()
+			writer.mu.Unlock()
+			if !strings.Contains(body, `"reason":"`+wantLimit+`"`) {
+				t.Fatalf("unit %d's refused stream = %q, want %q", unit, body, wantLimit)
+			}
+			return
+		}
+		opened++
+		waitForSSESubscribers(t, server, opened)
+		for len(closers) < unit {
+			closers = append(closers, nil)
+		}
+		closers[unit-1] = append(closers[unit-1], closeStream)
+	}
+	for unit := 1; unit <= 4; unit++ {
+		for range 4 {
+			open(unit, "")
+		}
+		open(unit, "too many live streams for this business unit")
+	}
+	for _, unit := range []int{5, 6} {
+		for range 4 {
+			open(unit, "")
+		}
+	}
+	if opened != 24 {
+		t.Fatalf("%d streams open, want 24", opened)
+	}
+	open(5, "too many live streams")
+
+	// Two more units shrink the share to three. The four streams each unit
+	// holds stay open, and a unit cannot open another, even below the
+	// deployment-wide limit, until it is back under its new share.
+	for index := 7; index <= 8; index++ {
+		if _, err := db.Platform().CreateTenant(ctx, fmt.Sprintf("Unit %d", index), fmt.Sprintf("unit-%d", index), store.AuditEntry{ActorKind: store.AuditActorHost}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := server.sseUnitStreamLimit(ctx); got != 3 {
+		t.Fatalf("share of eight units in 24 streams = %d, want 3", got)
+	}
+	for _, closeStream := range closers[5][:2] {
+		closeStream()
+	}
+	opened -= 2
+	waitForSSESubscribers(t, server, opened)
+	open(1, "too many live streams for this business unit")
+	open(6, "")
+	open(6, "too many live streams for this business unit")
+}
+
+func TestLiveStreamShareBounds(t *testing.T) {
+	t.Parallel()
+	for _, check := range []struct {
+		total, perUser, perUnit, units, want int
+	}{
+		{256, 4, 64, 2, 64},
+		{256, 4, 64, 4, 64},
+		{256, 4, 64, 5, 51},
+		{256, 4, 64, 6, 42},
+		{256, 4, 64, 64, 4},
+		{256, 4, 64, 100, 4},
+		{256, 4, 2, 100, 2},
+	} {
+		if got := sseUnitStreamShare(check.total, check.perUser, check.perUnit, check.units); got != check.want {
+			t.Errorf("share of %d units in %d streams = %d, want %d", check.units, check.total, got, check.want)
+		}
+	}
+}
+
+// NewServer takes the stream limits from web.max_live_streams and
+// web.max_live_streams_per_unit, and the defaults without a configuration.
+func TestNewServerTakesTheConfiguredStreamLimits(t *testing.T) {
+	t.Parallel()
+	total, perUnit := 512, 32
+	server := NewServer(&app.App{Config: &config.Config{Web: config.Web{MaxLiveStreams: &total, MaxLiveStreamsPerUnit: &perUnit}}}, nil, nil)
+	if server.maxSSESubscribers() != 512 || server.sseMaxSubscribersPerUnit != 32 {
+		t.Fatalf("configured limits = %d/%d", server.maxSSESubscribers(), server.sseMaxSubscribersPerUnit)
+	}
+	server = NewServer(nil, nil, nil)
+	if server.maxSSESubscribers() != config.DefaultMaxLiveStreams || server.maxSSESubscribersPerUser() != defaultMaxSSESubscribersPerUser || server.sseUnitStreamLimit(context.Background()) != config.DefaultMaxLiveStreamsPerUnit {
+		t.Fatalf("default limits = %d/%d/%d", server.maxSSESubscribers(), server.maxSSESubscribersPerUser(), server.sseUnitStreamLimit(context.Background()))
 	}
 }

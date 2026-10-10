@@ -665,12 +665,18 @@ func TestPlatformAuditAndTenantCount(t *testing.T) {
 	if multiple, err := f.store.Platform().HasMultipleTenants(ctx); err != nil || !multiple {
 		t.Fatalf("two tenants counted as multiple = %v, %v", multiple, err)
 	}
+	if active, err := f.store.Platform().ActiveTenantCount(ctx); err != nil || active != 2 {
+		t.Fatalf("active tenants = %d, %v; want 2", active, err)
+	}
 	for _, state := range []string{TenantStateDisabled, TenantStateDeleting} {
 		if _, err := f.store.DB.Exec(`UPDATE tenants SET state=? WHERE id=?`, state, secondTenantID); err != nil {
 			t.Fatal(err)
 		}
 		if multiple, err := f.store.Platform().HasMultipleTenants(ctx); err != nil || !multiple {
 			t.Fatalf("a %s second tenant counted as multiple = %v, %v", state, multiple, err)
+		}
+		if active, err := f.store.Platform().ActiveTenantCount(ctx); err != nil || active != 1 {
+			t.Fatalf("active tenants with a %s second tenant = %d, %v; want 1", state, active, err)
 		}
 	}
 	if _, err := f.store.DB.Exec(`UPDATE tenants SET state=? WHERE id=?`, TenantStateDeleted, secondTenantID); err != nil {

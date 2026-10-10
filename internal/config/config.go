@@ -166,6 +166,13 @@ type Web struct {
 	// its own. nil, when the key is omitted, is DefaultIPv6RateLimitPrefix.
 	// Audit records keep the full address.
 	IPv6RateLimitPrefix *int `yaml:"ipv6_rate_limit_prefix"`
+	// MaxLiveStreams is the number of live-update streams the deployment
+	// keeps open at once, and MaxLiveStreamsPerUnit the most that one
+	// business unit may hold once more than one unit is active. nil, when a
+	// key is omitted, is DefaultMaxLiveStreams and
+	// DefaultMaxLiveStreamsPerUnit, or MaxLiveStreams when that is lower.
+	MaxLiveStreams        *int `yaml:"max_live_streams"`
+	MaxLiveStreamsPerUnit *int `yaml:"max_live_streams_per_unit"`
 }
 
 // RateLimitIPv6Prefix returns web.ipv6_rate_limit_prefix, or
@@ -175,6 +182,29 @@ func (w Web) RateLimitIPv6Prefix() int {
 		return DefaultIPv6RateLimitPrefix
 	}
 	return *w.IPv6RateLimitPrefix
+}
+
+// The live-update stream limits of web.max_live_streams and
+// web.max_live_streams_per_unit.
+const (
+	DefaultMaxLiveStreams        = 256
+	DefaultMaxLiveStreamsPerUnit = 64
+	MaxLiveStreamsLimit          = 4096
+)
+
+// LiveStreamLimits returns the deployment-wide live-update stream limit and
+// the most streams one business unit may hold, with the defaults for the
+// settings that are omitted.
+func (w Web) LiveStreamLimits() (total, perUnit int) {
+	total = DefaultMaxLiveStreams
+	if w.MaxLiveStreams != nil {
+		total = *w.MaxLiveStreams
+	}
+	perUnit = min(DefaultMaxLiveStreamsPerUnit, total)
+	if w.MaxLiveStreamsPerUnit != nil {
+		perUnit = *w.MaxLiveStreamsPerUnit
+	}
+	return total, perUnit
 }
 
 type Scheduler struct {
@@ -1029,6 +1059,11 @@ func (c Config) ValidateDeployment() error {
 	}
 	if err := validateWebListen(c.Web.Listen); err != nil {
 		return err
+	}
+	if total, perUnit := c.Web.LiveStreamLimits(); total < 1 || total > MaxLiveStreamsLimit {
+		return fmt.Errorf("web.max_live_streams must be between 1 and %d", MaxLiveStreamsLimit)
+	} else if perUnit < 1 || perUnit > total {
+		return fmt.Errorf("web.max_live_streams_per_unit must be between 1 and web.max_live_streams (%d)", total)
 	}
 	if c.Web.SourceURL != "" {
 		source, err := url.Parse(c.Web.SourceURL)

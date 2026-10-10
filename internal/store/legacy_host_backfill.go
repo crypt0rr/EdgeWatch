@@ -117,7 +117,9 @@ func backfillLegacyScanHostsContextWithLoggerAndProgress(ctx context.Context, db
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		tx, err := db.BeginTx(ctx, nil)
+		// The batch selects its scans before it indexes them, so it takes
+		// the write lock first.
+		tx, err := beginWriteTx(ctx, db)
 		if err != nil {
 			return err
 		}

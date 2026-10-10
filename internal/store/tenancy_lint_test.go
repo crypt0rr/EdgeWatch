@@ -34,11 +34,6 @@ var tenantInsertExemptions = map[string]struct {
 	count  int
 	reason string
 }{
-	"migrateContextWithLogger:users":                            {1, "a migration step that runs before schema 52 adds users.tenant_id"},
-	"migrateContextWithLogger:latest_scan_hosts":                {1, "a migration step that runs before schema 54 adds latest_scan_hosts.tenant_id"},
-	"migrateContextWithLogger:security_audit":                   {1, "a migration step that runs before schema 51 adds security_audit.tenant_id"},
-	"migration52Statements:users":                               {1, "copies the legacy administrator before the rebuild adds users.tenant_id"},
-	"insertAuditEntryExec:security_audit":                       {1, "the fallback for a database before schema 51, whose table has no tenant_id"},
 	"applyRestoreDeliveryPolicy:restore_quarantined_deliveries": {1, "the column list names tenant_id at run time when the restored outbox has the column"},
 	"insertRestoreAuditTx:security_audit":                       {1, "the column list names tenant_id at run time when the restored table has the column"},
 }

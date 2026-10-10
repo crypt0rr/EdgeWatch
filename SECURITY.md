@@ -626,6 +626,12 @@ binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
 refuse a schema newer than the binary supports before they write anything.
+From v0.36.0 they also refuse a schema older than 54, the schema of v0.20.0,
+before anything writes, so its schema version and startup state stay
+unchanged, with the advice to upgrade through v0.35.0 first; `health`,
+`verify`, and a restore of such a backup report the same refusal. A new
+database starts from a frozen copy of schema 54 that a test keeps identical
+to what the retired migrations created.
 Schema 63 also marks legacy unsent deliveries with at least eight attempts
 and a retry scheduled before v0.22.1 as terminal; deliveries still retrying
 under the newer fifteen-attempt policy remain eligible. Schema 64 adds an
@@ -636,8 +642,15 @@ replaces scan history indexes with ones that hold each scan's tenant, job,
 and outcome, and records when the backfill of the host index of pre-index
 scans has completed; scans, their results, and the guard that keeps a
 latest-host row in its scan's tenant are unchanged.
-Only the daemon migrates. The host commands that act on business units or
-accounts (`admin`, `scan`, `status`, `history`, `baseline`, and `notify
+Only the daemon migrates, and only one process at a time: from v0.36.0 the
+daemon holds an advisory lock on the database directory, which restores take
+too, from before it opens the database until its migration and startup
+phases have finished, so a second daemon on the same data volume exits
+without writing, and each migration step checks the schema version inside
+its own transaction, so no step runs twice. The startup phases that read
+before they write take the write lock first, so a concurrent host command
+delays them instead of failing the start. The host commands that act on
+business units or accounts (`admin`, `scan`, `status`, `history`, `baseline`, and `notify
 test`) refuse a schema that the daemon has not upgraded yet, such as a
 restored backup of an older release, before they read or write anything, so
 account recovery never reports an existing account as missing. The daemon
@@ -684,8 +697,9 @@ review the ceiling of those units after the upgrade. Back up the complete
 
 Recovery codes are stored in the salted `v2` representation. Schema 38 removes
 legacy unsalted SHA-256 recovery-code digests and records only their count in
-the security audit; generate new recovery codes from the Security page after
-an upgrade. The old plaintext cannot be recovered or safely re-hashed.
+the security audit; every database that this release upgrades has passed it.
+Generate new recovery codes from the Security page after an upgrade from a
+release before it. The old plaintext cannot be recovered or safely re-hashed.
 
 Single-file restores create a new notification epoch. Pending deliveries are
 quarantined by default so alerts from the backup cannot be replayed; operators
@@ -735,8 +749,9 @@ remove the temporary copy. The next restore or dry run removes abandoned
 `.edgewatch-restore-*` staging directories left by a process killed outright
 or by a host crash. On Linux, concurrent restore commands are serialized with
 an advisory lock on the database directory, without leaving a lock file
-behind. Other platforms skip automatic orphan removal when cross-process
-locking is unavailable.
+behind; the daemon holds the same lock while it migrates, so a restore never
+replaces a database that is being migrated. Other platforms skip automatic
+orphan removal when cross-process locking is unavailable.
 
 A backup can hold sessions, activation and password-reset links, and a setup
 or platform setup token that were revoked, redeemed, or replaced after it was

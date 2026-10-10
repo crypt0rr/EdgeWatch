@@ -99,34 +99,6 @@ func TestAuditCategoryCoversEveryKnownAction(t *testing.T) {
 	}
 }
 
-// The migration backfill and auditCategory agree for every known action and
-// for an unknown one.
-func TestAuditCategoryBackfillMatchesAuditCategory(t *testing.T) {
-	t.Parallel()
-	s := openTestStore(t)
-	actions := []string{"future.action", "test"}
-	for _, list := range knownAuditActions {
-		actions = append(actions, list...)
-	}
-	for _, action := range actions {
-		if _, err := s.DB.Exec(`INSERT INTO security_audit(action,created_at,category) VALUES(?,datetime('now'),'')`, action); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := s.DB.Exec(auditCategoryBackfillStatement()); err != nil {
-		t.Fatal(err)
-	}
-	for _, action := range actions {
-		var category string
-		if err := s.DB.QueryRow(`SELECT category FROM security_audit WHERE action=?`, action).Scan(&category); err != nil {
-			t.Fatal(err)
-		}
-		if category != auditCategory(action) {
-			t.Errorf("backfilled %s = %q, auditCategory = %q", action, category, auditCategory(action))
-		}
-	}
-}
-
 // dottedActionPattern matches strings shaped like an audit action.
 var dottedActionPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$`)
 
@@ -148,6 +120,7 @@ var notAuditActions = map[string]bool{
 	"auth.key":                    true,
 	"notification.key":            true,
 	"edgewatch.db":                true,
+	"v0.35.0":                     true,
 	"github.com":                  true,
 	"localhost.localdomain":       true,
 	"experimental.business_units": true,

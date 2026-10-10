@@ -144,12 +144,14 @@ func TestRetentionProtectionPreparationReportsClosedDatabase(t *testing.T) {
 
 func TestExistingDatabaseAutoVacuumModeIsPreserved(t *testing.T) {
 	t.Parallel()
+	// The file holds a table before the first open, the startup state that a
+	// start which stopped before the baseline committed leaves.
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	raw, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := raw.Exec("CREATE TABLE legacy (id INTEGER)"); err != nil {
+	if _, err := raw.Exec(startupStateSchema); err != nil {
 		raw.Close()
 		t.Fatal(err)
 	}

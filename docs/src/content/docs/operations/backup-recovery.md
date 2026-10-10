@@ -52,7 +52,12 @@ foreign-key check, and the detection of a supported EdgeWatch schema. Add
 a large database. The output reports the backup's `path`, `bytes`, and
 `schema_version`, the `check` it passed with its `integrity_check` result, and
 `foreign_key_violations`. A database that fails a check, for example because a
-row breaks a foreign key, fails the backup and leaves nothing at `--out`. The
+row breaks a foreign key, fails the backup and leaves nothing at `--out`. A
+supported schema is one from schema 54, of v0.20.0, to the current one. From
+v0.36.0, `backup` refuses a database with an older schema before it copies it
+or records the attempt in its audit log, so back up a database of an older
+release with v0.35.0; see
+[Restore a backup of an older release](#restore-a-backup-of-an-older-release). The
 backup sets its private file mode on its temporary file before it is
 published, and never changes another file in the output directory, such as a
 file that happens to be named like a SQLite companion of the backup.
@@ -83,7 +88,8 @@ of the platform, paused or not, and how many TOTP seeds the keys cannot open,
 as counts only. The report is one JSON document with `valid` and, when a check
 fails, the reason in `error`; the command exits non-zero when the file is not
 valid, for example when it is truncated, has a newer schema than this release
-supports, or holds secrets that the configured keys cannot open. Add
+supports or one older than schema 54, or holds secrets that the configured
+keys cannot open. Add
 `--allow-key-mismatch` to report locked secrets without failing, for example
 when you check a backup on a host without its keys. `verify --from` writes
 nothing to the database and no audit record.
@@ -186,7 +192,10 @@ and remove the temporary copy. If a process is killed outright or the host
 crashes, the next restore or dry run removes abandoned `.edgewatch-restore-*`
 copies before starting. Concurrent restore commands are serialized with an
 advisory lock on Linux using the database directory itself, so no extra lock
-file is created. Other platforms retain signal cleanup but skip automatic
+file is created. The daemon holds the same lock while it migrates the database
+at startup, so a restore waits until the migration has finished, and a daemon
+that starts while a restore runs exits instead of migrating the database that
+is being replaced. Other platforms retain signal cleanup but skip automatic
 orphan removal when cross-process locking is unavailable.
 
 Before the staged copy can replace the database, the restore and its dry run
@@ -211,6 +220,24 @@ clears these copied leases, and the dry run does the same in its private copy.
 The service therefore starts at once after a restore, and a repeated restore
 onto the stopped service is not refused. The active-daemon check reads only
 the lease in the database that is being replaced.
+
+### Restore a backup of an older release
+
+A restore accepts a backup of schema 54, the schema of v0.20.0, or of a later
+schema up to the current one. The daemon upgrades it at its next start; see
+[Migration ownership](/reference/database-compatibility/#migration-ownership).
+From v0.36.0, a backup of an older release is refused by the restore, its dry
+run, and `verify --from` with `database schema version N is older than schema
+54, the oldest that this release upgrades; upgrade through v0.35.0 first`, and
+the database is not changed. To use such a backup, upgrade it with v0.35.0,
+which still upgrades every older schema:
+
+1. Pin `ghcr.io/crypt0rr/edgewatch:0.35.0` in a `compose.override.yaml`, as
+   under [Upgrade from a release before v0.20.0](/deployment/updates/#upgrade-from-a-release-before-v0200).
+2. Restore the backup with that image as shown above, start the service, and
+   wait until `edgewatch health` reports `ready`.
+3. Take a new backup, remove the override, and update to the current release.
+   Its daemon then upgrades the database from schema 65.
 
 ## Emergency restore overrides
 

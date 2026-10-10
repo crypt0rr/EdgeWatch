@@ -141,7 +141,9 @@ func OpenReadOnlyExistingContext(ctx context.Context, path string) (*Store, erro
 // business units or accounts, whose rows the migrations reshape. It also
 // refuses, before anything reads or writes, a database with an older schema
 // that the daemon has not migrated yet, such as a restored backup of an
-// older release, with an error that wraps ErrSchemaUpgradePending.
+// older release, with an error that wraps ErrSchemaUpgradePending, or with
+// one that wraps ErrSchemaBelowUpgradeFloor when the schema is older than
+// this release upgrades.
 func OpenExistingUpgraded(path string) (*Store, error) {
 	return openWithOptions(path, openOptions{requireExisting: true, refuseOlderSchema: true})
 }
@@ -239,6 +241,24 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 			}
 		}()
 	}
+	if options.migrate && !memoryDatabase {
+		// Hold the migration guard from before SQLite opens the file until
+		// the migration and its startup phases have finished, so a second
+		// daemon, or a restore, never works on the database at the same time.
+		unlock, err := acquireMigrationGuard(filepath.Dir(artifactPath))
+		switch {
+		case errors.Is(err, errMigrationGuardUnsupported):
+			logger := options.logger
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.Warn("database directory cannot be locked; migrating without the guard against a concurrent migration", "error", err)
+		case err != nil:
+			return nil, err
+		default:
+			defer unlock()
+		}
+	}
 	if options.queryOnly && !memoryDatabase {
 		// Capture the companion files before SQLite opens the live-safe
 		// read-only connection; it may initialize an empty WAL/SHM pair.
@@ -253,17 +273,15 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 	db.SetMaxIdleConns(1)
 	if !options.migrate && !options.queryOnly {
 		// Write-capable host commands open without migrating. Refuse a schema
-		// from a newer release before anything writes, as the daemon does.
+		// that the daemon does not migrate, from a newer release or older
+		// than minimumUpgradeSchema, before anything writes, as the daemon
+		// does: a backup of such a database writes no audit record to it.
 		// The commands that need the current schema also refuse one that
 		// the daemon has not migrated yet.
-		var version int
-		if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		version, err := checkUpgradableSchemaContext(ctx, db)
+		if err != nil {
 			db.Close()
 			return nil, err
-		}
-		if version > schemaVersion {
-			db.Close()
-			return nil, newerSchemaError(version)
 		}
 		if version < schemaVersion && options.refuseOlderSchema {
 			db.Close()
@@ -271,6 +289,14 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 		}
 	}
 	if options.migrate && !options.queryOnly {
+		// Refuse a schema that this release does not migrate, newer than it
+		// or older than minimumUpgradeSchema, before the journal mode below
+		// can rewrite the file header of a rollback-journal database, such
+		// as a restored backup, or create its WAL and shared-memory files.
+		if _, err := checkUpgradableSchemaContext(ctx, db); err != nil {
+			db.Close()
+			return nil, err
+		}
 		// New databases must select incremental auto-vacuum before WAL mode or
 		// any application table is created. Existing databases are intentionally
 		// left unchanged: converting a populated file requires a one-time
@@ -357,8 +383,9 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 				return nil, err
 			}
 			if version < schemaVersion {
+				err := olderSchemaError(ctx, db, version)
 				store.Close()
-				return nil, schemaUpgradePendingError{version: version}
+				return nil, err
 			}
 		}
 		return store, nil

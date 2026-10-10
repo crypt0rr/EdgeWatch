@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -135,27 +134,5 @@ func TestOpenExistingRefusesNewerSchemaWithoutWriting(t *testing.T) {
 	}
 	if err := current.Close(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestMigrateRejectsRecoveryFixtureMissingRequiredSourceTable(t *testing.T) {
-	t.Parallel()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if _, err := db.Exec(legacySchema); err != nil {
-		t.Fatal(err)
-	}
-	// A schema marker is not a promise that arbitrary newer tables can be
-	// reconstructed. This fixture claims the pre-FTS schema but omits the host
-	// source table required by migration 22; fail at that exact contract.
-	if _, err := db.Exec("PRAGMA user_version = 21"); err != nil {
-		t.Fatal(err)
-	}
-	err = migrate(db)
-	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "scan_hosts") {
-		t.Fatalf("missing-source fixture error = %v, want scan_hosts diagnostic", err)
 	}
 }

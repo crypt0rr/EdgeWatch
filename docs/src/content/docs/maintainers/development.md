@@ -185,4 +185,7 @@ Update the [API compatibility guide](/reference/api-compatibility/) when respons
 shapes change, and regenerate the [API types](#generated-api-types) when a
 listed struct changes. For database migrations, update
 [Database compatibility](/reference/database-compatibility/) and the root
-`SECURITY.md`, then run `./scripts/check-schema-docs.sh`.
+`SECURITY.md`, then run `./scripts/check-schema-docs.sh`. A new migration
+upgrades from the previous schema; a new database starts from the frozen
+schema 54 baseline in `internal/store/schema_baseline.go`, which must not
+change, and then runs every later migration.

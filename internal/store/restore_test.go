@@ -1360,61 +1360,6 @@ func addRestoreDeadDelivery(t *testing.T, path, destination string) {
 	}
 }
 
-func TestRestorePre31CountsOnlyRetryableDeliveries(t *testing.T) {
-	t.Parallel()
-	for _, policy := range []PendingDeliveryPolicy{PendingDeliveriesQuarantine, PendingDeliveriesDiscard} {
-		t.Run(string(policy), func(t *testing.T) {
-			ctx := context.Background()
-			path := filepath.Join(t.TempDir(), "pre31.db")
-			raw, err := sql.Open("sqlite", path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := raw.ExecContext(ctx, `CREATE TABLE outbox (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		destination TEXT NOT NULL,
-		payload_json BLOB NOT NULL,
-		attempts INTEGER NOT NULL DEFAULT 0,
-		next_at TEXT NOT NULL,
-		sent_at TEXT,
-		last_error TEXT NOT NULL DEFAULT ''
-		); INSERT INTO outbox(destination,payload_json,attempts,next_at) VALUES('retrying','{}',0,'2026-10-01T00:00:00Z'),('exhausted','{}',8,'2026-10-01T00:00:00Z'); PRAGMA user_version=30`); err != nil {
-				raw.Close()
-				t.Fatal(err)
-			}
-			if err := raw.Close(); err != nil {
-				t.Fatal(err)
-			}
-
-			affected, err := applyRestoreDeliveryPolicy(ctx, path, policy, "pre31-restore", time.Now().UTC())
-			if err != nil {
-				t.Fatalf("apply pre-31 %s policy: %v", policy, err)
-			}
-			if affected != 1 {
-				t.Fatalf("pre-31 affected count = %d, want only the retryable row", affected)
-			}
-			reader, err := sql.Open("sqlite", path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer reader.Close()
-			if got := countRows(t, reader, `SELECT COUNT(*) FROM outbox WHERE destination='exhausted'`); got != 1 {
-				t.Fatalf("exhausted pre-31 deliveries remaining = %d, want 1", got)
-			}
-			if got := countRows(t, reader, `SELECT COUNT(*) FROM outbox WHERE destination='retrying'`); got != 0 {
-				t.Fatalf("retryable pre-31 deliveries remaining = %d, want 0", got)
-			}
-			wantQuarantined := 0
-			if policy == PendingDeliveriesQuarantine {
-				wantQuarantined = 1
-			}
-			if got := countRows(t, reader, `SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE destination='retrying'`); got != wantQuarantined {
-				t.Fatalf("quarantined retryable pre-31 deliveries = %d, want %d", got, wantQuarantined)
-			}
-		})
-	}
-}
-
 func readRestoreValue(path string) (string, error) {
 	s, err := OpenReadOnlyExisting(path)
 	if err != nil {

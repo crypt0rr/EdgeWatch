@@ -10,8 +10,10 @@ EdgeWatch enforces the separation in the application, not in the host or the
 database; see [Limits](/administration/business-units/#limits).
 
 Every installation starts with one unit, the default unit, named `Default`
-with the slug `default`. The upgrade to schema 54 moves everything that
-existed into it, and every account keeps its role there, so existing
+with the slug `default`. The upgrade to schema 54, which v0.35.0 runs for a
+database of a release before v0.20.0 (see
+[Upgrade from a release before v0.20.0](/deployment/updates/#upgrade-from-a-release-before-v0200)),
+moves everything that existed into it, and every account keeps its role there, so existing
 administrators administer the default unit. There is nothing to configure.
 While the default unit is the only one, jobs, schedules, notifications,
 public status, and optional TOTP work as before. After upgrading, an

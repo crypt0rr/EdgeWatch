@@ -168,7 +168,7 @@ func legacyTombstoneWithResidue(t *testing.T) (tenantFixture, *sql.Tx) {
 	if _, err := f.store.DB.Exec(`UPDATE tenants SET state=?,purge_phase=? WHERE id=?`, TenantStateDeleted, tenantPurgePhaseComplete, secondTenantID); err != nil {
 		t.Fatal(err)
 	}
-	if err := applyMigration(f.store.DB, 55, migration55Statements()); err != nil {
+	if err := reapplyMigration(t, f.store.DB, 55, migration55Statements()); err != nil {
 		t.Fatal(err)
 	}
 	if row, ok := legacyPurgeMaintenanceRow(t, f.store); !ok || row.Complete {
@@ -453,7 +453,7 @@ func TestLegacyPurgeMaintenanceStopsWhenItIsNoLongerPending(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertTenantInState(t, s, "deleted", TenantStateDeleted, tenantPurgePhaseComplete)
-	if err := applyMigration(s.DB, 55, migration55Statements()); err != nil {
+	if err := reapplyMigration(t, s.DB, 55, migration55Statements()); err != nil {
 		t.Fatal(err)
 	}
 	complete := `UPDATE fts_backfill_state SET complete=1 WHERE table_name='` + legacyPurgeMaintenanceState + `'`

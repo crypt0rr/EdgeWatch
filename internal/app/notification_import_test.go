@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -144,32 +143,12 @@ func assertNoSecrets(t *testing.T, where, text string, secrets ...string) {
 	}
 }
 
-// downgradeToSchema49 removes the schema-50 import state, as a database
-// written by the previous release has it.
-func downgradeToSchema49(t *testing.T, database string) {
-	t.Helper()
-	raw, err := sql.Open("sqlite", database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
-	for _, statement := range []string{
-		`ALTER TABLE deployment_notification_ids DROP COLUMN managed_notification_id`,
-		`ALTER TABLE deployment_notification_ids DROP COLUMN imported_at`,
-		`DROP TABLE notification_config_import`,
-		`PRAGMA user_version=49`,
-	} {
-		if _, err := raw.Exec(statement); err != nil {
-			t.Fatalf("%s: %v", statement, err)
-		}
-	}
-}
-
-// The first daemon start of the new release imports the notification URLs of
-// a populated schema-49 installation. Every reference to the deployment
-// destinations moves to the imported ones, queued alerts are still delivered,
-// and a second start imports nothing.
-func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *testing.T) {
+// The first daemon start that imports the notification URLs of config.yaml
+// imports those of a populated installation that delivered to them as
+// deployment destinations. Every reference to the deployment destinations
+// moves to the imported ones, queued alerts are still delivered, and a
+// second start imports nothing.
+func TestDaemonStartImportsConfiguredNotificationURLsOfAPopulatedInstallation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -179,7 +158,7 @@ func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *test
 	opsURL, _ := importWebhook(t, "ops-secret-token")
 	digestInline, digestFile := urlDigest(inline), urlDigest(fromFile)
 
-	// The previous release: both URLs are deployment destinations with opaque
+	// Before the import: both URLs are deployment destinations with opaque
 	// IDs, next to one web-managed destination.
 	fixture, err := store.Open(database)
 	if err != nil {
@@ -234,7 +213,6 @@ func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *test
 	if err := fixture.Close(); err != nil {
 		t.Fatal(err)
 	}
-	downgradeToSchema49(t, database)
 
 	cfg := writeImportConfig(t, dir, database, inline, fromFile)
 	upgraded, err := store.Open(database)

@@ -412,3 +412,27 @@ func TestPublicAPIFailsClosedOutsideTheRouteTable(t *testing.T) {
 		}
 	}
 }
+
+func TestRoutePlaceholderNamesOnlyBracedSegments(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		segment string
+		name    string
+		rest    bool
+		ok      bool
+	}{
+		{"{id}", "id", false, true},
+		{"{slug...}", "slug", true, true},
+		{"jobs", "", false, false},
+		{"id}", "", false, false},
+		{"{id", "", false, false},
+		{"{}", "", false, false},
+		{"{...}", "", true, false},
+		{"", "", false, false},
+	} {
+		name, rest, ok := routePlaceholder(test.segment)
+		if name != test.name || rest != test.rest || ok != test.ok {
+			t.Errorf("routePlaceholder(%q) = %q, %t, %t; want %q, %t, %t", test.segment, name, rest, ok, test.name, test.rest, test.ok)
+		}
+	}
+}

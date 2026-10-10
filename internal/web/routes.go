@@ -286,11 +286,10 @@ func escapeRouteSegment(segment string) string {
 // routePlaceholder returns the name of a {name} or {name...} template
 // segment, and whether it takes the rest of the path.
 func routePlaceholder(segment string) (name string, rest, ok bool) {
-	inner, found := strings.CutPrefix(segment, "{")
-	if inner, found = strings.CutSuffix(inner, "}"); !found || inner == "" {
+	if len(segment) < 3 || segment[0] != '{' || segment[len(segment)-1] != '}' {
 		return "", false, false
 	}
-	name, rest = strings.CutSuffix(inner, "...")
+	name, rest = strings.CutSuffix(segment[1:len(segment)-1], "...")
 	return name, rest, name != ""
 }
 

@@ -2,40 +2,9 @@ package web
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
 )
-
-// requiredPermission maps an API method and path, relative to /api/v1, to
-// the capability a session needs, for the routes that legacyAPI still
-// dispatches. Every route it grants must be listed in apiRoutes below; the
-// route inventory tests check this function, legacyAPI and its sub-routers
-// against that table.
-func requiredPermission(path, method string) string {
-	switch {
-	case strings.HasPrefix(path, "/platform/"):
-		return requiredPlatformPermission(path, method)
-	}
-	return auth.PermissionDenied
-}
-
-func routeParts(path, prefix string) ([]string, bool) {
-	if path != prefix && !strings.HasPrefix(path, prefix+"/") {
-		return nil, false
-	}
-	rest := strings.Trim(path[len(prefix):], "/")
-	if rest == "" {
-		return nil, true
-	}
-	return strings.Split(rest, "/"), true
-}
-
-// requestPermission is the capability that legacyAPI requires for a
-// request.
-func requestPermission(path string, r *http.Request) string {
-	return requiredPermission(path, r.Method)
-}
 
 func isMutation(method string) bool {
 	return method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions
@@ -314,33 +283,67 @@ var apiRoutes = []apiRoute{
 	// units, their administrators and capacity, the platform
 	// administrators, the platform audit, the platform's notification
 	// destinations and update routing, and the deployment status.
-	{Method: http.MethodGet, Template: "/platform/units", Permission: auth.PermissionUnitsManage, Example: "/platform/units"},
-	{Method: http.MethodPost, Template: "/platform/units", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units"},
-	{Method: http.MethodGet, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Example: "/platform/units/unit-1"},
-	{Method: http.MethodPatch, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1"},
-	{Method: http.MethodDelete, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1"},
-	{Method: http.MethodPost, Template: "/platform/units/{id}/disable", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1/disable"},
-	{Method: http.MethodPost, Template: "/platform/units/{id}/enable", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1/enable"},
-	{Method: http.MethodGet, Template: "/platform/units/{id}/capacity", Permission: auth.PermissionUnitsManage, Example: "/platform/units/unit-1/capacity"},
-	{Method: http.MethodPatch, Template: "/platform/units/{id}/capacity", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1/capacity"},
-	{Method: http.MethodGet, Template: "/platform/units/{id}/accounts", Permission: auth.PermissionUnitAccountsManage, Example: "/platform/units/unit-1/accounts"},
-	{Method: http.MethodPost, Template: "/platform/units/{id}/accounts", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/units/unit-1/accounts"},
-	{Method: http.MethodPost, Template: "/platform/units/{id}/accounts/{uid}/password-reset", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/units/unit-1/accounts/user-1/password-reset"},
-	{Method: http.MethodDelete, Template: "/platform/units/{id}/accounts/{uid}/sessions", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/units/unit-1/accounts/user-1/sessions"},
-	{Method: http.MethodGet, Template: "/platform/admins", Permission: auth.PermissionUnitAccountsManage, Example: "/platform/admins"},
-	{Method: http.MethodPost, Template: "/platform/admins", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins"},
-	{Method: http.MethodPatch, Template: "/platform/admins/{id}", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1"},
-	{Method: http.MethodDelete, Template: "/platform/admins/{id}", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1"},
-	{Method: http.MethodPost, Template: "/platform/admins/{id}/activation", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1/activation"},
-	{Method: http.MethodDelete, Template: "/platform/admins/{id}/activation", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1/activation"},
-	{Method: http.MethodGet, Template: "/platform/audit", Permission: auth.PermissionPlatformAuditRead, Example: "/platform/audit"},
-	{Method: http.MethodGet, Template: "/platform/notifications", Permission: auth.PermissionPlatformNotificationsManage, Example: "/platform/notifications"},
-	{Method: http.MethodPost, Template: "/platform/notifications", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications"},
-	{Method: http.MethodPut, Template: "/platform/notifications/update-routing", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/update-routing"},
-	{Method: http.MethodPatch, Template: "/platform/notifications/update-routing", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/update-routing"},
-	{Method: http.MethodPatch, Template: "/platform/notifications/{id}", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/destination-1"},
-	{Method: http.MethodDelete, Template: "/platform/notifications/{id}", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/destination-1"},
-	{Method: http.MethodGet, Template: "/platform/status", Permission: auth.PermissionPlatformStatusRead, Example: "/platform/status"},
+	{Method: http.MethodGet, Template: "/platform/units", Permission: auth.PermissionUnitsManage, Example: "/platform/units", TrailingSlash: true, Handle: platformHandler(requestHandler((*Server).listPlatformUnits))},
+	{Method: http.MethodPost, Template: "/platform/units", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units", TrailingSlash: true, Handle: platformHandler(sessionHandler((*Server).createPlatformUnit))},
+	{Method: http.MethodGet, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Example: "/platform/units/unit-1", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.getPlatformUnit(w, r, r.PathValue("id"))
+	})},
+	{Method: http.MethodPatch, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.renamePlatformUnit(w, r, c.session, r.PathValue("id"))
+	})},
+	{Method: http.MethodDelete, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.deletePlatformUnit(w, r, c.session, r.PathValue("id"))
+	})},
+	{Method: http.MethodPost, Template: "/platform/units/{id}/disable", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1/disable", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.setPlatformUnitState(w, r, c.session, r.PathValue("id"), false)
+	})},
+	{Method: http.MethodPost, Template: "/platform/units/{id}/enable", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1/enable", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.setPlatformUnitState(w, r, c.session, r.PathValue("id"), true)
+	})},
+	{Method: http.MethodGet, Template: "/platform/units/{id}/capacity", Permission: auth.PermissionUnitsManage, Example: "/platform/units/unit-1/capacity", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.getPlatformUnitCapacity(w, r, r.PathValue("id"))
+	})},
+	{Method: http.MethodPatch, Template: "/platform/units/{id}/capacity", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1/capacity", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.updatePlatformUnitCapacity(w, r, c.session, r.PathValue("id"))
+	})},
+	{Method: http.MethodGet, Template: "/platform/units/{id}/accounts", Permission: auth.PermissionUnitAccountsManage, Example: "/platform/units/unit-1/accounts", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.listPlatformUnitAccounts(w, r, r.PathValue("id"))
+	})},
+	{Method: http.MethodPost, Template: "/platform/units/{id}/accounts", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/units/unit-1/accounts", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.invitePlatformUnitAdmin(w, r, c.session, r.PathValue("id"))
+	})},
+	{Method: http.MethodPost, Template: "/platform/units/{id}/accounts/{uid}/password-reset", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/units/unit-1/accounts/user-1/password-reset", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.resetPlatformUnitAdmin(w, r, c.session, r.PathValue("id"), r.PathValue("uid"))
+	})},
+	{Method: http.MethodDelete, Template: "/platform/units/{id}/accounts/{uid}/sessions", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/units/unit-1/accounts/user-1/sessions", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.revokePlatformUnitAccountSessions(w, r, c.session, r.PathValue("id"), r.PathValue("uid"))
+	})},
+	{Method: http.MethodGet, Template: "/platform/admins", Permission: auth.PermissionUnitAccountsManage, Example: "/platform/admins", TrailingSlash: true, Handle: platformHandler(requestHandler((*Server).listPlatformAdmins))},
+	{Method: http.MethodPost, Template: "/platform/admins", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins", TrailingSlash: true, Handle: platformHandler(sessionHandler((*Server).invitePlatformAdmin))},
+	{Method: http.MethodPatch, Template: "/platform/admins/{id}", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.updatePlatformAdmin(w, r, c.session, r.PathValue("id"))
+	})},
+	{Method: http.MethodDelete, Template: "/platform/admins/{id}", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.deletePendingPlatformAdmin(w, r, c.session, r.PathValue("id"))
+	})},
+	{Method: http.MethodPost, Template: "/platform/admins/{id}/activation", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1/activation", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.renewPlatformAdminInvitation(w, r, c.session, r.PathValue("id"))
+	})},
+	{Method: http.MethodDelete, Template: "/platform/admins/{id}/activation", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1/activation", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.revokePlatformAdminInvitation(w, r, c.session, r.PathValue("id"))
+	})},
+	{Method: http.MethodGet, Template: "/platform/audit", Permission: auth.PermissionPlatformAuditRead, Example: "/platform/audit", TrailingSlash: true, Handle: platformHandler(requestHandler((*Server).platformAudit))},
+	{Method: http.MethodGet, Template: "/platform/notifications", Permission: auth.PermissionPlatformNotificationsManage, Example: "/platform/notifications", TrailingSlash: true, Handle: platformHandler(requestHandler((*Server).listPlatformNotifications))},
+	{Method: http.MethodPost, Template: "/platform/notifications", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications", TrailingSlash: true, Handle: platformHandler(sessionHandler((*Server).createPlatformNotification))},
+	{Method: http.MethodPut, Template: "/platform/notifications/update-routing", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/update-routing", TrailingSlash: true, Handle: platformHandler(sessionHandler((*Server).updatePlatformNotificationRouting))},
+	{Method: http.MethodPatch, Template: "/platform/notifications/update-routing", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/update-routing", TrailingSlash: true, Handle: platformHandler(sessionHandler((*Server).togglePlatformNotificationRouting))},
+	{Method: http.MethodPatch, Template: "/platform/notifications/{id}", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/destination-1", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.updatePlatformNotification(w, r, c.session, r.PathValue("id"))
+	})},
+	{Method: http.MethodDelete, Template: "/platform/notifications/{id}", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/destination-1", TrailingSlash: true, Handle: platformHandler(func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		s.deletePlatformNotification(w, r, c.session, r.PathValue("id"))
+	})},
+	{Method: http.MethodGet, Template: "/platform/status", Permission: auth.PermissionPlatformStatusRead, Example: "/platform/status", TrailingSlash: true, Handle: platformHandler(requestHandler((*Server).platformStatus))},
 
 	// Unauthenticated public status projection, relative to publicAPIBase:
 	// the default business unit's page, and a unit's page by its slug.

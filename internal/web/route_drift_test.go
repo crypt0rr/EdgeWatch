@@ -895,7 +895,7 @@ func TestRouteInventoryCoversRoutingSource(t *testing.T) {
 	// to cover, or an empty result would prove nothing.
 	analyzer := &routeDriftAnalyzer{fset: fset, consumed: map[token.Pos]bool{}}
 	methods := serverMethods(files)
-	for _, name := range []string{"legacyAPI", "publicAPI", "platformRoute"} {
+	for _, name := range []string{"publicAPI"} {
 		function, ok := methods[name]
 		if !ok {
 			t.Errorf("routing function %s was not found", name)
@@ -903,13 +903,6 @@ func TestRouteInventoryCoversRoutingSource(t *testing.T) {
 		}
 		if len(analyzer.conditionAtoms(function.Body)) == 0 {
 			t.Errorf("routing function %s has no recognized routing conditions", name)
-		}
-	}
-	for name, want := range map[string][]string{
-		"platformRoute": {"/platform"},
-	} {
-		if got := subRouterPrefixes(methods, name); !slices.Equal(got, want) {
-			t.Errorf("%s prefixes = %v, want %v", name, got, want)
 		}
 	}
 }
@@ -1024,10 +1017,6 @@ func TestRouteInventoryDriftDetectsRemovedEntries(t *testing.T) {
 	t.Parallel()
 	fset, files := parseWebPackageSource(t)
 	for _, removed := range []string{
-		"PATCH /platform/units/{id}/capacity",
-		"DELETE /platform/units/{id}/accounts/{uid}/sessions",
-		"PUT /platform/notifications/update-routing",
-		"PATCH /platform/notifications/update-routing",
 		"GET " + publicAPIBase + "/dashboard",
 	} {
 		t.Run(removed, func(t *testing.T) {
@@ -1049,29 +1038,6 @@ func TestRouteInventoryDriftDetectsRemovedEntries(t *testing.T) {
 				t.Fatalf("removing %s from the inventory was not reported; findings:\n%s", removed, formatRouteDriftFindings(findings))
 			}
 		})
-	}
-	// Flipping NoHandler on a dispatched route, or clearing it on an
-	// undispatched one, is reported as a stale entry.
-	flipped := slices.Clone(apiRoutes)
-	var flips int
-	for index, route := range flipped {
-		switch routeInventoryName(route) {
-		case "GET /platform/units", "POST /scans":
-			flipped[index].NoHandler = !route.NoHandler
-			flips++
-		}
-	}
-	if flips != 2 {
-		t.Fatalf("flipped %d entries, want 2", flips)
-	}
-	var stale []string
-	for _, finding := range analyzeRouteDrift(fset, files, flipped) {
-		if finding.kind == routeDriftStaleEntry {
-			stale = append(stale, finding.message)
-		}
-	}
-	if len(stale) != 2 || !strings.Contains(strings.Join(stale, "\n"), "GET /platform/units is marked NoHandler") || !strings.Contains(strings.Join(stale, "\n"), "POST /scans is in the route inventory") {
-		t.Fatalf("stale NoHandler findings = %q", stale)
 	}
 }
 

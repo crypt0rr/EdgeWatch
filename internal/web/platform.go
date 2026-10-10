@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -24,8 +23,8 @@ import (
 // state and counts, and a unit's accounts as summaries without credentials.
 //
 // Only a platform administrator's session holds the permissions of its
-// routes; Server.api checks them before platformRoute runs, and
-// platformRoute checks the role again. The handlers act through the
+// routes; the gate checks them before a route's handler runs, and
+// platformHandler checks the role again. The handlers act through the
 // platform's store and the application, which check in their write
 // transactions that the actor is an enabled platform administrator.
 
@@ -69,137 +68,18 @@ func (s *Server) addSessionScope(ctx context.Context, response map[string]any, u
 	return nil
 }
 
-// requiredPlatformPermission maps a platform console path, relative to
-// /api/v1 and starting with /platform/, to its capability. It mirrors the
-// grammar of platformRoute; anything else, including an empty segment, is
-// denied.
-func requiredPlatformPermission(path, method string) string {
-	parts, ok := routeParts(path, "/platform")
-	if !ok || len(parts) == 0 || slices.Contains(parts, "") {
-		return auth.PermissionDenied
-	}
-	switch parts[0] {
-	case "units":
-		return requiredPlatformUnitPermission(parts[1:], method)
-	case "admins":
-		switch {
-		case len(parts) == 1 && (method == http.MethodGet || method == http.MethodPost),
-			len(parts) == 2 && (method == http.MethodPatch || method == http.MethodDelete),
-			len(parts) == 3 && parts[2] == "activation" && (method == http.MethodPost || method == http.MethodDelete):
-			return auth.PermissionUnitAccountsManage
+// platformHandler serves a platform console route. The gate admits only a
+// platform administrator's session to it, and platformHandler checks the
+// role again: any other session is refused like a route it may not use.
+// The platform console's responses are never cached.
+func platformHandler(handle routeHandler) routeHandler {
+	return func(s *Server, w http.ResponseWriter, r *http.Request, call routeCall) {
+		if call.session.Role != store.RolePlatformAdmin {
+			forbiddenRoute(w)
+			return
 		}
-	case "audit":
-		if len(parts) == 1 && method == http.MethodGet {
-			return auth.PermissionPlatformAuditRead
-		}
-	case "notifications":
-		switch {
-		case len(parts) == 1 && (method == http.MethodGet || method == http.MethodPost),
-			len(parts) == 2 && parts[1] == "update-routing" && (method == http.MethodPut || method == http.MethodPatch),
-			len(parts) == 2 && (method == http.MethodPatch || method == http.MethodDelete):
-			return auth.PermissionPlatformNotificationsManage
-		}
-	case "status":
-		if len(parts) == 1 && method == http.MethodGet {
-			return auth.PermissionPlatformStatusRead
-		}
-	}
-	return auth.PermissionDenied
-}
-
-// requiredPlatformUnitPermission maps the segments after /platform/units.
-func requiredPlatformUnitPermission(segments []string, method string) string {
-	switch len(segments) {
-	case 0:
-		if method == http.MethodGet || method == http.MethodPost {
-			return auth.PermissionUnitsManage
-		}
-	case 1:
-		if method == http.MethodGet || method == http.MethodPatch || method == http.MethodDelete {
-			return auth.PermissionUnitsManage
-		}
-	case 2:
-		switch {
-		case (segments[1] == "disable" || segments[1] == "enable") && method == http.MethodPost,
-			segments[1] == "capacity" && (method == http.MethodGet || method == http.MethodPatch):
-			return auth.PermissionUnitsManage
-		case segments[1] == "accounts" && (method == http.MethodGet || method == http.MethodPost):
-			return auth.PermissionUnitAccountsManage
-		}
-	case 4:
-		if segments[1] == "accounts" && ((segments[3] == "password-reset" && method == http.MethodPost) || (segments[3] == "sessions" && method == http.MethodDelete)) {
-			return auth.PermissionUnitAccountsManage
-		}
-	}
-	return auth.PermissionDenied
-}
-
-// platformRoute serves the platform console's routes, the rest of the path
-// after /platform/.
-func (s *Server) platformRoute(w http.ResponseWriter, r *http.Request, session store.Session, rest string) {
-	if session.Role != store.RolePlatformAdmin {
-		forbiddenRoute(w)
-		return
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	parts := strings.Split(strings.Trim(rest, "/"), "/")
-	switch {
-	case len(parts) == 1 && parts[0] == "units" && r.Method == http.MethodGet:
-		s.listPlatformUnits(w, r)
-	case len(parts) == 1 && parts[0] == "units" && r.Method == http.MethodPost:
-		s.createPlatformUnit(w, r, session)
-	case len(parts) == 2 && parts[0] == "units" && r.Method == http.MethodGet:
-		s.getPlatformUnit(w, r, parts[1])
-	case len(parts) == 2 && parts[0] == "units" && r.Method == http.MethodPatch:
-		s.renamePlatformUnit(w, r, session, parts[1])
-	case len(parts) == 2 && parts[0] == "units" && r.Method == http.MethodDelete:
-		s.deletePlatformUnit(w, r, session, parts[1])
-	case len(parts) == 3 && parts[0] == "units" && parts[2] == "disable" && r.Method == http.MethodPost:
-		s.setPlatformUnitState(w, r, session, parts[1], false)
-	case len(parts) == 3 && parts[0] == "units" && parts[2] == "enable" && r.Method == http.MethodPost:
-		s.setPlatformUnitState(w, r, session, parts[1], true)
-	case len(parts) == 3 && parts[0] == "units" && parts[2] == "capacity" && r.Method == http.MethodGet:
-		s.getPlatformUnitCapacity(w, r, parts[1])
-	case len(parts) == 3 && parts[0] == "units" && parts[2] == "capacity" && r.Method == http.MethodPatch:
-		s.updatePlatformUnitCapacity(w, r, session, parts[1])
-	case len(parts) == 3 && parts[0] == "units" && parts[2] == "accounts" && r.Method == http.MethodGet:
-		s.listPlatformUnitAccounts(w, r, parts[1])
-	case len(parts) == 3 && parts[0] == "units" && parts[2] == "accounts" && r.Method == http.MethodPost:
-		s.invitePlatformUnitAdmin(w, r, session, parts[1])
-	case len(parts) == 5 && parts[0] == "units" && parts[2] == "accounts" && parts[4] == "password-reset" && r.Method == http.MethodPost:
-		s.resetPlatformUnitAdmin(w, r, session, parts[1], parts[3])
-	case len(parts) == 5 && parts[0] == "units" && parts[2] == "accounts" && parts[4] == "sessions" && r.Method == http.MethodDelete:
-		s.revokePlatformUnitAccountSessions(w, r, session, parts[1], parts[3])
-	case len(parts) == 1 && parts[0] == "admins" && r.Method == http.MethodGet:
-		s.listPlatformAdmins(w, r)
-	case len(parts) == 1 && parts[0] == "admins" && r.Method == http.MethodPost:
-		s.invitePlatformAdmin(w, r, session)
-	case len(parts) == 2 && parts[0] == "admins" && r.Method == http.MethodPatch:
-		s.updatePlatformAdmin(w, r, session, parts[1])
-	case len(parts) == 2 && parts[0] == "admins" && r.Method == http.MethodDelete:
-		s.deletePendingPlatformAdmin(w, r, session, parts[1])
-	case len(parts) == 3 && parts[0] == "admins" && parts[2] == "activation" && r.Method == http.MethodPost:
-		s.renewPlatformAdminInvitation(w, r, session, parts[1])
-	case len(parts) == 3 && parts[0] == "admins" && parts[2] == "activation" && r.Method == http.MethodDelete:
-		s.revokePlatformAdminInvitation(w, r, session, parts[1])
-	case len(parts) == 1 && parts[0] == "audit" && r.Method == http.MethodGet:
-		s.platformAudit(w, r)
-	case len(parts) == 1 && parts[0] == "notifications" && r.Method == http.MethodGet:
-		s.listPlatformNotifications(w, r)
-	case len(parts) == 1 && parts[0] == "notifications" && r.Method == http.MethodPost:
-		s.createPlatformNotification(w, r, session)
-	case len(parts) == 2 && parts[0] == "notifications" && parts[1] == "update-routing" && r.Method == http.MethodPut:
-		s.updatePlatformNotificationRouting(w, r, session)
-	case len(parts) == 2 && parts[0] == "notifications" && parts[1] == "update-routing" && r.Method == http.MethodPatch:
-		s.togglePlatformNotificationRouting(w, r, session)
-	case len(parts) == 2 && parts[0] == "notifications" && r.Method == http.MethodPatch:
-		s.updatePlatformNotification(w, r, session, parts[1])
-	case len(parts) == 2 && parts[0] == "notifications" && r.Method == http.MethodDelete:
-		s.deletePlatformNotification(w, r, session, parts[1])
-	case len(parts) == 1 && parts[0] == "status" && r.Method == http.MethodGet:
-		s.platformStatus(w, r)
-	default:
-		writeError(w, http.StatusNotFound, "not_found", "endpoint not found", nil)
+		w.Header().Set("Cache-Control", "no-store")
+		handle(s, w, r, call)
 	}
 }
 

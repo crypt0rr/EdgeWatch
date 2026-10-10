@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -22,10 +23,10 @@ func routeRequestPermission(path string, r *http.Request) string {
 	target := *r.URL
 	target.Path, target.RawPath = consoleAPIBase+path, ""
 	request := &http.Request{Method: r.Method, URL: &target}
-	if route := consoleRoutes.match(request); route != nil && (route.Handle != nil || route.NoHandler) {
+	if route := consoleRoutes.match(request); route != nil {
 		return route.Permission
 	}
-	return requestPermission(path, r)
+	return auth.PermissionDenied
 }
 
 // serveRouteAs serves path, relative to /api/v1, with the handler of the
@@ -76,4 +77,10 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 // jobRoute serves rest, the path after /jobs/, through serveRouteAs.
 func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, rest string) {
 	s.serveRouteAs(w, r, "/jobs/"+rest, session, ts)
+}
+
+// platformRoute serves rest, the path after /platform/, through
+// serveRouteAs.
+func (s *Server) platformRoute(w http.ResponseWriter, r *http.Request, session store.Session, rest string) {
+	s.serveRouteAs(w, r, "/platform/"+rest, session, nil)
 }

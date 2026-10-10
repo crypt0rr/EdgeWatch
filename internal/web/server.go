@@ -474,58 +474,10 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// api serves the console API from consoleRoutes. A route with a handler
-// passes the gate in serveRoute; the routes that are not yet in the table
-// pass legacyAPI's gate, with the capability that requestPermission
-// assigns, and its dispatch.
+// api serves the console API from consoleRoutes, through the gate in
+// serveRoute.
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {
-	if route := consoleRoutes.match(r); route != nil && (route.Handle != nil || route.NoHandler) {
-		s.serveRoute(w, r, route)
-		return
-	}
-	s.legacyAPI(w, r)
-}
-
-func (s *Server) legacyAPI(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/api/v1")
-	if path == "" {
-		path = "/"
-	}
-	session, ok := s.Auth.AuthenticateReadOnly(r.Context(), r)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required", nil)
-		return
-	}
-	if isMutation(r.Method) && !s.Auth.CheckCSRF(r, session) {
-		writeError(w, http.StatusForbidden, "csrf", "missing or invalid CSRF token", nil)
-		return
-	}
-	permission := requestPermission(path, r)
-	if permission == "" || permission == auth.PermissionDenied || !auth.HasPermission(session, permission) {
-		details := map[string]string{"permission": permission}
-		if permission == auth.PermissionDenied || permission == "" {
-			details["permission"] = "route"
-		}
-		writeError(w, http.StatusForbidden, "forbidden", "your account is not allowed to perform this action", details)
-		return
-	}
-	if session.Role != store.RolePlatformAdmin || !isPlatformPermission(permission) {
-		if _, ok := s.requestTenant(w, r, session); !ok {
-			return
-		}
-	}
-	if isMutation(r.Method) {
-		if err := s.Auth.RecordActivity(r.Context(), session); err != nil {
-			s.Log.Debug("session activity timestamp could not be refreshed", "error", err)
-		}
-	}
-
-	switch {
-	case strings.HasPrefix(path, "/platform/"):
-		s.platformRoute(w, r, session, strings.TrimPrefix(path, "/platform/"))
-	default:
-		writeError(w, http.StatusNotFound, "not_found", "endpoint not found", nil)
-	}
+	s.serveRoute(w, r, consoleRoutes.match(r))
 }
 
 // validateRequestHost accepts only loopback/localhost host names, the
@@ -650,8 +602,3 @@ func requestHostName(raw string) string {
 	}
 	return strings.TrimSuffix(strings.ToLower(raw), ".")
 }
-
-// requiredPermission centralizes the route authorization boundary. The
-// frontend may hide controls for a role, but every API request is checked here
-// so a viewer cannot turn a read-only screen into a write primitive by calling
-// an endpoint directly.

@@ -519,6 +519,16 @@ func (s *Server) allowNotificationTest(r *http.Request) bool {
 	return true
 }
 
+// rateLimitIdentity returns the client identity under which the anonymous
+// rate limits count the request, the client address with an IPv6 network
+// grouped as the sign-in limits group it; see auth.Manager.RateLimitIdentity.
+func (s *Server) rateLimitIdentity(r *http.Request) string {
+	if s.Auth != nil {
+		return s.Auth.RateLimitIdentity(r)
+	}
+	return s.clientIP(r)
+}
+
 func (s *Server) clientIP(r *http.Request) string {
 	if s.Auth != nil {
 		return s.Auth.ClientIP(r)

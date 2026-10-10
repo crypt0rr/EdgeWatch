@@ -53,6 +53,8 @@ Docker host and any SSH tunnel access restricted to trusted administrators.
 When an untrusted tunnel or reverse proxy makes every remote client appear as
 the same loopback peer, all login attempts are throttled after five failed
 password or TOTP attempts in five minutes with a short two-second retry delay.
+Each account's own budget of wrong one-time and recovery codes, described
+below, applies there too.
 A successful sign-in through the peer, with any account, does not reset those
 failures; each one expires five minutes after it happened, so signing in
 between failed attempts gains no further attempts.
@@ -72,7 +74,9 @@ only the actual proxy addresses in `web.trusted_proxies` and the sanitized
 A client identified by its own address has a budget of five failed sign-ins
 in five minutes. Every failed sign-in costs it the same, whether the username
 is unknown, the account is disabled or its unit is not active, or the
-password, one-time code, or recovery code is wrong. Once it is used, every
+password, one-time code, or recovery code is wrong. A username longer than 80
+bytes, which no account can have, counts as one unknown name, so the limiter
+never keeps a copy of a long name. Once the budget is used, every
 sign-in from that client is refused with the same `429 rate_limited` answer
 for five minutes, whether or not the username exists, so neither the answer
 nor the number of attempts left reveals which accounts exist. A refused
@@ -83,9 +87,17 @@ valid account cannot sign in between failed attempts to gain more. Other
 clients are not affected; clients that share one address, such as the clients
 of an untrusted proxy on another host, share the budget, and they share the
 backstop of the setups and activation, which blocks the address for five
-minutes after a hundred wrong tokens. EdgeWatch keeps these limits for an
-address that is not loopback. When requests come through a proxy that
-EdgeWatch does not trust, it logs a warning that recommends
+minutes after a hundred wrong tokens. An IPv6 client is identified by its
+network of `web.ipv6_rate_limit_prefix` bits, a /64 by default, so every
+address of one /64 shares one budget, and rotating the addresses of a
+network gains nothing; IPv4 and loopback addresses are counted as they are.
+The same identity applies to the limits of the setups, activation, the
+password and TOTP confirmations, and the anonymous requests for the public
+pages and the setup status. Set the prefix to 128 to count each IPv6
+address on its own, for example when unrelated clients share one /64. Audit
+records and the untrusted-proxy notice keep the full address. EdgeWatch
+keeps these limits for an address that is not loopback. When requests come
+through a proxy that EdgeWatch does not trust, it logs a warning that recommends
 `web.trusted_proxies`, at most once an hour, and the console shows the
 proxy's address to the administrators of a deployment with one unit and on
 the platform status page, until a day after its last request. Such a proxy
@@ -99,8 +111,33 @@ send these headers itself and have its own address shown, so list an address
 only when it is a proxy that you run. The notice never changes the address
 that EdgeWatch uses for a client. EdgeWatch also logs a startup warning when
 proxy hostnames are approved without trusted client-IP forwarding. Failed
-login and TOTP attempts, along with rate-limit events, are written to the
-security audit log; they do not currently send notification-channel alerts.
+login and TOTP attempts, second-factor lockouts, and rate-limit events are
+written to the security audit log; they do not currently send
+notification-channel alerts.
+
+Each account with TOTP also has a budget of wrong one-time and recovery
+codes of its own, whichever clients send them and however many addresses
+they use, so the second factor still bounds guesses after a password leak.
+Only a sign-in with the account's right password, from any client including
+a shared loopback peer, and a TOTP confirmation of a signed-in account reach
+it: a wrong password never counts, so the budget reveals nothing about which
+usernames exist. After ten wrong codes within 24 hours, the account's codes
+are not checked for 15 minutes. During that lockout every sign-in with the
+right password gets the same `401 login_failed` answer as a wrong code,
+whatever code or recovery code it carries, costs the client's budget as a
+wrong code does, and is recorded as `auth.totp_failed`; a TOTP confirmation
+gets `401 totp_required`. Neither spends the code it carries. Concurrent
+requests cannot check more codes than the budget has left. While the ten
+latest wrong codes are less than 24 hours old, each further wrong code
+starts another lockout, twice as long as the one before, up to four hours;
+after 24 hours without a wrong code the count and the doubling start over. A
+successful sign-in resets neither. Each lockout is recorded once, as
+`auth.second_factor_locked`, in the account's unit or, for a platform
+administrator, in platform scope, with the address of the code that started
+it. Unless the account's owner sent the codes, such a record means that
+someone else holds the account's password, so change the password; a lockout
+can also keep the account's owner out until it ends. The counts are kept in the daemon's memory, so a restart starts
+them over.
 
 Setting up or replacing an authenticator requires the account password, plus
 the current authenticator or a recovery code when TOTP is already enabled. The
@@ -261,8 +298,14 @@ Each unit's public status page is served at `/public/<slug>` and
 page that is not enabled, a paused unit, and a unit being deleted get the
 same 404 `public_disabled` answer as a disabled page, so the address does not
 reveal whether a unit has that slug. Each page
-has its own per-client rate limit and its own cache: a busy page does not
-throttle another, and saving one page does not drop another page's cache.
+has its own per-client rate limit of 120 requests a minute and its own
+cache: a busy page does not throttle another, and saving one page does not
+drop another page's cache. Every well-formed slug is limited as a page,
+whether or not a unit has it, so a client also has a budget of 600 requests
+a minute for all pages together: rotating slugs gains it no unlimited
+lookups, and once the budget is spent every page answers it with
+`429 rate_limited` until the minute passes. The limiter keeps at most 4096
+client and page buckets and drops the least recently used one first.
 
 A platform administrator's action on a unit's account, and a change of the
 unit's capacity, is recorded in that unit's security audit with the

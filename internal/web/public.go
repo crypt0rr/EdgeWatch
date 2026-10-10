@@ -121,7 +121,9 @@ func publicSlugWellFormed(slug string) bool {
 // whether or not a unit publishes a page under it, so a busy page does not
 // throttle another, and a slug without a page is limited exactly as a slug
 // whose page is withdrawn. Addresses that cannot name a unit share one
-// namespace, so they cannot add limiter keys without bound.
+// namespace. Every page request also counts against the client's budget
+// for all pages, which bounds the namespaces that one client can use; see
+// allowPublicPageRequest.
 func publicPageRateLimit(slug string) string {
 	if !publicSlugWellFormed(slug) {
 		return publicDashboardRateLimit + "/*"
@@ -152,12 +154,13 @@ func writePublicDisabled(w http.ResponseWriter) {
 }
 
 // servePublicPage answers an anonymous request for a published page. It
-// counts the request in namespace, the page's rate-limit namespace, and then
+// counts the request in namespace, the page's rate-limit namespace, and in
+// the client's budget for all public pages, and then
 // resolves the scope of the page's tenant; the zero scope names no page.
 // Every read goes through the scope's PublicStore, and the payload is cached
 // for that scope only.
 func (s *Server) servePublicPage(w http.ResponseWriter, r *http.Request, namespace string, resolve func(context.Context) (store.PublicScope, error)) {
-	if !s.allowAnonymousRequest(r, namespace) {
+	if !s.allowPublicPageRequest(r, namespace) {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "public status requests are temporarily rate limited", nil)
 		return
@@ -385,59 +388,24 @@ func (s *Server) cachedPublicPageResponse(scope store.PublicScope) ([]byte, bool
 	return append([]byte(nil), cached.payload...), true
 }
 
+// allowAnonymousRequest admits an anonymous request of the client in the
+// namespace, anonymousRequestLimit a minute; see allowAnonymous.
 func (s *Server) allowAnonymousRequest(r *http.Request, namespace string) bool {
 	namespace = strings.TrimSpace(namespace)
 	if namespace == "" {
 		namespace = "anonymous"
 	}
-	key := namespace + ":" + s.clientIP(r)
-	now := time.Now().UTC()
-	cutoff := now.Add(-time.Minute)
-	s.publicMu.Lock()
-	defer s.publicMu.Unlock()
-	if s.publicHits == nil {
-		s.publicHits = map[string][]time.Time{}
-	}
-	hits := s.publicHits[key][:0]
-	for _, hit := range s.publicHits[key] {
-		if hit.After(cutoff) {
-			hits = append(hits, hit)
-		}
-	}
-	if len(hits) >= 120 {
-		s.publicHits[key] = hits
-		return false
-	}
-	s.publicHits[key] = append(hits, now)
-	if len(s.publicHits) > 4096 {
-		for candidate, values := range s.publicHits {
-			if len(values) == 0 || !values[len(values)-1].After(cutoff) {
-				delete(s.publicHits, candidate)
-			}
-		}
-		// A burst of distinct source addresses can otherwise keep the map above
-		// its bound when all entries are still fresh. Evict the oldest buckets
-		// until the memory bound is restored.
-		for len(s.publicHits) > 4096 {
-			oldestKey := ""
-			var oldest time.Time
-			for candidate, values := range s.publicHits {
-				if len(values) == 0 {
-					oldestKey = candidate
-					break
-				}
-				last := values[len(values)-1]
-				if oldestKey == "" || last.Before(oldest) {
-					oldestKey, oldest = candidate, last
-				}
-			}
-			if oldestKey == "" {
-				break
-			}
-			delete(s.publicHits, oldestKey)
-		}
-	}
-	return true
+	return s.allowAnonymous(s.rateLimitIdentity(r), s.currentTime(), anonymousBudget{namespace, anonymousRequestLimit})
+}
+
+// allowPublicPageRequest admits an anonymous request of the client for the
+// public page with the rate-limit namespace. The request counts against
+// the client's budget for all public pages together, and against its
+// budget for the page, so rotating slugs that no unit has, each a
+// namespace of its own, gains a client no more requests than one page
+// would, and one client cannot fill the limiter with its buckets.
+func (s *Server) allowPublicPageRequest(r *http.Request, namespace string) bool {
+	return s.allowAnonymous(s.rateLimitIdentity(r), s.currentTime(), anonymousBudget{publicPagesRateLimit, publicPagesRequestLimit}, anonymousBudget{namespace, anonymousRequestLimit})
 }
 
 // publicDashboardPayload replaces the whole publication. UpdatedAt is the

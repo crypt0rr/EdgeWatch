@@ -13,6 +13,7 @@ validated schema.
 | `database`, `retention` | YAML | SQLite location and history retention. |
 | `timezone` | YAML | Optional IANA timezone for log, CLI, notification, and console times, and the default for new jobs. |
 | `web.listen`, `web.allowed_hosts`, `web.trusted_proxies`, `web.forwarded_header` | YAML | Loopback listener, approved proxy hostnames, trusted proxy networks, and the single forwarding header used for client IPs. |
+| `web.ipv6_rate_limit_prefix` | YAML | Prefix length by which the rate limits group IPv6 client addresses. |
 | `web.auth_key_file` | YAML/secrets | Optional separate key for the encrypted TOTP seeds. |
 | `web.source_url` | YAML | Source of a modified or forked build, the target of the console's **Source code** link. |
 | `log.level` | YAML | Log verbosity: `debug`, `info`, `warn`, or `error`. |
@@ -43,6 +44,7 @@ recreated and reviewed explicitly in the console.
 | `scheduler.max_naabu_probe_count` | `20000000` | 1 to 100000000; `0` is rejected. |
 | `scanner.sandbox` | `auto` | `auto`, `required`, or `off`. |
 | `scanner.landlock` | `auto` | `auto`, `required`, or `off`; `required` needs `scanner.sandbox` other than `off`. |
+| `web.ipv6_rate_limit_prefix` | `64` | 32 to 128; `128` counts each IPv6 address on its own. |
 | `web.auth_key_file` | `auth.key` next to the database | A regular file of 32 raw bytes or 64 hexadecimal characters, without group or other permissions. |
 | `notifications.encryption_key_file` | `notification.key` next to the database | A regular file of 32 raw bytes or 64 hexadecimal characters with mode `0400` or `0600`. |
 | `notifications.sandbox` | `auto` | `auto`, `required`, or `off`. |
@@ -119,6 +121,25 @@ Jobs are configured in the console, which enforces these limits:
   proxy on another host in front of the proxy on the host. A client can send
   these headers itself and have its own address shown, so add the address to
   `web.trusted_proxies` only when it is a proxy that you run.
+- The rate limits count an IPv6 client by its network of
+  `web.ipv6_rate_limit_prefix` bits, a /64 by default, so all addresses of
+  one /64 share the sign-in budget and the other per-client limits, including
+  the anonymous limits of the public pages. IPv4 and loopback addresses are
+  counted as they are, and audit records keep the full address. Set
+  `web.ipv6_rate_limit_prefix: 128` when unrelated clients share one /64, or
+  a shorter prefix, down to 32, when one client holds a larger network.
+- Each account with TOTP may fail ten one-time or recovery codes within 24
+  hours, whichever clients send them; only a sign-in with the right password
+  or a TOTP confirmation of a signed-in account counts. After that, the
+  account's codes are not checked for 15 minutes: every sign-in with the
+  right password gets the answer of a wrong code, whatever code it carries,
+  and a confirmation is refused without spending its code. While the ten
+  latest wrong codes are less than 24 hours old, each further wrong code
+  starts another lockout, twice as long as the one before, up to four hours.
+  Each lockout is recorded once as `auth.second_factor_locked`. Unless the
+  account's owner sent the codes, someone else holds the account's password,
+  so change it. The counts are kept in memory, so restarting the daemon
+  starts them over.
 - Sessions end after 24 hours without activity and 30 days after sign-in; the
   daemon removes ended sessions at startup and once a day. An account keeps
   at most 20 sessions: a new sign-in beyond that ends the account's least

@@ -223,7 +223,9 @@ with `429 rate_limited` and `Retry-After`.
 projection as `GET /api/public/v1/dashboard`, for the unit with that slug.
 An unknown slug, a page that is not enabled, and a unit that is disabled or
 being deleted get `404 public_disabled`. Each
-slug has its own rate limit and cache.
+slug has its own rate limit and cache. A client's requests for all public
+pages together, on either URL, also share a budget of 600 a minute, past
+which every page answers `429 rate_limited` with `Retry-After: 60`.
 
 The audit views are read-only and return `{entries, next_before}`, newest
 first. Pass `next_before` as `before` for the next page; it is `null` on the

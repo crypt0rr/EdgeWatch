@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
-import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createPlatformNotification, createUser, getPublicDashboard, getScan, getScanSummary, historicalScanHost, issueUserActivation, issueUserPasswordReset, listHosts, listScans, listUsers, login, recordActivity, revokeUserSessions, scheduleSuggestion, setCSRF, setForbiddenHandler, setup, setupStatus, suppressIncident, updateNotificationDestination, updatePlatformNotification, updateUser } from './api'
+import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createPlatformNotification, createUser, getPublicDashboard, getScan, getScanSummary, historicalScanHost, issueUserActivation, issueUserPasswordReset, listHosts, listIncidents, listScans, listUsers, login, recordActivity, revokeUserSessions, scheduleSuggestion, setCSRF, setForbiddenHandler, setup, setupStatus, suppressIncident, updateIncidentReview, updateNotificationDestination, updatePlatformNotification, updateUser } from './api'
 import * as apiRoutes from './api'
 import { getDisplayTimeZone, setDisplayTimeZone } from './format'
 import type { Scan, ScanSummary } from './generated/api-types'
@@ -7,6 +7,59 @@ import type { Scan, ScanSummary } from './generated/api-types'
 afterEach(() => {
   vi.restoreAllMocks()
   setCSRF('')
+})
+
+describe('investigation inbox API contract', () => {
+  it('encodes validated inbox filters while retaining the active count and pagination', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify({
+      incidents: [], truncated: false, active_count: 7,
+      pagination: { limit: 20, offset: 40, total: 62, has_more: true, next_offset: 60 },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await listIncidents({ view: 'follow_up_due', job_id: 'job 1', severity: 'critical', kind: 'port-address', limit: 20, offset: 40 })
+
+    expect(response.active_count).toBe(7)
+    expect(response.pagination.total).toBe(62)
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/incidents?view=follow_up_due&limit=20&offset=40&job_id=job+1&severity=critical&kind=port-address')
+  })
+
+  it('keeps legacy summary calls on the unfiltered active view', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({
+      incidents: [], truncated: false, active_count: 3,
+      pagination: { limit: 1, offset: 0, total: 3, has_more: true, next_offset: 1 },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await listIncidents(0, 1)
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/incidents?view=all_active&limit=1&offset=0')
+  })
+
+  it('supports a bounded exact occurrence refresh scoped to one job', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({
+      incidents: [], truncated: false, active_count: 4,
+      pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await listIncidents({ view: 'all_active', job_id: 'job/1', occurrence_token: 'opaque token', limit: 1, offset: 0 })
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/incidents?view=all_active&limit=1&offset=0&job_id=job%2F1&occurrence_token=opaque+token')
+  })
+
+  it('sends optimistic review updates with CSRF and receives generated review data', async () => {
+    setCSRF('csrf-token')
+    const review = { status: 'investigating', reviewer_label: 'Riley', reviewed_at: '2026-10-11T12:00:00Z', note: 'Check next scan', follow_up_at: null, revision: 2 }
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify(review), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(updateIncidentReview('job/1', { key: 'port|host|tcp|443', occurrence_token: 'opaque-versioned-token', expected_revision: 1, status: 'investigating', note: 'Check next scan', follow_up_at: null })).resolves.toEqual(review)
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/jobs/job%2F1/incidents/review')
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'PUT', body: JSON.stringify({ key: 'port|host|tcp|443', occurrence_token: 'opaque-versioned-token', expected_revision: 1, status: 'investigating', note: 'Check next scan', follow_up_at: null }) })
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('X-CSRF-Token')).toBe('csrf-token')
+  })
 })
 
 describe('API pagination contract', () => {

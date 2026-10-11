@@ -31,7 +31,7 @@ function account(overrides: Partial<SessionUser> = {}): SessionUser {
 }
 
 const unauthenticated = () => new APIError('authentication required', 'unauthorized', undefined, 401)
-const noIncidents = { incidents: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } }
+const noIncidents = { incidents: [], truncated: false, active_count: 0, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } }
 
 /**
  * Renders the console as the browser bootstrap does, with the production
@@ -101,22 +101,22 @@ describe('returning to the requested page after signing in', () => {
 
   it('returns to the page that was open when the session ended, once signed in again', async () => {
     session = account()
-    const { client, view } = openConsole('/incidents?offset=0')
-    expect(await screen.findByRole('heading', { name: 'Incidents', level: 1 })).toBeInTheDocument()
+    const { client, view } = openConsole('/incidents?view=needs_review&offset=0')
+    expect(await screen.findByRole('heading', { name: 'Investigation inbox', level: 1 })).toBeInTheDocument()
 
     // The session ends on the server: the next request of the console is
     // refused with 401, and the console shows the sign-in page.
     session = null
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'authentication required' } }), { status: 401, headers: { 'Content-Type': 'application/json' } })))
-    vi.mocked(listIncidents).mockImplementation(() => api('/incidents?limit=1&offset=0'))
+    vi.mocked(listIncidents).mockImplementation(() => api('/incidents?view=needs_review&limit=50&offset=0'))
     await act(async () => { await client.refetchQueries({ queryKey: ['incidents', 'navigation'] }) })
     expect(await screen.findByRole('heading', { name: /Sign in to EdgeWatch/ })).toBeInTheDocument()
     expect(currentAddress()).toBe('/login')
 
     vi.mocked(listIncidents).mockResolvedValue(noIncidents)
     await signIn('admin')
-    expect(currentAddress()).toBe('/incidents?offset=0')
-    expect(await screen.findByRole('heading', { name: 'Incidents', level: 1 })).toBeInTheDocument()
+    expect(currentAddress()).toBe('/incidents?view=needs_review&offset=0')
+    expect(await screen.findByRole('heading', { name: 'Investigation inbox', level: 1 })).toBeInTheDocument()
     view.unmount()
     client.clear()
   })

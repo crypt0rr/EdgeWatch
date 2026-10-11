@@ -146,11 +146,18 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
   let incidents: any[] = [{
     job_id: 'job-1',
     job: 'fixture-job',
+    occurrence_token: 'fixture-occurrence-1',
+    opening_time_known: true, opening_scan_available: true,
+    view_status: 'needs_review',
     incident: {
       change: { key: 'port|192.0.2.10|tcp|443', kind: 'port', target: '192.0.2.10', protocol: 'tcp', port: 443, severity: 'critical' },
+      scan_id: 'scan-1',
       opened_at: '2026-01-01T00:00:00Z',
       last_seen_at: '2026-01-01T00:00:00Z',
+      recovery_count: 0,
     },
+    review: { status: 'needs_review', reviewer_label: null, reviewed_at: null, note: '', follow_up_at: null, revision: 0 },
+    observation_uncertainty: { status: 'unknown', reason: 'no_newer_observation' },
   }]
   let publicDashboard: any = {
     enabled: false,
@@ -357,7 +364,13 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/audit' && method === 'GET') {
       await json({ entries: [{ id: 1, created_at: '2026-01-01T00:00:01Z', action: 'user.login', category: 'account', actor: { kind: 'user', user_id: 'user-administrator', username: 'admin' }, detail: 'signed in', source_ip: '127.0.0.1' }], next_before: null }); return
     }
-    if (path === '/incidents' && method === 'GET') { await json({ incidents, pagination: pagination(incidents.length) }); return }
+    if (path === '/incidents' && method === 'GET') {
+      const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 20))
+      const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0)
+      const matching = incidents
+      const hasMore = offset + limit < matching.length
+      await json({ incidents: matching.slice(offset, offset + limit), truncated: false, active_count: incidents.length, pagination: { limit, offset, total: matching.length, has_more: hasMore, next_offset: hasMore ? offset + limit : null } }); return
+    }
     if (path === '/hosts' && method === 'GET') {
       const hosts = [{ ...host, job_id: 'job-1', job: 'fixture-job', scan_id: 'scan-1', scanned_at: scan.finished_at, open_ports: 1, open_filtered_ports: 0, has_open_ports: true, data_quality: 'detailed' }]
       await json({ hosts, pagination: pagination(hosts.length) }); return

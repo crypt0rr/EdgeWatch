@@ -53,8 +53,10 @@ async function installIssue1128Fixtures(page: import('@playwright/test').Page) {
   }
   const timestamp = (second: number) => `2026-09-29T10:00:${String(second).padStart(2, '0')}Z`
   const incidents = Array.from({ length: 5 }, (_, index) => ({
-    job_id: 'job-1', job: 'fixture-job',
-    incident: { change: { key: `port-${index}`, kind: 'port', target: address, protocol: 'tcp', port: 443 + index, severity: 'critical' }, opened_at: timestamp(index), last_seen_at: timestamp(index) },
+    job_id: 'job-1', job: 'fixture-job', occurrence_token: `occurrence-${index}`, opening_time_known: true, opening_scan_available: true, view_status: 'needs_review',
+    incident: { change: { key: `port-${index}`, kind: 'port', target: address, protocol: 'tcp', port: 443 + index, severity: 'critical' }, scan_id: 'scan-1', opened_at: timestamp(index), last_seen_at: timestamp(index), recovery_count: 0 },
+    review: { status: 'needs_review', reviewer_label: null, reviewed_at: null, note: '', follow_up_at: null, revision: 0 },
+    observation_uncertainty: { status: 'unknown', reason: 'no_newer_observation' },
   }))
   const events = Array.from({ length: 20 }, (_, index) => ({
     type: 'scan-failure', job_id: 'job-1', job: 'fixture-job', scan_id: 'scan-1',
@@ -80,7 +82,7 @@ async function installIssue1128Fixtures(page: import('@playwright/test').Page) {
       return
     }
     if (path === '/api/v1/incidents') {
-      await route.fulfill({ json: { incidents, pagination: { limit: 5, offset: 0, total: incidents.length, has_more: false, next_offset: null } } })
+      await route.fulfill({ json: { incidents, pagination: { limit: 20, offset: 0, total: incidents.length, has_more: false, next_offset: null }, truncated: false, active_count: incidents.length } })
       return
     }
     if (path.endsWith('/rdap')) {

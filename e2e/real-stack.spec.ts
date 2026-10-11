@@ -86,7 +86,7 @@ test('real EdgeWatch setup, baseline, change detection, and restart persistence'
     await page.goto(`${harness.url}/`, { waitUntil: 'domcontentloaded' })
     await expect(page.getByRole('heading', { name: /Good day, admin/ })).toBeVisible({ timeout: 15_000 })
     await navigateFromShell(page, 'Incidents')
-    await expect(page.getByRole('heading', { name: 'Incidents' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Investigation inbox' })).toBeVisible()
     await expect(page.getByRole('row', { name: /real-stack-fixture/ }).or(page.getByRole('article', { name: /real-stack-fixture/ })).first()).toBeVisible()
   } finally {
     await harness.stop()

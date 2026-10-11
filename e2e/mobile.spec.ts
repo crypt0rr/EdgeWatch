@@ -40,13 +40,20 @@ test('mobile navigation is modal and incident cards fit the viewport', async ({ 
         incidents: [{
           job_id: 'job-mobile',
           job: 'mobile-production-job',
+          occurrence_token: 'mobile-occurrence',
+          opening_time_known: true, opening_scan_available: true,
+          view_status: 'needs_review',
           incident: {
             change: { key: 'port|203.0.113.10|tcp|443', kind: 'port', target: '203.0.113.10', protocol: 'tcp', port: 443, severity: 'critical' },
+            scan_id: 'scan-mobile',
             opened_at: '2026-01-01T00:00:00Z',
             last_seen_at: '2026-01-01T00:00:00Z',
+            recovery_count: 0,
           },
+          review: { status: 'needs_review', reviewer_label: null, reviewed_at: null, note: '', follow_up_at: null, revision: 0 },
+          observation_uncertainty: { status: 'unknown', reason: 'no_newer_observation' },
         }],
-        pagination: { limit: 20, offset: 0, total: 1, has_more: false, next_offset: null },
+        pagination: { limit: 20, offset: 0, total: 1, has_more: false, next_offset: null }, truncated: false, active_count: 1,
       })
       return
     }
@@ -102,10 +109,11 @@ test('mobile navigation is modal and incident cards fit the viewport', async ({ 
   await expect(page.locator('main.main')).not.toHaveAttribute('aria-hidden', 'true')
   await expect.poll(() => page.evaluate(() => document.body.style.overflow)).toBe('')
 
-  await expect(page.locator('.desktop-incident-table')).toBeHidden()
-  await expect(page.locator('.mobile-incident-list')).toBeVisible()
+  await expect(page.locator('.inbox-desktop-table')).toBeHidden()
+  await expect(page.locator('.inbox-mobile-list')).toBeVisible()
   await expect(page.getByRole('article', { name: /mobile-production-job/ })).toBeVisible()
-  const suppress = page.getByRole('button', { name: 'Suppress 1 scan' })
+  await page.getByRole('button', { name: 'Review evidence' }).click()
+  const suppress = page.getByRole('complementary', { name: 'Evidence and review' }).getByRole('button', { name: 'Suppress 1 scan' })
   await suppress.click()
   const actionDialog = page.getByRole('dialog', { name: /Suppress this incident/ })
   await expect(actionDialog).toBeVisible()

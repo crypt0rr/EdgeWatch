@@ -22,7 +22,7 @@ describe('dashboard footprint with business units', () => {
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] })
     vi.mocked(listScans).mockResolvedValue({ scans: [], pagination })
     vi.mocked(activeScans).mockResolvedValue({ scans: [] })
-    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination })
+    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 0, pagination })
   })
   afterEach(() => vi.clearAllMocks())
 

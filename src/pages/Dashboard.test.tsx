@@ -147,7 +147,7 @@ describe('dashboard', () => {
     vi.mocked(listJobs).mockResolvedValue({ jobs: [job] })
     vi.mocked(listScans).mockResolvedValue({ scans: [scan], pagination })
     vi.mocked(activeScans).mockResolvedValue({ scans: [activeScan] })
-    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination })
+    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 0, pagination })
     vi.mocked(notificationTest).mockResolvedValue({ sent: 1 })
     vi.mocked(runJob).mockResolvedValue({ status: 'started', job_id: 'job-1' })
     vi.mocked(cancelScan).mockResolvedValue({ status: 'cancelling', scan_id: 'active-1' })

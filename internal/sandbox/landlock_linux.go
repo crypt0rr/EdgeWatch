@@ -306,7 +306,7 @@ func restrictSelf(paths []landlockPath, inherited []int) error {
 // createRuleset creates a ruleset that handles every right and scope ABI abi
 // restricts.
 func createRuleset(abi int) (int, error) {
-	attr := unix.LandlockRulesetAttr{Access_fs: handledAccess(abi), Scoped: handledScopes(abi)}
+	attr := unix.LandlockRulesetAttr{Handled_access_fs: handledAccess(abi), Scoped: handledScopes(abi)}
 	fd, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr), 0)
 	if errno != 0 {
 		return -1, fmt.Errorf("create the Landlock ruleset: %w", errno)

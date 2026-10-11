@@ -205,8 +205,12 @@ describe('application shell', () => {
     expect(invalidate).toHaveBeenCalledWith()
     act(() => stream.emit('application.update_status'))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['admin-status'] })
+    invalidate.mockClear()
+    act(() => stream.emit('incident.review.updated', 'job-9'))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['incidents'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['job', 'job-9'] })
     act(() => {
-      for (const type of ['changes-detected', 'changes-reminder', 'changes-recovered', 'incident-opened', 'incident-closed', 'incident-accepted', 'incident-suppressed']) stream.emit(type, 'job-9')
+      for (const type of ['changes-detected', 'changes-reminder', 'changes-recovered', 'incident-opened', 'incident-closed', 'incident-accepted', 'incident-suppressed', 'incident.review.updated']) stream.emit(type, 'job-9')
       for (const type of ['job.created', 'job.updated', 'job.archived', 'job.restored', 'job.deleted']) stream.emit(type, 'job-9')
       stream.emit('notification.changed')
       stream.emit('refresh_required')

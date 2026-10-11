@@ -149,8 +149,7 @@ incidents with no saved review and incidents explicitly returned for review.
 **Investigating** includes an investigation with no follow-up time or one due in
 the future. **Follow-up due** includes investigations whose follow-up instant
 has arrived or passed. **All active** shows every active incident. Returning an
-incident to **Needs review** clears its follow-up time but keeps its note and
-review history.
+incident to **Needs review** clears its follow-up time but keeps its note.
 
 The inbox can filter by job, severity, and change kind. It orders matching
 incidents by severity (critical, warning, then info), oldest opening time,
@@ -162,12 +161,12 @@ scan provenance, reviewer metadata, and any known observation uncertainty.
 When scan or host evidence is available, its link is labelled as opening in a
 new tab so the inbox context stays open.
 
-A review note is shared with other reviewers and can contain up to 4096 UTF-8
-bytes. A follow-up is an exact instant entered in the console's displayed
-timezone; that timezone is shown beside the field and the resulting instant is
-shown before saving. A time already past is allowed and immediately appears in
-**Follow-up due**. Times more than 30 days ahead are not accepted. During a
-daylight-saving clock change, a local time that does not exist must be changed;
+A plain-text review note is shared with other reviewers and can contain up to
+4096 UTF-8 bytes. A follow-up is an exact instant entered in the console's
+displayed timezone; that timezone is shown beside the field and the resulting
+instant is shown before saving. A time already past is allowed and appears
+immediately in **Follow-up due**. Times more than 30 days ahead are not
+accepted. During a daylight-saving clock change, a local time that does not exist must be changed;
 if a local time occurs twice, select which displayed UTC offset to use. These
 review fields record operator context only; they do not silence or alter
 existing alerts and reminders.

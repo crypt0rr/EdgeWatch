@@ -25,6 +25,7 @@ async function installInboxAPI(page: Page, conflict: 'revision-move' | 'occurren
   let occurrenceChanged = false
   let replacedOccurrence = ''
   const writes: Record<string, unknown>[] = []
+  const lookups: string[] = []
   await page.route(url => new URL(url).pathname === '/api/v1/incidents', async route => {
     const url = new URL(route.request().url())
     const offset = Number(url.searchParams.get('offset')) || 0
@@ -35,6 +36,7 @@ async function installInboxAPI(page: Page, conflict: 'revision-move' | 'occurren
       return incident(index, index === 35 ? currentReview : review0, occurrenceChanged && token === replacedOccurrence ? 'occurrence-replacement' : token)
     })
     if (token) {
+      lookups.push(token)
       if (conflict === 'lookup-error' && token === 'occurrence-35') {
         await route.fulfill({ status: 503, json: { error: { code: 'service_unavailable', message: 'lookup unavailable', details: {} } } })
         return
@@ -71,12 +73,28 @@ async function installInboxAPI(page: Page, conflict: 'revision-move' | 'occurren
     currentReview = { status: payload.status, reviewer_label: 'Administrator', reviewed_at: '2026-10-11T12:05:00Z', note: payload.note, follow_up_at: payload.follow_up_at, revision: 3 }
     await route.fulfill({ json: currentReview })
   })
-  return { writes }
+  return { writes, lookups, setCurrentReview: (review: typeof currentReview) => { currentReview = review } }
 }
 
 async function expectNoHorizontalScroll(page: Page) {
   const dimensions = await page.evaluate(() => ({ client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }))
   expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.client)
+}
+
+async function installEventSourceStub(page: Page) {
+  await page.addInitScript(() => {
+    const testWindow = window as typeof window & { __edgewatchEventSource?: { onmessage: ((event: { data: string }) => void) | null } }
+    class TestEventSource {
+      static CLOSED = 2
+      onmessage: ((event: { data: string }) => void) | null = null
+      onopen: (() => void) | null = null
+      onerror: (() => void) | null = null
+      readyState = 1
+      constructor() { testWindow.__edgewatchEventSource = this }
+      close() {}
+    }
+    Object.defineProperty(window, 'EventSource', { configurable: true, value: TestEventSource })
+  })
 }
 
 test.describe('investigation inbox browser behavior', () => {
@@ -177,8 +195,28 @@ test.describe('investigation inbox browser behavior', () => {
     await expect(panel.getByRole('button', { name: 'Show refreshed occurrence' })).toBeVisible()
     await expect(panel.getByRole('button', { name: 'Save draft to latest review' })).toBeDisabled()
     await panel.getByRole('button', { name: 'Show refreshed occurrence' }).click()
-    await expect(page).toHaveURL(/view=all_active.*job_id=job-1.*lookup_occurrence=occurrence-35.*occurrence=occurrence-35/)
+    await expect.poll(() => new URL(page.url()).searchParams.get('view')).toBe('all_active')
+    await expect.poll(() => new URL(page.url()).searchParams.get('job_id')).toBe('job-1')
+    await expect.poll(() => new URL(page.url()).searchParams.get('lookup_occurrence')).toBe('occurrence-35')
+    await expect.poll(() => new URL(page.url()).searchParams.get('occurrence')).toBe('occurrence-35')
     await expect(page.getByText('Showing the exact refreshed occurrence')).toBeVisible()
+    await expect(panel.getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('My draft stays here')
+    await expect(panel.locator('blockquote')).toHaveText('Saved by another reviewer')
+    await expect(panel.getByRole('button', { name: 'Save draft to latest review' })).toBeEnabled()
+
+    await page.getByRole('combobox', { name: 'Filter by review view' }).selectOption('needs_review')
+    await expect(panel).toHaveCount(0)
+    await expect(page).not.toHaveURL(/lookup_occurrence=/)
+    await page.getByRole('combobox', { name: 'Filter by review view' }).selectOption('all_active')
+    await page.getByRole('navigation', { name: 'Investigation inbox pagination' }).getByRole('button', { name: 'Next' }).click()
+    await expect(page).toHaveURL(/offset=20/)
+    const differentOccurrence = page.getByRole('row', { name: /192\.0\.2\.21/ })
+    await differentOccurrence.getByRole('button', { name: 'Review evidence' }).click()
+    await expect(panel.getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('')
+    const movedOccurrence = page.getByRole('row', { name: /192\.0\.2\.36/ })
+    await movedOccurrence.getByRole('button', { name: 'Review evidence' }).click()
+    await expect(panel.getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('My draft stays here')
+    await expect(panel.locator('blockquote')).toHaveText('Saved by another reviewer')
     await expect(panel.getByRole('button', { name: 'Save draft to latest review' })).toBeEnabled()
     await panel.getByRole('button', { name: 'Save draft to latest review' }).click()
     await expect.poll(() => writes.length).toBe(2)
@@ -189,6 +227,48 @@ test.describe('investigation inbox browser behavior', () => {
     await expect(page.getByRole('complementary', { name: 'Evidence and review' })).toHaveCount(0)
     await expect(page).not.toHaveURL(/lookup_occurrence=/)
     await expect(page).not.toHaveURL(/occurrence=/)
+  })
+
+  test('a shared review event refreshes a selected occurrence that moved out of the current view', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop', 'Live review movement is checked once in the desktop browser.')
+    await installEventSourceStub(page)
+    await mockConsole(page, 'administrator')
+    const { setCurrentReview, lookups } = await installInboxAPI(page, 'revision-move', 41)
+    await page.goto('/incidents?view=needs_review&job_id=job-1&offset=20&occurrence=occurrence-35')
+    const panel = page.getByRole('complementary', { name: 'Evidence and review' })
+    await expect(panel).toBeVisible()
+    await panel.getByRole('textbox', { name: 'Shared reviewer note' }).fill('Keep my draft after a shared update')
+    setCurrentReview({ status: 'investigating', reviewer_label: 'Another reviewer', reviewed_at: '2026-10-11T12:00:00Z', note: 'Changed in another session', follow_up_at: null, revision: 2 })
+    await page.evaluate(() => {
+      const testWindow = window as typeof window & { __edgewatchEventSource?: { onmessage: ((event: { data: string }) => void) | null } }
+      testWindow.__edgewatchEventSource?.onmessage?.({ data: JSON.stringify({ type: 'incident.review.updated', job_id: 'job-1' }) })
+    })
+    await expect(page.getByText('This occurrence is active, but it no longer matches the current view or page. Your draft is kept here.')).toBeVisible()
+    await expect(panel.getByRole('button', { name: 'Show refreshed occurrence' })).toBeVisible()
+    await expect.poll(() => lookups.includes('occurrence-35')).toBe(true)
+    await panel.getByRole('button', { name: 'Show refreshed occurrence' }).click()
+    await expect(page.getByText('Showing the exact refreshed occurrence')).toBeVisible()
+    await expect(panel.getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('Keep my draft after a shared update')
+    await expect(panel.locator('blockquote')).toHaveText('Changed in another session')
+    await expect(panel.getByRole('button', { name: 'Save draft to latest review' })).toBeEnabled()
+
+    await page.getByRole('combobox', { name: 'Filter by review view' }).selectOption('investigating')
+    await expect(panel).toHaveCount(0)
+    const investigatingRow = page.getByRole('row', { name: /192\.0\.2\.36/ })
+    await expect(investigatingRow).toBeVisible()
+    await investigatingRow.getByRole('button', { name: 'Review evidence' }).click()
+    await expect(panel.getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('Keep my draft after a shared update')
+    setCurrentReview({ status: 'needs_review', reviewer_label: 'A third reviewer', reviewed_at: '2026-10-11T12:10:00Z', note: 'Returned to Needs review in another session', follow_up_at: null, revision: 3 })
+    await page.evaluate(() => {
+      const testWindow = window as typeof window & { __edgewatchEventSource?: { onmessage: ((event: { data: string }) => void) | null } }
+      testWindow.__edgewatchEventSource?.onmessage?.({ data: JSON.stringify({ type: 'incident.review.updated', job_id: 'job-1' }) })
+    })
+    await expect(page.getByText('This occurrence is active, but it no longer matches the current view or page. Your draft is kept here.')).toBeVisible()
+    await expect.poll(() => lookups.filter(token => token === 'occurrence-35').length).toBeGreaterThanOrEqual(2)
+    await panel.getByRole('button', { name: 'Show refreshed occurrence' }).click()
+    await expect(panel.locator('blockquote')).toHaveText('Returned to Needs review in another session')
+    await expect(panel.getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('Keep my draft after a shared update')
+    await expect(panel.getByRole('button', { name: 'Save draft to latest review' })).toBeEnabled()
   })
 
   test('closed or replaced occurrences retain drafts and block stale retries', async ({ page }, testInfo) => {
@@ -202,7 +282,7 @@ test.describe('investigation inbox browser behavior', () => {
     await panel.getByRole('button', { name: 'Save review' }).click()
     await expect(panel.getByText('This occurrence is no longer active. Your draft is kept for reference, but it cannot be saved because the active occurrence has changed or closed.')).toBeVisible()
     await expect(panel.getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('Keep this draft after replacement')
-    await expect(panel.getByRole('button', { name: 'Save review' })).toBeDisabled()
+    await expect(panel.getByRole('button', { name: 'Save draft to latest review' })).toBeDisabled()
     expect(writes).toHaveLength(1)
   })
 
@@ -218,7 +298,7 @@ test.describe('investigation inbox browser behavior', () => {
     await expect(panel.getByText('Could not verify the latest active occurrence. Your draft is kept, and saving is disabled until the exact lookup succeeds.')).toBeVisible()
     await expect(panel.getByText(/This occurrence is no longer active/)).toHaveCount(0)
     await expect(panel.getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('Keep this draft when lookup fails')
-    await expect(panel.getByRole('button', { name: 'Save review' })).toBeDisabled()
+    await expect(panel.getByRole('button', { name: 'Save draft to latest review' })).toBeDisabled()
     expect(writes).toHaveLength(1)
   })
 })

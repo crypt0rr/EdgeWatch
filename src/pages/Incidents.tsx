@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ClipboardList, ExternalLink, X } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { APIError, acceptIncident, getSession, listIncidents, listJobs, suppressIncident, updateIncidentReview, type IncidentInboxQuery, type IncidentInboxView, type IncidentReviewUpdate } from '../api'
-import type { Change, Incident, IncidentInboxItem, IncidentReview } from '../generated/api-types'
+import type { Change, IncidentInboxItem, IncidentReview } from '../generated/api-types'
 import type { Job } from '../types'
 import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
@@ -23,7 +23,8 @@ const views: { value: IncidentInboxView; label: string }[] = [
 ]
 const severities = ['critical', 'warning', 'info'] as const
 const kinds = ['port', 'port-address', 'service', 'host', 'dns-added', 'dns-removed'] as const
-type ConflictRefresh = { token: string; status: 'loading' | 'found' | 'missing' | 'error' }
+type ConflictRefresh = { token: string; status: 'loading' | 'found' | 'missing' | 'error'; expectedRevision: number | null; pageQueryID: string; pageDataUpdatedAt: number }
+type ReviewDraft = { status: IncidentReviewUpdate['status']; note: string; dueLocal: string; ambiguousChoice: string }
 const statusLabels: Record<string, string> = {
   needs_review: 'Needs review',
   investigating: 'Investigating',
@@ -46,8 +47,8 @@ const uncertaintyReasons: Record<string, string> = {
   latest_scan_incomplete: 'The latest scan was incomplete.',
   latest_scan_not_compared: 'The latest scan was not compared with the baseline.',
   target_resolution_failed: 'The target could not be resolved in the latest scan.',
-  target_observation_incomplete: 'The relevant target timed out or had incomplete observation evidence in the latest scan.',
-  target_host_down: 'The latest scan reported the relevant host down; this does not confirm that its port or service recovered.',
+  target_observation_incomplete: 'The latest scan could not fully observe the relevant target. It may have timed out, been unreachable, or received an explicit network rejection; the finding remains unconfirmed.',
+  target_host_down: 'The latest scan reported the relevant host as down or unreachable; its port or service state remains unconfirmed.',
   target_unobserved: 'The relevant target was not observed in the latest scan coverage.',
   protocol_unobserved: 'The relevant protocol was not observed in the latest scan coverage.',
 }
@@ -150,11 +151,13 @@ export function Incidents() {
   const kind = validKind(kindParam) ? kindParam : ''
   const offset = parseOffset(search.get('offset'))
   const selectedOccurrence = search.get('occurrence') ?? ''
-  const lookupOccurrence = search.get('lookup_occurrence') ?? ''
+  const lookupOccurrenceParam = search.get('lookup_occurrence') ?? ''
   const timezone = incidentTimeZone()
   const [pendingAction, setPendingAction] = useState<{ row: IncidentInboxItem; action: 'accept' | 'suppress' } | null>(null)
   const [selectedSnapshot, setSelectedSnapshot] = useState<IncidentInboxItem | null>(null)
-  const [conflictRefresh, setConflictRefresh] = useState<ConflictRefresh | null>(null)
+  const [conflictRefreshes, setConflictRefreshes] = useState<Record<string, ConflictRefresh>>({})
+  const [reviewDrafts, setReviewDrafts] = useState<Record<string, ReviewDraft>>({})
+  const conflictLookupGenerationRef = useRef<Record<string, number>>({})
   const [actionError, setActionError] = useState('')
   const actionErrorRef = useRef<HTMLDivElement>(null)
   const evidencePanelRef = useRef<HTMLElement>(null)
@@ -168,22 +171,43 @@ export function Incidents() {
   const canRead = session.data?.permissions.includes('incidents.read') ?? false
   const canManage = session.data?.permissions.includes('incidents.manage') ?? false
   const jobs = useQuery({ queryKey: ['jobs', true], queryFn: () => listJobs(true), enabled: canRead })
-  const exactLookup = lookupOccurrence && jobID && view === 'all_active' ? lookupOccurrence : ''
+  const exactLookup = lookupOccurrenceParam && jobID && view === 'all_active' ? lookupOccurrenceParam : ''
   const filters: IncidentInboxQuery = { view, limit: exactLookup ? 1 : pageSize, offset: exactLookup ? 0 : offset, ...(jobID ? { job_id: jobID } : {}), ...(exactLookup ? { occurrence_token: exactLookup } : {}), ...(severity ? { severity } : {}), ...(kind ? { kind } : {}) }
+  const pageQueryKey = ['incidents', 'inbox', view, jobID, exactLookup, severity, kind, offset] as const
+  const pageQueryID = JSON.stringify(pageQueryKey)
   const incidents = useQuery({
-    queryKey: ['incidents', 'inbox', view, jobID, exactLookup, severity, kind, offset],
+    queryKey: pageQueryKey,
     queryFn: () => listIncidents(filters),
     enabled: canRead,
   })
   const rows = incidents.data?.incidents ?? []
   const selectedRow = rows.find(row => row.occurrence_token === selectedOccurrence)
-  const hasConflictRefresh = conflictRefresh?.token === selectedOccurrence
-  const refreshedSnapshot = hasConflictRefresh && conflictRefresh.status === 'found' && selectedSnapshot?.occurrence_token === selectedOccurrence ? selectedSnapshot : undefined
+  const conflictRefresh = conflictRefreshes[selectedOccurrence] ?? null
+  const hasConflictRefresh = !!conflictRefresh
+  const refreshedSnapshot = conflictRefresh?.status === 'found' && selectedSnapshot?.occurrence_token === selectedOccurrence ? selectedSnapshot : undefined
   const staleSelectedRow = !!refreshedSnapshot && !!selectedRow && refreshedSnapshot.review.revision !== selectedRow.review.revision
   const evidenceItem = refreshedSnapshot ?? selectedRow ?? (selectedSnapshot?.occurrence_token === selectedOccurrence ? selectedSnapshot : undefined)
   const selectionOutOfResults = !!selectedOccurrence && incidents.isSuccess && (!selectedRow || staleSelectedRow)
   const activeCount = incidents.data?.active_count ?? incidents.data?.pagination.total ?? 0
   const selectedJobUnavailable = !!jobID && !!jobs.data && !jobs.data.jobs.some(job => job.id === jobID)
+
+  const lookupOccurrence = useCallback(async (token: string, selectedJobID: string, expectedRevision: number | null) => {
+    const generation = (conflictLookupGenerationRef.current[token] ?? 0) + 1
+    conflictLookupGenerationRef.current[token] = generation
+    const pageQueryID = JSON.stringify(['incidents', 'inbox', view, jobID, exactLookup, severity, kind, offset])
+    const pageDataUpdatedAt = incidents.dataUpdatedAt
+    setConflictRefreshes(current => ({ ...current, [token]: { token, status: 'loading', expectedRevision, pageQueryID, pageDataUpdatedAt } }))
+    try {
+      const result = await listIncidents({ view: 'all_active', job_id: selectedJobID, occurrence_token: token, limit: 1, offset: 0 })
+      if (conflictLookupGenerationRef.current[token] !== generation) return
+      const current = result.incidents.find(row => row.occurrence_token === token)
+      if (current && selectedTokenRef.current === token) setSelectedSnapshot(current)
+      setConflictRefreshes(refreshes => ({ ...refreshes, [token]: { token, status: current ? 'found' : 'missing', expectedRevision, pageQueryID, pageDataUpdatedAt } }))
+    } catch {
+      if (conflictLookupGenerationRef.current[token] !== generation) return
+      setConflictRefreshes(refreshes => ({ ...refreshes, [token]: { token, status: 'error', expectedRevision, pageQueryID, pageDataUpdatedAt } }))
+    }
+  }, [incidents.dataUpdatedAt, view, jobID, exactLookup, severity, kind, offset])
 
   useEffect(() => {
     const normalized = normalizeSearch(search)
@@ -192,6 +216,12 @@ export function Incidents() {
   useEffect(() => {
     if (selectedRow) setSelectedSnapshot(selectedRow)
   }, [selectedRow])
+  useEffect(() => {
+    const token = selectedOccurrence
+    if (!token || !selectedSnapshot || selectedSnapshot.occurrence_token !== token || selectedRow || !incidents.isSuccess || incidents.isFetching) return
+    if (conflictRefresh?.pageQueryID === pageQueryID && conflictRefresh.pageDataUpdatedAt === incidents.dataUpdatedAt) return
+    void lookupOccurrence(token, selectedSnapshot.job_id, conflictRefresh?.expectedRevision ?? null)
+  }, [selectedOccurrence, selectedSnapshot?.occurrence_token, selectedSnapshot?.job_id, selectedRow, incidents.isSuccess, incidents.isFetching, incidents.dataUpdatedAt, pageQueryID, conflictRefresh?.pageQueryID, conflictRefresh?.pageDataUpdatedAt, conflictRefresh?.expectedRevision, lookupOccurrence])
   useEffect(() => {
     if (selectedOccurrence && selectedRow) {
       evidencePanelRef.current?.focus()
@@ -221,7 +251,6 @@ export function Incidents() {
   }
   function selectOccurrence(item: IncidentInboxItem, trigger: HTMLButtonElement) {
     evidenceOpenerRef.current = trigger
-    setConflictRefresh(null)
     setSelectedSnapshot(item)
     const next = new URLSearchParams(search)
     next.set('occurrence', item.occurrence_token)
@@ -230,7 +259,6 @@ export function Incidents() {
   function closeEvidence() {
     restoreEvidenceFocusRef.current = true
     setSelectedSnapshot(null)
-    setConflictRefresh(null)
     const next = new URLSearchParams(search)
     next.delete('occurrence')
     setSearch(next)
@@ -238,10 +266,25 @@ export function Incidents() {
   function changePage(nextOffset: number) {
     setSearch(currentOffsetSearch(search, nextOffset))
   }
-  function refreshConflict(token: string, status: ConflictRefresh['status'], row?: IncidentInboxItem) {
-    if (selectedTokenRef.current !== token) return
-    setConflictRefresh({ token, status })
-    if (row) setSelectedSnapshot(row)
+  function clearConflict(token: string) {
+    conflictLookupGenerationRef.current[token] = (conflictLookupGenerationRef.current[token] ?? 0) + 1
+    setConflictRefreshes(current => {
+      if (!(token in current)) return current
+      const next = { ...current }
+      delete next[token]
+      return next
+    })
+  }
+  function updateReviewDraft(token: string, draft: ReviewDraft | null) {
+    setReviewDrafts(current => {
+      if (!draft) {
+        if (!(token in current)) return current
+        const next = { ...current }
+        delete next[token]
+        return next
+      }
+      return { ...current, [token]: draft }
+    })
   }
   function showRefreshedOccurrence(item: IncidentInboxItem) {
     const next = new URLSearchParams(search)
@@ -338,11 +381,11 @@ export function Incidents() {
             <div className="incident-evidence-heading"><div><p className="eyebrow">Selected occurrence</p><h2 id="incident-evidence-title">Evidence and review</h2></div><button className="icon-button" type="button" aria-label="Close evidence panel" onClick={closeEvidence}><X size={18} aria-hidden="true" /></button></div>
             {evidenceItem ? <>
               {hasConflictRefresh && conflictRefresh.status === 'loading' && <p className="incident-context-notice" role="status">Checking this exact occurrence in the active job while keeping your draft.</p>}
-              {selectionOutOfResults && hasConflictRefresh && conflictRefresh.status === 'found' && <div className="incident-context-notice" role="status"><p>This occurrence is active with a newer saved review, but it no longer matches the current view or page. Your draft is kept here.</p><button className="button secondary" type="button" onClick={() => showRefreshedOccurrence(evidenceItem)}>Show refreshed occurrence</button></div>}
+              {selectionOutOfResults && hasConflictRefresh && conflictRefresh.status === 'found' && <div className="incident-context-notice" role="status"><p>This occurrence is active, but it no longer matches the current view or page. Your draft is kept here.</p><button className="button secondary" type="button" onClick={() => showRefreshedOccurrence(evidenceItem)}>Show refreshed occurrence</button></div>}
               {hasConflictRefresh && conflictRefresh.status === 'missing' && <p className="incident-context-notice" role="status">This occurrence is no longer active. Your draft is kept for reference, but it cannot be saved because the active occurrence has changed or closed.</p>}
-              {hasConflictRefresh && conflictRefresh.status === 'error' && <p className="incident-context-notice" role="status">Could not verify the latest active occurrence. Your draft is kept, and saving is disabled until the exact lookup succeeds.</p>}
+              {hasConflictRefresh && conflictRefresh.status === 'error' && <div className="incident-context-notice" role="status"><p>Could not verify the latest active occurrence. Your draft is kept, and saving is disabled until the exact lookup succeeds.</p><button className="button secondary" type="button" onClick={() => evidenceItem && void lookupOccurrence(evidenceItem.occurrence_token, evidenceItem.job_id, conflictRefresh.expectedRevision)}>Retry exact occurrence check</button></div>}
               {selectionOutOfResults && !hasConflictRefresh && <p className="incident-context-notice" role="status">This incident is no longer in the selected view or page. Its evidence stays open here; close the panel to keep your filters and page, or use All active to locate it again.</p>}
-              <EvidencePanel item={evidenceItem} canManage={canManage} readOnly={selectionOutOfResults || (!!conflictRefresh && conflictRefresh.token === selectedOccurrence && conflictRefresh.status !== 'found')} conflictRefreshStatus={conflictRefresh?.token === selectedOccurrence ? conflictRefresh.status : null} onConflictRefresh={refreshConflict} onAction={actionFor} onSaved={review => setSelectedSnapshot(current => current?.occurrence_token === evidenceItem.occurrence_token ? { ...current, review, view_status: reviewViewStatus(review) } : current)} />
+              <EvidencePanel item={evidenceItem} canManage={canManage} readOnly={selectionOutOfResults || (!!conflictRefresh && conflictRefresh.status !== 'found')} draft={reviewDrafts[evidenceItem.occurrence_token]} onDraftChange={updateReviewDraft} conflictRefresh={conflictRefresh} onConflictCheck={lookupOccurrence} onClearConflict={clearConflict} onAction={actionFor} onSaved={review => setSelectedSnapshot(current => current?.occurrence_token === evidenceItem.occurrence_token ? { ...current, review, view_status: reviewViewStatus(review) } : current)} />
             </> : <div className="inline-empty" role="status">This occurrence is not available in the selected view or page. Close the panel or use All active to locate it again.</div>}
           </aside>}
         </div>
@@ -375,7 +418,7 @@ function IncidentCard({ item, selected, onOpen }: { item: IncidentInboxItem; sel
   </article>
 }
 
-function EvidencePanel({ item, canManage, readOnly, conflictRefreshStatus, onConflictRefresh, onAction, onSaved }: { item: IncidentInboxItem; canManage: boolean; readOnly: boolean; conflictRefreshStatus: ConflictRefresh['status'] | null; onConflictRefresh: (token: string, status: ConflictRefresh['status'], row?: IncidentInboxItem) => void; onAction: (item: IncidentInboxItem, action: 'accept' | 'suppress') => void; onSaved: (review: IncidentReview) => void }) {
+function EvidencePanel({ item, canManage, readOnly, draft, onDraftChange, conflictRefresh, onConflictCheck, onClearConflict, onAction, onSaved }: { item: IncidentInboxItem; canManage: boolean; readOnly: boolean; draft?: ReviewDraft; onDraftChange: (token: string, draft: ReviewDraft | null) => void; conflictRefresh: ConflictRefresh | null; onConflictCheck: (token: string, jobID: string, expectedRevision: number | null) => Promise<void>; onClearConflict: (token: string) => void; onAction: (item: IncidentInboxItem, action: 'accept' | 'suppress') => void; onSaved: (review: IncidentReview) => void }) {
   const change = item.incident.change
   const sourceScan = item.incident.scan_id
   const sourceScanAvailable = !!sourceScan && item.opening_scan_available
@@ -407,25 +450,24 @@ function EvidencePanel({ item, canManage, readOnly, conflictRefreshStatus, onCon
         {sourceScan && !item.opening_scan_available && <span className="incident-evidence-unavailable" role="status">Opening scan {sourceScan} is no longer available.</span>}
         {address && openEvidencePath(`${base}/baseline/hosts/${encodeURIComponent(address)}`, `Open ${address} in baseline`)}
       </nav>
+      {item.review.note && <section className="incident-shared-note" aria-labelledby="current-review-note"><h3 id="current-review-note">Shared reviewer note</h3><p>{item.review.note}</p></section>}
     </section>
-    {item.review.note && <section className="incident-shared-note" aria-labelledby="current-review-note"><h3 id="current-review-note">Shared reviewer note</h3><p>{item.review.note}</p></section>}
-    {canManage ? <ReviewEditor key={item.occurrence_token} item={item} readOnly={readOnly} conflictRefreshStatus={conflictRefreshStatus} onConflictRefresh={onConflictRefresh} onSaved={onSaved} /> : <p className="muted">You can read this review. Saving review status, notes, or follow-up times requires incident management permission.</p>}
+    {canManage ? <ReviewEditor key={item.occurrence_token} item={item} readOnly={readOnly} draft={draft} onDraftChange={onDraftChange} conflictRefresh={conflictRefresh} onConflictCheck={onConflictCheck} onClearConflict={onClearConflict} onSaved={onSaved} /> : <p className="muted">You can read this review. Saving review status, notes, or follow-up times requires incident management permission.</p>}
     {canManage && !readOnly && <div className="incident-resolution-actions"><p className="eyebrow">Baseline actions</p><p className="muted">Accepting or suppressing changes remains a separate decision from investigation status.</p><button className="button secondary" type="button" disabled={!change.key} onClick={() => onAction(item, 'accept')}>Accept change</button><button className="button ghost" type="button" disabled={!change.key} onClick={() => onAction(item, 'suppress')}>Suppress 1 scan</button>{!change.key && <p className="muted">This legacy incident has no actionable key. A newer scan is needed before accepting or suppressing it.</p>}</div>}
   </>
 }
 
-function ReviewEditor({ item, readOnly, conflictRefreshStatus, onConflictRefresh, onSaved }: { item: IncidentInboxItem; readOnly: boolean; conflictRefreshStatus: ConflictRefresh['status'] | null; onConflictRefresh: (token: string, status: ConflictRefresh['status'], row?: IncidentInboxItem) => void; onSaved: (review: IncidentReview) => void }) {
+function ReviewEditor({ item, readOnly, draft, onDraftChange, conflictRefresh, onConflictCheck, onClearConflict, onSaved }: { item: IncidentInboxItem; readOnly: boolean; draft?: ReviewDraft; onDraftChange: (token: string, draft: ReviewDraft | null) => void; conflictRefresh: ConflictRefresh | null; onConflictCheck: (token: string, jobID: string, expectedRevision: number | null) => Promise<void>; onClearConflict: (token: string) => void; onSaved: (review: IncidentReview) => void }) {
   const client = useQueryClient()
-  const [status, setStatus] = useState<IncidentReviewUpdate['status']>(item.review.status === 'investigating' ? 'investigating' : 'needs_review')
-  const [note, setNote] = useState(item.review.note)
   const timezone = incidentTimeZone()
-  const [dueLocal, setDueLocal] = useState(() => incidentDateTimeInput(item.review.follow_up_at, timezone))
-  const [ambiguousChoice, setAmbiguousChoice] = useState('')
+  const status = draft?.status ?? (item.review.status === 'investigating' ? 'investigating' : 'needs_review')
+  const note = draft?.note ?? item.review.note
+  const dueLocal = draft?.dueLocal ?? incidentDateTimeInput(item.review.follow_up_at, timezone)
+  const ambiguousChoice = draft?.ambiguousChoice ?? ''
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [saved, setSaved] = useState('')
-  const [conflict, setConflict] = useState(false)
-  const [conflictedRevision, setConflictedRevision] = useState<number | null>(null)
+  const conflict = conflictRefresh !== null
   const bytes = new TextEncoder().encode(note).length
   const dueCandidates = dueLocal ? incidentDateTimeCandidates(dueLocal, timezone) : []
   const selectedDue = dueCandidates.length === 1 ? dueCandidates[0] : dueCandidates.includes(ambiguousChoice) ? ambiguousChoice : ''
@@ -437,28 +479,20 @@ function ReviewEditor({ item, readOnly, conflictRefreshStatus, onConflictRefresh
       : tooFarAhead
         ? 'Follow-up must be no more than 30 days ahead.'
         : ''
-  const conflictRefreshed = !conflict || (conflictRefreshStatus === 'found' && conflictedRevision !== null && item.review.revision !== conflictedRevision)
+  const conflictRefreshed = !conflict || (conflictRefresh?.status === 'found' && (conflictRefresh.expectedRevision === null || item.review.revision !== conflictRefresh.expectedRevision))
   const canSave = !!item.incident.change.key && !readOnly && !saving && bytes <= maxNoteBytes && !dueError && conflictRefreshed
   const queryKey = ['incidents', 'inbox']
 
-  function setReviewStatus(value: IncidentReviewUpdate['status']) {
-    setStatus(value)
+  function patchDraft(patch: Partial<ReviewDraft>) {
+    onDraftChange(item.occurrence_token, { status, note, dueLocal, ambiguousChoice, ...patch })
     setSaved('')
     setError('')
-    if (value === 'needs_review') {
-      setDueLocal('')
-      setAmbiguousChoice('')
-    }
   }
   async function resetDraft() {
-    setStatus(item.review.status === 'investigating' ? 'investigating' : 'needs_review')
-    setNote(item.review.note)
-    setDueLocal(incidentDateTimeInput(item.review.follow_up_at, timezone))
-    setAmbiguousChoice('')
+    onDraftChange(item.occurrence_token, null)
     setError('')
     setSaved('')
-    setConflict(false)
-    setConflictedRevision(null)
+    onClearConflict(item.occurrence_token)
   }
   async function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -477,25 +511,16 @@ function ReviewEditor({ item, readOnly, conflictRefreshStatus, onConflictRefresh
     try {
       const savedReview = await updateIncidentReview(item.job_id, update)
       onSaved(savedReview)
-      setConflict(false)
-      setConflictedRevision(null)
+      onDraftChange(item.occurrence_token, null)
+      onClearConflict(item.occurrence_token)
       setSaved('Review saved. Notes and follow-up times do not change notifications or reminders.')
       await client.invalidateQueries({ queryKey: ['incidents'] })
     } catch (cause) {
       if (cause instanceof APIError && (cause.code === 'incident_occurrence_conflict' || cause.code === 'incident_review_revision_conflict')) {
-        setConflict(true)
-        setConflictedRevision(update.expected_revision)
         setError(cause.code === 'incident_occurrence_conflict'
           ? 'This incident occurrence changed or closed while you were editing. The list was refreshed; your draft remains here if the occurrence is still available.'
           : 'Another reviewer saved an update first. The current review is refreshing; your draft remains here.')
-        onConflictRefresh(item.occurrence_token, 'loading')
-        try {
-          const refreshed = await listIncidents({ view: 'all_active', job_id: item.job_id, occurrence_token: item.occurrence_token, limit: 1, offset: 0 })
-          const current = refreshed.incidents.find(row => row.occurrence_token === item.occurrence_token)
-          onConflictRefresh(item.occurrence_token, current ? 'found' : 'missing', current)
-        } catch {
-          onConflictRefresh(item.occurrence_token, 'error')
-        }
+        await onConflictCheck(item.occurrence_token, item.job_id, update.expected_revision)
         await client.invalidateQueries({ queryKey })
       } else if (cause instanceof APIError && cause.code === 'incident_review_invalid') {
         setError(cause.message || 'The review could not be saved. Check the note and follow-up time.')
@@ -511,14 +536,14 @@ function ReviewEditor({ item, readOnly, conflictRefreshStatus, onConflictRefresh
     <div className="incident-review-form-heading"><h3>Shared investigation review</h3><span className="revision">Revision {item.review.revision}</span></div>
     {readOnly && <p className="incident-context-notice">Review fields are read-only because this occurrence is outside the current results.</p>}
     {conflict && <div className="incident-review-conflict" role="status"><strong>Latest saved review</strong><p>Status: {item.review.status === 'investigating' ? 'Investigating' : 'Needs review'} · Revision {item.review.revision}{item.review.reviewer_label ? ` · ${item.review.reviewer_label}` : ''}{item.review.reviewed_at ? ` · ${safeTime(item.review.reviewed_at)}` : ''}</p>{item.review.note ? <blockquote>{item.review.note}</blockquote> : <p>No saved note.</p>}<p>Your edited note and fields are kept above. Saving again will use the latest revision.</p></div>}
-    <label>Review status<select disabled={readOnly} value={status} onChange={event => setReviewStatus(event.target.value as IncidentReviewUpdate['status'])}>
+    <label>Review status<select disabled={readOnly} value={status} onChange={event => { const value = event.target.value as IncidentReviewUpdate['status']; patchDraft(value === 'needs_review' ? { status: value, dueLocal: '', ambiguousChoice: '' } : { status: value }) }}>
       <option value="needs_review">Needs review</option><option value="investigating">Investigating</option>
     </select></label>
-    <label>Shared reviewer note<textarea disabled={readOnly} value={note} rows={4} onChange={event => { setNote(event.target.value); setSaved(''); setError('') }} aria-describedby="incident-note-help incident-note-count" /></label>
+    <label>Shared reviewer note<textarea disabled={readOnly} value={note} rows={4} onChange={event => patchDraft({ note: event.target.value })} aria-describedby="incident-note-help incident-note-count" /></label>
     <div className="incident-note-meta"><small id="incident-note-help">Plain text shared with other reviewers. Maximum {maxNoteBytes} UTF-8 bytes.</small><small id="incident-note-count" aria-live="polite" className={bytes > maxNoteBytes ? 'over-limit' : ''}>{bytes} / {maxNoteBytes} bytes</small></div>
-    <label>Optional follow-up time <span className="incident-timezone-label">({timezone})</span><input type="datetime-local" value={dueLocal} disabled={readOnly || status === 'needs_review'} onChange={event => { setDueLocal(event.target.value); setAmbiguousChoice(''); setSaved(''); setError('') }} aria-describedby="incident-follow-up-help incident-follow-up-feedback" /></label>
+    <label>Optional follow-up time <span className="incident-timezone-label">({timezone})</span><input type="datetime-local" value={dueLocal} disabled={readOnly || status === 'needs_review'} onChange={event => patchDraft({ dueLocal: event.target.value, ambiguousChoice: '' })} aria-describedby="incident-follow-up-help incident-follow-up-feedback" /></label>
     <small id="incident-follow-up-help">Enter local wall time in {timezone}. Past times are allowed; future times are limited to 30 days. Returning to Needs review clears the follow-up and keeps the note.</small>
-    {dueCandidates.length > 1 && <label>Choose the matching local-time occurrence<select disabled={readOnly} value={selectedDue} onChange={event => { setAmbiguousChoice(event.target.value); setSaved('') }}>
+    {dueCandidates.length > 1 && <label>Choose the matching local-time occurrence<select disabled={readOnly} value={selectedDue} onChange={event => patchDraft({ ambiguousChoice: event.target.value })}>
       <option value="">Choose UTC offset</option>{dueCandidates.map(candidate => <option key={candidate} value={candidate}>{formatDateTime(candidate, { dateStyle: 'medium', timeStyle: 'short' })} · {incidentTimeOffset(candidate, timezone)} ({candidate})</option>)}
     </select></label>}
     <div id="incident-follow-up-feedback" className="incident-follow-up-feedback" aria-live="polite">

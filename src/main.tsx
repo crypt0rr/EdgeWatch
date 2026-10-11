@@ -175,6 +175,7 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
             case 'incident-closed':
             case 'incident-accepted':
             case 'incident-suppressed':
+            case 'incident.review.updated':
               void client.invalidateQueries({ queryKey: ['jobs'] })
               void client.invalidateQueries({ queryKey: ['incidents'] })
               void client.invalidateQueries({ queryKey: ['activity-events'] })

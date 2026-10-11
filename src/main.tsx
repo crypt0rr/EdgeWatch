@@ -366,7 +366,7 @@ function JobCreationJourney() {
 
 export function Jobs() {
   const navigate = useNavigate()
-  const jobs = useQuery({ queryKey: ['jobs', true], queryFn: () => listJobs(true) })
+  const jobs = useQuery({ queryKey: ['jobs', true], queryFn: () => listJobs(true), refetchInterval: 30_000 })
   const session = useQuery({ queryKey: ['session'], queryFn: getSession })
   const [filter, setFilter] = useState<'all' | 'attention'>('all')
   const canWrite = session.data?.permissions.includes('jobs.write') ?? false

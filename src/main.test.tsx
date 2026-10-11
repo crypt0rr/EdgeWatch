@@ -476,6 +476,36 @@ describe('application shell', () => {
     expect(screen.getByText(/Needs attention · Latest scan incomplete/)).toBeInTheDocument()
   })
 
+  it('refreshes the attention filter for a viewer without stream events', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const jobResponse = (status: string, attention: string) => ({ jobs: [{
+      id: 'polling-job', revision: 1, enabled: true, archived: false,
+      job: { name: 'Polling monitor', targets: ['198.51.100.10'], schedule: '0 * * * *' },
+      baseline: { status: 'complete', samples: 1 },
+      monitoring: {
+        availability: 'available', history_available: true, activity: 'none', schedule_state: 'scheduled',
+        next_run_at: '2026-10-12T00:00:00Z', timezone: 'UTC',
+        latest_attempt: { status, started_at: '2026-10-11T12:00:00Z', finished_at: '2026-10-11T12:01:00Z' },
+        latest_successful_scan: null, attention_reason: attention,
+      },
+    }] })
+    const responses = [jobResponse('success', 'none'), jobResponse('failed', 'failed')]
+    vi.mocked(listJobs).mockImplementation(async () => (responses.shift() ?? jobResponse('failed', 'failed')) as never)
+    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: ['jobs.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    renderWithProviders(<Jobs />)
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Polling monitor' })).toBeInTheDocument())
+    expect(listJobs).toHaveBeenCalledTimes(1)
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter jobs' }), { target: { value: 'attention' } })
+    expect(screen.getByText('No available jobs need attention')).toBeInTheDocument()
+    expect(EventSourceStub.instances).toHaveLength(0)
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+    await waitFor(() => expect(screen.getByText(/Needs attention · Latest scan failed/)).toBeInTheDocument())
+    expect(screen.getByRole('heading', { name: 'Polling monitor' })).toBeInTheDocument()
+    expect(listJobs).toHaveBeenCalledTimes(2)
+  })
+
   it('shows explicit unknown and no-scan states and gates scan links by permission', async () => {
     const monitoredJob = {
       id: 'monitoring-job', revision: 1, enabled: true, archived: false,

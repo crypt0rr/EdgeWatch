@@ -339,21 +339,27 @@ func incidentCoverageUncertainty(change model.Change, snapshot model.Snapshot) I
 			return IncidentReasonTargetResolutionFailed
 		}
 	}
-	if snapshotHostStateIsDown(snapshot.HostStates, change.Target) || snapshotHostStateIsDown(snapshot.HostStates, change.Address) {
-		return IncidentReasonTargetHostDown
-	}
 	for _, host := range snapshot.Hosts {
 		if !hostMatchesIncidentChange(host, change) {
 			continue
 		}
-		if explicitHostDown(host) || snapshotHostStateIsDown(snapshot.HostStates, host.Address) {
-			return IncidentReasonTargetHostDown
+		if reachabilityReasonIsUncertain(host.StatusReason) {
+			return IncidentReasonTargetObservationIncomplete
+		}
+		if change.Kind == "host" {
+			if explicitHostDown(host) || snapshotHostStateIsDown(snapshot.HostStates, host.Address) {
+				return IncidentReasonTargetHostDown
+			}
+			continue
 		}
 		for _, protocol := range host.Protocols {
-			if change.Kind == "host" || !strings.EqualFold(strings.TrimSpace(protocol.Protocol), strings.TrimSpace(change.Protocol)) {
+			if !strings.EqualFold(strings.TrimSpace(protocol.Protocol), strings.TrimSpace(change.Protocol)) {
 				continue
 			}
-			if protocol.DiscoveryState == "down" || strings.EqualFold(strings.TrimSpace(protocol.Status), "down") {
+			if reachabilityReasonIsUncertain(protocol.StatusReason) {
+				return IncidentReasonTargetObservationIncomplete
+			}
+			if protocol.DiscoveryState == "down" || strings.EqualFold(strings.TrimSpace(protocol.Status), "down") || snapshotHostStateIsDown(snapshot.HostStates, host.Address) || explicitHostDown(host) {
 				return IncidentReasonTargetHostDown
 			}
 		}
@@ -421,8 +427,17 @@ func explicitHostDown(host model.HostObservation) bool {
 		return true
 	}
 	switch strings.ToLower(strings.TrimSpace(host.StatusReason)) {
-	case "nmap-host-down", "host-down", "down", "no-response", "host-unreach", "net-unreach", "admin-prohibited":
+	case "nmap-host-down", "host-down", "down", "no-response":
 		return strings.EqualFold(strings.TrimSpace(host.Status), "unreachable")
+	default:
+		return false
+	}
+}
+
+func reachabilityReasonIsUncertain(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "host-unreach", "net-unreach", "admin-prohibited":
+		return true
 	default:
 		return false
 	}

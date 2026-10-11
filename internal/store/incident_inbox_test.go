@@ -324,6 +324,15 @@ func TestIncidentObservationUncertaintyRequiresExplicitCoverageEvidence(t *testi
 		t.Fatalf("matching IP timeout = %q; want target_observation_incomplete", reason)
 	}
 	downs := []model.HostState{{Address: "192.0.2.44", State: "down"}}
+	uncertainReachability := func(reason string) model.Snapshot {
+		value := base
+		value.Hosts = []model.HostObservation{{
+			Address: "192.0.2.44", SourceTargets: []string{"edge.example"}, Status: "unreachable", StatusReason: reason,
+			Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unreachable", StatusReason: reason, DiscoveryState: "down"}},
+		}}
+		value.HostStates = downs
+		return value
+	}
 	tests := []struct {
 		name       string
 		status     string
@@ -337,12 +346,9 @@ func TestIncidentObservationUncertaintyRequiresExplicitCoverageEvidence(t *testi
 		{name: "not compared", status: "success", comparison: model.ScanComparisonNotCompared, snapshot: base, wantStatus: IncidentObservationIncomplete, wantReason: IncidentReasonLatestScanNotCompared},
 		{name: "target resolution failure", status: "success", comparison: model.ScanComparisonCompared, snapshot: model.Snapshot{Scopes: base.Scopes, TargetFailures: []model.TargetCoverageFailure{{Target: "edge.example", Reason: "lookup-failed"}}}, wantStatus: IncidentObservationIncomplete, wantReason: IncidentReasonTargetResolutionFailed},
 		{name: "explicit host down", status: "success", comparison: model.ScanComparisonCompared, snapshot: func() model.Snapshot { value := down; value.HostStates = downs; return value }(), wantStatus: IncidentObservationIncomplete, wantReason: IncidentReasonTargetHostDown},
-		{name: "firewall explicitly prohibits host", status: "success", comparison: model.ScanComparisonCompared, snapshot: func() model.Snapshot {
-			value := down
-			value.Hosts[0].StatusReason = "admin-prohibited"
-			value.HostStates = nil
-			return value
-		}(), wantStatus: IncidentObservationIncomplete, wantReason: IncidentReasonTargetHostDown},
+		{name: "administrative rejection is reachability uncertainty", status: "success", comparison: model.ScanComparisonCompared, snapshot: uncertainReachability("admin-prohibited"), wantStatus: IncidentObservationIncomplete, wantReason: IncidentReasonTargetObservationIncomplete},
+		{name: "host unreachable response is not host down", status: "success", comparison: model.ScanComparisonCompared, snapshot: uncertainReachability("host-unreach"), wantStatus: IncidentObservationIncomplete, wantReason: IncidentReasonTargetObservationIncomplete},
+		{name: "network unreachable response is not host down", status: "success", comparison: model.ScanComparisonCompared, snapshot: uncertainReachability("net-unreach"), wantStatus: IncidentObservationIncomplete, wantReason: IncidentReasonTargetObservationIncomplete},
 		{name: "compared scan with partial target observation", status: "success", comparison: model.ScanComparisonCompared, snapshot: partial, wantStatus: IncidentObservationIncomplete, wantReason: IncidentReasonTargetObservationIncomplete},
 		{name: "target omitted", status: "success", comparison: model.ScanComparisonCompared, snapshot: model.Snapshot{Scopes: []model.Scope{{Target: "other.example", Protocol: "tcp", Ports: "443"}}}, wantStatus: IncidentObservationIncomplete, wantReason: IncidentReasonTargetUnobserved},
 		{name: "protocol omitted", status: "success", comparison: model.ScanComparisonCompared, snapshot: model.Snapshot{Scopes: []model.Scope{{Target: "edge.example", Protocol: "udp", Ports: "53"}}}, wantStatus: IncidentObservationIncomplete, wantReason: IncidentReasonProtocolUnobserved},

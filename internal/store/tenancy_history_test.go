@@ -183,6 +183,75 @@ var tenantHistoryLeakCases = map[string]tenantLeakCase{
 			}
 		}
 	}},
+	"ListIncidentInbox": {run: func(t *testing.T, f tenantFixture) {
+		ctx := context.Background()
+		for _, check := range []struct {
+			scope TenantScope
+			job   string
+		}{
+			{f.a, f.jobA},
+			{f.b, f.jobB},
+		} {
+			page, err := f.store.Tenant(check.scope).ListIncidentInbox(ctx, IncidentInboxFilter{
+				View: "all_active", JobID: check.job, Limit: 10, Now: time.Now().UTC(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if page.Total != 1 || page.ActiveCount != 1 || len(page.Items) != 1 || page.Items[0].JobID != check.job || page.Items[0].Incident.Change.Key != tenantHistoryIncident {
+				t.Errorf("tenant %s inbox for its job %s = %+v, want only its active incident", check.scope.ID(), check.job, page)
+			}
+		}
+		foreign, err := f.store.Tenant(f.b).ListIncidentInbox(ctx, IncidentInboxFilter{
+			View: "all_active", JobID: f.jobA, Limit: 10, Now: time.Now().UTC(),
+		})
+		if err != nil || foreign.Total != 0 || len(foreign.Items) != 0 {
+			t.Errorf("tenant B inbox for tenant A's job = %+v, %v; want no rows", foreign, err)
+		}
+		aPage, err := f.store.Tenant(f.a).ListIncidentInbox(ctx, IncidentInboxFilter{
+			View: "all_active", JobID: f.jobA, Limit: 10, Now: time.Now().UTC(),
+		})
+		if err != nil || len(aPage.Items) != 1 {
+			t.Fatalf("tenant A inbox for occurrence token test = %+v, %v", aPage, err)
+		}
+		foreignToken, err := f.store.Tenant(f.b).ListIncidentInbox(ctx, IncidentInboxFilter{
+			View: "all_active", JobID: f.jobA, OccurrenceToken: aPage.Items[0].OccurrenceToken, Limit: 10, Now: time.Now().UTC(),
+		})
+		if err != nil || foreignToken.Total != 0 || len(foreignToken.Items) != 0 {
+			t.Errorf("tenant B exact-occurrence lookup for tenant A token = %+v, %v; want same zero-row result as unknown", foreignToken, err)
+		}
+	}},
+	"SaveIncidentReview": {writes: true, run: func(t *testing.T, f tenantFixture) {
+		ctx := context.Background()
+		aPage, err := f.store.Tenant(f.a).ListIncidentInbox(ctx, IncidentInboxFilter{
+			View: "all_active", JobID: f.jobA, Limit: 10, Now: time.Now().UTC(),
+		})
+		if err != nil || len(aPage.Items) != 1 {
+			t.Fatalf("tenant A inbox = %+v, %v", aPage, err)
+		}
+		aItem := aPage.Items[0]
+		foreignWrite := IncidentReviewWrite{Key: aItem.Incident.Change.Key, OccurrenceToken: aItem.OccurrenceToken, ExpectedRevision: 0, Status: "investigating"}
+		if _, err := f.store.Tenant(f.b).SaveIncidentReview(ctx, f.jobA, foreignWrite, accountAdminB, "Tenant B reviewer", AuditEntry{Action: "incident.review.updated", ActorUserID: accountAdminB}); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("tenant B reviewed tenant A's incident: %v", err)
+		}
+		bPage, err := f.store.Tenant(f.b).ListIncidentInbox(ctx, IncidentInboxFilter{
+			View: "all_active", JobID: f.jobB, Limit: 10, Now: time.Now().UTC(),
+		})
+		if err != nil || len(bPage.Items) != 1 {
+			t.Fatalf("tenant B inbox = %+v, %v", bPage, err)
+		}
+		bItem := bPage.Items[0]
+		write := IncidentReviewWrite{Key: bItem.Incident.Change.Key, OccurrenceToken: bItem.OccurrenceToken, ExpectedRevision: 0, Status: "investigating", Note: "tenant B review"}
+		if _, err := f.store.Tenant(f.b).SaveIncidentReview(ctx, f.jobB, write, accountAdminB, "Tenant B reviewer", AuditEntry{Action: "incident.review.updated", ActorUserID: accountAdminB}); err != nil {
+			t.Fatal(err)
+		}
+		aAfter, err := f.store.Tenant(f.a).ListIncidentInbox(ctx, IncidentInboxFilter{
+			View: "all_active", JobID: f.jobA, Limit: 10, Now: time.Now().UTC(),
+		})
+		if err != nil || len(aAfter.Items) != 1 || aAfter.Items[0].Review.Revision != 0 || aAfter.Items[0].Review.Note != "" {
+			t.Errorf("tenant B's review changed tenant A's inbox: %+v, %v", aAfter, err)
+		}
+	}},
 	"FailedDeliveries": {run: func(t *testing.T, f tenantFixture) {
 		// Each tenant counts its own delivery. The platform's is counted by
 		// the platform only, not by the default tenant.

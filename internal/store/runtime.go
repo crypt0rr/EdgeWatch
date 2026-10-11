@@ -1387,24 +1387,7 @@ func discardUnpromotedCyclesTx(ctx context.Context, tx *sql.Tx, jobID, reason st
 }
 
 func replaceRuntimeIncidentProjectionTx(ctx context.Context, tx *sql.Tx, jobID string, state model.JobState) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM runtime_incidents WHERE job_id=?`, jobID); err != nil {
-		return err
-	}
-	keys := make([]string, 0, len(state.Incidents))
-	for key := range state.Incidents {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		raw, err := json.Marshal(state.Incidents[key])
-		if err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO runtime_incidents(job_id,key,incident_json) VALUES(?,?,?)`, jobID, key, raw); err != nil {
-			return err
-		}
-	}
-	return nil
+	return refreshRuntimeIncidentProjectionTx(ctx, tx, jobID, state)
 }
 
 func persistRuntimeTxWithOutbox(ctx context.Context, tx *sql.Tx, jobID string, state model.JobState, events []model.Event, destinations []string) ([]model.Event, error) {

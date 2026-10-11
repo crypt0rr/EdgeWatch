@@ -4,6 +4,17 @@ Please report security vulnerabilities privately through GitHub's security advis
 
 EdgeWatch executes Nmap with validated argument arrays and does not expose arbitrary Nmap flags. Treat its configuration, SQLite volume, backups, notification encryption key, and any remaining notification URL file as sensitive. Only configure targets you own or are explicitly authorized to scan.
 
+Incident review notes, reviewer labels, and follow-up times are stored in the
+SQLite database and its backups. They are plain text, limited to 4,096 UTF-8
+bytes per edit, and may contain sensitive operational context; restrict access
+to the database and backups accordingly. Review history keeps at most 20 edits
+per occurrence. Active reviews remain with their active incident, while closed
+reviews expire with the configured database history retention. Deleting a job
+or business unit erases its review records through the resumable purge. Review
+reads and writes are tenant-scoped and permission-checked; audit and live-update
+messages contain no note or occurrence token, and the public status surface
+does not expose review data.
+
 TCP jobs may use the optional Naabu discovery-to-Nmap pipeline. Both scanners
 are fixed, image-bundled executables (`/usr/local/bin/naabu` and
 `/usr/bin/nmap`); administrators can edit only validated argument arrays and
@@ -679,7 +690,7 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 67 must not be opened by an older EdgeWatch
+database upgraded to schema 68 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
@@ -704,6 +715,11 @@ Schema 67 adds each unit's security alert routing and the platform's
 security and deployment alert routing, all empty, the deployment's sandbox
 and alert state, and the security alert windows; a unit's windows are erased
 with the unit.
+Schema 68 adds tenant-scoped incident reviews and bounded edit history.
+The startup backfill adds occurrence and ordering metadata to the replaceable
+active-incident projection in restartable batches; it does not change scan
+results or baselines. Review notes are retained with active incidents and
+closed reviews are pruned under the configured history retention.
 Only the daemon migrates, and only one process at a time: from v0.36.0 the
 daemon holds an advisory lock on the database directory, which restores take
 too, from before it opens the database until its migration and startup

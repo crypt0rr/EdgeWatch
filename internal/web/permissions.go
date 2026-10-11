@@ -218,6 +218,7 @@ var apiRoutes = withPathAlias("/scanner-profiles", "/scanner/profiles", []apiRou
 		s.jobBaselineHostRDAP(w, r, c.tenant, r.PathValue("id"), r.PathValue("address"))
 	}},
 	{Method: http.MethodGet, Template: "/jobs/{id}/incidents", Permission: auth.PermissionIncidentsRead, Example: "/jobs/job-1/incidents", TrailingSlash: true, Handle: jobHandler(jobMissingOnAnyError, (*Server).jobIncidents)},
+	{Method: http.MethodPut, Template: "/jobs/{id}/incidents/review", Permission: auth.PermissionIncidentsManage, Mutates: true, Example: "/jobs/job-1/incidents/review", TrailingSlash: true, Handle: jobSessionHandler(jobMissingOnAnyError, (*Server).updateIncidentReview)},
 	{Method: http.MethodPost, Template: "/jobs/{id}/incidents/accept", Permission: auth.PermissionIncidentsManage, Mutates: true, Example: "/jobs/job-1/incidents/accept", TrailingSlash: true, Handle: (*Server).acceptIncidentRoute},
 	{Method: http.MethodPost, Template: "/jobs/{id}/incidents/suppress", Permission: auth.PermissionIncidentsManage, Mutates: true, Example: "/jobs/job-1/incidents/suppress", TrailingSlash: true, Handle: (*Server).suppressIncidentRoute},
 	{Method: http.MethodGet, Template: "/jobs/{id}/events", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/events", TrailingSlash: true, Handle: jobHandler(jobMissingOnAnyError, (*Server).jobEvents)},

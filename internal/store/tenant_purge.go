@@ -110,6 +110,8 @@ var tenantPurgeSteps = []tenantPurgeStep{
 	{table: "baseline_host_search", trigger: "baseline_hosts_search_ad"},
 	{table: "baseline_hosts", rowids: `SELECT rowid FROM baseline_hosts WHERE job_id IN (` + tenantJobsSQL + `)`},
 	{table: "public_dashboard_hosts", rowids: `SELECT rowid FROM public_dashboard_hosts WHERE job_id IN (` + tenantJobsSQL + `)`},
+	{table: "incident_review_history", rowids: `SELECT rowid FROM incident_review_history WHERE job_id IN (` + tenantJobsSQL + `)`},
+	{table: "incident_reviews", rowids: `SELECT rowid FROM incident_reviews WHERE job_id IN (` + tenantJobsSQL + `)`},
 	{table: "runtime_incidents", rowids: `SELECT rowid FROM runtime_incidents WHERE job_id IN (` + tenantJobsSQL + `)`},
 	{table: "job_runtime", rowids: `SELECT rowid FROM job_runtime WHERE job_id IN (` + tenantJobsSQL + `)`},
 	{table: "job_runtime_meta", rowids: `SELECT rowid FROM job_runtime_meta WHERE job_id IN (` + tenantJobsSQL + `)`},

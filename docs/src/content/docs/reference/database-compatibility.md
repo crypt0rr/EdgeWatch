@@ -5,7 +5,7 @@ description: Understand the current SQLite schema, the oldest schema that upgrad
 
 ## Current schema and rollback
 
-The current schema is version 67. Schema 31 records terminal notification
+The current schema is version 68. Schema 31 records terminal notification
 deliveries and marks rows that had already exhausted the original eight
 attempts. Schema 63 repairs databases that had already passed schema 31 by
 marking still-unsent rows with at least eight attempts and a scheduled retry
@@ -17,7 +17,10 @@ records how each new scan was compared with its job's baseline; it does not
 change existing scans. Schema 66 replaces scan history indexes; it does not
 change scans either. Schema 67 adds the routing and state of the security
 and deployment alerts; no existing row changes and every routing starts
-empty. Database migrations are forward-only. An older image
+empty. Schema 68 adds durable incident review records and an indexed inbox
+projection. Its startup backfill populates the projection from active runtime
+incidents in restartable batches of 250 rows; it does not rewrite scan results
+or baselines. Database migrations are forward-only. An older image
 must not be pointed at a database already upgraded by a newer image; restore
 the matching pre-upgrade `./data` backup if a rollback is required. The daemon
 and the commands that write to the database (admin, scan, notify test,
@@ -103,6 +106,31 @@ checks that the database is still at schema 66, like every step described
 under [Migration ownership](#migration-ownership), and it rebuilds no table.
 An older release refuses the upgraded database, so a rollback means
 restoring the pre-upgrade `./data` backup.
+
+## Schema 68
+
+Schema 68, introduced in v0.37.0, adds `incident_reviews` and its bounded
+`incident_review_history` for review status, reviewer label, review time,
+plain-text note, optional follow-up time, and revision of one incident
+occurrence. Reviews reference jobs rather than `runtime_incidents` or scans:
+active incidents are a replaceable projection, and scan history can be pruned
+while a review remains useful. A versioned occurrence token binds the review
+to the tenant, job, incident key, opening scan and time when known, and the
+exact change. Legacy incidents without opening metadata keep an explicit
+unknown opening time.
+
+The migration adds indexed occurrence and sort columns to the replaceable
+runtime projection. The daemon backfills active rows after applying migrations,
+in batches of 250 under a writer transaction; each committed batch can be
+resumed after shutdown or restart. New scans refresh the projection in the
+same transaction as runtime state, so review updates serialize with scan
+finalization. Review history keeps at most 20 edits per occurrence. The regular
+retention pass removes closed reviews older than the configured history
+retention in batches of 25; active reviews remain. Permanent job deletion and
+business-unit deletion erase reviews and their history through restartable
+purge steps. Backups contain these records, including notes. An older release
+refuses the upgraded database, so a rollback means restoring the pre-upgrade
+`./data` backup.
 
 ## Schema 66
 

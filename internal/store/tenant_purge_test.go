@@ -37,6 +37,8 @@ var tenantPurgeOracle = map[string]string{
 	"job_runtime":                      `SELECT x.rowid FROM job_runtime AS x JOIN jobs AS j ON j.id=x.job_id WHERE j.tenant_id=?1`,
 	"job_runtime_meta":                 `SELECT x.rowid FROM job_runtime_meta AS x JOIN jobs AS j ON j.id=x.job_id WHERE j.tenant_id=?1`,
 	"job_silence_state":                `SELECT x.rowid FROM job_silence_state AS x JOIN jobs AS j ON j.id=x.job_id WHERE j.tenant_id=?1`,
+	"incident_reviews":                 `SELECT x.rowid FROM incident_reviews AS x JOIN jobs AS j ON j.id=x.job_id WHERE j.tenant_id=?1`,
+	"incident_review_history":          `SELECT x.rowid FROM incident_review_history AS x JOIN jobs AS j ON j.id=x.job_id WHERE j.tenant_id=?1`,
 	"public_dashboard_hosts":           `SELECT x.rowid FROM public_dashboard_hosts AS x JOIN public_dashboards AS d ON d.id=x.dashboard_id WHERE d.tenant_id=?1`,
 	"runtime_incidents":                `SELECT x.rowid FROM runtime_incidents AS x JOIN jobs AS j ON j.id=x.job_id WHERE j.tenant_id=?1`,
 	"scan_cycles":                      `SELECT x.rowid FROM scan_cycles AS x JOIN jobs AS j ON j.id=x.job_id WHERE j.tenant_id=?1`,
@@ -149,6 +151,8 @@ func addTenantPurgeRows(t *testing.T, f tenantFixture) {
 			{`INSERT INTO job_history_purges(tenant_id,job_id,phase,created_at,updated_at) VALUES(?,?,?,?,?)`, []any{tenant, owner.job, jobPurgePhaseCycleCheckpoints, stamp, stamp}},
 			{`INSERT INTO job_history_purge_host_keys(tenant_id,job_id,address) VALUES(?,?,?)`, []any{tenant, owner.job, "192.0.2.10"}},
 			{`INSERT INTO security_alert_windows(tenant_id,kind,started_at,suppressed) VALUES(?,'rate_limited',?,2)`, []any{tenant, stamp}},
+			{`INSERT INTO incident_reviews(job_id,occurrence_token,incident_key,opening_scan_id,opened_at,status,reviewer_user_id,reviewer_label,reviewed_at,note,follow_up_at,revision,closed_at) VALUES(?,?,?,'',?,'investigating',?,'Purge reviewer',?,'purge fixture','',1,?)`, []any{owner.job, "purge:" + tenant, "purge:" + tenant, stamp, owner.account, stamp, stamp}},
+			{`INSERT INTO incident_review_history(job_id,occurrence_token,revision,status,reviewer_user_id,reviewer_label,reviewed_at,note,follow_up_at) VALUES(?,?,1,'investigating',?,'Purge reviewer',?,'purge fixture','')`, []any{owner.job, "purge:" + tenant, owner.account, stamp}},
 		} {
 			if _, err := f.store.DB.ExecContext(ctx, statement.query, statement.args...); err != nil {
 				t.Fatalf("%s: %v", statement.query, err)

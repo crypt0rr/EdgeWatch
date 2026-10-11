@@ -19,7 +19,7 @@ import (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 67
+const schemaVersion = 68
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -50,6 +50,7 @@ var conditionalMigrationStatements = map[int]func(*sql.Tx) ([]string, error){
 	// Schema 66 replaces the latest-host guard triggers only where the
 	// schema 54 copy has installed them.
 	66: migration66ConditionalStatements,
+	68: migration68ConditionalStatements,
 }
 
 // newerSchemaError is the refusal for a database that a newer release has
@@ -150,6 +151,18 @@ func migrateContextWithLogger(ctx context.Context, db *sql.DB, logger *slog.Logg
 			return err
 		}
 		logger.Info("database migration step completed", "schema", version, "target_schema", schemaVersion)
+	}
+	if err := updateMigrationStatus(ctx, db, "incident-inbox-projection", 0, 0); err != nil {
+		markMigrationFailed(ctx, db, err)
+		return err
+	}
+	if err := backfillIncidentInboxProjection(ctx, db, func(processed int64) {
+		statusCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		_ = updateMigrationStatus(statusCtx, db, "incident-inbox-projection", processed, 0)
+		cancel()
+	}); err != nil {
+		markMigrationFailed(ctx, db, err)
+		return fmt.Errorf("backfill incident inbox projection: %w", err)
 	}
 	// Copy the latest host projection into its tenant-keyed table first. Until
 	// the copy completes, the table has no search triggers and refuses other
@@ -306,6 +319,9 @@ func schemaMigrationStatements() map[int][]string {
 		// alert routing and state, and the security alert windows. See
 		// migration67.go.
 		67: migration67Statements(),
+		// Durable review state for one active incident occurrence, with a
+		// replaceable indexed projection used to filter and sort the inbox.
+		68: migration68Statements(),
 	}
 }
 

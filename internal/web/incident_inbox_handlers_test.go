@@ -98,9 +98,41 @@ func TestIncidentInboxRoutesExposeReviewAndConflictContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	unitEvents, _ := registerSSEChannel(server, sseSubscriber{tenantID: store.DefaultTenantID})
+	otherUnitEvents, _ := registerSSEChannel(server, sseSubscriber{tenantID: tenantAccountsOtherID})
 	updated := call(http.MethodPut, "/api/v1/jobs/"+job.ID+"/incidents/review", string(body), true)
 	if updated.Code != http.StatusOK {
 		t.Fatalf("PUT incident review status = %d: %s", updated.Code, updated.Body.String())
+	}
+	select {
+	case event := <-unitEvents:
+		if event.audience != audienceUnit(store.DefaultTenantID) {
+			t.Fatalf("review update audience = %+v, want tenant %s", event.audience, store.DefaultTenantID)
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(event.payload, &payload); err != nil {
+			t.Fatalf("decode review update event: %v", err)
+		}
+		var eventType, eventJobID string
+		if err := json.Unmarshal(payload["type"], &eventType); err != nil {
+			t.Fatalf("decode review update event type: %v", err)
+		}
+		if err := json.Unmarshal(payload["job_id"], &eventJobID); err != nil {
+			t.Fatalf("decode review update job id: %v", err)
+		}
+		if len(payload) != 2 || eventType != "incident.review.updated" || eventJobID != job.ID {
+			t.Fatalf("review update event payload = %s, want only event type and job id", event.payload)
+		}
+		if strings.Contains(string(event.payload), "private follow-up note") || strings.Contains(string(event.payload), item.OccurrenceToken) || strings.Contains(string(event.payload), item.Incident.Change.Key) {
+			t.Fatalf("review update event exposed note or private fingerprint: %s", event.payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("review update event was not delivered to its tenant")
+	}
+	select {
+	case event := <-otherUnitEvents:
+		t.Fatalf("review update for tenant %s reached another tenant: %s", store.DefaultTenantID, event.payload)
+	default:
 	}
 	var review store.IncidentReview
 	if err := json.Unmarshal(updated.Body.Bytes(), &review); err != nil {

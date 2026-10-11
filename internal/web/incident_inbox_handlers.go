@@ -111,7 +111,7 @@ func (s *Server) updateIncidentReview(w http.ResponseWriter, r *http.Request, se
 		s.writeIncidentReviewError(w, r, err)
 		return
 	}
-	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "incident.review.updated", "job_id": record.ID, "key": input.Key})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "incident.review.updated", "job_id": record.ID})
 	writeJSON(w, http.StatusOK, review)
 }
 

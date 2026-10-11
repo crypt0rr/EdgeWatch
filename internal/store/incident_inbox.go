@@ -220,7 +220,7 @@ func (ts *TenantStore) ListIncidentInbox(ctx context.Context, filter IncidentInb
 		return result, err
 	}
 	defer rows.Close()
-	result.Items = make([]IncidentInboxItem, 0, filter.Limit)
+	result.Items = make([]IncidentInboxItem, 0)
 	for rows.Next() {
 		var item IncidentInboxItem
 		var raw []byte
@@ -374,7 +374,8 @@ func incidentCoverageUncertainty(change model.Change, snapshot model.Snapshot) I
 
 	targetSeen, protocolSeen := false, false
 	for _, scope := range snapshot.Scopes {
-		if normalizedIncidentTarget(scope.Target) != target && !(address != "" && normalizedIncidentTarget(scope.Target) == address) {
+		scopeTarget := normalizedIncidentTarget(scope.Target)
+		if scopeTarget != target && (address == "" || scopeTarget != address) {
 			continue
 		}
 		targetSeen = true
@@ -507,7 +508,7 @@ func (ts *TenantStore) SaveIncidentReview(ctx context.Context, jobID string, wri
 	if err != nil {
 		return IncidentReview{}, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var owned int
 	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM jobs AS j WHERE j.id=? AND j.tenant_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.job_id=j.id AND purge.tenant_id=j.tenant_id)`, jobID, ts.scope.id).Scan(&owned); errors.Is(err, sql.ErrNoRows) {
 		return IncidentReview{}, fmt.Errorf("%w: job %s", ErrNotFound, jobID)

@@ -13,6 +13,44 @@ import (
 
 const incidentInboxBackfillBatchSize = 250
 
+type incidentInboxProjectionRow struct {
+	jobID, key, tenantID string
+	incident             model.Incident
+}
+
+func readIncidentInboxProjectionBatch(ctx context.Context, tx *sql.Tx) ([]incidentInboxProjectionRow, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT i.job_id,i.key,i.incident_json,j.tenant_id
+		FROM runtime_incidents AS i JOIN jobs AS j ON j.id=i.job_id
+		WHERE i.occurrence_token='' AND NOT EXISTS (
+			SELECT 1 FROM job_history_purges AS purge WHERE purge.job_id=i.job_id AND purge.tenant_id=j.tenant_id
+		)
+		ORDER BY i.job_id,i.key LIMIT ?`, incidentInboxBackfillBatchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	batch := make([]incidentInboxProjectionRow, 0, incidentInboxBackfillBatchSize)
+	for rows.Next() {
+		var item incidentInboxProjectionRow
+		var raw []byte
+		if err := rows.Scan(&item.jobID, &item.key, &raw, &item.tenantID); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(raw, &item.incident); err != nil {
+			return nil, fmt.Errorf("decode incident projection for job %s key %s: %w", item.jobID, item.key, err)
+		}
+		batch = append(batch, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return batch, nil
+}
+
 // backfillIncidentInboxProjection upgrades the replaceable active-incident
 // projection in bounded, restartable transactions. runtime_incidents is a
 // cache of job_runtime, so it can be rebuilt safely from its JSON source.
@@ -23,42 +61,8 @@ func backfillIncidentInboxProjection(ctx context.Context, db *sql.DB, progress f
 		if err != nil {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT i.job_id,i.key,i.incident_json,j.tenant_id
-			FROM runtime_incidents AS i JOIN jobs AS j ON j.id=i.job_id
-			WHERE i.occurrence_token='' AND NOT EXISTS (
-				SELECT 1 FROM job_history_purges AS purge WHERE purge.job_id=i.job_id AND purge.tenant_id=j.tenant_id
-			)
-			ORDER BY i.job_id,i.key LIMIT ?`, incidentInboxBackfillBatchSize)
+		batch, err := readIncidentInboxProjectionBatch(ctx, tx)
 		if err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		type projection struct {
-			jobID, key, tenantID string
-			incident             model.Incident
-		}
-		batch := make([]projection, 0, incidentInboxBackfillBatchSize)
-		for rows.Next() {
-			var item projection
-			var raw []byte
-			if err := rows.Scan(&item.jobID, &item.key, &raw, &item.tenantID); err != nil {
-				_ = rows.Close()
-				_ = tx.Rollback()
-				return err
-			}
-			if err := json.Unmarshal(raw, &item.incident); err != nil {
-				_ = rows.Close()
-				_ = tx.Rollback()
-				return fmt.Errorf("decode incident projection for job %s key %s: %w", item.jobID, item.key, err)
-			}
-			batch = append(batch, item)
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			_ = tx.Rollback()
-			return err
-		}
-		if err := rows.Close(); err != nil {
 			_ = tx.Rollback()
 			return err
 		}

@@ -115,6 +115,11 @@ function safeTime(value: string | undefined) {
   if (!value || !Number.isFinite(Date.parse(value))) return 'Unknown'
   return formatDateTime(value)
 }
+function followUpTime(value: string) {
+  const instant = Date.parse(value)
+  if (!Number.isFinite(instant)) return 'Unknown'
+  return `${formatDateTime(value)} (${incidentTimeZone()}) · UTC ${new Date(instant).toISOString()}`
+}
 function titleCase(value: string) {
   return value.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').replace(/^\w/, letter => letter.toUpperCase())
 }
@@ -439,7 +444,7 @@ function EvidencePanel({ item, canManage, readOnly, draft, onDraftChange, confli
         <div><dt>Recovery observations</dt><dd>{item.incident.recovery_count}</dd></div>
         {item.review.reviewer_label && <div><dt>Last reviewer</dt><dd>{item.review.reviewer_label}</dd></div>}
         {item.review.reviewed_at && <div><dt>Last reviewed</dt><dd>{safeTime(item.review.reviewed_at)}</dd></div>}
-        {item.review.follow_up_at && <div><dt>Follow-up instant</dt><dd>{safeTime(item.review.follow_up_at)} UTC</dd></div>}
+        {item.review.follow_up_at && <div><dt>Follow-up time</dt><dd>{followUpTime(item.review.follow_up_at)}</dd></div>}
       </dl>
       <div className={`incident-uncertainty uncertainty-${uncertainty.status}`} role="note"><strong>Observation uncertainty: {uncertainty.status === 'unknown' ? 'Unknown' : titleCase(uncertainty.status)}</strong><p>{uncertaintyText}</p>{uncertainty.observed_at && <p className="muted">Evidence observed {safeTime(uncertainty.observed_at)}{uncertainty.scan_id ? ` · scan ${uncertainty.scan_id}` : ''}</p>}{uncertainty.scan_status && <p className="muted">Latest scan status: {titleCase(uncertainty.scan_status)}</p>}{uncertainty.comparison && <p className="muted">Baseline comparison: {titleCase(uncertainty.comparison)}</p>}</div>
       <nav className="incident-evidence-links" aria-label="Incident evidence links">

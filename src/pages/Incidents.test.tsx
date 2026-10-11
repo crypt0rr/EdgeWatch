@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLocation } from 'react-router-dom'
 import { APIError, acceptIncident, getSession, listIncidents, listJobs, suppressIncident, updateIncidentReview } from '../api'
 import type { IncidentInboxItem, IncidentInboxPage, IncidentReview } from '../generated/api-types'
-import { setDisplayTimeZone } from '../format'
+import { formatDateTime, setDisplayTimeZone } from '../format'
 import { incidentDateTimeInput } from '../incident-time'
 import { renderWithProviders } from '../test/test-utils'
 import { Incidents } from './Incidents'
@@ -117,6 +117,16 @@ describe('investigation inbox filters and context', () => {
 })
 
 describe('shared review workflow', () => {
+  it('labels a saved follow-up with the displayed timezone and exact UTC instant', async () => {
+    setDisplayTimeZone('Europe/Amsterdam')
+    const current = { ...item, review: { status: 'investigating', reviewer_label: 'Sam', reviewed_at: '2026-10-10T00:00:00Z', note: '', follow_up_at: '2026-10-12T08:00:00Z', revision: 4 }, view_status: 'investigating' }
+    vi.mocked(listIncidents).mockResolvedValue(page([current]) as never)
+    renderInbox(['/incidents?view=all_active&occurrence=occurrence-1'])
+    const panel = await screen.findByRole('complementary', { name: 'Evidence and review' })
+
+    expect(within(panel).getByText(`${formatDateTime('2026-10-12T08:00:00Z')} (Europe/Amsterdam) · UTC 2026-10-12T08:00:00.000Z`)).toBeInTheDocument()
+  })
+
   it('saves a note and a local follow-up as an exact UTC instant', async () => {
     setDisplayTimeZone('Europe/Amsterdam')
     renderInbox()

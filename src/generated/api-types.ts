@@ -313,6 +313,8 @@ export type IncidentObservationUncertainty = {
   reason?: string
   scan_id?: string
   observed_at?: string
+  scan_status?: string
+  comparison?: string
 }
 
 // IncidentInboxItem is store.IncidentInboxItem.
@@ -322,6 +324,7 @@ export type IncidentInboxItem = {
   incident: Incident
   occurrence_token: string
   opening_time_known: boolean
+  opening_scan_available: boolean
   view_status: string
   review: IncidentReview
   observation_uncertainty: IncidentObservationUncertainty

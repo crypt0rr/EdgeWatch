@@ -27,6 +27,8 @@ type IncidentObservationUncertainty struct {
 	Reason     string     `json:"reason,omitempty"`
 	ScanID     string     `json:"scan_id,omitempty"`
 	ObservedAt *time.Time `json:"observed_at,omitempty"`
+	ScanStatus string     `json:"scan_status,omitempty"`
+	Comparison string     `json:"comparison,omitempty"`
 }
 
 // IncidentInboxItem is one tenant-scoped active incident and its durable
@@ -37,6 +39,7 @@ type IncidentInboxItem struct {
 	Incident               model.Incident                 `json:"incident"`
 	OccurrenceToken        string                         `json:"occurrence_token"`
 	OpeningTimeKnown       bool                           `json:"opening_time_known"`
+	OpeningScanAvailable   bool                           `json:"opening_scan_available"`
 	ViewStatus             string                         `json:"view_status"`
 	Review                 IncidentReview                 `json:"review"`
 	ObservationUncertainty IncidentObservationUncertainty `json:"observation_uncertainty"`

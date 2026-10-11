@@ -175,4 +175,114 @@ func TestIncidentInboxRoutesExposeReviewAndConflictContract(t *testing.T) {
 	if invalidNote.Code != http.StatusBadRequest || json.Unmarshal(invalidNote.Body.Bytes(), &invalidError) != nil || invalidError.Error.Code != "incident_review_invalid" {
 		t.Fatalf("oversize note response = %d: %s", invalidNote.Code, invalidNote.Body.String())
 	}
+
+	// A valid higher-priority incident may already have been scanned when the
+	// later row fails to decode. The public handler must return only an error,
+	// never a partial inbox page.
+	laterIncident := model.Incident{
+		Change: model.Change{Key: "later-corrupt-row", Kind: "host", Severity: "warning", Target: "later.example", Old: "absent", New: "present"},
+	}
+	if _, err := db.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Incidents[laterIncident.Change.Key] = laterIncident
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `UPDATE runtime_incidents SET incident_json=? WHERE job_id=? AND key=?`, `{broken`, job.ID, laterIncident.Change.Key); err != nil {
+		t.Fatal(err)
+	}
+	failedPage := call(http.MethodGet, "/api/v1/incidents?view=all_active&job_id="+job.ID, "", false)
+	var failedPayload struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if failedPage.Code != http.StatusInternalServerError || json.Unmarshal(failedPage.Body.Bytes(), &failedPayload) != nil || failedPayload.Error.Code != "store" {
+		t.Fatalf("corrupt projection response = %d: %s; want fail-closed store error", failedPage.Code, failedPage.Body.String())
+	}
+	if strings.Contains(failedPage.Body.String(), `"incidents"`) || strings.Contains(failedPage.Body.String(), item.OccurrenceToken) || strings.Contains(failedPage.Body.String(), laterIncident.Change.Key) {
+		t.Fatalf("failed inbox response included partial data: %s", failedPage.Body.String())
+	}
+}
+
+func TestDecodeIncidentReviewReturnsFieldErrorsWithoutEchoingRequest(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		body        string
+		contentType string
+		wantStatus  int
+		wantCode    string
+		wantFields  []string
+	}{
+		{
+			name:        "all required fields are validated together",
+			body:        `{"key":" ","occurrence_token":"","expected_revision":-1,"status":"closed","note":"private submitted value","follow_up_at":"2026-10-11T12:00:00Z"}`,
+			contentType: "application/json",
+			wantStatus:  http.StatusBadRequest,
+			wantCode:    "incident_review_invalid",
+			wantFields:  []string{"key", "occurrence_token", "expected_revision", "status"},
+		},
+		{
+			name:        "malformed follow-up instant is rejected",
+			body:        `{"key":"incident","occurrence_token":"v1:opaque","expected_revision":0,"status":"investigating","follow_up_at":"tomorrow"}`,
+			contentType: "application/json",
+			wantStatus:  http.StatusBadRequest,
+			wantCode:    "incident_review_invalid",
+			wantFields:  []string{"follow_up_at"},
+		},
+		{
+			name:        "needs review cannot retain a follow-up date",
+			body:        `{"key":"incident","occurrence_token":"v1:opaque","expected_revision":0,"status":"needs_review","follow_up_at":"2026-10-11T12:00:00Z"}`,
+			contentType: "application/json",
+			wantStatus:  http.StatusBadRequest,
+			wantCode:    "incident_review_invalid",
+			wantFields:  []string{"follow_up_at"},
+		},
+		{
+			name:        "malformed JSON gets a stable category",
+			body:        `{broken`,
+			contentType: "application/json",
+			wantStatus:  http.StatusBadRequest,
+			wantCode:    "invalid_json",
+		},
+		{
+			name:        "unsupported content type is rejected",
+			body:        `{}`,
+			contentType: "text/plain",
+			wantStatus:  http.StatusUnsupportedMediaType,
+			wantCode:    "unsupported_media_type",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPut, "/", strings.NewReader(test.body))
+			request.Header.Set("Content-Type", test.contentType)
+			response := httptest.NewRecorder()
+			_, ok := decodeIncidentReview(response, request)
+			if ok || response.Code != test.wantStatus {
+				t.Fatalf("decode result = ok %t status %d, want %d", ok, response.Code, test.wantStatus)
+			}
+			var payload struct {
+				Error struct {
+					Code    string            `json:"code"`
+					Details map[string]string `json:"details"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if payload.Error.Code != test.wantCode {
+				t.Fatalf("error code = %q; want %q (%s)", payload.Error.Code, test.wantCode, response.Body.String())
+			}
+			for _, field := range test.wantFields {
+				if payload.Error.Details[field] == "" {
+					t.Errorf("error response omitted %q detail: %s", field, response.Body.String())
+				}
+			}
+			if strings.Contains(response.Body.String(), "private submitted value") || strings.Contains(response.Body.String(), "tomorrow") {
+				t.Fatalf("error response echoed request content: %s", response.Body.String())
+			}
+		})
+	}
 }

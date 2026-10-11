@@ -181,6 +181,178 @@ func TestIncidentInboxFiltersBeforePaginationAndSavesBoundedReviews(t *testing.T
 	}
 }
 
+func TestIncidentInboxDefaultKindAndInvestigatingFilters(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job, err := ts.CreateJob(ctx, testJob("inbox-default-filters"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	incident := model.Incident{Change: model.Change{Key: "filter-port", Kind: "port", Severity: "warning", Target: "filter.example", Protocol: "tcp", Port: 443}, ScanID: "filter-scan", OpenedAt: now, LastSeenAt: now}
+	otherKind := model.Incident{Change: model.Change{Key: "filter-service", Kind: "service", Severity: "critical", Target: "filter.example", Protocol: "tcp", Port: 443}, ScanID: "filter-service-scan", OpenedAt: now, LastSeenAt: now}
+	if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Incidents[incident.Change.Key] = incident
+		state.Incidents[otherKind.Change.Key] = otherKind
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The kind filter applies before pagination: the higher-priority service
+	// item is excluded before the single-row page is selected.
+	defaultPage, err := ts.ListIncidentInbox(ctx, IncidentInboxFilter{Kind: "port", Limit: 1})
+	if err != nil || defaultPage.Total != 1 || defaultPage.ActiveCount != 2 || len(defaultPage.Items) != 1 || defaultPage.Items[0].Incident.Change.Key != incident.Change.Key || defaultPage.Items[0].ViewStatus != "needs_review" {
+		t.Fatalf("default kind-filtered page = %+v, %v", defaultPage, err)
+	}
+	if _, err := ts.ListIncidentInbox(ctx, IncidentInboxFilter{View: "recently_closed"}); !errors.Is(err, ErrIncidentReviewInvalid) {
+		t.Fatalf("unknown view = %v; want invalid-filter error", err)
+	}
+
+	item := findIncidentInboxItem(t, ts, ctx, job.ID, incident.Change.Key, now)
+	write := IncidentReviewWrite{Key: incident.Change.Key, OccurrenceToken: item.OccurrenceToken, Status: "investigating"}
+	if _, err := ts.SaveIncidentReview(ctx, job.ID, write, "reviewer", "Reviewer", AuditEntry{}); err != nil {
+		t.Fatalf("save investigating review without a due time: %v", err)
+	}
+	defaultView, err := ts.ListIncidentInbox(ctx, IncidentInboxFilter{Kind: "port", Now: now})
+	if err != nil || defaultView.Total != 1 || len(defaultView.Items) != 1 || defaultView.Items[0].ViewStatus != "investigating" {
+		t.Fatalf("omitted view did not include the investigating item from all_active: %+v, %v", defaultView, err)
+	}
+	needsReview, err := ts.ListIncidentInbox(ctx, IncidentInboxFilter{View: "needs_review", Kind: "port", Now: now})
+	if err != nil || needsReview.Total != 0 || len(needsReview.Items) != 0 {
+		t.Fatalf("explicit needs-review view included an investigating item: %+v, %v", needsReview, err)
+	}
+	page, err := ts.ListIncidentInbox(ctx, IncidentInboxFilter{View: "investigating", Kind: "port", Now: now})
+	if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].ViewStatus != "investigating" {
+		t.Fatalf("investigating view without due time = %+v, %v", page, err)
+	}
+
+	due := now.Add(24 * time.Hour)
+	write.ExpectedRevision = 1
+	write.FollowUpAt = &due
+	if _, err := ts.SaveIncidentReview(ctx, job.ID, write, "reviewer", "Reviewer", AuditEntry{}); err != nil {
+		t.Fatalf("save future follow-up: %v", err)
+	}
+	page, err = ts.ListIncidentInbox(ctx, IncidentInboxFilter{View: "investigating", Kind: "port", Now: now})
+	if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].Review.FollowUpAt == nil || !page.Items[0].Review.FollowUpAt.Equal(due) {
+		t.Fatalf("future follow-up remained in investigating view = %+v, %v", page, err)
+	}
+	pastDue := time.Now().UTC().Add(-time.Minute)
+	write.ExpectedRevision = 2
+	write.FollowUpAt = &pastDue
+	if _, err := ts.SaveIncidentReview(ctx, job.ID, write, "reviewer", "Reviewer", AuditEntry{}); err != nil {
+		t.Fatalf("save past-due follow-up: %v", err)
+	}
+	defaultNow, err := ts.ListIncidentInbox(ctx, IncidentInboxFilter{Kind: "port"})
+	if err != nil || defaultNow.Total != 1 || len(defaultNow.Items) != 1 || defaultNow.Items[0].ViewStatus != "follow_up_due" {
+		t.Fatalf("omitted timestamp did not use current time for past-due follow-up: %+v, %v", defaultNow, err)
+	}
+}
+
+func TestIncidentInboxReturnsErrorForCorruptProjectionAfterEarlierValidRow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job, err := ts.CreateJob(ctx, testJob("inbox-corrupt-projection"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := model.Incident{Change: model.Change{Key: "valid-first", Kind: "host", Severity: "critical", Target: "valid.example", Old: "absent", New: "present"}}
+	corrupt := model.Incident{Change: model.Change{Key: "corrupt-later", Kind: "host", Severity: "warning", Target: "corrupt.example", Old: "absent", New: "present"}}
+	if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Incidents[valid.Change.Key] = valid
+		state.Incidents[corrupt.Change.Key] = corrupt
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE runtime_incidents SET incident_json=? WHERE job_id=? AND key=?`, `{broken`, job.ID, corrupt.Change.Key); err != nil {
+		t.Fatal(err)
+	}
+
+	if page, err := ts.ListIncidentInbox(ctx, IncidentInboxFilter{View: "all_active"}); err == nil {
+		t.Fatalf("corrupt projection returned page=%+v; want an error after the earlier valid row", page)
+	}
+}
+
+func TestSaveIncidentReviewRejectsInvalidWritesWithoutPartialRows(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job, err := ts.CreateJob(ctx, testJob("inbox-invalid-writes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	incident := model.Incident{Change: model.Change{Key: "invalid-write", Kind: "host", Severity: "warning", Target: "invalid.example", Old: "absent", New: "present"}, ScanID: "invalid-write-scan", OpenedAt: time.Now().UTC(), LastSeenAt: time.Now().UTC()}
+	if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Incidents[incident.Change.Key] = incident
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	item := findIncidentInboxItem(t, ts, ctx, job.ID, incident.Change.Key, time.Now().UTC())
+	dueTooFar := time.Now().UTC().Add((incidentFollowUpMaxDays + 1) * 24 * time.Hour)
+	dueNow := time.Now().UTC()
+	valid := IncidentReviewWrite{Key: incident.Change.Key, OccurrenceToken: item.OccurrenceToken, Status: "investigating"}
+	tests := []struct {
+		name          string
+		write         IncidentReviewWrite
+		reviewerLabel string
+	}{
+		{name: "missing key", write: IncidentReviewWrite{OccurrenceToken: item.OccurrenceToken, Status: "investigating"}, reviewerLabel: "Reviewer"},
+		{name: "negative revision", write: func() IncidentReviewWrite { value := valid; value.ExpectedRevision = -1; return value }(), reviewerLabel: "Reviewer"},
+		{name: "unknown status", write: func() IncidentReviewWrite { value := valid; value.Status = "closed"; return value }(), reviewerLabel: "Reviewer"},
+		{name: "invalid utf8 note", write: func() IncidentReviewWrite { value := valid; value.Note = string([]byte{0xff}); return value }(), reviewerLabel: "Reviewer"},
+		{name: "oversize note", write: func() IncidentReviewWrite {
+			value := valid
+			value.Note = strings.Repeat("n", incidentReviewNoteMaxBytes+1)
+			return value
+		}(), reviewerLabel: "Reviewer"},
+		{name: "blank reviewer label", write: valid, reviewerLabel: " \t "},
+		{name: "needs review cannot carry a due time", write: func() IncidentReviewWrite {
+			value := valid
+			value.Status = "needs_review"
+			value.FollowUpAt = &dueNow
+			return value
+		}(), reviewerLabel: "Reviewer"},
+		{name: "follow-up is bounded to thirty days", write: func() IncidentReviewWrite { value := valid; value.FollowUpAt = &dueTooFar; return value }(), reviewerLabel: "Reviewer"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := ts.SaveIncidentReview(ctx, job.ID, test.write, "reviewer", test.reviewerLabel, AuditEntry{}); !errors.Is(err, ErrIncidentReviewInvalid) {
+				t.Fatalf("invalid review write error = %v; want ErrIncidentReviewInvalid", err)
+			}
+			for _, table := range []string{"incident_reviews", "incident_review_history", "security_audit"} {
+				var count int
+				query := `SELECT COUNT(*) FROM ` + table
+				if table == "security_audit" {
+					query += ` WHERE action='incident.review.updated'`
+				}
+				if err := s.DB.QueryRowContext(ctx, query).Scan(&count); err != nil || count != 0 {
+					t.Fatalf("%s rows after rejected write = %d, %v; want no partial write", table, count, err)
+				}
+			}
+		})
+	}
+
+	if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+		delete(state.Incidents, incident.Change.Key)
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.SaveIncidentReview(ctx, job.ID, valid, "reviewer", "Reviewer", AuditEntry{}); !errors.Is(err, ErrIncidentNotFound) {
+		t.Fatalf("write to recovered occurrence = %v; want ErrIncidentNotFound", err)
+	}
+	if countRows(t, s.DB, `SELECT COUNT(*) FROM incident_reviews`) != 0 || countRows(t, s.DB, `SELECT COUNT(*) FROM incident_review_history`) != 0 {
+		t.Fatal("review for a recovered occurrence left durable review rows")
+	}
+}
+
 func TestIncidentInboxObservationUsesStrictlyNewerJobEvidence(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -387,6 +559,69 @@ func TestIncidentObservationUncertaintyRequiresExplicitCoverageEvidence(t *testi
 			}
 			if uncertainty.Status != "unknown" || uncertainty.Reason != test.wantReason || uncertainty.ScanID != "" {
 				t.Fatalf("non-newer evidence affected uncertainty: %+v", uncertainty)
+			}
+		})
+	}
+}
+
+func TestIncidentCoverageUncertaintyClassifiesHostAndOmissionEvidence(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		change   model.Change
+		snapshot model.Snapshot
+		want     IncidentObservationReason
+	}{
+		{
+			name:   "host evidence matches DNS name and reports down",
+			change: model.Change{Key: "host-down", Kind: "host", Target: "host.example"},
+			snapshot: model.Snapshot{
+				Scopes: []model.Scope{{Target: "host.example", Protocol: "tcp"}},
+				Hosts:  []model.HostObservation{{Address: "192.0.2.80", DNSNames: []string{"HOST.EXAMPLE."}, Status: "down"}},
+			},
+			want: IncidentReasonTargetHostDown,
+		},
+		{
+			name:   "host evidence matches source target and host-state down",
+			change: model.Change{Key: "host-state-down", Kind: "host", Target: "host.example"},
+			snapshot: model.Snapshot{
+				Scopes:     []model.Scope{{Target: "host.example", Protocol: "tcp"}},
+				Hosts:      []model.HostObservation{{Address: "192.0.2.81", SourceTargets: []string{"HOST.EXAMPLE."}, Status: "up"}},
+				HostStates: []model.HostState{{Address: "192.0.2.81", State: "down"}},
+			},
+			want: IncidentReasonTargetHostDown,
+		},
+		{
+			name:   "hostname protocol evidence uses source target matching",
+			change: model.Change{Key: "port-source", Kind: "port", Target: "host.example", Protocol: "tcp", Port: 443},
+			snapshot: model.Snapshot{
+				Scopes: []model.Scope{{Target: "host.example", Protocol: "tcp", Ports: "443"}},
+				Hosts:  []model.HostObservation{{Address: "192.0.2.82", SourceTargets: []string{"host.example"}, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}}},
+			},
+		},
+		{
+			name:   "host omitted protocol is not treated as positive coverage",
+			change: model.Change{Key: "port-omitted", Kind: "port", Target: "host.example", Protocol: "tcp", Port: 443},
+			snapshot: model.Snapshot{
+				Scopes: []model.Scope{{Target: "host.example", Protocol: "tcp", Ports: "443"}},
+				Hosts:  []model.HostObservation{{Address: "192.0.2.83", DNSNames: []string{"host.example"}, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unknown", StatusReason: "nmap-omitted"}}}},
+			},
+			want: IncidentReasonProtocolUnobserved,
+		},
+		{
+			name:   "address resolution failure is attributed to that endpoint",
+			change: model.Change{Key: "port-resolution", Kind: "port-address", Target: "host.example", Address: "192.0.2.84", Protocol: "tcp", Port: 443},
+			snapshot: model.Snapshot{
+				Scopes:         []model.Scope{{Target: "host.example", Protocol: "tcp", Ports: "443"}},
+				TargetFailures: []model.TargetCoverageFailure{{Target: "192.0.2.84", Reason: "resolution-failed"}},
+			},
+			want: IncidentReasonTargetResolutionFailed,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := incidentCoverageUncertainty(test.change, test.snapshot); got != test.want {
+				t.Fatalf("coverage uncertainty = %q; want %q", got, test.want)
 			}
 		})
 	}
@@ -615,6 +850,17 @@ func TestIncidentReviewRetentionDeletesClosedRowsAndHistory(t *testing.T) {
 	if _, err := ts.SaveIncidentReview(ctx, job.ID, IncidentReviewWrite{Key: "retained", OccurrenceToken: token, Status: "investigating", Note: "retained note"}, "reviewer", "Reviewer", AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if deleted, err := s.System().deleteIncidentReviewRetentionBatches(cancelled, sqliteTimestamp(now.Add(24*time.Hour))); !errors.Is(err, context.Canceled) || deleted != 0 {
+		t.Fatalf("cancelled active-review retention = deleted %d, err %v; want cancellation before deletion", deleted, err)
+	}
+	if deleted, err := s.System().deleteIncidentReviewRetentionBatches(ctx, sqliteTimestamp(now.Add(24*time.Hour))); err != nil || deleted != 0 {
+		t.Fatalf("active-review retention = deleted %d, err %v; want active review preserved", deleted, err)
+	}
+	if got := countRows(t, s.DB, `SELECT COUNT(*) FROM incident_reviews WHERE job_id=?`, job.ID); got != 1 {
+		t.Fatalf("active review rows after retention = %d; want 1", got)
+	}
 	if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
 		delete(state.Incidents, "retained")
 		return nil, nil
@@ -743,6 +989,83 @@ func TestIncidentInboxProjectionBackfillResumesAfterCommittedBatch(t *testing.T)
 	var repeatedProgress []int64
 	if err := backfillIncidentInboxProjection(ctx, s.DB, func(processed int64) { repeatedProgress = append(repeatedProgress, processed) }); err != nil || len(repeatedProgress) != 0 {
 		t.Fatalf("completed backfill rerun progress = %v, %v; want an idempotent no-op", repeatedProgress, err)
+	}
+}
+
+func TestIncidentInboxProjectionBackfillRejectsMalformedJSONAndRollsBackPartialBatch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("inbox-backfill-rollback"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	incidents := []model.Incident{
+		{Change: model.Change{Key: "a-retry", Kind: "port", Severity: "critical", Target: "retry.example", Protocol: "tcp", Port: 443}, ScanID: "retry-scan-a", OpenedAt: time.Now().UTC()},
+		{Change: model.Change{Key: "z-retry", Kind: "port", Severity: "warning", Target: "retry.example", Protocol: "tcp", Port: 80}, ScanID: "retry-scan-z", OpenedAt: time.Now().UTC()},
+	}
+	if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+		for _, incident := range incidents {
+			state.Incidents[incident.Change.Key] = incident
+		}
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE runtime_incidents SET occurrence_token='',severity='',kind='',opened_at_sort='',last_seen_at_sort='' WHERE job_id=?`, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE runtime_incidents SET incident_json=? WHERE job_id=? AND key='z-retry'`, `{broken`, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := backfillIncidentInboxProjection(ctx, s.DB, nil); err == nil {
+		t.Fatal("backfill accepted malformed active-incident JSON")
+	}
+	var token, severity string
+	if err := s.DB.QueryRowContext(ctx, `SELECT occurrence_token,severity FROM runtime_incidents WHERE job_id=? AND key='a-retry'`, job.ID).Scan(&token, &severity); err != nil {
+		t.Fatal(err)
+	}
+	if token != "" || severity != "" {
+		t.Fatalf("malformed batch changed an earlier projection row: token=%q severity=%q", token, severity)
+	}
+
+	raw, err := json.Marshal(incidents[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE runtime_incidents SET incident_json=? WHERE job_id=? AND key='z-retry'`, raw, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER fail_second_inbox_projection_update BEFORE UPDATE OF occurrence_token ON runtime_incidents WHEN OLD.key='z-retry' BEGIN SELECT RAISE(ABORT,'injected projection update failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := backfillIncidentInboxProjection(ctx, s.DB, nil); err == nil {
+		t.Fatal("backfill succeeded after the injected second-row update failure")
+	}
+	var updated int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_incidents WHERE job_id=? AND occurrence_token<>''`, job.ID).Scan(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated != 0 {
+		t.Fatalf("failed batch left %d projection rows updated; want transaction rollback", updated)
+	}
+	if _, err := s.DB.ExecContext(ctx, `DROP TRIGGER fail_second_inbox_projection_update`); err != nil {
+		t.Fatal(err)
+	}
+	if err := backfillIncidentInboxProjection(ctx, s.DB, nil); err != nil {
+		t.Fatalf("retry backfill after correcting source and removing injected failure: %v", err)
+	}
+	for _, incident := range incidents {
+		want, err := incidentOccurrenceToken(DefaultTenantID, job.ID, incident.Change.Key, incident)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DB.QueryRowContext(ctx, `SELECT occurrence_token,severity FROM runtime_incidents WHERE job_id=? AND key=?`, job.ID, incident.Change.Key).Scan(&token, &severity); err != nil {
+			t.Fatal(err)
+		}
+		if token != want || severity != incident.Change.Severity {
+			t.Errorf("retried backfill row %s = token %q severity %q; want token %q and severity %q", incident.Change.Key, token, severity, want, incident.Change.Severity)
+		}
 	}
 }
 

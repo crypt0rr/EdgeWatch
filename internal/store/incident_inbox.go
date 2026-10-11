@@ -421,7 +421,7 @@ func explicitHostDown(host model.HostObservation) bool {
 		return true
 	}
 	switch strings.ToLower(strings.TrimSpace(host.StatusReason)) {
-	case "nmap-host-down", "host-down", "down", "no-response", "host-unreach", "net-unreach":
+	case "nmap-host-down", "host-down", "down", "no-response", "host-unreach", "net-unreach", "admin-prohibited":
 		return strings.EqualFold(strings.TrimSpace(host.Status), "unreachable")
 	default:
 		return false

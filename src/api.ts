@@ -1,5 +1,5 @@
-import type { ActiveScan, ActivityEvent, BaselineHostsResponse, GlobalHostsResponse, HostDetailResponse, Incident, Job, JobForm, JobPreview, Pagination, PendingChange, QueuedRun, RdapResult, ScanComparison, NaabuOptions } from './types'
-import type { AdminStatus, Change, DeploymentLimits, NotificationStatus, PlatformStatus, Scan, ScanSummary, Scope, Unit } from './generated/api-types'
+import type { ActiveScan, ActivityEvent, BaselineHostsResponse, GlobalHostsResponse, HostDetailResponse, Job, JobForm, JobPreview, Pagination, PendingChange, QueuedRun, RdapResult, ScanComparison, NaabuOptions } from './types'
+import type { AdminStatus, Change, DeploymentLimits, IncidentInboxItem, IncidentInboxPage, IncidentReview, NotificationStatus, PlatformStatus, Scan, ScanSummary, Scope, Unit } from './generated/api-types'
 import { setDisplayTimeZone } from './format'
 
 export type NotificationDestination = {
@@ -232,7 +232,45 @@ export const scanChanges = (jobId: string, scanId: string, offset = 0, limit = 5
 export const listScans = (offset = 0, limit = 20) => api<{ scans: ScanSummary[]; pagination: Pagination }>(`/scans?limit=${limit}&offset=${offset}`)
 export const listHosts = (filters: HostFilters = {}) => api<GlobalHostsResponse>(`/hosts?${hostQuery(filters)}`, filters.signal ? { signal: filters.signal } : undefined)
 export const activeScans = () => api<{ scans: ActiveScan[]; queued_runs?: QueuedRun[] }>('/scans/active')
-export const listIncidents = (offset = 0, limit = 20) => api<{ incidents: Incident[]; pagination: Pagination }>(`/incidents?limit=${limit}&offset=${offset}`)
+export type IncidentInboxView = 'needs_review' | 'investigating' | 'follow_up_due' | 'all_active'
+export type IncidentInboxQuery = {
+  view?: IncidentInboxView
+  job_id?: string
+  /** Tenant-scoped exact lookup used to refresh a selected occurrence after a write conflict. */
+  occurrence_token?: string
+  severity?: 'critical' | 'warning' | 'info'
+  kind?: string
+  limit?: number
+  offset?: number
+}
+export type IncidentReviewUpdate = {
+  key: string
+  occurrence_token: string
+  expected_revision: number
+  status: 'needs_review' | 'investigating'
+  note: string
+  follow_up_at: string | null
+}
+
+/** Filtered inbox query, with the offset/limit form retained for existing summaries. */
+export function listIncidents(filters: IncidentInboxQuery): Promise<IncidentInboxPage & { incidents: IncidentInboxItem[] }>
+export function listIncidents(offset?: number, limit?: number): Promise<IncidentInboxPage & { incidents: IncidentInboxItem[] }>
+export async function listIncidents(filtersOrOffset: IncidentInboxQuery | number = 0, legacyLimit = 20) {
+  const filters = typeof filtersOrOffset === 'number'
+    ? { view: 'all_active' as const, offset: filtersOrOffset, limit: legacyLimit }
+    : filtersOrOffset
+  const query = new URLSearchParams()
+  query.set('view', filters.view ?? 'all_active')
+  query.set('limit', String(filters.limit ?? 20))
+  query.set('offset', String(filters.offset ?? 0))
+  if (filters.job_id) query.set('job_id', filters.job_id)
+  if (filters.occurrence_token) query.set('occurrence_token', filters.occurrence_token)
+  if (filters.severity) query.set('severity', filters.severity)
+  if (filters.kind) query.set('kind', filters.kind)
+  const page = await api<IncidentInboxPage>(`/incidents?${query.toString()}`)
+  return { ...page, incidents: (page.incidents ?? []) as IncidentInboxItem[] }
+}
+export const updateIncidentReview = (jobId: string, update: IncidentReviewUpdate) => api<IncidentReview>(`/jobs/${encodeURIComponent(jobId)}/incidents/review`, { method: 'PUT', body: JSON.stringify(update) })
 export const acceptIncident = (jobId: string, key: string, expectedChange: Change) => api<void>(`/jobs/${encodeURIComponent(jobId)}/incidents/accept`, { method: 'POST', body: JSON.stringify({ key, expected_change: expectedChange }) })
 export const suppressIncident = (jobId: string, key: string, expectedChange: Change) => api<void>(`/jobs/${encodeURIComponent(jobId)}/incidents/suppress`, { method: 'POST', body: JSON.stringify({ key, expected_change: expectedChange }) })
 export const listEvents = (offset = 0, limit = 20, jobId?: string) => api<{ events: ActivityEvent[]; pagination: Pagination }>(`/events?limit=${limit}&offset=${offset}${jobId ? `&job_id=${encodeURIComponent(jobId)}` : ''}`)

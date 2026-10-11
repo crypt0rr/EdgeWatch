@@ -20,6 +20,7 @@ type PruneStats struct {
 	QuarantinedOutbox int64
 	Revisions         int64
 	Cycles            int64
+	IncidentReviews   int64
 	RDAPCache         int64
 	FTSOptimized      bool
 	FTSDeferred       bool
@@ -96,7 +97,7 @@ const retentionExpiredCycles = "edgewatch_retention_expired_cycles"
 const purgedTenantStates = `('` + TenantStateDeleting + `','` + TenantStateDeleted + `')`
 
 func (p PruneStats) Total() int64 {
-	return p.Scans + p.Events + p.SentOutbox + p.FailedOutbox + p.QuarantinedOutbox + p.Revisions + p.Cycles + p.RDAPCache
+	return p.Scans + p.Events + p.SentOutbox + p.FailedOutbox + p.QuarantinedOutbox + p.Revisions + p.Cycles + p.IncidentReviews + p.RDAPCache
 }
 
 // PruneWithStats removes rows outside the configured retention window while
@@ -196,6 +197,10 @@ func (ss *SystemStore) pruneWithStats(ctx context.Context, before time.Time, opt
 	if err != nil {
 		return stats, err
 	}
+	stats.IncidentReviews, err = ss.deleteIncidentReviewRetentionBatches(ctx, cutoff)
+	if err != nil {
+		return stats, err
+	}
 
 	// RDAP registration data is a short-lived enrichment cache rather than
 	// retained scan history. Remove rows once their seven-day stale window has
@@ -215,6 +220,49 @@ func (ss *SystemStore) pruneWithStats(ctx context.Context, before time.Time, opt
 		}
 	}
 	return stats, nil
+}
+
+// deleteIncidentReviewRetentionBatches bounds both the number of review
+// parents deleted and the cascading history snapshots (at most 20 per row).
+// Active reviews and rows owned by a tenant/job purge are left to those
+// lifecycles.
+func (ss *SystemStore) deleteIncidentReviewRetentionBatches(ctx context.Context, cutoff string) (int64, error) {
+	const parentBatch = 25
+	const statement = `DELETE FROM incident_reviews WHERE rowid IN (
+		SELECT review.rowid FROM incident_reviews AS review
+		JOIN jobs AS job ON job.id=review.job_id
+		JOIN tenants AS tenant ON tenant.id=job.tenant_id
+		WHERE review.closed_at<>'' AND review.closed_at<?
+		AND tenant.state NOT IN ` + purgedTenantStates + `
+		AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=job.tenant_id AND purge.job_id=job.id)
+		ORDER BY review.closed_at,review.rowid LIMIT ?)`
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		tx, err := ss.store.DB.BeginTx(ctx, nil)
+		if err != nil {
+			return total, err
+		}
+		result, err := tx.ExecContext(ctx, statement, cutoff, parentBatch)
+		if err != nil {
+			_ = tx.Rollback()
+			return total, fmt.Errorf("incident review retention batch: %w", err)
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			_ = tx.Rollback()
+			return total, err
+		}
+		if err := tx.Commit(); err != nil {
+			return total, err
+		}
+		total += count
+		if count < parentBatch {
+			return total, nil
+		}
+	}
 }
 
 type searchMaintenanceStats struct {

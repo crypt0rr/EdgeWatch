@@ -945,24 +945,6 @@ func (s *Server) getScanSummary(w http.ResponseWriter, r *http.Request, ts *stor
 	}
 }
 
-func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
-	offset, ok := requestOffset(w, r)
-	if !ok {
-		return
-	}
-	limit := queryLimit(r)
-	incidentPage, err := ts.ListIncidentsPage(r.Context(), limit, offset)
-	if err != nil {
-		s.writeInternalError(w, r, "store", err)
-		return
-	}
-	items := make([]map[string]any, 0, len(incidentPage.Items))
-	for _, item := range incidentPage.Items {
-		items = append(items, map[string]any{"job_id": item.JobID, "job": item.Job, "incident": item.Incident})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"incidents": items, "pagination": paginationJSON(offset, limit, incidentPage.Total), "truncated": false})
-}
-
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job string) {
 	if jobID := r.URL.Query().Get("job_id"); jobID != "" {
 		offset, ok := requestOffset(w, r)

@@ -2,8 +2,8 @@ import { StrictMode, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { Activity, ArrowUp, Bell, Boxes, Building2, ClipboardList, Code2, Gauge, Globe2, History, LogOut, Menu, ScrollText, Server, ShieldCheck, UserRound, Wifi, X } from 'lucide-react'
-import { acceptIncident, adminStatus, APIError, getSession, listIncidents, listJobs, setCSRF, setForbiddenHandler, setupStatus, suppressIncident, logout as apiLogout } from './api'
+import { Activity, ArrowUp, Bell, Boxes, Building2, Code2, Gauge, Globe2, History, LogOut, Menu, ScrollText, Server, ShieldCheck, UserRound, Wifi, X } from 'lucide-react'
+import { adminStatus, APIError, getSession, listIncidents, listJobs, setCSRF, setForbiddenHandler, setupStatus, logout as apiLogout } from './api'
 import type { SessionUser, UnitRef } from './api'
 import { useActivityHeartbeat, useNavigationDrawer } from './components/navigation'
 import { ErrorNotice } from './components/ErrorNotice'
@@ -28,13 +28,11 @@ import { PublicDashboard, PublicDashboardAdmin } from './pages/PublicDashboard'
 import { ScannerProfiles } from './pages/ScannerProfiles'
 import { ScanDetail } from './pages/ScanDetail'
 import type { Role } from './api'
-import { Pagination } from './components/Pagination'
-import { ActionDialog } from './components/ActionDialog'
+import { Incidents } from './pages/Incidents'
+export { Incidents } from './pages/Incidents'
 import { compactPortExpression } from './components/PortScopeDetails'
-import type { Incident } from './types'
 import { baselinePresentation } from './baseline'
-import { formatDateTime } from './format'
-import { changeKindLabel, changeTargetLabel, jobStatePresentation, severityLabel, severityTone } from './status'
+import { jobStatePresentation } from './status'
 import './tailwind.css'
 import './styles.css'
 
@@ -103,7 +101,7 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
   const update = updateStatus.data?.updates
   const updateAvailable = !!update && (update.available === true || update.status === 'update_available')
   const incidentSummary = useQuery({ queryKey: ['incidents', 'navigation'], queryFn: () => listIncidents(0, 1), refetchInterval: 15000, enabled: hasPermission('incidents.read') })
-  const incidentCount = incidentSummary.data?.pagination.total ?? 0
+  const incidentCount = incidentSummary.data?.active_count ?? incidentSummary.data?.pagination.total ?? 0
   const incidentCountUnavailable = incidentSummary.isError
   useEffect(() => {
     if (!hasPermission('stream.read')) return
@@ -177,6 +175,7 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
             case 'incident-closed':
             case 'incident-accepted':
             case 'incident-suppressed':
+            case 'incident.review.updated':
               void client.invalidateQueries({ queryKey: ['jobs'] })
               void client.invalidateQueries({ queryKey: ['incidents'] })
               void client.invalidateQueries({ queryKey: ['activity-events'] })
@@ -413,107 +412,6 @@ function protocolSummary(job: { job: { tcp?: { ports: string }; udp?: { ports: s
     job.job.tcp && `TCP · ${compactPortExpression(job.job.tcp.ports)}`,
     job.job.udp && `UDP · ${compactPortExpression(job.job.udp.ports)}`,
   ].filter(Boolean).join(' · ')
-}
-
-export function Incidents() {
-  const [offset, setOffset] = useState(0)
-  const [busy, setBusy] = useState('')
-  const [actionError, setActionError] = useState('')
-  const [pendingAction, setPendingAction] = useState<{ row: Incident; action: 'accept' | 'suppress' } | null>(null)
-  const actionErrorRef = useRef<HTMLDivElement>(null)
-  const client = useQueryClient()
-  const incidents = useQuery({ queryKey: ['incidents', offset], queryFn: () => listIncidents(offset) })
-  const session = useQuery({ queryKey: ['session'], queryFn: getSession })
-  // Reading incidents needs incidents.read; accepting or suppressing one
-  // needs incidents.manage, so a reader sees the list without the actions.
-  const canManage = session.data?.permissions.includes('incidents.manage') ?? false
-  const incidentPage = incidents.data?.pagination
-  const pageIsPastEnd = !!incidents.data && !incidents.data.incidents.length && !!incidentPage?.total && offset > 0
-  useEffect(() => {
-    if (!actionError || pendingAction) return
-    const alert = actionErrorRef.current
-    if (!alert) return
-    alert.scrollIntoView?.({ block: 'nearest' })
-    alert.focus({ preventScroll: true })
-  }, [actionError, pendingAction])
-  useEffect(() => {
-    // Resolving the last row of a later page, or a scan closing incidents,
-    // can leave this page empty while earlier pages still hold incidents.
-    // Step back to the last page that has rows instead of an empty page.
-    if (!pageIsPastEnd || !incidentPage) return
-    const lastPage = Math.floor((incidentPage.total - 1) / incidentPage.limit) * incidentPage.limit
-    setOffset(Math.max(0, Math.min(lastPage, offset - incidentPage.limit)))
-  }, [pageIsPastEnd, incidentPage, offset])
-  async function act(row: Incident, action: 'accept' | 'suppress') {
-    const key = row.incident.change.key
-    if (!key) {
-      setActionError('This legacy incident has no actionable key. Run a newer scan before changing it.')
-      return
-    }
-    const actionID = `${action}:${row.job_id}:${key}`
-    setBusy(actionID)
-    setActionError('')
-    try {
-      if (action === 'accept') await acceptIncident(row.job_id, key, row.incident.change)
-      else await suppressIncident(row.job_id, key, row.incident.change)
-      await client.invalidateQueries({ queryKey: ['incidents'] })
-      await client.invalidateQueries({ queryKey: ['job', row.job_id] })
-      if (action === 'accept') {
-        await client.invalidateQueries({ queryKey: ['baseline-hosts', row.job_id] })
-        await client.invalidateQueries({ queryKey: ['host-detail'] })
-      }
-      setPendingAction(null)
-    } catch (error) {
-      if (error instanceof APIError && (error.code === 'incident_conflict' || error.code === 'incident_not_found')) {
-        // The reviewed evidence is no longer current. Close the stale dialog
-        // and reload the list so the administrator sees the new observation
-        // before deciding again.
-        setPendingAction(null)
-        await client.invalidateQueries({ queryKey: ['incidents'] })
-        await client.invalidateQueries({ queryKey: ['job', row.job_id] })
-        setActionError(error.code === 'incident_not_found'
-          ? 'This incident is no longer active. The incident list was refreshed.'
-          : 'This incident changed while it was open. The incident list was refreshed; review the new evidence before retrying.')
-      } else {
-        setActionError(error instanceof Error ? error.message : 'The incident action could not be completed.')
-      }
-    } finally {
-      setBusy('')
-    }
-  }
-  const actionFor = (row: Incident, action: 'accept' | 'suppress') => {
-    setActionError('')
-    setPendingAction({ row, action })
-  }
-  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Change tracking</p><h1>Incidents</h1><p className="muted">Confirmed changes detected against active baselines.</p></div></div>{actionError && !pendingAction && <div ref={actionErrorRef} className="form-error banner" role="alert" tabIndex={-1}>{actionError}</div>}{incidents.isLoading ? <Loading /> : incidents.error ? <ErrorNotice message="Could not load active incidents." onRetry={() => incidents.refetch()} /> : incidents.data?.incidents.length ? <><div className="table-card incident-table-card"><div className="desktop-incident-table"><table><thead><tr><th scope="col">Job</th><th scope="col">Target</th><th scope="col">Change</th><th scope="col">Severity</th><th scope="col">Last seen</th>{canManage && <th scope="col">Actions</th>}</tr></thead><tbody>{incidents.data.incidents.map((row, i) => <IncidentTableRow key={`${row.job_id}-${row.incident.change.key ?? i}`} row={row} busy={busy} onAction={canManage ? actionFor : undefined} />)}</tbody></table></div><div className="mobile-incident-list" aria-label="Incidents">{incidents.data.incidents.map((row, i) => <IncidentCard key={`${row.job_id}-${row.incident.change.key ?? i}`} row={row} busy={busy} onAction={canManage ? actionFor : undefined} />)}</div></div><Pagination page={incidents.data.pagination} onChange={setOffset} /></> : incidents.data?.pagination.total ? <><div className="inline-empty">No incidents on this page.</div><Pagination page={incidents.data.pagination} onChange={setOffset} /></> : <Empty icon={<ClipboardList />} title="No active incidents" body="EdgeWatch will show confirmed port, service, or DNS changes here." />}{pendingAction && <ActionDialog title={pendingAction.action === 'accept' ? 'Accept this change?' : 'Suppress this incident for one scan?'} description={pendingAction.action === 'accept' ? `Accept this change into the baseline for “${pendingAction.row.job}”? Future scans will treat it as expected.` : 'The incident will be suppressed for the next successful scan. If it is still present after that scan, it will be reported again.'} confirmLabel={pendingAction.action === 'accept' ? 'Accept change' : 'Suppress 1 scan'} destructive={pendingAction.action === 'suppress'} onConfirm={() => act(pendingAction.row, pendingAction.action)} onCancel={() => { setPendingAction(null); setActionError('') }} error={actionError} />}</section>
-}
-
-function IncidentTableRow({ row, busy, onAction }: { row: Incident; busy: string; onAction?: (row: Incident, action: 'accept' | 'suppress') => void }) {
-  const key = row.incident.change.key
-  const acceptID = `accept:${row.job_id}:${key ?? ''}`
-  const suppressID = `suppress:${row.job_id}:${key ?? ''}`
-  return <tr><td><strong>{row.job}</strong></td><td>{changeTargetLabel(row.incident.change)}</td><td><strong>{formatIncidentChange(row.incident.change)}</strong><br /><span className="muted">{changeValues(row.incident.change)}</span></td><td><span className={`pill ${severityTone(row.incident.change.severity)}`}>{severityLabel(row.incident.change.severity)}</span></td><td>{formatDateTime(row.incident.last_seen_at)}</td>{onAction && <td><IncidentActions row={row} busy={busy} acceptID={acceptID} suppressID={suppressID} onAction={onAction} /></td>}</tr>
-}
-
-function IncidentCard({ row, busy, onAction }: { row: Incident; busy: string; onAction?: (row: Incident, action: 'accept' | 'suppress') => void }) {
-  const key = row.incident.change.key
-  const acceptID = `accept:${row.job_id}:${key ?? ''}`
-  const suppressID = `suppress:${row.job_id}:${key ?? ''}`
-  return <article className="incident-card" aria-label={`Incident for ${row.job}`}><div className="incident-card-heading"><strong>{row.job}</strong><span className={`pill ${severityTone(row.incident.change.severity)}`}>{severityLabel(row.incident.change.severity)}</span></div><dl className="incident-facts"><div><dt>Target</dt><dd>{changeTargetLabel(row.incident.change)}</dd></div><div><dt>Change</dt><dd><strong>{formatIncidentChange(row.incident.change)}</strong><br /><span className="muted">{changeValues(row.incident.change)}</span></dd></div><div><dt>Last seen</dt><dd>{formatDateTime(row.incident.last_seen_at)}</dd></div></dl>{onAction && <IncidentActions row={row} busy={busy} acceptID={acceptID} suppressID={suppressID} onAction={onAction} />}</article>
-}
-
-function formatIncidentChange(change: Incident['incident']['change']) {
-  return `${changeKindLabel(change.kind, change.old, change.new)}${change.port ? ` / ${change.protocol}:${change.port}` : ''}`
-}
-
-function changeValues(change: Incident['incident']['change']) {
-  if (change.old || change.new) return `${change.old ?? '—'} → ${change.new ?? '—'}`
-  return 'No before/after value recorded'
-}
-
-function IncidentActions({ row, busy, acceptID, suppressID, onAction }: { row: Incident; busy: string; acceptID: string; suppressID: string; onAction: (row: Incident, action: 'accept' | 'suppress') => void }) {
-  const key = row.incident.change.key
-  return <div className="incident-actions"><button className="button secondary" type="button" onClick={() => onAction(row, 'accept')} disabled={!key || !!busy}>{busy === acceptID ? 'Accepting…' : 'Accept change'}</button><button className="button ghost" type="button" onClick={() => onAction(row, 'suppress')} disabled={!key || !!busy}>{busy === suppressID ? 'Suppressing…' : 'Suppress 1 scan'}</button></div>
 }
 
 export function ProtectedApp({ onLogout }: { onLogout: () => Promise<void> }) { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); const location = useLocation(); useEffect(() => { if (session.error && !session.data && status.data?.configured) navigate('/login') }, [session.error, session.data, status.data, navigate])

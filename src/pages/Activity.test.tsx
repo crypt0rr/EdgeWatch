@@ -29,7 +29,7 @@ describe('activity history', () => {
   beforeEach(() => {
     vi.mocked(listEvents).mockResolvedValue({ events, pagination: page })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [job, archivedJob] })
-    vi.mocked(listIncidents).mockResolvedValue({ incidents: [{ job_id: 'job-1', job: 'Production', incident: { change: { key: 'port|192.0.2.1|tcp|80', kind: 'port', target: '192.0.2.1', protocol: 'tcp', port: 80, old: 'not-open', new: 'open', severity: 'critical' }, scan_id: 'scan-2', opened_at: '2026-09-20T08:00:00Z', last_seen_at: '2026-09-20T10:00:00Z' } }], pagination: { ...page, total: 1 } })
+vi.mocked(listIncidents).mockResolvedValue({ incidents: [{ job_id: 'job-1', job: 'Production', incident: { change: { key: 'port|192.0.2.1|tcp|80', kind: 'port', target: '192.0.2.1', protocol: 'tcp', port: 80, old: 'not-open', new: 'open', severity: 'critical' }, scan_id: 'scan-2', opened_at: '2026-09-20T08:00:00Z', last_seen_at: '2026-09-20T10:00:00Z', recovery_count: 0 }, occurrence_token: 'occurrence-1', opening_time_known: true, opening_scan_available: true, view_status: 'needs_review', review: { status: 'needs_review', reviewer_label: null, reviewed_at: null, note: '', follow_up_at: null, revision: 0 }, observation_uncertainty: { status: 'unknown', reason: 'no_newer_observation' } }], truncated: false, active_count: 1, pagination: { ...page, total: 1 } })
     vi.mocked(jobPendingChanges).mockResolvedValue({ job_id: 'job-1', job: 'Production', pending_changes: [{ key: 'service|192.0.2.1|tcp|443', change: { key: 'service|192.0.2.1|tcp|443', kind: 'service', target: '192.0.2.1', protocol: 'tcp', port: 443, old: 'unknown', new: 'https', severity: 'info' }, count: 1 }], pagination: { limit: 10, offset: 0, total: 1, has_more: false, next_offset: null } })
   })
 
@@ -92,7 +92,7 @@ describe('activity history', () => {
 
   it('shows useful empty states and reports event loading errors with retry', async () => {
     vi.mocked(listEvents).mockRejectedValueOnce(new Error('offline'))
-    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination: { ...page, total: 0 } })
+    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 0, pagination: { ...page, total: 0 } })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] })
     renderWithProviders(<Activity />)
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not load activity history.')

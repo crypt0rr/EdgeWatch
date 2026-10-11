@@ -2502,3 +2502,122 @@ label small,
 .notification-alert-toggle{display:flex;align-items:center;gap:8px;flex:0 0 auto;min-width:166px;cursor:pointer}.notification-alert-toggle input{appearance:none;width:36px!important;height:20px!important;padding:0!important;margin:0!important;border:1px solid #35516e;border-radius:999px;background:#1a2b40;position:relative;flex:0 0 auto;cursor:pointer;transition:background .18s,border-color .18s,box-shadow .18s}.notification-alert-toggle input::after{content:"";position:absolute;top:3px;left:3px;width:12px;height:12px;border-radius:50%;background:#8da4bb;transition:transform .18s,background .18s}.notification-alert-toggle input:checked{background:#15533f;border-color:#48bc8c}.notification-alert-toggle input:checked::after{background:#7ae4b8;transform:translateX(16px)}.notification-alert-toggle input:focus-visible{outline:2px solid #71b7ff;outline-offset:2px}.notification-alert-toggle span{min-width:0}.notification-alert-toggle strong,.notification-alert-toggle small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.notification-alert-toggle strong{font-size:10px;color:#dcecff}.notification-alert-toggle small{margin-top:3px;color:#7892ae;font-size:9px}.notification-alert-toggle input:disabled{cursor:not-allowed}.notification-alert-toggle:has(input:disabled){cursor:not-allowed;opacity:.65}
 .notification-alert-toggle strong,.notification-alert-toggle small{font-size:11px}
 @media (pointer: coarse){.notification-alert-toggle{min-height:44px}}
+
+/* Investigation inbox: priority queue, evidence panel, and shared review form. */
+.incident-inbox-heading { align-items: center; }
+.incident-inbox-active-count { display: grid; justify-items: end; gap: 3px; min-width: 150px; color: var(--muted); font-size: 11px; text-align: right; }
+.incident-inbox-active-count strong { color: #f0f6ff; font-size: 22px; line-height: 1; }
+.incident-inbox-filters { display: grid; grid-template-columns: repeat(4, minmax(145px, 1fr)); gap: 12px; margin-bottom: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 11px; background: #0c1a2c; }
+.incident-inbox-filters label,
+.incident-review-form label { display: grid; gap: 6px; min-width: 0; color: #dceafa; font-size: 12px; font-weight: 650; }
+.incident-inbox-filters select,
+.incident-review-form input,
+.incident-review-form select,
+.incident-review-form textarea { width: 100%; min-width: 0; border: 1px solid #29425f; border-radius: 7px; background: #081626; color: #e7eef8; padding: 10px 11px; font-size: 13px; }
+.incident-review-form textarea { min-height: 100px; resize: vertical; line-height: 1.5; }
+.incident-inbox-filters select:focus-visible,
+.incident-review-form input:focus-visible,
+.incident-review-form select:focus-visible,
+.incident-review-form textarea:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.incident-review-form :disabled { cursor: not-allowed; opacity: .65; }
+.incident-inbox-result-count { margin: 0 0 12px; color: var(--muted); font-size: 12px; }
+.incident-inbox-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
+.incident-inbox-layout.has-selection { grid-template-columns: minmax(0, 1.25fr) minmax(330px, .85fr); }
+.incident-inbox-results { min-width: 0; }
+.inbox-table-card { overflow: auto; }
+.inbox-desktop-table { min-width: 900px; }
+.inbox-desktop-table table { width: 100%; border-collapse: collapse; text-align: left; }
+.inbox-desktop-table th,
+.inbox-desktop-table td { padding: 12px 10px; border-bottom: 1px solid #1d3047; vertical-align: top; font-size: 12px; }
+.inbox-desktop-table th { color: #7f9ab8; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+.inbox-desktop-table tbody tr.selected { background: #112946; }
+.inbox-desktop-table td:nth-child(1) { min-width: 118px; }
+.inbox-desktop-table td:nth-child(2) { min-width: 85px; }
+.inbox-desktop-table td:nth-child(3) { min-width: 120px; }
+.inbox-desktop-table td:nth-child(4),
+.inbox-desktop-table td:nth-child(5) { overflow-wrap: anywhere; }
+.inbox-mobile-list { display: none; }
+.inbox-incident-card { display: grid; gap: 11px; min-width: 0; padding: 15px; border: 1px solid var(--line); border-radius: 10px; background: #0d1b2d; }
+.inbox-incident-card.selected { border-color: #4788cb; box-shadow: 0 0 0 1px #4788cb33; }
+.inbox-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; min-width: 0; }
+.inbox-card-heading strong { min-width: 0; overflow-wrap: anywhere; }
+.inbox-incident-card .incident-facts { margin: 0; }
+.inbox-incident-card > .button { min-height: 44px; }
+.incident-evidence-panel { min-width: 0; max-height: calc(100vh - 36px); overflow: auto; padding: 17px; border: 1px solid #29496a; border-radius: 11px; background: linear-gradient(145deg, #10243a, #0b192a); scroll-margin-top: 18px; }
+.incident-evidence-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; padding-bottom: 13px; border-bottom: 1px solid #29405b; }
+.incident-evidence-heading h2 { margin: 4px 0 0; font-size: 16px; }
+.incident-evidence-heading .icon-button { min-width: 40px; min-height: 40px; }
+.incident-evidence-section { padding-top: 14px; }
+.incident-evidence-status { display: flex; flex-wrap: wrap; gap: 7px; }
+.incident-evidence-section h3 { margin: 12px 0 7px; font-size: 14px; line-height: 1.4; overflow-wrap: anywhere; }
+.incident-evidence-section > p { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.incident-evidence-facts { display: grid; grid-template-columns: minmax(115px, .7fr) minmax(0, 1.3fr); margin: 14px 0; font-size: 12px; }
+.incident-evidence-facts dt,
+.incident-evidence-facts dd { margin: 0; padding: 7px 0; border-top: 1px solid #20364f; overflow-wrap: anywhere; }
+.incident-evidence-facts dt { color: var(--muted); }
+.incident-uncertainty { margin: 13px 0; padding: 12px; border: 1px solid #4a432e; border-radius: 8px; background: #261f16; font-size: 12px; }
+.incident-uncertainty p { margin: 5px 0 0; line-height: 1.5; overflow-wrap: anywhere; }
+.incident-uncertainty.uncertainty-incomplete { border-color: #574927; }
+.incident-uncertainty.uncertainty-down,
+.incident-uncertainty.uncertainty-unobserved { border-color: #3c4b5d; background: #131f2d; }
+.incident-evidence-links { display: grid; gap: 8px; margin: 13px 0 3px; }
+.incident-evidence-link { display: flex; align-items: center; gap: 6px; width: fit-content; max-width: 100%; color: #91c5ff; font-size: 12px; text-decoration: underline; text-underline-offset: 3px; overflow-wrap: anywhere; }
+.incident-evidence-link span { color: var(--muted); font-size: 10px; }
+.incident-evidence-link svg { flex: 0 0 auto; }
+.incident-evidence-unavailable { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.incident-shared-note { margin: 15px 0; padding: 12px; border-left: 3px solid #548bc0; border-radius: 3px 8px 8px 3px; background: #0b1a2a; }
+.incident-shared-note h3,
+.incident-review-form h3 { margin: 0; font-size: 13px; }
+.incident-shared-note p { margin: 8px 0 0; color: #d6e4f3; font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.incident-review-form { display: grid; gap: 11px; margin-top: 15px; padding-top: 14px; border-top: 1px solid #29405b; }
+.incident-review-form-heading { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.incident-review-form-heading .revision { flex: 0 0 auto; }
+.incident-note-meta { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 4px 10px; color: var(--muted); font-size: 10px; }
+.incident-note-meta small { font-size: inherit; }
+.incident-note-meta .over-limit { color: #ff9298; font-weight: 750; }
+.incident-timezone-label { color: var(--muted); font-weight: 500; }
+.incident-review-form > small { color: var(--muted); font-size: 10px; line-height: 1.45; }
+.incident-follow-up-feedback p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.incident-follow-up-feedback code { white-space: normal; color: #d1e7ff; }
+.incident-review-conflict,
+.incident-context-notice { padding: 11px 12px; border: 1px solid #6b5530; border-radius: 8px; background: #2a2418; color: #f2d393; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.incident-review-conflict p { margin: 5px 0 0; }
+.incident-review-conflict blockquote { margin: 8px 0 0; padding-left: 10px; border-left: 2px solid #8d774e; white-space: pre-wrap; overflow-wrap: anywhere; }
+.incident-context-notice { margin: 12px 0 0; color: #d9c28f; }
+.incident-context-notice .button { margin-top: 8px; }
+.incident-review-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.incident-review-actions .button { min-height: 42px; }
+.success-message { margin: 0; color: #76ddb3; font-size: 11px; line-height: 1.5; }
+.incident-resolution-actions { display: grid; gap: 8px; margin-top: 16px; padding-top: 14px; border-top: 1px solid #29405b; }
+.incident-resolution-actions .button { width: 100%; min-height: 42px; }
+.incident-resolution-actions .muted { font-size: 11px; }
+.incident-resolution-actions .eyebrow { margin-bottom: -4px; }
+
+@media (max-width: 1200px) {
+  .incident-inbox-layout.has-selection { grid-template-columns: minmax(0, 1fr); }
+  .incident-evidence-panel { max-height: none; }
+}
+@media (max-width: 900px) {
+  .incident-inbox-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .inbox-desktop-table { display: none; }
+  .inbox-mobile-list { display: grid; gap: 10px; }
+  .inbox-table-card { overflow: visible; border: 0; background: transparent; padding: 0; }
+  .incident-inbox-layout.has-selection .incident-evidence-panel { grid-row: 1; }
+  .incident-inbox-layout.has-selection .incident-inbox-results { grid-row: 2; }
+}
+@media (max-width: 620px) {
+  .incident-inbox-heading { align-items: flex-start; }
+  .incident-inbox-active-count { justify-items: start; text-align: left; min-width: auto; }
+  .incident-inbox-filters { grid-template-columns: minmax(0, 1fr); padding: 13px; }
+  .incident-evidence-panel { padding: 13px; }
+  .incident-evidence-facts { grid-template-columns: minmax(95px, .65fr) minmax(0, 1.35fr); }
+  .incident-review-actions { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .incident-review-actions .button { width: 100%; min-height: 44px; }
+}
+@media (pointer: coarse) {
+  .incident-inbox-filters select,
+  .incident-review-form input,
+  .incident-review-form select,
+  .incident-review-actions .button,
+  .incident-evidence-heading .icon-button { min-height: 44px; }
+}

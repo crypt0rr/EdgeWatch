@@ -45,6 +45,30 @@ func TestJobHistoryPurgeBatchesYieldsWriterAndResumesAfterRestart(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
+	for _, owner := range []JobRecord{deleted, other} {
+		incident := model.Incident{
+			Change: model.Change{Key: "purge-reviewed-" + owner.Job.Name, Kind: "port", Severity: "warning", Target: "reviewed.example", Protocol: "tcp", Port: 443, Old: "closed", New: "open"},
+			ScanID: "review-origin-" + owner.Job.Name, OpenedAt: finished, LastSeenAt: finished,
+		}
+		if _, err := s.System().UpdateRuntime(ctx, owner.ID, func(state *model.JobState) ([]model.Event, error) {
+			state.Incidents[incident.Change.Key] = incident
+			return nil, nil
+		}); err != nil {
+			s.Close()
+			t.Fatal(err)
+		}
+		page, err := tenant.ListIncidentInbox(ctx, IncidentInboxFilter{View: "all_active", JobID: owner.ID, Limit: 10, Now: finished})
+		if err != nil || len(page.Items) != 1 {
+			s.Close()
+			t.Fatalf("review purge fixture for %s = %+v, %v", owner.ID, page, err)
+		}
+		if _, err := tenant.SaveIncidentReview(ctx, owner.ID, IncidentReviewWrite{
+			Key: incident.Change.Key, OccurrenceToken: page.Items[0].OccurrenceToken, ExpectedRevision: 0, Status: "investigating", Note: "private retained review history",
+		}, "purge-test-reviewer", "Purge test reviewer", AuditEntry{Action: "incident.review.updated"}); err != nil {
+			s.Close()
+			t.Fatal(err)
+		}
+	}
 	if err := tenant.SetJobArchived(ctx, deleted.ID, true); err != nil {
 		s.Close()
 		t.Fatal(err)
@@ -85,6 +109,20 @@ func TestJobHistoryPurgeBatchesYieldsWriterAndResumesAfterRestart(t *testing.T) 
 	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id='newer-deleted-host-scan'`).Scan(&scanRows); err != nil || scanRows != hostCount-jobHistoryPurgeBatchSize {
 		t.Fatalf("remaining scan hosts = %d, %v; want %d after first bounded batch", scanRows, err, hostCount-jobHistoryPurgeBatchSize)
 	}
+	for _, check := range []struct {
+		job  string
+		want int
+	}{
+		{deleted.ID, 0},
+		{other.ID, 1},
+	} {
+		for _, table := range []string{"incident_reviews", "incident_review_history"} {
+			var count int
+			if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE job_id=?`, check.job).Scan(&count); err != nil || count != check.want {
+				t.Errorf("%s rows for job %s after interrupted purge = %d, %v; want %d", table, check.job, count, err, check.want)
+			}
+		}
+	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -117,6 +155,20 @@ func TestJobHistoryPurgeBatchesYieldsWriterAndResumesAfterRestart(t *testing.T) 
 	}
 	if err := restarted.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_history_purges WHERE tenant_id=? AND job_id=? AND phase=?`, tenant.scope.id, deleted.ID, jobPurgePhaseComplete).Scan(&jobRows); err != nil || jobRows != 1 {
 		t.Fatalf("completed deletion tombstone = %d, %v; want retained", jobRows, err)
+	}
+	for _, check := range []struct {
+		job  string
+		want int
+	}{
+		{deleted.ID, 0},
+		{other.ID, 1},
+	} {
+		for _, table := range []string{"incident_reviews", "incident_review_history"} {
+			var count int
+			if err := restarted.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE job_id=?`, check.job).Scan(&count); err != nil || count != check.want {
+				t.Errorf("%s rows for job %s after restart = %d, %v; want %d", table, check.job, count, err, check.want)
+			}
+		}
 	}
 }
 

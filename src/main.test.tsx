@@ -5,8 +5,8 @@ import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQuery } from '@tanstack/react-query'
 import { useLocation } from 'react-router-dom'
-import { APIError, adminStatus, acceptIncident, getSession, listEvents, listIncidents, listJobs, login, logout, recordActivity, setupStatus, suppressIncident } from './api'
-import { AppContent, AuthRoutes, createQueryClient, Incidents, Jobs, ProtectedApp, retryQuery, retryQueryDelay, Shell, unitBreadcrumb } from './main'
+import { APIError, adminStatus, getSession, listEvents, listIncidents, listJobs, login, logout, recordActivity, setupStatus } from './api'
+import { AppContent, AuthRoutes, createQueryClient, Jobs, ProtectedApp, retryQuery, retryQueryDelay, Shell, unitBreadcrumb } from './main'
 import { renderWithProviders } from './test/test-utils'
 
 vi.mock('./api', async () => {
@@ -41,7 +41,7 @@ describe('application shell', () => {
   beforeEach(() => {
     vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.18.70', version_release_url: 'https://github.com/crypt0rr/EdgeWatch/releases/tag/v0.18.70', updates: { available: true, status: 'update_available', latest_version: 'v0.19.0', release_url: 'https://github.com/crypt0rr/EdgeWatch/releases/tag/v0.19.0' } } as never)
     vi.mocked(listEvents).mockResolvedValue({ events: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null } })
-    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
+    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 0, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] } as never)
     vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'incidents.read', 'incidents.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
     vi.mocked(login).mockResolvedValue({ role: 'administrator', username: 'admin', permissions: ['jobs.write'], csrf_token: '', totp_required: false } as never)
@@ -55,7 +55,7 @@ describe('application shell', () => {
   afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks() })
 
   it('renders permission-aware navigation, update indicator, and incident count', async () => {
-    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination: { limit: 1, offset: 0, total: 3, has_more: true, next_offset: 1 } })
+    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 3, pagination: { limit: 1, offset: 0, total: 3, has_more: true, next_offset: 1 } })
     const onLogout = vi.fn()
     renderWithProviders(<Shell displayName="Alice" role="administrator" permissions={['overview.read', 'jobs.read', 'hosts.read', 'incidents.read', 'scans.read', 'stream.read']} onLogout={onLogout} />)
 
@@ -205,8 +205,12 @@ describe('application shell', () => {
     expect(invalidate).toHaveBeenCalledWith()
     act(() => stream.emit('application.update_status'))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['admin-status'] })
+    invalidate.mockClear()
+    act(() => stream.emit('incident.review.updated', 'job-9'))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['incidents'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['job', 'job-9'] })
     act(() => {
-      for (const type of ['changes-detected', 'changes-reminder', 'changes-recovered', 'incident-opened', 'incident-closed', 'incident-accepted', 'incident-suppressed']) stream.emit(type, 'job-9')
+      for (const type of ['changes-detected', 'changes-reminder', 'changes-recovered', 'incident-opened', 'incident-closed', 'incident-accepted', 'incident-suppressed', 'incident.review.updated']) stream.emit(type, 'job-9')
       for (const type of ['job.created', 'job.updated', 'job.archived', 'job.restored', 'job.deleted']) stream.emit(type, 'job-9')
       stream.emit('notification.changed')
       stream.emit('refresh_required')
@@ -468,117 +472,6 @@ describe('application shell', () => {
     const create = screen.getByRole('button', { name: /Create a job/ })
     expect(create).toBeInTheDocument()
     fireEvent.click(create)
-  })
-
-  it('retries a failed incident list read', async () => {
-    vi.mocked(listIncidents).mockRejectedValueOnce(new Error('incident service unavailable'))
-    renderWithProviders(<Incidents />)
-    await waitFor(() => expect(screen.getByText('Could not load active incidents.')).toBeInTheDocument())
-    vi.mocked(listIncidents).mockResolvedValueOnce({ incidents: [], pagination: { limit: 50, offset: 0, total: 0, has_more: false, next_offset: null } })
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
-    await waitFor(() => expect(screen.getByText('No active incidents')).toBeInTheDocument())
-  })
-
-  it('accepts and suppresses incidents, refreshes conflicts, and disables legacy actions', async () => {
-    const incident = { job_id: 'job-1', job: 'TCP monitor', incident: { change: { key: 'tcp:198.51.100.10:443', kind: 'port', target: '198.51.100.10', protocol: 'tcp', port: 443, old: 'closed', new: 'open', severity: 'critical' }, opened_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:01:00Z' } }
-    const legacy = { ...incident, job_id: 'job-2', incident: { ...incident.incident, change: { ...incident.incident.change, key: undefined, old: undefined, new: undefined } } }
-    vi.mocked(listIncidents).mockResolvedValue({ incidents: [incident, legacy], pagination: { limit: 50, offset: 0, total: 2, has_more: false, next_offset: null } } as never)
-    renderWithProviders(<Incidents />)
-    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Accept change' })).toHaveLength(4))
-    expect(screen.getAllByText('Port opened / tcp:443').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('Critical').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('No before/after value recorded')).toHaveLength(2)
-    expect(screen.getAllByRole('button', { name: 'Accept change' })[1]).toBeDisabled()
-    fireEvent.click(screen.getAllByRole('button', { name: 'Accept change' })[0])
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-    fireEvent.click(screen.getAllByRole('button', { name: 'Accept change' })[0])
-    fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
-    await waitFor(() => expect(acceptIncident).toHaveBeenCalledWith('job-1', 'tcp:198.51.100.10:443', incident.incident.change))
-    fireEvent.click(screen.getAllByRole('button', { name: 'Suppress 1 scan' })[0])
-    fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
-    await waitFor(() => expect(suppressIncident).toHaveBeenCalledWith('job-1', 'tcp:198.51.100.10:443', incident.incident.change))
-
-    vi.mocked(acceptIncident).mockRejectedValueOnce(new APIError('stale incident', 'incident_conflict'))
-    fireEvent.click(screen.getAllByRole('button', { name: 'Accept change' })[0])
-    fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
-    await waitFor(() => {
-      const alert = screen.getByRole('alert')
-      expect(alert).toHaveTextContent('changed while it was open')
-      expect(alert).toHaveFocus()
-    })
-  })
-
-  it('shows incidents without accept or suppress actions to a session that may only read them', async () => {
-    vi.mocked(getSession).mockResolvedValue({ role: 'operator', user_id: 'reader', username: 'reader', permissions: ['incidents.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
-    const incident = { job_id: 'job-1', job: 'TCP monitor', incident: { change: { key: 'tcp:198.51.100.10:443', kind: 'port', target: '198.51.100.10', protocol: 'tcp', port: 443, old: 'closed', new: 'open', severity: 'critical' }, last_seen_at: '2026-09-13T10:00:00Z' } }
-    vi.mocked(listIncidents).mockResolvedValue({ incidents: [incident], pagination: { limit: 50, offset: 0, total: 1, has_more: false, next_offset: null } } as never)
-    renderWithProviders(<Incidents />)
-    await waitFor(() => expect(screen.getAllByText('Port opened / tcp:443').length).toBeGreaterThan(0))
-    await waitFor(() => expect(getSession).toHaveBeenCalled())
-    expect(screen.queryByRole('button', { name: 'Accept change' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Suppress 1 scan' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('columnheader', { name: 'Actions' })).not.toBeInTheDocument()
-  })
-
-  it('shows informational incidents neutrally and closes and refreshes a missing incident action', async () => {
-    const row = { job_id: 'job-1', job: 'Mail monitor', incident: { change: { key: 'service|198.51.100.10|tcp|25', kind: 'service', target: '198.51.100.10', protocol: 'tcp', port: 25, old: 'smtp', new: 'unknown', severity: 'info' }, opened_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:01:00Z' } }
-    const page = { limit: 50, offset: 0, total: 1, has_more: false, next_offset: null }
-    vi.mocked(listIncidents).mockResolvedValue({ incidents: [row], pagination: page } as never)
-    renderWithProviders(<Incidents />)
-    await waitFor(() => expect(screen.getAllByText('Info').length).toBeGreaterThan(0))
-    expect(screen.getAllByText('Info')[0].closest('.pill')).toHaveClass('gray')
-
-    vi.mocked(acceptIncident).mockRejectedValueOnce(new APIError('incident is no longer active', 'incident_not_found'))
-    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination: { ...page, total: 0 } } as never)
-    fireEvent.click(screen.getAllByRole('button', { name: 'Accept change' })[0])
-    fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
-
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-    await waitFor(() => {
-      const alert = screen.getByRole('alert')
-      expect(alert).toHaveTextContent('This incident is no longer active')
-      expect(alert).toHaveFocus()
-    })
-    await waitFor(() => expect(screen.getByText('No active incidents')).toBeInTheDocument())
-    expect(listIncidents).toHaveBeenCalledTimes(2)
-  })
-
-  it('returns to the last non-empty incident page after resolving the only row on a later page', async () => {
-    const incidentRow = (index: number) => ({ job_id: 'job-1', job: 'TCP monitor', incident: { change: { key: `tcp:198.51.100.10:${1000 + index}`, kind: 'port', target: '198.51.100.10', protocol: 'tcp', port: 1000 + index, old: 'closed', new: 'open', severity: 'critical' }, opened_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:01:00Z' } })
-    let active = Array.from({ length: 21 }, (_, index) => incidentRow(index))
-    vi.mocked(listIncidents).mockImplementation(async (offset = 0, limit = 20) => {
-      const rows = active.slice(offset, offset + limit)
-      const hasMore = offset + rows.length < active.length
-      return { incidents: rows, pagination: { limit, offset, total: active.length, has_more: hasMore, next_offset: hasMore ? offset + limit : null } } as never
-    })
-    vi.mocked(acceptIncident).mockImplementation(async (_job, key) => { active = active.filter(row => row.incident.change.key !== key) })
-    renderWithProviders(<Incidents />)
-    await waitFor(() => expect(screen.getByText('1–20 of 21')).toBeInTheDocument())
-    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
-    await waitFor(() => expect(screen.getByText('21–21 of 21')).toBeInTheDocument())
-
-    fireEvent.click(screen.getAllByRole('button', { name: 'Accept change' })[0])
-    fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
-    await waitFor(() => expect(acceptIncident).toHaveBeenCalledWith('job-1', 'tcp:198.51.100.10:1020', expect.anything()))
-
-    // The 20 remaining incidents now fit on the first page; the page must not
-    // claim that there are no incidents or strand the operator on an empty page.
-    await waitFor(() => expect(screen.getAllByText('TCP monitor')).toHaveLength(40))
-    expect(vi.mocked(listIncidents)).toHaveBeenLastCalledWith(0)
-    expect(screen.queryByText('No active incidents')).not.toBeInTheDocument()
-  })
-
-  it('shows the incident empty state only when no incidents remain', async () => {
-    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination: { limit: 20, offset: 0, total: 3, has_more: false, next_offset: null } })
-    renderWithProviders(<Incidents />)
-    await waitFor(() => expect(screen.getByText('No incidents on this page.')).toBeInTheDocument())
-    expect(screen.queryByText('No active incidents')).not.toBeInTheDocument()
-
-    cleanup()
-    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null } })
-    renderWithProviders(<Incidents />)
-    await waitFor(() => expect(screen.getByText('No active incidents')).toBeInTheDocument())
   })
 
   it('routes auth states and bypasses authentication for the public path', async () => {

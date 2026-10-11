@@ -13,27 +13,29 @@ import (
 const jobHistoryPurgeBatchSize = 500
 
 const (
-	jobPurgePhaseCycleCheckpoints = "scan_cycle_discovery_checkpoints"
-	jobPurgePhaseCycleUnits       = "scan_cycle_units"
-	jobPurgePhaseCycles           = "scan_cycles"
-	jobPurgePhasePublicHosts      = "public_dashboard_hosts"
-	jobPurgePhaseBaselineHosts    = "baseline_hosts"
-	jobPurgePhaseIncidents        = "runtime_incidents"
-	jobPurgePhaseRuntime          = "job_runtime"
-	jobPurgePhaseRuntimeMeta      = "job_runtime_meta"
-	jobPurgePhaseSilence          = "job_silence_state"
-	jobPurgePhaseRevisions        = "job_revisions"
-	jobPurgePhaseScanBackfill     = "legacy_scan_host_backfill"
-	jobPurgePhaseScanHosts        = "scan_hosts"
-	jobPurgePhaseScans            = "scans"
-	jobPurgePhaseEvents           = "events"
-	jobPurgePhaseOutbox           = "outbox"
-	jobPurgePhaseQuarantine       = "restore_quarantined_deliveries"
-	jobPurgePhaseLeases           = "job_leases"
-	jobPurgePhaseLatestHosts      = "latest_scan_hosts"
-	jobPurgePhaseRepairHosts      = "repair_latest_scan_hosts"
-	jobPurgePhaseDeleteJob        = "delete_job"
-	jobPurgePhaseComplete         = "complete"
+	jobPurgePhaseCycleCheckpoints      = "scan_cycle_discovery_checkpoints"
+	jobPurgePhaseCycleUnits            = "scan_cycle_units"
+	jobPurgePhaseCycles                = "scan_cycles"
+	jobPurgePhasePublicHosts           = "public_dashboard_hosts"
+	jobPurgePhaseBaselineHosts         = "baseline_hosts"
+	jobPurgePhaseIncidents             = "runtime_incidents"
+	jobPurgePhaseIncidentReviewHistory = "incident_review_history"
+	jobPurgePhaseIncidentReviews       = "incident_reviews"
+	jobPurgePhaseRuntime               = "job_runtime"
+	jobPurgePhaseRuntimeMeta           = "job_runtime_meta"
+	jobPurgePhaseSilence               = "job_silence_state"
+	jobPurgePhaseRevisions             = "job_revisions"
+	jobPurgePhaseScanBackfill          = "legacy_scan_host_backfill"
+	jobPurgePhaseScanHosts             = "scan_hosts"
+	jobPurgePhaseScans                 = "scans"
+	jobPurgePhaseEvents                = "events"
+	jobPurgePhaseOutbox                = "outbox"
+	jobPurgePhaseQuarantine            = "restore_quarantined_deliveries"
+	jobPurgePhaseLeases                = "job_leases"
+	jobPurgePhaseLatestHosts           = "latest_scan_hosts"
+	jobPurgePhaseRepairHosts           = "repair_latest_scan_hosts"
+	jobPurgePhaseDeleteJob             = "delete_job"
+	jobPurgePhaseComplete              = "complete"
 )
 
 type jobHistoryPurgeOptions struct {
@@ -66,6 +68,8 @@ var jobHistoryPurgeSteps = []jobHistoryPurgeStep{
 	{jobPurgePhasePublicHosts, "public_dashboard_hosts", `SELECT rowid FROM public_dashboard_hosts WHERE job_id=?2 ORDER BY rowid`},
 	{jobPurgePhaseBaselineHosts, "baseline_hosts", `SELECT rowid FROM baseline_hosts WHERE job_id=?2 ORDER BY rowid`},
 	{jobPurgePhaseIncidents, "runtime_incidents", `SELECT rowid FROM runtime_incidents WHERE job_id=?2 ORDER BY rowid`},
+	{jobPurgePhaseIncidentReviewHistory, "incident_review_history", `SELECT rowid FROM incident_review_history WHERE job_id=?2 ORDER BY rowid`},
+	{jobPurgePhaseIncidentReviews, "incident_reviews", `SELECT rowid FROM incident_reviews WHERE job_id=?2 ORDER BY rowid`},
 	{jobPurgePhaseRuntime, "job_runtime", `SELECT rowid FROM job_runtime WHERE job_id=?2 ORDER BY rowid`},
 	{jobPurgePhaseRuntimeMeta, "job_runtime_meta", `SELECT rowid FROM job_runtime_meta WHERE job_id=?2 ORDER BY rowid`},
 	{jobPurgePhaseSilence, "job_silence_state", `SELECT rowid FROM job_silence_state WHERE job_id=?2 ORDER BY rowid`},

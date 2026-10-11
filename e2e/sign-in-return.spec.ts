@@ -63,6 +63,6 @@ test('signing in again after the session ends returns to the page that was open'
   await page.goto('/incidents')
   await signIn(page)
 
-  await expect(page.getByRole('heading', { name: 'Incidents', level: 1 })).toBeVisible()
-  await expect(page).toHaveURL(/\/incidents$/)
+  await expect(page.getByRole('heading', { name: 'Investigation inbox', level: 1 })).toBeVisible()
+  await expect(page).toHaveURL(/\/incidents\?view=needs_review&offset=0$/)
 })

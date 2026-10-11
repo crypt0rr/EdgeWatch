@@ -115,6 +115,7 @@ var auditActionCategories = map[string]string{
 	"job.notification_destination_replaced":    auditCategoryData,
 	"job.paused":                               auditCategoryData,
 	"job.rebaseline_requested":                 auditCategoryData,
+	"incident.review.updated":                  auditCategoryData,
 	"job.restored":                             auditCategoryData,
 	"job.resumed":                              auditCategoryData,
 	"job.updated":                              auditCategoryData,

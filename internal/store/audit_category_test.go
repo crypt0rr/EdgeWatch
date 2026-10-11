@@ -50,7 +50,7 @@ var knownAuditActions = map[string][]string{
 	},
 	auditCategoryData: {
 		"baseline.approved", "baseline.reset",
-		"incident.accepted", "incident.suppressed",
+		"incident.accepted", "incident.review.updated", "incident.suppressed",
 		"job.archived", "job.created", "job.deleted",
 		"job.notification_destination_removed", "job.notification_destination_replaced",
 		"job.paused", "job.rebaseline_requested", "job.restored", "job.resumed", "job.updated",

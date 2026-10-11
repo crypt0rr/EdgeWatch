@@ -93,14 +93,16 @@ var tenancyTables = map[string]tableTenancy{
 	"users":                          directTable,
 
 	// A job's configuration, baseline, and runtime state.
-	"baseline_hosts":         viaTable("jobs"),
-	"job_revisions":          viaTable("jobs"),
-	"job_runtime":            viaTable("jobs"),
-	"job_runtime_meta":       viaTable("jobs"),
-	"job_silence_state":      viaTable("jobs"),
-	"public_dashboard_hosts": viaTable("jobs"),
-	"runtime_incidents":      viaTable("jobs"),
-	"scan_cycles":            viaTable("jobs"),
+	"baseline_hosts":          viaTable("jobs"),
+	"incident_reviews":        viaTable("jobs"),
+	"incident_review_history": viaTable("incident_reviews"),
+	"job_revisions":           viaTable("jobs"),
+	"job_runtime":             viaTable("jobs"),
+	"job_runtime_meta":        viaTable("jobs"),
+	"job_silence_state":       viaTable("jobs"),
+	"public_dashboard_hosts":  viaTable("jobs"),
+	"runtime_incidents":       viaTable("jobs"),
+	"scan_cycles":             viaTable("jobs"),
 
 	// Resumable scan work and scan results.
 	"legacy_scan_host_backfill":        viaTable("scans"),

@@ -467,8 +467,9 @@ func TestMigration54KeysLatestHostsByTenant(t *testing.T) {
 		t.Fatalf("%s heartbeats = %v, want %v", latestScanHostsTenantPhase, got, progress)
 	}
 	phases := queryStrings(t, s.DB, `SELECT phase FROM migration_progress_observations WHERE phase NOT LIKE 'timestamp-normalization:%' AND phase NOT LIKE 'host-search:%' GROUP BY phase ORDER BY MIN(rowid)`)
-	if len(phases) < 3 || phases[0] != "schema" || phases[1] != latestScanHostsTenantPhase || phases[2] != "timestamp-normalization" {
-		t.Fatalf("startup phases = %v, want %s right after the schema steps", phases, latestScanHostsTenantPhase)
+	wantPhasePrefix := []string{"schema", "incident-inbox-projection", latestScanHostsTenantPhase, "timestamp-normalization"}
+	if len(phases) < len(wantPhasePrefix) || !slices.Equal(phases[:len(wantPhasePrefix)], wantPhasePrefix) {
+		t.Fatalf("startup phases = %v, want %v in order", phases, wantPhasePrefix)
 	}
 
 	// The writers use the tenant key: a newer scan replaces the row in

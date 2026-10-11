@@ -665,13 +665,18 @@ test.describe('responsive issue regressions', () => {
     await page.setViewportSize({ width: 820, height: 900 })
     await mockConsole(page, 'administrator')
     await page.goto('/incidents')
-    await expect(page.locator('.desktop-incident-table')).toBeHidden()
-    await expect(page.locator('.mobile-incident-list')).toBeVisible()
-    const incidentCard = page.locator('.mobile-incident-list article').first()
-    const action = incidentCard.getByRole('button', { name: 'Accept change' })
+    await expect(page.locator('.inbox-desktop-table')).toBeHidden()
+    await expect(page.locator('.inbox-mobile-list')).toBeVisible()
+    const incidentCard = page.locator('.inbox-mobile-list article').first()
+    const action = incidentCard.getByRole('button', { name: 'Review evidence' })
     await expect(action).toBeVisible()
     const [cardBox, actionBox] = await Promise.all([incidentCard.boundingBox(), action.boundingBox()])
     expect(actionBox!.x + actionBox!.width).toBeLessThanOrEqual(cardBox!.x + cardBox!.width)
+    await action.click()
+    const evidence = page.getByRole('complementary', { name: 'Evidence and review' })
+    const accept = evidence.getByRole('button', { name: 'Accept change' })
+    const [evidenceBox, acceptBox] = await Promise.all([evidence.boundingBox(), accept.boundingBox()])
+    expect(acceptBox!.x + acceptBox!.width).toBeLessThanOrEqual(evidenceBox!.x + evidenceBox!.width)
 
     const address = '2001:db8:85a3::8a2e:370:7334'
     const fingerprint = `${'Apache httpd OpenSSL mod_wsgi Python mod_perl '.repeat(5)}2.4.62`
@@ -705,6 +710,9 @@ test.describe('responsive issue regressions', () => {
     const rows = Array.from({ length: 8 }, (_, i) => ({
       job_id: 'job-1',
       job: 'Customer-facing API gateway perimeter monitoring for the EU West production estate (weekly)',
+      occurrence_token: `occurrence-${i}`,
+      opening_time_known: true, opening_scan_available: true,
+      view_status: 'needs_review',
       incident: {
         change: {
           key: `svc-${i}`,
@@ -718,45 +726,47 @@ test.describe('responsive issue regressions', () => {
         },
         opened_at: timestamp,
         last_seen_at: timestamp,
+        scan_id: 'scan-1',
+        recovery_count: 0,
       },
+      review: { status: 'needs_review', reviewer_label: null, reviewed_at: null, note: '', follow_up_at: null, revision: 0 },
+      observation_uncertainty: { status: 'unknown', reason: 'no_newer_observation' },
     }))
     await page.route(url => new URL(url).pathname === '/api/v1/incidents', async route => {
       if (route.request().method() !== 'GET') return route.fallback()
-      await route.fulfill({ json: { incidents: rows, pagination: { limit: 50, offset: 0, total: rows.length, has_more: false, next_offset: null } } })
+      await route.fulfill({ json: { incidents: rows, pagination: { limit: 20, offset: 0, total: rows.length, has_more: false, next_offset: null }, truncated: false, active_count: rows.length } })
     })
 
-    for (const width of [1101, 1180, 1280, 1920]) {
+    for (const width of [375, 820, 1024, 1280, 1920]) {
       await page.setViewportSize({ width, height: 900 })
       await page.goto('/incidents')
-      const card = page.locator('.incident-table-card')
+      const card = page.locator('.inbox-table-card')
       const cardBox = (await card.boundingBox())!
-      if (width <= 1400) {
-        await expect(page.locator('.desktop-incident-table')).toBeHidden()
-        const cards = page.locator('.mobile-incident-list .incident-card')
+      if (width <= 900) {
+        await expect(page.locator('.inbox-desktop-table')).toBeHidden()
+        const cards = page.locator('.inbox-mobile-list .inbox-incident-card')
         await expect(cards).toHaveCount(rows.length)
         for (const incidentCard of await cards.all()) {
-          await expect(incidentCard.locator('.pill')).toBeVisible()
-          await expect(incidentCard.locator('.incident-facts')).toContainText('Last seen')
+          await expect(incidentCard.locator('.pill').first()).toBeVisible()
+          await expect(incidentCard.locator('.incident-facts')).toContainText('Opened')
           const incidentBox = (await incidentCard.boundingBox())!
-          for (const button of await incidentCard.locator('.incident-actions button').all()) {
+          for (const button of await incidentCard.getByRole('button').all()) {
             const buttonBox = await button.boundingBox()
-            expect(buttonBox, `incident action is missing at ${width}px`).not.toBeNull()
+            expect(buttonBox, `evidence button is missing at ${width}px`).not.toBeNull()
             expect(buttonBox!.x).toBeGreaterThanOrEqual(incidentBox.x)
             expect(buttonBox!.x + buttonBox!.width).toBeLessThanOrEqual(incidentBox.x + incidentBox.width)
           }
         }
       } else {
-        await expect(page.locator('.desktop-incident-table')).toBeVisible()
+        await expect(page.locator('.inbox-desktop-table')).toBeVisible()
         const dimensions = await card.evaluate(element => ({ client: element.clientWidth, scroll: element.scrollWidth }))
-        expect(dimensions.scroll, `incident table overflows its card at ${width}px`).toBeLessThanOrEqual(dimensions.client)
+        expect(await card.evaluate(element => getComputedStyle(element).overflowX)).toBe('auto')
+        expect(dimensions.scroll, `incident table width at ${width}px`).toBeGreaterThanOrEqual(dimensions.client)
 
-        const importantCells = page.locator('.desktop-incident-table tbody tr td:nth-child(4), .desktop-incident-table tbody tr td:nth-child(5), .desktop-incident-table .incident-actions button')
-        for (const element of await importantCells.all()) {
-          const box = await element.boundingBox()
-          expect(box, `incident action or detail is missing at ${width}px`).not.toBeNull()
-          expect(box!.x, `incident content starts outside the card at ${width}px`).toBeGreaterThanOrEqual(cardBox.x)
-          expect(box!.x + box!.width, `incident content ends outside the card at ${width}px`).toBeLessThanOrEqual(cardBox.x + cardBox.width)
-        }
+        const evidence = page.locator('.inbox-desktop-table tbody tr button')
+        await expect(evidence.first()).toBeVisible()
+        const box = await evidence.first().boundingBox()
+        expect(box!.x).toBeGreaterThanOrEqual(cardBox.x)
       }
       await expectNoHorizontalScroll(page, `/incidents at ${width}px`)
     }
@@ -767,6 +777,9 @@ test.describe('responsive issue regressions', () => {
     const rows = Array.from({ length: 12 }, (_, i) => ({
       job_id: 'job-1',
       job: 'Public web',
+      occurrence_token: `occurrence-${i}`,
+      opening_time_known: true, opening_scan_available: true,
+      view_status: 'needs_review',
       incident: {
         change: {
           key: `port|192.0.2.${i + 1}|tcp|443`,
@@ -780,7 +793,11 @@ test.describe('responsive issue regressions', () => {
         },
         opened_at: timestamp,
         last_seen_at: timestamp,
+        scan_id: 'scan-1',
+        recovery_count: 0,
       },
+      review: { status: 'needs_review', reviewer_label: null, reviewed_at: null, note: '', follow_up_at: null, revision: 0 },
+      observation_uncertainty: { status: 'unknown', reason: 'no_newer_observation' },
     }))
     const staleScenarios = [
       { viewport: { width: 375, height: 812 }, status: 409, code: 'incident_conflict', message: 'This incident changed while it was open. The incident list was refreshed; review the new evidence before retrying.' },
@@ -791,7 +808,7 @@ test.describe('responsive issue regressions', () => {
     let activeScenario: typeof staleScenarios[number] = staleScenarios[0]
     await page.route(url => new URL(url).pathname === '/api/v1/incidents', async route => {
       if (route.request().method() !== 'GET') return route.fallback()
-      await route.fulfill({ json: { incidents: rows, pagination: { limit: 50, offset: 0, total: rows.length, has_more: false, next_offset: null } } })
+      await route.fulfill({ json: { incidents: rows, pagination: { limit: 20, offset: 0, total: rows.length, has_more: false, next_offset: null }, truncated: false, active_count: rows.length } })
     })
     await page.route('**/api/v1/jobs/job-1/incidents/accept', async route => {
       await route.fulfill({ status: activeScenario.status, json: { error: { code: activeScenario.code, message: 'incident changed' } } })
@@ -801,10 +818,11 @@ test.describe('responsive issue regressions', () => {
       activeScenario = scenario
       await page.setViewportSize(scenario.viewport)
       await page.goto('/incidents')
-      await expect(page.locator('.mobile-incident-list .incident-card')).toHaveCount(rows.length)
-      const accept = page.getByRole('button', { name: 'Accept change' }).last()
-      await accept.scrollIntoViewIfNeeded()
-      await accept.click()
+      const review = page.getByRole('button', { name: 'Review evidence' }).last()
+      await review.scrollIntoViewIfNeeded()
+      await review.click()
+      const panel = page.getByRole('complementary', { name: 'Evidence and review' })
+      await panel.getByRole('button', { name: 'Accept change' }).click()
       const dialog = page.getByRole('dialog', { name: 'Accept this change?' })
       await dialog.getByRole('button', { name: 'Accept change' }).click()
 

@@ -141,6 +141,36 @@ From **Incidents**, administrators and operators can:
 - **Suppress 1 scan** to defer the alert for the next successful scan. If the
   change remains, it is reported again afterward.
 
+The **Investigation inbox** adds shared review metadata for active incidents;
+it does not change scan comparisons, notifications, or reminders. Reviewers
+with `incidents.read` can inspect the inbox, while saving review status, a note,
+or a follow-up time requires `incidents.manage`. **Needs review** includes
+incidents with no saved review and incidents explicitly returned for review.
+**Investigating** includes an investigation with no follow-up time or one due in
+the future. **Follow-up due** includes investigations whose follow-up instant
+has arrived or passed. **All active** shows every active incident. Returning an
+incident to **Needs review** clears its follow-up time but keeps its note.
+
+The inbox can filter by job, severity, and change kind. It orders matching
+incidents by severity (critical, warning, then info), oldest opening time,
+and stable tie-breakers before paging, so pages preserve the same priority
+order. The displayed total follows the selected view and filters; the global
+active-incident count remains unfiltered. Opening an incident keeps these
+filters and its page in the URL. Its evidence panel shows the observed change,
+scan provenance, reviewer metadata, and any known observation uncertainty.
+When scan or host evidence is available, its link is labelled as opening in a
+new tab so the inbox context stays open.
+
+A plain-text review note is shared with other reviewers and can contain up to
+4096 UTF-8 bytes. A follow-up is an exact instant entered in the console's
+displayed timezone; that timezone is shown beside the field and the resulting
+instant is shown before saving. A time already past is allowed and appears
+immediately in **Follow-up due**. Times more than 30 days ahead are not
+accepted. During a daylight-saving clock change, a local time that does not exist must be changed;
+if a local time occurs twice, select which displayed UTC offset to use. These
+review fields record operator context only; they do not silence or alter
+existing alerts and reminders.
+
 The **Hosts** page aggregates the latest successful result for each effective
 IP. A host detail page shows configured-target relationships, TCP/UDP coverage,
 positive ports, services, scanner provenance, and summarized closed/filtered

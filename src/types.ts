@@ -37,7 +37,6 @@ export type ActiveScan = {
 export type QueuedRun = { job_id: string; job: string; queued_at: string; trigger: 'manual' | 'scheduled' | string }
 export type ScanCycleUnit = { cycle_id: string; sequence: number; engine?: string; phase?: string; protocol: string; family: number; ports: string; port_count: number; addresses: number; probes: number; status: string; attempts: number; started_at?: string; finished_at?: string; last_error?: string }
 export type ScanCycle = { id: string; job_id: string; job_revision: number; status: string; attempt_count: number; no_progress_attempts: number; total_units: number; completed_units: number; total_probes: number; completed_probes: number; started_at: string; updated_at: string; expires_at: string; finished_at?: string; last_error?: string; units?: ScanCycleUnit[] }
-export type Incident = { job_id: string; job: string; incident: { change: Change; scan_id?: string; opened_at: string; last_seen_at: string; recovery_count?: number } }
 export type ActivityEvent = {
   type: string
   job_id?: string

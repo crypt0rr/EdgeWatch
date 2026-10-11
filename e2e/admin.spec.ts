@@ -77,7 +77,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
       return
     }
     if (path === '/incidents' && method === 'GET') {
-      await json({ incidents: [{ job_id: 'job-existing', job: 'nightly', incident: { change: { key: 'port|192.0.2.2|tcp|443', kind: 'port', target: '192.0.2.2', protocol: 'tcp', port: 443, severity: 'high' }, opened_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:00:00Z' } }], pagination: { limit: 1, offset: 0, total: 1, has_more: false, next_offset: null } })
+      await json({ incidents: [{ job_id: 'job-existing', job: 'nightly', occurrence_token: 'occurrence-existing', opening_time_known: true, opening_scan_available: true, view_status: 'needs_review', incident: { change: { key: 'port|192.0.2.2|tcp|443', kind: 'port', target: '192.0.2.2', protocol: 'tcp', port: 443, severity: 'critical' }, scan_id: 'scan-1', opened_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:00:00Z', recovery_count: 0 }, review: { status: 'needs_review', reviewer_label: null, reviewed_at: null, note: '', follow_up_at: null, revision: 0 }, observation_uncertainty: { status: 'unknown', reason: 'no_newer_observation' } }], pagination: { limit: 20, offset: 0, total: 1, has_more: false, next_offset: null }, truncated: false, active_count: 1 })
       return
     }
     if (path === '/hosts' && method === 'GET') {
@@ -195,6 +195,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   const closeNavigation = page.getByRole('button', { name: 'Close navigation' }).first()
   if (await closeNavigation.isVisible()) await closeNavigation.click()
   await navigateFromShell(page, 'Incidents')
+  await page.getByRole('button', { name: 'Review evidence' }).click()
   await expect(page.getByRole('button', { name: 'Accept change' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Suppress 1 scan' })).toBeVisible()
   await navigateFromShell(page, 'Hosts')
@@ -293,7 +294,7 @@ test('host explorer renders every RDAP state without exposing contact data', asy
     if (path === '/setup/status' && method === 'GET') { await json({ configured: true, setup_available: false, password_requirements: { minimum_length: 12 } }); return }
     if (path === '/status' && method === 'GET') { await json({ configured: true, version: 'v0.7.0', updates: { enabled: false, status: 'disabled', current_version: 'v0.7.0' } }); return }
     if (path === '/auth/session' && method === 'GET') { await json({ username: 'admin', role: 'administrator', permissions: adminPermissions, csrf_token: 'test-csrf', totp_enabled: false, password_requirements: { minimum_length: 12 } }); return }
-    if (path === '/incidents' && method === 'GET') { await json({ incidents: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } }); return }
+    if (path === '/incidents' && method === 'GET') { await json({ incidents: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null }, truncated: false, active_count: 0 }); return }
     if (path === '/jobs/job-1/baseline/hosts' && method === 'GET') {
       await json({ job_id: 'job-1', job: 'fleet', data_quality: 'detailed', hosts: addresses.map(address => ({ address, address_family: address.includes(':') ? 'IPv6' : 'IPv4', source_targets: ['fleet.example.com'], dns_names: ['fleet.example.com'], protocols: [{ protocol: 'tcp', scanned_ports: '443', scanned_port_count: 1, service_detection: true, open_ports: 1, open_filtered_ports: 0 }], open_ports: 1, open_filtered_ports: 0, has_open_ports: true })), pagination: { limit: 50, offset: 0, total: addresses.length, has_more: false, next_offset: null } })
       return

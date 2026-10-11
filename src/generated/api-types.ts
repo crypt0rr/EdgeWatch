@@ -288,6 +288,62 @@ export type Change = {
   new?: string
 }
 
+// Incident is model.Incident.
+export type Incident = {
+  change: Change
+  scan_id?: string
+  opened_at: string
+  last_seen_at: string
+  recovery_count: number
+}
+
+// IncidentReview is store.IncidentReview.
+export type IncidentReview = {
+  status: string
+  reviewer_label: string | null
+  reviewed_at: string | null
+  note: string
+  follow_up_at: string | null
+  revision: number
+}
+
+// IncidentObservationUncertainty is store.IncidentObservationUncertainty.
+export type IncidentObservationUncertainty = {
+  status: string
+  reason?: string
+  scan_id?: string
+  observed_at?: string
+}
+
+// IncidentInboxItem is store.IncidentInboxItem.
+export type IncidentInboxItem = {
+  job_id: string
+  job: string
+  incident: Incident
+  occurrence_token: string
+  opening_time_known: boolean
+  view_status: string
+  review: IncidentReview
+  observation_uncertainty: IncidentObservationUncertainty
+}
+
+// IncidentInboxPagination is store.IncidentInboxPagination.
+export type IncidentInboxPagination = {
+  limit: number
+  offset: number
+  total: number
+  has_more: boolean
+  next_offset: number | null
+}
+
+// IncidentInboxPage is web.IncidentInboxPage.
+export type IncidentInboxPage = {
+  incidents: IncidentInboxItem[] | null
+  pagination: IncidentInboxPagination
+  truncated: boolean
+  active_count: number
+}
+
 // Snapshot is model.Snapshot.
 export type Snapshot = {
   units: Unit[] | null

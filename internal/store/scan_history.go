@@ -670,6 +670,85 @@ func (ts *TenantStore) GetLatestSuccessfulJobScanSummary(ctx context.Context, jo
 	return &v, nil
 }
 
+// JobScanStatusSummary is the bounded execution metadata shown in the Jobs
+// list. It deliberately omits scan errors, comparison payloads, and snapshots.
+type JobScanStatusSummary struct {
+	ID         string
+	Status     string
+	StartedAt  time.Time
+	FinishedAt time.Time
+}
+
+// JobExecutionSummary keeps the latest attempt separate from the latest
+// successful scan. Either pointer is nil when that job has no matching scan.
+type JobExecutionSummary struct {
+	LatestAttempt        *JobScanStatusSummary
+	LatestSuccessfulScan *JobScanStatusSummary
+}
+
+const jobExecutionSummariesSQL = `SELECT j.id,
+ attempt.id,attempt.status,attempt.started_at,attempt.finished_at,
+ successful.id,successful.status,successful.started_at,successful.finished_at
+FROM jobs AS j
+LEFT JOIN scans AS attempt ON attempt.id=(
+ SELECT candidate.id FROM scans AS candidate
+ WHERE candidate.tenant_id=j.tenant_id AND candidate.job_id=j.id
+ AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)
+ ORDER BY candidate.finished_at DESC,candidate.id DESC LIMIT 1
+) AND attempt.tenant_id=j.tenant_id
+LEFT JOIN scans AS successful ON successful.id=(
+ SELECT candidate.id FROM scans AS candidate
+ WHERE candidate.tenant_id=j.tenant_id AND candidate.job_id=j.id AND candidate.status='success'
+ AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)
+ ORDER BY candidate.finished_at DESC,candidate.id DESC LIMIT 1
+) AND successful.tenant_id=j.tenant_id
+WHERE j.tenant_id=? AND (?=1 OR j.archived=0)
+ AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`
+
+// ListJobExecutionSummaries returns at most one latest attempt and one latest
+// successful scan for each visible job in one tenant-scoped query. The
+// correlated lookups use the job-history index and never select scan JSON.
+func (ts *TenantStore) ListJobExecutionSummaries(ctx context.Context, includeArchived bool) (map[string]JobExecutionSummary, error) {
+	if err := ts.ready(); err != nil {
+		return nil, err
+	}
+	rows, err := ts.store.reader().QueryContext(ctx, jobExecutionSummariesSQL, ts.scope.id, boolInt(includeArchived))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[string]JobExecutionSummary)
+	for rows.Next() {
+		var jobID string
+		var attemptID, attemptStatus, attemptStarted, attemptFinished sql.NullString
+		var successID, successStatus, successStarted, successFinished sql.NullString
+		if err := rows.Scan(&jobID,
+			&attemptID, &attemptStatus, &attemptStarted, &attemptFinished,
+			&successID, &successStatus, &successStarted, &successFinished,
+		); err != nil {
+			return nil, err
+		}
+		summary := JobExecutionSummary{}
+		if attemptID.Valid {
+			summary.LatestAttempt = &JobScanStatusSummary{
+				ID: attemptID.String, Status: attemptStatus.String,
+				StartedAt: scanTime(attemptStarted.String), FinishedAt: scanTime(attemptFinished.String),
+			}
+		}
+		if successID.Valid {
+			summary.LatestSuccessfulScan = &JobScanStatusSummary{
+				ID: successID.String, Status: successStatus.String,
+				StartedAt: scanTime(successStarted.String), FinishedAt: scanTime(successFinished.String),
+			}
+		}
+		result[jobID] = summary
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // GetScanComparison returns the metadata and the immutable scan-time change
 // list of one of the tenant's scans without loading snapshot_json. Legacy
 // rows without a scan-time comparison can be resolved through GetScan when

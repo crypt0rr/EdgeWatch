@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQuery } from '@tanstack/react-query'
 import { useLocation } from 'react-router-dom'
 import { APIError, adminStatus, getSession, listEvents, listIncidents, listJobs, login, logout, recordActivity, setupStatus } from './api'
+import { formatDateTime } from './format'
 import { AppContent, AuthRoutes, createQueryClient, Jobs, ProtectedApp, retryQuery, retryQueryDelay, Shell, unitBreadcrumb } from './main'
 import { renderWithProviders } from './test/test-utils'
 
@@ -443,9 +444,117 @@ describe('application shell', () => {
   it('shows paused jobs in amber on the jobs list', async () => {
     vi.mocked(listJobs).mockResolvedValue({ jobs: [{ id: 'job-paused', revision: 1, enabled: false, archived: false, job: { name: 'Paused monitor', targets: [], schedule: '0 * * * *' }, baseline: { status: 'complete', samples: 1, host_count: 0 } }] } as never)
     renderWithProviders(<Jobs />)
-    const card = await screen.findByRole('link', { name: /Paused monitor/ })
+    const headingLink = await screen.findByRole('link', { name: 'Paused monitor' })
+    const card = headingLink.closest('article.job-card')!
     expect(card.querySelector('.pill')).toHaveTextContent('Paused')
     expect(card.querySelector('.pill')).toHaveClass('amber')
+  })
+
+  it('filters the complete tenant job list by explicit attention reasons', async () => {
+    const allJobs = Array.from({ length: 9 }, (_, index) => ({
+      id: `job-${index + 1}`,
+      revision: 1,
+      enabled: true,
+      archived: false,
+      job: { name: `Monitor ${index + 1}`, targets: ['198.51.100.10'], tcp: { ports: '443' }, schedule: '0 * * * *' },
+      baseline: { status: 'complete', samples: 1 },
+      monitoring: {
+        availability: 'available', history_available: true, activity: 'none', schedule_state: 'scheduled',
+        next_run_at: '2026-10-12T00:00:00Z', timezone: 'UTC', latest_attempt: null,
+        latest_successful_scan: null, attention_reason: index === 8 ? 'incomplete' : 'none',
+      },
+    }))
+    vi.mocked(listJobs).mockResolvedValue({ jobs: allJobs } as never)
+    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: ['jobs.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    renderWithProviders(<Jobs />)
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Monitor 9' })).toBeInTheDocument())
+    expect(screen.getByText('Showing 9 of 9 jobs')).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter jobs' }), { target: { value: 'attention' } })
+    expect(screen.getByRole('heading', { name: 'Monitor 9' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Monitor 1' })).not.toBeInTheDocument()
+    expect(screen.getByText('Showing 1 of 9 jobs')).toBeInTheDocument()
+    expect(screen.getByText(/Needs attention · Latest scan incomplete/)).toBeInTheDocument()
+  })
+
+  it('refreshes the attention filter for a viewer without stream events', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const jobResponse = (status: string, attention: string, nextRunAt: string) => ({ jobs: [{
+      id: 'polling-job', revision: 1, enabled: true, archived: false,
+      job: { name: 'Polling monitor', targets: ['198.51.100.10'], schedule: '0 * * * *' },
+      baseline: { status: 'complete', samples: 1 },
+      monitoring: {
+        availability: 'available', history_available: true, activity: 'none', schedule_state: 'scheduled',
+        next_run_at: nextRunAt, timezone: 'UTC',
+        latest_attempt: { status, started_at: '2026-10-11T12:00:00Z', finished_at: '2026-10-11T12:01:00Z' },
+        latest_successful_scan: null, attention_reason: attention,
+      },
+    }] })
+    const responses = [
+      jobResponse('success', 'none', '2026-10-12T00:00:00Z'),
+      jobResponse('failed', 'failed', '2026-10-13T00:00:00Z'),
+    ]
+    vi.mocked(listJobs).mockImplementation(async () => (responses.shift() ?? jobResponse('failed', 'failed', '2026-10-13T00:00:00Z')) as never)
+    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: ['jobs.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    renderWithProviders(<Jobs />)
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Polling monitor' })).toBeInTheDocument())
+    expect(listJobs).toHaveBeenCalledTimes(1)
+    expect(screen.getByText(formatDateTime('2026-10-12T00:00:00Z'))).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter jobs' }), { target: { value: 'attention' } })
+    expect(screen.getByText('No available jobs need attention')).toBeInTheDocument()
+    expect(EventSourceStub.instances).toHaveLength(0)
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+    await waitFor(() => expect(screen.getByText(/Needs attention · Latest scan failed/)).toBeInTheDocument())
+    expect(screen.getByText(formatDateTime('2026-10-13T00:00:00Z'))).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Polling monitor' })).toBeInTheDocument()
+    expect(listJobs).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows explicit unknown and no-scan states and gates scan links by permission', async () => {
+    const monitoredJob = {
+      id: 'monitoring-job', revision: 1, enabled: true, archived: false,
+      job: { name: 'Monitoring permissions', targets: ['198.51.100.10'], schedule: '' },
+      baseline: { status: 'learning', samples: 0 },
+      monitoring: {
+        availability: 'available', history_available: true, activity: 'none', schedule_state: 'manual', next_run_at: null, timezone: 'UTC',
+        latest_attempt: { scan_id: 'private-scan', status: 'failed', started_at: null, finished_at: null },
+        latest_successful_scan: null, attention_reason: 'failed',
+      },
+    }
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [monitoredJob] } as never)
+    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: ['jobs.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    renderWithProviders(<Jobs />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Monitoring permissions' })).toBeInTheDocument())
+    expect(screen.getByText('Unknown time')).toBeInTheDocument()
+    expect(screen.getByText('No successful scan yet')).toBeInTheDocument()
+    expect(screen.getByText('Manual runs only')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'View attempt' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/private-scan/)).not.toBeInTheDocument()
+
+    cleanup()
+    vi.mocked(getSession).mockResolvedValueOnce({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['jobs.read', 'scans.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    renderWithProviders(<Jobs />)
+    const attemptLink = await screen.findByRole('link', { name: 'View attempt' })
+    expect(attemptLink).toHaveAttribute('href', '/jobs/monitoring-job/scans/private-scan')
+  })
+
+  it('distinguishes unavailable history from an available no-scan job', async () => {
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [{
+      id: 'unknown-monitor', revision: 1, enabled: false, archived: false,
+      job: { name: 'Unknown monitor', targets: ['198.51.100.12'], schedule: '0 * * * *' }, baseline: { status: 'learning', samples: 0 },
+      monitoring: { availability: 'unavailable', history_available: false, activity: null, schedule_state: 'paused', next_run_at: null, timezone: 'UTC', latest_attempt: null, latest_successful_scan: null, attention_reason: 'none' },
+    }] } as never)
+    renderWithProviders(<Jobs />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Unknown monitor' })).toBeInTheDocument())
+    expect(screen.getAllByText('Unavailable')).toHaveLength(2)
+    expect(screen.getByText('Current work status unavailable')).toBeInTheDocument()
+    expect(screen.getByText('Some monitoring status is unavailable; known details remain shown.')).toBeInTheDocument()
+    expect(screen.queryByText('No scan recorded yet')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter jobs' }), { target: { value: 'attention' } })
+    expect(screen.getByText('No available jobs need attention')).toBeInTheDocument()
+    expect(screen.getByText(/Monitoring status is unavailable for 1 job; that job is not included in this filter/)).toBeInTheDocument()
   })
 
   it('lists a baseline whose stored scope is being updated as ready', async () => {

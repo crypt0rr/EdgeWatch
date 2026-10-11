@@ -174,7 +174,7 @@ var apiRoutes = withPathAlias("/scanner-profiles", "/scanner/profiles", []apiRou
 	}},
 
 	// Jobs.
-	{Method: http.MethodGet, Template: "/jobs", Permission: auth.PermissionJobsRead, Example: "/jobs", Handle: tenantHandler((*Server).listJobs)},
+	{Method: http.MethodGet, Template: "/jobs", Permission: auth.PermissionJobsRead, Example: "/jobs", Handle: sessionTenantHandler((*Server).listJobsWithSession)},
 	{Method: http.MethodPost, Template: "/jobs", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs", Handle: sessionTenantHandler((*Server).createJob)},
 	{Method: http.MethodPost, Template: "/jobs/preview", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/preview", Handle: sessionTenantHandler((*Server).previewJob)},
 	{Method: http.MethodGet, Template: "/jobs/schedule-suggestion", Permission: auth.PermissionJobsRead, Example: "/jobs/schedule-suggestion", Handle: tenantHandler((*Server).scheduleSuggestion)},

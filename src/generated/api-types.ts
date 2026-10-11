@@ -275,6 +275,27 @@ export type ScanSummary = {
   comparison?: string
 }
 
+// JobScanStatus is web.jobScanStatusView.
+export type JobScanStatus = {
+  scan_id?: string
+  status: string
+  started_at: string | null
+  finished_at: string | null
+}
+
+// JobMonitoringSummary is web.jobMonitoringSummaryView.
+export type JobMonitoringSummary = {
+  availability: string
+  history_available: boolean
+  activity: string | null
+  schedule_state: string
+  next_run_at: string | null
+  timezone: string
+  latest_attempt: JobScanStatus | null
+  latest_successful_scan: JobScanStatus | null
+  attention_reason: string
+}
+
 // Change is model.Change.
 export type Change = {
   key: string

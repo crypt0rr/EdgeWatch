@@ -1,7 +1,7 @@
 VERSION ?= dev
 GO_LDFLAGS ?= -s -w -X main.version=$(VERSION)
 GOLANGCI_LINT_VERSION ?= $(shell sed -n '1p' .golangci-lint-version)
-GOVULNCHECK_VERSION ?= v1.8.0
+GOVULNCHECK_VERSION ?= v1.9.0
 # CI supplies the pull request base (or the previous push revision). Local
 # callers can override this with GOLANGCI_LINT_BASE=...; when it is absent or
 # unavailable, fall back to the first parent so a detached checkout remains

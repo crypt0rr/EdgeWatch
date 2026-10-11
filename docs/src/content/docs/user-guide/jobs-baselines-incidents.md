@@ -53,6 +53,23 @@ timezone when it is omitted. New jobs receive an optional 30-minute
 schedule-offset suggestion when another active job is nearby; the administrator
 can keep concurrent times.
 
+The **Jobs** list shows each job's latest scan attempt separately from its
+latest successful scan, along with its next scheduled run and current queued,
+running, or resumable work. A paused cycle is shown as resumable; a stalled
+cycle stays marked for a manual retry. A job with no scan history is distinct
+from one whose monitoring summary could not be read. Missing schedule, paused,
+manual-only, and archived states do not create attention by themselves.
+
+Choose **Needs attention** to filter the full tenant job list to jobs whose
+latest attempt failed or was incomplete, or whose saved scan cycle stalled.
+Queued or running work supersedes an older failed or incomplete attempt; a
+later successful attempt clears that older failure. A stalled cycle remains
+actionable while a retry waits or runs. The filter does not infer problems
+from elapsed time or the absence of a schedule. Unavailable summaries remain
+visible in **All jobs** and are reported as unavailable rather than treated as
+healthy or as having no scan history. Readers with `jobs.read` can see the
+summary; opening scan details from it requires `scans.read`.
+
 Choose how many successful samples establish a baseline and how many matching
 changes confirm an incident. The same number of scans in a row must observe
 the expected state again before an open incident recovers.

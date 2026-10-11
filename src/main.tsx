@@ -33,6 +33,8 @@ export { Incidents } from './pages/Incidents'
 import { compactPortExpression } from './components/PortScopeDetails'
 import { baselinePresentation } from './baseline'
 import { jobStatePresentation } from './status'
+import { formatDateTime } from './format'
+import type { Job } from './types'
 import './tailwind.css'
 import './styles.css'
 
@@ -366,7 +368,12 @@ export function Jobs() {
   const navigate = useNavigate()
   const jobs = useQuery({ queryKey: ['jobs', true], queryFn: () => listJobs(true) })
   const session = useQuery({ queryKey: ['session'], queryFn: getSession })
+  const [filter, setFilter] = useState<'all' | 'attention'>('all')
   const canWrite = session.data?.permissions.includes('jobs.write') ?? false
+  const canReadScans = session.data?.permissions.includes('scans.read') ?? false
+  const allJobs = jobs.data?.jobs ?? []
+  const visibleJobs = filter === 'attention' ? allJobs.filter(job => job.monitoring?.attention_reason !== undefined && job.monitoring.attention_reason !== 'none') : allJobs
+  const unavailableMonitoringCount = allJobs.filter(job => !job.monitoring || job.monitoring.availability !== 'available').length
   return (
     <section className="page">
       <div className="page-heading">
@@ -378,17 +385,29 @@ export function Jobs() {
         {canWrite && <button className="button primary" onClick={() => navigate('/jobs/new')}>＋ New job</button>}
       </div>
       {jobs.isLoading ? <Loading /> : jobs.error ? <ErrorNotice message="Could not load jobs." onRetry={() => jobs.refetch()} /> : (
-        <div className="job-grid">
-          {jobs.data?.jobs.map(job => {
+        <>
+          <div className="job-list-controls">
+            <label htmlFor="jobs-filter">Filter jobs
+              <select id="jobs-filter" value={filter} onChange={event => setFilter(event.target.value as 'all' | 'attention')}>
+                <option value="all">All jobs</option>
+                <option value="attention">Needs attention</option>
+              </select>
+            </label>
+            <p className="muted" role="status" aria-live="polite">Showing {visibleJobs.length} of {allJobs.length} jobs</p>
+          </div>
+          {filter === 'attention' && unavailableMonitoringCount > 0 ? <p className="job-monitoring-unavailable" role="status">Monitoring status is unavailable for {unavailableMonitoringCount} job{unavailableMonitoringCount === 1 ? '; that job is' : 's; those jobs are'} not included in this filter.</p> : null}
+          {filter === 'attention' && allJobs.length > 0 && visibleJobs.length === 0 ? <div className="empty"><h3>No available jobs need attention</h3><p>No available job shows a latest failed or incomplete attempt or a stalled cycle.</p></div> : null}
+          <div className="job-grid">
+          {visibleJobs.map(job => {
             const baseline = baselinePresentation(job.baseline)
             const state = jobStatePresentation(job.archived, job.enabled)
             return (
-              <Link className={job.archived ? 'job-card archived' : 'job-card'} to={`/jobs/${job.id}`} key={job.id}>
+              <article className={job.archived ? 'job-card archived' : 'job-card'} key={job.id} aria-labelledby={`job-title-${job.id}`}>
                 <div className="job-card-top">
                   <span className={`pill ${state.tone}`}>{state.label}</span>
                   <span className="revision">r{job.revision}</span>
                 </div>
-                <h3>{job.job.name}</h3>
+                <h3 id={`job-title-${job.id}`}><Link to={`/jobs/${job.id}`}>{job.job.name}</Link></h3>
                 <p className="muted">{job.job.targets.length} target{job.job.targets.length === 1 ? '' : 's'} · {protocolSummary(job)}</p>
                 <div className="job-card-bottom">
                   <span className={`baseline${baseline.status === 'complete' ? ' complete' : baseline.status === 'stalled' ? ' stalled' : ''}`}>
@@ -396,14 +415,74 @@ export function Jobs() {
                   </span>
                   <span>{job.job.schedule}</span>
                 </div>
-              </Link>
+                <JobMonitoringStatus job={job} canReadScans={canReadScans} />
+              </article>
             )
           })}
-          {!jobs.data?.jobs.length && canWrite && <Empty title="No jobs yet" body="Create your first TCP or UDP monitoring job." action={<button className="button primary" onClick={() => navigate('/jobs/new')}>Create a job</button>} />}
-          {!jobs.data?.jobs.length && !canWrite && <Empty title="No jobs configured" body="An operator can create a monitoring job for this EdgeWatch instance." />}
-        </div>
+          {!allJobs.length && canWrite && <Empty title="No jobs yet" body="Create your first TCP or UDP monitoring job." action={<button className="button primary" onClick={() => navigate('/jobs/new')}>Create a job</button>} />}
+          {!allJobs.length && !canWrite && <Empty title="No jobs configured" body="An operator can create a monitoring job for this EdgeWatch instance." />}
+          </div>
+        </>
       )}
     </section>
+  )
+}
+
+function JobMonitoringStatus({ job, canReadScans }: { job: Job; canReadScans: boolean }) {
+  const monitoring = job.monitoring
+  if (!monitoring) {
+    return <p className="job-monitoring-unavailable" role="status">Monitoring status unavailable.</p>
+  }
+  const attempt = monitoring.latest_attempt
+  const successful = monitoring.latest_successful_scan
+  const attemptTime = attempt?.finished_at || attempt?.started_at
+  const successTime = successful?.finished_at || successful?.started_at
+  const activityLabel = monitoring.activity === 'queued' ? 'Queued'
+    : monitoring.activity === 'running' ? 'Running'
+      : monitoring.activity === 'resumable' ? 'Saved work can be resumed'
+        : monitoring.activity === 'stalled' ? 'Stalled cycle needs a manual retry'
+          : monitoring.activity === 'none' ? 'No current scan or resumable cycle'
+            : 'Current work status unavailable'
+  const scheduleLabel = monitoring.schedule_state === 'paused' ? 'Paused · no scheduled run'
+    : monitoring.schedule_state === 'manual' ? 'Manual runs only'
+      : monitoring.schedule_state === 'archived' ? 'Archived · no scheduled run'
+        : 'Schedule unavailable'
+  const attentionLabel = monitoring.attention_reason === 'failed' ? 'Latest scan failed'
+    : monitoring.attention_reason === 'incomplete' ? 'Latest scan incomplete'
+      : monitoring.attention_reason === 'stalled_cycle' ? 'Scan cycle stalled'
+        : undefined
+  return (
+    <div className="job-monitoring" aria-label={`Monitoring summary for ${job.job.name}`}>
+      <div className="job-monitoring-heading">
+        <strong>Monitoring</strong>
+        {attentionLabel && <span className="pill amber">Needs attention · {attentionLabel}</span>}
+      </div>
+      {monitoring.availability === 'unavailable' && <p className="job-monitoring-unavailable" role="status">Some monitoring status is unavailable; known details remain shown.</p>}
+      <dl className="job-monitoring-grid">
+        <div>
+          <dt>Latest attempt</dt>
+          <dd>{!monitoring.history_available ? 'Unavailable' : attempt ? attempt.status.replaceAll('_', ' ') : 'No scan recorded yet'}</dd>
+          {monitoring.history_available && attempt && <small>{attemptTime ? formatDateTime(attemptTime) : 'Unknown time'}</small>}
+          {canReadScans && attempt?.scan_id && <Link className="job-scan-link" to={`/jobs/${job.id}/scans/${attempt.scan_id}`}>View attempt</Link>}
+        </div>
+        <div>
+          <dt>Last successful scan</dt>
+          <dd>{!monitoring.history_available ? 'Unavailable' : successful ? (successTime ? formatDateTime(successTime) : 'Unknown time') : 'No successful scan yet'}</dd>
+          {canReadScans && successful?.scan_id && <Link className="job-scan-link" to={`/jobs/${job.id}/scans/${successful.scan_id}`}>View successful scan</Link>}
+        </div>
+        <div>
+          <dt>Current work</dt>
+          <dd>{activityLabel}</dd>
+          {monitoring.activity === 'resumable' && <small>Resume saved progress from job details.</small>}
+          {monitoring.attention_reason === 'stalled_cycle' && <small>Review the saved cycle from job details.</small>}
+        </div>
+        <div>
+          <dt>Next scheduled run</dt>
+          <dd>{monitoring.schedule_state === 'scheduled' && monitoring.next_run_at ? formatDateTime(monitoring.next_run_at) : scheduleLabel}</dd>
+          {monitoring.schedule_state === 'scheduled' && monitoring.next_run_at && <small>Scheduler timezone: {monitoring.timezone}</small>}
+        </div>
+      </dl>
+    </div>
   )
 }
 

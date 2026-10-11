@@ -180,6 +180,29 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 			}
 		}
 	}},
+	"ListJobExecutionSummaries": {run: func(t *testing.T, f tenantFixture) {
+		ctx := context.Background()
+		for scope, ownJob := range map[TenantScope]string{f.a: f.jobA, f.b: f.jobB} {
+			summaries, err := f.store.Tenant(scope).ListJobExecutionSummaries(ctx, false)
+			if err != nil {
+				t.Errorf("tenant %s list its job execution summaries: %v", scope.ID(), err)
+				continue
+			}
+			if _, exists := summaries[ownJob]; !exists {
+				t.Errorf("tenant %s did not receive its own job summary", scope.ID())
+			}
+			foreignJob := f.jobA
+			if scope.ID() == f.a.ID() {
+				foreignJob = f.jobB
+			}
+			if _, exists := summaries[foreignJob]; exists {
+				t.Errorf("tenant %s received another tenant's job summary", scope.ID())
+			}
+			if _, exists := summaries["unknown-job"]; exists {
+				t.Errorf("tenant %s received an unknown job summary", scope.ID())
+			}
+		}
+	}},
 	"ListScanChangesPage": {run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
 		if page, err := f.store.Tenant(f.b).ListScanChangesPage(ctx, f.scanA, 50, 0); err != nil || page.Total != 0 || len(page.Items) != 0 {

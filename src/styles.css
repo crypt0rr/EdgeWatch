@@ -2621,3 +2621,107 @@ label small,
   .incident-review-actions .button,
   .incident-evidence-heading .icon-button { min-height: 44px; }
 }
+
+.job-list-controls {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 16px;
+}
+
+.job-list-controls label {
+  width: min(240px, 100%);
+}
+
+.job-card h3 a:focus-visible {
+  border-radius: 3px;
+  outline: 3px solid #8fc8ff;
+  outline-offset: 3px;
+}
+
+.job-monitoring {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #1d3148;
+}
+
+.job-monitoring-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #c3d4e8;
+  font-size: 11px;
+}
+
+.job-monitoring-heading .pill {
+  white-space: normal;
+  text-align: right;
+}
+
+.job-monitoring-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+  margin: 0;
+}
+
+.job-monitoring-grid > div {
+  min-width: 0;
+}
+
+.job-monitoring-grid dt {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.job-monitoring-grid dd {
+  margin: 0;
+  color: #dce8f7;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.job-monitoring-grid small,
+.job-scan-link {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.job-scan-link {
+  color: #83b9ef;
+  width: max-content;
+  max-width: 100%;
+}
+
+.job-monitoring-unavailable {
+  margin: 0;
+  color: #f0c274;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+@media (max-width: 420px) {
+  .job-list-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .job-list-controls label {
+    width: 100%;
+  }
+
+  .job-monitoring-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

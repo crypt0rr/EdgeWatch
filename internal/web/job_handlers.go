@@ -386,6 +386,10 @@ func baselineJSONFromSummary(summary store.RuntimeStateSummary, currentHash stri
 }
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
+	s.listJobsWithSession(w, r, store.Session{}, ts)
+}
+
+func (s *Server) listJobsWithSession(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	include := r.URL.Query().Get("include_archived") == "true"
 	jobs, err := ts.ListJobs(r.Context(), include)
 	if err != nil {
@@ -396,6 +400,15 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request, ts *store.Tena
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
+	}
+	executions, executionErr := ts.ListJobExecutionSummaries(r.Context(), include)
+	if executionErr != nil {
+		logger := s.Log
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.ErrorContext(r.Context(), "job execution summary lookup failed", "request_id", RequestID(r.Context()), "error", executionErr)
+		executions = nil
 	}
 	cycles, cycleErr := ts.ListActiveScanCycleSummaries(r.Context(), include)
 	if cycleErr != nil {
@@ -414,6 +427,33 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request, ts *store.Tena
 		logger.ErrorContext(r.Context(), "scanner profile revision list lookup failed", "request_id", RequestID(r.Context()), "error", profileErr)
 		profileRevisions = nil
 	}
+	activityByJob := map[string]string{}
+	activityAvailable := false
+	if s.App != nil {
+		if scope, scopeErr := ts.Scope(); scopeErr == nil {
+			activityAvailable = true
+			// Read the queue first. A queued run becomes visible in ActiveScans
+			// in the same run-registry transition that removes it from this list.
+			for _, run := range s.App.QueuedRuns(scope) {
+				if run.JobID != "" {
+					activityByJob[run.JobID] = "queued"
+				}
+			}
+			for _, scan := range s.App.ActiveScans(scope) {
+				if scan.JobID != "" {
+					activityByJob[scan.JobID] = "running"
+				}
+			}
+		} else {
+			logger := s.Log
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.ErrorContext(r.Context(), "job activity scope lookup failed", "request_id", RequestID(r.Context()), "error", scopeErr)
+		}
+	}
+	canReadScans := auth.HasPermission(session, auth.PermissionScansRead)
+	now := s.currentTime()
 	out := make([]map[string]any, 0, len(jobs))
 	notifier := s.tenantNotifier(ts)
 	for _, j := range jobs {
@@ -432,6 +472,23 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request, ts *store.Tena
 		} else {
 			value["scan_cycle"] = nil
 		}
+		cycleStatus := ""
+		if cycle, ok := cycles[j.ID]; cycleErr == nil && ok {
+			cycleStatus = cycle.Status
+		}
+		_, historyExists := executions[j.ID]
+		monitoring := jobMonitoringSummary(
+			j,
+			executions[j.ID],
+			executionErr == nil && historyExists,
+			activityByJob[j.ID],
+			activityAvailable,
+			cycleStatus,
+			cycleErr == nil,
+			canReadScans,
+			now,
+		)
+		value["monitoring"] = monitoring
 		out = append(out, value)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": out})

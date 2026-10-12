@@ -67,7 +67,9 @@ later successful attempt clears that older failure. A stalled cycle remains
 actionable while a retry waits or runs. The filter does not infer problems
 from elapsed time or the absence of a schedule. Unavailable summaries remain
 visible in **All jobs** and are reported as unavailable rather than treated as
-healthy or as having no scan history. Readers with `jobs.read` can see the
+healthy or as having no scan history. When a summary is unavailable, known
+attention reasons remain eligible for **Needs attention**; jobs without a
+known attention reason are not included. Readers with `jobs.read` can see the
 summary; opening scan details from it requires `scans.read`.
 
 Choose how many successful samples establish a baseline and how many matching

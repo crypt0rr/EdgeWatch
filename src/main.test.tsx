@@ -553,8 +553,33 @@ describe('application shell', () => {
     expect(screen.getByText('Some monitoring status is unavailable; known details remain shown.')).toBeInTheDocument()
     expect(screen.queryByText('No scan recorded yet')).not.toBeInTheDocument()
     fireEvent.change(screen.getByRole('combobox', { name: 'Filter jobs' }), { target: { value: 'attention' } })
+    expect(screen.getByText('Showing 0 of 1 jobs')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Unknown monitor' })).not.toBeInTheDocument()
     expect(screen.getByText('No available jobs need attention')).toBeInTheDocument()
-    expect(screen.getByText(/Monitoring status is unavailable for 1 job; that job is not included in this filter/)).toBeInTheDocument()
+    expect(screen.getByText('Monitoring data is incomplete for 1 job; known attention reasons remain visible in this filter.')).toBeInTheDocument()
+  })
+
+  it('keeps known attention reasons in the filter when monitoring data is unavailable', async () => {
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [{
+      id: 'partial-monitor', revision: 1, enabled: true, archived: false,
+      job: { name: 'Partial monitor', targets: ['198.51.100.14'], schedule: '0 * * * *' },
+      baseline: { status: 'complete', samples: 1 },
+      monitoring: {
+        availability: 'unavailable', history_available: true, activity: null, schedule_state: 'scheduled',
+        next_run_at: '2026-10-12T00:00:00Z', timezone: 'UTC',
+        latest_attempt: { status: 'failed', started_at: '2026-10-11T12:00:00Z', finished_at: '2026-10-11T12:01:00Z' },
+        latest_successful_scan: null, attention_reason: 'failed',
+      },
+    }] } as never)
+    renderWithProviders(<Jobs />)
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Partial monitor' })).toBeInTheDocument())
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter jobs' }), { target: { value: 'attention' } })
+
+    expect(screen.getByRole('heading', { name: 'Partial monitor' })).toBeInTheDocument()
+    expect(screen.getByText('Showing 1 of 1 jobs')).toBeInTheDocument()
+    expect(screen.getByText('Needs attention · Latest scan failed')).toBeInTheDocument()
+    expect(screen.getByText('Monitoring data is incomplete for 1 job; known attention reasons remain visible in this filter.')).toBeInTheDocument()
   })
 
   it('lists a baseline whose stored scope is being updated as ready', async () => {

@@ -1228,6 +1228,7 @@ func TestPlatformStatus(t *testing.T) {
 func TestPlatformUnitsReportStoredScans(t *testing.T) {
 	t.Parallel()
 	f := newPlatformFixture(t)
+	createIsolationWindows(t, f)
 	ctx := context.Background()
 	// Unit B's "shared-job" is archived with a failed scan it keeps.
 	finished := time.Now().UTC()

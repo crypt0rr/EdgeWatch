@@ -168,6 +168,13 @@ func jobJSONFromStateSummary(record store.JobRecord, summary store.RuntimeStateS
 func (s *Server) jobJSONWithCycle(ctx context.Context, ts *store.TenantStore, record store.JobRecord, summary store.RuntimeStateSummary) map[string]any {
 	value := s.addNotificationRouting(ctx, s.tenantNotifier(ts), jobJSONFromStateSummary(record, summary))
 	value = s.addJobCycleAndProfile(ctx, ts, record, value)
+	if windows, err := ts.LatestChangeWindowSummaries(ctx, true, s.currentTime()); err == nil {
+		if window, ok := windows[record.ID]; ok {
+			value["change_window"] = window
+		} else {
+			value["change_window"] = nil
+		}
+	}
 	if budget, ok := s.jobScanBudget(ctx, ts, record.Job); ok {
 		value["scan_budget"] = budget
 	}
@@ -427,6 +434,15 @@ func (s *Server) listJobsWithSession(w http.ResponseWriter, r *http.Request, ses
 		logger.ErrorContext(r.Context(), "scanner profile revision list lookup failed", "request_id", RequestID(r.Context()), "error", profileErr)
 		profileRevisions = nil
 	}
+	windowSummaries, windowErr := ts.LatestChangeWindowSummaries(r.Context(), include, s.currentTime())
+	if windowErr != nil {
+		logger := s.Log
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.ErrorContext(r.Context(), "planned change window summary lookup failed", "request_id", RequestID(r.Context()), "error", windowErr)
+		windowSummaries = nil
+	}
 	activityByJob := map[string]string{}
 	activityAvailable := false
 	if s.App != nil {
@@ -458,6 +474,11 @@ func (s *Server) listJobsWithSession(w http.ResponseWriter, r *http.Request, ses
 	notifier := s.tenantNotifier(ts)
 	for _, j := range jobs {
 		value := s.addNotificationRouting(r.Context(), notifier, jobJSONFromStateSummary(j, summaries[j.ID]))
+		if window, ok := windowSummaries[j.ID]; ok {
+			value["change_window"] = window
+		} else {
+			value["change_window"] = nil
+		}
 		if payload, ok := value["job"].(jobPayload); ok && payload.TCP != nil && payload.TCP.ProfileID != "" && profileErr == nil {
 			if revision := profileRevisions[payload.TCP.ProfileID]; revision > payload.TCP.ProfileRevision {
 				payload.TCP.ProfileUpdateAvailable = true

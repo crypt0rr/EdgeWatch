@@ -368,6 +368,72 @@ export type IncidentInboxPage = {
   active_count: number
 }
 
+// ChangeWindowSummary is store.ChangeWindowSummary.
+export type ChangeWindowSummary = {
+  new_count: number
+  recovered_count: number
+  still_open_count: number
+  suppressed_event_count: number
+  in_flight_event_count: number
+  unknown_outcome_event_count: number
+  incomplete_event_count: number
+  incomplete_reported_change_count: number
+  known_change_details_truncated: boolean
+  still_open_details_truncated: boolean
+  known_changes: Change[] | null
+  still_open: Incident[] | null
+}
+
+// ChangeWindow is store.ChangeWindow.
+export type ChangeWindow = {
+  id: string
+  job_id: string
+  start_at: string
+  end_at: string
+  timezone: string
+  reason: string
+  actor_label: string
+  created_at: string
+  status: string
+  end_reason?: string
+  closed_at: string | null
+  effective_end: string | null
+  new_count: number
+  recovered_count: number
+  still_open_count: number
+  suppressed_event_count: number
+  in_flight_event_count: number
+  unknown_outcome_event_count: number
+  incomplete_event_count: number
+  review_state: string
+  reviewed_at: string | null
+  reviewer_label?: string
+  revision: number
+  summary: ChangeWindowSummary | null
+}
+
+// ChangeWindowStatus is store.ChangeWindowStatus.
+export type ChangeWindowStatus = {
+  id: string
+  start_at: string
+  end_at: string
+  timezone: string
+  reason: string
+  status: string
+  end_reason?: string
+  closed_at: string | null
+  review_state: string
+  new_count: number
+  recovered_count: number
+  known_change_count: number
+  still_open_count: number
+  suppressed_event_count: number
+  in_flight_event_count: number
+  unknown_outcome_event_count: number
+  incomplete_event_count: number
+  revision: number
+}
+
 // Snapshot is model.Snapshot.
 export type Snapshot = {
   units: Unit[] | null

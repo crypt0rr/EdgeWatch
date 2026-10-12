@@ -34,7 +34,9 @@ import { compactPortExpression } from './components/PortScopeDetails'
 import { baselinePresentation } from './baseline'
 import { jobStatePresentation } from './status'
 import { formatDateTime } from './format'
+import { formatChangeWindowTime } from './change-window-time'
 import type { Job } from './types'
+import type { ChangeWindowStatus } from './generated/api-types'
 import './tailwind.css'
 import './styles.css'
 
@@ -201,6 +203,14 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
               void client.invalidateQueries({ queryKey: ['jobs'] })
               void client.invalidateQueries({ queryKey: ['activity-events'] })
               if (event.job_id) void client.invalidateQueries({ queryKey: ['job', event.job_id] })
+              break
+            case 'change-window.updated':
+              void client.invalidateQueries({ queryKey: ['jobs'] })
+              if (event.job_id) {
+                void client.invalidateQueries({ queryKey: ['job', event.job_id] })
+                void client.invalidateQueries({ queryKey: ['job-change-windows', event.job_id] })
+                void client.invalidateQueries({ queryKey: ['job-change-window', event.job_id] })
+              }
               break
             case 'job-silent':
               void client.invalidateQueries({ queryKey: ['jobs'] })
@@ -416,6 +426,7 @@ export function Jobs() {
                   <span>{job.job.schedule}</span>
                 </div>
                 <JobMonitoringStatus job={job} canReadScans={canReadScans} />
+                <JobChangeWindowStatus status={job.change_window} jobID={job.id} />
               </article>
             )
           })}
@@ -484,6 +495,33 @@ function JobMonitoringStatus({ job, canReadScans }: { job: Job; canReadScans: bo
       </dl>
     </div>
   )
+}
+
+function JobChangeWindowStatus({ status, jobID }: { status: ChangeWindowStatus | null | undefined; jobID: string }) {
+  if (!status) return null
+  const label = status.review_state === 'due' ? 'Review due'
+    : status.review_state === 'reviewed' ? 'Reviewed'
+      : status.status === 'scheduled' ? 'Scheduled'
+        : status.status === 'active' ? 'Active'
+          : status.status === 'cancelled' ? 'Cancelled'
+            : status.end_reason === 'expired' ? 'Expired'
+              : 'Closed'
+  const tone = status.review_state === 'due' || status.status === 'active' ? 'amber'
+    : status.review_state === 'reviewed' ? 'green'
+      : status.status === 'scheduled' ? 'blue'
+        : 'gray'
+  const end = status.closed_at || status.end_at
+  const eventCount = status.suppressed_event_count
+  return <div className="job-change-window-status" aria-label={`Planned change window for job ${jobID}`}>
+    <div className="job-change-window-status-heading"><strong>Planned change window</strong><span className={`pill ${tone}`}>{label}</span></div>
+    <p>{status.reason}</p>
+    <dl>
+      <div><dt>Start</dt><dd><time dateTime={status.start_at}>{formatChangeWindowTime(status.start_at, status.timezone)}</time></dd></div>
+      <div><dt>End</dt><dd><time dateTime={end}>{formatChangeWindowTime(end, status.timezone)}</time></dd></div>
+    </dl>
+    <p className="job-change-window-counts">{eventCount} change event{eventCount === 1 ? '' : 's'} held · {status.new_count} new · {status.recovered_count} recovered · {status.still_open_count} still open{status.in_flight_event_count > 0 ? ` · ${status.in_flight_event_count} in flight at close` : ''}{status.unknown_outcome_event_count > 0 ? ` · ${status.unknown_outcome_event_count} with unknown prior outcome` : ''}{status.incomplete_event_count > 0 ? ` · ${status.incomplete_event_count} older events with incomplete identities` : ''}</p>
+    <Link className="job-change-window-details-link" to={`/jobs/${encodeURIComponent(jobID)}`}>Open window details</Link>
+  </div>
 }
 
 function protocolSummary(job: { job: { tcp?: { ports: string }; udp?: { ports: string } } }) {

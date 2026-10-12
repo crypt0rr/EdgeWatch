@@ -377,6 +377,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     }
     if (path === '/jobs' && method === 'GET') { await json({ jobs: createdJob ? [job, createdJob] : [job] }); return }
     if (path === '/jobs/schedule-suggestion' && method === 'GET') { await json({ suggested: false, draft_next_run: '2026-01-01T06:00:00Z', gap_minutes: 45 }); return }
+    if (/^\/jobs\/[^/]+\/change-windows$/.test(path) && method === 'GET') { await json({ windows: [] }); return }
     if (path === '/jobs/job-1' && method === 'GET') { await json(job); return }
     // Like the API, a known job with no successful scan or no saved cycle
     // answers 200 with null rather than 404.

@@ -38,9 +38,9 @@ func (ss *SystemStore) DeploymentTelemetry(ctx context.Context) (DeploymentTelem
 		COALESCE((SELECT COUNT(*) FROM latest_scan_hosts),0),
 		COALESCE((SELECT COUNT(*) FROM events),0),
 		COALESCE((SELECT COUNT(*) FROM scan_cycles),0),
-		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL),0),
-		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND terminal_at='' AND attempts > 0 AND attempts < ?),0),
-		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND (attempts >= ? OR terminal_at <> '')),0)`, deliveryMaxAttempts, deliveryMaxAttempts).
+		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND coalesced_at=''),0),
+		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND coalesced_at='' AND terminal_at='' AND attempts > 0 AND attempts < ?),0),
+		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND coalesced_at='' AND (attempts >= ? OR terminal_at <> '')),0)`, deliveryMaxAttempts, deliveryMaxAttempts).
 		Scan(&telemetry.Jobs, &telemetry.Scans, &telemetry.HostObservations, &telemetry.EffectiveHosts, &telemetry.Events, &telemetry.ScanCycles, &telemetry.OutboxPending, &telemetry.OutboxRetrying, &telemetry.OutboxFailed); err != nil {
 		return DeploymentTelemetry{}, err
 	}
@@ -120,9 +120,9 @@ func (ts *TenantStore) Telemetry(ctx context.Context) (TenantTelemetry, error) {
 		COALESCE((SELECT COUNT(*) FROM latest_scan_hosts WHERE tenant_id=?),0),
 		COALESCE((SELECT COUNT(*) FROM events WHERE `+historyTenantSQL+`),0),
 		COALESCE((SELECT COUNT(*) FROM scan_cycles AS c JOIN jobs AS j ON j.id=c.job_id AND j.tenant_id=?),0),
-		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND `+historyTenantSQL+`),0),
-		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND terminal_at='' AND attempts > 0 AND attempts < ? AND `+historyTenantSQL+`),0),
-		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND (attempts >= ? OR terminal_at <> '') AND `+historyTenantSQL+`),0)`,
+		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND coalesced_at='' AND `+historyTenantSQL+`),0),
+		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND coalesced_at='' AND terminal_at='' AND attempts > 0 AND attempts < ? AND `+historyTenantSQL+`),0),
+		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND coalesced_at='' AND (attempts >= ? OR terminal_at <> '') AND `+historyTenantSQL+`),0)`,
 		id, id, id, id, id, id, id, deliveryMaxAttempts, id, deliveryMaxAttempts, id).
 		Scan(&telemetry.Jobs, &telemetry.Scans, &telemetry.HostObservations, &telemetry.EffectiveHosts, &telemetry.Events, &telemetry.ScanCycles, &telemetry.OutboxPending, &telemetry.OutboxRetrying, &telemetry.OutboxFailed); err != nil {
 		return TenantTelemetry{}, err

@@ -13,18 +13,22 @@ import (
 )
 
 type PruneStats struct {
-	Scans             int64
-	Events            int64
-	SentOutbox        int64
-	FailedOutbox      int64
-	QuarantinedOutbox int64
-	Revisions         int64
-	Cycles            int64
-	IncidentReviews   int64
-	RDAPCache         int64
-	FTSOptimized      bool
-	FTSDeferred       bool
-	ReclaimedPages    int64
+	Scans              int64
+	Events             int64
+	SentOutbox         int64
+	FailedOutbox       int64
+	CoalescedOutbox    int64
+	ChangeWindowEvents int64
+	ChangeWindowRefs   int64
+	ChangeWindows      int64
+	QuarantinedOutbox  int64
+	Revisions          int64
+	Cycles             int64
+	IncidentReviews    int64
+	RDAPCache          int64
+	FTSOptimized       bool
+	FTSDeferred        bool
+	ReclaimedPages     int64
 }
 
 // retentionBatchSize bounds both lock duration and rollback cost. Retention
@@ -97,7 +101,7 @@ const retentionExpiredCycles = "edgewatch_retention_expired_cycles"
 const purgedTenantStates = `('` + TenantStateDeleting + `','` + TenantStateDeleted + `')`
 
 func (p PruneStats) Total() int64 {
-	return p.Scans + p.Events + p.SentOutbox + p.FailedOutbox + p.QuarantinedOutbox + p.Revisions + p.Cycles + p.IncidentReviews + p.RDAPCache
+	return p.Scans + p.Events + p.SentOutbox + p.FailedOutbox + p.CoalescedOutbox + p.ChangeWindowEvents + p.ChangeWindowRefs + p.ChangeWindows + p.QuarantinedOutbox + p.Revisions + p.Cycles + p.IncidentReviews + p.RDAPCache
 }
 
 // PruneWithStats removes rows outside the configured retention window while
@@ -160,6 +164,46 @@ func (ss *SystemStore) pruneWithStats(ctx context.Context, before time.Time, opt
 	if err != nil {
 		return stats, err
 	}
+	// Coalesced change alerts are intentionally neither sent nor terminal.
+	// Keep them out of delivery health while allowing the normal retention
+	// window to reclaim them after their summary has been durable.
+	stats.CoalescedOutbox, err = ss.deleteRetentionBatches(ctx, `DELETE FROM outbox WHERE rowid IN (SELECT rowid FROM outbox AS delivery WHERE sent_at IS NULL AND coalesced_at<>'' AND coalesced_at < ?
+		AND NOT EXISTS (SELECT 1 FROM tenants WHERE tenants.id = delivery.tenant_id AND tenants.state IN `+purgedTenantStates+`) ORDER BY coalesced_at,rowid LIMIT ?)`, cutoff)
+	if err != nil {
+		return stats, err
+	}
+	// Close summaries and their compact evidence live independently from the
+	// ordinary event-retention table. Keep due reviews and open windows
+	// indefinitely; expire other closed windows only after the configured
+	// history cutoff. Children are deleted in bounded batches before parents,
+	// and a parent stays while any delivery still points to it. Sent, terminal,
+	// and coalesced deliveries are pruned above when they have aged out.
+	windowEligible := `window.closed_at<>'' AND window.closed_at < ? AND window.review_state<>'due'
+		AND NOT EXISTS (SELECT 1 FROM outbox AS delivery WHERE delivery.change_window_id=window.id)
+		AND NOT EXISTS (SELECT 1 FROM tenants WHERE tenants.id=job.tenant_id AND tenants.state IN ` + purgedTenantStates + `)`
+	windowEvents, err := ss.deleteRetentionBatches(ctx, `DELETE FROM change_window_events WHERE rowid IN (
+		SELECT event.rowid FROM change_window_events AS event JOIN change_windows AS window ON window.id=event.window_id
+		JOIN jobs AS job ON job.id=window.job_id WHERE `+windowEligible+` ORDER BY window.closed_at,event.rowid LIMIT ?)`, cutoff)
+	if err != nil {
+		return stats, err
+	}
+	stats.ChangeWindowEvents = windowEvents
+	windowRefs, err := ss.deleteRetentionBatches(ctx, `DELETE FROM change_window_refs WHERE rowid IN (
+		SELECT ref.rowid FROM change_window_refs AS ref JOIN change_windows AS window ON window.id=ref.window_id
+		JOIN jobs AS job ON job.id=window.job_id WHERE `+windowEligible+` ORDER BY window.closed_at,ref.rowid LIMIT ?)`, cutoff)
+	if err != nil {
+		return stats, err
+	}
+	stats.ChangeWindowRefs = windowRefs
+	windowRows, err := ss.deleteRetentionBatches(ctx, `DELETE FROM change_windows WHERE rowid IN (
+		SELECT window.rowid FROM change_windows AS window JOIN jobs AS job ON job.id=window.job_id WHERE `+windowEligible+`
+		AND NOT EXISTS (SELECT 1 FROM change_window_events AS event WHERE event.window_id=window.id)
+		AND NOT EXISTS (SELECT 1 FROM change_window_refs AS ref WHERE ref.window_id=window.id)
+		ORDER BY window.closed_at,window.rowid LIMIT ?)`, cutoff)
+	if err != nil {
+		return stats, err
+	}
+	stats.ChangeWindows = windowRows
 	stats.QuarantinedOutbox, err = ss.deleteRetentionBatches(ctx, `DELETE FROM restore_quarantined_deliveries WHERE rowid IN (SELECT delivery.rowid FROM restore_quarantined_deliveries AS delivery WHERE quarantined_at < ?
 		AND NOT EXISTS (SELECT 1 FROM tenants WHERE tenants.id = delivery.tenant_id AND tenants.state IN `+purgedTenantStates+`) ORDER BY quarantined_at,rowid LIMIT ?)`, cutoff)
 	if err != nil {

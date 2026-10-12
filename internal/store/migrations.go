@@ -19,7 +19,7 @@ import (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 68
+const schemaVersion = 69
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -322,6 +322,9 @@ func schemaMigrationStatements() map[int][]string {
 		// Durable review state for one active incident occurrence, with a
 		// replaceable indexed projection used to filter and sort the inbox.
 		68: migration68Statements(),
+		// One-off planned change windows and the durable references used by
+		// their close summaries. See migration69.go.
+		69: migration69Statements(),
 	}
 }
 

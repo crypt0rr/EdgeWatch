@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
@@ -21,8 +22,8 @@ import (
 // isolationIDs are the values that the isolation matrix puts in a route's
 // placeholders.
 type isolationIDs struct {
-	job, scan, cycle, address, profile, user, destination string
-	unit, account, admin, platformDestination             string
+	job, scan, cycle, address, profile, user, destination, window string
+	unit, account, admin, platformDestination                     string
 }
 
 // unknownIsolationIDs name nothing in the fixture.
@@ -31,16 +32,36 @@ var unknownIsolationIDs = isolationIDs{
 	address: "203.0.113.254", profile: "00000000-0000-0000-0000-00000000dead", user: "00000000-0000-0000-0000-00000000dead",
 	destination: "00000000-0000-0000-0000-00000000dead", unit: "00000000-0000-0000-0000-00000000dead", account: "00000000-0000-0000-0000-00000000dead",
 	admin: "00000000-0000-0000-0000-00000000dead", platformDestination: "00000000-0000-0000-0000-00000000dead",
+	window: "00000000-0000-0000-0000-00000000dead",
 }
 
 // unitIDs returns the IDs of a unit's resources in the fixture.
 func (f *platformFixture) unitIDs(unit string) isolationIDs {
 	if unit == "A" {
-		return isolationIDs{job: f.jobA, scan: f.scanA, cycle: unknownIsolationIDs.cycle, address: "192.0.2.10", profile: f.profileA, user: f.users[actorViewerA].ID, destination: f.destinationA,
+		return isolationIDs{job: f.jobA, scan: f.scanA, cycle: unknownIsolationIDs.cycle, address: "192.0.2.10", profile: f.profileA, user: f.users[actorViewerA].ID, destination: f.destinationA, window: f.windowA,
 			unit: store.DefaultTenantID, account: f.users[actorAdminA].ID, admin: f.secondPlatformAdmin, platformDestination: unknownIsolationIDs.platformDestination}
 	}
-	return isolationIDs{job: f.jobB, scan: f.scanB, cycle: unknownIsolationIDs.cycle, address: platformFixtureAddress, profile: f.profileB, user: f.viewerB, destination: f.destinationB,
+	return isolationIDs{job: f.jobB, scan: f.scanB, cycle: unknownIsolationIDs.cycle, address: platformFixtureAddress, profile: f.profileB, user: f.viewerB, destination: f.destinationB, window: f.windowB,
 		unit: f.unitB, account: f.users[actorAdminB].ID, admin: f.secondPlatformAdmin, platformDestination: unknownIsolationIDs.platformDestination}
+}
+
+func createIsolationWindows(t *testing.T, f *platformFixture) {
+	t.Helper()
+	start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	for _, resource := range []struct {
+		tenant *store.TenantStore
+		jobID  string
+		assign func(string)
+	}{
+		{f.a, f.jobA, func(id string) { f.windowA = id }},
+		{f.b, f.jobB, func(id string) { f.windowB = id }},
+	} {
+		window, err := resource.tenant.CreateChangeWindow(context.Background(), resource.jobID, start, start.Add(time.Hour), false, "isolation fixture", "", "isolation fixture")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resource.assign(window.ID)
+	}
 }
 
 // path fills the template's placeholders with the IDs. A placeholder the
@@ -62,6 +83,8 @@ func (ids isolationIDs) path(t *testing.T, template string) string {
 			value = ids.address
 		case "{uid}":
 			value = ids.account
+		case "{window_id}":
+			value = ids.window
 		case "{id}":
 			switch segments[index-1] {
 			case "jobs":
@@ -193,6 +216,9 @@ func (f *platformFixture) isolationRequest(t *testing.T, actor string, route api
 func TestIsolationMatrix(t *testing.T) {
 	t.Parallel()
 	f := newPlatformFixture(t)
+	// The matrix must compare a real foreign child ID with an unknown child,
+	// including when both routes also carry a job ID.
+	createIsolationWindows(t, f)
 	before := f.unitBSnapshot(t)
 	resetNotificationTestLimiter := func() {
 		f.server.testMu.Lock()
@@ -315,6 +341,7 @@ func (f *platformFixture) unitBSnapshot(t *testing.T) map[string]string {
 func TestPositiveMatrix(t *testing.T) {
 	t.Parallel()
 	f := newPlatformFixture(t)
+	createIsolationWindows(t, f)
 	owned := []string{"/jobs/{id}", "/jobs/{id}/scans", "/jobs/{id}/scans/{scan}", "/scans/{id}", "/scans/{id}/summary", "/scans/{id}/hosts", "/scans/{id}/hosts/{address}", "/users/{id}", "/notifications/destinations/{id}", "/scanner-profiles/{id}", "/scanner/profiles/{id}", "/jobs/{id}/baseline", "/audit"}
 	platformOwned := []string{"/platform/units", "/platform/units/{id}", "/platform/units/{id}/capacity", "/platform/units/{id}/accounts", "/platform/admins", "/platform/audit", "/platform/notifications", "/platform/status"}
 	reached := map[string][]string{}

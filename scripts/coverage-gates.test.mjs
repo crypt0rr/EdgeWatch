@@ -24,10 +24,12 @@ const frontendReport = (overrides = {}) => {
   const files = [
     'src/api.ts',
     'src/baseline.ts',
+    'src/change-window-time.ts',
     'src/components/ActionDialog.tsx',
     'src/components/AuditLog.tsx',
     'src/components/ErrorNotice.tsx',
     'src/components/HostEmptyState.tsx',
+    'src/components/JobChangeWindows.tsx',
     'src/components/MonitorNextActions.tsx',
     'src/components/NotificationDestinationConfig.tsx',
     'src/components/NotificationDestinationCreateForm.tsx',

@@ -794,7 +794,10 @@ func applyRestoreDeliveryPolicy(ctx context.Context, path string, policy Pending
 		// Pending means a row that can still be claimed. Every schema that a
 		// restore accepts, from minimumUpgradeSchema, records exhausted
 		// deliveries in terminal_at, which schema 31 added.
-		const pendingPredicate = `sent_at IS NULL AND terminal_at=''`
+		pendingPredicate := `sent_at IS NULL AND terminal_at=''`
+		if columns["coalesced_at"] {
+			pendingPredicate += ` AND coalesced_at=''`
+		}
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE `+pendingPredicate).Scan(&pending); err != nil {
 			return 0, fmt.Errorf("count pending deliveries: %w", err)
 		}

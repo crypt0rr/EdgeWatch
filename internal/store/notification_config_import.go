@@ -373,7 +373,7 @@ func moveDeploymentDeliveriesTx(ctx context.Context, tx *sql.Tx, selectors []str
 			return 0, 0, err
 		}
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE outbox SET destination=? WHERE destination IN (`+placeholders+`) AND sent_at IS NULL AND terminal_at=''`, append([]any{target}, args...)...)
+	result, err := tx.ExecContext(ctx, `UPDATE outbox SET destination=? WHERE destination IN (`+placeholders+`) AND sent_at IS NULL AND terminal_at='' AND coalesced_at=''`, append([]any{target}, args...)...)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -386,9 +386,9 @@ func moveDeploymentDeliveriesTx(ctx context.Context, tx *sql.Tx, selectors []str
 // SQLite and never loaded. The rows are closed before the caller writes.
 func pendingDeploymentDeliveriesTx(ctx context.Context, tx *sql.Tx, placeholders string, args []any) ([]pendingDeliveryRow, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.attempts,o.deferrals,o.next_at,
- (SELECT MIN(k.id) FROM outbox k WHERE k.destination IN (`+placeholders+`) AND k.sent_at IS NULL AND k.terminal_at='' AND k.payload_json=o.payload_json)
+	 (SELECT MIN(k.id) FROM outbox k WHERE k.destination IN (`+placeholders+`) AND k.sent_at IS NULL AND k.terminal_at='' AND k.coalesced_at='' AND k.payload_json=o.payload_json)
 FROM outbox o
-WHERE o.destination IN (`+placeholders+`) AND o.sent_at IS NULL AND o.terminal_at=''
+WHERE o.destination IN (`+placeholders+`) AND o.sent_at IS NULL AND o.terminal_at='' AND o.coalesced_at=''
 ORDER BY o.id`, args...)
 	if err != nil {
 		return nil, err

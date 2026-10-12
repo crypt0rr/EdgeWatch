@@ -87,15 +87,15 @@ func (ss *SystemStore) UpdateState(ctx context.Context, job string, fn func(*mod
 // delivery belongs to the tenant of the event's job, or to the platform for
 // an event without a job.
 func (ss *SystemStore) QueueEvent(ctx context.Context, destination string, event model.Event) error {
-	_, b, err := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
-	if err != nil {
-		return err
-	}
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UTC()
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = now
+	}
 	if event.JobID != "" {
 		var purging int
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM job_history_purges WHERE job_id=?)`, event.JobID).Scan(&purging); err != nil {
@@ -120,10 +120,30 @@ func (ss *SystemStore) QueueEvent(ctx context.Context, destination string, event
 		}
 		destination = key
 	}
-	now := time.Now().UTC()
 	// A delivery belongs to the tenant of its event.
 	tenantSQL, tenantArgs := eventTenantSQL(event)
-	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at,tenant_id) VALUES(?,?,?,`+tenantSQL+`)`, append([]any{destination, b, now.Format(time.RFC3339Nano)}, tenantArgs...)...)
+	windowID := ""
+	if changeWindowEventType(event.Type) && event.JobID != "" {
+		tenantID, tenantErr := eventTenantIDTx(ctx, tx, event, "")
+		if tenantErr != nil {
+			return tenantErr
+		}
+		var active bool
+		windowID, active, _, err = windowForQueuedChangeTx(ctx, tx, event.JobID, tenantID, now)
+		if err != nil {
+			return err
+		}
+		if active {
+			if err := recordChangeWindowEventTx(ctx, tx, windowID, tenantID, event); err != nil {
+				return err
+			}
+		}
+	}
+	_, b, err := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
+	if err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at,tenant_id,event_type,event_job_id,change_window_id) VALUES(?,?,?,`+tenantSQL+`,?,?,?)`, append([]any{destination, b, now.Format(time.RFC3339Nano)}, append(tenantArgs, event.Type, event.JobID, windowID)...)...)
 	if err != nil {
 		return err
 	}
@@ -204,6 +224,14 @@ const (
 const heldDeliverySQL = `(due.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants WHERE tenants.id=due.tenant_id AND tenants.state='` + TenantStateActive + `'))
 AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=due.tenant_id AND purge.job_id=CASE WHEN json_valid(CAST(due.payload_json AS TEXT)) THEN COALESCE(json_extract(CAST(due.payload_json AS TEXT),'$.job_id'),'') ELSE '' END)`
 
+// changeWindowDeliverySQL keeps a pending change alert out of a claim while
+// its associated window has started but the close transaction has not yet
+// committed. The caller supplies the time after it acquired the writer.
+const changeWindowDeliverySQL = `(due.change_window_id='' OR NOT EXISTS (
+ SELECT 1 FROM change_windows AS quiet
+ WHERE quiet.id=due.change_window_id AND quiet.closed_at='' AND quiet.start_at<=?
+)) AND due.coalesced_at='' AND due.coalesce_after_attempt=0 AND due.attempt_started_at=''`
+
 // ClaimDueDeliveries atomically leases due outbox rows to one drain owner.
 // Expired claims can be recovered by a later process, while active claims are
 // invisible to concurrent drains until the owner records a result. The rows
@@ -254,27 +282,29 @@ func (ss *SystemStore) AgeLockedDeliveries(ctx context.Context, destinations []s
 	for i := range unique {
 		placeholders[i] = "?"
 	}
+	tx, err := beginWriteTx(ctx, ss.store.DB)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC()
-	nowText := now.Format(time.RFC3339Nano)
+	nowText := sqliteTimestamp(now)
+	windowNowText := sqliteTimestamp(now)
 	query := `SELECT id,destination,deferrals FROM outbox AS due
 WHERE sent_at IS NULL AND terminal_at='' AND next_at<=?
   AND attempts<? AND deferrals<?
   AND (claim_token='' OR claim_until='' OR claim_until<=?)
   AND ` + heldDeliverySQL + `
+  AND ` + changeWindowDeliverySQL + `
   AND destination IN (` + strings.Join(placeholders, ",") + `)
 ORDER BY id LIMIT ?`
 	// The first timestamp is the due cutoff and the last timestamp before the
 	// destination list is the claim-expiry cutoff.
-	args := []any{nowText, deliveryMaxAttempts, deliveryMaxDeferrals, nowText}
+	args := []any{nowText, deliveryMaxAttempts, deliveryMaxDeferrals, nowText, windowNowText}
 	for _, destination := range unique {
 		args = append(args, destination)
 	}
 	args = append(args, deliveryMaintenanceBatch)
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
@@ -375,9 +405,18 @@ func (ss *SystemStore) claimDueDeliveries(ctx context.Context, limit int, owner 
 	if owner == "" {
 		owner = uuid.NewString()
 	}
+	tx, err := beginWriteTx(ctx, ss.store.DB)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Sample after taking the writer so a concurrent window start/expiry and
+	// this claim have one deterministic SQLite transaction order.
 	now := time.Now().UTC()
-	query := `UPDATE outbox SET claim_token=?,claim_until=? WHERE id IN (SELECT id FROM outbox AS due WHERE sent_at IS NULL AND terminal_at='' AND attempts < ? AND next_at <= ? AND (claim_token='' OR claim_until='' OR claim_until <= ?) AND ` + heldDeliverySQL
-	args := []any{owner, now.Add(deliveryClaimLease).Format(time.RFC3339Nano), deliveryMaxAttempts, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)}
+	nowText := now.Format(time.RFC3339Nano)
+	windowNowText := sqliteTimestamp(now)
+	query := `UPDATE outbox SET claim_token=?,claim_until=? WHERE id IN (SELECT id FROM outbox AS due WHERE sent_at IS NULL AND terminal_at='' AND attempts < ? AND next_at <= ? AND (claim_token='' OR claim_until='' OR claim_until <= ?) AND ` + heldDeliverySQL + ` AND ` + changeWindowDeliverySQL
+	args := []any{owner, now.Add(deliveryClaimLease).Format(time.RFC3339Nano), deliveryMaxAttempts, nowText, nowText, windowNowText}
 	if len(excluded) > 0 {
 		placeholders := make([]string, 0, len(excluded))
 		for _, destination := range excluded {
@@ -393,7 +432,7 @@ func (ss *SystemStore) claimDueDeliveries(ctx context.Context, limit int, owner 
 	}
 	query += ` ORDER BY id LIMIT ?) RETURNING id,destination,payload_json,attempts,deferrals,claim_token,COALESCE(tenant_id,'')`
 	args = append(args, limit)
-	rows, err := ss.store.DB.QueryContext(ctx, query, args...)
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -417,6 +456,9 @@ func (ss *SystemStore) claimDueDeliveries(ctx context.Context, limit int, owner 
 	}
 	if closeErr != nil {
 		return nil, closeErr
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	var out []Delivery
 	for _, item := range claimed {
@@ -473,11 +515,100 @@ func (ss *SystemStore) failInvalidDeliveryPayload(ctx context.Context, id int64,
 // do not remain unavailable for the full claim lease. Delivery attempts and
 // next-at timestamps are intentionally preserved; only ownership is reset.
 func (ss *SystemStore) ReleaseDeliveryClaims(ctx context.Context) (int64, error) {
-	result, err := ss.store.DB.ExecContext(ctx, `UPDATE outbox SET claim_token='',claim_until='' WHERE sent_at IS NULL AND claim_token<>''`)
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UTC()
+	nowText := sqliteTimestamp(now)
+	var released int64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND claim_token<>''`).Scan(&released); err != nil {
+		return 0, err
+	}
+	// Recover rows whose process died after the final invocation marker. An
+	// active or scheduled window keeps the marker as durable evidence until
+	// close; a closed window or credential rotation coalesces it instead of
+	// replaying an alert whose provider outcome is unknown. Include rows whose
+	// lease was already cleared by an older credential-rotation path.
+	rows, err := tx.QueryContext(ctx, `SELECT id,claim_token,change_window_id,event_type,event_job_id,payload_json,coalesce_after_attempt,COALESCE(tenant_id,'') FROM outbox WHERE sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at<>'' ORDER BY id`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	type startedDelivery struct {
+		id                                int64
+		claim, windowID, eventType, jobID string
+		tenantID                          string
+		payload                           []byte
+		coalesceAfter                     int
+	}
+	var started []startedDelivery
+	for rows.Next() {
+		var item startedDelivery
+		if err := rows.Scan(&item.id, &item.claim, &item.windowID, &item.eventType, &item.jobID, &item.payload, &item.coalesceAfter, &item.tenantID); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		started = append(started, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	for _, item := range started {
+		if !changeWindowEventType(item.eventType) {
+			if _, err := tx.ExecContext(ctx, `UPDATE outbox SET attempt_started_at='' WHERE id=? AND claim_token=? AND attempt_started_at<>''`, item.id, item.claim); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		if item.windowID == "" {
+			if item.coalesceAfter != 0 {
+				if _, err := tx.ExecContext(ctx, `UPDATE outbox SET coalesced_at=CASE WHEN coalesced_at='' THEN ? ELSE coalesced_at END,attempt_started_at='',claim_token='',claim_until='',last_error='' WHERE id=? AND claim_token=? AND attempt_started_at<>''`, nowText, item.id, item.claim); err != nil {
+					return 0, err
+				}
+			} else if _, err := tx.ExecContext(ctx, `UPDATE outbox SET attempt_started_at='' WHERE id=? AND claim_token=? AND attempt_started_at<>''`, item.id, item.claim); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		var startRaw, endRaw, closedAt string
+		err := tx.QueryRowContext(ctx, `SELECT quiet.start_at,quiet.end_at,quiet.closed_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.id=? AND j.tenant_id=?`, item.windowID, item.tenantID).Scan(&startRaw, &endRaw, &closedAt)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, err
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			if item.coalesceAfter != 0 {
+				if _, err := tx.ExecContext(ctx, `UPDATE outbox SET coalesced_at=CASE WHEN coalesced_at='' THEN ? ELSE coalesced_at END,attempt_started_at='',claim_token='',claim_until='',last_error='' WHERE id=? AND claim_token=? AND attempt_started_at<>''`, nowText, item.id, item.claim); err != nil {
+					return 0, err
+				}
+			} else if _, err := tx.ExecContext(ctx, `UPDATE outbox SET attempt_started_at='' WHERE id=? AND claim_token=? AND attempt_started_at<>''`, item.id, item.claim); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		if closedAt != "" {
+			if _, err := tx.ExecContext(ctx, `UPDATE outbox SET coalesced_at=CASE WHEN coalesced_at='' THEN ? ELSE coalesced_at END,attempt_started_at='',claim_token='',claim_until='',last_error='' WHERE id=? AND claim_token=?`, nowText, item.id, item.claim); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		// For scheduled and active windows leave the invocation marker in place
+		// and only release its lease below. The event will appear as already in
+		// flight in the eventual close summary instead of being replayed or
+		// mislabeled as an alert held before its first provider handoff.
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE outbox SET claim_token='',claim_until='' WHERE sent_at IS NULL AND claim_token<>''`); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return released, nil
 }
 
 // ReleaseDeliveryClaim returns one in-flight delivery to the due queue without
@@ -497,7 +628,7 @@ func (ss *SystemStore) ReleaseDeliveryClaim(ctx context.Context, id int64, claim
 	if delay > 0 {
 		nextAt = nextAt.Add(delay)
 	}
-	result, err := ss.store.DB.ExecContext(ctx, `UPDATE outbox SET next_at=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND terminal_at='' AND claim_token=?`, nextAt.Format(time.RFC3339Nano), id, claim)
+	result, err := ss.store.DB.ExecContext(ctx, `UPDATE outbox SET next_at=?,claim_token='',claim_until='',attempt_started_at='' WHERE id=? AND sent_at IS NULL AND terminal_at='' AND claim_token=?`, nextAt.Format(time.RFC3339Nano), id, claim)
 	if err != nil {
 		return err
 	}
@@ -548,22 +679,66 @@ func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim 
 	if claim == "" {
 		return ErrDeliveryClaimLost
 	}
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var attempts, deferrals int
-	var destination string
-	if err := tx.QueryRowContext(ctx, `SELECT attempts,deferrals,destination FROM outbox WHERE id=? AND sent_at IS NULL AND claim_token=?`, id, claim).Scan(&attempts, &deferrals, &destination); err != nil {
+	var attempts, deferrals, coalesceAfter int
+	var destination, windowID, eventType, jobID, tenantID string
+	var payload []byte
+	if err := tx.QueryRowContext(ctx, `SELECT attempts,deferrals,destination,change_window_id,event_type,event_job_id,payload_json,coalesce_after_attempt,COALESCE(tenant_id,'') FROM outbox WHERE id=? AND sent_at IS NULL AND terminal_at='' AND claim_token=?`, id, claim).Scan(&attempts, &deferrals, &destination, &windowID, &eventType, &jobID, &payload, &coalesceAfter, &tenantID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrDeliveryClaimLost
 		}
 		return err
 	}
 	now := time.Now().UTC()
+	if changeWindowEventType(eventType) {
+		if coalesceAfter != 0 {
+			if sendErr == nil {
+				result, err := tx.ExecContext(ctx, `UPDATE outbox SET sent_at=?,last_error='',claim_token='',claim_until='',attempt_started_at='',coalesce_after_attempt=0 WHERE id=? AND sent_at IS NULL AND claim_token=?`, now.Format(time.RFC3339Nano), id, claim)
+				if err != nil {
+					return err
+				}
+				if affected, _ := result.RowsAffected(); affected != 1 {
+					return ErrDeliveryClaimLost
+				}
+				if err := recordDeliverySuccessTx(ctx, tx, destination, now); err != nil {
+					return err
+				}
+				return tx.Commit()
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE outbox SET coalesced_at=?,last_error='',claim_token='',claim_until='',attempt_started_at='',coalesce_after_attempt=0 WHERE id=? AND sent_at IS NULL AND claim_token=?`, sqliteTimestamp(now), id, claim); err != nil {
+				return err
+			}
+			return tx.Commit()
+		}
+		if windowID != "" {
+			var endRaw, closedAt string
+			err := tx.QueryRowContext(ctx, `SELECT quiet.end_at,quiet.closed_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.id=? AND j.tenant_id=?`, windowID, tenantID).Scan(&endRaw, &closedAt)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			if err == nil && closedAt == "" && !now.Before(scanTime(endRaw)) {
+				var event model.Event
+				if json.Unmarshal(payload, &event) == nil {
+					if event.JobID == "" {
+						event.JobID = jobID
+					}
+					if err := recordChangeWindowEventTx(ctx, tx, windowID, tenantID, event); err != nil {
+						return err
+					}
+				}
+				if _, err := tx.ExecContext(ctx, `UPDATE outbox SET next_at=?,last_error='',claim_token='',claim_until='',attempt_started_at='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, scanTime(endRaw).Format(time.RFC3339Nano), id, claim); err != nil {
+					return err
+				}
+				return tx.Commit()
+			}
+		}
+	}
 	if sendErr == nil {
-		result, err := tx.ExecContext(ctx, `UPDATE outbox SET sent_at=?,last_error='',claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, now.Format(time.RFC3339Nano), id, claim)
+		result, err := tx.ExecContext(ctx, `UPDATE outbox SET sent_at=?,last_error='',claim_token='',claim_until='',attempt_started_at='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, now.Format(time.RFC3339Nano), id, claim)
 		if err != nil {
 			return err
 		}
@@ -588,7 +763,7 @@ func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim 
 		if terminal {
 			terminalAt = now.Format(time.RFC3339Nano)
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE outbox SET deferrals=?,next_at=?,last_error=?,terminal_at=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, deferrals, now.Add(deliveryInitialDelay).Format(time.RFC3339Nano), deliveryErrorCode(sendErr), terminalAt, id, claim)
+		result, err := tx.ExecContext(ctx, `UPDATE outbox SET deferrals=?,next_at=?,last_error=?,terminal_at=?,claim_token='',claim_until='',attempt_started_at='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, deferrals, now.Add(deliveryInitialDelay).Format(time.RFC3339Nano), deliveryErrorCode(sendErr), terminalAt, id, claim)
 		if err != nil {
 			return err
 		}
@@ -617,7 +792,7 @@ func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim 
 	if terminal {
 		terminalAt = now.Format(time.RFC3339Nano)
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE outbox SET attempts=?,next_at=?,last_error=?,terminal_at=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, attempts, now.Add(delay).Format(time.RFC3339Nano), deliveryErrorCode(sendErr), terminalAt, id, claim)
+	result, err := tx.ExecContext(ctx, `UPDATE outbox SET attempts=?,next_at=?,last_error=?,terminal_at=?,claim_token='',claim_until='',attempt_started_at='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, attempts, now.Add(delay).Format(time.RFC3339Nano), deliveryErrorCode(sendErr), terminalAt, id, claim)
 	if err != nil {
 		return err
 	}
@@ -701,14 +876,14 @@ func (ss *SystemStore) DeferDeliveryWithError(ctx context.Context, id int64, cla
 	if delay < time.Minute {
 		delay = time.Minute
 	}
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var attempts, deferrals int
-	var destination, terminalAt string
-	if err := tx.QueryRowContext(ctx, `SELECT attempts,deferrals,destination,terminal_at FROM outbox WHERE id=? AND sent_at IS NULL AND claim_token=?`, id, claim).Scan(&attempts, &deferrals, &destination, &terminalAt); err != nil {
+	var attempts, deferrals, coalesceAfter int
+	var destination, terminalAt, eventType string
+	if err := tx.QueryRowContext(ctx, `SELECT attempts,deferrals,destination,terminal_at,event_type,coalesce_after_attempt FROM outbox WHERE id=? AND sent_at IS NULL AND claim_token=?`, id, claim).Scan(&attempts, &deferrals, &destination, &terminalAt, &eventType, &coalesceAfter); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrDeliveryClaimLost
 		}
@@ -719,12 +894,20 @@ func (ss *SystemStore) DeferDeliveryWithError(ctx context.Context, id int64, cla
 	}
 	deferrals++
 	now := time.Now().UTC()
+	if changeWindowEventType(eventType) && coalesceAfter != 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET coalesced_at=?,last_error='',claim_token='',claim_until='',attempt_started_at='',coalesce_after_attempt=0 WHERE id=? AND sent_at IS NULL AND claim_token=?`, sqliteTimestamp(now), id, claim); err != nil {
+			return err
+		}
+		// Closing a planned window forbids retries and destination-health
+		// penalties even when cancellation grace expires without an outcome.
+		return tx.Commit()
+	}
 	terminal := deferrals >= deliveryMaxDeferrals
 	terminalStamp := ""
 	if terminal {
 		terminalStamp = now.Format(time.RFC3339Nano)
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE outbox SET deferrals=?,next_at=?,last_error=?,terminal_at=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, deferrals, now.Add(delay).Format(time.RFC3339Nano), deliveryErrorCode(reason), terminalStamp, id, claim)
+	result, err := tx.ExecContext(ctx, `UPDATE outbox SET deferrals=?,next_at=?,last_error=?,terminal_at=?,claim_token='',claim_until='',attempt_started_at='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, deferrals, now.Add(delay).Format(time.RFC3339Nano), deliveryErrorCode(reason), terminalStamp, id, claim)
 	if err != nil {
 		return err
 	}

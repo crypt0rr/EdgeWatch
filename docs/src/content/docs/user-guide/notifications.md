@@ -240,6 +240,20 @@ appears in Activity as **Scan interrupted**, but sends no notification. A
 daemon that keeps stopping is still reported by the job's silence alert, which
 the daemon itself raises; to detect a daemon that stopped or hangs from
 outside, poll [`GET /healthz`](/operations/troubleshooting/#monitor-the-monitor).
+Planned change windows hold only a job's change-detected, change-reminder, and
+change-recovered notifications, including pending change alerts from before
+the window that remain undelivered when it starts. They do not hold scan-health,
+operator, security, deployment, or delivery-failure alerts. Scans, comparisons, and incidents continue during the
+window; held change alerts are coalesced at close instead of sent later as a
+stale backlog. A provider handoff that started before the window can still
+finish during it. If its claim is live at close, the review records it as in
+flight; if it was released or recovered without a result, the review records an
+unknown prior outcome instead. Neither is counted as an alert held during the
+window, and a later failure does not replay the individual alert or amend the
+closing snapshot. See [Planned change windows](/user-guide/jobs-baselines-incidents/#planned-change-windows)
+for scheduling, cancellation, and the closing review. If there was change
+activity, closing the window queues one summary for the job's configured
+destinations and leaves its review due even when delivery later fails.
 Definitive provider failures
 are retried durably for up to 15 attempts over roughly 77 hours; the delay
 doubles from two minutes and caps at 12 hours. A restart preserves each

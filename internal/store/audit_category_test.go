@@ -49,6 +49,7 @@ var knownAuditActions = map[string][]string{
 		"application.health_alert",
 	},
 	auditCategoryData: {
+		"change_window.cancelled", "change_window.created", "change_window.reviewed",
 		"baseline.approved", "baseline.reset",
 		"incident.accepted", "incident.review.updated", "incident.suppressed",
 		"job.archived", "job.created", "job.deleted",

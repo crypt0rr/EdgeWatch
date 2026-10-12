@@ -94,6 +94,9 @@ var tenancyTables = map[string]tableTenancy{
 
 	// A job's configuration, baseline, and runtime state.
 	"baseline_hosts":          viaTable("jobs"),
+	"change_windows":          viaTable("jobs"),
+	"change_window_events":    viaTable("change_windows"),
+	"change_window_refs":      viaTable("change_windows"),
 	"incident_reviews":        viaTable("jobs"),
 	"incident_review_history": viaTable("incident_reviews"),
 	"job_revisions":           viaTable("jobs"),

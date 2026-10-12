@@ -336,7 +336,7 @@ func (ps *PlatformStore) ListEventsPage(ctx context.Context, limit, offset int) 
 // deliveries that failed for good. A tenant's deliveries are not counted.
 func (ps *PlatformStore) FailedDeliveries(ctx context.Context) (int, error) {
 	var count int
-	err := ps.store.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND (attempts >= ? OR terminal_at <> '') AND `+platformHistorySQL, deliveryMaxAttempts).Scan(&count)
+	err := ps.store.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND coalesced_at='' AND (attempts >= ? OR terminal_at <> '') AND `+platformHistorySQL, deliveryMaxAttempts).Scan(&count)
 	return count, err
 }
 
@@ -409,7 +409,7 @@ func (ts *TenantStore) FailedDeliveries(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	var count int
-	err := ts.store.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND (attempts >= ? OR terminal_at <> '') AND `+historyTenantSQL, deliveryMaxAttempts, ts.scope.id).Scan(&count)
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND coalesced_at='' AND (attempts >= ? OR terminal_at <> '') AND `+historyTenantSQL, deliveryMaxAttempts, ts.scope.id).Scan(&count)
 	return count, err
 }
 

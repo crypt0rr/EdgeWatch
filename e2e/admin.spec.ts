@@ -156,6 +156,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
       return
     }
     if (path === '/jobs/job-1' && method === 'GET') { await json(createdJob); return }
+    if (path === '/jobs/job-1/change-windows' && method === 'GET') { await json({ windows: [] }); return }
     if (path === '/jobs/job-1/scans' && method === 'GET') {
       await json({ scans: [scan], pagination: { limit: 20, offset: 0, total: 1, has_more: false, next_offset: null } })
       return

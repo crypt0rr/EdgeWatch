@@ -53,6 +53,52 @@ timezone when it is omitted. New jobs receive an optional 30-minute
 schedule-offset suggestion when another active job is nearby; the administrator
 can keep concurrent times.
 
+## Planned change windows
+
+On a job page, an operator or administrator can schedule one finite change
+window, or start it immediately. Enter a reason and an end time; a scheduled
+window also needs a start time. A window lasts no more than 24 hours, and
+windows for the same job cannot overlap. Times use that job's IANA timezone,
+with the numeric UTC offset shown before saving. Choose another wall time when
+the local time is skipped by a daylight-saving change. When a local time is
+repeated, select the matching UTC offset so the window has one exact instant.
+The window is saved durably and continues across an EdgeWatch restart.
+
+A window holds only that job's **change detected**, **change reminder**, and
+**change recovered** notifications. Scans, baseline learning and comparison,
+incident tracking, scan-health alerts, operator alerts, security alerts,
+deployment alerts, and delivery-failure alerts continue normally. Pending
+change alerts raised before the window are held too. When the window ends or an
+operator cancels an active window, EdgeWatch coalesces those alerts rather than
+replaying an old backlog afterward. A provider handoff that began before the
+window cannot be recalled and may still finish while the window is active. If
+its claim is still live at close, the review records it separately as in
+flight. If its claim was released or recovered without a recorded result, the
+review records an unknown prior outcome instead; this does not claim that a
+provider is still running. Neither category counts as an alert held during the
+window, and a later provider failure does not replay that stale individual
+alert or change the closing snapshot.
+
+When there was change activity, closing the window creates one summary
+notification for the job's configured destinations and a durable review task.
+The review remains due if the notification cannot be delivered; normal
+notification retries and delivery-health reporting continue. The closing
+review shows unique new or recovered changes from held event records, the
+incidents still open at close, the number of held change events, a separate
+count of change events whose provider handoff was still in flight at close, and
+a count of earlier provider attempts with unknown outcomes after recovery or
+lease release. It can include a pending alert raised before the window if that
+alert had not been delivered before the window started. Some event payloads are truncated or do
+not contain enough change identity to count unique changes; EdgeWatch reports
+those events as incomplete instead of guessing. When an incomplete event
+reports a number of entries, that is shown as a reported count, not a unique
+change count. The totals remain exact for identities EdgeWatch could retain.
+Job readers can see the summary counts.
+Incident details and evidence links require `incidents.read`; marking the
+review complete requires `incidents.manage`. Canceling before a scheduled
+window starts produces no closing review. Canceling an active window closes it
+early and produces the same durable review as an expiry.
+
 The **Jobs** list shows each job's latest scan attempt separately from its
 latest successful scan, along with its next scheduled run and current queued,
 running, or resumable work. A paused cycle is shown as resumable; a stalled

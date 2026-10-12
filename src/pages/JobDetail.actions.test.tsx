@@ -4,7 +4,7 @@ import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { StrictMode, act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Route, Routes, useLocation, useNavigate, type MemoryRouterProps } from 'react-router-dom'
-import { APIError, activeScans, approveBaseline, archiveJob, cancelQueuedRun, cancelScan, deleteJob, discardScanCycle, getJob, getSession, jobBaseline, jobScans, latestSuccessfulScan, pauseJob, resetBaseline, restoreJob, resumeJob, runJob, scanCycle, scanDetail, scanHosts, scanResults } from '../api'
+import { APIError, activeScans, approveBaseline, archiveJob, cancelQueuedRun, cancelScan, deleteJob, discardScanCycle, getJob, getSession, jobBaseline, jobChangeWindows, jobScans, latestSuccessfulScan, pauseJob, resetBaseline, restoreJob, resumeJob, runJob, scanCycle, scanDetail, scanHosts, scanResults } from '../api'
 import { renderWithProviders, defaultUnitScope } from '../test/test-utils'
 import { consumeFirstScanIntent, issueFirstScanIntent } from '../firstScanIntent'
 import { JobDetail } from './JobDetail'
@@ -13,7 +13,7 @@ import type { QueryClient } from '@tanstack/react-query'
 
 vi.mock('../api', async () => {
   const actual = await vi.importActual<typeof import('../api')>('../api')
-  return { ...actual, activeScans: vi.fn(), approveBaseline: vi.fn(), archiveJob: vi.fn(), cancelQueuedRun: vi.fn(), cancelScan: vi.fn(), deleteJob: vi.fn(), getJob: vi.fn(), getSession: vi.fn(), jobBaseline: vi.fn(), jobScans: vi.fn(), latestSuccessfulScan: vi.fn(), pauseJob: vi.fn(), resetBaseline: vi.fn(), restoreJob: vi.fn(), resumeJob: vi.fn(), runJob: vi.fn(), scanCycle: vi.fn(), discardScanCycle: vi.fn(), scanDetail: vi.fn(), scanHosts: vi.fn(), scanResults: vi.fn() }
+  return { ...actual, activeScans: vi.fn(), approveBaseline: vi.fn(), archiveJob: vi.fn(), cancelQueuedRun: vi.fn(), cancelScan: vi.fn(), deleteJob: vi.fn(), getJob: vi.fn(), getSession: vi.fn(), jobBaseline: vi.fn(), jobChangeWindows: vi.fn(), jobScans: vi.fn(), latestSuccessfulScan: vi.fn(), pauseJob: vi.fn(), resetBaseline: vi.fn(), restoreJob: vi.fn(), resumeJob: vi.fn(), runJob: vi.fn(), scanCycle: vi.fn(), discardScanCycle: vi.fn(), scanDetail: vi.fn(), scanHosts: vi.fn(), scanResults: vi.fn() }
 })
 
 const job = {
@@ -38,6 +38,7 @@ describe('job detail actions', () => {
     vi.mocked(getJob).mockResolvedValue(job as never)
     vi.mocked(getSession).mockResolvedValue(administrator)
     vi.mocked(jobBaseline).mockResolvedValue({ job_id: 'job-1', job: 'Production', revision: 7, security_hash: 'scope', baseline: job.baseline, snapshot: { units: [], scopes: [] }, pagination: page } as never)
+    vi.mocked(jobChangeWindows).mockResolvedValue({ windows: [] })
     vi.mocked(latestSuccessfulScan).mockResolvedValue({ scan } as never)
     vi.mocked(jobScans).mockResolvedValue({ scans: [scan], pagination: page } as never)
     vi.mocked(scanDetail).mockResolvedValue({ scan, changes: [], changes_pagination: page, current_security_hash: 'scope', comparison_source: 'scan_time' } as never)

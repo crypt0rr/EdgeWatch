@@ -1,4 +1,4 @@
-import type { Change, HostObservation, JobMonitoringSummary, ScanSummary } from './generated/api-types'
+import type { Change, ChangeWindowStatus, HostObservation, JobMonitoringSummary, ScanSummary } from './generated/api-types'
 
 export type NaabuOptions = { scan_type?: 'connect' | 'syn' | string; rate?: number; workers?: number; retries?: number; timeout_ms?: number; warm_up_seconds?: number; verify?: boolean; address_batch_size?: number }
 export type Protocol = { ports: string; mode?: string; service_detection: boolean; engine?: 'nmap' | 'naabu_nmap' | string; profile_id?: string; profile_revision?: number; profile_update_available?: boolean; profile_latest_revision?: number; naabu?: NaabuOptions; naabu_args?: string[]; nmap_args?: string[]; enrichment_args?: string[]; nse_profile?: string; nse_args?: Record<string, string> }
@@ -13,7 +13,7 @@ export type JobForm = {
 export type WorkEstimate = { hosts: number; tcp_ports: number; udp_ports: number; probes: number; naabu_probes?: number; nmap_probes?: number; naabu_invocations?: number; nmap_invocations: number; estimated_seconds?: number; unknown_dns: number }
 export type JobPreviewWarning = { code: string; field?: string; message: string }
 export type JobPreview = { job: JobForm; scan_estimate: WorkEstimate; scan_budget: ScanBudget; warnings: JobPreviewWarning[] }
-export type Job = { id: string; revision: number; enabled: boolean; archived: boolean; security_hash: string; created_at: string; updated_at: string; job: JobForm; baseline: { status: string; samples?: number; attempts?: number; incomplete_attempts?: number; scan_id?: string; modified?: boolean; incidents?: number; pending?: number; host_count?: number }; scan_estimate?: WorkEstimate; scan_budget?: ScanBudget; high_cost_approval_cleared?: boolean; scan_cycle?: ScanCycle | null; scan_cycle_error?: 'cycle_status_unavailable'; monitoring?: JobMonitoringSummary; missing_notification_destinations?: string[] }
+export type Job = { id: string; revision: number; enabled: boolean; archived: boolean; security_hash: string; created_at: string; updated_at: string; job: JobForm; baseline: { status: string; samples?: number; attempts?: number; incomplete_attempts?: number; scan_id?: string; modified?: boolean; incidents?: number; pending?: number; host_count?: number }; scan_estimate?: WorkEstimate; scan_budget?: ScanBudget; high_cost_approval_cleared?: boolean; scan_cycle?: ScanCycle | null; scan_cycle_error?: 'cycle_status_unavailable'; monitoring?: JobMonitoringSummary; change_window?: ChangeWindowStatus | null; missing_notification_destinations?: string[] }
 // scan_budget says whether the job's estimated work fits its unit's probe
 // budget; a scheduled run that does not fit is skipped before it starts.
 export type ScanBudget = { exceeded: boolean; estimated_probes?: number; limit?: number; approval_would_fit?: boolean }

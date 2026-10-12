@@ -866,7 +866,26 @@ func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, dest
 		sendErr = n.destinationPolicy().check(ctx, raw)
 	}
 	if ok && sendErr == nil {
-		sendErr = safeSendContext(ctx, raw, alertMessage(delivery.Event, time.Now()))
+		attemptCtx := context.WithValue(ctx, notificationAttemptStartContextKey{}, notificationAttemptStartFunc(func() error {
+			attemptCtx, cancel := deliveryResultContext(ctx)
+			defer cancel()
+			return n.Store.System().BeginDeliveryAttempt(attemptCtx, delivery.ID, delivery.ClaimToken)
+		}))
+		sendErr = safeSendContext(attemptCtx, raw, alertMessage(delivery.Event, time.Now()))
+		if errors.Is(sendErr, store.ErrDeliveryWindowHeld) {
+			// The final durable gate already released the claim without a
+			// provider attempt. The row will be coalesced into the close review.
+			return nil
+		}
+		if errors.Is(sendErr, store.ErrDeliveryHeld) || errors.Is(sendErr, store.ErrDeliveryClaimLost) {
+			// The final gate can observe a tenant pause or a claim change after
+			// the earlier read-only check. BeginDeliveryAttempt has already
+			// released a held claim, and neither case reached the provider.
+			return nil
+		}
+		if errors.Is(sendErr, store.ErrDeliveryAttemptNotStarted) {
+			return errors.Join(sendErr, n.releaseClaimWithoutBudget(ctx, delivery, 0))
+		}
 	}
 	if errors.Is(sendErr, ErrNotificationSendIndeterminate) && !errors.Is(sendErr, ErrNotificationProviderTimeout) {
 		// The provider outcome is unknown after the cancellation grace period.
@@ -952,6 +971,10 @@ func deliveryResultContext(ctx context.Context) (context.Context, context.Cancel
 
 type notificationSendFunc func(context.Context, string, string) error
 
+type notificationAttemptStartContextKey struct{}
+
+type notificationAttemptStartFunc func() error
+
 func send(ctx context.Context, rawURL, message string) error {
 	if notificationIsTestBinary() {
 		return sendInProcess(rawURL, message)
@@ -1001,7 +1024,9 @@ func safeSend(rawURL, message string) error {
 
 func safeSendContext(ctx context.Context, rawURL, message string) error {
 	if err := sendContext(ctx, rawURL, message); err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrNotificationSendIndeterminate) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrNotificationSendIndeterminate) ||
+			errors.Is(err, store.ErrDeliveryAttemptNotStarted) || errors.Is(err, store.ErrDeliveryWindowHeld) ||
+			errors.Is(err, store.ErrDeliveryHeld) || errors.Is(err, store.ErrDeliveryClaimLost) {
 			return err
 		}
 		return redactedFailure(err)
@@ -1053,6 +1078,12 @@ func sendContext(ctx context.Context, rawURL, message string) error {
 				result <- store.ErrDeliveryProviderPanic
 			}
 		}()
+		if start, ok := ctx.Value(notificationAttemptStartContextKey{}).(notificationAttemptStartFunc); ok {
+			if err := start(); err != nil {
+				result <- err
+				return
+			}
+		}
 		result <- notificationProviderSend(providerCtx, rawURL, message)
 	}()
 	select {

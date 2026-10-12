@@ -179,6 +179,7 @@ describe('application shell', () => {
     for (const [type, key] of [
       ['job.paused', ['job', 'job-9']],
       ['job.resumed', ['jobs']],
+      ['change-window.updated', ['job-change-windows', 'job-9']],
       ['job-silent', ['activity-events']],
       ['baseline-approved', ['job-baseline-overview', 'job-9']],
       ['baseline-reset', ['baseline-hosts', 'job-9']],
@@ -194,6 +195,12 @@ describe('application shell', () => {
       expect(invalidate, type).toHaveBeenCalledWith({ queryKey: key })
       expect(invalidate, type).not.toHaveBeenCalledWith()
     }
+    invalidate.mockClear()
+    act(() => stream.emit('change-window.updated', 'job-9'))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['jobs'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['job', 'job-9'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['job-change-windows', 'job-9'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['job-change-window', 'job-9'] })
     invalidate.mockClear()
     act(() => stream.emit('scan-budget-exceeded', 'job-9'))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['activity-events'] })
@@ -439,6 +446,30 @@ describe('application shell', () => {
     vi.mocked(getSession).mockResolvedValueOnce({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: [], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
     renderWithProviders(<Jobs />)
     await waitFor(() => expect(screen.getByText('No jobs configured')).toBeInTheDocument())
+  })
+
+  it('shows each job’s latest change window, reason, end time, counts, and review state', async () => {
+    const base = { revision: 1, enabled: true, archived: false, job: { targets: [], schedule: '0 * * * *' }, baseline: { status: 'complete', samples: 1 } }
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [
+      { ...base, id: 'job-due', job: { ...base.job, name: 'Review monitor' }, change_window: { id: 'window-due', start_at: '2026-10-12T08:00:00Z', end_at: '2026-10-12T09:00:00Z', closed_at: '2026-10-12T08:45:00Z', timezone: 'Europe/Amsterdam', reason: 'Router replacement', status: 'closed', end_reason: 'cancelled', review_state: 'due', new_count: 1, recovered_count: 2, known_change_count: 3, still_open_count: 1, suppressed_event_count: 4, in_flight_event_count: 2, unknown_outcome_event_count: 3, incomplete_event_count: 1 } },
+      { ...base, id: 'job-scheduled', job: { ...base.job, name: 'Scheduled monitor' }, change_window: { id: 'window-scheduled', start_at: '2026-10-13T08:00:00Z', end_at: '2026-10-13T09:00:00Z', closed_at: null, timezone: 'UTC', reason: 'Planned upgrade', status: 'scheduled', review_state: 'none', new_count: 0, recovered_count: 0, known_change_count: 0, still_open_count: 0, suppressed_event_count: 0, in_flight_event_count: 0, unknown_outcome_event_count: 0, incomplete_event_count: 0 } },
+      { ...base, id: 'job-reviewed', job: { ...base.job, name: 'Reviewed monitor' }, change_window: { id: 'window-reviewed', start_at: '2026-10-11T08:00:00Z', end_at: '2026-10-11T09:00:00Z', closed_at: '2026-10-11T09:00:00Z', timezone: 'UTC', reason: 'Switch change', status: 'closed', end_reason: 'expired', review_state: 'reviewed', new_count: 0, recovered_count: 0, known_change_count: 0, still_open_count: 0, suppressed_event_count: 1, in_flight_event_count: 0, unknown_outcome_event_count: 0, incomplete_event_count: 0 } },
+    ] } as never)
+    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: ['jobs.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    renderWithProviders(<Jobs />)
+
+    const dueHeading = await screen.findByRole('heading', { name: 'Review monitor' })
+    const dueCard = dueHeading.closest('article.job-card')!
+    expect(dueCard.querySelector('.job-change-window-status')).toHaveTextContent('Review due')
+    expect(dueCard).toHaveTextContent('Router replacement')
+    expect(dueCard.querySelectorAll('time')[1]).toHaveAttribute('dateTime', '2026-10-12T08:45:00Z')
+    expect(dueCard.querySelector('.job-change-window-counts')).toHaveTextContent('4 change events held · 1 new · 2 recovered · 1 still open · 2 in flight at close · 3 with unknown prior outcome · 1 older events with incomplete identities')
+    expect(dueCard.querySelector('.job-change-window-details-link')).toHaveAttribute('href', '/jobs/job-due')
+    const scheduledCard = screen.getByRole('heading', { name: 'Scheduled monitor' }).closest('article.job-card')!
+    const reviewedCard = screen.getByRole('heading', { name: 'Reviewed monitor' }).closest('article.job-card')!
+    expect(scheduledCard.querySelector('.job-change-window-status')).toHaveTextContent('Scheduled')
+    expect(reviewedCard.querySelector('.job-change-window-status')).toHaveTextContent('Reviewed')
+    expect(screen.queryByText(/private-scan/)).not.toBeInTheDocument()
   })
 
   it('shows paused jobs in amber on the jobs list', async () => {

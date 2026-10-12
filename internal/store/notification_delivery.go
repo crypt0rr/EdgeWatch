@@ -266,10 +266,10 @@ func (ts *TenantStore) ListDeliveryHealth(ctx context.Context) (map[string]Deliv
 		return nil, err
 	}
 	healthQuery := `SELECT ` + deliveryHealthColumns + ` FROM notification_delivery_health AS h WHERE ` + tenantHealthSQL
-	outboxQuery := `SELECT ` + pendingOutboxColumns + ` FROM outbox AS o WHERE o.sent_at IS NULL AND o.terminal_at='' AND o.attempts < ? AND ` + tenantPendingSQL + ` GROUP BY o.destination`
+	outboxQuery := `SELECT ` + pendingOutboxColumns + ` FROM outbox AS o WHERE o.sent_at IS NULL AND o.terminal_at='' AND o.coalesced_at='' AND o.attempts < ? AND ` + tenantPendingSQL + ` GROUP BY o.destination`
 	if ts.scope.id == DefaultTenantID {
 		healthQuery = `SELECT ` + deliveryHealthColumns + ` FROM notification_delivery_health AS h WHERE ` + defaultHealthSQL
-		outboxQuery = `SELECT ` + pendingOutboxColumns + ` FROM outbox AS o WHERE o.sent_at IS NULL AND o.terminal_at='' AND o.attempts < ? AND ` + defaultPendingSQL + ` GROUP BY o.destination`
+		outboxQuery = `SELECT ` + pendingOutboxColumns + ` FROM outbox AS o WHERE o.sent_at IS NULL AND o.terminal_at='' AND o.coalesced_at='' AND o.attempts < ? AND ` + defaultPendingSQL + ` GROUP BY o.destination`
 	}
 	return listDeliveryHealth(ctx, ts.store.reader(), healthQuery, []any{ts.scope.id}, outboxQuery, []any{deliveryMaxAttempts, ts.scope.id})
 }
@@ -282,7 +282,7 @@ func (ts *TenantStore) ListDeliveryHealth(ctx context.Context) (map[string]Deliv
 // default tenant, is never returned.
 func (ps *PlatformStore) ListDeliveryHealth(ctx context.Context) (map[string]DeliveryHealth, error) {
 	healthQuery := `SELECT ` + deliveryHealthColumns + ` FROM notification_delivery_health AS h WHERE ` + platformHealthSQL
-	outboxQuery := `SELECT ` + pendingOutboxColumns + ` FROM outbox AS o WHERE o.sent_at IS NULL AND o.terminal_at='' AND o.attempts < ? AND ` + platformPendingSQL + ` GROUP BY o.destination`
+	outboxQuery := `SELECT ` + pendingOutboxColumns + ` FROM outbox AS o WHERE o.sent_at IS NULL AND o.terminal_at='' AND o.coalesced_at='' AND o.attempts < ? AND ` + platformPendingSQL + ` GROUP BY o.destination`
 	return listDeliveryHealth(ctx, ps.store.reader(), healthQuery, nil, outboxQuery, []any{deliveryMaxAttempts})
 }
 
@@ -367,7 +367,7 @@ const MaxTerminalDeliveriesPage = 100
 // credentials: an alert queued for credentials that were replaced since is
 // never sent with the new ones. A delivery's selector is
 // "managed:<id>:<revision>", so its revision starts after the ID.
-const terminalDeliverySQL = `o.destination LIKE 'managed:' || m.id || ':%' AND o.sent_at IS NULL AND o.terminal_at<>''
+const terminalDeliverySQL = `o.destination LIKE 'managed:' || m.id || ':%' AND o.sent_at IS NULL AND o.terminal_at<>'' AND o.coalesced_at=''
   AND CAST(substr(o.destination, length(m.id)+10) AS INTEGER) >= m.credential_revision`
 
 // ListTerminalDeliveries returns, newest first, up to limit alerts that the

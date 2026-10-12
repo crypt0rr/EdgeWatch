@@ -179,6 +179,15 @@ var apiRoutes = withPathAlias("/scanner-profiles", "/scanner/profiles", []apiRou
 	{Method: http.MethodPost, Template: "/jobs/preview", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/preview", Handle: sessionTenantHandler((*Server).previewJob)},
 	{Method: http.MethodGet, Template: "/jobs/schedule-suggestion", Permission: auth.PermissionJobsRead, Example: "/jobs/schedule-suggestion", Handle: tenantHandler((*Server).scheduleSuggestion)},
 	{Method: http.MethodGet, Template: "/jobs/{id}", Permission: auth.PermissionJobsRead, Example: "/jobs/job-1", TrailingSlash: true, Handle: jobHandler(jobMissingOnAnyError, (*Server).getJob)},
+	{Method: http.MethodGet, Template: "/jobs/{id}/change-windows", Permission: auth.PermissionJobsRead, Example: "/jobs/job-1/change-windows", TrailingSlash: true, Handle: jobSessionHandler(jobMissingOnAnyError, (*Server).listChangeWindows)},
+	{Method: http.MethodPost, Template: "/jobs/{id}/change-windows", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1/change-windows", TrailingSlash: true, Handle: jobSessionHandler(jobMissingOnAnyError, (*Server).createChangeWindow)},
+	{Method: http.MethodDelete, Template: "/jobs/{id}/change-windows", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1/change-windows", TrailingSlash: true, Handle: jobSessionHandler(jobMissingOnAnyError, (*Server).cancelChangeWindow)},
+	{Method: http.MethodGet, Template: "/jobs/{id}/change-windows/{window_id}", Permission: auth.PermissionJobsRead, Example: "/jobs/job-1/change-windows/window-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
+		if job, ok := s.resolveJob(w, r, c.tenant, r.PathValue("id"), jobMissingOnAnyError); ok {
+			s.getChangeWindow(w, r, c.session, c.tenant, job, r.PathValue("window_id"))
+		}
+	}},
+	{Method: http.MethodPut, Template: "/jobs/{id}/change-windows/review", Permission: auth.PermissionIncidentsManage, Mutates: true, Example: "/jobs/job-1/change-windows/review", TrailingSlash: true, Handle: jobSessionHandler(jobMissingOnAnyError, (*Server).reviewChangeWindow)},
 	{Method: http.MethodPut, Template: "/jobs/{id}", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1", TrailingSlash: true, Handle: (*Server).updateJobRoute},
 	{Method: http.MethodDelete, Template: "/jobs/{id}", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1", TrailingSlash: true, Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
 		s.archiveJob(w, r, c.session, c.tenant, r.PathValue("id"), true)

@@ -513,7 +513,7 @@ func (ss *SystemStore) UpdateRuntimeWithOutbox(ctx context.Context, jobID string
 // the active-scan exclusion of the operator actions, so it can commit its
 // own result while its lease is held.
 func (ss *SystemStore) updateRuntime(ctx context.Context, jobID, securityHash string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return nil, err
 	}
@@ -813,7 +813,7 @@ func (ss *SystemStore) FinalizeManagedScanWithOptions(ctx context.Context, scan 
 // the lease before any potentially lengthy serialization work.
 func (ss *SystemStore) beginManagedScanFinalization(ctx context.Context, jobID string, options ManagedScanFinalizationOptions) (*sql.Tx, context.Context, func(), error) {
 	if options.WriterWaitTimeout <= 0 && options.WorkTimeout <= 0 {
-		tx, err := ss.store.DB.BeginTx(ctx, nil)
+		tx, err := beginWriteTx(ctx, ss.store.DB)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -1018,7 +1018,11 @@ func queueEventsTx(ctx context.Context, tx *sql.Tx, events []model.Event, destin
 	if len(destinations) == 0 || len(events) == 0 {
 		return nil
 	}
-	now := sqliteTimestamp(time.Now())
+	if _, err := tx.ExecContext(ctx, `UPDATE startup_state SET rowid=rowid WHERE 0`); err != nil {
+		return err
+	}
+	windowNow := time.Now().UTC()
+	now := sqliteTimestamp(windowNow)
 	// A managed destination is resolved once for each owner of the events,
 	// because an alert may only go to its own tenant's destinations.
 	type intent struct{ destination, owner string }
@@ -1027,6 +1031,25 @@ func queueEventsTx(ctx context.Context, tx *sql.Tx, events []model.Event, destin
 	for _, event := range events {
 		if !model.EventDelivered(event.Type) {
 			continue
+		}
+		windowID := ""
+		if changeWindowEventType(event.Type) && event.JobID != "" {
+			tenantID, tenantErr := eventTenantIDTx(ctx, tx, event, "")
+			if tenantErr != nil {
+				return tenantErr
+			}
+			windowID, active, err := referencedChangeWindowTx(ctx, tx, event, tenantID)
+			if !active && windowID == "" {
+				windowID, active, _, err = windowForQueuedChangeTx(ctx, tx, event.JobID, tenantID, windowNow)
+			}
+			if err != nil {
+				return err
+			}
+			if active {
+				if err := recordChangeWindowEventTx(ctx, tx, windowID, tenantID, event); err != nil {
+					return err
+				}
+			}
 		}
 		bounded, payload, err := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
 		if err != nil {
@@ -1052,7 +1075,7 @@ func queueEventsTx(ctx context.Context, tx *sql.Tx, events []model.Event, destin
 			if key == "" {
 				continue
 			}
-			result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at,tenant_id) VALUES(?,?,?,`+tenantSQL+`)`, append([]any{key, payload, now}, tenantArgs...)...)
+			result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at,tenant_id,event_type,event_job_id,change_window_id) VALUES(?,?,?,`+tenantSQL+`,?,?,?)`, append([]any{key, payload, now}, append(tenantArgs, event.Type, event.JobID, windowID)...)...)
 			if err != nil {
 				return err
 			}
@@ -1313,6 +1336,12 @@ func loadRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string) (model.JobStat
 }
 
 func persistRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, state model.JobState, events []model.Event) ([]model.Event, error) {
+	// Runtime finalization and window expiry both hold SQLite's writer before
+	// classifying events. This makes their commit order the membership rule at
+	// the strict quiet boundary.
+	if _, err := tx.ExecContext(ctx, `UPDATE startup_state SET rowid=rowid WHERE 0`); err != nil {
+		return nil, err
+	}
 	raw, err := json.Marshal(state)
 	if err != nil {
 		return nil, err
@@ -1330,6 +1359,24 @@ func persistRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, state model
 	for i := range events {
 		if events[i].JobID == "" {
 			events[i].JobID = jobID
+		}
+		if events[i].CreatedAt.IsZero() {
+			events[i].CreatedAt = now
+		}
+		if changeWindowEventType(events[i].Type) {
+			tenantID, tenantErr := eventTenantIDTx(ctx, tx, events[i], "")
+			if tenantErr != nil {
+				return nil, tenantErr
+			}
+			windowID, active, _, windowErr := windowForQueuedChangeTx(ctx, tx, jobID, tenantID, now)
+			if windowErr != nil {
+				return nil, windowErr
+			}
+			if active {
+				if err := recordChangeWindowEventTx(ctx, tx, windowID, tenantID, events[i]); err != nil {
+					return nil, err
+				}
+			}
 		}
 		bounded, payload, err := model.MarshalBoundedEvent(events[i], model.EventPayloadLimit)
 		if err != nil {

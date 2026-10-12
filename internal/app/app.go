@@ -1187,6 +1187,9 @@ func (a *App) Daemon(ctx context.Context) error {
 		}
 	}()
 	a.wakeDelivery()
+	// Close expired planned change windows before the first normal heartbeat.
+	// The durable review remains due even if its optional summary delivery fails.
+	a.expireChangeWindows(ctx, system, true)
 	// Compare the sandboxes with the states that the last deployment-health
 	// alerts reported, once at startup and then with each heartbeat.
 	a.checkDeploymentAlerts(ctx, a.nowUTC())
@@ -1224,6 +1227,7 @@ func (a *App) Daemon(ctx context.Context) error {
 				continue
 			}
 			missedHeartbeats = 0
+			a.expireChangeWindows(ctx, system, false)
 			a.checkJobSilenceBounded(ctx, a.nowUTC())
 			a.checkDeploymentAlerts(ctx, a.nowUTC())
 		case <-a.scheduleWake:

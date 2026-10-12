@@ -15,6 +15,19 @@ reads and writes are tenant-scoped and permission-checked; audit and live-update
 messages contain no note or occurrence token, and the public status surface
 does not expose review data.
 
+Planned change windows store an operator-provided reason and label, the job's
+time zone, and a bounded closing summary of observed changes and currently
+open incidents in the SQLite database and its backups. Treat these details as
+operationally sensitive. Window records inherit their job's tenant and are
+available only through tenant-scoped job routes; the public status surface
+never exposes them. Job readers see bounded window metadata, while incident
+details in a closing summary require incident-read permission. The close
+notification contains counts and fixed wording rather than change or incident
+identities. Open and scheduled windows remain stored; closed windows without
+a pending review and their evidence expire under configured history retention.
+Review-due summaries remain until reviewed, and permanent job or tenant
+deletion erases them through the resumable purge.
+
 TCP jobs may use the optional Naabu discovery-to-Nmap pipeline. Both scanners
 are fixed, image-bundled executables (`/usr/local/bin/naabu` and
 `/usr/bin/nmap`); administrators can edit only validated argument arrays and
@@ -690,7 +703,7 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 68 must not be opened by an older EdgeWatch
+database upgraded to schema 69 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
@@ -720,6 +733,15 @@ The startup backfill adds occurrence and ordering metadata to the replaceable
 active-incident projection in restartable batches; it does not change scan
 results or baselines. Review notes are retained with active incidents and
 closed reviews are pruned under the configured history retention.
+Schema 69 adds tenant-scoped planned change windows and compact references for
+their closing reviews. Existing outbox payloads are inspected only when valid
+JSON, and malformed payloads leave empty event metadata without blocking the
+migration. Window summaries preserve aggregate counts while bounding stored
+detail lists; old truncated event payloads remain explicitly incomplete.
+Unreviewed due summaries are retained past the normal history cutoff, while
+other closed windows and their evidence expire in bounded batches. The daemon
+continues scanning and recording incidents during quiet windows; only the
+three change-notification event types are held or coalesced.
 Only the daemon migrates, and only one process at a time: from v0.36.0 the
 daemon holds an advisory lock on the database directory, which restores take
 too, from before it opens the database until its migration and startup

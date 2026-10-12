@@ -1,5 +1,5 @@
 import type { ActiveScan, ActivityEvent, BaselineHostsResponse, GlobalHostsResponse, HostDetailResponse, Job, JobForm, JobPreview, Pagination, PendingChange, QueuedRun, RdapResult, ScanComparison, NaabuOptions } from './types'
-import type { AdminStatus, Change, DeploymentLimits, IncidentInboxItem, IncidentInboxPage, IncidentReview, NotificationStatus, PlatformStatus, Scan, ScanSummary, Scope, Unit } from './generated/api-types'
+import type { AdminStatus, Change, ChangeWindow, DeploymentLimits, IncidentInboxItem, IncidentInboxPage, IncidentReview, NotificationStatus, PlatformStatus, Scan, ScanSummary, Scope, Unit } from './generated/api-types'
 import { setDisplayTimeZone } from './format'
 
 export type NotificationDestination = {
@@ -171,6 +171,12 @@ export type ScheduleSuggestion = {
 }
 export const scheduleSuggestion = (schedule: string, timezone: string) => api<ScheduleSuggestion>(`/jobs/schedule-suggestion?${new URLSearchParams({ schedule, timezone }).toString()}`)
 export const getJob = (id: string) => api<Job>(`/jobs/${id}`)
+export type ChangeWindowCreate = { start_now: boolean; start_at: string; end_at: string; reason: string }
+export const jobChangeWindows = (id: string) => api<{ windows: ChangeWindow[] }>(`/jobs/${encodeURIComponent(id)}/change-windows`)
+export const getJobChangeWindow = (id: string, windowID: string, signal?: AbortSignal) => api<{ window: ChangeWindow }>(`/jobs/${encodeURIComponent(id)}/change-windows/${encodeURIComponent(windowID)}`, { signal })
+export const createJobChangeWindow = (id: string, window: ChangeWindowCreate) => api<{ window: ChangeWindow }>(`/jobs/${encodeURIComponent(id)}/change-windows`, { method: 'POST', body: JSON.stringify(window) })
+export const cancelJobChangeWindow = (id: string, windowID: string) => api<{ window: ChangeWindow }>(`/jobs/${encodeURIComponent(id)}/change-windows`, { method: 'DELETE', body: JSON.stringify({ window_id: windowID }) })
+export const reviewJobChangeWindow = (id: string, windowID: string, revision: number) => api<{ window: ChangeWindow }>(`/jobs/${encodeURIComponent(id)}/change-windows/review`, { method: 'PUT', body: JSON.stringify({ window_id: windowID, revision }) })
 export const createJob = (job: JobForm) => api<Job>('/jobs', { method: 'POST', body: JSON.stringify(job) })
 export const previewJob = (draft: JobForm, signal?: AbortSignal) => api<JobPreview>('/jobs/preview', { method: 'POST', body: JSON.stringify(draft), signal })
 export const updateJob = (id: string, revision: number, job: JobForm, confirm_rebaseline = false) => api<Job>(`/jobs/${id}`, { method: 'PUT', body: JSON.stringify({ ...job, revision, confirm_rebaseline }) })

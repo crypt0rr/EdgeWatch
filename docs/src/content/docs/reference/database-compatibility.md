@@ -5,7 +5,7 @@ description: Understand the current SQLite schema, the oldest schema that upgrad
 
 ## Current schema and rollback
 
-The current schema is version 68. Schema 31 records terminal notification
+The current schema is version 69. Schema 31 records terminal notification
 deliveries and marks rows that had already exhausted the original eight
 attempts. Schema 63 repairs databases that had already passed schema 31 by
 marking still-unsent rows with at least eight attempts and a scheduled retry
@@ -34,6 +34,31 @@ file, notification URL, or metrics token file is unusable (see
 `config validate` under [Host commands](/reference/cli/)). Keep encryption
 keys with the database or encrypted web-managed destinations and never
 commit them.
+
+## Schema 69
+
+Schema 69 adds tenant-scoped `change_windows`, compact per-window event and
+change references, and delivery metadata for planned quiet windows. The
+migration backfills each existing outbox row's event type and job ID from a
+valid JSON payload; malformed payloads keep empty metadata and do not block
+the upgrade. It does not resend, rewrite, or remove existing notifications.
+New window references are captured before the existing event-payload size
+bound, so later event pruning does not erase a retained closing review.
+
+Closing an active or expired window stores a bounded summary and exact
+aggregate counts in the same transaction that queues its optional summary
+notification. A review-due window stays available until an authorized
+operator reviews it. Open and scheduled windows are retained; closed windows
+without a pending review, their compact evidence, and old linked delivery rows
+expire with the configured history retention in bounded batches. Pending
+delivery attempts keep their window association until the provider outcome is
+resolved, so retention cannot orphan an active handoff. Permanent job deletion
+and business-unit deletion erase window records and evidence through the
+existing resumable purge paths. The new tables inherit tenant ownership from
+their job and are not exposed through public status.
+
+An older release refuses the upgraded database, so a rollback means restoring
+the pre-upgrade `./data` backup.
 
 ## Upgrade floor
 

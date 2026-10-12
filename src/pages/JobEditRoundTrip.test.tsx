@@ -3,7 +3,7 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { activeScans, archiveJob, getJob, getSession, jobBaseline, jobScans, latestSuccessfulScan, listNotificationDestinations, listScannerProfiles, scanCycle, scannerCapabilities, updateJob } from '../api'
+import { activeScans, archiveJob, getJob, getSession, jobBaseline, jobChangeWindows, jobScans, latestSuccessfulScan, listNotificationDestinations, listScannerProfiles, scanCycle, scannerCapabilities, updateJob } from '../api'
 import { createQueryClient } from '../main'
 import { renderWithProviders, defaultUnitScope } from '../test/test-utils'
 import type { Job } from '../types'
@@ -12,7 +12,7 @@ import { JobEditor } from './JobEditor'
 
 vi.mock('../api', async () => {
   const actual = await vi.importActual<typeof import('../api')>('../api')
-  return { ...actual, activeScans: vi.fn(), archiveJob: vi.fn(), getJob: vi.fn(), getSession: vi.fn(), jobBaseline: vi.fn(), jobScans: vi.fn(), latestSuccessfulScan: vi.fn(), listNotificationDestinations: vi.fn(), listScannerProfiles: vi.fn(), scanCycle: vi.fn(), scannerCapabilities: vi.fn(), updateJob: vi.fn() }
+  return { ...actual, activeScans: vi.fn(), archiveJob: vi.fn(), getJob: vi.fn(), getSession: vi.fn(), jobBaseline: vi.fn(), jobChangeWindows: vi.fn(), jobScans: vi.fn(), latestSuccessfulScan: vi.fn(), listNotificationDestinations: vi.fn(), listScannerProfiles: vi.fn(), scanCycle: vi.fn(), scannerCapabilities: vi.fn(), updateJob: vi.fn() }
 })
 
 const saved: Job = {
@@ -39,6 +39,7 @@ describe('job edit round trip without live updates', () => {
     vi.mocked(listScannerProfiles).mockResolvedValue({ profiles: [] })
     vi.mocked(scannerCapabilities).mockResolvedValue({ engines: ['nmap'], nmap: { available: true, path: '/usr/bin/nmap', version: '7.99' }, naabu: { available: false, path: '', version: '', syn_supported: false } })
     vi.mocked(jobBaseline).mockResolvedValue({ job_id: 'job-1', job: 'Production', revision: 3, security_hash: 'scope', baseline: saved.baseline, snapshot: { units: [], scopes: [] }, pagination: page })
+    vi.mocked(jobChangeWindows).mockResolvedValue({ windows: [] })
     vi.mocked(jobScans).mockResolvedValue({ scans: [], pagination: page })
     vi.mocked(latestSuccessfulScan).mockResolvedValue({ scan: null })
     vi.mocked(scanCycle).mockResolvedValue({ cycle: null })

@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/model"
@@ -28,6 +30,23 @@ func eventTenantSQL(event model.Event) (string, []any) {
 	default:
 		return jobTenantSQL, []any{event.JobID}
 	}
+}
+
+func eventTenantIDTx(ctx context.Context, tx *sql.Tx, event model.Event, expectedTenantID string) (string, error) {
+	if event.JobID == "" {
+		return event.TenantID, nil
+	}
+	var tenantID string
+	var err error
+	if expectedTenantID != "" {
+		err = tx.QueryRowContext(ctx, `SELECT tenant_id FROM jobs WHERE id=? AND tenant_id=?`, event.JobID, expectedTenantID).Scan(&tenantID)
+	} else {
+		err = tx.QueryRowContext(ctx, `SELECT tenant_id FROM jobs WHERE id=? AND tenant_id IS NOT NULL`, event.JobID).Scan(&tenantID)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return tenantID, err
 }
 
 // platformEvent reports whether an event belongs to the platform: an event

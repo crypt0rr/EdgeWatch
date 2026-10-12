@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
-import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createPlatformNotification, createUser, getPublicDashboard, getScan, getScanSummary, historicalScanHost, issueUserActivation, issueUserPasswordReset, listHosts, listIncidents, listScans, listUsers, login, recordActivity, revokeUserSessions, scheduleSuggestion, setCSRF, setForbiddenHandler, setup, setupStatus, suppressIncident, updateIncidentReview, updateNotificationDestination, updatePlatformNotification, updateUser } from './api'
+import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, cancelJobChangeWindow, createJobChangeWindow, createNotificationDestination, createPlatformNotification, createUser, getJobChangeWindow, getPublicDashboard, getScan, getScanSummary, historicalScanHost, issueUserActivation, issueUserPasswordReset, jobChangeWindows, listHosts, listIncidents, listScans, listUsers, login, recordActivity, reviewJobChangeWindow, revokeUserSessions, scheduleSuggestion, setCSRF, setForbiddenHandler, setup, setupStatus, suppressIncident, updateIncidentReview, updateNotificationDestination, updatePlatformNotification, updateUser } from './api'
 import * as apiRoutes from './api'
 import { getDisplayTimeZone, setDisplayTimeZone } from './format'
 import type { Scan, ScanSummary } from './generated/api-types'
@@ -59,6 +59,34 @@ describe('investigation inbox API contract', () => {
     expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/jobs/job%2F1/incidents/review')
     expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'PUT', body: JSON.stringify({ key: 'port|host|tcp|443', occurrence_token: 'opaque-versioned-token', expected_revision: 1, status: 'investigating', note: 'Check next scan', follow_up_at: null }) })
     expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('X-CSRF-Token')).toBe('csrf-token')
+  })
+})
+
+describe('planned change window API', () => {
+  it('uses job-scoped paths and sends revision-protected mutations with CSRF', async () => {
+    setCSRF('csrf-token')
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ windows: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const detailSignal = new AbortController().signal
+
+    await jobChangeWindows('job/1')
+    await getJobChangeWindow('job/1', 'window/2', detailSignal)
+    await createJobChangeWindow('job/1', { start_now: false, start_at: '2026-10-25T02:30:00+01:00', end_at: '2026-10-25T04:00:00+01:00', reason: 'Router change' })
+    await cancelJobChangeWindow('job/1', 'window/2')
+    await reviewJobChangeWindow('job/1', 'window/2', 4)
+
+    expect(fetchMock.mock.calls.map(call => String(call[0]))).toEqual([
+      '/api/v1/jobs/job%2F1/change-windows',
+      '/api/v1/jobs/job%2F1/change-windows/window%2F2',
+      '/api/v1/jobs/job%2F1/change-windows',
+      '/api/v1/jobs/job%2F1/change-windows',
+      '/api/v1/jobs/job%2F1/change-windows/review',
+    ])
+    expect(fetchMock.mock.calls[2][1]).toMatchObject({ method: 'POST', body: JSON.stringify({ start_now: false, start_at: '2026-10-25T02:30:00+01:00', end_at: '2026-10-25T04:00:00+01:00', reason: 'Router change' }) })
+    expect(fetchMock.mock.calls[3][1]).toMatchObject({ method: 'DELETE', body: JSON.stringify({ window_id: 'window/2' }) })
+    expect(fetchMock.mock.calls[4][1]).toMatchObject({ method: 'PUT', body: JSON.stringify({ window_id: 'window/2', revision: 4 }) })
+    expect(fetchMock.mock.calls[1][1]?.signal).toBe(detailSignal)
+    for (const [, init] of fetchMock.mock.calls.slice(2)) expect(new Headers(init?.headers).get('X-CSRF-Token')).toBe('csrf-token')
   })
 })
 

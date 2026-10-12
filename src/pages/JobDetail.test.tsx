@@ -10,6 +10,7 @@ import {
   getJob,
   getSession,
   jobBaseline,
+  jobChangeWindows,
   jobPendingChanges,
   jobScans,
   latestSuccessfulScan,
@@ -31,6 +32,7 @@ vi.mock('../api', () => ({
   getJob: vi.fn(),
   getSession: vi.fn(),
   jobBaseline: vi.fn(),
+  jobChangeWindows: vi.fn(),
   jobPendingChanges: vi.fn(),
   jobScans: vi.fn(),
   latestSuccessfulScan: vi.fn(),
@@ -117,6 +119,7 @@ describe('job surface overview', () => {
     vi.mocked(getJob).mockResolvedValue(job)
     vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'user-1', username: 'admin', permissions: ['jobs.write', 'scans.read', 'baselines.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
     vi.mocked(jobBaseline).mockResolvedValue(baselineResponse)
+    vi.mocked(jobChangeWindows).mockResolvedValue({ windows: [] })
     vi.mocked(jobPendingChanges).mockResolvedValue({ job_id: 'job-1', job: 'production', pending_changes: [], pagination })
     vi.mocked(latestSuccessfulScan).mockResolvedValue(latestResponse)
     vi.mocked(scanResults).mockResolvedValue(latestResultsResponse)

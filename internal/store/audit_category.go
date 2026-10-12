@@ -82,6 +82,9 @@ var auditActionCategories = map[string]string{
 	"notifications.config_imported":       auditCategoryPlatform,
 	// A platform administrator's change to a tenant's scan capacity.
 	"tenant.capacity_changed": auditCategoryPlatform,
+	"change_window.created":   auditCategoryData,
+	"change_window.cancelled": auditCategoryData,
+	"change_window.reviewed":  auditCategoryData,
 
 	// The lifecycle of business units (tenants), recorded without a tenant.
 	auditTenantCreated:           auditCategoryPlatform,

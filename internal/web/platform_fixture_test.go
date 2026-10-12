@@ -51,9 +51,9 @@ type platformFixture struct {
 	users    map[string]store.User
 	sessions map[string]routeMatrixSession
 	// Unit B's resources, by kind.
-	jobB, sharedJobB, scanB, profileB, destinationB, viewerB string
+	jobB, sharedJobB, scanB, profileB, destinationB, viewerB, windowB string
 	// Unit A's resources, by kind.
-	jobA, scanA, profileA, destinationA string
+	jobA, scanA, profileA, destinationA, windowA string
 	// The platform administrator's second account and the platform's
 	// destination.
 	secondPlatformAdmin string

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"slices"
 	"strings"
@@ -157,6 +158,145 @@ func TestManagedNotificationCredentialEditDiscardsAndAuditsPendingDelivery(t *te
 	}
 	if actor != "admin" || detail == "" || !containsAll(detail, "1", created.ID, "credential rotation") {
 		t.Fatalf("pending-discard audit = detail %q actor %q", detail, actor)
+	}
+}
+
+func TestManagedNotificationRotationPreservesNonWindowDeliveryBehavior(t *testing.T) {
+	for _, keepPending := range []bool{false, true} {
+		name := "discard"
+		if keepPending {
+			name = "keep"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			s := openTestStore(t)
+			ts := defaultTenant(s)
+			job, err := ts.CreateJob(ctx, testJob("rotation-"+name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			destination, err := ts.CreateManagedNotification(ctx, "rotation-destination", "Ops", "generic", []byte{1}, []byte{2}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			queuedAt := time.Now().UTC()
+			for _, event := range []model.Event{
+				{Type: "changes-detected", JobID: job.ID, TenantID: DefaultTenantID, ScanID: "non-window-change", CreatedAt: queuedAt, Changes: []model.Change{{Key: "change", Kind: "port"}}},
+				{Type: "custom-notification", JobID: job.ID, TenantID: DefaultTenantID, CreatedAt: queuedAt},
+			} {
+				if err := s.System().QueueEvent(ctx, managedNotificationKey(destination.ID, destination.Revision), event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			claimed, err := s.System().ClaimDueDeliveries(ctx, 10, "rotation-"+name)
+			if err != nil || len(claimed) != 2 {
+				t.Fatalf("claims before rotation = %d, %v", len(claimed), err)
+			}
+			for _, item := range claimed {
+				if item.Event.Type == "changes-detected" {
+					if err := s.System().BeginDeliveryAttempt(ctx, item.ID, item.ClaimToken); err != nil {
+						t.Fatalf("begin non-window change attempt: %v", err)
+					}
+				}
+			}
+			updated, err := ts.GetManagedNotification(ctx, destination.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if keepPending {
+				updated, err = ts.UpdateManagedNotificationKeepingPendingWithAudit(ctx, destination.ID, updated.Revision, updated.Name, updated.Provider, []byte{3}, []byte{4}, true, AuditEntry{Action: "notifications.updated"})
+			} else {
+				updated, err = ts.UpdateManagedNotificationWithAudit(ctx, destination.ID, updated.Revision, updated.Name, updated.Provider, []byte{3}, []byte{4}, true, AuditEntry{Action: "notifications.updated"})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var rows int
+			if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination=? AND sent_at IS NULL`, managedNotificationKey(destination.ID, updated.Revision)).Scan(&rows); err != nil {
+				t.Fatal(err)
+			}
+			if keepPending && rows != 2 {
+				t.Fatalf("rows moved for keep-pending rotation = %d, want 2", rows)
+			}
+			if !keepPending && rows != 0 {
+				t.Fatalf("rows remaining after discard rotation = %d, want 0", rows)
+			}
+			for _, item := range claimed {
+				var marker, claim string
+				err := s.DB.QueryRowContext(ctx, `SELECT attempt_started_at,claim_token FROM outbox WHERE id=?`, item.ID).Scan(&marker, &claim)
+				if !keepPending {
+					if !errors.Is(err, sql.ErrNoRows) {
+						t.Fatalf("discarded row %d lookup = %v, want no rows", item.ID, err)
+					}
+					continue
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if marker != "" || claim != "" {
+					t.Fatalf("kept non-window row %d marker=%q claim=%q; legacy rotation should release it", item.ID, marker, claim)
+				}
+			}
+		})
+	}
+}
+
+func TestManagedNotificationRotationRetainsStartedWindowEventForReview(t *testing.T) {
+	for _, keepPending := range []bool{false, true} {
+		name := "discard"
+		if keepPending {
+			name = "keep"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			s := openTestStore(t)
+			ts := defaultTenant(s)
+			job := createWindowTestJob(t, ts, "rotation-window-"+name, "UTC")
+			destination, err := ts.CreateManagedNotification(ctx, "rotation-window-destination", "Ops", "generic", []byte{1}, []byte{2}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+			window := createTestChangeWindow(t, ts, job.ID, start, start.Add(time.Hour))
+			event := model.Event{Type: "changes-detected", JobID: job.ID, TenantID: DefaultTenantID, ScanID: "rotation-window-event", CreatedAt: time.Now().UTC(), Changes: []model.Change{{Key: "rotation-window-change", Kind: "port", Port: 443}}}
+			if err := s.System().QueueEvent(ctx, managedNotificationKey(destination.ID, destination.Revision), event); err != nil {
+				t.Fatal(err)
+			}
+			claimed, err := s.System().ClaimDueDeliveries(ctx, 1, "rotation-window-"+name)
+			if err != nil || len(claimed) != 1 {
+				t.Fatalf("claim window-linked event = %d, %v", len(claimed), err)
+			}
+			if err := s.System().BeginDeliveryAttempt(ctx, claimed[0].ID, claimed[0].ClaimToken); err != nil {
+				t.Fatal(err)
+			}
+			current, err := ts.GetManagedNotification(ctx, destination.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if keepPending {
+				_, err = ts.UpdateManagedNotificationKeepingPendingWithAudit(ctx, destination.ID, current.Revision, current.Name, current.Provider, []byte{3}, []byte{4}, true, AuditEntry{Action: "notifications.updated"})
+			} else {
+				_, err = ts.UpdateManagedNotificationWithAudit(ctx, destination.ID, current.Revision, current.Name, current.Provider, []byte{3}, []byte{4}, true, AuditEntry{Action: "notifications.updated"})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var claim, marker string
+			var coalesceAfter int
+			if err := s.DB.QueryRowContext(ctx, `SELECT claim_token,attempt_started_at,coalesce_after_attempt FROM outbox WHERE id=?`, claimed[0].ID).Scan(&claim, &marker, &coalesceAfter); err != nil {
+				t.Fatal(err)
+			}
+			if claim != claimed[0].ClaimToken || marker == "" || coalesceAfter != 1 {
+				t.Fatalf("started window delivery after rotation = claim %q marker %q coalesce-after %d", claim, marker, coalesceAfter)
+			}
+			if released, err := s.System().ReleaseDeliveryClaims(ctx); err != nil || released != 1 {
+				t.Fatalf("release after rotation = %d claims, %v", released, err)
+			}
+			closeAt := window.EndAt.Add(time.Second)
+			summary, changed, err := ts.ExpireChangeWindow(ctx, window.ID, func() time.Time { return closeAt }, nil)
+			if err != nil || !changed || summary.UnknownOutcomeEventCount != 1 || summary.InFlightEventCount != 0 {
+				t.Fatalf("window review after rotation/recovery = %+v, changed %v, err %v", summary, changed, err)
+			}
+		})
 	}
 }
 

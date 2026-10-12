@@ -45,6 +45,7 @@ import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { PortScopeDetails } from '../components/PortScopeDetails'
 import { MonitorNextActions } from '../components/MonitorNextActions'
+import { JobChangeWindows } from '../components/JobChangeWindows'
 import { SurfaceUnitList } from '../components/SurfaceUnitList'
 import type { ActiveScan, QueuedRun, ScanBudget, WorkEstimate } from '../types'
 import { baselinePresentation } from '../baseline'
@@ -118,6 +119,7 @@ export function JobDetail() {
   const canReadScans = session.data?.permissions.includes('scans.read') ?? false
   const canReadBaseline = session.data?.permissions.includes('baselines.read') ?? false
   const canReadIncidents = session.data?.permissions.includes('incidents.read') ?? false
+  const canManageIncidents = session.data?.permissions.includes('incidents.manage') ?? false
   const active = useQuery({
     queryKey: ['active-scans'],
     queryFn: activeScans,
@@ -715,6 +717,19 @@ export function JobDetail() {
         onRun={run}
         onRetryScans={() => { void scans.refetch() }}
         onRetrySchedule={() => { void nextRun.refetch() }}
+      />
+
+      <JobChangeWindows
+        key={id}
+        jobID={id}
+        jobName={value.job.name}
+        timezone={value.job.timezone || 'UTC'}
+        archived={value.archived}
+        latestWindow={value.change_window}
+        canManageWindows={canOperate}
+        canReadIncidents={canReadIncidents}
+        canReadScans={canReadScans}
+        canManageIncidents={canManageIncidents}
       />
 
       <div className="detail-summary">

@@ -395,7 +395,7 @@ export function Jobs() {
             </label>
             <p className="muted" role="status" aria-live="polite">Showing {visibleJobs.length} of {allJobs.length} jobs</p>
           </div>
-          {filter === 'attention' && unavailableMonitoringCount > 0 ? <p className="job-monitoring-unavailable" role="status">Monitoring status is unavailable for {unavailableMonitoringCount} job{unavailableMonitoringCount === 1 ? '; that job is' : 's; those jobs are'} not included in this filter.</p> : null}
+          {filter === 'attention' && unavailableMonitoringCount > 0 ? <p className="job-monitoring-unavailable" role="status">Monitoring data is incomplete for {unavailableMonitoringCount} job{unavailableMonitoringCount === 1 ? '' : 's'}; known attention reasons remain visible in this filter.</p> : null}
           {filter === 'attention' && allJobs.length > 0 && visibleJobs.length === 0 ? <div className="empty"><h3>No available jobs need attention</h3><p>No available job shows a latest failed or incomplete attempt or a stalled cycle.</p></div> : null}
           <div className="job-grid">
           {visibleJobs.map(job => {

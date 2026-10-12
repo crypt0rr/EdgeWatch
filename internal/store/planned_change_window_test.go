@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,14 +35,14 @@ func createTestChangeWindow(t *testing.T, ts *TenantStore, jobID string, start, 
 	return window
 }
 
-func queueWindowTestEvent(t *testing.T, s *Store, destination, jobID, eventType, scanID string, at time.Time, changes []model.Change, truncated bool, reported int) {
+func queueWindowTestEvent(t *testing.T, ctx context.Context, s *Store, destination, jobID, eventType, scanID string, at time.Time, changes []model.Change, truncated bool, reported int) {
 	t.Helper()
 	event := model.Event{
 		Type: eventType, JobID: jobID, Job: "edge", ScanID: scanID,
 		Message: "test change event", CreatedAt: at, Changes: changes,
 		ChangesTruncated: truncated, ChangesCount: reported,
 	}
-	if err := s.System().QueueEvent(context.Background(), destination, event); err != nil {
+	if err := s.System().QueueEvent(ctx, destination, event); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -104,6 +105,127 @@ func TestChangeWindowValidationAndZoneOffsets(t *testing.T) {
 	}
 }
 
+func TestCreateChangeWindowValidationAndActorLabelBounds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job := createWindowTestJob(t, ts, "window-input-bounds", "UTC")
+	now := time.Now().UTC()
+	end := now.Add(3 * time.Hour)
+	cases := []struct {
+		name     string
+		jobID    string
+		startAt  time.Time
+		endAt    time.Time
+		startNow bool
+		reason   string
+		actor    string
+	}{
+		{name: "unknown job", jobID: "missing-window-job", startNow: true, endAt: end, reason: "maintenance", actor: "operator"},
+		{name: "empty reason", jobID: job.ID, startNow: true, endAt: end, reason: " ", actor: "operator"},
+		{name: "oversized reason", jobID: job.ID, startNow: true, endAt: end, reason: strings.Repeat("r", changeWindowReasonMaxBytes+1), actor: "operator"},
+		{name: "empty actor label", jobID: job.ID, startNow: true, endAt: end, reason: "maintenance", actor: " "},
+		{name: "scheduled start in the past", jobID: job.ID, startAt: now.Add(-time.Hour), endAt: end, reason: "maintenance", actor: "operator"},
+		{name: "end not after start", jobID: job.ID, startAt: now.Add(time.Hour), endAt: now.Add(30 * time.Minute), reason: "maintenance", actor: "operator"},
+		{name: "end not in the future", jobID: job.ID, startNow: true, endAt: now.Add(-time.Minute), reason: "maintenance", actor: "operator"},
+		{name: "wrong explicit timezone offset", jobID: job.ID, startNow: true, endAt: end.In(time.FixedZone("wrong", int(time.Hour/time.Second))), reason: "maintenance", actor: "operator"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := ts.CreateChangeWindow(ctx, test.jobID, test.startAt, test.endAt, test.startNow, test.reason, "actor-id", test.actor)
+			if test.name == "unknown job" {
+				if !errors.Is(err, ErrNotFound) {
+					t.Fatalf("create error = %v; want ErrNotFound", err)
+				}
+			} else if !errors.Is(err, ErrValidation) {
+				t.Fatalf("create error = %v; want ErrValidation", err)
+			}
+		})
+	}
+	longActor := strings.Repeat("名", changeWindowActorMaxRunes+2)
+	window, err := ts.CreateChangeWindow(ctx, job.ID, time.Time{}, end, true, "maintenance", "actor-id", longActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len([]rune(window.ActorLabel)); got != changeWindowActorMaxRunes {
+		t.Fatalf("stored actor label has %d runes; want bounded to %d", got, changeWindowActorMaxRunes)
+	}
+}
+
+func TestLatestChangeWindowProjectionKeepsOlderDueReviewVisible(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job := createWindowTestJob(t, ts, "window-projection-review", "UTC")
+	createDueWindow := func(scanID string) ChangeWindow {
+		t.Helper()
+		window, err := ts.CreateChangeWindow(ctx, job.ID, time.Time{}, time.Now().UTC().Add(time.Hour), true, "maintenance", "operator", "Operator")
+		if err != nil {
+			t.Fatal(err)
+		}
+		queueWindowTestEvent(t, ctx, s, "destination-"+scanID, job.ID, "changes-detected", scanID, time.Now().UTC(), []model.Change{{Key: "new:" + scanID, Kind: "port", Target: "192.0.2.10", Port: 443}}, false, 0)
+		closed, changed, err := ts.CancelChangeWindow(ctx, job.ID, window.ID, "operator", "Operator", nil, AuditEntry{})
+		if err != nil || !changed || closed.ReviewState != "due" {
+			t.Fatalf("close window for projection: changed %v, state %q, err %v", changed, closed.ReviewState, err)
+		}
+		return closed
+	}
+	olderDue := createDueWindow("projection-old")
+	newerReviewed := createDueWindow("projection-new")
+	if _, err := ts.ReviewChangeWindow(ctx, job.ID, newerReviewed.ID, newerReviewed.Revision, "reviewer", "Reviewer", AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := ts.LatestChangeWindowSummaries(ctx, false, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, ok := projection[job.ID]
+	if !ok || status.ID != olderDue.ID || status.ReviewState != "due" || status.KnownChangeCount != 1 || status.Revision != olderDue.Revision {
+		t.Fatalf("job projection = %+v, present %v; want older due window %q and its bounded counts", status, ok, olderDue.ID)
+	}
+	if err := ts.SetJobArchived(ctx, job.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	activeOnly, err := ts.LatestChangeWindowSummaries(ctx, false, time.Now().UTC())
+	if err != nil || len(activeOnly) != 0 {
+		t.Fatalf("archived job projection without includeArchived = %+v, %v", activeOnly, err)
+	}
+	archived, err := ts.LatestChangeWindowSummaries(ctx, true, time.Now().UTC())
+	if err != nil || archived[job.ID].ID != olderDue.ID {
+		t.Fatalf("archived due review projection = %+v, %v", archived, err)
+	}
+}
+
+func TestMarshalBoundedChangeWindowSummaryTruncatesDetailsWithoutChangingCounts(t *testing.T) {
+	t.Parallel()
+	large := strings.Repeat("evidence", 700)
+	summary := ChangeWindowSummary{NewCount: 40, RecoveredCount: 5, StillOpenCount: 40, SuppressedEventCount: 2}
+	for i := 0; i < 40; i++ {
+		change := model.Change{Key: fmt.Sprintf("new:%02d", i), Kind: "port", Severity: "high", Target: large}
+		summary.KnownChanges = append(summary.KnownChanges, change)
+		summary.StillOpen = append(summary.StillOpen, model.Incident{Change: change, ScanID: "scan-" + large, OpenedAt: time.Now().UTC(), LastSeenAt: time.Now().UTC()})
+	}
+	raw, err := marshalBoundedChangeWindowSummary(&summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) == 0 || len(raw) > changeWindowSummaryMaxBytes {
+		t.Fatalf("serialized summary is %d bytes; bound is %d", len(raw), changeWindowSummaryMaxBytes)
+	}
+	var decoded ChangeWindowSummary
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.KnownChangeDetailsTruncated || !decoded.StillOpenDetailsTruncated || len(decoded.KnownChanges) >= 40 || len(decoded.StillOpen) >= 40 {
+		t.Fatalf("summary details were not explicitly truncated: %+v", decoded)
+	}
+	if decoded.NewCount != 40 || decoded.RecoveredCount != 5 || decoded.StillOpenCount != 40 || decoded.SuppressedEventCount != 2 {
+		t.Fatalf("truncation changed aggregate counts: %+v", decoded)
+	}
+}
+
 func TestChangeWindowTimestampBoundariesUseFixedWidthUTC(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -153,10 +275,10 @@ func TestChangeWindowCloseDedupeBoundsSummaryAndCoalescesAlerts(t *testing.T) {
 	for i := range changes {
 		changes[i] = model.Change{Key: fmt.Sprintf("new:%02d", i), Kind: "port", Severity: "high", Target: "192.0.2.10", Port: 8000 + i}
 	}
-	queueWindowTestEvent(t, s, "changes-destination-a", job.ID, "changes-detected", "scan-new", createdAt, changes, false, 0)
-	queueWindowTestEvent(t, s, "changes-destination-b", job.ID, "changes-detected", "scan-new", createdAt, changes, false, 0)
-	queueWindowTestEvent(t, s, "recovered-destination", job.ID, "changes-recovered", "scan-recovered", createdAt.Add(time.Second), []model.Change{{Key: "recovered:1", Kind: "port", Target: "192.0.2.10", Port: 8443}}, false, 0)
-	queueWindowTestEvent(t, s, "reminder-destination", job.ID, "changes-reminder", "scan-reminder", createdAt.Add(2*time.Second), nil, true, 3)
+	queueWindowTestEvent(t, context.Background(), s, "changes-destination-a", job.ID, "changes-detected", "scan-new", createdAt, changes, false, 0)
+	queueWindowTestEvent(t, context.Background(), s, "changes-destination-b", job.ID, "changes-detected", "scan-new", createdAt, changes, false, 0)
+	queueWindowTestEvent(t, context.Background(), s, "recovered-destination", job.ID, "changes-recovered", "scan-recovered", createdAt.Add(time.Second), []model.Change{{Key: "recovered:1", Kind: "port", Target: "192.0.2.10", Port: 8443}}, false, 0)
+	queueWindowTestEvent(t, context.Background(), s, "reminder-destination", job.ID, "changes-reminder", "scan-reminder", createdAt.Add(2*time.Second), nil, true, 3)
 	if err := s.System().QueueEvent(ctx, "health-destination", model.Event{Type: "health-check", TenantID: DefaultTenantID, Message: "unrelated", CreatedAt: createdAt.Add(3 * time.Second)}); err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +370,7 @@ func TestDelayedWindowExpiryHoldsOnlyLinkedBacklog(t *testing.T) {
 	ts := defaultTenant(s)
 	job := createWindowTestJob(t, ts, "window-delayed-expiry", "UTC")
 	createdAt := time.Now().UTC().Truncate(time.Millisecond)
-	queueWindowTestEvent(t, s, "before-window", job.ID, "changes-detected", "scan-before", createdAt, []model.Change{{Key: "old-change", Kind: "port", Target: "192.0.2.10", Port: 443}}, false, 0)
+	queueWindowTestEvent(t, context.Background(), s, "before-window", job.ID, "changes-detected", "scan-before", createdAt, []model.Change{{Key: "old-change", Kind: "port", Target: "192.0.2.10", Port: 443}}, false, 0)
 	window, err := ts.CreateChangeWindow(ctx, job.ID, time.Time{}, time.Now().UTC().Add(time.Hour), true, "maintenance", "actor", "Test Operator")
 	if err != nil {
 		t.Fatal(err)
@@ -257,7 +379,7 @@ func TestDelayedWindowExpiryHoldsOnlyLinkedBacklog(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET end_at=? WHERE id=?`, sqliteTimestamp(expiredEnd), window.ID); err != nil {
 		t.Fatal(err)
 	}
-	queueWindowTestEvent(t, s, "after-window", job.ID, "changes-detected", "scan-after", time.Now().UTC(), []model.Change{{Key: "new-change", Kind: "port", Target: "192.0.2.10", Port: 444}}, false, 0)
+	queueWindowTestEvent(t, context.Background(), s, "after-window", job.ID, "changes-detected", "scan-after", time.Now().UTC(), []model.Change{{Key: "new-change", Kind: "port", Target: "192.0.2.10", Port: 444}}, false, 0)
 	deliveries, err := s.System().ClaimDueDeliveries(ctx, 20, "window-delayed")
 	if err != nil {
 		t.Fatal(err)
@@ -288,7 +410,7 @@ func TestStartedBeforeFutureWindowDoesNotCountAsSuppressedAndFailureCoalesces(t 
 	s := openTestStore(t)
 	ts := defaultTenant(s)
 	job := createWindowTestJob(t, ts, "window-claim-gate", "UTC")
-	queueWindowTestEvent(t, s, "claim-destination", job.ID, "changes-detected", "scan-claim", time.Now().UTC(), []model.Change{{Key: "claim-change", Kind: "port", Target: "192.0.2.10", Port: 443}}, false, 0)
+	queueWindowTestEvent(t, context.Background(), s, "claim-destination", job.ID, "changes-detected", "scan-claim", time.Now().UTC(), []model.Change{{Key: "claim-change", Kind: "port", Target: "192.0.2.10", Port: 443}}, false, 0)
 	start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 	window := createTestChangeWindow(t, ts, job.ID, start, start.Add(time.Hour))
 	deliveries, err := s.System().ClaimDueDeliveries(ctx, 10, "window-claim")
@@ -345,7 +467,7 @@ func TestStartedBeforeFutureWindowRecoveryPreservesInFlightEvidenceUntilClose(t 
 	s := openTestStore(t)
 	ts := defaultTenant(s)
 	job := createWindowTestJob(t, ts, "window-recovered-inflight", "UTC")
-	queueWindowTestEvent(t, s, "recovery-destination", job.ID, "changes-detected", "scan-recovery", time.Now().UTC(), []model.Change{{Key: "recovery-change", Kind: "port", Target: "192.0.2.11", Port: 443}}, false, 0)
+	queueWindowTestEvent(t, context.Background(), s, "recovery-destination", job.ID, "changes-detected", "scan-recovery", time.Now().UTC(), []model.Change{{Key: "recovery-change", Kind: "port", Target: "192.0.2.11", Port: 443}}, false, 0)
 	start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 	window := createTestChangeWindow(t, ts, job.ID, start, start.Add(time.Hour))
 	deliveries, err := s.System().ClaimDueDeliveries(ctx, 10, "pre-window-worker")
@@ -396,7 +518,7 @@ func TestLateIndeterminateOutcomeAfterWindowCloseCoalescesWithoutHealthPenalty(t
 	s := openTestStore(t)
 	ts := defaultTenant(s)
 	job := createWindowTestJob(t, ts, "window-late-indeterminate", "UTC")
-	queueWindowTestEvent(t, s, "indeterminate-destination", job.ID, "changes-detected", "scan-indeterminate", time.Now().UTC(), []model.Change{{Key: "indeterminate-change", Kind: "port", Target: "192.0.2.12", Port: 443}}, false, 0)
+	queueWindowTestEvent(t, context.Background(), s, "indeterminate-destination", job.ID, "changes-detected", "scan-indeterminate", time.Now().UTC(), []model.Change{{Key: "indeterminate-change", Kind: "port", Target: "192.0.2.12", Port: 443}}, false, 0)
 	start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 	window := createTestChangeWindow(t, ts, job.ID, start, start.Add(time.Hour))
 	deliveries, err := s.System().ClaimDueDeliveries(ctx, 10, "indeterminate-worker")
@@ -485,7 +607,7 @@ func TestDeliveryResultAfterExactSecondWindowEndKeepsRetryTimestampFormat(t *tes
 	s := openTestStore(t)
 	ts := defaultTenant(s)
 	job := createWindowTestJob(t, ts, "window-retry-timestamp", "UTC")
-	queueWindowTestEvent(t, s, "retry-destination", job.ID, "changes-detected", "scan-retry", time.Now().UTC(), []model.Change{{Key: "retry-change", Kind: "port", Target: "192.0.2.10", Port: 443}}, false, 0)
+	queueWindowTestEvent(t, context.Background(), s, "retry-destination", job.ID, "changes-detected", "scan-retry", time.Now().UTC(), []model.Change{{Key: "retry-change", Kind: "port", Target: "192.0.2.10", Port: 443}}, false, 0)
 	start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 	window := createTestChangeWindow(t, ts, job.ID, start, start.Add(time.Hour))
 	deliveries, err := s.System().ClaimDueDeliveries(ctx, 10, "window-retry")
@@ -524,7 +646,7 @@ func TestChangeWindowRetentionPreservesDueAndScheduledAndDeletesClosedHistory(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	queueWindowTestEvent(t, s, "retention-due", dueJob.ID, "changes-detected", "scan-retention-due", time.Now().UTC(), []model.Change{{Key: "due-change", Kind: "port", Target: "192.0.2.10", Port: 443}}, false, 0)
+	queueWindowTestEvent(t, context.Background(), s, "retention-due", dueJob.ID, "changes-detected", "scan-retention-due", time.Now().UTC(), []model.Change{{Key: "due-change", Kind: "port", Target: "192.0.2.10", Port: 443}}, false, 0)
 	due, changed, err := ts.CancelChangeWindow(ctx, dueJob.ID, due.ID, "actor", "Operator", nil, AuditEntry{})
 	if err != nil || !changed || due.ReviewState != "due" {
 		t.Fatalf("close due-review window = %+v, changed %v, err %v", due, changed, err)
@@ -535,7 +657,7 @@ func TestChangeWindowRetentionPreservesDueAndScheduledAndDeletesClosedHistory(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	queueWindowTestEvent(t, s, "retention-reviewed", reviewedJob.ID, "changes-detected", "scan-retention-reviewed", time.Now().UTC(), []model.Change{{Key: "reviewed-change", Kind: "port", Target: "192.0.2.10", Port: 8443}}, false, 0)
+	queueWindowTestEvent(t, context.Background(), s, "retention-reviewed", reviewedJob.ID, "changes-detected", "scan-retention-reviewed", time.Now().UTC(), []model.Change{{Key: "reviewed-change", Kind: "port", Target: "192.0.2.10", Port: 8443}}, false, 0)
 	reviewed, changed, err = ts.CancelChangeWindow(ctx, reviewedJob.ID, reviewed.ID, "actor", "Operator", nil, AuditEntry{})
 	if err != nil || !changed || reviewed.ReviewState != "due" {
 		t.Fatalf("close reviewed-history window = %+v, changed %v, err %v", reviewed, changed, err)

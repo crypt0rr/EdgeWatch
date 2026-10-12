@@ -1038,12 +1038,14 @@ func queueEventsTx(ctx context.Context, tx *sql.Tx, events []model.Event, destin
 			if tenantErr != nil {
 				return tenantErr
 			}
-			windowID, active, err := referencedChangeWindowTx(ctx, tx, event, tenantID)
+			var active bool
+			var windowErr error
+			windowID, active, windowErr = referencedChangeWindowTx(ctx, tx, event, tenantID)
 			if !active && windowID == "" {
-				windowID, active, _, err = windowForQueuedChangeTx(ctx, tx, event.JobID, tenantID, windowNow)
+				windowID, active, _, windowErr = windowForQueuedChangeTx(ctx, tx, event.JobID, tenantID, windowNow)
 			}
-			if err != nil {
-				return err
+			if windowErr != nil {
+				return windowErr
 			}
 			if active {
 				if err := recordChangeWindowEventTx(ctx, tx, windowID, tenantID, event); err != nil {

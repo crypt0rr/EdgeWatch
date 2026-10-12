@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -78,6 +79,21 @@ func TestChangeWindowEvidenceIsPermissionScopedForReadAndMutationResponses(t *te
 	if viewerDetail.Code != http.StatusOK || strings.Contains(viewerDetail.Body.String(), "private-fingerprint-read") {
 		t.Fatalf("jobs.read without incidents.read detail = %d: %s", viewerDetail.Code, viewerDetail.Body.String())
 	}
+	listRequest := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+job.ID+"/change-windows", nil)
+	listResponse := httptest.NewRecorder()
+	server.listChangeWindows(listResponse, listRequest, viewer, ts, job)
+	if listResponse.Code != http.StatusOK || strings.Contains(listResponse.Body.String(), "private-fingerprint-read") {
+		t.Fatalf("metadata-only list response = %d: %s", listResponse.Code, listResponse.Body.String())
+	}
+	var listPayload struct {
+		Windows []store.ChangeWindow `json:"windows"`
+	}
+	if err := json.Unmarshal(listResponse.Body.Bytes(), &listPayload); err != nil {
+		t.Fatal(err)
+	}
+	if len(listPayload.Windows) != 1 || listPayload.Windows[0].Summary != nil || listPayload.Windows[0].SuppressedEventCount != 1 {
+		t.Fatalf("list window metadata = %+v", listPayload.Windows)
+	}
 	var viewerPayload struct {
 		Window store.ChangeWindow `json:"window"`
 	}
@@ -138,5 +154,135 @@ func TestChangeWindowEvidenceIsPermissionScopedForReadAndMutationResponses(t *te
 	}
 	if reviewed.Window.Summary != nil || reviewed.Window.ReviewState != "reviewed" || reviewed.Window.SuppressedEventCount != 1 {
 		t.Fatalf("redacted review response lost status/count metadata: %+v", reviewed.Window)
+	}
+}
+
+func TestCreateChangeWindowValidatesTimeAndCreatesDurableWindow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	server, _, admin := newUsersTestServer(t)
+	ts := defaultTenantStore(server)
+	job, err := ts.CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name: "change-window-create-validation", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := time.Now().UTC().Add(3 * time.Hour).Format(time.RFC3339Nano)
+	wrongZone := time.Now().UTC().Add(4 * time.Hour).In(time.FixedZone("wrong", 60*60)).Format(time.RFC3339Nano)
+	cases := []struct {
+		name      string
+		input     map[string]any
+		status    int
+		code      string
+		fieldName string
+	}{
+		{name: "missing start mode", input: map[string]any{"end_at": end, "reason": "maintenance"}, status: http.StatusBadRequest, code: "validation_failed", fieldName: "start_now"},
+		{name: "invalid scheduled start", input: map[string]any{"start_now": false, "start_at": "not-an-instant", "end_at": end, "reason": "maintenance"}, status: http.StatusBadRequest, code: "validation_failed", fieldName: "start_at"},
+		{name: "start now with a start instant", input: map[string]any{"start_now": true, "start_at": end, "end_at": end, "reason": "maintenance"}, status: http.StatusBadRequest, code: "validation_failed", fieldName: "start_at"},
+		{name: "invalid end", input: map[string]any{"start_now": true, "start_at": "", "end_at": "not-an-instant", "reason": "maintenance"}, status: http.StatusBadRequest, code: "validation_failed", fieldName: "end_at"},
+		{name: "wrong job zone offset", input: map[string]any{"start_now": true, "start_at": "", "end_at": wrongZone, "reason": "maintenance"}, status: http.StatusBadRequest, code: "validation_failed", fieldName: "job"},
+		{name: "empty reason", input: map[string]any{"start_now": true, "start_at": "", "end_at": end, "reason": "  "}, status: http.StatusBadRequest, code: "validation_failed", fieldName: "job"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			encoded, err := json.Marshal(test.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+job.ID+"/change-windows", strings.NewReader(string(encoded)))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			server.createChangeWindow(response, request, admin, ts, job)
+			if response.Code != test.status {
+				t.Fatalf("create response = %d: %s; want %d", response.Code, response.Body.String(), test.status)
+			}
+			var payload struct {
+				Error struct {
+					Code    string            `json:"code"`
+					Message string            `json:"message"`
+					Details map[string]string `json:"details"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Error.Code != test.code || payload.Error.Message == "" || payload.Error.Details[test.fieldName] == "" {
+				t.Fatalf("validation payload = %+v; want code %q and field %q", payload.Error, test.code, test.fieldName)
+			}
+		})
+	}
+
+	create := func(end string) *httptest.ResponseRecorder {
+		t.Helper()
+		encoded, err := json.Marshal(map[string]any{"start_now": true, "start_at": "", "end_at": end, "reason": "scheduled maintenance"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+job.ID+"/change-windows", strings.NewReader(string(encoded)))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		server.createChangeWindow(response, request, admin, ts, job)
+		return response
+	}
+	created := create(time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("valid create response = %d: %s", created.Code, created.Body.String())
+	}
+	var payload struct {
+		Window store.ChangeWindow `json:"window"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Window.ID == "" || payload.Window.Status != "active" || payload.Window.Reason != "scheduled maintenance" {
+		t.Fatalf("created window = %+v", payload.Window)
+	}
+	conflict := create(time.Now().UTC().Add(4 * time.Hour).Format(time.RFC3339Nano))
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("overlapping create response = %d: %s; want conflict", conflict.Code, conflict.Body.String())
+	}
+}
+
+func TestChangeWindowErrorMapping(t *testing.T) {
+	t.Parallel()
+	server, _, _ := newUsersTestServer(t)
+	cases := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{name: "not found", err: store.ErrNotFound, status: http.StatusNotFound, code: "not_found"},
+		{name: "conflict", err: store.ErrConflict, status: http.StatusConflict, code: "conflict"},
+		{name: "validation", err: store.NewValidationError(errors.New("invalid window")), status: http.StatusBadRequest, code: "validation_failed"},
+		{name: "audit unavailable", err: store.ErrAuditUnavailable, status: http.StatusServiceUnavailable, code: "audit_unavailable"},
+		{name: "internal", err: errors.New("injected storage error"), status: http.StatusInternalServerError, code: "store"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/job/change-windows", nil)
+			response := httptest.NewRecorder()
+			server.writeChangeWindowError(response, request, test.err)
+			if response.Code != test.status {
+				t.Fatalf("error response = %d: %s; want %d", response.Code, response.Body.String(), test.status)
+			}
+			var payload struct {
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Error.Code != test.code || payload.Error.Message == "" {
+				t.Fatalf("error contract = %+v; want code %q", payload.Error, test.code)
+			}
+			if test.name == "internal" && strings.Contains(payload.Error.Message, "injected storage error") {
+				t.Fatal("internal storage error leaked into the API response")
+			}
+		})
 	}
 }

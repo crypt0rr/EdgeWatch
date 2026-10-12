@@ -522,6 +522,10 @@ func (ss *SystemStore) ReleaseDeliveryClaims(ctx context.Context) (int64, error)
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC()
 	nowText := sqliteTimestamp(now)
+	var released int64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND claim_token<>''`).Scan(&released); err != nil {
+		return 0, err
+	}
 	// Recover rows whose process died after the final invocation marker. An
 	// active or scheduled window keeps the marker as durable evidence until
 	// close; a closed window or credential rotation coalesces it instead of
@@ -598,18 +602,13 @@ func (ss *SystemStore) ReleaseDeliveryClaims(ctx context.Context) (int64, error)
 		// flight in the eventual close summary instead of being replayed or
 		// mislabeled as an alert held before its first provider handoff.
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE outbox SET claim_token='',claim_until='' WHERE sent_at IS NULL AND claim_token<>''`)
-	if err != nil {
-		return 0, err
-	}
-	changed, err := result.RowsAffected()
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE outbox SET claim_token='',claim_until='' WHERE sent_at IS NULL AND claim_token<>''`); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	return changed, nil
+	return released, nil
 }
 
 // ReleaseDeliveryClaim returns one in-flight delivery to the due queue without

@@ -201,3 +201,68 @@ func TestIndeterminateSendAfterWindowCloseCoalescesThroughNotifierWithoutHealthP
 		t.Fatalf("late indeterminate delivery recorded %d destination health failures", failures)
 	}
 }
+
+func TestAttemptMarkerFailurePreventsProviderInvocationWithoutRetryPenalty(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ts := db.Tenant(store.DefaultTenantScope())
+	job, err := ts.CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name: "attempt-marker-failure", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const destination = "generic://localhost/attempt-marker-failure?disabletls=yes&template=json"
+	notifier, err := New(db, []string{destination})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := model.Event{
+		Type: "changes-detected", JobID: job.ID, Job: job.Job.Name, ScanID: "attempt-marker-failure-scan",
+		Message: "one change", CreatedAt: time.Now().UTC(),
+		Changes: []model.Change{{Key: "attempt-marker-failure-change", Kind: "port", Target: "192.0.2.10", Protocol: "tcp", Port: 443}},
+	}
+	if err := notifier.Queue(ctx, []model.Event{event}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := db.System().ClaimDueDeliveries(ctx, 8, "attempt-marker-failure-owner")
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim before marker failure = %d deliveries, %v", len(claimed), err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `CREATE TRIGGER fail_change_attempt_marker BEFORE UPDATE OF attempt_started_at ON outbox WHEN NEW.attempt_started_at<>'' BEGIN SELECT RAISE(ABORT,'synthetic marker storage failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	var providerCalls atomic.Int32
+	previousSend := notificationProviderSend
+	notificationProviderSend = func(context.Context, string, string) error {
+		providerCalls.Add(1)
+		return nil
+	}
+	defer func() { notificationProviderSend = previousSend }()
+	if err := notifier.deliverOne(ctx, claimed[0], notifier.destinationSnapshot()); !errors.Is(err, store.ErrDeliveryAttemptNotStarted) {
+		t.Fatalf("delivery with failed durable marker = %v; want ErrDeliveryAttemptNotStarted", err)
+	}
+	if providerCalls.Load() != 0 {
+		t.Fatalf("provider was invoked %d times despite the failed invocation marker", providerCalls.Load())
+	}
+	var attempts, deferrals int
+	var claim, marker, terminal, sent string
+	if err := db.DB.QueryRowContext(ctx, `SELECT attempts,deferrals,claim_token,attempt_started_at,terminal_at,COALESCE(sent_at,'') FROM outbox WHERE id=?`, claimed[0].ID).Scan(&attempts, &deferrals, &claim, &marker, &terminal, &sent); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 || deferrals != 0 || claim != "" || marker != "" || terminal != "" || sent != "" {
+		t.Fatalf("unstarted outbox row = attempts %d deferrals %d claim %q marker %q terminal %q sent %q", attempts, deferrals, claim, marker, terminal, sent)
+	}
+	health, err := ts.ListDeliveryHealth(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health[claimed[0].Destination].TerminalFailures != 0 || !health[claimed[0].Destination].LastFailureAt.IsZero() {
+		t.Fatalf("failed marker write penalized destination health: %+v", health[claimed[0].Destination])
+	}
+}

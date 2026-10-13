@@ -189,7 +189,7 @@ func TestNaabuSilentAddressesAreCompleteOnlyWithoutHostDiscovery(t *testing.T) {
 			argsPath := filepath.Join(dir, "args")
 			naabuPath := writeNaabuFixture(t, "printf '%s\\n' \"$@\" > "+argsPath+"\nprintf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":22,\"protocol\":\"tcp\"}'\n")
 			nmapPath := filepath.Join(dir, "nmap")
-			if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\nprintf '%s' '"+sampleXML+"'\n"), 0o700); err != nil {
+			if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\nprintf '%s' '"+sampleXMLSinglePort+"'\n"), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			n := NewWithNaabu(nmapPath, naabuPath)

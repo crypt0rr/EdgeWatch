@@ -81,6 +81,21 @@ func NmapAddressBatchLimit(template []string) int {
 	return nmapBatchSize
 }
 
+// nmapInvocationAddressLimit keeps the selected host-by-port scope of one XML
+// result within the parser's materialization ceiling. The profile still sets
+// the independent maximum command batch size.
+func nmapInvocationAddressLimit(template []string, portCount int) int {
+	limit := NmapAddressBatchLimit(template)
+	if portCount <= 0 {
+		return limit
+	}
+	portLimited := int(maxNmapXMLMaterializedPortSlots / int64(portCount))
+	if portLimited < 1 {
+		portLimited = 1
+	}
+	return min(limit, portLimited)
+}
+
 // ResumableScanner is implemented by scanners that can create and execute
 // deterministic checkpointable work units. The ordinary Scanner interface is
 // intentionally left unchanged for deterministic test and plugin scanners.
@@ -148,7 +163,7 @@ func (n *Nmap) Plan(ctx context.Context, job config.Job) (WorkPlan, error) {
 		// use the same one-address batch size as the scanner executor. Without
 		// this, persisted probe and invocation totals describe work that cannot be
 		// executed by the selected template.
-		addressBatchSize := NmapAddressBatchLimit(item.NmapArgs)
+		addressBatchSize := nmapInvocationAddressLimit(item.NmapArgs, len(ports))
 		for _, family := range []int{4, 6} {
 			if err := ctx.Err(); err != nil {
 				return WorkPlan{}, err

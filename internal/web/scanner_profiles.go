@@ -233,19 +233,15 @@ func (s *Server) scannerCapabilities(w http.ResponseWriter, r *http.Request) {
 		capabilities["max_job_hosts"] = s.App.Config.Scanner.MaxJobHostsValue()
 	}
 	if s.App != nil {
-		if versioned, ok := s.App.Scanner.(interface{ Version(context.Context) string }); ok {
-			version := versioned.Version(r.Context())
-			capabilities["nmap"].(map[string]any)["version"] = version
-			capabilities["nmap"].(map[string]any)["available"] = version != "unknown"
-		}
-		if versioned, ok := s.App.Scanner.(interface{ NaabuVersion(context.Context) string }); ok {
-			version := versioned.NaabuVersion(r.Context())
-			naabu := capabilities["naabu"].(map[string]any)
-			naabu["version"] = version
-			naabu["available"] = version != "unknown"
-			if supported, ok := s.App.Scanner.(interface{ NaabuSYNSupported() bool }); ok {
-				naabu["syn_supported"] = version != "unknown" && supported.NaabuSYNSupported()
-			}
+		nmapVersion, naabuVersion := s.App.ScannerVersions()
+		nmap := capabilities["nmap"].(map[string]any)
+		nmap["version"] = nmapVersion
+		nmap["available"] = nmapVersion != "unknown"
+		naabu := capabilities["naabu"].(map[string]any)
+		naabu["version"] = naabuVersion
+		naabu["available"] = naabuVersion != "unknown"
+		if supported, ok := s.App.Scanner.(interface{ NaabuSYNSupported() bool }); ok {
+			naabu["syn_supported"] = naabuVersion != "unknown" && supported.NaabuSYNSupported()
 		}
 	}
 	writeJSON(w, http.StatusOK, capabilities)

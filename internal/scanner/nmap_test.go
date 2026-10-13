@@ -1,7 +1,9 @@
 package scanner
 
 import (
+	"bytes"
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"math"
@@ -9,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -18,6 +21,7 @@ import (
 )
 
 const sampleXML = `<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="22"><state state="open"/><service name="ssh" product="OpenSSH" version="9.7" extrainfo="Ubuntu" method="probed"><cpe>cpe:/a:openbsd:openssh:9.7</cpe></service></port><port protocol="tcp" portid="23"><state state="closed"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`
+const sampleXMLSinglePort = `<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="22"><state state="open"/><service name="ssh" product="OpenSSH" version="9.7" extrainfo="Ubuntu" method="probed"><cpe>cpe:/a:openbsd:openssh:9.7</cpe></service></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`
 
 var nmapPortParseBenchmarkSink int64
 
@@ -153,14 +157,18 @@ func TestParseXMLBoundsTargetControlledMetadata(t *testing.T) {
 	data.WriteString(huge)
 	data.WriteString(`"/><address addr="198.51.100.20" addrtype="ipv4"/>`)
 	data.WriteString(`<hostnames>`)
-	for i := 0; i < maxScannerHostnames+8; i++ {
+	for i := 0; i < maxNmapHostnamesPerHost; i++ {
 		fmt.Fprintf(&data, `<hostname name="%s-%d" type="%s"/>`, huge, i, huge)
 	}
 	data.WriteString(`</hostnames><address addr="`)
 	data.WriteString(huge)
 	data.WriteString(`" addrtype="mac" vendor="`)
 	data.WriteString(huge)
-	data.WriteString(`"/><ports><port protocol="tcp" portid="443"><state state="open" reason="`)
+	data.WriteString(`"/>`)
+	for i := 0; i < maxNmapAddressesPerHost-2; i++ {
+		fmt.Fprintf(&data, `<address addr="02:00:00:%02X:%02X:%02X" addrtype="mac" vendor="Example"/>`, i>>16, i>>8, i)
+	}
+	data.WriteString(`<ports><port protocol="tcp" portid="443"><state state="open" reason="`)
 	data.WriteString(huge)
 	data.WriteString(`"/><service name="`)
 	data.WriteString(huge)
@@ -177,14 +185,14 @@ func TestParseXMLBoundsTargetControlledMetadata(t *testing.T) {
 	data.WriteString(`" devicetype="`)
 	data.WriteString(huge)
 	data.WriteString(`" conf="9">`)
-	for i := 0; i < maxScannerCPEs+8; i++ {
-		data.WriteString(`<cpe>`)
+	for i := 0; i < maxNmapCPEsPerService; i++ {
+		fmt.Fprintf(&data, `<cpe>cpe:/a:example:%d:`, i)
 		data.WriteString(huge)
 		data.WriteString(`</cpe>`)
 	}
 	data.WriteString(`</service></port></ports><hostscript>`)
-	for i := 0; i < maxScannerNSEOutputs+8; i++ {
-		data.WriteString(`<script id="`)
+	for i := 0; i < maxScannerNSEOutputs+maxNmapMetadataRecordSlack; i++ {
+		fmt.Fprintf(&data, `<script id="script-%d-`, i)
 		data.WriteString(huge)
 		data.WriteString(`" output="`)
 		data.WriteString(huge)
@@ -217,8 +225,8 @@ func TestParseXMLBoundsTargetControlledMetadata(t *testing.T) {
 		t.Fatalf("compact service fingerprint was not bounded: %#v", run.Units["198.51.100.20"].Ports)
 	}
 	protocol := host.Protocols[0]
-	if len(protocol.NSEOutput) > maxScannerNSEOutputs {
-		t.Fatalf("NSE output count = %d", len(protocol.NSEOutput))
+	if len(protocol.NSEOutput) != maxScannerNSEOutputs {
+		t.Fatalf("NSE output count = %d, want %d after raw slack", len(protocol.NSEOutput), maxScannerNSEOutputs)
 	}
 	for _, output := range protocol.NSEOutput {
 		if len(output) > maxScannerMetadataBytes {
@@ -234,8 +242,8 @@ func TestParseXMLBoundsTargetControlledMetadata(t *testing.T) {
 			t.Fatalf("service or port metadata length = %d", len(value))
 		}
 	}
-	if len(service.CPEs) > maxScannerCPEs {
-		t.Fatalf("CPE count = %d", len(service.CPEs))
+	if len(service.CPEs) != maxScannerCPEs {
+		t.Fatalf("CPE count = %d, want %d after raw slack", len(service.CPEs), maxScannerCPEs)
 	}
 	for _, cpe := range service.CPEs {
 		if len(cpe) > maxScannerMetadataBytes {
@@ -252,6 +260,972 @@ func TestParseXMLBoundsTargetControlledMetadata(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestParseXMLPreflightBoundsExpandedPortAllocation(t *testing.T) {
+	data, portRecords := func() ([]byte, int) {
+		const prefix = `<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports>`
+		const suffix = `</ports></host><runstats><finished exit="success"/></runstats></nmaprun>`
+		portRecords := nmapPortRecordLimit(65535) + 1
+		portXML := strings.Repeat(`<port protocol="tcp" portid="1"/>`, portRecords)
+		commentBytes := maxNmapOutput - len(prefix) - len(portXML) - len(suffix) - len(`<!---->`)
+		if commentBytes < 0 {
+			t.Fatal("port fixture exceeds the existing XML byte limit")
+		}
+		var input strings.Builder
+		input.Grow(maxNmapOutput)
+		input.WriteString(prefix)
+		input.WriteString(portXML)
+		input.WriteString("<!--")
+		input.WriteString(strings.Repeat("x", commentBytes))
+		input.WriteString("-->")
+		input.WriteString(suffix)
+		data := []byte(input.String())
+		if len(data) != maxNmapOutput {
+			t.Fatalf("oversized fixture length = %d, want %d", len(data), maxNmapOutput)
+		}
+		return data, portRecords
+	}()
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	stats := nmapXMLParseStats{}
+	_, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "1-65535"}, []string{"192.0.2.1"}, 65535, &stats)
+	if err == nil || !strings.Contains(err.Error(), "port-record safety limit") {
+		t.Fatalf("oversized port list error = %v, want bounded port-record failure", err)
+	}
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	if allocated > 64<<20 {
+		t.Fatalf("preflight allocated %d bytes for a %d-byte XML result; want under 64 MiB", allocated, len(data))
+	}
+	if stats.PortElements != portRecords || stats.MaterializedHosts != 0 || stats.MaterializedPortElements != 0 {
+		t.Fatalf("preflight object counts = %#v; exceeded port records must fail before host materialization", stats)
+	}
+}
+
+func TestParseXMLBoundsLargeNSEAndCPETextBeforeRetention(t *testing.T) {
+	const scriptCount = 8
+	data := func() []byte {
+		const cpeCount = maxNmapCPEsPerService
+		const scriptBytes = 256 << 10
+		const cpeBytes = 320 << 10
+		scriptOutput := strings.Repeat("s", scriptBytes)
+		cpeValue := strings.Repeat("c", cpeBytes)
+		var input strings.Builder
+		input.Grow(15 << 20)
+		input.WriteString(`<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><hostscript>`)
+		for i := 0; i < scriptCount; i++ {
+			input.WriteString(`<script id="script-`)
+			fmt.Fprint(&input, i)
+			input.WriteString(`" output="`)
+			input.WriteString(scriptOutput)
+			input.WriteString(`"/>`)
+		}
+		input.WriteString(`</hostscript><ports><port protocol="tcp" portid="443"><state state="open"/><service name="https" method="probed">`)
+		for i := 0; i < cpeCount; i++ {
+			input.WriteString(`<cpe>cpe:`)
+			fmt.Fprintf(&input, "%02d:", i)
+			input.WriteString(cpeValue)
+			input.WriteString(`</cpe>`)
+		}
+		input.WriteString(`</service></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+		return []byte(input.String())
+	}()
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	stats := nmapXMLParseStats{}
+	parsed, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "443", ServiceDetection: true}, []string{"192.0.2.1"}, 1, &stats)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	if allocated > 128<<20 {
+		t.Fatalf("bounded text parse allocated %d bytes for a %d-byte XML result", allocated, len(data))
+	}
+	protocol := parsed.Hosts["192.0.2.1"].Protocols[0]
+	service := protocol.Ports[0].Service
+	if stats.MaterializedHosts != 1 || stats.MaterializedPortElements != 1 || stats.MaterializedScriptElements != scriptCount || len(protocol.NSEOutput) != scriptCount || service == nil || len(service.CPEs) != maxScannerCPEs {
+		t.Fatalf("selected metadata materialization = stats %#v, protocol %#v", stats, protocol)
+	}
+	for _, output := range protocol.NSEOutput {
+		if len(output) > maxScannerMetadataBytes {
+			t.Fatalf("NSE output escaped the existing truncation bound: %d bytes", len(output))
+		}
+	}
+	for _, cpe := range service.CPEs {
+		if len(cpe) > maxScannerMetadataBytes {
+			t.Fatalf("CPE escaped the existing truncation bound: %d bytes", len(cpe))
+		}
+	}
+}
+
+type cancelAfterNmapTokens struct {
+	context.Context
+	stats *nmapXMLParseStats
+	after int
+}
+
+func (ctx cancelAfterNmapTokens) Err() error {
+	if ctx.stats.Tokens >= ctx.after {
+		return context.Canceled
+	}
+	return ctx.Context.Err()
+}
+
+func TestParseXMLPreflightSkipsForeignHostsAndChecksCancellation(t *testing.T) {
+	const selected = "192.0.2.1"
+	var data strings.Builder
+	data.WriteString(`<?xml version="1.0"?><nmaprun>`)
+	for i := 0; i < 2_000; i++ {
+		fmt.Fprintf(&data, `<host><status state="up"/><address addr="198.51.%d.%d" addrtype="ipv4"/><trace><hop ttl="1"/></trace><hostscript><script id="ignored-%d" output="foreign"/></hostscript></host>`, i/250, i%250+1, i)
+	}
+	data.WriteString(`<host><status state="up"/><address addr="` + selected + `" addrtype="ipv4"/><ports><port protocol="tcp" portid="443"><state state="open"/></port></ports><hostscript><script id="selected-a" output="evidence"/><script id="selected-b" output="evidence"/></hostscript></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	stats := nmapXMLParseStats{}
+	run, err := parseXMLWithPortCount(context.Background(), []byte(data.String()), "tcp", config.Protocol{Ports: "1-65535"}, []string{selected}, 65535, &stats)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Hosts) != 1 || run.Hosts[selected].Address != selected {
+		t.Fatalf("materialized host set = %#v", run.Hosts)
+	}
+	if stats.HostElements != 2_001 || stats.SelectedHostSpans != 1 || stats.MaterializedHosts != 1 || stats.MaterializedPortElements != 1 || stats.SelectedScriptElements != 2 || stats.MaterializedScriptElements != 2 || stats.RetainedScriptSummaries != 2 {
+		t.Fatalf("foreign host materialization counts = %#v", stats)
+	}
+
+	foreign := `<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="198.51.100.1" addrtype="ipv4"/><trace>`
+	for i := 0; i < 100; i++ {
+		foreign += `<hop ttl="1"/>`
+	}
+	foreign += `</trace></host><runstats><finished exit="success"/></runstats></nmaprun>`
+	cancelStats := nmapXMLParseStats{}
+	cancelCtx := cancelAfterNmapTokens{Context: context.Background(), stats: &cancelStats, after: 12}
+	_, err = parseXMLWithPortCount(cancelCtx, []byte(foreign), "tcp", config.Protocol{Ports: "443"}, []string{selected}, 1, &cancelStats)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("foreign subtree cancellation error = %v, want context.Canceled", err)
+	}
+	if cancelStats.HostElements != 1 || cancelStats.MaterializedHosts != 0 || cancelStats.SelectedHostSpans != 0 || cancelStats.Tokens < cancelCtx.after {
+		t.Fatalf("cancellation did not occur while streaming a skipped host: %#v", cancelStats)
+	}
+}
+
+type cancelAfterSelectedHostIndex struct {
+	context.Context
+	stats *nmapXMLParseStats
+}
+
+func (ctx cancelAfterSelectedHostIndex) Err() error {
+	if ctx.stats.SelectedHostSpans > 0 {
+		return context.Canceled
+	}
+	return ctx.Context.Err()
+}
+
+func TestParseXMLChecksCancellationBeforeHostMaterialization(t *testing.T) {
+	data := []byte(`<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="443"><state state="open"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	stats := nmapXMLParseStats{}
+	ctx := cancelAfterSelectedHostIndex{Context: context.Background(), stats: &stats}
+	_, err := parseXMLWithPortCount(ctx, data, "tcp", config.Protocol{Ports: "443"}, []string{"192.0.2.1"}, 1, &stats)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation after preflight = %v, want context.Canceled", err)
+	}
+	if stats.SelectedHostSpans != 1 || stats.MaterializedHosts != 0 || stats.MaterializedPortElements != 0 {
+		t.Fatalf("host was materialized after cancellation: %#v", stats)
+	}
+}
+
+func TestParseXMLStreamsNSERecordsIntoBoundedSummaries(t *testing.T) {
+	const address = "192.0.2.1"
+	const scriptCount = 50_000
+	var scripts strings.Builder
+	scripts.Grow(scriptCount * len(`<script id="s" output="x"/>`))
+	for i := 0; i < scriptCount; i++ {
+		fmt.Fprintf(&scripts, `<script id="s%d" output="x"/>`, i)
+	}
+	data := []byte(`<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="` + address + `" addrtype="ipv4"/><ports><port protocol="tcp" portid="443"><state state="open"/>` + scripts.String() + `</port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	scripts.Reset()
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	stats := nmapXMLParseStats{}
+	parsed, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "443"}, []string{address}, 1, &stats)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	if allocated > 96<<20 {
+		t.Fatalf("streamed %d NSE records allocated %d bytes for %d bytes of XML", scriptCount, allocated, len(data))
+	}
+	if stats.SelectedScriptElements != scriptCount || stats.MaterializedScriptElements != scriptCount || stats.RetainedScriptSummaries != maxScannerNSEOutputs {
+		t.Fatalf("NSE stream/materialization counts = %#v", stats)
+	}
+	if got := parsed.Hosts[address].Protocols[0].NSEOutput; len(got) != maxScannerNSEOutputs {
+		t.Fatalf("NSE output retained %d summaries, want %d", len(got), maxScannerNSEOutputs)
+	}
+}
+
+type cancelAfterContextErrors struct {
+	context.Context
+	calls int
+	after int
+}
+
+func (ctx *cancelAfterContextErrors) Err() error {
+	ctx.calls++
+	if ctx.calls >= ctx.after {
+		return context.Canceled
+	}
+	return ctx.Context.Err()
+}
+
+func TestNSECompactionChecksCancellationWithinLongField(t *testing.T) {
+	ctx := &cancelAfterContextErrors{Context: context.Background(), after: 4}
+	_, err := summarizeNSEOutputContext(ctx, "", strings.Repeat(" ", 1<<20))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("long NSE field cancellation = %v, want context.Canceled", err)
+	}
+}
+
+func TestContextAwareScannerHelpersRejectNilContextBeforeNoop(t *testing.T) {
+	var nilContext context.Context
+	if _, _, err := foldedPositivePortsContext(nilContext, nmapExtraPorts{}, "tcp"); err == nil {
+		t.Fatal("folded port helper accepted a nil context for empty scope")
+	}
+	values := make([]string, maxScannerNSEOutputs)
+	if _, err := appendNSESummaryContext(nilContext, values, "", ""); err == nil {
+		t.Fatal("NSE summary helper accepted a nil context after reaching its output cap")
+	}
+}
+
+func TestNmapXMLTextBoundedChecksCancellationWithinLongField(t *testing.T) {
+	ctx := &cancelAfterContextErrors{Context: context.Background(), after: 3}
+	decoder := xml.NewDecoder(strings.NewReader(`<cpe>` + strings.Repeat("c", 1<<20) + `</cpe>`))
+	if _, err := decoder.Token(); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readNmapXMLTextBounded(ctx, decoder)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("long XML text cancellation = %v, want context.Canceled", err)
+	}
+}
+
+func TestFoldedPositivePortsChecksCancellationDuringExpansion(t *testing.T) {
+	ctx := &cancelAfterContextErrors{Context: context.Background(), after: 4}
+	extra := nmapExtraPorts{
+		State: "open|filtered",
+		Count: 65535,
+		Reasons: []nmapExtraReason{{
+			Reason: "no-response", Count: 65535, Protocol: "tcp", Ports: "1-65535",
+		}},
+	}
+	_, _, err := foldedPositivePortsContext(ctx, extra, "tcp")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("folded port expansion cancellation = %v, want context.Canceled", err)
+	}
+}
+
+func TestFoldedPositivePortsValidatesBeforeReturningResults(t *testing.T) {
+	valid := nmapExtraPorts{
+		State: "open|filtered",
+		Count: 3,
+		Reasons: []nmapExtraReason{
+			{Reason: "no-response", Count: 2, Protocol: "UDP", Ports: "53, 123"},
+			{Reason: "admin-prohibited", Count: 1, Ports: "500"},
+		},
+	}
+	want := []foldedPort{{port: 53, reason: "no-response"}, {port: 123, reason: "no-response"}, {port: 500, reason: "admin-prohibited"}}
+	ports, ok := foldedPositivePorts(valid, "udp")
+	if !ok || !reflect.DeepEqual(ports, want) {
+		t.Fatalf("compatibility expansion = %#v, %t; want %#v, true", ports, ok, want)
+	}
+	contextPorts, contextOK, err := foldedPositivePortsContext(context.Background(), valid, "udp")
+	if err != nil || !contextOK || !reflect.DeepEqual(contextPorts, ports) {
+		t.Fatalf("context expansion = %#v, %t, %v; want %#v, true, nil", contextPorts, contextOK, err, ports)
+	}
+
+	invalid := []struct {
+		name  string
+		extra nmapExtraPorts
+	}{
+		{name: "no reasons", extra: nmapExtraPorts{Count: 1}},
+		{name: "wrong protocol", extra: nmapExtraPorts{Count: 1, Reasons: []nmapExtraReason{{Count: 1, Protocol: "tcp", Ports: "53"}}}},
+		{name: "duplicate across reasons", extra: nmapExtraPorts{Count: 2, Reasons: []nmapExtraReason{{Count: 1, Ports: "53"}, {Count: 1, Ports: "53"}}}},
+		{name: "malformed port", extra: nmapExtraPorts{Count: 1, Reasons: []nmapExtraReason{{Count: 1, Ports: "not-a-port"}}}},
+		{name: "out-of-domain port", extra: nmapExtraPorts{Count: 1, Reasons: []nmapExtraReason{{Count: 1, Ports: "65536"}}}},
+		{name: "listed count differs", extra: nmapExtraPorts{Count: 2, Reasons: []nmapExtraReason{{Count: 2, Ports: "53"}}}},
+		{name: "reason count exceeds folded count", extra: nmapExtraPorts{Count: 1, Reasons: []nmapExtraReason{{Count: 2, Ports: "53-54"}}}},
+		{name: "port list exceeds reason count", extra: nmapExtraPorts{Count: 1, Reasons: []nmapExtraReason{{Count: 1, Ports: "53,54"}}}},
+	}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			got, valid := foldedPositivePorts(test.extra, "udp")
+			if valid || len(got) != 0 {
+				t.Fatalf("invalid folded list returned partial results %#v, valid=%t", got, valid)
+			}
+		})
+	}
+
+	callbackErr := errors.New("stop folded-port consumer")
+	emitted := 0
+	complete, err := walkFoldedPositivePortsContext(context.Background(), valid, "udp", func(foldedPort) error {
+		emitted++
+		return callbackErr
+	})
+	if complete || !errors.Is(err, callbackErr) || emitted != 1 {
+		t.Fatalf("callback failure = complete %t, err %v, emitted %d; want false, callback error, one record", complete, err, emitted)
+	}
+}
+
+func TestNmapPortBitsetGuardsThePortDomain(t *testing.T) {
+	var ports nmapPortBitset
+	ports.add(-1)
+	ports.add(65536)
+	if ports.contains(-1) || ports.contains(65536) {
+		t.Fatal("out-of-domain ports appeared in the bitset")
+	}
+	// The parser rejects port zero before it reaches this storage helper.
+	ports.add(65535)
+	ports.add(1)
+	if !ports.contains(1) || !ports.contains(65535) || ports.contains(0) || ports.contains(2) {
+		t.Fatal("bitset did not preserve valid port endpoints and leave unset values clear")
+	}
+}
+
+func TestParseXMLPreservesStateReasonSlackAndOutputCap(t *testing.T) {
+	const address = "192.0.2.1"
+	var ports strings.Builder
+	for i := 0; i < maxScannerStateReasons+maxNmapMetadataRecordSlack; i++ {
+		fmt.Fprintf(&ports, `<port protocol="tcp" portid="%d"><state state="open" reason="reason-%02d"/></port>`, i+1, i)
+	}
+	data := []byte(`<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="` + address + `" addrtype="ipv4"/><ports>` + ports.String() + `</ports></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	parsed, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "1-100"}, []string{address}, 100, nil)
+	if err != nil {
+		t.Fatalf("the established eight-reason allowance was rejected: %v", err)
+	}
+	protocol := parsed.Hosts[address].Protocols[0]
+	if len(protocol.StateSummaries) != 1 || protocol.StateSummaries[0].Count != maxScannerStateReasons+maxNmapMetadataRecordSlack || len(protocol.StateSummaries[0].Reasons) != maxScannerStateReasons {
+		t.Fatalf("reason slack and stored output cap = %#v", protocol.StateSummaries)
+	}
+}
+
+func TestParseXMLRejectsTokenOverflowBeforeHostMaterialization(t *testing.T) {
+	const address = "192.0.2.1"
+	const hopCount = maxNmapXMLTokens/2 + 10
+	var input strings.Builder
+	input.Grow(hopCount * len(`<hop/>`))
+	input.WriteString(`<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="` + address + `" addrtype="ipv4"/><trace>`)
+	for i := 0; i < hopCount; i++ {
+		input.WriteString(`<hop/>`)
+	}
+	input.WriteString(`</trace></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	data := []byte(input.String())
+	input.Reset()
+	if len(data) >= maxNmapOutput {
+		t.Fatalf("token-overflow fixture unexpectedly reached the XML byte cap: %d bytes", len(data))
+	}
+	stats := nmapXMLParseStats{}
+	_, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "443"}, []string{address}, 1, &stats)
+	if err == nil || !strings.Contains(err.Error(), "token safety limit") {
+		t.Fatalf("token-overflow error = %v", err)
+	}
+	if stats.Tokens != maxNmapXMLTokens+1 || stats.MaterializedHosts != 0 || stats.MaterializedPortElements != 0 {
+		t.Fatalf("token overflow was not rejected before materialization: %#v", stats)
+	}
+}
+
+func TestParseXMLRejectsExcessAttributesBeforeHostMaterialization(t *testing.T) {
+	var attrs strings.Builder
+	for i := 0; i <= maxNmapXMLAttributes; i++ {
+		fmt.Fprintf(&attrs, ` a%d="x"`, i)
+	}
+	data := []byte(`<?xml version="1.0"?><nmaprun` + attrs.String() + `><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	stats := nmapXMLParseStats{}
+	_, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "443"}, []string{"192.0.2.1"}, 1, &stats)
+	if err == nil || !strings.Contains(err.Error(), "attribute safety limit") {
+		t.Fatalf("attribute count error = %v, want bounded attribute failure", err)
+	}
+	if stats.MaterializedHosts != 0 || stats.SelectedHostSpans != 0 {
+		t.Fatalf("excess attributes reached host materialization: %#v", stats)
+	}
+}
+
+func TestParseXMLAttributeGuardBoundsLargeAttributeListAllocation(t *testing.T) {
+	const attributeCount = 200_000
+	const rootPrefix = `<?xml version="1.0"?><nmaprun`
+	const longAttributePrefix = ` a-long="`
+	const documentSuffix = `"><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/></host><runstats><finished exit="success"/></runstats></nmaprun>`
+	var attrs strings.Builder
+	for index := 0; index < attributeCount; index++ {
+		fmt.Fprintf(&attrs, ` a%d=""`, index)
+	}
+	var input strings.Builder
+	input.Grow(maxNmapOutput)
+	input.WriteString(rootPrefix)
+	input.WriteString(attrs.String())
+	input.WriteString(longAttributePrefix)
+	longValueBytes := maxNmapOutput - len(rootPrefix) - attrs.Len() - len(longAttributePrefix) - len(documentSuffix)
+	if longValueBytes < 0 {
+		t.Fatal("attribute fixture exceeds the Nmap XML byte limit")
+	}
+	input.WriteString(strings.Repeat("x", longValueBytes))
+	input.WriteString(documentSuffix)
+	data := []byte(input.String())
+	input.Reset()
+	attrs.Reset()
+	if len(data) != maxNmapOutput {
+		t.Fatalf("attribute fixture length = %d, want %d", len(data), maxNmapOutput)
+	}
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	stats := nmapXMLParseStats{}
+	_, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "443"}, []string{"192.0.2.1"}, 1, &stats)
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	if err == nil || !strings.Contains(err.Error(), "attribute safety limit") {
+		t.Fatalf("attribute overflow error = %v, want bounded pre-token failure", err)
+	}
+	allocated := after.TotalAlloc - before.TotalAlloc
+	if allocated > 2<<20 {
+		t.Fatalf("attribute guard allocated %d bytes before rejecting %d raw attributes", allocated, attributeCount)
+	}
+	if stats.Tokens > 1 || stats.MaterializedHosts != 0 || stats.SelectedHostSpans != 0 {
+		t.Fatalf("attribute-overflow document produced XML tokens or hosts: %#v", stats)
+	}
+	runtime.KeepAlive(data)
+}
+
+type nmapXMLChunkReader struct {
+	reader *bytes.Reader
+	chunk  int
+}
+
+func (reader nmapXMLChunkReader) Read(buffer []byte) (int, error) {
+	if len(buffer) > reader.chunk {
+		buffer = buffer[:reader.chunk]
+	}
+	return reader.reader.Read(buffer)
+}
+
+func TestNmapXMLAttributeGuardStopsBeforeExcessAttributeAcrossReads(t *testing.T) {
+	var decoyAttrs strings.Builder
+	for index := 0; index <= maxNmapXMLAttributes; index++ {
+		fmt.Fprintf(&decoyAttrs, ` a%d="x"`, index)
+	}
+	var input strings.Builder
+	input.WriteString(`<?xml version="1.0"?><?probe <ignored` + decoyAttrs.String() + `?><!DOCTYPE nmaprun [<!ELEMENT nmaprun ANY><!ENTITY marker "a > b [ c ]"><!-- ] <ignored` + decoyAttrs.String() + ` -->]><nmaprun`)
+	for index := 0; index <= maxNmapXMLAttributes; index++ {
+		fmt.Fprintf(&input, ` a%d="x"`, index)
+	}
+	input.WriteString(`></nmaprun>`)
+	data := []byte(input.String())
+	actualTag := strings.LastIndex(string(data), `<nmaprun`)
+	guard := newNmapXMLAttributeLimitReader(context.Background(), nmapXMLChunkReader{reader: bytes.NewReader(data), chunk: 3})
+	buffer := make([]byte, 3)
+	var exposed []byte
+	for {
+		count, err := guard.Read(buffer)
+		exposed = append(exposed, buffer[:count]...)
+		if errors.Is(err, errNmapXMLAttributeLimit) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("attribute guard read failed before the limit: %v", err)
+		}
+		if count == 0 {
+			t.Fatal("attribute guard made no progress before the limit")
+		}
+	}
+	firstExcessName := actualTag + strings.Index(string(data[actualTag:]), fmt.Sprintf("a%d=", maxNmapXMLAttributes))
+	if firstExcessName < 0 || len(exposed) != firstExcessName {
+		t.Fatalf("guard exposed %d bytes before rejecting attr %d at byte %d (actual tag offset %d)", len(exposed), maxNmapXMLAttributes+1, firstExcessName, actualTag)
+	}
+}
+
+func TestParseXMLAttributeGuardSkipsNonTagMarkupAndQuotedValues(t *testing.T) {
+	data := []byte(`<?xml version="1.0"?><?probe <ignored a="1" b="2"?><!-- <ignored a="1" b="2"> --><!DOCTYPE nmaprun [<!ELEMENT nmaprun ANY><!-- ] <ignored a="1" b="2"> -->]><nmaprun note="a > b"><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><trace><![CDATA[<ignored a="1" b="2">]]></trace></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	parsed, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "443"}, []string{"192.0.2.1"}, 1, nil)
+	if err != nil {
+		t.Fatalf("valid Nmap DOCTYPE or markup decoy was rejected: %v", err)
+	}
+	if _, ok := parsed.Hosts["192.0.2.1"]; !ok {
+		t.Fatalf("host after valid DTD and CDATA was not parsed: %#v", parsed.Hosts)
+	}
+}
+
+func TestNmapXMLAttributeGuardStopsMalformedBareAttributesBeforeTokenization(t *testing.T) {
+	var input strings.Builder
+	input.WriteString(`<nmaprun`)
+	for i := 0; i <= maxNmapXMLAttributes; i++ {
+		fmt.Fprintf(&input, ` a%d`, i)
+	}
+	input.WriteString(`>`)
+	data := []byte(input.String())
+	guard := newNmapXMLAttributeLimitReader(context.Background(), bytes.NewReader(data))
+	buffer := make([]byte, len(data))
+	read, err := guard.Read(buffer)
+	if !errors.Is(err, errNmapXMLAttributeLimit) || read >= len(data) {
+		t.Fatalf("malformed bare attributes read %d/%d bytes with error %v, want bounded pre-token rejection", read, len(data), err)
+	}
+	read, repeatedErr := guard.Read(buffer)
+	if read != 0 || !errors.Is(repeatedErr, errNmapXMLAttributeLimit) {
+		t.Fatalf("repeat read after attribute limit = %d, %v; want 0 and the pending limit error", read, repeatedErr)
+	}
+	var nilContext context.Context
+	zeroRead, zeroErr := newNmapXMLAttributeLimitReader(nilContext, bytes.NewReader(nil)).Read(nil)
+	if zeroRead != 0 || zeroErr != nil {
+		t.Fatalf("zero-length guard read = %d, %v; want 0, nil", zeroRead, zeroErr)
+	}
+	_, nilContextErr := newNmapXMLAttributeLimitReader(nilContext, bytes.NewReader(nil)).Read(buffer)
+	if nilContextErr == nil {
+		t.Fatal("attribute guard accepted a nil context for a nonempty read")
+	}
+}
+
+func TestParseXMLRejectsMalformedSelectedRecordsWithoutReturningSnapshot(t *testing.T) {
+	prefix := `<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="192.0.2.2" addrtype="ipv4"/><ports><port protocol="tcp" portid="22"><state state="open"/></port></ports></host><host>`
+	suffix := `</host><runstats><finished exit="success"/></runstats></nmaprun>`
+	cases := []struct {
+		name                 string
+		host                 string
+		want                 string
+		wantSelectedSpans    int
+		wantMaterializedHost int
+	}{
+		{name: "port before address", host: `<status state="up"/><ports><port protocol="tcp" portid="22"><state state="open"/></port></ports><address addr="192.0.2.1" addrtype="ipv4"/>`, want: "port records appeared before the host address"},
+		{name: "missing port id", host: `<status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp"><state state="open"/></port></ports>`, want: "missing its port id"},
+		{name: "invalid port id", host: `<status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="invalid"/></ports>`, want: "invalid nmap XML portid attribute"},
+		{name: "out-of-range port id", host: `<status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="0"/></ports>`, want: "invalid port id 0"},
+		{name: "missing folded count", host: `<status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><extraports state="closed"/></ports>`, want: "missing or negative extraports count"},
+		{name: "negative folded count", host: `<status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><extraports state="closed" count="-1"/></ports>`, want: "missing or negative extraports count"},
+		{name: "invalid state reason TTL", host: `<status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="22"><state state="open" reason_ttl="bad"/></port></ports>`, want: "invalid nmap XML reason_ttl attribute"},
+		{name: "invalid service confidence", host: `<status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="22"><state state="open"/><service conf="unknown"/></port></ports>`, want: "invalid nmap XML conf attribute"},
+		{name: "invalid host status reason TTL", host: `<status state="up" reason_ttl="bad"/><address addr="192.0.2.1" addrtype="ipv4"/>`, want: "invalid nmap XML reason_ttl attribute", wantSelectedSpans: 2, wantMaterializedHost: 1},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			data := []byte(prefix + test.host + suffix)
+			stats := nmapXMLParseStats{}
+			parsed, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "22"}, []string{"192.0.2.1", "192.0.2.2"}, 1, &stats)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("malformed Nmap result = %#v, %v; want error containing %q", parsed, err, test.want)
+			}
+			if parsed.Hosts != nil || parsed.Units != nil {
+				t.Fatalf("malformed Nmap result returned a partial snapshot: %#v", parsed)
+			}
+			if stats.SelectedHostSpans != test.wantSelectedSpans || stats.MaterializedHosts != test.wantMaterializedHost {
+				t.Fatalf("failed parse stats = %#v, want selected spans %d and materialized hosts %d", stats, test.wantSelectedSpans, test.wantMaterializedHost)
+			}
+		})
+	}
+}
+
+func TestParseXMLRejectsUnexpectedDocumentElement(t *testing.T) {
+	data := []byte(`<?xml version="1.0"?><wrapper><nmaprun><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/></host><runstats><finished exit="success"/></runstats></nmaprun></wrapper>`)
+	_, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "443"}, []string{"192.0.2.1"}, 1, nil)
+	if err == nil || !strings.Contains(err.Error(), `unexpected document element "wrapper"`) {
+		t.Fatalf("wrapped Nmap result error = %v, want fail-closed document-root error", err)
+	}
+
+	data = []byte(`<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/></runstats></nmaprun><nmaprun><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	_, err = parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "443"}, []string{"192.0.2.1"}, 1, nil)
+	if err == nil || !strings.Contains(err.Error(), "multiple document elements") {
+		t.Fatalf("multiple Nmap roots error = %v, want fail-closed document structure error", err)
+	}
+}
+
+func TestParseXMLCapsMaterializedHostsAtScannerBatchSize(t *testing.T) {
+	var input strings.Builder
+	input.WriteString(`<?xml version="1.0"?><nmaprun>`)
+	for i := 1; i <= maxNmapXMLMaterializedHosts+1; i++ {
+		fmt.Fprintf(&input, `<host><status state="up"/><address addr="198.51.100.%d" addrtype="ipv4"/></host>`, i)
+	}
+	input.WriteString(`<runstats><finished exit="success"/></runstats></nmaprun>`)
+	stats := nmapXMLParseStats{}
+	_, err := parseXMLWithPortCount(context.Background(), []byte(input.String()), "tcp", config.Protocol{Ports: "443"}, nil, 1, &stats)
+	if err == nil || !strings.Contains(err.Error(), "materialized host safety limit") {
+		t.Fatalf("materialized host count error = %v", err)
+	}
+	if stats.HostElements != maxNmapXMLMaterializedHosts || stats.MaterializedHosts != 0 {
+		t.Fatalf("host batch limit was not enforced before materialization: %#v", stats)
+	}
+}
+
+func TestParseXMLRejectsExcessRepeatedEvidenceBeforeMaterialization(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "service CPEs",
+			body: func() string {
+				var cpes strings.Builder
+				for i := 0; i <= maxNmapCPEsPerService; i++ {
+					cpes.WriteString(`<cpe>cpe:/a:example:service</cpe>`)
+				}
+				return `<ports><port protocol="tcp" portid="443"><state state="open"/><service method="table">` + cpes.String() + `</service></port></ports>`
+			}(),
+			want: "CPE safety limit",
+		},
+		{
+			name: "state reasons",
+			body: func() string {
+				var ports strings.Builder
+				for i := 0; i <= maxScannerStateReasons+maxNmapMetadataRecordSlack; i++ {
+					fmt.Fprintf(&ports, `<port protocol="tcp" portid="%d"><state state="open" reason="r%d"/></port>`, i+1, i)
+				}
+				return `<ports>` + ports.String() + `</ports>`
+			}(),
+			want: "distinct reasons",
+		},
+		{
+			name: "state summaries",
+			body: func() string {
+				var ports strings.Builder
+				for i := 0; i < maxNmapStateSummaries; i++ {
+					fmt.Fprintf(&ports, `<port protocol="tcp" portid="%d"><state state="custom-%d"/></port>`, i+1, i)
+				}
+				return `<ports>` + ports.String() + `</ports>`
+			}(),
+			want: "state-summary safety limit",
+		},
+		{
+			name: "folded states",
+			body: func() string {
+				var states strings.Builder
+				for i := 0; i <= maxNmapExtraPortsPerHost; i++ {
+					fmt.Fprintf(&states, `<extraports state="closed" count="0" marker="%d"/>`, i)
+				}
+				return `<ports>` + states.String() + `</ports>`
+			}(),
+			want: "folded-state safety limit",
+		},
+		{
+			name: "folded reasons",
+			body: func() string {
+				var reasons strings.Builder
+				for i := 0; i <= maxNmapExtraReasonsPerRecord; i++ {
+					fmt.Fprintf(&reasons, `<extrareasons reason="r%d" count="0"/>`, i)
+				}
+				return `<ports><extraports state="closed" count="0">` + reasons.String() + `</extraports></ports>`
+			}(),
+			want: "reason safety limit",
+		},
+		{
+			name: "folded port list bytes",
+			body: func() string {
+				ports := strings.Repeat("1", maxNmapFoldedListBytes+1)
+				return `<ports><extraports state="closed" count="0"><extrareasons reason="unknown" count="0" proto="tcp" ports="` + ports + `"/></extraports></ports>`
+			}(),
+			want: "folded port list exceeded",
+		},
+		{
+			name: "hostnames",
+			body: func() string {
+				var names strings.Builder
+				for i := 0; i <= maxNmapHostnamesPerHost; i++ {
+					fmt.Fprintf(&names, `<hostname name="n%d" type="user"/>`, i)
+				}
+				return `<hostnames>` + names.String() + `</hostnames>`
+			}(),
+			want: "hostname safety limit",
+		},
+		{
+			name: "addresses",
+			body: func() string {
+				var addresses strings.Builder
+				for i := 0; i < maxNmapAddressesPerHost; i++ {
+					fmt.Fprintf(&addresses, `<address addr="02:00:00:00:00:%02X" addrtype="mac"/>`, i)
+				}
+				return addresses.String()
+			}(),
+			want: "address safety limit",
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			data := []byte(`<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/>` + test.body + `</host><runstats><finished exit="success"/></runstats></nmaprun>`)
+			stats := nmapXMLParseStats{}
+			_, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "1-100"}, []string{"192.0.2.1"}, 100, &stats)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("safety error = %v, want substring %q", err, test.want)
+			}
+			if stats.MaterializedHosts != 0 || stats.MaterializedPortElements != 0 {
+				t.Fatalf("unsafe records were materialized before rejection: %#v", stats)
+			}
+		})
+	}
+}
+
+func TestNmapInvocationDeduplicatesSelectedAddressesBeforeParsing(t *testing.T) {
+	dir := t.TempDir()
+	nmapPath := filepath.Join(dir, "nmap")
+	invocations := filepath.Join(dir, "invocations")
+	output := `<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="443"><state state="open"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`
+	script := "#!/bin/sh\nxml_output=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"-oX\" ]; then xml_output=\"$2\"; shift 2; else shift; fi\ndone\nprintf '%s' '" + output + "' > \"$xml_output\"\nprintf x >> '" + invocations + "'\n"
+	if err := os.WriteFile(nmapPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	targets := []resolvedTarget{
+		{Name: "first.example", Addresses: []string{"192.0.2.1"}},
+		{Name: "second.example", Addresses: []string{"192.0.2.1"}},
+	}
+	result, err := New(nmapPath).scanProtocolBatchDetailedProgress(context.Background(), targets, "tcp", config.Protocol{Ports: "443", Mode: "connect"}, "balanced", true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(invocations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || len(result.Units) != 1 || result.Units[0].Target != "192.0.2.1" {
+		t.Fatalf("duplicate resolved address was not scanned once: calls=%q result=%#v", calls, result)
+	}
+}
+
+func TestParseXMLDeduplicatesRepeatedPortsAndKeepsFullScope(t *testing.T) {
+	const duplicateXML = `<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="443"><state state="open" reason="syn-ack"/></port><port protocol="tcp" portid="443"><state state="open" reason="syn-ack"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`
+	duplicate, err := parseXMLWithPortCount(context.Background(), []byte(duplicateXML), "tcp", config.Protocol{Ports: "443"}, []string{"192.0.2.1", "192.0.2.1"}, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := duplicate.Units["192.0.2.1"]
+	protocol := duplicate.Hosts["192.0.2.1"].Protocols[0]
+	if len(unit.Ports) != 1 || len(protocol.Ports) != 1 || len(protocol.StateSummaries) != 1 || protocol.StateSummaries[0].Count != 1 {
+		t.Fatalf("duplicate port result was not deduplicated: unit=%#v protocol=%#v", unit, protocol)
+	}
+
+	var full strings.Builder
+	full.Grow(4 << 20)
+	full.WriteString(`<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports>`)
+	for port := 1; port <= 65535; port++ {
+		fmt.Fprintf(&full, `<port protocol="tcp" portid="%d"><state state="closed"/></port>`, port)
+	}
+	for duplicate := 0; duplicate < nmapPortRecordLimit(65535)-65535; duplicate++ {
+		full.WriteString(`<port protocol="tcp" portid="1"><state state="closed"/></port>`)
+	}
+	full.WriteString(`</ports></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	data := []byte(full.String())
+	full = strings.Builder{}
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	stats := nmapXMLParseStats{}
+	wholeScope, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "1-65535"}, []string{"192.0.2.1"}, 65535, &stats)
+	if err != nil {
+		t.Fatalf("full 65,535-port response: %v", err)
+	}
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	// TotalAlloc counts transient XML token allocations across both bounded
+	// passes; a full-range scan legitimately visits tens of thousands of
+	// records. The over-scope regression above caps allocation before
+	// materialization. Here, the relevant bound is the retained output model.
+	if after.HeapAlloc > before.HeapAlloc && after.HeapAlloc-before.HeapAlloc > 32<<20 {
+		t.Fatalf("full-range parse retained %d bytes for %d port records", after.HeapAlloc-before.HeapAlloc, stats.MaterializedPortElements)
+	}
+	runtime.KeepAlive(data)
+	if stats.MaterializedPortElements != nmapPortRecordLimit(65535) || wholeScope.Hosts["192.0.2.1"].Protocols[0].StateSummaries[0].Count != 65535 {
+		t.Fatalf("full-scope output was truncated: stats=%#v summaries=%#v", stats, wholeScope.Hosts["192.0.2.1"].Protocols[0].StateSummaries)
+	}
+}
+
+func foldedOpenFilteredHostXML(address string, count int) string {
+	return fmt.Sprintf(`<host><status state="up"/><address addr="%s" addrtype="ipv4"/><ports><extraports state="open|filtered" count="%d"><extrareasons reason="no-response" count="%d" proto="tcp" ports="1-%d"/></extraports></ports></host>`, address, count, count, count)
+}
+
+func TestNmapXMLMaterializationBudgetCountsUniqueSelectedAddresses(t *testing.T) {
+	const selected = "192.0.2.1"
+	const fullRange = 65535
+	selectedHost := foldedOpenFilteredHostXML(selected, fullRange)
+	cases := []struct {
+		name    string
+		prefix  string
+		suffix  string
+		targets []string
+		spans   int
+	}{
+		{
+			name:    "sparse selected output only charges emitted address",
+			prefix:  `<?xml version="1.0"?><nmaprun>` + selectedHost,
+			suffix:  `<runstats><finished exit="success"/></runstats></nmaprun>`,
+			targets: []string{selected, "192.0.2.2"},
+			spans:   1,
+		},
+		{
+			name:    "duplicate invocation target is one address slot",
+			prefix:  `<?xml version="1.0"?><nmaprun>` + selectedHost,
+			suffix:  `<runstats><finished exit="success"/></runstats></nmaprun>`,
+			targets: []string{selected, selected},
+			spans:   1,
+		},
+		{
+			name:    "duplicate selected host record is decoded once",
+			prefix:  `<?xml version="1.0"?><nmaprun>` + selectedHost,
+			suffix:  selectedHost + `<runstats><finished exit="success"/></runstats></nmaprun>`,
+			targets: []string{selected},
+			spans:   1,
+		},
+		{
+			name: "foreign hosts do not consume selected slots",
+			prefix: func() string {
+				var prefix strings.Builder
+				prefix.WriteString(`<?xml version="1.0"?><nmaprun>`)
+				for index := 0; index < 2000; index++ {
+					fmt.Fprintf(&prefix, `<host><status state="up"/><address addr="198.51.%d.%d" addrtype="ipv4"/></host>`, index/254, index%254+1)
+				}
+				prefix.WriteString(selectedHost)
+				return prefix.String()
+			}(),
+			suffix:  `<runstats><finished exit="success"/></runstats></nmaprun>`,
+			targets: []string{selected},
+			spans:   1,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			data := []byte(test.prefix + test.suffix)
+			stats := nmapXMLParseStats{}
+			parsed, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "1-65535"}, test.targets, fullRange, &stats)
+			if err != nil {
+				t.Fatalf("full-range selected result rejected: %v", err)
+			}
+			if stats.SelectedHostSpans != test.spans || stats.MaterializedHosts != test.spans {
+				t.Fatalf("selected host spans/materialization = %d/%d, want %d: %#v", stats.SelectedHostSpans, stats.MaterializedHosts, test.spans, stats)
+			}
+			if got := len(parsed.Units[selected].Ports); got != fullRange {
+				t.Fatalf("selected full-range positive ports = %d, want %d", got, fullRange)
+			}
+		})
+	}
+}
+
+func TestNmapDuplicateRecordSlackDoesNotExpandPortScope(t *testing.T) {
+	const address = "192.0.2.1"
+	duplicateRecords := `<port protocol="tcp" portid="443"><state state="open"/></port>`
+	var duplicates strings.Builder
+	for i := 0; i < nmapPortRecordLimit(1); i++ {
+		duplicates.WriteString(duplicateRecords)
+	}
+	accepted := []byte(`<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="` + address + `" addrtype="ipv4"/><ports>` + duplicates.String() + `</ports></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	stats := nmapXMLParseStats{}
+	parsed, err := parseXMLWithPortCount(context.Background(), accepted, "tcp", config.Protocol{Ports: "443"}, []string{address}, 1, &stats)
+	if err != nil {
+		t.Fatalf("duplicate record slack response: %v", err)
+	}
+	if stats.MaterializedPortElements != nmapPortRecordLimit(1) || len(parsed.Units[address].Ports) != 1 || parsed.Hosts[address].Protocols[0].StateSummaries[0].Count != 1 {
+		t.Fatalf("duplicate record slack changed the one-port scope: stats=%#v run=%#v", stats, parsed)
+	}
+
+	tooManyDistinct := []byte(`<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="` + address + `" addrtype="ipv4"/><ports><port protocol="tcp" portid="443"><state state="open"/></port><port protocol="tcp" portid="444"><state state="open"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	if _, err := parseXMLWithPortCount(context.Background(), tooManyDistinct, "tcp", config.Protocol{Ports: "443"}, []string{address}, 1, nil); err == nil || !strings.Contains(err.Error(), "scan scope") {
+		t.Fatalf("distinct ports beyond the configured scope = %v, want scan-scope error", err)
+	}
+}
+
+func TestParseXMLPreservesNSESummaryTruncationAcrossMultipleScriptsPerPort(t *testing.T) {
+	const address = "192.0.2.1"
+	var scripts strings.Builder
+	for script := 0; script < maxScannerNSEOutputs*3; script++ {
+		fmt.Fprintf(&scripts, `<script id="script-%d" output="result-%d"/>`, script, script)
+	}
+	data := []byte(`<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="` + address + `" addrtype="ipv4"/><ports><port protocol="tcp" portid="443"><state state="open"/>` + scripts.String() + `</port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	stats := nmapXMLParseStats{}
+	parsed, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "443"}, []string{address}, 1, &stats)
+	if err != nil {
+		t.Fatalf("multiple NSE results for one scanned port: %v", err)
+	}
+	if got := parsed.Hosts[address].Protocols[0].NSEOutput; len(got) != maxScannerNSEOutputs {
+		t.Fatalf("NSE summaries = %d, want the existing %d-item output cap", len(got), maxScannerNSEOutputs)
+	}
+	if stats.SelectedScriptElements != maxScannerNSEOutputs*3 || stats.MaterializedScriptElements != maxScannerNSEOutputs*3 || stats.RetainedScriptSummaries > maxScannerNSEOutputs {
+		t.Fatalf("raw NSE stream and retained summaries = %#v", stats)
+	}
+}
+
+func TestNSESummaryRetentionSkipsIgnoredPortRecords(t *testing.T) {
+	const address = "192.0.2.1"
+	data := []byte(`<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="` + address + `" addrtype="ipv4"/><ports>` +
+		`<port protocol="udp" portid="443"><state state="open"/><script id="udp" output="ignored"/></port>` +
+		`<port protocol="tcp" portid="443"><state state="closed"/><script id="closed" output="ignored"/></port>` +
+		`<port protocol="tcp" portid="443"><state state="open"/><script id="duplicate" output="ignored"/></port>` +
+		`<port protocol="tcp" portid="444"><state state="open"/><script id="kept" output="result"/></port>` +
+		`</ports></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	parsed, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "443,444"}, []string{address}, 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Hosts[address].Protocols[0].NSEOutput; !reflect.DeepEqual(got, []string{"kept: result"}) {
+		t.Fatalf("port NSE summaries included an ignored record or lost later evidence: %v", got)
+	}
+}
+
+func TestParseXMLReservesTheCombinedNSESummaryCapForHostScripts(t *testing.T) {
+	const address = "192.0.2.1"
+	var portScripts strings.Builder
+	for index := 0; index < maxScannerNSEOutputs; index++ {
+		fmt.Fprintf(&portScripts, `<script id="port-%02d" output="result-%02d"/>`, index, index)
+	}
+	data := []byte(`<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="` + address + `" addrtype="ipv4"/><ports><port protocol="tcp" portid="443"><state state="open"/>` + portScripts.String() + `</port></ports><hostscript><script id="host-priority" output="preserve this summary"/></hostscript></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	parsed, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "443"}, []string{address}, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := parsed.Hosts[address].Protocols[0].NSEOutput
+	if len(got) != maxScannerNSEOutputs {
+		t.Fatalf("combined host and port NSE summaries = %d, want %d", len(got), maxScannerNSEOutputs)
+	}
+	if got[0] != "host-priority: preserve this summary" || got[len(got)-1] != "port-30: result-30" {
+		t.Fatalf("NSE cap did not preserve host evidence before trimming one port summary: first=%q last=%q", got[0], got[len(got)-1])
+	}
+}
+
+func TestAppendNSESummaryKeepsTheExistingOutputCap(t *testing.T) {
+	values := make([]string, maxScannerNSEOutputs)
+	for index := range values {
+		values[index] = fmt.Sprintf("summary-%d", index)
+	}
+	want := slices.Clone(values)
+	got, err := appendNSESummaryContext(context.Background(), values, "extra", "ignored after the summary cap")
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("NSE output at cap = %#v, %v; want unchanged %#v", got, err, want)
+	}
+}
+
+func TestBoundedScannerStringsKeepsSortedLimitWithBoundedAllocation(t *testing.T) {
+	const inputCount = 100_000
+	values := make([]string, inputCount)
+	for index := range values {
+		values[index] = fmt.Sprintf("cpe:%06d", inputCount-index)
+	}
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	bounded := boundedScannerStrings(values, maxScannerCPEs)
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	if allocated > 1<<20 {
+		t.Fatalf("bounded string selection allocated %d bytes for %d values", allocated, inputCount)
+	}
+	if len(bounded) != maxScannerCPEs || bounded[0] != "cpe:000001" || bounded[len(bounded)-1] != fmt.Sprintf("cpe:%06d", maxScannerCPEs) {
+		t.Fatalf("sorted bounded CPE values = %v..%v (%d items)", bounded[0], bounded[len(bounded)-1], len(bounded))
+	}
+	runtime.KeepAlive(values)
+	runtime.KeepAlive(bounded)
 }
 
 func TestMergeHostObservationKeepsIncompleteStatusRegardlessOfOrder(t *testing.T) {
@@ -834,8 +1808,9 @@ func TestParseXMLFlagsUnlistedFoldedOpenFilteredPorts(t *testing.T) {
 		return []byte(strings.Replace(folded, old, replacement, 1))
 	}
 	for _, test := range []struct {
-		name string
-		xml  []byte
+		name      string
+		xml       []byte
+		wantError bool
 	}{
 		{name: "no port list", xml: udpOpenFilteredXML(26, 40, false, false)},
 		{name: "short port list", xml: replace(`ports="20001-20026"`, `ports="20001-20025"`)},
@@ -845,9 +1820,16 @@ func TestParseXMLFlagsUnlistedFoldedOpenFilteredPorts(t *testing.T) {
 		{name: "reversed range", xml: replace(`ports="20001-20026"`, `ports="20026-20001"`)},
 		{name: "duplicate ports", xml: replace(reason, `<extrareasons reason="no-response" count="13" proto="udp" ports="20001-20013"/><extrareasons reason="no-response" count="13" proto="udp" ports="20001-20013"/>`)},
 		{name: "reason counts exceed the folded count", xml: replace(reason, `<extrareasons reason="no-response" count="26" proto="udp" ports="20001-20026"/><extrareasons reason="no-response" count="1" proto="udp" ports="20027"/>`)},
-		{name: "implausible count", xml: replace(`state="open|filtered" count="26"`, `state="open|filtered" count="70000"`)},
+		{name: "implausible count", xml: replace(`state="open|filtered" count="26"`, `state="open|filtered" count="70000"`), wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			if test.wantError {
+				_, err := parseXMLWithConfig(test.xml, "udp", config.Protocol{Ports: "20001-20040"})
+				if err == nil || !strings.Contains(err.Error(), "scan scope") {
+					t.Fatalf("implausible folded count error = %v, want failed scan-scope validation", err)
+				}
+				return
+			}
 			unit, protocol := udpUnitPorts(t, test.xml)
 			if len(unit.Ports) != 0 {
 				t.Fatalf("unverifiable folded ports were recorded: %#v", unit.Ports)
@@ -988,6 +1970,41 @@ func TestScanBatchesExpandedCIDRTargets(t *testing.T) {
 	}
 }
 
+func TestDirectNmapScanBatchesFullRangeAndReportsMatchingInvocationTotals(t *testing.T) {
+	dir := t.TempDir()
+	nmapPath := filepath.Join(dir, "nmap")
+	countPath := filepath.Join(dir, "invocations")
+	output := `<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/></runstats></nmaprun>`
+	script := "#!/bin/sh\nprintf x >> '" + countPath + "'\nprintf '%s' '" + output + "'\n"
+	if err := os.WriteFile(nmapPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	job := config.NormalizeJob(config.Job{
+		Name:             "direct-full-range",
+		Targets:          []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"},
+		MaxExpandedHosts: 3,
+		TCP:              &config.Protocol{Ports: "1-65535", Mode: "syn"},
+	})
+	var updates []Progress
+	if _, err := New(nmapPath).ScanWithProgress(context.Background(), job, func(progress Progress) { updates = append(updates, progress) }); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("full-range Nmap invocations = %d, want 3 one-address batches: %q", len(calls), calls)
+	}
+	if len(updates) == 0 {
+		t.Fatal("scan emitted no progress")
+	}
+	last := updates[len(updates)-1]
+	if last.Phase != "complete" || last.TotalInvocations != 3 || last.CompletedInvocations != 3 || last.TotalProbes != 3*65535 || last.CompletedProbes != last.TotalProbes {
+		t.Fatalf("progress totals do not match the adaptive batches: %#v", last)
+	}
+}
+
 func TestScanWithProgressReportsBoundedWork(t *testing.T) {
 	dir := t.TempDir()
 	nmapPath := filepath.Join(dir, "nmap")
@@ -1054,7 +2071,7 @@ func TestScanWithProgressReportsLiveProcessHeartbeatAndNmapOutput(t *testing.T) 
 func TestScanWithProgressUsesTerminalStatusWithoutControllingTTY(t *testing.T) {
 	dir := t.TempDir()
 	nmapPath := filepath.Join(dir, "nmap")
-	script := "#!/bin/sh\nout=\"\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"-oX\" ]; then out=\"$2\"; shift 2; else shift; fi\ndone\nif [ -t 1 ]; then\n  printf 'Scanning 192.0.2.1\\r\\n'\n  printf 'Connect Scan Timing: About 37.50%% done\\r\\n'\nfi\nprintf '%s' '" + sampleXML + "' > \"$out\"\n"
+	script := "#!/bin/sh\nout=\"\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"-oX\" ]; then out=\"$2\"; shift 2; else shift; fi\ndone\nif [ -t 1 ]; then\n  printf 'Scanning 192.0.2.1\\r\\n'\n  printf 'Connect Scan Timing: About 37.50%% done\\r\\n'\nfi\nprintf '%s' '" + sampleXMLSinglePort + "' > \"$out\"\n"
 	if err := os.WriteFile(nmapPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}

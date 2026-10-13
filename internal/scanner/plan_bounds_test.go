@@ -127,6 +127,65 @@ func TestPlanGroupsNetworksWithoutChangingTheScan(t *testing.T) {
 	}
 }
 
+func TestPlanCapsAddressPortSlotsAtTheWorkUnitBoundary(t *testing.T) {
+	job := config.NormalizeJob(config.Job{
+		Name:             "full-range-work-units",
+		Targets:          []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"},
+		MaxExpandedHosts: 3,
+		TCP:              &config.Protocol{Ports: "1-65535", Mode: "syn"},
+	})
+	plan, err := New("unused-nmap").Plan(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	portsByAddress := make(map[string]int, 3)
+	for _, unit := range plan.Units {
+		if len(unit.Addresses) != 1 || unit.PortCount < 1 || int64(len(unit.Addresses)*unit.PortCount) > maxNmapXMLMaterializedPortSlots {
+			t.Fatalf("work unit exceeds the invocation slot contract: %#v", unit)
+		}
+		portsByAddress[unit.Addresses[0]] += unit.PortCount
+	}
+	if len(portsByAddress) != 3 {
+		t.Fatalf("work unit address groups = %d, want 3", len(portsByAddress))
+	}
+	for address, count := range portsByAddress {
+		if count != 65535 {
+			t.Fatalf("work units for %s cover %d ports, want all 65,535", address, count)
+		}
+	}
+	if plan.TotalProbes != 3*65535 {
+		t.Fatalf("full-range plan probes = %d, want %d", plan.TotalProbes, 3*65535)
+	}
+}
+
+func TestNmapInvocationAddressLimitPreservesPortScope(t *testing.T) {
+	pluralTemplate := []string{"-iL", config.PlaceholderAddresses}
+	singularTemplate := []string{"-iL", config.PlaceholderAddress}
+	tests := []struct {
+		name     string
+		template []string
+		ports    int
+		want     int
+	}{
+		{name: "singular address placeholder", template: singularTemplate, ports: 1, want: 1},
+		{name: "one full-range host", template: pluralTemplate, ports: 65535, want: 1},
+		{name: "full 4096-port chunk", template: pluralTemplate, ports: 4096, want: 16},
+		{name: "small port scope keeps profile batch", template: pluralTemplate, ports: 1, want: nmapBatchSize},
+		{name: "missing port count keeps profile batch", template: pluralTemplate, ports: 0, want: nmapBatchSize},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := nmapInvocationAddressLimit(test.template, test.ports)
+			if got != test.want {
+				t.Fatalf("address limit = %d, want %d", got, test.want)
+			}
+			if test.ports > 0 && int64(got)*int64(test.ports) > maxNmapXMLMaterializedPortSlots {
+				t.Fatalf("invocation scope = %d addresses × %d ports, over the %d-slot parser limit", got, test.ports, maxNmapXMLMaterializedPortSlots)
+			}
+		})
+	}
+}
+
 // TestPlanOfTheLargestScopeStaysSmall measures the heap, so it does not run in
 // parallel with other tests.
 func TestPlanOfTheLargestScopeStaysSmall(t *testing.T) {

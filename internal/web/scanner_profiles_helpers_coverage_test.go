@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,8 +9,28 @@ import (
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
+	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
+
+type requestVersionCountingScanner struct {
+	nmapCalls  int
+	naabuCalls int
+}
+
+func (s *requestVersionCountingScanner) Scan(context.Context, config.Job) (model.Snapshot, error) {
+	return model.Snapshot{}, nil
+}
+
+func (s *requestVersionCountingScanner) Version(context.Context) string {
+	s.nmapCalls++
+	return "request-nmap-version"
+}
+
+func (s *requestVersionCountingScanner) NaabuVersion(context.Context) string {
+	s.naabuCalls++
+	return "request-naabu-version"
+}
 
 func TestNaabuOptionHelpersRoundTripEveryField(t *testing.T) {
 	t.Parallel()
@@ -51,6 +72,12 @@ func TestScannerProfileJSONShapesAndCapabilities(t *testing.T) {
 	}
 
 	server, _, admin := newUsersTestServer(t)
+	cachedNmapVersion, cachedNaabuVersion := server.App.ScannerVersions()
+	if cachedNmapVersion != "unknown" || cachedNaabuVersion != "unknown" {
+		t.Fatalf("application without scanner policy cached %q/%q, want unknown/unknown", cachedNmapVersion, cachedNaabuVersion)
+	}
+	countingScanner := &requestVersionCountingScanner{}
+	server.App.Scanner = countingScanner
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/scanner-capabilities", nil)
 	server.scannerCapabilities(recorder, request)
@@ -64,6 +91,19 @@ func TestScannerProfileJSONShapesAndCapabilities(t *testing.T) {
 	if _, ok := capabilities["engines"]; !ok || capabilities["max_job_hosts"] != float64(config.DefaultMaxJobHosts) {
 		t.Fatalf("capabilities response = %#v", capabilities)
 	}
+	assertCapabilityVersions := func() {
+		t.Helper()
+		for key, want := range map[string]string{"nmap": cachedNmapVersion, "naabu": cachedNaabuVersion} {
+			entry, ok := capabilities[key].(map[string]any)
+			if !ok || entry["version"] != want {
+				t.Errorf("%s capabilities version = %#v, want cached %q", key, entry, want)
+			}
+		}
+	}
+	assertCapabilityVersions()
+	if countingScanner.nmapCalls != 0 || countingScanner.naabuCalls != 0 {
+		t.Fatalf("first capabilities GET reprobed scanner versions %d/%d times", countingScanner.nmapCalls, countingScanner.naabuCalls)
+	}
 	// The deployment's scanner.max_job_hosts is reported for the editor's
 	// warning.
 	ceiling := 1024
@@ -72,6 +112,10 @@ func TestScannerProfileJSONShapesAndCapabilities(t *testing.T) {
 	server.scannerCapabilities(recorder, request)
 	if err := json.Unmarshal(recorder.Body.Bytes(), &capabilities); err != nil || capabilities["max_job_hosts"] != float64(1024) {
 		t.Fatalf("capabilities with a ceiling = %#v, %v", capabilities, err)
+	}
+	assertCapabilityVersions()
+	if countingScanner.nmapCalls != 0 || countingScanner.naabuCalls != 0 {
+		t.Fatalf("repeated capabilities GET reprobed scanner versions %d/%d times", countingScanner.nmapCalls, countingScanner.naabuCalls)
 	}
 	server.App.Config.Scanner.MaxJobHosts = nil
 	// The route accepts the session argument for symmetry with other scanner

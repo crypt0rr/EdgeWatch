@@ -416,6 +416,24 @@ func (a *App) NotificationSandbox() sandbox.Status {
 	return a.notificationSandbox.Status()
 }
 
+// ScannerVersions reports the scanner versions captured during startup. The
+// binaries are fixed for the lifetime of the daemon, so request handlers can
+// serve these values without starting another scanner process.
+func (a *App) ScannerVersions() (nmap, naabu string) {
+	if a == nil {
+		return "unknown", "unknown"
+	}
+	nmap = strings.TrimSpace(a.nmapVersion)
+	if nmap == "" {
+		nmap = "unknown"
+	}
+	naabu = strings.TrimSpace(a.naabuVersion)
+	if naabu == "" {
+		naabu = "unknown"
+	}
+	return nmap, naabu
+}
+
 // NewWithOptions is New with daemon-only startup work selected by options.
 func NewWithOptions(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logger, options Options) (*App, error) {
 	return newApp(cfg, s, nmapPath, "/usr/local/bin/naabu", logger, options)
@@ -511,7 +529,16 @@ func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logg
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	a := &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, sandbox: options.Sandbox, notificationSandbox: options.NotificationSandbox, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, slots: newSlotPool(cfg.Scheduler.MaxConcurrent, nil), nmapVersion: sc.Version(ctx), naabuVersion: sc.NaabuVersion(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second, clock: time.Now}
+	nmapVersion, naabuVersion := "unknown", "unknown"
+	// Host commands such as notification tests and baseline review also build an
+	// App, but do not install a scanner policy because they never run scanners.
+	// Avoid starting version probes from those paths; the daemon and scan
+	// command pass their configured policy here and capture versions through it.
+	if options.Sandbox != nil {
+		nmapVersion = sc.Version(ctx)
+		naabuVersion = sc.NaabuVersion(ctx)
+	}
+	a := &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, sandbox: options.Sandbox, notificationSandbox: options.NotificationSandbox, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, slots: newSlotPool(cfg.Scheduler.MaxConcurrent, nil), nmapVersion: nmapVersion, naabuVersion: naabuVersion, entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second, clock: time.Now}
 	// A security alert that an authentication record queues outside a
 	// request's transaction is sent at once, not on the worker's next tick.
 	s.SetAlertWake(a.wakeDelivery)

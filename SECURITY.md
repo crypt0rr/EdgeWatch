@@ -49,6 +49,40 @@ implausible number of repeated records. Connect discovery is the least
 privileged default; SYN discovery additionally requires the explicitly opted-in
 `NET_ADMIN` and `NET_RAW` container capabilities.
 
+Nmap XML is checked as a token stream before EdgeWatch builds observations.
+Each invocation is limited to 16 MiB, 1,000,000 XML tokens, 128 levels of
+nesting, 64 attributes per element, and 500,000 top-level Nmap host records.
+It decodes selected numeric host addresses only, up to 128 per invocation,
+and caps their combined address-by-scanned-port scope at 65,536 slots. The
+slot count uses unique selected addresses actually present in the XML, so
+omitted targets, foreign hosts, and duplicate address records do not consume
+another selected address's allowance. Direct Nmap scans reduce their address
+batch to fit this limit; resumable work units use the same address-by-port
+ceiling. A single host may still scan all 65,535 ports. Foreign host subtrees
+are tokenized and cancellation-checked without creating host or port objects.
+For each selected host, distinct listed and folded ports cannot exceed the
+configured scan scope; an eight-record allowance for repeated listed records
+never increases that scope. The parser checks metadata cardinalities before
+materializing a selected host: up to 40 hostname elements, 42 address
+elements, 40 CPEs per service with an aggregate cap of
+`min((scan scope + 8) × 40, 500,000)`, 16 folded-state records, 16 state
+summaries, and 40 distinct reasons per state. Each folded state can contain at
+most 40 reason records. Stored hostnames, addresses, CPEs, and reasons keep
+their existing 32-item output caps. NSE script elements have no per-port or
+per-host count limit: the parser processes them one at a time and retains at
+most 32 bounded summaries. The XML decoder may hold one raw attribute or text
+token before the retained value is shortened; the 16 MiB document cap bounds
+that transient token. A folded-port list is limited to 1 MiB, enough to name
+every port in Nmap's 1–65,535 range. Descriptive values remain limited to 512
+bytes. A selected host set above the 65,536-slot limit fails before host
+decoding, and a positive-port record counter is checked again before output
+expansion. An XML result over these limits fails the scan instead of being
+accepted as complete, so it cannot advance a baseline. This is a per-invocation
+result bound; resumable scans still merge completed work units into the final
+snapshot. The bounds protect the daemon
+while it handles XML emitted by the scanner and scan targets; scanner output
+and host metadata remain untrusted input.
+
 The daemon intentionally retains UID 0 because the supported Docker
 capability model does not reliably expose raw packet privileges to an
 unprivileged process. Nmap UDP/SYN and Naabu SYN fail closed without those

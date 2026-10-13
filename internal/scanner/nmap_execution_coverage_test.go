@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
+	"github.com/crypt0rr/edgewatch/internal/sandbox"
 )
 
 type failingResolver struct{ err error }
@@ -35,7 +36,7 @@ func TestRunScannerVersionProbeKillsChildWhenOutputLimitExceeded(t *testing.T) {
 			if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			_, err := runScannerVersionProbe(context.Background(), path, "--version")
+			_, err := runScannerVersionProbe(context.Background(), path, nil, "--version")
 			if err == nil || !strings.Contains(err.Error(), "scanner version output exceeded") {
 				t.Fatalf("oversized %s error = %v", stream, err)
 			}
@@ -44,6 +45,43 @@ func TestRunScannerVersionProbeKillsChildWhenOutputLimitExceeded(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestScannerVersionProbeRunsThroughLandlockHelper(t *testing.T) {
+	dir := t.TempDir()
+	probePath := filepath.Join(dir, "nmap")
+	if err := os.WriteFile(probePath, []byte("#!/bin/sh\nprintf '%s\\n' 'Nmap version 7.98' 'naabu v2.6.1'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	argsPath := filepath.Join(dir, "sandbox-args")
+	helperPath := filepath.Join(dir, "sandbox-exec")
+	helper := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsPath + "\nwhile [ \"$#\" -gt 0 ] && [ \"$1\" != \"--\" ]; do shift; done\n[ \"$#\" -gt 0 ] || exit 2\nshift\nexec \"$@\"\n"
+	if err := os.WriteFile(helperPath, []byte(helper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	policy := (*sandbox.Policy)(nil).WithLandlock(helperPath, 6)
+	n := New(probePath)
+	n.NaabuPath = probePath
+	n.SetSandbox(policy)
+	assertHelperArgs := func(versionFlag string) {
+		t.Helper()
+		got, err := os.ReadFile(argsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{sandbox.ExecCommand, "--profile", "scanner", "--files", "0", "--", probePath, versionFlag}
+		if lines := strings.Split(strings.TrimSpace(string(got)), "\n"); !reflect.DeepEqual(lines, want) {
+			t.Fatalf("sandbox helper argv = %#v, want %#v", lines, want)
+		}
+	}
+	if got := n.Version(context.Background()); got != "Nmap version 7.98" {
+		t.Fatalf("sandboxed Nmap version = %q", got)
+	}
+	assertHelperArgs("--version")
+	if got := n.NaabuVersion(context.Background()); got != "2.6.1" {
+		t.Fatalf("sandboxed Naabu version = %q", got)
+	}
+	assertHelperArgs("-version")
 }
 
 func TestNmapTargetExclusionsAndVersions(t *testing.T) {
@@ -300,11 +338,15 @@ func TestNmapServiceAndNSESummaryHelpers(t *testing.T) {
 	for _, test := range []struct{ id, output, want string }{
 		{"", "", ""}, {"http", "", "http"}, {"", "hello\nworld", "hello world"}, {"http", "hello", "http: hello"},
 	} {
-		if got := summarizeNSEOutput(test.id, test.output); got != test.want {
-			t.Errorf("summarizeNSEOutput(%q,%q) = %q, want %q", test.id, test.output, got, test.want)
+		got, err := summarizeNSEOutputContext(context.Background(), test.id, test.output)
+		if err != nil {
+			t.Errorf("summarizeNSEOutputContext(%q,%q): %v", test.id, test.output, err)
+		} else if got != test.want {
+			t.Errorf("summarizeNSEOutputContext(%q,%q) = %q, want %q", test.id, test.output, got, test.want)
 		}
 	}
-	if got := summarizeNSEOutput("long", strings.Repeat("x", 600)); len(got) != maxScannerMetadataBytes || !strings.HasSuffix(got, "…") {
+	got, err := summarizeNSEOutputContext(context.Background(), "long", strings.Repeat("x", 600))
+	if err != nil || len(got) != maxScannerMetadataBytes || !strings.HasSuffix(got, "…") {
 		t.Fatalf("long NSE summary length = %d (%q)", len(got), got)
 	}
 }

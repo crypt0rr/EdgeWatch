@@ -32,6 +32,11 @@ const (
 	jobPurgePhaseOutbox                = "outbox"
 	jobPurgePhaseQuarantine            = "restore_quarantined_deliveries"
 	jobPurgePhaseLeases                = "job_leases"
+	jobPurgePhaseWindowOutboxJob       = "change_window_outbox_job"
+	jobPurgePhaseWindowOutboxLinks     = "change_window_outbox_links"
+	jobPurgePhaseWindowRefs            = "change_window_refs"
+	jobPurgePhaseWindowEvents          = "change_window_events"
+	jobPurgePhaseWindows               = "change_windows"
 	jobPurgePhaseLatestHosts           = "latest_scan_hosts"
 	jobPurgePhaseRepairHosts           = "repair_latest_scan_hosts"
 	jobPurgePhaseDeleteJob             = "delete_job"
@@ -85,6 +90,13 @@ var jobHistoryPurgeSteps = []jobHistoryPurgeStep{
 	{jobPurgePhaseOutbox, "outbox", `SELECT rowid FROM outbox WHERE tenant_id=?1 AND json_valid(CAST(payload_json AS TEXT)) AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?2 ORDER BY rowid`},
 	{jobPurgePhaseQuarantine, "restore_quarantined_deliveries", `SELECT rowid FROM restore_quarantined_deliveries WHERE tenant_id=?1 AND json_valid(CAST(payload_json AS TEXT)) AND json_extract(CAST(payload_json AS TEXT),'$.job_id')=?2 ORDER BY rowid`},
 	{jobPurgePhaseLeases, "job_leases", `SELECT rowid FROM job_leases WHERE job=?2 ORDER BY rowid`},
+	// These bounded selectors use schema 69's structured event and window
+	// metadata rather than decoding tenant payload blobs to find a small page.
+	{jobPurgePhaseWindowOutboxJob, "outbox", `SELECT rowid FROM outbox WHERE tenant_id=?1 AND event_job_id=?2`},
+	{jobPurgePhaseWindowOutboxLinks, "outbox", `SELECT rowid FROM outbox WHERE tenant_id=?1 AND change_window_id IN (SELECT w.id FROM change_windows AS w JOIN jobs AS j ON j.id=w.job_id WHERE j.tenant_id=?1 AND j.id=?2)`},
+	{jobPurgePhaseWindowRefs, "change_window_refs", `SELECT r.rowid FROM change_window_refs AS r WHERE r.window_id IN (SELECT w.id FROM change_windows AS w JOIN jobs AS j ON j.id=w.job_id WHERE j.tenant_id=?1 AND j.id=?2)`},
+	{jobPurgePhaseWindowEvents, "change_window_events", `SELECT e.rowid FROM change_window_events AS e WHERE e.window_id IN (SELECT w.id FROM change_windows AS w JOIN jobs AS j ON j.id=w.job_id WHERE j.tenant_id=?1 AND j.id=?2)`},
+	{jobPurgePhaseWindows, "change_windows", `SELECT w.rowid FROM change_windows AS w JOIN jobs AS j ON j.id=w.job_id WHERE j.tenant_id=?1 AND j.id=?2`},
 }
 
 func startJobHistoryPurgeTx(ctx context.Context, tx *sql.Tx, tenantID, jobID string, now time.Time) error {
@@ -173,8 +185,13 @@ func (ss *SystemStore) purgeJobHistory(ctx context.Context, record jobHistoryPur
 			continue
 		}
 		if record.phase == jobPurgePhaseDeleteJob {
-			if err := ss.finishJobHistoryPurge(ctx, record); err != nil {
+			finished, err := ss.finishJobHistoryPurge(ctx, record)
+			if err != nil {
 				return erasedTotal, err
+			}
+			if !finished {
+				record.phase = jobPurgePhaseWindowOutboxJob
+				continue
 			}
 			return erasedTotal + 1, nil
 		}
@@ -334,29 +351,57 @@ func updateJobHistoryPurgePhase(ctx context.Context, tx *sql.Tx, record jobHisto
 	return nil
 }
 
-func (ss *SystemStore) finishJobHistoryPurge(ctx context.Context, record jobHistoryPurgeRecord) error {
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+func (ss *SystemStore) finishJobHistoryPurge(ctx context.Context, record jobHistoryPurgeRecord) (bool, error) {
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	windowStep := jobHistoryPurgeStepIndex(jobPurgePhaseWindowOutboxJob)
+	if windowStep < 0 {
+		return false, fmt.Errorf("job history purge has no change-window cleanup phase")
+	}
+	for _, step := range jobHistoryPurgeSteps[windowStep:] {
+		var remaining int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(`+step.rowids+`)`, record.tenantID, record.jobID).Scan(&remaining); err != nil {
+			return false, fmt.Errorf("check %s before deleting job %s: %w", step.table, record.jobID, err)
+		}
+		if remaining == 0 {
+			continue
+		}
+		firstTailPhase := jobHistoryPurgeSteps[windowStep].phase
+		result, err := tx.ExecContext(ctx, `UPDATE job_history_purges SET phase=?,updated_at=? WHERE tenant_id=? AND job_id=? AND phase=?`, firstTailPhase, sqliteTimestamp(time.Now().UTC()), record.tenantID, record.jobID, jobPurgePhaseDeleteJob)
+		if err != nil {
+			return false, err
+		}
+		if rows, _ := result.RowsAffected(); rows != 1 {
+			return false, fmt.Errorf("%w: job history purge phase changed for job %s", ErrConflict, record.jobID)
+		}
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE id=? AND tenant_id=? AND EXISTS (
 		SELECT 1 FROM job_history_purges WHERE tenant_id=? AND job_id=? AND phase=?)`, record.jobID, record.tenantID, record.tenantID, record.jobID, jobPurgePhaseDeleteJob)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if rows, _ := result.RowsAffected(); rows != 1 {
-		return fmt.Errorf("%w: job history purge is no longer finalizable for job %s", ErrConflict, record.jobID)
+		return false, fmt.Errorf("%w: job history purge is no longer finalizable for job %s", ErrConflict, record.jobID)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM job_history_purge_host_keys WHERE tenant_id=? AND job_id=?`, record.tenantID, record.jobID); err != nil {
-		return err
+		return false, err
 	}
 	result, err = tx.ExecContext(ctx, `UPDATE job_history_purges SET phase=?,updated_at=? WHERE tenant_id=? AND job_id=? AND phase=?`, jobPurgePhaseComplete, sqliteTimestamp(time.Now().UTC()), record.tenantID, record.jobID, jobPurgePhaseDeleteJob)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if rows, _ := result.RowsAffected(); rows != 1 {
-		return fmt.Errorf("%w: job history purge tombstone changed for job %s", ErrConflict, record.jobID)
+		return false, fmt.Errorf("%w: job history purge tombstone changed for job %s", ErrConflict, record.jobID)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }

@@ -5,7 +5,7 @@ description: Understand the current SQLite schema, the oldest schema that upgrad
 
 ## Current schema and rollback
 
-The current schema is version 70. Schema 31 records terminal notification
+The current schema is version 71. Schema 31 records terminal notification
 deliveries and marks rows that had already exhausted the original eight
 attempts. Schema 63 repairs databases that had already passed schema 31 by
 marking still-unsent rows with at least eight attempts and a scheduled retry
@@ -82,6 +82,16 @@ distinct snapshots. The migration does not change scan results or baselines.
 It rebuilds one index by reading retained scans, so it can take time on a
 large history. An older release refuses the upgraded database; restore the
 matching pre-upgrade `./data` backup to roll back.
+
+## Schema 71
+
+Schema 71 adds an all-row index on outbox tenant and row ID. Tenant deletion
+uses it to select bounded batches of every delivery, including sent history
+whose event metadata is intentionally blank and rows without event metadata.
+The migration does not read or rewrite payloads or change delivery state. It
+builds the index over existing outbox rows, so its duration depends on outbox
+size. An older release refuses the upgraded database; restore the matching
+pre-upgrade `./data` backup to roll back.
 
 ## Upgrade floor
 

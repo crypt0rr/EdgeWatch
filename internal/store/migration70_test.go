@@ -40,8 +40,8 @@ func TestMigration70ExtendsScansIdentityIndex(t *testing.T) {
 		t.Fatalf("upgrade from schema 69: %v", err)
 	}
 	t.Cleanup(func() { _ = upgraded.Close() })
-	if version := countRows(t, upgraded.DB, `PRAGMA user_version`); version != 70 {
-		t.Fatalf("schema version = %d, want 70", version)
+	if version := countRows(t, upgraded.DB, `PRAGMA user_version`); version != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
 	}
 	if got := indexKeys(t, upgraded.DB, scansIdentityIndex); got != schema70ScanIndexes[scansIdentityIndex] {
 		t.Fatalf("%s keys = %q, want %q", scansIdentityIndex, got, schema70ScanIndexes[scansIdentityIndex])

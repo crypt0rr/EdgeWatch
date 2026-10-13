@@ -48,6 +48,82 @@ func TestReleaseDeliveryClaimsRetriesUnlinkedChangeAlert(t *testing.T) {
 	}
 }
 
+func TestRecoverExpiredDeliveryClaimsIsBoundedAndMakesRowsRetryable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	startedAt := now.Add(-time.Hour).Format(time.RFC3339Nano)
+	expiredAt := now.Add(-time.Minute).Format(time.RFC3339Nano)
+	dueAt := now.Add(-time.Second).Format(time.RFC3339Nano)
+	const rows = deliveryMaintenanceBatch + 1
+	for i := 0; i < rows; i++ {
+		_, err := s.DB.ExecContext(ctx, `INSERT INTO outbox(destination,payload_json,next_at,claim_token,claim_until,tenant_id,event_type,event_job_id,attempt_started_at)
+VALUES(?,?,?,?,?,?,?,?,?)`, "expired-recovery-"+strconv.Itoa(i), `{"type":"changes-detected"}`, dueAt, "expired-owner-"+strconv.Itoa(i), expiredAt, DefaultTenantID, "changes-detected", "", startedAt)
+		if err != nil {
+			t.Fatalf("insert expired delivery %d: %v", i, err)
+		}
+	}
+	if recovered, err := s.System().RecoverExpiredDeliveryClaims(ctx); err != nil || recovered != deliveryMaintenanceBatch {
+		t.Fatalf("first bounded recovery = %d rows, %v; want %d", recovered, err, deliveryMaintenanceBatch)
+	}
+	var pending int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE attempt_started_at<>'' AND claim_token<>''`).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("expired rows after first recovery = %d, %v; want one remaining beyond the batch", pending, err)
+	}
+	if recovered, err := s.System().RecoverExpiredDeliveryClaims(ctx); err != nil || recovered != 1 {
+		t.Fatalf("second bounded recovery = %d rows, %v; want final row", recovered, err)
+	}
+	var markers int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE attempt_started_at<>'' OR claim_token<>''`).Scan(&markers); err != nil || markers != 0 {
+		t.Fatalf("recovered rows retain attempt markers or claims: count %d, err %v", markers, err)
+	}
+	if deliveries, err := s.System().ClaimDueDeliveries(ctx, rows, "expired-recovery-retry"); err != nil || len(deliveries) != rows {
+		t.Fatalf("claim after live recovery = %d rows, %v; want %d retryable rows", len(deliveries), err, rows)
+	}
+}
+
+func TestRecoverExpiredDeliveryClaimsClearsLastErrorOnlyWhenCoalescing(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	startedAt := now.Add(-time.Hour).Format(time.RFC3339Nano)
+	expiredAt := now.Add(-time.Minute).Format(time.RFC3339Nano)
+	dueAt := now.Add(-time.Second).Format(time.RFC3339Nano)
+	for _, item := range []struct {
+		destination string
+		coalesce    int
+	}{
+		{destination: "expired-recovery-preserves-error"},
+		{destination: "expired-recovery-clears-error", coalesce: 1},
+	} {
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO outbox(destination,payload_json,next_at,claim_token,claim_until,tenant_id,event_type,attempt_started_at,coalesce_after_attempt,last_error)
+VALUES(?,?,?,?,?,?,?,?,?,'provider_timeout')`, item.destination, `{"type":"changes-detected"}`, dueAt, "expired-owner", expiredAt, DefaultTenantID, "changes-detected", startedAt, item.coalesce); err != nil {
+			t.Fatalf("insert %s: %v", item.destination, err)
+		}
+	}
+	if recovered, err := s.System().RecoverExpiredDeliveryClaims(ctx); err != nil || recovered != 2 {
+		t.Fatalf("recover expired rows = %d, %v; want 2", recovered, err)
+	}
+	for _, item := range []struct {
+		destination  string
+		wantError    string
+		wantCoalesce bool
+	}{
+		{destination: "expired-recovery-preserves-error", wantError: "provider_timeout"},
+		{destination: "expired-recovery-clears-error", wantCoalesce: true},
+	} {
+		var claim, started, coalesced, lastError string
+		if err := s.DB.QueryRowContext(ctx, `SELECT claim_token,attempt_started_at,coalesced_at,last_error FROM outbox WHERE destination=?`, item.destination).Scan(&claim, &started, &coalesced, &lastError); err != nil {
+			t.Fatal(err)
+		}
+		if claim != "" || started != "" || lastError != item.wantError || (coalesced != "") != item.wantCoalesce {
+			t.Errorf("recovered %s = claim %q marker %q coalesced %q last error %q; want claim/marker cleared, coalesced %t, last error %q", item.destination, claim, started, coalesced, lastError, item.wantCoalesce, item.wantError)
+		}
+	}
+}
+
 func TestWindowDeliveryResultAndRecoveryFailClosedWhenWindowMetadataIsUnavailable(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

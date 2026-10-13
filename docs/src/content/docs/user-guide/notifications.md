@@ -257,7 +257,11 @@ finish during it. If its claim is live at close, the review records it as in
 flight; if it was released or recovered without a result, the review records an
 unknown prior outcome instead. Neither is counted as an alert held during the
 window, and a later failure does not replay the individual alert or amend the
-closing snapshot. See [Planned change windows](/user-guide/jobs-baselines-incidents/#planned-change-windows)
+closing snapshot. Alerts linked to a future window are released for retry
+before that window starts; an alert whose provider attempt is still uncertain
+inside an active window remains held for the close review. Redelivering a
+terminal change alert clears its old window association, then the final send
+gate checks whether a window is active now. See [Planned change windows](/user-guide/jobs-baselines-incidents/#planned-change-windows)
 for scheduling, cancellation, and the closing review. If there was change
 activity, closing the window queues one summary for the job's configured
 destinations and leaves its review due even when delivery later fails.
@@ -278,7 +282,11 @@ Delivery is at least once. After a provider accepts an alert, EdgeWatch
 retries recording the delivery for up to a minute if the database is busy.
 If it still cannot record it, the daemon logs `notification sent but its
 delivery could not be recorded; it may be sent again`, and the alert is sent
-again when its 30-minute claim ends or at the next start. A provider that
+again when its 30-minute claim ends or at the next start. Deliveries with an
+expired provider-attempt marker are recovered during a delivery pass. For a
+change alert, a marker linked to a future window is cleared so the alert can
+retry before the window; a marker linked to an active window stays until its
+close review records the unknown provider outcome. A provider that
 accepts an alert without answering in time can also receive it twice.
 
 Terminal failures are visible in the console without exposing provider errors
@@ -300,7 +308,9 @@ dropped, its attempts and deferrals, and its error code, never its message or
 the destination's URL. **Redeliver** queues one alert again and **Redeliver
 all** queues all of the destination's failed alerts; the next delivery pass
 sends them to the destination's current URL with fresh retries, and each
-message names when the alert was raised. Redelivered alerts no longer count
+message names when the alert was raised. A redelivered change alert is no
+longer bound to a window that has already closed; a currently active window
+can hold it and include it in that window's review. Redelivered alerts no longer count
 as terminal failures. The security
 audit log records each redelivery as `notifications.redelivered` with a count.
 Only alerts queued for the destination's current credentials are listed, and

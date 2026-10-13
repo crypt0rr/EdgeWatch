@@ -125,6 +125,50 @@ func TestDrainProcessesMultipleBoundedBatches(t *testing.T) {
 	}
 }
 
+func TestDrainRecoversExpiredStartedChangeAlertWithoutRestart(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := "generic://" + parsed.Host + "/edgewatch?disabletls=yes&template=json"
+	db, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	notifier, err := New(db, []string{destination})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := notifier.Queue(context.Background(), []model.Event{{Type: "changes-detected", Job: "expired-attempt", ScanID: "expired-attempt-scan", Message: "retry after worker lease expiry", CreatedAt: time.Now().UTC()}}); err != nil {
+		t.Fatal(err)
+	}
+	expired := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	if _, err := db.DB.ExecContext(context.Background(), `UPDATE outbox SET claim_token='crashed-worker',claim_until=?,attempt_started_at=?,next_at=? WHERE sent_at IS NULL`, expired, expired, expired); err != nil {
+		t.Fatal(err)
+	}
+	if err := notifier.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("drain sent %d webhook calls after recovering the expired attempt; want one", calls.Load())
+	}
+	var sentAt, claim, attempt string
+	if err := db.DB.QueryRowContext(context.Background(), `SELECT COALESCE(sent_at,''),claim_token,attempt_started_at FROM outbox WHERE sent_at<>''`).Scan(&sentAt, &claim, &attempt); err != nil {
+		t.Fatal(err)
+	}
+	if sentAt == "" || claim != "" || attempt != "" {
+		t.Fatalf("recovered delivery terminal row = sent %q claim %q marker %q", sentAt, claim, attempt)
+	}
+}
+
 func TestQueueDestinationsForJobUsesStableSelection(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

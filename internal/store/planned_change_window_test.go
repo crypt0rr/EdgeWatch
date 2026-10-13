@@ -404,6 +404,98 @@ func TestDelayedWindowExpiryHoldsOnlyLinkedBacklog(t *testing.T) {
 	}
 }
 
+func TestEarlierWindowRebindsPendingAlertFromLaterScheduledWindow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job := createWindowTestJob(t, ts, "window-earlier-rebind", "UTC")
+	queueWindowTestEvent(t, ctx, s, "earlier-rebind-destination", job.ID, "changes-detected", "scan-earlier-rebind", time.Now().UTC(), []model.Change{{Key: "earlier-rebind-change", Kind: "port", Target: "192.0.2.14", Port: 443}}, false, 0)
+	now := time.Now().UTC()
+	later := createTestChangeWindow(t, ts, job.ID, now.Add(2*time.Hour), now.Add(3*time.Hour))
+	var outboxID int64
+	var linked string
+	if err := s.DB.QueryRowContext(ctx, `SELECT id,change_window_id FROM outbox WHERE destination=? AND event_type='changes-detected'`, "earlier-rebind-destination").Scan(&outboxID, &linked); err != nil || linked != later.ID {
+		t.Fatalf("initial future-window link = %q, %v; want %q", linked, err, later.ID)
+	}
+	earlier, err := ts.CreateChangeWindow(ctx, job.ID, time.Time{}, time.Now().UTC().Add(time.Hour), true, "earlier maintenance", "test-actor", "Test Operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT change_window_id FROM outbox WHERE id=?`, outboxID).Scan(&linked); err != nil || linked != earlier.ID {
+		t.Fatalf("pending alert after earlier window creation = %q, %v; want %q", linked, err, earlier.ID)
+	}
+	claimed, err := s.System().ClaimDueDeliveries(ctx, 10, "earlier-window-rebind")
+	if err != nil || len(claimed) != 0 {
+		t.Fatalf("claim during earlier active window = %+v, %v; want the alert held", claimed, err)
+	}
+	closedAt := earlier.EndAt.Add(time.Second)
+	summary, changed, err := ts.ExpireChangeWindow(ctx, earlier.ID, func() time.Time { return closedAt }, []string{"earlier-window-summary"})
+	if err != nil || !changed || summary.SuppressedEventCount != 1 {
+		t.Fatalf("close earlier window = %+v, changed %v, err %v; want its pending alert in the summary", summary, changed, err)
+	}
+	var coalesced string
+	if err := s.DB.QueryRowContext(ctx, `SELECT change_window_id,coalesced_at FROM outbox WHERE id=?`, outboxID).Scan(&linked, &coalesced); err != nil || linked != earlier.ID || coalesced == "" {
+		t.Fatalf("closed earlier-window alert = link %q coalesced %q err %v", linked, coalesced, err)
+	}
+}
+
+func TestCancelEarlierWindowRestoresLaterLinkForInFlightReview(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job := createWindowTestJob(t, ts, "window-cancel-earlier-rebind", "UTC")
+	queueWindowTestEvent(t, ctx, s, "cancel-earlier-rebind-destination", job.ID, "changes-detected", "scan-cancel-earlier-rebind", time.Now().UTC(), []model.Change{{Key: "cancel-earlier-rebind-change", Kind: "port", Target: "192.0.2.16", Port: 443}}, false, 0)
+	now := time.Now().UTC().Truncate(time.Second)
+	later := createTestChangeWindow(t, ts, job.ID, now.Add(4*time.Hour), now.Add(5*time.Hour))
+	earlier := createTestChangeWindow(t, ts, job.ID, now.Add(2*time.Hour), now.Add(3*time.Hour))
+	var outboxID int64
+	var linked string
+	if err := s.DB.QueryRowContext(ctx, `SELECT id,change_window_id FROM outbox WHERE destination=? AND event_type='changes-detected'`, "cancel-earlier-rebind-destination").Scan(&outboxID, &linked); err != nil || linked != earlier.ID {
+		t.Fatalf("initial earlier-window link = %q, %v; want %q", linked, err, earlier.ID)
+	}
+	if cancelled, changed, err := ts.CancelChangeWindow(ctx, job.ID, earlier.ID, "test-actor", "Test Operator", nil, AuditEntry{}); err != nil || !changed || cancelled.Status != "cancelled" {
+		t.Fatalf("cancel earlier scheduled window = %+v, changed %v, err %v", cancelled, changed, err)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT change_window_id FROM outbox WHERE id=?`, outboxID).Scan(&linked); err != nil || linked != later.ID {
+		t.Fatalf("pending row after earlier-window cancellation = %q, %v; want later window %q restored", linked, err, later.ID)
+	}
+	claimed, err := s.System().ClaimDueDeliveries(ctx, 1, "cancel-earlier-window-worker")
+	if err != nil || len(claimed) != 1 || claimed[0].ID != outboxID {
+		t.Fatalf("claim before restored window = %+v, %v; want the linked alert", claimed, err)
+	}
+	if err := s.System().BeginDeliveryAttempt(ctx, outboxID, claimed[0].ClaimToken); err != nil {
+		t.Fatalf("begin attempt before restored window: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET claim_until=? WHERE id=?`, later.EndAt.Add(time.Hour).Format(time.RFC3339Nano), outboxID); err != nil {
+		t.Fatal(err)
+	}
+	summary, changed, err := ts.ExpireChangeWindow(ctx, later.ID, func() time.Time { return later.EndAt.Add(time.Second) }, nil)
+	if err != nil || !changed || summary.InFlightEventCount != 1 {
+		t.Fatalf("close restored later window = %+v, changed %v, err %v; want the started delivery included as in flight", summary, changed, err)
+	}
+	if err := s.System().DeliveryResultClaim(ctx, outboxID, claimed[0].ClaimToken, ErrDeliveryProviderTimeout); err != nil {
+		t.Fatalf("record late failed provider result: %v", err)
+	}
+	var sentAt, coalesced, claim, started, lastError string
+	var attempts, deferrals, coalesceAfter int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COALESCE(sent_at,''),coalesced_at,claim_token,attempt_started_at,last_error,attempts,deferrals,coalesce_after_attempt FROM outbox WHERE id=?`, outboxID).Scan(&sentAt, &coalesced, &claim, &started, &lastError, &attempts, &deferrals, &coalesceAfter); err != nil {
+		t.Fatal(err)
+	}
+	if sentAt != "" || coalesced == "" || claim != "" || started != "" || lastError != "" || attempts != 0 || deferrals != 0 || coalesceAfter != 0 {
+		t.Fatalf("late result after restored-window close = sent %q coalesced %q claim %q marker %q error %q attempts %d deferrals %d coalesce-after %d", sentAt, coalesced, claim, started, lastError, attempts, deferrals, coalesceAfter)
+	}
+	var failures int
+	var lastFailure string
+	if err := s.DB.QueryRowContext(ctx, `SELECT terminal_failures,last_failure_at FROM notification_delivery_health WHERE destination_identity=?`, "cancel-earlier-rebind-destination").Scan(&failures, &lastFailure); err != nil {
+		t.Fatal(err)
+	}
+	if failures != 0 || lastFailure != "" {
+		t.Fatalf("coalesced late failure changed destination health: failures %d, last failure %q", failures, lastFailure)
+	}
+}
+
 func TestStartedBeforeFutureWindowDoesNotCountAsSuppressedAndFailureCoalesces(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -461,7 +553,7 @@ func TestStartedBeforeFutureWindowDoesNotCountAsSuppressedAndFailureCoalesces(t 
 	}
 }
 
-func TestStartedBeforeFutureWindowRecoveryPreservesInFlightEvidenceUntilClose(t *testing.T) {
+func TestStartedBeforeFutureWindowRecoveryClearsMarkerAndRetries(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -485,30 +577,72 @@ func TestStartedBeforeFutureWindowRecoveryPreservesInFlightEvidenceUntilClose(t 
 	if err := s.DB.QueryRowContext(ctx, `SELECT claim_token,attempt_started_at FROM outbox WHERE id=?`, item.ID).Scan(&claim, &startedAt); err != nil {
 		t.Fatal(err)
 	}
-	if claim != "" || startedAt == "" {
-		t.Fatalf("recovered attempt marker = %q, claim = %q; want durable marker and released claim", startedAt, claim)
+	if claim != "" || startedAt != "" {
+		t.Fatalf("recovered pre-start attempt marker = %q, claim = %q; want cleared marker and released claim", startedAt, claim)
 	}
-	if deliveries, err := s.System().ClaimDueDeliveries(ctx, 10, "replay-worker"); err != nil || len(deliveries) != 0 {
-		t.Fatalf("recovered started attempt was replayed before close: %#v, %v", deliveries, err)
+	deliveries, err = s.System().ClaimDueDeliveries(ctx, 10, "pre-start-retry-worker")
+	if err != nil || len(deliveries) != 1 || deliveries[0].ID != item.ID {
+		t.Fatalf("recovered pre-start attempt was not retryable: %+v, %v", deliveries, err)
+	}
+	if deliveries[0].ClaimToken == "" || window.ID == "" {
+		t.Fatalf("retry claim/window identity = %q/%q", deliveries[0].ClaimToken, window.ID)
+	}
+}
+
+func TestStartedAttemptInActiveWindowRecoveryPreservesUncertaintyUntilClose(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job := createWindowTestJob(t, ts, "window-active-recovered-inflight", "UTC")
+	queueWindowTestEvent(t, ctx, s, "active-recovery-destination", job.ID, "changes-detected", "scan-active-recovery", time.Now().UTC(), []model.Change{{Key: "active-recovery-change", Kind: "port", Target: "192.0.2.13", Port: 443}}, false, 0)
+	start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	window := createTestChangeWindow(t, ts, job.ID, start, start.Add(time.Hour))
+	deliveries, err := s.System().ClaimDueDeliveries(ctx, 10, "active-pre-window-worker")
+	if err != nil || len(deliveries) != 1 {
+		t.Fatalf("claim before active window setup = %d deliveries, %v", len(deliveries), err)
+	}
+	item := deliveries[0]
+	if err := s.System().BeginDeliveryAttempt(ctx, item.ID, item.ClaimToken); err != nil {
+		t.Fatalf("begin provider attempt: %v", err)
+	}
+	// Advance only the fixture's start boundary; no code under test receives a
+	// synthetic clock, so this puts the row in the genuine active-window path.
+	activeStart := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET start_at=?,status='active' WHERE id=?`, sqliteTimestamp(activeStart), window.ID); err != nil {
+		t.Fatal(err)
+	}
+	if released, err := s.System().ReleaseDeliveryClaims(ctx); err != nil || released != 1 {
+		t.Fatalf("recover active-window attempt = %d released, %v", released, err)
+	}
+	var claim, startedAt string
+	if err := s.DB.QueryRowContext(ctx, `SELECT claim_token,attempt_started_at FROM outbox WHERE id=?`, item.ID).Scan(&claim, &startedAt); err != nil {
+		t.Fatal(err)
+	}
+	if claim != "" || startedAt == "" {
+		t.Fatalf("active-window recovery marker = %q, claim = %q; want uncertainty marker retained and claim released", startedAt, claim)
+	}
+	if deliveries, err := s.System().ClaimDueDeliveries(ctx, 10, "active-replay-worker"); err != nil || len(deliveries) != 0 {
+		t.Fatalf("active-window uncertain attempt was replayed: %+v, %v", deliveries, err)
 	}
 	closedAt := window.EndAt.Add(time.Second)
-	summary, changed, err := ts.ExpireChangeWindow(ctx, window.ID, func() time.Time { return closedAt }, []string{"recovery-destination"})
+	summary, changed, err := ts.ExpireChangeWindow(ctx, window.ID, func() time.Time { return closedAt }, []string{"active-recovery-destination"})
 	if err != nil || !changed || summary.UnknownOutcomeEventCount != 1 || summary.InFlightEventCount != 0 || summary.SuppressedEventCount != 0 {
-		t.Fatalf("close after recovered pre-window attempt = %+v, changed %v, err %v", summary, changed, err)
+		t.Fatalf("close after recovered active-window attempt = %+v, changed %v, err %v", summary, changed, err)
 	}
 	closed, err := ts.GetChangeWindow(ctx, job.ID, window.ID)
 	if err != nil || closed.ReviewState != "due" || closed.Summary == nil || closed.Summary.UnknownOutcomeEventCount != 1 || closed.InFlightEventCount != 0 || closed.UnknownOutcomeEventCount != 1 {
-		t.Fatalf("recovered attempt close review = %+v, err %v", closed, err)
+		t.Fatalf("recovered active attempt close review = %+v, err %v", closed, err)
 	}
 	if countRows(t, s.DB, `SELECT COUNT(*) FROM change_window_events WHERE window_id=? AND disposition='unknown_outcome'`, window.ID) != 1 {
-		t.Fatal("window did not retain recovered provider-attempt uncertainty as separate evidence")
+		t.Fatal("window did not retain active provider-attempt uncertainty as separate evidence")
 	}
 	var coalesced, marker, claimAfter string
 	if err := s.DB.QueryRowContext(ctx, `SELECT coalesced_at,attempt_started_at,claim_token FROM outbox WHERE id=?`, item.ID).Scan(&coalesced, &marker, &claimAfter); err != nil {
 		t.Fatal(err)
 	}
 	if coalesced == "" || marker != "" || claimAfter != "" {
-		t.Fatalf("closed orphan attempt state = coalesced %q marker %q claim %q", coalesced, marker, claimAfter)
+		t.Fatalf("closed active attempt state = coalesced %q marker %q claim %q", coalesced, marker, claimAfter)
 	}
 }
 

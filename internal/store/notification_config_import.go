@@ -369,11 +369,19 @@ func moveDeploymentDeliveriesTx(ctx context.Context, tx *sql.Tx, selectors []str
 			}
 			merged++
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET attempts=?,deferrals=?,next_at=? WHERE id=?`, best.attempts, best.deferrals, best.nextAt, keeper); err != nil {
+		if _, err := applyOutboxTransition(ctx, tx, outboxImportMerge,
+			`id=?`, []any{keeper},
+			outboxChange("attempts", outboxSet, "?", best.attempts),
+			outboxChange("deferrals", outboxSet, "?", best.deferrals),
+			outboxChange("next_at", outboxSet, "?", best.nextAt),
+		); err != nil {
 			return 0, 0, err
 		}
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE outbox SET destination=? WHERE destination IN (`+placeholders+`) AND sent_at IS NULL AND terminal_at='' AND coalesced_at=''`, append([]any{target}, args...)...)
+	result, err := applyOutboxTransition(ctx, tx, outboxImportMove,
+		`destination IN (`+placeholders+`) AND sent_at IS NULL AND terminal_at='' AND coalesced_at=''`, args,
+		outboxChange("destination", outboxSet, "?", target),
+	)
 	if err != nil {
 		return 0, 0, err
 	}

@@ -317,3 +317,81 @@ func TestTerminalDeliveriesListAndRedeliver(t *testing.T) {
 		t.Fatalf("an unknown destination = %v", err)
 	}
 }
+
+func TestRedeliveredChangeAlertReevaluatesClosedAndActiveWindows(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name     string
+		active   bool
+		wantHeld bool
+	}{
+		{name: "closed window is detached and alert sends"},
+		{name: "active window is rechecked at final gate", active: true, wantHeld: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			s := openTestStore(t)
+			ts := defaultTenant(s)
+			destination := managedDestinationWithDeliveries(t, s, "redelivery-"+strings.ReplaceAll(test.name, " ", "-"), 0)
+			job := createWindowTestJob(t, ts, "redelivery-window-"+destination.ID[:8], "UTC")
+			start := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second)
+			var window ChangeWindow
+			var err error
+			if test.active {
+				window, err = ts.CreateChangeWindow(ctx, job.ID, time.Time{}, time.Now().UTC().Add(time.Hour), true, "maintenance", "test-actor", "Test Operator")
+			} else {
+				window = createTestChangeWindow(t, ts, job.ID, start, start.Add(time.Hour))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !test.active {
+				if _, changed, err := ts.ExpireChangeWindow(ctx, window.ID, func() time.Time { return window.EndAt.Add(time.Second) }, nil); err != nil || !changed {
+					t.Fatalf("close old window before queueing alert: changed %v, err %v", changed, err)
+				}
+			}
+			destinationKey := managedNotificationKey(destination.ID, destination.Revision)
+			queueWindowTestEvent(t, ctx, s, destinationKey, job.ID, "changes-detected", "scan-redelivery-"+destination.ID[:8], time.Now().UTC(), []model.Change{{Key: "redeliver-change-" + destination.ID[:8], Kind: "port", Target: "192.0.2.15", Port: 443}}, false, 0)
+			var id int64
+			if err := s.DB.QueryRowContext(ctx, `SELECT id FROM outbox WHERE destination=? AND event_type='changes-detected' AND event_job_id=?`, destinationKey, job.ID).Scan(&id); err != nil {
+				t.Fatal(err)
+			}
+			stamp := time.Now().UTC().Format(time.RFC3339Nano)
+			if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET change_window_id=?,attempt_started_at=?,coalesce_after_attempt=1,terminal_at=?,attempts=15,deferrals=7,last_error='delivery_failed',claim_token='stale-owner',claim_until=? WHERE id=?`, window.ID, stamp, stamp, time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano), id); err != nil {
+				t.Fatal(err)
+			}
+			if count, err := ts.RedeliverTerminalDeliveries(ctx, destination.ID, []int64{id}, AuditEntry{Action: "notifications.redelivered", ActorUsername: "admin"}); err != nil || count != 1 {
+				t.Fatalf("redeliver terminal change alert = %d rows, %v; want one", count, err)
+			}
+			var linked, marker, coalesced, terminal, lastError, claim, claimUntil, next string
+			var attempts, deferrals, coalesceAfter int
+			if err := s.DB.QueryRowContext(ctx, `SELECT change_window_id,attempt_started_at,coalesced_at,terminal_at,last_error,claim_token,claim_until,next_at,attempts,deferrals,coalesce_after_attempt FROM outbox WHERE id=?`, id).Scan(&linked, &marker, &coalesced, &terminal, &lastError, &claim, &claimUntil, &next, &attempts, &deferrals, &coalesceAfter); err != nil {
+				t.Fatal(err)
+			}
+			if linked != "" || marker != "" || coalesced != "" || terminal != "" || lastError != "" || claim != "" || claimUntil != "" || attempts != 0 || deferrals != 0 || coalesceAfter != 0 || scanTime(next).After(time.Now().UTC()) {
+				t.Fatalf("redelivered outbox state link=%q marker=%q coalesced=%q terminal=%q error=%q claim=%q until=%q attempts=%d deferrals=%d coalesce-after=%d next=%s", linked, marker, coalesced, terminal, lastError, claim, claimUntil, attempts, deferrals, coalesceAfter, next)
+			}
+			claimed, err := s.System().ClaimDueDeliveries(ctx, 1, "redelivery-window-final-gate")
+			if err != nil || len(claimed) != 1 || claimed[0].ID != id {
+				t.Fatalf("claim redelivered alert = %+v, %v; want its original row", claimed, err)
+			}
+			attemptErr := s.System().BeginDeliveryAttempt(ctx, id, claimed[0].ClaimToken)
+			if test.wantHeld {
+				if !errors.Is(attemptErr, ErrDeliveryWindowHeld) {
+					t.Fatalf("active-window final gate = %v; want ErrDeliveryWindowHeld", attemptErr)
+				}
+				closedAt := window.EndAt.Add(time.Second)
+				summary, changed, err := ts.ExpireChangeWindow(ctx, window.ID, func() time.Time { return closedAt }, []string{"redelivery-window-summary"})
+				if err != nil || !changed || summary.SuppressedEventCount != 1 {
+					t.Fatalf("close after active-window recheck = %+v, changed %v, err %v", summary, changed, err)
+				}
+				if err := s.DB.QueryRowContext(ctx, `SELECT change_window_id,coalesced_at FROM outbox WHERE id=?`, id).Scan(&linked, &coalesced); err != nil || linked != window.ID || coalesced == "" {
+					t.Fatalf("active-window requeue disposition = link %q coalesced %q err %v", linked, coalesced, err)
+				}
+			} else if attemptErr != nil {
+				t.Fatalf("closed-window stale association blocked retry: %v", attemptErr)
+			}
+		})
+	}
+}

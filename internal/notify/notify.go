@@ -674,6 +674,9 @@ func (n *Notifier) drain(sendCtx, dispatchCtx context.Context) error {
 		// A bounded pass drains several batches so a burst of events does not
 		// wait for multiple 30-second worker ticks. The batch and pass limits
 		// keep provider latency from starving scans and schedule reconciliation.
+		if _, err := n.Store.System().RecoverExpiredDeliveryClaims(dispatchCtx); err != nil {
+			return errors.Join(append(all, err)...)
+		}
 		deliveries, err := n.Store.System().ClaimDueDeliveriesExcluding(dispatchCtx, notificationBatchSize, uuid.NewString(), excludedDestinations)
 		if err != nil {
 			return errors.Join(append(all, err)...)

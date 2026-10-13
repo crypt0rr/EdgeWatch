@@ -182,7 +182,9 @@ below. The destination is never changed. The report includes `safe`, a
 `refusal` reason when the restore would be refused, the backup's
 `source_schema_version`, the number of claimable pending deliveries the chosen
 `--pending-deliveries` policy would affect, and `key_check`. Terminal failures stay in the outbox; restore policies do not quarantine
-or discard them. Quarantined payloads are removed in bounded batches after they
+or discard them. For older backups that predate the retry-budget migration,
+deliveries already exhausted under the former retry limit are treated as
+terminal before the selected restore policy is applied. Quarantined payloads are removed in bounded batches after they
 fall outside the configured history retention; the purge removes them for units
 whose deletion is pending. The command exits non-zero when the restore would be
 refused, so scripts can act on its exit status.
@@ -316,4 +318,4 @@ Read [Database compatibility](/reference/database-compatibility/) before upgradi
 
 ## Pending notification deliveries
 
-Single-file restores quarantine pending deliveries by default so alerts from the backup cannot be replayed. Explicitly choose `--pending-deliveries discard` or `--pending-deliveries preserve` only when that policy is appropriate. Terminal failures remain in the outbox. Keep the database and its original encryption keys together; the restore refuses a backup that the configured keys cannot open unless `--allow-key-mismatch` is given.
+Single-file restores quarantine pending deliveries by default so alerts from the backup cannot be replayed. Explicitly choose `--pending-deliveries discard` or `--pending-deliveries preserve` only when that policy is appropriate. Terminal failures remain in the outbox. When restoring an older backup that has not applied the retry-budget migration, previously exhausted deliveries remain terminal and are not quarantined or discarded. Keep the database and its original encryption keys together; the restore refuses a backup that the configured keys cannot open unless `--allow-key-mismatch` is given.

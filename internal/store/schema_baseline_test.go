@@ -52,24 +52,32 @@ var baselineTestDigit = regexp.MustCompile(`\d`)
 // digits of each timestamp are masked, and its format is kept, so a row
 // written in another timestamp format differs.
 func baselineSchemaDump(t *testing.T, db *sql.DB) []string {
+	return baselineSchemaDumpContext(context.Background(), t, db)
+}
+
+func baselineSchemaDumpContext(ctx context.Context, t *testing.T, db *sql.DB) []string {
 	t.Helper()
 	var dump []string
 	for _, pragma := range []string{"user_version", "auto_vacuum", "journal_mode", "foreign_keys"} {
-		dump = append(dump, fmt.Sprintf("pragma %s=%s", pragma, templateTestPragma(t, db, pragma)))
+		dump = append(dump, fmt.Sprintf("pragma %s=%s", pragma, templateTestPragmaContext(ctx, t, db, pragma)))
 	}
-	for _, entry := range templateTestSchema(t, db) {
+	for _, entry := range templateTestSchemaContext(ctx, t, db) {
 		dump = append(dump, "schema "+entry)
 	}
-	for _, table := range templateTestTables(t, db) {
-		dump = append(dump, baselineTableDump(t, db, table)...)
+	for _, table := range templateTestTablesContext(ctx, t, db) {
+		dump = append(dump, baselineTableDumpContext(ctx, t, db, table)...)
 	}
 	return dump
 }
 
 // baselineTableDump returns the rows of table for baselineSchemaDump, sorted.
 func baselineTableDump(t *testing.T, db *sql.DB, table string) []string {
+	return baselineTableDumpContext(context.Background(), t, db, table)
+}
+
+func baselineTableDumpContext(ctx context.Context, t *testing.T, db *sql.DB, table string) []string {
 	t.Helper()
-	rows, err := db.Query(`SELECT * FROM "` + table + `"`)
+	rows, err := db.QueryContext(ctx, `SELECT * FROM "`+table+`"`)
 	if err != nil {
 		t.Fatal(err)
 	}

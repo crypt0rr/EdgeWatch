@@ -494,7 +494,7 @@ func stageRestore(ctx context.Context, source, destination string, options Resto
 	}
 	staged.epoch = uuid.NewString()
 	staged.restoredAt = time.Now().UTC()
-	staged.pending, err = applyRestoreDeliveryPolicy(ctx, staged.path, policy, staged.epoch, staged.restoredAt)
+	staged.pending, err = applyRestoreDeliveryPolicy(ctx, staged.path, staged.schemaVersion, policy, staged.epoch, staged.restoredAt)
 	if err != nil {
 		return staged, err
 	}
@@ -748,7 +748,7 @@ CREATE TABLE IF NOT EXISTS restore_epochs (
 // host recovery command. The same transaction also clears the copied sessions
 // and lease rows and revokes the copied activation links and setup token, so
 // Restore and DryRunRestore sanitize the copy identically.
-func applyRestoreDeliveryPolicy(ctx context.Context, path string, policy PendingDeliveryPolicy, epoch string, restoredAt time.Time) (int, error) {
+func applyRestoreDeliveryPolicy(ctx context.Context, path string, sourceSchemaVersion int, policy PendingDeliveryPolicy, epoch string, restoredAt time.Time) (int, error) {
 	staged, err := OpenExistingContext(ctx, path)
 	if err != nil {
 		return 0, fmt.Errorf("open staged restore database: %w", err)
@@ -791,10 +791,15 @@ func applyRestoreDeliveryPolicy(ctx context.Context, path string, policy Pending
 			}
 			tenant = ",tenant_id"
 		}
-		// Pending means a row that can still be claimed. Every schema that a
-		// restore accepts, from minimumUpgradeSchema, records exhausted
-		// deliveries in terminal_at, which schema 31 added.
+		// Pending means a row that can still be claimed. Schema 63 first
+		// terminalized deliveries exhausted by the former eight-attempt
+		// budget. A backup from an earlier accepted schema has not run that
+		// migration yet, so apply the exact migration predicate before
+		// quarantine/discard; startup will mark the retained row terminal.
 		pendingPredicate := `sent_at IS NULL AND terminal_at=''`
+		if sourceSchemaVersion < 63 {
+			pendingPredicate += ` AND NOT (attempts>=8 AND next_at < '` + legacyDeliveryRetryBudgetStart + `')`
+		}
 		if columns["coalesced_at"] {
 			pendingPredicate += ` AND coalesced_at=''`
 		}

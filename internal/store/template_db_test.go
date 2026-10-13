@@ -142,9 +142,13 @@ func TestBuildMigratedTemplateReportsOpenFailure(t *testing.T) {
 }
 
 func templateTestPragma(t *testing.T, db *sql.DB, pragma string) string {
+	return templateTestPragmaContext(context.Background(), t, db, pragma)
+}
+
+func templateTestPragmaContext(ctx context.Context, t *testing.T, db *sql.DB, pragma string) string {
 	t.Helper()
 	var value string
-	if err := db.QueryRowContext(context.Background(), "PRAGMA "+pragma).Scan(&value); err != nil {
+	if err := db.QueryRowContext(ctx, "PRAGMA "+pragma).Scan(&value); err != nil {
 		t.Fatal(err)
 	}
 	return value
@@ -153,8 +157,12 @@ func templateTestPragma(t *testing.T, db *sql.DB, pragma string) string {
 var templateTestWhitespace = regexp.MustCompile(`\s+`)
 
 func templateTestSchema(t *testing.T, db *sql.DB) []string {
+	return templateTestSchemaContext(context.Background(), t, db)
+}
+
+func templateTestSchemaContext(ctx context.Context, t *testing.T, db *sql.DB) []string {
 	t.Helper()
-	rows, err := db.QueryContext(context.Background(), `SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_master ORDER BY type,name`)
+	rows, err := db.QueryContext(ctx, `SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_master ORDER BY type,name`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,8 +182,12 @@ func templateTestSchema(t *testing.T, db *sql.DB) []string {
 }
 
 func templateTestTables(t *testing.T, db *sql.DB) []string {
+	return templateTestTablesContext(context.Background(), t, db)
+}
+
+func templateTestTablesContext(ctx context.Context, t *testing.T, db *sql.DB) []string {
 	t.Helper()
-	rows, err := db.QueryContext(context.Background(), `SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`)
+	rows, err := db.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`)
 	if err != nil {
 		t.Fatal(err)
 	}

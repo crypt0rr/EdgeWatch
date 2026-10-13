@@ -834,8 +834,10 @@ payloads remain in the restored database but are never claimed by the delivery
 worker; records older than the configured history retention are pruned in
 bounded batches. Records owned by a unit whose deletion is pending are left to
 that unit's purge. Restore policies count, quarantine, or discard only
-claimable pending deliveries; terminal failures stay in the outbox. A restore
-also clears the daemon and scan leases copied from the
+claimable pending deliveries; terminal failures stay in the outbox. For older
+backups that predate the retry-budget migration, deliveries already exhausted
+under the former retry limit remain terminal and are excluded from quarantine
+or discard. A restore also clears the daemon and scan leases copied from the
 backup, because no process runs on the restored copy. It still refuses to
 replace a database whose own daemon heartbeat is recent, unless the operator
 passes the emergency `--allow-active-daemon` override.

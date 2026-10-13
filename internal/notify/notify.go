@@ -1020,6 +1020,16 @@ func sendInProcess(rawURL, message string) error {
 // same title parameter as the ordinary router path, while guarding the
 // provider's actual HTTP and SMTP network paths.
 func sendInProcessWithPolicy(ctx context.Context, rawURL, message string, policy *destinationPolicy) error {
+	return sendInProcessWithPolicyLifetime(ctx, rawURL, message, policy, false)
+}
+
+// sendInProcessWithPolicyForChild keeps the installed destination guards for
+// the remainder of the notification child's one-request process lifetime.
+func sendInProcessWithPolicyForChild(ctx context.Context, rawURL, message string, policy *destinationPolicy) error {
+	return sendInProcessWithPolicyLifetime(ctx, rawURL, message, policy, true)
+}
+
+func sendInProcessWithPolicyLifetime(ctx context.Context, rawURL, message string, policy *destinationPolicy, processOwnsGlobalsUntilExit bool) error {
 	if policy == nil {
 		return sendInProcess(rawURL, message)
 	}
@@ -1029,11 +1039,18 @@ func sendInProcessWithPolicy(ctx context.Context, rawURL, message string, policy
 	}
 	blocked := &blockedDNSNames{}
 	guarded, _ := service.(guardedHTTPClient)
-	restore, err := installDestinationGuards(policy, guarded, blocked)
+	var restore func()
+	if processOwnsGlobalsUntilExit {
+		err = installDestinationGuardsForProcessExit(policy, guarded, blocked)
+	} else {
+		restore, err = installDestinationGuards(policy, guarded, blocked)
+	}
 	if err != nil {
 		return err
 	}
-	defer restore()
+	if restore != nil {
+		defer restore()
+	}
 	if err := policy.check(ctx, rawURL); err != nil {
 		return err
 	}

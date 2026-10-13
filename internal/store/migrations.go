@@ -19,7 +19,7 @@ import (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 69
+const schemaVersion = 70
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -325,6 +325,9 @@ func schemaMigrationStatements() map[int][]string {
 		// One-off planned change windows and the durable references used by
 		// their close summaries. See migration69.go.
 		69: migration69Statements(),
+		// The Inbox can read compared scan metadata from a covering identity
+		// index without visiting snapshot overflow pages. See migration70.go.
+		70: migration70Statements(),
 	}
 }
 

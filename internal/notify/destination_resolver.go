@@ -281,7 +281,10 @@ type destinationResolverDial struct {
 }
 
 var destinationResolverUpstreamDial = func(ctx context.Context, network, address string) (net.Conn, error) {
-	dialer := &net.Dialer{}
+	// Resolver-provided DNS server addresses are numeric. Supplying an
+	// explicit resolver keeps this upstream dial independent of
+	// net.DefaultResolver, which the one-shot notification child installs.
+	dialer := &net.Dialer{Resolver: &net.Resolver{PreferGo: true}}
 	return dialer.DialContext(ctx, network, address)
 }
 
@@ -639,7 +642,10 @@ type destinationAddressDialer struct {
 }
 
 var destinationTargetDial = func(ctx context.Context, network, address string) (net.Conn, error) {
-	dialer := &net.Dialer{}
+	// destinationAddressDialer passes only IPs that were already resolved and
+	// checked against the tenant policy. Do not let this final dial consult the
+	// mutable process DefaultResolver while a guarded child is active.
+	dialer := &net.Dialer{Resolver: &net.Resolver{PreferGo: true}}
 	return dialer.DialContext(ctx, network, address)
 }
 
@@ -725,10 +731,23 @@ type guardedHTTPClient interface {
 }
 
 // installDestinationGuards confines policy-bearing provider code to checked
-// destinations. The caller restores the process globals after this
-// child-only send; production always executes the send in its isolated
-// notification process.
+// destinations and returns a cleanup for callers that run inside a longer-
+// lived process. The one-request production child uses
+// installDestinationGuardsForProcessExit instead.
 func installDestinationGuards(policy *destinationPolicy, service guardedHTTPClient, blocked *blockedDNSNames) (func(), error) {
+	return installDestinationGuardsWithLifetime(policy, service, blocked, false)
+}
+
+// installDestinationGuardsForProcessExit installs the destination policy for
+// the one-request notification child. The child deliberately keeps these
+// process globals until exit, so an in-flight provider dial cannot race with
+// restoration to the parent defaults.
+func installDestinationGuardsForProcessExit(policy *destinationPolicy, service guardedHTTPClient, blocked *blockedDNSNames) error {
+	_, err := installDestinationGuardsWithLifetime(policy, service, blocked, true)
+	return err
+}
+
+func installDestinationGuardsWithLifetime(policy *destinationPolicy, service guardedHTTPClient, blocked *blockedDNSNames, processOwnsGlobalsUntilExit bool) (func(), error) {
 	if policy == nil {
 		return func() {}, nil
 	}
@@ -796,7 +815,7 @@ func installDestinationGuards(policy *destinationPolicy, service guardedHTTPClie
 			serviceClient.CheckRedirect = policyRedirect(policy, oldServiceRedirect)
 		}
 	}
-	return func() {
+	restore := func() {
 		if serviceClient != nil && serviceClient != http.DefaultClient {
 			serviceClient.Transport = oldServiceTransport
 			serviceClient.CheckRedirect = oldServiceRedirect
@@ -807,5 +826,13 @@ func installDestinationGuards(policy *destinationPolicy, service guardedHTTPClie
 		defaultTransport.DialContext = oldDefaultTransportDial
 		net.DefaultResolver = oldResolver
 		destinationGuardMu.Unlock()
-	}, nil
+	}
+	if processOwnsGlobalsUntilExit {
+		// RunSendChild is a single-request process entry point. After the
+		// guarded globals are installed, it has no second send to serialize;
+		// release the setup lock while retaining the guards until process exit.
+		destinationGuardMu.Unlock()
+		return nil, nil
+	}
+	return restore, nil
 }

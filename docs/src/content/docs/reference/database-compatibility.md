@@ -5,7 +5,7 @@ description: Understand the current SQLite schema, the oldest schema that upgrad
 
 ## Current schema and rollback
 
-The current schema is version 69. Schema 31 records terminal notification
+The current schema is version 70. Schema 31 records terminal notification
 deliveries and marks rows that had already exhausted the original eight
 attempts. Schema 63 repairs databases that had already passed schema 31 by
 marking still-unsent rows with at least eight attempts and a scheduled retry
@@ -59,6 +59,29 @@ their job and are not exposed through public status.
 
 An older release refuses the upgraded database, so a rollback means restoring
 the pre-upgrade `./data` backup.
+
+## Schema 70
+
+Schema 70 rebuilds `scans_identity` with the scan comparison outcome in the
+index. The Investigation Inbox can read a newer scan's status, completion
+time, and comparison without reading its snapshot. It loads a snapshot only
+when a strictly newer successful, compared scan needs target and protocol
+coverage evidence, and does so once per distinct scan for each request.
+
+Inbox commits the page metadata read before loading those blobs. Finished scan
+rows are immutable, and each selected snapshot is read by its fixed tenant,
+job, and scan ID; this releases the shared read connection before JSON
+decoding. If retention deletes a selected scan between those reads, the Inbox
+reports that item's evidence as unclassifiable.
+
+The Inbox classifies all matching incidents and discards a scan's raw and
+decoded data before loading the next one, keeping memory proportional to the
+largest individual snapshot needed by the page instead of the sum of all
+distinct snapshots. The migration does not change scan results or baselines.
+
+It rebuilds one index by reading retained scans, so it can take time on a
+large history. An older release refuses the upgraded database; restore the
+matching pre-upgrade `./data` backup to roll back.
 
 ## Upgrade floor
 

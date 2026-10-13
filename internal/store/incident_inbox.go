@@ -35,6 +35,15 @@ const newestIncidentEvidenceScanIDSQL = `SELECT candidate.id FROM scans AS candi
 	WHERE candidate.job_id=page.job_id AND candidate.tenant_id=page.tenant_id AND candidate.finished_at>page.last_seen_at_sort
 	ORDER BY candidate.finished_at DESC,candidate.id DESC LIMIT 1`
 
+// incidentInboxEvidenceJoinsSQL reads scan identity and comparison metadata
+// only from the covering index. Scan results live before these metadata
+// columns in the table row, so joining the table directly would visit each
+// snapshot's overflow pages.
+const incidentInboxEvidenceJoinsSQL = `LEFT JOIN scans AS opening INDEXED BY scans_identity
+	ON opening.id=json_extract(page.incident_json,'$.scan_id') AND opening.job_id=page.job_id AND opening.tenant_id=page.tenant_id
+LEFT JOIN scans AS newer INDEXED BY scans_identity
+	ON newer.id=(` + newestIncidentEvidenceScanIDSQL + `) AND newer.job_id=page.job_id AND newer.tenant_id=page.tenant_id`
+
 // IncidentInboxFilter contains the tenant-scoped filters applied before the
 // inbox count, ordering, and pagination are calculated.
 type IncidentInboxFilter struct {
@@ -59,6 +68,21 @@ type IncidentInboxResult struct {
 	HasMore     bool
 	NextOffset  *int
 }
+
+type incidentInboxSnapshotKey struct {
+	tenantID string
+	jobID    string
+	scanID   string
+}
+
+type incidentInboxPendingItem struct {
+	item        IncidentInboxItem
+	uncertainty IncidentObservationUncertainty
+}
+
+type incidentInboxSnapshotReader func(context.Context, incidentInboxSnapshotKey) ([]byte, error)
+
+type incidentInboxSnapshotDecoder func([]byte, *model.Snapshot) error
 
 // IncidentReviewWrite is a proposed optimistic review update. Actor identity
 // and timestamp are supplied separately by the authenticated server layer.
@@ -138,8 +162,20 @@ func incidentViewStatus(review IncidentReview, now time.Time) string {
 // ListIncidentInbox applies view and field filters before counting and
 // paginating. Every query carries the tenant predicate on the owning job.
 func (ts *TenantStore) ListIncidentInbox(ctx context.Context, filter IncidentInboxFilter) (IncidentInboxResult, error) {
+	return ts.listIncidentInboxWithSnapshotAccess(ctx, filter, nil, nil)
+}
+
+// listIncidentInboxWithSnapshotAccess keeps the storage path testable for
+// read/decode-count regressions while the exported method uses the production
+// SQL query and JSON decoder.
+func (ts *TenantStore) listIncidentInboxWithSnapshotAccess(ctx context.Context, filter IncidentInboxFilter, readSnapshot incidentInboxSnapshotReader, decodeSnapshot incidentInboxSnapshotDecoder) (IncidentInboxResult, error) {
 	if err := ts.ready(); err != nil {
 		return IncidentInboxResult{}, err
+	}
+	if decodeSnapshot == nil {
+		decodeSnapshot = func(raw []byte, snapshot *model.Snapshot) error {
+			return json.Unmarshal(raw, snapshot)
+		}
 	}
 	if filter.View == "" {
 		filter.View = incidentInboxDefaultView
@@ -192,13 +228,18 @@ func (ts *TenantStore) ListIncidentInbox(ctx context.Context, filter IncidentInb
 	var result IncidentInboxResult
 	result.Limit, result.Offset = filter.Limit, filter.Offset
 	readDB := ts.store.reader()
-	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_incidents AS i JOIN jobs AS j ON j.id=i.job_id AND j.tenant_id=? WHERE NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, ts.scope.id).Scan(&result.ActiveCount); err != nil {
+	tx, err := readDB.BeginTx(ctx, nil)
+	if err != nil {
 		return result, err
 	}
-	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) `+from, args...).Scan(&result.Total); err != nil {
+	defer func() { _ = tx.Rollback() }()
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_incidents AS i JOIN jobs AS j ON j.id=i.job_id AND j.tenant_id=? WHERE NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, ts.scope.id).Scan(&result.ActiveCount); err != nil {
 		return result, err
 	}
-	rows, err := readDB.QueryContext(ctx, `WITH page AS MATERIALIZED (
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) `+from, args...).Scan(&result.Total); err != nil {
+		return result, err
+	}
+	rows, err := tx.QueryContext(ctx, `WITH page AS MATERIALIZED (
 		SELECT i.job_id,j.name AS job_name,j.tenant_id,i.key,i.severity,i.opened_at_sort,i.incident_json,i.occurrence_token,i.last_seen_at_sort,
 			r.status,r.reviewer_label,r.reviewed_at,r.note,r.follow_up_at,r.revision
 		`+from+`
@@ -209,10 +250,9 @@ func (ts *TenantStore) ListIncidentInbox(ctx context.Context, filter IncidentInb
 	SELECT page.job_id,page.job_name,page.incident_json,page.occurrence_token,
 		page.status,page.reviewer_label,page.reviewed_at,page.note,page.follow_up_at,page.revision,
 		CASE WHEN opening.id IS NULL THEN 0 ELSE 1 END,
-		COALESCE(newer.id,''),COALESCE(newer.finished_at,''),COALESCE(newer.status,''),COALESCE(newer.comparison,''),newer.snapshot_json
+		COALESCE(newer.id,''),COALESCE(newer.finished_at,''),COALESCE(newer.status,''),COALESCE(newer.comparison,'')
 	FROM page
-	LEFT JOIN scans AS opening ON opening.id=json_extract(page.incident_json,'$.scan_id') AND opening.job_id=page.job_id AND opening.tenant_id=page.tenant_id
-	LEFT JOIN scans AS newer ON newer.id=(`+newestIncidentEvidenceScanIDSQL+`) AND newer.job_id=page.job_id AND newer.tenant_id=page.tenant_id
+	`+incidentInboxEvidenceJoinsSQL+`
 	ORDER BY CASE lower(page.severity) WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 WHEN 'info' THEN 2 ELSE 3 END,
 		CASE WHEN page.opened_at_sort='' THEN 1 ELSE 0 END,page.opened_at_sort,page.job_name COLLATE NOCASE,page.key,page.job_id,page.occurrence_token`,
 		append(args, filter.Limit, filter.Offset)...)
@@ -220,7 +260,8 @@ func (ts *TenantStore) ListIncidentInbox(ctx context.Context, filter IncidentInb
 		return result, err
 	}
 	defer rows.Close()
-	result.Items = make([]IncidentInboxItem, 0)
+	pending := make([]incidentInboxPendingItem, 0, filter.Limit)
+	neededSnapshotItems := make(map[incidentInboxSnapshotKey][]int)
 	for rows.Next() {
 		var item IncidentInboxItem
 		var raw []byte
@@ -228,10 +269,9 @@ func (ts *TenantStore) ListIncidentInbox(ctx context.Context, filter IncidentInb
 		var revision sql.NullInt64
 		var openingScanAvailable bool
 		var newerScanID, newerFinishedAt, newerStatus, newerComparison sql.NullString
-		var newerSnapshot []byte
 		if err := rows.Scan(&item.JobID, &item.Job, &raw, &item.OccurrenceToken,
 			&reviewStatus, &reviewerLabel, &reviewedAt, &note, &followUpAt, &revision,
-			&openingScanAvailable, &newerScanID, &newerFinishedAt, &newerStatus, &newerComparison, &newerSnapshot); err != nil {
+			&openingScanAvailable, &newerScanID, &newerFinishedAt, &newerStatus, &newerComparison); err != nil {
 			return result, err
 		}
 		if err := json.Unmarshal(raw, &item.Incident); err != nil {
@@ -258,15 +298,41 @@ func (ts *TenantStore) ListIncidentInbox(ctx context.Context, filter IncidentInb
 			}
 		}
 		item.ViewStatus = incidentViewStatus(item.Review, now)
-		item.ObservationUncertainty = incidentObservationUncertainty(item.Incident, newerScanID.String, newerFinishedAt.String, newerStatus.String, newerComparison.String, newerSnapshot)
-		if !item.ObservationUncertainty.valid() {
-			item.ObservationUncertainty.Status = IncidentObservationUnknown
-			item.ObservationUncertainty.Reason = IncidentReasonLatestScanUnclassifiable
+		uncertainty, needsSnapshot := incidentObservationMetadataUncertainty(item.Incident, newerScanID.String, newerFinishedAt.String, newerStatus.String, newerComparison.String)
+		if needsSnapshot {
+			snapshotKey := incidentInboxSnapshotKey{tenantID: ts.scope.id, jobID: item.JobID, scanID: newerScanID.String}
+			neededSnapshotItems[snapshotKey] = append(neededSnapshotItems[snapshotKey], len(pending))
 		}
-		result.Items = append(result.Items, item)
+		pending = append(pending, incidentInboxPendingItem{item: item, uncertainty: uncertainty})
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return result, err
+	}
+	if err := rows.Close(); err != nil {
+		return result, err
+	}
+	if err := tx.Commit(); err != nil {
+		return result, err
+	}
+	if readSnapshot == nil {
+		readDB := ts.store.reader()
+		readSnapshot = func(ctx context.Context, key incidentInboxSnapshotKey) ([]byte, error) {
+			return readIncidentInboxSnapshot(ctx, readDB, key)
+		}
+	}
+	if err := classifyIncidentInboxSnapshots(ctx, neededSnapshotItems, pending, readSnapshot, decodeSnapshot); err != nil {
+		return result, err
+	}
+	result.Items = make([]IncidentInboxItem, 0, len(pending))
+	for _, entry := range pending {
+		uncertainty := entry.uncertainty
+		if !uncertainty.valid() {
+			uncertainty.Status = IncidentObservationUnknown
+			uncertainty.Reason = IncidentReasonLatestScanUnclassifiable
+		}
+		entry.item.ObservationUncertainty = uncertainty
+		result.Items = append(result.Items, entry.item)
 	}
 	result.HasMore = result.Offset+len(result.Items) < result.Total
 	if result.HasMore {
@@ -276,20 +342,34 @@ func (ts *TenantStore) ListIncidentInbox(ctx context.Context, filter IncidentInb
 	return result, nil
 }
 
-func incidentObservationUncertainty(incident model.Incident, scanID, finishedAt, scanStatus, comparison string, rawSnapshot []byte) IncidentObservationUncertainty {
+// readIncidentInboxSnapshot scans one fixed identity through the shared
+// reader. QueryRow.Scan closes its rows before returning, releasing the pool
+// connection before the caller decodes the returned bytes.
+func readIncidentInboxSnapshot(ctx context.Context, db *sql.DB, key incidentInboxSnapshotKey) ([]byte, error) {
+	var raw []byte
+	err := db.QueryRowContext(ctx, `SELECT snapshot_json FROM scans INDEXED BY scans_identity WHERE id=? AND tenant_id=? AND job_id=?`, key.scanID, key.tenantID, key.jobID).Scan(&raw)
+	return raw, err
+}
+
+func incidentObservationNeedsSnapshot(incident model.Incident, scanID, finishedAt, scanStatus, comparison string) bool {
+	_, needsSnapshot := incidentObservationMetadataUncertainty(incident, scanID, finishedAt, scanStatus, comparison)
+	return needsSnapshot
+}
+
+func incidentObservationMetadataUncertainty(incident model.Incident, scanID, finishedAt, scanStatus, comparison string) (IncidentObservationUncertainty, bool) {
 	uncertainty := IncidentObservationUncertainty{Status: IncidentObservationUnknown}
 	if incident.LastSeenAt.IsZero() {
 		uncertainty.Reason = IncidentReasonLegacyOriginUnknown
-		return uncertainty
+		return uncertainty, false
 	}
 	if scanID == "" {
 		uncertainty.Reason = IncidentReasonNoNewerObservation
-		return uncertainty
+		return uncertainty, false
 	}
 	observedAt := scanTime(finishedAt)
 	if observedAt.IsZero() || !observedAt.After(incident.LastSeenAt) {
 		uncertainty.Reason = IncidentReasonNoNewerObservation
-		return uncertainty
+		return uncertainty, false
 	}
 	uncertainty.ScanID = scanID
 	uncertainty.ObservedAt = &observedAt
@@ -298,20 +378,28 @@ func incidentObservationUncertainty(incident model.Incident, scanID, finishedAt,
 	if scanStatus == "failed" {
 		uncertainty.Status = IncidentObservationIncomplete
 		uncertainty.Reason = IncidentReasonLatestScanFailed
-		return uncertainty
+		return uncertainty, false
 	}
 	if scanStatus == "incomplete" {
 		uncertainty.Status = IncidentObservationIncomplete
 		uncertainty.Reason = IncidentReasonLatestScanIncomplete
-		return uncertainty
+		return uncertainty, false
 	}
 	if comparison == model.ScanComparisonNotCompared {
 		uncertainty.Status = IncidentObservationIncomplete
 		uncertainty.Reason = IncidentReasonLatestScanNotCompared
-		return uncertainty
+		return uncertainty, false
 	}
 	if scanStatus != "success" || comparison != model.ScanComparisonCompared {
 		uncertainty.Reason = IncidentReasonLatestScanUnclassifiable
+		return uncertainty, false
+	}
+	return uncertainty, true
+}
+
+func incidentObservationUncertainty(incident model.Incident, scanID, finishedAt, scanStatus, comparison string, rawSnapshot []byte) IncidentObservationUncertainty {
+	uncertainty, needsSnapshot := incidentObservationMetadataUncertainty(incident, scanID, finishedAt, scanStatus, comparison)
+	if !needsSnapshot {
 		return uncertainty
 	}
 	var snapshot model.Snapshot
@@ -319,7 +407,11 @@ func incidentObservationUncertainty(incident model.Incident, scanID, finishedAt,
 		uncertainty.Reason = IncidentReasonLatestScanUnclassifiable
 		return uncertainty
 	}
-	if reason := incidentCoverageUncertainty(incident.Change, snapshot); reason != "" {
+	return incidentObservationUncertaintyFromSnapshot(uncertainty, incident.Change, snapshot)
+}
+
+func incidentObservationUncertaintyFromSnapshot(uncertainty IncidentObservationUncertainty, change model.Change, snapshot model.Snapshot) IncidentObservationUncertainty {
+	if reason := incidentCoverageUncertainty(change, snapshot); reason != "" {
 		if reason != IncidentReasonLatestScanUnclassifiable {
 			uncertainty.Status = IncidentObservationIncomplete
 		}
@@ -328,6 +420,49 @@ func incidentObservationUncertainty(incident model.Incident, scanID, finishedAt,
 	}
 	uncertainty.Reason = IncidentReasonLatestScanDoesNotEstablishRecovery
 	return uncertainty
+}
+
+// classifyIncidentInboxSnapshots reads and decodes one distinct scan at a
+// time, then classifies every matching inbox row before moving to the next
+// key. The page metadata transaction is already closed before this helper
+// runs, and each reader returns after copying one immutable finalized scan
+// blob. This releases the shared read connection before JSON decoding and
+// bounds retained snapshot memory to the largest needed snapshot rather than
+// the page's aggregate evidence. Retention can delete a scan between metadata
+// selection and this read; a missing fixed key remains unclassifiable.
+func classifyIncidentInboxSnapshots(ctx context.Context, rowsBySnapshot map[incidentInboxSnapshotKey][]int, pending []incidentInboxPendingItem, read incidentInboxSnapshotReader, decode incidentInboxSnapshotDecoder) error {
+	for key, rowIndexes := range rowsBySnapshot {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		raw, readErr := read(ctx, key)
+		if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
+			return readErr
+		}
+		var snapshot model.Snapshot
+		decodeErr := readErr
+		if decodeErr == nil {
+			decodeErr = decode(raw, &snapshot)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		for _, rowIndex := range rowIndexes {
+			if rowIndex < 0 || rowIndex >= len(pending) {
+				return fmt.Errorf("incident inbox snapshot row index %d is out of bounds", rowIndex)
+			}
+			entry := &pending[rowIndex]
+			if decodeErr != nil {
+				entry.uncertainty.Reason = IncidentReasonLatestScanUnclassifiable
+			} else {
+				entry.uncertainty = incidentObservationUncertaintyFromSnapshot(entry.uncertainty, entry.item.Incident.Change, snapshot)
+			}
+		}
+		// Do not retain snapshots for the rest of the page. Each iteration
+		// keeps at most one raw blob and one decoded model live.
+		snapshot = model.Snapshot{}
+	}
+	return nil
 }
 
 func incidentCoverageUncertainty(change model.Change, snapshot model.Snapshot) IncidentObservationReason {

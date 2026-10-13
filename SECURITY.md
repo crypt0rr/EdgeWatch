@@ -713,7 +713,7 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 69 must not be opened by an older EdgeWatch
+database upgraded to schema 70 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
@@ -752,6 +752,19 @@ Unreviewed due summaries are retained past the normal history cutoff, while
 other closed windows and their evidence expire in bounded batches. The daemon
 continues scanning and recording incidents during quiet windows; only the
 three change-notification event types are held or coalesced.
+Schema 70 rebuilds the scan identity index to include the recorded comparison
+outcome. The Investigation Inbox can read status and comparison metadata from
+that index without reading scan snapshots; it loads newer successful,
+compared snapshots only when coverage evidence is needed and only once per
+distinct scan in a request. The Inbox commits its consistent page-metadata
+read before loading those blobs. Finished scan rows are immutable; each
+snapshot is fetched by its fixed tenant, job, and scan ID, then the read
+connection is released before JSON decoding. Retention may delete a scan
+between metadata selection and the blob read; that item is reported as
+unclassifiable. The Inbox classifies each scan's incidents before loading the
+next and releases its raw and decoded snapshot, so it does not retain all
+distinct page snapshots together or hold a shared read connection during
+decode. It changes no scan results or baselines.
 Only the daemon migrates, and only one process at a time: from v0.36.0 the
 daemon holds an advisory lock on the database directory, which restores take
 too, from before it opens the database until its migration and startup

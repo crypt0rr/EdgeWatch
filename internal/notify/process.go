@@ -191,9 +191,14 @@ func notificationChildEnvironment() []string {
 // RunSendChild is the hidden command entry point used by the daemon's
 // notification subprocess. It is intentionally small and does not load the
 // EdgeWatch configuration or open SQLite; only the fixed Shoutrrr provider
-// implementation is invoked. A failed send is a ChildExitError, whose exit
+// implementation is invoked. The child sends once and owns its guarded
+// process globals until exit. A failed send is a ChildExitError, whose exit
 // status reports the class of the failure.
 func RunSendChild(input io.Reader) error {
+	return runSendChild(input, sendInProcessWithPolicyForChild)
+}
+
+func runSendChild(input io.Reader, guardedSend func(context.Context, string, string, *destinationPolicy) error) error {
 	if input == nil {
 		return errors.New("notification child input is required")
 	}
@@ -210,7 +215,7 @@ func RunSendChild(input io.Reader) error {
 		return errors.New("invalid notification destination policy")
 	}
 	if policy != nil {
-		err = sendInProcessWithPolicy(context.Background(), request.URL, request.Message, policy)
+		err = guardedSend(context.Background(), request.URL, request.Message, policy)
 	} else {
 		err = sendInProcess(request.URL, request.Message)
 	}

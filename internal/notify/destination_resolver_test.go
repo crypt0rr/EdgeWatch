@@ -32,6 +32,13 @@ type destinationDNSTestServer struct {
 	closeOnce sync.Once
 }
 
+// dialDestinationTestAddress always receives an IP literal. Use an explicit
+// resolver so these controlled dials never read the mutable DefaultResolver
+// installed by guarded notification sends.
+func dialDestinationTestAddress(ctx context.Context, network, address string) (net.Conn, error) {
+	return (&net.Dialer{Resolver: &net.Resolver{PreferGo: true}}).DialContext(ctx, network, address)
+}
+
 type destinationPacketTestConn struct {
 	read       []byte
 	readAddr   net.Addr
@@ -171,7 +178,7 @@ func (s *destinationDNSTestServer) serveTCP() {
 
 func (s *destinationDNSTestServer) resolver(policy *destinationPolicy) *net.Resolver {
 	dial := func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, network, s.address)
+		return dialDestinationTestAddress(ctx, network, s.address)
 	}
 	return newDestinationResolver(policy, nil, dial)
 }
@@ -275,6 +282,48 @@ func testDestinationPolicy(t *testing.T) *destinationPolicy {
 		t.Fatal(err)
 	}
 	return &destinationPolicy{exclusions: []*net.IPNet{network}}
+}
+
+func TestDefaultDestinationDialersConnectToNumericEndpoints(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tcpListener.Close()
+	tcpConn, err := destinationTargetDial(ctx, "tcp", tcpListener.Addr().String())
+	if err != nil {
+		t.Fatalf("checked target dial to local numeric address: %v", err)
+	}
+	defer tcpConn.Close()
+	accepted, err := tcpListener.Accept()
+	if err != nil {
+		t.Fatalf("accept checked target dial: %v", err)
+	}
+	defer accepted.Close()
+
+	upstream, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+	resolverConn, err := destinationResolverUpstreamDial(ctx, "udp", upstream.LocalAddr().String())
+	if err != nil {
+		t.Fatalf("resolver upstream dial to local numeric address: %v", err)
+	}
+	defer resolverConn.Close()
+	if _, err := resolverConn.Write([]byte("query")); err != nil {
+		t.Fatalf("write through resolver upstream dial: %v", err)
+	}
+	if err := upstream.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, len("query"))
+	if _, _, err := upstream.ReadFrom(buffer); err != nil {
+		t.Fatalf("receive through resolver upstream dial: %v", err)
+	}
 }
 
 func TestDestinationResolverFiltersPrivateAddressesAndCNAMEs(t *testing.T) {

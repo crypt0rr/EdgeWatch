@@ -144,6 +144,10 @@ child preflight. The resolver packet filter does not observe hosts-file reads;
 the host operator controls that file and its stability during the short send
 is part of the threat model.
 
+The production notification child sends once and keeps its destination guards
+installed until that process exits; the parent process is unaffected. Scoped
+in-process helpers restore the guards when their send returns.
+
 The pinned Shoutrrr v0.8.0 provider inventory is split by destination:
 
 - URL hostname: bark, generic, Google Chat, Gotify, Hangouts, Matrix,

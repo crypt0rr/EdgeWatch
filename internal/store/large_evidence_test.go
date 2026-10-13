@@ -190,6 +190,10 @@ func TestScanHistoryReadsUseCoveringIndexes(t *testing.T) {
 	hostPage := scanHostsPageQueries(tenant, "evidence-000001", "", "", nil, 50, 0)
 	_, repairSQL, repairArgs := latestScanHostRepairQueries([]latestScanHostKey{{tenant, "10.0.0.1"}})
 	trigger := strings.NewReplacer("NEW.tenant_id", "?", "NEW.scan_id", "?").Replace(latestScanHostScanTenantSQL)
+	incidentInboxPlanSQL := `WITH page(job_id,tenant_id,last_seen_at_sort,incident_json) AS (VALUES(?,?,?,?))
+SELECT opening.id,newer.id,newer.finished_at,newer.status,newer.comparison
+FROM page
+` + incidentInboxEvidenceJoinsSQL
 	cases := []planCase{
 		{label: "job history count", statement: jobPage.countSQL, args: jobPage.countArg, aliases: []string{"s"}},
 		{label: "job history page", statement: jobPage.pageSQL, args: jobPage.pageArg, aliases: []string{"s"}, index: scansJobHistoryIndex, pageRows: true},
@@ -202,6 +206,7 @@ func TestScanHistoryReadsUseCoveringIndexes(t *testing.T) {
 		{label: "scan host page count", statement: hostPage.countSQL, args: hostPage.countArg, aliases: []string{"s"}, index: scansIdentityIndex},
 		{label: "successful host index", statement: `SELECT EXISTS(SELECT 1 FROM scan_hosts h JOIN scans s ON s.id=h.scan_id WHERE s.tenant_id=? AND s.status='success' AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=s.tenant_id AND purge.job_id=s.job_id))`, args: []any{tenant}, aliases: []string{"s"}},
 		{label: "latest host guard trigger", statement: `SELECT ` + trigger, args: []any{tenant, "evidence-000001"}, index: scansIdentityIndex},
+		{label: "incident inbox scan metadata page", statement: incidentInboxPlanSQL, args: []any{job, tenant, "2026-10-01T00:00:00.000000000Z", `{}`}, aliases: []string{"opening", "newer", "candidate"}, index: scansIdentityIndex},
 		// A successful scan writes one latest observation per host; the
 		// statement takes the scan's tenant as an argument and reads no scan.
 		{label: "latest host upsert", statement: upsertLatestScanHostSQL, args: []any{tenant, "10.0.0.1", "evidence-000001", job, job, "2026-10-01T00:00:00.000000000Z", "detailed", "IPv4", "[]", "[]", "{}", "", 0, 0, 1, 0, 0, 0, 0, 0}},
@@ -219,6 +224,11 @@ func TestScanHistoryReadsUseCoveringIndexes(t *testing.T) {
 		}
 	}
 	assertScanPlans(t, s.DB, cases)
+	incidentInboxPlan := explainPlan(t, s.DB, incidentInboxPlanSQL, job, tenant, "2026-10-01T00:00:00.000000000Z", `{}`)
+	incidentInboxPlanText := strings.Join(incidentInboxPlan, " | ")
+	if !strings.Contains(incidentInboxPlanText, "INDEX "+scansJobHistoryIndex) {
+		t.Errorf("incident inbox newer-scan seek does not use %s: %s", scansJobHistoryIndex, incidentInboxPlanText)
+	}
 
 	// The cycle checks of a retention pass read the scans' cycle outcome
 	// from scans_cycle_outcome.

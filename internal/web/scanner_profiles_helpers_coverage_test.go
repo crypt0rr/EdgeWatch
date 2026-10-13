@@ -73,6 +73,9 @@ func TestScannerProfileJSONShapesAndCapabilities(t *testing.T) {
 
 	server, _, admin := newUsersTestServer(t)
 	cachedNmapVersion, cachedNaabuVersion := server.App.ScannerVersions()
+	if cachedNmapVersion != "unknown" || cachedNaabuVersion != "unknown" {
+		t.Fatalf("application without scanner policy cached %q/%q, want unknown/unknown", cachedNmapVersion, cachedNaabuVersion)
+	}
 	countingScanner := &requestVersionCountingScanner{}
 	server.App.Scanner = countingScanner
 	recorder := httptest.NewRecorder()

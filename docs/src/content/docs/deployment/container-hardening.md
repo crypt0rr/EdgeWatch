@@ -144,10 +144,12 @@ process other than UID 0 cannot send raw packets and falls back to connect
 scans. Naabu detects its capabilities itself. Scan results are the same as
 without the sandbox.
 
-Nmap and Naabu version probes use this same scanner policy. EdgeWatch captures
-their bounded version strings once at daemon startup; the console serves the
-cached values instead of starting scanner processes for each capabilities
-request.
+Nmap and Naabu version probes use this same scanner policy when a scanner-enabled
+application starts. The daemon and `scan` command capture their bounded version
+strings once at startup; the console serves the daemon's cached values instead
+of starting scanner processes for each capabilities request. Host commands such
+as `notify test` and baseline review do not need scanner binaries and skip the
+probes when they create an application without a scanner policy.
 
 At startup EdgeWatch checks that the container grants `SETUID`, `SETGID` and
 `KILL`, and starts a short test process as UID 65532 to confirm that the

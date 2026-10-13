@@ -3,6 +3,9 @@ package app
 import (
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,5 +48,67 @@ func TestNewWithOptionsInstallsTheScannerSandbox(t *testing.T) {
 	}
 	if got := newApp(Options{}).NotificationSandbox(); got.State != sandbox.StateDisabled {
 		t.Fatalf("application without a notification policy reports %+v, want disabled", got)
+	}
+}
+
+func TestNewWithoutScannerPolicyDoesNotProbeScannerBinaries(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeVersionProbe := func(name, output string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' '"+output+"'\nprintf x >> \"${0}.called\"\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	nmapPath := writeVersionProbe("nmap", "Nmap version 99.1")
+	naabuPath := writeVersionProbe("naabu", "[INF] Current Version: 99.2")
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	newTestApp := func(options Options) *App {
+		t.Helper()
+		s, err := store.Open(storetest.FreshPath(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		a, err := newApp(cfg, s, nmapPath, naabuPath, slog.New(slog.NewTextHandler(io.Discard, nil)), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+
+	unconfined := newTestApp(Options{})
+	if nmap, naabu := unconfined.ScannerVersions(); nmap != "unknown" || naabu != "unknown" {
+		t.Fatalf("versions without scanner policy = %q/%q, want unknown/unknown", nmap, naabu)
+	}
+	for _, path := range []string{nmapPath, naabuPath} {
+		if _, err := os.Stat(path + ".called"); !os.IsNotExist(err) {
+			t.Fatalf("scanner version probe ran without a policy for %s (stat error %v)", path, err)
+		}
+	}
+
+	helperLog := filepath.Join(dir, "sandbox-exec.called")
+	helperPath := filepath.Join(dir, "sandbox-exec")
+	helper := "#!/bin/sh\nprintf x >> \"${0}.called\"\nwhile [ \"$#\" -gt 0 ] && [ \"$1\" != \"--\" ]; do shift; done\n[ \"$#\" -gt 0 ] || exit 2\nshift\nexec \"$@\"\n"
+	if err := os.WriteFile(helperPath, []byte(helper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	policy := (*sandbox.Policy)(nil).WithLandlock(helperPath, 6)
+	confined := newTestApp(Options{Sandbox: policy})
+	if nmap, naabu := confined.ScannerVersions(); nmap != "Nmap version 99.1" || naabu != "99.2" {
+		t.Fatalf("versions with configured scanner policy = %q/%q, want fixture versions", nmap, naabu)
+	}
+	for _, path := range []string{nmapPath, naabuPath} {
+		if _, err := os.Stat(path + ".called"); err != nil {
+			t.Fatalf("configured scanner policy did not run %s through the helper: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(helperLog); err != nil {
+		t.Fatalf("configured scanner policy did not invoke its helper: %v", err)
+	}
+	if calls, err := os.ReadFile(helperLog); err != nil || strings.Count(string(calls), "x") != 2 {
+		t.Fatalf("scanner helper calls = %q, err=%v; want exactly two probes", calls, err)
 	}
 }

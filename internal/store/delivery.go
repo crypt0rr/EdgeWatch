@@ -674,7 +674,11 @@ func recoverStartedDeliveryTx(ctx context.Context, tx *sql.Tx, id int64, claim, 
 			case closedAt != "":
 				coalesce = true
 			case now.Before(scanTime(startRaw)):
-				// A scheduled window must not strand a pre-start attempt.
+				// Ordinary pre-start attempts must be retryable before the
+				// window. A credential rotation explicitly prevents retrying
+				// against the new destination, so retain that uncertain handoff
+				// for the scheduled window's review and coalesce it at close.
+				clearMarker = coalesceAfter == 0
 			default:
 				// An active (or overdue but not yet closed) window preserves the
 				// provider-outcome uncertainty until its close summary commits.

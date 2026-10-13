@@ -193,7 +193,7 @@ func (ts *TenantStore) CreateChangeWindow(ctx context.Context, jobID string, sta
 	// They become summary references only if still pending when the window is
 	// closed; rows delivered before start do not inflate the summary.
 	if _, err := applyOutboxTransition(ctx, tx, outboxAssignWindow,
-		`event_job_id=? AND tenant_id=? AND event_type IN ('changes-detected','changes-reminder','changes-recovered') AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at='' AND (change_window_id='' OR EXISTS (SELECT 1 FROM change_windows AS previous JOIN jobs AS j ON j.id=previous.job_id WHERE previous.id=outbox.change_window_id AND previous.job_id=? AND previous.closed_at='' AND previous.start_at>? AND j.tenant_id=? AND j.tenant_id=outbox.tenant_id))`,
+		`event_job_id=? AND tenant_id=? AND event_type IN ('changes-detected','changes-reminder','changes-recovered') AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND (change_window_id='' OR (attempt_started_at='' AND EXISTS (SELECT 1 FROM change_windows AS previous JOIN jobs AS j ON j.id=previous.job_id WHERE previous.id=outbox.change_window_id AND previous.job_id=? AND previous.closed_at='' AND previous.start_at>? AND j.tenant_id=? AND j.tenant_id=outbox.tenant_id)))`,
 		[]any{jobID, ts.scope.id, jobID, sqliteTimestamp(startUTC), ts.scope.id},
 		outboxChange("change_window_id", outboxSet, "?", id),
 	); err != nil {

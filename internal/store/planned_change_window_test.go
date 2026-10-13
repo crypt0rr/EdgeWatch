@@ -440,6 +440,38 @@ func TestEarlierWindowRebindsPendingAlertFromLaterScheduledWindow(t *testing.T) 
 	}
 }
 
+func TestEarlierWindowDoesNotRebindStartedLaterWindowAlert(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job := createWindowTestJob(t, ts, "window-earlier-rebind-started", "UTC")
+	queueWindowTestEvent(t, ctx, s, "earlier-rebind-started-destination", job.ID, "changes-detected", "scan-earlier-rebind-started", time.Now().UTC(), []model.Change{{Key: "earlier-rebind-started-change", Kind: "port", Target: "192.0.2.17", Port: 443}}, false, 0)
+	now := time.Now().UTC()
+	later := createTestChangeWindow(t, ts, job.ID, now.Add(2*time.Hour), now.Add(3*time.Hour))
+	var outboxID int64
+	var linked, claim, startedAt string
+	if err := s.DB.QueryRowContext(ctx, `SELECT id,change_window_id FROM outbox WHERE destination=? AND event_type='changes-detected'`, "earlier-rebind-started-destination").Scan(&outboxID, &linked); err != nil || linked != later.ID {
+		t.Fatalf("initial future-window link = %q, %v; want %q", linked, err, later.ID)
+	}
+	claimed, err := s.System().ClaimDueDeliveries(ctx, 1, "earlier-window-rebind-started")
+	if err != nil || len(claimed) != 1 || claimed[0].ID != outboxID {
+		t.Fatalf("claim before the later window = %+v, %v; want its alert", claimed, err)
+	}
+	if err := s.System().BeginDeliveryAttempt(ctx, outboxID, claimed[0].ClaimToken); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.CreateChangeWindow(ctx, job.ID, time.Time{}, time.Now().UTC().Add(time.Hour), true, "earlier maintenance", "test-actor", "Test Operator"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT change_window_id,claim_token,attempt_started_at FROM outbox WHERE id=?`, outboxID).Scan(&linked, &claim, &startedAt); err != nil {
+		t.Fatal(err)
+	}
+	if linked != later.ID || claim != claimed[0].ClaimToken || startedAt == "" {
+		t.Fatalf("in-flight later-window alert changed to link=%q claim=%q marker=%q; want later link and original fenced attempt", linked, claim, startedAt)
+	}
+}
+
 func TestCancelEarlierWindowRestoresLaterLinkForInFlightReview(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -144,6 +144,11 @@ process other than UID 0 cannot send raw packets and falls back to connect
 scans. Naabu detects its capabilities itself. Scan results are the same as
 without the sandbox.
 
+Nmap and Naabu version probes use this same scanner policy. EdgeWatch captures
+their bounded version strings once at daemon startup; the console serves the
+cached values instead of starting scanner processes for each capabilities
+request.
+
 At startup EdgeWatch checks that the container grants `SETUID`, `SETGID` and
 `KILL`, and starts a short test process as UID 65532 to confirm that the
 runtime allows the change. Check the outcome with:

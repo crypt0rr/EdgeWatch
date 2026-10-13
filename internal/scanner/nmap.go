@@ -287,7 +287,7 @@ type resolvedTarget struct {
 const nmapBatchSize = 128
 
 func (n *Nmap) Version(ctx context.Context) string {
-	out, err := runScannerVersionProbe(ctx, n.Path, "--version")
+	out, err := runScannerVersionProbe(ctx, n.Path, n.sandbox, "--version")
 	if err != nil {
 		return "unknown"
 	}
@@ -304,9 +304,9 @@ func (n *Nmap) NaabuVersion(ctx context.Context) string {
 	if strings.TrimSpace(path) == "" {
 		path = "/usr/local/bin/naabu"
 	}
-	out, err := runScannerVersionProbe(ctx, path, "-version")
+	out, err := runScannerVersionProbe(ctx, path, n.sandbox, "-version")
 	if err != nil {
-		out, err = runScannerVersionProbe(ctx, path, "--version")
+		out, err = runScannerVersionProbe(ctx, path, n.sandbox, "--version")
 	}
 	if err != nil {
 		return "unknown"
@@ -351,9 +351,10 @@ const maxVersionProbeOutput = 64 << 10
 // scanner configuration. The fixed command is killed as soon as either stream
 // exceeds the cap so a malicious replacement cannot keep running after the
 // bound is reached.
-func runScannerVersionProbe(ctx context.Context, path string, args ...string) ([]byte, error) {
+func runScannerVersionProbe(ctx context.Context, path string, policy *sandbox.Policy, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = append([]string(nil), scannerProbeEnv...)
+	policy.Confine(cmd)
 	startInProcessGroup(cmd, false)
 	var stdout, stderr cappedBuffer
 	var exceeded atomic.Bool

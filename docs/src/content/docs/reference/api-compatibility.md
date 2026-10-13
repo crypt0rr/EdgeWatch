@@ -221,6 +221,10 @@ expand to more. A job's `max_expanded_hosts` keeps its range of 1 to
 1,000,000; a scan of a job whose targets expand beyond `max_job_hosts` fails;
 see [Scanning](/user-guide/scanning/#nmap-or-naabu-to-nmap).
 
+The response reports Nmap and Naabu versions captured at daemon
+startup. An unavailable or unrecognized version is `unknown`; reading the
+endpoint does not start scanner processes.
+
 From v0.36.0, creating, updating, or validating a scanner profile refuses
 `nse_args` keys other than the selected script's own and values with a comma
 or a quote, with an `nse_args` field error; see

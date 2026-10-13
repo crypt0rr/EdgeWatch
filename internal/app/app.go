@@ -416,6 +416,24 @@ func (a *App) NotificationSandbox() sandbox.Status {
 	return a.notificationSandbox.Status()
 }
 
+// ScannerVersions reports the scanner versions captured during startup. The
+// binaries are fixed for the lifetime of the daemon, so request handlers can
+// serve these values without starting another scanner process.
+func (a *App) ScannerVersions() (nmap, naabu string) {
+	if a == nil {
+		return "unknown", "unknown"
+	}
+	nmap = strings.TrimSpace(a.nmapVersion)
+	if nmap == "" {
+		nmap = "unknown"
+	}
+	naabu = strings.TrimSpace(a.naabuVersion)
+	if naabu == "" {
+		naabu = "unknown"
+	}
+	return nmap, naabu
+}
+
 // NewWithOptions is New with daemon-only startup work selected by options.
 func NewWithOptions(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logger, options Options) (*App, error) {
 	return newApp(cfg, s, nmapPath, "/usr/local/bin/naabu", logger, options)

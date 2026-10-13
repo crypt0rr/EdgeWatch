@@ -68,7 +68,9 @@ func migration69Statements() []string {
 		`ALTER TABLE outbox ADD COLUMN attempt_started_at TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE outbox ADD COLUMN coalesce_after_attempt INTEGER NOT NULL DEFAULT 0 CHECK(coalesce_after_attempt IN (0,1))`,
 		`ALTER TABLE outbox ADD COLUMN coalesced_at TEXT NOT NULL DEFAULT ''`,
-		`UPDATE outbox SET event_type=COALESCE(json_extract(CAST(payload_json AS TEXT),'$.type'),''),event_job_id=COALESCE(json_extract(CAST(payload_json AS TEXT),'$.job_id'),'' ) WHERE json_valid(CAST(payload_json AS TEXT))`,
+		// Sent payloads are historical records. Leave their rows untouched;
+		// only unsent deliveries need the metadata used by window handling.
+		`UPDATE outbox SET event_type=COALESCE(json_extract(CAST(payload_json AS TEXT),'$.type'),''),event_job_id=COALESCE(json_extract(CAST(payload_json AS TEXT),'$.job_id'),'' ) WHERE sent_at IS NULL AND json_valid(CAST(payload_json AS TEXT))`,
 		`CREATE INDEX IF NOT EXISTS outbox_change_window_pending ON outbox(change_window_id,sent_at,terminal_at,coalesced_at,id)`,
 		`CREATE INDEX IF NOT EXISTS outbox_job_change_pending ON outbox(event_job_id,event_type,sent_at,terminal_at,id)`,
 	}

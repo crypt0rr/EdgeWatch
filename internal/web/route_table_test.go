@@ -341,9 +341,9 @@ func TestConsoleAPIFailsClosedOutsideTheRouteTable(t *testing.T) {
 	}
 }
 
-// Through the whole handler, which validates the host first, a request
-// outside the table is refused like before; the outer ServeMux still
-// redirects only an unclean escaped path, as it always has.
+// Through the whole handler, requests in either API namespace reach the
+// route table with their original path. The outer ServeMux still handles
+// requests outside the APIs, including its path-cleaning redirects.
 func TestHandlerFailsClosedOutsideTheRouteTable(t *testing.T) {
 	t.Parallel()
 	server, accounts := newRouteMatrixSessions(t)
@@ -357,6 +357,13 @@ func TestHandlerFailsClosedOutsideTheRouteTable(t *testing.T) {
 		{http.MethodPatch, "/api/v1/status", http.StatusForbidden, "forbidden"},
 		{http.MethodHead, "/api/v1/status", http.StatusForbidden, ""},
 		{http.MethodGet, "/api/v1/status/", http.StatusForbidden, "forbidden"},
+		{http.MethodGet, "/api/v1//status", http.StatusForbidden, "forbidden"},
+		{http.MethodGet, "/api/v1/./status", http.StatusForbidden, "forbidden"},
+		{http.MethodGet, "/api/v1/../../healthz", http.StatusForbidden, "forbidden"},
+		{http.MethodGet, "/api/../api/v1/status", http.StatusForbidden, "forbidden"},
+		{http.MethodGet, "/api/v1", http.StatusForbidden, "forbidden"},
+		{http.MethodPost, "/api/v1//status", http.StatusForbidden, "forbidden"},
+		{http.MethodConnect, "/api/v1//status", http.StatusForbidden, "forbidden"},
 		{http.MethodGet, "/api/v1/scanner-profiles/a%2Fb", http.StatusForbidden, "forbidden"},
 		{http.MethodGet, "/api/v1/scanner-profiles/%2E%2E/revisions", http.StatusNotFound, "not_found"},
 		{http.MethodGet, "/api/v1/scanner-profiles/", http.StatusOK, ""},
@@ -371,9 +378,98 @@ func TestHandlerFailsClosedOutsideTheRouteTable(t *testing.T) {
 		if recorder.Code != test.status || (test.code != "" && !strings.Contains(recorder.Body.String(), `"code":"`+test.code+`"`)) {
 			t.Errorf("%s %s = %d %s, want %d %s", test.method, test.target, recorder.Code, recorder.Body.String(), test.status, test.code)
 		}
-		if allow := recorder.Header().Get("Allow"); allow != "" {
-			t.Errorf("%s %s answered with Allow %q", test.method, test.target, allow)
+		if location, allow := recorder.Header().Get("Location"), recorder.Header().Get("Allow"); location != "" || allow != "" {
+			t.Errorf("%s %s answered with Location %q and Allow %q", test.method, test.target, location, allow)
 		}
+	}
+}
+
+func TestHandlerFailsClosedBeforeOuterAPICanonicalization(t *testing.T) {
+	t.Parallel()
+	server, accounts := newRouteMatrixSessions(t)
+	admin := &accounts[0]
+	handler := server.Handler()
+	for _, test := range []struct{ method, target string }{
+		{http.MethodGet, "/api/v1//unknown"},
+		{http.MethodGet, "/api/v1/./unknown"},
+		{http.MethodGet, "/api/v1/../../healthz"},
+		{http.MethodGet, "/api/../api/v1/unknown"},
+		{http.MethodPost, "/api/v1//unknown"},
+		{http.MethodConnect, "/api/v1//unknown"},
+	} {
+		for _, check := range []struct {
+			name    string
+			account *routeMatrixSession
+			csrf    bool
+			status  int
+			code    string
+		}{
+			{"without a session", nil, false, http.StatusUnauthorized, "unauthorized"},
+			{"without CSRF", admin, false, http.StatusForbidden, "csrf"},
+			{"with CSRF", admin, true, http.StatusForbidden, "forbidden"},
+		} {
+			if check.code == "csrf" && !isMutation(test.method) {
+				continue
+			}
+			request := httptest.NewRequest(test.method, test.target, nil)
+			request.Host = "127.0.0.1:8080"
+			request.RemoteAddr = "127.0.0.1:9000"
+			if check.account != nil {
+				request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: check.account.raw})
+				if check.csrf {
+					request.Header.Set("X-CSRF-Token", check.account.session.CSRFToken)
+				}
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			body := recorder.Body.String()
+			if recorder.Code != check.status || !strings.Contains(body, `"code":"`+check.code+`"`) {
+				t.Errorf("%s %s %s = %d %s, want %d %s", test.method, test.target, check.name, recorder.Code, body, check.status, check.code)
+			}
+			if check.code == "forbidden" && !strings.Contains(body, `"permission":"route"`) {
+				t.Errorf("%s %s %s = %s, want the permission route", test.method, test.target, check.name, body)
+			}
+			if location, allow := recorder.Header().Get("Location"), recorder.Header().Get("Allow"); location != "" || allow != "" {
+				t.Errorf("%s %s %s answered with Location %q and Allow %q", test.method, test.target, check.name, location, allow)
+			}
+		}
+	}
+}
+
+func TestHandlerKeepsPublicAPINamespaceBehindItsRouteTable(t *testing.T) {
+	t.Parallel()
+	server, _ := newRouteMatrixSessions(t)
+	handler := server.Handler()
+	for _, target := range []string{
+		"/api/public/v1/dashboard//",
+		"/api/public/v1/../../healthz",
+		"/api/../api/public/v1/dashboard//",
+		"/api/public/v1/../../api/v1/status",
+		"/api/public/v1/../../../api/v1/unknown",
+	} {
+		request := httptest.NewRequest(http.MethodGet, target, nil)
+		request.Host = "evil.example.test"
+		request.RemoteAddr = "127.0.0.1:9000"
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotFound || !strings.Contains(recorder.Body.String(), `"code":"not_found"`) {
+			t.Errorf("GET %s = %d %s, want 404 not_found", target, recorder.Code, recorder.Body.String())
+		}
+		if location, allow := recorder.Header().Get("Location"), recorder.Header().Get("Allow"); location != "" || allow != "" {
+			t.Errorf("GET %s answered with Location %q and Allow %q", target, location, allow)
+		}
+	}
+}
+
+func TestHandlerPreservesNonAPICanonicalization(t *testing.T) {
+	t.Parallel()
+	server, _ := newRouteMatrixSessions(t)
+	request := httptest.NewRequest(http.MethodGet, "/assets//app.js", nil)
+	request.Host = "127.0.0.1:8080"
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusTemporaryRedirect || recorder.Header().Get("Location") != "/assets/app.js" {
+		t.Fatalf("GET /assets//app.js = %d Location %q, want 307 to /assets/app.js", recorder.Code, recorder.Header().Get("Location"))
 	}
 }
 

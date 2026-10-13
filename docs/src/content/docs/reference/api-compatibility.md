@@ -245,8 +245,17 @@ answer it always got: `401 unauthorized` without a session, `403 csrf` for a
 state-changing request without the CSRF token, and otherwise `403 forbidden`
 with `details.permission` set to `route`. The public API answers such a
 request with `404 not_found`. Neither API redirects a request or answers
-`405`; the server's path cleaning still redirects a path such as
-`/api/v1/jobs//{id}` before any route is looked up, as before.
+`405`.
+
+From v0.39.1, the server passes the original request path to the API route
+table whenever it belongs to an API namespace or the outer ServeMux would
+clean it into one. A request such as `GET /api/v1/jobs//{id}` is checked as
+written and gets the route gate's fail-closed response, without `Location` or
+`Allow`. A path that starts in an API namespace but would clean out of it,
+such as `/api/v1/../../healthz`, also stays behind that API's gate and cannot
+reach `/healthz` or the console shell. The public API follows the same
+boundary rule and returns `404 not_found` for an unmatched path. Paths outside
+the APIs keep the outer ServeMux behavior.
 
 A path segment is percent-decoded before it is matched, and an escaped slash
 (`%2F`) separates segments, as before. The routes that always accepted one

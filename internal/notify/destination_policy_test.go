@@ -75,12 +75,14 @@ func TestUnitDestinationRefusesExcludedAddresses(t *testing.T) {
 		"generic://169.254.169.254/latest/meta-data",
 		"generic://0.0.0.0/hook",
 		"generic://[fe80::1%25eth0]/hook",
+		"generic://[::ffff:127.0.0.1]:8080/hook",
 		"generic://loopback.example/hook",
 		"generic+http://metadata.example/hook",
 		"ntfy://user:secret@loopback.example/topic",
 		"gotify://mapped.example/token",
 		"smtp://user:secret@metadata.example:25/?from=a@example.com&to=b@example.com",
 		"teams://11111111-4444-4444-8444-cccccccccccc@22222222-4444-4444-8444-cccccccccccc/33333333012222222222333333333344/44444444-4444-4444-8444-cccccccccccc?host=loopback.example",
+		"teams://11111111-4444-4444-8444-cccccccccccc@22222222-4444-4444-8444-cccccccccccc/33333333012222222222333333333344/44444444-4444-4444-8444-cccccccccccc?host=public.example&HOST=loopback.example",
 	}
 	for _, raw := range refused {
 		_, err := defaultNotifier(notifier).createManaged(ctx, "Refused", raw, true, nil)
@@ -127,7 +129,8 @@ func TestDestinationPolicyMatchesTargetExclusions(t *testing.T) {
 	policy := notifier.destinationPolicy()
 	for address, want := range map[string]bool{
 		"10.1.2.3": true, "2001:db8::1": true, "2001:db8::2": false, "127.0.0.2": true, "::": true,
-		"169.254.10.1": true, "fe80::2": true, "ff02::1": true, "192.0.2.1": false, "::ffff:10.0.0.1": true,
+		"169.254.10.1": true, "fe80::2": true, "ff02::1": true, "ff01::1": true,
+		"192.0.2.1": false, "::ffff:10.0.0.1": true, "ff0e::1": false,
 	} {
 		if got := policy.refuses(netip.MustParseAddr(address)); got != want {
 			t.Errorf("refuses(%s) = %v, want %v", address, got, want)
@@ -147,21 +150,56 @@ func TestDestinationPolicyMatchesTargetExclusions(t *testing.T) {
 func TestDestinationHostsFollowTheProvider(t *testing.T) {
 	t.Parallel()
 	for raw, want := range map[string][]string{
-		"generic://hooks.example:8443/path":                   {"hooks.example"},
-		"generic+https://hooks.example/path":                  {"hooks.example"},
-		"ntfy://user:secret@ntfy.example/topic":               {"ntfy.example"},
-		"smtp://user:secret@[2001:db8::25]:25/?from=a@b.c":    {"2001:db8::25"},
-		"teams://group@tenant/alt/owner?host=example.webhook": {"example.webhook"},
-		"teams://group@tenant/alt/owner?HOST=[::1]:443":       {"::1"},
-		"teams://group@tenant/alt/owner":                      nil,
-		"discord://token@123456789":                           nil,
-		"telegram://token@telegram?chats=@channel":            nil,
+		"generic://hooks.example:8443/path":                                      {"hooks.example"},
+		"generic+https://hooks.example/path":                                     {"hooks.example"},
+		"ntfy://user:secret@ntfy.example/topic":                                  {"ntfy.example"},
+		"smtp://user:secret@[2001:db8::25]:25/?from=a@b.c":                       {"2001:db8::25"},
+		"teams://group@tenant/alt/owner?host=example.webhook":                    {"example.webhook"},
+		"teams://group@tenant/alt/owner?HOST=[::1]:443":                          {"::1"},
+		"teams://group@tenant/alt/owner":                                         {teamsDefaultHost},
+		"teams://group@tenant/alt/owner?host=":                                   {teamsDefaultHost},
+		"teams+https://safe.example/hook":                                        {"safe.example"},
+		"teams+https://safe.example/hook?host=excluded.example":                  {"excluded.example"},
+		"teams+https://safe.example/hook?host=":                                  {teamsDefaultHost},
+		"teams://group@tenant/alt/owner?host=safe.example&HOST=excluded.example": {"excluded.example", "safe.example"},
+		"teams://group@tenant/alt/owner?host=first.example&host=second.example":  {"first.example"},
+		"discord://token@123456789":                                              nil,
+		"telegram://token@telegram?chats=@channel":                               nil,
 		"logger://": nil,
 		"%":         nil,
 	} {
 		if got := destinationHosts(raw); !reflect.DeepEqual(got, want) {
 			t.Errorf("destinationHosts(%q) = %v, want %v", raw, got, want)
 		}
+	}
+}
+
+func TestDestinationPolicyCheckHonorsCanceledContextForLiteralHost(t *testing.T) {
+	policy := &destinationPolicy{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := policy.check(ctx, "generic+http://203.0.113.1/hook")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("check error = %v, want context.Canceled", err)
+	}
+}
+
+func TestDestinationPolicyCheckReturnsCancellationDuringDNSLookup(t *testing.T) {
+	previousLookup := destinationLookup
+	ctx, cancel := context.WithCancel(context.Background())
+	destinationLookup = func(context.Context, string) ([]netip.Addr, error) {
+		cancel()
+		return nil, context.Canceled
+	}
+	t.Cleanup(func() {
+		destinationLookup = previousLookup
+		cancel()
+	})
+
+	err := destinationTestPolicy(t).check(ctx, "generic+http://hook.example/hook")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("check error = %v, want context.Canceled", err)
 	}
 }
 

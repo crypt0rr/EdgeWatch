@@ -27,8 +27,9 @@ import (
 // contain credentials, so neither the parent process argument list nor its
 // environment should expose them to process inspection tools.
 type notificationProcessRequest struct {
-	URL     string `json:"url"`
-	Message string `json:"message"`
+	URL              string   `json:"url"`
+	Message          string   `json:"message"`
+	TargetExclusions []string `json:"target_exclusions,omitempty"`
 }
 
 // These indirections keep the process boundary deterministic in unit tests
@@ -73,7 +74,8 @@ const (
 	childExitTLS     = 12
 	// childExitTimeout reports a provider that did not answer within the
 	// provider timeout. The provider may have accepted the message.
-	childExitTimeout = 13
+	childExitTimeout  = 13
+	childExitExcluded = 14
 )
 
 // ChildExitError is the error of a failed send in the notification child.
@@ -105,6 +107,13 @@ func childExitCode(class string) int {
 	return 1
 }
 
+func notificationChildExitCode(err error) int {
+	if errors.Is(err, ErrDestinationExcluded) {
+		return childExitExcluded
+	}
+	return childExitCode(failureClass(err))
+}
+
 // childFailure is the redacted failure that a child's exit status reports.
 func childFailure(code int) error {
 	switch code {
@@ -116,6 +125,8 @@ func childFailure(code int) error {
 		return &store.DeliveryFailure{Err: store.ErrDeliveryProvider, Class: store.DeliveryClassTLS}
 	case childExitTimeout:
 		return providerTimeoutFailure()
+	case childExitExcluded:
+		return ErrDestinationExcluded
 	}
 	return &store.DeliveryFailure{Err: store.ErrDeliveryProvider, Class: store.DeliveryClassProvider}
 }
@@ -136,7 +147,11 @@ func runNotificationProcess(ctx context.Context, rawURL, message string) error {
 	if err != nil {
 		return errors.Join(store.ErrDeliveryProvider, err)
 	}
-	payload, err := json.Marshal(notificationProcessRequest{URL: rawURL, Message: message})
+	request := notificationProcessRequest{URL: rawURL, Message: message}
+	if policy := destinationPolicyFromContext(ctx); policy != nil {
+		request.TargetExclusions = policy.exclusionCIDRs()
+	}
+	payload, err := json.Marshal(request)
 	if err != nil {
 		return errors.Join(store.ErrDeliveryProvider, err)
 	}
@@ -190,8 +205,17 @@ func RunSendChild(input io.Reader) error {
 	if strings.TrimSpace(request.URL) == "" {
 		return errors.New("notification child URL is required")
 	}
-	if err := sendInProcess(request.URL, request.Message); err != nil {
-		return &ChildExitError{code: childExitCode(failureClass(err)), err: err}
+	policy, err := destinationPolicyFromCIDRs(request.TargetExclusions)
+	if err != nil {
+		return errors.New("invalid notification destination policy")
+	}
+	if policy != nil {
+		err = sendInProcessWithPolicy(context.Background(), request.URL, request.Message, policy)
+	} else {
+		err = sendInProcess(request.URL, request.Message)
+	}
+	if err != nil {
+		return &ChildExitError{code: notificationChildExitCode(err), err: err}
 	}
 	return nil
 }

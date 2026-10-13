@@ -37,19 +37,22 @@ is frozen remain opt-in. Select a destination in each job that should use it.
 A unit's destinations cannot point the daemon at the addresses that the
 scanner refuses to scan. EdgeWatch refuses a destination whose host is, or
 resolves to, an address in `scanner.target_exclusions` or an unspecified,
-loopback, or link-local address, such as `127.0.0.1`, `::1`, or the
-`169.254.169.254` cloud metadata endpoint. It checks the host when a
+loopback, link-local, or interface-local multicast address, such as
+`127.0.0.1`, `::1`, or the `169.254.169.254` cloud metadata endpoint. It checks the host when a
 destination is created or its URL is replaced, and again before each delivery
 and test, so a name whose DNS answer changes to such an address afterwards is
-not contacted either. The error says only that the deployment does not allow
-the address; it never repeats the URL or the address. A delivery that is
-refused fails with the error code `destination_excluded` and is retried like
-any other failed delivery.
+not contacted either. The notification child checks literal IPs and the
+daemon's hosts-file results in its preflight, filters DNS answers used by SMTP,
+and checks each HTTP redirect and the final direct connection. A failed or
+empty DNS lookup fails closed and remains retryable; only a resolved address
+that the policy refuses gets the error code `destination_excluded`. Errors
+never repeat the URL, address, or resolver details.
 
 The check uses the host that the provider connects to: the host of the URL
 for providers such as the generic webhook, ntfy, Gotify, Matrix, Mattermost,
-and SMTP, and the `host` parameter for Teams. Providers that always connect
-to their public service, such as Discord, Slack, and Telegram, need no check.
+and SMTP, and the `host` parameter for Teams. Providers that connect to a fixed
+public service, such as Discord, Slack, and Telegram, use that service's host
+instead of the URL host; the child still checks their final HTTP connections.
 
 The rule follows `scanner.target_exclusions`, with the same override: set it
 to an explicitly empty list, `[]`, to allow every address, which also lets the
@@ -58,14 +61,18 @@ ntfy server, otherwise needs an address that is not loopback. Destinations
 that the host operator or a platform administrator configured are not
 checked: platform destinations, URLs that `config.yaml` still lists, and a
 destination imported from `config.yaml` until its URL is replaced in the
-console. A destination that a unit's administrator added on a loopback or
-link-local address before this check existed is refused from the upgrade on;
+console. A destination that a unit's administrator added on a loopback,
+link-local, or interface-local multicast address before this check existed is refused from the upgrade on;
 its deliveries fail with `destination_excluded` until you move the receiver
 or set the override.
 
-The check resolves names with the daemon's resolver. It cannot see a
-redirect that the provider follows, or a name whose answer changes between
-the check and the notification process's own lookup.
+The notification child resolves names again immediately before sending.
+HTTP redirects and each final direct dial are checked, and the SMTP resolver
+filters every address record the Go resolver can return before it connects.
+The DNS filter does not inspect `/etc/hosts`; the child preflight checks its
+result, and the policy assumes host-operator-controlled resolver and hosts-file
+configuration stays stable for the short send. The child fails closed on DNS
+errors and malformed answers.
 
 You can also add and test a destination while creating a monitor. This uses the
 same provider fields and account-password confirmation as this page. The
@@ -303,10 +310,18 @@ accepted an alert but reported a failure receives it again.
 
 ### Proxies
 
-Notifications to providers that use HTTPS or HTTP go through the proxy that
-the daemon's `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` variables name, as
-update checks do; SMTP connects directly. RDAP lookups ignore these variables;
-see [the configuration reference](/reference/configuration/).
+Unit-managed destinations with this address policy connect directly so a
+proxy cannot resolve or connect to a destination outside the check. If an
+HTTP provider's configured proxy selects a proxy, its send fails closed and
+will retry. A provider transport with a custom proxy function also fails
+closed because its target cannot be verified through that proxy. `NO_PROXY`
+can select a direct connection for environment proxies, and provider
+transports that were already direct remain direct. Platform destinations,
+URLs still listed in `config.yaml`, and imported destinations whose URL has
+not been replaced retain Shoutrrr's existing proxy behavior. SMTP connects
+directly.
+RDAP lookups also ignore proxy variables; see [the configuration
+reference](/reference/configuration/).
 
 ## Notification URLs in `config.yaml` (deprecated)
 

@@ -31,9 +31,10 @@ var routePathReaders = map[string]string{
 }
 
 // handlerPatterns are the patterns that Handler registers on the outer
-// ServeMux. Only the two API bases reach apiRoutes; /healthz and /metrics
-// are served outside the versioned APIs, each by one handler that reads no
-// path.
+// ServeMux. The two API bases identify requests for apiRoutes; Handler sends
+// those requests to their table with the original path before the outer mux
+// can answer. /healthz and /metrics are served outside the versioned APIs,
+// each by one handler that reads no path.
 var handlerPatterns = map[string]bool{
 	publicAPIBase + "/":  true,
 	consoleAPIBase + "/": true,

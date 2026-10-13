@@ -125,6 +125,7 @@ var notAuditActions = map[string]bool{
 	"auth.key":                    true,
 	"notification.key":            true,
 	"edgewatch.db":                true,
+	"outlook.office.com":          true, // Shoutrrr's fixed Microsoft Teams destination host.
 	"v0.35.0":                     true,
 	"github.com":                  true,
 	"localhost.localdomain":       true,

@@ -447,12 +447,14 @@ func (set destinationSet) testDestination(ctx context.Context, id string) error 
 	if entry.locked {
 		return ErrManagedNotificationLocked
 	}
+	sendCtx := ctx
 	if !entry.record.ConfigImported {
 		if err := set.policy.check(ctx, entry.url); err != nil {
 			return err
 		}
+		sendCtx = withDestinationPolicy(ctx, set.policy)
 	}
-	return safeSendContext(ctx, entry.url, "EdgeWatch notification test")
+	return safeSendContext(sendCtx, entry.url, "EdgeWatch notification test")
 }
 
 // TenantNotifier is the notifier as one tenant sees it: the tenant's own

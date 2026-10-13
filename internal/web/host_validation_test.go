@@ -65,12 +65,22 @@ func TestValidateRequestHostAllowsLoopbackAndConfiguredProxyNames(t *testing.T) 
 func TestHandlerRejectsForeignAPIHostBeforeAuthentication(t *testing.T) {
 	t.Parallel()
 	server := &Server{App: &app.App{Config: &config.Config{Web: config.Web{Listen: "127.0.0.1:8080"}}}}
-	req := httptest.NewRequest(http.MethodGet, "http://evil.example.test/api/v1/setup/status", nil)
-	req.Host = "evil.example.test"
-	rec := httptest.NewRecorder()
-	server.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusMisdirectedRequest {
-		t.Fatalf("foreign API host status = %d, want %d", rec.Code, http.StatusMisdirectedRequest)
+	for _, path := range []string{
+		"/api/v1/setup/status",
+		"/api/v1//setup/status",
+		"/api/v1/../../healthz",
+		"/api/../api/v1/setup/status",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "http://evil.example.test"+path, nil)
+		req.Host = "evil.example.test"
+		rec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusMisdirectedRequest || !strings.Contains(rec.Body.String(), `"code":"host"`) {
+			t.Errorf("GET %s with foreign Host = %d %s, want 421 host", path, rec.Code, rec.Body.String())
+		}
+		if location, allow := rec.Header().Get("Location"), rec.Header().Get("Allow"); location != "" || allow != "" {
+			t.Errorf("GET %s with foreign Host answered with Location %q and Allow %q", path, location, allow)
+		}
 	}
 }
 

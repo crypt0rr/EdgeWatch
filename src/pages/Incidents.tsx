@@ -24,7 +24,7 @@ const views: { value: IncidentInboxView; label: string }[] = [
 const severities = ['critical', 'warning', 'info'] as const
 const kinds = ['port', 'port-address', 'service', 'host', 'dns-added', 'dns-removed'] as const
 type ConflictRefresh = { token: string; status: 'loading' | 'found' | 'missing' | 'error'; expectedRevision: number | null; pageQueryID: string; pageDataUpdatedAt: number }
-type ReviewDraft = { status: IncidentReviewUpdate['status']; note: string; dueLocal: string; ambiguousChoice: string }
+type ReviewDraft = { baseRevision: number; rebasedToRevision?: number; status: IncidentReviewUpdate['status']; note: string; dueLocal: string; ambiguousChoice: string }
 const statusLabels: Record<string, string> = {
   needs_review: 'Needs review',
   investigating: 'Investigating',
@@ -169,6 +169,7 @@ export function Incidents() {
   const inboxHeadingRef = useRef<HTMLHeadingElement>(null)
   const evidenceOpenerRef = useRef<HTMLButtonElement | null>(null)
   const restoreEvidenceFocusRef = useRef(false)
+  const lastFocusedOccurrenceRef = useRef('')
   const selectedTokenRef = useRef(selectedOccurrence)
   selectedTokenRef.current = selectedOccurrence
   const client = useQueryClient()
@@ -229,11 +230,17 @@ export function Incidents() {
   }, [selectedOccurrence, selectedSnapshot?.occurrence_token, selectedSnapshot?.job_id, selectedRow, incidents.isSuccess, incidents.isFetching, incidents.dataUpdatedAt, pageQueryID, conflictRefresh?.pageQueryID, conflictRefresh?.pageDataUpdatedAt, conflictRefresh?.expectedRevision, lookupOccurrence])
   useEffect(() => {
     if (selectedOccurrence && selectedRow) {
-      evidencePanelRef.current?.focus()
+      if (lastFocusedOccurrenceRef.current !== selectedOccurrence) {
+        lastFocusedOccurrenceRef.current = selectedOccurrence
+        if (!evidencePanelRef.current?.contains(document.activeElement)) evidencePanelRef.current?.focus()
+      }
     } else if (!selectedOccurrence && restoreEvidenceFocusRef.current) {
+      lastFocusedOccurrenceRef.current = ''
       restoreEvidenceFocusRef.current = false
       if (evidenceOpenerRef.current?.isConnected) evidenceOpenerRef.current.focus()
       else inboxHeadingRef.current?.focus()
+    } else if (!selectedOccurrence) {
+      lastFocusedOccurrenceRef.current = ''
     }
   }, [selectedOccurrence, selectedRow])
   useEffect(() => {
@@ -472,7 +479,6 @@ function ReviewEditor({ item, readOnly, draft, onDraftChange, conflictRefresh, o
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [saved, setSaved] = useState('')
-  const conflict = conflictRefresh !== null
   const bytes = new TextEncoder().encode(note).length
   const dueCandidates = dueLocal ? incidentDateTimeCandidates(dueLocal, timezone) : []
   const selectedDue = dueCandidates.length === 1 ? dueCandidates[0] : dueCandidates.includes(ambiguousChoice) ? ambiguousChoice : ''
@@ -481,17 +487,33 @@ function ReviewEditor({ item, readOnly, draft, onDraftChange, conflictRefresh, o
     ? `This local time does not exist in ${timezone} because the clock changes. Choose another time.`
     : dueCandidates.length > 1 && !selectedDue
       ? `This local time occurs twice in ${timezone}. Choose the displayed UTC offset.`
-      : tooFarAhead
-        ? 'Follow-up must be no more than 30 days ahead.'
-        : ''
-  const conflictRefreshed = !conflict || (conflictRefresh?.status === 'found' && (conflictRefresh.expectedRevision === null || item.review.revision !== conflictRefresh.expectedRevision))
+        : tooFarAhead
+          ? 'Follow-up must be no more than 30 days ahead.'
+          : ''
+  const conflict = !!draft && draft.baseRevision !== item.review.revision
+  const draftBaseRevision = draft?.baseRevision ?? item.review.revision
+  const conflictRefreshed = conflictRefresh === null || (conflictRefresh.status === 'found' && (conflictRefresh.expectedRevision === null || item.review.revision !== conflictRefresh.expectedRevision))
   const canSave = !!item.incident.change.key && !readOnly && !saving && bytes <= maxNoteBytes && !dueError && conflictRefreshed
   const queryKey = ['incidents', 'inbox']
 
   function patchDraft(patch: Partial<ReviewDraft>) {
-    onDraftChange(item.occurrence_token, { status, note, dueLocal, ambiguousChoice, ...patch })
+    onDraftChange(item.occurrence_token, {
+      baseRevision: draft?.baseRevision ?? item.review.revision,
+      ...(draft?.rebasedToRevision === undefined ? {} : { rebasedToRevision: draft.rebasedToRevision }),
+      status,
+      note,
+      dueLocal,
+      ambiguousChoice,
+      ...patch,
+    })
     setSaved('')
     setError('')
+  }
+  function rebaseDraft() {
+    if (!draft || draft.baseRevision === item.review.revision || readOnly || saving) return
+    onDraftChange(item.occurrence_token, { ...draft, baseRevision: item.review.revision, rebasedToRevision: item.review.revision })
+    setError('')
+    setSaved('')
   }
   async function resetDraft() {
     onDraftChange(item.occurrence_token, null)
@@ -502,10 +524,12 @@ function ReviewEditor({ item, readOnly, draft, onDraftChange, conflictRefresh, o
   async function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!canSave) return
+    const expectedRevision = draft?.baseRevision ?? item.review.revision
+    if (!draft) onDraftChange(item.occurrence_token, { baseRevision: expectedRevision, status, note, dueLocal, ambiguousChoice })
     const update: IncidentReviewUpdate = {
       key: item.incident.change.key,
       occurrence_token: item.occurrence_token,
-      expected_revision: item.review.revision,
+      expected_revision: expectedRevision,
       status,
       note,
       follow_up_at: status === 'investigating' && selectedDue ? selectedDue : null,
@@ -540,7 +564,8 @@ function ReviewEditor({ item, readOnly, draft, onDraftChange, conflictRefresh, o
   return <form className={`incident-review-form${readOnly ? ' read-only' : ''}`} onSubmit={save} aria-label={`Review ${item.job} incident`}>
     <div className="incident-review-form-heading"><h3>Shared investigation review</h3><span className="revision">Revision {item.review.revision}</span></div>
     {readOnly && <p className="incident-context-notice">Review fields are read-only because this occurrence is outside the current results.</p>}
-    {conflict && <div className="incident-review-conflict" role="status"><strong>Latest saved review</strong><p>Status: {item.review.status === 'investigating' ? 'Investigating' : 'Needs review'} · Revision {item.review.revision}{item.review.reviewer_label ? ` · ${item.review.reviewer_label}` : ''}{item.review.reviewed_at ? ` · ${safeTime(item.review.reviewed_at)}` : ''}</p>{item.review.note ? <blockquote>{item.review.note}</blockquote> : <p>No saved note.</p>}<p>Your edited note and fields are kept above. Saving again will use the latest revision.</p></div>}
+    {conflict && <div className="incident-review-conflict" role="status"><strong>Latest saved review</strong><p>Status: {item.review.status === 'investigating' ? 'Investigating' : 'Needs review'} · Revision {item.review.revision}{item.review.reviewer_label ? ` · ${item.review.reviewer_label}` : ''}{item.review.reviewed_at ? ` · ${safeTime(item.review.reviewed_at)}` : ''}</p><p>Shared note:</p>{item.review.note ? <blockquote>{item.review.note}</blockquote> : <p>No saved note.</p>}<p>Follow-up: {item.review.follow_up_at ? followUpTime(item.review.follow_up_at) : 'None'}</p><p>Your draft remains based on revision {draftBaseRevision}. Rebase keeps your edits and changes the revision used when you save.</p><button className="button secondary" type="button" disabled={readOnly || saving} onClick={rebaseDraft}>Rebase my draft to revision {item.review.revision}</button></div>}
+    {draft?.rebasedToRevision === item.review.revision && <p className="success-message" role="status">Your draft is based on revision {item.review.revision}. Save it to share your changes.</p>}
     <label>Review status<select disabled={readOnly} value={status} onChange={event => { const value = event.target.value as IncidentReviewUpdate['status']; patchDraft(value === 'needs_review' ? { status: value, dueLocal: '', ambiguousChoice: '' } : { status: value }) }}>
       <option value="needs_review">Needs review</option><option value="investigating">Investigating</option>
     </select></label>
@@ -556,6 +581,6 @@ function ReviewEditor({ item, readOnly, draft, onDraftChange, conflictRefresh, o
     </div>
     {item.review.status === 'needs_review' && status === 'needs_review' && item.review.note && <p className="muted">This incident is in Needs review. Its existing note stays shared and is retained when you save or change the status.</p>}
     {error && <div className="form-error" role="alert">{error}</div>}{saved && <p className="success-message" role="status">{saved}</p>}
-    <div className="incident-review-actions"><button className="button primary" type="submit" disabled={!canSave}>{saving ? 'Saving…' : conflict ? 'Save draft to latest review' : 'Save review'}</button><button className="button ghost" type="button" disabled={saving || readOnly} onClick={() => void resetDraft()}>Reset draft</button></div>
+    <div className="incident-review-actions"><button className="button primary" type="submit" disabled={!canSave}>{saving ? 'Saving…' : 'Save review'}</button><button className="button ghost" type="button" disabled={saving || readOnly} onClick={() => void resetDraft()}>Reset draft</button></div>
   </form>
 }

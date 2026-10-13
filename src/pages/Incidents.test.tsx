@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { useQueryClient } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLocation } from 'react-router-dom'
 import { APIError, acceptIncident, getSession, listIncidents, listJobs, suppressIncident, updateIncidentReview } from '../api'
@@ -32,8 +33,12 @@ function LocationOutput() {
   const location = useLocation()
   return <output data-testid="location">{location.pathname}{location.search}</output>
 }
-function renderInbox(route = ['/incidents']) {
-  return renderWithProviders(<><Incidents /><LocationOutput /></>, { route })
+function RefreshIncidentsButton() {
+  const client = useQueryClient()
+  return <button type="button" onClick={() => void client.invalidateQueries({ queryKey: ['incidents'] })}>Refresh incidents</button>
+}
+function renderInbox(route = ['/incidents'], includeRefresh = false) {
+  return renderWithProviders(<><Incidents />{includeRefresh && <RefreshIncidentsButton />}<LocationOutput /></>, { route })
 }
 function locationSearch() {
   return new URL(screen.getByTestId('location').textContent || '/incidents', 'http://example.test').searchParams
@@ -117,6 +122,76 @@ describe('investigation inbox filters and context', () => {
 })
 
 describe('shared review workflow', () => {
+  it('pins a draft to its starting revision across an in-view refresh and rebases only by explicit choice', async () => {
+    const latest = {
+      ...item,
+      review: { status: 'investigating', reviewer_label: 'Sam', reviewed_at: '2026-10-12T10:00:00Z', note: 'Saved by another reviewer', follow_up_at: '2026-10-13T10:00:00Z', revision: 1 },
+      view_status: 'investigating',
+    }
+    vi.mocked(listIncidents).mockResolvedValueOnce(page() as never).mockResolvedValue(page([latest]) as never)
+    vi.mocked(updateIncidentReview)
+      .mockRejectedValueOnce(new APIError('review changed', 'incident_review_revision_conflict', undefined, 409))
+      .mockResolvedValueOnce({ ...latest.review, note: 'My draft', reviewer_label: 'Riley Reviewer', revision: 2 } as never)
+    renderInbox(['/incidents?view=all_active'], true)
+    await waitForInbox()
+    openFirstEvidence()
+    const panel = await screen.findByRole('complementary', { name: 'Evidence and review' })
+    const note = within(panel).getByRole('textbox', { name: 'Shared reviewer note' })
+    fireEvent.change(note, { target: { value: 'My draft' } })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh incidents' }))
+    await within(panel).findAllByText('Saved by another reviewer')
+    expect(note).toHaveValue('My draft')
+    fireEvent.click(within(panel).getByRole('button', { name: 'Save review' }))
+    await waitFor(() => expect(updateIncidentReview).toHaveBeenNthCalledWith(1, 'job-1', expect.objectContaining({ expected_revision: 0, note: 'My draft' })))
+    await within(panel).findByText(/Another reviewer saved an update first/)
+    await within(panel).findByText('Latest saved review')
+    expect(within(panel).getAllByText('Saved by another reviewer').length).toBeGreaterThan(0)
+    expect(within(panel).getByText(/Follow-up:/)).toHaveTextContent('2026-10-13T10:00:00.000Z')
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Rebase my draft to revision 1' }))
+    expect(note).toHaveValue('My draft')
+    expect(updateIncidentReview).toHaveBeenCalledTimes(1)
+    await within(panel).findByText(/Your draft is based on revision 1/)
+    fireEvent.click(within(panel).getByRole('button', { name: 'Save review' }))
+    await waitFor(() => expect(updateIncidentReview).toHaveBeenNthCalledWith(2, 'job-1', expect.objectContaining({ expected_revision: 1, note: 'My draft' })))
+  })
+
+  it('keeps keyboard focus in the note when an in-view refetch replaces the selected row', async () => {
+    const latestObservation = { ...item, incident: { ...item.incident, last_seen_at: '2026-10-12T08:00:00Z' } }
+    vi.mocked(listIncidents).mockResolvedValueOnce(page() as never).mockResolvedValue(page([latestObservation]) as never)
+    renderInbox(['/incidents?view=all_active'], true)
+    await waitForInbox()
+    openFirstEvidence()
+    const panel = await screen.findByRole('complementary', { name: 'Evidence and review' })
+    const note = within(panel).getByRole('textbox', { name: 'Shared reviewer note' })
+    note.focus()
+    expect(note).toHaveFocus()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh incidents' }))
+    await within(panel).findByText(formatDateTime('2026-10-12T08:00:00Z'))
+    expect(note).toHaveFocus()
+  })
+
+  it('keeps focus on Save after a successful save refreshes the selected row', async () => {
+    const savedReview = { ...review, status: 'investigating', reviewer_label: 'Riley Reviewer', reviewed_at: '2026-10-12T10:00:00Z', note: 'My draft', revision: 1 }
+    const refreshed = { ...item, review: savedReview, incident: { ...item.incident, last_seen_at: '2026-10-12T08:00:00Z' }, view_status: 'investigating' }
+    vi.mocked(listIncidents).mockResolvedValueOnce(page() as never).mockResolvedValue(page([refreshed]) as never)
+    vi.mocked(updateIncidentReview).mockResolvedValue(savedReview as never)
+    renderInbox(['/incidents?view=all_active'])
+    await waitForInbox()
+    openFirstEvidence()
+    const panel = await screen.findByRole('complementary', { name: 'Evidence and review' })
+    fireEvent.change(within(panel).getByRole('textbox', { name: 'Shared reviewer note' }), { target: { value: 'My draft' } })
+    const save = within(panel).getByRole('button', { name: 'Save review' })
+    save.focus()
+    fireEvent.click(save)
+
+    await within(panel).findByText(/Review saved/)
+    await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(2))
+    expect(save).toHaveFocus()
+  })
+
   it('labels a saved follow-up with the displayed timezone and exact UTC instant', async () => {
     setDisplayTimeZone('Europe/Amsterdam')
     const current = { ...item, review: { status: 'investigating', reviewer_label: 'Sam', reviewed_at: '2026-10-10T00:00:00Z', note: '', follow_up_at: '2026-10-12T08:00:00Z', revision: 4 }, view_status: 'investigating' }
@@ -201,7 +276,7 @@ describe('shared review workflow', () => {
     await waitFor(() => expect(updateIncidentReview).toHaveBeenCalledWith('job-1', expect.objectContaining({ follow_up_at: '2026-10-25T00:30:00.000Z' })))
   })
 
-  it('refreshes a stale revision while preserving the draft for an explicit retry', async () => {
+  it('refreshes a racing revision conflict and keeps the draft pinned until it is rebased', async () => {
     const latest = { ...item, review: { status: 'needs_review', reviewer_label: 'Sam', reviewed_at: '2026-10-11T10:00:00Z', note: 'Saved by another reviewer', follow_up_at: null, revision: 2 } }
     vi.mocked(listIncidents).mockResolvedValueOnce(page()).mockResolvedValue(page([latest]))
     vi.mocked(updateIncidentReview)
@@ -217,7 +292,10 @@ describe('shared review workflow', () => {
     await within(panel).findByText(/Another reviewer saved an update first/)
     await waitFor(() => expect(within(panel).getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('My draft'))
     expect(within(panel).getAllByText('Saved by another reviewer').length).toBeGreaterThan(0)
-    fireEvent.click(within(panel).getByRole('button', { name: 'Save draft to latest review' }))
+    fireEvent.click(within(panel).getByRole('button', { name: 'Rebase my draft to revision 2' }))
+    expect(updateIncidentReview).toHaveBeenCalledTimes(1)
+    expect(note).toHaveValue('My draft')
+    fireEvent.click(within(panel).getByRole('button', { name: 'Save review' }))
     await waitFor(() => expect(updateIncidentReview).toHaveBeenLastCalledWith('job-1', expect.objectContaining({ expected_revision: 2, note: 'My draft' })))
   })
 })

@@ -4,7 +4,7 @@ import { mockConsole } from './mock-console'
 const review0 = { status: 'needs_review', reviewer_label: null, reviewed_at: null, note: '', follow_up_at: null, revision: 0 }
 const pagination = (offset: number, total: number, count: number) => ({ limit: 20, offset, total, has_more: offset + count < total, next_offset: offset + count < total ? offset + 20 : null })
 
-function incident(index: number, review = review0, occurrenceToken = `occurrence-${index}`) {
+function incident(index: number, review = review0, occurrenceToken = `occurrence-${index}`, lastSeenAt?: string) {
   const opened = new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString()
   return {
     job_id: 'job-1', job: 'Production perimeter monitoring', occurrence_token: occurrenceToken,
@@ -12,7 +12,7 @@ function incident(index: number, review = review0, occurrenceToken = `occurrence
     opening_scan_available: index !== 20,
     incident: {
       change: { key: `port|192.0.2.${index + 1}|tcp|443`, kind: 'port', target: `192.0.2.${index + 1}`, protocol: 'tcp', port: 443, old: 'closed', new: 'open', severity: index % 3 === 0 ? 'critical' : 'warning' },
-      scan_id: index === 20 ? 'scan-pruned' : 'scan-1', opened_at: opened, last_seen_at: opened, recovery_count: 0,
+      scan_id: index === 20 ? 'scan-pruned' : 'scan-1', opened_at: opened, last_seen_at: lastSeenAt ?? opened, recovery_count: 0,
     },
     review,
     observation_uncertainty: { status: 'unknown', reason: 'no_newer_observation' },
@@ -24,6 +24,7 @@ async function installInboxAPI(page: Page, conflict: 'revision-move' | 'occurren
   let reviewWrites = 0
   let occurrenceChanged = false
   let replacedOccurrence = ''
+  let lastSeenAt = ''
   const writes: Record<string, unknown>[] = []
   const lookups: string[] = []
   await page.route(url => new URL(url).pathname === '/api/v1/incidents', async route => {
@@ -33,7 +34,7 @@ async function installInboxAPI(page: Page, conflict: 'revision-move' | 'occurren
     const token = url.searchParams.get('occurrence_token')
     const all = Array.from({ length: total }, (_, index) => {
       const token = `occurrence-${index}`
-      return incident(index, index === 35 ? currentReview : review0, occurrenceChanged && token === replacedOccurrence ? 'occurrence-replacement' : token)
+      return incident(index, index === 35 ? currentReview : review0, occurrenceChanged && token === replacedOccurrence ? 'occurrence-replacement' : token, index === 35 ? lastSeenAt || undefined : undefined)
     })
     if (token) {
       lookups.push(token)
@@ -73,7 +74,12 @@ async function installInboxAPI(page: Page, conflict: 'revision-move' | 'occurren
     currentReview = { status: payload.status, reviewer_label: 'Administrator', reviewed_at: '2026-10-11T12:05:00Z', note: payload.note, follow_up_at: payload.follow_up_at, revision: 3 }
     await route.fulfill({ json: currentReview })
   })
-  return { writes, lookups, setCurrentReview: (review: typeof currentReview) => { currentReview = review } }
+  return {
+    writes,
+    lookups,
+    setCurrentReview: (review: typeof currentReview) => { currentReview = review },
+    setLastSeenAt: (value: string) => { lastSeenAt = value },
+  }
 }
 
 async function expectNoHorizontalScroll(page: Page) {
@@ -179,6 +185,70 @@ test.describe('investigation inbox browser behavior', () => {
     }
   })
 
+  test('an in-view refresh keeps focus in the note and reopening the same occurrence focuses its panel', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop', 'Refetch focus is checked once in the desktop browser.')
+    await installEventSourceStub(page)
+    await mockConsole(page, 'administrator')
+    const { setLastSeenAt } = await installInboxAPI(page, 'revision-move', 41)
+    await page.goto('/incidents?view=all_active&job_id=job-1&offset=20&occurrence=occurrence-35')
+    const panel = page.getByRole('complementary', { name: 'Evidence and review' })
+    await expect(panel).toBeVisible()
+    await expect(panel).toBeFocused()
+    const note = panel.getByRole('textbox', { name: 'Shared reviewer note' })
+    const lastSeen = panel.locator('.incident-evidence-facts dd').nth(1)
+    const previousLastSeen = await lastSeen.innerText()
+    await note.fill('Keep keyboard focus here')
+    setLastSeenAt('2026-10-12T08:00:00Z')
+    await page.evaluate(() => {
+      const testWindow = window as typeof window & { __edgewatchEventSource?: { onmessage: ((event: { data: string }) => void) | null } }
+      testWindow.__edgewatchEventSource?.onmessage?.({ data: JSON.stringify({ type: 'incident.review.updated', job_id: 'job-1' }) })
+    })
+    await expect(lastSeen).not.toHaveText(previousLastSeen)
+    await expect(note).toHaveValue('Keep keyboard focus here')
+    await expect(note).toBeFocused()
+
+    await panel.getByRole('button', { name: 'Close evidence panel' }).click()
+    await expect(panel).toHaveCount(0)
+    const row = page.getByRole('row', { name: /192\.0\.2\.36/ })
+    await row.getByRole('button', { name: 'Review evidence' }).click()
+    await expect(page.getByRole('complementary', { name: 'Evidence and review' })).toBeFocused()
+  })
+
+  test('an in-view shared review update keeps the draft pinned through a refetch and racing conflict', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop', 'In-view revision conflicts are checked once in the desktop browser.')
+    await installEventSourceStub(page)
+    await mockConsole(page, 'administrator')
+    const { setCurrentReview, writes } = await installInboxAPI(page, 'revision-move', 41)
+    await page.goto('/incidents?view=all_active&job_id=job-1&offset=20&occurrence=occurrence-35')
+    const panel = page.getByRole('complementary', { name: 'Evidence and review' })
+    await expect(panel).toBeVisible()
+    const note = panel.getByRole('textbox', { name: 'Shared reviewer note' })
+    await note.fill('My draft stays on revision zero')
+    setCurrentReview({ status: 'investigating', reviewer_label: 'Another reviewer', reviewed_at: '2026-10-11T12:00:00Z', note: 'Saved before my update', follow_up_at: null, revision: 1 })
+    await page.evaluate(() => {
+      const testWindow = window as typeof window & { __edgewatchEventSource?: { onmessage: ((event: { data: string }) => void) | null } }
+      testWindow.__edgewatchEventSource?.onmessage?.({ data: JSON.stringify({ type: 'incident.review.updated', job_id: 'job-1' }) })
+    })
+    await expect(panel.locator('.incident-review-conflict')).toContainText('Revision 1')
+    await expect(panel.locator('.incident-review-conflict')).toContainText('Saved before my update')
+    await expect(note).toHaveValue('My draft stays on revision zero')
+
+    await panel.getByRole('button', { name: 'Save review' }).click()
+    await expect(panel.locator('.incident-review-conflict')).toContainText('Revision 2')
+    await expect(note).toHaveValue('My draft stays on revision zero')
+    expect(writes).toHaveLength(1)
+    expect(writes[0]).toMatchObject({ occurrence_token: 'occurrence-35', expected_revision: 0, note: 'My draft stays on revision zero' })
+
+    await panel.getByRole('button', { name: 'Rebase my draft to revision 2' }).click()
+    await expect(panel.getByText(/Your draft is based on revision 2/)).toBeVisible()
+    await expect(note).toHaveValue('My draft stays on revision zero')
+    expect(writes).toHaveLength(1)
+    await panel.getByRole('button', { name: 'Save review' }).click()
+    await expect.poll(() => writes.length).toBe(2)
+    expect(writes[1]).toMatchObject({ occurrence_token: 'occurrence-35', expected_revision: 2, note: 'My draft stays on revision zero' })
+    await expect(panel.getByText(/Review saved/)).toBeVisible()
+  })
+
   test('revision conflicts find a moved occurrence by token and preserve the draft', async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== 'desktop', 'Conflict refresh is checked once in the desktop browser.')
     await mockConsole(page, 'administrator')
@@ -193,7 +263,7 @@ test.describe('investigation inbox browser behavior', () => {
     await expect(panel.getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('My draft stays here')
     await expect(panel.locator('blockquote')).toHaveText('Saved by another reviewer')
     await expect(panel.getByRole('button', { name: 'Show refreshed occurrence' })).toBeVisible()
-    await expect(panel.getByRole('button', { name: 'Save draft to latest review' })).toBeDisabled()
+    await expect(panel.getByRole('button', { name: 'Rebase my draft to revision 2' })).toBeDisabled()
     await panel.getByRole('button', { name: 'Show refreshed occurrence' }).click()
     await expect.poll(() => new URL(page.url()).searchParams.get('view')).toBe('all_active')
     await expect.poll(() => new URL(page.url()).searchParams.get('job_id')).toBe('job-1')
@@ -202,7 +272,7 @@ test.describe('investigation inbox browser behavior', () => {
     await expect(page.getByText('Showing the exact refreshed occurrence')).toBeVisible()
     await expect(panel.getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('My draft stays here')
     await expect(panel.locator('blockquote')).toHaveText('Saved by another reviewer')
-    await expect(panel.getByRole('button', { name: 'Save draft to latest review' })).toBeEnabled()
+    await expect(panel.getByRole('button', { name: 'Rebase my draft to revision 2' })).toBeEnabled()
 
     await page.getByRole('combobox', { name: 'Filter by review view' }).selectOption('needs_review')
     await expect(panel).toHaveCount(0)
@@ -217,8 +287,10 @@ test.describe('investigation inbox browser behavior', () => {
     await movedOccurrence.getByRole('button', { name: 'Review evidence' }).click()
     await expect(panel.getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('My draft stays here')
     await expect(panel.locator('blockquote')).toHaveText('Saved by another reviewer')
-    await expect(panel.getByRole('button', { name: 'Save draft to latest review' })).toBeEnabled()
-    await panel.getByRole('button', { name: 'Save draft to latest review' }).click()
+    await expect(panel.getByRole('button', { name: 'Rebase my draft to revision 2' })).toBeEnabled()
+    await panel.getByRole('button', { name: 'Rebase my draft to revision 2' }).click()
+    await expect(panel.getByText(/Your draft is based on revision 2/)).toBeVisible()
+    await panel.getByRole('button', { name: 'Save review' }).click()
     await expect.poll(() => writes.length).toBe(2)
     expect(writes[0]).toMatchObject({ occurrence_token: 'occurrence-35', expected_revision: 0, note: 'My draft stays here' })
     expect(writes[1]).toMatchObject({ occurrence_token: 'occurrence-35', expected_revision: 2, note: 'My draft stays here', status: 'investigating' })
@@ -250,7 +322,7 @@ test.describe('investigation inbox browser behavior', () => {
     await expect(page.getByText('Showing the exact refreshed occurrence')).toBeVisible()
     await expect(panel.getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('Keep my draft after a shared update')
     await expect(panel.locator('blockquote')).toHaveText('Changed in another session')
-    await expect(panel.getByRole('button', { name: 'Save draft to latest review' })).toBeEnabled()
+    await expect(panel.getByRole('button', { name: 'Rebase my draft to revision 2' })).toBeEnabled()
 
     await page.getByRole('combobox', { name: 'Filter by review view' }).selectOption('investigating')
     await expect(panel).toHaveCount(0)
@@ -268,7 +340,7 @@ test.describe('investigation inbox browser behavior', () => {
     await panel.getByRole('button', { name: 'Show refreshed occurrence' }).click()
     await expect(panel.locator('blockquote')).toHaveText('Returned to Needs review in another session')
     await expect(panel.getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('Keep my draft after a shared update')
-    await expect(panel.getByRole('button', { name: 'Save draft to latest review' })).toBeEnabled()
+    await expect(panel.getByRole('button', { name: 'Rebase my draft to revision 3' })).toBeEnabled()
   })
 
   test('closed or replaced occurrences retain drafts and block stale retries', async ({ page }, testInfo) => {
@@ -282,7 +354,7 @@ test.describe('investigation inbox browser behavior', () => {
     await panel.getByRole('button', { name: 'Save review' }).click()
     await expect(panel.getByText('This occurrence is no longer active. Your draft is kept for reference, but it cannot be saved because the active occurrence has changed or closed.')).toBeVisible()
     await expect(panel.getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('Keep this draft after replacement')
-    await expect(panel.getByRole('button', { name: 'Save draft to latest review' })).toBeDisabled()
+    await expect(panel.getByRole('button', { name: 'Save review' })).toBeDisabled()
     expect(writes).toHaveLength(1)
   })
 
@@ -298,7 +370,7 @@ test.describe('investigation inbox browser behavior', () => {
     await expect(panel.getByText('Could not verify the latest active occurrence. Your draft is kept, and saving is disabled until the exact lookup succeeds.')).toBeVisible()
     await expect(panel.getByText(/This occurrence is no longer active/)).toHaveCount(0)
     await expect(panel.getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('Keep this draft when lookup fails')
-    await expect(panel.getByRole('button', { name: 'Save draft to latest review' })).toBeDisabled()
+    await expect(panel.getByRole('button', { name: 'Save review' })).toBeDisabled()
     expect(writes).toHaveLength(1)
   })
 })

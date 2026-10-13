@@ -384,3 +384,35 @@ func TestJobHistoryPurgeRejectsUnknownPhaseAndReportsClosedStore(t *testing.T) {
 		t.Fatal("purge on a closed store succeeded; want the database error")
 	}
 }
+
+func TestJobHistoryPurgeCoversJobOwnedTablesAndWindowChildren(t *testing.T) {
+	positions := make(map[string]int, len(jobHistoryPurgeSteps))
+	phasePositions := make(map[string]int, len(jobHistoryPurgeSteps))
+	for i, step := range jobHistoryPurgeSteps {
+		phasePositions[step.phase] = i
+		if _, exists := positions[step.table]; !exists {
+			positions[step.table] = i
+		}
+	}
+	for table, tenancy := range tenancyTables {
+		if tenancy.class != tenancyVia || tenancy.parent != "jobs" {
+			continue
+		}
+		if _, ok := positions[table]; !ok {
+			t.Errorf("job-owned table %s has no bounded job-history purge phase", table)
+		}
+	}
+	for _, table := range []string{"change_window_refs", "change_window_events", "change_windows"} {
+		if _, ok := positions[table]; !ok {
+			t.Errorf("change-window table %s has no bounded job-history purge phase", table)
+		}
+	}
+	for _, child := range []string{"change_window_refs", "change_window_events"} {
+		if positions[child] >= positions["change_windows"] {
+			t.Errorf("job-history purge deletes change-window parent before child %s", child)
+		}
+	}
+	if phasePositions[jobPurgePhaseWindowOutboxLinks] >= positions["change_window_refs"] || phasePositions[jobPurgePhaseWindowOutboxJob] >= positions["change_window_refs"] {
+		t.Error("job-history purge deletes change-window evidence before linked outbox deliveries")
+	}
+}

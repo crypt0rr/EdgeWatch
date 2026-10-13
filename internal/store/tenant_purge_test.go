@@ -120,6 +120,12 @@ func TestTenantPurgeCoversTheRegistry(t *testing.T) {
 			t.Errorf("%s is purged after its parent %s, so deleting the parent would cascade to it", table, tenancy.parent)
 		}
 	}
+	windowOrder := []string{"outbox", "change_window_refs", "change_window_events", "change_windows", "runtime_incidents", "scans", "events"}
+	for i := 1; i < len(windowOrder); i++ {
+		if position[windowOrder[i-1]] >= position[windowOrder[i]] {
+			t.Errorf("tenant purge order must keep %s before %s so legacy checkpoints replay every pending phase", windowOrder[i-1], windowOrder[i])
+		}
+	}
 }
 
 // addTenantPurgeRows gives both tenants of the fixture a row in each table
@@ -637,6 +643,11 @@ func TestTenantPurgeStartsOverWhenRowsRemain(t *testing.T) {
 	ctx := context.Background()
 	f := newTenantPurgeFixture(t)
 	requestSecondTenantDeletion(t, f)
+	insertPurgeTestDelivery(t, f.store, secondTenantID, f.jobB, "purge-window-"+secondTenantID, "unknown-phase-outbox", "pending")
+	cycleID := cyclesOf(f, f.b).active
+	if countRows(t, f.store.DB, `SELECT COUNT(*) FROM scan_cycle_discovery_checkpoints WHERE cycle_id=?`, cycleID) == 0 {
+		t.Fatal("the fixture must retain an early scan-cycle checkpoint before replay")
+	}
 	for _, phase := range []string{tenantPurgePhaseVerify, "retired_table"} {
 		if _, err := f.store.DB.Exec(`UPDATE tenants SET purge_phase=? WHERE id=?`, phase, secondTenantID); err != nil {
 			t.Fatal(err)
@@ -647,6 +658,9 @@ func TestTenantPurgeStartsOverWhenRowsRemain(t *testing.T) {
 		}
 		if record, err := f.store.Platform().GetTenant(ctx, secondTenantID); err != nil || record.State != TenantStateDeleting || record.PurgePhase != tenantPurgeSteps[0].table {
 			t.Fatalf("tenant after the purge from phase %s found rows = %+v, %v", phase, record, err)
+		}
+		if countRows(t, f.store.DB, `SELECT COUNT(*) FROM scan_cycle_discovery_checkpoints WHERE cycle_id=?`, cycleID) == 0 || countRows(t, f.store.DB, `SELECT COUNT(*) FROM outbox WHERE destination='unknown-phase-outbox'`) != 1 {
+			t.Fatalf("unknown checkpoint %q jumped to outbox and skipped early bounded replay", phase)
 		}
 	}
 	results, err := f.store.System().PurgeDeletingTenants(ctx)

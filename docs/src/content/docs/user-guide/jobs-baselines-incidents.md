@@ -184,10 +184,11 @@ re-keyed by the next finalized scan or a saved job change.
 
 Archiving stops a job while keeping its results and incidents available. An
 administrator can permanently delete an archived job by typing its exact name;
-this also removes that job's scan results, incidents, saved scan progress, and
-notification delivery records. The job and its evidence disappear from the
-interface immediately; retained data is erased in bounded, restart-safe
-background batches. The security audit record is retained. This action is
+this also removes that job's scan results, incidents, saved scan progress,
+change-window history, and notification delivery records. The job and its
+evidence disappear from the interface immediately; retained data is erased in
+bounded, restart-safe background batches, with deliveries removed before their
+window history. The security audit record is retained. This action is
 irreversible and does not delete history belonging to other jobs, even when
 they monitor the same IP address.
 

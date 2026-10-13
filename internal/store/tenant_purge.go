@@ -112,6 +112,11 @@ var tenantPurgeSteps = []tenantPurgeStep{
 	{table: "public_dashboard_hosts", rowids: `SELECT rowid FROM public_dashboard_hosts WHERE job_id IN (` + tenantJobsSQL + `)`},
 	{table: "incident_review_history", rowids: `SELECT rowid FROM incident_review_history WHERE job_id IN (` + tenantJobsSQL + `)`},
 	{table: "incident_reviews", rowids: `SELECT rowid FROM incident_reviews WHERE job_id IN (` + tenantJobsSQL + `)`},
+	// Remove every tenant outbox row before its referenced change-window
+	// children and parents. Schema 71's tenant-leading index selects bounded
+	// batches even when old sent rows have no event/window metadata or a payload
+	// is invalid; cleanup does not decode payloads to find the rows.
+	{table: "outbox", rowids: `SELECT rowid FROM outbox WHERE tenant_id=?1 ORDER BY rowid`},
 	{table: "change_window_refs", rowids: `SELECT rowid FROM change_window_refs WHERE window_id IN (SELECT id FROM change_windows WHERE job_id IN (` + tenantJobsSQL + `))`},
 	{table: "change_window_events", rowids: `SELECT rowid FROM change_window_events WHERE window_id IN (SELECT id FROM change_windows WHERE job_id IN (` + tenantJobsSQL + `))`},
 	{table: "change_windows", rowids: `SELECT rowid FROM change_windows WHERE job_id IN (` + tenantJobsSQL + `)`},
@@ -131,7 +136,6 @@ var tenantPurgeSteps = []tenantPurgeStep{
 	{table: "legacy_scan_host_backfill", rowids: `SELECT rowid FROM legacy_scan_host_backfill WHERE scan_id IN (` + tenantScansSQL + `)`},
 	{table: "scans", rowids: `SELECT rowid FROM scans WHERE tenant_id=?1`},
 	{table: "events", rowids: `SELECT rowid FROM events WHERE tenant_id=?1`},
-	{table: "outbox", rowids: `SELECT rowid FROM outbox WHERE tenant_id=?1`},
 	{table: "restore_quarantined_deliveries", rowids: `SELECT rowid FROM restore_quarantined_deliveries WHERE tenant_id=?1`},
 	{table: "security_alert_windows", rowids: `SELECT rowid FROM security_alert_windows WHERE tenant_id=?1`},
 	{table: "job_history_purge_host_keys", rowids: `SELECT rowid FROM job_history_purge_host_keys WHERE tenant_id=?1`},
@@ -277,6 +281,10 @@ func (ss *SystemStore) purgeTenant(ctx context.Context, id string, options tenan
 		result.Deferred = leased
 		return result, err
 	}
+	result.Phase, err = rewindTenantPurgeForOutbox(ctx, db, id, result.Phase)
+	if err != nil {
+		return result, err
+	}
 	start := 0
 	if result.Phase != "" {
 		start = len(tenantPurgeSteps)
@@ -322,6 +330,68 @@ func (ss *SystemStore) purgeTenant(ctx context.Context, id string, options tenan
 
 // purgeTenantStep erases the tenant's rows of step i in batches, each with
 // its progress, and records the next step once the table holds none.
+// rewindTenantPurgeForOutbox resumes from the relocated outbox step when a
+// legacy checkpoint has already passed it but tenant delivery rows remain.
+// Older purges erased change-window parents before outbox, so an interrupted
+// purge can leave a delivery with a missing window reference. The check and
+// checkpoint update share a write transaction so a resumed purge cannot skip
+// that row while it advances its phase.
+func rewindTenantPurgeForOutbox(ctx context.Context, db *sql.DB, tenantID, phase string) (string, error) {
+	outboxIndex := -1
+	phaseIndex := -1
+	for i, step := range tenantPurgeSteps {
+		if step.table == "outbox" {
+			outboxIndex = i
+		}
+		if step.table == phase {
+			phaseIndex = i
+		}
+	}
+	if outboxIndex < 0 {
+		return phase, errors.New("tenant purge has no outbox cleanup step")
+	}
+	if phase == "" || phase == tenantPurgePhaseComplete || phaseIndex < 0 || phaseIndex <= outboxIndex {
+		return phase, nil
+	}
+	tx, err := beginWriteTx(ctx, db)
+	if err != nil {
+		return phase, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var storedPhase string
+	if err := tx.QueryRowContext(ctx, `SELECT purge_phase FROM tenants WHERE id=? AND state=? AND is_default=0`, tenantID, TenantStateDeleting).Scan(&storedPhase); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return phase, fmt.Errorf("%w: tenant is no longer being deleted", ErrConflict)
+		}
+		return phase, err
+	}
+	if storedPhase != phase {
+		return phase, fmt.Errorf("%w: tenant purge phase changed from %q to %q", ErrConflict, phase, storedPhase)
+	}
+	var remaining int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM outbox WHERE tenant_id=?)`, tenantID).Scan(&remaining); err != nil {
+		return phase, err
+	}
+	if remaining == 0 {
+		if err := tx.Commit(); err != nil {
+			return phase, err
+		}
+		return phase, nil
+	}
+	outboxPhase := tenantPurgeSteps[outboxIndex].table
+	updated, err := execCount(ctx, tx, `UPDATE tenants SET purge_phase=? WHERE id=? AND state=? AND purge_phase=?`, outboxPhase, tenantID, TenantStateDeleting, phase)
+	if err != nil {
+		return phase, err
+	}
+	if updated != 1 {
+		return phase, fmt.Errorf("%w: tenant purge phase changed before outbox recovery", ErrConflict)
+	}
+	if err := tx.Commit(); err != nil {
+		return phase, err
+	}
+	return outboxPhase, nil
+}
+
 func purgeTenantStep(ctx context.Context, db *sql.DB, id string, i int, options tenantPurgeOptions, result *TenantPurgeResult) error {
 	step := tenantPurgeSteps[i]
 	next := tenantPurgePhaseVerify

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/model"
 	"modernc.org/sqlite"
 )
 
@@ -44,14 +45,21 @@ func openFrozenSchema54Fixture(ctx context.Context, t *testing.T) (string, *sql.
 	return path, db
 }
 
-func insertUpgradeBudgetDeliveries(t *testing.T, db *sql.DB) (exhaustedPayload, pendingPayload, sentPayload []byte, exhaustedAt string) {
+func insertUpgradeBudgetDeliveries(t *testing.T, db *sql.DB, exhaustedDestination string) (exhaustedPayload, pendingPayload, sentPayload []byte, exhaustedAt string) {
 	t.Helper()
 	cutoff, err := time.Parse(time.RFC3339Nano, legacyDeliveryRetryBudgetStart)
 	if err != nil {
 		t.Fatal(err)
 	}
 	exhaustedAt = cutoff.Add(-time.Second).Format(time.RFC3339Nano)
-	exhaustedPayload = []byte(`{"type":"changes-detected","job_id":"legacy-exhausted","changes":[{"key":"old"}]}`)
+	if exhaustedDestination == "" {
+		exhaustedDestination = "floor-exhausted"
+	}
+	legacyEvent := model.Event{Type: "changes-detected", JobID: "legacy-exhausted", Job: "legacy-exhausted", Message: "legacy exhausted delivery", TenantID: DefaultTenantID, CreatedAt: cutoff.Add(-time.Second)}
+	_, exhaustedPayload, err = model.MarshalBoundedEvent(legacyEvent, model.EventPayloadLimit)
+	if err != nil {
+		t.Fatalf("marshal exhausted delivery fixture: %v", err)
+	}
 	pendingPayload = []byte(`{"type":"changes-reminder","job_id":"pending-reminder","changes_truncated":true,"changes_count":17}`)
 	sentPayload = []byte(`{"type":"changes-detected","job_id":"sent-history","changes":[{"key":"must-remain-byte-identical"}]}`)
 	rows := []struct {
@@ -61,7 +69,7 @@ func insertUpgradeBudgetDeliveries(t *testing.T, db *sql.DB) (exhaustedPayload, 
 		nextAt      string
 		sentAt      string
 	}{
-		{"floor-exhausted", exhaustedPayload, 8, exhaustedAt, ""},
+		{exhaustedDestination, exhaustedPayload, 8, exhaustedAt, ""},
 		{"floor-pending", pendingPayload, 2, cutoff.Add(time.Hour).Format(time.RFC3339Nano), ""},
 		{"floor-sent", sentPayload, 1, cutoff.Add(time.Hour).Format(time.RFC3339Nano), cutoff.Format(time.RFC3339Nano)},
 	}
@@ -71,6 +79,29 @@ func insertUpgradeBudgetDeliveries(t *testing.T, db *sql.DB) (exhaustedPayload, 
 		}
 	}
 	return exhaustedPayload, pendingPayload, sentPayload, exhaustedAt
+}
+
+func managedNotificationColumnNames(t *testing.T, ctx context.Context, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(managed_notifications)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var columns []string
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		columns = append(columns, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return columns
 }
 
 func insertUpgradeHistoryFixture(t *testing.T, db *sql.DB) {
@@ -132,7 +163,7 @@ func truncateFixtureWAL(t *testing.T, db *sql.DB) {
 func TestUpgradeFromFrozenSchema54BoundsEveryMigrationTransaction(t *testing.T) {
 	ctx := context.Background()
 	path, db := openFrozenSchema54Fixture(ctx, t)
-	exhaustedPayload, pendingPayload, sentPayload, exhaustedAt := insertUpgradeBudgetDeliveries(t, db)
+	exhaustedPayload, pendingPayload, sentPayload, exhaustedAt := insertUpgradeBudgetDeliveries(t, db, "")
 	insertUpgradeHistoryFixture(t, db)
 	if version := countRows(t, db, `PRAGMA user_version`); version != minimumUpgradeSchema {
 		t.Fatalf("fixture starts at schema %d, want %d", version, minimumUpgradeSchema)
@@ -297,14 +328,42 @@ func TestRestoreAcceptedSchemaFloorsDoNotQuarantineOldBudgetExhaustedRows(t *tes
 			if version := countRows(t, db, `PRAGMA user_version`); version != sourceVersion {
 				t.Fatalf("legacy fixture schema version = %d, want %d", version, sourceVersion)
 			}
-			exhaustedPayload, pendingPayload, _, exhaustedAt := insertUpgradeBudgetDeliveries(t, db)
-			// Include one already-terminal row so its existing state remains distinct
-			// from the row migration 63 still needs to terminalize.
-			if _, err := db.ExecContext(ctx, `INSERT INTO outbox(destination,payload_json,attempts,next_at,terminal_at,tenant_id) VALUES(?,?,?,?,?,?)`, "floor-already-terminal", []byte(`{"type":"changes-recovered","job_id":"already-terminal"}`), 15, exhaustedAt, exhaustedAt, DefaultTenantID); err != nil {
+			columnsBeforeCreate := managedNotificationColumnNames(t, ctx, db)
+			wantColumns := []string{"id", "tenant_id", "name", "provider", "ciphertext", "nonce", "enabled", "revision", "created_at", "updated_at", "credential_revision"}
+			if !slices.Equal(columnsBeforeCreate, wantColumns) {
+				t.Fatalf("schema %d managed_notifications columns before destination creation = %v, want %v", sourceVersion, columnsBeforeCreate, wantColumns)
+			}
+			if err := db.Close(); err != nil {
 				t.Fatal(err)
 			}
-			truncateFixtureWAL(t, db)
-			if err := db.Close(); err != nil {
+			legacyStore, err := OpenExistingContext(ctx, path)
+			if err != nil {
+				t.Fatalf("open schema %d fixture for managed destination: %v", sourceVersion, err)
+			}
+			managedDestination, err := defaultTenant(legacyStore).CreateManagedNotification(ctx, "floor-managed-exhausted", "Floor exhausted", "generic", []byte("sealed"), []byte("nonce"), true)
+			if err != nil {
+				legacyStore.Close()
+				t.Fatalf("create managed destination in schema %d fixture: %v", sourceVersion, err)
+			}
+			if version := countRows(t, legacyStore.DB, `PRAGMA user_version`); version != sourceVersion {
+				legacyStore.Close()
+				t.Fatalf("managed destination creation upgraded the source from schema %d to %d", sourceVersion, version)
+			}
+			columnsAfterCreate := managedNotificationColumnNames(t, ctx, legacyStore.DB)
+			if !slices.Equal(columnsAfterCreate, columnsBeforeCreate) {
+				legacyStore.Close()
+				t.Fatalf("managed destination creation changed schema %d managed_notifications columns from %v to %v", sourceVersion, columnsBeforeCreate, columnsAfterCreate)
+			}
+			exhaustedDestination := managedNotificationKey(managedDestination.ID, managedDestination.CredentialRevision)
+			exhaustedPayload, pendingPayload, _, exhaustedAt := insertUpgradeBudgetDeliveries(t, legacyStore.DB, exhaustedDestination)
+			// Include one already-terminal row so its existing state remains distinct
+			// from the row migration 63 still needs to terminalize.
+			if _, err := legacyStore.DB.ExecContext(ctx, `INSERT INTO outbox(destination,payload_json,attempts,next_at,terminal_at,tenant_id) VALUES(?,?,?,?,?,?)`, "floor-already-terminal", []byte(`{"type":"changes-recovered","job_id":"already-terminal"}`), 15, exhaustedAt, exhaustedAt, DefaultTenantID); err != nil {
+				legacyStore.Close()
+				t.Fatal(err)
+			}
+			truncateFixtureWAL(t, legacyStore.DB)
+			if err := legacyStore.Close(); err != nil {
 				t.Fatal(err)
 			}
 
@@ -332,7 +391,7 @@ func TestRestoreAcceptedSchemaFloorsDoNotQuarantineOldBudgetExhaustedRows(t *tes
 						t.Fatal(err)
 					}
 					var retainedPayload []byte
-					if err := staged.DB.QueryRowContext(ctx, `SELECT payload_json FROM outbox WHERE destination='floor-exhausted'`).Scan(&retainedPayload); err != nil {
+					if err := staged.DB.QueryRowContext(ctx, `SELECT payload_json FROM outbox WHERE destination=?`, exhaustedDestination).Scan(&retainedPayload); err != nil {
 						staged.Close()
 						t.Fatalf("read old-budget exhausted row before startup: %v", err)
 					}
@@ -341,7 +400,7 @@ func TestRestoreAcceptedSchemaFloorsDoNotQuarantineOldBudgetExhaustedRows(t *tes
 						t.Fatal("restore changed the exhausted historical payload")
 					}
 					var exhaustedQuarantineCount int
-					if err := staged.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE restore_epoch=? AND destination='floor-exhausted'`, result.RestoreEpoch).Scan(&exhaustedQuarantineCount); err != nil {
+					if err := staged.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE restore_epoch=? AND destination=?`, result.RestoreEpoch, exhaustedDestination).Scan(&exhaustedQuarantineCount); err != nil {
 						staged.Close()
 						t.Fatal(err)
 					}
@@ -372,7 +431,7 @@ func TestRestoreAcceptedSchemaFloorsDoNotQuarantineOldBudgetExhaustedRows(t *tes
 					}
 					t.Cleanup(func() { _ = upgraded.Close() })
 					var terminalAt string
-					if err := upgraded.DB.QueryRowContext(ctx, `SELECT terminal_at FROM outbox WHERE destination='floor-exhausted'`).Scan(&terminalAt); err != nil {
+					if err := upgraded.DB.QueryRowContext(ctx, `SELECT terminal_at FROM outbox WHERE destination=?`, exhaustedDestination).Scan(&terminalAt); err != nil {
 						t.Fatal(err)
 					}
 					if terminalAt != exhaustedAt {
@@ -382,11 +441,18 @@ func TestRestoreAcceptedSchemaFloorsDoNotQuarantineOldBudgetExhaustedRows(t *tes
 					if err := upgraded.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination='floor-pending' AND sent_at IS NULL AND terminal_at=''`).Scan(&pendingCount); err != nil {
 						t.Fatal(err)
 					}
-					if err := upgraded.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination IN ('floor-exhausted','floor-already-terminal') AND sent_at IS NULL AND terminal_at<>''`).Scan(&terminalCount); err != nil {
+					if err := upgraded.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination IN (?,'floor-already-terminal') AND sent_at IS NULL AND terminal_at<>''`, exhaustedDestination).Scan(&terminalCount); err != nil {
 						t.Fatal(err)
 					}
 					if (policy == PendingDeliveriesPreserve && pendingCount != 1) || (policy != PendingDeliveriesPreserve && pendingCount != 0) || terminalCount != 2 {
 						t.Fatalf("policy %s post-upgrade pending=%d terminal=%d", policy, pendingCount, terminalCount)
+					}
+					listed, err := defaultTenant(upgraded).ListTerminalDeliveries(ctx, managedDestination.ID, 0, 10)
+					if err != nil || len(listed) != 1 {
+						t.Fatalf("policy %s restored legacy terminal deliveries = %+v, err=%v; want the managed exhausted row", policy, listed, err)
+					}
+					if listed[0].EventType != "changes-detected" || listed[0].Job != "legacy-exhausted" || listed[0].Attempts != 8 || listed[0].TerminalAt.Format(time.RFC3339Nano) != exhaustedAt || listed[0].EventAt.IsZero() {
+						t.Fatalf("policy %s restored legacy terminal delivery = %+v; want its legacy event, attempts, and terminal time", policy, listed[0])
 					}
 				})
 			}

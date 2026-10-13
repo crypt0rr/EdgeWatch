@@ -145,6 +145,41 @@ func incidentOccurrenceToken(tenantID, jobID, key string, incident model.Inciden
 	return "v1:" + hex.EncodeToString(digest[:]), nil
 }
 
+// loadIncidentReviewOccurrenceTx reads the active occurrence from the
+// maintained runtime_incidents projection. Runtime writers refresh that
+// projection in the same transaction as job_runtime, so a review can verify
+// the occurrence without decoding the job's baseline and other runtime state
+// while holding the SQLite writer.
+func loadIncidentReviewOccurrenceTx(ctx context.Context, tx *sql.Tx, tenantID, jobID, key string) (model.Incident, string, error) {
+	var raw []byte
+	var projectedToken string
+	err := tx.QueryRowContext(ctx, `SELECT incidents.incident_json,incidents.occurrence_token
+		FROM runtime_incidents AS incidents
+		JOIN jobs AS owner ON owner.id=incidents.job_id AND owner.tenant_id=?
+		JOIN job_runtime AS runtime ON runtime.job_id=incidents.job_id
+		WHERE incidents.job_id=? AND incidents.key=?`, tenantID, jobID, key).Scan(&raw, &projectedToken)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Incident{}, "", ErrIncidentNotFound
+	}
+	if err != nil {
+		return model.Incident{}, "", err
+	}
+	var incident model.Incident
+	if err := json.Unmarshal(raw, &incident); err != nil {
+		return model.Incident{}, "", err
+	}
+	token, err := incidentOccurrenceToken(tenantID, jobID, key, incident)
+	if err != nil {
+		return model.Incident{}, "", err
+	}
+	// A blank or inconsistent token means the projection is stale or corrupt.
+	// Do not turn it into a review of an occurrence whose identity is unclear.
+	if projectedToken == "" || projectedToken != token {
+		return model.Incident{}, "", ErrIncidentOccurrenceChanged
+	}
+	return incident, token, nil
+}
+
 func validIncidentReviewStatus(status string) bool {
 	return status == "needs_review" || status == "investigating"
 }
@@ -618,8 +653,9 @@ func normalizedIncidentTarget(value string) string {
 }
 
 // SaveIncidentReview stores one occurrence review with optimistic locking.
-// It verifies the active occurrence against job_runtime while holding the
-// writer lock, and commits the bounded history and audit row atomically.
+// It verifies the active occurrence against the maintained runtime incident
+// projection while holding the writer lock, and commits the bounded history
+// and audit row atomically.
 func (ts *TenantStore) SaveIncidentReview(ctx context.Context, jobID string, write IncidentReviewWrite, reviewerUserID, reviewerLabel string, audit AuditEntry) (IncidentReview, error) {
 	if err := ts.ready(); err != nil {
 		return IncidentReview{}, err
@@ -650,15 +686,7 @@ func (ts *TenantStore) SaveIncidentReview(ctx context.Context, jobID string, wri
 	} else if err != nil {
 		return IncidentReview{}, err
 	}
-	state, err := loadRuntimeTx(ctx, tx, jobID)
-	if err != nil {
-		return IncidentReview{}, err
-	}
-	incident, active := state.Incidents[write.Key]
-	if !active {
-		return IncidentReview{}, ErrIncidentNotFound
-	}
-	currentToken, err := incidentOccurrenceToken(ts.scope.id, jobID, write.Key, incident)
+	incident, currentToken, err := loadIncidentReviewOccurrenceTx(ctx, tx, ts.scope.id, jobID, write.Key)
 	if err != nil {
 		return IncidentReview{}, err
 	}

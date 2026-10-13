@@ -260,7 +260,7 @@ func (ts *TenantStore) listIncidentInboxWithSnapshotAccess(ctx context.Context, 
 		return result, err
 	}
 	defer rows.Close()
-	pending := make([]incidentInboxPendingItem, 0, filter.Limit)
+	var pending []incidentInboxPendingItem
 	neededSnapshotItems := make(map[incidentInboxSnapshotKey][]int)
 	for rows.Next() {
 		var item IncidentInboxItem

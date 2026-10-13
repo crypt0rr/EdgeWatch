@@ -953,6 +953,24 @@ func (ss *SystemStore) BeginDeliveryAttempt(ctx context.Context, id int64, claim
 		}
 		return ErrDeliveryHeld
 	}
+	var startRaw, endRaw, closedAt string
+	windowLoaded := false
+	loadWindow := func() error {
+		err := tx.QueryRowContext(ctx, `SELECT quiet.start_at,quiet.end_at,quiet.closed_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.id=? AND j.tenant_id=?`, windowID, tenantID).Scan(&startRaw, &endRaw, &closedAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: delivery %d references missing linked change window %q", ErrDeliveryAttemptNotStarted, id, windowID)
+		}
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrDeliveryAttemptNotStarted, err)
+		}
+		windowLoaded = true
+		return nil
+	}
+	if windowID != "" {
+		if err := loadWindow(); err != nil {
+			return err
+		}
+	}
 	if !changeWindowEventType(eventType) {
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("%w: %v", ErrDeliveryAttemptNotStarted, err)
@@ -981,62 +999,34 @@ func (ss *SystemStore) BeginDeliveryAttempt(ctx context.Context, id int64, claim
 		}
 	}
 	if windowID != "" {
-		var startRaw, endRaw, closedAt string
-		err := tx.QueryRowContext(ctx, `SELECT quiet.start_at,quiet.end_at,quiet.closed_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.id=? AND j.tenant_id=?`, windowID, tenantID).Scan(&startRaw, &endRaw, &closedAt)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("%w: %v", ErrDeliveryAttemptNotStarted, err)
-		}
-		if err == nil {
-			startAt, endAt := scanTime(startRaw), scanTime(endRaw)
-			// An unclosed due window continues to hold the row until the
-			// expiry worker commits its summary and coalesces the backlog.
-			if closedAt == "" && now.Before(startAt) {
-				var activeID, activeEndRaw string
-				activeErr := tx.QueryRowContext(ctx, `SELECT quiet.id,quiet.end_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.job_id=? AND j.tenant_id=? AND quiet.closed_at='' AND quiet.start_at<=? ORDER BY quiet.start_at,quiet.id LIMIT 1`, jobID, tenantID, sqliteTimestamp(now)).Scan(&activeID, &activeEndRaw)
-				if activeErr != nil && !errors.Is(activeErr, sql.ErrNoRows) {
-					return fmt.Errorf("%w: %v", ErrDeliveryAttemptNotStarted, activeErr)
-				}
-				if activeErr == nil && activeID != windowID {
-					var event model.Event
-					if json.Unmarshal(payload, &event) == nil {
-						if event.JobID == "" {
-							event.JobID = jobID
-						}
-						if err := recordChangeWindowEventTx(ctx, tx, activeID, tenantID, event); err != nil {
-							return fmt.Errorf("%w: %v", ErrDeliveryAttemptNotStarted, err)
-						}
-					}
-					next := scanTime(activeEndRaw).Format(time.RFC3339Nano)
-					if _, err := applyOutboxTransition(ctx, tx, outboxHoldInWindow,
-						`id=? AND claim_token=?`, []any{id, claim},
-						outboxChange("change_window_id", outboxSet, "?", activeID),
-						outboxChange("next_at", outboxSet, "?", next),
-						outboxChange("claim_token", outboxReset, "''"),
-						outboxChange("claim_until", outboxReset, "''"),
-						outboxChange("last_error", outboxReset, "''"),
-					); err != nil {
-						return fmt.Errorf("%w: %v", ErrDeliveryAttemptNotStarted, err)
-					}
-					if err := tx.Commit(); err != nil {
-						return fmt.Errorf("%w: %v", ErrDeliveryAttemptNotStarted, err)
-					}
-					return ErrDeliveryWindowHeld
-				}
+		if !windowLoaded {
+			if err := loadWindow(); err != nil {
+				return err
 			}
-			if closedAt == "" && !now.Before(startAt) {
+		}
+		startAt, endAt := scanTime(startRaw), scanTime(endRaw)
+		// An unclosed due window continues to hold the row until the
+		// expiry worker commits its summary and coalesces the backlog.
+		if closedAt == "" && now.Before(startAt) {
+			var activeID, activeEndRaw string
+			activeErr := tx.QueryRowContext(ctx, `SELECT quiet.id,quiet.end_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.job_id=? AND j.tenant_id=? AND quiet.closed_at='' AND quiet.start_at<=? ORDER BY quiet.start_at,quiet.id LIMIT 1`, jobID, tenantID, sqliteTimestamp(now)).Scan(&activeID, &activeEndRaw)
+			if activeErr != nil && !errors.Is(activeErr, sql.ErrNoRows) {
+				return fmt.Errorf("%w: %v", ErrDeliveryAttemptNotStarted, activeErr)
+			}
+			if activeErr == nil && activeID != windowID {
 				var event model.Event
 				if json.Unmarshal(payload, &event) == nil {
 					if event.JobID == "" {
 						event.JobID = jobID
 					}
-					if err := recordChangeWindowEventTx(ctx, tx, windowID, tenantID, event); err != nil {
+					if err := recordChangeWindowEventTx(ctx, tx, activeID, tenantID, event); err != nil {
 						return fmt.Errorf("%w: %v", ErrDeliveryAttemptNotStarted, err)
 					}
 				}
-				next := endAt.Format(time.RFC3339Nano)
+				next := scanTime(activeEndRaw).Format(time.RFC3339Nano)
 				if _, err := applyOutboxTransition(ctx, tx, outboxHoldInWindow,
 					`id=? AND claim_token=?`, []any{id, claim},
-					outboxChange("change_window_id", outboxSet, "?", windowID),
+					outboxChange("change_window_id", outboxSet, "?", activeID),
 					outboxChange("next_at", outboxSet, "?", next),
 					outboxChange("claim_token", outboxReset, "''"),
 					outboxChange("claim_until", outboxReset, "''"),
@@ -1049,21 +1039,47 @@ func (ss *SystemStore) BeginDeliveryAttempt(ctx context.Context, id int64, claim
 				}
 				return ErrDeliveryWindowHeld
 			}
-			if closedAt != "" {
-				if _, err := applyOutboxTransition(ctx, tx, outboxCoalesceHeld,
-					`id=? AND claim_token=?`, []any{id, claim},
-					outboxChange("coalesced_at", outboxConditional, "CASE WHEN coalesced_at='' THEN ? ELSE coalesced_at END", sqliteTimestamp(now)),
-					outboxChange("claim_token", outboxReset, "''"),
-					outboxChange("claim_until", outboxReset, "''"),
-					outboxChange("last_error", outboxReset, "''"),
-				); err != nil {
+		}
+		if closedAt == "" && !now.Before(startAt) {
+			var event model.Event
+			if json.Unmarshal(payload, &event) == nil {
+				if event.JobID == "" {
+					event.JobID = jobID
+				}
+				if err := recordChangeWindowEventTx(ctx, tx, windowID, tenantID, event); err != nil {
 					return fmt.Errorf("%w: %v", ErrDeliveryAttemptNotStarted, err)
 				}
-				if err := tx.Commit(); err != nil {
-					return fmt.Errorf("%w: %v", ErrDeliveryAttemptNotStarted, err)
-				}
-				return ErrDeliveryWindowHeld
 			}
+			next := endAt.Format(time.RFC3339Nano)
+			if _, err := applyOutboxTransition(ctx, tx, outboxHoldInWindow,
+				`id=? AND claim_token=?`, []any{id, claim},
+				outboxChange("change_window_id", outboxSet, "?", windowID),
+				outboxChange("next_at", outboxSet, "?", next),
+				outboxChange("claim_token", outboxReset, "''"),
+				outboxChange("claim_until", outboxReset, "''"),
+				outboxChange("last_error", outboxReset, "''"),
+			); err != nil {
+				return fmt.Errorf("%w: %v", ErrDeliveryAttemptNotStarted, err)
+			}
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("%w: %v", ErrDeliveryAttemptNotStarted, err)
+			}
+			return ErrDeliveryWindowHeld
+		}
+		if closedAt != "" {
+			if _, err := applyOutboxTransition(ctx, tx, outboxCoalesceHeld,
+				`id=? AND claim_token=?`, []any{id, claim},
+				outboxChange("coalesced_at", outboxConditional, "CASE WHEN coalesced_at='' THEN ? ELSE coalesced_at END", sqliteTimestamp(now)),
+				outboxChange("claim_token", outboxReset, "''"),
+				outboxChange("claim_until", outboxReset, "''"),
+				outboxChange("last_error", outboxReset, "''"),
+			); err != nil {
+				return fmt.Errorf("%w: %v", ErrDeliveryAttemptNotStarted, err)
+			}
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("%w: %v", ErrDeliveryAttemptNotStarted, err)
+			}
+			return ErrDeliveryWindowHeld
 		}
 	}
 	if _, err := applyOutboxTransition(ctx, tx, outboxBeginAttempt,

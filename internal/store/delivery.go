@@ -600,8 +600,8 @@ func (ss *SystemStore) ReleaseDeliveryClaims(ctx context.Context) (int64, error)
 // RecoverExpiredDeliveryClaims recovers a bounded page of deliveries whose
 // provider invocation marker outlived its lease. Change alerts linked to a
 // future window may retry after recovery; an active window keeps the marker
-// for its close summary. Closed and missing-window rows follow the same
-// conservative disposition as startup recovery.
+// for its close summary. A dangling nonempty window link is an invariant error;
+// the transaction rolls back instead of recovering a row without its policy.
 func (ss *SystemStore) RecoverExpiredDeliveryClaims(ctx context.Context) (int64, error) {
 	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
@@ -657,20 +657,21 @@ func expiredDeliveryClaimsTx(ctx context.Context, tx *sql.Tx, nowText string) ([
 func recoverStartedDeliveryTx(ctx context.Context, tx *sql.Tx, id int64, claim, windowID, eventType string, coalesceAfter int, tenantID string, now time.Time, nowText string, transition outboxTransitionName, extraFence string) error {
 	clearMarker := true
 	coalesce := false
+	var startRaw, closedAt string
+	if windowID != "" {
+		err := tx.QueryRowContext(ctx, `SELECT quiet.start_at,quiet.closed_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.id=? AND j.tenant_id=?`, windowID, tenantID).Scan(&startRaw, &closedAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("outbox delivery %d references missing linked change window %q: %w", id, windowID, err)
+		}
+		if err != nil {
+			return err
+		}
+	}
 	if changeWindowEventType(eventType) {
 		if windowID == "" {
 			coalesce = coalesceAfter != 0
 		} else {
-			var startRaw, closedAt string
-			err := tx.QueryRowContext(ctx, `SELECT quiet.start_at,quiet.closed_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.id=? AND j.tenant_id=?`, windowID, tenantID).Scan(&startRaw, &closedAt)
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return err
-			}
 			switch {
-			case errors.Is(err, sql.ErrNoRows):
-				// Retention may remove a closed window. Preserve the existing
-				// behavior: only a pending credential rotation coalesces here.
-				coalesce = coalesceAfter != 0
 			case closedAt != "":
 				coalesce = true
 			case now.Before(scanTime(startRaw)):
@@ -797,6 +798,15 @@ func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim 
 		return err
 	}
 	now := time.Now().UTC()
+	if windowID != "" {
+		var linkedWindowID string
+		if err := tx.QueryRowContext(ctx, `SELECT quiet.id FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.id=? AND j.tenant_id=?`, windowID, tenantID).Scan(&linkedWindowID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("outbox delivery %d references missing linked change window %q: %w", id, windowID, err)
+			}
+			return err
+		}
+	}
 	if changeWindowEventType(eventType) {
 		if coalesceAfter != 0 {
 			if sendErr == nil {
@@ -836,10 +846,13 @@ func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim 
 		if windowID != "" {
 			var endRaw, closedAt string
 			err := tx.QueryRowContext(ctx, `SELECT quiet.end_at,quiet.closed_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.id=? AND j.tenant_id=?`, windowID, tenantID).Scan(&endRaw, &closedAt)
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("outbox delivery %d references missing linked change window %q: %w", id, windowID, err)
+			}
+			if err != nil {
 				return err
 			}
-			if err == nil && closedAt == "" && !now.Before(scanTime(endRaw)) {
+			if closedAt == "" && !now.Before(scanTime(endRaw)) {
 				var event model.Event
 				if json.Unmarshal(payload, &event) == nil {
 					if event.JobID == "" {

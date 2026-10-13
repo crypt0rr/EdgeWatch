@@ -251,6 +251,193 @@ func TestBeginDeliveryAttemptFailsClosedWhenLinkedWindowCannotBeRead(t *testing.
 	}
 }
 
+func TestBeginDeliveryAttemptFailsClosedWhenLinkedWindowIsMissing(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, window, item := prepareLinkedWindowDelivery(t, "missing-attempt-window", false)
+	before := snapshotWindowDelivery(t, s, item.ID)
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM change_windows WHERE id=?`, window.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.System().BeginDeliveryAttempt(ctx, item.ID, item.ClaimToken); !errors.Is(err, ErrDeliveryAttemptNotStarted) {
+		t.Fatalf("begin provider attempt with dangling window link = %v; want ErrDeliveryAttemptNotStarted", err)
+	}
+	if after := snapshotWindowDelivery(t, s, item.ID); after != before {
+		t.Fatalf("failed provider gate changed linked delivery: before %+v, after %+v", before, after)
+	}
+}
+
+func TestDeliveryResultClaimFailsClosedWhenLinkedWindowIsMissing(t *testing.T) {
+	t.Parallel()
+	for _, result := range []struct {
+		name          string
+		err           error
+		coalesceAfter int
+	}{
+		{name: "success"},
+		{name: "provider failure", err: errors.New("provider_timeout")},
+		{name: "rotation coalesced success", coalesceAfter: 1},
+	} {
+		t.Run(result.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			s, window, item := prepareLinkedWindowDelivery(t, "missing-result-window-"+result.name, true)
+			if result.coalesceAfter != 0 {
+				if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET coalesce_after_attempt=? WHERE id=?`, result.coalesceAfter, item.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.DB.ExecContext(ctx, `UPDATE notification_delivery_health SET last_success_at=?,updated_at=? WHERE destination_identity=?`, "before-success", "before-update", item.Destination); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotWindowDelivery(t, s, item.ID)
+			healthBefore := snapshotDeliveryHealth(t, s, item.Destination)
+			if _, err := s.DB.ExecContext(ctx, `DELETE FROM change_windows WHERE id=?`, window.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.System().DeliveryResultClaim(ctx, item.ID, item.ClaimToken, result.err); err == nil {
+				t.Fatal("provider result committed with a dangling window link")
+			}
+			if after := snapshotWindowDelivery(t, s, item.ID); after != before {
+				t.Fatalf("failed provider result changed linked delivery: before %+v, after %+v", before, after)
+			}
+			if healthAfter := snapshotDeliveryHealth(t, s, item.Destination); healthAfter != healthBefore {
+				t.Fatalf("failed provider result changed destination health: before %+v, after %+v", healthBefore, healthAfter)
+			}
+			if countRows(t, s.DB, `SELECT COUNT(*) FROM change_window_events WHERE window_id=?`, window.ID) != 0 {
+				t.Fatal("provider result created evidence for a missing window")
+			}
+		})
+	}
+}
+
+func TestDeliveryClaimRecoveryRollsBackWhenLinkedWindowIsMissing(t *testing.T) {
+	t.Parallel()
+	for _, recovery := range []struct {
+		name    string
+		expired bool
+	}{
+		{name: "startup"},
+		{name: "expired lease", expired: true},
+	} {
+		t.Run(recovery.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			s := openTestStore(t)
+			ts := defaultTenant(s)
+			items := make([]Delivery, 0, 2)
+			windows := make([]ChangeWindow, 0, 2)
+			for i := 0; i < 2; i++ {
+				job := createWindowTestJob(t, ts, "missing-recovery-window-"+recovery.name+"-"+strconv.Itoa(i), "UTC")
+				destination := "missing-recovery-destination-" + recovery.name + "-" + strconv.Itoa(i)
+				queueWindowTestEvent(t, ctx, s, destination, job.ID, "changes-detected", "missing-recovery-scan-"+strconv.Itoa(i), time.Now().UTC(), []model.Change{{Key: "missing-recovery-change-" + strconv.Itoa(i), Kind: "port", Target: "192.0.2.76", Port: 443}}, false, 0)
+				start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+				window := createTestChangeWindow(t, ts, job.ID, start, start.Add(time.Hour))
+				claimed, err := s.System().ClaimDueDeliveries(ctx, 1, "missing-recovery-owner-"+strconv.Itoa(i))
+				if err != nil || len(claimed) != 1 {
+					t.Fatalf("claim row %d = %d deliveries, %v", i, len(claimed), err)
+				}
+				if err := s.System().BeginDeliveryAttempt(ctx, claimed[0].ID, claimed[0].ClaimToken); err != nil {
+					t.Fatalf("begin row %d = %v", i, err)
+				}
+				items = append(items, claimed[0])
+				windows = append(windows, window)
+				if _, err := s.DB.ExecContext(ctx, `UPDATE notification_delivery_health SET last_success_at=?,updated_at=? WHERE destination_identity=?`, "before-success", "before-update", destination); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if recovery.expired {
+				expiredAt := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+				for _, item := range items {
+					if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET claim_until=? WHERE id=?`, expiredAt, item.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			before := make([]windowDeliverySnapshot, len(items))
+			healthBefore := make([]deliveryHealthSnapshot, len(items))
+			for i, item := range items {
+				before[i] = snapshotWindowDelivery(t, s, item.ID)
+				healthBefore[i] = snapshotDeliveryHealth(t, s, item.Destination)
+			}
+			if result, err := s.DB.ExecContext(ctx, `DELETE FROM change_windows WHERE id=?`, windows[1].ID); err != nil {
+				t.Fatal(err)
+			} else if deleted, _ := result.RowsAffected(); deleted != 1 {
+				t.Fatalf("delete second linked window affected %d rows; want 1", deleted)
+			}
+			var changed int64
+			var err error
+			if recovery.expired {
+				changed, err = s.System().RecoverExpiredDeliveryClaims(ctx)
+			} else {
+				changed, err = s.System().ReleaseDeliveryClaims(ctx)
+			}
+			if err == nil || changed != 0 {
+				t.Fatalf("%s recovery with a dangling link = %d rows, %v; want an error and transaction rollback", recovery.name, changed, err)
+			}
+			for i, item := range items {
+				if after := snapshotWindowDelivery(t, s, item.ID); after != before[i] {
+					t.Errorf("%s recovery partially changed row %d: before %+v, after %+v", recovery.name, i, before[i], after)
+				}
+				if healthAfter := snapshotDeliveryHealth(t, s, item.Destination); healthAfter != healthBefore[i] {
+					t.Errorf("%s recovery changed row %d destination health: before %+v, after %+v", recovery.name, i, healthBefore[i], healthAfter)
+				}
+			}
+		})
+	}
+}
+
+type windowDeliverySnapshot struct {
+	windowID, claim, claimUntil, startedAt, sentAt, coalescedAt, lastError string
+	attempts, deferrals, coalesceAfter                                     int
+}
+
+func snapshotWindowDelivery(t *testing.T, s *Store, id int64) windowDeliverySnapshot {
+	t.Helper()
+	var snapshot windowDeliverySnapshot
+	if err := s.DB.QueryRowContext(context.Background(), `SELECT change_window_id,claim_token,claim_until,attempt_started_at,COALESCE(sent_at,''),coalesced_at,last_error,attempts,deferrals,coalesce_after_attempt FROM outbox WHERE id=?`, id).Scan(&snapshot.windowID, &snapshot.claim, &snapshot.claimUntil, &snapshot.startedAt, &snapshot.sentAt, &snapshot.coalescedAt, &snapshot.lastError, &snapshot.attempts, &snapshot.deferrals, &snapshot.coalesceAfter); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+type deliveryHealthSnapshot struct {
+	terminalFailures                                                   int
+	lastSuccess, lastFailure, lastTerminal, code, fingerprint, updated string
+}
+
+func snapshotDeliveryHealth(t *testing.T, s *Store, destination string) deliveryHealthSnapshot {
+	t.Helper()
+	var snapshot deliveryHealthSnapshot
+	if err := s.DB.QueryRowContext(context.Background(), `SELECT terminal_failures,last_success_at,last_failure_at,last_terminal_at,last_error_code,last_error_fingerprint,updated_at FROM notification_delivery_health WHERE destination_identity=?`, destination).Scan(&snapshot.terminalFailures, &snapshot.lastSuccess, &snapshot.lastFailure, &snapshot.lastTerminal, &snapshot.code, &snapshot.fingerprint, &snapshot.updated); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func prepareLinkedWindowDelivery(t *testing.T, label string, started bool) (*Store, ChangeWindow, Delivery) {
+	t.Helper()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job := createWindowTestJob(t, ts, label, "UTC")
+	destination := "destination-" + label
+	queueWindowTestEvent(t, ctx, s, destination, job.ID, "changes-detected", "scan-"+label, time.Now().UTC(), []model.Change{{Key: "change-" + label, Kind: "port", Target: "192.0.2.77", Port: 443}}, false, 0)
+	start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	window := createTestChangeWindow(t, ts, job.ID, start, start.Add(time.Hour))
+	claimed, err := s.System().ClaimDueDeliveries(ctx, 1, "owner-"+label)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim linked delivery = %d rows, %v", len(claimed), err)
+	}
+	item := claimed[0]
+	if started {
+		if err := s.System().BeginDeliveryAttempt(ctx, item.ID, item.ClaimToken); err != nil {
+			t.Fatalf("begin linked delivery = %v", err)
+		}
+	}
+	return s, window, item
+}
+
 func TestLateWindowDeliveryEvidenceFailureRollsBackProviderResult(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

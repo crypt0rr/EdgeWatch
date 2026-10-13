@@ -183,10 +183,12 @@ queue without consuming retries; URL replacement discards queued alerts unless
 you select **Keep queued alerts**. After an outage, an administrator can
 redeliver a destination's alerts that ran out of retries from its **Failed
 alerts**. The error code `destination_excluded` means the destination's host
-resolves to an address that `scanner.target_exclusions` or the loopback and
-link-local rules refuse, and `provider_timeout` that the provider did not
-answer within 15 seconds. See [Notifications](/user-guide/notifications/) for
-retries, terminal failures, destination addresses, and legacy-import warnings.
+resolves to an address that `scanner.target_exclusions` or the loopback,
+link-local, or interface-local multicast rules refuse. A DNS failure is refused before sending but remains
+retryable; it does not receive `destination_excluded`. `provider_timeout`
+means the provider did not answer within 15 seconds. See
+[Notifications](/user-guide/notifications/) for retries, proxy behavior,
+terminal failures, destination addresses, and legacy-import warnings.
 
 ## RDAP is unavailable behind a proxy
 

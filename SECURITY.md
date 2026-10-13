@@ -665,19 +665,29 @@ are audited, and without it they are discarded.
 
 A unit's destinations cannot reach the addresses that the scanner refuses.
 The daemon refuses a unit destination whose host is, or resolves to, an
-address in `scanner.target_exclusions` or an unspecified, loopback, or
-link-local address, with an error that names neither the URL nor the
-address. It checks the host when the destination is saved and again, with
-the daemon's resolver, before each delivery and test, so a unit
-administrator cannot direct delivery traffic to the host's own services or to
-a link-local metadata endpoint, even with a name whose DNS answer changes
-later. An explicitly empty `scanner.target_exclusions` is the one override,
-as it is for scans. Platform destinations, URLs that config.yaml lists, and a
-destination imported from config.yaml until a unit administrator replaces
-its URL are not checked, because platform administrators and the host
-operator configure them. The check does not follow provider redirects, and a DNS answer that
-changes between the check and the notification process's own lookup is not
-seen.
+address in `scanner.target_exclusions` or an unspecified, loopback, link-local,
+or interface-local multicast address, with a redacted error that names neither the URL nor the
+address. It checks the host when the destination is saved and again in the
+isolated notification child before each delivery and test. HTTP redirects and
+the final direct dial are checked, and the SMTP DNS filter rejects every
+prohibited A or AAAA answer before Go can connect. Literal addresses and
+hosts-file results are checked in the child's preflight; the DNS packet filter
+does not inspect hosts-file lookups. The system resolver and hosts file are
+host-operator-controlled, and their configuration is assumed stable for the
+short send. DNS errors, empty answers, malformed responses, and unverifiable
+targets fail closed and remain retryable; only a confirmed prohibited address
+is classified `destination_excluded`. An explicitly empty
+`scanner.target_exclusions` is the one override, as it is for scans. Platform
+destinations, URLs that config.yaml lists, and a destination imported from
+config.yaml until a unit administrator replaces its URL are not checked,
+because platform administrators and the host operator configure them.
+
+Policy-bearing unit HTTP sends use direct connections. An environment proxy
+selected by the provider's transport, or a custom proxy function, is refused
+because it would resolve or connect outside the address check; `NO_PROXY` can
+select direct egress for environment proxies. Provider transports that were
+already configured direct remain direct. Platform and deployment-owned
+destinations retain Shoutrrr's existing proxy behavior.
 
 Optional TOTP seeds are encrypted independently with AES-256-GCM. The default
 authentication key is `./data/auth.key`; set `web.auth_key_file` for a separate

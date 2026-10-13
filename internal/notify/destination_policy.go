@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -39,15 +40,61 @@ type destinationPolicy struct {
 	exclusions []*net.IPNet
 }
 
+type destinationPolicyContextKey struct{}
+
+func withDestinationPolicy(ctx context.Context, policy *destinationPolicy) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if policy == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, destinationPolicyContextKey{}, policy)
+}
+
+func destinationPolicyFromContext(ctx context.Context) *destinationPolicy {
+	if ctx == nil {
+		return nil
+	}
+	policy, _ := ctx.Value(destinationPolicyContextKey{}).(*destinationPolicy)
+	return policy
+}
+
+// exclusionCIDRs returns the immutable policy as the small, nonsecret part
+// of the notification child's stdin request.
+func (p *destinationPolicy) exclusionCIDRs() []string {
+	if p == nil || len(p.exclusions) == 0 {
+		return nil
+	}
+	cidrs := make([]string, 0, len(p.exclusions))
+	for _, exclusion := range p.exclusions {
+		if exclusion != nil {
+			cidrs = append(cidrs, exclusion.String())
+		}
+	}
+	return cidrs
+}
+
+func destinationPolicyFromCIDRs(cidrs []string) (*destinationPolicy, error) {
+	if len(cidrs) == 0 {
+		return nil, nil
+	}
+	exclusions, err := config.ParseTargetExclusions(cidrs)
+	if err != nil {
+		return nil, err
+	}
+	return &destinationPolicy{exclusions: exclusions}, nil
+}
+
 // SetTargetExclusions installs scanner.target_exclusions as the address
 // policy of the destinations that units own, as the scanner and the store
 // use it. A nil list, for embedded callers, and an explicitly empty list,
 // the operator's override, refuse nothing; any other list refuses its
-// networks and every unspecified, loopback, and link-local address. The
-// policy does not apply to the platform's destinations, to the URLs that
-// config.yaml lists, or to a destination imported from config.yaml until
-// its URL is replaced: the platform administrators and the host operator
-// configure those.
+// networks and every unspecified, loopback, and link-local address, plus
+// interface-local multicast. The policy does not apply to the platform's
+// destinations, to the URLs that config.yaml lists, or to a destination
+// imported from config.yaml until its URL is replaced: the platform
+// administrators and the host operator configure those.
 func (n *Notifier) SetTargetExclusions(exclusions []string) error {
 	if len(exclusions) == 0 {
 		n.policy.Store(nil)
@@ -79,13 +126,19 @@ func (p *destinationPolicy) refuses(addr netip.Addr) bool {
 
 // check refuses a destination URL with ErrDestinationExcluded when a host
 // that its provider connects to is, or resolves to, an address that the
-// policy refuses. A name that does not resolve is not refused here: the
-// provider cannot reach it either, and its own lookup reports the failure.
-// The check runs when a unit's destination is saved and again before each
-// send, so a name whose answer changed since it was saved is refused too.
+// policy refuses. An address that cannot be resolved is refused as well: the
+// active policy must verify a destination before allowing it to be contacted.
+// The check runs when a unit's destination is saved and again in the
+// notification child immediately before a send.
 func (p *destinationPolicy) check(ctx context.Context, rawURL string) error {
 	if p == nil {
 		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	for _, host := range destinationHosts(rawURL) {
 		if addr, err := netip.ParseAddr(host); err == nil {
@@ -95,18 +148,20 @@ func (p *destinationPolicy) check(ctx context.Context, rawURL string) error {
 			continue
 		}
 		lookupCtx, cancel := context.WithTimeout(ctx, destinationLookupTimeout)
-		addresses, err := destinationLookup(lookupCtx, host)
+		_, err := resolveDestination(lookupCtx, host, p)
 		cancel()
 		if err != nil {
-			continue
-		}
-		for _, addr := range addresses {
-			if p.refuses(addr) {
-				return ErrDestinationExcluded
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
+			return err
 		}
 	}
 	return nil
+}
+
+func destinationDNSFailure() error {
+	return &store.DeliveryFailure{Err: store.ErrDeliveryProvider, Class: store.DeliveryClassDNS}
 }
 
 // fixedHostProviders are the Shoutrrr services that always connect to their
@@ -117,40 +172,86 @@ var fixedHostProviders = map[string]bool{
 	"pushover": true, "slack": true, "telegram": true,
 }
 
+const teamsDefaultHost = "outlook.office.com"
+
 // destinationHosts returns the hosts that the provider of a Shoutrrr URL
 // connects to. Teams takes its host from the host query parameter and
 // otherwise connects to its public default; every other provider, including
 // one that a later Shoutrrr release adds, and every custom URL such as
-// generic+https://, connects to the host of the URL.
+// generic+https://, connects to the host of the URL. Teams query keys are
+// case-insensitive in Shoutrrr; if differently-cased keys conflict, every
+// candidate is checked because map iteration makes the provider's winner
+// nondeterministic.
 func destinationHosts(rawURL string) []string {
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
 		return nil
 	}
 	scheme := strings.ToLower(parsed.Scheme)
-	var host string
+	provider := scheme
+	if separator := strings.IndexByte(provider, '+'); separator >= 0 {
+		provider = provider[:separator]
+	}
+	var hosts []string
 	switch {
-	case strings.Contains(scheme, "+"):
-		host = parsed.Hostname()
-	case scheme == "teams":
+	case provider == "teams":
+		hasHostOverride := false
 		for key, values := range parsed.Query() {
 			if strings.EqualFold(key, "host") && len(values) > 0 {
-				host = values[0]
+				hasHostOverride = true
+				host := providerHostname(values[0])
+				if host == "" {
+					// Shoutrrr's Teams provider uses LegacyHost when the host
+					// parameter is explicitly empty.
+					host = teamsDefaultHost
+				}
+				hosts = append(hosts, host)
 			}
 		}
-		if parsedHost, _, err := net.SplitHostPort(host); err == nil {
-			host = parsedHost
+		if !hasHostOverride {
+			if provider != scheme {
+				hosts = append(hosts, parsed.Hostname())
+			} else {
+				hosts = append(hosts, teamsDefaultHost)
+			}
 		}
+	case strings.Contains(scheme, "+"):
+		hosts = append(hosts, parsed.Hostname())
 	case fixedHostProviders[scheme]:
 		return nil
 	default:
-		host = parsed.Hostname()
+		hosts = append(hosts, parsed.Hostname())
 	}
-	host = strings.Trim(strings.TrimSpace(host), "[]")
-	if host == "" {
-		return nil
+	result := make([]string, 0, len(hosts))
+	seen := make(map[string]struct{}, len(hosts))
+	for _, host := range hosts {
+		host = strings.Trim(strings.TrimSpace(host), "[]")
+		if host == "" {
+			continue
+		}
+		key := strings.ToLower(host)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, host)
 	}
-	return []string{host}
+	sort.Strings(result)
+	return result
+}
+
+func providerHostname(value string) string {
+	value = strings.TrimSpace(value)
+	if address, err := netip.ParseAddr(strings.Trim(value, "[]")); err == nil {
+		return address.String()
+	}
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		return strings.Trim(strings.TrimSpace(host), "[]")
+	}
+	if parsed, err := url.Parse("//" + value); err == nil && parsed.Hostname() != "" {
+		return parsed.Hostname()
+	}
+	return strings.Trim(value, "[]")
 }
 
 // destinationPolicy returns the policy for the destinations that units own.

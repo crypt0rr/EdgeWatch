@@ -287,11 +287,32 @@ func (s *Server) Handler() http.Handler {
 	// bypass this network-boundary middleware.
 	hostGuard := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.noteUntrustedProxy(r)
-		if strings.HasPrefix(r.URL.Path, "/api/v1") && !s.validateRequestHost(r) {
+		// Ask the outer mux what broad mount would handle the request, but do
+		// not let its canonical-path redirect handle either API. The API tables
+		// must see the original path so a noncanonical request cannot become a
+		// different route, or escape the API namespace, before it reaches the
+		// fail-closed route gate.
+		_, pattern := mux.Handler(r)
+		consoleAPIPath := r.URL.Path == consoleAPIBase || strings.HasPrefix(r.URL.Path, consoleAPIBase+"/")
+		publicAPIPath := r.URL.Path == publicAPIBase || strings.HasPrefix(r.URL.Path, publicAPIBase+"/")
+		consoleAPIMount := pattern == consoleAPIBase+"/"
+		publicAPIMount := pattern == publicAPIBase+"/"
+		if (consoleAPIPath || consoleAPIMount && !publicAPIPath) && !s.validateRequestHost(r) {
 			writeError(w, http.StatusMisdirectedRequest, "host", "request host is not allowed", nil)
 			return
 		}
-		mux.ServeHTTP(w, r)
+		switch {
+		case consoleAPIPath:
+			s.api(w, r)
+		case publicAPIPath:
+			s.publicAPI(w, r)
+		case consoleAPIMount:
+			s.api(w, r)
+		case publicAPIMount:
+			s.publicAPI(w, r)
+		default:
+			mux.ServeHTTP(w, r)
+		}
 	})
 	return s.requestLogging(securityHeaders(hostGuard))
 }

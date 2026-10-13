@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/containrrr/shoutrrr"
+	"github.com/containrrr/shoutrrr/pkg/router"
 	"github.com/containrrr/shoutrrr/pkg/types"
 	"github.com/crypt0rr/edgewatch/internal/engine"
 	"github.com/crypt0rr/edgewatch/internal/model"
@@ -857,13 +858,15 @@ func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, dest
 		ok = state == managedReady
 	}
 	var sendErr error
+	var activePolicy *destinationPolicy
 	switch {
 	case !ok:
 		sendErr = store.ErrDeliveryDestinationMissing
 	case managedDestination && n.addressChecked(strings.SplitN(delivery.Destination, ":", 3)[1]):
 		// A unit's destination is checked again just before the send, so a
 		// name whose answer changed since it was saved is not reached.
-		sendErr = n.destinationPolicy().check(ctx, raw)
+		activePolicy = n.destinationPolicy()
+		sendErr = activePolicy.check(ctx, raw)
 	}
 	if ok && sendErr == nil {
 		attemptCtx := context.WithValue(ctx, notificationAttemptStartContextKey{}, notificationAttemptStartFunc(func() error {
@@ -871,6 +874,7 @@ func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, dest
 			defer cancel()
 			return n.Store.System().BeginDeliveryAttempt(attemptCtx, delivery.ID, delivery.ClaimToken)
 		}))
+		attemptCtx = withDestinationPolicy(attemptCtx, activePolicy)
 		sendErr = safeSendContext(attemptCtx, raw, alertMessage(delivery.Event, time.Now()))
 		if errors.Is(sendErr, store.ErrDeliveryWindowHeld) {
 			// The final durable gate already released the claim without a
@@ -977,6 +981,9 @@ type notificationAttemptStartFunc func() error
 
 func send(ctx context.Context, rawURL, message string) error {
 	if notificationIsTestBinary() {
+		if policy := destinationPolicyFromContext(ctx); policy != nil {
+			return sendInProcessWithPolicy(ctx, rawURL, message, policy)
+		}
 		return sendInProcess(rawURL, message)
 	}
 	return notificationProcessRunner(ctx, rawURL, message)
@@ -1008,6 +1015,79 @@ func sendInProcess(rawURL, message string) error {
 	}
 }
 
+// sendInProcessWithPolicy applies a unit destination policy in the isolated
+// notification child. It locates the same Shoutrrr service and supplies the
+// same title parameter as the ordinary router path, while guarding the
+// provider's actual HTTP and SMTP network paths.
+func sendInProcessWithPolicy(ctx context.Context, rawURL, message string, policy *destinationPolicy) error {
+	if policy == nil {
+		return sendInProcess(rawURL, message)
+	}
+	service, err := (&router.ServiceRouter{}).Locate(rawURL)
+	if err != nil {
+		return err
+	}
+	blocked := &blockedDNSNames{}
+	guarded, _ := service.(guardedHTTPClient)
+	restore, err := installDestinationGuards(policy, guarded, blocked)
+	if err != nil {
+		return err
+	}
+	defer restore()
+	if err := policy.check(ctx, rawURL); err != nil {
+		return err
+	}
+	// The child preflight ran through the same Resolver hook, but the SMTP
+	// classification below is about the provider's own lookup only.
+	blocked.reset()
+	result := make(chan error, 1)
+	go func() {
+		result <- service.Send(message, &types.Params{"title": "EdgeWatch"})
+	}()
+	timer := time.NewTimer(notificationProviderTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-result:
+		if err != nil && providerRefusedDestination(err) {
+			return ErrDestinationExcluded
+		}
+		if smtpDestinationWasRefused(err, rawURL, blocked) {
+			return ErrDestinationExcluded
+		}
+		return err
+	case <-timer.C:
+		return errProviderTimeout
+	}
+}
+
+func providerRefusedDestination(err error) bool {
+	return err != nil && (errors.Is(err, ErrDestinationExcluded) || strings.Contains(err.Error(), ErrDestinationExcluded.Error()))
+}
+
+func isSMTPDestination(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	provider := strings.ToLower(parsed.Scheme)
+	if separator := strings.IndexByte(provider, '+'); separator >= 0 {
+		provider = provider[:separator]
+	}
+	return provider == "smtp"
+}
+
+func smtpDestinationWasRefused(err error, rawURL string, blocked *blockedDNSNames) bool {
+	if err == nil || !isSMTPDestination(rawURL) || failureClass(err) != store.DeliveryClassDNS {
+		return false
+	}
+	for _, host := range destinationHosts(rawURL) {
+		if blocked.definitelyContains(host) {
+			return true
+		}
+	}
+	return false
+}
+
 // notificationProviderSend is isolated behind one function so timeout and
 // panic paths can be tested without contacting a real notification service.
 // Production code always points it at send.
@@ -1026,7 +1106,7 @@ func safeSendContext(ctx context.Context, rawURL, message string) error {
 	if err := sendContext(ctx, rawURL, message); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrNotificationSendIndeterminate) ||
 			errors.Is(err, store.ErrDeliveryAttemptNotStarted) || errors.Is(err, store.ErrDeliveryWindowHeld) ||
-			errors.Is(err, store.ErrDeliveryHeld) || errors.Is(err, store.ErrDeliveryClaimLost) {
+			errors.Is(err, store.ErrDeliveryHeld) || errors.Is(err, store.ErrDeliveryClaimLost) || errors.Is(err, ErrDestinationExcluded) {
 			return err
 		}
 		return redactedFailure(err)
@@ -1226,6 +1306,7 @@ func testSet(ctx context.Context, set destinationSet) (TestSummary, error) {
 		go func() {
 			defer wg.Done()
 			for target := range jobs {
+				sendCtx := testCtx
 				if target.checked {
 					// A unit's destination whose address the policy refuses
 					// fails the test without being contacted.
@@ -1233,8 +1314,9 @@ func testSet(ctx context.Context, set destinationSet) (TestSummary, error) {
 						results <- err
 						continue
 					}
+					sendCtx = withDestinationPolicy(testCtx, set.policy)
 				}
-				results <- safeSendContext(testCtx, target.url, "EdgeWatch notification test")
+				results <- safeSendContext(sendCtx, target.url, "EdgeWatch notification test")
 			}
 		}()
 	}

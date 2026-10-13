@@ -175,7 +175,8 @@ Jobs are configured in the console, which enforces these limits:
   Change `scanner.target_exclusions` only when you understand the host-network
   exposure. The same list keeps a unit's notification destinations away from
   these addresses, and EdgeWatch refuses a unit's destination on an
-  unspecified, loopback, or link-local address whatever the list holds. An
+  unspecified, loopback, link-local, or interface-local multicast address
+  whatever the list holds. An
   explicitly empty list, `[]`, allows every address for both; see
   [destination addresses](/user-guide/notifications/#destination-addresses).
 - `scanner.sandbox: auto` starts Nmap and Naabu as UID 65532 with only their
@@ -219,11 +220,16 @@ Jobs are configured in the console, which enforces these limits:
   Set `enrichment.rdap.enabled: false` for isolated or privacy-sensitive
   deployments. RDAP lookups need direct HTTPS egress to IANA and the regional
   registries: they ignore `HTTPS_PROXY` and the other proxy variables, which
-  update checks and notifications use, because a proxy would resolve and
-  connect to the registry itself, past the checks that keep lookups away from
-  private addresses. Where only a proxy reaches the internet, host pages show
-  RDAP as unavailable; set `enrichment.rdap.enabled: false` there. The daemon
-  logs a warning at startup when RDAP is enabled and a proxy variable is set.
+  update checks use, because a proxy would resolve and connect to the registry
+  itself, past the checks that keep lookups away from private addresses.
+  Unit-managed notification destinations with the target policy connect
+  directly; an environment proxy selected by an HTTP provider causes that
+  send to fail closed, while `NO_PROXY` can select direct egress. Platform,
+  deployment-file, and not-yet-replaced imported destinations retain
+  Shoutrrr's existing proxy behavior. Where only a proxy reaches the internet,
+  host pages show RDAP as unavailable; set `enrichment.rdap.enabled: false`
+  there. The daemon logs a warning at startup when RDAP is enabled and a proxy
+  variable is set.
 - Scheduled backups are off by default. Setting `backup.directory` turns them
   on: the daemon writes a backup there on `backup.schedule`, checks it as the
   `backup` command does before it publishes it, and keeps the newest

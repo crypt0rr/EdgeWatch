@@ -80,17 +80,20 @@ when the committed file differs from what the command writes.
 
 ## API routes
 
-`apiRoutes` in `internal/web/permissions.go` is the route table of the
-console API under `/api/v1` and the public API under `/api/public/v1`. Each
-entry lists a route's method, its path template, which with the method and
-the API base is its `net/http` ServeMux pattern, the capability that it
-requires, an example path for the tests, and its handler. Nothing else
-routes a request. `internal/web/routes.go` registers the entries and runs
-the gate: an unauthenticated route is served after the browser origin check
-for a state-changing request; any other console request needs a session, a
-CSRF token when it changes state, and the entry's permission, which also
-holds a session that must enroll TOTP to its own account. The gate resolves
-the session's unit store once and hands it to the handler.
+`apiRoutes` in `internal/web/permissions.go` is the endpoint route table of
+the console API under `/api/v1` and the public API under `/api/public/v1`.
+Each entry lists a route's method, its path template, which with the method
+and API base is its `net/http` ServeMux pattern, the capability that it
+requires, an example path for the tests, and its handler. `Server.Handler`
+uses the outer ServeMux to identify the broad API namespaces and its other
+fixed handlers. Before the outer mux can redirect an API request, it sends
+the original path to the matching API handler. `internal/web/routes.go`
+registers endpoint entries and runs the gate: an unauthenticated route is
+served after the browser origin check for a state-changing request; any other
+console request needs a session, a CSRF token when it changes state, and the
+entry's permission, which also holds a session that must enroll TOTP to its
+own account. The gate resolves the session's unit store once and hands it to
+the handler.
 
 To add a route:
 
@@ -111,19 +114,67 @@ To add a route:
 - Teach `TestIsolationMatrix` a new path placeholder, and follow the tenancy
   rules in the repository's `AGENTS.md`.
 
-The route table uses the ServeMux only to find a request's route, so the
-ServeMux never redirects or answers `405`. A request that no route serves
-gets `401` without a session, `403 csrf` for a mutation without the CSRF
-token, and otherwise `403` with the permission `route`; the public API
-answers it with `404 not_found`. `go test ./internal/web/` checks that every
-entry is registered once, has its handler, and is reached by its example;
-that the table refuses ambiguous patterns; these fail-closed answers; that no
-other function reads the request path or registers a ServeMux pattern; and
-that a handler reads only the path values of its template.
+Each API route table uses its ServeMux only to find a request's endpoint, so
+it never redirects or answers `405`. `Server.Handler` dispatches requests
+from an API namespace, including paths the outer mux would clean into or out
+of that namespace, with the original path intact. A request that no route
+serves gets `401` without a session, `403 csrf` for a mutation without the
+CSRF token, and otherwise `403` with the permission `route`; the public API
+answers it with `404 not_found`. Paths outside the APIs retain the outer
+ServeMux behavior. `go test ./internal/web/` checks that every entry is
+registered once, has its handler, and is reached by its example; that the
+table refuses ambiguous patterns; these fail-closed answers; that no other
+function reads the request path or registers a ServeMux pattern; and that a
+handler reads only the path values of its template.
 `TestRouteInventoryGateMatrix` sends every entry as each role.
 The few paths served outside the two APIs, such as `/healthz` and
 `/metrics`, are registered in `Server.Handler` and listed in
 `handlerPatterns` in `internal/web/route_drift_test.go`.
+
+## Notification destination policy
+
+The notification child applies the unit destination policy at the provider's
+actual connection path. HTTP uses a guarded dial to the checked numeric IP,
+while leaving the request URL hostname intact for the HTTP `Host` header and
+TLS SNI; every redirect is checked before it is followed. SMTP uses
+`net.Dial`/`tls.Dial`, so the child installs a Go resolver with
+`PreferGo` and `StrictErrors` and filters every A and AAAA answer the standard
+library may return. Literal hosts and hosts-file results are checked in the
+child preflight. The resolver packet filter does not observe hosts-file reads;
+the host operator controls that file and its stability during the short send
+is part of the threat model.
+
+The pinned Shoutrrr v0.8.0 provider inventory is split by destination:
+
+- URL hostname: bark, generic, Google Chat, Gotify, Hangouts, Matrix,
+  Mattermost, ntfy, Opsgenie, Rocket.Chat, SMTP, and Zulip.
+- Teams: the `host` query property, or `outlook.office.com` when omitted or
+  empty. Query keys are case-insensitive; conflicting case variants are all
+  checked because Shoutrrr's map iteration can select either one.
+- Fixed public service hostname: Discord, IFTTT, Join, logger, Pushbullet,
+  Pushover, Slack, and Telegram. These URLs carry tokens or IDs in their host
+  component. Their actual HTTP connections still use the guarded transport.
+
+The HTTP providers use `http.DefaultClient`, `http.Post`, or Shoutrrr's
+`jsonclient`. Telegram's package-level `jsonclient.DefaultClient` captures the
+original `http.DefaultClient` pointer during package initialization, so the
+child guards the captured client's existing transport rather than replacing
+that pointer. Gotify is the only pinned provider with a private `http.Client`;
+the child clones and guards its transport, preserving its TLS settings and
+originally direct proxy behavior. Shoutrrr's default environment proxy is
+refused when it selects a proxy, and uninspectable custom proxy functions are
+refused; direct transports and environment `NO_PROXY` paths remain direct.
+
+`TestDestinationProviderInventoryMatchesPinnedShoutrrr` compares this host
+classification with `ServiceRouter.ListServices()`. It fails when an upgrade
+adds or removes a provider without an explicit inventory review. For every
+Shoutrrr dependency update, also inspect the pinned source for new or changed
+HTTP clients, transports, redirect handling, SMTP/raw dial paths, and provider
+target construction. Update the inventory and add a controlled listener or
+fake-resolver regression for any new path; preserve TLS SNI, provider URL
+options, proxy behavior, secret redaction, and notification sandboxing. The
+inventory test alone does not prove that a provider's transport path stayed
+guarded.
 
 ## Validate changes
 

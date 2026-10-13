@@ -1234,21 +1234,30 @@ func TestIncidentReviewSerializesCompetingWritersAndScanFinalization(t *testing.
 	}
 	item := findIncidentInboxItem(t, ts, ctx, job.ID, "writer", now)
 	start := make(chan struct{})
-	results := make(chan error, 2)
+	type writeResult struct {
+		err     error
+		elapsed time.Duration
+	}
+	results := make(chan writeResult, 2)
 	for _, note := range []string{"writer one", "writer two"} {
 		note := note
 		go func() {
 			<-start
+			started := time.Now()
 			_, err := ts.SaveIncidentReview(ctx, job.ID, IncidentReviewWrite{
 				Key: "writer", OccurrenceToken: item.OccurrenceToken, ExpectedRevision: 0, Status: "investigating", Note: note,
 			}, "reviewer", "Reviewer", AuditEntry{})
-			results <- err
+			results <- writeResult{err: err, elapsed: time.Since(started)}
 		}()
 	}
+	concurrentStarted := time.Now()
 	close(start)
 	successes, conflicts := 0, 0
+	var writeLatencies []time.Duration
 	for range 2 {
-		err := <-results
+		result := <-results
+		writeLatencies = append(writeLatencies, result.elapsed)
+		err := result.err
 		switch {
 		case err == nil:
 			successes++
@@ -1261,6 +1270,7 @@ func TestIncidentReviewSerializesCompetingWritersAndScanFinalization(t *testing.
 	if successes != 1 || conflicts != 1 {
 		t.Fatalf("competing review writes produced %d successes and %d conflicts", successes, conflicts)
 	}
+	t.Logf("two competing incident-review writes: total=%s calls=%v", time.Since(concurrentStarted), writeLatencies)
 
 	// Race an optimistic review save against the scan-finalization path. The
 	// finalization changes the occurrence origin; either it wins and rejects
@@ -1421,6 +1431,11 @@ func TestMigration68BackfillsActiveOccurrenceProjection(t *testing.T) {
 	}
 	if got := countRows(t, upgraded.DB, `PRAGMA user_version`); got != schemaVersion {
 		t.Fatalf("upgraded schema version = %d, want %d", got, schemaVersion)
+	}
+	if _, err := upgraded.Tenant(DefaultTenantScope()).SaveIncidentReview(ctx, job.ID, IncidentReviewWrite{
+		Key: incident.Change.Key, OccurrenceToken: want, ExpectedRevision: 0, Status: "investigating", Note: "review after schema backfill",
+	}, "migration-reviewer", "Migration Reviewer", AuditEntry{}); err != nil {
+		t.Fatalf("save review against schema-67 occurrence backfilled at startup: %v", err)
 	}
 }
 
@@ -1589,7 +1604,7 @@ func TestIncidentReviewsSurviveBackupAndRestore(t *testing.T) {
 	if _, err := Restore(ctx, backup, destination, RestoreOptions{}); err != nil {
 		t.Fatalf("restore review backup: %v", err)
 	}
-	restored, err := OpenReadOnlyExisting(destination)
+	restored, err := Open(destination)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1601,6 +1616,15 @@ func TestIncidentReviewsSurviveBackupAndRestore(t *testing.T) {
 	var history int
 	if err := restored.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM incident_review_history WHERE job_id=? AND occurrence_token=?`, job.ID, item.OccurrenceToken).Scan(&history); err != nil || history != 1 {
 		t.Fatalf("restored review history count = %d, %v; want one", history, err)
+	}
+	if _, err := restored.Tenant(DefaultTenantScope()).SaveIncidentReview(ctx, job.ID, IncidentReviewWrite{
+		Key: incident.Change.Key, OccurrenceToken: item.OccurrenceToken, ExpectedRevision: 1, Status: "needs_review", Note: "updated after restore",
+	}, "restored-reviewer", "Restored Reviewer", AuditEntry{}); err != nil {
+		t.Fatalf("save review after writable restore startup: %v", err)
+	}
+	page, err = restored.Tenant(DefaultTenantScope()).ListIncidentInbox(ctx, IncidentInboxFilter{View: "all_active", JobID: job.ID, Limit: 10, Now: now})
+	if err != nil || page.Total != 1 || page.Items[0].Review.Revision != 2 || page.Items[0].Review.Status != "needs_review" || page.Items[0].Review.Note != "updated after restore" {
+		t.Fatalf("review after restore startup = %+v, %v; want revision 2 from the restored projection", page, err)
 	}
 }
 

@@ -236,6 +236,16 @@ if a local time occurs twice, select which displayed UTC offset to use. These
 review fields record operator context only; they do not silence or alter
 existing alerts and reminders.
 
+The editor keeps the review revision from when you first change a field in a
+draft. If a refresh or another review update shows a newer revision, your
+edited fields stay in the form and the latest status, note, and follow-up time
+appear above it. Compare those values before choosing **Rebase my draft to
+revision N**. Rebase keeps your edits and changes only the revision expected
+when you save; it does not copy the shared fields into your draft or save it.
+Until you rebase, saving still uses the revision your draft started from, so a
+newer shared review cannot be silently replaced. After rebasing, choose **Save
+review** to publish your edits.
+
 The **Hosts** page aggregates the latest successful result for each effective
 IP. A host detail page shows configured-target relationships, TCP/UDP coverage,
 positive ports, services, scanner provenance, and summarized closed/filtered

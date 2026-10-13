@@ -4,9 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -14,6 +18,130 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
+
+// runSendChildInProcess keeps guarded globals scoped to direct unit tests.
+// Production RunSendChild is exercised in a subprocess because it deliberately
+// retains its guards until that one-request process exits.
+func runSendChildInProcess(input io.Reader) error {
+	return runSendChild(input, sendInProcessWithPolicy)
+}
+
+func TestRunSendChildOwnsDestinationGuardsUntilProcessExit(t *testing.T) {
+	const modeEnv = "EDGEWATCH_NOTIFY_CHILD_GUARD_TEST_MODE"
+	mode := os.Getenv(modeEnv)
+	if mode == "" {
+		for _, childMode := range []string{"blocked", "allowed", "timeout"} {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestRunSendChildOwnsDestinationGuardsUntilProcessExit$")
+			cmd.Env = append(environmentWithout(modeEnv), modeEnv+"="+childMode)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("child mode %q: %v\n%s", childMode, err, output)
+			}
+		}
+		return
+	}
+
+	originalResolver := net.DefaultResolver
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		t.Fatal("default transport is not an HTTP transport")
+	}
+	var rawURL string
+	var exclusions []string
+	var providerStarted <-chan struct{}
+	switch mode {
+	case "blocked":
+		rawURL = "generic+http://127.0.0.1:1/hook?template=json"
+		exclusions = []string{"127.0.0.0/8"}
+	case "allowed", "timeout":
+		started := make(chan struct{}, 1)
+		release := make(chan struct{})
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			started <- struct{}{}
+			if mode == "timeout" {
+				<-release
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer server.Close()
+		defer close(release)
+		providerStarted = started
+		parsed, err := url.Parse(server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, port, err := net.SplitHostPort(parsed.Host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rawURL = "generic+http://safe.example:" + port + "/hook?template=json"
+		exclusions = []string{"198.51.100.0/24"}
+		defaultTransport.Proxy = nil
+		serverAddress := server.Listener.Addr().String()
+		destinationLookup = func(context.Context, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("1.1.1.1")}, nil
+		}
+		destinationTargetDial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return dialDestinationTestAddress(ctx, network, serverAddress)
+		}
+		if mode == "timeout" {
+			notificationProviderTimeout = 150 * time.Millisecond
+		}
+	default:
+		t.Fatalf("unknown child test mode %q", mode)
+	}
+	payload, err := json.Marshal(notificationProcessRequest{URL: rawURL, Message: "guard lifecycle", TargetExclusions: exclusions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode == "timeout" {
+		sendResult := make(chan error, 1)
+		go func() { sendResult <- RunSendChild(strings.NewReader(string(payload))) }()
+		select {
+		case <-providerStarted:
+		case <-time.After(2 * time.Second):
+			t.Fatal("provider did not reach the controlled listener")
+		}
+		select {
+		case err = <-sendResult:
+		case <-time.After(2 * time.Second):
+			t.Fatal("notification child did not return after its provider timeout")
+		}
+		var childErr *ChildExitError
+		if !errors.As(err, &childErr) || childErr.ExitCode() != childExitTimeout {
+			t.Fatalf("timed-out child send error = %v, want timeout child error", err)
+		}
+	} else {
+		err = RunSendChild(strings.NewReader(string(payload)))
+	}
+	switch mode {
+	case "blocked":
+		if !errors.Is(err, ErrDestinationExcluded) {
+			t.Fatalf("blocked child send error = %v, want destination exclusion", err)
+		}
+	case "allowed":
+		if err != nil {
+			t.Fatalf("allowed child send error = %v", err)
+		}
+	}
+	if net.DefaultResolver == originalResolver {
+		t.Fatal("child restored DefaultResolver before process exit")
+	}
+	if http.DefaultClient.Transport != defaultTransport || http.DefaultClient.CheckRedirect == nil || defaultTransport.DialContext == nil {
+		t.Fatal("child restored HTTP guards before process exit")
+	}
+}
+
+func environmentWithout(key string) []string {
+	prefix := key + "="
+	environment := os.Environ()
+	filtered := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, prefix) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}
 
 func TestRunSendChildRejectsMalformedRequest(t *testing.T) {
 	t.Parallel()

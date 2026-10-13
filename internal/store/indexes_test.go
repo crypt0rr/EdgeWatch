@@ -57,7 +57,7 @@ func TestScanHistoryIndexesSupportManagedQueries(t *testing.T) {
 			t.Errorf("scan index %s present = %t, want %t", name, found[name], present)
 		}
 	}
-	for index, keys := range schema66ScanIndexes {
+	for index, keys := range schema70ScanIndexes {
 		if got := indexKeys(t, s.DB, index); got != keys {
 			t.Errorf("%s keys = %q, want %q", index, got, keys)
 		}

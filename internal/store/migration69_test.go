@@ -58,8 +58,8 @@ func TestMigration69BackfillsOutboxEventMetadataSafely(t *testing.T) {
 		t.Fatalf("upgrade from schema 68: %v", err)
 	}
 	t.Cleanup(func() { _ = upgraded.Close() })
-	if version := countRows(t, upgraded.DB, `PRAGMA user_version`); version != 69 {
-		t.Fatalf("schema version = %d, want 69", version)
+	if version := countRows(t, upgraded.DB, `PRAGMA user_version`); version != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
 	}
 	for _, want := range rows {
 		var eventType, jobID string

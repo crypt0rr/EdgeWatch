@@ -21,6 +21,11 @@ var (
 		scansIdentityIndex:      "id,tenant_id,job_id,status,finished_at,job",
 		scansCycleOutcomeIndex:  "cycle_id,cycle_status,status,tenant_id",
 	}
+	schema70ScanIndexes = func() map[string]string {
+		indexes := maps.Clone(schema66ScanIndexes)
+		indexes[scansIdentityIndex] = "id,tenant_id,job_id,status,finished_at,job,comparison"
+		return indexes
+	}()
 	schema65ScanIndexes = map[string]string{
 		"scans_job_time":       "job,finished_at DESC",
 		"scans_job_id_time":    "job_id,finished_at DESC,id DESC",
@@ -149,7 +154,7 @@ func TestMigration66ReplacesScanHistoryIndexesAndKeepsScans(t *testing.T) {
 		if err != nil {
 			t.Fatalf("upgrade from schema 65 (repeated %t): %v", repeat, err)
 		}
-		for index, keys := range schema66ScanIndexes {
+		for index, keys := range schema70ScanIndexes {
 			if got := indexKeys(t, upgraded.DB, index); got != keys {
 				t.Fatalf("%s keys = %q, want %q", index, got, keys)
 			}

@@ -21,6 +21,12 @@ func TestMigration65AddsScanComparisonAndKeepsLegacyRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Test databases are copied from the newest schema. Schema 70's identity
+	// index covers comparison, so remove that index before reconstructing the
+	// schema-64 table shape below. The upgrade recreates it at migration 70.
+	if _, err := s.DB.Exec(`DROP INDEX IF EXISTS ` + scansIdentityIndex); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.DB.Exec(`ALTER TABLE scans DROP COLUMN comparison`); err != nil {
 		t.Fatal(err)
 	}

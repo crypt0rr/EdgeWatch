@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -439,6 +440,232 @@ func insertIncidentEvidenceScan(t *testing.T, ctx context.Context, s *Store, job
 	}
 }
 
+func seedLargeIncidentInboxPage(t *testing.T, incidentCount, hostCount, paddingBytes int) (*Store, *TenantStore, JobRecord, time.Time, int) {
+	t.Helper()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job, err := ts.CreateJob(ctx, testJob("large-inbox-page"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	padding := strings.Repeat("x", paddingBytes)
+	snapshot := model.Snapshot{
+		Scopes: []model.Scope{{Target: "shared.example", Protocol: "tcp", Ports: "1-65535"}},
+		Hosts:  make([]model.HostObservation, hostCount),
+	}
+	for index := range snapshot.Hosts {
+		snapshot.Hosts[index] = model.HostObservation{
+			Address:  fmt.Sprintf("10.0.%d.%d", index/256, index%256),
+			DNSNames: []string{fmt.Sprintf("%s-%04d.example", padding, index)},
+		}
+	}
+	snapshot.Hosts[0].SourceTargets = []string{"shared.example"}
+	snapshot.Hosts[0].Protocols = []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}
+	rawSnapshot, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertIncidentEvidenceScan(t, ctx, s, job, "shared-newer-scan", now.Add(time.Second), "success", model.ScanComparisonCompared, snapshot)
+	if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+		if state.Incidents == nil {
+			state.Incidents = make(map[string]model.Incident)
+		}
+		for index := range incidentCount {
+			key := fmt.Sprintf("shared-port-%03d", index)
+			state.Incidents[key] = model.Incident{
+				Change:     model.Change{Key: key, Kind: "port", Severity: "warning", Target: "shared.example", Protocol: "tcp", Port: index + 1, Old: "closed", New: "open"},
+				LastSeenAt: now,
+			}
+		}
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return s, ts, job, now, len(rawSnapshot)
+}
+
+func TestIncidentInboxFullPageReadsAndDecodesLargeComparedSnapshotOnce(t *testing.T) {
+	s, ts, _, now, snapshotBytes := seedLargeIncidentInboxPage(t, 400, 3000, 1400)
+	if snapshotBytes < 3<<20 {
+		t.Fatalf("large evidence snapshot is %d bytes; want a multi-megabyte fixture", snapshotBytes)
+	}
+	readCount, decodeCount := 0, 0
+	connectionsInUseDuringDecode := -1
+	page, err := ts.listIncidentInboxWithSnapshotAccess(context.Background(), IncidentInboxFilter{View: "all_active", Limit: 400, Now: now.Add(time.Hour)}, func(ctx context.Context, key incidentInboxSnapshotKey) ([]byte, error) {
+		readCount++
+		return readIncidentInboxSnapshot(ctx, s.ReadDB, key)
+	}, func(raw []byte, snapshot *model.Snapshot) error {
+		decodeCount++
+		connectionsInUseDuringDecode = s.ReadDB.Stats().InUse
+		return json.Unmarshal(raw, snapshot)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Limit != 400 || page.Total != 400 || len(page.Items) != 400 {
+		t.Fatalf("full inbox page = limit %d, total %d, items %d; want 400 rows", page.Limit, page.Total, len(page.Items))
+	}
+	if readCount != 1 || decodeCount != 1 {
+		t.Fatalf("full-page shared scan accesses = %d reads and %d decodes; want one each", readCount, decodeCount)
+	}
+	if connectionsInUseDuringDecode != 0 {
+		t.Fatalf("read connections in use while decoding = %d; want the snapshot query connection released before decode", connectionsInUseDuringDecode)
+	}
+}
+
+func TestIncidentInboxIncompleteNewerScanDoesNotReadItsSnapshot(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job, err := ts.CreateJob(ctx, testJob("incomplete-inbox-snapshot"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastSeen := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	insertIncidentEvidenceScan(t, ctx, s, job, "incomplete-newer-scan", lastSeen.Add(time.Second), "incomplete", model.ScanComparisonNotCompared, model.Snapshot{})
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scans SET snapshot_json='{' WHERE id=?`, "incomplete-newer-scan"); err != nil {
+		t.Fatal(err)
+	}
+	incident := model.Incident{Change: model.Change{Key: "incomplete", Kind: "port", Severity: "warning", Target: "partial.example", Protocol: "tcp", Port: 443}, LastSeenAt: lastSeen}
+	if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Incidents[incident.Change.Key] = incident
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	readCount, decodeCount := 0, 0
+	page, err := ts.listIncidentInboxWithSnapshotAccess(ctx, IncidentInboxFilter{View: "all_active", Limit: 10, Now: lastSeen.Add(time.Hour)}, func(ctx context.Context, key incidentInboxSnapshotKey) ([]byte, error) {
+		readCount++
+		return readIncidentInboxSnapshot(ctx, s.ReadDB, key)
+	}, func(raw []byte, snapshot *model.Snapshot) error {
+		decodeCount++
+		return json.Unmarshal(raw, snapshot)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ObservationUncertainty.Reason != IncidentReasonLatestScanIncomplete {
+		t.Fatalf("incomplete newer evidence = %+v; want metadata-only incomplete classification", page.Items)
+	}
+	if readCount != 0 || decodeCount != 0 {
+		t.Fatalf("incomplete scan snapshot access = %d reads and %d decodes; want no blob access", readCount, decodeCount)
+	}
+}
+
+func TestIncidentInboxSnapshotDeletedAfterMetadataReadIsUnclassifiable(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job, err := ts.CreateJob(ctx, testJob("deleted-inbox-snapshot"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastSeen := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	insertIncidentEvidenceScan(t, ctx, s, job, "retained-until-request", lastSeen.Add(time.Second), "success", model.ScanComparisonCompared, model.Snapshot{
+		Scopes: []model.Scope{{Target: "deleted.example", Protocol: "tcp", Ports: "443"}},
+		Hosts:  []model.HostObservation{{Address: "192.0.2.44", SourceTargets: []string{"deleted.example"}, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}}},
+	})
+	incident := model.Incident{Change: model.Change{Key: "deleted", Kind: "port", Severity: "warning", Target: "deleted.example", Protocol: "tcp", Port: 443}, LastSeenAt: lastSeen}
+	if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Incidents[incident.Change.Key] = incident
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	readCount, decodeCount := 0, 0
+	page, err := ts.listIncidentInboxWithSnapshotAccess(ctx, IncidentInboxFilter{View: "all_active", Limit: 10, Now: lastSeen.Add(time.Hour)}, func(ctx context.Context, key incidentInboxSnapshotKey) ([]byte, error) {
+		readCount++
+		if _, err := s.DB.ExecContext(ctx, `DELETE FROM scans WHERE id=? AND tenant_id=? AND job_id=?`, key.scanID, key.tenantID, key.jobID); err != nil {
+			return nil, err
+		}
+		return readIncidentInboxSnapshot(ctx, s.ReadDB, key)
+	}, func(raw []byte, snapshot *model.Snapshot) error {
+		decodeCount++
+		return json.Unmarshal(raw, snapshot)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readCount != 1 || decodeCount != 0 || len(page.Items) != 1 || page.Items[0].ObservationUncertainty.Reason != IncidentReasonLatestScanUnclassifiable {
+		t.Fatalf("deleted fixed scan classification = %+v, reads=%d decodes=%d; want one no-row read and conservative unclassifiable result", page.Items, readCount, decodeCount)
+	}
+}
+
+func TestIncidentInboxSnapshotReaderRequiresTenantAndJob(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	insertSecondTenant(t, s)
+	ts := defaultTenant(s)
+	job, err := ts.CreateJob(ctx, testJob("snapshot-reader-scope"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertIncidentEvidenceScan(t, ctx, s, job, "scoped-snapshot", time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC), "success", model.ScanComparisonCompared, model.Snapshot{})
+	for _, key := range []incidentInboxSnapshotKey{
+		{tenantID: job.TenantID, jobID: "another-job", scanID: "scoped-snapshot"},
+		{tenantID: secondTenantID, jobID: job.ID, scanID: "scoped-snapshot"},
+	} {
+		if _, err := readIncidentInboxSnapshot(ctx, s.ReadDB, key); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("snapshot read for tenant/job scope %+v = %v; want sql.ErrNoRows", key, err)
+		}
+	}
+}
+
+func TestIncidentInboxReadPoolSessionLatencyWithFourFullPages(t *testing.T) {
+	ctx := context.Background()
+	s, ts, _, now, snapshotBytes := seedLargeIncidentInboxPage(t, 400, 3000, 1400)
+	if snapshotBytes < 3<<20 {
+		t.Fatalf("large evidence snapshot is %d bytes; want a multi-megabyte fixture", snapshotBytes)
+	}
+	user, err := createTestUser(ctx, ts, User{Username: "inbox-pool-session", Role: RoleViewer, PasswordHash: "test-hash", Enabled: true}, AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := now
+	if err := createTestSession(ctx, s, user.ID, "inbox-pool-session-hash", "csrf", created, created.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	const pageRequests = 4
+	started := make(chan struct{}, pageRequests)
+	completed := make(chan error, pageRequests)
+	for range pageRequests {
+		go func() {
+			started <- struct{}{}
+			page, err := ts.ListIncidentInbox(ctx, IncidentInboxFilter{View: "all_active", Limit: 400, Now: now.Add(time.Hour)})
+			if err == nil && (page.Total != 400 || len(page.Items) != 400) {
+				err = fmt.Errorf("full inbox page returned total=%d items=%d", page.Total, len(page.Items))
+			}
+			completed <- err
+		}()
+	}
+	for range pageRequests {
+		<-started
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for s.ReadDB.Stats().InUse < pageRequests && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if inUse := s.ReadDB.Stats().InUse; inUse < pageRequests {
+		t.Fatalf("concurrent inbox requests occupied %d read connections; want all %d", inUse, pageRequests)
+	}
+	sessionContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	startedAt := time.Now()
+	session, err := s.GetSession(sessionContext, "inbox-pool-session-hash")
+	latency := time.Since(startedAt)
+	if err != nil || session.IDHash != "inbox-pool-session-hash" {
+		t.Fatalf("GetSession under four full inbox pages = %+v, %v after %s", session, err, latency)
+	}
+	t.Logf("GetSession latency with four concurrent %d-row pages over a %d-byte snapshot: %s", 400, snapshotBytes, latency)
+	for range pageRequests {
+		if err := <-completed; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestIncidentInboxLatestScanSeekUsesHistoryIndex(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
@@ -465,6 +692,267 @@ func TestIncidentInboxLatestScanSeekUsesHistoryIndex(t *testing.T) {
 	}
 	if !strings.Contains(plan.String(), scansJobHistoryIndex) {
 		t.Fatalf("newer observation seek does not use the bounded job history index: %s", plan.String())
+	}
+}
+
+func TestIncidentObservationNeedsSnapshotOnlyForNewerSuccessfulComparedScan(t *testing.T) {
+	t.Parallel()
+	lastSeen := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	incident := model.Incident{LastSeenAt: lastSeen}
+	tests := []struct {
+		name       string
+		scanID     string
+		finishedAt time.Time
+		status     string
+		comparison string
+		want       bool
+	}{
+		{name: "legacy incident", scanID: "later", finishedAt: lastSeen.Add(time.Second), status: "success", comparison: model.ScanComparisonCompared},
+		{name: "no newer scan", status: "success", comparison: model.ScanComparisonCompared},
+		{name: "same instant", scanID: "same", finishedAt: lastSeen, status: "success", comparison: model.ScanComparisonCompared},
+		{name: "older scan", scanID: "older", finishedAt: lastSeen.Add(-time.Second), status: "success", comparison: model.ScanComparisonCompared},
+		{name: "failed scan", scanID: "failed", finishedAt: lastSeen.Add(time.Second), status: "failed", comparison: model.ScanComparisonNotCompared},
+		{name: "incomplete scan", scanID: "incomplete", finishedAt: lastSeen.Add(time.Second), status: "incomplete", comparison: model.ScanComparisonNotCompared},
+		{name: "not compared", scanID: "not-compared", finishedAt: lastSeen.Add(time.Second), status: "success", comparison: model.ScanComparisonNotCompared},
+		{name: "baseline sample", scanID: "sample", finishedAt: lastSeen.Add(time.Second), status: "success", comparison: model.ScanComparisonBaselineSample},
+		{name: "compared scan", scanID: "compared", finishedAt: lastSeen.Add(time.Second), status: "success", comparison: model.ScanComparisonCompared, want: true},
+	}
+	incident.Change = model.Change{Key: "legacy"}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := incident
+			if test.name == "legacy incident" {
+				value.LastSeenAt = time.Time{}
+			}
+			got := incidentObservationNeedsSnapshot(value, test.scanID, sqliteTimestamp(test.finishedAt), test.status, test.comparison)
+			if got != test.want {
+				t.Fatalf("needs snapshot = %t; want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestIncidentInboxSnapshotCacheReadsAndDecodesDistinctScanIdentitiesOnce(t *testing.T) {
+	t.Parallel()
+	shared := incidentInboxSnapshotKey{tenantID: "tenant-a", jobID: "job-a", scanID: "shared-scan"}
+	otherJob := incidentInboxSnapshotKey{tenantID: "tenant-a", jobID: "job-b", scanID: "shared-scan"}
+	otherTenant := incidentInboxSnapshotKey{tenantID: "tenant-b", jobID: "job-a", scanID: "shared-scan"}
+	keys := make([]incidentInboxSnapshotKey, 400)
+	for index := range keys {
+		keys[index] = shared
+	}
+	keys = append(keys, otherJob, otherTenant)
+
+	large := model.Snapshot{Scopes: []model.Scope{{Target: "shared.example", Protocol: "tcp", Ports: "1-65535"}}, Hosts: make([]model.HostObservation, 1800)}
+	padding := strings.Repeat("x", 1024)
+	for index := range large.Hosts {
+		large.Hosts[index] = model.HostObservation{Address: fmt.Sprintf("192.0.2.%d", index), DNSNames: []string{padding + fmt.Sprint(index)}}
+		if index == 0 {
+			large.Hosts[index].SourceTargets = []string{"shared.example"}
+			large.Hosts[index].Protocols = []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}
+		}
+	}
+	rawLarge, err := json.Marshal(large)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rawLarge) < 1<<20 {
+		t.Fatalf("large fixture snapshot is only %d bytes", len(rawLarge))
+	}
+	var readCalls = map[incidentInboxSnapshotKey]int{}
+	decodeCalls := 0
+	pending := make([]incidentInboxPendingItem, len(keys))
+	rowsBySnapshot := make(map[incidentInboxSnapshotKey][]int)
+	for index, key := range keys {
+		target := "shared.example"
+		if key != shared {
+			target = key.tenantID + "/" + key.jobID
+		}
+		pending[index] = incidentInboxPendingItem{
+			item:        IncidentInboxItem{Incident: model.Incident{Change: model.Change{Target: target, Protocol: "tcp"}}},
+			uncertainty: IncidentObservationUncertainty{Status: IncidentObservationUnknown},
+		}
+		rowsBySnapshot[key] = append(rowsBySnapshot[key], index)
+	}
+	err = classifyIncidentInboxSnapshots(context.Background(), rowsBySnapshot, pending, func(ctx context.Context, key incidentInboxSnapshotKey) ([]byte, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		readCalls[key]++
+		if key == shared {
+			return rawLarge, nil
+		}
+		target := key.tenantID + "/" + key.jobID
+		snapshot := model.Snapshot{
+			Scopes: []model.Scope{{Target: target, Protocol: "tcp", Ports: "443"}},
+			Hosts:  []model.HostObservation{{Address: "192.0.2.44", SourceTargets: []string{target}, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}}},
+		}
+		return json.Marshal(snapshot)
+	}, func(raw []byte, snapshot *model.Snapshot) error {
+		decodeCalls++
+		return json.Unmarshal(raw, snapshot)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readCalls[shared] != 1 || readCalls[otherJob] != 1 || readCalls[otherTenant] != 1 {
+		t.Fatalf("snapshot read counts = %v; want one read for each tenant/job/scan identity", readCalls)
+	}
+	if decodeCalls != 3 {
+		t.Fatalf("snapshot decode count = %d; want one decode for each distinct scan identity", decodeCalls)
+	}
+	for index, item := range pending {
+		if item.uncertainty.Reason != IncidentReasonLatestScanDoesNotEstablishRecovery {
+			t.Fatalf("row %d classification = %+v; snapshots were not independently classified for their identity", index, item.uncertainty)
+		}
+	}
+}
+
+func TestIncidentInboxSnapshotCacheStopsOnCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := incidentInboxSnapshotKey{tenantID: "tenant", jobID: "job", scanID: "first"}
+	second := incidentInboxSnapshotKey{tenantID: "tenant", jobID: "job", scanID: "second"}
+	rowsBySnapshot := map[incidentInboxSnapshotKey][]int{first: {0}, second: {1}}
+	pending := []incidentInboxPendingItem{
+		{item: IncidentInboxItem{Incident: model.Incident{Change: model.Change{Target: "first.example", Protocol: "tcp"}}}, uncertainty: IncidentObservationUncertainty{Status: IncidentObservationUnknown}},
+		{item: IncidentInboxItem{Incident: model.Incident{Change: model.Change{Target: "second.example", Protocol: "tcp"}}}, uncertainty: IncidentObservationUncertainty{Status: IncidentObservationUnknown}},
+	}
+	calls := 0
+	err := classifyIncidentInboxSnapshots(ctx, rowsBySnapshot, pending, func(context.Context, incidentInboxSnapshotKey) ([]byte, error) {
+		calls++
+		cancel()
+		return []byte(`{"scopes":[]}`), nil
+	}, func(raw []byte, snapshot *model.Snapshot) error { return json.Unmarshal(raw, snapshot) })
+	if !errors.Is(err, context.Canceled) || calls != 1 {
+		t.Fatalf("cancelled snapshot load = %v after %d reads; want context cancellation after one", err, calls)
+	}
+}
+
+func TestIncidentInboxSnapshotClassificationFailsClosedOnReadAndDecodeErrors(t *testing.T) {
+	t.Parallel()
+	key := incidentInboxSnapshotKey{tenantID: "tenant", jobID: "job", scanID: "scan"}
+	rowsBySnapshot := map[incidentInboxSnapshotKey][]int{key: {0}}
+	pending := []incidentInboxPendingItem{{
+		item:        IncidentInboxItem{Incident: model.Incident{Change: model.Change{Target: "safe.example", Protocol: "tcp"}}},
+		uncertainty: IncidentObservationUncertainty{Status: IncidentObservationUnknown},
+	}}
+
+	readFailure := errors.New("snapshot read failed")
+	err := classifyIncidentInboxSnapshots(context.Background(), rowsBySnapshot, pending, func(context.Context, incidentInboxSnapshotKey) ([]byte, error) {
+		return nil, readFailure
+	}, func([]byte, *model.Snapshot) error {
+		t.Fatal("decoder ran after a snapshot read failure")
+		return nil
+	})
+	if !errors.Is(err, readFailure) {
+		t.Fatalf("snapshot read failure = %v; want %v", err, readFailure)
+	}
+
+	decodeFailure := errors.New("snapshot decode failed")
+	pending[0].uncertainty = IncidentObservationUncertainty{Status: IncidentObservationUnknown}
+	err = classifyIncidentInboxSnapshots(context.Background(), rowsBySnapshot, pending, func(context.Context, incidentInboxSnapshotKey) ([]byte, error) {
+		return []byte(`{}`), nil
+	}, func([]byte, *model.Snapshot) error {
+		return decodeFailure
+	})
+	if err != nil {
+		t.Fatalf("classification with malformed snapshot = %v; want fail-closed item", err)
+	}
+	if got := pending[0].uncertainty; got.Status != IncidentObservationUnknown || got.Reason != IncidentReasonLatestScanUnclassifiable {
+		t.Fatalf("malformed snapshot uncertainty = %+v; want unknown/unclassifiable", got)
+	}
+}
+
+func TestIncidentInboxSnapshotClassificationRejectsInvalidRowIndexes(t *testing.T) {
+	t.Parallel()
+	key := incidentInboxSnapshotKey{tenantID: "tenant", jobID: "job", scanID: "scan"}
+	err := classifyIncidentInboxSnapshots(context.Background(), map[incidentInboxSnapshotKey][]int{key: {1}}, []incidentInboxPendingItem{{}}, func(context.Context, incidentInboxSnapshotKey) ([]byte, error) {
+		return []byte(`{}`), nil
+	}, func(raw []byte, snapshot *model.Snapshot) error {
+		return json.Unmarshal(raw, snapshot)
+	})
+	if err == nil || !strings.Contains(err.Error(), "row index 1 is out of bounds") {
+		t.Fatalf("invalid snapshot row index error = %v; want an explicit bounds error", err)
+	}
+}
+
+func TestIncidentInboxNewerEvidenceStaysWithinJobAndTenant(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	insertSecondTenant(t, s)
+	tenantA := defaultTenant(s)
+	tenantB := s.Tenant(TenantScope{id: secondTenantID})
+	jobA, err := tenantA.CreateJob(ctx, testJob("inbox-tenant-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobA2, err := tenantA.CreateJob(ctx, testJob("inbox-tenant-a-second-job"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobB, err := tenantB.CreateJob(ctx, testJob("inbox-tenant-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastSeen := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	putIncident := func(job JobRecord, key, target, scanID string) {
+		t.Helper()
+		incident := model.Incident{Change: model.Change{Key: key, Kind: "port", Severity: "warning", Target: target, Protocol: "tcp", Port: 443}, ScanID: "opening-" + key, LastSeenAt: lastSeen}
+		if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+			if state.Incidents == nil {
+				state.Incidents = make(map[string]model.Incident)
+			}
+			state.Incidents[key] = incident
+			return nil, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		insertIncidentEvidenceScan(t, ctx, s, job, scanID, lastSeen.Add(time.Minute), "success", model.ScanComparisonCompared, model.Snapshot{
+			Scopes: []model.Scope{{Target: target, Protocol: "tcp", Ports: "443"}},
+			Hosts:  []model.HostObservation{{Address: "192.0.2.44", SourceTargets: []string{target}, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}}},
+		})
+	}
+	putIncident(jobA, "tenant-a-one", "one-a.example", "tenant-a-shared")
+	// A second incident in the same job shares the same newer scan and should
+	// reuse its decoded snapshot within the request.
+	second := model.Incident{Change: model.Change{Key: "tenant-a-two", Kind: "port", Severity: "warning", Target: "one-a.example", Protocol: "tcp", Port: 8443}, ScanID: "opening-tenant-a-two", LastSeenAt: lastSeen}
+	if _, err := s.System().UpdateRuntime(ctx, jobA.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Incidents[second.Change.Key] = second
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	putIncident(jobA2, "tenant-a-second-job", "two-a.example", "tenant-a-second-scan")
+	putIncident(jobB, "tenant-b-one", "one-b.example", "tenant-b-scan")
+
+	pageA, err := tenantA.ListIncidentInbox(ctx, IncidentInboxFilter{View: "all_active", Limit: 10, Now: lastSeen.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pageA.Total != 3 || pageA.ActiveCount != 3 || len(pageA.Items) != 3 {
+		t.Fatalf("tenant A inbox totals = total %d active %d items %d; want 3", pageA.Total, pageA.ActiveCount, len(pageA.Items))
+	}
+	seenA := map[string]string{}
+	for _, item := range pageA.Items {
+		seenA[item.Incident.Change.Key] = item.ObservationUncertainty.ScanID
+		if item.ObservationUncertainty.Reason != IncidentReasonLatestScanDoesNotEstablishRecovery {
+			t.Errorf("tenant A incident %s classification = %+v", item.Incident.Change.Key, item.ObservationUncertainty)
+		}
+	}
+	if seenA["tenant-a-one"] != "tenant-a-shared" || seenA["tenant-a-two"] != "tenant-a-shared" || seenA["tenant-a-second-job"] != "tenant-a-second-scan" || seenA["tenant-b-one"] != "" {
+		t.Fatalf("tenant A newer evidence = %v; want only same-tenant, same-job scans", seenA)
+	}
+	pageB, err := tenantB.ListIncidentInbox(ctx, IncidentInboxFilter{View: "all_active", Limit: 10, Now: lastSeen.Add(time.Hour)})
+	if err != nil || pageB.Total != 1 || len(pageB.Items) != 1 || pageB.Items[0].JobID != jobB.ID || pageB.Items[0].ObservationUncertainty.ScanID != "tenant-b-scan" {
+		t.Fatalf("tenant B inbox = %+v, %v; want only tenant B's own job and scan", pageB, err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := tenantA.ListIncidentInbox(canceled, IncidentInboxFilter{View: "all_active", Limit: 10}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled inbox request = %v; want context.Canceled", err)
 	}
 }
 

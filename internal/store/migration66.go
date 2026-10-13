@@ -16,7 +16,8 @@ const (
 	// scansTenantHistoryIndex lists a tenant's scans newest first, with the
 	// job ID, outcome and job name of each.
 	scansTenantHistoryIndex = "scans_tenant_history"
-	// scansIdentityIndex finds a scan's tenant, job and outcome by its ID.
+	// scansIdentityIndex finds a scan's tenant, job, outcome and comparison
+	// by its ID; schema 70 adds comparison to the original identity index.
 	scansIdentityIndex = "scans_identity"
 	// scansCycleOutcomeIndex finds the scans recorded for a cycle by their
 	// cycle and scan outcome.

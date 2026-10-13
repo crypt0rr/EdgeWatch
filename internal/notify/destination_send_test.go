@@ -77,6 +77,44 @@ func sameDestinationTestFunc(left, right any) bool {
 	return leftValue.Pointer() == rightValue.Pointer()
 }
 
+type destinationGuardProcessGlobals struct {
+	resolver               *net.Resolver
+	client                 *http.Client
+	defaultClientTransport http.RoundTripper
+	defaultClientRedirect  func(*http.Request, []*http.Request) error
+	defaultTransport       http.RoundTripper
+	transport              *http.Transport
+	transportProxy         func(*http.Request) (*url.URL, error)
+	transportDial          func(context.Context, string, string) (net.Conn, error)
+}
+
+func captureDestinationGuardProcessGlobals(t *testing.T) destinationGuardProcessGlobals {
+	t.Helper()
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		t.Fatal("default transport is not an HTTP transport")
+	}
+	return destinationGuardProcessGlobals{
+		resolver:               net.DefaultResolver,
+		client:                 http.DefaultClient,
+		defaultClientTransport: http.DefaultClient.Transport,
+		defaultClientRedirect:  http.DefaultClient.CheckRedirect,
+		defaultTransport:       http.DefaultTransport,
+		transport:              transport,
+		transportProxy:         transport.Proxy,
+		transportDial:          transport.DialContext,
+	}
+}
+
+func (before destinationGuardProcessGlobals) assertRestored(t *testing.T) {
+	t.Helper()
+	if net.DefaultResolver != before.resolver || http.DefaultClient != before.client || http.DefaultTransport != before.defaultTransport ||
+		http.DefaultClient.Transport != before.defaultClientTransport || !sameDestinationTestFunc(http.DefaultClient.CheckRedirect, before.defaultClientRedirect) ||
+		!sameDestinationTestFunc(before.transport.Proxy, before.transportProxy) || !sameDestinationTestFunc(before.transport.DialContext, before.transportDial) {
+		t.Fatal("in-process guarded send did not restore resolver and HTTP globals")
+	}
+}
+
 func testDestinationCertificate(t *testing.T, hosts ...string) (tls.Certificate, *x509.CertPool) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -121,7 +159,9 @@ func TestDestinationPolicyRechecksDNSAtTheActualHTTPDial(t *testing.T) {
 		return nil, errors.New("the refused address must never be dialed")
 	})
 
+	globals := captureDestinationGuardProcessGlobals(t)
 	err := sendInProcessWithPolicy(context.Background(), "generic+http://rebound.example/hook?template=json", "test", destinationTestPolicy(t))
+	globals.assertRestored(t)
 	if !errors.Is(err, ErrDestinationExcluded) {
 		t.Fatalf("send error = %v, want destination excluded after DNS rebinding", err)
 	}
@@ -213,7 +253,9 @@ func TestCanceledUnitSendDoesNotStartProvider(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
+	globals := captureDestinationGuardProcessGlobals(t)
 	err := sendInProcessWithPolicy(ctx, "generic+http://203.0.113.1/hook?template=json", "test", destinationTestPolicy(t))
+	globals.assertRestored(t)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("send error = %v, want context.Canceled", err)
 	}
@@ -251,10 +293,12 @@ func TestDestinationPolicyChecksEveryHTTPRedirect(t *testing.T) {
 		return []netip.Addr{netip.MustParseAddr("203.0.113.12")}, nil
 	}, func(ctx context.Context, network, _ string) (net.Conn, error) {
 		dials.Add(1)
-		return (&net.Dialer{}).DialContext(ctx, network, serverAddress)
+		return dialDestinationTestAddress(ctx, network, serverAddress)
 	})
 
+	globals := captureDestinationGuardProcessGlobals(t)
 	err := sendInProcessWithPolicy(context.Background(), "generic+http://safe.example/start?template=json", "test", destinationTestPolicy(t))
+	globals.assertRestored(t)
 	if err != nil {
 		t.Fatalf("safe redirect failed: %v", err)
 	}
@@ -290,10 +334,12 @@ func TestDestinationPolicyStopsAnExcludedHTTPRedirect(t *testing.T) {
 		return []netip.Addr{netip.MustParseAddr("203.0.113.13")}, nil
 	}, func(ctx context.Context, network, _ string) (net.Conn, error) {
 		dials.Add(1)
-		return (&net.Dialer{}).DialContext(ctx, network, serverAddress)
+		return dialDestinationTestAddress(ctx, network, serverAddress)
 	})
 
+	globals := captureDestinationGuardProcessGlobals(t)
 	err := sendInProcessWithPolicy(context.Background(), "generic+http://safe.example/start?template=json", "test", destinationTestPolicy(t))
+	globals.assertRestored(t)
 	if !errors.Is(err, ErrDestinationExcluded) {
 		t.Fatalf("send error = %v, want excluded redirect target", err)
 	}
@@ -352,7 +398,7 @@ func TestDestinationGuardPreservesTLSHostnameAndTelegramCapturedClient(t *testin
 		}
 		return []netip.Addr{netip.MustParseAddr("203.0.113.14")}, nil
 	}, func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, network, serverAddress)
+		return dialDestinationTestAddress(ctx, network, serverAddress)
 	})
 	port := server.Listener.Addr().(*net.TCPAddr).Port
 	policy := destinationTestPolicy(t)
@@ -486,7 +532,7 @@ func TestGotifyPolicyKeepsItsOriginallyDirectPrivateTransport(t *testing.T) {
 		} else if port != strconv.Itoa(plainPort) {
 			return nil, errors.New("unexpected Gotify test port")
 		}
-		return (&net.Dialer{}).DialContext(ctx, network, serverAddress)
+		return dialDestinationTestAddress(ctx, network, serverAddress)
 	})
 	destinationProxyLookup = func(*http.Request) (*url.URL, error) {
 		proxyCalls.Add(1)
@@ -552,6 +598,37 @@ func TestDestinationProxyPolicyRefusesSelectedProxiesAndPreservesDirectPaths(t *
 	destinationProxyLookup = func(*http.Request) (*url.URL, error) { return nil, errors.New("proxy configuration error") }
 	if _, err := guardedProxy(request); err == nil {
 		t.Fatal("proxy lookup failure was silently allowed")
+	}
+}
+
+func TestInProcessGuardedSendRestoresGlobalsAfterProxyRefusal(t *testing.T) {
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		t.Fatal("default transport is not an HTTP transport")
+	}
+	oldProxy := defaultTransport.Proxy
+	defaultTransport.Proxy = http.ProxyFromEnvironment
+	t.Cleanup(func() { defaultTransport.Proxy = oldProxy })
+
+	var dials atomic.Int32
+	useDestinationSendHooks(t, func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("1.1.1.1")}, nil
+	}, func(context.Context, string, string) (net.Conn, error) {
+		dials.Add(1)
+		return nil, errors.New("proxy refusal must happen before target dial")
+	})
+	destinationProxyLookup = func(*http.Request) (*url.URL, error) {
+		return &url.URL{Scheme: "http", Host: "proxy.example:3128"}, nil
+	}
+
+	globals := captureDestinationGuardProcessGlobals(t)
+	err := sendInProcessWithPolicy(context.Background(), "generic+http://safe.example/hook?template=json", "test", destinationTestPolicy(t, "198.51.100.0/24"))
+	globals.assertRestored(t)
+	if err == nil {
+		t.Fatal("send through a selected proxy unexpectedly succeeded")
+	}
+	if got := dials.Load(); got != 0 {
+		t.Fatalf("proxy refusal attempted %d direct target dials", got)
 	}
 }
 
@@ -824,7 +901,7 @@ func TestRunSendChildEnforcesSerializedConfiguredExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = RunSendChild(strings.NewReader(string(payload)))
+	err = runSendChildInProcess(strings.NewReader(string(payload)))
 	var childErr *ChildExitError
 	if !errors.As(err, &childErr) || childErr.ExitCode() != childExitExcluded || !errors.Is(err, ErrDestinationExcluded) {
 		t.Fatalf("active-policy child error = %v, want destination-excluded child status", err)
@@ -891,7 +968,7 @@ func TestRunSendChildSMTPRefusesReboundAddressBeforeDial(t *testing.T) {
 	})
 	previousUpstreamDial := destinationResolverUpstreamDial
 	destinationResolverUpstreamDial = func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, network, dns.address)
+		return dialDestinationTestAddress(ctx, network, dns.address)
 	}
 	t.Cleanup(func() { destinationResolverUpstreamDial = previousUpstreamDial })
 
@@ -905,7 +982,7 @@ func TestRunSendChildSMTPRefusesReboundAddressBeforeDial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = RunSendChild(strings.NewReader(string(payload)))
+	err = runSendChildInProcess(strings.NewReader(string(payload)))
 	var childErr *ChildExitError
 	if !errors.As(err, &childErr) || childErr.ExitCode() != childExitExcluded || !errors.Is(err, ErrDestinationExcluded) {
 		t.Fatalf("active-policy SMTP child error = %v, want excluded after provider DNS rebound", err)

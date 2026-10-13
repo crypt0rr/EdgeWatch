@@ -535,6 +535,73 @@ func TestFoldedPositivePortsChecksCancellationDuringExpansion(t *testing.T) {
 	}
 }
 
+func TestFoldedPositivePortsValidatesBeforeReturningResults(t *testing.T) {
+	valid := nmapExtraPorts{
+		State: "open|filtered",
+		Count: 3,
+		Reasons: []nmapExtraReason{
+			{Reason: "no-response", Count: 2, Protocol: "UDP", Ports: "53, 123"},
+			{Reason: "admin-prohibited", Count: 1, Ports: "500"},
+		},
+	}
+	want := []foldedPort{{port: 53, reason: "no-response"}, {port: 123, reason: "no-response"}, {port: 500, reason: "admin-prohibited"}}
+	ports, ok := foldedPositivePorts(valid, "udp")
+	if !ok || !reflect.DeepEqual(ports, want) {
+		t.Fatalf("compatibility expansion = %#v, %t; want %#v, true", ports, ok, want)
+	}
+	contextPorts, contextOK, err := foldedPositivePortsContext(context.Background(), valid, "udp")
+	if err != nil || !contextOK || !reflect.DeepEqual(contextPorts, ports) {
+		t.Fatalf("context expansion = %#v, %t, %v; want %#v, true, nil", contextPorts, contextOK, err, ports)
+	}
+
+	invalid := []struct {
+		name  string
+		extra nmapExtraPorts
+	}{
+		{name: "no reasons", extra: nmapExtraPorts{Count: 1}},
+		{name: "wrong protocol", extra: nmapExtraPorts{Count: 1, Reasons: []nmapExtraReason{{Count: 1, Protocol: "tcp", Ports: "53"}}}},
+		{name: "duplicate across reasons", extra: nmapExtraPorts{Count: 2, Reasons: []nmapExtraReason{{Count: 1, Ports: "53"}, {Count: 1, Ports: "53"}}}},
+		{name: "malformed port", extra: nmapExtraPorts{Count: 1, Reasons: []nmapExtraReason{{Count: 1, Ports: "not-a-port"}}}},
+		{name: "out-of-domain port", extra: nmapExtraPorts{Count: 1, Reasons: []nmapExtraReason{{Count: 1, Ports: "65536"}}}},
+		{name: "listed count differs", extra: nmapExtraPorts{Count: 2, Reasons: []nmapExtraReason{{Count: 2, Ports: "53"}}}},
+		{name: "reason count exceeds folded count", extra: nmapExtraPorts{Count: 1, Reasons: []nmapExtraReason{{Count: 2, Ports: "53-54"}}}},
+		{name: "port list exceeds reason count", extra: nmapExtraPorts{Count: 1, Reasons: []nmapExtraReason{{Count: 1, Ports: "53,54"}}}},
+	}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			got, valid := foldedPositivePorts(test.extra, "udp")
+			if valid || len(got) != 0 {
+				t.Fatalf("invalid folded list returned partial results %#v, valid=%t", got, valid)
+			}
+		})
+	}
+
+	callbackErr := errors.New("stop folded-port consumer")
+	emitted := 0
+	complete, err := walkFoldedPositivePortsContext(context.Background(), valid, "udp", func(foldedPort) error {
+		emitted++
+		return callbackErr
+	})
+	if complete || !errors.Is(err, callbackErr) || emitted != 1 {
+		t.Fatalf("callback failure = complete %t, err %v, emitted %d; want false, callback error, one record", complete, err, emitted)
+	}
+}
+
+func TestNmapPortBitsetGuardsThePortDomain(t *testing.T) {
+	var ports nmapPortBitset
+	ports.add(-1)
+	ports.add(65536)
+	if ports.contains(-1) || ports.contains(65536) {
+		t.Fatal("out-of-domain ports appeared in the bitset")
+	}
+	// The parser rejects port zero before it reaches this storage helper.
+	ports.add(65535)
+	ports.add(1)
+	if !ports.contains(1) || !ports.contains(65535) || ports.contains(0) || ports.contains(2) {
+		t.Fatal("bitset did not preserve valid port endpoints and leave unset values clear")
+	}
+}
+
 func TestParseXMLPreservesStateReasonSlackAndOutputCap(t *testing.T) {
 	const address = "192.0.2.1"
 	var ports strings.Builder
@@ -652,13 +719,18 @@ func (reader nmapXMLChunkReader) Read(buffer []byte) (int, error) {
 }
 
 func TestNmapXMLAttributeGuardStopsBeforeExcessAttributeAcrossReads(t *testing.T) {
+	var decoyAttrs strings.Builder
+	for index := 0; index <= maxNmapXMLAttributes; index++ {
+		fmt.Fprintf(&decoyAttrs, ` a%d="x"`, index)
+	}
 	var input strings.Builder
-	input.WriteString(`<nmaprun`)
+	input.WriteString(`<?xml version="1.0"?><?probe <ignored` + decoyAttrs.String() + `?><!DOCTYPE nmaprun [<!ELEMENT nmaprun ANY><!ENTITY marker "a > b [ c ]"><!-- ] <ignored` + decoyAttrs.String() + ` -->]><nmaprun`)
 	for index := 0; index <= maxNmapXMLAttributes; index++ {
 		fmt.Fprintf(&input, ` a%d="x"`, index)
 	}
 	input.WriteString(`></nmaprun>`)
 	data := []byte(input.String())
+	actualTag := strings.LastIndex(string(data), `<nmaprun`)
 	guard := newNmapXMLAttributeLimitReader(context.Background(), nmapXMLChunkReader{reader: bytes.NewReader(data), chunk: 3})
 	buffer := make([]byte, 3)
 	var exposed []byte
@@ -675,20 +747,87 @@ func TestNmapXMLAttributeGuardStopsBeforeExcessAttributeAcrossReads(t *testing.T
 			t.Fatal("attribute guard made no progress before the limit")
 		}
 	}
-	firstExcessName := strings.Index(string(data), fmt.Sprintf("a%d=", maxNmapXMLAttributes))
+	firstExcessName := actualTag + strings.Index(string(data[actualTag:]), fmt.Sprintf("a%d=", maxNmapXMLAttributes))
 	if firstExcessName < 0 || len(exposed) != firstExcessName {
-		t.Fatalf("guard exposed %d bytes before rejecting attr %d at byte %d", len(exposed), maxNmapXMLAttributes+1, firstExcessName)
+		t.Fatalf("guard exposed %d bytes before rejecting attr %d at byte %d (actual tag offset %d)", len(exposed), maxNmapXMLAttributes+1, firstExcessName, actualTag)
 	}
 }
 
 func TestParseXMLAttributeGuardSkipsNonTagMarkupAndQuotedValues(t *testing.T) {
-	data := []byte(`<?xml version="1.0"?><!-- <ignored a="1" b="2"> --><!DOCTYPE nmaprun [<!ELEMENT nmaprun ANY><!-- ] <ignored a="1" b="2"> -->]><nmaprun note="a > b"><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><trace><![CDATA[<ignored a="1" b="2">]]></trace></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	data := []byte(`<?xml version="1.0"?><?probe <ignored a="1" b="2"?><!-- <ignored a="1" b="2"> --><!DOCTYPE nmaprun [<!ELEMENT nmaprun ANY><!-- ] <ignored a="1" b="2"> -->]><nmaprun note="a > b"><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><trace><![CDATA[<ignored a="1" b="2">]]></trace></host><runstats><finished exit="success"/></runstats></nmaprun>`)
 	parsed, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "443"}, []string{"192.0.2.1"}, 1, nil)
 	if err != nil {
 		t.Fatalf("valid Nmap DOCTYPE or markup decoy was rejected: %v", err)
 	}
 	if _, ok := parsed.Hosts["192.0.2.1"]; !ok {
 		t.Fatalf("host after valid DTD and CDATA was not parsed: %#v", parsed.Hosts)
+	}
+}
+
+func TestNmapXMLAttributeGuardStopsMalformedBareAttributesBeforeTokenization(t *testing.T) {
+	var input strings.Builder
+	input.WriteString(`<nmaprun`)
+	for i := 0; i <= maxNmapXMLAttributes; i++ {
+		fmt.Fprintf(&input, ` a%d`, i)
+	}
+	input.WriteString(`>`)
+	data := []byte(input.String())
+	guard := newNmapXMLAttributeLimitReader(context.Background(), bytes.NewReader(data))
+	buffer := make([]byte, len(data))
+	read, err := guard.Read(buffer)
+	if !errors.Is(err, errNmapXMLAttributeLimit) || read >= len(data) {
+		t.Fatalf("malformed bare attributes read %d/%d bytes with error %v, want bounded pre-token rejection", read, len(data), err)
+	}
+	read, repeatedErr := guard.Read(buffer)
+	if read != 0 || !errors.Is(repeatedErr, errNmapXMLAttributeLimit) {
+		t.Fatalf("repeat read after attribute limit = %d, %v; want 0 and the pending limit error", read, repeatedErr)
+	}
+	var nilContext context.Context
+	zeroRead, zeroErr := newNmapXMLAttributeLimitReader(nilContext, bytes.NewReader(nil)).Read(nil)
+	if zeroRead != 0 || zeroErr != nil {
+		t.Fatalf("zero-length guard read = %d, %v; want 0, nil", zeroRead, zeroErr)
+	}
+	_, nilContextErr := newNmapXMLAttributeLimitReader(nilContext, bytes.NewReader(nil)).Read(buffer)
+	if nilContextErr == nil {
+		t.Fatal("attribute guard accepted a nil context for a nonempty read")
+	}
+}
+
+func TestParseXMLRejectsMalformedSelectedRecordsWithoutReturningSnapshot(t *testing.T) {
+	prefix := `<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="192.0.2.2" addrtype="ipv4"/><ports><port protocol="tcp" portid="22"><state state="open"/></port></ports></host><host>`
+	suffix := `</host><runstats><finished exit="success"/></runstats></nmaprun>`
+	cases := []struct {
+		name                 string
+		host                 string
+		want                 string
+		wantSelectedSpans    int
+		wantMaterializedHost int
+	}{
+		{name: "port before address", host: `<status state="up"/><ports><port protocol="tcp" portid="22"><state state="open"/></port></ports><address addr="192.0.2.1" addrtype="ipv4"/>`, want: "port records appeared before the host address"},
+		{name: "missing port id", host: `<status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp"><state state="open"/></port></ports>`, want: "missing its port id"},
+		{name: "invalid port id", host: `<status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="invalid"/></ports>`, want: "invalid nmap XML portid attribute"},
+		{name: "out-of-range port id", host: `<status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="0"/></ports>`, want: "invalid port id 0"},
+		{name: "missing folded count", host: `<status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><extraports state="closed"/></ports>`, want: "missing or negative extraports count"},
+		{name: "negative folded count", host: `<status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><extraports state="closed" count="-1"/></ports>`, want: "missing or negative extraports count"},
+		{name: "invalid state reason TTL", host: `<status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="22"><state state="open" reason_ttl="bad"/></port></ports>`, want: "invalid nmap XML reason_ttl attribute"},
+		{name: "invalid service confidence", host: `<status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="22"><state state="open"/><service conf="unknown"/></port></ports>`, want: "invalid nmap XML conf attribute"},
+		{name: "invalid host status reason TTL", host: `<status state="up" reason_ttl="bad"/><address addr="192.0.2.1" addrtype="ipv4"/>`, want: "invalid nmap XML reason_ttl attribute", wantSelectedSpans: 2, wantMaterializedHost: 1},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			data := []byte(prefix + test.host + suffix)
+			stats := nmapXMLParseStats{}
+			parsed, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "22"}, []string{"192.0.2.1", "192.0.2.2"}, 1, &stats)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("malformed Nmap result = %#v, %v; want error containing %q", parsed, err, test.want)
+			}
+			if parsed.Hosts != nil || parsed.Units != nil {
+				t.Fatalf("malformed Nmap result returned a partial snapshot: %#v", parsed)
+			}
+			if stats.SelectedHostSpans != test.wantSelectedSpans || stats.MaterializedHosts != test.wantMaterializedHost {
+				t.Fatalf("failed parse stats = %#v, want selected spans %d and materialized hosts %d", stats, test.wantSelectedSpans, test.wantMaterializedHost)
+			}
+		})
 	}
 }
 
@@ -1031,6 +1170,38 @@ func TestNSESummaryRetentionSkipsIgnoredPortRecords(t *testing.T) {
 	}
 	if got := parsed.Hosts[address].Protocols[0].NSEOutput; !reflect.DeepEqual(got, []string{"kept: result"}) {
 		t.Fatalf("port NSE summaries included an ignored record or lost later evidence: %v", got)
+	}
+}
+
+func TestParseXMLReservesTheCombinedNSESummaryCapForHostScripts(t *testing.T) {
+	const address = "192.0.2.1"
+	var portScripts strings.Builder
+	for index := 0; index < maxScannerNSEOutputs; index++ {
+		fmt.Fprintf(&portScripts, `<script id="port-%02d" output="result-%02d"/>`, index, index)
+	}
+	data := []byte(`<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="` + address + `" addrtype="ipv4"/><ports><port protocol="tcp" portid="443"><state state="open"/>` + portScripts.String() + `</port></ports><hostscript><script id="host-priority" output="preserve this summary"/></hostscript></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	parsed, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "443"}, []string{address}, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := parsed.Hosts[address].Protocols[0].NSEOutput
+	if len(got) != maxScannerNSEOutputs {
+		t.Fatalf("combined host and port NSE summaries = %d, want %d", len(got), maxScannerNSEOutputs)
+	}
+	if got[0] != "host-priority: preserve this summary" || got[len(got)-1] != "port-30: result-30" {
+		t.Fatalf("NSE cap did not preserve host evidence before trimming one port summary: first=%q last=%q", got[0], got[len(got)-1])
+	}
+}
+
+func TestAppendNSESummaryKeepsTheExistingOutputCap(t *testing.T) {
+	values := make([]string, maxScannerNSEOutputs)
+	for index := range values {
+		values[index] = fmt.Sprintf("summary-%d", index)
+	}
+	want := slices.Clone(values)
+	got, err := appendNSESummaryContext(context.Background(), values, "extra", "ignored after the summary cap")
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("NSE output at cap = %#v, %v; want unchanged %#v", got, err, want)
 	}
 }
 

@@ -112,3 +112,19 @@ func TestNewWithoutScannerPolicyDoesNotProbeScannerBinaries(t *testing.T) {
 		t.Fatalf("scanner helper calls = %q, err=%v; want exactly two probes", calls, err)
 	}
 }
+
+func TestScannerVersionsUsesUnknownForMissingCachedValues(t *testing.T) {
+	var nilApp *App
+	if nmap, naabu := nilApp.ScannerVersions(); nmap != "unknown" || naabu != "unknown" {
+		t.Fatalf("nil application versions = %q/%q, want unknown/unknown", nmap, naabu)
+	}
+
+	app := &App{nmapVersion: "  ", naabuVersion: "\t"}
+	if nmap, naabu := app.ScannerVersions(); nmap != "unknown" || naabu != "unknown" {
+		t.Fatalf("empty cached versions = %q/%q, want unknown/unknown", nmap, naabu)
+	}
+	app.nmapVersion, app.naabuVersion = " Nmap version 7.99 ", " 7.99 "
+	if nmap, naabu := app.ScannerVersions(); nmap != "Nmap version 7.99" || naabu != "7.99" {
+		t.Fatalf("cached versions were not trimmed: %q/%q", nmap, naabu)
+	}
+}

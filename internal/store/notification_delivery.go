@@ -420,8 +420,10 @@ ORDER BY o.id DESC LIMIT ?`, destinationID, ts.scope.id, ts.scope.id, before, be
 // those of them that ids names, and returns how many it queued. Each is due
 // at once with fresh retry and deferral budgets and the destination's
 // current selector, so a paused or locked destination holds it as any other
-// alert, and its delivery health counts one terminal failure fewer. An alert
-// queued for replaced credentials, and one in restore quarantine, which is
+// alert, and its delivery health counts one terminal failure fewer. A change
+// alert is detached from its prior window and checked against the current
+// active window at the final provider gate. An alert queued for replaced
+// credentials, and one in restore quarantine, which is
 // not in the outbox, is never queued. When it queues any, the audit entry is
 // recorded in the same transaction, with a detail that has the count. A
 // destination of another tenant or of the platform is ErrNotFound, and
@@ -444,9 +446,8 @@ func (ts *TenantStore) RedeliverTerminalDeliveries(ctx context.Context, destinat
 		return 0, err
 	}
 	now := time.Now().UTC()
-	query := `UPDATE outbox SET destination=?,attempts=0,deferrals=0,terminal_at='',next_at=?,last_error='',claim_token='',claim_until=''
-WHERE id IN (SELECT o.id FROM outbox AS o JOIN managed_notifications AS m ON m.id=? AND m.tenant_id=? WHERE ` + terminalDeliverySQL + ` AND o.tenant_id=?`
-	args := []any{managedNotificationKey(destinationID, revision), now.Format(time.RFC3339Nano), destinationID, ts.scope.id, ts.scope.id}
+	where := `id IN (SELECT o.id FROM outbox AS o JOIN managed_notifications AS m ON m.id=? AND m.tenant_id=? WHERE ` + terminalDeliverySQL + ` AND o.tenant_id=?`
+	whereArgs := []any{destinationID, ts.scope.id, ts.scope.id}
 	if ids != nil {
 		if len(ids) == 0 {
 			return 0, nil
@@ -454,11 +455,24 @@ WHERE id IN (SELECT o.id FROM outbox AS o JOIN managed_notifications AS m ON m.i
 		placeholders := make([]string, len(ids))
 		for i, id := range ids {
 			placeholders[i] = "?"
-			args = append(args, id)
+			whereArgs = append(whereArgs, id)
 		}
-		query += ` AND o.id IN (` + strings.Join(placeholders, ",") + `)`
+		where += ` AND o.id IN (` + strings.Join(placeholders, ",") + `)`
 	}
-	result, err := tx.ExecContext(ctx, query+`)`, args...)
+	where += `)`
+	result, err := applyOutboxTransition(ctx, tx, outboxRedeliverTerminal, where, whereArgs,
+		outboxChange("destination", outboxSet, "?", managedNotificationKey(destinationID, revision)),
+		outboxChange("attempts", outboxReset, "0"),
+		outboxChange("deferrals", outboxReset, "0"),
+		outboxChange("terminal_at", outboxReset, "''"),
+		outboxChange("next_at", outboxSet, "?", now.Format(time.RFC3339Nano)),
+		outboxChange("last_error", outboxReset, "''"),
+		outboxChange("claim_token", outboxReset, "''"),
+		outboxChange("claim_until", outboxReset, "''"),
+		outboxChange("change_window_id", outboxReset, "''"),
+		outboxChange("attempt_started_at", outboxReset, "''"),
+		outboxChange("coalesce_after_attempt", outboxReset, "0"),
+	)
 	if err != nil {
 		return 0, err
 	}

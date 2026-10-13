@@ -599,7 +599,11 @@ func (ps *PlatformStore) UpdatePlatformNotificationWithAudit(ctx context.Context
 		if err != nil {
 			return ManagedNotification{}, err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET coalesce_after_attempt=1 WHERE destination LIKE ? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at<>'' AND change_window_id<>'' AND event_type IN ('changes-detected','changes-reminder','changes-recovered')`+platformDestinationSQL, "managed:"+id+":%", id); err != nil {
+		if _, err := applyOutboxTransition(ctx, tx, outboxMarkInflight,
+			`destination LIKE ? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at<>'' AND change_window_id<>'' AND event_type IN ('changes-detected','changes-reminder','changes-recovered')`+platformDestinationSQL,
+			[]any{"managed:" + id + ":%", id},
+			outboxChange("coalesce_after_attempt", outboxSet, "1"),
+		); err != nil {
 			return ManagedNotification{}, err
 		}
 		if discarded > 0 {
@@ -607,7 +611,11 @@ func (ps *PlatformStore) UpdatePlatformNotificationWithAudit(ctx context.Context
 			entry.ActorKind = AuditActorPlatform
 			audits = append(audits, entry)
 		}
-	} else if _, err := tx.ExecContext(ctx, `UPDATE outbox SET destination=? WHERE destination=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at=''`+platformDestinationSQL, managedNotificationKey(id, next), managedNotificationKey(id, current.Revision), id); err != nil {
+	} else if _, err := applyOutboxTransition(ctx, tx, outboxRenameDestination,
+		`destination=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at=''`+platformDestinationSQL,
+		[]any{managedNotificationKey(id, current.Revision), id},
+		outboxChange("destination", outboxSet, "?", managedNotificationKey(id, next)),
+	); err != nil {
 		return ManagedNotification{}, err
 	}
 	for _, entry := range audits {

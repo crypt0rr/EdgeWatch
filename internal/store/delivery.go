@@ -333,9 +333,16 @@ ORDER BY id LIMIT ?`
 		if terminal {
 			terminalAt = nowText
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE outbox SET deferrals=?,next_at=?,last_error=?,terminal_at=?,claim_token='',claim_until=''
-WHERE id=? AND sent_at IS NULL AND terminal_at='' AND attempts<? AND deferrals=?
-  AND (claim_token='' OR claim_until='' OR claim_until<=?)`, deferrals, now.Add(deliveryLockedDelay).Format(time.RFC3339Nano), deliveryErrorCode(ErrDeliveryDestinationLocked), terminalAt, item.id, deliveryMaxAttempts, item.deferrals, nowText)
+		result, err := applyOutboxTransition(ctx, tx, outboxAgeLocked,
+			`id=? AND sent_at IS NULL AND terminal_at='' AND attempts<? AND deferrals=? AND (claim_token='' OR claim_until='' OR claim_until<=?)`,
+			[]any{item.id, deliveryMaxAttempts, item.deferrals, nowText},
+			outboxChange("deferrals", outboxSet, "?", deferrals),
+			outboxChange("next_at", outboxSet, "?", now.Add(deliveryLockedDelay).Format(time.RFC3339Nano)),
+			outboxChange("last_error", outboxSet, "?", deliveryErrorCode(ErrDeliveryDestinationLocked)),
+			outboxChange("terminal_at", outboxSet, "?", terminalAt),
+			outboxChange("claim_token", outboxReset, "''"),
+			outboxChange("claim_until", outboxReset, "''"),
+		)
 		if err != nil {
 			return err
 		}
@@ -389,12 +396,15 @@ func (ss *SystemStore) WakeLockedDeliveries(ctx context.Context, destinations []
 		placeholders[i] = "?"
 		args = append(args, destination)
 	}
-	query := `UPDATE outbox SET next_at=?
-WHERE sent_at IS NULL AND terminal_at='' AND last_error='destination_locked'
-  AND (claim_token='' OR claim_until='' OR claim_until<=?)
-  AND destination IN (` + strings.Join(placeholders, ",") + `)`
-	args = append([]any{nowText, nowText}, args...)
-	_, err := ss.store.DB.ExecContext(ctx, query, args...)
+	where := `sent_at IS NULL AND terminal_at='' AND last_error='destination_locked' AND (claim_token='' OR claim_until='' OR claim_until<=?) AND destination IN (` + strings.Join(placeholders, ",") + `)`
+	whereArgs := append([]any{nowText}, args...)
+	query, queryArgs, err := buildOutboxTransitionStatement(outboxWakeLocked, where, whereArgs,
+		outboxChange("next_at", outboxSet, "?", nowText),
+	)
+	if err != nil {
+		return err
+	}
+	_, err = ss.store.DB.ExecContext(ctx, query, queryArgs...)
 	return err
 }
 
@@ -415,8 +425,8 @@ func (ss *SystemStore) claimDueDeliveries(ctx context.Context, limit int, owner 
 	now := time.Now().UTC()
 	nowText := now.Format(time.RFC3339Nano)
 	windowNowText := sqliteTimestamp(now)
-	query := `UPDATE outbox SET claim_token=?,claim_until=? WHERE id IN (SELECT id FROM outbox AS due WHERE sent_at IS NULL AND terminal_at='' AND attempts < ? AND next_at <= ? AND (claim_token='' OR claim_until='' OR claim_until <= ?) AND ` + heldDeliverySQL + ` AND ` + changeWindowDeliverySQL
-	args := []any{owner, now.Add(deliveryClaimLease).Format(time.RFC3339Nano), deliveryMaxAttempts, nowText, nowText, windowNowText}
+	where := `id IN (SELECT id FROM outbox AS due WHERE sent_at IS NULL AND terminal_at='' AND attempts < ? AND next_at <= ? AND (claim_token='' OR claim_until='' OR claim_until <= ?) AND ` + heldDeliverySQL + ` AND ` + changeWindowDeliverySQL
+	whereArgs := []any{deliveryMaxAttempts, nowText, nowText, windowNowText}
 	if len(excluded) > 0 {
 		placeholders := make([]string, 0, len(excluded))
 		for _, destination := range excluded {
@@ -424,15 +434,22 @@ func (ss *SystemStore) claimDueDeliveries(ctx context.Context, limit int, owner 
 				continue
 			}
 			placeholders = append(placeholders, "?")
-			args = append(args, destination)
+			whereArgs = append(whereArgs, destination)
 		}
 		if len(placeholders) > 0 {
-			query += " AND destination NOT IN (" + strings.Join(placeholders, ",") + ")"
+			where += " AND destination NOT IN (" + strings.Join(placeholders, ",") + ")"
 		}
 	}
-	query += ` ORDER BY id LIMIT ?) RETURNING id,destination,payload_json,attempts,deferrals,claim_token,COALESCE(tenant_id,'')`
-	args = append(args, limit)
-	rows, err := tx.QueryContext(ctx, query, args...)
+	where += ` ORDER BY id LIMIT ?)`
+	whereArgs = append(whereArgs, limit)
+	query, args, err := buildOutboxTransitionStatement(outboxClaimDue, where, whereArgs,
+		outboxChange("claim_token", outboxSet, "?", owner),
+		outboxChange("claim_until", outboxSet, "?", now.Add(deliveryClaimLease).Format(time.RFC3339Nano)),
+	)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, query+` RETURNING id,destination,payload_json,attempts,deferrals,claim_token,COALESCE(tenant_id,'')`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -494,7 +511,13 @@ func (ss *SystemStore) failInvalidDeliveryPayload(ctx context.Context, id int64,
 	}
 	now := time.Now().UTC()
 	stamp := now.Format(time.RFC3339Nano)
-	result, err := tx.ExecContext(ctx, `UPDATE outbox SET terminal_at=?,last_error='payload_invalid',claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND terminal_at='' AND claim_token=?`, stamp, id, claim)
+	result, err := applyOutboxTransition(ctx, tx, outboxInvalidPayload,
+		`id=? AND sent_at IS NULL AND terminal_at='' AND claim_token=?`, []any{id, claim},
+		outboxChange("terminal_at", outboxSet, "?", stamp),
+		outboxChange("last_error", outboxSet, "'payload_invalid'"),
+		outboxChange("claim_token", outboxReset, "''"),
+		outboxChange("claim_until", outboxReset, "''"),
+	)
 	if err != nil {
 		return err
 	}
@@ -512,8 +535,10 @@ func (ss *SystemStore) failInvalidDeliveryPayload(ctx context.Context, id int64,
 
 // ReleaseDeliveryClaims clears all active outbox leases. It is used when a
 // daemon starts (or shuts down cleanly) so rows claimed by a previous process
-// do not remain unavailable for the full claim lease. Delivery attempts and
-// next-at timestamps are intentionally preserved; only ownership is reset.
+// do not remain unavailable for the full claim lease. Attempt markers for a
+// future scheduled window are cleared so the alert is retryable before the
+// window starts; a started attempt in an active window remains unknown until
+// that window closes.
 func (ss *SystemStore) ReleaseDeliveryClaims(ctx context.Context) (int64, error) {
 	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
@@ -521,32 +546,27 @@ func (ss *SystemStore) ReleaseDeliveryClaims(ctx context.Context) (int64, error)
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC()
-	nowText := sqliteTimestamp(now)
+	nowText := now.Format(time.RFC3339Nano)
 	var released int64
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND claim_token<>''`).Scan(&released); err != nil {
 		return 0, err
 	}
-	// Recover rows whose process died after the final invocation marker. An
-	// active or scheduled window keeps the marker as durable evidence until
-	// close; a closed window or credential rotation coalesces it instead of
-	// replaying an alert whose provider outcome is unknown. Include rows whose
-	// lease was already cleared by an older credential-rotation path.
-	rows, err := tx.QueryContext(ctx, `SELECT id,claim_token,change_window_id,event_type,event_job_id,payload_json,coalesce_after_attempt,COALESCE(tenant_id,'') FROM outbox WHERE sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at<>'' ORDER BY id`)
+	rows, err := tx.QueryContext(ctx, `SELECT id,claim_token,change_window_id,event_type,coalesce_after_attempt,COALESCE(tenant_id,'') FROM outbox WHERE sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at<>'' ORDER BY id`)
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
 	type startedDelivery struct {
-		id                                int64
-		claim, windowID, eventType, jobID string
-		tenantID                          string
-		payload                           []byte
-		coalesceAfter                     int
+		id            int64
+		claim         string
+		windowID      string
+		eventType     string
+		coalesceAfter int
+		tenantID      string
 	}
 	var started []startedDelivery
 	for rows.Next() {
 		var item startedDelivery
-		if err := rows.Scan(&item.id, &item.claim, &item.windowID, &item.eventType, &item.jobID, &item.payload, &item.coalesceAfter, &item.tenantID); err != nil {
+		if err := rows.Scan(&item.id, &item.claim, &item.windowID, &item.eventType, &item.coalesceAfter, &item.tenantID); err != nil {
 			_ = rows.Close()
 			return 0, err
 		}
@@ -560,55 +580,133 @@ func (ss *SystemStore) ReleaseDeliveryClaims(ctx context.Context) (int64, error)
 		return 0, err
 	}
 	for _, item := range started {
-		if !changeWindowEventType(item.eventType) {
-			if _, err := tx.ExecContext(ctx, `UPDATE outbox SET attempt_started_at='' WHERE id=? AND claim_token=? AND attempt_started_at<>''`, item.id, item.claim); err != nil {
-				return 0, err
-			}
-			continue
-		}
-		if item.windowID == "" {
-			if item.coalesceAfter != 0 {
-				if _, err := tx.ExecContext(ctx, `UPDATE outbox SET coalesced_at=CASE WHEN coalesced_at='' THEN ? ELSE coalesced_at END,attempt_started_at='',claim_token='',claim_until='',last_error='' WHERE id=? AND claim_token=? AND attempt_started_at<>''`, nowText, item.id, item.claim); err != nil {
-					return 0, err
-				}
-			} else if _, err := tx.ExecContext(ctx, `UPDATE outbox SET attempt_started_at='' WHERE id=? AND claim_token=? AND attempt_started_at<>''`, item.id, item.claim); err != nil {
-				return 0, err
-			}
-			continue
-		}
-		var startRaw, endRaw, closedAt string
-		err := tx.QueryRowContext(ctx, `SELECT quiet.start_at,quiet.end_at,quiet.closed_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.id=? AND j.tenant_id=?`, item.windowID, item.tenantID).Scan(&startRaw, &endRaw, &closedAt)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		if err := recoverStartedDeliveryTx(ctx, tx, item.id, item.claim, item.windowID, item.eventType, item.coalesceAfter, item.tenantID, now, nowText, outboxRecoverStartup, ""); err != nil {
 			return 0, err
 		}
-		if errors.Is(err, sql.ErrNoRows) {
-			if item.coalesceAfter != 0 {
-				if _, err := tx.ExecContext(ctx, `UPDATE outbox SET coalesced_at=CASE WHEN coalesced_at='' THEN ? ELSE coalesced_at END,attempt_started_at='',claim_token='',claim_until='',last_error='' WHERE id=? AND claim_token=? AND attempt_started_at<>''`, nowText, item.id, item.claim); err != nil {
-					return 0, err
-				}
-			} else if _, err := tx.ExecContext(ctx, `UPDATE outbox SET attempt_started_at='' WHERE id=? AND claim_token=? AND attempt_started_at<>''`, item.id, item.claim); err != nil {
-				return 0, err
-			}
-			continue
-		}
-		if closedAt != "" {
-			if _, err := tx.ExecContext(ctx, `UPDATE outbox SET coalesced_at=CASE WHEN coalesced_at='' THEN ? ELSE coalesced_at END,attempt_started_at='',claim_token='',claim_until='',last_error='' WHERE id=? AND claim_token=?`, nowText, item.id, item.claim); err != nil {
-				return 0, err
-			}
-			continue
-		}
-		// For scheduled and active windows leave the invocation marker in place
-		// and only release its lease below. The event will appear as already in
-		// flight in the eventual close summary instead of being replayed or
-		// mislabeled as an alert held before its first provider handoff.
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE outbox SET claim_token='',claim_until='' WHERE sent_at IS NULL AND claim_token<>''`); err != nil {
+	if _, err := applyOutboxTransition(ctx, tx, outboxReleaseStartup,
+		`sent_at IS NULL AND claim_token<>''`, nil,
+		outboxChange("claim_token", outboxReset, "''"),
+		outboxChange("claim_until", outboxReset, "''"),
+	); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return released, nil
+}
+
+// RecoverExpiredDeliveryClaims recovers a bounded page of deliveries whose
+// provider invocation marker outlived its lease. Change alerts linked to a
+// future window may retry after recovery; an active window keeps the marker
+// for its close summary. A dangling nonempty window link is an invariant error;
+// the transaction rolls back instead of recovering a row without its policy.
+func (ss *SystemStore) RecoverExpiredDeliveryClaims(ctx context.Context) (int64, error) {
+	tx, err := beginWriteTx(ctx, ss.store.DB)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UTC()
+	nowText := now.Format(time.RFC3339Nano)
+	expired, err := expiredDeliveryClaimsTx(ctx, tx, nowText)
+	if err != nil {
+		return 0, err
+	}
+	for _, item := range expired {
+		if err := recoverStartedDeliveryTx(ctx, tx, item.id, item.claim, item.windowID, item.eventType, item.coalesceAfter, item.tenantID, now, nowText, outboxRecoverExpired, `AND claim_until<>'' AND claim_until<=?`); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int64(len(expired)), nil
+}
+
+type expiredDeliveryClaim struct {
+	id            int64
+	claim         string
+	windowID      string
+	eventType     string
+	coalesceAfter int
+	tenantID      string
+}
+
+func expiredDeliveryClaimsTx(ctx context.Context, tx *sql.Tx, nowText string) ([]expiredDeliveryClaim, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id,claim_token,change_window_id,event_type,coalesce_after_attempt,COALESCE(tenant_id,'') FROM outbox WHERE sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at<>'' AND claim_token<>'' AND claim_until<>'' AND claim_until<=? ORDER BY id LIMIT ?`, nowText, deliveryMaintenanceBatch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var expired []expiredDeliveryClaim
+	for rows.Next() {
+		var item expiredDeliveryClaim
+		if err := rows.Scan(&item.id, &item.claim, &item.windowID, &item.eventType, &item.coalesceAfter, &item.tenantID); err != nil {
+			return nil, err
+		}
+		expired = append(expired, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return expired, nil
+}
+
+func recoverStartedDeliveryTx(ctx context.Context, tx *sql.Tx, id int64, claim, windowID, eventType string, coalesceAfter int, tenantID string, now time.Time, nowText string, transition outboxTransitionName, extraFence string) error {
+	clearMarker := true
+	coalesce := false
+	var startRaw, closedAt string
+	if windowID != "" {
+		err := tx.QueryRowContext(ctx, `SELECT quiet.start_at,quiet.closed_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.id=? AND j.tenant_id=?`, windowID, tenantID).Scan(&startRaw, &closedAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("outbox delivery %d references missing linked change window %q: %w", id, windowID, err)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if changeWindowEventType(eventType) {
+		if windowID == "" {
+			coalesce = coalesceAfter != 0
+		} else {
+			switch {
+			case closedAt != "":
+				coalesce = true
+			case now.Before(scanTime(startRaw)):
+				// Ordinary pre-start attempts must be retryable before the
+				// window. A credential rotation explicitly prevents retrying
+				// against the new destination, so retain that uncertain handoff
+				// for the scheduled window's review and coalesce it at close.
+				clearMarker = coalesceAfter == 0
+			default:
+				// An active (or overdue but not yet closed) window preserves the
+				// provider-outcome uncertainty until its close summary commits.
+				clearMarker = false
+			}
+		}
+	}
+	changes := []outboxColumnChange{
+		outboxChange("claim_token", outboxReset, "''"),
+		outboxChange("claim_until", outboxReset, "''"),
+		outboxChange("attempt_started_at", outboxConditional, "CASE WHEN ? THEN '' ELSE attempt_started_at END", clearMarker),
+		outboxChange("coalesced_at", outboxConditional, "CASE WHEN ? THEN CASE WHEN coalesced_at='' THEN ? ELSE coalesced_at END ELSE coalesced_at END", coalesce, sqliteTimestamp(now)),
+		outboxChange("last_error", outboxConditional, "CASE WHEN ? THEN '' ELSE last_error END", coalesce),
+	}
+	where := `id=? AND claim_token=? AND attempt_started_at<>'' ` + extraFence
+	args := []any{id, claim}
+	if extraFence != "" {
+		args = append(args, nowText)
+	}
+	result, err := applyOutboxTransition(ctx, tx, transition, where, args, changes...)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrDeliveryClaimLost
+	}
+	return nil
 }
 
 // ReleaseDeliveryClaim returns one in-flight delivery to the due queue without
@@ -628,7 +726,13 @@ func (ss *SystemStore) ReleaseDeliveryClaim(ctx context.Context, id int64, claim
 	if delay > 0 {
 		nextAt = nextAt.Add(delay)
 	}
-	result, err := ss.store.DB.ExecContext(ctx, `UPDATE outbox SET next_at=?,claim_token='',claim_until='',attempt_started_at='' WHERE id=? AND sent_at IS NULL AND terminal_at='' AND claim_token=?`, nextAt.Format(time.RFC3339Nano), id, claim)
+	result, err := applyOutboxTransition(ctx, ss.store.DB, outboxReleaseClaim,
+		`id=? AND sent_at IS NULL AND terminal_at='' AND claim_token=?`, []any{id, claim},
+		outboxChange("next_at", outboxSet, "?", nextAt.Format(time.RFC3339Nano)),
+		outboxChange("claim_token", outboxReset, "''"),
+		outboxChange("claim_until", outboxReset, "''"),
+		outboxChange("attempt_started_at", outboxReset, "''"),
+	)
 	if err != nil {
 		return err
 	}
@@ -694,10 +798,27 @@ func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim 
 		return err
 	}
 	now := time.Now().UTC()
+	if windowID != "" {
+		var linkedWindowID string
+		if err := tx.QueryRowContext(ctx, `SELECT quiet.id FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.id=? AND j.tenant_id=?`, windowID, tenantID).Scan(&linkedWindowID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("outbox delivery %d references missing linked change window %q: %w", id, windowID, err)
+			}
+			return err
+		}
+	}
 	if changeWindowEventType(eventType) {
 		if coalesceAfter != 0 {
 			if sendErr == nil {
-				result, err := tx.ExecContext(ctx, `UPDATE outbox SET sent_at=?,last_error='',claim_token='',claim_until='',attempt_started_at='',coalesce_after_attempt=0 WHERE id=? AND sent_at IS NULL AND claim_token=?`, now.Format(time.RFC3339Nano), id, claim)
+				result, err := applyOutboxTransition(ctx, tx, outboxCompleteCoalesced,
+					`id=? AND sent_at IS NULL AND claim_token=?`, []any{id, claim},
+					outboxChange("sent_at", outboxSet, "?", now.Format(time.RFC3339Nano)),
+					outboxChange("last_error", outboxReset, "''"),
+					outboxChange("claim_token", outboxReset, "''"),
+					outboxChange("claim_until", outboxReset, "''"),
+					outboxChange("attempt_started_at", outboxReset, "''"),
+					outboxChange("coalesce_after_attempt", outboxReset, "0"),
+				)
 				if err != nil {
 					return err
 				}
@@ -709,7 +830,15 @@ func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim 
 				}
 				return tx.Commit()
 			}
-			if _, err := tx.ExecContext(ctx, `UPDATE outbox SET coalesced_at=?,last_error='',claim_token='',claim_until='',attempt_started_at='',coalesce_after_attempt=0 WHERE id=? AND sent_at IS NULL AND claim_token=?`, sqliteTimestamp(now), id, claim); err != nil {
+			if _, err := applyOutboxTransition(ctx, tx, outboxCoalesceCompleted,
+				`id=? AND sent_at IS NULL AND claim_token=?`, []any{id, claim},
+				outboxChange("coalesced_at", outboxSet, "?", sqliteTimestamp(now)),
+				outboxChange("last_error", outboxReset, "''"),
+				outboxChange("claim_token", outboxReset, "''"),
+				outboxChange("claim_until", outboxReset, "''"),
+				outboxChange("attempt_started_at", outboxReset, "''"),
+				outboxChange("coalesce_after_attempt", outboxReset, "0"),
+			); err != nil {
 				return err
 			}
 			return tx.Commit()
@@ -717,10 +846,13 @@ func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim 
 		if windowID != "" {
 			var endRaw, closedAt string
 			err := tx.QueryRowContext(ctx, `SELECT quiet.end_at,quiet.closed_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.id=? AND j.tenant_id=?`, windowID, tenantID).Scan(&endRaw, &closedAt)
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("outbox delivery %d references missing linked change window %q: %w", id, windowID, err)
+			}
+			if err != nil {
 				return err
 			}
-			if err == nil && closedAt == "" && !now.Before(scanTime(endRaw)) {
+			if closedAt == "" && !now.Before(scanTime(endRaw)) {
 				var event model.Event
 				if json.Unmarshal(payload, &event) == nil {
 					if event.JobID == "" {
@@ -730,7 +862,14 @@ func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim 
 						return err
 					}
 				}
-				if _, err := tx.ExecContext(ctx, `UPDATE outbox SET next_at=?,last_error='',claim_token='',claim_until='',attempt_started_at='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, scanTime(endRaw).Format(time.RFC3339Nano), id, claim); err != nil {
+				if _, err := applyOutboxTransition(ctx, tx, outboxHoldClosedWindow,
+					`id=? AND sent_at IS NULL AND claim_token=?`, []any{id, claim},
+					outboxChange("next_at", outboxSet, "?", scanTime(endRaw).Format(time.RFC3339Nano)),
+					outboxChange("last_error", outboxReset, "''"),
+					outboxChange("claim_token", outboxReset, "''"),
+					outboxChange("claim_until", outboxReset, "''"),
+					outboxChange("attempt_started_at", outboxReset, "''"),
+				); err != nil {
 					return err
 				}
 				return tx.Commit()
@@ -738,7 +877,14 @@ func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim 
 		}
 	}
 	if sendErr == nil {
-		result, err := tx.ExecContext(ctx, `UPDATE outbox SET sent_at=?,last_error='',claim_token='',claim_until='',attempt_started_at='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, now.Format(time.RFC3339Nano), id, claim)
+		result, err := applyOutboxTransition(ctx, tx, outboxCompleteSent,
+			`id=? AND sent_at IS NULL AND claim_token=?`, []any{id, claim},
+			outboxChange("sent_at", outboxSet, "?", now.Format(time.RFC3339Nano)),
+			outboxChange("last_error", outboxReset, "''"),
+			outboxChange("claim_token", outboxReset, "''"),
+			outboxChange("claim_until", outboxReset, "''"),
+			outboxChange("attempt_started_at", outboxReset, "''"),
+		)
 		if err != nil {
 			return err
 		}
@@ -763,7 +909,16 @@ func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim 
 		if terminal {
 			terminalAt = now.Format(time.RFC3339Nano)
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE outbox SET deferrals=?,next_at=?,last_error=?,terminal_at=?,claim_token='',claim_until='',attempt_started_at='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, deferrals, now.Add(deliveryInitialDelay).Format(time.RFC3339Nano), deliveryErrorCode(sendErr), terminalAt, id, claim)
+		result, err := applyOutboxTransition(ctx, tx, outboxDeferIndeterminate,
+			`id=? AND sent_at IS NULL AND claim_token=?`, []any{id, claim},
+			outboxChange("deferrals", outboxSet, "?", deferrals),
+			outboxChange("next_at", outboxSet, "?", now.Add(deliveryInitialDelay).Format(time.RFC3339Nano)),
+			outboxChange("last_error", outboxSet, "?", deliveryErrorCode(sendErr)),
+			outboxChange("terminal_at", outboxSet, "?", terminalAt),
+			outboxChange("claim_token", outboxReset, "''"),
+			outboxChange("claim_until", outboxReset, "''"),
+			outboxChange("attempt_started_at", outboxReset, "''"),
+		)
 		if err != nil {
 			return err
 		}
@@ -792,7 +947,16 @@ func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim 
 	if terminal {
 		terminalAt = now.Format(time.RFC3339Nano)
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE outbox SET attempts=?,next_at=?,last_error=?,terminal_at=?,claim_token='',claim_until='',attempt_started_at='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, attempts, now.Add(delay).Format(time.RFC3339Nano), deliveryErrorCode(sendErr), terminalAt, id, claim)
+	result, err := applyOutboxTransition(ctx, tx, outboxRecordSendFailure,
+		`id=? AND sent_at IS NULL AND claim_token=?`, []any{id, claim},
+		outboxChange("attempts", outboxSet, "?", attempts),
+		outboxChange("next_at", outboxSet, "?", now.Add(delay).Format(time.RFC3339Nano)),
+		outboxChange("last_error", outboxSet, "?", deliveryErrorCode(sendErr)),
+		outboxChange("terminal_at", outboxSet, "?", terminalAt),
+		outboxChange("claim_token", outboxReset, "''"),
+		outboxChange("claim_until", outboxReset, "''"),
+		outboxChange("attempt_started_at", outboxReset, "''"),
+	)
 	if err != nil {
 		return err
 	}
@@ -895,7 +1059,15 @@ func (ss *SystemStore) DeferDeliveryWithError(ctx context.Context, id int64, cla
 	deferrals++
 	now := time.Now().UTC()
 	if changeWindowEventType(eventType) && coalesceAfter != 0 {
-		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET coalesced_at=?,last_error='',claim_token='',claim_until='',attempt_started_at='',coalesce_after_attempt=0 WHERE id=? AND sent_at IS NULL AND claim_token=?`, sqliteTimestamp(now), id, claim); err != nil {
+		if _, err := applyOutboxTransition(ctx, tx, outboxCoalesceDeferred,
+			`id=? AND sent_at IS NULL AND claim_token=?`, []any{id, claim},
+			outboxChange("coalesced_at", outboxSet, "?", sqliteTimestamp(now)),
+			outboxChange("last_error", outboxReset, "''"),
+			outboxChange("claim_token", outboxReset, "''"),
+			outboxChange("claim_until", outboxReset, "''"),
+			outboxChange("attempt_started_at", outboxReset, "''"),
+			outboxChange("coalesce_after_attempt", outboxReset, "0"),
+		); err != nil {
 			return err
 		}
 		// Closing a planned window forbids retries and destination-health
@@ -907,7 +1079,16 @@ func (ss *SystemStore) DeferDeliveryWithError(ctx context.Context, id int64, cla
 	if terminal {
 		terminalStamp = now.Format(time.RFC3339Nano)
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE outbox SET deferrals=?,next_at=?,last_error=?,terminal_at=?,claim_token='',claim_until='',attempt_started_at='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, deferrals, now.Add(delay).Format(time.RFC3339Nano), deliveryErrorCode(reason), terminalStamp, id, claim)
+	result, err := applyOutboxTransition(ctx, tx, outboxDeferIndeterminate,
+		`id=? AND sent_at IS NULL AND claim_token=?`, []any{id, claim},
+		outboxChange("deferrals", outboxSet, "?", deferrals),
+		outboxChange("next_at", outboxSet, "?", now.Add(delay).Format(time.RFC3339Nano)),
+		outboxChange("last_error", outboxSet, "?", deliveryErrorCode(reason)),
+		outboxChange("terminal_at", outboxSet, "?", terminalStamp),
+		outboxChange("claim_token", outboxReset, "''"),
+		outboxChange("claim_until", outboxReset, "''"),
+		outboxChange("attempt_started_at", outboxReset, "''"),
+	)
 	if err != nil {
 		return err
 	}

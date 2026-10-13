@@ -491,7 +491,18 @@ func (ts *TenantStore) updateManagedNotificationWithAudits(ctx context.Context, 
 		// but not sent yet: its claim check fails, and a later pass sends it
 		// with the new credentials.
 		stamp := now.Format(time.RFC3339Nano)
-		moved, err := tx.ExecContext(ctx, `UPDATE outbox SET destination=?,attempts=0,deferrals=0,next_at=?,last_error='',claim_token='',claim_until='',attempt_started_at='' WHERE destination LIKE ? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND (attempt_started_at='' OR change_window_id='')`+ownedDestinationSQL, newKey, stamp, "managed:"+id+":%", id, ts.scope.id)
+		moved, err := applyOutboxTransition(ctx, tx, outboxKeepPending,
+			`destination LIKE ? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND (attempt_started_at='' OR change_window_id='')`+ownedDestinationSQL,
+			[]any{"managed:" + id + ":%", id, ts.scope.id},
+			outboxChange("destination", outboxSet, "?", newKey),
+			outboxChange("attempts", outboxReset, "0"),
+			outboxChange("deferrals", outboxReset, "0"),
+			outboxChange("next_at", outboxSet, "?", stamp),
+			outboxChange("last_error", outboxReset, "''"),
+			outboxChange("claim_token", outboxReset, "''"),
+			outboxChange("claim_until", outboxReset, "''"),
+			outboxChange("attempt_started_at", outboxReset, "''"),
+		)
 		if err != nil {
 			return ManagedNotification{}, err
 		}
@@ -499,10 +510,18 @@ func (ts *TenantStore) updateManagedNotificationWithAudits(ctx context.Context, 
 		// its claim and original selector until that attempt records an outcome.
 		// A failed attempt is then coalesced instead of being retried with a
 		// credential revision that intentionally replaced its destination.
-		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET coalesce_after_attempt=1 WHERE destination LIKE ? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at<>'' AND change_window_id<>'' AND event_type IN ('changes-detected','changes-reminder','changes-recovered')`+ownedDestinationSQL, "managed:"+id+":%", id, ts.scope.id); err != nil {
+		if _, err := applyOutboxTransition(ctx, tx, outboxMarkInflight,
+			`destination LIKE ? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at<>'' AND change_window_id<>'' AND event_type IN ('changes-detected','changes-reminder','changes-recovered')`+ownedDestinationSQL,
+			[]any{"managed:" + id + ":%", id, ts.scope.id},
+			outboxChange("coalesce_after_attempt", outboxSet, "1"),
+		); err != nil {
 			return ManagedNotification{}, err
 		}
-		failed, err := tx.ExecContext(ctx, `UPDATE outbox SET destination=? WHERE destination LIKE ? AND sent_at IS NULL AND terminal_at<>''`+ownedDestinationSQL, newKey, "managed:"+id+":%", id, ts.scope.id)
+		failed, err := applyOutboxTransition(ctx, tx, outboxMoveTerminal,
+			`destination LIKE ? AND sent_at IS NULL AND terminal_at<>''`+ownedDestinationSQL,
+			[]any{"managed:" + id + ":%", id, ts.scope.id},
+			outboxChange("destination", outboxSet, "?", newKey),
+		)
 		if err != nil {
 			return ManagedNotification{}, err
 		}
@@ -519,7 +538,11 @@ func (ts *TenantStore) updateManagedNotificationWithAudits(ctx context.Context, 
 		if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE destination LIKE ? AND sent_at IS NULL AND (attempt_started_at='' OR change_window_id='')`+ownedDestinationSQL, "managed:"+id+":%", id, ts.scope.id); err != nil {
 			return ManagedNotification{}, err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET coalesce_after_attempt=1 WHERE destination LIKE ? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at<>'' AND change_window_id<>'' AND event_type IN ('changes-detected','changes-reminder','changes-recovered')`+ownedDestinationSQL, "managed:"+id+":%", id, ts.scope.id); err != nil {
+		if _, err := applyOutboxTransition(ctx, tx, outboxMarkInflight,
+			`destination LIKE ? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at<>'' AND change_window_id<>'' AND event_type IN ('changes-detected','changes-reminder','changes-recovered')`+ownedDestinationSQL,
+			[]any{"managed:" + id + ":%", id, ts.scope.id},
+			outboxChange("coalesce_after_attempt", outboxSet, "1"),
+		); err != nil {
 			return ManagedNotification{}, err
 		}
 		if pending > 0 {
@@ -529,7 +552,11 @@ func (ts *TenantStore) updateManagedNotificationWithAudits(ctx context.Context, 
 		// A rename, provider-neutral enable/disable, or other metadata-only
 		// edit does not invalidate an alert. Keep the row id and claim state so
 		// an in-flight delivery can finish safely while its selector advances.
-		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET destination=? WHERE destination=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at=''`+ownedDestinationSQL, newKey, oldKey, id, ts.scope.id); err != nil {
+		if _, err := applyOutboxTransition(ctx, tx, outboxRenameDestination,
+			`destination=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at=''`+ownedDestinationSQL,
+			[]any{oldKey, id, ts.scope.id},
+			outboxChange("destination", outboxSet, "?", newKey),
+		); err != nil {
 			return ManagedNotification{}, err
 		}
 	}

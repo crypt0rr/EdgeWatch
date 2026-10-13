@@ -316,7 +316,7 @@ func TestScannerFilesStayInItsTemporaryDirectory(t *testing.T) {
 	base := filepath.Join(dir, "data", "tmp", "scanner")
 	nmapPaths, naabuPaths := filepath.Join(dir, "nmap-paths"), filepath.Join(dir, "naabu-paths")
 	nmap, naabu := filepath.Join(dir, "nmap"), filepath.Join(dir, "naabu")
-	writeScript(t, nmap, xmlOutputScript+"printf '%s\\n' \"$out\" >> '"+nmapPaths+"'\nprintf '%s' '"+sampleXML+"' > \"$out\"\n")
+	writeScript(t, nmap, xmlOutputScript+"printf '%s\\n' \"$out\" >> '"+nmapPaths+"'\nprintf '%s' '"+sampleXMLSinglePort+"' > \"$out\"\n")
 	writeScript(t, naabu, "#!/bin/sh\nprintf '%s\\n' \"$2\" >> '"+naabuPaths+"'\nprintf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":22,\"protocol\":\"tcp\"}'\n")
 	n := NewWithNaabu(nmap, naabu)
 	if err := n.SetTemporaryDirectory(base); err != nil {

@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -19,6 +20,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/creack/pty"
@@ -124,6 +126,31 @@ const (
 	maxScannerLinkAddresses = 32
 	maxScannerNSEOutputs    = 32
 	maxScannerStateReasons  = 32
+)
+
+// Nmap's XML DTD leaves most repeated records unbounded. The parser therefore
+// applies limits derived from EdgeWatch's own scan scope and evidence limits.
+// The scanner output byte cap remains the first bound; these limits also keep
+// a compact XML document from expanding into a much larger object graph.
+const (
+	maxNmapXMLTokens = 1_000_000
+	maxNmapXMLDepth  = 128
+	maxNmapXMLHosts  = maxNmapXMLTokens / 2 // each host requires at least a start and end token
+	// One invocation may materialize at most one scanner work unit's
+	// address-by-port scope, matching the planner's hard probe-work ceiling.
+	maxNmapXMLMaterializedPortSlots int64 = MaxWorkUnitProbes
+	// Nmap elements use small fixed attribute groups; leave generous room for extensions.
+	maxNmapXMLAttributes         = 64
+	maxNmapXMLMaterializedHosts  = nmapBatchSize
+	maxNmapMetadataRecordSlack   = 8 // retain the established fixture allowance beyond stored evidence caps
+	maxNmapPortDuplicateSlack    = maxNmapMetadataRecordSlack
+	maxNmapAddressesPerHost      = maxScannerLinkAddresses + 2 + maxNmapMetadataRecordSlack // retained links, IPv4/IPv6, and existing allowance
+	maxNmapHostnamesPerHost      = maxScannerHostnames + maxNmapMetadataRecordSlack
+	maxNmapCPEsPerService        = maxScannerCPEs + maxNmapMetadataRecordSlack
+	maxNmapExtraPortsPerHost     = 16 // Nmap's finite port-state set has fewer states; leave room for extensions
+	maxNmapExtraReasonsPerRecord = maxScannerStateReasons + maxNmapMetadataRecordSlack
+	maxNmapFoldedListBytes       = 1 << 20 // above the text needed to name every port in the 1..65535 domain
+	maxNmapStateSummaries        = 16      // bounds state indexes while allowing the finite Nmap state set
 )
 
 // scannerProbeEnv keeps version probes deterministic and prevents a scanner
@@ -597,7 +624,7 @@ func protocolProgressTotals(targets []resolvedTarget, protocol config.Protocol, 
 			byFamily[family][address] = struct{}{}
 		}
 	}
-	batchLimit := NmapAddressBatchLimit(template)
+	batchLimit := nmapInvocationAddressLimit(template, len(ports))
 	for _, addresses := range byFamily {
 		count := int64(len(addresses))
 		invocations += int64((len(addresses) + batchLimit - 1) / batchLimit)
@@ -859,17 +886,11 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 	}
 	all := map[string]model.Unit{}
 	allHosts := map[string]model.HostObservation{}
-	batchLimit := nmapBatchSize
-	// {address} is deliberately singular. A custom profile that uses it is
-	// still safe for a multi-address target set, but each invocation must carry
-	// exactly one address; {addresses} is the opt-in list form for batching.
-	if templateContains(template, config.PlaceholderAddress) {
-		batchLimit = 1
-	}
 	ports, err := config.ParsePorts(pc.Ports)
 	if err != nil {
 		return protocolScanResult{}, ConfigurationError(fmt.Errorf("invalid %s ports: %w", protocol, err))
 	}
+	batchLimit := nmapInvocationAddressLimit(template, len(ports))
 	probesPerHost := int64(len(ports))
 	if pc.ServiceDetection {
 		probesPerHost *= 2
@@ -924,7 +945,7 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 			if status != nil {
 				status(invocationProgress{Protocol: protocol, Invocation: localInvocation, BatchProbes: batchProbes, Fraction: 1, Output: lastOutput, Alive: false})
 			}
-			parsed, err := parseXMLWithConfig(stdout, protocol, pc)
+			parsed, err := parseXMLWithPortCount(ctx, stdout, protocol, pc, batch, len(ports), nil)
 			if err != nil {
 				return protocolScanResult{Units: unitsFromMap(all), Hosts: allHosts}, err
 			}
@@ -946,7 +967,7 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 					// response. Preserve an explicit state for the host explorer,
 					// but do not synthesize a Unit: an absent Unit must never be
 					// interpreted as a closed port by the comparison engine.
-					host = unreachableHostObservation(address, protocol, pc, "nmap-omitted")
+					host = unreachableHostObservationWithPortCount(address, protocol, pc, "nmap-omitted", len(ports))
 				} else if !ok {
 					// Down hosts are represented as observations by the XML parser
 					// without a compact Unit. Normalize any non-up status to the
@@ -974,6 +995,7 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 		}
 	}
 	var units []model.Unit
+	emittedUnitAddresses := make(map[string]struct{}, len(all))
 	for _, target := range targets {
 		if target.Aggregate {
 			aggregated := make(map[string]model.Unit, len(target.Addresses))
@@ -984,10 +1006,14 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 			continue
 		}
 		for _, address := range target.Addresses {
+			if _, emitted := emittedUnitAddresses[address]; emitted {
+				continue
+			}
 			unit, ok := all[address]
 			if !ok {
 				continue
 			}
+			emittedUnitAddresses[address] = struct{}{}
 			unit.Target = address
 			units = append(units, unit)
 		}
@@ -1871,78 +1897,96 @@ func parseNmapProgress(line string) (float64, bool) {
 	return value / 100, true
 }
 
-type nmapRun struct {
-	Hosts []struct {
-		TimedOut string `xml:"timedout,attr"`
-		Status   struct {
-			State  string `xml:"state,attr"`
-			Reason string `xml:"reason,attr"`
-			TTL    int    `xml:"reason_ttl,attr"`
-		} `xml:"status"`
-		Addresses []struct {
-			Addr   string `xml:"addr,attr"`
-			Type   string `xml:"addrtype,attr"`
-			Vendor string `xml:"vendor,attr"`
-		} `xml:"address"`
-		Hostnames []struct {
-			Name string `xml:"name,attr"`
-			Type string `xml:"type,attr"`
-		} `xml:"hostnames>hostname"`
-		HostScripts []struct {
-			ID     string `xml:"id,attr"`
-			Output string `xml:"output,attr"`
-		} `xml:"hostscript>script"`
-		Times struct {
-			SRTT string `xml:"srtt,attr"`
-		} `xml:"times"`
-		Ports []struct {
-			Protocol string `xml:"protocol,attr"`
-			PortID   int    `xml:"portid,attr"`
-			State    struct {
-				State  string `xml:"state,attr"`
-				Reason string `xml:"reason,attr"`
-				TTL    int    `xml:"reason_ttl,attr"`
-			} `xml:"state"`
-			Service struct {
-				Name       string   `xml:"name,attr"`
-				Product    string   `xml:"product,attr"`
-				Version    string   `xml:"version,attr"`
-				Extra      string   `xml:"extrainfo,attr"`
-				Method     string   `xml:"method,attr"`
-				Confidence int      `xml:"conf,attr"`
-				Tunnel     string   `xml:"tunnel,attr"`
-				OSType     string   `xml:"ostype,attr"`
-				DeviceType string   `xml:"devicetype,attr"`
-				CPES       []string `xml:"cpe"`
-			} `xml:"service"`
-			Scripts []struct {
-				ID     string `xml:"id,attr"`
-				Output string `xml:"output,attr"`
-			} `xml:"script"`
-		} `xml:"ports>port"`
-		ExtraPorts []nmapExtraPorts `xml:"ports>extraports"`
-	} `xml:"host"`
-	RunStats struct {
-		Exit string `xml:"exit,attr"`
-	} `xml:"runstats>finished"`
+type nmapHost struct {
+	TimedOut string `xml:"timedout,attr"`
+	Status   struct {
+		State  string `xml:"state,attr"`
+		Reason string `xml:"reason,attr"`
+		TTL    int    `xml:"reason_ttl,attr"`
+	} `xml:"status"`
+	Addresses []struct {
+		Addr   string `xml:"addr,attr"`
+		Type   string `xml:"addrtype,attr"`
+		Vendor string `xml:"vendor,attr"`
+	} `xml:"address"`
+	Hostnames []struct {
+		Name string `xml:"name,attr"`
+		Type string `xml:"type,attr"`
+	} `xml:"hostnames>hostname"`
+	HostScripts []nmapScript `xml:"hostscript>script"`
+	Times       struct {
+		SRTT string `xml:"srtt,attr"`
+	} `xml:"times"`
+	Ports      []nmapPort       `xml:"ports>port"`
+	ExtraPorts []nmapExtraPorts `xml:"ports>extraports"`
+}
+
+type nmapPort struct {
+	Protocol string `xml:"protocol,attr"`
+	PortID   int    `xml:"portid,attr"`
+	State    struct {
+		State  string `xml:"state,attr"`
+		Reason string `xml:"reason,attr"`
+		TTL    int    `xml:"reason_ttl,attr"`
+	} `xml:"state"`
+	Service nmapService  `xml:"service"`
+	Scripts []nmapScript `xml:"script"`
+}
+
+type nmapService struct {
+	Name       string   `xml:"name,attr"`
+	Product    string   `xml:"product,attr"`
+	Version    string   `xml:"version,attr"`
+	Extra      string   `xml:"extrainfo,attr"`
+	Method     string   `xml:"method,attr"`
+	Confidence int      `xml:"conf,attr"`
+	Tunnel     string   `xml:"tunnel,attr"`
+	OSType     string   `xml:"ostype,attr"`
+	DeviceType string   `xml:"devicetype,attr"`
+	CPES       []string `xml:"cpe"`
+}
+
+type nmapScript struct {
+	ID     string `xml:"id,attr"`
+	Output string `xml:"output,attr"`
 }
 
 // nmapExtraPorts is a state Nmap folded instead of listing each port. Nmap
 // 7.80 and later attach the folded ports to each reason.
 type nmapExtraPorts struct {
-	State   string `xml:"state,attr"`
-	Count   int    `xml:"count,attr"`
-	Reasons []struct {
-		Reason   string `xml:"reason,attr"`
-		Count    int    `xml:"count,attr"`
-		Protocol string `xml:"proto,attr"`
-		Ports    string `xml:"ports,attr"`
-	} `xml:"extrareasons"`
+	State   string            `xml:"state,attr"`
+	Count   int               `xml:"count,attr"`
+	Reasons []nmapExtraReason `xml:"extrareasons"`
+}
+
+type nmapExtraReason struct {
+	Reason   string `xml:"reason,attr"`
+	Count    int    `xml:"count,attr"`
+	Protocol string `xml:"proto,attr"`
+	Ports    string `xml:"ports,attr"`
 }
 
 type foldedPort struct {
 	port   int
 	reason string
+}
+
+// nmapPortBitset tracks the complete TCP/UDP port domain without allocating a
+// hash table for every selected host or folded state.
+type nmapPortBitset [65536 / 64]uint64
+
+func (set *nmapPortBitset) contains(port int) bool {
+	if port < 0 || port > 65535 {
+		return false
+	}
+	return set[port/64]&(uint64(1)<<uint(port%64)) != 0
+}
+
+func (set *nmapPortBitset) add(port int) {
+	if port < 0 || port > 65535 {
+		return
+	}
+	set[port/64] |= uint64(1) << uint(port%64)
 }
 
 // foldedPositivePorts expands the port lists of a folded open|filtered (or,
@@ -1951,17 +1995,56 @@ type foldedPort struct {
 // as a list names more ports than its count, so a malformed list cannot
 // expand beyond 65535 ports.
 func foldedPositivePorts(extra nmapExtraPorts, protocol string) (ports []foldedPort, ok bool) {
-	if extra.Count < 1 || extra.Count > 65535 {
-		return nil, false
+	ports, ok, _ = foldedPositivePortsContext(context.Background(), extra, protocol)
+	return ports, ok
+}
+
+func foldedPositivePortsContext(ctx context.Context, extra nmapExtraPorts, protocol string) (ports []foldedPort, ok bool, err error) {
+	if ctx == nil {
+		return nil, false, errors.New("folded port scan context is nil")
 	}
-	seen := make(map[int]struct{}, extra.Count)
+	if extra.Count < 1 || extra.Count > 65535 {
+		return nil, false, nil
+	}
+	ports = make([]foldedPort, 0, extra.Count)
+	ok, err = walkFoldedPositivePortsContext(ctx, extra, protocol, func(port foldedPort) error {
+		ports = append(ports, port)
+		return nil
+	})
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	return ports, true, nil
+}
+
+// walkFoldedPositivePortsContext validates the complete folded port list with
+// a fixed-size bitset before making a second cancellation-aware pass to emit
+// records. A malformed list therefore emits nothing, and a valid 65,535-port
+// range needs no per-port hash entry or temporary output slice.
+func walkFoldedPositivePortsContext(ctx context.Context, extra nmapExtraPorts, protocol string, emit func(foldedPort) error) (ok bool, err error) {
+	if ctx == nil {
+		return false, errors.New("folded port scan context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if extra.Count < 1 || extra.Count > 65535 {
+		return false, nil
+	}
+	var seen nmapPortBitset
+	visited := 0
 	for _, reason := range extra.Reasons {
-		if reason.Count < 1 || len(ports)+reason.Count > extra.Count || (reason.Protocol != "" && !strings.EqualFold(reason.Protocol, protocol)) {
-			return nil, false
+		if err := ctx.Err(); err != nil {
+			return false, err
 		}
-		label := boundScannerMetadata(reason.Reason)
+		if reason.Count < 1 || visited+reason.Count > extra.Count || (reason.Protocol != "" && !strings.EqualFold(reason.Protocol, protocol)) {
+			return false, nil
+		}
 		listed := 0
 		for item := range strings.SplitSeq(reason.Ports, ",") {
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
 			first, last, isRange := strings.Cut(strings.TrimSpace(item), "-")
 			start, err := strconv.Atoi(first)
 			end := start
@@ -1969,25 +2052,1002 @@ func foldedPositivePorts(extra nmapExtraPorts, protocol string) (ports []foldedP
 				end, err = strconv.Atoi(last)
 			}
 			if err != nil || start < 1 || end > 65535 || end < start || listed+end-start+1 > reason.Count {
-				return nil, false
+				return false, nil
 			}
 			for port := start; port <= end; port++ {
-				if _, duplicate := seen[port]; duplicate {
-					return nil, false
+				if visited&255 == 0 {
+					if err := ctx.Err(); err != nil {
+						return false, err
+					}
 				}
-				seen[port] = struct{}{}
-				ports = append(ports, foldedPort{port: port, reason: label})
+				if seen.contains(port) {
+					return false, nil
+				}
+				seen.add(port)
+				visited++
 			}
 			listed += end - start + 1
 		}
 		if listed != reason.Count {
-			return nil, false
+			return false, nil
 		}
 	}
-	if len(ports) != extra.Count {
-		return nil, false
+	if visited != extra.Count {
+		return false, nil
 	}
-	return ports, true
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	for _, reason := range extra.Reasons {
+		label := boundScannerMetadata(reason.Reason)
+		for item := range strings.SplitSeq(reason.Ports, ",") {
+			first, last, isRange := strings.Cut(strings.TrimSpace(item), "-")
+			start, _ := strconv.Atoi(first)
+			end := start
+			if isRange {
+				end, _ = strconv.Atoi(last)
+			}
+			for port := start; port <= end; port++ {
+				if visited&255 == 0 {
+					if err := ctx.Err(); err != nil {
+						return false, err
+					}
+				}
+				if emit != nil {
+					if err := emit(foldedPort{port: port, reason: label}); err != nil {
+						return false, err
+					}
+				}
+				visited++
+			}
+		}
+	}
+	return true, nil
+}
+
+type nmapXMLHostSpan struct {
+	start int
+	end   int
+}
+
+type nmapXMLParseStats struct {
+	Tokens                     int
+	HostElements               int
+	SelectedHostSpans          int
+	SelectedScriptElements     int
+	MaterializedHosts          int
+	PortElements               int
+	MaterializedPortElements   int
+	MaterializedPositivePorts  int
+	MaterializedScriptElements int
+	RetainedScriptSummaries    int
+}
+
+type nmapXMLHostCounts struct {
+	start              int
+	address            string
+	selected           bool
+	materialize        bool
+	ports              int
+	uniquePorts        int
+	portIDs            nmapPortBitset
+	reportedExtraPorts int
+	addresses          int
+	hostnames          int
+	scripts            int
+	cpes               int
+	extraPorts         int
+	hostState          string
+	hostReason         string
+	states             map[string]struct{}
+	reasons            map[string]map[string]struct{}
+}
+
+type nmapXMLFrame struct {
+	name             string
+	extraState       string
+	extraReasonCount int
+	serviceCPEs      int
+}
+
+type nmapXMLContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r nmapXMLContextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buffer)
+}
+
+var errNmapXMLAttributeLimit = fmt.Errorf("nmap XML element exceeded %d attribute safety limit", maxNmapXMLAttributes)
+
+type nmapXMLLexState uint8
+
+const (
+	nmapXMLLexText nmapXMLLexState = iota
+	nmapXMLLexAfterLessThan
+	nmapXMLLexEndTag
+	nmapXMLLexBang
+	nmapXMLLexComment
+	nmapXMLLexCDATA
+	nmapXMLLexProcessingInstruction
+	nmapXMLLexDeclaration
+	nmapXMLLexStartTagName
+	nmapXMLLexStartTagAttributes
+	nmapXMLLexAttributeName
+	nmapXMLLexAttributeBeforeEquals
+	nmapXMLLexAttributeBeforeValue
+	nmapXMLLexAttributeValue
+	nmapXMLLexUnquotedAttributeValue
+	nmapXMLLexStartTagSlash
+)
+
+// nmapXMLAttributeLimitReader counts attribute starts in the byte stream
+// before encoding/xml can materialize a StartElement.Attr slice. It only
+// treats XML's ASCII markup delimiters as syntax, so UTF-8 element and
+// attribute names pass through unchanged. Attribute values are not length
+// limited here; the scanner output cap remains their bound.
+type nmapXMLAttributeLimitReader struct {
+	ctx    context.Context
+	reader io.Reader
+
+	state              nmapXMLLexState
+	attributeCount     int
+	quote              byte
+	bangProbe          [7]byte
+	bangProbeLength    int
+	commentDashRun     int
+	cdataCloseRun      int
+	declarationQuote   byte
+	declarationDepth   int
+	declarationPrefix  int
+	declarationComment bool
+	declarationDashes  int
+	declarationPI      bool
+	declarationPIQMark bool
+	pendingErr         error
+}
+
+func newNmapXMLAttributeLimitReader(ctx context.Context, reader io.Reader) *nmapXMLAttributeLimitReader {
+	return &nmapXMLAttributeLimitReader{ctx: ctx, reader: reader}
+}
+
+func (r *nmapXMLAttributeLimitReader) Read(buffer []byte) (int, error) {
+	if len(buffer) == 0 {
+		return 0, nil
+	}
+	if r.ctx == nil {
+		return 0, errors.New("nmap XML attribute reader context is nil")
+	}
+	if r.pendingErr != nil {
+		return 0, r.pendingErr
+	}
+	n, readErr := r.reader.Read(buffer)
+	for index := 0; index < n; index++ {
+		if index&255 == 0 {
+			if err := r.ctx.Err(); err != nil {
+				r.pendingErr = err
+				return index, err
+			}
+		}
+		if err := r.consume(buffer[index]); err != nil {
+			r.pendingErr = err
+			return index, err
+		}
+	}
+	return n, readErr
+}
+
+func (r *nmapXMLAttributeLimitReader) consume(value byte) error {
+	switch r.state {
+	case nmapXMLLexText:
+		if value == '<' {
+			r.state = nmapXMLLexAfterLessThan
+		}
+	case nmapXMLLexAfterLessThan:
+		switch value {
+		case '/':
+			r.state = nmapXMLLexEndTag
+		case '?':
+			r.state = nmapXMLLexProcessingInstruction
+			r.commentDashRun = 0
+		case '!':
+			r.state = nmapXMLLexBang
+			r.bangProbeLength = 0
+		default:
+			r.state = nmapXMLLexStartTagName
+			r.attributeCount = 0
+			return r.consumeStartTagName(value)
+		}
+	case nmapXMLLexEndTag:
+		if value == '>' {
+			r.state = nmapXMLLexText
+		}
+	case nmapXMLLexBang:
+		return r.consumeBang(value)
+	case nmapXMLLexComment:
+		if value == '>' && r.commentDashRun >= 2 {
+			r.state = nmapXMLLexText
+			r.commentDashRun = 0
+		} else if value == '-' {
+			r.commentDashRun = min(r.commentDashRun+1, 2)
+		} else {
+			r.commentDashRun = 0
+		}
+	case nmapXMLLexCDATA:
+		if value == '>' && r.cdataCloseRun >= 2 {
+			r.state = nmapXMLLexText
+			r.cdataCloseRun = 0
+		} else if value == ']' {
+			r.cdataCloseRun = min(r.cdataCloseRun+1, 2)
+		} else {
+			r.cdataCloseRun = 0
+		}
+	case nmapXMLLexProcessingInstruction:
+		if value == '>' && r.commentDashRun == 1 {
+			r.state = nmapXMLLexText
+			r.commentDashRun = 0
+		} else if value == '?' {
+			r.commentDashRun = 1
+		} else {
+			r.commentDashRun = 0
+		}
+	case nmapXMLLexDeclaration:
+		r.consumeDeclaration(value)
+	case nmapXMLLexStartTagName:
+		return r.consumeStartTagName(value)
+	case nmapXMLLexStartTagAttributes:
+		switch {
+		case nmapXMLSpace(value):
+			return nil
+		case value == '>':
+			r.state = nmapXMLLexText
+		case value == '/':
+			r.state = nmapXMLLexStartTagSlash
+		default:
+			return r.startAttribute()
+		}
+	case nmapXMLLexAttributeName:
+		switch {
+		case nmapXMLSpace(value):
+			r.state = nmapXMLLexAttributeBeforeEquals
+		case value == '=':
+			r.state = nmapXMLLexAttributeBeforeValue
+		case value == '>':
+			r.state = nmapXMLLexText
+		case value == '/':
+			r.state = nmapXMLLexStartTagSlash
+		}
+	case nmapXMLLexAttributeBeforeEquals:
+		switch {
+		case nmapXMLSpace(value):
+			return nil
+		case value == '=':
+			r.state = nmapXMLLexAttributeBeforeValue
+		case value == '>':
+			r.state = nmapXMLLexText
+		case value == '/':
+			r.state = nmapXMLLexStartTagSlash
+		default:
+			// Malformed markup is rejected by encoding/xml. Treat this
+			// byte as another attribute start in the meantime so malformed
+			// syntax cannot bypass the cardinality guard.
+			return r.startAttribute()
+		}
+	case nmapXMLLexAttributeBeforeValue:
+		if nmapXMLSpace(value) {
+			return nil
+		}
+		if value == '\'' || value == '"' {
+			r.quote = value
+			r.state = nmapXMLLexAttributeValue
+		} else {
+			r.state = nmapXMLLexUnquotedAttributeValue
+		}
+	case nmapXMLLexAttributeValue:
+		if value == r.quote {
+			r.quote = 0
+			r.state = nmapXMLLexStartTagAttributes
+		}
+	case nmapXMLLexUnquotedAttributeValue:
+		switch {
+		case nmapXMLSpace(value):
+			r.state = nmapXMLLexStartTagAttributes
+		case value == '>':
+			r.state = nmapXMLLexText
+		}
+	case nmapXMLLexStartTagSlash:
+		if value == '>' {
+			r.state = nmapXMLLexText
+		} else {
+			r.state = nmapXMLLexStartTagAttributes
+			return r.consume(value)
+		}
+	}
+	return nil
+}
+
+func (r *nmapXMLAttributeLimitReader) consumeStartTagName(value byte) error {
+	switch {
+	case nmapXMLSpace(value):
+		r.state = nmapXMLLexStartTagAttributes
+	case value == '>':
+		r.state = nmapXMLLexText
+	case value == '/':
+		r.state = nmapXMLLexStartTagSlash
+	}
+	return nil
+}
+
+func (r *nmapXMLAttributeLimitReader) startAttribute() error {
+	r.attributeCount++
+	if r.attributeCount > maxNmapXMLAttributes {
+		return errNmapXMLAttributeLimit
+	}
+	r.state = nmapXMLLexAttributeName
+	return nil
+}
+
+func (r *nmapXMLAttributeLimitReader) consumeBang(value byte) error {
+	r.bangProbe[r.bangProbeLength] = value
+	r.bangProbeLength++
+	probe := r.bangProbe[:r.bangProbeLength]
+	if nmapXMLPrefixOf("--", probe) {
+		if len(probe) == len("--") {
+			r.state = nmapXMLLexComment
+			r.commentDashRun = 0
+			r.bangProbeLength = 0
+		}
+		return nil
+	}
+	if nmapXMLPrefixOf("[CDATA[", probe) {
+		if len(probe) == len("[CDATA[") {
+			r.state = nmapXMLLexCDATA
+			r.cdataCloseRun = 0
+			r.bangProbeLength = 0
+		}
+		return nil
+	}
+	r.state = nmapXMLLexDeclaration
+	for _, prefixByte := range probe {
+		r.consumeDeclaration(prefixByte)
+	}
+	r.bangProbeLength = 0
+	return nil
+}
+
+func (r *nmapXMLAttributeLimitReader) consumeDeclaration(value byte) {
+	if r.declarationPI {
+		if value == '>' && r.declarationPIQMark {
+			r.declarationPI = false
+			r.declarationPIQMark = false
+		} else {
+			r.declarationPIQMark = value == '?'
+		}
+		return
+	}
+	if r.declarationComment {
+		if value == '>' && r.declarationDashes >= 2 {
+			r.declarationComment = false
+			r.declarationDashes = 0
+		} else if value == '-' {
+			r.declarationDashes = min(r.declarationDashes+1, 2)
+		} else {
+			r.declarationDashes = 0
+		}
+		return
+	}
+	if r.declarationQuote != 0 {
+		if value == r.declarationQuote {
+			r.declarationQuote = 0
+		}
+		return
+	}
+	if r.declarationPrefix != 0 {
+		switch r.declarationPrefix {
+		case 1:
+			switch value {
+			case '!':
+				r.declarationPrefix = 2
+				return
+			case '?':
+				r.declarationPrefix = 0
+				r.declarationPI = true
+				r.declarationPIQMark = false
+				return
+			default:
+				r.declarationPrefix = 0
+			}
+		case 2:
+			if value == '-' {
+				r.declarationPrefix = 3
+				return
+			}
+		case 3:
+			if value == '-' {
+				r.declarationPrefix = 0
+				r.declarationComment = true
+				r.declarationDashes = 0
+				return
+			}
+		}
+		if value == '<' {
+			r.declarationPrefix = 1
+			return
+		}
+		r.declarationPrefix = 0
+	}
+	if value == '<' {
+		r.declarationPrefix = 1
+		return
+	}
+	if value == '\'' || value == '"' {
+		r.declarationQuote = value
+		return
+	}
+	switch value {
+	case '[':
+		r.declarationDepth++
+	case ']':
+		if r.declarationDepth > 0 {
+			r.declarationDepth--
+		}
+	case '>':
+		if r.declarationDepth == 0 {
+			r.state = nmapXMLLexText
+			r.declarationPrefix = 0
+		}
+	}
+}
+
+func nmapXMLPrefixOf(prefix string, value []byte) bool {
+	if len(value) > len(prefix) {
+		return false
+	}
+	for index, current := range value {
+		if prefix[index] != current {
+			return false
+		}
+	}
+	return true
+}
+
+func nmapXMLSpace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\n' || value == '\r'
+}
+
+func nmapPortScopeLimit(scannedPorts int) int {
+	if scannedPorts < 1 || scannedPorts > 65535 {
+		return 65535
+	}
+	return scannedPorts
+}
+
+func nmapPortRecordLimit(scannedPorts int) int {
+	scannedPorts = nmapPortScopeLimit(scannedPorts)
+	// XML may repeat a record without expanding the port scope. Allow a small
+	// fixed tolerance for such records, but never use it for distinct or folded
+	// ports represented in the scan.
+	return scannedPorts + maxNmapPortDuplicateSlack
+}
+
+func nmapSelectedHostLimit(targetCount int) int {
+	if targetCount < 0 {
+		targetCount = 0
+	}
+	return min(nmapBatchSize, targetCount)
+}
+
+func nmapCPERecordLimit(scannedPorts int) int {
+	scannedPorts = nmapPortScopeLimit(scannedPorts)
+	// Keep the existing per-service CPE cap plus its established fixture
+	// allowance while allowing a full configured scan's worth of services.
+	// The XML token ceiling is the tighter bound for large scans.
+	return min(nmapPortRecordLimit(scannedPorts)*maxNmapCPEsPerService, maxNmapXMLTokens/2)
+}
+
+func addNmapXMLState(counts *nmapXMLHostCounts, state string) error {
+	if !counts.selected {
+		return nil
+	}
+	state = boundScannerMetadata(state)
+	if state == "" {
+		return nil
+	}
+	if counts.states == nil {
+		counts.states = make(map[string]struct{})
+	}
+	if _, exists := counts.states[state]; exists {
+		return nil
+	}
+	if len(counts.states) >= maxNmapStateSummaries {
+		return fmt.Errorf("nmap XML host exceeded %d state-summary safety limit", maxNmapStateSummaries)
+	}
+	counts.states[state] = struct{}{}
+	return nil
+}
+
+func nmapXMLAttribute(start xml.StartElement, name string) (string, bool) {
+	for _, attribute := range start.Attr {
+		if attribute.Name.Local == name {
+			return attribute.Value, true
+		}
+	}
+	return "", false
+}
+
+func nmapXMLIntAttribute(start xml.StartElement, name string) (int, bool, error) {
+	value, exists := nmapXMLAttribute(start, name)
+	if !exists {
+		return 0, false, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, true, fmt.Errorf("invalid nmap XML %s attribute: %w", name, err)
+	}
+	return parsed, true, nil
+}
+
+func addNmapXMLReason(counts *nmapXMLHostCounts, state, reason string) error {
+	if !counts.selected {
+		return nil
+	}
+	state = boundScannerMetadata(state)
+	reason = boundScannerMetadata(reason)
+	if state == "" || reason == "" {
+		return nil
+	}
+	if counts.reasons == nil {
+		counts.reasons = make(map[string]map[string]struct{})
+	}
+	reasons := counts.reasons[state]
+	if reasons == nil {
+		reasons = make(map[string]struct{})
+		counts.reasons[state] = reasons
+	}
+	if _, exists := reasons[reason]; exists {
+		return nil
+	}
+	if len(reasons) >= maxScannerStateReasons+maxNmapMetadataRecordSlack {
+		return fmt.Errorf("nmap XML exceeded %d distinct reasons for state %q", maxScannerStateReasons+maxNmapMetadataRecordSlack, boundScannerMetadata(state))
+	}
+	reasons[reason] = struct{}{}
+	return nil
+}
+
+func validateNmapSelectedHostMetadataCounts(counts *nmapXMLHostCounts) error {
+	if counts.addresses > maxNmapAddressesPerHost {
+		return fmt.Errorf("nmap XML host exceeded %d address safety limit", maxNmapAddressesPerHost)
+	}
+	if counts.hostnames > maxNmapHostnamesPerHost {
+		return fmt.Errorf("nmap XML host exceeded %d hostname safety limit", maxNmapHostnamesPerHost)
+	}
+	return nil
+}
+
+// indexNmapXML validates the complete document and records byte spans only for
+// hosts the current invocation asked Nmap to scan. Foreign host subtrees are
+// still tokenized, counted, bounded, and cancellation-checked, but never
+// decoded into host/port objects. Selected host spans are streamed into a
+// bounded accumulator one at a time only after the whole result passes these
+// bounds.
+func indexNmapXML(ctx context.Context, data []byte, protocol string, scannedPorts int, targets []string, stats *nmapXMLParseStats) (string, []nmapXMLHostSpan, error) {
+	if ctx == nil {
+		return "", nil, errors.New("parse nmap XML context is nil")
+	}
+	if stats != nil {
+		*stats = nmapXMLParseStats{}
+	}
+	if len(data) > maxNmapOutput {
+		return "", nil, fmt.Errorf("nmap XML exceeded %d byte output limit", maxNmapOutput)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", nil, fmt.Errorf("parse nmap XML cancelled: %w", err)
+	}
+
+	if len(targets) > nmapBatchSize {
+		return "", nil, fmt.Errorf("nmap XML target batch exceeds the %d-address scanner limit", nmapBatchSize)
+	}
+	targetSet := make(map[string]struct{}, min(len(targets), nmapBatchSize))
+	for _, target := range targets {
+		targetSet[normalizeAddress(target)] = struct{}{}
+	}
+	includeAllHosts := targets == nil
+	selectedLimit := maxNmapXMLMaterializedHosts
+	if !includeAllHosts {
+		selectedLimit = nmapSelectedHostLimit(len(targetSet))
+	}
+	portRecordLimit := nmapPortRecordLimit(scannedPorts)
+	portScopeLimit := nmapPortScopeLimit(scannedPorts)
+	stack := make([]nmapXMLFrame, 0, 32)
+	var rootName string
+	var rootSeen bool
+	var runExit string
+	var hostCounts *nmapXMLHostCounts
+	var spans []nmapXMLHostSpan
+	totalHosts := 0
+	totalSelectedHosts := 0
+	selectedHostAddresses := make(map[string]struct{}, selectedLimit)
+	totalPortElements := 0
+	totalTokens := 0
+	attributeGuard := newNmapXMLAttributeLimitReader(ctx, bytes.NewReader(data))
+	decoder := xml.NewDecoder(nmapXMLContextReader{ctx: ctx, reader: attributeGuard})
+	decoder.Strict = true
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", nil, fmt.Errorf("parse nmap XML cancelled: %w", err)
+		}
+		before := decoder.InputOffset()
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return "", nil, fmt.Errorf("parse nmap XML cancelled: %w", ctx.Err())
+			}
+			if errors.Is(err, errNmapXMLAttributeLimit) {
+				return "", nil, errNmapXMLAttributeLimit
+			}
+			return "", nil, fmt.Errorf("parse nmap XML: %w", err)
+		}
+		totalTokens++
+		if stats != nil {
+			stats.Tokens = totalTokens
+		}
+		if totalTokens > maxNmapXMLTokens {
+			return "", nil, fmt.Errorf("nmap XML exceeded %d token safety limit", maxNmapXMLTokens)
+		}
+
+		switch element := token.(type) {
+		case xml.StartElement:
+			if rootSeen && len(stack) == 0 {
+				return "", nil, errors.New("parse nmap XML: multiple document elements")
+			}
+			if len(element.Attr) > maxNmapXMLAttributes {
+				return "", nil, fmt.Errorf("nmap XML element exceeded %d attribute safety limit", maxNmapXMLAttributes)
+			}
+			if len(stack)+1 > maxNmapXMLDepth {
+				return "", nil, fmt.Errorf("nmap XML exceeded %d element depth safety limit", maxNmapXMLDepth)
+			}
+			parent := ""
+			if len(stack) > 0 {
+				parent = stack[len(stack)-1].name
+			}
+			if !rootSeen {
+				rootSeen = true
+				rootName = element.Name.Local
+			}
+			frame := nmapXMLFrame{name: element.Name.Local}
+			if len(stack) > 0 {
+				frame.extraState = stack[len(stack)-1].extraState
+			}
+			if element.Name.Local == "extraports" {
+				frame.extraState, _ = nmapXMLAttribute(element, "state")
+				frame.extraState = boundScannerMetadata(frame.extraState)
+			}
+
+			if element.Name.Local == "host" && rootName == "nmaprun" && parent == "nmaprun" {
+				if hostCounts != nil {
+					return "", nil, errors.New("nested nmap host element")
+				}
+				if includeAllHosts && totalHosts >= maxNmapXMLMaterializedHosts {
+					return "", nil, fmt.Errorf("nmap XML exceeded %d materialized host safety limit", maxNmapXMLMaterializedHosts)
+				}
+				totalHosts++
+				if stats != nil {
+					stats.HostElements = totalHosts
+				}
+				if totalHosts > maxNmapXMLHosts {
+					return "", nil, fmt.Errorf("nmap XML exceeded %d host safety limit", maxNmapXMLHosts)
+				}
+				hostCounts = &nmapXMLHostCounts{start: int(before), selected: includeAllHosts}
+			} else if hostCounts != nil {
+				switch element.Name.Local {
+				case "address":
+					hostCounts.addresses++
+					addressType, _ := nmapXMLAttribute(element, "addrtype")
+					address, _ := nmapXMLAttribute(element, "addr")
+					if addressType == "ipv4" || addressType == "ipv6" {
+						if ip := net.ParseIP(strings.TrimSpace(address)); ip != nil {
+							canonical := ip.String()
+							if hostCounts.address == "" {
+								hostCounts.address = canonical
+								_, selected := targetSet[canonical]
+								if includeAllHosts || selected {
+									if !hostCounts.selected {
+										hostCounts.selected = true
+										if stats != nil {
+											stats.SelectedScriptElements += hostCounts.scripts
+										}
+										if err := validateNmapSelectedHostMetadataCounts(hostCounts); err != nil {
+											return "", nil, err
+										}
+										if err := addNmapXMLState(hostCounts, hostCounts.hostState); err != nil {
+											return "", nil, err
+										}
+										if err := addNmapXMLReason(hostCounts, hostCounts.hostState, hostCounts.hostReason); err != nil {
+											return "", nil, err
+										}
+									}
+									if _, duplicate := selectedHostAddresses[canonical]; !duplicate {
+										if totalSelectedHosts >= selectedLimit {
+											if includeAllHosts {
+												return "", nil, fmt.Errorf("nmap XML exceeded %d materialized host safety limit", selectedLimit)
+											}
+											return "", nil, fmt.Errorf("nmap XML exceeded %d selected host safety limit", selectedLimit)
+										}
+										nextSelectedHosts := int64(totalSelectedHosts + 1)
+										if nextSelectedHosts*int64(portScopeLimit) > maxNmapXMLMaterializedPortSlots {
+											return "", nil, fmt.Errorf("nmap XML selected host-port scope exceeded %d materialized slot safety limit", maxNmapXMLMaterializedPortSlots)
+										}
+										selectedHostAddresses[canonical] = struct{}{}
+										totalSelectedHosts++
+										hostCounts.materialize = true
+									}
+								}
+							}
+						}
+					}
+					if hostCounts.selected {
+						if err := validateNmapSelectedHostMetadataCounts(hostCounts); err != nil {
+							return "", nil, err
+						}
+					}
+				case "hostname":
+					hostCounts.hostnames++
+					if hostCounts.selected {
+						if err := validateNmapSelectedHostMetadataCounts(hostCounts); err != nil {
+							return "", nil, err
+						}
+					}
+				case "script":
+					hostCounts.scripts++
+					if hostCounts.selected && stats != nil {
+						stats.SelectedScriptElements++
+					}
+				case "cpe":
+					if parent == "service" && hostCounts.selected {
+						hostCounts.cpes++
+						serviceIndex := len(stack) - 1
+						stack[serviceIndex].serviceCPEs++
+						if stack[serviceIndex].serviceCPEs > maxNmapCPEsPerService {
+							return "", nil, fmt.Errorf("nmap XML service exceeded %d CPE safety limit", maxNmapCPEsPerService)
+						}
+						if hostCounts.cpes > nmapCPERecordLimit(scannedPorts) {
+							return "", nil, fmt.Errorf("nmap XML host exceeded %d CPE safety limit for %d scanned ports", nmapCPERecordLimit(scannedPorts), scannedPorts)
+						}
+					}
+				case "port":
+					if hostCounts.address == "" {
+						return "", nil, errors.New("nmap XML port records appeared before the host address")
+					}
+					totalPortElements++
+					if stats != nil {
+						stats.PortElements = totalPortElements
+					}
+					if hostCounts.selected {
+						portID, exists, intErr := nmapXMLIntAttribute(element, "portid")
+						if intErr != nil {
+							return "", nil, intErr
+						}
+						if !exists {
+							return "", nil, errors.New("nmap XML port is missing its port id")
+						}
+						if portID < 1 || portID > 65535 {
+							return "", nil, fmt.Errorf("nmap XML contains invalid port id %d", portID)
+						}
+						hostCounts.ports++
+						if hostCounts.ports > portRecordLimit {
+							return "", nil, fmt.Errorf("nmap XML %s host exceeded %d port-record safety limit for %d scanned ports", protocol, portRecordLimit, scannedPorts)
+						}
+						portProtocol, _ := nmapXMLAttribute(element, "protocol")
+						if portProtocol == protocol {
+							if !hostCounts.portIDs.contains(portID) {
+								hostCounts.portIDs.add(portID)
+								hostCounts.uniquePorts++
+							}
+						}
+						if hostCounts.uniquePorts+hostCounts.reportedExtraPorts > portScopeLimit {
+							return "", nil, fmt.Errorf("nmap XML host exceeded the %d-port scan scope", portScopeLimit)
+						}
+					}
+				case "extraports":
+					if hostCounts.address == "" {
+						return "", nil, errors.New("nmap XML folded port records appeared before the host address")
+					}
+					if !hostCounts.selected {
+						break
+					}
+					count, exists, intErr := nmapXMLIntAttribute(element, "count")
+					if intErr != nil {
+						return "", nil, intErr
+					}
+					if !exists || count < 0 {
+						return "", nil, errors.New("nmap XML contains a missing or negative extraports count")
+					}
+					hostCounts.extraPorts++
+					if hostCounts.extraPorts > maxNmapExtraPortsPerHost {
+						return "", nil, fmt.Errorf("nmap XML host exceeded %d folded-state safety limit", maxNmapExtraPortsPerHost)
+					}
+					if err := addNmapXMLState(hostCounts, frame.extraState); err != nil {
+						return "", nil, err
+					}
+					if count > portScopeLimit-hostCounts.reportedExtraPorts {
+						return "", nil, fmt.Errorf("nmap XML host exceeded the %d-port scan scope", portScopeLimit)
+					}
+					hostCounts.reportedExtraPorts += count
+					if hostCounts.selected && hostCounts.uniquePorts+hostCounts.reportedExtraPorts > portScopeLimit {
+						return "", nil, fmt.Errorf("nmap XML host exceeded the %d-port scan scope", portScopeLimit)
+					}
+				case "extrareasons":
+					if !hostCounts.selected {
+						break
+					}
+					count, _, intErr := nmapXMLIntAttribute(element, "count")
+					if intErr != nil {
+						return "", nil, intErr
+					}
+					if count < 0 {
+						return "", nil, errors.New("nmap XML contains a negative extrareasons count")
+					}
+					if parent == "extraports" {
+						parentFrame := &stack[len(stack)-1]
+						parentFrame.extraReasonCount++
+						if parentFrame.extraReasonCount > maxNmapExtraReasonsPerRecord {
+							return "", nil, fmt.Errorf("nmap XML folded state exceeded %d reason safety limit", maxNmapExtraReasonsPerRecord)
+						}
+						state := parentFrame.extraState
+						reason, _ := nmapXMLAttribute(element, "reason")
+						if err := addNmapXMLReason(hostCounts, state, reason); err != nil {
+							return "", nil, err
+						}
+					}
+					reasonPorts, _ := nmapXMLAttribute(element, "ports")
+					if len(reasonPorts) > maxNmapFoldedListBytes {
+						return "", nil, fmt.Errorf("nmap XML folded port list exceeded %d byte safety limit", maxNmapFoldedListBytes)
+					}
+				case "status":
+					if !hostCounts.selected {
+						state, _ := nmapXMLAttribute(element, "state")
+						reason, _ := nmapXMLAttribute(element, "reason")
+						hostCounts.hostState = boundScannerMetadata(state)
+						hostCounts.hostReason = boundScannerMetadata(reason)
+						break
+					}
+					if _, _, intErr := nmapXMLIntAttribute(element, "reason_ttl"); intErr != nil {
+						return "", nil, intErr
+					}
+					state, _ := nmapXMLAttribute(element, "state")
+					reason, _ := nmapXMLAttribute(element, "reason")
+					hostCounts.hostState = boundScannerMetadata(state)
+					hostCounts.hostReason = boundScannerMetadata(reason)
+					if err := addNmapXMLState(hostCounts, state); err != nil {
+						return "", nil, err
+					}
+					if err := addNmapXMLReason(hostCounts, state, reason); err != nil {
+						return "", nil, err
+					}
+				case "state":
+					if !hostCounts.selected {
+						break
+					}
+					if _, _, intErr := nmapXMLIntAttribute(element, "reason_ttl"); intErr != nil {
+						return "", nil, intErr
+					}
+					state, _ := nmapXMLAttribute(element, "state")
+					if err := addNmapXMLState(hostCounts, state); err != nil {
+						return "", nil, err
+					}
+					reason, _ := nmapXMLAttribute(element, "reason")
+					if err := addNmapXMLReason(hostCounts, state, reason); err != nil {
+						return "", nil, err
+					}
+				case "service":
+					if !hostCounts.selected {
+						break
+					}
+					if _, _, intErr := nmapXMLIntAttribute(element, "conf"); intErr != nil {
+						return "", nil, intErr
+					}
+				}
+			}
+			if element.Name.Local == "finished" && parent == "runstats" {
+				runExit, _ = nmapXMLAttribute(element, "exit")
+			}
+			stack = append(stack, frame)
+
+		case xml.EndElement:
+			if len(stack) == 0 || stack[len(stack)-1].name != element.Name.Local {
+				return "", nil, errors.New("malformed nmap XML element nesting")
+			}
+			if element.Name.Local == "host" && hostCounts != nil {
+				if hostCounts.materialize {
+					spans = append(spans, nmapXMLHostSpan{start: hostCounts.start, end: int(decoder.InputOffset())})
+				}
+				hostCounts = nil
+			}
+			stack = stack[:len(stack)-1]
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", nil, fmt.Errorf("parse nmap XML cancelled: %w", err)
+	}
+	if !rootSeen {
+		return "", nil, errors.New("parse nmap XML: no document element")
+	}
+	if rootName != "nmaprun" {
+		// Do not let a success marker under an unrelated wrapper make an empty
+		// host set look like a complete Nmap observation.
+		return "", nil, fmt.Errorf("parse nmap XML: unexpected document element %q", rootName)
+	}
+	if len(stack) != 0 || hostCounts != nil {
+		return "", nil, errors.New("parse nmap XML: incomplete document")
+	}
+	if stats != nil {
+		stats.SelectedHostSpans = len(spans)
+	}
+	return runExit, spans, nil
+}
+
+type nmapStateSummaryIndexes struct {
+	observation *model.ProtocolObservation
+	states      map[string]int
+	reasons     map[string]map[string]int
+}
+
+func newNmapStateSummaryIndexes(observation *model.ProtocolObservation) nmapStateSummaryIndexes {
+	return nmapStateSummaryIndexes{
+		observation: observation,
+		states:      make(map[string]int, maxNmapStateSummaries),
+		reasons:     make(map[string]map[string]int, maxNmapStateSummaries),
+	}
+}
+
+func (indexes *nmapStateSummaryIndexes) addSummary(state, reason string, count int) {
+	if count <= 0 {
+		return
+	}
+	state = boundScannerMetadata(state)
+	index, exists := indexes.states[state]
+	if !exists {
+		index = len(indexes.observation.StateSummaries)
+		indexes.states[state] = index
+		indexes.observation.StateSummaries = append(indexes.observation.StateSummaries, model.StateSummary{State: state})
+	}
+	indexes.observation.StateSummaries[index].Count += count
+	if reason != "" {
+		indexes.addReason(state, reason, count)
+	}
+}
+
+func (indexes *nmapStateSummaryIndexes) addReason(state, reason string, count int) {
+	if reason == "" || count <= 0 {
+		return
+	}
+	state = boundScannerMetadata(state)
+	reason = boundScannerMetadata(reason)
+	stateIndex, exists := indexes.states[state]
+	if !exists {
+		stateIndex = len(indexes.observation.StateSummaries)
+		indexes.states[state] = stateIndex
+		indexes.observation.StateSummaries = append(indexes.observation.StateSummaries, model.StateSummary{State: state})
+	}
+	reasonIndexes := indexes.reasons[state]
+	if reasonIndexes == nil {
+		reasonIndexes = make(map[string]int, maxScannerStateReasons)
+		indexes.reasons[state] = reasonIndexes
+	}
+	reasonIndex, exists := reasonIndexes[reason]
+	if !exists {
+		reasonIndex = len(indexes.observation.StateSummaries[stateIndex].Reasons)
+		reasonIndexes[reason] = reasonIndex
+		indexes.observation.StateSummaries[stateIndex].Reasons = append(indexes.observation.StateSummaries[stateIndex].Reasons, model.StateReason{Reason: reason})
+	}
+	indexes.observation.StateSummaries[stateIndex].Reasons[reasonIndex].Count += count
 }
 
 type parsedRun struct {
@@ -2001,12 +3061,425 @@ func parseXML(data []byte, protocol string, detectService bool) (parsedRun, erro
 }
 
 func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parsedRun, error) {
-	var raw nmapRun
-	if err := xml.Unmarshal(data, &raw); err != nil {
-		return parsedRun{}, fmt.Errorf("parse nmap XML: %w", err)
+	scannedPorts := 0
+	if ports, err := config.ParsePorts(pc.Ports); err == nil {
+		scannedPorts = len(ports)
 	}
-	result := parsedRun{Exit: raw.RunStats.Exit, Units: map[string]model.Unit{}, Hosts: map[string]model.HostObservation{}}
-	for _, host := range raw.Hosts {
+	return parseXMLWithPortCount(context.Background(), data, protocol, pc, nil, scannedPorts, nil)
+}
+
+type nmapPortScriptSummary struct {
+	portIndex int
+	script    nmapScript
+}
+
+// decodeNmapHostBounded materializes one already-validated selected host at a
+// time. Ports and CPEs use the preflight's scope/cardinality limits; NSE
+// elements are streamed and reduced to summaries as they arrive, so a target
+// cannot turn a large script table into a slice of raw script objects.
+func decodeNmapHostBounded(ctx context.Context, data []byte, protocol string) (nmapHost, int, int, error) {
+	if ctx == nil {
+		return nmapHost{}, 0, 0, errors.New("decode nmap XML host context is nil")
+	}
+	decoder := xml.NewDecoder(nmapXMLContextReader{ctx: ctx, reader: bytes.NewReader(data)})
+	decoder.Strict = true
+	var host nmapHost
+	stack := make([]string, 0, 16)
+	currentPort, currentExtra := -1, -1
+	portScriptEligible := make([]bool, 0, 16)
+	seenPortRecords := make(map[int]struct{})
+	portScriptSummaries := make([]nmapPortScriptSummary, 0, maxScannerNSEOutputs)
+	scriptElements := 0
+	rootSeen := false
+	var metadataErr error
+	boundMetadata := func(value string) string {
+		if metadataErr != nil {
+			return ""
+		}
+		bounded, err := boundNmapXMLMetadata(ctx, value)
+		if err != nil {
+			metadataErr = err
+			return ""
+		}
+		return bounded
+	}
+
+	readToken := func() (xml.Token, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		token, err := decoder.Token()
+		if err != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return token, err
+	}
+
+	for {
+		token, err := readToken()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nmapHost{}, scriptElements, 0, err
+		}
+		switch element := token.(type) {
+		case xml.StartElement:
+			parent, grandparent := "", ""
+			if len(stack) > 0 {
+				parent = stack[len(stack)-1]
+			}
+			if len(stack) > 1 {
+				grandparent = stack[len(stack)-2]
+			}
+			name := element.Name.Local
+			if !rootSeen {
+				if name != "host" {
+					return nmapHost{}, scriptElements, 0, errors.New("selected nmap XML span does not begin with a host")
+				}
+				rootSeen = true
+				host.TimedOut, _ = nmapXMLAttribute(element, "timedout")
+				host.TimedOut = boundMetadata(host.TimedOut)
+				if metadataErr != nil {
+					return nmapHost{}, scriptElements, 0, metadataErr
+				}
+				stack = append(stack, name)
+				continue
+			}
+
+			switch name {
+			case "status":
+				if parent == "host" {
+					host.Status.State, _ = nmapXMLAttribute(element, "state")
+					host.Status.Reason, _ = nmapXMLAttribute(element, "reason")
+					host.Status.State = boundMetadata(host.Status.State)
+					host.Status.Reason = boundMetadata(host.Status.Reason)
+					ttl, exists, parseErr := nmapXMLIntAttribute(element, "reason_ttl")
+					if parseErr != nil {
+						return nmapHost{}, scriptElements, 0, parseErr
+					}
+					if exists {
+						host.Status.TTL = ttl
+					}
+				}
+			case "address":
+				if parent == "host" {
+					addr, _ := nmapXMLAttribute(element, "addr")
+					addrType, _ := nmapXMLAttribute(element, "addrtype")
+					vendor, _ := nmapXMLAttribute(element, "vendor")
+					host.Addresses = append(host.Addresses, struct {
+						Addr   string `xml:"addr,attr"`
+						Type   string `xml:"addrtype,attr"`
+						Vendor string `xml:"vendor,attr"`
+					}{Addr: boundMetadata(addr), Type: boundMetadata(addrType), Vendor: boundMetadata(vendor)})
+				}
+			case "hostname":
+				if parent == "hostnames" && grandparent == "host" {
+					nameValue, _ := nmapXMLAttribute(element, "name")
+					typeValue, _ := nmapXMLAttribute(element, "type")
+					host.Hostnames = append(host.Hostnames, struct {
+						Name string `xml:"name,attr"`
+						Type string `xml:"type,attr"`
+					}{Name: boundMetadata(nameValue), Type: boundMetadata(typeValue)})
+				}
+			case "times":
+				if parent == "host" {
+					host.Times.SRTT, _ = nmapXMLAttribute(element, "srtt")
+					host.Times.SRTT = boundMetadata(host.Times.SRTT)
+				}
+			case "port":
+				if parent == "ports" && grandparent == "host" {
+					if strings.EqualFold(strings.TrimSpace(host.TimedOut), "true") {
+						currentPort = -1
+						stack = append(stack, name)
+						continue
+					}
+					portID, exists, parseErr := nmapXMLIntAttribute(element, "portid")
+					if parseErr != nil {
+						return nmapHost{}, scriptElements, 0, parseErr
+					}
+					if !exists {
+						return nmapHost{}, scriptElements, 0, errors.New("selected nmap XML port is missing its port id")
+					}
+					portProtocol, _ := nmapXMLAttribute(element, "protocol")
+					host.Ports = append(host.Ports, nmapPort{Protocol: boundMetadata(portProtocol), PortID: portID})
+					currentPort = len(host.Ports) - 1
+					eligible := false
+					if host.Ports[currentPort].Protocol == protocol {
+						if _, duplicate := seenPortRecords[portID]; !duplicate {
+							seenPortRecords[portID] = struct{}{}
+							eligible = true
+						}
+					}
+					portScriptEligible = append(portScriptEligible, eligible)
+				}
+			case "state":
+				if parent == "port" && currentPort >= 0 {
+					state, _ := nmapXMLAttribute(element, "state")
+					reason, _ := nmapXMLAttribute(element, "reason")
+					ttl, exists, parseErr := nmapXMLIntAttribute(element, "reason_ttl")
+					if parseErr != nil {
+						return nmapHost{}, scriptElements, 0, parseErr
+					}
+					host.Ports[currentPort].State.State = boundMetadata(state)
+					host.Ports[currentPort].State.Reason = boundMetadata(reason)
+					if exists {
+						host.Ports[currentPort].State.TTL = ttl
+					}
+				}
+			case "service":
+				if parent == "port" && currentPort >= 0 {
+					service := &host.Ports[currentPort].Service
+					service.Name, _ = nmapXMLAttribute(element, "name")
+					service.Product, _ = nmapXMLAttribute(element, "product")
+					service.Version, _ = nmapXMLAttribute(element, "version")
+					service.Extra, _ = nmapXMLAttribute(element, "extrainfo")
+					service.Method, _ = nmapXMLAttribute(element, "method")
+					service.Tunnel, _ = nmapXMLAttribute(element, "tunnel")
+					service.OSType, _ = nmapXMLAttribute(element, "ostype")
+					service.DeviceType, _ = nmapXMLAttribute(element, "devicetype")
+					service.Name = boundMetadata(service.Name)
+					service.Product = boundMetadata(service.Product)
+					service.Version = boundMetadata(service.Version)
+					service.Extra = boundMetadata(service.Extra)
+					service.Method = boundMetadata(service.Method)
+					service.Tunnel = boundMetadata(service.Tunnel)
+					service.OSType = boundMetadata(service.OSType)
+					service.DeviceType = boundMetadata(service.DeviceType)
+					confidence, exists, parseErr := nmapXMLIntAttribute(element, "conf")
+					if parseErr != nil {
+						return nmapHost{}, scriptElements, 0, parseErr
+					}
+					if exists {
+						service.Confidence = confidence
+					}
+				}
+			case "cpe":
+				if parent == "service" && currentPort >= 0 {
+					value, readErr := readNmapXMLTextBounded(ctx, decoder)
+					if readErr != nil {
+						return nmapHost{}, scriptElements, 0, readErr
+					}
+					host.Ports[currentPort].Service.CPES = append(host.Ports[currentPort].Service.CPES, value)
+					continue
+				}
+			case "script":
+				scriptElements++
+				if strings.EqualFold(strings.TrimSpace(host.TimedOut), "true") {
+					break
+				}
+				id, _ := nmapXMLAttribute(element, "id")
+				output, _ := nmapXMLAttribute(element, "output")
+				summary, summaryErr := summarizeNSEOutputContext(ctx, id, output)
+				if summaryErr != nil {
+					return nmapHost{}, scriptElements, 0, summaryErr
+				}
+				if summary != "" && parent == "hostscript" && grandparent == "host" && len(host.HostScripts) < maxScannerNSEOutputs {
+					if len(host.HostScripts)+len(portScriptSummaries) >= maxScannerNSEOutputs && len(portScriptSummaries) > 0 {
+						portScriptSummaries = portScriptSummaries[:len(portScriptSummaries)-1]
+					}
+					host.HostScripts = append(host.HostScripts, nmapScript{Output: summary})
+				} else if summary != "" && parent == "port" && currentPort >= 0 &&
+					(host.Ports[currentPort].State.State == "open" || host.Ports[currentPort].State.State == "open|filtered") && len(portScriptSummaries) < maxScannerNSEOutputs {
+					if portScriptEligible[currentPort] && len(host.HostScripts)+len(portScriptSummaries) < maxScannerNSEOutputs {
+						portScriptSummaries = append(portScriptSummaries, nmapPortScriptSummary{portIndex: currentPort, script: nmapScript{Output: summary}})
+					}
+				}
+			case "extraports":
+				if parent == "ports" && grandparent == "host" && !strings.EqualFold(strings.TrimSpace(host.TimedOut), "true") {
+					state, _ := nmapXMLAttribute(element, "state")
+					count, exists, parseErr := nmapXMLIntAttribute(element, "count")
+					if parseErr != nil {
+						return nmapHost{}, scriptElements, 0, parseErr
+					}
+					if !exists {
+						return nmapHost{}, scriptElements, 0, errors.New("selected nmap XML extraports is missing its count")
+					}
+					host.ExtraPorts = append(host.ExtraPorts, nmapExtraPorts{State: boundMetadata(state), Count: count})
+					currentExtra = len(host.ExtraPorts) - 1
+				}
+			case "extrareasons":
+				if parent == "extraports" && currentExtra >= 0 {
+					reason, _ := nmapXMLAttribute(element, "reason")
+					count, _, parseErr := nmapXMLIntAttribute(element, "count")
+					if parseErr != nil {
+						return nmapHost{}, scriptElements, 0, parseErr
+					}
+					protocol, _ := nmapXMLAttribute(element, "proto")
+					ports, _ := nmapXMLAttribute(element, "ports")
+					host.ExtraPorts[currentExtra].Reasons = append(host.ExtraPorts[currentExtra].Reasons, nmapExtraReason{
+						Reason: boundMetadata(reason), Count: count,
+						Protocol: boundMetadata(protocol), Ports: ports,
+					})
+				}
+			}
+			if metadataErr != nil {
+				return nmapHost{}, scriptElements, 0, metadataErr
+			}
+			stack = append(stack, name)
+
+		case xml.EndElement:
+			if len(stack) == 0 || stack[len(stack)-1] != element.Name.Local {
+				return nmapHost{}, scriptElements, 0, errors.New("malformed selected nmap XML host nesting")
+			}
+			if element.Name.Local == "host" && len(stack) == 1 {
+				for _, summary := range portScriptSummaries {
+					host.Ports[summary.portIndex].Scripts = append(host.Ports[summary.portIndex].Scripts, summary.script)
+				}
+				retained := len(host.HostScripts) + len(portScriptSummaries)
+				return host, scriptElements, retained, nil
+			}
+			if element.Name.Local == "port" {
+				currentPort = -1
+			}
+			if element.Name.Local == "extraports" {
+				currentExtra = -1
+			}
+			stack = stack[:len(stack)-1]
+		}
+	}
+	return nmapHost{}, scriptElements, 0, errors.New("selected nmap XML host is incomplete")
+}
+
+func readNmapXMLTextBounded(ctx context.Context, decoder *xml.Decoder) (string, error) {
+	const retainedPrefixBytes = maxScannerMetadataBytes + utf8.UTFMax
+	var text strings.Builder
+	text.Grow(retainedPrefixBytes)
+	truncated := false
+	seenContent := false
+	depth := 1
+	for depth > 0 {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		token, err := decoder.Token()
+		if err != nil {
+			return "", err
+		}
+		switch part := token.(type) {
+		case xml.StartElement:
+			depth++
+		case xml.EndElement:
+			depth--
+		case xml.CharData:
+			for offset := 0; offset < len(part); {
+				if offset&4095 == 0 {
+					if err := ctx.Err(); err != nil {
+						return "", err
+					}
+				}
+				r, size := utf8.DecodeRune(part[offset:])
+				offset += size
+				if !unicode.IsSpace(r) {
+					seenContent = true
+					if text.Len() >= retainedPrefixBytes {
+						truncated = true
+						continue
+					}
+				}
+				if seenContent && text.Len()+size <= retainedPrefixBytes {
+					text.Write(part[offset-size : offset])
+				}
+			}
+		}
+	}
+	value := strings.TrimSpace(strings.ToValidUTF8(text.String(), "�"))
+	if truncated {
+		return truncateNSESummary(value), nil
+	}
+	return boundScannerMetadata(value), nil
+}
+
+func boundNmapXMLMetadata(ctx context.Context, value string) (string, error) {
+	if ctx == nil {
+		return "", errors.New("bound nmap XML metadata context is nil")
+	}
+	start, end := 0, len(value)
+	for start < end {
+		if start&4095 == 0 {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+		}
+		r, size := utf8.DecodeRuneInString(value[start:])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		start += size
+	}
+	for end > start {
+		if (len(value)-end)&4095 == 0 {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+		}
+		r, size := utf8.DecodeLastRuneInString(value[:end])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		end -= size
+	}
+	trimmed := value[start:end]
+	if len(trimmed) <= maxScannerMetadataBytes {
+		return boundScannerMetadata(trimmed), ctx.Err()
+	}
+	limit, prefixEnd := maxScannerMetadataBytes-len("…"), 0
+	for index, r := range trimmed {
+		if index&4095 == 0 {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+		}
+		size := utf8.RuneLen(r)
+		if prefixEnd+size > limit {
+			break
+		}
+		prefixEnd += size
+	}
+	cleanPrefix := strings.ToValidUTF8(trimmed[:prefixEnd], "�")
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return truncateNSESummary(cleanPrefix), nil
+}
+
+func parseXMLWithPortCount(ctx context.Context, data []byte, protocol string, pc config.Protocol, targets []string, scannedPortCount int, stats *nmapXMLParseStats) (parsedRun, error) {
+	if ctx == nil {
+		return parsedRun{}, errors.New("parse nmap XML context is nil")
+	}
+	exit, spans, err := indexNmapXML(ctx, data, protocol, scannedPortCount, targets, stats)
+	if err != nil {
+		return parsedRun{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return parsedRun{}, fmt.Errorf("parse nmap XML cancelled: %w", err)
+	}
+	result := parsedRun{Exit: exit, Units: map[string]model.Unit{}, Hosts: map[string]model.HostObservation{}}
+	var materializedPositivePorts int64
+	for _, span := range spans {
+		if err := ctx.Err(); err != nil {
+			return parsedRun{}, fmt.Errorf("parse nmap XML cancelled: %w", err)
+		}
+		if span.start < 0 || span.end > len(data) || span.start >= span.end {
+			return parsedRun{}, errors.New("invalid nmap XML host span")
+		}
+		host, scriptElements, retainedScriptSummaries, err := decodeNmapHostBounded(ctx, data[span.start:span.end], protocol)
+		if err != nil {
+			if ctx.Err() != nil {
+				return parsedRun{}, fmt.Errorf("parse nmap XML cancelled: %w", ctx.Err())
+			}
+			return parsedRun{}, fmt.Errorf("parse nmap XML host: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return parsedRun{}, fmt.Errorf("parse nmap XML cancelled: %w", err)
+		}
+		if stats != nil {
+			stats.MaterializedHosts++
+			stats.MaterializedPortElements += len(host.Ports)
+			stats.MaterializedScriptElements += scriptElements
+			stats.RetainedScriptSummaries += retainedScriptSummaries
+		}
+
 		if strings.EqualFold(strings.TrimSpace(host.TimedOut), "true") {
 			address := ""
 			for _, candidate := range host.Addresses {
@@ -2025,7 +3498,7 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 			if reason == "" {
 				reason = "nmap-host-timeout"
 			}
-			observation := unreachableHostObservation(address, protocol, pc, reason)
+			observation := unreachableHostObservationWithPortCount(address, protocol, pc, reason, scannedPortCount)
 			observation.ReasonTTL = host.Status.TTL
 			observation.StatusReason = boundScannerMetadata(reason)
 			for _, hostname := range host.Hostnames {
@@ -2075,10 +3548,7 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 				hostObservation.LinkAddresses = append(hostObservation.LinkAddresses, model.LinkAddress{Address: boundScannerMetadata(a.Addr), Type: boundScannerMetadata(a.Type), Vendor: boundScannerMetadata(a.Vendor)})
 			}
 		}
-		observation := model.ProtocolObservation{Protocol: protocol, Status: status, StatusReason: boundScannerMetadata(host.Status.Reason), ScanType: scanType(protocol, pc), ScannedPorts: pc.Ports, ServiceDetection: pc.ServiceDetection, NSEProfile: strings.TrimSpace(pc.NSEProfile), NSEArgs: cloneStringMap(pc.NSEArgs)}
-		if ports, err := config.ParsePorts(pc.Ports); err == nil {
-			observation.ScannedPortCount = len(ports)
-		}
+		observation := model.ProtocolObservation{Protocol: protocol, Status: status, StatusReason: boundScannerMetadata(host.Status.Reason), ScanType: scanType(protocol, pc), ScannedPorts: pc.Ports, ScannedPortCount: scannedPortCount, ServiceDetection: pc.ServiceDetection, NSEProfile: strings.TrimSpace(pc.NSEProfile), NSEArgs: cloneStringMap(pc.NSEArgs)}
 		if status != "up" {
 			// Preserve an explicit Nmap down element as unreachable evidence
 			// instead of making the caller guess whether the address was omitted.
@@ -2094,27 +3564,50 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 			if count == 0 {
 				count = 1
 			}
-			addStateSummary(&observation, "unreachable", hostObservation.StatusReason, count)
+			indexes := newNmapStateSummaryIndexes(&observation)
+			indexes.addSummary("unreachable", hostObservation.StatusReason, count)
 			hostObservation.Protocols = append(hostObservation.Protocols, observation)
 			dedupeHostObservation(&hostObservation)
 			result.Hosts[address] = hostObservation
 			continue
 		}
 		unit := model.Unit{Target: address, Protocol: protocol, Addresses: []string{address}}
+		stateIndexes := newNmapStateSummaryIndexes(&observation)
+		var seenPortRecords nmapPortBitset
+		var listedPositivePorts nmapPortBitset
 		for _, script := range host.HostScripts {
-			observation.NSEOutput = appendNSESummary(observation.NSEOutput, script.ID, script.Output)
+			observation.NSEOutput, err = appendNSESummaryContext(ctx, observation.NSEOutput, script.ID, script.Output)
+			if err != nil {
+				return parsedRun{}, fmt.Errorf("parse nmap XML script: %w", err)
+			}
 		}
-		for _, p := range host.Ports {
+		for portIndex, p := range host.Ports {
+			if portIndex&255 == 0 {
+				if err := ctx.Err(); err != nil {
+					return parsedRun{}, fmt.Errorf("parse nmap XML cancelled: %w", err)
+				}
+			}
 			if p.Protocol != protocol {
 				continue
 			}
+			if seenPortRecords.contains(p.PortID) {
+				continue
+			}
+			seenPortRecords.add(p.PortID)
 			reason := boundScannerMetadata(p.State.Reason)
-			addStateSummary(&observation, p.State.State, reason, 1)
+			stateIndexes.addSummary(p.State.State, reason, 1)
 			if p.State.State != "open" && p.State.State != "open|filtered" {
 				continue
 			}
+			if materializedPositivePorts >= maxNmapXMLMaterializedPortSlots {
+				return parsedRun{}, fmt.Errorf("nmap XML exceeded %d materialized positive-port safety limit", maxNmapXMLMaterializedPortSlots)
+			}
+			materializedPositivePorts++
 			for _, script := range p.Scripts {
-				observation.NSEOutput = appendNSESummary(observation.NSEOutput, script.ID, script.Output)
+				observation.NSEOutput, err = appendNSESummaryContext(ctx, observation.NSEOutput, script.ID, script.Output)
+				if err != nil {
+					return parsedRun{}, fmt.Errorf("parse nmap XML script: %w", err)
+				}
 			}
 			serviceName := boundScannerMetadata(p.Service.Name)
 			serviceProduct := boundScannerMetadata(p.Service.Product)
@@ -2130,6 +3623,7 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 				state.Service = boundScannerMetadata(model.Fingerprint(serviceName, serviceProduct, serviceVersion, serviceExtra, serviceCPES))
 			}
 			unit.Ports = append(unit.Ports, state)
+			listedPositivePorts.add(p.PortID)
 			port := model.PortObservation{Port: p.PortID, State: p.State.State, Reason: reason, ReasonTTL: p.State.TTL, Verification: "confirmed"}
 			if pc.ServiceDetection && hasServiceEvidence(p.Service) {
 				port.Service = &model.ServiceObservation{Name: serviceName, Product: serviceProduct, Version: serviceVersion, ExtraInfo: serviceExtra, Method: serviceMethod, Confidence: p.Service.Confidence, Tunnel: serviceTunnel, OSType: serviceOSType, DeviceType: serviceDeviceType, CPEs: serviceCPES}
@@ -2137,9 +3631,9 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 			observation.Ports = append(observation.Ports, port)
 		}
 		for _, extra := range host.ExtraPorts {
-			addStateSummary(&observation, extra.State, "", extra.Count)
+			stateIndexes.addSummary(extra.State, "", extra.Count)
 			for _, reason := range extra.Reasons {
-				addStateReason(&observation, extra.State, boundScannerMetadata(reason.Reason), reason.Count)
+				stateIndexes.addReason(extra.State, reason.Reason, reason.Count)
 			}
 			if extra.State != "open" && extra.State != "open|filtered" {
 				continue
@@ -2149,29 +3643,42 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 			// is recorded exactly like listed ports. Without a usable port list
 			// the ports cannot be named; flag the protocol as incomplete rather
 			// than letting the missing ports look closed.
-			folded, ok := foldedPositivePorts(extra, protocol)
+			ok, err := walkFoldedPositivePortsContext(ctx, extra, protocol, func(port foldedPort) error {
+				if listedPositivePorts.contains(port.port) {
+					return nil
+				}
+				if materializedPositivePorts >= maxNmapXMLMaterializedPortSlots {
+					return fmt.Errorf("nmap XML exceeded %d materialized positive-port safety limit", maxNmapXMLMaterializedPortSlots)
+				}
+				materializedPositivePorts++
+				listedPositivePorts.add(port.port)
+				unit.Ports = append(unit.Ports, model.PortState{Port: port.port, State: extra.State, Evidence: []string{address}})
+				observation.Ports = append(observation.Ports, model.PortObservation{Port: port.port, State: extra.State, Reason: port.reason, Verification: "confirmed"})
+				return nil
+			})
+			if err != nil {
+				if ctx.Err() != nil {
+					return parsedRun{}, fmt.Errorf("parse nmap XML cancelled: %w", ctx.Err())
+				}
+				return parsedRun{}, err
+			}
 			if !ok {
 				observation.Status = "unknown"
 				observation.StatusReason = nmapUnlistedOpenFilteredReason
 				continue
 			}
-			listed := make(map[int]struct{}, len(unit.Ports))
-			for _, port := range unit.Ports {
-				listed[port.Port] = struct{}{}
-			}
-			for _, port := range folded {
-				if _, exists := listed[port.port]; exists {
-					continue
-				}
-				unit.Ports = append(unit.Ports, model.PortState{Port: port.port, State: extra.State, Evidence: []string{address}})
-				observation.Ports = append(observation.Ports, model.PortObservation{Port: port.port, State: extra.State, Reason: port.reason, Verification: "confirmed"})
-			}
+		}
+		if err := ctx.Err(); err != nil {
+			return parsedRun{}, fmt.Errorf("parse nmap XML cancelled: %w", err)
 		}
 		hostObservation.Protocols = append(hostObservation.Protocols, observation)
 		hostObservation.Address = address
 		dedupeHostObservation(&hostObservation)
 		result.Units[address] = unit
 		result.Hosts[address] = hostObservation
+		if stats != nil {
+			stats.MaterializedPositivePorts = int(materializedPositivePorts)
+		}
 	}
 	return result, nil
 }
@@ -2200,14 +3707,19 @@ func scanType(protocol string, pc config.Protocol) string {
 // is created for this state because an absent result is not equivalent to a
 // closed port.
 func unreachableHostObservation(address, protocol string, pc config.Protocol, reason string) model.HostObservation {
+	scannedPortCount := 0
+	if ports, err := config.ParsePorts(pc.Ports); err == nil {
+		scannedPortCount = len(ports)
+	}
+	return unreachableHostObservationWithPortCount(address, protocol, pc, reason, scannedPortCount)
+}
+
+func unreachableHostObservationWithPortCount(address, protocol string, pc config.Protocol, reason string, scannedPortCount int) model.HostObservation {
 	address = normalizeAddress(address)
 	if strings.TrimSpace(reason) == "" {
 		reason = "nmap-omitted"
 	}
-	count := 0
-	if ports, err := config.ParsePorts(pc.Ports); err == nil {
-		count = len(ports)
-	}
+	count := scannedPortCount
 	if count == 0 {
 		count = 1
 	}
@@ -2320,15 +3832,33 @@ func boundedScannerStrings(values []string, maxItems int) []string {
 	if len(values) == 0 || maxItems <= 0 {
 		return nil
 	}
-	seen := make(map[string]struct{}, len(values))
+	// Preserve the prior sorted-first-N result without sizing a set from
+	// target-controlled input. The retained set stays at maxItems entries even
+	// when the scanner emits hundreds of thousands of repeated CPEs.
+	seen := make(map[string]struct{}, min(len(values), maxItems))
 	bounded := make([]string, 0, min(len(values), maxItems))
 	for _, value := range values {
 		if value = boundScannerMetadata(value); value != "" {
 			if _, exists := seen[value]; exists {
 				continue
 			}
+			if len(bounded) < maxItems {
+				seen[value] = struct{}{}
+				bounded = append(bounded, value)
+				continue
+			}
+			largestIndex := 0
+			for index := 1; index < len(bounded); index++ {
+				if bounded[index] > bounded[largestIndex] {
+					largestIndex = index
+				}
+			}
+			if value >= bounded[largestIndex] {
+				continue
+			}
+			delete(seen, bounded[largestIndex])
+			bounded[largestIndex] = value
 			seen[value] = struct{}{}
-			bounded = append(bounded, value)
 		}
 	}
 	sort.Strings(bounded)
@@ -2338,29 +3868,110 @@ func boundedScannerStrings(values []string, maxItems int) []string {
 	return bounded
 }
 
-func appendNSESummary(values []string, id, output string) []string {
+func appendNSESummaryContext(ctx context.Context, values []string, id, output string) ([]string, error) {
+	if ctx == nil {
+		return values, errors.New("summarize NSE output context is nil")
+	}
 	if len(values) >= maxScannerNSEOutputs {
-		return values
+		return values, nil
 	}
-	if summary := summarizeNSEOutput(id, output); summary != "" {
-		return append(values, summary)
+	summary, err := summarizeNSEOutputContext(ctx, id, output)
+	if err != nil {
+		return values, err
 	}
-	return values
+	if summary != "" {
+		values = append(values, summary)
+	}
+	return values, nil
 }
 
-func summarizeNSEOutput(id, output string) string {
-	id = boundScannerMetadata(id)
-	output = strings.Join(strings.Fields(strings.TrimSpace(output)), " ")
-	if id == "" && output == "" {
-		return ""
+func summarizeNSEOutputContext(ctx context.Context, id, output string) (string, error) {
+	if ctx == nil {
+		return "", errors.New("summarize NSE output context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	var err error
+	id, err = boundNmapXMLMetadata(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	compact, truncated, err := compactNSEOutputContext(ctx, output, maxScannerMetadataBytes)
+	if err != nil {
+		return "", err
 	}
 	if id == "" {
-		return boundScannerMetadata(output)
+		if truncated {
+			return truncateNSESummary(compact), nil
+		}
+		return boundScannerMetadata(compact), nil
 	}
-	if output == "" {
-		return id
+	if compact == "" {
+		return id, nil
 	}
-	return boundScannerMetadata(id + ": " + output)
+	combined := id + ": " + compact
+	if truncated {
+		return truncateNSESummary(combined), nil
+	}
+	return boundScannerMetadata(combined), nil
+}
+
+func compactNSEOutputContext(ctx context.Context, value string, maxBytes int) (string, bool, error) {
+	if ctx == nil {
+		return "", false, errors.New("compact NSE output context is nil")
+	}
+	if maxBytes <= 0 {
+		return "", value != "", nil
+	}
+	var compact strings.Builder
+	compact.Grow(min(len(value), maxBytes))
+	content, pendingSpace := false, false
+	for index, r := range value {
+		if index&4095 == 0 {
+			if err := ctx.Err(); err != nil {
+				return "", false, err
+			}
+		}
+		if unicode.IsSpace(r) {
+			if content {
+				pendingSpace = true
+			}
+			continue
+		}
+		if pendingSpace {
+			if compact.Len()+1 > maxBytes {
+				return compact.String(), true, nil
+			}
+			compact.WriteByte(' ')
+			pendingSpace = false
+		}
+		if compact.Len()+utf8.RuneLen(r) > maxBytes {
+			return compact.String(), true, nil
+		}
+		compact.WriteRune(r)
+		content = true
+	}
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	return compact.String(), false, nil
+}
+
+func truncateNSESummary(value string) string {
+	const ellipsis = "…"
+	limit := maxScannerMetadataBytes - len(ellipsis)
+	end := 0
+	for index, r := range value {
+		if index+utf8.RuneLen(r) > limit {
+			break
+		}
+		end = index + utf8.RuneLen(r)
+	}
+	return value[:end] + ellipsis
 }
 
 func cloneStringMap(values map[string]string) map[string]string {

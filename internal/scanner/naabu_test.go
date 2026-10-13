@@ -103,7 +103,7 @@ func TestNaabuPipelineEnrichmentSkipsNmapHostDiscoveryAndVerbosity(t *testing.T)
 	dir := t.TempDir()
 	argsPath := filepath.Join(dir, "nmap-args")
 	nmapPath := filepath.Join(dir, "nmap")
-	nmapScript := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsPath + "\nprintf '%s' '" + sampleXML + "'\n"
+	nmapScript := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsPath + "\nprintf '%s' '" + sampleXMLSinglePort + "'\n"
 	if err := os.WriteFile(nmapPath, []byte(nmapScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestNaabuPipelineKeepsDiscoveryEvidenceOutOfUnits(t *testing.T) {
 		t.Fatal(err)
 	}
 	nmapPath := filepath.Join(dir, "nmap")
-	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\nprintf '%s' '"+sampleXML+"'\n"), 0o700); err != nil {
+	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\nprintf '%s' '"+sampleXMLSinglePort+"'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	n := NewWithNaabu(nmapPath, naabuPath)
@@ -587,7 +587,7 @@ func TestNaabuPipelineWithUDPReportsCumulativeProgress(t *testing.T) {
 	nmapPath := filepath.Join(dir, "nmap")
 	// The same valid XML is sufficient for both phases; the UDP parser simply
 	// ignores the TCP port while still recording a successful host response.
-	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\nprintf '%s' '"+sampleXML+"'\n"), 0o700); err != nil {
+	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\nprintf '%s' '"+sampleXMLSinglePort+"'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	n := NewWithNaabu(nmapPath, naabuPath)

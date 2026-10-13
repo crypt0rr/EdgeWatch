@@ -14,7 +14,7 @@ import (
 func TestNmapVersionAndScanWorkUnit(t *testing.T) {
 	dir := t.TempDir()
 	nmapPath := filepath.Join(dir, "nmap")
-	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\nprintf '%s' '"+sampleXML+"'\n"), 0o700); err != nil {
+	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\nprintf '%s' '"+sampleXMLSinglePort+"'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	n := New(nmapPath)
@@ -58,7 +58,7 @@ func TestScanWorkUnitEnrichmentSkipsNmapHostDiscoveryAndVerbosity(t *testing.T) 
 	dir := t.TempDir()
 	argsPath := filepath.Join(dir, "nmap-args")
 	nmapPath := filepath.Join(dir, "nmap")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsPath + "\nout=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"-oX\" ]; then out=\"$2\"; shift 2; else shift; fi\ndone\nprintf '%s' '" + sampleXML + "' > \"$out\"\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsPath + "\nout=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"-oX\" ]; then out=\"$2\"; shift 2; else shift; fi\ndone\nprintf '%s' '" + sampleXMLSinglePort + "' > \"$out\"\n"
 	if err := os.WriteFile(nmapPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}

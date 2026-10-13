@@ -264,7 +264,7 @@ func TestNaabuPipelineBudgetAllowsEnrichmentAtLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	nmapPath := filepath.Join(dir, "nmap")
-	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\ntouch "+marker+"\nprintf '%s' '"+sampleXML+"'\n"), 0o700); err != nil {
+	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\ntouch "+marker+"\nprintf '%s' '"+sampleXMLSinglePort+"'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	n := NewWithNaabu(nmapPath, naabuPath)

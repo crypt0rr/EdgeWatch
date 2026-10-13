@@ -300,11 +300,15 @@ func TestNmapServiceAndNSESummaryHelpers(t *testing.T) {
 	for _, test := range []struct{ id, output, want string }{
 		{"", "", ""}, {"http", "", "http"}, {"", "hello\nworld", "hello world"}, {"http", "hello", "http: hello"},
 	} {
-		if got := summarizeNSEOutput(test.id, test.output); got != test.want {
-			t.Errorf("summarizeNSEOutput(%q,%q) = %q, want %q", test.id, test.output, got, test.want)
+		got, err := summarizeNSEOutputContext(context.Background(), test.id, test.output)
+		if err != nil {
+			t.Errorf("summarizeNSEOutputContext(%q,%q): %v", test.id, test.output, err)
+		} else if got != test.want {
+			t.Errorf("summarizeNSEOutputContext(%q,%q) = %q, want %q", test.id, test.output, got, test.want)
 		}
 	}
-	if got := summarizeNSEOutput("long", strings.Repeat("x", 600)); len(got) != maxScannerMetadataBytes || !strings.HasSuffix(got, "…") {
+	got, err := summarizeNSEOutputContext(context.Background(), "long", strings.Repeat("x", 600))
+	if err != nil || len(got) != maxScannerMetadataBytes || !strings.HasSuffix(got, "…") {
 		t.Fatalf("long NSE summary length = %d (%q)", len(got), got)
 	}
 }

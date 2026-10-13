@@ -169,7 +169,34 @@ Nmap's terminal status stream is only a progress hint while Nmap writes its
 XML result to a file, so a long scan is never stopped for the amount of status
 it prints. The XML result is limited to 16 MiB and Nmap's diagnostic output to
 8 MiB; a scanner that exceeds either is stopped and the error names the
-limit.
+limit. EdgeWatch checks the XML token by token before it decodes observations
+for the addresses in that invocation. The parser also caps XML complexity at
+1,000,000 tokens, 128 levels of nesting, 64 attributes per element, and
+500,000 top-level Nmap host records, while decoding at most the 128 host
+records selected for a scanner batch. Foreign host subtrees are checked as
+tokens without building host or port objects.
+The selected addresses in one invocation share a 65,536-slot limit: the
+number of unique selected addresses present in the result multiplied by the
+configured scanned-port count cannot exceed that value. Missing targets,
+foreign hosts, and duplicate address records do not consume additional slots.
+Direct scans shrink their address batches to fit; resumable work units use the
+same ceiling, and one address can still scan all 65,535 ports. The parser checks
+the scope before decoding selected hosts and checks positive-port records
+again before expansion. This bounds each Nmap result; completed resumable
+units are still combined into the scan's final snapshot.
+Listed and folded ports must fit the configured scan scope; duplicate listed
+records have a separate eight-record allowance that never expands coverage.
+Selected-host metadata is bounded before materialization: up to 40 hostname
+elements, 42 address elements, 40 CPEs per service within an aggregate
+scope/token budget, 16 folded states, and 40 reason records per folded state.
+Stored hostname, address, CPE, and reason summaries keep their existing
+32-item caps. NSE script records have no per-port or per-host count limit; the
+parser processes them one at a time and retains at most 32 stored summaries.
+The XML decoder may hold one raw attribute or text token before shortening the
+retained value; the 16 MiB document cap bounds that transient token. A result
+that exceeds a parser bound fails the scan, so it cannot be treated as
+complete or advance a baseline. Descriptive values keep their existing
+512-byte display limit.
 
 See the [configuration reference](/reference/configuration/) for deployment
 budgets and exclusions, and [Your first scan](/getting-started/first-scan/)

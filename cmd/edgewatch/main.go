@@ -72,6 +72,17 @@ func exitStatus(err error) int {
 	return 1
 }
 
+// cleanDaemonCancellation treats a cancellation as an orderly daemon stop
+// only when the command's signal context itself was canceled. An unrelated
+// startup error that happens to wrap context.Canceled remains an error while
+// the command context is live.
+func cleanDaemonCancellation(ctx context.Context, err error) error {
+	if err != nil && ctx != nil && ctx.Err() == context.Canceled && errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
+}
+
 func run(args []string) error {
 	if len(args) == 0 {
 		return usage()
@@ -273,11 +284,14 @@ func run(args []string) error {
 			// Refuse before migrating when another daemon's lease is live, so
 			// a second daemon never upgrades the schema or rewrites
 			// startup_state under a running one. If the lease cannot be read
-			// here, startup continues and App.Daemon still refuses to take a
-			// live lease after the migration.
-			if err := store.CheckDaemonLeaseBeforeStartup(context.Background(), path); err != nil {
+			// here, the daemon-specific open repeats the check under the
+			// migration guard and fails closed before any migration.
+			if err := store.CheckDaemonLeaseBeforeStartup(ctx, path); err != nil {
 				if errors.Is(err, store.ErrDaemonLeaseBusy) {
 					return nil, err
+				}
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
 				}
 				logger.Warn("could not check the daemon lease before migration", "error", err)
 			}
@@ -294,7 +308,7 @@ func run(args []string) error {
 			} else {
 				startup = listener
 			}
-			return store.OpenWithLogger(path, logger)
+			return store.OpenDaemonWithLoggerContext(ctx, path, logger)
 		}
 	default:
 		openStore = store.OpenExistingUpgraded
@@ -304,6 +318,9 @@ func run(args []string) error {
 		return fmt.Errorf("%w; start the daemon once to upgrade it, then run this command again", err)
 	}
 	if err != nil {
+		if cmd == "daemon" {
+			return cleanDaemonCancellation(ctx, err)
+		}
 		return err
 	}
 	defer s.Close()
@@ -315,8 +332,8 @@ func run(args []string) error {
 	// configured key before it opened the database.
 	s.SetAuthKeyPath(cfg.Web.AuthKeyFile)
 	if cmd == "daemon" {
-		if err := s.MigrateAdminCompatibility(context.Background()); err != nil {
-			return fmt.Errorf("migrate administrator compatibility state: %w", err)
+		if err := s.MigrateAdminCompatibility(ctx); err != nil {
+			return cleanDaemonCancellation(ctx, fmt.Errorf("migrate administrator compatibility state: %w", err))
 		}
 	}
 	if cmd == "admin" {
@@ -356,8 +373,15 @@ func run(args []string) error {
 		if cmd == "daemon" || cmd == "scan" {
 			options.ScannerTemporaryDirectory = scannerTemporaryDirectory(s)
 		}
-		application, err = app.NewWithOptions(cfg, s, *nmapPath, logger, options)
+		if cmd == "daemon" {
+			application, err = app.NewWithOptionsContext(ctx, cfg, s, *nmapPath, logger, options)
+		} else {
+			application, err = app.NewWithOptions(cfg, s, *nmapPath, logger, options)
+		}
 		if err != nil {
+			if cmd == "daemon" {
+				return cleanDaemonCancellation(ctx, err)
+			}
 			return err
 		}
 		application.Version = version
@@ -370,7 +394,7 @@ func run(args []string) error {
 	}
 	switch cmd {
 	case "daemon":
-		return runDaemon(ctx, application, cfg.Web.Listen, startup, s, logger)
+		return cleanDaemonCancellation(ctx, runDaemon(ctx, application, cfg.Web.Listen, startup, s, logger))
 	case "scan":
 		if *jobName == "" {
 			return errors.New("--job is required")

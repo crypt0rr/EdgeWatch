@@ -826,10 +826,17 @@ fetching only the selected event payloads. The migration builds indexes over
 existing history without rewriting or deleting events.
 Only the daemon migrates, and only one process at a time: from v0.36.0 the
 daemon holds an advisory lock on the database directory, which restores take
-too, from before it opens the database until its migration and startup
-phases have finished, so a second daemon on the same data volume exits
+too, from before it opens the database until migration and startup finish and
+the daemon lease is committed. A second daemon on the same data volume exits
 without writing, and each migration step checks the schema version inside
-its own transaction, so no step runs twice. The startup phases that read
+its own transaction. The daemon refuses startup before migration if the
+platform or filesystem cannot lock the database directory; move the database
+to a filesystem that supports advisory directory locks, then restart it. The
+daemon also requires a persistent file-backed SQLite database: in-memory
+SQLite paths have no directory to lock and are refused before startup work.
+Startup work uses the daemon's signal context. Completed migration steps and
+backfill batches remain committed, while unfinished transactions roll back
+and the next start resumes the remaining work. Startup phases that read
 before they write take the write lock first, so a concurrent host command
 delays them instead of failing the start. Daemon and scheduled-job lease
 acquisition likewise reserve the write lock before reading ownership or job

@@ -109,6 +109,23 @@ func TestDaemonRefusesLiveLeaseBeforeMigrating(t *testing.T) {
 	}
 }
 
+func TestCleanDaemonCancellationRequiresTheCommandContext(t *testing.T) {
+	active := context.Background()
+	if got := cleanDaemonCancellation(active, context.Canceled); !errors.Is(got, context.Canceled) {
+		t.Fatalf("cancellation with a live command context = %v, want context.Canceled", got)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := cleanDaemonCancellation(ctx, fmt.Errorf("startup: %w", context.Canceled)); got != nil {
+		t.Fatalf("wrapped cancellation after command cancellation = %v, want nil", got)
+	}
+	ordinary := errors.New("unrelated startup failure")
+	if got := cleanDaemonCancellation(ctx, ordinary); !errors.Is(got, ordinary) {
+		t.Fatalf("unrelated error after command cancellation = %v, want the original error", got)
+	}
+}
+
 // A daemon restarting after a crash (stale lease) or starting for the first
 // time (no database yet) still migrates and starts. The occupied listener makes
 // startup fail only after the database work is done.
@@ -126,8 +143,9 @@ func TestDaemonStartsWithoutLiveLease(t *testing.T) {
 			t.Fatalf("user_version = %d, want %d", got, supported)
 		}
 	})
-	// A lease that cannot be read before migrating does not block startup
-	// here; App.Daemon still refuses to take it after the migration.
+	// A lease that cannot be read before migration may pass the early
+	// diagnostic check, but the daemon-specific open repeats the check while
+	// holding the migration guard and fails closed before changing the schema.
 	t.Run("unreadable lease", func(t *testing.T) {
 		dir := t.TempDir()
 		database := filepath.Join(dir, "edgewatch.db")
@@ -143,12 +161,21 @@ func TestDaemonStartsWithoutLiveLease(t *testing.T) {
 		if err := fixture.Close(); err != nil {
 			t.Fatal(err)
 		}
-		err = run([]string{"daemon", "--config", writeDaemonLeaseConfig(t, dir, database)})
-		if err == nil || (!errors.Is(err, store.ErrDaemonLeaseBusy) && !strings.Contains(err.Error(), "address already in use")) {
-			t.Fatalf("daemon error = %v, want a lease or listener error after startup", err)
+		startup := readCLIStartupState(t, database)
+		configPath := filepath.Join(dir, "config.yaml")
+		contents := fmt.Sprintf("database: %s\nweb:\n  listen: 127.0.0.1:0\nupdates:\n  enabled: false\nenrichment:\n  rdap:\n    enabled: false\n", database)
+		if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
 		}
-		if got := sqliteUserVersion(t, database); got != supported {
-			t.Fatalf("user_version = %d, want %d", got, supported)
+		err = run([]string{"daemon", "--config", configPath})
+		if err == nil || errors.Is(err, store.ErrDaemonLeaseBusy) || strings.Contains(err.Error(), "address already in use") {
+			t.Fatalf("daemon error = %v, want the unreadable lease error before migration", err)
+		}
+		if got := sqliteUserVersion(t, database); got != supported-1 {
+			t.Fatalf("user_version = %d after fail-closed startup, want %d", got, supported-1)
+		}
+		if got := readCLIStartupState(t, database); got != startup {
+			t.Fatalf("startup_state after unreadable lease = %#v, want %#v", got, startup)
 		}
 	})
 	t.Run("first start", func(t *testing.T) {

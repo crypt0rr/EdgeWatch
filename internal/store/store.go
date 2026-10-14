@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
@@ -38,6 +39,11 @@ type Store struct {
 	// releaseOpen removes this store from the process-wide registry of open
 	// databases once its connections are closed.
 	releaseOpen func()
+	// migrationGuardUnlock is retained only by a daemon startup open. The
+	// daemon releases it after committing its singleton lease; Close also
+	// releases it so every failed or cancelled startup unlocks the directory.
+	migrationGuardUnlock func()
+	migrationGuardOnce   sync.Once
 	// targetExclusions is configured once during daemon startup. A nil slice
 	// means the caller did not provide deployment policy (kept for embedded
 	// library compatibility); a non-nil empty slice is an explicit allow-all
@@ -117,6 +123,33 @@ func OpenWithLogger(path string, logger *slog.Logger) (*Store, error) {
 	return openWithOptions(path, openOptions{create: true, migrate: true, configureWAL: true, logger: logger})
 }
 
+// OpenDaemonWithLoggerContext opens and migrates a daemon database with the
+// command's cancellation context. It checks for an active daemon lease again
+// after acquiring the migration guard, then keeps that guard until the daemon
+// commits its own lease or closes the store. Host commands and generic opens
+// retain their existing guard lifetime.
+func OpenDaemonWithLoggerContext(ctx context.Context, path string, logger *slog.Logger) (*Store, error) {
+	if ctx == nil {
+		return nil, errors.New("daemon database open context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if isSQLiteMemoryPath(path) {
+		return nil, errDaemonRequiresFileDatabase
+	}
+	return openWithOptionsContext(ctx, path, openOptions{
+		create:               true,
+		migrate:              true,
+		configureWAL:         true,
+		logger:               logger,
+		daemonStartup:        true,
+		retainMigrationGuard: true,
+	})
+}
+
+var errDaemonRequiresFileDatabase = errors.New("daemon startup requires a persistent SQLite database file")
+
 // OpenExisting opens an existing database without running migrations or
 // repair/backfill work. It is intended for host-side data commands such as
 // backup, where opening the source must not mutate schema state or compete
@@ -188,6 +221,11 @@ type openOptions struct {
 	// do not migrate.
 	refuseOlderSchema bool
 	logger            *slog.Logger
+	// daemonStartup repeats the lease check while the migration guard is held.
+	daemonStartup bool
+	// retainMigrationGuard transfers the guard to the returned Store so the
+	// daemon can hold it until its singleton lease is committed.
+	retainMigrationGuard bool
 }
 
 func openWithOptions(path string, options openOptions) (*Store, error) {
@@ -195,6 +233,12 @@ func openWithOptions(path string, options openOptions) (*Store, error) {
 }
 
 func openWithOptionsContext(ctx context.Context, path string, options openOptions) (*Store, error) {
+	if ctx == nil {
+		return nil, errors.New("database open context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if path == "" {
 		return nil, errors.New("database path is empty")
 	}
@@ -252,17 +296,24 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 	}
 	var releaseOpen func()
 	opened := false
-	if !memoryDatabase {
+	if !memoryDatabase && !options.daemonStartup {
 		// Register before SQLite opens the file, so a read-only probe closing
 		// in this process never tests for other connections by opening and
 		// closing its own descriptor while this store holds SQLite locks.
 		releaseOpen = openDatabases.register(artifactPath)
-		defer func() {
-			if !opened {
-				releaseOpen()
-			}
-		}()
 	}
+	defer func() {
+		if !opened && releaseOpen != nil {
+			releaseOpen()
+		}
+	}()
+	var migrationGuardUnlock func()
+	migrationGuardTransferred := false
+	defer func() {
+		if !migrationGuardTransferred && migrationGuardUnlock != nil {
+			migrationGuardUnlock()
+		}
+	}()
 	if options.migrate && !memoryDatabase {
 		// Hold the migration guard from before SQLite opens the file until
 		// the migration and its startup phases have finished, so a second
@@ -270,6 +321,9 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 		unlock, err := acquireMigrationGuard(filepath.Dir(artifactPath))
 		switch {
 		case errors.Is(err, errMigrationGuardUnsupported):
+			if options.daemonStartup {
+				return nil, fmt.Errorf("daemon startup requires a lockable database directory: %w", err)
+			}
 			logger := options.logger
 			if logger == nil {
 				logger = slog.Default()
@@ -278,8 +332,24 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 		case err != nil:
 			return nil, err
 		default:
-			defer unlock()
+			migrationGuardUnlock = unlock
 		}
+	}
+	if options.daemonStartup {
+		// The CLI's early read is useful for a clear refusal before doing any
+		// work, but another daemon may claim the lease between that read and
+		// this guarded open. Any read error is fail-closed: startup must not
+		// migrate or rewrite startup_state when lease ownership is unknown.
+		if err := CheckDaemonLeaseBeforeStartup(ctx, path); err != nil {
+			return nil, err
+		}
+	}
+	if !memoryDatabase && releaseOpen == nil {
+		// A daemon's guarded lease probe must be able to clean up any empty
+		// WAL/SHM files it creates before the outer store is registered. Once
+		// the probe succeeds, register before opening the migration connection
+		// so another probe in this process cannot disturb its SQLite locks.
+		releaseOpen = openDatabases.register(artifactPath)
 	}
 	if options.queryOnly && !memoryDatabase {
 		// Capture the companion files before SQLite opens the live-safe
@@ -443,6 +513,10 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 	store := &Store{DB: db, ReadDB: readDB, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true, releaseOpen: releaseOpen}
 	if !memoryDatabase {
 		store.artifactPath = artifactPath
+	}
+	if options.retainMigrationGuard {
+		store.migrationGuardUnlock = migrationGuardUnlock
+		migrationGuardTransferred = migrationGuardUnlock != nil
 	}
 	return store, nil
 }
@@ -670,6 +744,7 @@ func (s *Store) Close() error {
 	if s.releaseOpen != nil {
 		s.releaseOpen()
 	}
+	s.ReleaseDaemonStartupGuard()
 	if s.queryOnly && s.artifactPath != "" {
 		// The read-only DSN is intentionally live-safe and may cause SQLite to
 		// create an empty WAL/SHM pair. Remove only companions that were absent
@@ -679,6 +754,21 @@ func (s *Store) Close() error {
 		cleanupSQLiteProbeSidecars(s.artifactPath, s.probeSidecars)
 	}
 	return closeErr
+}
+
+// ReleaseDaemonStartupGuard releases the directory migration guard retained
+// by OpenDaemonWithLoggerContext. It is safe to call more than once; Store.Close
+// also calls it for every startup path that did not acquire the daemon lease.
+func (s *Store) ReleaseDaemonStartupGuard() {
+	if s == nil {
+		return
+	}
+	s.migrationGuardOnce.Do(func() {
+		if s.migrationGuardUnlock != nil {
+			s.migrationGuardUnlock()
+			s.migrationGuardUnlock = nil
+		}
+	})
 }
 
 func (s *Store) reader() *sql.DB {

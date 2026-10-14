@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -72,7 +73,7 @@ func TestNewWithoutScannerPolicyDoesNotProbeScannerBinaries(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = s.Close() })
-		a, err := newApp(cfg, s, nmapPath, naabuPath, slog.New(slog.NewTextHandler(io.Discard, nil)), options)
+		a, err := newApp(context.Background(), cfg, s, nmapPath, naabuPath, slog.New(slog.NewTextHandler(io.Discard, nil)), options)
 		if err != nil {
 			t.Fatal(err)
 		}

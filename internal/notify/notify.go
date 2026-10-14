@@ -166,20 +166,45 @@ type Notifier struct {
 }
 
 func New(s *store.Store, urls []string) (*Notifier, error) {
+	return NewContext(context.Background(), s, urls)
+}
+
+// NewContext is New with the context used for persisted startup reads and
+// writes. The non-context constructor remains for embedded callers.
+func NewContext(ctx context.Context, s *store.Store, urls []string) (*Notifier, error) {
+	if ctx == nil {
+		return nil, errors.New("notification notifier context is nil")
+	}
 	keyPath := ""
 	if s != nil {
 		// Use the normalized database file, not the DSN: a file: URI in
 		// s.Path would otherwise place the key under the working directory.
 		keyPath = keyPathBeside(s.FilePath())
 	}
-	return newWithKeyFile(s, urls, keyPath, true)
+	return newWithKeyFileContext(ctx, s, urls, keyPath, true)
 }
 
 func NewWithKeyFile(s *store.Store, urls []string, keyPath string) (*Notifier, error) {
-	return newWithKeyFile(s, urls, keyPath, false)
+	return NewWithKeyFileContext(context.Background(), s, urls, keyPath)
+}
+
+// NewWithKeyFileContext is NewWithKeyFile with a caller-supplied startup
+// context.
+func NewWithKeyFileContext(ctx context.Context, s *store.Store, urls []string, keyPath string) (*Notifier, error) {
+	if ctx == nil {
+		return nil, errors.New("notification notifier context is nil")
+	}
+	return newWithKeyFileContext(ctx, s, urls, keyPath, false)
 }
 
 func newWithKeyFile(s *store.Store, urls []string, keyPath string, autoCreateKey bool) (*Notifier, error) {
+	return newWithKeyFileContext(context.Background(), s, urls, keyPath, autoCreateKey)
+}
+
+func newWithKeyFileContext(ctx context.Context, s *store.Store, urls []string, keyPath string, autoCreateKey bool) (*Notifier, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	n := &Notifier{Store: s, fileURLs: map[string]string{}, fileLegacy: map[string]string{}, managed: map[string]managedDestination{}, keyPath: keyPath, autoCreateKey: autoCreateKey}
 	legacyURLs := make(map[string]string, len(urls))
 	for index, raw := range urls {
@@ -195,14 +220,14 @@ func newWithKeyFile(s *store.Store, urls []string, keyPath string, autoCreateKey
 		// A URL that the daemon imported as a web-managed destination is no
 		// longer a deployment destination, even while config.yaml still lists
 		// it. Before the import, every configured URL is delivered as before.
-		imported, err := s.System().ImportedDeploymentNotifications(context.Background(), sortedKeys(legacyURLs))
+		imported, err := s.System().ImportedDeploymentNotifications(ctx, sortedKeys(legacyURLs))
 		if err != nil {
 			return nil, fmt.Errorf("load imported notification URLs: %w", err)
 		}
 		for digest := range imported {
 			delete(legacyURLs, digest)
 		}
-		opaqueIDs, err = s.System().EnsureDeploymentNotificationIDs(context.Background(), sortedKeys(legacyURLs))
+		opaqueIDs, err = s.System().EnsureDeploymentNotificationIDs(ctx, sortedKeys(legacyURLs))
 		if err != nil {
 			return nil, fmt.Errorf("persist deployment notification IDs: %w", err)
 		}
@@ -218,7 +243,7 @@ func newWithKeyFile(s *store.Store, urls []string, keyPath string, autoCreateKey
 		n.fileURLs[opaque] = raw
 		n.fileLegacy[legacy] = opaque
 	}
-	if err := n.Reload(context.Background()); err != nil {
+	if err := n.Reload(ctx); err != nil {
 		return nil, err
 	}
 	return n, nil

@@ -25,9 +25,12 @@ var errMigrationGuardUnsupported = errors.New("the database directory cannot be 
 // process exits, so a crash leaves nothing to clean up. A busy lock returns
 // an error wrapping ErrMigrationInProgress.
 //
-// Platforms without an implementation return a no-op unlock.
+// Platforms without an implementation report an unsupported guard. Generic
+// migration opens retain their warning-and-continue behavior, while a daemon
+// startup refuses because its lease check and startup reconciliation require
+// cross-process serialization.
 var acquireMigrationGuard = acquireUnsupportedMigrationGuard
 
 func acquireUnsupportedMigrationGuard(string) (func(), error) {
-	return func() {}, nil
+	return nil, errMigrationGuardUnsupported
 }

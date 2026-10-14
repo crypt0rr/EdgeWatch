@@ -290,7 +290,7 @@ func (ts *TenantStore) MaterializeLegacyNotificationSelections(ctx context.Conte
 		return 0, err
 	}
 	selection = cloneNotificationSelection(selection)
-	tx, err := ts.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ts.store.DB)
 	if err != nil {
 		return 0, err
 	}

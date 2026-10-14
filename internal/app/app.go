@@ -436,17 +436,30 @@ func (a *App) ScannerVersions() (nmap, naabu string) {
 
 // NewWithOptions is New with daemon-only startup work selected by options.
 func NewWithOptions(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logger, options Options) (*App, error) {
-	return newApp(cfg, s, nmapPath, "/usr/local/bin/naabu", logger, options)
+	return newApp(context.Background(), cfg, s, nmapPath, "/usr/local/bin/naabu", logger, options)
+}
+
+// NewWithOptionsContext is NewWithOptions with the daemon's startup context.
+// It propagates cancellation through startup imports, routing materialization,
+// and the read-only startup diagnostics.
+func NewWithOptionsContext(ctx context.Context, cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logger, options Options) (*App, error) {
+	return newApp(ctx, cfg, s, nmapPath, "/usr/local/bin/naabu", logger, options)
 }
 
 // NewWithScannerPaths is the production constructor used when the daemon
 // needs to locate both fixed scanner binaries. New remains the compatibility
 // entry point for tests and embedded callers that only know about Nmap.
 func NewWithScannerPaths(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logger *slog.Logger) (*App, error) {
-	return newApp(cfg, s, nmapPath, naabuPath, logger, Options{})
+	return newApp(context.Background(), cfg, s, nmapPath, naabuPath, logger, Options{})
 }
 
-func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logger *slog.Logger, options Options) (*App, error) {
+func newApp(ctx context.Context, cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logger *slog.Logger, options Options) (*App, error) {
+	if ctx == nil {
+		return nil, errors.New("application startup context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -466,7 +479,10 @@ func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logg
 	if options.ImportNotificationURLs {
 		// The import runs before the notifier loads, so imported URLs are
 		// never registered as deployment destinations or queued for delivery.
-		if err := importConfiguredNotifications(context.Background(), cfg, s, logger); err != nil {
+		if err := importConfiguredNotifications(ctx, cfg, s, logger); err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 	}
@@ -474,9 +490,9 @@ func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logg
 		// An explicitly configured path is operator-managed. It must already
 		// contain a valid key; the notifier only generates the default key next
 		// to the database when no override is configured.
-		n, err = notify.NewWithKeyFile(s, cfg.Notifications.URLs, cfg.Notifications.EncryptionKeyFile)
+		n, err = notify.NewWithKeyFileContext(ctx, s, cfg.Notifications.URLs, cfg.Notifications.EncryptionKeyFile)
 	} else {
-		n, err = notify.New(s, cfg.Notifications.URLs)
+		n, err = notify.NewContext(ctx, s, cfg.Notifications.URLs)
 	}
 	if err != nil {
 		return nil, err
@@ -494,15 +510,21 @@ func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logg
 	// they belong to the default tenant, and only its jobs are frozen here.
 	// Adding a destination to any tenant freezes that tenant's nil
 	// selections first, so another tenant's jobs are left as they are.
-	materialized, err := materializeLegacyNotificationSelections(context.Background(), s, n)
+	materialized, err := materializeLegacyNotificationSelections(ctx, s, n)
 	if err != nil {
 		return nil, fmt.Errorf("freeze legacy notification selections: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if materialized > 0 {
 		logger.Info("froze legacy notification selections", "jobs", materialized)
 	}
-	reportMissingNotificationDestinations(context.Background(), s, n, logger)
-	reportJobsBeyondHostCeiling(context.Background(), s, cfg, logger)
+	reportMissingNotificationDestinations(ctx, s, n, logger)
+	reportJobsBeyondHostCeiling(ctx, s, cfg, logger)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if len(cfg.Jobs) > 0 {
 		legacyNames := make([]string, 0, len(cfg.Jobs))
 		for _, job := range cfg.Jobs {
@@ -527,7 +549,7 @@ func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logg
 	if err := s.SetTargetExclusions(cfg.Scanner.TargetExclusions); err != nil {
 		return nil, fmt.Errorf("configure store target exclusions: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	nmapVersion, naabuVersion := "unknown", "unknown"
 	// Host commands such as notification tests and baseline review also build an
@@ -535,8 +557,11 @@ func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logg
 	// Avoid starting version probes from those paths; the daemon and scan
 	// command pass their configured policy here and capture versions through it.
 	if options.Sandbox != nil {
-		nmapVersion = sc.Version(ctx)
-		naabuVersion = sc.NaabuVersion(ctx)
+		nmapVersion = sc.Version(probeCtx)
+		naabuVersion = sc.NaabuVersion(probeCtx)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	a := &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, sandbox: options.Sandbox, notificationSandbox: options.NotificationSandbox, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, slots: newSlotPool(cfg.Scheduler.MaxConcurrent, nil), nmapVersion: nmapVersion, naabuVersion: naabuVersion, entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second, clock: time.Now}
 	// A security alert that an authentication record queues outside a
@@ -1129,6 +1154,9 @@ func (a *App) Daemon(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// The lease transaction committed successfully, so another daemon that
+	// acquires the migration guard will observe this owner before migrating.
+	a.Store.ReleaseDaemonStartupGuard()
 	a.setDaemonOwner(owner)
 	if reclaimed > 0 {
 		a.Logger.Info("reclaimed job leases from previous daemon", "leases", reclaimed)

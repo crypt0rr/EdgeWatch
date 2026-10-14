@@ -95,17 +95,106 @@ func init() {
 	hardenProcess = hardenLinux
 }
 
-// hardenLinux sets a soft and hard core file size limit of zero, which the
-// processes this one starts inherit and cannot raise, and clears the dumpable
-// flag, which execve sets again for the program it runs.
+// hardenLinux limits ordinary core-file output, excludes memory mappings from
+// core dumps, and clears the dumpable flag, which execve sets again for the
+// program it runs. The coredump filter is set or its inherited zero value is
+// checked before the process becomes non-dumpable, so startup fails if a
+// nonzero filter cannot be cleared or the current value cannot be verified.
 func hardenLinux() error {
 	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{}); err != nil {
 		return fmt.Errorf("disable core dumps: %w", err)
+	}
+	if err := setAndVerifyZeroCoredumpFilter(); err != nil {
+		return err
 	}
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		return fmt.Errorf("make the process non-dumpable: %w", err)
 	}
 	return nil
+}
+
+const procCoredumpFilter = "/proc/self/coredump_filter"
+
+// coredumpFilterIO separates the value update/verification from process
+// hardening. The production implementation below always opens the fixed
+// proc control file; the per-call interface lets tests exercise the decision
+// paths without changing the test process's limits or dumpability.
+type coredumpFilterIO interface {
+	openForWrite() (io.WriteCloser, error)
+	read() ([]byte, error)
+}
+
+type procCoredumpFilterIO struct{}
+
+func (procCoredumpFilterIO) openForWrite() (io.WriteCloser, error) {
+	return os.OpenFile(procCoredumpFilter, os.O_WRONLY, 0)
+}
+
+func (procCoredumpFilterIO) read() ([]byte, error) {
+	return os.ReadFile(procCoredumpFilter)
+}
+
+func setAndVerifyZeroCoredumpFilter() error {
+	return setAndVerifyZeroCoredumpFilterWith(procCoredumpFilterIO{})
+}
+
+func setAndVerifyZeroCoredumpFilterWith(filterIO coredumpFilterIO) error {
+	file, err := filterIO.openForWrite()
+	if err != nil {
+		return verifyInheritedZeroCoredumpFilter(filterIO, fmt.Errorf("open %s: %w", procCoredumpFilter, err))
+	}
+	written, writeErr := io.WriteString(file, "0")
+	closeErr := file.Close()
+	if writeErr != nil {
+		return verifyInheritedZeroCoredumpFilter(filterIO, fmt.Errorf("set %s to zero: %w", procCoredumpFilter, writeErr))
+	}
+	if written != 1 {
+		return verifyInheritedZeroCoredumpFilter(filterIO, fmt.Errorf("set %s to zero: wrote %d of 1 byte", procCoredumpFilter, written))
+	}
+	if closeErr != nil {
+		return verifyInheritedZeroCoredumpFilter(filterIO, fmt.Errorf("close %s after setting it: %w", procCoredumpFilter, closeErr))
+	}
+	filter, err := readCoredumpFilterWith(filterIO)
+	if err != nil {
+		return fmt.Errorf("read back %s: %w", procCoredumpFilter, err)
+	}
+	if filter != 0 {
+		return fmt.Errorf("verify %s: value is %#x, want zero", procCoredumpFilter, filter)
+	}
+	return nil
+}
+
+// verifyInheritedZeroCoredumpFilter permits a process that inherited the
+// already-zero filter to continue when its context cannot write the proc
+// control file, such as an EdgeWatch child after Landlock is applied. A
+// failed write is never accepted unless the current filter can be read back
+// as zero; a nonzero or unreadable filter remains a startup error.
+func verifyInheritedZeroCoredumpFilter(filterIO coredumpFilterIO, setErr error) error {
+	filter, err := readCoredumpFilterWith(filterIO)
+	if err != nil {
+		return errors.Join(setErr, fmt.Errorf("read back %s after setting it failed: %w", procCoredumpFilter, err))
+	}
+	if filter != 0 {
+		return fmt.Errorf("%w; current filter is %#x, want zero", setErr, filter)
+	}
+	return nil
+}
+
+func readCoredumpFilter() (uint64, error) {
+	return readCoredumpFilterWith(procCoredumpFilterIO{})
+}
+
+func readCoredumpFilterWith(filterIO coredumpFilterIO) (uint64, error) {
+	contents, err := filterIO.read()
+	if err != nil {
+		return 0, err
+	}
+	value := strings.TrimSpace(string(contents))
+	filter, err := strconv.ParseUint(value, 16, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse value %q: %w", value, err)
+	}
+	return filter, nil
 }
 
 // limitScannerResources makes the kernel's out-of-memory killer choose the
@@ -114,8 +203,9 @@ func hardenLinux() error {
 // refuses oom_score_adj still runs the scanner restricted. A process may
 // write its oom_score_adj only while it owns its /proc entries, which a
 // non-dumpable process does not, so it becomes dumpable again first. The
-// scanner it executes is dumpable anyway, because execve resets the flag, and
-// the zero core file size limit it inherits still keeps it from dumping core.
+// scanner it executes is dumpable anyway, because execve resets the flag; the
+// zero core file size limit and coredump filter it inherits still restrict
+// core output and exclude normal memory mappings.
 func limitScannerResources() {
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 1, 0, 0, 0); err == nil {
 		if file, err := os.OpenFile("/proc/self/oom_score_adj", os.O_WRONLY, 0); err == nil {

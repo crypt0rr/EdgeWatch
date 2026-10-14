@@ -131,8 +131,15 @@ needs, such as `ptrace`, io_uring, BPF, namespace and mount changes, and
 `setsid` and `setpgid`, which would let a process leave the scanner's process
 group; and each scanner gets an `oom_score_adj` of 1000, so that the kernel's
 out-of-memory killer stops a scanner before the daemon, and at most 65,536
-open files. No EdgeWatch process can dump core: each sets a zero core file
-size limit, which its children inherit, and is non-dumpable.
+open files. On Linux, startup sets a zero core file size limit and a zero
+`/proc/self/coredump_filter`, reads the filter back, then clears the dumpable
+flag before any child starts. A re-executed EdgeWatch child verifies an
+already-zero inherited filter when Landlock prevents rewriting the proc
+control file; it stops if the filter is nonzero or cannot be read. Children
+inherit the limit and filter across `fork` and `exec`. The filter excludes
+normal memory mappings from core data, but Linux always includes the vDSO
+mapping and a configured piped core handler may still be invoked and receive
+core metadata; `RLIMIT_CORE` does not limit piped handlers.
 All sandboxed scanner processes share UID 65532. Each Naabu invocation has a
 separate temporary leaf below `/tmp`. With the sandbox helper, the leaf is
 listable and writable by path (`01777`); its sticky bit protects entries owned

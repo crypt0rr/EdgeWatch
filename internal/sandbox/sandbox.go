@@ -248,13 +248,15 @@ var (
 	hardenProcess  func() error
 )
 
-// HardenProcess keeps the calling process, and every process it starts, from
-// dumping core, and makes the calling process non-dumpable, so that a process
-// of the same identity without CAP_SYS_PTRACE can neither trace it nor read
-// its memory. A core dump of the daemon, the notification process, or a
-// scanner would hold the keys, a destination URL, or scan data, and the
-// host's core handler would keep it outside the container. Elsewhere than
-// Linux it does nothing.
+// HardenProcess sets Linux's core-file size limit and coredump filter, then
+// makes the calling process non-dumpable so that a process of the same
+// identity without CAP_SYS_PTRACE can neither trace it nor read its memory.
+// A re-executed EdgeWatch child may verify an already-zero inherited filter
+// when Landlock prevents rewriting the proc control file; it fails if that
+// value is nonzero or cannot be read. The zero coredump filter excludes
+// normal memory mappings from core data; it does not prevent a configured
+// piped core handler from being invoked, and Linux always includes the vDSO
+// mapping. Elsewhere than Linux it does nothing.
 func HardenProcess() error {
 	if hardenProcess == nil {
 		return nil

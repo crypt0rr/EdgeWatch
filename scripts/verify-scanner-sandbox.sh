@@ -479,18 +479,30 @@ expect_no_scanner_processes() {
   fail "$1 left processes of UID 65532 running: $left"
 }
 
-# process_hardening PID prints the number of seccomp filters of a process in
-# the daemon's container and its soft and hard core file size limits.
+# process_hardening PID prints the seccomp filter count, core file size limits,
+# and coredump filter of a process in the daemon's container.
 process_hardening() {
-  docker exec "$container" /bin/sh -c 'awk "/^Seccomp_filters:/{print \$2}" "/proc/$1/status"; awk "/^Max core file size/{print \$5, \$6}" "/proc/$1/limits"' sh "$1" | tr '\n' ' ' | sed 's/ $//'
+  docker exec "$container" /bin/sh -c 'awk "/^Seccomp_filters:/{print \$2}" "/proc/$1/status"; awk "/^Max core file size/{print \$5, \$6}" "/proc/$1/limits"; tr -d "[:space:]" <"/proc/$1/coredump_filter"; echo' sh "$1" | tr '\n' ' ' | sed 's/ $//'
+}
+
+# expect_zero_coredump_filter NAME HARDENING requires a process's mapping
+# filter to be zero.
+expect_zero_coredump_filter() {
+  local name=$1 got=$2 filter=${2##* }
+  case "$filter" in
+    ''|*[!0]*) fail "the $name process has nonzero or unreadable coredump filter '$filter' in '$got'" ;;
+  esac
 }
 
 # expect_filtered NAME HARDENING requires a process's hardening to be one
-# seccomp filter more than the daemon's and no core dumps.
+# seccomp filter more than the daemon's, zero core limits, and a zero mapping
+# filter.
 expect_filtered() {
-  local name=$1 got=$2 daemon_filters
-  daemon_filters=$(process_hardening 1 | cut -d' ' -f1)
-  [ "$got" = "$((daemon_filters + 1)) 0 0" ] || fail "the $name process has seccomp filters and core limits '$got', want '$((daemon_filters + 1)) 0 0'"
+  local name=$1 got=$2 daemon_filters filters core_soft core_hard filter
+  daemon_filters=$(docker exec "$container" /bin/sh -c 'awk "/^Seccomp_filters:/{print \$2}" "/proc/$1/status"' sh 1)
+  read -r filters core_soft core_hard filter <<< "$got"
+  [ "$filters $core_soft $core_hard" = "$((daemon_filters + 1)) 0 0" ] || fail "the $name process has seccomp filters and core limits '$got', want '$((daemon_filters + 1)) 0 0 and a zero coredump filter"
+  expect_zero_coredump_filter "$name" "$got"
 }
 
 expect_health() {
@@ -548,7 +560,10 @@ udp_ports="$udp_open"
 run_daemon base auto "${bundled_caps[@]}"
 expect_health "enforced 65532 NET_RAW landlock:enforced seccomp:enforced limits:1000,65536"
 expect_legacy_tmp_grant_rejected
-[ "$(process_hardening 1 | cut -d' ' -f2-)" = "0 0" ] || fail "the daemon may dump core: $(process_hardening 1)"
+daemon_hardening=$(process_hardening 1)
+read -r daemon_filters daemon_core_soft daemon_core_hard daemon_filter <<< "$daemon_hardening"
+[ "$daemon_core_soft $daemon_core_hard" = "0 0" ] || fail "the daemon has nonzero core file limits: $daemon_hardening"
+expect_zero_coredump_filter daemon "$daemon_hardening"
 sandboxed=$(python3 "$workdir/driver.py" scan "$base" "$state" sandboxed "$tcp_ports" "$udp_ports")
 
 # Landlock restricts a process whatever its identity: as UID 0, which owns

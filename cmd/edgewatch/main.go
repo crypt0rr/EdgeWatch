@@ -49,11 +49,11 @@ var (
 const daemonShutdownTimeout = 6 * time.Minute
 
 func main() {
-	// Every EdgeWatch process can hold a key, a destination URL, or scan
-	// data, so none dumps core and none can be read by a debugger of its own
-	// identity.
+	// Establish process hardening before starting any command or child. In
+	// particular, do not run with an unverified Linux coredump filter.
 	if err := sandbox.HardenProcess(); err != nil {
-		fmt.Fprintln(os.Stderr, "edgewatch: warning:", err)
+		fmt.Fprintln(os.Stderr, "edgewatch: process hardening failed:", err)
+		os.Exit(1)
 	}
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "edgewatch:", err)

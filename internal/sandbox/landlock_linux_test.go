@@ -17,9 +17,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// hardenCheck is the argument with which the test binary hardens itself and
-// prints its dumpable flag and core file size limits.
+// hardenCheck asks the test binary to harden itself and exec a second copy
+// that verifies the core limit and mapping filter were inherited.
 const hardenCheck = "harden-check"
+const hardenExecCheck = "harden-exec-check"
 
 const privateTemporaryProcFDCheck = "private-temporary-proc-fd-check"
 
@@ -47,7 +48,40 @@ func TestMain(m *testing.M) {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		fmt.Println(dumpable, limit.Cur, limit.Max)
+		filter, err := readCoredumpFilter()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if dumpable != 0 || limit.Cur != 0 || limit.Max != 0 || filter != 0 {
+			fmt.Fprintf(os.Stderr, "hardened state = dumpable %d, core limit %d/%d, coredump filter %#x\n", dumpable, limit.Cur, limit.Max, filter)
+			os.Exit(1)
+		}
+		executable, err := os.Executable()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := unix.Exec(executable, []string{executable, hardenExecCheck}, os.Environ()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	if len(os.Args) > 1 && os.Args[1] == hardenExecCheck {
+		filter, err := readCoredumpFilter()
+		var limit unix.Rlimit
+		if err == nil {
+			err = unix.Getrlimit(unix.RLIMIT_CORE, &limit)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if filter != 0 || limit.Cur != 0 || limit.Max != 0 {
+			fmt.Fprintf(os.Stderr, "exec inherited core limit %d/%d, coredump filter %#x\n", limit.Cur, limit.Max, filter)
+			os.Exit(1)
+		}
+		fmt.Println("inherited core limit 0/0 and coredump filter 0")
 		os.Exit(0)
 	}
 	if len(os.Args) > 1 && os.Args[1] == privateTemporaryProcFDCheck {

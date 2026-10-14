@@ -95,17 +95,62 @@ func init() {
 	hardenProcess = hardenLinux
 }
 
-// hardenLinux sets a soft and hard core file size limit of zero, which the
-// processes this one starts inherit and cannot raise, and clears the dumpable
-// flag, which execve sets again for the program it runs.
+// hardenLinux limits ordinary core-file output, excludes memory mappings from
+// core dumps, and clears the dumpable flag, which execve sets again for the
+// program it runs. The coredump filter is set and checked before the process
+// becomes non-dumpable so startup fails if the kernel does not honor it.
 func hardenLinux() error {
 	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{}); err != nil {
 		return fmt.Errorf("disable core dumps: %w", err)
+	}
+	if err := setAndVerifyZeroCoredumpFilter(); err != nil {
+		return err
 	}
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		return fmt.Errorf("make the process non-dumpable: %w", err)
 	}
 	return nil
+}
+
+const procCoredumpFilter = "/proc/self/coredump_filter"
+
+func setAndVerifyZeroCoredumpFilter() error {
+	file, err := os.OpenFile(procCoredumpFilter, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", procCoredumpFilter, err)
+	}
+	written, writeErr := file.WriteString("0")
+	closeErr := file.Close()
+	if writeErr != nil {
+		return fmt.Errorf("set %s to zero: %w", procCoredumpFilter, writeErr)
+	}
+	if written != 1 {
+		return fmt.Errorf("set %s to zero: wrote %d of 1 byte", procCoredumpFilter, written)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close %s after setting it: %w", procCoredumpFilter, closeErr)
+	}
+	filter, err := readCoredumpFilter()
+	if err != nil {
+		return fmt.Errorf("read back %s: %w", procCoredumpFilter, err)
+	}
+	if filter != 0 {
+		return fmt.Errorf("verify %s: value is %#x, want zero", procCoredumpFilter, filter)
+	}
+	return nil
+}
+
+func readCoredumpFilter() (uint64, error) {
+	contents, err := os.ReadFile(procCoredumpFilter)
+	if err != nil {
+		return 0, err
+	}
+	value := strings.TrimSpace(string(contents))
+	filter, err := strconv.ParseUint(value, 16, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse value %q: %w", value, err)
+	}
+	return filter, nil
 }
 
 // limitScannerResources makes the kernel's out-of-memory killer choose the
@@ -114,8 +159,9 @@ func hardenLinux() error {
 // refuses oom_score_adj still runs the scanner restricted. A process may
 // write its oom_score_adj only while it owns its /proc entries, which a
 // non-dumpable process does not, so it becomes dumpable again first. The
-// scanner it executes is dumpable anyway, because execve resets the flag, and
-// the zero core file size limit it inherits still keeps it from dumping core.
+// scanner it executes is dumpable anyway, because execve resets the flag; the
+// zero core file size limit and coredump filter it inherits still restrict
+// core output and exclude normal memory mappings.
 func limitScannerResources() {
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 1, 0, 0, 0); err == nil {
 		if file, err := os.OpenFile("/proc/self/oom_score_adj", os.O_WRONLY, 0); err == nil {

@@ -259,16 +259,16 @@ func TestSeccompArchitectureOfThisBuild(t *testing.T) {
 	}
 }
 
-// TestHardenProcessStopsCoreDumps runs the hardening in a test binary of its
-// own, which then reports its dumpable flag and core file size limits.
-func TestHardenProcessStopsCoreDumps(t *testing.T) {
+// TestHardenProcessDisablesCoreMappings verifies the hardening and checks
+// that the core limit and mapping filter survive an actual exec.
+func TestHardenProcessDisablesCoreMappings(t *testing.T) {
 	t.Parallel()
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	output, err := exec.Command(executable, hardenCheck).CombinedOutput()
-	if err != nil || strings.TrimSpace(string(output)) != "0 0 0" {
-		t.Fatalf("hardened process = %q, %v; want non-dumpable with no core dumps", output, err)
+	if err != nil || strings.TrimSpace(string(output)) != "inherited core limit 0/0 and coredump filter 0" {
+		t.Fatalf("hardened exec child = %q, %v; want zero core limit and coredump filter", output, err)
 	}
 }

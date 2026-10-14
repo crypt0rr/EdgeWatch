@@ -304,6 +304,12 @@ locked. The startup phases that read their progress before they write, such
 as the backfills, take the database's write lock first, so a host command
 that writes while they run, such as `scan` or `admin`, makes them wait, up
 to the five-second busy timeout, instead of failing the daemon's start.
+Daemon and scheduled-job lease acquisition also reserves the write lock before
+reading lease ownership or job revision, so a concurrent writer delays the
+claim through SQLite's busy timeout instead of causing a failed read-to-write
+upgrade. During service, a heartbeat that receives `SQLITE_BUSY` retries on
+the next heartbeat tick without counting it as a missed heartbeat; lease loss,
+`SQLITE_LOCKED`, and other database errors keep their existing failure behavior.
 The daemon also opens its listener before it migrates, so `GET /healthz`
 answers `starting` during a long upgrade; see
 [Monitor the monitor](/operations/troubleshooting/#monitor-the-monitor).

@@ -1281,6 +1281,10 @@ const daemonHeartbeatTimeout = 10 * time.Second
 var errHeartbeatTimedOut = errors.New("daemon heartbeat timed out")
 
 // heartbeat renews the daemon lease of owner within the heartbeat timeout.
+// SQLite can return SQLITE_BUSY at its own shorter busy_timeout before the
+// heartbeat context expires; that external writer wait is the same retryable
+// condition as a context timeout. SQLITE_LOCKED and lease/database errors are
+// left untouched so the daemon does not hide connection misuse or lost ownership.
 func (a *App) heartbeat(ctx context.Context, system *store.SystemStore, owner string) error {
 	timeout := a.heartbeatTimeout
 	if timeout <= 0 {
@@ -1289,8 +1293,10 @@ func (a *App) heartbeat(ctx context.Context, system *store.SystemStore, owner st
 	heartbeatCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	err := system.Heartbeat(heartbeatCtx, owner)
-	if err != nil && ctx.Err() == nil && errors.Is(heartbeatCtx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("%w: %w", errHeartbeatTimedOut, err)
+	if err != nil && ctx.Err() == nil && !errors.Is(err, store.ErrLeaseLost) {
+		if errors.Is(heartbeatCtx.Err(), context.DeadlineExceeded) || store.IsSQLiteBusy(err) {
+			return fmt.Errorf("%w: %w", errHeartbeatTimedOut, err)
+		}
 	}
 	return err
 }

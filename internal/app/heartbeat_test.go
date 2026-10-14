@@ -14,7 +14,7 @@ import (
 
 // startTestDaemon runs the daemon of a until the test ends and returns its
 // result channel once it holds the daemon lease.
-func startTestDaemon(t *testing.T, a *App, db *store.Store) (context.CancelFunc, <-chan error) {
+func startTestDaemon(t *testing.T, a *App, db *store.Store) (context.CancelFunc, chan error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -35,6 +35,44 @@ func startTestDaemon(t *testing.T, a *App, db *store.Store) (context.CancelFunc,
 		time.Sleep(5 * time.Millisecond)
 	}
 	return cancel, done
+}
+
+// holdExternalWriter takes SQLite's writer lock through a separate store
+// handle, as a host command does beside the daemon.
+func holdExternalWriter(t *testing.T, db *store.Store) func() {
+	t.Helper()
+	external, err := store.OpenExisting(db.FilePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := external.DB.Conn(context.Background())
+	if err != nil {
+		_ = external.Close()
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		_ = conn.Close()
+		_ = external.Close()
+		t.Fatal(err)
+	}
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		if _, err := conn.ExecContext(context.Background(), `COMMIT`); err != nil {
+			t.Errorf("release external SQLite writer: %v", err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Errorf("close external SQLite connection: %v", err)
+		}
+		if err := external.Close(); err != nil {
+			t.Errorf("close external SQLite store: %v", err)
+		}
+	}
+	t.Cleanup(release)
+	return release
 }
 
 // A scan finalization holds SQLite's only writer for its work budget, which
@@ -222,5 +260,116 @@ func TestHeartbeatTimeoutWithoutRenewedLeaseWarns(t *testing.T) {
 	defer conn.Close()
 	if err := a.heartbeat(ctx, db.System(), "owner"); !errors.Is(err, errHeartbeatTimedOut) {
 		t.Fatalf("heartbeat while the writer is held = %v, want %v", err, errHeartbeatTimedOut)
+	}
+}
+
+// A separate host process uses SQLite's busy handler, which can return
+// SQLITE_BUSY before the daemon heartbeat context reaches its longer deadline.
+// That is still a writer wait, not a missed heartbeat.
+func TestHeartbeatTreatsExternalSQLiteBusyAsWriterWait(t *testing.T) {
+	t.Parallel()
+	a, db := newLifecycleTestApp(t, schedulerFake{}, nil)
+	ctx := context.Background()
+	if err := db.System().AcquireLease(ctx, "external-writer-heartbeat"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `PRAGMA busy_timeout=50`); err != nil {
+		t.Fatal(err)
+	}
+	a.heartbeatTimeout = time.Second
+	release := holdExternalWriter(t, db)
+	err := a.heartbeat(ctx, db.System(), "external-writer-heartbeat")
+	if !errors.Is(err, errHeartbeatTimedOut) || !store.IsSQLiteBusy(err) {
+		t.Fatalf("heartbeat under an external writer lock = %v, want a busy writer wait", err)
+	}
+	release()
+	if err := a.heartbeat(ctx, db.System(), "external-writer-heartbeat"); err != nil {
+		t.Fatalf("heartbeat after external writer released: %v", err)
+	}
+}
+
+func TestDaemonLoopRetriesExternalSQLiteBusyHeartbeats(t *testing.T) {
+	t.Parallel()
+	var logs syncBuffer
+	a, db := newLifecycleTestApp(t, schedulerFake{}, nil)
+	a.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	a.ReleaseChecker = nil
+	a.heartbeatInterval = 20 * time.Millisecond
+	a.heartbeatTimeout = time.Second
+	if _, err := db.DB.ExecContext(context.Background(), `PRAGMA busy_timeout=50`); err != nil {
+		t.Fatal(err)
+	}
+	_, done := startTestDaemon(t, a, db)
+	ctx := context.Background()
+	before, err := db.System().DaemonLeaseStatus(ctx)
+	if err != nil || !before.Active {
+		t.Fatalf("initial daemon lease = %#v, %v", before, err)
+	}
+	release := holdExternalWriter(t, db)
+	released := false
+	defer func() {
+		if !released {
+			release()
+		}
+	}()
+	deadline := time.Now().Add(4 * time.Second)
+	for strings.Count(logs.String(), "daemon heartbeat timed out waiting for the database writer") < 4 && time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			done <- err
+			t.Fatalf("daemon stopped during external writer contention: %v", err)
+		default:
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if waits := strings.Count(logs.String(), "daemon heartbeat timed out waiting for the database writer"); waits < 4 {
+		t.Fatalf("external-writer heartbeat waits = %d, want at least 4: %s", waits, logs.String())
+	}
+	select {
+	case err := <-done:
+		done <- err
+		t.Fatalf("daemon stopped before writer release: %v", err)
+	default:
+	}
+	release()
+	released = true
+	deadline = time.Now().Add(4 * time.Second)
+	for {
+		lease, err := db.System().DaemonLeaseStatus(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lease.Heartbeat.After(before.Heartbeat) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("daemon heartbeat did not recover after writer release: before=%s after=%s", before.Heartbeat, lease.Heartbeat)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		done <- err
+		t.Fatalf("daemon stopped after writer release: %v", err)
+	default:
+	}
+	if strings.Contains(logs.String(), "daemon lease heartbeat failed") {
+		t.Fatalf("external writer contention was counted as a failed heartbeat: %s", logs.String())
+	}
+}
+
+func TestHeartbeatPreservesLeaseLossAndCancellation(t *testing.T) {
+	t.Parallel()
+	a, db := newLifecycleTestApp(t, schedulerFake{}, nil)
+	if err := db.System().AcquireLease(context.Background(), "current-owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.heartbeat(context.Background(), db.System(), "other-owner"); !errors.Is(err, store.ErrLeaseLost) || errors.Is(err, errHeartbeatTimedOut) {
+		t.Fatalf("lost lease heartbeat = %v, want unwrapped ErrLeaseLost", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := a.heartbeat(canceled, db.System(), "current-owner"); !errors.Is(err, context.Canceled) || errors.Is(err, errHeartbeatTimedOut) {
+		t.Fatalf("canceled heartbeat = %v, want unwrapped context cancellation", err)
 	}
 }

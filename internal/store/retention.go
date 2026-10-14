@@ -868,16 +868,28 @@ func CheckDaemonLeaseBeforeStartup(ctx context.Context, path string) error {
 }
 
 func (ss *SystemStore) acquireLease(ctx context.Context, owner string, reclaimPreviousDaemon bool) (int64, error) {
+	return ss.acquireLeaseWithClock(ctx, owner, reclaimPreviousDaemon, time.Now)
+}
+
+func (ss *SystemStore) acquireLeaseWithClock(ctx context.Context, owner string, reclaimPreviousDaemon bool, nowFn func() time.Time) (int64, error) {
 	if strings.TrimSpace(owner) == "" {
 		return 0, errors.New("daemon lease owner is required")
 	}
-	now := time.Now().UTC()
-	stale := now.Add(-2 * time.Minute).Format(time.RFC3339Nano)
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	// Acquire the writer before reading the singleton row. Starting with a
+	// deferred read transaction can fail immediately when a host command holds
+	// SQLite's writer: SQLite does not run busy_timeout while upgrading a
+	// transaction that has already read. The no-op startup_state update makes
+	// acquisition wait consistently with the other startup phases.
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Do not age the lease cutoff while waiting for SQLite's writer. A
+	// heartbeat can become stale during that wait, so sample the clock only
+	// after the ownership decision can proceed.
+	now := nowFn().UTC()
+	stale := now.Add(-2 * time.Minute).Format(time.RFC3339Nano)
 	var previousOwner, previousHeartbeat string
 	queryErr := tx.QueryRowContext(ctx, `SELECT owner,heartbeat FROM daemon_lease WHERE id=1`).Scan(&previousOwner, &previousHeartbeat)
 	if errors.Is(queryErr, sql.ErrNoRows) {
@@ -1009,20 +1021,33 @@ ON CONFLICT(job) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_
 // a tenant that is not active is refused with ErrTenantNotActive, so a paused
 // tenant starts no scan, scheduled or manual.
 func (ss *SystemStore) AcquireJobLeaseForRevision(ctx context.Context, job, owner string, revision int64, expires time.Time) error {
+	return ss.acquireJobLeaseForRevisionWithClock(ctx, job, owner, revision, expires, time.Now)
+}
+
+func (ss *SystemStore) acquireJobLeaseForRevisionWithClock(ctx context.Context, job, owner string, revision int64, expires time.Time, nowFn func() time.Time) error {
 	if strings.TrimSpace(job) == "" {
 		return errors.New("job lease job is required")
 	}
 	if strings.TrimSpace(owner) == "" {
 		return errors.New("job lease owner is required")
 	}
-	if !expires.After(time.Now().UTC()) {
+	if !expires.After(nowFn().UTC()) {
 		return errors.New("job lease expiry must be in the future")
 	}
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	// The revision check and lease write must stay atomic, but a deferred
+	// read transaction can fail immediately when another process holds the
+	// SQLite writer. Reserve the writer before checking the job so busy_timeout
+	// handles the same host-command contention as daemon lease acquisition.
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// The writer wait can outlast the caller's lease deadline. Recheck after
+	// the lock is held so an already-expired lease is never persisted.
+	if !expires.After(nowFn().UTC()) {
+		return errors.New("job lease expiry must be in the future")
+	}
 	var current int64
 	var archived int
 	var tenantState string
@@ -1042,7 +1067,10 @@ func (ss *SystemStore) AcquireJobLeaseForRevision(ctx context.Context, job, owne
 	if current != revision {
 		return ErrJobRevisionChanged
 	}
-	now := time.Now().UTC()
+	now := nowFn().UTC()
+	if !expires.After(now) {
+		return errors.New("job lease expiry must be in the future")
+	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO job_leases(job,owner,expires_at) VALUES(?,?,?) ON CONFLICT(job) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at WHERE job_leases.expires_at < ?`, job, owner, expires.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	if err != nil {
 		return err

@@ -196,15 +196,20 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		seen.retireFrom(state)
 		return event, nil, nil
 	}
+	baselineIndex := newBaselineIndex(*state.Baseline)
+	var indexedScopes *scopeLookups
+	if scopeChanged {
+		indexedScopes = &scopeLookups{old: baselineIndex.scopes, current: newScopeIndex(scan.Snapshot)}
+	}
 	var learningServices map[string]struct{}
 	if !scopeChanged {
 		// A scope migration uses the candidate-convergence path to decide when
 		// replacement service fingerprints are stable. Running the ordinary
 		// missing-fingerprint learner here would clear that candidate for every
 		// scan because the old baseline already has a fingerprint.
-		learningServices = learnMissingFingerprints(state, scan.Snapshot, job.Baseline.Samples)
+		learningServices = learnMissingFingerprintsWithIndex(state, scan.Snapshot, job.Baseline.Samples, baselineIndex)
 	}
-	changes := diffForJob(*state.Baseline, scan.Snapshot, scopeChanged, job)
+	changes := diffForJobWithScopeLookups(*state.Baseline, scan.Snapshot, scopeChanged, job, indexedScopes)
 	if scopeChanged {
 		// Do not run the stateful fingerprint learner while a scope candidate is
 		// converging: that would mutate the active baseline before the candidate
@@ -212,7 +217,7 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		// scope candidate merge will adopt it after its normal stability check.
 		learningServices = map[string]struct{}{}
 		for _, change := range changes {
-			if change.Kind == "service" && fingerprintLearnable(state, change.Target, change.Protocol, change.Port) {
+			if change.Kind == "service" && fingerprintLearnableWithIndex(state, change.Target, change.Protocol, change.Port, baselineIndex) {
 				learningServices[change.Key] = struct{}{}
 			}
 		}
@@ -362,7 +367,13 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 		// A partial scan with some positive evidence can still compare reachable
 		// targets, but it must never carry a stale total-loss candidate forward.
 		clearTotalLossCandidate(state)
-		changes = diffForJob(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash, job)
+		baselineIndex := newBaselineIndex(*state.Baseline)
+		scopeChanged := state.BaselineConfigHash != scan.ConfigHash
+		var indexedScopes *scopeLookups
+		if scopeChanged {
+			indexedScopes = &scopeLookups{old: baselineIndex.scopes, current: newScopeIndex(scan.Snapshot)}
+		}
+		changes = diffForJobWithScopeLookups(*state.Baseline, scan.Snapshot, scopeChanged, job, indexedScopes)
 		filtered := changes[:0]
 		deferredLearning := make(map[string]struct{})
 		for _, change := range changes {
@@ -371,7 +382,7 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 			// change to the next complete scan instead of reporting it: an
 			// incident opened here would also stop the fingerprint from ever
 			// being learned.
-			if change.Kind == "service" && fingerprintLearnable(state, change.Target, change.Protocol, change.Port) {
+			if change.Kind == "service" && fingerprintLearnableWithIndex(state, change.Target, change.Protocol, change.Port, baselineIndex) {
 				deferredLearning[change.Key] = struct{}{}
 				continue
 			}
@@ -1149,6 +1160,123 @@ func fingerprintKey(target, protocol string, port int) string {
 	return fmt.Sprintf("service|%s|%s|%d", target, protocol, port)
 }
 
+type scopeIndexKey struct {
+	target   string
+	protocol string
+}
+
+type baselinePortIndexKey struct {
+	target   string
+	protocol string
+	port     int
+}
+
+type baselinePortLocation struct {
+	unit int
+	port int
+}
+
+// snapshotScopeIndex groups all matching scopes without expanding their port
+// expressions. The common single-scope case stores its scope inline; extra
+// entries are retained only for overlapping scopes, preserving their OR
+// semantics and service-detection eligibility without one slice allocation
+// per network target.
+type snapshotScopeGroup struct {
+	first model.Scope
+	rest  []model.Scope
+}
+
+type snapshotScopeIndex map[scopeIndexKey]snapshotScopeGroup
+
+func newScopeIndex(snapshot model.Snapshot) snapshotScopeIndex {
+	index := make(snapshotScopeIndex, len(snapshot.Scopes))
+	for _, scope := range snapshot.Scopes {
+		key := scopeIndexKey{target: scope.Target, protocol: scope.Protocol}
+		group, exists := index[key]
+		if !exists {
+			index[key] = snapshotScopeGroup{first: scope}
+			continue
+		}
+		group.rest = append(group.rest, scope)
+		index[key] = group
+	}
+	return index
+}
+
+func (index snapshotScopeIndex) allows(target, protocol string, port int, service bool) bool {
+	group, ok := index[scopeIndexKey{target: target, protocol: protocol}]
+	if !ok {
+		return false
+	}
+	if config.PortContains(group.first.Ports, port) && (!service || group.first.ServiceDetection) {
+		return true
+	}
+	for _, scope := range group.rest {
+		if config.PortContains(scope.Ports, port) && (!service || scope.ServiceDetection) {
+			return true
+		}
+	}
+	return false
+}
+
+type baselineIndex struct {
+	scopes snapshotScopeIndex
+	ports  map[baselinePortIndexKey]baselinePortLocation
+}
+
+func newBaselineIndex(snapshot model.Snapshot) baselineIndex {
+	portCount := 0
+	for _, unit := range snapshot.Units {
+		portCount += len(unit.Ports)
+	}
+	index := baselineIndex{
+		scopes: newScopeIndex(snapshot),
+		ports:  make(map[baselinePortIndexKey]baselinePortLocation, portCount),
+	}
+	for unitIndex, unit := range snapshot.Units {
+		for portIndex, port := range unit.Ports {
+			key := baselinePortIndexKey{target: unit.Target, protocol: unit.Protocol, port: port.Port}
+			if _, exists := index.ports[key]; !exists {
+				// The linear lookup and mutation helpers have always selected the
+				// first matching unit/port. Retain that behavior for legacy or
+				// malformed snapshots with duplicate entries.
+				index.ports[key] = baselinePortLocation{unit: unitIndex, port: portIndex}
+			}
+		}
+	}
+	return index
+}
+
+func (index baselineIndex) baselinePort(snapshot model.Snapshot, target, protocol string, port int) (model.PortState, bool) {
+	location, ok := index.ports[baselinePortIndexKey{target: target, protocol: protocol, port: port}]
+	if !ok || location.unit >= len(snapshot.Units) || location.port >= len(snapshot.Units[location.unit].Ports) {
+		return model.PortState{}, false
+	}
+	return snapshot.Units[location.unit].Ports[location.port], true
+}
+
+func (index baselineIndex) setBaselineService(snapshot *model.Snapshot, target, protocol string, port int, service string) bool {
+	location, ok := index.ports[baselinePortIndexKey{target: target, protocol: protocol, port: port}]
+	if !ok || snapshot == nil || location.unit >= len(snapshot.Units) || location.port >= len(snapshot.Units[location.unit].Ports) {
+		return false
+	}
+	value := &snapshot.Units[location.unit].Ports[location.port]
+	if value.Service == service {
+		return false
+	}
+	value.Service = service
+	return true
+}
+
+type scopeLookups struct {
+	old     snapshotScopeIndex
+	current snapshotScopeIndex
+}
+
+func newScopeLookups(old, current model.Snapshot) scopeLookups {
+	return scopeLookups{old: newScopeIndex(old), current: newScopeIndex(current)}
+}
+
 func updateFingerprintCandidates(state *model.JobState, snapshot model.Snapshot) {
 	seen := map[string]bool{}
 	for _, unit := range snapshot.Units {
@@ -1191,6 +1319,13 @@ func withStableFingerprints(snapshot model.Snapshot, candidates map[string]model
 // established without a stable fingerprint. It returns the service keys that
 // are still collecting samples so their changes are not reported yet.
 func learnMissingFingerprints(state *model.JobState, current model.Snapshot, required int) map[string]struct{} {
+	if state.Baseline == nil {
+		return map[string]struct{}{}
+	}
+	return learnMissingFingerprintsWithIndex(state, current, required, newBaselineIndex(*state.Baseline))
+}
+
+func learnMissingFingerprintsWithIndex(state *model.JobState, current model.Snapshot, required int, index baselineIndex) map[string]struct{} {
 	learning := map[string]struct{}{}
 	if state.Baseline == nil {
 		return learning
@@ -1198,7 +1333,7 @@ func learnMissingFingerprints(state *model.JobState, current model.Snapshot, req
 	seen := map[string]bool{}
 	for _, unit := range current.Units {
 		for _, port := range unit.Ports {
-			if port.Service == "" || !fingerprintLearnable(state, unit.Target, unit.Protocol, port.Port) {
+			if port.Service == "" || !fingerprintLearnableWithIndex(state, unit.Target, unit.Protocol, port.Port, index) {
 				continue
 			}
 			key := fingerprintKey(unit.Target, unit.Protocol, port.Port)
@@ -1211,7 +1346,7 @@ func learnMissingFingerprints(state *model.JobState, current model.Snapshot, req
 			}
 			state.FingerprintCandidates[key] = candidate
 			if candidate.Count >= required {
-				if setBaselineService(state.Baseline, unit.Target, unit.Protocol, port.Port, candidate.Value) {
+				if index.setBaselineService(state.Baseline, unit.Target, unit.Protocol, port.Port, candidate.Value) {
 					// The learned service is an expected-state mutation that does not
 					// replace the immutable source scan. Host explorer reads must use the
 					// runtime baseline until a later scan establishes a new source.
@@ -1235,7 +1370,14 @@ func learnMissingFingerprints(state *model.JobState, current model.Snapshot, req
 // service of this port instead of comparing it. It does not change state, so
 // an incomplete scan can use it to defer the same services.
 func fingerprintLearnable(state *model.JobState, target, protocol string, port int) bool {
-	if state.Baseline == nil || !scopeAllows(*state.Baseline, target, protocol, port, true) {
+	if state.Baseline == nil {
+		return false
+	}
+	return fingerprintLearnableWithIndex(state, target, protocol, port, newBaselineIndex(*state.Baseline))
+}
+
+func fingerprintLearnableWithIndex(state *model.JobState, target, protocol string, port int, index baselineIndex) bool {
+	if state.Baseline == nil || !index.scopes.allows(target, protocol, port, true) {
 		return false
 	}
 	// Only a port that is already expected can learn its missing
@@ -1243,7 +1385,7 @@ func fingerprintLearnable(state *model.JobState, target, protocol string, port i
 	// part of that port's new observation and goes through the normal
 	// comparison; learning it here could never complete and would make
 	// the service incident open and recover on alternate scans.
-	expected, ok := baselinePort(*state.Baseline, target, protocol, port)
+	expected, ok := index.baselinePort(*state.Baseline, target, protocol, port)
 	if !ok || expected.Service != "" {
 		return false
 	}
@@ -1402,6 +1544,15 @@ func Diff(old, new model.Snapshot, intersectionOnly bool) []model.Change {
 }
 
 func diffWithDownAddresses(old, new model.Snapshot, intersectionOnly bool, downByProtocol map[string]map[string]struct{}) []model.Change {
+	var indexes *scopeLookups
+	if intersectionOnly {
+		lookups := newScopeLookups(old, new)
+		indexes = &lookups
+	}
+	return diffWithDownAddressesAndScopes(old, new, intersectionOnly, downByProtocol, indexes)
+}
+
+func diffWithDownAddressesAndScopes(old, new model.Snapshot, intersectionOnly bool, downByProtocol map[string]map[string]struct{}, scopeIndexes *scopeLookups) []model.Change {
 	a, b := items(old), items(new)
 	newPositivePorts := make(map[string]struct{})
 	for _, unit := range new.Units {
@@ -1426,7 +1577,7 @@ func diffWithDownAddresses(old, new model.Snapshot, intersectionOnly bool, downB
 		if yok {
 			probe = y
 		}
-		if intersectionOnly && !inBothScopes(old, new, probe) {
+		if intersectionOnly && !inBothScopesWithScopeIndexes(old, new, probe, scopeIndexes) {
 			continue
 		}
 		// A service fingerprint is evidence about a positively observed port,
@@ -1470,7 +1621,7 @@ func diffWithDownAddresses(old, new model.Snapshot, intersectionOnly bool, downB
 		}
 		out = append(out, c)
 	}
-	_, portAddresses := comparePortAddresses(old, new, intersectionOnly, downByProtocol)
+	_, portAddresses := comparePortAddressesWithScopeIndexes(old, new, intersectionOnly, downByProtocol, scopeIndexes)
 	out = append(out, portAddresses...)
 	out = append(out, hostStateChanges(old, new, intersectionOnly)...)
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
@@ -1498,6 +1649,15 @@ func portAddressKey(target, protocol string, port int, address string) string {
 // It returns the key of every comparison it made, whether or not the address
 // changed, together with the changes.
 func comparePortAddresses(old, current model.Snapshot, intersectionOnly bool, downByProtocol map[string]map[string]struct{}) (map[string]struct{}, []model.Change) {
+	var indexes *scopeLookups
+	if intersectionOnly {
+		lookups := newScopeLookups(old, current)
+		indexes = &lookups
+	}
+	return comparePortAddressesWithScopeIndexes(old, current, intersectionOnly, downByProtocol, indexes)
+}
+
+func comparePortAddressesWithScopeIndexes(old, current model.Snapshot, intersectionOnly bool, downByProtocol map[string]map[string]struct{}, scopeIndexes *scopeLookups) (map[string]struct{}, []model.Change) {
 	compared := map[string]struct{}{}
 	var changes []model.Change
 	oldUnits := unitMap(old)
@@ -1529,7 +1689,7 @@ func comparePortAddresses(old, current model.Snapshot, intersectionOnly bool, do
 			if !ok || !isPositivePortState(oldPort.State) || !isPositivePortState(port.State) || len(oldPort.Evidence) == 0 || len(port.Evidence) == 0 {
 				continue
 			}
-			if intersectionOnly && !inBothScopes(old, current, item{Kind: "port", Target: unit.Target, Protocol: unit.Protocol, Port: port.Port}) {
+			if intersectionOnly && !inBothScopesWithScopeIndexes(old, current, item{Kind: "port", Target: unit.Target, Protocol: unit.Protocol, Port: port.Port}, scopeIndexes) {
 				continue
 			}
 			before, after := canonicalAddressSet(oldPort.Evidence), canonicalAddressSet(port.Evidence)
@@ -1649,6 +1809,19 @@ func inBothScopes(a, b model.Snapshot, v item) bool {
 		return hostInScope(a, v.Target) && hostInScope(b, v.Target)
 	}
 	return scopeAllows(a, v.Target, v.Protocol, v.Port, v.Kind == "service") && scopeAllows(b, v.Target, v.Protocol, v.Port, v.Kind == "service")
+}
+
+func inBothScopesWithScopeIndexes(a, b model.Snapshot, v item, indexes *scopeLookups) bool {
+	if indexes == nil {
+		return inBothScopes(a, b, v)
+	}
+	if v.Kind == "dns" {
+		return hasTarget(a, v.Target) && hasTarget(b, v.Target)
+	}
+	if v.Kind == "host" {
+		return hostInScope(a, v.Target) && hostInScope(b, v.Target)
+	}
+	return indexes.old.allows(v.Target, v.Protocol, v.Port, v.Kind == "service") && indexes.current.allows(v.Target, v.Protocol, v.Port, v.Kind == "service")
 }
 
 func missingPositivePortExplainedByDown(old model.Snapshot, value item, downByProtocol map[string]map[string]struct{}) bool {
@@ -2016,8 +2189,17 @@ func filterDNSAggregateChanges(old, current model.Snapshot, changes []model.Chan
 }
 
 func diffForJob(old, current model.Snapshot, intersectionOnly bool, job config.Job) []model.Change {
+	var indexes *scopeLookups
+	if intersectionOnly {
+		lookups := newScopeLookups(old, current)
+		indexes = &lookups
+	}
+	return diffForJobWithScopeLookups(old, current, intersectionOnly, job, indexes)
+}
+
+func diffForJobWithScopeLookups(old, current model.Snapshot, intersectionOnly bool, job config.Job, indexes *scopeLookups) []model.Change {
 	downByProtocol := completedDownAddressesByProtocolForJob(old, current, job)
-	return filterDNSAggregateChanges(old, current, diffWithDownAddresses(old, current, intersectionOnly, downByProtocol), job)
+	return filterDNSAggregateChanges(old, current, diffWithDownAddressesAndScopes(old, current, intersectionOnly, downByProtocol, indexes), job)
 }
 
 func scopeAllowsProtocol(snapshot model.Snapshot, target, protocol string) bool {

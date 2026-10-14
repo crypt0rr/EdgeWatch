@@ -157,6 +157,22 @@ describe('shared review workflow', () => {
     await waitFor(() => expect(updateIncidentReview).toHaveBeenNthCalledWith(2, 'job-1', expect.objectContaining({ expected_revision: 1, note: 'My draft' })))
   })
 
+  it('keeps a review draft by occurrence when its evidence panel closes and reopens', async () => {
+    renderInbox(['/incidents?view=all_active'])
+    await waitForInbox()
+    openFirstEvidence()
+    let panel = await screen.findByRole('complementary', { name: 'Evidence and review' })
+    fireEvent.change(within(panel).getByRole('textbox', { name: 'Shared reviewer note' }), { target: { value: 'Keep this draft' } })
+    fireEvent.click(within(panel).getByRole('button', { name: 'Close evidence panel' }))
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Evidence and review' })).not.toBeInTheDocument())
+
+    openFirstEvidence()
+    panel = await screen.findByRole('complementary', { name: 'Evidence and review' })
+    expect(within(panel).getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('Keep this draft')
+    fireEvent.click(within(panel).getByRole('button', { name: 'Reset draft' }))
+    expect(within(panel).getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('')
+  })
+
   it('keeps keyboard focus in the note when an in-view refetch replaces the selected row', async () => {
     const latestObservation = { ...item, incident: { ...item.incident, last_seen_at: '2026-10-12T08:00:00Z' } }
     vi.mocked(listIncidents).mockResolvedValueOnce(page() as never).mockResolvedValue(page([latestObservation]) as never)

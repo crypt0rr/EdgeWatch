@@ -9,6 +9,7 @@ import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { Pagination } from '../components/Pagination'
 import { formatDateTime } from '../format'
+import { useServerDraft, type ServerDraftSnapshot } from '../hooks/useServerDraft'
 import { incidentDateTimeCandidates, incidentDateTimeInput, incidentTimeOffset, incidentTimeZone } from '../incident-time'
 import { changeKindLabel, changeTargetLabel, severityLabel, severityTone } from '../status'
 
@@ -24,7 +25,8 @@ const views: { value: IncidentInboxView; label: string }[] = [
 const severities = ['critical', 'warning', 'info'] as const
 const kinds = ['port', 'port-address', 'service', 'host', 'dns-added', 'dns-removed'] as const
 type ConflictRefresh = { token: string; status: 'loading' | 'found' | 'missing' | 'error'; expectedRevision: number | null; pageQueryID: string; pageDataUpdatedAt: number }
-type ReviewDraft = { baseRevision: number; rebasedToRevision?: number; status: IncidentReviewUpdate['status']; note: string; dueLocal: string; ambiguousChoice: string }
+type ReviewDraft = { rebasedToRevision?: number; status: IncidentReviewUpdate['status']; note: string; dueLocal: string; ambiguousChoice: string }
+type ReviewDraftSnapshot = ServerDraftSnapshot<ReviewDraft, number>
 const statusLabels: Record<string, string> = {
   needs_review: 'Needs review',
   investigating: 'Investigating',
@@ -161,7 +163,7 @@ export function Incidents() {
   const [pendingAction, setPendingAction] = useState<{ row: IncidentInboxItem; action: 'accept' | 'suppress' } | null>(null)
   const [selectedSnapshot, setSelectedSnapshot] = useState<IncidentInboxItem | null>(null)
   const [conflictRefreshes, setConflictRefreshes] = useState<Record<string, ConflictRefresh>>({})
-  const [reviewDrafts, setReviewDrafts] = useState<Record<string, ReviewDraft>>({})
+  const [reviewDrafts, setReviewDrafts] = useState<Record<string, ReviewDraftSnapshot>>({})
   const conflictLookupGenerationRef = useRef<Record<string, number>>({})
   const [actionError, setActionError] = useState('')
   const actionErrorRef = useRef<HTMLDivElement>(null)
@@ -287,7 +289,7 @@ export function Incidents() {
       return next
     })
   }
-  function updateReviewDraft(token: string, draft: ReviewDraft | null) {
+  function updateReviewDraft(token: string, draft: ReviewDraftSnapshot | null) {
     setReviewDrafts(current => {
       if (!draft) {
         if (!(token in current)) return current
@@ -430,7 +432,7 @@ function IncidentCard({ item, selected, onOpen }: { item: IncidentInboxItem; sel
   </article>
 }
 
-function EvidencePanel({ item, canManage, readOnly, draft, onDraftChange, conflictRefresh, onConflictCheck, onClearConflict, onAction, onSaved }: { item: IncidentInboxItem; canManage: boolean; readOnly: boolean; draft?: ReviewDraft; onDraftChange: (token: string, draft: ReviewDraft | null) => void; conflictRefresh: ConflictRefresh | null; onConflictCheck: (token: string, jobID: string, expectedRevision: number | null) => Promise<void>; onClearConflict: (token: string) => void; onAction: (item: IncidentInboxItem, action: 'accept' | 'suppress') => void; onSaved: (review: IncidentReview) => void }) {
+function EvidencePanel({ item, canManage, readOnly, draft, onDraftChange, conflictRefresh, onConflictCheck, onClearConflict, onAction, onSaved }: { item: IncidentInboxItem; canManage: boolean; readOnly: boolean; draft?: ReviewDraftSnapshot; onDraftChange: (token: string, draft: ReviewDraftSnapshot | null) => void; conflictRefresh: ConflictRefresh | null; onConflictCheck: (token: string, jobID: string, expectedRevision: number | null) => Promise<void>; onClearConflict: (token: string) => void; onAction: (item: IncidentInboxItem, action: 'accept' | 'suppress') => void; onSaved: (review: IncidentReview) => void }) {
   const change = item.incident.change
   const sourceScan = item.incident.scan_id
   const sourceScanAvailable = !!sourceScan && item.opening_scan_available
@@ -469,13 +471,21 @@ function EvidencePanel({ item, canManage, readOnly, draft, onDraftChange, confli
   </>
 }
 
-function ReviewEditor({ item, readOnly, draft, onDraftChange, conflictRefresh, onConflictCheck, onClearConflict, onSaved }: { item: IncidentInboxItem; readOnly: boolean; draft?: ReviewDraft; onDraftChange: (token: string, draft: ReviewDraft | null) => void; conflictRefresh: ConflictRefresh | null; onConflictCheck: (token: string, jobID: string, expectedRevision: number | null) => Promise<void>; onClearConflict: (token: string) => void; onSaved: (review: IncidentReview) => void }) {
+function ReviewEditor({ item, readOnly, draft: draftSnapshot, onDraftChange, conflictRefresh, onConflictCheck, onClearConflict, onSaved }: { item: IncidentInboxItem; readOnly: boolean; draft?: ReviewDraftSnapshot; onDraftChange: (token: string, draft: ReviewDraftSnapshot | null) => void; conflictRefresh: ConflictRefresh | null; onConflictCheck: (token: string, jobID: string, expectedRevision: number | null) => Promise<void>; onClearConflict: (token: string) => void; onSaved: (review: IncidentReview) => void }) {
   const client = useQueryClient()
   const timezone = incidentTimeZone()
-  const status = draft?.status ?? (item.review.status === 'investigating' ? 'investigating' : 'needs_review')
-  const note = draft?.note ?? item.review.note
-  const dueLocal = draft?.dueLocal ?? incidentDateTimeInput(item.review.follow_up_at, timezone)
-  const ambiguousChoice = draft?.ambiguousChoice ?? ''
+  const initialDraft: ReviewDraft = {
+    status: item.review.status === 'investigating' ? 'investigating' : 'needs_review',
+    note: item.review.note,
+    dueLocal: incidentDateTimeInput(item.review.follow_up_at, timezone),
+    ambiguousChoice: '',
+  }
+  const { draft, setDraft, baseRevision, remoteChanged, hasDraft, rebase, discard, markSaved } = useServerDraft(
+    initialDraft,
+    item.review.revision,
+    { controlled: { snapshot: draftSnapshot, onChange: snapshot => onDraftChange(item.occurrence_token, snapshot) } },
+  )
+  const { status, note, dueLocal, ambiguousChoice } = draft
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [saved, setSaved] = useState('')
@@ -490,33 +500,26 @@ function ReviewEditor({ item, readOnly, draft, onDraftChange, conflictRefresh, o
         : tooFarAhead
           ? 'Follow-up must be no more than 30 days ahead.'
           : ''
-  const conflict = !!draft && draft.baseRevision !== item.review.revision
-  const draftBaseRevision = draft?.baseRevision ?? item.review.revision
+  const conflict = remoteChanged
+  const draftBaseRevision = baseRevision
   const conflictRefreshed = conflictRefresh === null || (conflictRefresh.status === 'found' && (conflictRefresh.expectedRevision === null || item.review.revision !== conflictRefresh.expectedRevision))
   const canSave = !!item.incident.change.key && !readOnly && !saving && bytes <= maxNoteBytes && !dueError && conflictRefreshed
   const queryKey = ['incidents', 'inbox']
 
   function patchDraft(patch: Partial<ReviewDraft>) {
-    onDraftChange(item.occurrence_token, {
-      baseRevision: draft?.baseRevision ?? item.review.revision,
-      ...(draft?.rebasedToRevision === undefined ? {} : { rebasedToRevision: draft.rebasedToRevision }),
-      status,
-      note,
-      dueLocal,
-      ambiguousChoice,
-      ...patch,
-    })
+    setDraft(current => ({ ...current, ...patch }))
     setSaved('')
     setError('')
   }
   function rebaseDraft() {
-    if (!draft || draft.baseRevision === item.review.revision || readOnly || saving) return
-    onDraftChange(item.occurrence_token, { ...draft, baseRevision: item.review.revision, rebasedToRevision: item.review.revision })
+    if (!hasDraft || !remoteChanged || readOnly || saving) return
+    setDraft(current => ({ ...current, rebasedToRevision: item.review.revision }))
+    rebase(item.review.revision)
     setError('')
     setSaved('')
   }
   async function resetDraft() {
-    onDraftChange(item.occurrence_token, null)
+    discard()
     setError('')
     setSaved('')
     onClearConflict(item.occurrence_token)
@@ -524,8 +527,8 @@ function ReviewEditor({ item, readOnly, draft, onDraftChange, conflictRefresh, o
   async function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!canSave) return
-    const expectedRevision = draft?.baseRevision ?? item.review.revision
-    if (!draft) onDraftChange(item.occurrence_token, { baseRevision: expectedRevision, status, note, dueLocal, ambiguousChoice })
+    const expectedRevision = baseRevision
+    if (!hasDraft) setDraft(draft)
     const update: IncidentReviewUpdate = {
       key: item.incident.change.key,
       occurrence_token: item.occurrence_token,
@@ -540,7 +543,7 @@ function ReviewEditor({ item, readOnly, draft, onDraftChange, conflictRefresh, o
     try {
       const savedReview = await updateIncidentReview(item.job_id, update)
       onSaved(savedReview)
-      onDraftChange(item.occurrence_token, null)
+      markSaved()
       onClearConflict(item.occurrence_token)
       setSaved('Review saved. Notes and follow-up times do not change notifications or reminders.')
       await client.invalidateQueries({ queryKey: ['incidents'] })
@@ -565,7 +568,7 @@ function ReviewEditor({ item, readOnly, draft, onDraftChange, conflictRefresh, o
     <div className="incident-review-form-heading"><h3>Shared investigation review</h3><span className="revision">Revision {item.review.revision}</span></div>
     {readOnly && <p className="incident-context-notice">Review fields are read-only because this occurrence is outside the current results.</p>}
     {conflict && <div className="incident-review-conflict" role="status"><strong>Latest saved review</strong><p>Status: {item.review.status === 'investigating' ? 'Investigating' : 'Needs review'} · Revision {item.review.revision}{item.review.reviewer_label ? ` · ${item.review.reviewer_label}` : ''}{item.review.reviewed_at ? ` · ${safeTime(item.review.reviewed_at)}` : ''}</p><p>Shared note:</p>{item.review.note ? <blockquote>{item.review.note}</blockquote> : <p>No saved note.</p>}<p>Follow-up: {item.review.follow_up_at ? followUpTime(item.review.follow_up_at) : 'None'}</p><p>Your draft remains based on revision {draftBaseRevision}. Rebase keeps your edits and changes the revision used when you save.</p><button className="button secondary" type="button" disabled={readOnly || saving} onClick={rebaseDraft}>Rebase my draft to revision {item.review.revision}</button></div>}
-    {draft?.rebasedToRevision === item.review.revision && <p className="success-message" role="status">Your draft is based on revision {item.review.revision}. Save it to share your changes.</p>}
+    {draft.rebasedToRevision === item.review.revision && <p className="success-message" role="status">Your draft is based on revision {item.review.revision}. Save it to share your changes.</p>}
     <label>Review status<select disabled={readOnly} value={status} onChange={event => { const value = event.target.value as IncidentReviewUpdate['status']; patchDraft(value === 'needs_review' ? { status: value, dueLocal: '', ambiguousChoice: '' } : { status: value }) }}>
       <option value="needs_review">Needs review</option><option value="investigating">Investigating</option>
     </select></label>

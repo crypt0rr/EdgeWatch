@@ -112,6 +112,8 @@ export function JobChangeWindows({ jobID, jobName, timezone, archived, latestWin
   const [reason, setReason] = useState('')
   const [formError, setFormError] = useState('')
   const [formSuccess, setFormSuccess] = useState('')
+  const [cancelError, setCancelError] = useState('')
+  const [reviewErrors, setReviewErrors] = useState<Record<string, string>>({})
   const [creating, setCreating] = useState(false)
   const [cancelTarget, setCancelTarget] = useState<WindowRecord | null>(null)
   const [busyWindowID, setBusyWindowID] = useState('')
@@ -184,15 +186,15 @@ export function JobChangeWindows({ jobID, jobName, timezone, archived, latestWin
   }
 
   async function cancel(window: WindowRecord) {
+    setCancelError('')
     setBusyWindowID(window.id)
     try {
       await cancelJobChangeWindow(jobID, window.id)
       setCancelTarget(null)
       await refreshWindows()
     } catch (cause) {
-      setFormError(cause instanceof Error ? cause.message : 'Could not cancel the planned change window.')
+      setCancelError(cause instanceof Error ? cause.message : 'Could not cancel the planned change window.')
       await windows.refetch()
-      setCancelTarget(null)
     } finally {
       setBusyWindowID('')
     }
@@ -200,13 +202,17 @@ export function JobChangeWindows({ jobID, jobName, timezone, archived, latestWin
 
   async function markReviewed(window: WindowRecord) {
     setBusyWindowID(window.id)
-    setFormError('')
+    setReviewErrors(current => {
+      const next = { ...current }
+      delete next[window.id]
+      return next
+    })
     try {
       const revision = window.revision
       await reviewJobChangeWindow(jobID, window.id, revision)
       await refreshWindows()
     } catch (cause) {
-      setFormError(cause instanceof Error ? cause.message : 'Could not mark the window review complete.')
+      setReviewErrors(current => ({ ...current, [window.id]: cause instanceof Error ? cause.message : 'Could not mark the window review complete.' }))
       await windows.refetch()
     } finally {
       setBusyWindowID('')
@@ -289,10 +295,13 @@ export function JobChangeWindows({ jobID, jobName, timezone, archived, latestWin
                     </> : <p className="muted">No incident details are available for this window.</p>}
               </div>}
               {window.review_state === 'due' && (canManageIncidents
-                ? <button className="button secondary" type="button" disabled={busyWindowID === window.id} onClick={() => void markReviewed(window)}>{busyWindowID === window.id ? 'Saving…' : 'Mark review complete'}</button>
+                ? <>
+                  <button className="button secondary" type="button" disabled={busyWindowID === window.id} onClick={() => void markReviewed(window)}>{busyWindowID === window.id ? 'Saving…' : 'Mark review complete'}</button>
+                  {reviewErrors[window.id] && <p className="form-error" role="alert">{reviewErrors[window.id]}</p>}
+                </>
                 : <p className="muted">Marking this review complete requires incidents.manage.</p>)}
               {(window.status === 'closed' || window.status === 'cancelled') && !hasChangeEvidence && <p className="muted change-window-no-activity">No change activity was recorded; no closing review was created.</p>}
-              {canManageWindows && !archived && (window.status === 'scheduled' || window.status === 'active') && <button className="button ghost" type="button" disabled={busyWindowID === window.id} onClick={() => setCancelTarget(window)}>{busyWindowID === window.id ? 'Cancelling…' : 'Cancel window'}</button>}
+              {canManageWindows && !archived && (window.status === 'scheduled' || window.status === 'active') && <button className="button ghost" type="button" disabled={busyWindowID === window.id} onClick={() => { setCancelError(''); setCancelTarget(window) }}>{busyWindowID === window.id ? 'Cancelling…' : 'Cancel window'}</button>}
             </article>
           })}</div>}
     {cancelTarget && <ActionDialog
@@ -303,8 +312,8 @@ export function JobChangeWindows({ jobID, jobName, timezone, archived, latestWin
       confirmLabel={cancelTarget.status === 'active' ? 'End window now' : 'Cancel scheduled window'}
       destructive
       onConfirm={() => cancel(cancelTarget)}
-      onCancel={() => setCancelTarget(null)}
-      error={formError}
+      onCancel={() => { setCancelTarget(null); setCancelError('') }}
+      error={cancelError}
     />}
   </section>
 }

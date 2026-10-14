@@ -1095,7 +1095,7 @@ func (ts *TenantStore) DiscardCompletedScanCycleAfterFinalizationFailures(ctx co
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var status string
 	var cycleEpoch int64

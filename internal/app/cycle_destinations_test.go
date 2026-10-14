@@ -180,6 +180,55 @@ func TestRepeatedCompletedCycleFinalizationFailuresPlanFreshCycle(t *testing.T) 
 	}
 }
 
+func TestCompletedCycleDiscardStorageErrorIsReturnedWithoutLosingProgress(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	probe := &completingCycleScanner{}
+	a, db := newLifecycleTestApp(t, probe, nil)
+	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("cycle-finalization-discard-error"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	budgetCalls := 0
+	a.persistenceBudget = func(int) time.Duration {
+		budgetCalls++
+		if budgetCalls <= 2 {
+			return time.Nanosecond
+		}
+		return scanPersistenceTimeout(0)
+	}
+
+	var cycleID string
+	for attempt := 1; attempt <= 2; attempt++ {
+		scan, _, runErr := a.runJobRecord(ctx, record, false)
+		if runErr == nil || scan.Status != "failed" || scan.Error != model.ScanFinalizationFailureMessage || scan.CycleStatus != "completed" || !scan.Resumable {
+			t.Fatalf("finalization failure %d = %#v, %v", attempt, scan, runErr)
+		}
+		if attempt == 1 {
+			cycleID = scan.CycleID
+		} else if scan.CycleID != cycleID {
+			t.Fatalf("cycle changed before retry bound: first=%q second=%q", cycleID, scan.CycleID)
+		}
+	}
+	if _, err := db.DB.ExecContext(ctx, `CREATE TRIGGER reject_cycle_discard BEFORE UPDATE OF status ON scan_cycles WHEN NEW.status='discarded' BEGIN SELECT RAISE(ABORT, 'injected cycle discard failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	scan, _, runErr := a.runJobRecord(ctx, record, false)
+	if runErr == nil || scan.Status != "failed" || !strings.Contains(runErr.Error(), "injected cycle discard failure") {
+		t.Fatalf("discard storage failure = %#v, %v; want the completed cycle failure returned", scan, runErr)
+	}
+	if cycle, err := defaultTenant(db).GetScanCycle(ctx, cycleID); err != nil || cycle.Status != "completed" || cycle.CompletedUnits != 2 {
+		t.Fatalf("cycle after failed discard = %+v, %v; want completed progress retained", cycle, err)
+	}
+	if units, err := defaultTenant(db).ListScanCycleUnitSummaries(ctx, cycleID); err != nil || len(units) != 2 {
+		t.Fatalf("units after failed discard = %v, %v; want all saved progress retained", units, err)
+	}
+	if plans, units := probe.counts(); plans != 1 || units != 2 {
+		t.Fatalf("scanner planned %d cycles and scanned %d units; discard failure must not start new work", plans, units)
+	}
+}
+
 // A scan outside a completed cycle keeps the earlier behavior: its result is
 // saved as not compared.
 func TestCompletedCycleResult(t *testing.T) {

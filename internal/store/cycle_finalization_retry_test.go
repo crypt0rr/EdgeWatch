@@ -160,6 +160,50 @@ func TestDiscardCompletedCycleAfterFinalizationFailuresRollsBackOnUnitCleanupErr
 	}
 }
 
+func TestDiscardCompletedCycleLeavesUnitsWhenUpdateIsIgnored(t *testing.T) {
+	t.Parallel()
+	ctx, s, job, cycle := completedUnpromotedCycle(t)
+	for _, id := range []string{"ignored-discard-one", "ignored-discard-two"} {
+		saveCycleAttempt(t, ctx, s, job, cycle, id, "failed", "completed", model.ScanFinalizationFailureMessage, true)
+	}
+	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER ignore_cycle_discard BEFORE UPDATE OF status ON scan_cycles WHEN NEW.status='discarded' BEGIN SELECT RAISE(IGNORE); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	discarded, err := defaultTenant(s).DiscardCompletedScanCycleAfterFinalizationFailures(ctx, cycle.ID, cycle.BaselineEpoch, 2)
+	if !errors.Is(err, ErrCycleNotResumable) || discarded {
+		t.Fatalf("ignored discard update = %t, %v; want ErrCycleNotResumable", discarded, err)
+	}
+	if got, err := defaultTenant(s).GetScanCycle(ctx, cycle.ID); err != nil || got.Status != "completed" || got.CompletedUnits != 1 {
+		t.Fatalf("cycle after ignored discard = %+v, %v; want completed cycle with progress", got, err)
+	}
+	if units, err := defaultTenant(s).ListScanCycleUnitSummaries(ctx, cycle.ID); err != nil || len(units) != 1 {
+		t.Fatalf("units after ignored discard = %v, %v; want saved unit retained", units, err)
+	}
+}
+
+func TestDiscardCompletedCyclePreservesProgressWhenFailureIndexIsUnavailable(t *testing.T) {
+	t.Parallel()
+	ctx, s, job, cycle := completedUnpromotedCycle(t)
+	for _, id := range []string{"missing-index-one", "missing-index-two"} {
+		saveCycleAttempt(t, ctx, s, job, cycle, id, "failed", "completed", model.ScanFinalizationFailureMessage, true)
+	}
+	if _, err := s.DB.ExecContext(ctx, `DROP INDEX `+scansCycleOutcomeIndex); err != nil {
+		t.Fatal(err)
+	}
+
+	discarded, err := defaultTenant(s).DiscardCompletedScanCycleAfterFinalizationFailures(ctx, cycle.ID, cycle.BaselineEpoch, 2)
+	if err == nil || discarded {
+		t.Fatalf("decision with unavailable required index = %t, %v; want query failure", discarded, err)
+	}
+	if got, err := defaultTenant(s).GetScanCycle(ctx, cycle.ID); err != nil || got.Status != "completed" || got.CompletedUnits != 1 {
+		t.Fatalf("cycle after marker-query failure = %+v, %v; want completed cycle with progress", got, err)
+	}
+	if units, err := defaultTenant(s).ListScanCycleUnitSummaries(ctx, cycle.ID); err != nil || len(units) != 1 {
+		t.Fatalf("units after marker-query failure = %v, %v; want saved unit retained", units, err)
+	}
+}
+
 func TestConcurrentFinalizationFailureDecisionsDiscardOnce(t *testing.T) {
 	t.Parallel()
 	ctx, s, job, cycle := completedUnpromotedCycle(t)

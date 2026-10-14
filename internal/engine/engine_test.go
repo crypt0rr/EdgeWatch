@@ -2096,6 +2096,120 @@ func TestClosingPortRetiresOpenServiceIncidentWithoutRecovery(t *testing.T) {
 	}
 }
 
+func TestIncompleteScanDoesNotRecoverClosedPortServiceIncident(t *testing.T) {
+	const (
+		serviceTarget = "192.0.2.9"
+		otherTarget   = "192.0.2.10"
+		serviceKey    = "service|192.0.2.9|tcp|443"
+	)
+	scopes := []model.Scope{
+		{Target: serviceTarget, Protocol: "tcp", Ports: "22,443", ServiceDetection: true},
+		{Target: serviceTarget, Protocol: "udp", Ports: "53"},
+		{Target: otherTarget, Protocol: "tcp", Ports: "80"},
+	}
+	buildSnapshot := func(service string, httpsOpen bool, incomplete string) model.Snapshot {
+		tcpPorts := []model.PortState{{Port: 22, State: "open", Service: "ssh | OpenSSH"}}
+		if httpsOpen {
+			tcpPorts = append(tcpPorts, model.PortState{Port: 443, State: "open", Service: service})
+		}
+		snapshot := model.Snapshot{
+			Scopes: scopes,
+			Units: []model.Unit{
+				{Target: serviceTarget, Protocol: "tcp", Ports: tcpPorts},
+				{Target: serviceTarget, Protocol: "udp", Ports: []model.PortState{{Port: 53, State: "open", Service: "domain | dns"}}},
+				{Target: otherTarget, Protocol: "tcp", Ports: []model.PortState{{Port: 80, State: "open", Service: "http | nginx"}}},
+			},
+		}
+		switch incomplete {
+		case "other-target":
+			snapshot.Units = snapshot.Units[:2]
+			snapshot.Hosts = []model.HostObservation{{Address: otherTarget, Status: "unreachable", StatusReason: "nmap-host-timeout"}}
+		case "other-protocol":
+			snapshot.Units = []model.Unit{snapshot.Units[0], snapshot.Units[2]}
+			snapshot.Hosts = []model.HostObservation{{
+				Address: serviceTarget,
+				Status:  "up",
+				Protocols: []model.ProtocolObservation{
+					{Protocol: "tcp", Status: "up"},
+					{Protocol: "udp", Status: "timedout", StatusReason: "test timeout"},
+				},
+			}}
+		}
+		snapshot.Normalize()
+		return snapshot
+	}
+
+	for _, incomplete := range []string{"other-target", "other-protocol"} {
+		t.Run(incomplete, func(t *testing.T) {
+			baseline := buildSnapshot("https | nginx", true, "")
+			changed := buildSnapshot("https | apache", true, "")
+			closed := buildSnapshot("", false, "")
+			state := model.JobState{
+				Baseline: &baseline, BaselineScanID: "baseline", BaselineConfigHash: "hash",
+				Pending: map[string]model.Pending{}, Incidents: map[string]model.Incident{},
+				Suppressed: map[string]int{}, SuppressedChanges: map[string]model.Change{},
+				FingerprintCandidates: map[string]model.ValueCount{},
+			}
+			baselineHash := baseline.Hash()
+			job := config.Job{Name: "incomplete-close", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+
+			events, _, err := processSuccessWithChanges(&state, job, scan("service-change", changed))
+			if err != nil || len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 1 || events[0].Changes[0].Key != serviceKey {
+				t.Fatalf("service change = %#v, %v", events, err)
+			}
+			if incident, ok := state.Incidents[serviceKey]; !ok || incident.RecoveryCount != 0 {
+				t.Fatalf("service incident before port closure = %#v, exists %t", incident, ok)
+			}
+
+			partial := buildSnapshot("", false, incomplete)
+			events, _, err = processSuccessWithChanges(&state, job, scan("incomplete-close", partial))
+			if err != nil {
+				t.Fatalf("incomplete port closure: %v", err)
+			}
+			if !hasEventType(events, "scan-incomplete") {
+				t.Fatalf("incomplete port closure omitted its incomplete event: %#v", events)
+			}
+			for _, event := range events {
+				if event.Type != "changes-recovered" {
+					continue
+				}
+				for _, change := range event.Changes {
+					if change.Key == serviceKey {
+						t.Fatalf("incomplete scan reported a false service recovery: %#v", events)
+					}
+				}
+			}
+			if incident, ok := state.Incidents[serviceKey]; !ok || incident.RecoveryCount != 0 {
+				t.Fatalf("incomplete scan changed the closed-port service incident = %#v, exists %t", incident, ok)
+			}
+			if got := state.Baseline.Hash(); got != baselineHash {
+				t.Fatalf("incomplete scan changed the baseline hash: got %s want %s", got, baselineHash)
+			}
+
+			events, _, err = processSuccessWithChanges(&state, job, scan("complete-close", closed))
+			if err != nil {
+				t.Fatalf("complete port closure: %v", err)
+			}
+			if hasEventType(events, "scan-incomplete") {
+				t.Fatalf("complete port closure remained incomplete: %#v", events)
+			}
+			for _, event := range events {
+				if event.Type != "changes-recovered" {
+					continue
+				}
+				for _, change := range event.Changes {
+					if change.Key == serviceKey {
+						t.Fatalf("complete scan reported a false service recovery: %#v", events)
+					}
+				}
+			}
+			if _, ok := state.Incidents[serviceKey]; ok {
+				t.Fatalf("complete scan did not retire the closed-port service incident: %#v", state.Incidents)
+			}
+		})
+	}
+}
+
 func TestOpenServiceIncidentRecoversWhenBaselineFingerprintReturns(t *testing.T) {
 	scopes := []model.Scope{{Target: "192.0.2.9", Protocol: "tcp", Ports: "443", ServiceDetection: true}}
 	baseline := model.Snapshot{Scopes: scopes, Units: []model.Unit{{Target: "192.0.2.9", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open", Service: "https | nginx"}}}}}

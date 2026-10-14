@@ -831,7 +831,11 @@ phases have finished, so a second daemon on the same data volume exits
 without writing, and each migration step checks the schema version inside
 its own transaction, so no step runs twice. The startup phases that read
 before they write take the write lock first, so a concurrent host command
-delays them instead of failing the start. The host commands that act on
+delays them instead of failing the start. Daemon and scheduled-job lease
+acquisition likewise reserve the write lock before reading ownership or job
+revision. A heartbeat that receives `SQLITE_BUSY` retries at the next tick
+without counting as missed; lease loss, `SQLITE_LOCKED`, and other database
+errors keep their existing failure behavior. The host commands that act on
 business units or accounts (`admin`, `scan`, `status`, `history`, `baseline`, and `notify
 test`) refuse a schema that the daemon has not upgraded yet, such as a
 restored backup of an older release, before they read or write anything, so

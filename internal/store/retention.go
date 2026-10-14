@@ -873,7 +873,12 @@ func (ss *SystemStore) acquireLease(ctx context.Context, owner string, reclaimPr
 	}
 	now := time.Now().UTC()
 	stale := now.Add(-2 * time.Minute).Format(time.RFC3339Nano)
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	// Acquire the writer before reading the singleton row. Starting with a
+	// deferred read transaction can fail immediately when a host command holds
+	// SQLite's writer: SQLite does not run busy_timeout while upgrading a
+	// transaction that has already read. The no-op startup_state update makes
+	// acquisition wait consistently with the other startup phases.
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return 0, err
 	}
@@ -1018,7 +1023,11 @@ func (ss *SystemStore) AcquireJobLeaseForRevision(ctx context.Context, job, owne
 	if !expires.After(time.Now().UTC()) {
 		return errors.New("job lease expiry must be in the future")
 	}
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	// The revision check and lease write must stay atomic, but a deferred
+	// read transaction can fail immediately when another process holds the
+	// SQLite writer. Reserve the writer before checking the job so busy_timeout
+	// handles the same host-command contention as daemon lease acquisition.
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return err
 	}

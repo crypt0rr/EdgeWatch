@@ -176,6 +176,38 @@ func TestStartupPhasesWaitForAConcurrentWriter(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "daemon lease with no existing owner",
+			prepare: func(t *testing.T, s *Store) {
+				execStoreStatements(t, s, `DELETE FROM daemon_lease WHERE id=1`)
+			},
+			run: func(ctx context.Context, s *Store) error {
+				_, err := s.System().AcquireDaemonLease(ctx, "writer-wait-empty")
+				return err
+			},
+			check: func(t *testing.T, s *Store) {
+				if got := queryStrings(t, s.DB, `SELECT owner FROM daemon_lease WHERE id=1`); len(got) != 1 || got[0] != "writer-wait-empty" {
+					t.Fatalf("daemon lease owner = %v, want writer-wait-empty", got)
+				}
+			},
+		},
+		{
+			name: "daemon lease with stale previous owner",
+			prepare: func(t *testing.T, s *Store) {
+				if _, err := s.DB.ExecContext(context.Background(), `INSERT INTO daemon_lease(id,owner,heartbeat) VALUES(1,'stale-daemon',?)`, time.Now().UTC().Add(-3*time.Minute).Format(time.RFC3339Nano)); err != nil {
+					t.Fatal(err)
+				}
+			},
+			run: func(ctx context.Context, s *Store) error {
+				_, err := s.System().AcquireDaemonLease(ctx, "writer-wait-replacement")
+				return err
+			},
+			check: func(t *testing.T, s *Store) {
+				if got := queryStrings(t, s.DB, `SELECT owner FROM daemon_lease WHERE id=1`); len(got) != 1 || got[0] != "writer-wait-replacement" {
+					t.Fatalf("daemon lease owner = %v, want writer-wait-replacement", got)
+				}
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -193,6 +225,33 @@ func TestStartupPhasesWaitForAConcurrentWriter(t *testing.T) {
 			}
 			test.check(t, s)
 		})
+	}
+}
+
+func TestAcquireJobLeaseForRevisionWaitsForConcurrentWriter(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	ctx := context.Background()
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("lease-revision-writer-wait"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := holdWriteLock(t, s.FilePath())
+	timer := time.AfterFunc(startupWriteLockHold, release)
+	defer timer.Stop()
+	started := time.Now()
+	if err := s.System().AcquireJobLeaseForRevision(ctx, record.ID, "writer-wait-scan", record.Revision, time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatalf("revision lease acquisition while another connection writes: %v", err)
+	}
+	if waited := time.Since(started); waited < startupWriteLockHold/2 {
+		t.Fatalf("revision lease acquisition finished after %v without waiting for the writer", waited)
+	}
+	var owner string
+	if err := s.DB.QueryRowContext(ctx, `SELECT owner FROM job_leases WHERE job=?`, record.ID).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner != "writer-wait-scan" {
+		t.Fatalf("job lease owner = %q, want writer-wait-scan", owner)
 	}
 }
 

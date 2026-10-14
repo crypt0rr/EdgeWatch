@@ -931,6 +931,15 @@ func isSQLiteWriterBusy(err error) bool {
 	return code == sqlite3.SQLITE_BUSY || code == sqlite3.SQLITE_LOCKED
 }
 
+// IsSQLiteBusy reports whether err is an SQLite SQLITE_BUSY error, including
+// extended BUSY result codes. It deliberately excludes SQLITE_LOCKED, which
+// can indicate same-connection or shared-cache misuse rather than contention
+// with an independent writer.
+func IsSQLiteBusy(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqlite3.SQLITE_BUSY
+}
+
 func waitForWriterRetry(ctx context.Context, delay time.Duration) error {
 	timer := time.NewTimer(delay)
 	defer timer.Stop()

@@ -92,10 +92,17 @@ Tag only a commit on `main` whose CI passed. The workflow refuses any other
 tag before it builds anything, and waits for CI on the tagged commit before
 it stages a release. A later push to `main` can cancel that commit's CI run;
 re-run it, or run CI on the tag with `gh workflow run ci.yml --ref <tag>`.
+The Dockerfile keeps `npm ci` and the frontend build in its local-build path.
+Release image builds copy the verified frontend artifact from the candidate;
+they fail if that artifact has no `index.html` instead of rebuilding it.
 Before the release is published and the image is promoted, the workflow:
 
 - builds the image from scratch, without registry or Actions caches, with
   BuildKit, QEMU and the SBOM generator pinned by digest;
+- records each Linux archive's `edgewatch` member digest in schema 2 of
+  `release-manifest.json`, compares the staged per-architecture executable to
+  that archive member, and compares the executable copied from each candidate
+  image to the same digest;
 - scans both platforms of the image for known vulnerabilities;
 - runs the AMD64 image and archive on an AMD64 runner and the ARM64 image and
   archive on an ARM64 runner, including the runtime matrix, the real sandboxed

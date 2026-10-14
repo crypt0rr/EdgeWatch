@@ -8,6 +8,8 @@ artifact_dir="${1:?usage: $0 <artifact-dir> <manifest> <tag> [commit]}"
 manifest="${2:?usage: $0 <artifact-dir> <manifest> <tag> [commit]}"
 tag="${3:?usage: $0 <artifact-dir> <manifest> <tag> [commit]}"
 expected_commit="${4:-}"
+binary_dir="${5:-}"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 checksums="$artifact_dir/checksums.txt"
@@ -71,11 +73,29 @@ for archive in "${archives[@]}"; do
   done
 done
 
+schema_version="$(jq -r '.schema_version // empty' "$manifest")"
 if ! jq -e --arg tag "$tag" --arg commit "$expected_commit" '
-  .schema_version == 1 and .tag == $tag and ($commit == "" or .source_commit == $commit) and
-  (.artifacts | length > 0) and (.frontend_sha256 | type == "string" and length == 64)
+  (.schema_version == 1 or .schema_version == 2) and .tag == $tag and ($commit == "" or .source_commit == $commit) and
+  (.artifacts | length > 0) and (.frontend_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
 ' "$manifest" >/dev/null; then
   echo "release manifest metadata is invalid" >&2
+  exit 1
+fi
+if [[ -n "$binary_dir" && "$schema_version" != "2" ]]; then
+  echo "candidate artifact verification requires release manifest schema 2 binary digests" >&2
+  exit 1
+fi
+if [[ "$schema_version" == "2" ]] && ! jq -e '
+  (.binaries | type == "array" and length == 2) and
+  ([.binaries[].arch] | sort == ["amd64", "arm64"]) and
+  ([.binaries[].archive] | unique | length == 2) and
+  all(.binaries[];
+    (.archive | type == "string" and endswith(".tar.gz")) and
+    (.member | type == "string" and endswith("edgewatch")) and
+    (.sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+  )
+' "$manifest" >/dev/null; then
+  echo "release manifest binary bindings are invalid" >&2
   exit 1
 fi
 
@@ -116,5 +136,53 @@ while IFS=$'\t' read -r name sha256 size; do
   test "$(sha256sum "$file" | awk '{print $1}')" = "$sha256" || { echo "manifest hash mismatch: $name" >&2; exit 1; }
   test "$(stat -c '%s' "$file")" = "$size" || { echo "manifest size mismatch: $name" >&2; exit 1; }
 done < <(jq -r '.artifacts[] | [.name, .sha256, (.size | tostring)] | @tsv' "$manifest")
+
+if [[ "$schema_version" == "2" ]]; then
+  while IFS=$'\t' read -r arch archive member expected_sha256; do
+    archive_file=""
+    for candidate in "${archives[@]}"; do
+      if [[ "$candidate" == "$archive" ]]; then
+        archive_file="$artifact_dir/$candidate"
+        break
+      fi
+    done
+    if [[ -z "$archive_file" ]]; then
+      echo "binary manifest references an unknown release archive: $archive" >&2
+      exit 1
+    fi
+    case "$archive" in
+      *_Linux_x86_64.tar.gz|*_linux_amd64.tar.gz|*_Linux_amd64.tar.gz) archive_arch=amd64 ;;
+      *_Linux_arm64.tar.gz|*_linux_arm64.tar.gz) archive_arch=arm64 ;;
+      *) echo "unsupported binary archive name: $archive" >&2; exit 1 ;;
+    esac
+    if [[ "$archive_arch" != "$arch" ]]; then
+      echo "binary manifest architecture does not match archive name: $archive" >&2
+      exit 1
+    fi
+
+    binary_info="$("$script_dir/hash-release-binary.sh" "$archive_file")"
+    IFS=$'\t' read -r archive_member archive_sha256 <<< "$binary_info"
+    if [[ "$archive_member" != "$member" || "$archive_sha256" != "$expected_sha256" ]]; then
+      echo "release manifest binary digest does not match archive member: $archive" >&2
+      exit 1
+    fi
+
+    if [[ -n "$binary_dir" && "$binary_dir" != "-" ]]; then
+      extracted="$binary_dir/linux_$arch/edgewatch"
+      # actions/upload-artifact normalizes downloaded file modes to 0644.
+      # The image build restores executable mode with `install -m 0755`; here
+      # require a regular, non-symlink file and verify its bytes instead.
+      if [[ ! -f "$extracted" || -L "$extracted" || ! -r "$extracted" ]]; then
+        echo "prepared release binary is missing or invalid: $extracted" >&2
+        exit 1
+      fi
+      extracted_sha256="$(sha256sum "$extracted" | awk '{print $1}')"
+      if [[ "$extracted_sha256" != "$expected_sha256" ]]; then
+        echo "prepared release binary does not match archive member: $archive" >&2
+        exit 1
+      fi
+    fi
+  done < <(jq -r '.binaries[] | [.arch, .archive, .member, .sha256] | @tsv' "$manifest" | LC_ALL=C sort)
+fi
 
 echo "release artifacts verified for $tag"

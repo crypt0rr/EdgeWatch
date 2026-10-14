@@ -3,15 +3,16 @@ FROM --platform=$BUILDPLATFORM node:24.21.0-alpine3.24@sha256:ebfe2f90462722a7a4
 WORKDIR /src
 ARG PREBUILT_FRONTEND=0
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN if [ "$PREBUILT_FRONTEND" != "1" ]; then npm ci; fi
 COPY index.html tsconfig.json tsconfig.node.json vite.config.ts ./
 COPY src ./src
 COPY scripts/build-frontend.mjs ./scripts/build-frontend.mjs
 COPY scripts/check-node-runtime.mjs ./scripts/check-node-runtime.mjs
 COPY internal/webui/dist ./prebuilt-dist
 # Release builds pass the candidate frontend artifact through the Docker
-# context. Local builds retain the self-contained Node build fallback.
-RUN if [ "$PREBUILT_FRONTEND" = "1" ] && [ -f ./prebuilt-dist/index.html ]; then \
+# context. A missing artifact is an error; only local builds run npm.
+RUN if [ "$PREBUILT_FRONTEND" = "1" ]; then \
+      test -f ./prebuilt-dist/index.html || { echo "prebuilt frontend is missing index.html" >&2; exit 1; }; \
       rm -rf ./internal/webui/dist && mkdir -p ./internal/webui/dist && cp -a ./prebuilt-dist/. ./internal/webui/dist/; \
     else \
       npm run build; \

@@ -395,6 +395,19 @@ var cycleTenantLeakCases = map[string]tenantLeakCase{
 			t.Fatalf("tenant B's discard of its own cycles changed tenant A:\nbefore\n%s\nafter\n%s", before, after)
 		}
 	}},
+	"DiscardCompletedScanCycleAfterFinalizationFailures": {writes: true, run: func(t *testing.T, _ tenantFixture) {
+		ctx := context.Background()
+		f := newCycleTenantFixture(t)
+		a := cyclesOf(f, f.a)
+		before := tenantCycleRows(t, f.store, f.a)
+		discarded, err := f.store.Tenant(f.b).DiscardCompletedScanCycleAfterFinalizationFailures(ctx, a.recoverable, 0, 2)
+		if !errors.Is(err, ErrNoScanCycle) || discarded {
+			t.Errorf("tenant B discarded tenant A's recoverable cycle: discarded=%t err=%v", discarded, err)
+		}
+		if after := tenantCycleRows(t, f.store, f.a); after != before {
+			t.Fatalf("tenant B's finalization retry decision changed tenant A:\nbefore\n%s\nafter\n%s", before, after)
+		}
+	}},
 }
 
 // The cycle checks outside the leak suite share one copy of the cycle

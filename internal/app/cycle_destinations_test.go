@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
@@ -125,6 +126,106 @@ func TestCompletedCycleWaitsForNotificationDestinations(t *testing.T) {
 	}
 	if state, err := defaultTenant(db).RuntimeState(ctx, record.ID); err != nil || len(state.Incidents) != 1 {
 		t.Fatalf("runtime after promotion = %#v, %v", state, err)
+	}
+}
+
+func TestRepeatedCompletedCycleFinalizationFailuresPlanFreshCycle(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	probe := &completingCycleScanner{}
+	a, db := newLifecycleTestApp(t, probe, nil)
+	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("cycle-finalization-retry-limit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	budgetCalls := 0
+	a.persistenceBudget = func(int) time.Duration {
+		budgetCalls++
+		if budgetCalls <= 2 {
+			return time.Nanosecond
+		}
+		return scanPersistenceTimeout(0)
+	}
+
+	var failedCycleID string
+	for attempt := 1; attempt <= 2; attempt++ {
+		scan, _, runErr := a.runJobRecord(ctx, record, false)
+		if runErr == nil || scan.Status != "failed" || scan.Error != model.ScanFinalizationFailureMessage || scan.CycleStatus != "completed" || !scan.Resumable {
+			t.Fatalf("finalization failure %d = %#v, %v", attempt, scan, runErr)
+		}
+		if attempt == 1 {
+			failedCycleID = scan.CycleID
+		} else if scan.CycleID != failedCycleID {
+			t.Fatalf("retry changed cycle before the failure bound: first=%q second=%q", failedCycleID, scan.CycleID)
+		}
+	}
+
+	scan, _, runErr := a.runJobRecord(ctx, record, false)
+	if runErr != nil || scan.Status != "success" || scan.CycleStatus != "completed" || scan.CycleID == failedCycleID {
+		t.Fatalf("run after repeated finalization failures = %#v, %v", scan, runErr)
+	}
+	oldCycle, err := defaultTenant(db).GetScanCycle(ctx, failedCycleID)
+	if err != nil || oldCycle.Status != "discarded" {
+		t.Fatalf("old cycle after retry bound = %+v, %v", oldCycle, err)
+	}
+	if units, err := defaultTenant(db).ListScanCycleUnitSummaries(ctx, failedCycleID); err != nil || len(units) != 0 {
+		t.Fatalf("old cycle retained units after discard: %v, %v", units, err)
+	}
+	var fallbackRows int
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE cycle_id=? AND status='failed' AND cycle_status='completed' AND resumable=1 AND error=?`, failedCycleID, model.ScanFinalizationFailureMessage).Scan(&fallbackRows); err != nil || fallbackRows != 2 {
+		t.Fatalf("old cycle finalization failure rows = %d, %v; want exactly 2", fallbackRows, err)
+	}
+	if plans, units := probe.counts(); plans != 2 || units != 4 {
+		t.Fatalf("scanner planned %d cycles and scanned %d units; want one retry then one fresh plan", plans, units)
+	}
+}
+
+func TestCompletedCycleDiscardStorageErrorIsReturnedWithoutLosingProgress(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	probe := &completingCycleScanner{}
+	a, db := newLifecycleTestApp(t, probe, nil)
+	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("cycle-finalization-discard-error"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	budgetCalls := 0
+	a.persistenceBudget = func(int) time.Duration {
+		budgetCalls++
+		if budgetCalls <= 2 {
+			return time.Nanosecond
+		}
+		return scanPersistenceTimeout(0)
+	}
+
+	var cycleID string
+	for attempt := 1; attempt <= 2; attempt++ {
+		scan, _, runErr := a.runJobRecord(ctx, record, false)
+		if runErr == nil || scan.Status != "failed" || scan.Error != model.ScanFinalizationFailureMessage || scan.CycleStatus != "completed" || !scan.Resumable {
+			t.Fatalf("finalization failure %d = %#v, %v", attempt, scan, runErr)
+		}
+		if attempt == 1 {
+			cycleID = scan.CycleID
+		} else if scan.CycleID != cycleID {
+			t.Fatalf("cycle changed before retry bound: first=%q second=%q", cycleID, scan.CycleID)
+		}
+	}
+	if _, err := db.DB.ExecContext(ctx, `CREATE TRIGGER reject_cycle_discard BEFORE UPDATE OF status ON scan_cycles WHEN NEW.status='discarded' BEGIN SELECT RAISE(ABORT, 'injected cycle discard failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	scan, _, runErr := a.runJobRecord(ctx, record, false)
+	if runErr == nil || scan.Status != "failed" || !strings.Contains(runErr.Error(), "injected cycle discard failure") {
+		t.Fatalf("discard storage failure = %#v, %v; want the completed cycle failure returned", scan, runErr)
+	}
+	if cycle, err := defaultTenant(db).GetScanCycle(ctx, cycleID); err != nil || cycle.Status != "completed" || cycle.CompletedUnits != 2 {
+		t.Fatalf("cycle after failed discard = %+v, %v; want completed progress retained", cycle, err)
+	}
+	if units, err := defaultTenant(db).ListScanCycleUnitSummaries(ctx, cycleID); err != nil || len(units) != 2 {
+		t.Fatalf("units after failed discard = %v, %v; want all saved progress retained", units, err)
+	}
+	if plans, units := probe.counts(); plans != 1 || units != 2 {
+		t.Fatalf("scanner planned %d cycles and scanned %d units; discard failure must not start new work", plans, units)
 	}
 }
 

@@ -20,6 +20,12 @@ import (
 // choose whether to discard progress.
 const scanCycleMaxUnitAttempts = 3
 
+// scanCycleMaxFinalizationFailures permits one recovery retry after a
+// completed cycle's result could not be finalized. A second persisted
+// finalization failure discards its saved work so the next trigger plans a
+// fresh scan instead of repeatedly merging the same result.
+const scanCycleMaxFinalizationFailures = 2
+
 // retryableResumableError distinguishes execution failures from errors that
 // indicate an invalid or unusable scanner configuration. Process exits,
 // malformed output, and network-level failures are retryable. Validation and
@@ -119,7 +125,15 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, ts *store.Tenant
 					return true, model.Snapshot{}, scanErr
 				}
 				if !hasScan {
-					return a.recoverCompletedCycle(stateCtx, scan, run, latest)
+					discarded, discardErr := ts.DiscardCompletedScanCycleAfterFinalizationFailures(stateCtx, latest.ID, baselineEpoch, scanCycleMaxFinalizationFailures)
+					if discardErr != nil {
+						scan.Status = "failed"
+						scan.Error = discardErr.Error()
+						return true, model.Snapshot{}, discardErr
+					}
+					if !discarded {
+						return a.recoverCompletedCycle(stateCtx, scan, run, latest)
+					}
 				}
 			} else {
 				// A completed but unpromoted cycle from an older baseline is

@@ -469,7 +469,7 @@ func (r *managedRun) finalize(ctx, scanCtx context.Context, snapshot model.Snaps
 		}
 		failureScan := *scan
 		failureScan.Status = "failed"
-		failureScan.Error = "scan result could not be finalized; inspect the EdgeWatch server log"
+		failureScan.Error = model.ScanFinalizationFailureMessage
 		failureScan.Snapshot = model.Snapshot{
 			Scopes:         append([]model.Scope(nil), scan.Snapshot.Scopes...),
 			TargetFailures: append([]model.TargetCoverageFailure(nil), scan.Snapshot.TargetFailures...),

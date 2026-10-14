@@ -1057,6 +1057,12 @@ func (ts *TenantStore) ScanCycleExpiryNotified(ctx context.Context, cycleID stri
 // count.
 const scanCycleHasScanQuery = `SELECT COUNT(*) FROM scans WHERE cycle_id=? AND tenant_id=? AND cycle_status='completed' AND status IN ('success','incomplete')`
 
+// scanCycleFinalizationFailureCountQuery counts only a bounded prefix of the
+// exact fallback rows that identify a failed completed-cycle promotion. The
+// cycle outcome index narrows by cycle, state, and tenant before the residual
+// resumable/error predicates are checked.
+const scanCycleFinalizationFailureCountQuery = `SELECT COUNT(*) FROM (SELECT 1 FROM scans INDEXED BY ` + scansCycleOutcomeIndex + ` WHERE cycle_id=? AND cycle_status='completed' AND status='failed' AND tenant_id=? AND resumable=1 AND error=? LIMIT ?)`
+
 // ScanCycleHasScan reports whether one of the tenant's terminal cycles has
 // already been promoted into scan history; a cycle of another tenant has
 // not. The cycle is marked completed before the engine's final transaction,
@@ -1071,6 +1077,72 @@ func (ts *TenantStore) ScanCycleHasScan(ctx context.Context, cycleID string) (bo
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// DiscardCompletedScanCycleAfterFinalizationFailures atomically decides
+// whether to abandon an unpromoted completed cycle after repeated persisted
+// result-finalization failures. Only exact fallback rows for this tenant and
+// cycle count. Cycles with a different baseline epoch, terminal state, or a
+// promoted scan are left unchanged.
+func (ts *TenantStore) DiscardCompletedScanCycleAfterFinalizationFailures(ctx context.Context, cycleID string, baselineEpoch int64, maxFailures int) (bool, error) {
+	if err := ts.ready(); err != nil {
+		return false, err
+	}
+	if maxFailures < 1 {
+		return false, errors.New("finalization failure limit must be positive")
+	}
+	tx, err := beginWriteTx(ctx, ts.store.DB)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var status string
+	var cycleEpoch int64
+	err = tx.QueryRowContext(ctx, `SELECT c.status,c.baseline_epoch FROM scan_cycles c JOIN jobs j ON j.id=c.job_id AND j.tenant_id=? WHERE c.id=?`, ts.scope.id, cycleID).Scan(&status, &cycleEpoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNoScanCycle
+	}
+	if err != nil {
+		return false, err
+	}
+	if status != "completed" || cycleEpoch != baselineEpoch {
+		return false, tx.Commit()
+	}
+	var promoted int
+	if err := tx.QueryRowContext(ctx, scanCycleHasScanQuery, cycleID, ts.scope.id).Scan(&promoted); err != nil {
+		return false, err
+	}
+	if promoted != 0 {
+		return false, tx.Commit()
+	}
+	var failures int
+	if err := tx.QueryRowContext(ctx, scanCycleFinalizationFailureCountQuery, cycleID, ts.scope.id, model.ScanFinalizationFailureMessage, maxFailures).Scan(&failures); err != nil {
+		return false, err
+	}
+	if failures < maxFailures {
+		return false, tx.Commit()
+	}
+
+	stamp := sqliteTimestamp(time.Now())
+	result, err := tx.ExecContext(ctx, `UPDATE scan_cycles SET status='discarded',updated_at=?,finished_at=?,last_error='repeated scan result finalization failures; saved progress was discarded',completed_units=0,total_units=0,completed_probes=0,total_probes=0 WHERE id=? AND status='completed' AND baseline_epoch=? AND id IN (`+tenantScanCycleSQL+`)`, stamp, stamp, cycleID, baselineEpoch, ts.scope.id, cycleID)
+	if err != nil {
+		return false, err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if updated != 1 {
+		return false, ErrCycleNotResumable
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM scan_cycle_units WHERE cycle_id=? AND cycle_id IN (`+tenantScanCycleSQL+`)`, cycleID, ts.scope.id, cycleID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ListScanCycleUnitSummaries returns the progress of every unit of one of

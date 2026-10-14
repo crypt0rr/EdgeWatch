@@ -5,7 +5,7 @@ description: Understand the current SQLite schema, the oldest schema that upgrad
 
 ## Current schema and rollback
 
-The current schema is version 71. Schema 31 records terminal notification
+The current schema is version 72. Schema 31 records terminal notification
 deliveries and marks rows that had already exhausted the original eight
 attempts. Schema 63 repairs databases that had already passed schema 31 by
 marking still-unsent rows with at least eight attempts and a scheduled retry
@@ -90,6 +90,17 @@ uses it to select bounded batches of every delivery, including sent history
 whose event metadata is intentionally blank and rows without event metadata.
 The migration does not read or rewrite payloads or change delivery state. It
 builds the index over existing outbox rows, so its duration depends on outbox
+size. An older release refuses the upgraded database; restore the matching
+pre-upgrade `./data` backup to roll back.
+
+## Schema 72
+
+Schema 72 replaces the tenant event-order index and adds tenant-qualified
+indexes for legacy job-name and stable job-ID history lookups. Counts can use
+the indexes without reading event payloads, and ordered pages apply purge
+filtering and pagination before fetching only the selected payloads. The
+migration builds the indexes over existing event rows without rewriting or
+removing history, so its duration and temporary WAL depend on event history
 size. An older release refuses the upgraded database; restore the matching
 pre-upgrade `./data` backup to roll back.
 

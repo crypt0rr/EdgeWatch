@@ -502,13 +502,13 @@ func assertTenantEventListsReadInOrder(t *testing.T, f tenantFixture) {
 	for _, scope := range []TenantScope{f.a, f.b} {
 		query := `SELECT payload_json ` + eventsFromSQL + ` ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`
 		plan := queryPlan(t, f.store.DB, query, scope.ID(), 10, 0)
-		if !strings.Contains(plan, "events_tenant_id_time") || strings.Contains(plan, "TEMP B-TREE") {
-			t.Errorf("tenant %s: plan = %q, want events_tenant_id_time without a sort", scope.ID(), plan)
+		if !strings.Contains(plan, eventsTenantHistoryIndex) || strings.Contains(plan, "TEMP B-TREE") {
+			t.Errorf("tenant %s: plan = %q, want %s without a sort", scope.ID(), plan, eventsTenantHistoryIndex)
 		}
 	}
 	plan := queryPlan(t, f.store.DB, `SELECT payload_json FROM events WHERE `+platformHistorySQL+` ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, 10, 0)
-	if !strings.Contains(plan, "events_tenant_id_time") || strings.Contains(plan, "TEMP B-TREE") {
-		t.Errorf("platform: plan = %q, want events_tenant_id_time without a sort", plan)
+	if !strings.Contains(plan, eventsTenantHistoryIndex) || strings.Contains(plan, "TEMP B-TREE") {
+		t.Errorf("platform: plan = %q, want %s without a sort", plan, eventsTenantHistoryIndex)
 	}
 }
 

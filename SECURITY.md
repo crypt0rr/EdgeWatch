@@ -747,7 +747,7 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 71 must not be opened by an older EdgeWatch
+database upgraded to schema 72 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
@@ -803,6 +803,11 @@ Schema 71 adds an all-row index on outbox tenant and row ID. Tenant deletion
 uses it to select bounded batches, including sent history whose event metadata
 is intentionally blank, without reading or rewriting payloads or changing
 delivery state.
+Schema 72 replaces the tenant event-order index and adds tenant-qualified
+indexes for legacy job-name and stable job-ID history lookups. Counts use
+covering indexes; ordered pages apply purge filtering and pagination before
+fetching only the selected event payloads. The migration builds indexes over
+existing history without rewriting or deleting events.
 Only the daemon migrates, and only one process at a time: from v0.36.0 the
 daemon holds an advisory lock on the database directory, which restores take
 too, from before it opens the database until its migration and startup

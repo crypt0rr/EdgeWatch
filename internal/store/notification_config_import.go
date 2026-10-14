@@ -162,7 +162,7 @@ func (ss *SystemStore) ImportDeploymentNotifications(ctx context.Context, items 
 	}
 	now := time.Now().UTC()
 	stamp := now.Format(time.RFC3339Nano)
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return result, err
 	}

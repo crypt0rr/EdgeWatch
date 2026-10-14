@@ -19,7 +19,7 @@ func (ss *SystemStore) EnsureDeploymentNotificationIDs(ctx context.Context, lega
 	if len(legacyHashes) == 0 {
 		return result, nil
 	}
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return nil, err
 	}

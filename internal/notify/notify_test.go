@@ -3,6 +3,7 @@ package notify
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -81,6 +82,79 @@ func TestQueueAndDeliverGenericWebhook(t *testing.T) {
 	due, err := db.System().DueDeliveries(context.Background(), 10)
 	if err != nil || len(due) != 0 {
 		t.Fatalf("delivery remains due: %#v %v", due, err)
+	}
+}
+
+func TestNewContextCancelsBlockedDeploymentIDWrite(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.DB.ExecContext(context.Background(), `PRAGMA busy_timeout=100`); err != nil {
+		t.Fatal(err)
+	}
+	other, err := sql.Open("sqlite", db.FilePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	conn, err := other.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	urls := []string{"generic://127.0.0.1:9/context?disabletls=yes"}
+	_, err = NewContext(ctx, db, urls)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("notifier startup behind a writer = %v, want context deadline", err)
+	}
+	var count int
+	if err := db.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM deployment_notification_ids`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("canceled notifier startup wrote %d deployment IDs", count)
+	}
+	if _, err := conn.ExecContext(context.Background(), `ROLLBACK`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewContext(context.Background(), db, urls); err != nil {
+		t.Fatalf("notifier initialization retry after the writer is released = %v", err)
+	}
+	if err := db.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM deployment_notification_ids`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("notifier retry created %d deployment IDs, want 1", count)
+	}
+}
+
+func TestNotifierContextConstructorsRejectNilAndCanceledContexts(t *testing.T) {
+	t.Parallel()
+	var nilContext context.Context
+	if _, err := NewContext(nilContext, nil, nil); err == nil {
+		t.Fatal("NewContext with a nil context unexpectedly succeeded")
+	}
+	if _, err := NewWithKeyFileContext(nilContext, nil, nil, ""); err == nil {
+		t.Fatal("NewWithKeyFileContext with a nil context unexpectedly succeeded")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := NewContext(ctx, nil, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("NewContext with a canceled context = %v, want context.Canceled", err)
+	}
+	if _, err := NewWithKeyFileContext(ctx, nil, nil, ""); !errors.Is(err, context.Canceled) {
+		t.Fatalf("NewWithKeyFileContext with a canceled context = %v, want context.Canceled", err)
 	}
 }
 

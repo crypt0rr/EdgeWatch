@@ -128,15 +128,16 @@ const (
 // without the tenant predicate only in the account and legacy administrator
 // methods, which are global by design.
 var globalStoreMethods = map[string]string{
-	"Close":               globalLifecycle,
-	"FilePath":            globalLifecycle,
-	"SetAuthKeyPath":      globalLifecycle,
-	"SetTargetExclusions": globalLifecycle,
-	"SetAlertWake":        globalLifecycle,
-	"wakeAlerts":          globalLifecycle,
-	"authKeyForWrite":     globalLifecycle,
-	"reader":              globalLifecycle,
-	"validateManagedJob":  globalLifecycle,
+	"Close":                     globalLifecycle,
+	"FilePath":                  globalLifecycle,
+	"ReleaseDaemonStartupGuard": globalLifecycle,
+	"SetAuthKeyPath":            globalLifecycle,
+	"SetTargetExclusions":       globalLifecycle,
+	"SetAlertWake":              globalLifecycle,
+	"wakeAlerts":                globalLifecycle,
+	"authKeyForWrite":           globalLifecycle,
+	"reader":                    globalLifecycle,
+	"validateManagedJob":        globalLifecycle,
 
 	"Tenant":                globalScopes,
 	"System":                globalScopes,

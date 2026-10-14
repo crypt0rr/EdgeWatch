@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -441,6 +443,91 @@ func TestDaemonImportFailureKeepsDeliveringFromConfig(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("configured URL deliveries after a failed import = %d, want 1", got)
+	}
+}
+
+func TestDaemonStartupContextCancelsBlockedNotificationImport(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	database := filepath.Join(dir, "data", "edgewatch.db")
+	s, err := store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.DB.ExecContext(context.Background(), `PRAGMA busy_timeout=100`); err != nil {
+		t.Fatal(err)
+	}
+	configured := "generic://127.0.0.1:9/startup-context?disabletls=yes"
+	cfg := writeImportConfig(t, dir, database, configured)
+	keyPath := filepath.Join(dir, "operator.key")
+	if err := os.WriteFile(keyPath, make([]byte, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Notifications.EncryptionKeyFile = keyPath
+
+	other, err := sql.Open("sqlite", s.FilePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	conn, err := other.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := NewWithOptionsContext(ctx, cfg, s, "missing-nmap", slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), Options{ImportNotificationURLs: true})
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("daemon app startup with blocked import = %v, want context deadline", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("daemon app startup did not stop after its context deadline")
+	}
+	if countRows(t, s, `SELECT COUNT(*) FROM managed_notifications`) != 0 {
+		t.Fatal("canceled startup imported a managed notification")
+	}
+	if _, err := conn.ExecContext(context.Background(), `ROLLBACK`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewWithOptionsContext(context.Background(), cfg, s, "missing-nmap", slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), Options{ImportNotificationURLs: true}); err != nil {
+		t.Fatalf("notification import retry after the writer is released = %v", err)
+	}
+	if countRows(t, s, `SELECT COUNT(*) FROM managed_notifications`) != 1 {
+		t.Fatal("notification import retry did not create the configured destination")
+	}
+}
+
+func TestDaemonAppStartupWithCanceledContextDoesNotImport(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	database := filepath.Join(dir, "data", "edgewatch.db")
+	s, err := store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := writeImportConfig(t, dir, database, "generic://127.0.0.1:9/canceled-startup?disabletls=yes")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := NewWithOptionsContext(ctx, cfg, s, "missing-nmap", slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), Options{ImportNotificationURLs: true}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("application startup with a canceled context = %v, want context.Canceled", err)
+	}
+	if got := countRows(t, s, `SELECT COUNT(*) FROM managed_notifications`); got != 0 {
+		t.Fatalf("canceled application startup imported %d managed notifications", got)
 	}
 }
 

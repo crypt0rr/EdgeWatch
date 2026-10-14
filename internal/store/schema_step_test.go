@@ -300,7 +300,7 @@ func TestBeginWriteTxReportsAMissingLockTable(t *testing.T) {
 }
 
 // The guard reports a directory that it cannot open, which is not another
-// migration, and platforms without the guard return a no-op unlock.
+// migration. Platforms without a guard report that it is unsupported.
 func TestMigrationGuardReportsADirectoryItCannotOpen(t *testing.T) {
 	t.Parallel()
 	missing := filepath.Join(t.TempDir(), "missing")
@@ -310,8 +310,35 @@ func TestMigrationGuardReportsADirectoryItCannotOpen(t *testing.T) {
 		}
 	}
 	unlock, err := acquireUnsupportedMigrationGuard(missing)
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, errMigrationGuardUnsupported) {
+		t.Fatalf("unsupported migration guard = %v, want errMigrationGuardUnsupported", err)
 	}
-	unlock()
+	if unlock != nil {
+		t.Fatal("unsupported migration guard returned an unlock function")
+	}
+}
+
+// Generic library opens retain their compatibility behavior on filesystems
+// where the migration guard is unavailable: they log the limitation and
+// continue migrating. Daemon startup is covered separately and fails closed.
+func TestGenericOpenContinuesWhenMigrationGuardIsUnsupported(t *testing.T) {
+	previousGuard := acquireMigrationGuard
+	acquireMigrationGuard = func(string) (func(), error) {
+		return nil, errMigrationGuardUnsupported
+	}
+	defer func() { acquireMigrationGuard = previousGuard }()
+
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	store, err := OpenWithLogger(freshTestDatabasePath(t), logger)
+	if err != nil {
+		t.Fatalf("generic open without a migration guard: %v", err)
+	}
+	defer store.Close()
+	if got := countRows(t, store.DB, `PRAGMA user_version`); got != schemaVersion {
+		t.Fatalf("generic open schema version = %d, want %d", got, schemaVersion)
+	}
+	if !strings.Contains(logs.String(), "database directory cannot be locked; migrating without the guard") {
+		t.Fatalf("generic open did not report the unsupported guard: %s", logs.String())
+	}
 }

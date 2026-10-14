@@ -55,10 +55,11 @@ type liveUpdateStatusView struct {
 	HistorySize   int    `json:"history_size"`
 }
 
-// applicationUpdateStatusView is the outcome of the release check, which
-// both the console's status and the platform status show. Status is
-// up_to_date, update_available, ahead, check_failed, disabled, or
-// development_build.
+// applicationUpdateStatusView is the outcome of the release check. The
+// platform status can include its raw failure diagnostic; tenant status
+// replaces a non-empty diagnostic with the fixed update_check_failed
+// category. Status is up_to_date, update_available, ahead, check_failed,
+// disabled, or development_build.
 type applicationUpdateStatusView struct {
 	Available             bool      `json:"available"`
 	CurrentVersion        string    `json:"current_version"`

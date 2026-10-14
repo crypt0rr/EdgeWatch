@@ -329,8 +329,10 @@ Go structs that write them, in
 the console status (`GET /api/v1/status`), the platform status
 (`GET /api/v1/platform/status`), the notification `status` of the destination
 lists, and scans with their summaries, changes, and snapshots. The status
-responses were built as maps before; their JSON is unchanged, byte for byte,
-for every role and number of units. An optional property (`?`) is a key that
+responses were built as maps before; their JSON matches the prior map
+representations for the same fields, except that tenant status now replaces a
+non-empty raw update-check diagnostic with the fixed category described above.
+An optional property (`?`) is a key that
 the response can leave out, such as the operational keys that a viewer's
 status lacks, and a property typed `| null` can be `null`. The full scan
 response of a scan that an older release recorded can still lack keys, as
@@ -448,6 +450,7 @@ route inventory, `apiRoutes` in `internal/web/permissions.go`.
 | `GET /api/v1/auth/session` | `scope` is `platform` for a platform administrator and `unit` otherwise; `unit` is the account's unit as `{id, name, slug}`, or `null` for a platform administrator; `multi_unit` reports whether more than one unit that is not deleted exists. `role` can be `platform_admin`. |
 | `POST /api/v1/auth/login`, `GET /api/v1/auth/session` | `totp_enrollment_required: true` when an administrator or platform administrator without TOTP must enroll first; `permissions` then lists only `account.self`. The key is absent otherwise. It depends on the number of units. |
 | `GET /api/v1/status` | `live_updates` is left out while more than one unit exists or the units cannot be counted; `telemetry` counts the unit's own rows, and only the default unit's status includes `telemetry.database_bytes`; and `max_concurrent_scans`, `max_probe_count`, and `max_naabu_probe_count` are the unit's own limits, which the scheduler enforces: the unit's cap where it has one and it is lower, otherwise the deployment's setting. A unit without caps reports the deployment's settings as before. The three keys are left out when the unit's capacity cannot be read. |
+| `updates.error` | In `GET /api/v1/status`, a release-check diagnostic is replaced with the fixed `update_check_failed` category. The raw diagnostic remains available on `/api/v1/platform/status` to platform administrators. |
 | `permissions` in the login, session, and status responses | Administrators also hold `audit.read`. A platform administrator holds `units.manage`, `unit_accounts.manage`, `platform_audit.read`, `platform_notifications.manage`, `platform_status.read`, and `account.self`. |
 
 ### New routes

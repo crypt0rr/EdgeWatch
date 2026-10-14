@@ -583,6 +583,10 @@ only, its scan slots and probe budgets are its own limits, the Hosts view
 keeps each unit's newest observation of an address apart, and a public slug
 does not reveal whether a unit has it. The inactive YAML jobs in config.yaml
 belong to the default unit, so only its status names them.
+The unit status keeps release-check failures visible but replaces the raw
+diagnostic with the fixed `update_check_failed` category; only platform status
+retains the raw diagnostic, which can include proxy, resolver, peer, or TLS
+details.
 
 ## Live-update streams and session revocation
 

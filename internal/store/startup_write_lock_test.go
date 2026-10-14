@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"sync"
 	"testing"
 	"time"
 )
@@ -252,6 +253,161 @@ func TestAcquireJobLeaseForRevisionWaitsForConcurrentWriter(t *testing.T) {
 	}
 	if owner != "writer-wait-scan" {
 		t.Fatalf("job lease owner = %q, want writer-wait-scan", owner)
+	}
+}
+
+func TestDaemonLeaseFreshnessIsEvaluatedAfterWriterWait(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC()
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO daemon_lease(id,owner,heartbeat) VALUES(1,'previous-daemon',?)`, base.Add(-2*time.Minute+5*time.Second).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	release := holdWriteLock(t, s.FilePath())
+	released := false
+	defer func() {
+		if !released {
+			release()
+		}
+	}()
+
+	var clockMu sync.Mutex
+	fakeNow := base
+	sampled := make(chan struct{}, 1)
+	nowFn := func() time.Time {
+		sampled <- struct{}{}
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return fakeNow
+	}
+	type leaseResult struct {
+		reclaimed int64
+		err       error
+	}
+	started := make(chan struct{})
+	done := make(chan leaseResult, 1)
+	go func() {
+		close(started)
+		reclaimed, err := s.System().acquireLeaseWithClock(ctx, "replacement-daemon", true, nowFn)
+		done <- leaseResult{reclaimed: reclaimed, err: err}
+	}()
+	<-started
+
+	// The lease clock must not be sampled while this connection still owns the
+	// writer. Advancing it before release makes the old lease stale precisely
+	// during the controlled SQLite wait.
+	select {
+	case <-sampled:
+		t.Fatal("daemon freshness clock was sampled before the writer was acquired")
+	case result := <-done:
+		t.Fatalf("lease acquisition returned while another writer was held: %+v", result)
+	case <-time.After(100 * time.Millisecond):
+	}
+	clockMu.Lock()
+	fakeNow = base.Add(10 * time.Second)
+	clockMu.Unlock()
+	release()
+	released = true
+
+	select {
+	case <-sampled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("lease acquisition did not sample freshness after obtaining the writer")
+	}
+	select {
+	case result := <-done:
+		if result.err != nil {
+			t.Fatalf("reclaim stale daemon after writer wait: %v", result.err)
+		}
+		if result.reclaimed != 0 {
+			t.Fatalf("reclaimed job leases = %d, want 0", result.reclaimed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("daemon lease acquisition did not finish")
+	}
+	var owner, heartbeat string
+	if err := s.DB.QueryRowContext(ctx, `SELECT owner,heartbeat FROM daemon_lease WHERE id=1`).Scan(&owner, &heartbeat); err != nil {
+		t.Fatal(err)
+	}
+	if owner != "replacement-daemon" || heartbeat != fakeNow.Format(time.RFC3339Nano) {
+		t.Fatalf("daemon lease = (%q,%q), want replacement at %s", owner, heartbeat, fakeNow.Format(time.RFC3339Nano))
+	}
+}
+
+func TestRevisionLeaseExpiryIsRecheckedAfterWriterWait(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	ctx := context.Background()
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("lease-expiry-writer-wait"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC()
+	expires := base.Add(time.Second)
+	release := holdWriteLock(t, s.FilePath())
+	released := false
+	defer func() {
+		if !released {
+			release()
+		}
+	}()
+
+	var clockMu sync.Mutex
+	fakeNow := base
+	var calls int
+	firstSampled := make(chan struct{})
+	nowFn := func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		calls++
+		if calls == 1 {
+			close(firstSampled)
+		}
+		return fakeNow
+	}
+	done := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		done <- s.System().acquireJobLeaseForRevisionWithClock(ctx, record.ID, "expiry-wait-scan", record.Revision, expires, nowFn)
+	}()
+	<-started
+	select {
+	case <-firstSampled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("revision lease did not perform its initial expiry check")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("revision lease returned while another writer was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	clockMu.Lock()
+	fakeNow = base.Add(2 * time.Second)
+	clockMu.Unlock()
+	release()
+	released = true
+
+	select {
+	case err := <-done:
+		if err == nil || err.Error() != "job lease expiry must be in the future" {
+			t.Fatalf("revision lease result after expiry crossed during writer wait = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("revision lease did not finish after writer release")
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_leases WHERE job=?`, record.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("expired revision lease left %d persisted rows", count)
+	}
+	clockMu.Lock()
+	defer clockMu.Unlock()
+	if calls != 2 {
+		t.Fatalf("expiry clock samples = %d, want initial and post-wait checks", calls)
 	}
 }
 

@@ -170,6 +170,103 @@ func TestApplicationUpdateStatusCoversVersionStateMatrix(t *testing.T) {
 	}
 }
 
+func TestTenantUpdateStatusRedactsPlatformDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	f := newPlatformFixture(t)
+	server := f.server
+	server.Version = "v1.0.0"
+	ctx := context.Background()
+	platform := f.db.Platform()
+	accounts := []statusAccount{
+		{name: actorAdminA, session: f.sessions[actorAdminA].session, ts: f.a},
+		{name: actorOperatorA, session: f.sessions[actorOperatorA].session, ts: f.a},
+		{name: actorViewerA, session: f.sessions[actorViewerA].session, ts: f.a},
+		{name: actorAdminB, session: f.sessions[actorAdminB].session, ts: f.b},
+	}
+	actors := []string{actorAdminA, actorOperatorA, actorViewerA, actorAdminB}
+	for _, diagnostic := range []string{
+		"proxyconnect tcp: dial tcp 10.20.30.40:3128: connect: connection refused",
+		"lookup api.github.com on 10.0.0.2:53: no such host",
+		"dial tcp 198.51.100.9:443: i/o timeout",
+		"x509: certificate signed by unknown authority",
+	} {
+		t.Run(diagnostic, func(t *testing.T) {
+			if _, err := platform.RecordReleaseCheck(ctx, server.Version, "v1.1.0", "https://example.invalid/release", "EdgeWatch v1.1.0", "2026-10-14T12:00:00Z", `"etag"`, false, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := platform.RecordReleaseCheckFailure(ctx, diagnostic); err != nil {
+				t.Fatal(err)
+			}
+
+			// Exercise the real authenticated API for every tenant role. The
+			// hidden legacy map handlers below remain byte-for-byte compatible
+			// with these safe tenant responses.
+			for _, actor := range actors {
+				response := f.call(t, actor, http.MethodGet, "/status", "")
+				if response.Code != http.StatusOK {
+					t.Fatalf("tenant status for %s = %d: %s", actor, response.Code, response.Body.String())
+				}
+				var body struct {
+					Updates struct {
+						Error string `json:"error"`
+					} `json:"updates"`
+				}
+				if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+					t.Fatal(err)
+				}
+				if body.Updates.Error != "update_check_failed" || strings.Contains(response.Body.String(), diagnostic) {
+					t.Errorf("tenant status for %s exposed unsafe update error: %s", actor, response.Body.String())
+				}
+			}
+			compareStatuses(t, server, "failed release check", accounts)
+
+			response := f.call(t, actorPlatform, http.MethodGet, "/platform/status", "")
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), diagnostic) {
+				t.Fatalf("platform status did not retain raw diagnostic: %d %s", response.Code, response.Body.String())
+			}
+			var platformBody struct {
+				Updates struct {
+					Error string `json:"error"`
+				} `json:"updates"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &platformBody); err != nil {
+				t.Fatal(err)
+			}
+			if platformBody.Updates.Error != diagnostic {
+				t.Fatalf("platform update error = %q, want raw diagnostic %q", platformBody.Updates.Error, diagnostic)
+			}
+
+			if diagnostic == "proxyconnect tcp: dial tcp 10.20.30.40:3128: connect: connection refused" {
+				for _, path := range []string{"/api/v1/setup/status", "/api/public/v1/dashboard"} {
+					request := httptest.NewRequest(http.MethodGet, path, nil)
+					request.RemoteAddr = "198.51.100.44:9000"
+					public := httptest.NewRecorder()
+					server.api(public, request)
+					if strings.Contains(public.Body.String(), diagnostic) {
+						t.Errorf("anonymous %s response exposed update diagnostic: %s", path, public.Body.String())
+					}
+				}
+			}
+		})
+	}
+
+	if _, err := platform.RecordReleaseCheck(ctx, server.Version, "v1.1.0", "https://example.invalid/release", "EdgeWatch v1.1.0", "2026-10-14T12:00:00Z", `"etag"`, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, actor := range actors {
+		response := f.call(t, actor, http.MethodGet, "/status", "")
+		var body struct {
+			Updates struct {
+				Error string `json:"error"`
+			} `json:"updates"`
+		}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &body) != nil || body.Updates.Error != "" {
+			t.Errorf("successful update status for %s contains an error: %d %s", actor, response.Code, response.Body.String())
+		}
+	}
+}
+
 func TestWithAuthRejectsMissingSessionWithoutCallingHandler(t *testing.T) {
 	t.Parallel()
 	server, _, _ := newUsersTestServer(t)

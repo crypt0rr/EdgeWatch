@@ -59,7 +59,7 @@ func (s *Server) legacyAdminStatus(w http.ResponseWriter, r *http.Request, sessi
 		// overview data just to show the product version and release indicator.
 		viewerStatus := map[string]any{
 			"version": s.Version,
-			"updates": s.legacyApplicationUpdateStatus(r.Context()),
+			"updates": s.legacyTenantApplicationUpdateStatus(r.Context()),
 		}
 		s.legacyAddVersionReleaseURL(viewerStatus)
 		writeJSON(w, http.StatusOK, viewerStatus)
@@ -136,7 +136,7 @@ func (s *Server) legacyAdminStatus(w http.ResponseWriter, r *http.Request, sessi
 			status["backups"] = backups
 		}
 	}
-	status["updates"] = s.legacyApplicationUpdateStatus(r.Context())
+	status["updates"] = s.legacyTenantApplicationUpdateStatus(r.Context())
 	if telemetry, telemetryErr := s.cachedTenantTelemetry(r.Context(), ts); telemetryErr != nil {
 		s.Log.Warn("deployment telemetry refresh failed", "error", telemetryErr)
 	} else {
@@ -216,6 +216,14 @@ func (s *Server) legacyApplicationUpdateStatus(ctx context.Context) map[string]a
 		result["status"] = "up_to_date"
 	default:
 		result["status"] = "check_failed"
+	}
+	return result
+}
+
+func (s *Server) legacyTenantApplicationUpdateStatus(ctx context.Context) map[string]any {
+	result := s.legacyApplicationUpdateStatus(ctx)
+	if _, failed := result["error"]; failed {
+		result["error"] = "update_check_failed"
 	}
 	return result
 }

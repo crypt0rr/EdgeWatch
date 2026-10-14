@@ -84,7 +84,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 	if !auth.HasPermission(session, auth.PermissionOverviewRead) {
 		// Viewers are authenticated users too, but must not inherit operational
 		// overview data just to show the product version and release indicator.
-		writeJSON(w, http.StatusOK, adminStatusView{Version: s.Version, VersionReleaseURL: s.versionReleaseURL(), Updates: s.applicationUpdateStatus(r.Context())})
+		writeJSON(w, http.StatusOK, adminStatusView{Version: s.Version, VersionReleaseURL: s.versionReleaseURL(), Updates: s.tenantApplicationUpdateStatus(r.Context())})
 		return
 	}
 	rdapEnabled := s.App.Config.RDAPEnabled()
@@ -160,7 +160,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 			status.Backups = backups
 		}
 	}
-	status.Updates = s.applicationUpdateStatus(r.Context())
+	status.Updates = s.tenantApplicationUpdateStatus(r.Context())
 	if telemetry, telemetryErr := s.cachedTenantTelemetry(r.Context(), ts); telemetryErr != nil {
 		s.Log.Warn("deployment telemetry refresh failed", "error", telemetryErr)
 	} else {
@@ -303,6 +303,17 @@ func (s *Server) applicationUpdateStatus(ctx context.Context) applicationUpdateS
 		result.Status = "up_to_date"
 	default:
 		result.Status = "check_failed"
+	}
+	return result
+}
+
+// tenantApplicationUpdateStatus keeps the useful failure category in unit
+// status without exposing the deployment's proxy, resolver, peer, or TLS
+// diagnostics. The platform status continues to use applicationUpdateStatus.
+func (s *Server) tenantApplicationUpdateStatus(ctx context.Context) applicationUpdateStatusView {
+	result := s.applicationUpdateStatus(ctx)
+	if result.Error != "" {
+		result.Error = "update_check_failed"
 	}
 	return result
 }

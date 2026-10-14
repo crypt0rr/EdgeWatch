@@ -575,7 +575,7 @@ func (ps *PlatformStore) RecordReleaseNotModified(ctx context.Context, etag stri
 }
 
 // RecordReleaseCheckFailure leaves the last successful release untouched and
-// records only a bounded diagnostic for the authenticated status view.
+// records a bounded diagnostic for the platform status view.
 func (ps *PlatformStore) RecordReleaseCheckFailure(ctx context.Context, message string) error {
 	message = strings.TrimSpace(message)
 	if len(message) > 256 {

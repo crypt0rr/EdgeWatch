@@ -93,3 +93,20 @@ func validateCommandFlags(fs *flag.FlagSet, cmd, action string) error {
 	}
 	return fmt.Errorf("--%s does not apply to %s; it is accepted by %s", unsupported, command, strings.Join(acceptedBy, ", "))
 }
+
+// validateOutputFormat rejects values that printValue would otherwise treat
+// as text. Commands that do not accept --output keep their existing
+// command-specific flag error from validateCommandFlags.
+func validateOutputFormat(cmd, action, format string) error {
+	allowed, knownCommand := commandFlagAllowlist[commandFlagKey(cmd, action)]
+	if !knownCommand {
+		return nil
+	}
+	if _, acceptsOutput := allowed["output"]; !acceptsOutput {
+		return nil
+	}
+	if format != "text" && format != "json" {
+		return fmt.Errorf("--output must be %q or %q", "text", "json")
+	}
+	return nil
+}

@@ -411,6 +411,43 @@ func TestRevisionLeaseExpiryIsRecheckedAfterWriterWait(t *testing.T) {
 	}
 }
 
+func TestRevisionLeaseExpiryIsRecheckedAfterJobValidation(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	ctx := context.Background()
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("lease-expiry-job-validation"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC()
+	expires := base.Add(time.Second)
+	calls := 0
+	nowFn := func() time.Time {
+		calls++
+		if calls < 3 {
+			return base
+		}
+		// The lease is live both before and after taking SQLite's writer. It
+		// expires while the tenant/job/revision checks run, immediately before
+		// the UPSERT would otherwise persist it.
+		return base.Add(2 * time.Second)
+	}
+	err = s.System().acquireJobLeaseForRevisionWithClock(ctx, record.ID, "expiry-validation-scan", record.Revision, expires, nowFn)
+	if err == nil || err.Error() != "job lease expiry must be in the future" {
+		t.Fatalf("revision lease result after expiry crossed during job validation = %v", err)
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_leases WHERE job=?`, record.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("expired revision lease left %d persisted rows", count)
+	}
+	if calls != 3 {
+		t.Fatalf("expiry clock samples = %d, want initial, post-lock, and pre-write checks", calls)
+	}
+}
+
 // execStoreStatements runs fixture statements on the store's writer.
 func execStoreStatements(t *testing.T, s *Store, statements ...string) {
 	t.Helper()

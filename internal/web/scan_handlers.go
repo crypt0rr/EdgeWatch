@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/app"
 	"github.com/crypt0rr/edgewatch/internal/auth"
@@ -844,27 +845,46 @@ func (s *Server) listScans(w http.ResponseWriter, r *http.Request, ts *store.Ten
 	writeJSON(w, 200, map[string]any{"scans": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
 
-// maxConcurrentFullScans bounds the full-result scan responses in flight.
-// Each holds its scan's snapshot in memory, and a read connection, until the
-// client has received it.
-const maxConcurrentFullScans = 2
-
 // getScan serves the full-result compatibility endpoint. It writes the
 // stored snapshot and change list as they were saved, without decoding and
 // encoding them again, so a broad scan is held in memory once rather than
 // as decoded structs and a second encoding. For a scan that EdgeWatch saved,
-// the response is the one that decoding and encoding it gave. A request
-// waits for one of maxConcurrentFullScans slots, so parallel requests cannot
-// multiply that memory without bound.
+// the response is the one that decoding and encoding it gave. Admission is
+// bounded deployment-wide and by tenant so one unit cannot occupy both slots.
 func (s *Server) getScan(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string) {
-	s.fullScanSlotOnce.Do(func() { s.fullScanSlots = make(chan struct{}, maxConcurrentFullScans) })
-	select {
-	case s.fullScanSlots <- struct{}{}:
-	case <-r.Context().Done():
+	scope, err := ts.Scope()
+	if err != nil {
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
-	defer func() { <-s.fullScanSlots }()
-	err := ts.WithScanDocument(r.Context(), id, func(scan model.Scan, snapshot, changes []byte) error {
+	started, ok := fullScanRequestStartedAt(r.Context())
+	if !ok {
+		started = time.Now()
+	}
+	waitLimit := s.fullScanAdmissionWait
+	if waitLimit <= 0 {
+		waitLimit = defaultFullScanAdmissionWait
+	}
+	wait, withinWriteBudget := fullScanAdmissionWaitBudget(r.Context(), time.Now(), started, s.httpWriteTimeout(), waitLimit)
+	if !withinWriteBudget {
+		// There is no response-write budget left for a refusal. In particular,
+		// do not open the scan document after the listener deadline is spent.
+		return
+	}
+	release, result := s.fullScanAdmission.acquire(r.Context(), scope.ID(), wait)
+	switch result {
+	case fullScanAdmissionCanceled:
+		return
+	case fullScanAdmissionBusy:
+		writeFullScanAdmissionBusy(w)
+		return
+	}
+	if _, withinWriteBudget = fullScanAdmissionWaitBudget(r.Context(), time.Now(), started, s.httpWriteTimeout(), waitLimit); !withinWriteBudget {
+		release()
+		return
+	}
+	defer release()
+	err = ts.WithScanDocument(r.Context(), id, func(scan model.Scan, snapshot, changes []byte) error {
 		return writeStoredScan(w, scan, snapshot, changes)
 	})
 	if errors.Is(err, errScanNotVerbatim) {
@@ -878,6 +898,11 @@ func (s *Server) getScan(w http.ResponseWriter, r *http.Request, ts *store.Tenan
 	if err != nil && !errors.Is(err, errScanResponseStarted) {
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
 	}
+}
+
+func writeFullScanAdmissionBusy(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", fullScanRetryAfterSeconds)
+	writeError(w, http.StatusServiceUnavailable, "scan_slots_busy", "full scan responses are temporarily busy", nil)
 }
 
 // errScanNotVerbatim reports a stored snapshot or change list that cannot

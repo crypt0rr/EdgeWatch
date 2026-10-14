@@ -135,8 +135,14 @@ the same, byte for byte. A scan recorded by an older release can lack keys
 that a newer release adds to its stored results; the response then lacks them
 too, where it used to show them with empty values. A stored value that is not
 a JSON object (`snapshot`) or array (`changes`) is still decoded as before.
-The daemon answers two such requests at a time; further requests wait for
-one of them to finish.
+The daemon serves at most two full responses at once across the deployment and
+at most one for each business unit. A bounded number of requests can wait
+briefly for admission. If the queue is full or capacity remains unavailable,
+the endpoint returns `503 scan_slots_busy` with `Retry-After: 1` while there is
+time left to write that refusal. Admission waits at most two seconds and never
+extends the listener's response-write budget. If that budget is already spent,
+the handler does not load the scan result and the listener may close the
+connection without a response.
 
 ## Job baseline pages
 

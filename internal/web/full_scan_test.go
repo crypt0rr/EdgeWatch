@@ -184,8 +184,8 @@ func TestFullScanResponseHoldsALargeSnapshotOnce(t *testing.T) {
 }
 
 // TestFullScanResponsesWaitForASlot holds every full-result slot, so a
-// request waits and gives up when its client does. Once a slot is free, a
-// request is answered, and an interrupted response frees its slot again.
+// request is refused after its bounded admission wait. Once the unit's slot is
+// free, it is answered, and an interrupted response frees its slot again.
 func TestFullScanResponsesWaitForASlot(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -197,20 +197,29 @@ func TestFullScanResponsesWaitForASlot(t *testing.T) {
 	if got := getFullScan(server, "full-scan-slots"); got.Code != http.StatusOK {
 		t.Fatalf("GET /scans/{id} = %d", got.Code)
 	}
-	for range maxConcurrentFullScans {
-		server.fullScanSlots <- struct{}{}
+	scope, err := defaultTenantStore(server).Scope()
+	if err != nil {
+		t.Fatal(err)
 	}
-	canceled, cancel := context.WithCancel(ctx)
-	cancel()
-	waiting := httptest.NewRecorder()
-	server.getScan(waiting, httptest.NewRequest(http.MethodGet, "/api/v1/scans/full-scan-slots", nil).WithContext(canceled), defaultTenantStore(server), "full-scan-slots")
-	if waiting.Body.Len() != 0 || waiting.Header().Get("Content-Type") != "" {
-		t.Fatalf("request without a slot wrote %q", waiting.Body.String())
+	releaseDefault, result := server.fullScanAdmission.acquire(ctx, scope.ID(), 0)
+	if result != fullScanAdmitted {
+		t.Fatalf("first active scan admission = %v", result)
 	}
-	<-server.fullScanSlots
+	releaseOther, result := server.fullScanAdmission.acquire(ctx, "other-tenant", 0)
+	if result != fullScanAdmitted {
+		releaseDefault()
+		t.Fatalf("second active scan admission = %v", result)
+	}
+	server.fullScanAdmissionWait = 5 * time.Millisecond
+	busy := getFullScan(server, "full-scan-slots")
+	if busy.Code != http.StatusServiceUnavailable || busy.Header().Get("Retry-After") != fullScanRetryAfterSeconds || !strings.Contains(busy.Body.String(), `"code":"scan_slots_busy"`) {
+		t.Fatalf("GET /scans/{id} at capacity = %d, Retry-After %q: %s", busy.Code, busy.Header().Get("Retry-After"), busy.Body.String())
+	}
+	releaseDefault()
 	if got := getFullScan(server, "full-scan-slots"); got.Code != http.StatusOK {
-		t.Fatalf("GET /scans/{id} after a slot was freed = %d", got.Code)
+		t.Fatalf("GET /scans/{id} after this tenant's slot was freed = %d: %s", got.Code, got.Body.String())
 	}
+	releaseOther()
 
 	// A client that goes away during the response gets nothing more, and
 	// the slot is released.

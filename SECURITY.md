@@ -83,6 +83,18 @@ snapshot. The bounds protect the daemon
 while it handles XML emitted by the scanner and scan targets; scanner output
 and host metadata remain untrusted input.
 
+The compatibility endpoint that returns a complete scan holds its stored
+snapshot and a SQLite reader until the response finishes. It therefore admits
+at most two such responses across the deployment and at most one per business
+unit. Its waiting queue is bounded deployment-wide and per unit. A full queue
+or a wait of up to two seconds returns `503 scan_slots_busy` with
+`Retry-After: 1` while the listener still has time to write the refusal.
+Admission stops at the listener's existing response-write deadline rather than
+extending it; if that budget is spent, the handler does not load the scan result
+and the listener may close without a response. This bounds concurrent
+full-result readers, not the size of an individual response or the time a slow
+client can take to receive it.
+
 The daemon intentionally retains UID 0 because the supported Docker
 capability model does not reliably expose raw packet privileges to an
 unprivileged process. Nmap UDP/SYN and Naabu SYN fail closed without those

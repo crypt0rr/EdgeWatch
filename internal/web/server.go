@@ -110,10 +110,10 @@ type Server struct {
 	sseMaxSubscribers        int
 	sseMaxSubscribersPerUser int
 	sseMaxSubscribersPerUnit int
-	// fullScanSlots bounds the full-result scan responses in flight; see
-	// getScan.
-	fullScanSlots    chan struct{}
-	fullScanSlotOnce sync.Once
+	// fullScanAdmission bounds full-result scan responses across the
+	// deployment and by tenant; see getScan.
+	fullScanAdmission     fullScanAdmission
+	fullScanAdmissionWait time.Duration
 }
 
 type sseMessage struct {
@@ -314,7 +314,17 @@ func (s *Server) Handler() http.Handler {
 			mux.ServeHTTP(w, r)
 		}
 	})
-	return s.requestLogging(securityHeaders(hostGuard))
+	next := s.requestLogging(securityHeaders(hostGuard))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// net/http starts WriteTimeout just before it calls the handler. Record
+		// that boundary before request logging, authentication, and route lookup
+		// so getScan can reserve time for its response instead of giving a late
+		// waiter a fresh admission timeout.
+		if _, ok := fullScanRequestStartedAt(r.Context()); !ok {
+			r = r.WithContext(context.WithValue(r.Context(), fullScanRequestStartContextKey{}, time.Now()))
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // source offers a public, stable link to the running build's corresponding
@@ -376,10 +386,7 @@ func listenConsole(address string) (net.Listener, string, error) {
 // database owner from closing while handlers or SSE subscribers are still
 // draining.
 func (s *Server) serveListener(ctx context.Context, listener net.Listener, address string, handler http.Handler) error {
-	writeTimeout := s.writeTimeout
-	if writeTimeout <= 0 {
-		writeTimeout = defaultHTTPWriteTimeout
-	}
+	writeTimeout := s.httpWriteTimeout()
 	// Keep a startup cursor outage recoverable even when no browser is
 	// connected. The retry loop is scoped to this listener and is cancelled and
 	// joined before the server (and its database owner) is allowed to stop.
@@ -442,6 +449,13 @@ func (s *Server) serveListener(ctx context.Context, listener net.Listener, addre
 	shutdown()
 	<-shutdownDone
 	return err
+}
+
+func (s *Server) httpWriteTimeout() time.Duration {
+	if s != nil && s.writeTimeout > 0 {
+		return s.writeTimeout
+	}
+	return defaultHTTPWriteTimeout
 }
 
 func (s *Server) trackHandlers(next http.Handler) http.Handler {

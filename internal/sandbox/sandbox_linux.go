@@ -143,7 +143,11 @@ func detect(options Options, env environment) *Policy {
 		status.Seccomp = SeccompStatus{State: StateDisabled, Reason: seccompWithoutLandlock}
 		return &Policy{profile: profile, status: status}
 	}
-	return detectLandlock(detectIdentity(profile, mode, status, options.IdentityProbe, env), options, env)
+	identity := detectIdentity(profile, mode, status, options.IdentityProbe, env)
+	if env.executableErr == nil {
+		identity.temporaryHelper = env.executable
+	}
+	return detectLandlock(identity, options, env)
 }
 
 // detectIdentity decides whether the processes of profile start as its

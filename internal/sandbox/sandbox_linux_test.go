@@ -372,24 +372,6 @@ func TestConfineStartsTheProgramThroughSandboxExec(t *testing.T) {
 		t.Fatalf("notification process = %q, want %q", notifier.Args, want)
 	}
 
-	// A scanner that keeps temporary files, Naabu, may create them below
-	// /tmp; the notification process never may.
-	naabu := exec.Command("/bin/true", "-list", "/dev/fd/3")
-	NewEnforced(unix.CAP_NET_RAW).WithLandlock(helper, 6).WithSeccomp().ConfineWithTemporaryFiles(naabu)
-	if want := []string{helper, ExecCommand, "--profile", "scanner", "--files", "0", "--tmp", "--seccomp", "--", "/bin/true", "-list", "/dev/fd/3"}; !reflect.DeepEqual(naabu.Args, want) {
-		t.Fatalf("scanner with temporary files = %q, want %q", naabu.Args, want)
-	}
-	notifierTemporary := exec.Command("/bin/true", "notify-send")
-	NewEnforcedFor(Notifier).WithLandlock(helper, 6).ConfineWithTemporaryFiles(notifierTemporary)
-	if want := []string{helper, ExecCommand, "--profile", "notifier", "--files", "0", "--", "/bin/true", "notify-send"}; !reflect.DeepEqual(notifierTemporary.Args, want) {
-		t.Fatalf("notification process with temporary files = %q, want %q", notifierTemporary.Args, want)
-	}
-	identityOnly := exec.Command("/bin/true")
-	NewEnforced(unix.CAP_NET_RAW).ConfineWithTemporaryFiles(identityOnly)
-	if identityOnly.Path != "/bin/true" || identityOnly.SysProcAttr == nil || identityOnly.SysProcAttr.Credential.Uid != UID {
-		t.Fatalf("identity-only scanner with temporary files = %q %+v", identityOnly.Args, identityOnly.SysProcAttr)
-	}
-
 	// Without the confined identity, Landlock alone restricts the process.
 	alone := exec.Command("/bin/true")
 	(*Policy)(nil).WithLandlock(helper, 6).Confine(alone)

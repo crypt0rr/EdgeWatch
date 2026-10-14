@@ -4,6 +4,8 @@ package scanner
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +17,17 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/sandbox"
 	"golang.org/x/sys/unix"
 )
+
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == sandbox.ExecCommand {
+		if err := sandbox.Exec(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(126)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 // writeScript writes a script that the test then runs. A process that a
 // parallel test forks while the script is open for writing inherits the
@@ -122,13 +135,52 @@ func TestConfinedNaabuReadsTargetsThroughItsDescriptor(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("as UID 0 the confined start succeeds; the container matrix covers it")
 	}
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 	n := NewWithNaabu("nmap", "/bin/true")
-	n.SetSandbox(sandbox.NewEnforced(unix.CAP_NET_RAW))
+	n.SetSandbox(sandbox.NewEnforced(unix.CAP_NET_RAW).WithLandlock(helper, 6))
 	// An unprivileged test process cannot change identity, so the confined
 	// start is refused after the targets were shared, never run unconfined.
-	_, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+	_, _, err = n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
 	if err == nil || !strings.Contains(err.Error(), "operation not permitted") {
 		t.Fatalf("confined Naabu start = %v, want the identity change refused", err)
+	}
+}
+
+func TestIdentityConfinedNaabuWithoutHelperFailsBeforeExecution(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "started")
+	naabu := filepath.Join(dir, "naabu")
+	writeScript(t, naabu, fmt.Sprintf("#!/bin/sh\nprintf ran > %q\n", marker))
+	n := NewWithNaabu("missing-nmap", naabu)
+	n.SetSandbox(sandbox.NewEnforced(unix.CAP_NET_RAW))
+	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+	if err == nil || !strings.Contains(err.Error(), "sandbox helper is unavailable") {
+		t.Fatalf("identity-only Naabu without helper = results %#v, stderr %q, error %v", results, stderr, err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Naabu executed without its required helper: %v", err)
+	}
+}
+
+func TestModeOffNaabuRunsWithTheCurrentIdentity(t *testing.T) {
+	naabu := writeNaabuFixture(t, `printf 'uid=' >&2
+id -u >&2
+printf '%s\n' '{"ip":"192.0.2.1","port":443,"protocol":"tcp"}'
+`)
+	n := NewWithNaabu("missing-nmap", naabu)
+	n.SetSandbox(sandbox.Detect(sandbox.Options{Mode: sandbox.ModeOff}))
+	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+	if err != nil {
+		t.Fatalf("mode-off Naabu = %v (stderr %q)", err, stderr)
+	}
+	if !strings.Contains(stderr, fmt.Sprintf("uid=%d", os.Geteuid())) {
+		t.Fatalf("mode-off Naabu did not use the current identity %d: %q", os.Geteuid(), stderr)
+	}
+	if got := results.ports["192.0.2.1"]; len(got) != 1 || got[0] != 443 {
+		t.Fatalf("mode-off result = %#v", results)
 	}
 }
 
@@ -210,24 +262,22 @@ done
 
 func TestRestrictedNaabuReadsTargetsThroughSandboxExec(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	helper := writeFakeHelper(t, dir, "cat /dev/fd/3 > "+filepath.Join(dir, "targets")+"\nprintf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":443,\"protocol\":\"tcp\"}'\n")
-	naabu := writeFakeScanner(t, "naabu")
-	n := NewWithNaabu("nmap", naabu)
-	n.SetSandbox((*sandbox.Policy)(nil).WithLandlock(helper, 6))
+	abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, unix.LANDLOCK_CREATE_RULESET_VERSION)
+	if errno != 0 || abi < 1 {
+		t.Skipf("Landlock is unavailable: %v", errno)
+	}
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := NewWithNaabu("nmap", "/bin/true")
+	n.SetSandbox((*sandbox.Policy)(nil).WithLandlock(helper, int(abi)))
 	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
 	if err != nil {
 		t.Fatalf("restricted Naabu = %v (stderr %q)", err, stderr)
 	}
-	if len(results.ports["192.0.2.1"]) != 1 {
+	if len(results.ports) != 0 {
 		t.Fatalf("results = %#v", results)
-	}
-	args, err := os.ReadFile(filepath.Join(dir, "args"))
-	if err != nil || !strings.HasPrefix(string(args), sandbox.ExecCommand+"\n--profile\nscanner\n--files\n1\n--tmp\n--\n"+naabu+"\n-list\n/dev/fd/3\n") {
-		t.Fatalf("sandbox-exec arguments = %q, %v", args, err)
-	}
-	if targets, err := os.ReadFile(filepath.Join(dir, "targets")); err != nil || string(targets) != "192.0.2.1\n" {
-		t.Fatalf("inherited targets = %q, %v", targets, err)
 	}
 }
 

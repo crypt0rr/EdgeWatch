@@ -44,6 +44,38 @@ func TestUsageAndPrintValue(t *testing.T) {
 	}
 }
 
+func TestOutputFormatIsValidatedBeforeLoadingConfiguration(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "missing-config.yaml")
+	for _, format := range []string{"yaml", "JSON"} {
+		t.Run(format, func(t *testing.T) {
+			stdout, _, err := captureCLIOutput(t, func() error {
+				return run([]string{"health", "--config", configPath, "--output", format})
+			})
+			if err == nil || err.Error() != `--output must be "text" or "json"` {
+				t.Fatalf("health --output %q error = %v", format, err)
+			}
+			if stdout != "" {
+				t.Fatalf("invalid output format printed %q", stdout)
+			}
+			if _, statErr := os.Stat(configPath); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("configuration was accessed before output validation (stat error %v)", statErr)
+			}
+		})
+	}
+
+}
+
+func TestVersionRejectsConfigOption(t *testing.T) {
+	err := run([]string{"version", "--config", filepath.Join(t.TempDir(), "missing-config.yaml")})
+	if err == nil || !strings.Contains(err.Error(), "--config does not apply to version") {
+		t.Fatalf("version --config error = %v, want command-specific flag rejection", err)
+	}
+	err = run([]string{"version", "--output", "json"})
+	if err == nil || !strings.Contains(err.Error(), "--output does not apply to version") {
+		t.Fatalf("version --output error = %v, want command-specific flag rejection", err)
+	}
+}
+
 func TestNormalizedConfigIncludesDeploymentAndLegacyJobMetadata(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{
@@ -718,6 +750,87 @@ func TestHealthCommandNamesMissingDaemonHeartbeat(t *testing.T) {
 	if stdout != "" {
 		t.Fatalf("unhealthy text health printed %q on stdout, want only the stderr reason", stdout)
 	}
+
+	belowFloorDB := storetest.FreshPath(t)
+	setSQLiteUserVersion(t, belowFloorDB, belowFloorSchemaVersion)
+	belowFloorBytes, err := os.ReadFile(belowFloorDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidConfigPath := filepath.Join(dir, "invalid-config.yaml")
+	if err := os.WriteFile(invalidConfigPath, []byte("definitely_unknown: value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name        string
+		configPath  string
+		wantMessage string
+		database    string
+		wantFloor   bool
+	}{
+		{name: "missing configuration", configPath: filepath.Join(dir, "missing-config.yaml")},
+		{name: "invalid configuration", configPath: invalidConfigPath, wantMessage: "definitely_unknown"},
+		{name: "missing database", configPath: writeHealthConfig(t, dir, "missing", filepath.Join(dir, "missing.db")), wantMessage: "database", database: filepath.Join(dir, "missing.db")},
+		{name: "below upgrade floor", configPath: writeHealthConfig(t, dir, "below-floor", belowFloorDB), wantMessage: "older than schema", database: belowFloorDB, wantFloor: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, err := captureHealthJSONFailure(t, tc.configPath)
+			if tc.wantMessage != "" && !strings.Contains(err.Error(), tc.wantMessage) {
+				t.Fatalf("health error = %v, want it to contain %q", err, tc.wantMessage)
+			}
+			if exitStatus(err) == 0 {
+				t.Fatalf("health error %v maps to success", err)
+			}
+			if tc.wantFloor && !errors.Is(err, store.ErrSchemaBelowUpgradeFloor) {
+				t.Fatalf("health error %v does not wrap ErrSchemaBelowUpgradeFloor", err)
+			}
+			if tc.database != "" {
+				if _, statErr := os.Stat(tc.database); tc.name == "missing database" && !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("missing database was created (stat error %v)", statErr)
+				}
+			}
+			if tc.wantFloor {
+				after, readErr := os.ReadFile(tc.database)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if !bytes.Equal(after, belowFloorBytes) {
+					t.Fatal("health refusal changed the below-floor database")
+				}
+			}
+			if stdout == "" {
+				t.Fatal("health --output json returned no document")
+			}
+		})
+	}
+}
+
+func writeHealthConfig(t *testing.T, dir, name, database string) string {
+	t.Helper()
+	path := filepath.Join(dir, name+"-config.yaml")
+	if err := os.WriteFile(path, []byte("database: "+database+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func captureHealthJSONFailure(t *testing.T, configPath string) (string, error) {
+	t.Helper()
+	stdout, _, err := captureCLIOutput(t, func() error {
+		return run([]string{"health", "--config", configPath, "--output", "json"})
+	})
+	if err == nil {
+		t.Fatal("health unexpectedly succeeded")
+	}
+	var document healthCommandFailure
+	if decodeErr := json.Unmarshal([]byte(stdout), &document); decodeErr != nil {
+		t.Fatalf("health failure output is not exactly one JSON document: %v\n%s", decodeErr, stdout)
+	}
+	if document.Status != "unhealthy" || document.Error != err.Error() {
+		t.Fatalf("health failure document = %+v, want status unhealthy and error %q", document, err)
+	}
+	return stdout, err
 }
 
 func TestRunVerifyPreservesResultWhenAuditStoreIsReadOnly(t *testing.T) {

@@ -92,20 +92,31 @@ func TestDaemonLoopKeepsServingWhileAFinalizationHoldsTheWriter(t *testing.T) {
 	a.ReleaseChecker = nil
 	a.heartbeatInterval = 20 * time.Millisecond
 	a.heartbeatTimeout = 50 * time.Millisecond
-	_, done := startTestDaemon(t, a, db)
 	ctx := context.Background()
 	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("held-writer-schedule"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	scheduled := func() bool {
+	_, done := startTestDaemon(t, a, db)
+	initialSpec := "CRON_TZ=" + record.Job.Timezone + " " + record.Job.Schedule
+	updatedSpec := "CRON_TZ=" + record.Job.Timezone + " 15 * * * *"
+	scheduleSpec := func() string {
 		a.scheduleMu.Lock()
 		defer a.scheduleMu.Unlock()
-		_, ok := a.entries[record.ID]
-		return ok
+		return a.scheduleSpecs[record.ID]
 	}
-	if scheduled() {
-		t.Fatal("the job was scheduled before the test asked for a reconciliation")
+	deadline := time.Now().Add(5 * time.Second)
+	for scheduleSpec() != initialSpec && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := scheduleSpec(); got != initialSpec {
+		t.Fatalf("the daemon's initial schedule = %q, want %q", got, initialSpec)
+	}
+	updated := record.Job
+	updated.Schedule = "15 * * * *"
+	record, _, err = defaultTenant(db).UpdateJob(ctx, record.ID, record.Revision, updated, true, false, false)
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	holding, release := make(chan struct{}), make(chan struct{})
@@ -142,12 +153,12 @@ func TestDaemonLoopKeepsServingWhileAFinalizationHoldsTheWriter(t *testing.T) {
 		t.Fatalf("health while the finalization holds the writer = %#v, %v", health, err)
 	}
 	a.RefreshSchedules()
-	deadline := time.Now().Add(5 * time.Second)
-	for !scheduled() && time.Now().Before(deadline) {
+	deadline = time.Now().Add(5 * time.Second)
+	for scheduleSpec() != updatedSpec && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if !scheduled() {
-		t.Fatal("the daemon loop did not reconcile schedules while the writer was held")
+	if got := scheduleSpec(); got != updatedSpec {
+		t.Fatalf("the daemon loop schedule while the writer was held = %q, want %q", got, updatedSpec)
 	}
 	// Several heartbeats time out meanwhile; none counts as a miss.
 	deadline = time.Now().Add(5 * time.Second)

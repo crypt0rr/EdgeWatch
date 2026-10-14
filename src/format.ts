@@ -100,6 +100,17 @@ export function formatDateTime(value: DateInput, options: Intl.DateTimeFormatOpt
   return new Date(value).toLocaleString(undefined, { ...options, timeZone: displayTimeZone })
 }
 
+/** Format an instant in a named timezone, keeping its RFC3339 value visible if the browser cannot render it. */
+export function formatDateTimeInTimeZone(value: string, timeZone: string, options: Intl.DateTimeFormatOptions = {}): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  try {
+    return date.toLocaleString(undefined, { ...options, timeZone })
+  } catch {
+    return value
+  }
+}
+
 /** Calendar date in the deployment timezone (or the browser's own). */
 export function formatDate(value: DateInput, options: Intl.DateTimeFormatOptions = {}): string {
   return new Date(value).toLocaleDateString(undefined, { ...options, timeZone: displayTimeZone })

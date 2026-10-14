@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom'
 import type { ScheduleSuggestion } from '../api'
 import { baselinePresentation } from '../baseline'
 import { ErrorNotice } from './ErrorNotice'
+import { formatDateTimeInTimeZone } from '../format'
 import type { ActiveScan, Job, Pagination, QueuedRun, ScanCycle } from '../types'
 import type { ScanSummary, Unit } from '../generated/api-types'
 
@@ -176,7 +177,7 @@ export function MonitorNextActions({
                 : scheduleError
                   ? <ErrorNotice message="Could not load the next scheduled sample time." onRetry={onRetrySchedule} />
                   : schedule?.draft_next_run
-                    ? <p className="muted">Next scheduled sample: <strong>{formatNextRun(schedule.draft_next_run, job.job.timezone)}</strong> ({job.job.timezone}).</p>
+                    ? <p className="muted">Next scheduled sample: <strong>{formatDateTimeInTimeZone(schedule.draft_next_run, job.job.timezone, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</strong> ({job.job.timezone}).</p>
                     : <p className="muted">The next scheduled sample time is unavailable.</p>}
           {canRun && liveStatusReady && !liveWorkExists && cycleKnown && job.scan_budget?.exceeded === true && (
             <p className="notice warning">This job currently exceeds its unit probe budget. Reduce its scope or ask an administrator to approve a high-cost scan before starting or resuming a sample.</p>
@@ -213,18 +214,5 @@ function failedAttemptMessage(scan: ScanSummary) {
     case 'canceled': return 'The latest scan was canceled.'
     case 'timed_out': return 'The latest scan timed out.'
     default: return 'The latest scan did not complete successfully.'
-  }
-}
-
-function formatNextRun(value: string, timeZone: string) {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  const options: Intl.DateTimeFormatOptions = { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone }
-  try {
-    return date.toLocaleString(undefined, options)
-  } catch {
-    // The server has validated the IANA zone. Keep the RFC3339 offset visible
-    // if this browser's Intl database does not yet recognize a newer zone.
-    return value
   }
 }

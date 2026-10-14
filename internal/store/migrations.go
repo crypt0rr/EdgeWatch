@@ -19,7 +19,7 @@ import (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 72
+const schemaVersion = 73
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -334,6 +334,9 @@ func schemaMigrationStatements() map[int][]string {
 		// Event history counts and pages use tenant-qualified job and time
 		// indexes without reading unrelated payload rows. See migration72.go.
 		72: migration72Statements(),
+		// Planned change-window inventory keeps its priority groups index-backed
+		// and merges only bounded candidates. See migration73.go.
+		73: migration73Statements(),
 	}
 }
 

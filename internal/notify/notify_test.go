@@ -138,6 +138,26 @@ func TestNewContextCancelsBlockedDeploymentIDWrite(t *testing.T) {
 	}
 }
 
+func TestNotifierContextConstructorsRejectNilAndCanceledContexts(t *testing.T) {
+	t.Parallel()
+	var nilContext context.Context
+	if _, err := NewContext(nilContext, nil, nil); err == nil {
+		t.Fatal("NewContext with a nil context unexpectedly succeeded")
+	}
+	if _, err := NewWithKeyFileContext(nilContext, nil, nil, ""); err == nil {
+		t.Fatal("NewWithKeyFileContext with a nil context unexpectedly succeeded")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := NewContext(ctx, nil, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("NewContext with a canceled context = %v, want context.Canceled", err)
+	}
+	if _, err := NewWithKeyFileContext(ctx, nil, nil, ""); !errors.Is(err, context.Canceled) {
+		t.Fatalf("NewWithKeyFileContext with a canceled context = %v, want context.Canceled", err)
+	}
+}
+
 func TestDrainProcessesMultipleBoundedBatches(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int32

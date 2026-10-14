@@ -200,6 +200,31 @@ func TestDaemonStartupLeaseProbeErrorCleansItsSidecars(t *testing.T) {
 	assertNoDaemonStartupSidecars(t, path)
 }
 
+func TestDaemonStartupCancellationStopsBeforeFilesystemMutation(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "not-created", "edgewatch.db")
+	var nilContext context.Context
+	if _, err := OpenDaemonWithLoggerContext(nilContext, path, nil); err == nil {
+		t.Fatal("daemon open with a nil context unexpectedly succeeded")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := OpenDaemonWithLoggerContext(ctx, path, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("daemon open with a canceled context = %v, want context.Canceled", err)
+	}
+	if _, err := openWithOptionsContext(ctx, path, openOptions{create: true, migrate: true, configureWAL: true}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("generic open with a canceled context = %v, want context.Canceled", err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("database directory after canceled opens: %v, want no directory", err)
+	}
+
+	var nilStore *Store
+	nilStore.ReleaseDaemonStartupGuard()
+}
+
 func assertNoDaemonStartupSidecars(t *testing.T, path string) {
 	t.Helper()
 	for _, suffix := range []string{"-wal", "-shm"} {

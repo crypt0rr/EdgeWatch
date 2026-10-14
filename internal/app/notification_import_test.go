@@ -510,6 +510,27 @@ func TestDaemonStartupContextCancelsBlockedNotificationImport(t *testing.T) {
 	}
 }
 
+func TestDaemonAppStartupWithCanceledContextDoesNotImport(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	database := filepath.Join(dir, "data", "edgewatch.db")
+	s, err := store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := writeImportConfig(t, dir, database, "generic://127.0.0.1:9/canceled-startup?disabletls=yes")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := NewWithOptionsContext(ctx, cfg, s, "missing-nmap", slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), Options{ImportNotificationURLs: true}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("application startup with a canceled context = %v, want context.Canceled", err)
+	}
+	if got := countRows(t, s, `SELECT COUNT(*) FROM managed_notifications`); got != 0 {
+		t.Fatalf("canceled application startup imported %d managed notifications", got)
+	}
+}
+
 // Host commands build the application without the import. Before the daemon
 // imports, they keep the configured URLs as deployment destinations.
 func TestHostCommandsDoNotImportNotificationURLs(t *testing.T) {

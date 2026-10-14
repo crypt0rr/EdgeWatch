@@ -60,6 +60,32 @@ func TestRunNaabuSuccessParsesJSONAndReportsLiveness(t *testing.T) {
 	}
 }
 
+func TestRunNaabuCleanupFailureDiscardsCollectedResults(t *testing.T) {
+	path := writeNaabuFixture(t, `printf 'tmp=%s\n' "$TMPDIR" >&2
+printf '%s\n' '{"ip":"192.0.2.1","port":443,"protocol":"tcp"}'
+mkfifo "$TMPDIR/unsupported-entry"
+`)
+	n := NewWithNaabu("missing-nmap", path)
+	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+	if err == nil || !strings.Contains(err.Error(), "temporary directory cleanup failed") {
+		t.Fatalf("runNaabu cleanup failure = %v (stderr %q)", err, stderr)
+	}
+	if len(results.ports) != 0 || len(results.macs) != 0 || len(results.truncated) != 0 {
+		t.Fatalf("cleanup failure returned partial Naabu results: %#v", results)
+	}
+	var temporaryPath string
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "tmp=") {
+			temporaryPath = strings.TrimPrefix(line, "tmp=")
+			break
+		}
+	}
+	if temporaryPath == "" || filepath.Base(filepath.Dir(temporaryPath)) == "" || !strings.HasPrefix(filepath.Base(filepath.Dir(temporaryPath)), "edgewatch-naabu-root-") || !strings.HasPrefix(filepath.Base(temporaryPath), "edgewatch-naabu-") {
+		t.Fatalf("cleanup test did not report its private temp path: %q", stderr)
+	}
+	defer os.RemoveAll(filepath.Dir(temporaryPath))
+}
+
 func TestRunNaabuSerializesStatusCallbacksAcrossOutputAndHeartbeat(t *testing.T) {
 	script := "printf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":22,\"protocol\":\"tcp\"}'\ni=0\nwhile [ \"$i\" -lt 500 ]; do\n  printf 'progress %s\\n' \"$i\" >&2\n  i=$((i + 1))\ndone\n"
 	n := NewWithNaabu("missing-nmap", writeNaabuFixture(t, script))

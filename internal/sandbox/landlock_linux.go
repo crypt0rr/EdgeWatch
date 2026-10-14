@@ -98,15 +98,6 @@ var scannerLandlockPaths = []landlockPath{
 	{"/dev/tty", unix.LANDLOCK_ACCESS_FS_READ_FILE | unix.LANDLOCK_ACCESS_FS_WRITE_FILE},
 }
 
-// temporaryLandlockPaths are what a scanner started with temporary files
-// opens besides scannerLandlockPaths. Naabu keeps its target list and address
-// map in temporary files. The scanner environment sets no TMPDIR, so they go
-// to /tmp, a private tmpfs in the container. The files EdgeWatch passes to
-// scanners lie in its data directory, which no scanner can reach.
-var temporaryLandlockPaths = []landlockPath{
-	{"/tmp", landlockTemporary},
-}
-
 // landlockVersion reports the kernel's Landlock ABI version.
 func landlockVersion() (int, error) {
 	abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, unix.LANDLOCK_CREATE_RULESET_VERSION)
@@ -150,18 +141,33 @@ func handledScopes(abi int) uint64 {
 
 // execLandlocked is the sandbox-exec command:
 //
-//	sandbox-exec --profile PROFILE --files N [--tmp] [--seccomp] -- PROGRAM [ARGUMENT...]
+//	sandbox-exec --profile PROFILE --files N [--seccomp] -- PROGRAM [ARGUMENT...]
 //
-// It restricts its own process with Landlock to the paths of PROFILE, /tmp
-// with --tmp, and its N inherited descriptors, starting at 3, sets
+// It restricts its own process with Landlock to the paths of PROFILE and its
+// N inherited descriptors, starting at 3, sets
 // no_new_privs, installs the seccomp filter with --seccomp, and then executes
 // PROGRAM in place. A scanner also gets the resource limits of
 // limitScannerResources first. The process keeps its identity, capabilities,
 // descriptors, and environment, and the daemon's handle on it stays valid.
 func execLandlocked(args []string) error {
+	if len(args) > 0 && args[0] == "--cleanup-private-tmp" {
+		request, err := parsePrivateTemporaryCleanupArgs(args[1:])
+		if err != nil {
+			return err
+		}
+		// The cleanup helper runs as the scanner identity in both Landlock and
+		// identity-only modes. Keep the same core/open-file resource safeguards
+		// in either mode; only the filesystem restriction is conditional.
+		runtime.LockOSThread()
+		limitScannerResources()
+		return cleanupPrivateTemporaryDirectoryRequestWithDescriptor(request, 3)
+	}
 	request, err := parseExecArgs(args)
 	if err != nil {
 		return err
+	}
+	if request.privateTemp {
+		return execPrivateTemporary(request)
 	}
 	profile, files, argv := request.profile, request.files, request.argv
 	// no_new_privs and the Landlock domain belong to the calling thread, and
@@ -175,7 +181,7 @@ func execLandlocked(args []string) error {
 	if profile == Scanner {
 		limitScannerResources()
 	}
-	if err := restrictSelf(profilePaths(profile, request.temporary, os.Getenv), inherited); err != nil {
+	if err := restrictSelf(profilePaths(profile, os.Getenv), inherited); err != nil {
 		return fmt.Errorf("%s: %w", ExecCommand, err)
 	}
 	if request.seccomp {
@@ -189,19 +195,66 @@ func execLandlocked(args []string) error {
 	return nil
 }
 
+// execPrivateTemporary verifies the parent-pinned temporary leaf, restricts
+// the helper to that leaf when Landlock is enabled, and waits for the parent
+// to acknowledge readiness before Naabu can start. Control descriptors are
+// separate from scanner data descriptors and none reaches Naabu.
+func execPrivateTemporary(request execRequest) error {
+	runtime.LockOSThread()
+	limitScannerResources()
+	namespaceFD, leafFD, controlFD := request.privateRootFD, request.privateLeafFD, request.controlFD
+	defer func() {
+		_ = closePrivateTemporaryControlDescriptors(namespaceFD, leafFD, controlFD)
+	}()
+	setup, err := preparePrivateTemporaryExec(request)
+	if err != nil {
+		return fmt.Errorf("%s: %w", ExecCommand, err)
+	}
+	if request.landlock {
+		// Landlock's EXECUTE right authorizes executing files beneath a rule.
+		// DAC search permissions resolve /tmp/<namespace>/<leaf>; no EXECUTE
+		// rule is granted on either ancestor.
+		if err := restrictPrivateTemporary(request, leafFD); err != nil {
+			return fmt.Errorf("%s: %w", ExecCommand, err)
+		}
+	}
+	if err := helperSendPrivateTemporaryReady(controlFD, setup.initialization.name, setup.initialization.nonce, &setup.stat); err != nil {
+		return fmt.Errorf("%s: %w", ExecCommand, err)
+	}
+	// Only the scanner's intended data descriptors survive exec. The namespace,
+	// leaf, and handshake socket are control state and never inherit into Naabu.
+	if err := closePrivateTemporaryControlDescriptors(namespaceFD, leafFD, controlFD); err != nil {
+		return fmt.Errorf("%s: close private temporary control descriptor: %w", ExecCommand, err)
+	}
+	namespaceFD, leafFD, controlFD = -1, -1, -1
+	if request.seccomp {
+		if err := installSeccompFilter(); err != nil {
+			return fmt.Errorf("%s: %w", ExecCommand, err)
+		}
+	}
+	if err := syscall.Exec(request.argv[0], request.argv, setup.environment); err != nil {
+		return fmt.Errorf("%s: execute %s: %w", ExecCommand, request.argv[0], err)
+	}
+	return nil
+}
+
 // execRequest is what the sandbox-exec arguments ask for.
 type execRequest struct {
-	profile Profile
-	files   int
-	// temporary lets a scanner create files below /tmp.
-	temporary bool
-	seccomp   bool
-	argv      []string
+	profile       Profile
+	files         int
+	privateTemp   bool
+	privateRootFD int
+	privateLeafFD int
+	controlFD     int
+	landlock      bool
+	seccomp       bool
+	argv          []string
 }
 
 func parseExecArgs(args []string) (execRequest, error) {
-	usage := fmt.Errorf("usage: %s --profile scanner|notifier --files N [--tmp] [--seccomp] -- PROGRAM [ARGUMENT...]", ExecCommand)
-	request := execRequest{files: -1}
+	usage := fmt.Errorf("usage: %s --profile scanner|notifier --files N [--private-tmp --private-root-fd FD --private-leaf-fd FD --control-fd FD [--landlock]] [--seccomp] -- PROGRAM [ARGUMENT...]", ExecCommand)
+	request := execRequest{files: -1, privateRootFD: -1, privateLeafFD: -1, controlFD: -1}
+	privateSeen, rootSeen, leafSeen, controlSeen, landlockSeen, seccompSeen := false, false, false, false, false, false
 	for index := 0; index < len(args); index++ {
 		switch args[index] {
 		case "--profile":
@@ -220,10 +273,57 @@ func parseExecArgs(args []string) (execRequest, error) {
 				return execRequest{}, usage
 			}
 			request.files = files
-		case "--tmp":
-			request.temporary = true
+		case "--private-tmp":
+			if privateSeen {
+				return execRequest{}, usage
+			}
+			request.privateTemp = true
+			privateSeen = true
+		case "--private-root-fd":
+			if index+1 >= len(args) || rootSeen {
+				return execRequest{}, usage
+			}
+			index++
+			fd, err := strconv.Atoi(args[index])
+			if err != nil || fd < 3 {
+				return execRequest{}, usage
+			}
+			request.privateRootFD = fd
+			rootSeen = true
+		case "--private-leaf-fd":
+			if index+1 >= len(args) || leafSeen {
+				return execRequest{}, usage
+			}
+			index++
+			fd, err := strconv.Atoi(args[index])
+			if err != nil || fd < 3 {
+				return execRequest{}, usage
+			}
+			request.privateLeafFD = fd
+			leafSeen = true
+		case "--control-fd":
+			if index+1 >= len(args) || controlSeen {
+				return execRequest{}, usage
+			}
+			index++
+			fd, err := strconv.Atoi(args[index])
+			if err != nil || fd < 3 {
+				return execRequest{}, usage
+			}
+			request.controlFD = fd
+			controlSeen = true
+		case "--landlock":
+			if landlockSeen {
+				return execRequest{}, usage
+			}
+			request.landlock = true
+			landlockSeen = true
 		case "--seccomp":
+			if seccompSeen {
+				return execRequest{}, usage
+			}
 			request.seccomp = true
+			seccompSeen = true
 		case "--":
 			request.argv = args[index+1:]
 			index = len(args)
@@ -231,7 +331,11 @@ func parseExecArgs(args []string) (execRequest, error) {
 			return execRequest{}, usage
 		}
 	}
-	if !request.profile.valid() || request.files < 0 || len(request.argv) == 0 || (request.temporary && request.profile != Scanner) {
+	if !request.profile.valid() || request.files < 0 || len(request.argv) == 0 ||
+		(request.landlock && !privateSeen) ||
+		(privateSeen && (request.profile != Scanner || request.privateRootFD != 3+request.files || request.privateLeafFD != request.privateRootFD+1 || request.controlFD != request.privateLeafFD+1 || !rootSeen || !leafSeen || !controlSeen)) ||
+		(!privateSeen && (rootSeen || leafSeen || request.privateRootFD != -1 || request.privateLeafFD != -1 || request.controlFD != -1 || request.landlock)) ||
+		(request.seccomp && privateSeen && !request.landlock) {
 		return execRequest{}, usage
 	}
 	if !filepath.IsAbs(request.argv[0]) {
@@ -241,12 +345,12 @@ func parseExecArgs(args []string) (execRequest, error) {
 }
 
 // profilePaths are landlockPaths, the search path files of musl's dynamic
-// loader, which are named after the architecture, and the paths of profile:
-// for a scanner with temporary set, also /tmp. The notification process also
+// loader, which are named after the architecture, and the paths of profile.
+// The notification process also
 // reads the certificate authorities that the SSL_CERT_FILE and SSL_CERT_DIR
 // variables of its environment name, which the daemon passes on from its
 // own.
-func profilePaths(profile Profile, temporary bool, getenv func(string) string) []landlockPath {
+func profilePaths(profile Profile, getenv func(string) string) []landlockPath {
 	paths := append([]landlockPath(nil), landlockPaths...)
 	musl, _ := filepath.Glob("/etc/ld-musl-*.path")
 	for _, path := range musl {
@@ -255,9 +359,6 @@ func profilePaths(profile Profile, temporary bool, getenv func(string) string) [
 	switch profile {
 	case Scanner:
 		paths = append(paths, scannerLandlockPaths...)
-		if temporary {
-			paths = append(paths, temporaryLandlockPaths...)
-		}
 	case Notifier:
 		if file := getenv("SSL_CERT_FILE"); file != "" {
 			paths = append(paths, landlockPath{file, landlockRead})
@@ -274,6 +375,10 @@ func profilePaths(profile Profile, temporary bool, getenv func(string) string) [
 // restrictSelf restricts the calling thread with Landlock to paths and the
 // files behind the inherited descriptors.
 func restrictSelf(paths []landlockPath, inherited []int) error {
+	return restrictSelfWithPrivateDirectory(paths, inherited, -1)
+}
+
+func restrictSelfWithPrivateDirectory(paths []landlockPath, inherited []int, privateDirectory int) error {
 	abi, err := landlockVersion()
 	if err != nil {
 		return fmt.Errorf("detect Landlock: %w", err)
@@ -292,6 +397,11 @@ func restrictSelf(paths []landlockPath, inherited []int) error {
 	for _, descriptor := range inherited {
 		if err := addDescriptorRule(ruleset, descriptor, handled); err != nil {
 			return err
+		}
+	}
+	if privateDirectory >= 0 {
+		if err := addRule(ruleset, privateDirectory, landlockTemporary&handled); err != nil {
+			return fmt.Errorf("allow private temporary directory: %w", err)
 		}
 	}
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -90,6 +92,67 @@ func newLifecycleTestApp(t *testing.T, sc Scanner, logs io.Writer) (*App, *store
 
 func lifecycleJob(name string) config.Job {
 	return config.NormalizeJob(config.Job{Name: name, Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}, Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour), Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}})
+}
+
+func TestNaabuTemporaryCleanupFailureDoesNotAdvanceBaseline(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	a, db := newLifecycleTestApp(t, nil, nil)
+	dir := t.TempDir()
+	naabuPath := filepath.Join(dir, "naabu")
+	temporaryPathFile := filepath.Join(dir, "naabu-tmpdir")
+	naabu := "#!/bin/sh\nprintf '%s\\n' \"$TMPDIR\" > " + temporaryPathFile + "\nprintf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":443,\"protocol\":\"tcp\"}'\nmkfifo \"$TMPDIR/unsupported-entry\"\n"
+	if err := os.WriteFile(naabuPath, []byte(naabu), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a.Scanner = scanner.NewWithNaabu("missing-nmap", naabuPath)
+
+	job := lifecycleJob("naabu-cleanup-failure")
+	job.TCP.Engine = config.EngineNaabuNmap
+	job.TCP.Ports = "443"
+	job.TCP.Naabu = &config.NaabuOptions{ScanType: "connect"}
+	assumeAlive := true
+	job.AssumeAlive = &assumeAlive
+	record, err := defaultTenant(db).CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := model.Snapshot{
+		Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "443"}},
+		Units:  []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open"}}}},
+	}
+	if _, err := db.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &baseline
+		state.BaselineScanID = "pre-cleanup-baseline"
+		state.BaselineConfigHash = record.Job.SecurityHash()
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	scan, _, runErr := a.runJobRecord(ctx, record, false)
+	if runErr == nil || !strings.Contains(runErr.Error(), "temporary directory cleanup failed") {
+		t.Fatalf("runJobRecord cleanup failure = %v, scan=%#v", runErr, scan)
+	}
+	if scan.Status != "failed" {
+		t.Fatalf("cleanup failure scan status = %q, want failed", scan.Status)
+	}
+	after, err := defaultTenant(db).RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.BaselineScanID != "pre-cleanup-baseline" || !reflect.DeepEqual(after.Baseline, &baseline) {
+		t.Fatalf("cleanup failure advanced baseline: scan_id=%q baseline=%#v", after.BaselineScanID, after.Baseline)
+	}
+	pathBytes, err := os.ReadFile(temporaryPathFile)
+	if err != nil {
+		t.Fatalf("Naabu did not run: %v", err)
+	}
+	privatePath := strings.TrimSpace(string(pathBytes))
+	if !strings.HasPrefix(privatePath, "/tmp/edgewatch-naabu-root-") || !strings.HasPrefix(filepath.Base(privatePath), "edgewatch-naabu-") {
+		t.Fatalf("fake Naabu reported unexpected TMPDIR %q", privatePath)
+	}
+	defer os.RemoveAll(filepath.Dir(privatePath))
 }
 
 func hasEventType(events []model.Event, eventType string) bool {

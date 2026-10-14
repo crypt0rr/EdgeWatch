@@ -122,8 +122,9 @@ fails the scan when a process still holds either. When the kernel
 provides Landlock, the default `scanner.landlock: auto` also restricts each
 scanner process, whatever its identity, to reading and executing the system
 directories, reading the `/etc` files a scan needs, and writing the files
-EdgeWatch passes to it; Nmap creates no file, and Naabu creates files only
-below `/tmp`, none of which it can execute. A scanner cannot read the
+EdgeWatch passes to it; Nmap creates no file, and Naabu writes its own
+temporary files only in a per-invocation leaf below `/tmp`, which it cannot
+execute. A scanner cannot read the
 database, the keys, or `config.yaml` even as UID 0. With Landlock, a seccomp
 filter also refuses the system calls no scanner or notification process
 needs, such as `ptrace`, io_uring, BPF, namespace and mount changes, and
@@ -132,8 +133,19 @@ group; and each scanner gets an `oom_score_adj` of 1000, so that the kernel's
 out-of-memory killer stops a scanner before the daemon, and at most 65,536
 open files. No EdgeWatch process can dump core: each sets a zero core file
 size limit, which its children inherit, and is non-dumpable.
-All sandboxed scanner processes share UID 65532, and Naabu processes share
-`/tmp`. The
+All sandboxed scanner processes share UID 65532. Each Naabu invocation has a
+separate temporary leaf below `/tmp`. With the sandbox helper, the leaf is
+listable and writable by path (`01777`); its sticky bit protects entries owned
+by another user. Landlock limits scanner access to the current leaf when
+available. Without Landlock, another same-UID process that knows the leaf path
+can access its contents. Scanner processes also receive inherited descriptors
+for their target list or XML output. Whether another same-UID process can
+reopen a live scanner's descriptors through `/proc/<pid>/fd/<n>` depends on the
+host's procfs and ptrace access checks; EdgeWatch does not enforce or rely on
+those checks to deny access. Landlock is required for the sandbox's
+cross-scan protection of those files. With the scanner sandbox off, the leaf
+has mode `0700`, but another process running as the daemon's UID is not
+separated from it by a kernel scanner boundary. The
 notification child process, which receives one destination URL, runs in a
 sandbox of its own with `notifications.sandbox: auto`: as UID and GID 65531
 without capabilities, restricted with Landlock to reading the system files

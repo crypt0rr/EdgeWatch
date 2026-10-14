@@ -784,10 +784,19 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/nonexistent", "XDG_CONFIG_HOME=/nonexistent"}
 	// Naabu detects its raw-packet privileges from its capabilities, so a
 	// confined Naabu needs no extra flag. It keeps its own target list and
-	// address map in temporary files, the only scanner that does. It leads a
-	// process group of its own, which cancellation, an exceeded bound, and
-	// its exit stop.
-	n.sandbox.ConfineWithTemporaryFiles(cmd)
+	// address map in its invocation's private temporary leaf. The helper pins
+	// that leaf before acknowledging startup; the scanner never inherits the
+	// namespace or control descriptors.
+	temporary, err := sandbox.PreparePrivateTemporaryDirectory(ctx, cmd, n.sandbox)
+	if err != nil {
+		return naabuDiscovery{}, "", ExecutableStartError(cmd.Path, err)
+	}
+	defer temporary.Close()
+	cleanupTemporary := func() error {
+		cleanupErr := temporary.Cleanup(ctx)
+		closeErr := temporary.Close()
+		return errors.Join(cleanupErr, closeErr)
+	}
 	startInProcessGroup(cmd, false)
 	var outputExceeded atomic.Bool
 	killOnOutputLimit := func() {
@@ -826,7 +835,31 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
-		return naabuDiscovery{}, stderr.String(), ExecutableStartError(cmd.Path, err)
+		startErr := ExecutableStartError(cmd.Path, err)
+		if cleanupErr := cleanupTemporary(); cleanupErr != nil {
+			startErr = errors.Join(startErr, fmt.Errorf("naabu temporary directory cleanup failed: %w", cleanupErr))
+		}
+		return naabuDiscovery{}, stderr.String(), startErr
+	}
+	if err := temporary.Started(); err != nil {
+		_ = stopProcessGroup(cmd)
+		waitErr := waitProcessGroup(cmd)
+		cleanupErr := cleanupTemporary()
+		return naabuDiscovery{}, stderr.String(), errors.Join(
+			fmt.Errorf("naabu temporary directory startup failed: %w", err),
+			waitErr,
+			cleanupErr,
+		)
+	}
+	if err := temporary.WaitReady(ctx); err != nil {
+		_ = stopProcessGroup(cmd)
+		waitErr := waitProcessGroup(cmd)
+		cleanupErr := cleanupTemporary()
+		return naabuDiscovery{}, stderr.String(), errors.Join(
+			fmt.Errorf("naabu temporary directory startup failed: %w", err),
+			waitErr,
+			cleanupErr,
+		)
 	}
 	heartbeatStop := make(chan struct{})
 	heartbeatDone := make(chan struct{})
@@ -850,6 +883,7 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 		close(heartbeatDone)
 	}
 	waitErr := scannerWaitError("naabu", waitProcessGroup(cmd))
+	cleanupErr := cleanupTemporary()
 	close(heartbeatStop)
 	if status != nil {
 		// Flush a final partial diagnostic line before publishing the terminal
@@ -858,6 +892,9 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 		stderr.Flush()
 		<-heartbeatDone
 		emitStatus(invocationProgress{Alive: false})
+	}
+	if cleanupErr != nil {
+		return naabuDiscovery{}, stderr.String(), fmt.Errorf("naabu temporary directory cleanup failed: %w", cleanupErr)
 	}
 	if stderr.exceeded {
 		return naabuDiscovery{}, stderr.String(), fmt.Errorf("naabu diagnostic output exceeded %d bytes", maxProgressOutput)

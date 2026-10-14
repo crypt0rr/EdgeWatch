@@ -185,16 +185,31 @@ Jobs are configured in the console, which enforces these limits:
   EdgeWatch warns. Set `required` to refuse to scan without the sandbox.
   `off` also turns off Landlock.
 - `scanner.landlock: auto` also restricts Nmap and Naabu with Landlock to the
-  system files a scan reads and the files EdgeWatch passes to them, and lets
-  only Naabu create files, below `/tmp`, when the kernel provides it. It
-  installs a seccomp filter that refuses the system calls no scanner needs and
-  makes the kernel's out-of-memory killer stop a scanner before the daemon.
+  system files a scan reads and the files EdgeWatch passes to them. Naabu can
+  use only its per-invocation temporary leaf below `/tmp`; it cannot execute
+  files there. Without Landlock, a process of the same UID that knows the leaf
+  path can access its contents and may reopen another live scanner's inherited
+  files through `/proc/<pid>/fd/<n>` if the host's procfs and ptrace checks
+  permit it. EdgeWatch does not rely on those OS checks as cross-scan
+  protection. The setting also installs a seccomp filter
+  that refuses system calls no scanner needs and makes the kernel's
+  out-of-memory killer stop a scanner before the daemon.
   Set `required` to refuse to scan without Landlock, or `off`, which turns off
-  the filter and the limits too, if a scanner needs files outside those paths.
+  the filter and its general scanner limits if a scanner needs files outside
+  those paths. When `scanner.sandbox` remains enabled, Naabu's temporary-path
+  helper still applies the out-of-memory and open-file limits to Naabu even
+  without Landlock; `scanner.sandbox: off` disables that helper too.
 - EdgeWatch keeps the files it passes to scanners, Nmap's XML output and
   Naabu's target list, in `tmp/scanner` beside the database, which only the
   daemon can open, whatever `TMPDIR` names; see
   [scanner files](/deployment/container-hardening/#scanner-files).
+- Naabu's own temporary files use a parent-created leaf below `/tmp` for each
+  invocation. With the sandbox helper, the leaf is listable and writable by
+  path (`01777`); its sticky bit protects other users' entries. Landlock limits
+  access to the current leaf when available. With the sandbox off, the leaf has
+  mode `0700`, but another process running as the daemon's UID is not separated
+  from it by a kernel scanner boundary. Cleanup failure makes the scan fail
+  without advancing its baseline.
 - `scanner.max_job_hosts`, 65,536 by default, a /16, caps the addresses the
   targets of one job expand to when it scans, whatever the job's own
   `max_expanded_hosts` allows: a scan keeps a scope and a result for every

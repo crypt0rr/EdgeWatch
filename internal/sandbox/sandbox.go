@@ -167,7 +167,9 @@ type Status struct {
 	// make, which the Landlock restriction installs.
 	Seccomp SeccompStatus `json:"seccomp"`
 	// Limits are the resource limits the Landlock restriction gives scanner
-	// processes. Nil when it does not apply them.
+	// processes. Nil when it does not apply them. Naabu's private-temporary
+	// helper also applies these limits when Landlock is disabled; that
+	// per-process behavior is not represented by this Landlock status field.
 	Limits *ProcessLimits `json:"limits,omitempty"`
 }
 
@@ -303,18 +305,10 @@ func Exec(args []string) error {
 // set, such as the session and controlling terminal of a pseudo-terminal.
 // When the policy confines nothing, cmd is unchanged.
 func (p *Policy) Confine(cmd *exec.Cmd) {
-	p.confine(cmd, false)
+	p.confine(cmd)
 }
 
-// ConfineWithTemporaryFiles is Confine for a scanner process that keeps
-// temporary files of its own, such as Naabu: the Landlock restriction also
-// lets it create, change, and remove files below /tmp, none of which it can
-// execute.
-func (p *Policy) ConfineWithTemporaryFiles(cmd *exec.Cmd) {
-	p.confine(cmd, true)
-}
-
-func (p *Policy) confine(cmd *exec.Cmd, temporary bool) {
+func (p *Policy) confine(cmd *exec.Cmd) {
 	if p == nil {
 		return
 	}
@@ -323,18 +317,17 @@ func (p *Policy) confine(cmd *exec.Cmd, temporary bool) {
 		confineProcess(cmd, spec.uid, spec.gid, p.ambient)
 	}
 	if p.helper != "" {
-		startThroughHelper(cmd, p.helper, p.profileName(), p.seccomp, temporary && p.profileName() == Scanner)
+		startThroughHelper(cmd, p.helper, p.profileName(), p.seccomp)
 	}
 }
 
 // startThroughHelper makes cmd start the sandbox-exec command of the EdgeWatch
-// executable helper, which restricts itself for profile, with /tmp when
-// temporary is set and the seccomp filter when seccomp is set, and then
-// executes cmd's program with cmd's arguments and the descriptors cmd
-// passes. A program that does not exist makes cmd's start fail with that
-// error instead, so callers still recognize a missing scanner, and never
-// starts it without the restriction.
-func startThroughHelper(cmd *exec.Cmd, helper string, profile Profile, seccomp, temporary bool) {
+// executable helper, which restricts itself for profile and installs the
+// seccomp filter when requested, then executes cmd's program with its arguments
+// and descriptors. A program that does not exist makes cmd's start fail with
+// that error instead, so callers still recognize a missing scanner and never
+// start it without the restriction.
+func startThroughHelper(cmd *exec.Cmd, helper string, profile Profile, seccomp bool) {
 	if cmd.Err != nil {
 		return
 	}
@@ -343,9 +336,6 @@ func startThroughHelper(cmd *exec.Cmd, helper string, profile Profile, seccomp, 
 		return
 	}
 	args := []string{helper, ExecCommand, "--profile", string(profile), "--files", strconv.Itoa(len(cmd.ExtraFiles))}
-	if temporary {
-		args = append(args, "--tmp")
-	}
 	if seccomp {
 		args = append(args, "--seccomp")
 	}
@@ -371,6 +361,12 @@ type Policy struct {
 	// helper is the EdgeWatch executable whose sandbox-exec command restricts
 	// the processes with Landlock. Empty starts them without it.
 	helper string
+	// temporaryHelper is the EdgeWatch executable used to create and confine
+	// one Naabu invocation's temporary directory. It is available even when
+	// Landlock is not, so the helper can still create and later clean the
+	// directory as the scanner identity. Such a directory is not private from
+	// another process of that identity without Landlock.
+	temporaryHelper string
 	// seccomp makes sandbox-exec also install the seccomp filter.
 	seccomp bool
 }
@@ -453,6 +449,7 @@ func (p *Policy) WithLandlock(helper string, abi int) *Policy {
 		restricted = &copied
 	}
 	restricted.helper = helper
+	restricted.temporaryHelper = helper
 	restricted.seccomp = false
 	restricted.status.NoNewPrivileges = true
 	restricted.status.Landlock = LandlockStatus{Mode: ModeAuto, State: StateEnforced, ABI: abi}

@@ -2,9 +2,10 @@
 set -euo pipefail
 
 # Run real Nmap TCP SYN and UDP scans and a Naabu discovery of local
-# listeners through EdgeWatch, with the scanner sandbox enforced, with only
+# listeners through EdgeWatch with the scanner sandbox enforced, with only
 # its Landlock restriction (the capabilities of a Compose file from before
-# v0.27.0), and with it off, and require the same results from all of them.
+# v0.27.0), with an unprivileged identity but no Landlock, and with it off;
+# require the same results from all of them.
 # With the sandbox enforced, also require that a running Nmap is UID 65532
 # holding only NET_RAW, that cancelling it works, that the sandbox identity
 # can neither list the data directory nor read the configuration, and that a
@@ -12,11 +13,12 @@ set -euo pipefail
 # notification to a local webhook and require that the notification process
 # runs as UID 65531 without capabilities. Require that both run with the
 # seccomp filter, one more than the daemon's, and that no process dumps core.
-# Require that a running Nmap has the scanner's resource limits. Without
-# TMPDIR, require that the files of running Nmap and Naabu scans lie in the
-# scanner files directory, where no other sandboxed process can open them,
-# and that cancelling a Naabu scan stops it. Require that cancelling a scan of
-# a stand-in Nmap that leaves background processes stops every one of them,
+# Require that a running Nmap has the scanner's resource limits. Require that
+# Nmap's inherited files lie in the scanner files directory, while Naabu's
+# temporary leaf uses the production helper's per-invocation path and is
+# removed after success or cancellation. Require that cancelling a Naabu scan
+# stops it. Require that cancelling a scan of a stand-in Nmap that leaves
+# background processes stops every one of them,
 # also one that tries to leave its process group, and that a sandboxed Nmap
 # dies with the edgewatch scan command that started it.
 image=${1:?usage: verify-scanner-sandbox.sh IMAGE}
@@ -270,6 +272,7 @@ bundled_caps=(NET_RAW SETUID SETGID KILL)
 # compose.yaml does unless daemon_tmpdir is empty, and adds the docker run
 # arguments in daemon_mounts.
 daemon_tmpdir=/var/lib/edgewatch/tmp
+daemon_landlock=auto
 daemon_mounts=()
 run_daemon() {
   local name=$1 mode=$2
@@ -292,6 +295,7 @@ scheduler:
 scanner:
   target_exclusions: []
   sandbox: $mode
+  landlock: $daemon_landlock
 updates:
   enabled: false
 EOF
@@ -380,30 +384,86 @@ scan_file() {
 
 # expect_private_scan_file NAME PATTERN requires that a running scan's file
 # lies in the scanner files directory, whatever TMPDIR names, and that
-# neither the sandbox identity nor a process restricted with Landlock, as
-# Nmap or as Naabu is, can open it.
+# neither the sandbox identity nor a process restricted with Landlock can
+# open it.
 expect_private_scan_file() {
   local name=$1 path output
   path=$(scan_file "$2")
   [ -n "$path" ] || fail "no $name file was found in /var/lib/edgewatch/tmp/scanner"
-  # Naabu's own temporary directories in /tmp belong to UID 65532, so find
-  # cannot read them; only the daemon's files are looked for.
-  if [ -n "$(docker exec "$container" find /tmp -name 'edgewatch-*' 2>/dev/null || true)" ]; then
-    fail "a scan file was created in /tmp"
-  fi
   for open in "cat '$path'" "echo forged >>'$path'"; do
     if output=$(docker exec --user 65532:65532 "$container" /bin/sh -c "$open" 2>&1); then
       fail "UID 65532 succeeded at: $open"
     fi
     printf '%s\n' "$output" | grep -qi 'permission denied' || fail "'$open' as UID 65532 failed for another reason: $output"
-    for profile in "--files 0" "--files 0 --tmp"; do
-      # shellcheck disable=SC2086
-      if output=$(docker exec "$container" edgewatch sandbox-exec --profile scanner $profile -- /bin/sh -c "$open" 2>&1); then
-        fail "a restricted process ($profile) succeeded at: $open"
-      fi
-      printf '%s\n' "$output" | grep -qi 'permission denied' || fail "'$open' restricted ($profile) failed for another reason: $output"
-    done
+    if output=$(docker exec "$container" edgewatch sandbox-exec --profile scanner --files 0 -- /bin/sh -c "$open" 2>&1); then
+      fail "a restricted process (--files 0) succeeded at: $open"
+    fi
+    printf '%s\n' "$output" | grep -qi 'permission denied' || fail "'$open' restricted (--files 0) failed for another reason: $output"
   done
+}
+
+# expect_private_naabu_tmp checks the active generated leaf and the real
+# temporary input and LevelDB files a live production Naabu process created
+# there. Container root lacks CAP_SYS_PTRACE, so it cannot read a scanner's
+# /proc/<pid>/environ across the UID boundary; the leaf artifacts prove the
+# configured TMPDIR is in use without adding that capability.
+expect_private_naabu_tmp() {
+  local pid=$1 namespaces namespace leaves leaf namespace_stat leaf_stat
+  local inputs input input_stat databases database database_stat current_stat manifest manifest_stat matches expected
+  docker exec "$container" test -d "/proc/$pid" || fail "Naabu process $pid exited before its temporary files were inspected"
+  namespaces=$(docker exec "$container" find /tmp -mindepth 1 -maxdepth 1 -type d -name 'edgewatch-naabu-root-*' -print 2>/dev/null || true)
+  [ "$(printf '%s\n' "$namespaces" | grep -c .)" = 1 ] || fail "active Naabu has $(printf '%s\n' "$namespaces" | grep -c .) invocation namespaces: $namespaces"
+  namespace=$namespaces
+  [[ "$namespace" =~ ^/tmp/edgewatch-naabu-root-[a-f0-9]{32}$ ]] || fail "Naabu invocation namespace has an unexpected name: $namespace"
+  leaves=$(docker exec "$container" find "$namespace" -mindepth 1 -maxdepth 1 -type d -name 'edgewatch-naabu-*' -print 2>/dev/null || true)
+  [ "$(printf '%s\n' "$leaves" | grep -c .)" = 1 ] || fail "active Naabu namespace has $(printf '%s\n' "$leaves" | grep -c .) leaves: $leaves"
+  leaf=$leaves
+  [[ "$leaf" =~ ^/tmp/edgewatch-naabu-root-[a-f0-9]{32}/edgewatch-naabu-[a-f0-9]{32}$ ]] || fail "Naabu leaf has an unexpected name: $leaf"
+  namespace_stat=$(docker exec "$container" stat -c '%a %u %g' "$namespace")
+  leaf_stat=$(docker exec "$container" stat -c '%a %u %g' "$leaf")
+  [ "$namespace_stat" = "711 0 0" ] || fail "Naabu invocation namespace is '$namespace_stat', want '711 0 0'"
+  [ "$leaf_stat" = "1777 0 0" ] || fail "Naabu invocation leaf is '$leaf_stat', want '1777 0 0'"
+  inputs=$(docker exec --user 65532:65532 "$container" find "$leaf" -mindepth 1 -maxdepth 1 -type f -name 'stdin-input-*' -print 2>/dev/null || true)
+  [ "$(printf '%s\n' "$inputs" | grep -c .)" = 1 ] || fail "Naabu created $(printf '%s\n' "$inputs" | grep -c .) temporary input files in its leaf: $inputs"
+  input=$inputs
+  input_stat=$(docker exec --user 65532:65532 "$container" stat -c '%a %u %g' "$input")
+  [ "$input_stat" = "600 65532 65532" ] || fail "Naabu temporary input is '$input_stat', want '600 65532 65532'"
+  databases=$(docker exec --user 65532:65532 "$container" find "$leaf" -mindepth 1 -maxdepth 1 -type d -name 'naabu*' -print 2>/dev/null || true)
+  [ "$(printf '%s\n' "$databases" | grep -c .)" = 1 ] || fail "Naabu created $(printf '%s\n' "$databases" | grep -c .) LevelDB directories in its leaf: $databases"
+  database=$databases
+  [[ "$database" =~ /naabu[0-9]+$ ]] || fail "Naabu LevelDB directory has an unexpected name: $database"
+  database_stat=$(docker exec --user 65532:65532 "$container" stat -c '%a %u %g' "$database")
+  [ "$database_stat" = "700 65532 65532" ] || fail "Naabu LevelDB directory is '$database_stat', want '700 65532 65532'"
+  docker exec --user 65532:65532 "$container" test -f "$database/CURRENT" || fail "Naabu LevelDB CURRENT file is missing from $database"
+  current_stat=$(docker exec --user 65532:65532 "$container" stat -c '%a %u %g' "$database/CURRENT")
+  [ "$current_stat" = "644 65532 65532" ] || fail "Naabu LevelDB CURRENT file is '$current_stat', want '644 65532 65532'"
+  manifest=$(docker exec --user 65532:65532 "$container" find "$database" -mindepth 1 -maxdepth 1 -type f -name 'MANIFEST-*' -print 2>/dev/null || true)
+  [ "$(printf '%s\n' "$manifest" | grep -c .)" = 1 ] || fail "Naabu LevelDB manifest is missing or ambiguous in $database: $manifest"
+  manifest_stat=$(docker exec --user 65532:65532 "$container" stat -c '%a %u %g' "$manifest")
+  [ "$manifest_stat" = "644 65532 65532" ] || fail "Naabu LevelDB manifest is '$manifest_stat', want '644 65532 65532'"
+  matches=$(docker exec "$container" find /tmp -xdev \( -type f -name "${input##*/}" -o -type d -name "${database##*/}" \) -print 2>/dev/null || true)
+  expected=$(printf '%s\n%s\n' "$input" "$database" | sort)
+  [ "$(printf '%s\n' "$matches" | sort)" = "$expected" ] || fail "Naabu temporary input/LevelDB artifacts exist outside its active leaf: $matches"
+  docker exec "$container" test -d "/proc/$pid" || fail "Naabu process $pid exited while its temporary files were inspected"
+  echo "verified live Naabu temporary artifacts: namespace=$namespace ($namespace_stat), leaf=$leaf ($leaf_stat), input=$input ($input_stat), LevelDB=$database ($database_stat), CURRENT=$current_stat, manifest=$manifest_stat"
+}
+
+expect_no_naabu_temporary_namespaces() {
+  local remaining
+  remaining=$(docker exec "$container" find /tmp -mindepth 1 -maxdepth 1 -type d -name 'edgewatch-naabu-root-*' -print 2>/dev/null || true)
+  [ -z "$remaining" ] || fail "Naabu left invocation namespaces behind: $remaining"
+}
+
+expect_legacy_tmp_grant_rejected() {
+  if docker exec "$container" edgewatch sandbox-exec --profile scanner --files 0 --tmp -- /bin/true >/dev/null 2>&1; then
+    fail "sandbox-exec accepted the removed broad temporary-directory grant"
+  fi
+}
+
+expect_scanner_identity() {
+  local got
+  got=$(docker exec "$container" /bin/sh -c 'awk "/^Uid:/{uid=\$2} /^Gid:/{gid=\$2} /^Groups:/{groups=\$2} /^CapEff:/{cap=\$2} END{print uid, gid, (groups == \"\" ? \"-\" : groups), cap}" "/proc/$1/status"' sh "$1")
+  [ "$got" = "65532 65532 - 0000000000002000" ] || fail "the identity-only Naabu process credentials are '$got', want '65532 65532 - 0000000000002000'"
 }
 
 # expect_no_scanner_processes requires that no process of the sandbox
@@ -453,13 +513,9 @@ expect_notification_health() {
 }
 
 # landlocked runs a command in the daemon's container as UID 0, restricted
-# with Landlock as Nmap is; landlocked_naabu as Naabu is, which may also use
-# /tmp; landlocked_notifier as the notification process is.
+# with Landlock as Nmap is; landlocked_notifier runs the notifier profile.
 landlocked() {
   docker exec "$container" edgewatch sandbox-exec --profile scanner --files 0 -- "$@"
-}
-landlocked_naabu() {
-  docker exec "$container" edgewatch sandbox-exec --profile scanner --files 0 --tmp -- "$@"
 }
 landlocked_notifier() {
   docker exec "$container" edgewatch sandbox-exec --profile notifier --files 0 -- "$@"
@@ -491,26 +547,32 @@ udp_ports="$udp_open"
 # The bundled Compose deployment: the sandbox keeps NET_RAW only.
 run_daemon base auto "${bundled_caps[@]}"
 expect_health "enforced 65532 NET_RAW landlock:enforced seccomp:enforced limits:1000,65536"
+expect_legacy_tmp_grant_rejected
 [ "$(process_hardening 1 | cut -d' ' -f2-)" = "0 0" ] || fail "the daemon may dump core: $(process_hardening 1)"
 sandboxed=$(python3 "$workdir/driver.py" scan "$base" "$state" sandboxed "$tcp_ports" "$udp_ports")
 
 # Landlock restricts a process whatever its identity: as UID 0, which owns
 # the database, a restricted process can neither read it nor list the data
-# directory, read the configuration, write outside /tmp, or execute a file it
-# wrote, and only Naabu's restriction lets it use /tmp at all. The
-# unrestricted reads show that only Landlock refuses them; the read-only root
-# filesystem already refuses writes elsewhere.
+# directory, read the configuration, write in /tmp, or execute a file there.
+# The unrestricted reads show that only Landlock refuses them; the read-only
+# root filesystem already refuses writes elsewhere. Naabu receives access to
+# its exact leaf only through its production scan helper.
 docker exec "$container" cat /var/lib/edgewatch/edgewatch.db >/dev/null || fail "UID 0 could not read the database without Landlock"
 docker exec "$container" cat /etc/edgewatch/config.yaml >/dev/null || fail "UID 0 could not read the configuration without Landlock"
 landlocked /bin/cat /etc/hosts >/dev/null || fail "a restricted process could not read /etc/hosts"
-landlocked_naabu /bin/sh -c 'echo scanner >/tmp/edgewatch-landlock && rm /tmp/edgewatch-landlock' || fail "a process restricted as Naabu could not use /tmp"
 if output=$(landlocked /bin/sh -c 'echo scanner >/tmp/edgewatch-landlock' 2>&1); then
-  fail "a process restricted as Nmap created a file in /tmp"
+  fail "a generic restricted process created a file in /tmp"
 fi
-printf '%s\n' "$output" | grep -qi 'permission denied' || fail "creating a file in /tmp as Nmap failed for another reason than Landlock: $output"
+printf '%s\n' "$output" | grep -qi 'permission denied' || fail "creating a file in /tmp failed for another reason than Landlock: $output"
+docker exec "$container" /bin/sh -c "printf '#!/bin/sh\\nexit 0\\n' >/tmp/edgewatch-landlock-exec; chmod 0755 /tmp/edgewatch-landlock-exec"
+if output=$(landlocked /tmp/edgewatch-landlock-exec 2>&1); then
+  fail "a generic restricted process executed a file in /tmp"
+fi
+printf '%s\n' "$output" | grep -qi 'permission denied' || fail "executing a file in /tmp failed for another reason than Landlock: $output"
+docker exec "$container" rm -f /tmp/edgewatch-landlock-exec
 for escape in "cat /var/lib/edgewatch/edgewatch.db" "ls /var/lib/edgewatch" "cat /etc/edgewatch/config.yaml" \
   "touch /var/lib/edgewatch/escape" "cp /bin/true /tmp/escape && /tmp/escape"; do
-  if output=$(landlocked_naabu /bin/sh -c "$escape" 2>&1); then
+  if output=$(landlocked /bin/sh -c "$escape" 2>&1); then
     fail "a restricted UID 0 process succeeded at: $escape"
   fi
   printf '%s\n' "$output" | grep -qi 'permission denied' || fail "'$escape' failed for another reason than Landlock: $output"
@@ -611,11 +673,14 @@ scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load
 naabu_pid=$(scanner_pid naabu)
 [ -n "$naabu_pid" ] || fail "the slow Naabu scan started no Naabu"
 expect_scanner_limits Naabu "$naabu_pid"
+expect_private_naabu_tmp "$naabu_pid"
 expect_private_scan_file "Naabu target list" 'edgewatch-naabu-targets-*'
 cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
 [ "$cancelled" = canceled ] || fail "the cancelled Naabu scan ended '$cancelled'"
 expect_no_scanner_processes "the cancelled Naabu scan"
+expect_no_naabu_temporary_namespaces
 naabu_sandboxed=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-sandboxed "$tcp_open")
+expect_no_naabu_temporary_namespaces
 stop_daemon
 
 # A stand-in Nmap that leaves a background process that ignores the hangup of
@@ -652,17 +717,46 @@ expect_notification_health "unavailable 0 landlock:enforced seccomp:enforced"
 deliver_notification legacy >/dev/null
 landlock_only=$(python3 "$workdir/driver.py" scan "$base" "$state" landlock-only "$tcp_ports" "$udp_ports")
 naabu_landlock_only=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-landlock-only "$tcp_open")
+expect_no_naabu_temporary_namespaces
+stop_daemon
+
+# Keep identity confinement while disabling Landlock. Naabu still starts
+# through the temporary-directory helper as UID 65532; the helper path is
+# required to create and clean the per-invocation directory even though files
+# elsewhere remain reachable under this explicit fallback.
+daemon_landlock=off
+run_daemon identity-only auto "${bundled_caps[@]}"
+daemon_landlock=auto
+expect_health "enforced 65532 NET_RAW landlock:disabled seccomp:disabled limits:-"
+identity_only_scan=$(python3 "$workdir/driver.py" scan "$base" "$state" identity-only "$tcp_ports" "$udp_ports")
+identity_only_naabu=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-identity-only "$tcp_open")
+expect_no_naabu_temporary_namespaces
+started=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" slow-naabu-identity-only)
+job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
+scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
+naabu_pid=$(scanner_pid naabu)
+[ -n "$naabu_pid" ] || fail "the identity-only slow Naabu scan started no Naabu"
+expect_scanner_identity "$naabu_pid"
+expect_scanner_limits Naabu "$naabu_pid"
+expect_private_naabu_tmp "$naabu_pid"
+cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
+[ "$cancelled" = canceled ] || fail "the identity-only Naabu scan ended '$cancelled'"
+expect_no_scanner_processes "the identity-only cancelled Naabu scan"
+expect_no_naabu_temporary_namespaces
 stop_daemon
 
 run_daemon off off "${bundled_caps[@]}" NET_ADMIN
 expect_health "disabled 0 - landlock:disabled seccomp:disabled limits:-"
 unconfined=$(python3 "$workdir/driver.py" scan "$base" "$state" unconfined "$tcp_ports" "$udp_ports")
 naabu_unconfined=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-unconfined "$tcp_open")
+expect_no_naabu_temporary_namespaces
 stop_daemon
 
 [ "$sandboxed" = "$unconfined" ] || fail "sandboxed Nmap results $sandboxed differ from unconfined results $unconfined"
 [ "$landlock_only" = "$unconfined" ] || fail "Nmap results with only Landlock $landlock_only differ from unconfined results $unconfined"
 [ "$naabu_landlock_only" = "$naabu_unconfined" ] || fail "Naabu results with only Landlock $naabu_landlock_only differ from unconfined results $naabu_unconfined"
+[ "$identity_only_scan" = "$unconfined" ] || fail "identity-only Nmap results $identity_only_scan differ from unconfined results $unconfined"
+[ "$identity_only_naabu" = "$naabu_unconfined" ] || fail "identity-only Naabu results $identity_only_naabu differ from unconfined results $naabu_unconfined"
 printf '%s\n' "$sandboxed" | grep -q "\"tcp\", $tcp_open, \"open\"" || fail "the open TCP listener was not reported open: $sandboxed"
 [ "$naabu_sandboxed" = "$naabu_unconfined" ] || fail "sandboxed Naabu results $naabu_sandboxed differ from unconfined results $naabu_unconfined"
 [ "$naabu_sandboxed" = "[[\"tcp\", $tcp_open, \"open\"]]" ] || fail "Naabu did not report the open TCP listener: $naabu_sandboxed"

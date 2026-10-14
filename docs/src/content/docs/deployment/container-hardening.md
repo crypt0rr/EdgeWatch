@@ -194,9 +194,9 @@ place. The restricted process:
   `/sys`; `config.yaml` and `/run/secrets` stay closed;
 - can write only to `/dev/null`, its terminal, and the files EdgeWatch passes
   to it, and can reopen a passed file only with the access EdgeWatch gave it;
-- creates no file when it is Nmap. Naabu, which keeps its own target list and
-  address map in temporary files, can create, change and remove files only
-  below `/tmp`, and can execute none of them;
+- creates no file when it is Nmap. Naabu keeps its target list and address
+  map in a per-invocation leaf below `/tmp`; Landlock grants file and directory
+  access only to that leaf, and does not let Naabu execute files there;
 - with Landlock ABI 6 (Linux 6.12) or later, cannot signal processes outside
   its restriction, such as the daemon, or connect to their abstract UNIX
   sockets.
@@ -206,7 +206,10 @@ also protects a deployment whose `compose.yaml` does not grant `SETUID`,
 `SETGID` and `KILL`, where scanner processes still run as UID 0. A process
 cannot lift the restriction, and every process it starts inherits it.
 
-`scanner.landlock` in `config.yaml` selects it:
+`scanner.landlock` in `config.yaml` selects it. When Landlock is unavailable
+in `auto` mode, Naabu still gets a unique temporary leaf, but the kernel does
+not prevent another process of the same UID from accessing that leaf if it
+knows the path. `required` refuses to scan without Landlock.
 
 | Value | Behaviour |
 | --- | --- |
@@ -267,10 +270,30 @@ below it, which it locks while it runs. At startup the daemon, and
 `edgewatch scan`, remove the directories of processes that no longer run, with
 the files of scans they were stopped in.
 
+Naabu also creates temporary target and address-map files of its own. EdgeWatch
+creates a separate invocation namespace below `/tmp` with mode `0711` before
+starting Naabu. When the sandbox helper is available, it creates and pins a
+parent-owned leaf with mode `01777`; any process that knows the path can list
+it and create entries, while the sticky bit prevents it from removing entries
+owned by another user. The mode is not private. With the sandbox disabled, the
+per-invocation leaf has mode `0700`, but another process running as the
+daemon's UID is not separated from it by a kernel scanner boundary. Landlock
+confines a scanner to its own leaf when available.
+Without Landlock, another process that runs as the same UID and knows the leaf
+path can access its contents. After Naabu exits, a fixed helper removes its
+nested temporary files and directories, and EdgeWatch removes the empty leaf
+and namespace. Cleanup failure fails the scan, so its results do not become a
+successful observation or advance the baseline.
+
 A sandboxed scanner cannot list `./data` or reach a file below it by its name,
 and Landlock never grants the data directory to a scanner, even one that runs
-as UID 0, so a scanner reaches only the files of its own scan, through the
-descriptors it inherits. The bundled `compose.yaml` sets `TMPDIR` to
+as UID 0. With Landlock, a scanner reaches only the files of its own scan,
+through the descriptors it inherits. That cross-scan protection requires
+Landlock: without it, scanners share UID 65532, and a same-UID process may be
+able to reopen another live scanner's inherited target-list or XML descriptor
+through `/proc/<pid>/fd/<n>`. The host's procfs and ptrace checks may deny that
+access, but EdgeWatch does not enforce or rely on such a denial. The bundled
+`compose.yaml` sets `TMPDIR` to
 `/var/lib/edgewatch/tmp` for the daemon's other temporary files, such as
 SQLite's, so they share the data volume rather than the 128 MiB `/tmp`
 tmpfs.
@@ -358,14 +381,24 @@ needed; `./data` keeps its UID 0 ownership.
 
 - The daemon, which serves the console and holds the database and keys, still
   runs as UID 0 with the container's capabilities.
-- All sandboxed scanner processes share UID 65532, and all Naabu processes
-  share `/tmp`, so a compromised scanner process could observe other scans
-  that run at the same time. It cannot reach their XML output or target
-  lists, which lie in the [scanner files directory](#scanner-files).
+- All sandboxed scanner processes share UID 65532. Each Naabu invocation has
+  a separate temporary leaf, but the leaf is listable and another same-UID
+  process that knows its path can access it when Landlock is unavailable. The
+  XML output and target-list files remain in the
+  [scanner files directory](#scanner-files), outside scanner reach by path;
+  without Landlock, a same-UID process may still reopen another live
+  scanner's inherited descriptors through `/proc/<pid>/fd/<n>` if the host's
+  procfs and ptrace checks permit it. EdgeWatch does not enforce or rely on
+  those OS checks as cross-scan protection. Use `scanner.landlock: required`
+  when scans need that boundary.
 - Where the seccomp filter does not apply, such as on a kernel without
   Landlock, a process that a compromised scanner starts can leave the
   scanner's process group with `setsid` and outlive the scan. Without
-  Landlock, the [resource limits](#resource-limits) do not apply either.
+  Landlock, the general scanner helper does not apply the [resource
+  limits](#resource-limits). When the scanner sandbox and temporary helper are
+  enabled, Naabu's per-invocation launcher still applies the OOM score and
+  open-file limits before it execs Naabu; `scanner.sandbox: off` disables
+  that helper as well.
 - A scanner process keeps its network access; target exclusions and probe
   budgets are enforced by EdgeWatch before it starts.
 - On a kernel without Landlock, a sandboxed process can read every file its

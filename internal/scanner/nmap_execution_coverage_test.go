@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/sandbox"
@@ -42,6 +43,23 @@ func TestRunScannerVersionProbeKillsChildWhenOutputLimitExceeded(t *testing.T) {
 			}
 			if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
 				t.Fatalf("version-probe child reached post-output marker (stat error %v)", statErr)
+			}
+		})
+	}
+}
+
+func TestNmapInvocationRejectsInvalidProgressPollIntervalBeforeChangingCommand(t *testing.T) {
+	for _, interval := range []time.Duration{0, -time.Nanosecond} {
+		t.Run(interval.String(), func(t *testing.T) {
+			cmd := exec.Command("/usr/bin/nmap", "-n", "192.0.2.1")
+			pathBefore := cmd.Path
+			argsBefore := append([]string(nil), cmd.Args...)
+			_, _, err := runNmapInvocationWithProgressPollInterval(context.Background(), cmd, nil, "", nil, nil, interval, nil)
+			if err == nil || err.Error() != "nmap progress poll interval must be greater than zero" {
+				t.Fatalf("runNmapInvocationWithProgressPollInterval() = %v, want invalid-interval error", err)
+			}
+			if cmd.Path != pathBefore || !reflect.DeepEqual(cmd.Args, argsBefore) || cmd.Process != nil || cmd.Stdin != nil || cmd.Stdout != nil || cmd.Stderr != nil {
+				t.Fatalf("invalid interval changed command before start: path=%q args=%q process=%v", cmd.Path, cmd.Args, cmd.Process)
 			}
 		})
 	}

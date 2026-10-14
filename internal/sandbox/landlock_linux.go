@@ -389,22 +389,37 @@ func parseExecArgs(args []string) (execRequest, error) {
 // setFileSizeLimit sets both the soft and hard per-file limit. Lowering the
 // hard limit prevents the scanner from raising its soft limit after exec.
 func setFileSizeLimit(bytes uint64) error {
+	return setFileSizeLimitWithOps(bytes, fileSizeLimitOps{
+		getrlimit: unix.Getrlimit,
+		setrlimit: unix.Setrlimit,
+	})
+}
+
+type fileSizeLimitOps struct {
+	getrlimit func(resource int, limit *unix.Rlimit) error
+	setrlimit func(resource int, limit *unix.Rlimit) error
+}
+
+// setFileSizeLimitWithOps keeps the production resource fixed at RLIMIT_FSIZE
+// while making the syscall result handling directly testable without changing
+// the parent test process's limits.
+func setFileSizeLimitWithOps(bytes uint64, ops fileSizeLimitOps) error {
 	if bytes == 0 {
 		return errors.New("file-size limit must be greater than zero")
 	}
 	var inherited unix.Rlimit
-	if err := unix.Getrlimit(unix.RLIMIT_FSIZE, &inherited); err != nil {
+	if err := ops.getrlimit(unix.RLIMIT_FSIZE, &inherited); err != nil {
 		return fmt.Errorf("read inherited RLIMIT_FSIZE: %w", err)
 	}
 	if inherited.Max < bytes {
 		return fmt.Errorf("inherited RLIMIT_FSIZE hard limit %d is below required %d", inherited.Max, bytes)
 	}
 	limit := unix.Rlimit{Cur: bytes, Max: bytes}
-	if err := unix.Setrlimit(unix.RLIMIT_FSIZE, &limit); err != nil {
+	if err := ops.setrlimit(unix.RLIMIT_FSIZE, &limit); err != nil {
 		return fmt.Errorf("set RLIMIT_FSIZE: %w", err)
 	}
 	var actual unix.Rlimit
-	if err := unix.Getrlimit(unix.RLIMIT_FSIZE, &actual); err != nil {
+	if err := ops.getrlimit(unix.RLIMIT_FSIZE, &actual); err != nil {
 		return fmt.Errorf("verify RLIMIT_FSIZE: %w", err)
 	}
 	if actual.Cur != bytes || actual.Max != bytes {

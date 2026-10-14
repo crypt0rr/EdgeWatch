@@ -223,7 +223,7 @@ jobs:
       - name: Generate release manifest
         run: ./scripts/generate-release-manifest.sh "$GITHUB_REF_NAME"
       - name: Verify candidate artifacts
-        run: ./scripts/verify-release-artifacts.sh dist dist/release-manifest.json "$GITHUB_REF_NAME" "$GITHUB_SHA"
+        run: ./scripts/verify-release-artifacts.sh dist dist/release-manifest.json "$GITHUB_REF_NAME" "$GITHUB_SHA" release-binaries
       - name: Upload release candidate
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -338,7 +338,7 @@ jobs:
           name: release-candidate
           path: .
       - name: Verify downloaded candidate
-        run: ./scripts/verify-release-artifacts.sh dist dist/release-manifest.json "$GITHUB_REF_NAME" "$GITHUB_SHA"
+        run: ./scripts/verify-release-artifacts.sh dist dist/release-manifest.json "$GITHUB_REF_NAME" "$GITHUB_SHA" release-binaries
       - name: Remove an abandoned draft from a previous attempt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -412,7 +412,7 @@ jobs:
           name: release-candidate
           path: .
       - name: Verify downloaded candidate
-        run: ./scripts/verify-release-artifacts.sh dist dist/release-manifest.json "$GITHUB_REF_NAME" "$GITHUB_SHA"
+        run: ./scripts/verify-release-artifacts.sh dist dist/release-manifest.json "$GITHUB_REF_NAME" "$GITHUB_SHA" release-binaries
       # The binfmt installer runs privileged, and BuildKit builds and pushes
       # the attested image with the registry credentials. Pin both instead of
       # the actions' floating defaults, and pull binfmt from the registry
@@ -591,7 +591,10 @@ jobs:
         run: |
           archive_dir="$(mktemp -d)"
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern '*.tar.gz' --pattern checksums.txt --pattern release-manifest.json --dir "$archive_dir"
-          ./scripts/verify-release-artifacts.sh "$archive_dir" "$archive_dir/release-manifest.json" "$GITHUB_REF_NAME" "$GITHUB_SHA"
+          ./scripts/verify-release-artifacts.sh "$archive_dir" "$archive_dir/release-manifest.json" "$GITHUB_REF_NAME" "$GITHUB_SHA" -
+          # Keep the exact manifest whose archive bindings were just verified
+          # for the later immutable-image executable comparison.
+          echo "VERIFIED_RELEASE_MANIFEST=$archive_dir/release-manifest.json" >> "$GITHUB_ENV"
           version="${GITHUB_REF_NAME#v}"
           expected="EdgeWatch $version"
           archives=("$archive_dir"/*.tar.gz)
@@ -638,6 +641,8 @@ jobs:
           test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$GITHUB_REF_NAME"
           test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}')" = "AGPL-3.0-only"
           docker run --rm --entrypoint /bin/sh "$image" -c 'test -s /usr/share/licenses/edgewatch/LICENSE && test -s /usr/share/licenses/edgewatch/LICENSE.md && test -s /usr/share/licenses/edgewatch/THIRD_PARTY_LICENSES.md && test -s /usr/share/licenses/naabu/LICENSE.md'
+      - name: Verify AMD64 image binary matches the release archive
+        run: ./scripts/verify-release-image-binary.sh "$IMAGE" "$VERIFIED_RELEASE_MANIFEST" amd64 linux/amd64
       - name: Verify container runtime capability matrix
         run: ./scripts/verify-container-runtime.sh "$IMAGE"
       - name: Verify scanner sandbox with real scans
@@ -739,7 +744,7 @@ jobs:
           name: release-candidate
           path: .
       - name: Verify downloaded candidate
-        run: ./scripts/verify-release-artifacts.sh dist dist/release-manifest.json "$GITHUB_REF_NAME" "$GITHUB_SHA"
+        run: ./scripts/verify-release-artifacts.sh dist dist/release-manifest.json "$GITHUB_REF_NAME" "$GITHUB_SHA" release-binaries
       - name: Run the ARM64 release archive natively
         run: |
           set -euo pipefail
@@ -775,6 +780,8 @@ jobs:
           test "$(docker run --rm --platform linux/arm64 --entrypoint /bin/uname "$image" -m)" = aarch64
           test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
           test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$GITHUB_REF_NAME"
+      - name: Verify ARM64 image binary matches the release archive
+        run: ./scripts/verify-release-image-binary.sh "$IMAGE" dist/release-manifest.json arm64 linux/arm64
       - name: Verify the ARM64 image
         run: bash ./scripts/test-prebuilt-image.sh "$IMAGE" linux/arm64 "${GITHUB_REF_NAME#v}"
       - name: Verify container runtime capability matrix

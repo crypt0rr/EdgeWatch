@@ -26,6 +26,8 @@ const scanScript = await readRepositoryFile(scanScriptPath)
 const naabuAllowlist = await readRepositoryFile('scripts/naabu-vulncheck-allowlist.txt')
 const grypeConfig = await readRepositoryFile('.grype.yaml')
 const composeScript = await readRepositoryFile('scripts/verify-compose-deployment.sh')
+const binaryImageScript = await readRepositoryFile('scripts/verify-release-image-binary.sh')
+const prebuiltFrontendTest = await readRepositoryFile('scripts/test-prebuilt-frontend-fails-closed.sh')
 
 const jobsStart = workflow.indexOf('\njobs:\n')
 assert.notEqual(jobsStart, -1, 'release workflow is missing its jobs')
@@ -176,6 +178,51 @@ test('the published image is built from scratch without imported caches', () => 
   for (const { name, block } of jobsOf(ciWorkflow)) {
     assert.deepEqual(writeScopes(permissionsOf(block, 4) ?? {}), [], `CI job ${name} must not hold a write scope`)
   }
+})
+
+test('prebuilt Docker builds skip npm and fail when frontend assets are missing', () => {
+  const frontendEnd = dockerfile.indexOf('\nFROM --platform=$BUILDPLATFORM golang:', dockerfile.indexOf(' AS frontend'))
+  assert.notEqual(frontendEnd, -1, 'Dockerfile is missing the frontend stage boundary')
+  const frontend = dockerfile.slice(0, frontendEnd)
+  assert.match(frontend, /RUN if \[ "\$PREBUILT_FRONTEND" != "1" \]; then npm ci; fi/)
+  assert.match(frontend, /RUN if \[ "\$PREBUILT_FRONTEND" = "1" \]; then \\\n\s+test -f \.\/prebuilt-dist\/index\.html \|\| \{ echo "prebuilt frontend is missing index\.html" >&2; exit 1; \};/)
+  assert.match(frontend, /else \\\n\s+npm run build;/)
+  assert.doesNotMatch(frontend, /^RUN npm ci$/m)
+
+  const container = ciJobBlock('container')
+  assert.match(stepBlock(container, 'Reject missing prebuilt frontend assets'), /test-prebuilt-frontend-fails-closed\.sh/)
+  assert.match(prebuiltFrontendTest, /docker buildx build --no-cache --progress=plain --target frontend/)
+  assert.match(prebuiltFrontendTest, /PREBUILT_FRONTEND=1/)
+  assert.match(prebuiltFrontendTest, /prebuilt frontend is missing index\.html/)
+})
+
+test('release manifests bind archive members to extracted and image executables', () => {
+  const verify = jobBlock('verify')
+  const prepare = stepBlock(verify, 'Prepare binaries for the container build')
+  const manifest = stepBlock(verify, 'Generate release manifest')
+  const candidate = stepBlock(verify, 'Verify candidate artifacts')
+  assert.match(prepare, /prepare-release-binaries\.sh/)
+  assert.ok(verify.indexOf(prepare) < verify.indexOf(manifest))
+  assert.ok(verify.indexOf(manifest) < verify.indexOf(candidate))
+  assert.match(candidate, /verify-release-artifacts\.sh .*release-binaries$/)
+  assert.match(binaryImageScript, /docker cp .*\/usr\/local\/bin\/edgewatch/)
+  assert.match(binaryImageScript, /image EdgeWatch binary does not match the linux\/\$arch release archive digest/)
+
+  const smoke = jobBlock('smoke')
+  const archiveVerify = stepBlock(smoke, 'Verify release archive versions')
+  assert.match(archiveVerify, /verify-release-artifacts\.sh .* -\n/)
+  assert.match(archiveVerify, /VERIFIED_RELEASE_MANIFEST=\$archive_dir\/release-manifest\.json/)
+  const amd64Image = stepBlock(smoke, 'Verify AMD64 image binary matches the release archive')
+  assert.match(amd64Image, /verify-release-image-binary\.sh "\$IMAGE" "\$VERIFIED_RELEASE_MANIFEST" amd64 linux\/amd64/)
+  assert.doesNotMatch(amd64Image, /gh release download/)
+  assert.equal((smoke.match(/gh release download[^\n]*release-manifest\.json/g) ?? []).length, 1,
+    'AMD64 image verification must reuse the manifest whose archive bindings were verified')
+
+  const arm = jobBlock('smoke-arm64')
+  const armCandidate = stepBlock(arm, 'Verify downloaded candidate')
+  assert.match(armCandidate, /verify-release-artifacts\.sh .*release-binaries$/)
+  const armImage = stepBlock(arm, 'Verify ARM64 image binary matches the release archive')
+  assert.match(armImage, /verify-release-image-binary\.sh .* arm64 linux\/arm64/)
 })
 
 // The verify job builds the release binaries and the frontend that the image

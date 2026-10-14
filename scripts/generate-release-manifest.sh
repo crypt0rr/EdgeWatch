@@ -6,7 +6,11 @@
 set -euo pipefail
 
 tag="${1:?usage: $0 <tag> [manifest-path]}"
-manifest="${2:-dist/release-manifest.json}"
+dist_dir="${DIST_DIR:-dist}"
+frontend_dist="${FRONTEND_DIST:-internal/webui/dist}"
+binary_dir="${RELEASE_BINARIES:-release-binaries}"
+manifest="${2:-$dist_dir/release-manifest.json}"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
   echo "invalid release tag: $tag" >&2
@@ -31,7 +35,7 @@ if [[ -z "$naabu_version" || -z "$naabu_commit" ]]; then
   exit 1
 fi
 
-if [[ ! -f internal/webui/dist/index.html ]]; then
+if [[ ! -f "$frontend_dist/index.html" ]]; then
   echo "frontend assets are missing; run the production frontend build first" >&2
   exit 1
 fi
@@ -40,14 +44,14 @@ fi
 # compared by downstream jobs without storing generated files in Git.
 frontend_hash="$({
   while IFS= read -r -d '' file; do
-    relative="${file#internal/webui/dist/}"
+    relative="${file#"$frontend_dist"/}"
     digest="$(sha256sum "$file" | awk '{print $1}')"
     printf '%s  %s\n' "$relative" "$digest"
-  done < <(find internal/webui/dist -type f ! -name '.gitkeep' -print0 | LC_ALL=C sort -z)
+  done < <(find "$frontend_dist" -type f ! -name '.gitkeep' -print0 | LC_ALL=C sort -z)
 } | sha256sum | awk '{print $1}')"
 
 artifact_json='[]'
-for artifact in dist/*.tar.gz dist/checksums.txt; do
+for artifact in "$dist_dir"/*.tar.gz "$dist_dir"/checksums.txt; do
   [[ -f "$artifact" ]] || continue
   name="$(basename "$artifact")"
   sha256="$(sha256sum "$artifact" | awk '{print $1}')"
@@ -60,10 +64,47 @@ if [[ "$artifact_json" == '[]' ]]; then
   exit 1
 fi
 
+binary_json='[]'
+declare -A binary_arch_seen=()
+for archive in "$dist_dir"/*.tar.gz; do
+  [[ -f "$archive" ]] || continue
+  name="$(basename "$archive")"
+  case "$name" in
+    *_Linux_x86_64.tar.gz|*_linux_amd64.tar.gz|*_Linux_amd64.tar.gz) arch=amd64 ;;
+    *_Linux_arm64.tar.gz|*_linux_arm64.tar.gz) arch=arm64 ;;
+    *) echo "unsupported release archive: $name" >&2; exit 1 ;;
+  esac
+  if [[ -n "${binary_arch_seen[$arch]:-}" ]]; then
+    echo "multiple release archives found for linux/$arch" >&2
+    exit 1
+  fi
+  binary_arch_seen[$arch]=1
+
+  binary_info="$("$script_dir/hash-release-binary.sh" "$archive")"
+  IFS=$'\t' read -r member archive_sha256 <<< "$binary_info"
+  extracted_binary="$binary_dir/linux_$arch/edgewatch"
+  if [[ ! -f "$extracted_binary" || -L "$extracted_binary" || ! -x "$extracted_binary" ]]; then
+    echo "prepared release binary is missing or invalid: $extracted_binary" >&2
+    exit 1
+  fi
+  extracted_sha256="$(sha256sum "$extracted_binary" | awk '{print $1}')"
+  if [[ "$extracted_sha256" != "$archive_sha256" ]]; then
+    echo "prepared release binary does not match archive member: $name" >&2
+    exit 1
+  fi
+  binary_json="$(jq -c --arg arch "$arch" --arg archive "$name" --arg member "$member" --arg sha256 "$archive_sha256" '. + [{arch: $arch, archive: $archive, member: $member, sha256: $sha256}]' <<<"$binary_json")"
+done
+for arch in amd64 arm64; do
+  if [[ -z "${binary_arch_seen[$arch]:-}" ]]; then
+    echo "release archive missing for linux/$arch" >&2
+    exit 1
+  fi
+done
+
 mkdir -p "$(dirname "$manifest")"
 tmp="${manifest}.tmp"
 jq -n \
-  --arg schema_version "1" \
+  --arg schema_version "2" \
   --arg repository "$repository" \
   --arg tag "$tag" \
   --arg version "$version" \
@@ -75,7 +116,8 @@ jq -n \
   --arg naabu_commit "$naabu_commit" \
   --arg frontend_sha256 "$frontend_hash" \
   --argjson artifacts "$artifact_json" \
-  '{schema_version: ($schema_version | tonumber), repository: $repository, tag: $tag, version: $version, source_commit: $commit, toolchain: {go: $go_version, node: $node_version, goreleaser: $goreleaser_version}, dependencies: {naabu_version: $naabu_version, naabu_commit: $naabu_commit}, frontend_sha256: $frontend_sha256, artifacts: $artifacts}' \
+  --argjson binaries "$binary_json" \
+  '{schema_version: ($schema_version | tonumber), repository: $repository, tag: $tag, version: $version, source_commit: $commit, toolchain: {go: $go_version, node: $node_version, goreleaser: $goreleaser_version}, dependencies: {naabu_version: $naabu_version, naabu_commit: $naabu_commit}, frontend_sha256: $frontend_sha256, binaries: $binaries, artifacts: $artifacts}' \
   > "$tmp"
 mv "$tmp" "$manifest"
 printf 'release manifest: %s (%s)\n' "$manifest" "$commit"

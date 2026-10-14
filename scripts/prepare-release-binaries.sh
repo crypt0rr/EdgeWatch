@@ -6,6 +6,7 @@ set -euo pipefail
 
 dist="${1:-dist}"
 output="${2:-release-binaries}"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ "$output" == "/" || "$output" == "." || "$output" == "$PWD" ]]; then
   echo "refusing to use a broad output directory: $output" >&2
@@ -13,6 +14,7 @@ if [[ "$output" == "/" || "$output" == "." || "$output" == "$PWD" ]]; then
 fi
 rm -rf "$output/linux_amd64" "$output/linux_arm64"
 mkdir -p "$output"
+declare -A seen_arch=()
 shopt -s nullglob
 archives=("$dist"/*.tar.gz)
 if [[ "${#archives[@]}" -eq 0 ]]; then
@@ -27,11 +29,30 @@ for archive in "${archives[@]}"; do
     *) echo "unsupported release archive: $archive" >&2; exit 1 ;;
   esac
 
+  if [[ -n "${seen_arch[$arch]:-}" ]]; then
+    echo "multiple release archives found for linux/$arch" >&2
+    exit 1
+  fi
+  seen_arch[$arch]=1
+
+  binary_info="$("$script_dir/hash-release-binary.sh" "$archive")"
+  IFS=$'\t' read -r member archive_sha256 <<< "$binary_info"
+
   extract="$(mktemp -d)"
-  tar -xzf "$archive" -C "$extract"
-  binary="$(find "$extract" -type f -name edgewatch -print -quit)"
-  if [[ -z "$binary" ]]; then
-    echo "EdgeWatch binary missing from $archive" >&2
+  if ! tar -xzf "$archive" -C "$extract" -- "$member"; then
+    echo "EdgeWatch binary could not be extracted from $archive" >&2
+    rm -rf "$extract"
+    exit 1
+  fi
+  binary="$extract/$member"
+  if [[ ! -f "$binary" || -L "$binary" ]]; then
+    echo "EdgeWatch archive member is not a regular file: $archive:$member" >&2
+    rm -rf "$extract"
+    exit 1
+  fi
+  extracted_sha256="$(sha256sum "$binary" | awk '{print $1}')"
+  if [[ "$extracted_sha256" != "$archive_sha256" ]]; then
+    echo "EdgeWatch extracted binary does not match archive member: $archive" >&2
     rm -rf "$extract"
     exit 1
   fi
@@ -41,5 +62,9 @@ for archive in "${archives[@]}"; do
 done
 
 for arch in amd64 arm64; do
+  if [[ -z "${seen_arch[$arch]:-}" ]]; then
+    echo "release archive missing for linux/$arch" >&2
+    exit 1
+  fi
   test -x "$output/linux_$arch/edgewatch"
 done

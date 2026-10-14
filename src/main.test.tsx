@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQuery } from '@tanstack/react-query'
 import { useLocation } from 'react-router-dom'
 import { APIError, adminStatus, getSession, listEvents, listIncidents, listJobs, login, logout, recordActivity, setupStatus } from './api'
-import { formatDateTime } from './format'
+import { formatDateTimeInTimeZone, setDisplayTimeZone } from './format'
 import { AppContent, AuthRoutes, createQueryClient, Jobs, ProtectedApp, retryQuery, retryQueryDelay, Shell, unitBreadcrumb } from './main'
 import { renderWithProviders } from './test/test-utils'
 
@@ -53,7 +53,7 @@ describe('application shell', () => {
     vi.stubGlobal('EventSource', EventSourceStub)
   })
 
-  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks() })
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks(); setDisplayTimeZone(undefined) })
 
   it('renders permission-aware navigation, update indicator, and incident count', async () => {
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 3, pagination: { limit: 1, offset: 0, total: 3, has_more: true, next_offset: 1 } })
@@ -452,6 +452,7 @@ describe('application shell', () => {
     const base = { revision: 1, enabled: true, archived: false, job: { targets: [], schedule: '0 * * * *' }, baseline: { status: 'complete', samples: 1 } }
     vi.mocked(listJobs).mockResolvedValue({ jobs: [
       { ...base, id: 'job-due', job: { ...base.job, name: 'Review monitor' }, change_window: { id: 'window-due', start_at: '2026-10-12T08:00:00Z', end_at: '2026-10-12T09:00:00Z', closed_at: '2026-10-12T08:45:00Z', timezone: 'Europe/Amsterdam', reason: 'Router replacement', status: 'closed', end_reason: 'cancelled', review_state: 'due', new_count: 1, recovered_count: 2, known_change_count: 3, still_open_count: 1, suppressed_event_count: 4, in_flight_event_count: 2, unknown_outcome_event_count: 3, incomplete_event_count: 1 } },
+      { ...base, id: 'job-active', job: { ...base.job, name: 'Active monitor' }, change_window: { id: 'window-active', start_at: '2026-10-12T08:00:00Z', end_at: '2026-10-12T09:00:00Z', closed_at: null, timezone: 'Europe/Amsterdam', reason: 'Database maintenance', status: 'active', end_reason: 'expired', review_state: 'none', new_count: 1, recovered_count: 0, known_change_count: 1, still_open_count: 1, suppressed_event_count: 1, in_flight_event_count: 0, unknown_outcome_event_count: 0, incomplete_event_count: 0 } },
       { ...base, id: 'job-scheduled', job: { ...base.job, name: 'Scheduled monitor' }, change_window: { id: 'window-scheduled', start_at: '2026-10-13T08:00:00Z', end_at: '2026-10-13T09:00:00Z', closed_at: null, timezone: 'UTC', reason: 'Planned upgrade', status: 'scheduled', review_state: 'none', new_count: 0, recovered_count: 0, known_change_count: 0, still_open_count: 0, suppressed_event_count: 0, in_flight_event_count: 0, unknown_outcome_event_count: 0, incomplete_event_count: 0 } },
       { ...base, id: 'job-reviewed', job: { ...base.job, name: 'Reviewed monitor' }, change_window: { id: 'window-reviewed', start_at: '2026-10-11T08:00:00Z', end_at: '2026-10-11T09:00:00Z', closed_at: '2026-10-11T09:00:00Z', timezone: 'UTC', reason: 'Switch change', status: 'closed', end_reason: 'expired', review_state: 'reviewed', new_count: 0, recovered_count: 0, known_change_count: 0, still_open_count: 0, suppressed_event_count: 1, in_flight_event_count: 0, unknown_outcome_event_count: 0, incomplete_event_count: 0 } },
     ] } as never)
@@ -465,6 +466,9 @@ describe('application shell', () => {
     expect(dueCard.querySelectorAll('time')[1]).toHaveAttribute('dateTime', '2026-10-12T08:45:00Z')
     expect(dueCard.querySelector('.job-change-window-counts')).toHaveTextContent('4 change events held · 1 new · 2 recovered · 1 still open · 2 in flight at close · 3 with unknown prior outcome · 1 older events with incomplete identities')
     expect(dueCard.querySelector('.job-change-window-details-link')).toHaveAttribute('href', '/jobs/job-due')
+    const activeCard = screen.getByRole('heading', { name: 'Active monitor' }).closest('article.job-card')!
+    expect(activeCard.querySelector('.job-change-window-status')).toHaveTextContent('Active')
+    expect(activeCard.querySelector('.job-change-window-status')).toHaveTextContent('Database maintenance')
     const scheduledCard = screen.getByRole('heading', { name: 'Scheduled monitor' }).closest('article.job-card')!
     const reviewedCard = screen.getByRole('heading', { name: 'Reviewed monitor' }).closest('article.job-card')!
     expect(scheduledCard.querySelector('.job-change-window-status')).toHaveTextContent('Scheduled')
@@ -531,16 +535,38 @@ describe('application shell', () => {
 
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Polling monitor' })).toBeInTheDocument())
     expect(listJobs).toHaveBeenCalledTimes(1)
-    expect(screen.getByText(formatDateTime('2026-10-12T00:00:00Z'))).toBeInTheDocument()
+    expect(screen.getByText(formatDateTimeInTimeZone('2026-10-12T00:00:00Z', 'UTC'))).toBeInTheDocument()
     fireEvent.change(screen.getByRole('combobox', { name: 'Filter jobs' }), { target: { value: 'attention' } })
     expect(screen.getByText('No available jobs need attention')).toBeInTheDocument()
     expect(EventSourceStub.instances).toHaveLength(0)
 
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
     await waitFor(() => expect(screen.getByText(/Needs attention · Latest scan failed/)).toBeInTheDocument())
-    expect(screen.getByText(formatDateTime('2026-10-13T00:00:00Z'))).toBeInTheDocument()
+    expect(screen.getByText(formatDateTimeInTimeZone('2026-10-13T00:00:00Z', 'UTC'))).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Polling monitor' })).toBeInTheDocument()
     expect(listJobs).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows the next scheduled run in the job scheduler timezone', async () => {
+    setDisplayTimeZone('Europe/Amsterdam')
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [{
+      id: 'timezone-job', revision: 1, enabled: true, archived: false,
+      job: { name: 'New York monitor', targets: ['198.51.100.10'], schedule: '0 3 * * *' },
+      baseline: { status: 'complete', samples: 1 },
+      monitoring: {
+        availability: 'available', history_available: true, activity: 'none', schedule_state: 'scheduled',
+        next_run_at: '2026-10-13T07:00:00Z', timezone: 'America/New_York', latest_attempt: null,
+        latest_successful_scan: null, attention_reason: 'none',
+      },
+    }] } as never)
+    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: ['jobs.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    renderWithProviders(<Jobs />)
+
+    const heading = await screen.findByRole('heading', { name: 'New York monitor' })
+    const card = heading.closest('article.job-card')!
+    expect(card).toHaveTextContent(formatDateTimeInTimeZone('2026-10-13T07:00:00Z', 'America/New_York'))
+    expect(card).toHaveTextContent('Scheduler timezone: America/New_York')
+    expect(card).not.toHaveTextContent(formatDateTimeInTimeZone('2026-10-13T07:00:00Z', 'Europe/Amsterdam'))
   })
 
   it('shows explicit unknown and no-scan states and gates scan links by permission', async () => {

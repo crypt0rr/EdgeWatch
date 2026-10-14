@@ -33,7 +33,7 @@ export { Incidents } from './pages/Incidents'
 import { compactPortExpression } from './components/PortScopeDetails'
 import { baselinePresentation } from './baseline'
 import { jobStatePresentation } from './status'
-import { formatDateTime } from './format'
+import { formatDateTime, formatDateTimeInTimeZone } from './format'
 import { formatChangeWindowTime } from './change-window-time'
 import type { Job } from './types'
 import type { ChangeWindowStatus } from './generated/api-types'
@@ -489,7 +489,7 @@ function JobMonitoringStatus({ job, canReadScans }: { job: Job; canReadScans: bo
         </div>
         <div>
           <dt>Next scheduled run</dt>
-          <dd>{monitoring.schedule_state === 'scheduled' && monitoring.next_run_at ? formatDateTime(monitoring.next_run_at) : scheduleLabel}</dd>
+          <dd>{monitoring.schedule_state === 'scheduled' && monitoring.next_run_at ? formatDateTimeInTimeZone(monitoring.next_run_at, monitoring.timezone) : scheduleLabel}</dd>
           {monitoring.schedule_state === 'scheduled' && monitoring.next_run_at && <small>Scheduler timezone: {monitoring.timezone}</small>}
         </div>
       </dl>

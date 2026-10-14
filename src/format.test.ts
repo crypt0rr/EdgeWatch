@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { editableDuration, formatDate, formatDateTime, formatRetention, formatTime, getDisplayTimeZone, setDisplayTimeZone } from './format'
+import { editableDuration, formatDate, formatDateTime, formatDateTimeInTimeZone, formatRetention, formatTime, getDisplayTimeZone, setDisplayTimeZone } from './format'
 
 describe('editableDuration', () => {
   it('turns Go durations into the units the job editor accepts', () => {
@@ -63,5 +63,25 @@ describe('deployment timezone formatting', () => {
       expect(formatTime(instant, clock)).toBe(new Date(instant).toLocaleTimeString(undefined, clock))
       expect(formatDate(instant)).toBe(new Date(instant).toLocaleDateString())
     }
+  })
+})
+
+describe('named timezone formatting', () => {
+  const instant = '2026-10-13T07:00:00Z'
+  afterEach(() => setDisplayTimeZone(undefined))
+
+  it('uses the named timezone instead of the deployment timezone', () => {
+    setDisplayTimeZone('Europe/Amsterdam')
+    const options = { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' } as const
+    expect(formatDateTimeInTimeZone(instant, 'America/New_York', options)).toBe(
+      new Date(instant).toLocaleString(undefined, { ...options, timeZone: 'America/New_York' }),
+    )
+    expect(formatDateTimeInTimeZone(instant, 'America/New_York', options)).not.toBe(formatDateTime(instant))
+    expect(formatDateTime(instant)).toBe(new Date(instant).toLocaleString(undefined, { timeZone: 'Europe/Amsterdam' }))
+  })
+
+  it('returns the original timestamp when the instant or timezone is unsupported', () => {
+    expect(formatDateTimeInTimeZone(instant, 'Mars/Olympus')).toBe(instant)
+    expect(formatDateTimeInTimeZone('not-a-time', 'America/New_York')).toBe('not-a-time')
   })
 })

@@ -198,6 +198,154 @@ func TestLatestChangeWindowProjectionKeepsOlderDueReviewVisible(t *testing.T) {
 	}
 }
 
+func TestLatestChangeWindowSummariesPrioritizeActiveThenExpiredThenNearestScheduled(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	now := time.Now().UTC().Truncate(time.Second)
+	end := now.Add(time.Hour)
+
+	activeJob := createWindowTestJob(t, ts, "window-rank-active", "UTC")
+	active, err := ts.CreateChangeWindow(ctx, activeJob.ID, time.Time{}, end, true, "maintenance", "test-actor", "Test Operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	createTestChangeWindow(t, ts, activeJob.ID, now.Add(2*time.Hour), now.Add(3*time.Hour))
+	if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET start_at=?,end_at=? WHERE id=?`, sqliteTimestamp(now), sqliteTimestamp(end), active.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	expiredJob := createWindowTestJob(t, ts, "window-rank-expired", "UTC")
+	expired, err := ts.CreateChangeWindow(ctx, expiredJob.ID, time.Time{}, now.Add(2*time.Hour), true, "maintenance", "test-actor", "Test Operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	createTestChangeWindow(t, ts, expiredJob.ID, now.Add(4*time.Hour), now.Add(5*time.Hour))
+	if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET start_at=?,end_at=? WHERE id=?`, sqliteTimestamp(now.Add(-time.Hour)), sqliteTimestamp(now), expired.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	scheduledJob := createWindowTestJob(t, ts, "window-rank-scheduled", "UTC")
+	nearOnly := createTestChangeWindow(t, ts, scheduledJob.ID, now.Add(2*time.Hour), now.Add(3*time.Hour))
+	createTestChangeWindow(t, ts, scheduledJob.ID, now.Add(4*time.Hour), now.Add(5*time.Hour))
+
+	dueJob := createWindowTestJob(t, ts, "window-rank-due", "UTC")
+	due, err := ts.CreateChangeWindow(ctx, dueJob.ID, time.Time{}, now.Add(2*time.Hour), true, "maintenance", "test-actor", "Test Operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueWindowTestEvent(t, ctx, s, "window-rank-due-destination", dueJob.ID, "changes-detected", "window-rank-due-scan", now, []model.Change{{Key: "new:window-rank-due", Kind: "port", Target: "192.0.2.10", Port: 443}}, false, 0)
+	closedDue, changed, err := ts.CancelChangeWindow(ctx, dueJob.ID, due.ID, "operator", "Operator", nil, AuditEntry{})
+	if err != nil || !changed || closedDue.ReviewState != "due" {
+		t.Fatalf("close due-review fixture: changed %v, state %q, err %v", changed, closedDue.ReviewState, err)
+	}
+	dueScheduled := createTestChangeWindow(t, ts, dueJob.ID, now.Add(2*time.Hour), now.Add(3*time.Hour))
+
+	tieJob := createWindowTestJob(t, ts, "window-rank-tie", "UTC")
+	firstDue := makeDueWindowForProjectionTest(t, ctx, s, ts, tieJob.ID, "window-rank-tie-first")
+	secondDue := makeDueWindowForProjectionTest(t, ctx, s, ts, tieJob.ID, "window-rank-tie-second")
+	sharedStart, sharedEnd := sqliteTimestamp(now.Add(-2*time.Hour)), sqliteTimestamp(now.Add(-time.Hour))
+	if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET start_at=?,end_at=? WHERE id IN (?,?)`, sharedStart, sharedEnd, firstDue.ID, secondDue.ID); err != nil {
+		t.Fatal(err)
+	}
+	wantTie := firstDue.ID
+	if secondDue.ID > wantTie {
+		wantTie = secondDue.ID
+	}
+
+	projection, err := ts.LatestChangeWindowSummaries(ctx, false, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := []struct {
+		jobID string
+		want  string
+	}{
+		{activeJob.ID, active.ID},
+		{expiredJob.ID, expired.ID},
+		{scheduledJob.ID, nearOnly.ID},
+		{dueJob.ID, dueScheduled.ID},
+		{tieJob.ID, wantTie},
+	}
+	for _, check := range checks {
+		if got := projection[check.jobID].ID; got != check.want {
+			t.Errorf("latest window for job %s = %q; want %q", check.jobID, got, check.want)
+		}
+	}
+	if got := projection[activeJob.ID].Status; got != "active" {
+		t.Errorf("window starting exactly at now has status %q; want active", got)
+	}
+	if got := projection[expiredJob.ID].Status; got != "expired" {
+		t.Errorf("window ending exactly at now has status %q; want expired", got)
+	}
+}
+
+func makeDueWindowForProjectionTest(t *testing.T, ctx context.Context, s *Store, ts *TenantStore, jobID, scanID string) ChangeWindow {
+	t.Helper()
+	window, err := ts.CreateChangeWindow(ctx, jobID, time.Time{}, time.Now().UTC().Add(time.Hour), true, "maintenance", "test-actor", "Test Operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueWindowTestEvent(t, ctx, s, "destination-"+scanID, jobID, "changes-detected", scanID, time.Now().UTC(), []model.Change{{Key: "new:" + scanID, Kind: "port", Target: "192.0.2.10", Port: 443}}, false, 0)
+	closed, changed, err := ts.CancelChangeWindow(ctx, jobID, window.ID, "operator", "Operator", nil, AuditEntry{})
+	if err != nil || !changed || closed.ReviewState != "due" {
+		t.Fatalf("close due window %s: changed %v, state %q, err %v", scanID, changed, closed.ReviewState, err)
+	}
+	return closed
+}
+
+func TestListChangeWindowsKeepsActiveExpiredScheduledAndDueBeforeReviewedHistory(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job := createWindowTestJob(t, ts, "window-list-priority", "UTC")
+	now := time.Now().UTC().Truncate(time.Second)
+	created := sqliteTimestamp(now)
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insert := func(id string, start, end time.Time, status, closedAt, reviewState string) {
+		t.Helper()
+		if _, err := tx.ExecContext(ctx, `INSERT INTO change_windows(id,job_id,start_at,end_at,timezone,reason,actor_label,created_at,status,end_reason,closed_at,review_state) VALUES (?,?,? ,?,'UTC','test window','Operator',?,?,'expired',?,?)`, id, job.ID, sqliteTimestamp(start), sqliteTimestamp(end), created, status, closedAt, reviewState); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 105; i++ {
+		start := now.Add(-time.Duration(i+3) * time.Hour)
+		insert(fmt.Sprintf("reviewed-%03d", i), start, start.Add(time.Hour), "closed", sqliteTimestamp(start.Add(time.Hour)), "reviewed")
+	}
+	insert("due-review", now.Add(-3*time.Hour), now.Add(-2*time.Hour), "closed", sqliteTimestamp(now.Add(-2*time.Hour)), "due")
+	insert("expired-open", now.Add(-time.Hour), now, "active", "", "none")
+	insert("active-open", now, now.Add(time.Hour), "active", "", "none")
+	insert("scheduled-open", now.Add(2*time.Hour), now.Add(3*time.Hour), "scheduled", "", "none")
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	windows, err := ts.ListChangeWindows(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windows) != 100 {
+		t.Fatalf("visible window count = %d; want bounded page of 100", len(windows))
+	}
+	want := []struct{ id, status, review string }{
+		{"active-open", "active", "none"},
+		{"expired-open", "expired", "none"},
+		{"scheduled-open", "scheduled", "none"},
+		{"due-review", "expired", "due"},
+	}
+	for index, check := range want {
+		if windows[index].ID != check.id || windows[index].Status != check.status || windows[index].ReviewState != check.review {
+			t.Errorf("window %d = %+v; want id=%s status=%s review=%s", index, windows[index], check.id, check.status, check.review)
+		}
+	}
+}
+
 func TestMarshalBoundedChangeWindowSummaryTruncatesDetailsWithoutChangingCounts(t *testing.T) {
 	t.Parallel()
 	large := strings.Repeat("evidence", 700)

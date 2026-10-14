@@ -208,6 +208,51 @@ func (ts *TenantStore) CreateChangeWindow(ctx context.Context, jobID string, sta
 	return ChangeWindow{ID: id, JobID: jobID, StartAt: startUTC, EndAt: endUTC, Timezone: zone, Reason: reason, ActorLabel: actorLabel, CreatedAt: now, Status: status, ReviewState: "none", Revision: 1}, nil
 }
 
+// ListChangeWindows ranks active, expired-unclosed, scheduled, due-review, and
+// reviewed-history rows. Each group contributes at most one page to a small
+// final merge, so retained review history is not sorted with open windows.
+// Active windows are bounded by their enforced 24-hour maximum duration.
+// Expired-unclosed windows have no age cutoff because delayed expiry work may
+// leave them visible indefinitely.
+const listChangeWindowsQuery = `WITH candidates(id, priority, start_at) AS MATERIALIZED (
+	SELECT id, 0, start_at FROM (
+		SELECT id,start_at FROM change_windows INDEXED BY change_windows_open_latest
+		WHERE job_id=?1 AND EXISTS (SELECT 1 FROM jobs WHERE jobs.id=change_windows.job_id AND jobs.tenant_id=?2)
+			AND closed_at='' AND start_at>=?4 AND start_at<=?3 AND end_at>?3
+		ORDER BY start_at DESC,id DESC LIMIT 100
+	)
+	UNION ALL SELECT id, 1, start_at FROM (
+		SELECT id,start_at FROM change_windows INDEXED BY change_windows_open_latest
+		WHERE job_id=?1 AND EXISTS (SELECT 1 FROM jobs WHERE jobs.id=change_windows.job_id AND jobs.tenant_id=?2)
+			AND closed_at='' AND start_at<=?3 AND end_at<=?3
+		ORDER BY start_at DESC,id DESC LIMIT 100
+	)
+	UNION ALL SELECT id, 2, start_at FROM (
+		SELECT id,start_at FROM change_windows INDEXED BY change_windows_open_scheduled
+		WHERE job_id=?1 AND EXISTS (SELECT 1 FROM jobs WHERE jobs.id=change_windows.job_id AND jobs.tenant_id=?2)
+			AND closed_at='' AND start_at>?3
+		ORDER BY start_at ASC,id DESC LIMIT 100
+	)
+	UNION ALL SELECT id, 3, start_at FROM (
+		SELECT id,start_at FROM change_windows
+		WHERE job_id=?1 AND EXISTS (SELECT 1 FROM jobs WHERE jobs.id=change_windows.job_id AND jobs.tenant_id=?2)
+			AND closed_at<>'' AND review_state='due'
+		ORDER BY start_at DESC,id DESC LIMIT 100
+	)
+	UNION ALL SELECT id, 4, start_at FROM (
+		SELECT id,start_at FROM change_windows
+		WHERE job_id=?1 AND EXISTS (SELECT 1 FROM jobs WHERE jobs.id=change_windows.job_id AND jobs.tenant_id=?2)
+			AND closed_at<>'' AND review_state<>'due'
+		ORDER BY start_at DESC,id DESC LIMIT 100
+	)
+)
+SELECT change_windows.id,change_windows.job_id,change_windows.start_at,change_windows.end_at,change_windows.timezone,change_windows.reason,change_windows.actor_label,change_windows.created_at,change_windows.status,change_windows.end_reason,change_windows.closed_at,change_windows.effective_end,change_windows.new_count,change_windows.recovered_count,change_windows.still_open_count,change_windows.suppressed_event_count,change_windows.in_flight_event_count,change_windows.unknown_outcome_event_count,change_windows.incomplete_event_count,X'',change_windows.review_state,change_windows.reviewed_at,change_windows.reviewer_label,change_windows.revision
+FROM candidates CROSS JOIN change_windows
+WHERE candidates.id=change_windows.id AND change_windows.job_id=?1
+	AND EXISTS (SELECT 1 FROM jobs WHERE jobs.id=change_windows.job_id AND jobs.tenant_id=?2)
+ORDER BY candidates.priority, CASE WHEN candidates.priority=2 THEN candidates.start_at END ASC, candidates.start_at DESC, candidates.id DESC
+LIMIT 100`
+
 // ListChangeWindows returns retained windows for one of the tenant's jobs.
 func (ts *TenantStore) ListChangeWindows(ctx context.Context, jobID string) ([]ChangeWindow, error) {
 	if err := ts.ready(); err != nil {
@@ -216,7 +261,10 @@ func (ts *TenantStore) ListChangeWindows(ctx context.Context, jobID string) ([]C
 	if _, err := ts.GetJob(ctx, jobID); err != nil {
 		return nil, err
 	}
-	rows, err := ts.store.reader().QueryContext(ctx, `SELECT id,job_id,start_at,end_at,timezone,reason,actor_label,created_at,status,end_reason,closed_at,effective_end,new_count,recovered_count,still_open_count,suppressed_event_count,in_flight_event_count,unknown_outcome_event_count,incomplete_event_count,X'',review_state,reviewed_at,reviewer_label,revision FROM change_windows WHERE job_id=? AND EXISTS (SELECT 1 FROM jobs WHERE jobs.id=change_windows.job_id AND jobs.tenant_id=?) ORDER BY start_at DESC,id DESC LIMIT 100`, jobID, ts.scope.id)
+	nowTime := time.Now().UTC()
+	now := sqliteTimestamp(nowTime)
+	activeStartCutoff := sqliteTimestamp(nowTime.Add(-changeWindowMaximumDuration))
+	rows, err := ts.store.reader().QueryContext(ctx, listChangeWindowsQuery, jobID, ts.scope.id, now, activeStartCutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -298,8 +346,10 @@ func scanChangeWindow(scanner changeWindowScanner) (ChangeWindow, error) {
 
 // LatestChangeWindowSummaries returns at most one relevant window per job in
 // one tenant-scoped query. Unclosed windows outrank retained review-due
-// windows; among those, the most recent window wins. A due review remains
-// visible after newer windows have been reviewed.
+// windows. Active windows outrank expired unclosed windows, which outrank
+// scheduled windows; the soonest scheduled window wins. A due review remains
+// visible after newer windows have been reviewed when no unclosed window is
+// available.
 func (ts *TenantStore) LatestChangeWindowSummaries(ctx context.Context, includeArchived bool, now time.Time) (map[string]ChangeWindowStatus, error) {
 	if err := ts.ready(); err != nil {
 		return nil, err
@@ -307,11 +357,14 @@ func (ts *TenantStore) LatestChangeWindowSummaries(ctx context.Context, includeA
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	nowText := sqliteTimestamp(now)
 	rows, err := ts.store.reader().QueryContext(ctx, `SELECT w.job_id,w.id,w.start_at,w.end_at,w.timezone,w.reason,w.status,w.end_reason,w.closed_at,w.review_state,w.new_count,w.recovered_count,w.still_open_count,w.suppressed_event_count,w.in_flight_event_count,w.unknown_outcome_event_count,w.incomplete_event_count,w.revision
 FROM change_windows AS w JOIN jobs AS j ON j.id=w.job_id AND j.tenant_id=?
 WHERE (? OR j.archived=0) AND (w.closed_at='' OR w.review_state='due')
- AND w.id=(SELECT candidate.id FROM change_windows AS candidate WHERE candidate.job_id=w.job_id AND (candidate.closed_at='' OR candidate.review_state='due') ORDER BY CASE WHEN candidate.closed_at='' THEN 0 ELSE 1 END,candidate.start_at DESC,candidate.id DESC LIMIT 1)
-ORDER BY w.job_id`, ts.scope.id, boolInt(includeArchived))
+ AND w.id=(SELECT candidate.id FROM change_windows AS candidate WHERE candidate.job_id=w.job_id AND (candidate.closed_at='' OR candidate.review_state='due')
+ ORDER BY CASE WHEN candidate.closed_at='' AND candidate.start_at<=?3 AND candidate.end_at>?3 THEN 0 WHEN candidate.closed_at='' AND candidate.end_at<=?3 THEN 1 WHEN candidate.closed_at='' THEN 2 ELSE 3 END,
+ CASE WHEN candidate.closed_at='' AND candidate.start_at>?3 THEN candidate.start_at END ASC,candidate.start_at DESC,candidate.id DESC LIMIT 1)
+ORDER BY w.job_id`, ts.scope.id, boolInt(includeArchived), nowText)
 	if err != nil {
 		return nil, err
 	}

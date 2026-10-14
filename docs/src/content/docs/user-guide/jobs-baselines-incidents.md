@@ -101,6 +101,9 @@ early and produces the same durable review as an expiry.
 If EdgeWatch cannot load the job's notification destinations while canceling an
 active window, the request fails and leaves the window open with its held
 alerts unchanged. Retry the cancellation when the destinations are available.
+Creation errors remain by the form, cancellation errors stay in the open
+confirmation dialog so the operator can retry, and review errors remain beside
+the affected window.
 
 The **Jobs** list shows each job's latest scan attempt separately from its
 latest successful scan, along with its next scheduled run and current queued,

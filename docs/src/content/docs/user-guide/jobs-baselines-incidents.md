@@ -130,9 +130,15 @@ expected state again. A host that host discovery reports down shows none of
 its ports, so its state change is reported instead. The incidents, pending changes, and one-scan
 suppressions of its ports and services stay as they are until a scan observes
 the host up again. A port that is still changed when its host returns keeps
-its incident, without a recovery or a new alert. For a DNS name in
-**Address-sensitive** mode, a port that opened outside the baseline waits
-while any of the name's addresses is down.
+its target-level incident, without a recovery or a new alert. For a DNS name
+in **Address-sensitive** mode, a target-level port finding that opened
+outside the baseline waits while any of the name's addresses is down. A
+per-address port finding for an address whose host discovery completes down
+cannot be compared, so that complete scan retires the finding without a
+recovery even if the address remains in the DNS answer. If the same exposure
+is present when the address returns, it opens as a new per-address incident.
+An address that leaves the DNS answer also retires its per-address findings
+without a recovery.
 
 When a security-impacting job setting changes,
 EdgeWatch shows the affected scope and asks for explicit rebaselining. Schedule

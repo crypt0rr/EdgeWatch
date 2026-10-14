@@ -204,6 +204,63 @@ func TestPortAddressFindingIsRetiredWhenItCannotBeCompared(t *testing.T) {
 	}
 }
 
+func TestDownAddressPortAddressFindingRetiresAndReopensWhenExposureReturns(t *testing.T) {
+	job := dualStackJob(config.DNSComparisonAddressSensitive)
+	baseline := dualStackSnapshot(map[int][]string{22: {dualStackV4}})
+	state := dualStackState(baseline, job)
+	key := portAddressChangeKey(22, dualStackV6)
+	opened := dualStackSnapshot(map[int][]string{22: {dualStackV4, dualStackV6}})
+
+	firstScan := dualStackScan("ipv6-opened", job, opened)
+	firstScan.FinishedAt = time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	events, changes, err := processSuccessWithChanges(&state, job, firstScan)
+	if err != nil || !slices.Equal(changeKeys(changes), []string{key}) || !slices.Equal(detectedChangeKeys(events), []string{key}) {
+		t.Fatalf("opening the IPv6 exposure: events %#v changes %#v err %v", events, changes, err)
+	}
+	firstIncident := state.Incidents[key]
+	if firstIncident.ScanID != firstScan.ID || firstIncident.RecoveryCount != 0 {
+		t.Fatalf("initial per-address incident = %#v", firstIncident)
+	}
+
+	down := dualStackSnapshot(map[int][]string{22: {dualStackV4}})
+	down.Hosts[1] = model.HostObservation{
+		Address: dualStackV6, Status: "unreachable", StatusReason: "no-response",
+		Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down"}},
+	}
+	downScan := dualStackScan("ipv6-down", job, down)
+	downScan.FinishedAt = firstScan.FinishedAt.Add(time.Minute)
+	events, changes, err = processSuccessWithChanges(&state, job, downScan)
+	if err != nil || !slices.Equal(changeKeys(changes), []string{"host|" + dualStackV6}) || !slices.Equal(detectedChangeKeys(events), []string{"host|" + dualStackV6}) {
+		t.Fatalf("down address: events %#v changes %#v err %v", events, changes, err)
+	}
+	if _, ok := state.Incidents[key]; ok {
+		t.Fatalf("uncomparable per-address incident was not retired: %#v", state.Incidents)
+	}
+	if got := recoveredChangeKeys(events); len(got) != 0 {
+		t.Fatalf("down address reported a recovery: %#v", events)
+	}
+	if _, ok := state.Incidents["host|"+dualStackV6]; !ok {
+		t.Fatalf("down address host incident missing: %#v", state.Incidents)
+	}
+
+	returnScan := dualStackScan("ipv6-returned", job, opened)
+	returnScan.FinishedAt = downScan.FinishedAt.Add(time.Minute)
+	events, changes, err = processSuccessWithChanges(&state, job, returnScan)
+	if err != nil || !slices.Equal(changeKeys(changes), []string{key}) || !slices.Equal(detectedChangeKeys(events), []string{key}) {
+		t.Fatalf("same exposure returned: events %#v changes %#v err %v", events, changes, err)
+	}
+	returnedIncident, ok := state.Incidents[key]
+	if !ok || returnedIncident.ScanID != returnScan.ID || returnedIncident.ScanID == firstIncident.ScanID || !returnedIncident.OpenedAt.After(firstIncident.OpenedAt) || returnedIncident.RecoveryCount != 0 {
+		t.Fatalf("returned per-address incident = %#v, original %#v", returnedIncident, firstIncident)
+	}
+	if got := recoveredChangeKeys(events); !slices.Equal(got, []string{"host|" + dualStackV6}) {
+		t.Fatalf("host recovery did not remain separate: %#v", events)
+	}
+	if _, ok := state.Incidents["host|"+dualStackV6]; ok {
+		t.Fatalf("returned host incident remained open: %#v", state.Incidents)
+	}
+}
+
 func TestAggregateDNSComparisonIgnoresPortAddresses(t *testing.T) {
 	job := dualStackJob(config.DNSComparisonAggregate)
 	baseline := dualStackSnapshot(map[int][]string{22: {dualStackV4}, 443: {dualStackV4, dualStackV6}})

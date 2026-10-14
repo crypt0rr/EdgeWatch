@@ -258,6 +258,10 @@ func TestNmapInvocationOutputBounds(t *testing.T) {
 			script: "head -c " + overXML + " /dev/zero > \"$out\"\nsleep 300\n", fileXML: true,
 			want: "nmap XML output exceeded 16777216 bytes",
 		},
+		"fast XML file": {
+			script: "head -c " + strconv.Itoa(nmapOutputFileSizeLimit) + " /dev/zero > \"$out\"\n", fileXML: true,
+			want: "nmap XML output exceeded 16777216 bytes",
+		},
 		"XML on stdout": {
 			script: "head -c " + overXML + " /dev/zero | tr '\\0' 'x'\nsleep 300\n",
 			want:   "nmap XML output exceeded 16777216 bytes",

@@ -10,9 +10,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/sandbox"
 	"golang.org/x/sys/unix"
@@ -215,7 +217,7 @@ func TestRestrictedNmapStartsThroughSandboxExecWithItsXMLFile(t *testing.T) {
 			defer os.Remove(path)
 			defer release()
 			confineNmap(cmd, test.policy)
-			want := []string{helper, sandbox.ExecCommand, "--profile", "scanner", "--files", "1", "--", nmap}
+			want := []string{helper, sandbox.ExecCommand, "--profile", "scanner", "--files", "1", "--file-size-limit", strconv.Itoa(nmapOutputFileSizeLimit), "--", nmap}
 			if test.privileged {
 				want = append(want, "--privileged")
 			}
@@ -255,8 +257,66 @@ done
 		t.Fatalf("XML = %q", stdout)
 	}
 	args, err := os.ReadFile(filepath.Join(dir, "args"))
-	if err != nil || !strings.HasPrefix(string(args), sandbox.ExecCommand+"\n--profile\nscanner\n--files\n1\n--\n") {
+	if err != nil || !strings.HasPrefix(string(args), sandbox.ExecCommand+"\n--profile\nscanner\n--files\n1\n--file-size-limit\n"+strconv.Itoa(nmapOutputFileSizeLimit)+"\n--\n") {
 		t.Fatalf("sandbox-exec arguments = %q, %v", args, err)
+	}
+}
+
+func TestRestrictedNmapFinalSizeCheckCatchesWriterAfterEmptyInitialPoll(t *testing.T) {
+	abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, unix.LANDLOCK_CREATE_RULESET_VERSION)
+	if errno != 0 || abi < 1 {
+		t.Skipf("Landlock is unavailable: %v", errno)
+	}
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := (*sandbox.Policy)(nil).WithLandlock(helper, int(abi))
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	gateReader, gateWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateReader.Close()
+	defer gateWriter.Close()
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", xmlOutputScript+
+		"IFS= read -r _ <&3\n"+
+		"head -c 33554432 /dev/zero > \"$out\"\n"+
+		"printf 'writer-finished\\n' >&2\n", "sh", "-oX", "-", "192.0.2.1")
+	// FD 3 gates the child until the controlled initial poll has completed.
+	// prepareNmapXMLOutput adds the XML output as FD 4; both are inherited by
+	// this test child through the same Landlock helper path as Nmap.
+	cmd.ExtraFiles = append(cmd.ExtraFiles, gateReader)
+	released := make(chan error, 1)
+	afterInitialPoll := func() {
+		_, writeErr := gateWriter.Write([]byte("continue\n"))
+		if closeErr := gateWriter.Close(); writeErr == nil {
+			writeErr = closeErr
+		}
+		released <- writeErr
+	}
+	// A one-hour interval ensures the recurring poll cannot run before this
+	// writer exits. The initial poll sees an empty file because the child waits
+	// on FD 3 until afterInitialPoll releases it. The bound error must therefore
+	// come from the final post-exit size check, independent of scheduler timing.
+	_, stderr, err := runNmapInvocationWithProgressPollInterval(ctx, cmd, policy, "", nil, nil, time.Hour, afterInitialPoll)
+	select {
+	case releaseErr := <-released:
+		if releaseErr != nil {
+			t.Fatalf("release writer after initial poll: %v", releaseErr)
+		}
+	default:
+		t.Fatal("the child was not released after the initial empty-file poll")
+	}
+	if !strings.Contains(stderr, "writer-finished") {
+		t.Fatalf("the writer did not reach its completion marker; stderr = %q", stderr)
+	}
+	if err == nil || !strings.Contains(err.Error(), "nmap XML output exceeded 16777216 bytes") {
+		t.Fatalf("restricted writer = %v (stderr %q), want stable post-exit XML size error", err, stderr)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("the writer was canceled before it exited: %v", ctx.Err())
 	}
 }
 

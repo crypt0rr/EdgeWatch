@@ -256,23 +256,41 @@ func TestParseExecArgs(t *testing.T) {
 	if err != nil || request.profile != Notifier || !request.seccomp || request.files != 0 {
 		t.Fatalf("notifier parse = %+v %v", request, err)
 	}
+	request, err = parseExecArgs([]string{"--profile", "scanner", "--files", "1", "--file-size-limit", "16777217", "--", "/usr/bin/nmap", "-oX", "/dev/fd/3"})
+	if err != nil || request.fileSizeLimit != 16777217 || request.resourceOnly {
+		t.Fatalf("Landlock file-size-limit parse = %+v %v", request, err)
+	}
+	request, err = parseExecArgs([]string{"--profile", "scanner", "--files", "1", "--resource-only", "--file-size-limit", "16777217", "--", "/usr/bin/nmap", "-oX", "/dev/fd/3"})
+	if err != nil || request.fileSizeLimit != 16777217 || !request.resourceOnly {
+		t.Fatalf("resource-only file-size-limit parse = %+v %v", request, err)
+	}
 	for name, args := range map[string][]string{
-		"empty":                         nil,
-		"no profile":                    {"--files", "0", "--", "/usr/bin/nmap", "-n", "x"},
-		"unknown profile":               {"--profile", "daemon", "--files", "0", "--", "/usr/bin/nmap"},
-		"no program":                    {"--profile", "scanner", "--files", "0", "--"},
-		"no separator":                  {"--profile", "scanner", "--files", "0", "/usr/bin/nmap", "-n"},
-		"bad count":                     {"--profile", "scanner", "--files", "x", "--", "/usr/bin/nmap"},
-		"negative":                      {"--profile", "scanner", "--files", "-1", "--", "/usr/bin/nmap"},
-		"too many files":                {"--profile", "scanner", "--files", "17", "--", "/usr/bin/nmap"},
-		"no count":                      {"--profile", "scanner", "--", "/usr/bin/nmap"},
-		"profile twice":                 {"--profile", "scanner", "--profile", "notifier", "--files", "0", "--", "/usr/bin/nmap"},
-		"count twice":                   {"--profile", "scanner", "--files", "0", "--files", "1", "--", "/usr/bin/nmap"},
-		"dangling flag":                 {"--profile"},
-		"dangling count":                {"--profile", "scanner", "--files"},
-		"unknown flag":                  {"--profile", "scanner", "--files", "0", "--network", "--", "/usr/bin/nmap"},
-		"legacy global temporary grant": {"--profile", "scanner", "--files", "0", "--tmp", "--", "/usr/local/bin/naabu"},
-		"private temporary notifier":    {"--profile", "notifier", "--files", "0", "--private-tmp", "--private-root-fd", "3", "--private-leaf-fd", "4", "--control-fd", "5", "--", "/usr/local/bin/edgewatch"},
+		"empty":                             nil,
+		"no profile":                        {"--files", "0", "--", "/usr/bin/nmap", "-n", "x"},
+		"unknown profile":                   {"--profile", "daemon", "--files", "0", "--", "/usr/bin/nmap"},
+		"no program":                        {"--profile", "scanner", "--files", "0", "--"},
+		"no separator":                      {"--profile", "scanner", "--files", "0", "/usr/bin/nmap", "-n"},
+		"bad count":                         {"--profile", "scanner", "--files", "x", "--", "/usr/bin/nmap"},
+		"negative":                          {"--profile", "scanner", "--files", "-1", "--", "/usr/bin/nmap"},
+		"too many files":                    {"--profile", "scanner", "--files", "17", "--", "/usr/bin/nmap"},
+		"no count":                          {"--profile", "scanner", "--", "/usr/bin/nmap"},
+		"profile twice":                     {"--profile", "scanner", "--profile", "notifier", "--files", "0", "--", "/usr/bin/nmap"},
+		"count twice":                       {"--profile", "scanner", "--files", "0", "--files", "1", "--", "/usr/bin/nmap"},
+		"dangling flag":                     {"--profile"},
+		"dangling count":                    {"--profile", "scanner", "--files"},
+		"unknown flag":                      {"--profile", "scanner", "--files", "0", "--network", "--", "/usr/bin/nmap"},
+		"legacy global temporary grant":     {"--profile", "scanner", "--files", "0", "--tmp", "--", "/usr/local/bin/naabu"},
+		"private temporary notifier":        {"--profile", "notifier", "--files", "0", "--private-tmp", "--private-root-fd", "3", "--private-leaf-fd", "4", "--control-fd", "5", "--", "/usr/local/bin/edgewatch"},
+		"zero file-size limit":              {"--profile", "scanner", "--files", "0", "--file-size-limit", "0", "--", "/usr/bin/nmap"},
+		"negative file-size limit":          {"--profile", "scanner", "--files", "0", "--file-size-limit", "-1", "--", "/usr/bin/nmap"},
+		"missing file-size limit value":     {"--profile", "scanner", "--files", "0", "--file-size-limit"},
+		"duplicate file-size limit":         {"--profile", "scanner", "--files", "0", "--file-size-limit", "1", "--file-size-limit", "2", "--", "/usr/bin/nmap"},
+		"duplicate resource-only":           {"--profile", "scanner", "--files", "0", "--resource-only", "--resource-only", "--file-size-limit", "1", "--", "/usr/bin/nmap"},
+		"notifier file-size limit":          {"--profile", "notifier", "--files", "0", "--file-size-limit", "16777217", "--", "/usr/bin/edgewatch"},
+		"resource-only notifier":            {"--profile", "notifier", "--files", "0", "--resource-only", "--file-size-limit", "16777217", "--", "/usr/bin/edgewatch"},
+		"resource-only without limit":       {"--profile", "scanner", "--files", "0", "--resource-only", "--", "/usr/bin/nmap"},
+		"resource-only with seccomp":        {"--profile", "scanner", "--files", "0", "--resource-only", "--file-size-limit", "16777217", "--seccomp", "--", "/usr/bin/nmap"},
+		"file-size limit with private temp": {"--profile", "scanner", "--files", "0", "--file-size-limit", "16777217", "--private-tmp", "--private-root-fd", "3", "--private-leaf-fd", "4", "--control-fd", "5", "--", "/usr/local/bin/naabu"},
 	} {
 		if _, err := parseExecArgs(args); err == nil || !strings.Contains(err.Error(), "usage: sandbox-exec") {
 			t.Errorf("%s: parse = %v, want usage", name, err)
@@ -283,6 +301,87 @@ func TestParseExecArgs(t *testing.T) {
 	}
 	if err := execLandlocked([]string{"--files"}); err == nil || !strings.Contains(err.Error(), "usage") {
 		t.Fatalf("sandbox-exec with bad arguments = %v", err)
+	}
+}
+
+func TestSetFileSizeLimitWithOps(t *testing.T) {
+	t.Parallel()
+
+	const requested = uint64(16<<20 + 1)
+	readErr := errors.New("getrlimit failed")
+	writeErr := errors.New("setrlimit failed")
+	tests := []struct {
+		name       string
+		zeroLimit  bool
+		initial    unix.Rlimit
+		getErrors  map[int]error
+		setError   error
+		readback   *unix.Rlimit
+		wantErr    string
+		wantSet    bool
+		wantGetNum int
+	}{
+		{name: "zero limit", zeroLimit: true, wantErr: "file-size limit must be greater than zero"},
+		{name: "read inherited limit", getErrors: map[int]error{1: readErr}, wantErr: "read inherited RLIMIT_FSIZE: getrlimit failed", wantGetNum: 1},
+		{name: "hard limit too small", initial: unix.Rlimit{Cur: requested, Max: requested - 1}, wantErr: "inherited RLIMIT_FSIZE hard limit", wantGetNum: 1},
+		{name: "set failure", initial: unix.Rlimit{Cur: requested * 2, Max: requested * 2}, setError: writeErr, wantErr: "set RLIMIT_FSIZE: setrlimit failed", wantSet: true, wantGetNum: 1},
+		{name: "readback failure", initial: unix.Rlimit{Cur: requested * 2, Max: requested * 2}, getErrors: map[int]error{2: readErr}, wantErr: "verify RLIMIT_FSIZE: getrlimit failed", wantSet: true, wantGetNum: 2},
+		{name: "mismatched readback", initial: unix.Rlimit{Cur: requested * 2, Max: requested * 2}, readback: &unix.Rlimit{Cur: requested, Max: requested + 1}, wantErr: "RLIMIT_FSIZE is", wantSet: true, wantGetNum: 2},
+		{name: "sets exact soft and hard limits", initial: unix.Rlimit{Cur: requested * 2, Max: requested * 2}, readback: &unix.Rlimit{Cur: requested, Max: requested}, wantSet: true, wantGetNum: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			limit := requested
+			if test.zeroLimit {
+				limit = 0
+			}
+			getCount := 0
+			setCount := 0
+			var gotSet unix.Rlimit
+			ops := fileSizeLimitOps{
+				getrlimit: func(resource int, limit *unix.Rlimit) error {
+					if resource != unix.RLIMIT_FSIZE {
+						t.Fatalf("Getrlimit resource = %d, want RLIMIT_FSIZE", resource)
+					}
+					getCount++
+					if err := test.getErrors[getCount]; err != nil {
+						return err
+					}
+					if getCount == 1 || test.readback == nil {
+						*limit = test.initial
+					} else {
+						*limit = *test.readback
+					}
+					return nil
+				},
+				setrlimit: func(resource int, limit *unix.Rlimit) error {
+					if resource != unix.RLIMIT_FSIZE {
+						t.Fatalf("Setrlimit resource = %d, want RLIMIT_FSIZE", resource)
+					}
+					setCount++
+					gotSet = *limit
+					return test.setError
+				},
+			}
+
+			err := setFileSizeLimitWithOps(limit, ops)
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatalf("setFileSizeLimitWithOps() = %v, want success", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("setFileSizeLimitWithOps() = %v, want error containing %q", err, test.wantErr)
+			}
+			if test.wantSet && (setCount != 1 || gotSet != (unix.Rlimit{Cur: requested, Max: requested})) {
+				t.Fatalf("Setrlimit calls/value = %d/%+v, want one call with exact %d/%d", setCount, gotSet, requested, requested)
+			}
+			if !test.wantSet && setCount != 0 {
+				t.Fatalf("Setrlimit calls = %d, want none", setCount)
+			}
+			if getCount != test.wantGetNum {
+				t.Fatalf("Getrlimit calls = %d, want %d", getCount, test.wantGetNum)
+			}
+		})
 	}
 }
 
@@ -603,6 +702,72 @@ func TestSandboxExecRestrictsTheScannerProcess(t *testing.T) {
 		if value, err := strconv.Atoi(field); err != nil || value > ScannerMaxOpenFiles {
 			t.Fatalf("restricted scanner open file limits = %q, want at most %d", limits, ScannerMaxOpenFiles)
 		}
+	}
+}
+
+func TestSandboxExecCapsScannerFileSize(t *testing.T) {
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const limit = uint64(16<<20 + 1)
+	abi, abiErr := landlockVersion()
+	tests := []struct {
+		name   string
+		policy *Policy
+		want   string
+	}{
+		{name: "identity-only resource helper", policy: &Policy{profile: Scanner, temporaryHelper: helper}, want: "--resource-only"},
+	}
+	if abiErr == nil {
+		tests = append(tests, struct {
+			name   string
+			policy *Policy
+			want   string
+		}{name: "Landlock helper", policy: (*Policy)(nil).WithLandlock(helper, abi), want: "--profile scanner"})
+	}
+	if len(tests) == 1 {
+		t.Logf("Landlock unavailable; checking the identity-only helper path: %v", abiErr)
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "output.xml")
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			output, err := os.OpenFile(path, os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer output.Close()
+			cmd := exec.Command("/bin/sh", "-c", `awk '/^Max file size/{print $4, $5}' /proc/self/limits; head -c 33554432 /dev/zero > "$1"`, "sh", "/dev/fd/3")
+			childPath, err := test.policy.InheritFile(cmd, output, Write)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd.Args[len(cmd.Args)-1] = childPath
+			if !test.policy.ConfineWithFileSizeLimit(cmd, limit) {
+				t.Fatal("scanner helper did not apply the file-size limit")
+			}
+			if !strings.Contains(strings.Join(cmd.Args, " "), test.want) {
+				t.Fatalf("helper arguments %q do not contain %q", cmd.Args, test.want)
+			}
+			result, runErr := cmd.CombinedOutput()
+			if runErr == nil {
+				t.Fatalf("scanner writer succeeded beyond the limit; output %q", result)
+			}
+			if !strings.Contains(string(result), "16777217 16777217") {
+				t.Fatalf("scanner Max file size = %q, want 16777217/16777217", result)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Size() != int64(limit) {
+				t.Fatalf("scanner output file size = %d, want exact limit %d", info.Size(), limit)
+			}
+		})
 	}
 }
 

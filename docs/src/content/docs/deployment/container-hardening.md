@@ -329,9 +329,10 @@ once with `scheduler.max_concurrent_scans`.
 
 ### Resource limits
 
-With Landlock, the `sandbox-exec` command also sets the following limits for
-each scanner process before it restricts it. Every process the scanner starts
-inherits them:
+When the Linux scanner helper is available, it sets the following limits
+before it execs each scanner process. Every process the scanner starts
+inherits them. With Landlock, `sandbox-exec` sets the limits before it
+restricts the scanner:
 
 - `oom_score_adj` is `1000`, the highest value, so that when the container or
   host runs out of memory the kernel's out-of-memory killer stops a scanner
@@ -340,10 +341,21 @@ inherits them:
 - The soft and hard open file limits are at most 65,536 descriptors. Nmap
   raises its soft limit to the hard limit for connect scans, and Naabu holds
   about one socket for each of at most 1,024 workers.
+- For Nmap only, the soft and hard per-file size limits are 16 MiB plus one
+  byte. The parser accepts at most 16 MiB; the extra byte lets EdgeWatch
+  recognize an oversized XML file after Nmap exits, including when it exits
+  before the next 200 ms size poll. The limit is inherited by Nmap's children.
 
 `scanner_sandbox.limits` in `edgewatch health` reports them, as
 `oom_score_adj` and `max_open_files`; it is absent when Landlock does not
-apply. EdgeWatch sets no process count limit (`RLIMIT_NPROC`), which the
+apply. When Landlock is disabled but the Linux helper is available, it still
+sets the OOM, open-file, and Nmap file-size limits before exec. The Nmap
+file-size limit is not included in `scanner_sandbox.limits`, which reports
+only the OOM score and open-file limit. If no helper starts the scanner,
+including with `scanner.sandbox: off`, or on non-Linux systems, EdgeWatch uses
+its 200 ms output polling and final size check without an OS per-file limit; a
+fast writer can exceed 16 MiB before it is stopped or exits. EdgeWatch sets no
+process count limit (`RLIMIT_NPROC`), which the
 kernel counts for the scanner's UID across all of its scans, threads, and
 other containers that use the same UID, and no address space or data limit,
 which would fail large scans whose memory needs the release matrix does not
@@ -402,8 +414,9 @@ needed; `./data` keeps its UID 0 ownership.
   Landlock, the general scanner helper does not apply the [resource
   limits](#resource-limits). When the scanner sandbox and temporary helper are
   enabled, Naabu's per-invocation launcher still applies the OOM score and
-  open-file limits before it execs Naabu; `scanner.sandbox: off` disables
-  that helper as well.
+  open-file limits before it execs Naabu, and Nmap's launcher also applies its
+  per-file output limit; `scanner.sandbox: off` disables those helpers as
+  well.
 - A scanner process keeps its network access; target exclusions and probe
   budgets are enforced by EdgeWatch before it starts.
 - On a kernel without Landlock, a sandboxed process can read every file its

@@ -149,6 +149,53 @@ func TestDetectOffNeverProbes(t *testing.T) {
 	}
 }
 
+func TestConfineWithFileSizeLimitFallbacks(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		policy  *Policy
+		limit   uint64
+		want    bool
+		wantErr string
+		wantID  bool
+	}{
+		{name: "nil policy retains caller output checks", policy: nil, limit: 16 << 20},
+		{name: "no helper retains caller output checks", policy: &Policy{profile: Scanner}, limit: 16 << 20},
+		{name: "identity-only no-helper fallback keeps credentials and caller checks", policy: &Policy{profile: Scanner, enforce: true, ambient: []uintptr{unix.CAP_NET_RAW}}, limit: 16 << 20, wantID: true},
+		{name: "non-scanner profile rejected", policy: &Policy{profile: Notifier}, limit: 16 << 20, wantErr: "file-size limit is only supported for the scanner profile"},
+		{name: "zero limit rejected", policy: &Policy{profile: Scanner}, wantErr: "scanner file-size limit must be greater than zero"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := exec.Command("/usr/local/bin/nmap", "-oX", "/dev/fd/3")
+			pathBefore := cmd.Path
+			argsBefore := append([]string(nil), cmd.Args...)
+			got := test.policy.ConfineWithFileSizeLimit(cmd, test.limit)
+			if got != test.want {
+				t.Fatalf("ConfineWithFileSizeLimit() = %t, want %t", got, test.want)
+			}
+			if cmd.Path != pathBefore || !reflect.DeepEqual(cmd.Args, argsBefore) || cmd.Process != nil {
+				t.Fatalf("command changed on fallback/rejection: path=%q args=%q process=%v", cmd.Path, cmd.Args, cmd.Process)
+			}
+			if test.wantID {
+				if attr := cmd.SysProcAttr; attr == nil || attr.Credential == nil || attr.Credential.Uid != uint32(UID) || attr.Credential.Gid != uint32(GID) || len(attr.Credential.Groups) != 0 || !reflect.DeepEqual(attr.AmbientCaps, []uintptr{unix.CAP_NET_RAW}) {
+					t.Fatalf("identity-only fallback process attributes = %+v, want scanner identity and NET_RAW", attr)
+				}
+			} else if cmd.SysProcAttr != nil {
+				t.Fatalf("unconfined fallback/rejection changed process attributes: %+v", cmd.SysProcAttr)
+			}
+			if test.wantErr == "" {
+				if cmd.Err != nil {
+					t.Fatalf("fallback command error = %v, want nil", cmd.Err)
+				}
+			} else if cmd.Err == nil || cmd.Err.Error() != test.wantErr {
+				t.Fatalf("command error = %v, want %q", cmd.Err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestDetectProbesEachScannerWithLandlock(t *testing.T) {
 	t.Parallel()
 	env, _ := containerEnvironment()

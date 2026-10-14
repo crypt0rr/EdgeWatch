@@ -175,8 +175,15 @@ Nmap's terminal status stream is only a progress hint while Nmap writes its
 XML result to a file, so a long scan is never stopped for the amount of status
 it prints. The XML result is limited to 16 MiB and Nmap's diagnostic output to
 8 MiB; a scanner that exceeds either is stopped and the error names the
-limit. EdgeWatch checks the XML token by token before it decodes observations
-for the addresses in that invocation. The parser also caps XML complexity at
+limit. On Linux, when the scanner helper is available, Nmap also inherits a
+soft and hard per-file limit of 16 MiB plus one byte, in both Landlock and
+identity-only helper modes. The extra byte lets EdgeWatch recognize an
+oversized file after Nmap exits, even when it exits before the next 200 ms
+size poll. Without that helper, including when the sandbox is off or on a
+non-Linux system, EdgeWatch relies on the 200 ms polling check and a final
+size check after exit; the file can grow past 16 MiB until a poll stops the
+scanner or it exits. EdgeWatch checks the XML token by token before it decodes
+observations for the addresses in that invocation. The parser also caps XML complexity at
 1,000,000 tokens, 128 levels of nesting, 64 attributes per element, and
 500,000 top-level Nmap host records, while decoding at most the 128 host
 records selected for a scanner batch. Foreign host subtrees are checked as

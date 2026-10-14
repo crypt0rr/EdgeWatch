@@ -142,14 +142,18 @@ func handledScopes(abi int) uint64 {
 
 // execLandlocked is the sandbox-exec command:
 //
-//	sandbox-exec --profile PROFILE --files N [--seccomp] -- PROGRAM [ARGUMENT...]
+//	sandbox-exec --profile PROFILE --files N [--file-size-limit BYTES] [--seccomp] -- PROGRAM [ARGUMENT...]
+//	sandbox-exec --profile scanner --files N --resource-only --file-size-limit BYTES -- PROGRAM [ARGUMENT...]
 //
 // It restricts its own process with Landlock to the paths of PROFILE and its
 // N inherited descriptors, starting at 3, sets
 // no_new_privs, installs the seccomp filter with --seccomp, and then executes
 // PROGRAM in place. A scanner also gets the resource limits of
-// limitScannerResources first. The process keeps its identity, capabilities,
-// descriptors, and environment, and the daemon's handle on it stays valid.
+// limitScannerResources first. The resource-only form applies scanner
+// resource and file-size limits without Landlock or seccomp, for deployments
+// without a Landlock helper. In either form the process keeps its identity,
+// capabilities, descriptors, and environment, and the daemon's handle on it
+// stays valid.
 func execLandlocked(args []string) error {
 	if len(args) > 0 && args[0] == "--cleanup-private-tmp" {
 		request, err := parsePrivateTemporaryCleanupArgs(args[1:])
@@ -171,6 +175,17 @@ func execLandlocked(args []string) error {
 		return execPrivateTemporary(request)
 	}
 	profile, files, argv := request.profile, request.files, request.argv
+	if request.resourceOnly {
+		runtime.LockOSThread()
+		limitScannerResources()
+		if err := setFileSizeLimit(request.fileSizeLimit); err != nil {
+			return fmt.Errorf("%s: set scanner file-size limit: %w", ExecCommand, err)
+		}
+		if err := syscall.Exec(argv[0], argv, os.Environ()); err != nil {
+			return fmt.Errorf("%s: execute %s: %w", ExecCommand, argv[0], err)
+		}
+		return nil
+	}
 	// no_new_privs and the Landlock domain belong to the calling thread, and
 	// PROGRAM executes from it, so the goroutine must not move to another
 	// thread. The process ends with the exec, so the thread stays locked.
@@ -181,6 +196,11 @@ func execLandlocked(args []string) error {
 	}
 	if profile == Scanner {
 		limitScannerResources()
+		if request.fileSizeLimit > 0 {
+			if err := setFileSizeLimit(request.fileSizeLimit); err != nil {
+				return fmt.Errorf("%s: set scanner file-size limit: %w", ExecCommand, err)
+			}
+		}
 	}
 	if err := restrictSelf(profilePaths(profile, os.Getenv), inherited); err != nil {
 		return fmt.Errorf("%s: %w", ExecCommand, err)
@@ -249,13 +269,15 @@ type execRequest struct {
 	controlFD     int
 	landlock      bool
 	seccomp       bool
+	fileSizeLimit uint64
+	resourceOnly  bool
 	argv          []string
 }
 
 func parseExecArgs(args []string) (execRequest, error) {
-	usage := fmt.Errorf("usage: %s --profile scanner|notifier --files N [--private-tmp --private-root-fd FD --private-leaf-fd FD --control-fd FD [--landlock]] [--seccomp] -- PROGRAM [ARGUMENT...]", ExecCommand)
+	usage := fmt.Errorf("usage: %s --profile scanner|notifier --files N [--file-size-limit BYTES] [--resource-only] [--private-tmp --private-root-fd FD --private-leaf-fd FD --control-fd FD [--landlock]] [--seccomp] -- PROGRAM [ARGUMENT...]", ExecCommand)
 	request := execRequest{files: -1, privateRootFD: -1, privateLeafFD: -1, controlFD: -1}
-	privateSeen, rootSeen, leafSeen, controlSeen, landlockSeen, seccompSeen := false, false, false, false, false, false
+	privateSeen, rootSeen, leafSeen, controlSeen, landlockSeen, seccompSeen, sizeLimitSeen, resourceOnlySeen := false, false, false, false, false, false, false, false
 	for index := 0; index < len(args); index++ {
 		switch args[index] {
 		case "--profile":
@@ -325,6 +347,23 @@ func parseExecArgs(args []string) (execRequest, error) {
 			}
 			request.seccomp = true
 			seccompSeen = true
+		case "--file-size-limit":
+			if index+1 >= len(args) || sizeLimitSeen {
+				return execRequest{}, usage
+			}
+			index++
+			limit, err := strconv.ParseUint(args[index], 10, 64)
+			if err != nil || limit == 0 {
+				return execRequest{}, usage
+			}
+			request.fileSizeLimit = limit
+			sizeLimitSeen = true
+		case "--resource-only":
+			if resourceOnlySeen {
+				return execRequest{}, usage
+			}
+			request.resourceOnly = true
+			resourceOnlySeen = true
 		case "--":
 			request.argv = args[index+1:]
 			index = len(args)
@@ -336,13 +375,57 @@ func parseExecArgs(args []string) (execRequest, error) {
 		(request.landlock && !privateSeen) ||
 		(privateSeen && (request.profile != Scanner || request.privateRootFD != 3+request.files || request.privateLeafFD != request.privateRootFD+1 || request.controlFD != request.privateLeafFD+1 || !rootSeen || !leafSeen || !controlSeen)) ||
 		(!privateSeen && (rootSeen || leafSeen || request.privateRootFD != -1 || request.privateLeafFD != -1 || request.controlFD != -1 || request.landlock)) ||
-		(request.seccomp && privateSeen && !request.landlock) {
+		(request.seccomp && privateSeen && !request.landlock) ||
+		(request.fileSizeLimit > 0 && (request.profile != Scanner || privateSeen)) ||
+		(request.resourceOnly && (request.fileSizeLimit == 0 || request.profile != Scanner || request.seccomp || privateSeen)) {
 		return execRequest{}, usage
 	}
 	if !filepath.IsAbs(request.argv[0]) {
 		return execRequest{}, fmt.Errorf("%s: the program %q is not an absolute path", ExecCommand, request.argv[0])
 	}
 	return request, nil
+}
+
+// setFileSizeLimit sets both the soft and hard per-file limit. Lowering the
+// hard limit prevents the scanner from raising its soft limit after exec.
+func setFileSizeLimit(bytes uint64) error {
+	return setFileSizeLimitWithOps(bytes, fileSizeLimitOps{
+		getrlimit: unix.Getrlimit,
+		setrlimit: unix.Setrlimit,
+	})
+}
+
+type fileSizeLimitOps struct {
+	getrlimit func(resource int, limit *unix.Rlimit) error
+	setrlimit func(resource int, limit *unix.Rlimit) error
+}
+
+// setFileSizeLimitWithOps keeps the production resource fixed at RLIMIT_FSIZE
+// while making the syscall result handling directly testable without changing
+// the parent test process's limits.
+func setFileSizeLimitWithOps(bytes uint64, ops fileSizeLimitOps) error {
+	if bytes == 0 {
+		return errors.New("file-size limit must be greater than zero")
+	}
+	var inherited unix.Rlimit
+	if err := ops.getrlimit(unix.RLIMIT_FSIZE, &inherited); err != nil {
+		return fmt.Errorf("read inherited RLIMIT_FSIZE: %w", err)
+	}
+	if inherited.Max < bytes {
+		return fmt.Errorf("inherited RLIMIT_FSIZE hard limit %d is below required %d", inherited.Max, bytes)
+	}
+	limit := unix.Rlimit{Cur: bytes, Max: bytes}
+	if err := ops.setrlimit(unix.RLIMIT_FSIZE, &limit); err != nil {
+		return fmt.Errorf("set RLIMIT_FSIZE: %w", err)
+	}
+	var actual unix.Rlimit
+	if err := ops.getrlimit(unix.RLIMIT_FSIZE, &actual); err != nil {
+		return fmt.Errorf("verify RLIMIT_FSIZE: %w", err)
+	}
+	if actual.Cur != bytes || actual.Max != bytes {
+		return fmt.Errorf("RLIMIT_FSIZE is %d/%d, want %d/%d", actual.Cur, actual.Max, bytes, bytes)
+	}
+	return nil
 }
 
 // profilePaths are landlockPaths, the search path files of musl's dynamic

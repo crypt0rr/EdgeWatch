@@ -13,7 +13,9 @@ set -euo pipefail
 # notification to a local webhook and require that the notification process
 # runs as UID 65531 without capabilities. Require that both run with the
 # seccomp filter, one more than the daemon's, and that no process dumps core.
-# Require that a running Nmap has the scanner's resource limits. Require that
+# Require that a running Nmap has the scanner's resource limits, including
+# the Nmap-only RLIMIT_FSIZE bound in Landlock and identity-only helper modes.
+# Require that
 # Nmap's inherited files lie in the scanner files directory, while Naabu's
 # temporary leaf uses the production helper's per-invocation path and is
 # removed after success or cancellation. Require that cancelling a Naabu scan
@@ -358,6 +360,16 @@ expect_scanner_limits() {
   fi
 }
 
+# expect_nmap_file_size_limit NAME PID requires the helper-backed Nmap
+# invocation's soft and hard per-file limit to equal the parser cap plus one
+# byte. That extra byte makes an oversized XML result observable after Nmap
+# exits, including when it exits before the output-polling ticker runs.
+expect_nmap_file_size_limit() {
+  local name=$1 got
+  got=$(docker exec "$container" awk '/^Max file size/{print $4, $5}' "/proc/$2/limits")
+  [ "$got" = "16777217 16777217" ] || fail "the $name process has Max file size '$got', want '16777217 16777217'"
+}
+
 # scanner_pid NAME prints the ID of the running process with that name.
 scanner_pid() {
   local pid=
@@ -644,6 +656,7 @@ nmap_identity=$(printf '%s\n' "$nmap_identity" | head -1)
 [ "$nmap_identity" = "65532 65532 - 0000000000002000" ] || fail "running Nmap identity is '$nmap_identity', want '65532 65532 - 0000000000002000'"
 expect_filtered Nmap "$(process_hardening "$nmap_pid")"
 expect_scanner_limits Nmap "$nmap_pid"
+expect_nmap_file_size_limit Nmap "$nmap_pid"
 cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
 [ "$cancelled" = canceled ] || fail "the cancelled scan ended '$cancelled'"
 if docker exec "$container" /bin/sh -c 'grep -l "^Name:[[:space:]]*nmap$" /proc/[0-9]*/status' >/dev/null 2>&1; then
@@ -746,6 +759,16 @@ expect_health "enforced 65532 NET_RAW landlock:disabled seccomp:disabled limits:
 identity_only_scan=$(python3 "$workdir/driver.py" scan "$base" "$state" identity-only "$tcp_ports" "$udp_ports")
 identity_only_naabu=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-identity-only "$tcp_open")
 expect_no_naabu_temporary_namespaces
+started=$(python3 "$workdir/driver.py" start "$base" "$state" slow-identity-only "1-20000")
+job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
+scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
+nmap_pid=$(scanner_pid nmap)
+[ -n "$nmap_pid" ] || fail "the identity-only slow scan started no Nmap"
+expect_scanner_identity "$nmap_pid"
+expect_nmap_file_size_limit "identity-only Nmap" "$nmap_pid"
+cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
+[ "$cancelled" = canceled ] || fail "the identity-only Nmap scan ended '$cancelled'"
+expect_no_scanner_processes "the identity-only cancelled Nmap scan"
 started=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" slow-naabu-identity-only)
 job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')

@@ -170,6 +170,7 @@ type Status struct {
 	// processes. Nil when it does not apply them. Naabu's private-temporary
 	// helper also applies these limits when Landlock is disabled; that
 	// per-process behavior is not represented by this Landlock status field.
+	// The Nmap-only per-file size limit is also not reported here.
 	Limits *ProcessLimits `json:"limits,omitempty"`
 }
 
@@ -310,6 +311,38 @@ func (p *Policy) Confine(cmd *exec.Cmd) {
 	p.confine(cmd)
 }
 
+// ConfineWithFileSizeLimit confines cmd and, when a sandbox-exec helper is
+// available, sets an inherited hard and soft RLIMIT_FSIZE before the program
+// starts. A resource-only helper is used when Landlock is not available. It
+// reports whether a helper was configured; when no helper is available, the
+// caller must retain its output checks.
+func (p *Policy) ConfineWithFileSizeLimit(cmd *exec.Cmd, limit uint64) bool {
+	if p == nil {
+		return false
+	}
+	if p.enforce && confineProcess != nil {
+		spec := p.profileName().spec()
+		confineProcess(cmd, spec.uid, spec.gid, p.ambient)
+	}
+	if p.profileName() != Scanner {
+		cmd.Err = errors.New("file-size limit is only supported for the scanner profile")
+		return false
+	}
+	if limit == 0 {
+		cmd.Err = errors.New("scanner file-size limit must be greater than zero")
+		return false
+	}
+	if p.helper != "" {
+		startThroughHelperWithFileSizeLimit(cmd, p.helper, p.profileName(), p.seccomp, limit, false)
+		return cmd.Err == nil && cmd.Path == p.helper
+	}
+	if p.temporaryHelper != "" {
+		startThroughHelperWithFileSizeLimit(cmd, p.temporaryHelper, p.profileName(), false, limit, true)
+		return cmd.Err == nil && cmd.Path == p.temporaryHelper
+	}
+	return false
+}
+
 func (p *Policy) confine(cmd *exec.Cmd) {
 	if p == nil {
 		return
@@ -330,6 +363,10 @@ func (p *Policy) confine(cmd *exec.Cmd) {
 // that error instead, so callers still recognize a missing scanner and never
 // start it without the restriction.
 func startThroughHelper(cmd *exec.Cmd, helper string, profile Profile, seccomp bool) {
+	startThroughHelperWithFileSizeLimit(cmd, helper, profile, seccomp, 0, false)
+}
+
+func startThroughHelperWithFileSizeLimit(cmd *exec.Cmd, helper string, profile Profile, seccomp bool, fileSizeLimit uint64, resourceOnly bool) {
 	if cmd.Err != nil {
 		return
 	}
@@ -338,6 +375,12 @@ func startThroughHelper(cmd *exec.Cmd, helper string, profile Profile, seccomp b
 		return
 	}
 	args := []string{helper, ExecCommand, "--profile", string(profile), "--files", strconv.Itoa(len(cmd.ExtraFiles))}
+	if resourceOnly {
+		args = append(args, "--resource-only")
+	}
+	if fileSizeLimit > 0 {
+		args = append(args, "--file-size-limit", strconv.FormatUint(fileSizeLimit, 10))
+	}
 	if seccomp {
 		args = append(args, "--seccomp")
 	}

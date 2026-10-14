@@ -52,6 +52,14 @@ privileged default; SYN discovery additionally requires the explicitly opted-in
 Nmap XML is checked as a token stream before EdgeWatch builds observations.
 Each invocation is limited to 16 MiB, 1,000,000 XML tokens, 128 levels of
 nesting, 64 attributes per element, and 500,000 top-level Nmap host records.
+On Linux, when the scanner helper is available, Nmap also inherits a soft and
+hard `RLIMIT_FSIZE` of 16 MiB plus one byte, in both Landlock and identity-only
+helper modes. The extra byte makes a too-large XML file detectable even when
+Nmap exits before the next 200 ms size poll. Without a helper, including when
+the sandbox is off or on non-Linux systems, EdgeWatch polls every 200 ms and
+checks the final file size after exit; a fast writer can exceed 16 MiB until a
+poll stops it or it exits. The limit is per file and is inherited by Nmap's
+children; it does not apply to Naabu's LevelDB temporary files.
 It decodes selected numeric host addresses only, up to 128 per invocation,
 and caps their combined address-by-scanned-port scope at 65,536 slots. The
 slot count uses unique selected addresses actually present in the XML, so

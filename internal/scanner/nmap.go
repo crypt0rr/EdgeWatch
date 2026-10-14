@@ -82,11 +82,11 @@ func (n *Nmap) SetSandbox(policy *sandbox.Policy) {
 // executed argument list; the recorded command fingerprint is computed from
 // the scan's arguments without it. Call it once the XML output file is
 // shared: Landlock lets Nmap reopen only the files it inherits by then.
-func confineNmap(cmd *exec.Cmd, policy *sandbox.Policy) {
+func confineNmap(cmd *exec.Cmd, policy *sandbox.Policy) bool {
 	if policy.Enforced() {
 		cmd.Args = append([]string{cmd.Args[0], "--privileged"}, cmd.Args[1:]...)
 	}
-	policy.Confine(cmd)
+	return policy.ConfineWithFileSizeLimit(cmd, nmapOutputFileSizeLimit)
 }
 
 // maxProgressOutput bounds diagnostic stderr retained from either scanner.
@@ -104,6 +104,11 @@ const maxProgressOutput = 8 << 20
 // that limit and terminate a child while it is writing, rather than waiting
 // for a full filesystem or allocating an oversized result in memory.
 const maxNmapOutput = 16 << 20
+
+// Nmap's helper-backed invocation may write one byte beyond the parser's
+// accepted output cap. That byte makes an RLIMIT_FSIZE hit observable to the
+// existing post-exit size check, even when the process exits before polling.
+const nmapOutputFileSizeLimit = maxNmapOutput + 1
 
 var errNmapProgressOutputExceeded = fmt.Errorf("nmap XML output exceeded %d bytes", maxNmapOutput)
 
@@ -1305,6 +1310,17 @@ func sanitizeStderr(v string) string {
 // and the invocation then waits at most scannerWaitDelay for the child's
 // stderr and terminal to close, and fails when either is still held.
 func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, policy *sandbox.Policy, dir string, onOutput func(string, float64), onHeartbeat func()) ([]byte, string, error) {
+	return runNmapInvocationWithProgressPollInterval(ctx, cmd, policy, dir, onOutput, onHeartbeat, 200*time.Millisecond, nil)
+}
+
+// runNmapInvocationWithProgressPollInterval keeps the poll interval and the
+// initial-poll callback scoped to one invocation. The callback is nil in
+// production; tests use it to release a controlled child only after its first
+// empty-file poll has completed.
+func runNmapInvocationWithProgressPollInterval(ctx context.Context, cmd *exec.Cmd, policy *sandbox.Policy, dir string, onOutput func(string, float64), onHeartbeat func(), progressPollInterval time.Duration, afterInitialPoll func()) ([]byte, string, error) {
+	if progressPollInterval <= 0 {
+		return nil, "", errors.New("nmap progress poll interval must be greater than zero")
+	}
 	xmlPath, releaseXML, err := prepareNmapXMLOutput(cmd, policy, dir)
 	if err != nil {
 		return nil, "", err
@@ -1415,7 +1431,7 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, policy *sandbox.Polic
 		defer close(progressDone)
 		heartbeatTicker := time.NewTicker(time.Second)
 		defer heartbeatTicker.Stop()
-		progressTicker := time.NewTicker(200 * time.Millisecond)
+		progressTicker := time.NewTicker(progressPollInterval)
 		defer progressTicker.Stop()
 		poll := func() {
 			if xmlPath == "" {
@@ -1433,6 +1449,9 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, policy *sandbox.Polic
 			}
 		}
 		poll()
+		if afterInitialPoll != nil {
+			afterInitialPoll()
+		}
 		for {
 			select {
 			case <-progressTicker.C:

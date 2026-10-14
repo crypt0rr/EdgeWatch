@@ -251,10 +251,12 @@ var (
 // HardenProcess sets Linux's core-file size limit and coredump filter, then
 // makes the calling process non-dumpable so that a process of the same
 // identity without CAP_SYS_PTRACE can neither trace it nor read its memory.
-// The zero coredump filter excludes normal memory mappings from core data; it
-// does not prevent a configured piped core handler from being invoked, and
-// Linux always includes the vDSO mapping. A Linux error is returned if the
-// filter cannot be set and read back. Elsewhere than Linux it does nothing.
+// A re-executed EdgeWatch child may verify an already-zero inherited filter
+// when Landlock prevents rewriting the proc control file; it fails if that
+// value is nonzero or cannot be read. The zero coredump filter excludes
+// normal memory mappings from core data; it does not prevent a configured
+// piped core handler from being invoked, and Linux always includes the vDSO
+// mapping. Elsewhere than Linux it does nothing.
 func HardenProcess() error {
 	if hardenProcess == nil {
 		return nil

@@ -353,15 +353,17 @@ cover.
 
 On Linux, EdgeWatch sets its soft and hard core file size limits to zero,
 sets `/proc/self/coredump_filter` to zero and reads it back, then clears the
-dumpable flag before starting any command or child. Startup stops if any of
-those settings fail. Children inherit the core limit and filter across
-`fork` and `exec`; the limit cannot be raised by them. The zero filter excludes
-normal memory mappings from core data. Linux always includes the vDSO mapping,
-and the filter does not prevent the kernel from invoking a configured piped
-core handler or prevent that handler from receiving core metadata. The
-`RLIMIT_CORE` limit is not enforced for piped handlers. A non-dumpable process
-cannot be traced, and its memory cannot be read, by another process of its
-identity without `CAP_SYS_PTRACE`.
+dumpable flag before starting any command or child. A re-executed EdgeWatch
+child verifies an already-zero inherited filter when Landlock prevents
+rewriting the proc control file; startup stops if the filter is nonzero or
+cannot be read. Children inherit the core limit and filter across `fork` and
+`exec`; the limit cannot be raised by them. The zero filter excludes normal
+memory mappings from core data. Linux always includes the vDSO mapping, and
+the filter does not prevent the kernel from invoking a configured piped core
+handler or prevent that handler from receiving core metadata. The `RLIMIT_CORE`
+limit is not enforced for piped handlers. A non-dumpable process cannot be
+traced, and its memory cannot be read, by another process of its identity
+without `CAP_SYS_PTRACE`.
 
 ### Upgrading an existing deployment
 

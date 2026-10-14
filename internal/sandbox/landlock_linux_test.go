@@ -21,12 +21,33 @@ import (
 // that verifies the core limit and mapping filter were inherited.
 const hardenCheck = "harden-check"
 const hardenExecCheck = "harden-exec-check"
+const hardenNonzeroCheck = "harden-nonzero-check"
+const hardenZeroLandlock = "harden-zero-landlock"
+const hardenNonzeroLandlock = "harden-nonzero-landlock"
+const hardenLandlockZeroCheck = "harden-landlock-zero-check"
+const hardenLandlockNonzeroCheck = "harden-landlock-nonzero-check"
+
+const nonzeroCoredumpFilter = 0x1
 
 const privateTemporaryProcFDCheck = "private-temporary-proc-fd-check"
 
 // TestMain lets the test binary stand in for the EdgeWatch executable as the
 // sandbox-exec command, and harden a process of its own.
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == hardenZeroLandlock {
+		if err := HardenProcess(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		execLandlockHardenCheck(hardenLandlockZeroCheck)
+	}
+	if len(os.Args) > 1 && os.Args[1] == hardenNonzeroLandlock {
+		if err := setCoredumpFilterForTest(nonzeroCoredumpFilter); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		execLandlockHardenCheck(hardenLandlockNonzeroCheck)
+	}
 	if len(os.Args) > 1 && os.Args[1] == ExecCommand {
 		if err := Exec(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -34,38 +55,59 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if len(os.Args) > 1 && os.Args[1] == hardenLandlockZeroCheck {
+		if err := expectCoredumpFilterWriteDenied(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := HardenProcess(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := verifyHardenedProcess(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		execHardenedCheck()
+	}
+	if len(os.Args) > 1 && os.Args[1] == hardenLandlockNonzeroCheck {
+		if err := expectCoredumpFilterWriteDenied(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		err := HardenProcess()
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("current filter is %#x, want zero", nonzeroCoredumpFilter)) {
+			fmt.Fprintf(os.Stderr, "HardenProcess error = %v, want refusal of inherited filter %#x\n", err, nonzeroCoredumpFilter)
+			os.Exit(1)
+		}
+		fmt.Println("nonzero inherited coredump filter refused")
+		os.Exit(0)
+	}
+	if len(os.Args) > 1 && os.Args[1] == hardenNonzeroCheck {
+		if err := setCoredumpFilterForTest(nonzeroCoredumpFilter); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := HardenProcess(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := verifyHardenedProcess(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		execHardenedCheck()
+	}
 	if len(os.Args) > 1 && os.Args[1] == hardenCheck {
 		if err := HardenProcess(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		dumpable, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
-		var limit unix.Rlimit
-		if err == nil {
-			err = unix.Getrlimit(unix.RLIMIT_CORE, &limit)
-		}
-		if err != nil {
+		if err := verifyHardenedProcess(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		filter, err := readCoredumpFilter()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		if dumpable != 0 || limit.Cur != 0 || limit.Max != 0 || filter != 0 {
-			fmt.Fprintf(os.Stderr, "hardened state = dumpable %d, core limit %d/%d, coredump filter %#x\n", dumpable, limit.Cur, limit.Max, filter)
-			os.Exit(1)
-		}
-		executable, err := os.Executable()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		if err := unix.Exec(executable, []string{executable, hardenExecCheck}, os.Environ()); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
+		execHardenedCheck()
 	}
 	if len(os.Args) > 1 && os.Args[1] == hardenExecCheck {
 		filter, err := readCoredumpFilter()
@@ -103,6 +145,96 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+func execLandlockHardenCheck(target string) {
+	executable, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	// Production EdgeWatch is below /usr, which the notifier profile can
+	// execute. The Go test binary lives in the build directory instead, so
+	// grant this exact file the same read/execute access for the test process.
+	paths := append(profilePaths(Notifier, os.Getenv), landlockPath{path: executable, access: landlockExecute})
+	runtime.LockOSThread()
+	if err := restrictSelf(paths, nil); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := unix.Exec(executable, []string{executable, target}, os.Environ()); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func execHardenedCheck() {
+	executable, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := unix.Exec(executable, []string{executable, hardenExecCheck}, os.Environ()); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func verifyHardenedProcess() error {
+	dumpable, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
+	var limit unix.Rlimit
+	if err == nil {
+		err = unix.Getrlimit(unix.RLIMIT_CORE, &limit)
+	}
+	if err != nil {
+		return err
+	}
+	filter, err := readCoredumpFilter()
+	if err != nil {
+		return err
+	}
+	if dumpable != 0 || limit.Cur != 0 || limit.Max != 0 || filter != 0 {
+		return fmt.Errorf("hardened state = dumpable %d, core limit %d/%d, coredump filter %#x", dumpable, limit.Cur, limit.Max, filter)
+	}
+	return nil
+}
+
+func setCoredumpFilterForTest(filter uint64) error {
+	file, err := os.OpenFile(procCoredumpFilter, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	written, writeErr := fmt.Fprintf(file, "%x", filter)
+	closeErr := file.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if written == 0 {
+		return errors.New("coredump filter test setup wrote no bytes")
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	got, err := readCoredumpFilter()
+	if err != nil {
+		return err
+	}
+	if got != filter {
+		return fmt.Errorf("test coredump filter = %#x, want %#x", got, filter)
+	}
+	return nil
+}
+
+func expectCoredumpFilterWriteDenied() error {
+	file, err := os.OpenFile(procCoredumpFilter, os.O_WRONLY, 0)
+	if err == nil {
+		_ = file.Close()
+		return errors.New("Landlock unexpectedly allowed writing the coredump filter")
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		return fmt.Errorf("open coredump filter for write = %w, want permission denied", err)
+	}
+	return nil
 }
 
 func requireLandlock(t *testing.T) int {

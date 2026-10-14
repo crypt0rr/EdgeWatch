@@ -267,8 +267,34 @@ func TestHardenProcessDisablesCoreMappings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := exec.Command(executable, hardenCheck).CombinedOutput()
+	output, err := exec.Command(executable, hardenNonzeroCheck).CombinedOutput()
 	if err != nil || strings.TrimSpace(string(output)) != "inherited core limit 0/0 and coredump filter 0" {
-		t.Fatalf("hardened exec child = %q, %v; want zero core limit and coredump filter", output, err)
+		t.Fatalf("hardened exec child after nonzero filter = %q, %v; want zero core limit and coredump filter", output, err)
+	}
+}
+
+func TestHardenProcessAcceptsVerifiedZeroFilterAfterLandlockExec(t *testing.T) {
+	t.Parallel()
+	requireLandlock(t)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command(executable, hardenZeroLandlock).CombinedOutput()
+	if err != nil || strings.TrimSpace(string(output)) != "inherited core limit 0/0 and coredump filter 0" {
+		t.Fatalf("zero-filter Landlock exec child = %q, %v; want verified inherited zero filter", output, err)
+	}
+}
+
+func TestHardenProcessRejectsNonzeroFilterItCannotChangeAfterLandlock(t *testing.T) {
+	t.Parallel()
+	requireLandlock(t)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command(executable, hardenNonzeroLandlock).CombinedOutput()
+	if err != nil || strings.TrimSpace(string(output)) != "nonzero inherited coredump filter refused" {
+		t.Fatalf("nonzero-filter Landlock exec child = %q, %v; want refusal before startup", output, err)
 	}
 }

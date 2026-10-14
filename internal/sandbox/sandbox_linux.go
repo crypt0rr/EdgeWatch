@@ -97,8 +97,9 @@ func init() {
 
 // hardenLinux limits ordinary core-file output, excludes memory mappings from
 // core dumps, and clears the dumpable flag, which execve sets again for the
-// program it runs. The coredump filter is set and checked before the process
-// becomes non-dumpable so startup fails if the kernel does not honor it.
+// program it runs. The coredump filter is set or its inherited zero value is
+// checked before the process becomes non-dumpable, so startup fails if a
+// nonzero filter cannot be cleared or the current value cannot be verified.
 func hardenLinux() error {
 	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{}); err != nil {
 		return fmt.Errorf("disable core dumps: %w", err)
@@ -117,18 +118,18 @@ const procCoredumpFilter = "/proc/self/coredump_filter"
 func setAndVerifyZeroCoredumpFilter() error {
 	file, err := os.OpenFile(procCoredumpFilter, os.O_WRONLY, 0)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", procCoredumpFilter, err)
+		return verifyInheritedZeroCoredumpFilter(fmt.Errorf("open %s: %w", procCoredumpFilter, err))
 	}
 	written, writeErr := file.WriteString("0")
 	closeErr := file.Close()
 	if writeErr != nil {
-		return fmt.Errorf("set %s to zero: %w", procCoredumpFilter, writeErr)
+		return verifyInheritedZeroCoredumpFilter(fmt.Errorf("set %s to zero: %w", procCoredumpFilter, writeErr))
 	}
 	if written != 1 {
-		return fmt.Errorf("set %s to zero: wrote %d of 1 byte", procCoredumpFilter, written)
+		return verifyInheritedZeroCoredumpFilter(fmt.Errorf("set %s to zero: wrote %d of 1 byte", procCoredumpFilter, written))
 	}
 	if closeErr != nil {
-		return fmt.Errorf("close %s after setting it: %w", procCoredumpFilter, closeErr)
+		return verifyInheritedZeroCoredumpFilter(fmt.Errorf("close %s after setting it: %w", procCoredumpFilter, closeErr))
 	}
 	filter, err := readCoredumpFilter()
 	if err != nil {
@@ -136,6 +137,22 @@ func setAndVerifyZeroCoredumpFilter() error {
 	}
 	if filter != 0 {
 		return fmt.Errorf("verify %s: value is %#x, want zero", procCoredumpFilter, filter)
+	}
+	return nil
+}
+
+// verifyInheritedZeroCoredumpFilter permits a process that inherited the
+// already-zero filter to continue when its context cannot write the proc
+// control file, such as an EdgeWatch child after Landlock is applied. A
+// failed write is never accepted unless the current filter can be read back
+// as zero; a nonzero or unreadable filter remains a startup error.
+func verifyInheritedZeroCoredumpFilter(setErr error) error {
+	filter, err := readCoredumpFilter()
+	if err != nil {
+		return errors.Join(setErr, fmt.Errorf("read back %s after setting it failed: %w", procCoredumpFilter, err))
+	}
+	if filter != 0 {
+		return fmt.Errorf("%w; current filter is %#x, want zero", setErr, filter)
 	}
 	return nil
 }

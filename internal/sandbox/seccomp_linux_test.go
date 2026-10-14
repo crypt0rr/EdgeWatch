@@ -280,9 +280,9 @@ func TestHardenProcessAcceptsVerifiedZeroFilterAfterLandlockExec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := exec.Command(executable, hardenZeroLandlock).CombinedOutput()
+	output, err := commandWithoutGoCoverDir(executable, hardenZeroLandlock).Output()
 	if err != nil || strings.TrimSpace(string(output)) != "inherited core limit 0/0 and coredump filter 0" {
-		t.Fatalf("zero-filter Landlock exec child = %q, %v; want verified inherited zero filter", output, err)
+		t.Fatalf("zero-filter Landlock exec child = %q, %v (stderr %q); want verified inherited zero filter", output, err, commandErrorStderr(err))
 	}
 }
 
@@ -293,8 +293,27 @@ func TestHardenProcessRejectsNonzeroFilterItCannotChangeAfterLandlock(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := exec.Command(executable, hardenNonzeroLandlock).CombinedOutput()
+	output, err := commandWithoutGoCoverDir(executable, hardenNonzeroLandlock).Output()
 	if err != nil || strings.TrimSpace(string(output)) != "nonzero inherited coredump filter refused" {
-		t.Fatalf("nonzero-filter Landlock exec child = %q, %v; want refusal before startup", output, err)
+		t.Fatalf("nonzero-filter Landlock exec child = %q, %v (stderr %q); want refusal before startup", output, err, commandErrorStderr(err))
 	}
+}
+
+func commandWithoutGoCoverDir(executable, argument string) *exec.Cmd {
+	cmd := exec.Command(executable, argument)
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "GOCOVERDIR=") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, entry)
+	}
+	return cmd
+}
+
+func commandErrorStderr(err error) []byte {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.Stderr
+	}
+	return nil
 }

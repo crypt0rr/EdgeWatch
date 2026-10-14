@@ -90,6 +90,7 @@ func observe(state *model.JobState, job config.Job, view scanView) observation {
 		seen.keep(hostsGone)
 	case view.incomplete != nil:
 		seen.keep(protectedChangeKeys(state, *state.Baseline, view.snapshot, view.incomplete.protocols, view.incomplete.targets))
+		seen.keep(closedPortServiceKeys(state, view.snapshot))
 		for key := range view.deferred {
 			seen.unobserved[key] = true
 		}

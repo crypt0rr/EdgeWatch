@@ -179,6 +179,11 @@ the baseline automatically. It never lowers that sample count or performs the
 explicit **Use as baseline** override on your behalf. Incident acceptance
 remains an explicit decision.
 
+An incomplete scan also does not recover a service incident just because its
+port is closed. The incident stays open until a complete scan can verify the
+closure; if the port is still closed then, EdgeWatch retires the service finding
+without reporting that its previous fingerprint returned.
+
 An active baseline applies to the targets and TCP/UDP ports configured for that
 job. It can be complete even when no positive ports were found; the job page
 states this as a valid empty baseline. When the card says **Ready (updating

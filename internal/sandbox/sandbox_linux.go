@@ -115,23 +115,46 @@ func hardenLinux() error {
 
 const procCoredumpFilter = "/proc/self/coredump_filter"
 
+// coredumpFilterIO separates the value update/verification from process
+// hardening. The production implementation below always opens the fixed
+// proc control file; the per-call interface lets tests exercise the decision
+// paths without changing the test process's limits or dumpability.
+type coredumpFilterIO interface {
+	openForWrite() (io.WriteCloser, error)
+	read() ([]byte, error)
+}
+
+type procCoredumpFilterIO struct{}
+
+func (procCoredumpFilterIO) openForWrite() (io.WriteCloser, error) {
+	return os.OpenFile(procCoredumpFilter, os.O_WRONLY, 0)
+}
+
+func (procCoredumpFilterIO) read() ([]byte, error) {
+	return os.ReadFile(procCoredumpFilter)
+}
+
 func setAndVerifyZeroCoredumpFilter() error {
-	file, err := os.OpenFile(procCoredumpFilter, os.O_WRONLY, 0)
+	return setAndVerifyZeroCoredumpFilterWith(procCoredumpFilterIO{})
+}
+
+func setAndVerifyZeroCoredumpFilterWith(filterIO coredumpFilterIO) error {
+	file, err := filterIO.openForWrite()
 	if err != nil {
-		return verifyInheritedZeroCoredumpFilter(fmt.Errorf("open %s: %w", procCoredumpFilter, err))
+		return verifyInheritedZeroCoredumpFilter(filterIO, fmt.Errorf("open %s: %w", procCoredumpFilter, err))
 	}
-	written, writeErr := file.WriteString("0")
+	written, writeErr := io.WriteString(file, "0")
 	closeErr := file.Close()
 	if writeErr != nil {
-		return verifyInheritedZeroCoredumpFilter(fmt.Errorf("set %s to zero: %w", procCoredumpFilter, writeErr))
+		return verifyInheritedZeroCoredumpFilter(filterIO, fmt.Errorf("set %s to zero: %w", procCoredumpFilter, writeErr))
 	}
 	if written != 1 {
-		return verifyInheritedZeroCoredumpFilter(fmt.Errorf("set %s to zero: wrote %d of 1 byte", procCoredumpFilter, written))
+		return verifyInheritedZeroCoredumpFilter(filterIO, fmt.Errorf("set %s to zero: wrote %d of 1 byte", procCoredumpFilter, written))
 	}
 	if closeErr != nil {
-		return verifyInheritedZeroCoredumpFilter(fmt.Errorf("close %s after setting it: %w", procCoredumpFilter, closeErr))
+		return verifyInheritedZeroCoredumpFilter(filterIO, fmt.Errorf("close %s after setting it: %w", procCoredumpFilter, closeErr))
 	}
-	filter, err := readCoredumpFilter()
+	filter, err := readCoredumpFilterWith(filterIO)
 	if err != nil {
 		return fmt.Errorf("read back %s: %w", procCoredumpFilter, err)
 	}
@@ -146,8 +169,8 @@ func setAndVerifyZeroCoredumpFilter() error {
 // control file, such as an EdgeWatch child after Landlock is applied. A
 // failed write is never accepted unless the current filter can be read back
 // as zero; a nonzero or unreadable filter remains a startup error.
-func verifyInheritedZeroCoredumpFilter(setErr error) error {
-	filter, err := readCoredumpFilter()
+func verifyInheritedZeroCoredumpFilter(filterIO coredumpFilterIO, setErr error) error {
+	filter, err := readCoredumpFilterWith(filterIO)
 	if err != nil {
 		return errors.Join(setErr, fmt.Errorf("read back %s after setting it failed: %w", procCoredumpFilter, err))
 	}
@@ -158,7 +181,11 @@ func verifyInheritedZeroCoredumpFilter(setErr error) error {
 }
 
 func readCoredumpFilter() (uint64, error) {
-	contents, err := os.ReadFile(procCoredumpFilter)
+	return readCoredumpFilterWith(procCoredumpFilterIO{})
+}
+
+func readCoredumpFilterWith(filterIO coredumpFilterIO) (uint64, error) {
+	contents, err := filterIO.read()
 	if err != nil {
 		return 0, err
 	}

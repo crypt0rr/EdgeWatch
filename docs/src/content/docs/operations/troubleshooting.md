@@ -159,6 +159,14 @@ the cycle, that run records the expiry as timed out, once, and the next run
 starts a fresh cycle. Read [Scanning and profiles](/user-guide/scanning/)
 and [Host commands](/reference/cli/) before changing scan scope or retrying.
 
+If a completed cycle's result cannot be finalized, EdgeWatch retries promotion
+from the saved work once. A second persisted finalization failure discards the
+cycle, and the next trigger plans a fresh scan. Notification-destination lookup
+failures do not count toward this limit; after correcting the destination
+configuration, the next trigger can still promote the completed result. A
+process restart between cycle completion and scan-history insertion also keeps
+the existing recovery path.
+
 A scan that fails with `expanded targets exceed scanner.max_job_hosts=65536`
 covers more addresses than one job may scan; split its targets into several
 jobs, or raise `scanner.max_job_hosts` together with the container's memory.

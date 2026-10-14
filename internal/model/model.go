@@ -11,6 +11,12 @@ import (
 	"time"
 )
 
+// ScanFinalizationFailureMessage marks the durable fallback scan row written
+// when a completed scan result cannot be finalized. Resumable-cycle recovery
+// uses this exact message to distinguish that failure from cancellation,
+// destination lookup errors, and other failed scans.
+const ScanFinalizationFailureMessage = "scan result could not be finalized; inspect the EdgeWatch server log"
+
 // PortState is a port of a unit and its state. Evidence, which the JSON
 // calls addresses, lists the effective addresses on which a positive port
 // was observed.

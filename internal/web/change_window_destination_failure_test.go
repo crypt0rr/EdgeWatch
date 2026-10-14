@@ -1,0 +1,160 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/crypt0rr/edgewatch/internal/config"
+	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/store"
+)
+
+func TestCancelChangeWindowKeepsHeldAlertsWhenDestinationsCannotBeLoaded(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, db, admin := newUsersTestServer(t)
+	server := newRoutingTestServer(t, db, "generic://localhost/edgewatch?disabletls=yes&template=json")
+	ts := defaultTenantStore(server)
+	job, err := ts.CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name: "cancel-window-destination-failure", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	window, err := ts.CreateChangeWindow(ctx, job.ID, time.Time{}, time.Now().UTC().Add(time.Hour), true, "maintenance", admin.UserID, admin.Username)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.System().QueueEvent(ctx, "held-change-alert", model.Event{
+		Type: "changes-detected", JobID: job.ID, Job: job.Job.Name, ScanID: "cancel-window-read-failure",
+		Message: "change detected", CreatedAt: time.Now().UTC(),
+		Changes: []model.Change{{Key: "port|192.0.2.10|tcp|443", Kind: "port", Severity: "high", Target: "192.0.2.10", Protocol: "tcp", Port: 443}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replace the destination table with a view whose source is missing. This
+	// makes the notifier's real tenant-scoped SELECT fail while leaving the
+	// change-window writer and outbox tables writable for the handler.
+	const savedTable = "managed_notifications_saved_for_cancel_test"
+	const brokenSource = "missing_managed_notifications_for_cancel_test"
+	if _, err := db.DB.ExecContext(ctx, `ALTER TABLE managed_notifications RENAME TO `+savedTable); err != nil {
+		t.Fatal(err)
+	}
+	viewInstalled := false
+	restoreMetadata := func() error {
+		if _, err := db.DB.ExecContext(ctx, `DROP VIEW IF EXISTS managed_notifications`); err != nil {
+			return err
+		}
+		if _, err := db.DB.ExecContext(ctx, `ALTER TABLE `+savedTable+` RENAME TO managed_notifications`); err != nil {
+			return err
+		}
+		viewInstalled = false
+		return nil
+	}
+	t.Cleanup(func() {
+		if viewInstalled {
+			if err := restoreMetadata(); err != nil {
+				t.Errorf("restore destination schema: %v", err)
+			}
+		}
+	})
+	_, err = db.DB.ExecContext(ctx, `CREATE VIEW managed_notifications(id,tenant_id,name,provider,ciphertext,nonce,enabled,revision,credential_revision,created_at,updated_at) AS SELECT NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL FROM `+brokenSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewInstalled = true
+	if _, err := server.App.Notifier.Tenant(ts).QueueDestinationsForJob(ctx, job.Job); err == nil {
+		t.Fatal("destination lookup succeeded with a broken metadata source")
+	}
+
+	cancel := func() *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{"window_id": window.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+job.ID+"/change-windows", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		server.cancelChangeWindow(response, req, admin, ts, job)
+		return response
+	}
+	failed := cancel()
+	if failed.Code != http.StatusInternalServerError || !strings.Contains(failed.Body.String(), `"code":"notification"`) || strings.Contains(failed.Body.String(), brokenSource) {
+		t.Fatalf("cancel with unavailable destinations = %d %s; want a redacted 500 notification error", failed.Code, failed.Body.String())
+	}
+	open, err := ts.GetChangeWindow(ctx, job.ID, window.ID)
+	if err != nil || open.ClosedAt != nil || open.ReviewState != "none" {
+		t.Fatalf("window after failed destination read = %+v, %v; want unchanged and open", open, err)
+	}
+	var heldRows, coalescedRows, summaryRows, cancelAudits int
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(coalesced_at<>''),0) FROM outbox WHERE change_window_id=?`, window.ID).Scan(&heldRows, &coalescedRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE event_type='change-window-summary' AND event_job_id=?`, job.ID).Scan(&summaryRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE tenant_id=? AND action='change_window.cancelled'`, store.DefaultTenantID).Scan(&cancelAudits); err != nil {
+		t.Fatal(err)
+	}
+	if heldRows != 1 || coalescedRows != 0 || summaryRows != 0 || cancelAudits != 0 {
+		t.Fatalf("failed cancel side effects: held=%d coalesced=%d summaries=%d cancel audits=%d; want 1,0,0,0", heldRows, coalescedRows, summaryRows, cancelAudits)
+	}
+
+	if err := restoreMetadata(); err != nil {
+		t.Fatal(err)
+	}
+	wantDestinations, err := server.App.Notifier.Tenant(ts).QueueDestinationsForJob(ctx, job.Job)
+	if err != nil || len(wantDestinations) != 1 {
+		t.Fatalf("healthy destination lookup = %v, %v; want one configured destination", wantDestinations, err)
+	}
+	retried := cancel()
+	if retried.Code != http.StatusOK {
+		t.Fatalf("healthy retry = %d: %s", retried.Code, retried.Body.String())
+	}
+	closed, err := ts.GetChangeWindow(ctx, job.ID, window.ID)
+	if err != nil || closed.ClosedAt == nil || closed.ReviewState != "due" {
+		t.Fatalf("window after healthy retry = %+v, %v; want closed with due review", closed, err)
+	}
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(coalesced_at<>''),0) FROM outbox WHERE change_window_id=?`, window.ID).Scan(&heldRows, &coalescedRows); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.DB.QueryContext(ctx, `SELECT destination FROM outbox WHERE event_type='change-window-summary' AND event_job_id=? ORDER BY destination`, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	gotDestinations := make([]string, 0, len(wantDestinations))
+	for rows.Next() {
+		var destination string
+		if err := rows.Scan(&destination); err != nil {
+			t.Fatal(err)
+		}
+		gotDestinations = append(gotDestinations, destination)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(wantDestinations)
+	if heldRows != 1 || coalescedRows != 1 || !reflect.DeepEqual(gotDestinations, wantDestinations) || len(gotDestinations) != 1 {
+		t.Fatalf("healthy retry deliveries: held=%d coalesced=%d summaries=%v; want one held coalesced row and destinations %v", heldRows, coalescedRows, gotDestinations, wantDestinations)
+	}
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE tenant_id=? AND action='change_window.cancelled'`, store.DefaultTenantID).Scan(&cancelAudits); err != nil {
+		t.Fatal(err)
+	}
+	if cancelAudits != 1 {
+		t.Fatalf("cancel audit count after healthy retry = %d; want one", cancelAudits)
+	}
+}

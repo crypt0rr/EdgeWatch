@@ -99,9 +99,12 @@ func (s *Server) cancelChangeWindow(w http.ResponseWriter, r *http.Request, sess
 	}
 	destinations := []string{}
 	if notifier := s.tenantNotifier(ts); notifier != nil {
-		if selected, err := notifier.QueueDestinationsForJob(r.Context(), job.Job); err == nil {
-			destinations = selected
+		selected, err := notifier.QueueDestinationsForJob(r.Context(), job.Job)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
+			return
 		}
+		destinations = selected
 	}
 	window, changed, err := ts.CancelChangeWindow(r.Context(), job.ID, input.WindowID, session.UserID, session.Username, destinations, actorAudit(session, "change_window.cancelled", ""))
 	if err != nil {

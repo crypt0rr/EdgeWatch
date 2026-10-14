@@ -98,6 +98,9 @@ Incident details and evidence links require `incidents.read`; marking the
 review complete requires `incidents.manage`. Canceling before a scheduled
 window starts produces no closing review. Canceling an active window closes it
 early and produces the same durable review as an expiry.
+If EdgeWatch cannot load the job's notification destinations while canceling an
+active window, the request fails and leaves the window open with its held
+alerts unchanged. Retry the cancellation when the destinations are available.
 
 The **Jobs** list shows each job's latest scan attempt separately from its
 latest successful scan, along with its next scheduled run and current queued,

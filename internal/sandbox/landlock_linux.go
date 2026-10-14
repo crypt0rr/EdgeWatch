@@ -467,6 +467,9 @@ func addDescriptorRule(ruleset, descriptor int, handled uint64) error {
 // refers to; a file or device takes only file rights. Other descriptors, such
 // as pipes, take no rule.
 func addRule(ruleset, fd int, access uint64) error {
+	if fd < 0 || uint64(fd) > uint64(^uint32(0)>>1) {
+		return fmt.Errorf("descriptor %d is outside the Landlock parent fd range", fd)
+	}
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return err

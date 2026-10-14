@@ -364,6 +364,16 @@ func TestRulesReportWhatCannotBeAllowed(t *testing.T) {
 	}
 }
 
+func TestAddRuleRejectsDescriptorOutsideLandlockRange(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("an int cannot represent a descriptor above MaxInt32 on this architecture")
+	}
+	fd := int(uint64(1) << 31)
+	if err := addRule(-1, fd, landlockRead); err == nil || !strings.Contains(err.Error(), "outside the Landlock parent fd range") {
+		t.Fatalf("addRule with descriptor %d = %v, want an explicit range error", fd, err)
+	}
+}
+
 func TestSandboxExecRestrictsTheScannerProcess(t *testing.T) {
 	t.Parallel()
 	abi := requireLandlock(t)

@@ -16,6 +16,7 @@ import { changeKindLabel, changeTargetLabel, severityLabel, severityTone } from 
 const pageSize = 20
 const maxNoteBytes = 4096
 const maxFollowUpMs = 30 * 24 * 60 * 60 * 1000
+const maxTimeoutMs = 2_147_483_647
 const views: { value: IncidentInboxView; label: string }[] = [
   { value: 'needs_review', label: 'Needs review' },
   { value: 'investigating', label: 'Investigating' },
@@ -136,6 +137,27 @@ function reviewViewStatus(review: IncidentReview) {
   if (review.follow_up_at && Date.parse(review.follow_up_at) <= Date.now()) return 'follow_up_due'
   return 'investigating'
 }
+function followUpTimestamp(item: IncidentInboxItem) {
+  if (item.review.status !== 'investigating' || !item.review.follow_up_at) return null
+  const timestamp = Date.parse(item.review.follow_up_at)
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+function earliestFutureFollowUpAt(items: IncidentInboxItem[], now: number) {
+  let earliest: number | null = null
+  for (const item of items) {
+    const timestamp = followUpTimestamp(item)
+    if (timestamp !== null && timestamp > now && (earliest === null || timestamp < earliest)) earliest = timestamp
+  }
+  return earliest
+}
+function earliestDueFollowUpAt(items: IncidentInboxItem[], now: number, handled: ReadonlySet<number> = new Set()) {
+  let earliest: number | null = null
+  for (const item of items) {
+    const timestamp = followUpTimestamp(item)
+    if (timestamp !== null && timestamp <= now && item.view_status !== 'follow_up_due' && !handled.has(timestamp) && (earliest === null || timestamp < earliest)) earliest = timestamp
+  }
+  return earliest
+}
 function openEvidencePath(path: string, label: string) {
   return <a className="incident-evidence-link" href={path} target="_blank" rel="noopener noreferrer">{label} <span>(opens in new tab)</span><ExternalLink size={13} aria-hidden="true" /></a>
 }
@@ -183,12 +205,59 @@ export function Incidents() {
   const filters: IncidentInboxQuery = { view, limit: exactLookup ? 1 : pageSize, offset: exactLookup ? 0 : offset, ...(jobID ? { job_id: jobID } : {}), ...(exactLookup ? { occurrence_token: exactLookup } : {}), ...(severity ? { severity } : {}), ...(kind ? { kind } : {}) }
   const pageQueryKey = ['incidents', 'inbox', view, jobID, exactLookup, severity, kind, offset] as const
   const pageQueryID = JSON.stringify(pageQueryKey)
+  const handledDueRefreshesRef = useRef(new Set<number>())
+  const handledDueRefreshQueryRef = useRef(pageQueryID)
+  if (handledDueRefreshQueryRef.current !== pageQueryID) {
+    handledDueRefreshQueryRef.current = pageQueryID
+    handledDueRefreshesRef.current.clear()
+  }
+  const scheduledDueRefreshRef = useRef<{ key: string; dueAt: number; queryID: string } | null>(null)
   const incidents = useQuery({
     queryKey: pageQueryKey,
     queryFn: () => listIncidents(filters),
     enabled: canRead,
+    refetchOnWindowFocus: query => {
+      const data = query.state.data as { incidents?: IncidentInboxItem[] } | undefined
+      const rows = data?.incidents ?? []
+      const now = Date.now()
+      if (earliestDueFollowUpAt(rows, now) === null) return true
+      const dueAt = earliestDueFollowUpAt(rows, now, handledDueRefreshesRef.current)
+      if (dueAt === null) return false
+      handledDueRefreshesRef.current.add(dueAt)
+      return 'always'
+    },
   })
   const rows = incidents.data?.incidents ?? []
+  const now = Date.now()
+  const futureDueAt = canRead && incidents.data ? earliestFutureFollowUpAt(rows, now) : null
+  const alreadyDueAt = canRead && incidents.data ? earliestDueFollowUpAt(rows, now, handledDueRefreshesRef.current) : null
+  const candidateDueAt = alreadyDueAt ?? futureDueAt
+  const priorDue = scheduledDueRefreshRef.current
+  const priorStillPending = !!priorDue && priorDue.queryID === pageQueryID && !handledDueRefreshesRef.current.has(priorDue.dueAt) && rows.some(item => followUpTimestamp(item) === priorDue.dueAt)
+  const nextDueAt = priorStillPending && (candidateDueAt === null || priorDue.dueAt < candidateDueAt) ? priorDue.dueAt : candidateDueAt
+  const nextDueKey = nextDueAt === null ? null : `${pageQueryID}:${nextDueAt}`
+  scheduledDueRefreshRef.current = nextDueAt === null || nextDueKey === null ? null : { key: nextDueKey, dueAt: nextDueAt, queryID: pageQueryID }
+  const incidentsRefetchRef = useRef(incidents.refetch)
+  incidentsRefetchRef.current = incidents.refetch
+  useEffect(() => {
+    if (!canRead || !incidents.data || nextDueAt === null || nextDueKey === null) return
+    const key = nextDueKey
+    const dueAt = nextDueAt
+    let timer: number
+    const checkDue = () => {
+      if (scheduledDueRefreshRef.current?.key !== key) return
+      const remaining = dueAt - Date.now()
+      if (remaining > 0) {
+        timer = window.setTimeout(checkDue, Math.min(remaining, maxTimeoutMs))
+        return
+      }
+      if (document.visibilityState !== 'visible' || handledDueRefreshesRef.current.has(dueAt)) return
+      handledDueRefreshesRef.current.add(dueAt)
+      void incidentsRefetchRef.current()
+    }
+    timer = window.setTimeout(checkDue, Math.min(Math.max(dueAt - Date.now(), 0), maxTimeoutMs))
+    return () => window.clearTimeout(timer)
+  }, [canRead, incidents.data !== undefined, nextDueAt, nextDueKey])
   const selectedRow = rows.find(row => row.occurrence_token === selectedOccurrence)
   const conflictRefresh = conflictRefreshes[selectedOccurrence] ?? null
   const hasConflictRefresh = !!conflictRefresh

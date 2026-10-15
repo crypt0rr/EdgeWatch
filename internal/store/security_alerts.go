@@ -34,6 +34,8 @@ func securityAlertKindOf(entry AuditEntry) string {
 	switch entry.Action {
 	case "auth.rate_limited":
 		return model.SecurityAlertRateLimited
+	case "auth.sign_in_failures":
+		return model.SecurityAlertAccountSignInFailures
 	case "auth.second_factor_locked":
 		return model.SecurityAlertSecondFactorLocked
 	case "auth.recovery_code_used":
@@ -90,6 +92,9 @@ func securityAlertDetail(entry AuditEntry, kind string, platform bool) model.Ale
 	case model.SecurityAlertSecondFactorLocked, model.SecurityAlertRecoveryCodeUsed:
 		detail.Account = alertUsername(entry.ActorUsername)
 		detail.Source = strings.TrimSpace(entry.SourceIP)
+	case model.SecurityAlertAccountSignInFailures:
+		detail.Account = alertUsername(entry.ActorUsername)
+		detail.Count = model.SecurityAlertAccountSignInFailureCount
 	default:
 		detail.Account = alertUsername(entry.alertAccount)
 		detail.Actor = alertUsername(entry.ActorUsername)

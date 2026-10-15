@@ -40,6 +40,12 @@ the account's owner sent them, someone holds the password, so change it; see
 [Accounts and public status](/administration/accounts-public-status/) and
 [Business units](/administration/business-units/).
 
+The separate `auth.sign_in_failures` event records five wrong passwords for
+one known, enabled account within five minutes, across client addresses. It
+does not lock the account and its aggregate record omits the client address.
+See [Security alerts](/user-guide/notifications/#security-alerts) for its
+scope and retention behavior.
+
 ## Secrets and backups
 
 Notification credentials, supplied as provider fields or a Shoutrrr URL, are

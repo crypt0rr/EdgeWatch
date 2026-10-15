@@ -113,6 +113,7 @@ These audit records send a security alert:
 | Event | Audit action | The alert names |
 | --- | --- | --- |
 | A client became rate limited on sign-in, password or TOTP confirmation, activation, or setup | `auth.rate_limited` | the operation, the client's address, and, for a sign-in, the unit's account |
+| Five wrong passwords were entered for the same known, enabled account within five minutes, across client addresses | `auth.sign_in_failures` | the account and the threshold count, without a client address |
 | An account's one-time and recovery codes were locked after ten wrong codes | `auth.second_factor_locked` | the account and the address of the code that started the lockout |
 | An account signed in with a recovery code | `auth.recovery_code_used` | the account and the client's address |
 | A platform administrator invited a unit administrator | `user.created` with the `platform` actor | the invited account and the platform administrator |
@@ -142,12 +143,20 @@ administrator actions share one window. The summary names no account; the
 unit's audit holds every record. A failure to queue an alert never fails the
 action or its audit record; the daemon logs a warning instead.
 
+The wrong-password threshold is separate from per-client rate limiting. It
+counts attempts for one enabled account across client addresses, does not lock
+the account, and a successful sign-in does not reset it. Unknown and disabled
+accounts are not aggregated. Its in-memory detector is bounded and local to
+the daemon process, so a daemon restart clears its current window and
+cooldown. The aggregate audit record and alert omit the client address; the
+ordinary failed-login audit records retain their existing attribution.
+
 The platform has security alerts of its own, for the records in platform
-scope: the rate limits, lockouts, and recovery-code sign-ins of platform
-administrators, and the rate limits of sign-ins with a username that no
-account has, whose alert leaves the username out. Platform administrators turn
-them on per platform destination with the **Security alerts** toggle on the
-platform console's **Notifications** page.
+scope: the rate limits, account-wide wrong-password bursts, lockouts, and
+recovery-code sign-ins of platform administrators, and the rate limits of
+sign-ins with a username that no account has, whose alert leaves the username
+out. Platform administrators turn them on per platform destination with the
+**Security alerts** toggle on the platform console's **Notifications** page.
 
 ## Deployment alerts
 

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -14,12 +15,12 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
-// Repeated rate-limit refusals of sign-ins to a unit's account, from one
-// client and from several, produce one security alert to that unit's
-// destination within the alert window; the default unit, which routes its
-// own security alerts, gets none. The alert names the account and the first
-// client, and neither the attempted password nor a URL.
-func TestRepeatedRateLimitRefusalsSendOneSecurityAlert(t *testing.T) {
+// Repeated rate-limit refusals and admitted wrong passwords produce one
+// alert of each kind within their respective windows. The alerts go only to
+// the unit's destination; the default unit gets none. The rate-limit alert
+// names the first client, while the account-wide alert has no source address.
+// Neither alert includes the attempted password or a URL.
+func TestRepeatedRateLimitRefusalsCoalesceSecurityAlertsByKind(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s, _, _ := platformTestStore(t)
@@ -65,7 +66,8 @@ func TestRepeatedRateLimitRefusalsSendOneSecurityAlert(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rows.Close()
-	var payloads []string
+	payloads := make(map[string]model.Event)
+	payloadJSON := make(map[string]string)
 	for rows.Next() {
 		var tenant, payload string
 		if err := rows.Scan(&tenant, &payload); err != nil {
@@ -74,26 +76,44 @@ func TestRepeatedRateLimitRefusalsSendOneSecurityAlert(t *testing.T) {
 		if tenant != platformTestTenantID {
 			t.Errorf("a security alert went to %q", tenant)
 		}
-		payloads = append(payloads, payload)
+		var event model.Event
+		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			t.Fatalf("decode security alert %s: %v", payload, err)
+		}
+		if event.Type != model.EventSecurityAlert || event.Alert == nil {
+			t.Errorf("unexpected outbox event: %+v", event)
+			continue
+		}
+		kind := event.Alert.Kind
+		if _, exists := payloads[kind]; exists {
+			t.Errorf("duplicate %s alert in one window: %s", kind, payload)
+		}
+		payloads[kind] = event
+		payloadJSON[kind] = payload
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if len(payloads) != 1 {
-		t.Fatalf("security alerts = %v, want one", payloads)
+	if len(payloads) != 2 {
+		t.Fatalf("security alerts = %v, want one per kind", payloads)
 	}
-	for _, want := range []string{`"kind":"rate_limited"`, `"account":"bravo-admin"`, `"operation":"sign-in"`} {
-		if !strings.Contains(payloads[0], want) {
-			t.Errorf("alert %s lacks %s", payloads[0], want)
-		}
+	rateLimited, ok := payloads[model.SecurityAlertRateLimited]
+	if !ok || rateLimited.Alert.Account != "bravo-admin" || rateLimited.Alert.Operation != "sign-in" || rateLimited.Alert.Source != "203.0.113.11" {
+		t.Errorf("rate-limit alert = %+v, want one sign-in alert for the first client", rateLimited)
 	}
-	for _, leak := range []string{wrong, "://"} {
-		if strings.Contains(payloads[0], leak) {
-			t.Errorf("alert %s contains %q", payloads[0], leak)
+	aggregate, ok := payloads[model.SecurityAlertAccountSignInFailures]
+	if !ok || aggregate.Alert.Account != "bravo-admin" || aggregate.Alert.Count != model.SecurityAlertAccountSignInFailureCount || aggregate.Alert.Source != "" {
+		t.Errorf("account-wide alert = %+v, want count-only alert without source attribution", aggregate)
+	}
+	for kind, payload := range payloadJSON {
+		for _, leak := range []string{wrong, "://", "203.0.113.12", "203.0.113.13"} {
+			if strings.Contains(payload, leak) {
+				t.Errorf("%s alert %s contains %q", kind, payload, leak)
+			}
 		}
 	}
 	held, err := s.System().FlushSecurityAlertWindows(ctx, time.Now().UTC().Add(store.SecurityAlertWindow+time.Minute))
 	if err != nil || held != 1 {
-		t.Fatalf("summaries after the window = %d, %v; want one for the two held episodes", held, err)
+		t.Fatalf("summaries after the window = %d, %v; want one summary for the two suppressed rate-limit alerts", held, err)
 	}
 }

@@ -92,6 +92,11 @@ Tag only a commit on `main` whose CI passed. The workflow refuses any other
 tag before it builds anything, and waits for CI on the tagged commit before
 it stages a release. A later push to `main` can cancel that commit's CI run;
 re-run it, or run CI on the tag with `gh workflow run ci.yml --ref <tag>`.
+When a dispatched run has no pull-request or push base, Go lint uses the
+merge base with fetched `origin/main`, then falls back to the selected
+commit's first parent. If neither provides a non-`HEAD` base, it fails clearly
+instead of reporting an empty lint diff.
+
 The Dockerfile keeps `npm ci` and the frontend build in its local-build path.
 Release image builds copy the verified frontend artifact from the candidate;
 they fail if that artifact has no `index.html` instead of rebuilding it.

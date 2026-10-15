@@ -143,7 +143,7 @@ func (allocator *scannerIdentityAllocator) acquire(ctx context.Context) (*scanne
 	if err := lockScannerIdentity(ctx, lockFD); err != nil {
 		return nil, err
 	}
-	defer unix.Flock(lockFD, unix.LOCK_UN)
+	defer func() { _ = unix.Flock(lockFD, unix.LOCK_UN) }()
 	identitiesInUse, err := allocator.inUse(allocator.uidStart, allocator.count)
 	if err != nil {
 		return nil, errors.New("acquire scanner identity: current identity use cannot be inspected")
@@ -235,7 +235,7 @@ func (lease *scannerIdentityLease) release() error {
 	if err := unix.Flock(lockFD, unix.LOCK_EX); err != nil {
 		return errors.New("release scanner identity: allocator lock failed")
 	}
-	defer unix.Flock(lockFD, unix.LOCK_UN)
+	defer func() { _ = unix.Flock(lockFD, unix.LOCK_UN) }()
 	bootID, err := allocator.bootID()
 	if err != nil || bootID != lease.bootID {
 		return errors.New("release scanner identity: boot changed while lease was active")
@@ -290,7 +290,7 @@ func (lease *scannerIdentityLease) update(state string) error {
 	if err := unix.Flock(lockFD, unix.LOCK_EX); err != nil {
 		return errors.New("update scanner identity: allocator lock failed")
 	}
-	defer unix.Flock(lockFD, unix.LOCK_UN)
+	defer func() { _ = unix.Flock(lockFD, unix.LOCK_UN) }()
 	bootID, err := allocator.bootID()
 	if err != nil || bootID != lease.bootID {
 		return errors.New("update scanner identity: boot changed while lease was active")
@@ -540,8 +540,7 @@ func writeScannerIdentityFile(directoryFD int, name string, data []byte) error {
 	return unix.Fsync(directoryFD)
 }
 
-func openScannerIdentityDirectories(path, markerDir string) (directoryFD, markerFD int, err error) {
-	directoryFD, markerFD = -1, -1
+func openScannerIdentityDirectories(path, markerDir string) (int, int, error) {
 	if filepath.Clean(filepath.Dir(path)) != filepath.Clean(markerDir) || filepath.Base(path) == "." || filepath.Base(path) == string(filepath.Separator) {
 		return -1, -1, errors.New("scanner identity allocator paths must be sibling directories")
 	}
@@ -550,7 +549,7 @@ func openScannerIdentityDirectories(path, markerDir string) (directoryFD, marker
 			return -1, -1, err
 		}
 	}
-	markerFD, err = unix.Open(markerDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	markerFD, err := unix.Open(markerDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return -1, -1, errors.New("scanner identity allocator trusted parent is unavailable")
 	}
@@ -566,7 +565,7 @@ func openScannerIdentityDirectories(path, markerDir string) (directoryFD, marker
 		_ = unix.Close(markerFD)
 		return -1, -1, errors.New("scanner identity allocator private directory cannot be created")
 	}
-	directoryFD, err = unix.Openat(markerFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	directoryFD, err := unix.Openat(markerFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		_ = unix.Close(markerFD)
 		return -1, -1, errors.New("scanner identity allocator private directory is unavailable")
@@ -730,10 +729,7 @@ func scannerIdentitiesInUse(uidStart, count uint32) (map[uint32]struct{}, error)
 		return nil, err
 	}
 	used := make(map[uint32]struct{})
-	if err := addScannerAccountsInUse("/etc/passwd", 3, uidStart, count, used); err != nil {
-		return nil, err
-	}
-	if err := addScannerAccountsInUse("/etc/group", 2, uidStart, count, used); err != nil {
+	if err := addScannerLocalAccountsInUse("/etc/passwd", "/etc/group", uidStart, count, used); err != nil {
 		return nil, err
 	}
 	for _, entry := range entries {
@@ -788,6 +784,14 @@ func addScannerAccountsInUse(path string, idField, uidStart, count uint32, used 
 		}
 	}
 	return nil
+}
+
+func addScannerLocalAccountsInUse(passwdPath, groupPath string, uidStart, count uint32, used map[uint32]struct{}) error {
+	// Both passwd and group records put their numeric UID/GID in field three.
+	if err := addScannerAccountsInUse(passwdPath, 3, uidStart, count, used); err != nil {
+		return err
+	}
+	return addScannerAccountsInUse(groupPath, 3, uidStart, count, used)
 }
 
 func currentBootID() (string, error) {
@@ -869,7 +873,7 @@ func validBootID(value string) bool {
 			}
 			continue
 		}
-		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
 			return false
 		}
 	}

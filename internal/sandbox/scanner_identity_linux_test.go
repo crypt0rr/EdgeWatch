@@ -435,21 +435,29 @@ func TestScannerIdentityIDMapAndAccountRangeValidation(t *testing.T) {
 			t.Errorf("accepted malformed ID map %q", value)
 		}
 	}
-	accounts := filepath.Join(t.TempDir(), "passwd")
-	if err := os.WriteFile(accounts, []byte("edgewatch:x:61001:61001::/nonexistent:/sbin/nologin\n"), 0o600); err != nil {
+	accountDir := t.TempDir()
+	passwdPath := filepath.Join(accountDir, "passwd")
+	groupPath := filepath.Join(accountDir, "group")
+	if err := os.WriteFile(passwdPath, []byte("edgewatch:x:61001:61000::/nonexistent:/sbin/nologin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(groupPath, []byte("edgewatch:x:61003:scanner\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	used := make(map[uint32]struct{})
-	if err := addScannerAccountsInUse(accounts, 3, 61000, 2, used); err != nil {
+	if err := addScannerLocalAccountsInUse(passwdPath, groupPath, 61000, 4, used); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := used[61001]; !ok {
 		t.Fatal("existing account UID was not excluded")
 	}
-	if err := os.WriteFile(accounts, []byte("malformed:account\n"), 0o600); err != nil {
+	if _, ok := used[61003]; !ok {
+		t.Fatal("existing group GID from the third field was not excluded")
+	}
+	if err := os.WriteFile(passwdPath, []byte("malformed:account\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := addScannerAccountsInUse(accounts, 3, 61000, 2, make(map[uint32]struct{})); err == nil {
+	if err := addScannerAccountsInUse(passwdPath, 3, 61000, 2, make(map[uint32]struct{})); err == nil {
 		t.Fatal("malformed account database did not fail closed")
 	}
 }

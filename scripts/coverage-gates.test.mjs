@@ -46,6 +46,7 @@ const frontendReport = (overrides = {}) => {
     'src/format.ts',
     'src/firstScanIntent.ts',
     'src/generated/api-types.ts',
+    'src/hooks/useServerDraft.ts',
     'src/incident-time.ts',
     'src/hostSearch.ts',
     'src/job-creation-draft.tsx',

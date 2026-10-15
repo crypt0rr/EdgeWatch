@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { type FormEvent, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { AlertTriangle, Gauge, Globe2, Trash2 } from 'lucide-react'
@@ -8,6 +8,7 @@ import type { DeploymentLimits } from '../../generated/api-types'
 import { ActionDialog } from '../../components/ActionDialog'
 import { ErrorNotice } from '../../components/ErrorNotice'
 import { formatDateTime } from '../../format'
+import { useServerDraft } from '../../hooks/useServerDraft'
 import { errorMessage, formatCount, isChangedElsewhere, isConflict, Loading, plural, publicPath, publicURL, slugProblem, UnitStatusPill } from './common'
 import { UnitAccounts } from './UnitAccounts'
 
@@ -51,13 +52,24 @@ async function refreshUnit(client: ReturnType<typeof useQueryClient>, id: string
 
 function UnitOverview({ unit }: { unit: BusinessUnit }) {
   const client = useQueryClient()
-  const [name, setName] = useState(unit.name)
-  const [slug, setSlug] = useState(unit.slug)
+  const { draft, setDraft, baseRevision, remoteChanged, adopt, markSaved } = useServerDraft(
+    { name: unit.name, slug: unit.slug },
+    unit.revision,
+    { createDraft: () => ({}), mergeDraft: (server, edits) => ({ ...server, ...edits }) },
+  )
+  const { name, slug } = draft
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  useEffect(() => { setName(unit.name); setSlug(unit.slug) }, [unit.name, unit.slug])
+  const nameChanged = name.trim() !== unit.name
   const slugChanged = slug !== unit.slug
+
+  function loadTheirs() {
+    adopt()
+    setError('')
+    setMessage('')
+    void refreshUnit(client, unit.id)
+  }
   async function save(event: FormEvent) {
     event.preventDefault()
     setMessage('')
@@ -67,15 +79,16 @@ function UnitOverview({ unit }: { unit: BusinessUnit }) {
     if (problem) { setError(problem); return }
     setBusy(true)
     try {
-      await renameUnit(unit.id, { revision: unit.revision, name: name.trim(), ...(slugChanged ? { slug } : {}) })
+      await renameUnit(unit.id, { revision: baseRevision, ...(nameChanged ? { name: name.trim() } : {}), ...(slugChanged ? { slug } : {}) })
       await refreshUnit(client, unit.id)
+      markSaved()
       setMessage(slugChanged ? `Saved. The public page is now at /public/${slug}.` : 'Saved.')
     } catch (err) {
       // A stale revision answers with the current unit; a name or slug that
       // another unit uses answers with that field.
       const stale = isConflict(err) && err instanceof APIError && !!err.details?.current
       if (stale) await refreshUnit(client, unit.id)
-      setError(stale ? 'Another platform administrator changed this unit. The current values were loaded; review them and save again.' : errorMessage(err, 'The unit could not be saved.'))
+      setError(stale ? 'Another platform administrator changed this unit. Your edits are kept; load theirs or review them before saving again.' : errorMessage(err, 'The unit could not be saved.'))
     } finally {
       setBusy(false)
     }
@@ -84,11 +97,12 @@ function UnitOverview({ unit }: { unit: BusinessUnit }) {
     <div className="panel"><div className="panel-heading"><div><h2>Name and public link</h2><p className="muted">Members see the name in their console. The slug is part of the unit’s public status address.</p></div></div>
       {message && <div className="success-banner" role="status">{message}</div>}
       {error && <div className="form-error" role="alert">{error}</div>}
+      {remoteChanged && <div className="notice warning" role="status"><span><strong>Another platform administrator changed this unit.</strong> Your edits are kept. Saving still uses revision {baseRevision}.</span><button type="button" className="text-button" onClick={loadTheirs}>Load theirs</button></div>}
       <form className="settings-form" onSubmit={save}>
-        <label>Unit name<input value={name} onChange={event => setName(event.target.value)} maxLength={80} required /></label>
-        <label>Slug<input value={slug} onChange={event => setSlug(event.target.value.toLowerCase())} maxLength={40} required autoComplete="off" spellCheck={false} /><small>Lowercase letters, digits, and hyphens. Public address: {publicURL(slug || '…')}</small></label>
+        <label>Unit name<input value={name} onChange={event => setDraft(current => ({ ...current, name: event.target.value }))} maxLength={80} required /></label>
+        <label>Slug<input value={slug} onChange={event => setDraft(current => ({ ...current, slug: event.target.value.toLowerCase() }))} maxLength={40} required autoComplete="off" spellCheck={false} /><small>Lowercase letters, digits, and hyphens. Public address: {publicURL(slug || '…')}</small></label>
         <div className={slugChanged ? 'notice warning' : 'notice'} aria-live="polite"><AlertTriangle size={14} /><span>{slugChanged ? `Changing the slug changes the public link: ${publicURL(unit.slug)} stops working. Share ${publicURL(slug)} instead.` : 'Changing the slug changes the public link. Anyone who uses the current link then gets a page that is not available.'}</span></div>
-        <button className="button primary" type="submit" disabled={busy || (name === unit.name && !slugChanged)}>{busy ? 'Saving…' : 'Save changes'}</button>
+        <button className="button primary" type="submit" disabled={busy || (!nameChanged && !slugChanged)}>{busy ? 'Saving…' : 'Save changes'}</button>
       </form>
     </div>
     <div className="panel"><div className="panel-heading"><div><h2>Public status page</h2><p className="muted">The unit’s administrators choose whether to publish it and what it shows.</p></div><Globe2 className="muted-icon" size={20} /></div>

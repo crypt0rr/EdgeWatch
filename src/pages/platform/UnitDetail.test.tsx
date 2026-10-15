@@ -374,6 +374,33 @@ describe('business unit detail', () => {
       expect(await screen.findByText('Saved.')).toBeInTheDocument()
     })
 
+    it('keeps typed fields across refetch, pins their starting revision, and can load the latest values', async () => {
+      let current = businessUnit()
+      vi.mocked(getUnit).mockImplementation(async () => current)
+      vi.mocked(renameUnit).mockRejectedValueOnce(new APIError('the business unit was modified; reload and try again', 'conflict', { current: businessUnit({ name: 'Another name', slug: 'shops', revision: 4 }) }))
+      const { client } = renderUnit('overview')
+      const name = await screen.findByLabelText('Unit name')
+      const slug = screen.getByLabelText(/^Slug/)
+      fireEvent.change(name, { target: { value: 'My stores' } })
+
+      current = businessUnit({ name: 'Another name', slug: 'shops', revision: 4 })
+      await act(async () => { await client.refetchQueries({ queryKey: ['platform-unit', 'unit-retail'] }) })
+      await waitFor(() => {
+        expect(screen.getByLabelText('Unit name')).toHaveValue('My stores')
+        expect(screen.getByLabelText(/^Slug/)).toHaveValue('shops')
+      })
+      expect(screen.getByText(/Your edits are kept\. Saving still uses revision 3/)).toBeInTheDocument()
+      fireEvent.submit(name.closest('form')!)
+      expect(await screen.findByRole('alert')).toHaveTextContent('Your edits are kept; load theirs or review them before saving again.')
+      expect(renameUnit).toHaveBeenCalledWith('unit-retail', { revision: 3, name: 'My stores' })
+      expect(name).toHaveValue('My stores')
+
+      fireEvent.click(screen.getByRole('button', { name: 'Load theirs' }))
+      await waitFor(() => expect(name).toHaveValue('Another name'))
+      expect(slug).toHaveValue('shops')
+      expect(screen.queryByText(/Saving still uses revision 3/)).not.toBeInTheDocument()
+    })
+
     it('shows the unit’s stored scans with its other counts', async () => {
       renderUnit('overview')
       expect(await screen.findByRole('heading', { name: 'Public status page' })).toBeInTheDocument()

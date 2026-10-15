@@ -84,6 +84,13 @@ from the name when left empty, has 2 to 40 lowercase letters, digits, or
 hyphens and cannot be a reserved word such as `api`, `platform`, or `public`.
 Then invite the unit's first administrator from the unit's **Accounts** tab.
 
+When you edit a unit's name or slug, the form keeps the revision it first
+loaded. If another platform administrator changes the unit while you are
+editing, the form keeps your entries and warns that the revision is stale.
+Compare your edits with the latest values before saving; a stale save cannot
+silently replace the newer unit. Choose **Load theirs** to discard your edits
+and reload the current values.
+
 The platform administrator invites and resets only unit administrators, and
 receives each one-time link to pass on. It does both only while the unit is
 active: the **Accounts** tab of a disabled unit offers only to sign an

@@ -94,6 +94,17 @@ func TestScheduledBudgetSkipIsRecordedOnceUntilAScanRuns(t *testing.T) {
 	if !sawLive {
 		t.Fatal("the budget skip was not published as a live update")
 	}
+	assertBudgetSkipKey := func(wantNonempty bool) {
+		t.Helper()
+		summary, err := defaultTenant(s).RuntimeStateSummary(ctx, record.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if gotNonempty := summary.BudgetSkipAlertKey != ""; gotNonempty != wantNonempty {
+			t.Fatalf("budget skip projection = %q, want nonempty %v", summary.BudgetSkipAlertKey, wantNonempty)
+		}
+	}
+	assertBudgetSkipKey(true)
 
 	// The same scope and budget are not reported again.
 	scheduled()
@@ -106,9 +117,11 @@ func TestScheduledBudgetSkipIsRecordedOnceUntilAScanRuns(t *testing.T) {
 	if _, _, err := a.RunJobRecord(ctx, record); err != nil {
 		t.Fatal(err)
 	}
+	assertBudgetSkipKey(false)
 	a.Config.Scheduler.MaxProbeCount = 100
 	scheduled()
 	if events, outbox := budgetEvents(); len(events) != 2 || outbox != 2 {
 		t.Fatalf("skip after a scan ran = %d events, %d deliveries, want 2 and 2", len(events), outbox)
 	}
+	assertBudgetSkipKey(true)
 }

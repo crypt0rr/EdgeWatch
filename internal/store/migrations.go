@@ -19,7 +19,7 @@ import (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 73
+const schemaVersion = 74
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -51,6 +51,7 @@ var conditionalMigrationStatements = map[int]func(*sql.Tx) ([]string, error){
 	// schema 54 copy has installed them.
 	66: migration66ConditionalStatements,
 	68: migration68ConditionalStatements,
+	74: migration74ConditionalStatements,
 }
 
 // newerSchemaError is the refusal for a database that a newer release has
@@ -113,13 +114,16 @@ func migrateContextWithLogger(ctx context.Context, db *sql.DB, logger *slog.Logg
 	if err := ensureStartupStateContext(ctx, db); err != nil {
 		return err
 	}
+	initialVersion := version
 	migrations := schemaMigrationStatements()
 	// Mark the complete startup reconciliation as active, not only the DDL
 	// steps. FTS and other resumable backfills can be the longest part of an
 	// upgrade even when the schema marker is already current.
-	if err := markMigrationStarted(ctx, db, version, schemaVersion); err != nil {
+	previousStartupState, previousStartupPhase, err := markMigrationStarted(ctx, db, version, schemaVersion)
+	if err != nil {
 		return err
 	}
+	resumeBudgetSkipBackfill := initialVersion < 74 || previousStartupState != "ready" || previousStartupPhase != ""
 	logger.Info("database migration started", "from_schema", version, "to_schema", schemaVersion)
 	if version == 0 {
 		// A new database starts from the frozen schema 54 baseline.
@@ -151,6 +155,20 @@ func migrateContextWithLogger(ctx context.Context, db *sql.DB, logger *slog.Logg
 			return err
 		}
 		logger.Info("database migration step completed", "schema", version, "target_schema", schemaVersion)
+	}
+	if resumeBudgetSkipBackfill {
+		if err := updateMigrationStatus(ctx, db, "probe-budget-alert-projection", 0, 0); err != nil {
+			markMigrationFailed(ctx, db, err)
+			return err
+		}
+		if err := backfillBudgetSkipAlertKeyProjection(ctx, db, func(processed int64) {
+			statusCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+			_ = updateMigrationStatus(statusCtx, db, "probe-budget-alert-projection", processed, 0)
+			cancel()
+		}); err != nil {
+			markMigrationFailed(ctx, db, err)
+			return fmt.Errorf("backfill probe-budget alert projection: %w", err)
+		}
 	}
 	if err := updateMigrationStatus(ctx, db, "incident-inbox-projection", 0, 0); err != nil {
 		markMigrationFailed(ctx, db, err)
@@ -337,6 +355,9 @@ func schemaMigrationStatements() map[int][]string {
 		// Planned change-window inventory keeps its priority groups index-backed
 		// and merges only bounded candidates. See migration73.go.
 		73: migration73Statements(),
+		// The job list reads scheduled probe-budget skips from the compact
+		// runtime projection rather than decoding state_json. See migration74.go.
+		74: migration74Statements(),
 	}
 }
 

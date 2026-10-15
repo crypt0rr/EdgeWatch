@@ -34,7 +34,7 @@ func monitoringAttempt(status string) *store.JobScanStatusSummary {
 }
 
 func monitoringView(record store.JobRecord, attempt *store.JobScanStatusSummary, historyAvailable bool, appActivity string, appActivityAvailable bool, cycleStatus string, cycleAvailable bool) jobMonitoringSummaryView {
-	return jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: attempt}, historyAvailable, appActivity, appActivityAvailable, cycleStatus, cycleAvailable, false, time.Date(2026, 10, 11, 8, 0, 0, 0, time.UTC))
+	return jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: attempt}, "", historyAvailable, appActivity, appActivityAvailable, cycleStatus, cycleAvailable, false, time.Date(2026, 10, 11, 8, 0, 0, 0, time.UTC))
 }
 
 func TestJobMonitoringSummaryStatusPrecedenceAndAvailability(t *testing.T) {
@@ -95,6 +95,34 @@ func TestJobMonitoringSummaryStatusPrecedenceAndAvailability(t *testing.T) {
 	}
 }
 
+func TestJobMonitoringScheduledBudgetSkipPrecedence(t *testing.T) {
+	t.Parallel()
+	record := monitoringTestJob()
+	failed := store.JobExecutionSummary{LatestAttempt: monitoringAttempt("failed")}
+	now := time.Date(2026, 10, 11, 8, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name           string
+		activity       string
+		activityLoaded bool
+		cycle          string
+		cycleLoaded    bool
+		want           string
+	}{
+		{name: "saved budget skip remains visible over an older failure", activity: "none", activityLoaded: true, cycleLoaded: true, want: "probe_budget_skipped"},
+		{name: "active queued work suppresses older budget skip", activity: "queued", activityLoaded: true, cycleLoaded: true, want: "none"},
+		{name: "active running work suppresses older budget skip", activity: "running", activityLoaded: true, cycleLoaded: true, want: "none"},
+		{name: "stalled cycle has higher precedence", activity: "none", activityLoaded: true, cycle: "stalled", cycleLoaded: true, want: "stalled_cycle"},
+		{name: "known budget skip survives unavailable activity", want: "probe_budget_skipped"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			view := jobMonitoringSummary(record, failed, "scope-hash|65536", true, test.activity, test.activityLoaded, test.cycle, test.cycleLoaded, false, now)
+			if view.AttentionReason != test.want {
+				t.Fatalf("attention reason = %q, want %q", view.AttentionReason, test.want)
+			}
+		})
+	}
+}
+
 func TestJobMonitoringSummaryNextRunUsesCronTimezoneDSTSemantics(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -110,7 +138,7 @@ func TestJobMonitoringSummaryNextRunUsesCronTimezoneDSTSemantics(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			record := monitoringTestJob()
 			record.Job.Schedule = test.schedule
-			view := jobMonitoringSummary(record, store.JobExecutionSummary{}, true, "", true, "", true, false, test.now)
+			view := jobMonitoringSummary(record, store.JobExecutionSummary{}, "", true, "", true, "", true, false, test.now)
 			if view.ScheduleState != "scheduled" || view.NextRunAt == nil || !view.NextRunAt.Equal(test.want) {
 				t.Fatalf("next run = %+v, state %q; want %s", view.NextRunAt, view.ScheduleState, test.want)
 			}
@@ -130,7 +158,7 @@ func TestJobMonitoringSummaryScanIDsAndNullTimesRespectPermission(t *testing.T) 
 	t.Parallel()
 	record := monitoringTestJob()
 	scan := &store.JobScanStatusSummary{ID: "scan-private-id", Status: "failed"}
-	view := jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: scan}, true, "", true, "", true, false, time.Now().UTC())
+	view := jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: scan}, "", true, "", true, "", true, false, time.Now().UTC())
 	encoded, err := json.Marshal(view)
 	if err != nil {
 		t.Fatal(err)
@@ -138,7 +166,7 @@ func TestJobMonitoringSummaryScanIDsAndNullTimesRespectPermission(t *testing.T) 
 	if strings.Contains(string(encoded), "scan-private-id") || !strings.Contains(string(encoded), `"started_at":null`) || !strings.Contains(string(encoded), `"finished_at":null`) {
 		t.Fatalf("jobs.read monitoring data = %s; scan ID must be omitted and missing times explicit", encoded)
 	}
-	allowed := jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: scan}, true, "", true, "", true, true, time.Now().UTC())
+	allowed := jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: scan}, "", true, "", true, "", true, true, time.Now().UTC())
 	if allowed.LatestAttempt == nil || allowed.LatestAttempt.ScanID != scan.ID {
 		t.Fatalf("scans.read latest attempt = %+v", allowed.LatestAttempt)
 	}
@@ -154,6 +182,12 @@ func TestJobListMonitoringFieldsArePermissionScopedAndDoNotExposeScanErrors(t *t
 	}))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := db.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.BudgetSkipAlertKey = "private-budget-projection|65536"
+		return nil, nil
+	}); err != nil {
+		t.Fatalf("save scheduled budget skip: %v", err)
 	}
 	stamp := time.Date(2026, 10, 11, 8, 30, 0, 0, time.UTC)
 	if err := db.System().SaveScan(ctx, model.Scan{ID: "private-success-id", JobID: record.ID, Job: record.Job.Name, Status: "success", StartedAt: stamp.Add(-time.Minute), FinishedAt: stamp.Add(-time.Minute)}); err != nil {
@@ -200,13 +234,14 @@ func TestJobListMonitoringFieldsArePermissionScopedAndDoNotExposeScanErrors(t *t
 	viewerMonitoring := viewerJob["monitoring"].(map[string]any)
 	viewerAttempt := viewerMonitoring["latest_attempt"].(map[string]any)
 	viewerSuccess := viewerMonitoring["latest_successful_scan"].(map[string]any)
-	if viewerAttempt["status"] != "failed" || viewerAttempt["scan_id"] != nil || viewerSuccess["status"] != "success" || viewerSuccess["scan_id"] != nil || strings.Contains(viewerRaw, "private diagnostic text") || strings.Contains(viewerRaw, "private-scan-id") || strings.Contains(viewerRaw, "private-success-id") {
+	if viewerAttempt["status"] != "failed" || viewerAttempt["scan_id"] != nil || viewerSuccess["status"] != "success" || viewerSuccess["scan_id"] != nil || viewerMonitoring["attention_reason"] != "probe_budget_skipped" || strings.Contains(viewerRaw, "private diagnostic text") || strings.Contains(viewerRaw, "private-scan-id") || strings.Contains(viewerRaw, "private-success-id") || strings.Contains(viewerRaw, "private-budget-projection") {
 		t.Fatalf("jobs.read viewer response = %s", viewerRaw)
 	}
 	adminJob, adminRaw := responseFor(admin, adminToken)
-	adminAttempt := adminJob["monitoring"].(map[string]any)["latest_attempt"].(map[string]any)
-	adminSuccess := adminJob["monitoring"].(map[string]any)["latest_successful_scan"].(map[string]any)
-	if adminAttempt["scan_id"] != "private-scan-id" || adminSuccess["scan_id"] != "private-success-id" || !strings.Contains(adminRaw, "private-scan-id") || !strings.Contains(adminRaw, "private-success-id") {
+	adminMonitoring := adminJob["monitoring"].(map[string]any)
+	adminAttempt := adminMonitoring["latest_attempt"].(map[string]any)
+	adminSuccess := adminMonitoring["latest_successful_scan"].(map[string]any)
+	if adminAttempt["scan_id"] != "private-scan-id" || adminSuccess["scan_id"] != "private-success-id" || adminMonitoring["attention_reason"] != "probe_budget_skipped" || strings.Contains(adminRaw, "private-budget-projection") || !strings.Contains(adminRaw, "private-scan-id") || !strings.Contains(adminRaw, "private-success-id") {
 		t.Fatalf("scans.read admin response = %s", adminRaw)
 	}
 }

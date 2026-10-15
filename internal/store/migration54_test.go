@@ -467,7 +467,7 @@ func TestMigration54KeysLatestHostsByTenant(t *testing.T) {
 		t.Fatalf("%s heartbeats = %v, want %v", latestScanHostsTenantPhase, got, progress)
 	}
 	phases := queryStrings(t, s.DB, `SELECT phase FROM migration_progress_observations WHERE phase NOT LIKE 'timestamp-normalization:%' AND phase NOT LIKE 'host-search:%' GROUP BY phase ORDER BY MIN(rowid)`)
-	wantPhasePrefix := []string{"schema", "incident-inbox-projection", latestScanHostsTenantPhase, "timestamp-normalization"}
+	wantPhasePrefix := []string{"schema", "probe-budget-alert-projection", "incident-inbox-projection", latestScanHostsTenantPhase, "timestamp-normalization"}
 	if len(phases) < len(wantPhasePrefix) || !slices.Equal(phases[:len(wantPhasePrefix)], wantPhasePrefix) {
 		t.Fatalf("startup phases = %v, want %v in order", phases, wantPhasePrefix)
 	}

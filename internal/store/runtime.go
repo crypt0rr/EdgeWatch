@@ -174,6 +174,7 @@ type RuntimeStateSummary struct {
 	IncidentCount               int
 	PendingCount                int
 	BaselineHostCount           int
+	BudgetSkipAlertKey          string
 }
 
 // RuntimeStateSummary returns the bounded state projection of one of the
@@ -187,13 +188,13 @@ func (ts *TenantStore) RuntimeStateSummary(ctx context.Context, jobID string) (R
 	}
 	var summary RuntimeStateSummary
 	var metadataVersion int
-	var scanID, configHash sql.NullString
+	var scanID, configHash, budgetSkipAlertKey sql.NullString
 	var projectionVersion sql.NullInt64
 	var modified, candidateCount, candidateAttempts, incompleteCandidateAttempts, pendingCount sql.NullInt64
 	var metaUpdated, runtimeUpdated string
 	reader := ts.store.reader()
-	err := reader.QueryRowContext(ctx, `SELECT m.metadata_version,m.projection_version,m.baseline_scan_id,m.baseline_config_hash,m.baseline_modified,m.candidate_count,m.candidate_attempts,m.incomplete_candidate_attempts,m.pending_count,m.updated_at,COALESCE(r.updated_at,'') FROM job_runtime_meta m JOIN jobs j ON j.id=m.job_id AND j.tenant_id=? LEFT JOIN job_runtime r ON r.job_id=m.job_id WHERE m.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, ts.scope.id, jobID).
-		Scan(&metadataVersion, &projectionVersion, &scanID, &configHash, &modified, &candidateCount, &candidateAttempts, &incompleteCandidateAttempts, &pendingCount, &metaUpdated, &runtimeUpdated)
+	err := reader.QueryRowContext(ctx, `SELECT m.metadata_version,m.projection_version,m.baseline_scan_id,m.baseline_config_hash,m.baseline_modified,m.candidate_count,m.candidate_attempts,m.incomplete_candidate_attempts,m.pending_count,m.budget_skip_alert_key,m.updated_at,COALESCE(r.updated_at,'') FROM job_runtime_meta m JOIN jobs j ON j.id=m.job_id AND j.tenant_id=? LEFT JOIN job_runtime r ON r.job_id=m.job_id WHERE m.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, ts.scope.id, jobID).
+		Scan(&metadataVersion, &projectionVersion, &scanID, &configHash, &modified, &candidateCount, &candidateAttempts, &incompleteCandidateAttempts, &pendingCount, &budgetSkipAlertKey, &metaUpdated, &runtimeUpdated)
 	if err == nil && metadataVersion > 0 && (runtimeUpdated == "" || metaUpdated >= runtimeUpdated) {
 		summary.HasBaseline = projectionVersion.Int64 > 0 || (scanID.Valid && scanID.String != "")
 		summary.BaselineScanID, summary.BaselineConfigHash = scanID.String, configHash.String
@@ -202,6 +203,7 @@ func (ts *TenantStore) RuntimeStateSummary(ctx context.Context, jobID string) (R
 		summary.CandidateAttempts = int(candidateAttempts.Int64)
 		summary.IncompleteCandidateAttempts = int(incompleteCandidateAttempts.Int64)
 		summary.PendingCount = int(pendingCount.Int64)
+		summary.BudgetSkipAlertKey = budgetSkipAlertKey.String
 		if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_incidents i JOIN jobs j ON j.id=i.job_id AND j.tenant_id=? WHERE i.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, ts.scope.id, jobID).Scan(&summary.IncidentCount); err != nil {
 			return summary, err
 		}
@@ -220,13 +222,14 @@ func (ts *TenantStore) RuntimeStateSummary(ctx context.Context, jobID string) (R
 // The JSON stays in SQLite: only its counters and arrays are counted.
 func (ts *TenantStore) legacyRuntimeStateSummary(ctx context.Context, jobID string) (RuntimeStateSummary, error) {
 	var summary RuntimeStateSummary
-	var baselineType, scanID, configHash sql.NullString
+	var baselineType, scanID, configHash, budgetSkipAlertKey sql.NullString
 	var modified, candidateCount, candidateAttempts, incompleteCandidateAttempts, pendingCount sql.NullInt64
 	var incidentCount, hostArrayCount, unitAddressCount sql.NullInt64
 	err := ts.store.reader().QueryRowContext(ctx, `SELECT
  json_type(r.state_json,'$.baseline'),
  json_extract(r.state_json,'$.baseline_scan_id'),
  json_extract(r.state_json,'$.baseline_config_hash'),
+ json_extract(r.state_json,'$.budget_skip_alert_key'),
  COALESCE(json_extract(r.state_json,'$.baseline_modified'),0),
  COALESCE(json_extract(r.state_json,'$.candidate_count'),0),
  COALESCE(json_extract(r.state_json,'$.candidate_attempts'),0),
@@ -237,7 +240,7 @@ func (ts *TenantStore) legacyRuntimeStateSummary(ctx context.Context, jobID stri
  COALESCE((SELECT COUNT(DISTINCT addresses.value)
    FROM json_each(r.state_json,'$.baseline.units') AS units
    JOIN json_each(units.value,'$.addresses') AS addresses),0)
-		 FROM job_runtime r JOIN jobs j ON j.id=r.job_id AND j.tenant_id=? WHERE r.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, ts.scope.id, jobID).Scan(&baselineType, &scanID, &configHash, &modified, &candidateCount, &candidateAttempts, &incompleteCandidateAttempts, &incidentCount, &pendingCount, &hostArrayCount, &unitAddressCount)
+		 FROM job_runtime r JOIN jobs j ON j.id=r.job_id AND j.tenant_id=? WHERE r.job_id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, ts.scope.id, jobID).Scan(&baselineType, &scanID, &configHash, &budgetSkipAlertKey, &modified, &candidateCount, &candidateAttempts, &incompleteCandidateAttempts, &incidentCount, &pendingCount, &hostArrayCount, &unitAddressCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return summary, nil
 	}
@@ -246,6 +249,7 @@ func (ts *TenantStore) legacyRuntimeStateSummary(ctx context.Context, jobID stri
 	}
 	summary.HasBaseline = baselineType.Valid && baselineType.String != "null" && baselineType.String != ""
 	summary.BaselineScanID, summary.BaselineConfigHash = scanID.String, configHash.String
+	summary.BudgetSkipAlertKey = budgetSkipAlertKey.String
 	summary.BaselineModified = modified.Int64 != 0
 	summary.CandidateCount = int(candidateCount.Int64)
 	summary.CandidateAttempts = int(candidateAttempts.Int64)
@@ -299,6 +303,7 @@ func (ts *TenantStore) RuntimeStateSummaries(ctx context.Context, includeArchive
  m.baseline_scan_id, m.baseline_config_hash, COALESCE(m.baseline_modified,0),
  COALESCE(m.candidate_count,0), COALESCE(m.candidate_attempts,0),
  COALESCE(m.incomplete_candidate_attempts,0), COALESCE(m.pending_count,0),
+ COALESCE(m.budget_skip_alert_key,''),
  COALESCE(m.updated_at,''), COALESCE(r.updated_at,''),
  CASE WHEN r.job_id IS NULL THEN 0 ELSE 1 END,
  (SELECT COUNT(*) FROM runtime_incidents i WHERE i.job_id=j.id),
@@ -320,12 +325,13 @@ func (ts *TenantStore) RuntimeStateSummaries(ctx context.Context, includeArchive
 		var jobID string
 		var metadataVersion, projectionVersion, modified, candidateCount, candidateAttempts, incompleteAttempts, pendingCount int64
 		var scanID, configHash sql.NullString
+		var budgetSkipAlertKey string
 		var metaUpdated, runtimeUpdated string
 		var runtimeExists int
 		var incidentCount, baselineHostCount, scanHostCount int64
 		if err := rows.Scan(
 			&jobID, &metadataVersion, &projectionVersion, &scanID, &configHash, &modified,
-			&candidateCount, &candidateAttempts, &incompleteAttempts, &pendingCount,
+			&candidateCount, &candidateAttempts, &incompleteAttempts, &pendingCount, &budgetSkipAlertKey,
 			&metaUpdated, &runtimeUpdated, &runtimeExists, &incidentCount, &baselineHostCount, &scanHostCount,
 		); err != nil {
 			return nil, err
@@ -349,6 +355,7 @@ func (ts *TenantStore) RuntimeStateSummaries(ctx context.Context, includeArchive
 			IncompleteCandidateAttempts: int(incompleteAttempts),
 			IncidentCount:               int(incidentCount),
 			PendingCount:                int(pendingCount),
+			BudgetSkipAlertKey:          budgetSkipAlertKey,
 		}
 		switch {
 		case baselineHostCount > 0:
@@ -1405,7 +1412,7 @@ func upsertRuntimeBaselineMetaTx(ctx context.Context, tx *sql.Tx, jobID string, 
 	if projectionVersion == 0 && state.Baseline != nil {
 		projectionVersion = 1
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET metadata_version=excluded.metadata_version,baseline_scan_id=excluded.baseline_scan_id,baseline_config_hash=excluded.baseline_config_hash,baseline_modified=excluded.baseline_modified,projection_version=excluded.projection_version,candidate_count=excluded.candidate_count,candidate_attempts=excluded.candidate_attempts,incomplete_candidate_attempts=excluded.incomplete_candidate_attempts,pending_count=excluded.pending_count,updated_at=excluded.updated_at`, jobID, 1, state.BaselineScanID, state.BaselineConfigHash, boolInt(state.BaselineModified), projectionVersion, state.CandidateCount, state.CandidateAttempts, state.IncompleteCandidateAttempts, len(state.Pending), sqliteTimestamp(now))
+	_, err := tx.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,budget_skip_alert_key,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET metadata_version=excluded.metadata_version,baseline_scan_id=excluded.baseline_scan_id,baseline_config_hash=excluded.baseline_config_hash,baseline_modified=excluded.baseline_modified,projection_version=excluded.projection_version,candidate_count=excluded.candidate_count,candidate_attempts=excluded.candidate_attempts,incomplete_candidate_attempts=excluded.incomplete_candidate_attempts,pending_count=excluded.pending_count,budget_skip_alert_key=excluded.budget_skip_alert_key,updated_at=excluded.updated_at`, jobID, 1, state.BaselineScanID, state.BaselineConfigHash, boolInt(state.BaselineModified), projectionVersion, state.CandidateCount, state.CandidateAttempts, state.IncompleteCandidateAttempts, len(state.Pending), state.BudgetSkipAlertKey, sqliteTimestamp(now))
 	return err
 }
 

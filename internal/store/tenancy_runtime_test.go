@@ -470,28 +470,49 @@ var runtimeTenantLeakCases = map[string]tenantLeakCase{
 			}
 		})
 	}},
-	"RuntimeStateSummary": {run: func(t *testing.T, f tenantFixture) {
+	"RuntimeStateSummary": {writes: true, run: func(t *testing.T, f tenantFixture) {
+		for _, projection := range []struct{ jobID, key string }{
+			{f.archivedA, "tenant-a-summary"},
+			{f.archivedB, "tenant-b-summary"},
+		} {
+			if _, err := f.store.DB.ExecContext(context.Background(), `UPDATE job_runtime_meta SET budget_skip_alert_key=? WHERE job_id=?`, projection.key, projection.jobID); err != nil {
+				t.Fatal(err)
+			}
+		}
 		checkTenantRuntimeReads(t, f, func(ts *TenantStore, jobID string) (RuntimeStateSummary, error) {
 			return ts.RuntimeStateSummary(context.Background(), jobID)
 		}, func(t *testing.T, scope TenantScope, summary RuntimeStateSummary) {
-			want := RuntimeStateSummary{HasBaseline: true, BaselineScanID: runtimeScanOf(f, scope), BaselineConfigHash: testJob("edge-archived").SecurityHash(), BaselineModified: true, CandidateCount: runtimeCandidatesOf(f, scope), BaselineHostCount: 3}
+			want := RuntimeStateSummary{HasBaseline: true, BaselineScanID: runtimeScanOf(f, scope), BaselineConfigHash: testJob("edge-archived").SecurityHash(), BaselineModified: true, CandidateCount: runtimeCandidatesOf(f, scope), BaselineHostCount: 3, BudgetSkipAlertKey: runtimeMarker(f, scope) + "-summary"}
 			if summary != want {
 				t.Errorf("tenant %s: own summary = %+v, want %+v", scope.ID(), summary, want)
 			}
 		})
 	}},
-	"RuntimeStateSummaries": {run: func(t *testing.T, f tenantFixture) {
+	"RuntimeStateSummaries": {writes: true, run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
+		for _, projection := range []struct{ jobID, key string }{
+			{f.jobA, "tenant-a-current"},
+			{f.archivedA, "tenant-a-archived"},
+			{f.jobB, "tenant-b-current"},
+			{f.archivedB, "tenant-b-archived"},
+		} {
+			if _, err := f.store.DB.ExecContext(ctx, `UPDATE job_runtime_meta SET budget_skip_alert_key=? WHERE job_id=?`, projection.key, projection.jobID); err != nil {
+				t.Fatal(err)
+			}
+		}
 		for _, check := range []struct {
 			scope           TenantScope
 			includeArchived bool
 			archived        string
 			want            []string
+			currentID       string
+			currentKey      string
+			archivedKey     string
 		}{
-			{f.b, false, "", []string{f.jobB}},
-			{f.b, true, f.archivedB, sortedIDs(f.jobB, f.archivedB)},
-			{f.a, false, "", []string{f.jobA}},
-			{f.a, true, f.archivedA, sortedIDs(f.jobA, f.archivedA)},
+			{f.b, false, "", []string{f.jobB}, f.jobB, "tenant-b-current", ""},
+			{f.b, true, f.archivedB, sortedIDs(f.jobB, f.archivedB), f.jobB, "tenant-b-current", "tenant-b-archived"},
+			{f.a, false, "", []string{f.jobA}, f.jobA, "tenant-a-current", ""},
+			{f.a, true, f.archivedA, sortedIDs(f.jobA, f.archivedA), f.jobA, "tenant-a-current", "tenant-a-archived"},
 		} {
 			summaries, err := f.store.Tenant(check.scope).RuntimeStateSummaries(ctx, check.includeArchived)
 			if err != nil {
@@ -505,10 +526,13 @@ var runtimeTenantLeakCases = map[string]tenantLeakCase{
 			if !reflect.DeepEqual(got, check.want) {
 				t.Fatalf("tenant %s, archived %v: summaries of %v, want %v", check.scope.ID(), check.includeArchived, got, check.want)
 			}
+			if summary := summaries[check.currentID]; summary.BudgetSkipAlertKey != check.currentKey {
+				t.Errorf("tenant %s: current projection = %q, want %q", check.scope.ID(), summary.BudgetSkipAlertKey, check.currentKey)
+			}
 			if check.archived == "" {
 				continue
 			}
-			if own := summaries[check.archived]; own.BaselineScanID != runtimeScanOf(f, check.scope) || own.CandidateCount != runtimeCandidatesOf(f, check.scope) || own.BaselineHostCount != 3 {
+			if own := summaries[check.archived]; own.BaselineScanID != runtimeScanOf(f, check.scope) || own.CandidateCount != runtimeCandidatesOf(f, check.scope) || own.BaselineHostCount != 3 || own.BudgetSkipAlertKey != check.archivedKey {
 				t.Errorf("tenant %s: own summary = %+v", check.scope.ID(), own)
 			}
 		}

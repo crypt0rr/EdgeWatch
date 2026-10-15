@@ -117,6 +117,18 @@ and temporary WAL depend on the retained change-window history size. An older
 release refuses the upgraded database; restore the matching pre-upgrade
 `./data` backup to roll back.
 
+## Schema 74
+
+Schema 74 adds a bounded scalar copy of a scheduled probe-budget skip to the
+job runtime metadata used by the Jobs list. A partial index identifies rows
+that still need the copy. The daemon backfills those rows in restartable
+batches of 250, validates legacy JSON, and records progress in startup status;
+malformed or oversized values become empty markers. The migration does not
+rewrite scan history, runtime snapshots, or baselines. Its duration and
+temporary WAL depend on the number of runtime metadata rows. An older release
+refuses the upgraded database; restore the matching pre-upgrade `./data`
+backup to roll back.
+
 ## Upgrade floor
 
 From v0.36.0, EdgeWatch upgrades a database from schema 54, the schema of

@@ -119,16 +119,21 @@ up to 100 windows, with unclosed windows and due reviews ahead of reviewed
 history.
 
 Choose **Needs attention** to filter the full tenant job list to jobs whose
-latest attempt failed or was incomplete, or whose saved scan cycle stalled.
-Queued or running work supersedes an older failed or incomplete attempt; a
-later successful attempt clears that older failure. A stalled cycle remains
-actionable while a retry waits or runs. The filter does not infer problems
-from elapsed time or the absence of a schedule. Unavailable summaries remain
-visible in **All jobs** and are reported as unavailable rather than treated as
-healthy or as having no scan history. When a summary is unavailable, known
-attention reasons remain eligible for **Needs attention**; jobs without a
-known attention reason are not included. Readers with `jobs.read` can see the
-summary; opening scan details from it requires `scans.read`.
+latest attempt failed or was incomplete, whose saved scan cycle stalled, or
+whose last scheduled run was skipped because it exceeded the probe budget.
+That saved marker reports the last skip rather than predicting the next run:
+DNS answers, job settings, or the unit's budget can change. The job keeps its
+next scheduled time, and a later scan clears the marker when its result is
+finalized. Queued or running work supersedes an older failed or incomplete
+attempt or budget-skip marker; a later successful attempt clears that older
+failure. A stalled cycle remains actionable while a retry waits or runs. The
+filter does not infer problems from elapsed time or the absence of a schedule.
+Unavailable summaries remain visible in **All jobs** and are reported as
+unavailable rather than treated as healthy or as having no scan history. When
+a summary is unavailable, known attention reasons remain eligible for **Needs
+attention**; jobs without a known attention reason are not included. Readers
+with `jobs.read` can see the summary; opening scan details from it requires
+`scans.read`.
 
 Choose how many successful samples establish a baseline and how many matching
 changes confirm an incident. The same number of scans in a row must observe

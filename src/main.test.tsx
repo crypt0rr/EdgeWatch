@@ -496,7 +496,7 @@ describe('application shell', () => {
       monitoring: {
         availability: 'available', history_available: true, activity: 'none', schedule_state: 'scheduled',
         next_run_at: '2026-10-12T00:00:00Z', timezone: 'UTC', latest_attempt: null,
-        latest_successful_scan: null, attention_reason: index === 8 ? 'incomplete' : 'none',
+        latest_successful_scan: null, attention_reason: index === 8 ? 'incomplete' : index === 7 ? 'probe_budget_skipped' : 'none',
       },
     }))
     vi.mocked(listJobs).mockResolvedValue({ jobs: allJobs } as never)
@@ -507,9 +507,11 @@ describe('application shell', () => {
     expect(screen.getByText('Showing 9 of 9 jobs')).toBeInTheDocument()
     fireEvent.change(screen.getByRole('combobox', { name: 'Filter jobs' }), { target: { value: 'attention' } })
     expect(screen.getByRole('heading', { name: 'Monitor 9' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Monitor 8' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Monitor 1' })).not.toBeInTheDocument()
-    expect(screen.getByText('Showing 1 of 9 jobs')).toBeInTheDocument()
+    expect(screen.getByText('Showing 2 of 9 jobs')).toBeInTheDocument()
     expect(screen.getByText(/Needs attention · Latest scan incomplete/)).toBeInTheDocument()
+    expect(screen.getByText(/Needs attention · Last scheduled run skipped \(probe budget\)/)).toBeInTheDocument()
   })
 
   it('refreshes the attention filter for a viewer without stream events', async () => {

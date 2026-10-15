@@ -406,7 +406,7 @@ export function Jobs() {
             <p className="muted" role="status" aria-live="polite">Showing {visibleJobs.length} of {allJobs.length} jobs</p>
           </div>
           {filter === 'attention' && unavailableMonitoringCount > 0 ? <p className="job-monitoring-unavailable" role="status">Monitoring data is incomplete for {unavailableMonitoringCount} job{unavailableMonitoringCount === 1 ? '' : 's'}; known attention reasons remain visible in this filter.</p> : null}
-          {filter === 'attention' && allJobs.length > 0 && visibleJobs.length === 0 ? <div className="empty"><h3>No available jobs need attention</h3><p>No available job shows a latest failed or incomplete attempt or a stalled cycle.</p></div> : null}
+          {filter === 'attention' && allJobs.length > 0 && visibleJobs.length === 0 ? <div className="empty"><h3>No available jobs need attention</h3><p>No available job shows a latest failed or incomplete attempt, a stalled cycle, or a saved probe-budget skip.</p></div> : null}
           <div className="job-grid">
           {visibleJobs.map(job => {
             const baseline = baselinePresentation(job.baseline)
@@ -461,6 +461,7 @@ function JobMonitoringStatus({ job, canReadScans }: { job: Job; canReadScans: bo
   const attentionLabel = monitoring.attention_reason === 'failed' ? 'Latest scan failed'
     : monitoring.attention_reason === 'incomplete' ? 'Latest scan incomplete'
       : monitoring.attention_reason === 'stalled_cycle' ? 'Scan cycle stalled'
+        : monitoring.attention_reason === 'probe_budget_skipped' ? 'Last scheduled run skipped (probe budget)'
         : undefined
   return (
     <div className="job-monitoring" aria-label={`Monitoring summary for ${job.job.name}`}>

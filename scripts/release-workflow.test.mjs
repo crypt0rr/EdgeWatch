@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
-import { readdir, readFile } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
@@ -28,6 +30,128 @@ const grypeConfig = await readRepositoryFile('.grype.yaml')
 const composeScript = await readRepositoryFile('scripts/verify-compose-deployment.sh')
 const binaryImageScript = await readRepositoryFile('scripts/verify-release-image-binary.sh')
 const prebuiltFrontendTest = await readRepositoryFile('scripts/test-prebuilt-frontend-fails-closed.sh')
+const lintBaseScript = await readRepositoryFile('scripts/resolve-lint-base.sh')
+
+async function createLintBaseFixture({ withParent = true, originMain = 'head' } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'edgewatch-lint-base-'))
+  const scripts = join(directory, 'scripts')
+  const fakeBin = join(directory, 'fake-bin')
+  await mkdir(scripts)
+  await mkdir(fakeBin)
+  await writeFile(join(directory, 'Makefile'), await readRepositoryFile('Makefile'))
+  await writeFile(join(directory, '.golangci-lint-version'), 'v2.14.0\n')
+  const resolverPath = join(scripts, 'resolve-lint-base.sh')
+  await writeFile(resolverPath, lintBaseScript)
+  await chmod(resolverPath, 0o755)
+
+  const fakeGo = join(fakeBin, 'go')
+  await writeFile(fakeGo, [
+    '#!/bin/sh',
+    'if [ "${1:-}" = env ] && [ "${2:-}" = GOVERSION ]; then',
+    '  printf "%s\\n" go1.27.2',
+    '  exit 0',
+    'fi',
+    'printf "%s\\n" "$@" > "$CAPTURE_ARGS"',
+    '',
+  ].join('\n'))
+  await chmod(fakeGo, 0o755)
+
+  const git = (args) => execFileSync('git', args, { cwd: directory, encoding: 'utf8' }).trim()
+  git(['init', '--quiet', '--initial-branch=main'])
+  git(['config', 'user.email', 'lint-base@example.invalid'])
+  git(['config', 'user.name', 'Lint Base Fixture'])
+  await writeFile(join(directory, 'source.go'), 'package fixture\n')
+  git(['add', 'source.go'])
+  git(['-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'base'])
+  const base = git(['rev-parse', 'HEAD'])
+  let parent = base
+  let head = base
+  if (withParent) {
+    await writeFile(join(directory, 'source.go'), 'package fixture\n\n// changed\n')
+    git(['add', 'source.go'])
+    git(['-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'change'])
+    parent = git(['rev-parse', 'HEAD'])
+    await writeFile(join(directory, 'source.go'), 'package fixture\n\n// changed again\n')
+    git(['add', 'source.go'])
+    git(['-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'second change'])
+    head = git(['rev-parse', 'HEAD'])
+  }
+  const remoteMain = { base, parent, head }[originMain]
+  if (!remoteMain) throw new Error(`unknown fixture origin/main: ${originMain}`)
+  git(['update-ref', 'refs/remotes/origin/main', remoteMain])
+
+  return {
+    directory,
+    base,
+    parent,
+    head,
+    async run(base) {
+      const capture = join(directory, 'go-args')
+      const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, CAPTURE_ARGS: capture }
+      if (base === undefined) delete env.GOLANGCI_LINT_BASE
+      else env.GOLANGCI_LINT_BASE = base
+      const result = spawnSync('make', ['lint-go'], { cwd: directory, env, encoding: 'utf8' })
+      let args = ''
+      try {
+        args = await readFile(capture, 'utf8')
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error
+      }
+      return { ...result, args }
+    },
+  }
+}
+
+async function assertLintBase(t, fixtureOptions, requestedBase, expectedCommit = 'parent') {
+  const fixture = await createLintBaseFixture(fixtureOptions)
+  t.after(() => rm(fixture.directory, { recursive: true, force: true }))
+  const result = await fixture.run(requestedBase)
+  const expectedBase = fixture[expectedCommit]
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+  assert.ok(result.args.includes(`--new-from-rev=${expectedBase}`), `golangci-lint args were: ${result.args}`)
+  assert.ok(!result.args.includes(`--new-from-rev=${fixture.head}`), 'the selected base must not be HEAD')
+}
+
+test('lint-go resolves a nonempty diff base for CI and local runs', async (t) => {
+  await t.test('empty workflow_dispatch base with origin/main at HEAD uses HEAD^', async (t) => {
+    await assertLintBase(t, {}, '', 'parent')
+  })
+
+  await t.test('unset base on a detached/local run uses HEAD^', async (t) => {
+    const fixture = await createLintBaseFixture()
+    t.after(() => rm(fixture.directory, { recursive: true, force: true }))
+    const result = await fixture.run(undefined)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.ok(result.args.includes(`--new-from-rev=${fixture.parent}`), `golangci-lint args were: ${result.args}`)
+  })
+
+  await t.test('a pull request keeps its supplied base commit', async (t) => {
+    const fixture = await createLintBaseFixture()
+    t.after(() => rm(fixture.directory, { recursive: true, force: true }))
+    const result = await fixture.run(fixture.base)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.ok(result.args.includes(`--new-from-rev=${fixture.base}`), `golangci-lint args were: ${result.args}`)
+    assert.ok(!result.args.includes(`--new-from-rev=${fixture.head}`), 'the supplied PR base must not be HEAD')
+  })
+
+  await t.test('an unavailable push-before object uses the fetched main merge base', async (t) => {
+    const fixture = await createLintBaseFixture({ originMain: 'base' })
+    t.after(() => rm(fixture.directory, { recursive: true, force: true }))
+    const result = await fixture.run('0000000000000000000000000000000000000000')
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.ok(result.args.includes(`--new-from-rev=${fixture.base}`), `golangci-lint args were: ${result.args}`)
+    assert.ok(!result.args.includes(`--new-from-rev=${fixture.head}`), 'the fallback must not resolve to HEAD')
+  })
+
+  await t.test('a root commit fails before invoking golangci-lint', async (t) => {
+    const fixture = await createLintBaseFixture({ withParent: false })
+    t.after(() => rm(fixture.directory, { recursive: true, force: true }))
+    const result = await fixture.run('')
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /could not find a non-HEAD golangci-lint base; HEAD must have a parent commit/)
+    assert.equal(result.args, '', 'the linter must not be called with an empty diff')
+  })
+})
 
 const jobsStart = workflow.indexOf('\njobs:\n')
 assert.notEqual(jobsStart, -1, 'release workflow is missing its jobs')

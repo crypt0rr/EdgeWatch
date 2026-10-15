@@ -265,6 +265,7 @@ default; while it is off, `/metrics` answers `404`. Turn it on with a bearer
 token that only the scraper knows:
 
 ```sh
+install -d -m 0700 ./secrets
 umask 077
 openssl rand -hex 32 > ./secrets/metrics.token
 ```

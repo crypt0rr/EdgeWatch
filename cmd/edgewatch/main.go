@@ -143,6 +143,9 @@ func run(args []string) error {
 	if err := validateCommandFlags(fs, cmd, action); err != nil {
 		return err
 	}
+	if err := validateOutputFormat(cmd, action, *output); err != nil {
+		return err
+	}
 	if cmd == "history" && (*limit < 1 || *limit > 1000) {
 		return errors.New("--limit must be between 1 and 1000")
 	}
@@ -171,7 +174,7 @@ func run(args []string) error {
 	}
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
-		return err
+		return reportHealthConfigurationFailure(cmd, *output, err)
 	}
 	if cmd == "daemon" {
 		// Refuse an unusable key file or notification URL before the
@@ -315,13 +318,14 @@ func run(args []string) error {
 	}
 	s, err := openStore(cfg.Database)
 	if errors.Is(err, store.ErrSchemaUpgradePending) {
-		return fmt.Errorf("%w; start the daemon once to upgrade it, then run this command again", err)
+		err = fmt.Errorf("%w; start the daemon once to upgrade it, then run this command again", err)
+		return reportHealthCommandFailure(cmd, *output, err)
 	}
 	if err != nil {
 		if cmd == "daemon" {
 			return cleanDaemonCancellation(ctx, err)
 		}
-		return err
+		return reportHealthCommandFailure(cmd, *output, err)
 	}
 	defer s.Close()
 	// Install the operator-managed authentication key before any command reads
@@ -862,6 +866,47 @@ type unhealthyStatus struct {
 	Backups             *app.BackupStatus `json:"backups,omitempty"`
 	Status              string            `json:"status"`
 	Error               string            `json:"error"`
+}
+
+// healthCommandFailure is the compact health document used when the command
+// cannot load configuration or open the database far enough to build a full
+// health report.
+type healthCommandFailure struct {
+	Status string `json:"status"`
+	Error  string `json:"error"`
+}
+
+func reportHealthCommandFailure(cmd, output string, err error) error {
+	if err == nil || cmd != "health" || output != "json" {
+		return err
+	}
+	if printErr := printValue(output, healthCommandFailure{Status: "unhealthy", Error: err.Error()}); printErr != nil {
+		return errors.Join(err, fmt.Errorf("print health failure report: %w", printErr))
+	}
+	return err
+}
+
+// Configuration decoding errors can contain the offending YAML scalar. Keep
+// that value out of machine-readable health output and the CLI's stderr while
+// preserving the original cause for errors.Is and errors.As.
+func reportHealthConfigurationFailure(cmd, output string, err error) error {
+	if err == nil || cmd != "health" || output != "json" {
+		return err
+	}
+	safeErr := healthConfigurationLoadError{cause: err}
+	return reportHealthCommandFailure(cmd, output, safeErr)
+}
+
+type healthConfigurationLoadError struct {
+	cause error
+}
+
+func (e healthConfigurationLoadError) Error() string {
+	return "configuration could not be loaded"
+}
+
+func (e healthConfigurationLoadError) Unwrap() error {
+	return e.cause
 }
 
 // healthReport is the health command's document: the daemon's health, how

@@ -37,8 +37,9 @@ docker compose exec edgewatch edgewatch status \
 
 ## Commands and options
 
-Every command takes `--config` (default `/etc/edgewatch/config.yaml`), and
-every command except `daemon`, `version`, and `help` takes `--output text|json`
+Every documented host command except `version` and `help` takes `--config`
+(default `/etc/edgewatch/config.yaml`), and every command except `daemon`,
+`version`, and `help` takes `--output text|json`
 (default `text`). A command refuses an option that does not apply to it.
 `edgewatch help` and `edgewatch --help` list the commands, and
 `edgewatch COMMAND --help` lists the options of one command with their
@@ -125,14 +126,21 @@ refuses `--tenant`.
 
 ## Health checks
 
-`health` exits non-zero when migrations or the daemon heartbeat are unhealthy,
-and writes the reason to stderr. The heartbeat is stale two minutes after the
-daemon last renewed it. Saving the result of a very large scan can hold the
-database for longer, so before it saves a scan, the daemon renews its
-heartbeat for as long as saving that scan may take. With `--output json` it then also prints a
-document with `"status": "unhealthy"` and the reason in `error`, so a monitoring
-script always receives JSON; the text output prints nothing on stdout in that
-case. A healthy or starting daemon prints its status, and `warnings` list
+`health` exits non-zero when the configuration or database cannot be read, or
+when migrations or the daemon heartbeat are unhealthy, and writes the reason
+to stderr. The heartbeat is stale two minutes after the daemon last renewed
+it. Saving the result of a very large scan can hold the database for longer,
+so before it saves a scan, the daemon renews its heartbeat for as long as
+saving that scan may take. With a valid `--output json`, health prints one JSON
+document on success and on command failures: an unhealthy result includes
+`"status": "unhealthy"` and the reason in `error`; failures before a full
+health report is available include those same fields. For configuration-load
+failures, JSON and stderr use a generic error message so malformed values are
+not echoed; the command still exits non-zero.
+Invalid flags or output values are rejected before the health report is
+produced. Text output prints nothing on stdout when health is unhealthy or the
+configuration/database cannot be read. A healthy or starting
+daemon prints its status, and `warnings` list
 actions that do not stop EdgeWatch, such as removing imported notification URLs
 from `config.yaml`, or scanner or notification processes that run as UID 0
 outside their sandbox. Both
@@ -156,8 +164,10 @@ outcome: the newest good backup with `last_success_at` and
 `consecutive_failures`. A failed scheduled backup adds a warning without
 making the daemon unhealthy; see
 [Scheduled backups](/operations/backup-recovery/#scheduled-backups). A
-database that cannot be opened at all, for example one with a newer schema,
-still fails before any document is printed.
+database below the oldest schema this release upgrades, or newer than this
+release, still fails before its health report is available; JSON mode reports
+that refusal in the compact failure document, and text mode prints no health
+document.
 
 `health` needs shell access to the container. From v0.36.0, a monitor
 outside it can poll `GET /healthz` on the console's listener instead, which

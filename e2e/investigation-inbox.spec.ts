@@ -104,6 +104,33 @@ async function installEventSourceStub(page: Page) {
 }
 
 test.describe('investigation inbox browser behavior', () => {
+  test('refreshes a visible follow-up at its due boundary without polling afterward', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop', 'The follow-up due timer runs once in the desktop browser.')
+    const now = new Date('2026-10-14T12:00:00Z')
+    const dueAt = new Date(now.getTime() + 60_000).toISOString()
+    await page.clock.install({ time: now })
+    await mockConsole(page, 'administrator')
+    let incidentRequests = 0
+    await page.route(url => new URL(url).pathname === '/api/v1/incidents', async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      // The shell separately fetches one incident for its navigation badge.
+      if (new URL(route.request().url()).searchParams.get('limit') === '1') return route.fallback()
+      incidentRequests++
+      const review = { status: 'investigating', reviewer_label: 'Administrator', reviewed_at: now.toISOString(), note: '', follow_up_at: dueAt, revision: 1 }
+      const row = { ...incident(0, review), view_status: incidentRequests === 1 ? 'investigating' : 'follow_up_due' }
+      await route.fulfill({ json: { incidents: [row], truncated: false, active_count: 1, pagination: pagination(0, 1, 1) } })
+    })
+    await page.goto('/incidents?view=all_active')
+
+    await expect(page.locator('.inbox-desktop-table')).toContainText('Investigating')
+    expect(incidentRequests).toBe(1)
+    await page.clock.fastForward(60_000)
+    await expect(page.locator('.inbox-desktop-table')).toContainText('Follow-up due')
+    await expect.poll(() => incidentRequests).toBe(2)
+    await page.clock.fastForward(10 * 60_000)
+    expect(incidentRequests).toBe(2)
+  })
+
   test('direct URLs, reload, and close preserve filters and page while pruned evidence stays unavailable', async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== 'desktop', 'Direct URL behavior is checked once in the desktop browser.')
     await mockConsole(page, 'administrator')

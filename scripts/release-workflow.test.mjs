@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
-import { readdir, readFile } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
@@ -20,7 +22,10 @@ const workflows = await Promise.all(
 const readRepositoryFile = (path) => readFile(resolve(repositoryRoot, path), 'utf8')
 const dockerfile = await readRepositoryFile('Dockerfile')
 const makefile = await readRepositoryFile('Makefile')
+const golangciLintVersion = await readRepositoryFile('.golangci-lint-version')
 const renovate = JSON.parse(await readRepositoryFile('renovate.json'))
+const thirdPartyLicenses = await readRepositoryFile('THIRD_PARTY_LICENSES.md')
+const releaseManifestScript = await readRepositoryFile('scripts/generate-release-manifest.sh')
 const scanScriptPath = 'scripts/scan-image-vulnerabilities.sh'
 const scanScript = await readRepositoryFile(scanScriptPath)
 const naabuAllowlist = await readRepositoryFile('scripts/naabu-vulncheck-allowlist.txt')
@@ -28,6 +33,128 @@ const grypeConfig = await readRepositoryFile('.grype.yaml')
 const composeScript = await readRepositoryFile('scripts/verify-compose-deployment.sh')
 const binaryImageScript = await readRepositoryFile('scripts/verify-release-image-binary.sh')
 const prebuiltFrontendTest = await readRepositoryFile('scripts/test-prebuilt-frontend-fails-closed.sh')
+const lintBaseScript = await readRepositoryFile('scripts/resolve-lint-base.sh')
+
+async function createLintBaseFixture({ withParent = true, originMain = 'head' } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'edgewatch-lint-base-'))
+  const scripts = join(directory, 'scripts')
+  const fakeBin = join(directory, 'fake-bin')
+  await mkdir(scripts)
+  await mkdir(fakeBin)
+  await writeFile(join(directory, 'Makefile'), await readRepositoryFile('Makefile'))
+  await writeFile(join(directory, '.golangci-lint-version'), 'v2.14.0\n')
+  const resolverPath = join(scripts, 'resolve-lint-base.sh')
+  await writeFile(resolverPath, lintBaseScript)
+  await chmod(resolverPath, 0o755)
+
+  const fakeGo = join(fakeBin, 'go')
+  await writeFile(fakeGo, [
+    '#!/bin/sh',
+    'if [ "${1:-}" = env ] && [ "${2:-}" = GOVERSION ]; then',
+    '  printf "%s\\n" go1.27.2',
+    '  exit 0',
+    'fi',
+    'printf "%s\\n" "$@" > "$CAPTURE_ARGS"',
+    '',
+  ].join('\n'))
+  await chmod(fakeGo, 0o755)
+
+  const git = (args) => execFileSync('git', args, { cwd: directory, encoding: 'utf8' }).trim()
+  git(['init', '--quiet', '--initial-branch=main'])
+  git(['config', 'user.email', 'lint-base@example.invalid'])
+  git(['config', 'user.name', 'Lint Base Fixture'])
+  await writeFile(join(directory, 'source.go'), 'package fixture\n')
+  git(['add', 'source.go'])
+  git(['-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'base'])
+  const base = git(['rev-parse', 'HEAD'])
+  let parent = base
+  let head = base
+  if (withParent) {
+    await writeFile(join(directory, 'source.go'), 'package fixture\n\n// changed\n')
+    git(['add', 'source.go'])
+    git(['-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'change'])
+    parent = git(['rev-parse', 'HEAD'])
+    await writeFile(join(directory, 'source.go'), 'package fixture\n\n// changed again\n')
+    git(['add', 'source.go'])
+    git(['-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'second change'])
+    head = git(['rev-parse', 'HEAD'])
+  }
+  const remoteMain = { base, parent, head }[originMain]
+  if (!remoteMain) throw new Error(`unknown fixture origin/main: ${originMain}`)
+  git(['update-ref', 'refs/remotes/origin/main', remoteMain])
+
+  return {
+    directory,
+    base,
+    parent,
+    head,
+    async run(base) {
+      const capture = join(directory, 'go-args')
+      const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, CAPTURE_ARGS: capture }
+      if (base === undefined) delete env.GOLANGCI_LINT_BASE
+      else env.GOLANGCI_LINT_BASE = base
+      const result = spawnSync('make', ['lint-go'], { cwd: directory, env, encoding: 'utf8' })
+      let args = ''
+      try {
+        args = await readFile(capture, 'utf8')
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error
+      }
+      return { ...result, args }
+    },
+  }
+}
+
+async function assertLintBase(t, fixtureOptions, requestedBase, expectedCommit = 'parent') {
+  const fixture = await createLintBaseFixture(fixtureOptions)
+  t.after(() => rm(fixture.directory, { recursive: true, force: true }))
+  const result = await fixture.run(requestedBase)
+  const expectedBase = fixture[expectedCommit]
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+  assert.ok(result.args.includes(`--new-from-rev=${expectedBase}`), `golangci-lint args were: ${result.args}`)
+  assert.ok(!result.args.includes(`--new-from-rev=${fixture.head}`), 'the selected base must not be HEAD')
+}
+
+test('lint-go resolves a nonempty diff base for CI and local runs', async (t) => {
+  await t.test('empty workflow_dispatch base with origin/main at HEAD uses HEAD^', async (t) => {
+    await assertLintBase(t, {}, '', 'parent')
+  })
+
+  await t.test('unset base on a detached/local run uses HEAD^', async (t) => {
+    const fixture = await createLintBaseFixture()
+    t.after(() => rm(fixture.directory, { recursive: true, force: true }))
+    const result = await fixture.run(undefined)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.ok(result.args.includes(`--new-from-rev=${fixture.parent}`), `golangci-lint args were: ${result.args}`)
+  })
+
+  await t.test('a pull request keeps its supplied base commit', async (t) => {
+    const fixture = await createLintBaseFixture()
+    t.after(() => rm(fixture.directory, { recursive: true, force: true }))
+    const result = await fixture.run(fixture.base)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.ok(result.args.includes(`--new-from-rev=${fixture.base}`), `golangci-lint args were: ${result.args}`)
+    assert.ok(!result.args.includes(`--new-from-rev=${fixture.head}`), 'the supplied PR base must not be HEAD')
+  })
+
+  await t.test('an unavailable push-before object uses the fetched main merge base', async (t) => {
+    const fixture = await createLintBaseFixture({ originMain: 'base' })
+    t.after(() => rm(fixture.directory, { recursive: true, force: true }))
+    const result = await fixture.run('0000000000000000000000000000000000000000')
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.ok(result.args.includes(`--new-from-rev=${fixture.base}`), `golangci-lint args were: ${result.args}`)
+    assert.ok(!result.args.includes(`--new-from-rev=${fixture.head}`), 'the fallback must not resolve to HEAD')
+  })
+
+  await t.test('a root commit fails before invoking golangci-lint', async (t) => {
+    const fixture = await createLintBaseFixture({ withParent: false })
+    t.after(() => rm(fixture.directory, { recursive: true, force: true }))
+    const result = await fixture.run('')
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /could not find a non-HEAD golangci-lint base; HEAD must have a parent commit/)
+    assert.equal(result.args, '', 'the linter must not be called with an empty diff')
+  })
+})
 
 const jobsStart = workflow.indexOf('\njobs:\n')
 assert.notEqual(jobsStart, -1, 'release workflow is missing its jobs')
@@ -118,9 +245,9 @@ function withoutComments(text) {
 }
 
 // The dependencies that Renovate's custom managers extract from a file.
-function renovateDependencies(file, text) {
+function renovateDependencies(file, text, config = renovate) {
   const dependencies = []
-  for (const manager of renovate.customManagers) {
+  for (const manager of config.customManagers) {
     const patterns = manager.managerFilePatterns.map((pattern) => {
       const match = /^\/(.*)\/([a-z]*)$/.exec(pattern)
       assert.ok(match, `managerFilePatterns entry ${pattern} is not a /regex/`)
@@ -141,10 +268,71 @@ function renovateDependencies(file, text) {
   return dependencies
 }
 
+function dockerfileArgFrom(source, name) {
+  const matches = [...source.matchAll(new RegExp(`^ARG ${name}=(\\S+)$`, 'gm'))]
+  assert.equal(matches.length, 1, `Dockerfile must define ARG ${name} exactly once`)
+  return matches[0][1]
+}
+
 function dockerfileArg(name) {
-  const match = new RegExp(`^ARG ${name}=(\\S+)$`, 'm').exec(dockerfile)
-  assert.ok(match, `Dockerfile is missing ARG ${name}`)
-  return match[1]
+  return dockerfileArgFrom(dockerfile, name)
+}
+
+function apkPackagePins(source) {
+  const logicalLines = source.replace(/\\\r?\n[ \t]*/g, ' ')
+  return [...logicalLines.matchAll(/^RUN[ \t]+apk add --no-cache[ \t]+([^\n]*)/gm)].flatMap((match) => {
+    const packageArguments = match[1].split(/[ \t]+&&[ \t]+/, 1)[0]
+    return packageArguments.trim().split(/[ \t]+/).filter(Boolean)
+  })
+}
+
+function assertApkPinsManaged(source, config = renovate) {
+  const pins = apkPackagePins(source)
+  assert.ok(pins.length > 0, 'Dockerfile must have at least one apk add package')
+  const repologyPins = renovateDependencies('Dockerfile', source, config)
+    .filter((dependency) => dependency.datasource === 'repology')
+    .map(({ depName, currentValue }) => `${depName}=${currentValue}`)
+  for (const pin of pins) {
+    assert.match(pin, /^[a-z0-9.+-]+=[0-9][0-9A-Za-z.+~-]*$/, `apk package ${pin} must be pinned to a version`)
+    assert.ok(repologyPins.includes(pin), `Renovate must update the apk pin ${pin}`)
+  }
+  return pins
+}
+
+function assertAlpineRepologyMatchesBases(source, config = renovate) {
+  const images = [...source.matchAll(/^FROM[ \t]+(?:--platform=\S+[ \t]+)?(\S+)/gm)].map((match) => match[1])
+  assert.ok(images.length > 0, 'Dockerfile must have Alpine FROM images')
+  const repologyManagers = config.customManagers.filter((manager) => manager.datasourceTemplate === 'repology')
+  assert.equal(repologyManagers.length, 1, 'Renovate must have exactly one Alpine repology package manager')
+  const repository = /^alpine_3_(\d+)\/\{\{\{depName\}\}\}$/.exec(repologyManagers[0].packageNameTemplate ?? '')
+  assert.ok(repository, 'Renovate must track apk packages in an alpine_3_<minor> repository')
+  const repologyMinor = repository[1]
+  const minors = images.map((image) => {
+    const withoutDigest = image.split('@', 1)[0]
+    const colon = withoutDigest.lastIndexOf(':')
+    const name = colon < 0 ? '' : withoutDigest.slice(0, colon).split('/').at(-1)
+    const tag = colon < 0 ? '' : withoutDigest.slice(colon + 1)
+    const builderMinor = /(?:^|-)alpine3\.(\d+)(?:\.\d+)?$/.exec(tag)?.[1]
+    const runtimeMinor = name === 'alpine' ? /^3\.(\d+)(?:\.\d+)?$/.exec(tag)?.[1] : undefined
+    const minor = builderMinor ?? runtimeMinor
+    assert.equal(minor, repologyMinor, `Dockerfile FROM ${image} must match Renovate's alpine_3_${repologyMinor} package repository`)
+    return minor
+  })
+  assert.equal(new Set(minors).size, 1, 'all Dockerfile FROM images must use the same Alpine minor')
+}
+
+function assertNaabuNoticeMatches(source, notice) {
+  const version = dockerfileArgFrom(source, 'NAABU_VERSION')
+  const commit = dockerfileArgFrom(source, 'NAABU_COMMIT')
+  const noticeVersion = [...notice.matchAll(/^\* \*\*Naabu (v[0-9]+\.[0-9]+\.[0-9]+)\*\*/gm)]
+  assert.equal(noticeVersion.length, 1, 'third-party license notice must name Naabu exactly once')
+  assert.equal(noticeVersion[0][1], version, 'third-party notice release version must match Dockerfile NAABU_VERSION')
+  const sourceTags = [...notice.matchAll(/github\.com\/projectdiscovery\/naabu\/tree\/(v[0-9]+\.[0-9]+\.[0-9]+)/g)]
+  assert.equal(sourceTags.length, 1, 'third-party notice must link the Naabu source tag exactly once')
+  assert.equal(sourceTags[0][1], version, 'third-party notice source tag must match Dockerfile NAABU_VERSION')
+  const noticeCommits = [...notice.matchAll(/immutable commit\s+`([0-9a-f]{40})`/gi)]
+  assert.equal(noticeCommits.length, 1, 'third-party notice must name the immutable commit exactly once')
+  assert.equal(noticeCommits[0][1], commit, 'third-party notice commit must match Dockerfile NAABU_COMMIT')
 }
 
 test('release images are staged under unique candidate tags', () => {
@@ -452,18 +640,80 @@ test('Renovate updates every pinned image, package, and the Naabu release', () =
   assert.deepEqual(renovateDependencies('Dockerfile', dockerfile).filter((dependency) => dependency.datasource === 'github-tags'), [
     { datasource: 'github-tags', depName: 'projectdiscovery/naabu', currentValue: dockerfileArg('NAABU_VERSION'), currentDigest: dockerfileArg('NAABU_COMMIT') },
   ])
-  const apkPins = [...dockerfile.matchAll(/^RUN apk add --no-cache ([^\n\\]*)/gm)].flatMap((match) => match[1].trim().split(/\s+/))
-  const repology = renovateDependencies('Dockerfile', dockerfile).filter((dependency) => dependency.datasource === 'repology').map(({ depName, currentValue }) => `${depName}=${currentValue}`)
+  const apkPins = assertApkPinsManaged(dockerfile)
   assert.ok(apkPins.includes('zlib=1.3.2-r1') || apkPins.some((pin) => pin.startsWith('zlib=')), 'the image pins zlib')
-  for (const pin of apkPins) {
-    assert.match(pin, /^[a-z0-9.+-]+=[0-9][0-9A-Za-z.+~-]*$/, `apk package ${pin} must be pinned to a version`)
-    assert.ok(repology.includes(pin), `Renovate must update the apk pin ${pin}`)
-  }
+  assertAlpineRepologyMatchesBases(dockerfile)
   const govulncheck = /^GOVULNCHECK_VERSION \?= (\S+)$/m.exec(makefile)?.[1]
   assert.deepEqual(renovateDependencies('Makefile', makefile), [{ datasource: 'go', depName: 'golang.org/x/vuln', currentValue: govulncheck, currentDigest: undefined }])
 
   const npmAge = renovate.packageRules.find((rule) => rule.matchDatasources?.includes('npm') && rule.minimumReleaseAge)
   assert.equal(npmAge?.minimumReleaseAge, '3 days')
+})
+
+test('Renovate tracks golangci-lint from its GitHub Releases repository', () => {
+  const version = golangciLintVersion.trim()
+  assert.match(version, /^v[0-9]+\.[0-9]+\.[0-9]+$/)
+  assert.deepEqual(renovateDependencies('.golangci-lint-version', golangciLintVersion), [
+    { datasource: 'github-releases', depName: 'golangci-lint', currentValue: version, currentDigest: undefined },
+  ])
+  const manager = renovate.customManagers.find((entry) => entry.datasourceTemplate === 'github-releases' && entry.packageNameTemplate === 'golangci/golangci-lint')
+  assert.ok(manager, 'Renovate must query golangci/golangci-lint GitHub releases')
+  assert.equal(manager.depNameTemplate, 'golangci-lint', 'the dependency dashboard should show golangci-lint')
+  assert.ok(manager.managerFilePatterns.some((pattern) => new RegExp(/^\/(.*)\/([a-z]*)$/.exec(pattern)?.[1] ?? 'a^').test('.golangci-lint-version')))
+})
+
+test('the Alpine package repository stays aligned with every Dockerfile base image', () => {
+  assertAlpineRepologyMatchesBases(dockerfile)
+  const mismatchedBase = dockerfile.replace('node:24.21.0-alpine3.24@', 'node:24.21.0-alpine3.25@')
+  assert.notEqual(mismatchedBase, dockerfile, 'the mismatch fixture must change one actual Dockerfile base')
+  assert.throws(() => assertAlpineRepologyMatchesBases(mismatchedBase), /must match Renovate's alpine_3_24 package repository/)
+})
+
+test('the apk pin check sees unpinned packages on Dockerfile continuation lines', () => {
+  const wrappedInstall = [
+    'FROM alpine:3.24.2',
+    'RUN apk add --no-cache ca-certificates=20260909-r0 \\',
+    '    git=2.54.0-r0 \\',
+    '    new-package \\',
+    '    && echo done',
+  ].join('\n') + '\n'
+  assert.throws(() => assertApkPinsManaged(wrappedInstall), /apk package new-package must be pinned to a version/)
+})
+
+test('the Naabu license notice matches the Dockerfile release and immutable commit', () => {
+  assertNaabuNoticeMatches(dockerfile, thirdPartyLicenses)
+
+  const newVersion = 'v9.8.7'
+  const newCommit = '0123456789abcdef0123456789abcdef01234567'
+  const oldVersion = dockerfileArg('NAABU_VERSION')
+  const oldCommit = dockerfileArg('NAABU_COMMIT')
+  const bumpedDockerfile = dockerfile
+    .replace(`ARG NAABU_VERSION=${oldVersion}`, `ARG NAABU_VERSION=${newVersion}`)
+    .replace(`ARG NAABU_COMMIT=${oldCommit}`, `ARG NAABU_COMMIT=${newCommit}`)
+  assert.notEqual(bumpedDockerfile, dockerfile, 'the drift fixture must change both Dockerfile Naabu inputs')
+  assert.throws(() => assertNaabuNoticeMatches(bumpedDockerfile, thirdPartyLicenses), /notice release version must match Dockerfile NAABU_VERSION/)
+  const changedCommit = dockerfile.replace(`ARG NAABU_COMMIT=${oldCommit}`, `ARG NAABU_COMMIT=${newCommit}`)
+  assert.throws(() => assertNaabuNoticeMatches(changedCommit, thirdPartyLicenses), /notice commit must match Dockerfile NAABU_COMMIT/)
+  const updatedNotice = thirdPartyLicenses.replaceAll(oldVersion, newVersion).replace(oldCommit, newCommit)
+  assert.doesNotThrow(() => assertNaabuNoticeMatches(bumpedDockerfile, updatedNotice))
+})
+
+test('the release manifest GoReleaser version follows the pinned release workflow tool', () => {
+  const configuredVersions = [...workflowHeader.matchAll(/^  GORELEASER_VERSION: (v[0-9]+\.[0-9]+\.[0-9]+)\s*$/gm)].map((match) => match[1])
+  assert.equal(configuredVersions.length, 1, 'release workflow must define one canonical GoReleaser version')
+  const [version] = configuredVersions
+  const actionSteps = stepsOf(jobBlock('verify')).filter((step) => /uses: goreleaser\/goreleaser-action@/.test(step))
+  assert.ok(actionSteps.length > 0, 'release verification must install GoReleaser')
+  for (const step of actionSteps) {
+    assert.match(step, /^ {10}version: \$\{\{ env\.GORELEASER_VERSION \}\}$/m, 'the executed tool must use the canonical workflow pin')
+  }
+  assert.deepEqual(renovateDependencies('.github/workflows/release.yml', workflow).filter((entry) => entry.depName === 'goreleaser'), [
+    { datasource: 'github-releases', depName: 'goreleaser', currentValue: version, currentDigest: undefined },
+  ])
+  assert.match(releaseManifestScript, /release_workflow=.*\.github\/workflows\/release\.yml/)
+  assert.match(releaseManifestScript, /"\$release_workflow"/)
+  assert.match(releaseManifestScript, /GORELEASER_VERSION=.*does not match \.github\/workflows\/release\.yml pin/)
+  assert.doesNotMatch(releaseManifestScript, /GORELEASER_VERSION:-v[0-9]/, 'the manifest must not silently fall back to a stale version')
 })
 
 // verify runs on every v* tag, so it must refuse a tag on a commit that never

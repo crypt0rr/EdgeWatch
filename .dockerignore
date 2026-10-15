@@ -4,6 +4,7 @@
 data
 config.yaml
 notification-urls.txt
+/secrets/
 *.key
 *.db*
 coverage.out

@@ -10,6 +10,7 @@ func TestSecurityAlertWindowKind(t *testing.T) {
 		SecurityAlertPlatformPasswordReset: SecurityAlertPlatformAccountActions,
 		SecurityAlertPlatformSessionsEnded: SecurityAlertPlatformAccountActions,
 		SecurityAlertRateLimited:           SecurityAlertRateLimited,
+		SecurityAlertAccountSignInFailures: SecurityAlertAccountSignInFailures,
 		SecurityAlertSecondFactorLocked:    SecurityAlertSecondFactorLocked,
 	} {
 		if got := SecurityAlertWindowKind(kind); got != want {

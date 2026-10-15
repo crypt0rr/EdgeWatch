@@ -5,6 +5,7 @@ package model
 // their owner held back.
 const (
 	SecurityAlertRateLimited            = "rate_limited"
+	SecurityAlertAccountSignInFailures  = "account_sign_in_failures"
 	SecurityAlertSecondFactorLocked     = "second_factor_locked"
 	SecurityAlertRecoveryCodeUsed       = "recovery_code_used"
 	SecurityAlertPlatformInvitation     = "platform_invitation"
@@ -12,6 +13,10 @@ const (
 	SecurityAlertPlatformSessionsEnded  = "platform_sessions_revoked"
 	SecurityAlertPlatformAccountActions = "platform_account_action"
 	SecurityAlertSummary                = "summary"
+
+	// SecurityAlertAccountSignInFailureCount is the minimum number of wrong
+	// password sign-ins represented by an account-wide sign-in alert.
+	SecurityAlertAccountSignInFailureCount = 5
 )
 
 // The kinds of a deployment-health alert.

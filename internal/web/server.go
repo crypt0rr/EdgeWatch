@@ -421,10 +421,10 @@ func (s *Server) serveListener(ctx context.Context, listener net.Listener, addre
 			s.waitForSSEShutdown(shutdownCtx)
 			_ = server.Shutdown(shutdownCtx)
 			s.waitForHandlers(shutdownCtx)
-			// A refused sign-in writes its rate-limit record in the
-			// background; let it finish before the database closes.
+			// Authentication audit writes run in the background; stop new
+			// submissions and let accepted writes finish before SQLite closes.
 			if s.Auth != nil {
-				_ = s.Auth.WaitForRateLimitRecords(shutdownCtx)
+				_ = s.Auth.CloseAndWaitForAuthAuditWrites(shutdownCtx)
 			}
 			close(shutdownDone)
 		})

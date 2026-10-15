@@ -24,6 +24,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"golang.org/x/crypto/argon2"
 )
@@ -152,16 +153,18 @@ type Manager struct {
 	// paths use the account maps below so different operations and accounts
 	// do not share a lockout bucket. The login-client maps hold the sign-in
 	// budget of each client that has its own address.
-	fails               map[string][]time.Time
-	blocked             map[string]time.Time
-	accountFails        map[string][]time.Time
-	accountBlocked      map[string]time.Time
-	loginClientFails    map[string][]time.Time
-	loginClientBlocked  map[string]time.Time
-	sourceInFlight      map[string]int
-	accountInFlight     map[string]int
-	loginClientInFlight map[string]int
-	rateAudit           map[string]time.Time
+	fails                 map[string][]time.Time
+	blocked               map[string]time.Time
+	accountFails          map[string][]time.Time
+	accountBlocked        map[string]time.Time
+	accountSignInFailures map[string]*accountSignInFailureState
+	accountFailureClaim   uint64
+	loginClientFails      map[string][]time.Time
+	loginClientBlocked    map[string]time.Time
+	sourceInFlight        map[string]int
+	accountInFlight       map[string]int
+	loginClientInFlight   map[string]int
+	rateAudit             map[string]time.Time
 	// secondFactor holds each account's wrong one-time and recovery codes,
 	// by account ID, whatever their source; see admitSecondFactor.
 	secondFactor    map[string]*secondFactorState
@@ -171,13 +174,13 @@ type Manager struct {
 	// client addresses; zero is defaultIPv6RateLimitPrefix.
 	ipv6Prefix int
 	argon2Sem  chan struct{}
-	// rateRecordSlots holds a slot for each rate-limit record of a refused
-	// sign-in that is being written. rateRecordsPending counts them for
-	// WaitForRateLimitRecords, and rateRecordsIdle is closed once the count
-	// returns to zero.
-	rateRecordSlots    chan struct{}
-	rateRecordsPending int
-	rateRecordsIdle    chan struct{}
+	// rateRecordSlots bounds authentication audit writes in the background.
+	// rateRecordsPending counts accepted writes for both wait methods, and
+	// rateRecordsIdle is closed once that count returns to zero.
+	rateRecordSlots      chan struct{}
+	rateRecordsPending   int
+	rateRecordsIdle      chan struct{}
+	authAuditQueueClosed bool
 	// untrustedProxy is the latest request from an untrusted proxy that
 	// NoteForwarding saw, and untrustedProxyLogged when it last asked for
 	// the warning to be logged.
@@ -282,7 +285,8 @@ func NewManager(s *store.Store) *Manager {
 		forwardedHeader: forwardedHeaderXForwardedFor,
 		fails:           map[string][]time.Time{}, blocked: map[string]time.Time{},
 		accountFails: map[string][]time.Time{}, accountBlocked: map[string]time.Time{},
-		loginClientFails: map[string][]time.Time{}, loginClientBlocked: map[string]time.Time{},
+		accountSignInFailures: map[string]*accountSignInFailureState{},
+		loginClientFails:      map[string][]time.Time{}, loginClientBlocked: map[string]time.Time{},
 		sourceInFlight: map[string]int{}, accountInFlight: map[string]int{}, loginClientInFlight: map[string]int{},
 		rateAudit: map[string]time.Time{}, secondFactor: map[string]*secondFactorState{}, argon2Sem: make(chan struct{}, authArgon2MaxConcurrent),
 		rateRecordSlots: make(chan struct{}, rateLimitRecordsPending),
@@ -884,6 +888,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	if !passwordValid {
 		m.failedScoped(source, account, loginClient)
 		m.auditAccountFailure(ctx, "auth.login_failed", identity, user, request)
+		m.recordAccountPasswordFailure(ctx, user)
 		return "", user, errors.New("invalid credentials")
 	}
 	// A tenant that is disabled or being deleted stops sign-in, and the
@@ -1331,25 +1336,187 @@ func (m *Manager) authEvent(action, subject, tenantID string, platform bool, req
 // dropped, so a later refusal in the scope writes it.
 func (m *Manager) recordRateLimitInBackground(ctx context.Context, subject, tenantID string, platform bool, request *http.Request) {
 	entry, write := m.authEvent("auth.rate_limited", subject, tenantID, platform, request)
+	m.recordAuditInBackground(ctx, entry, write, func(err error, submitted bool) {
+		if !submitted || err != nil {
+			m.unclaimRateAudit(subject, tenantID, platform, request)
+		}
+	})
+}
+
+// accountSignInFailureState tracks a known account's wrong-password attempts
+// across client addresses. The successful audit claim is kept for one
+// detection window so a temporary dip below the threshold cannot cause a
+// second alert when attempts cross it again.
+type accountSignInFailureState struct {
+	failures     []time.Time
+	lastAlertAt  time.Time
+	lastTouched  time.Time
+	claim        uint64
+	pendingAudit bool
+}
+
+// recordAccountPasswordFailure aggregates only wrong passwords for an
+// enabled account already found by the login path. It does no database work
+// on the request goroutine; a bounded background queue writes one audit
+// record when the account reaches the threshold.
+func (m *Manager) recordAccountPasswordFailure(ctx context.Context, account store.User) {
+	if !account.Enabled || account.ID == "" || account.Username == "" {
+		return
+	}
+
+	platform := account.Role == store.RolePlatformAdmin
+	if !platform && account.TenantID == "" {
+		return
+	}
+	key := accountSignInFailureKey(account, platform)
+	now := m.now()
+
 	m.mu.Lock()
+	m.ensureScopedLimiterMapsLocked()
+	state := m.accountSignInFailures[key]
+	if state == nil {
+		if len(m.accountSignInFailures) >= authLimiterMaxEntries && !m.evictAccountSignInFailureLocked(now) {
+			m.mu.Unlock()
+			return
+		}
+		state = &accountSignInFailureState{}
+		m.accountSignInFailures[key] = state
+	}
+	state.recentFailures(now)
+	state.failures = append(state.failures, now)
+	if len(state.failures) > model.SecurityAlertAccountSignInFailureCount {
+		state.failures = state.failures[len(state.failures)-model.SecurityAlertAccountSignInFailureCount:]
+	}
+	state.lastTouched = now
+	if len(state.failures) < model.SecurityAlertAccountSignInFailureCount || state.pendingAudit ||
+		(!state.lastAlertAt.IsZero() && now.Sub(state.lastAlertAt) < authFailureWindow) {
+		m.mu.Unlock()
+		return
+	}
+	state.lastAlertAt = now
+	state.pendingAudit = true
+	m.accountFailureClaim++
+	if m.accountFailureClaim == 0 {
+		m.accountFailureClaim++
+	}
+	state.claim = m.accountFailureClaim
+	claim := state.claim
+	m.mu.Unlock()
+
+	entry := store.AuditEntry{
+		Action:        "auth.sign_in_failures",
+		Detail:        fmt.Sprintf("at least %d incorrect passwords for a known account within five minutes", model.SecurityAlertAccountSignInFailureCount),
+		ActorUserID:   account.ID,
+		ActorUsername: account.Username,
+		TenantID:      account.TenantID,
+		ActorKind:     store.AuditActorUnit,
+	}
+	write := m.Store.AuditEntry
+	if platform {
+		entry.TenantID = ""
+		entry.ActorKind = store.AuditActorPlatform
+		write = m.Store.Platform().AuditEntry
+	}
+	// The aggregate is keyed by account, not source. Suppress request
+	// attribution too, so neither the stored record nor its alert receives the
+	// address of whichever client happened to cross the threshold.
+	ctx = store.WithAuditContext(ctx, "", "")
+	m.recordAuditInBackground(ctx, entry, write, func(err error, submitted bool) {
+		m.finishAccountSignInFailureAudit(key, claim, err, submitted)
+	})
+}
+
+// finishAccountSignInFailureAudit releases the bounded pending claim once its
+// writer finishes. A failed or unsubmitted write clears the cooldown so a
+// later threshold crossing can retry; the claim token keeps a late result
+// from an older attempt from changing a newer state.
+func (m *Manager) finishAccountSignInFailureAudit(key string, claim uint64, err error, submitted bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current := m.accountSignInFailures[key]
+	if current == nil || current.claim != claim {
+		return
+	}
+	current.pendingAudit = false
+	if !submitted || err != nil {
+		current.lastAlertAt = time.Time{}
+	}
+}
+
+func accountSignInFailureKey(account store.User, platform bool) string {
+	if platform {
+		return "platform\x00" + account.ID
+	}
+	return "tenant\x00" + account.TenantID + "\x00" + account.ID
+}
+
+func (state *accountSignInFailureState) recentFailures(now time.Time) int {
+	cut := now.Add(-authFailureWindow)
+	kept := state.failures[:0]
+	for _, failure := range state.failures {
+		if failure.After(cut) {
+			kept = append(kept, failure)
+		}
+	}
+	state.failures = kept
+	return len(kept)
+}
+
+// evictAccountSignInFailureLocked frees only a state that cannot suppress an
+// alert in its current cooldown window. If all bounded slots are active, a
+// new account is left untracked until an existing slot expires.
+func (m *Manager) evictAccountSignInFailureLocked(now time.Time) bool {
+	oldestKey := ""
+	var oldest time.Time
+	for key, state := range m.accountSignInFailures {
+		if state.recentFailures(now) > 0 || state.pendingAudit ||
+			(!state.lastAlertAt.IsZero() && now.Sub(state.lastAlertAt) < authFailureWindow) {
+			continue
+		}
+		if oldestKey == "" || state.lastTouched.Before(oldest) {
+			oldestKey, oldest = key, state.lastTouched
+		}
+	}
+	if oldestKey == "" {
+		return false
+	}
+	delete(m.accountSignInFailures, oldestKey)
+	return true
+}
+
+// recordAuditInBackground writes an authentication audit entry without
+// extending the sign-in response with storage latency. The shared channel
+// bounds waiting writes, and completion is reported after the writer returns.
+// submitted is false only when the queue had no slot.
+func (m *Manager) recordAuditInBackground(ctx context.Context, entry store.AuditEntry, write func(context.Context, store.AuditEntry) error, finish func(error, bool)) {
+	m.mu.Lock()
+	if m.authAuditQueueClosed {
+		m.mu.Unlock()
+		if finish != nil {
+			finish(errors.New("authentication audit writer is shutting down"), false)
+		}
+		slog.Default().Warn("security audit write skipped", "action", entry.Action, "reason", "authentication audit writer is shutting down")
+		return
+	}
 	if m.rateRecordSlots == nil {
 		m.rateRecordSlots = make(chan struct{}, rateLimitRecordsPending)
 	}
 	slots := m.rateRecordSlots
-	m.mu.Unlock()
 	select {
 	case slots <- struct{}{}:
+		if m.rateRecordsPending == 0 {
+			m.rateRecordsIdle = make(chan struct{})
+		}
+		m.rateRecordsPending++
+		m.mu.Unlock()
 	default:
-		m.unclaimRateAudit(subject, tenantID, platform, request)
-		slog.Default().Warn("security audit write skipped", "action", entry.Action, "reason", "too many rate-limit records are waiting for the audit writer")
+		m.mu.Unlock()
+		if finish != nil {
+			finish(errors.New("authentication audit queue is full"), false)
+		}
+		slog.Default().Warn("security audit write skipped", "action", entry.Action, "reason", "too many authentication audit records are waiting for the audit writer")
 		return
 	}
-	m.mu.Lock()
-	if m.rateRecordsPending == 0 {
-		m.rateRecordsIdle = make(chan struct{})
-	}
-	m.rateRecordsPending++
-	m.mu.Unlock()
 	detached := context.WithoutCancel(ctx)
 	go func() {
 		defer func() {
@@ -1361,18 +1528,41 @@ func (m *Manager) recordRateLimitInBackground(ctx context.Context, subject, tena
 			}
 			m.mu.Unlock()
 		}()
-		if err := write(detached, entry); err != nil {
+		err := write(detached, entry)
+		if err != nil {
 			slog.Default().Warn("security audit write failed", "action", entry.Action, "error", err)
+		}
+		if finish != nil {
+			finish(err, true)
 		}
 	}()
 }
 
-// WaitForRateLimitRecords waits until the rate-limit records of refused
-// sign-ins that are being written in the background are written, or ctx
-// ends. The web server calls it when it stops, after its requests have
-// finished and before the database closes.
+// WaitForRateLimitRecords waits until the authentication audit records being
+// written in the background are complete, or ctx ends. It does not stop new
+// audit records from being enqueued.
 func (m *Manager) WaitForRateLimitRecords(ctx context.Context) error {
 	m.mu.Lock()
+	if m.rateRecordsPending == 0 {
+		m.mu.Unlock()
+		return nil
+	}
+	idle := m.rateRecordsIdle
+	m.mu.Unlock()
+	select {
+	case <-idle:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// CloseAndWaitForAuthAuditWrites prevents new background audit writes and
+// waits for records already accepted by the bounded queue. Call it after
+// request handlers have drained and before closing the database.
+func (m *Manager) CloseAndWaitForAuthAuditWrites(ctx context.Context) error {
+	m.mu.Lock()
+	m.authAuditQueueClosed = true
 	if m.rateRecordsPending == 0 {
 		m.mu.Unlock()
 		return nil
@@ -2070,6 +2260,9 @@ func (m *Manager) ensureScopedLimiterMapsLocked() {
 	if m.rateAudit == nil {
 		m.rateAudit = map[string]time.Time{}
 	}
+	if m.accountSignInFailures == nil {
+		m.accountSignInFailures = map[string]*accountSignInFailureState{}
+	}
 	if m.secondFactor == nil {
 		m.secondFactor = map[string]*secondFactorState{}
 	}
@@ -2143,6 +2336,12 @@ func (m *Manager) sweepLimiterLocked(now time.Time) {
 	for userID, state := range m.secondFactor {
 		if secondFactorStateIdle(now, state) {
 			delete(m.secondFactor, userID)
+		}
+	}
+	for key, state := range m.accountSignInFailures {
+		if state.recentFailures(now) == 0 && !state.pendingAudit &&
+			(state.lastAlertAt.IsZero() || now.Sub(state.lastAlertAt) >= authFailureWindow) {
+			delete(m.accountSignInFailures, key)
 		}
 	}
 }

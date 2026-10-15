@@ -34,6 +34,7 @@ var auditActionCategories = map[string]string{
 	"auth.password_confirmation_failed":  auditCategoryAccount,
 	"auth.platform_setup_failed":         auditCategoryAccount,
 	"auth.rate_limited":                  auditCategoryAccount,
+	"auth.sign_in_failures":              auditCategoryAccount,
 	"auth.recovery_code_used":            auditCategoryAccount,
 	"auth.second_factor_locked":          auditCategoryAccount,
 	"auth.setup_failed":                  auditCategoryAccount,

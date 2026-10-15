@@ -236,6 +236,14 @@ for five minutes, whether or not the username exists, so neither the answer
 nor the number of attempts left reveals which accounts exist. A refused
 sign-in answers without waiting for its `auth.rate_limited` record, which is
 written in the background, so the refusal takes as long for every username.
+A separate account-wide detector records `auth.sign_in_failures` after five
+wrong passwords for the same known, enabled account within five minutes,
+across client addresses. It does not lock the account, and a successful
+sign-in does not reset the window. Unknown and disabled accounts are not
+aggregated. The detector is bounded and process-local, so a daemon restart
+clears its current window and cooldown. This aggregate audit record and its
+alert omit the client address; ordinary failed-login audit records keep their
+existing source attribution.
 A successful sign-in does not reset the budget, so a client that holds one
 valid account cannot sign in between failed attempts to gain more. Other
 clients are not affected; clients that share one address, such as the clients
@@ -268,7 +276,8 @@ proxy hostnames are approved without trusted client-IP forwarding. Failed
 login and TOTP attempts, second-factor lockouts, and rate-limit events are
 written to the security audit log. A fixed set of these records also sends a
 security alert to destinations that their owner selected: the start of a
-rate-limited episode (`auth.rate_limited`), a second-factor lockout
+rate-limited episode (`auth.rate_limited`), an account-wide wrong-password
+threshold (`auth.sign_in_failures`), a second-factor lockout
 (`auth.second_factor_locked`), a sign-in with a recovery code
 (`auth.recovery_code_used`), and a platform administrator's invitation of a
 unit administrator, password-reset link for one, or end of a unit account's

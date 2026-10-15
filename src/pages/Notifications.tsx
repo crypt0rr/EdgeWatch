@@ -104,7 +104,7 @@ const unitNotifications: NotificationScope = {
   failedAlerts: { list: (id, before) => listTerminalDeliveries(id, before), redeliver: (id, deliveryIDs) => redeliverTerminalDeliveries(id, deliveryIDs) },
   keepPendingOnReplace: true,
   toggleRouting: (destinationID, enabled, password) => toggleNotificationUpdateAlert(destinationID, enabled, password),
-  alertRoutings: [{ field: 'security_routing', label: 'Security alerts', description: 'rate-limited sign-ins, second-factor lockouts, recovery-code sign-ins, and platform administrator actions on this unit’s accounts', toggle: (destinationID, enabled, password) => toggleNotificationSecurityAlert(destinationID, enabled, password) }],
+  alertRoutings: [{ field: 'security_routing', label: 'Security alerts', description: 'rate-limited sign-ins, account-wide wrong-password bursts for known enabled accounts (without client addresses), second-factor lockouts, recovery-code sign-ins, and platform administrator actions on this unit’s accounts', toggle: (destinationID, enabled, password) => toggleNotificationSecurityAlert(destinationID, enabled, password) }],
   routingDefaultsToAllDestinations: true,
   configImport: true,
   eyebrow: 'Delivery',

@@ -13,7 +13,7 @@ const platformNotifications: NotificationScope = {
   remove: (id, revision, password) => deletePlatformNotification(id, revision, password),
   toggleRouting: (destinationID, enabled, password) => togglePlatformNotificationUpdateAlert(destinationID, enabled, password),
   alertRoutings: [
-    { field: 'security_routing', label: 'Security alerts', description: 'rate-limited sign-ins, second-factor lockouts, and recovery-code sign-ins of platform administrators and of usernames that no account has', toggle: (destinationID, enabled, password) => togglePlatformSecurityAlert(destinationID, enabled, password) },
+    { field: 'security_routing', label: 'Security alerts', description: 'rate-limited sign-ins, account-wide wrong-password bursts for known enabled platform administrators (without client addresses), second-factor lockouts, and recovery-code sign-ins of platform administrators and of usernames that no account has', toggle: (destinationID, enabled, password) => togglePlatformSecurityAlert(destinationID, enabled, password) },
     { field: 'health_routing', label: 'Deployment alerts', description: 'sandbox degradation, version rollbacks, and alerts that failed for good', toggle: (destinationID, enabled, password) => togglePlatformDeploymentAlert(destinationID, enabled, password) },
   ],
   routingDefaultsToAllDestinations: false,

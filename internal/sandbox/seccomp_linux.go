@@ -38,12 +38,13 @@ var seccompDenied = []string{
 // I/O and loading a shared library.
 var seccompDeniedX86 = []string{"iopl", "ioperm", "uselib"}
 
-// cloneNamespaces are the clone flags that create namespaces. clone with any
-// of them is refused like unshare. clone3 passes its flags in memory, which a
-// filter cannot read, so it fails with ENOSYS and the C libraries fall back to
-// clone; Go uses clone3 only for cgroup and time namespace options.
-const cloneNamespaces = unix.CLONE_NEWNS | unix.CLONE_NEWCGROUP | unix.CLONE_NEWUTS | unix.CLONE_NEWIPC |
-	unix.CLONE_NEWUSER | unix.CLONE_NEWPID | unix.CLONE_NEWNET
+// cloneNamespaceFlags are the clone flags that create namespaces. clone with
+// any of them is refused like unshare. clone3 passes its flags in memory,
+// which a filter cannot read, so it fails with ENOSYS and callers that fall
+// back to clone are checked against this mask; Go also uses clone3 for cgroup
+// and time namespace options.
+const cloneNamespaceFlags = unix.CLONE_NEWNS | unix.CLONE_NEWCGROUP | unix.CLONE_NEWUTS | unix.CLONE_NEWIPC |
+	unix.CLONE_NEWUSER | unix.CLONE_NEWPID | unix.CLONE_NEWNET | unix.CLONE_NEWTIME
 
 // x32Bit marks the system call numbers of the x32 ABI on x86-64.
 const x32Bit = 0x40000000
@@ -151,7 +152,7 @@ func seccompFilter(arch seccompArchitecture) ([]unix.SockFilter, error) {
 		jump(unix.BPF_JEQ, clone3, "nosys", ""),
 		jump(unix.BPF_JEQ, clone, "", "allow"),
 		load(seccompFirstArgLow),
-		jump(unix.BPF_JSET, cloneNamespaces, "deny", "allow"),
+		jump(unix.BPF_JSET, cloneNamespaceFlags, "deny", "allow"),
 		result("allow", unix.SECCOMP_RET_ALLOW),
 		result("deny", unix.SECCOMP_RET_ERRNO|uint32(unix.EPERM)),
 		result("nosys", unix.SECCOMP_RET_ERRNO|uint32(unix.ENOSYS)),

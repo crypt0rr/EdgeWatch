@@ -399,7 +399,7 @@ func TestRunHealthReportsTheScheduledBackups(t *testing.T) {
 		return document
 	}
 	document := health(t)
-	if document.Status != "ready" || document.Backups == nil || document.Backups.Directory != backups || document.Backups.Schedule != "0 3 * * *" || document.Backups.Keep != 3 || document.Backups.LastSuccessAgeSeconds != nil || len(document.Warnings) != 0 {
+	if document.Status != "ready" || document.Backups == nil || document.Backups.Directory != backups || document.Backups.Schedule != "0 3 * * *" || document.Backups.Keep != 3 || document.Backups.LastSuccessAgeSeconds != nil || !containsWarning(document.Warnings, "scanner launches are unavailable because the per-invocation identity pool could not be enforced") {
 		t.Fatalf("health before the first backup = %+v", document)
 	}
 
@@ -419,13 +419,13 @@ func TestRunHealthReportsTheScheduledBackups(t *testing.T) {
 	if document.Status != "ready" || document.Backups.LastBackup != "edgewatch-scheduled-20261001T030000Z.db" || document.Backups.LastSuccessAgeSeconds == nil || *document.Backups.LastSuccessAgeSeconds < 3500 || document.Backups.ConsecutiveFailures != 1 {
 		t.Fatalf("health after a failed backup = %+v", document)
 	}
-	if len(document.Warnings) != 1 || !strings.Contains(document.Warnings[0], "the scheduled backup failed 1 time(s)") || !strings.Contains(document.Warnings[0], "disk full") {
+	if !containsWarning(document.Warnings, "the scheduled backup failed 1 time(s)") || !containsWarning(document.Warnings, "disk full") || !containsWarning(document.Warnings, "scanner launches are unavailable because the per-invocation identity pool could not be enforced") {
 		t.Fatalf("health warnings = %v", document.Warnings)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "backup-status.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if document := health(t); len(document.Warnings) != 1 || !strings.Contains(document.Warnings[0], "read scheduled backup status") || document.Backups == nil {
+	if document := health(t); !containsWarning(document.Warnings, "read scheduled backup status") || !containsWarning(document.Warnings, "scanner launches are unavailable because the per-invocation identity pool could not be enforced") || document.Backups == nil {
 		t.Fatalf("health with an unreadable status = %+v", document)
 	}
 
@@ -441,4 +441,13 @@ func TestRunHealthReportsTheScheduledBackups(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &normalized); err != nil || normalized.Backup["directory"] != backups || normalized.Backup["keep"] != float64(3) || normalized.Backup["schedule"] != "0 3 * * *" {
 		t.Fatalf("config validate backup = %s, %v", stdout, err)
 	}
+}
+
+func containsWarning(warnings []string, fragment string) bool {
+	for _, warning := range warnings {
+		if strings.Contains(warning, fragment) {
+			return true
+		}
+	}
+	return false
 }

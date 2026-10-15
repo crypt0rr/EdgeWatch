@@ -22,20 +22,26 @@ import (
 )
 
 const (
-	privateTemporaryPrefix         = "edgewatch-naabu-"
-	privateNamespacePrefix         = "edgewatch-naabu-root-"
-	privateNamespaceMode           = 0o711
-	privateTemporaryMode           = 0o1777
-	privateTemporaryFallbackMode   = 0o700
-	privateTemporaryNonceSize      = 16
-	privateTemporaryInitMagic      = "EWTINI01"
-	privateTemporaryMessageMagic   = "EWTMP001"
-	privateTemporaryMessageMax     = 256
-	privateTemporaryStartupTimeout = 5 * time.Second
-	privateTemporaryCleanupTimeout = 5 * time.Second
-	privateTemporaryCleanupEntries = 100000
-	privateTemporaryCleanupDepth   = 32
+	privateTemporaryPrefix          = "edgewatch-naabu-"
+	privateNamespacePrefix          = "edgewatch-naabu-root-"
+	privateNamespaceMode            = 0o711
+	privateScannerNamespaceMode     = 0o1733
+	privateTemporaryMode            = 0o1777
+	privateScannerTemporaryMode     = 0o700
+	privateTemporaryFallbackMode    = 0o700
+	privateTemporaryNonceSize       = 16
+	privateTemporaryInitMagic       = "EWTINI01"
+	privateTemporaryCreateInitMagic = "EWTINI02"
+	privateTemporaryMessageMagic    = "EWTMP001"
+	privateTemporaryCreateMagic     = "EWTMP002"
+	privateTemporaryMessageMax      = 256
+	privateTemporaryStartupTimeout  = 5 * time.Second
+	privateTemporaryCleanupTimeout  = 5 * time.Second
+	privateTemporaryCleanupEntries  = 100000
+	privateTemporaryCleanupDepth    = 32
 )
+
+var errPrivateTemporaryLeafAbsent = errors.New("scanner-owned temporary leaf was not created")
 
 // linuxPrivateTemporaryDirectory owns one Naabu invocation namespace and its
 // parent-created leaf. The helper verifies the pinned leaf and grants
@@ -58,6 +64,8 @@ type linuxPrivateTemporaryDirectory struct {
 	namespaceStat unix.Stat_t
 	leafStat      unix.Stat_t
 	private       bool
+	childCreates  bool
+	namespaceMode uint32
 	started       bool
 	accepted      bool
 	cleaned       bool
@@ -123,9 +131,10 @@ func prepareLinuxPrivateTemporaryDirectoryWithFilesystem(ctx context.Context, cm
 		return nil, errors.New("prepare Naabu temporary directory: invalid command")
 	}
 	temporary := &linuxPrivateTemporaryDirectory{
-		filesystem: filesystem,
-		uid:        uint32(os.Geteuid()),
-		gid:        uint32(os.Getegid()),
+		filesystem:    filesystem,
+		uid:           uint32(os.Geteuid()),
+		gid:           uint32(os.Getegid()),
+		namespaceMode: privateNamespaceMode,
 	}
 	if policy != nil && policy.Enforced() {
 		temporary.uid, temporary.gid = uint32(policy.status.UID), uint32(policy.status.GID)
@@ -157,6 +166,11 @@ func prepareLinuxPrivateTemporaryDirectoryWithFilesystem(ctx context.Context, cm
 		}
 		temporary.private, temporary.landlocked = true, landlocked
 		temporary.leafMode = privateTemporaryMode
+		temporary.childCreates = policy != nil && policy.identityReservation != nil
+		if temporary.childCreates {
+			temporary.leafMode = privateScannerTemporaryMode
+			temporary.namespaceMode = privateScannerNamespaceMode
+		}
 	} else {
 		temporary.leafMode = privateTemporaryFallbackMode
 	}
@@ -169,10 +183,23 @@ func prepareLinuxPrivateTemporaryDirectoryWithFilesystem(ctx context.Context, cm
 		_ = temporary.Close()
 		return nil, err
 	}
-	if err := temporary.createLeaf(); err != nil {
-		_ = temporary.Cleanup(ctx)
-		_ = temporary.Close()
-		return nil, errors.New("prepare Naabu temporary directory: create and pin leaf failed")
+	if temporary.childCreates {
+		if err := temporary.newChildCreatedNames(); err != nil {
+			_ = temporary.Cleanup(ctx)
+			_ = temporary.Close()
+			return nil, err
+		}
+		if _, err := rand.Read(temporary.nonce[:]); err != nil {
+			_ = temporary.Cleanup(ctx)
+			_ = temporary.Close()
+			return nil, errors.New("prepare Naabu temporary directory: random handshake unavailable")
+		}
+	} else {
+		if err := temporary.createLeaf(); err != nil {
+			_ = temporary.Cleanup(ctx)
+			_ = temporary.Close()
+			return nil, errors.New("prepare Naabu temporary directory: create and pin leaf failed")
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		_ = temporary.Cleanup(ctx)
@@ -187,13 +214,15 @@ func prepareLinuxPrivateTemporaryDirectoryWithFilesystem(ctx context.Context, cm
 	if helper == "" {
 		return temporary, nil
 	}
-	var random [privateTemporaryNonceSize]byte
-	if _, err := rand.Read(random[:]); err != nil {
-		_ = temporary.Cleanup(ctx)
-		_ = temporary.Close()
-		return nil, errors.New("prepare Naabu temporary directory: random name unavailable")
+	if !temporary.childCreates {
+		var random [privateTemporaryNonceSize]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			_ = temporary.Cleanup(ctx)
+			_ = temporary.Close()
+			return nil, errors.New("prepare Naabu temporary directory: random name unavailable")
+		}
+		copy(temporary.nonce[:], random[:])
 	}
-	copy(temporary.nonce[:], random[:])
 	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		_ = temporary.Cleanup(ctx)
@@ -279,14 +308,13 @@ func (temporary *linuxPrivateTemporaryDirectory) createLeafNamed() error {
 }
 
 func (temporary *linuxPrivateTemporaryDirectory) createNamespace() error {
-	rootFD, err := temporary.filesystem.open("/tmp", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return errors.New("prepare Naabu temporary directory: temporary root unavailable")
+	if temporary.namespaceMode == 0 {
+		temporary.namespaceMode = privateNamespaceMode
 	}
-	temporary.root = os.NewFile(uintptr(rootFD), "temporary filesystem root")
-	if err := temporary.filesystem.fstat(rootFD, &temporary.rootStat); err != nil {
-		return errors.New("prepare Naabu temporary directory: temporary root identity unavailable")
+	if err := temporary.openTemporaryRoot(); err != nil {
+		return err
 	}
+	rootFD := int(temporary.root.Fd())
 	for attempt := 0; attempt < 8; attempt++ {
 		var random [privateTemporaryNonceSize]byte
 		if _, err := rand.Read(random[:]); err != nil {
@@ -303,13 +331,13 @@ func (temporary *linuxPrivateTemporaryDirectory) createNamespace() error {
 			_ = temporary.filesystem.unlinkat(rootFD, name, unix.AT_REMOVEDIR)
 			return errors.New("prepare Naabu temporary directory: pin invocation namespace failed")
 		}
-		if err := temporary.filesystem.fchmod(fd, privateNamespaceMode); err != nil {
+		if err := temporary.filesystem.fchmod(fd, temporary.namespaceMode); err != nil {
 			_ = temporary.filesystem.close(fd)
 			_ = temporary.filesystem.unlinkat(rootFD, name, unix.AT_REMOVEDIR)
 			return errors.New("prepare Naabu temporary directory: restrict invocation namespace failed")
 		}
 		var stat, named unix.Stat_t
-		if err := temporary.filesystem.fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Mode&0o7777 != privateNamespaceMode || stat.Uid != uint32(os.Geteuid()) || stat.Gid != uint32(os.Getegid()) {
+		if err := temporary.filesystem.fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Mode&0o7777 != temporary.namespaceMode || stat.Uid != uint32(os.Geteuid()) || stat.Gid != uint32(os.Getegid()) {
 			_ = temporary.filesystem.close(fd)
 			_ = temporary.filesystem.unlinkat(rootFD, name, unix.AT_REMOVEDIR)
 			return errors.New("prepare Naabu temporary directory: invocation namespace identity is unexpected")
@@ -327,6 +355,25 @@ func (temporary *linuxPrivateTemporaryDirectory) createNamespace() error {
 	return errors.New("prepare Naabu temporary directory: unique invocation namespace unavailable")
 }
 
+func (temporary *linuxPrivateTemporaryDirectory) openTemporaryRoot() error {
+	if temporary.root != nil {
+		return nil
+	}
+	rootFD, err := temporary.filesystem.open("/tmp", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return errors.New("prepare Naabu temporary directory: temporary root unavailable")
+	}
+	temporary.root = os.NewFile(uintptr(rootFD), "temporary filesystem root")
+	if err := temporary.filesystem.fstat(rootFD, &temporary.rootStat); err != nil {
+		return errors.New("prepare Naabu temporary directory: temporary root identity unavailable")
+	}
+	return nil
+}
+
+func (temporary *linuxPrivateTemporaryDirectory) newChildCreatedNames() error {
+	return temporary.newLeafName()
+}
+
 func (temporary *linuxPrivateTemporaryDirectory) newLeafName() error {
 	var random [privateTemporaryNonceSize]byte
 	if _, err := rand.Read(random[:]); err != nil {
@@ -341,22 +388,32 @@ func (temporary *linuxPrivateTemporaryDirectory) path() string {
 }
 
 func (temporary *linuxPrivateTemporaryDirectory) configureCommand(cmd *exec.Cmd, policy *Policy) error {
-	if temporary.child == nil || temporary.namespace == nil || temporary.leaf == nil || len(cmd.ExtraFiles) > maxInheritedFiles {
+	if temporary.child == nil || temporary.namespace == nil || (!temporary.childCreates && temporary.leaf == nil) || len(cmd.ExtraFiles) > maxInheritedFiles {
 		return errors.New("prepare Naabu temporary directory: too many inherited descriptors")
 	}
 	originalPath := cmd.Path
 	originalArgs := append([]string(nil), cmd.Args...)
 	dataFiles := len(cmd.ExtraFiles)
-	rootFD := 3 + dataFiles
-	leafFD := rootFD + 1
-	controlFD := leafFD + 1
-	cmd.ExtraFiles = append(cmd.ExtraFiles, temporary.namespace, temporary.leaf, temporary.child)
+	rootFD, secondaryFD, controlFD := 3+dataFiles, 4+dataFiles, 5+dataFiles
+	if temporary.childCreates {
+		if temporary.root == nil {
+			return errors.New("prepare Naabu temporary directory: pinned temporary root is unavailable")
+		}
+		cmd.ExtraFiles = append(cmd.ExtraFiles, temporary.root, temporary.namespace, temporary.child)
+	} else {
+		controlFD = 5 + dataFiles
+		cmd.ExtraFiles = append(cmd.ExtraFiles, temporary.namespace, temporary.leaf, temporary.child)
+	}
 	if policy != nil && policy.enforce {
 		spec := policy.profileName().spec()
 		confineProcess(cmd, spec.uid, spec.gid, policy.ambient)
 	}
-	args := []string{temporary.helper, ExecCommand, "--profile", string(Scanner), "--files", strconv.Itoa(dataFiles),
-		"--private-tmp", "--private-root-fd", strconv.Itoa(rootFD), "--private-leaf-fd", strconv.Itoa(leafFD), "--control-fd", strconv.Itoa(controlFD)}
+	args := []string{temporary.helper, ExecCommand, "--profile", string(Scanner), "--files", strconv.Itoa(dataFiles), "--private-tmp"}
+	if temporary.childCreates {
+		args = append(args, "--private-create", "--private-root-fd", strconv.Itoa(rootFD), "--private-namespace-fd", strconv.Itoa(secondaryFD), "--control-fd", strconv.Itoa(controlFD))
+	} else {
+		args = append(args, "--private-root-fd", strconv.Itoa(rootFD), "--private-leaf-fd", strconv.Itoa(secondaryFD), "--control-fd", strconv.Itoa(controlFD))
+	}
 	if temporary.landlocked {
 		args = append(args, "--landlock")
 	}
@@ -387,7 +444,13 @@ func (temporary *linuxPrivateTemporaryDirectory) Started() error {
 	if !temporary.private {
 		return nil
 	}
-	message, err := encodePrivateTemporaryInit(temporary.namespaceName, temporary.name, temporary.nonce, &temporary.namespaceStat, &temporary.leafStat)
+	var message []byte
+	var err error
+	if temporary.childCreates {
+		message, err = encodePrivateTemporaryCreateInit(temporary.namespaceName, temporary.name, temporary.nonce, &temporary.rootStat, &temporary.namespaceStat)
+	} else {
+		message, err = encodePrivateTemporaryInit(temporary.namespaceName, temporary.name, temporary.nonce, &temporary.namespaceStat, &temporary.leafStat)
+	}
 	if err != nil {
 		return err
 	}
@@ -439,27 +502,81 @@ func (temporary *linuxPrivateTemporaryDirectory) WaitReady(ctx context.Context) 
 	if flags&(unix.MSG_TRUNC|unix.MSG_CTRUNC) != 0 || controlErr != nil {
 		return errors.New("prepare Naabu temporary directory: malformed readiness message")
 	}
-	var leaf, named unix.Stat_t
-	if err := unix.Fstat(int(temporary.leaf.Fd()), &leaf); err != nil || !sameObject(&temporary.leafStat, &leaf) || leaf.Mode != temporary.leafStat.Mode || leaf.Uid != temporary.leafStat.Uid || leaf.Gid != temporary.leafStat.Gid {
-		return errors.New("prepare Naabu temporary directory: pinned directory changed")
-	}
 	if err := temporary.checkNamespaceEntry(); err != nil {
 		return err
 	}
-	if err := unix.Fstatat(int(temporary.namespace.Fd()), temporary.name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&leaf, &named) || named.Mode != leaf.Mode || named.Uid != leaf.Uid || named.Gid != leaf.Gid {
-		return errors.New("prepare Naabu temporary directory: directory identity changed")
-	}
-	device, inode, uid, gid, mode, err := decodePrivateTemporaryMessage(message[:n], temporary.name, temporary.nonce)
-	if err != nil {
-		return err
-	}
-	if !privateTemporaryStatMatches(&leaf, device, inode, uid, gid, mode) || !privateTemporaryStatMatches(&named, device, inode, uid, gid, mode) {
-		return errors.New("prepare Naabu temporary directory: helper returned an unexpected directory")
+	if temporary.childCreates {
+		if err := temporary.pinChildCreatedLeaf(message[:n]); err != nil {
+			return err
+		}
+	} else {
+		var leaf, named unix.Stat_t
+		if err := unix.Fstat(int(temporary.leaf.Fd()), &leaf); err != nil || !sameObject(&temporary.leafStat, &leaf) || leaf.Mode != temporary.leafStat.Mode || leaf.Uid != temporary.leafStat.Uid || leaf.Gid != temporary.leafStat.Gid {
+			return errors.New("prepare Naabu temporary directory: pinned directory changed")
+		}
+		if err := unix.Fstatat(int(temporary.namespace.Fd()), temporary.name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&leaf, &named) || named.Mode != leaf.Mode || named.Uid != leaf.Uid || named.Gid != leaf.Gid {
+			return errors.New("prepare Naabu temporary directory: directory identity changed")
+		}
+		device, inode, uid, gid, mode, err := decodePrivateTemporaryMessage(message[:n], temporary.name, temporary.nonce)
+		if err != nil {
+			return err
+		}
+		if !privateTemporaryStatMatches(&leaf, device, inode, uid, gid, mode) || !privateTemporaryStatMatches(&named, device, inode, uid, gid, mode) {
+			return errors.New("prepare Naabu temporary directory: helper returned an unexpected directory")
+		}
 	}
 	if n, err := unix.Write(int(temporary.parent.Fd()), []byte{1}); err != nil || n != 1 {
 		return errors.New("prepare Naabu temporary directory: helper acknowledgement failed")
 	}
 	temporary.accepted = true
+	return nil
+}
+
+func (temporary *linuxPrivateTemporaryDirectory) pinChildCreatedLeaf(message []byte) error {
+	device, inode, uid, gid, mode, err := decodePrivateTemporaryCreateMessage(message, temporary.name, temporary.nonce)
+	if err != nil {
+		return err
+	}
+	fd, err := unix.Openat(int(temporary.namespace.Fd()), temporary.name, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return errors.New("prepare Naabu temporary directory: pin scanner-owned leaf failed")
+	}
+	var leaf, named unix.Stat_t
+	if err := unix.Fstat(fd, &leaf); err != nil || leaf.Mode != unix.S_IFDIR|privateScannerTemporaryMode || leaf.Uid != temporary.uid || leaf.Gid != temporary.gid || uint64(leaf.Dev) != device || leaf.Ino != inode || uid != temporary.uid || gid != temporary.gid || mode != unix.S_IFDIR|privateScannerTemporaryMode {
+		_ = unix.Close(fd)
+		return errors.New("prepare Naabu temporary directory: scanner-owned leaf identity is unexpected")
+	}
+	if err := unix.Fstatat(int(temporary.namespace.Fd()), temporary.name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&leaf, &named) || named.Mode != leaf.Mode || named.Uid != leaf.Uid || named.Gid != leaf.Gid {
+		_ = unix.Close(fd)
+		return errors.New("prepare Naabu temporary directory: scanner-owned leaf entry changed")
+	}
+	temporary.leafStat = leaf
+	temporary.leaf = os.NewFile(uintptr(fd), "scanner-owned private temporary directory")
+	return nil
+}
+
+func (temporary *linuxPrivateTemporaryDirectory) pinChildCreatedLeafForCleanup() error {
+	var named unix.Stat_t
+	if err := unix.Fstatat(int(temporary.namespace.Fd()), temporary.name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return errPrivateTemporaryLeafAbsent
+		}
+		return errors.New("cleanup Naabu temporary directory: inspect scanner-owned leaf failed")
+	}
+	if named.Mode != unix.S_IFDIR|privateScannerTemporaryMode || named.Uid != temporary.uid || named.Gid != temporary.gid || uint64(named.Dev) != uint64(temporary.rootStat.Dev) {
+		return errors.New("cleanup Naabu temporary directory: scanner-owned leaf identity is unexpected")
+	}
+	fd, err := unix.Openat(int(temporary.namespace.Fd()), temporary.name, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return errors.New("cleanup Naabu temporary directory: pin scanner-owned leaf failed")
+	}
+	var pinned unix.Stat_t
+	if err := unix.Fstat(fd, &pinned); err != nil || !sameObject(&named, &pinned) || pinned.Mode != named.Mode || pinned.Uid != named.Uid || pinned.Gid != named.Gid {
+		_ = unix.Close(fd)
+		return errors.New("cleanup Naabu temporary directory: scanner-owned leaf changed while pinning")
+	}
+	temporary.leafStat = pinned
+	temporary.leaf = os.NewFile(uintptr(fd), "scanner-owned private temporary cleanup directory")
 	return nil
 }
 
@@ -485,20 +602,37 @@ func (temporary *linuxPrivateTemporaryDirectory) Cleanup(ctx context.Context) er
 		return nil
 	}
 	if temporary.leaf == nil {
-		if temporary.name != "" {
+		if temporary.childCreates && temporary.name != "" {
+			err := temporary.pinChildCreatedLeafForCleanup()
+			if errors.Is(err, errPrivateTemporaryLeafAbsent) {
+				if err := temporary.ensureDirectoryEmpty(temporary.namespace); err != nil {
+					return err
+				}
+				if err := temporary.removeNamespace(); err != nil {
+					return err
+				}
+				temporary.cleaned = true
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+		} else if temporary.name != "" {
 			var unexpected unix.Stat_t
 			if err := unix.Fstatat(int(temporary.namespace.Fd()), temporary.name, &unexpected, unix.AT_SYMLINK_NOFOLLOW); err == nil || !errors.Is(err, unix.ENOENT) {
 				return errors.New("cleanup Naabu temporary directory: refusing to remove an unpinned leaf")
 			}
 		}
-		if err := temporary.ensureDirectoryEmpty(temporary.namespace); err != nil {
-			return err
+		if temporary.leaf == nil {
+			if err := temporary.ensureDirectoryEmpty(temporary.namespace); err != nil {
+				return err
+			}
+			if err := temporary.removeNamespace(); err != nil {
+				return err
+			}
+			temporary.cleaned = true
+			return nil
 		}
-		if err := temporary.removeNamespace(); err != nil {
-			return err
-		}
-		temporary.cleaned = true
-		return nil
 	}
 	var leaf unix.Stat_t
 	if err := unix.Fstat(int(temporary.leaf.Fd()), &leaf); err != nil {
@@ -554,10 +688,10 @@ func (temporary *linuxPrivateTemporaryDirectory) checkNamespaceEntry() error {
 	if err := unix.Fstat(currentRoot, &root); err != nil || !sameObject(&temporary.rootStat, &root) {
 		return errors.New("cleanup Naabu temporary directory: temporary root identity changed")
 	}
-	if err := unix.Fstat(int(temporary.namespace.Fd()), &namespace); err != nil || !sameObject(&temporary.namespaceStat, &namespace) || namespace.Mode&unix.S_IFMT != unix.S_IFDIR || namespace.Mode&0o7777 != privateNamespaceMode {
+	if err := unix.Fstat(int(temporary.namespace.Fd()), &namespace); err != nil || !sameObject(&temporary.namespaceStat, &namespace) || namespace.Mode&unix.S_IFMT != unix.S_IFDIR || namespace.Mode&0o7777 != temporary.namespaceMode {
 		return errors.New("cleanup Naabu temporary directory: invocation namespace identity changed")
 	}
-	if err := unix.Fstatat(int(temporary.root.Fd()), temporary.namespaceName, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&namespace, &named) || named.Mode&0o7777 != privateNamespaceMode {
+	if err := unix.Fstatat(int(temporary.root.Fd()), temporary.namespaceName, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&namespace, &named) || named.Mode&0o7777 != temporary.namespaceMode {
 		return errors.New("cleanup Naabu temporary directory: invocation namespace entry changed")
 	}
 	return nil
@@ -621,7 +755,8 @@ func (temporary *linuxPrivateTemporaryDirectory) cleanupWithHelper(ctx context.C
 	defer cancel()
 	args := []string{temporary.helper, ExecCommand, "--cleanup-private-tmp", "--device", strconv.FormatUint(uint64(leaf.Dev), 10),
 		"--inode", strconv.FormatUint(leaf.Ino, 10), "--leaf-uid", strconv.FormatUint(uint64(leaf.Uid), 10),
-		"--leaf-gid", strconv.FormatUint(uint64(leaf.Gid), 10), "--uid", strconv.FormatUint(uint64(temporary.uid), 10),
+		"--leaf-gid", strconv.FormatUint(uint64(leaf.Gid), 10), "--leaf-mode", strconv.FormatUint(uint64(leaf.Mode&0o7777), 8),
+		"--uid", strconv.FormatUint(uint64(temporary.uid), 10),
 		"--gid", strconv.FormatUint(uint64(temporary.gid), 10)}
 	if temporary.landlocked {
 		args = append(args, "--landlock")
@@ -668,8 +803,10 @@ type privateTemporaryInit struct {
 	namespaceName string
 	name          string
 	nonce         [privateTemporaryNonceSize]byte
+	root          unix.Stat_t
 	namespace     unix.Stat_t
 	leaf          unix.Stat_t
+	childCreates  bool
 }
 
 func encodePrivateTemporaryInit(namespaceName, name string, nonce [privateTemporaryNonceSize]byte, namespace, leaf *unix.Stat_t) ([]byte, error) {
@@ -752,6 +889,59 @@ func decodePrivateTemporaryInit(message []byte) (privateTemporaryInit, error) {
 	return request, nil
 }
 
+func encodePrivateTemporaryCreateInit(namespaceName, name string, nonce [privateTemporaryNonceSize]byte, root, namespace *unix.Stat_t) ([]byte, error) {
+	if !validPrivateNamespaceName(namespaceName) || !validPrivateTemporaryName(name) || root == nil || namespace == nil ||
+		root.Mode&unix.S_IFMT != unix.S_IFDIR || namespace.Mode != unix.S_IFDIR|privateScannerNamespaceMode ||
+		root.Dev != namespace.Dev {
+		return nil, errors.New("invalid scanner-owned temporary initialization")
+	}
+	message := make([]byte, len(privateTemporaryCreateInitMagic)+1+len(namespaceName)+1+len(name)+2*(8+8+4+4+4)+privateTemporaryNonceSize)
+	index := copy(message, privateTemporaryCreateInitMagic)
+	message[index] = byte(len(namespaceName))
+	index++
+	index += copy(message[index:], namespaceName)
+	message[index] = byte(len(name))
+	index++
+	index += copy(message[index:], name)
+	index = encodeTemporaryStat(message, index, root)
+	index = encodeTemporaryStat(message, index, namespace)
+	copy(message[index:], nonce[:])
+	return message, nil
+}
+
+func decodePrivateTemporaryCreateInit(message []byte) (privateTemporaryInit, error) {
+	const fixed = 2*(8+8+4+4+4) + privateTemporaryNonceSize
+	if len(message) < len(privateTemporaryCreateInitMagic)+2+fixed || len(message) > privateTemporaryMessageMax || string(message[:len(privateTemporaryCreateInitMagic)]) != privateTemporaryCreateInitMagic {
+		return privateTemporaryInit{}, errors.New("malformed scanner-owned temporary initialization")
+	}
+	index := len(privateTemporaryCreateInitMagic)
+	namespaceLength := int(message[index])
+	index++
+	if namespaceLength <= 0 || index+namespaceLength+1 > len(message) {
+		return privateTemporaryInit{}, errors.New("malformed scanner-owned temporary namespace name")
+	}
+	namespaceName := string(message[index : index+namespaceLength])
+	index += namespaceLength
+	nameLength := int(message[index])
+	index++
+	if nameLength <= 0 || index+nameLength+fixed != len(message) {
+		return privateTemporaryInit{}, errors.New("malformed scanner-owned temporary leaf name")
+	}
+	name := string(message[index : index+nameLength])
+	index += nameLength
+	if !validPrivateNamespaceName(namespaceName) || !validPrivateTemporaryName(name) {
+		return privateTemporaryInit{}, errors.New("invalid scanner-owned temporary names")
+	}
+	root, index := decodeTemporaryStat(message, index)
+	namespace, index := decodeTemporaryStat(message, index)
+	var nonce [privateTemporaryNonceSize]byte
+	copy(nonce[:], message[index:])
+	if root.Mode&unix.S_IFMT != unix.S_IFDIR || namespace.Mode != unix.S_IFDIR|privateScannerNamespaceMode || root.Dev != namespace.Dev {
+		return privateTemporaryInit{}, errors.New("unexpected scanner-owned temporary root or namespace")
+	}
+	return privateTemporaryInit{namespaceName: namespaceName, name: name, nonce: nonce, root: root, namespace: namespace, childCreates: true}, nil
+}
+
 func readPrivateTemporaryInit(controlFD int) (privateTemporaryInit, error) {
 	message := make([]byte, privateTemporaryMessageMax)
 	control := make([]byte, unix.CmsgSpace(16*4))
@@ -761,6 +951,17 @@ func readPrivateTemporaryInit(controlFD int) (privateTemporaryInit, error) {
 		return privateTemporaryInit{}, errors.New("read private temporary initialization failed")
 	}
 	return decodePrivateTemporaryInit(message[:n])
+}
+
+func readPrivateTemporaryCreateInit(controlFD int) (privateTemporaryInit, error) {
+	message := make([]byte, privateTemporaryMessageMax)
+	control := make([]byte, unix.CmsgSpace(16*4))
+	n, controlN, flags, _, err := unix.Recvmsg(controlFD, message, control, 0)
+	controlErr := closeReceivedDescriptors(control[:controlN])
+	if err != nil || n == 0 || flags&(unix.MSG_TRUNC|unix.MSG_CTRUNC) != 0 || controlErr != nil {
+		return privateTemporaryInit{}, errors.New("read scanner-owned temporary initialization failed")
+	}
+	return decodePrivateTemporaryCreateInit(message[:n])
 }
 
 func validatePrivateTemporaryLocation(namespaceFD, leafFD int, initialization privateTemporaryInit) error {
@@ -879,6 +1080,39 @@ func encodePrivateTemporaryMessage(name string, nonce [privateTemporaryNonceSize
 	return message, nil
 }
 
+func encodePrivateTemporaryCreateMessage(name string, nonce [privateTemporaryNonceSize]byte, stat *unix.Stat_t) ([]byte, error) {
+	if !validPrivateTemporaryName(name) || len(name) > 255 || stat == nil || stat.Mode != unix.S_IFDIR|privateScannerTemporaryMode {
+		return nil, errors.New("invalid scanner-owned private temporary leaf")
+	}
+	message := make([]byte, len(privateTemporaryCreateMagic)+1+len(name)+8+8+4+4+4+privateTemporaryNonceSize)
+	index := copy(message, privateTemporaryCreateMagic)
+	message[index] = byte(len(name))
+	index++
+	index += copy(message[index:], name)
+	index = encodeTemporaryStat(message, index, stat)
+	copy(message[index:], nonce[:])
+	return message, nil
+}
+
+func decodePrivateTemporaryCreateMessage(message []byte, expectedName string, expectedNonce [privateTemporaryNonceSize]byte) (uint64, uint64, uint32, uint32, uint32, error) {
+	const fixed = 8 + 8 + 4 + 4 + 4 + privateTemporaryNonceSize
+	if len(message) < len(privateTemporaryCreateMagic)+1+fixed || len(message) > privateTemporaryMessageMax || string(message[:len(privateTemporaryCreateMagic)]) != privateTemporaryCreateMagic {
+		return 0, 0, 0, 0, 0, errors.New("prepare Naabu temporary directory: malformed scanner-owned readiness")
+	}
+	index := len(privateTemporaryCreateMagic)
+	nameLength := int(message[index])
+	index++
+	if nameLength != len(expectedName) || index+nameLength+fixed != len(message) || string(message[index:index+nameLength]) != expectedName {
+		return 0, 0, 0, 0, 0, errors.New("prepare Naabu temporary directory: scanner-owned readiness name mismatch")
+	}
+	index += nameLength
+	stat, index := decodeTemporaryStat(message, index)
+	if !bytes.Equal(message[index:], expectedNonce[:]) || stat.Mode != unix.S_IFDIR|privateScannerTemporaryMode {
+		return 0, 0, 0, 0, 0, errors.New("prepare Naabu temporary directory: scanner-owned readiness identity mismatch")
+	}
+	return uint64(stat.Dev), stat.Ino, stat.Uid, stat.Gid, stat.Mode, nil
+}
+
 func validPrivateTemporaryName(name string) bool {
 	if !strings.HasPrefix(name, privateTemporaryPrefix) || len(name) != len(privateTemporaryPrefix)+32 {
 		return false
@@ -900,13 +1134,14 @@ type privateTemporaryCleanupRequest struct {
 	inode    uint64
 	leafUID  uint32
 	leafGID  uint32
+	leafMode uint32
 	uid      uint32
 	gid      uint32
 	landlock bool
 }
 
 func parsePrivateTemporaryCleanupArgs(args []string) (privateTemporaryCleanupRequest, error) {
-	const usage = "usage: sandbox-exec --cleanup-private-tmp --device N --inode N --leaf-uid N --leaf-gid N --uid N --gid N [--landlock]"
+	const usage = "usage: sandbox-exec --cleanup-private-tmp --device N --inode N --leaf-uid N --leaf-gid N --uid N --gid N [--leaf-mode OCTAL] [--landlock]"
 	values := map[string]string{}
 	landlock := false
 	for index := 0; index < len(args); index++ {
@@ -927,13 +1162,20 @@ func parsePrivateTemporaryCleanupArgs(args []string) (privateTemporaryCleanupReq
 		values[key] = args[index+1]
 		index++
 	}
-	expected := map[string]bool{"--device": true, "--inode": true, "--leaf-uid": true, "--leaf-gid": true, "--uid": true, "--gid": true}
-	if len(values) != len(expected) {
+	expected := map[string]bool{"--device": true, "--inode": true, "--leaf-uid": true, "--leaf-gid": true, "--uid": true, "--gid": true, "--leaf-mode": true}
+	if len(values) < len(expected)-1 || len(values) > len(expected) {
 		return privateTemporaryCleanupRequest{}, errors.New(usage)
 	}
 	for key := range values {
 		if !expected[key] || values[key] == "" {
 			return privateTemporaryCleanupRequest{}, errors.New(usage)
+		}
+	}
+	for key := range expected {
+		if key != "--leaf-mode" {
+			if _, ok := values[key]; !ok {
+				return privateTemporaryCleanupRequest{}, errors.New(usage)
+			}
 		}
 	}
 	device, errDevice := strconv.ParseUint(values["--device"], 10, 64)
@@ -942,12 +1184,17 @@ func parsePrivateTemporaryCleanupArgs(args []string) (privateTemporaryCleanupReq
 	leafGID, errLeafGID := strconv.ParseUint(values["--leaf-gid"], 10, 32)
 	uid, errUID := strconv.ParseUint(values["--uid"], 10, 32)
 	gid, errGID := strconv.ParseUint(values["--gid"], 10, 32)
-	if errDevice != nil || errInode != nil || errLeafUID != nil || errLeafGID != nil || errUID != nil || errGID != nil {
+	leafMode := uint64(privateTemporaryMode)
+	var errLeafMode error
+	if raw, ok := values["--leaf-mode"]; ok {
+		leafMode, errLeafMode = strconv.ParseUint(raw, 8, 32)
+	}
+	if errDevice != nil || errInode != nil || errLeafUID != nil || errLeafGID != nil || errUID != nil || errGID != nil || errLeafMode != nil || (leafMode != privateTemporaryMode && leafMode != privateScannerTemporaryMode) {
 		return privateTemporaryCleanupRequest{}, errors.New(usage)
 	}
 	return privateTemporaryCleanupRequest{
 		device: device, inode: inode, leafUID: uint32(leafUID), leafGID: uint32(leafGID),
-		uid: uint32(uid), gid: uint32(gid), landlock: landlock,
+		leafMode: uint32(leafMode), uid: uint32(uid), gid: uint32(gid), landlock: landlock,
 	}, nil
 }
 
@@ -993,8 +1240,12 @@ func validatePrivateTemporaryCleanupLeaf(request privateTemporaryCleanupRequest,
 	if uint32(os.Geteuid()) != request.uid || uint32(os.Getegid()) != request.gid {
 		return unix.Stat_t{}, errors.New("cleanup Naabu temporary directory: invalid ownership")
 	}
+	leafMode := request.leafMode
+	if leafMode == 0 {
+		leafMode = privateTemporaryMode
+	}
 	var stat unix.Stat_t
-	if err := unix.Fstat(leafFD, &stat); err != nil || uint64(stat.Dev) != request.device || stat.Ino != request.inode || stat.Uid != request.leafUID || stat.Gid != request.leafGID || stat.Mode != unix.S_IFDIR|privateTemporaryMode {
+	if err := unix.Fstat(leafFD, &stat); err != nil || uint64(stat.Dev) != request.device || stat.Ino != request.inode || stat.Uid != request.leafUID || stat.Gid != request.leafGID || stat.Mode != unix.S_IFDIR|leafMode {
 		return unix.Stat_t{}, errors.New("cleanup Naabu temporary directory: pinned directory identity changed")
 	}
 	return stat, nil
@@ -1103,6 +1354,23 @@ func helperSendPrivateTemporaryReady(controlFD int, name string, nonce [privateT
 	n, err = unix.Read(controlFD, reply[:])
 	if err != nil || n != 1 || reply[0] != 1 {
 		return errors.New("private temporary readiness was not acknowledged")
+	}
+	return nil
+}
+
+func helperSendPrivateTemporaryCreateReady(controlFD int, name string, nonce [privateTemporaryNonceSize]byte, stat *unix.Stat_t) error {
+	message, err := encodePrivateTemporaryCreateMessage(name, nonce, stat)
+	if err != nil {
+		return err
+	}
+	n, err := unix.SendmsgN(controlFD, message, nil, nil, 0)
+	if err != nil || n != len(message) {
+		return errors.New("send scanner-owned private temporary readiness failed")
+	}
+	var reply [2]byte
+	n, err = unix.Read(controlFD, reply[:])
+	if err != nil || n != 1 || reply[0] != 1 {
+		return errors.New("scanner-owned private temporary readiness was not acknowledged")
 	}
 	return nil
 }

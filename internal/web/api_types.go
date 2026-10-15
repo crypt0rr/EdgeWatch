@@ -23,6 +23,7 @@ func ResponseTypes() []apitypes.Type {
 		{Name: "ApplicationUpdateStatus", Value: applicationUpdateStatusView{}},
 		{Name: "NotificationStatus", Value: notify.Status{}},
 		{Name: "ScannerSandboxStatus", Value: sandbox.Status{}},
+		{Name: "ScannerIdentityPoolStatus", Value: sandbox.ScannerIdentityPoolStatus{}},
 		{Name: "ScannerLandlockStatus", Value: sandbox.LandlockStatus{}},
 		{Name: "ScannerSeccompStatus", Value: sandbox.SeccompStatus{}},
 		{Name: "ScannerProcessLimits", Value: sandbox.ProcessLimits{}},

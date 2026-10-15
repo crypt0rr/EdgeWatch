@@ -357,24 +357,54 @@ const maxVersionProbeOutput = 64 << 10
 // exceeds the cap so a malicious replacement cannot keep running after the
 // bound is reached.
 func runScannerVersionProbe(ctx context.Context, path string, policy *sandbox.Policy, args ...string) ([]byte, error) {
+	if ctx == nil {
+		return nil, errors.New("scanner version probe context is nil")
+	}
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = append([]string(nil), scannerProbeEnv...)
 	policy.Confine(cmd)
-	startInProcessGroup(cmd, false)
+	invocation, err := sandbox.PrepareScannerInvocation(ctx, cmd, policy, false)
+	if err != nil {
+		return nil, err
+	}
+	if invocation == nil {
+		startInProcessGroup(cmd, false)
+	} else {
+		invocation.InstallCancellation(cmd)
+	}
 	var stdout, stderr cappedBuffer
 	var exceeded atomic.Bool
 	kill := func() {
 		if exceeded.CompareAndSwap(false, true) {
-			_ = stopProcessGroup(cmd)
+			if invocation != nil {
+				_ = invocation.Cancel(cmd)
+			} else {
+				_ = stopProcessGroup(cmd)
+			}
 		}
 	}
 	stdout = cappedBuffer{limit: maxVersionProbeOutput, onExceeded: kill}
 	stderr = cappedBuffer{limit: maxVersionProbeOutput, onExceeded: kill}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Start()
-	if err == nil {
+	err = cmd.Start()
+	if err != nil {
+		if invocation != nil {
+			err = errors.Join(err, invocation.StartFailed(true))
+		}
+	} else if invocation == nil {
 		err = waitProcessGroup(cmd)
+	} else {
+		if startErr := invocation.Started(); startErr != nil {
+			_ = invocation.Cancel(cmd)
+			waitErr := cmd.Wait()
+			proofErr := invocation.VerifyProcessTree()
+			err = errors.Join(fmt.Errorf("start supervised scanner version probe: %w", startErr), waitErr, proofErr, invocation.Finish(proofErr == nil))
+		} else {
+			waitErr := cmd.Wait()
+			proofErr := invocation.VerifyProcessTree()
+			err = errors.Join(waitErr, proofErr, invocation.Finish(proofErr == nil))
+		}
 	}
 	if exceeded.Load() || stdout.exceeded || stderr.exceeded {
 		return nil, fmt.Errorf("scanner version output exceeded %d bytes", maxVersionProbeOutput)
@@ -1317,20 +1347,46 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, policy *sandbox.Polic
 // initial-poll callback scoped to one invocation. The callback is nil in
 // production; tests use it to release a controlled child only after its first
 // empty-file poll has completed.
-func runNmapInvocationWithProgressPollInterval(ctx context.Context, cmd *exec.Cmd, policy *sandbox.Policy, dir string, onOutput func(string, float64), onHeartbeat func(), progressPollInterval time.Duration, afterInitialPoll func()) ([]byte, string, error) {
+func runNmapInvocationWithProgressPollInterval(ctx context.Context, cmd *exec.Cmd, policy *sandbox.Policy, dir string, onOutput func(string, float64), onHeartbeat func(), progressPollInterval time.Duration, afterInitialPoll func()) (structured []byte, diagnostic string, resultErr error) {
 	if progressPollInterval <= 0 {
 		return nil, "", errors.New("nmap progress poll interval must be greater than zero")
 	}
-	xmlPath, releaseXML, err := prepareNmapXMLOutput(cmd, policy, dir)
+	reservation, err := sandbox.ReserveScannerIdentity(ctx, policy)
 	if err != nil {
 		return nil, "", err
 	}
-	if xmlPath != "" {
-		defer func() {
-			releaseXML()
-			_ = os.Remove(xmlPath)
-		}()
+	policy = policy.WithScannerIdentityReservation(reservation)
+	scannerPath := cmd.Path
+	xmlPath, releaseXML, err := prepareNmapXMLOutput(cmd, policy, dir)
+	if err != nil {
+		return nil, "", errors.Join(err, reservation.Finish(true))
 	}
+	var invocation *sandbox.ScannerInvocation
+	childStarted, childWaited := false, false
+	processTreeVerified := false
+	xmlCleanupSucceeded := true
+	defer func() {
+		releaseXML()
+		if xmlPath != "" {
+			if childStarted && !processTreeVerified {
+				xmlCleanupSucceeded = false
+			} else if removeErr := os.Remove(xmlPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				xmlCleanupSucceeded = false
+				resultErr = errors.Join(resultErr, fmt.Errorf("remove nmap XML output: %w", removeErr))
+			}
+		}
+		if invocation == nil {
+			resultErr = errors.Join(resultErr, reservation.Finish(xmlCleanupSucceeded))
+			return
+		}
+		var finishErr error
+		if !childStarted {
+			finishErr = invocation.StartFailed(xmlCleanupSucceeded)
+		} else {
+			finishErr = invocation.Finish(childWaited && processTreeVerified && xmlCleanupSucceeded)
+		}
+		resultErr = errors.Join(resultErr, finishErr)
+	}()
 	confineNmap(cmd, policy)
 	var callbackMu sync.Mutex
 	emitOutput := func(line string, fraction float64) {
@@ -1356,9 +1412,16 @@ func runNmapInvocationWithProgressPollInterval(ctx context.Context, cmd *exec.Cm
 	// xmlExceeded records that the XML, in its file or on stdout, exceeded
 	// maxNmapOutput, and stops the child.
 	var xmlExceeded atomic.Bool
+	stopScanner := func() {
+		if invocation != nil {
+			_ = invocation.Cancel(cmd)
+			return
+		}
+		_ = stopProcessGroup(cmd)
+	}
 	stopForXML := func() {
 		if xmlExceeded.CompareAndSwap(false, true) {
-			_ = stopProcessGroup(cmd)
+			stopScanner()
 		}
 	}
 	// While Nmap writes its XML to the file, the terminal stream is only a
@@ -1382,7 +1445,7 @@ func runNmapInvocationWithProgressPollInterval(ctx context.Context, cmd *exec.Cm
 	}
 	// Diagnostic output is not expected to grow with a scan's duration, so it
 	// keeps its cumulative bound and stops the child once it exceeds it.
-	stderr := &progressOutputWriter{limit: maxProgressOutput, onExceeded: func() { _ = stopProcessGroup(cmd) }, emit: func(line string) {
+	stderr := &progressOutputWriter{limit: maxProgressOutput, onExceeded: stopScanner, emit: func(line string) {
 		fraction, _ := parseNmapProgress(line)
 		emitOutput(line, fraction)
 	}}
@@ -1401,7 +1464,22 @@ func runNmapInvocationWithProgressPollInterval(ctx context.Context, cmd *exec.Cm
 	} else {
 		cmd.Stdout = stdout
 	}
-	startInProcessGroup(cmd, terminalErr == nil)
+	invocation, err = sandbox.PrepareScannerInvocation(ctx, cmd, policy, terminalErr == nil)
+	if err != nil {
+		if terminal != nil {
+			_ = terminal.Close()
+		}
+		if master != nil {
+			_ = master.Close()
+		}
+		return nil, "", err
+	}
+	// An unconfined invocation is the scanner itself, so it still owns the
+	// Nmap session/terminal. A supervised invocation starts a separate wrapper
+	// here; the supervisor creates the scanner's session after it receives the
+	// bounded launch request.
+	startInProcessGroup(cmd, invocation == nil && terminalErr == nil)
+	invocation.InstallCancellation(cmd)
 	startErr := cmd.Start()
 	if terminal != nil {
 		// The child has its own descriptor; the daemon reads the master only.
@@ -1411,7 +1489,19 @@ func runNmapInvocationWithProgressPollInterval(ctx context.Context, cmd *exec.Cm
 		if master != nil {
 			_ = master.Close()
 		}
-		return nil, "", ExecutableStartError(cmd.Path, startErr)
+		return nil, "", ExecutableStartError(scannerPath, startErr)
+	}
+	childStarted = true
+	if err := invocation.Started(); err != nil {
+		_ = invocation.Cancel(cmd)
+		_, waitErr := waitProcessGroupUntil(cmd)
+		childWaited = true
+		proofErr := invocation.VerifyProcessTree()
+		processTreeVerified = proofErr == nil
+		if master != nil {
+			_ = master.Close()
+		}
+		return nil, "", errors.Join(fmt.Errorf("start supervised nmap invocation: %w", err), waitErr, proofErr)
 	}
 
 	terminalDone := make(chan struct{})
@@ -1467,6 +1557,14 @@ func runNmapInvocationWithProgressPollInterval(ctx context.Context, cmd *exec.Cm
 	}()
 
 	outputDeadline, waitErr := waitProcessGroupUntil(cmd)
+	childWaited = true
+	var proofErr error
+	if invocation != nil {
+		proofErr = invocation.VerifyProcessTree()
+		processTreeVerified = proofErr == nil
+	} else {
+		processTreeVerified = true
+	}
 	terminalHeld := false
 	if master != nil {
 		// Once every process holding the terminal has exited, Linux completes the
@@ -1495,9 +1593,9 @@ func runNmapInvocationWithProgressPollInterval(ctx context.Context, cmd *exec.Cm
 	// invocation's terminal update, then one final poll captures records flushed
 	// as the child exited.
 	<-progressDone
-	structured := stdout.Bytes()
+	structured = stdout.Bytes()
 	terminalDropped := false
-	if xmlPath != "" {
+	if xmlPath != "" && proofErr == nil {
 		if exceeded, err := nmapXMLOutputExceeded(xmlPath, maxNmapOutput); err == nil && exceeded {
 			xmlExceeded.Store(true)
 		}
@@ -1515,8 +1613,11 @@ func runNmapInvocationWithProgressPollInterval(ctx context.Context, cmd *exec.Cm
 			terminalDropped = stdout.overflowed()
 		}
 	}
-	diagnostic := stderr.String()
+	diagnostic = stderr.String()
 	waitErr = scannerWaitError("nmap", waitErr)
+	if proofErr != nil {
+		return nil, diagnostic, errors.Join(waitErrWithContext(ctx, waitErr), proofErr)
+	}
 	if stderr.overflowed() {
 		return structured, diagnostic, withWaitError(waitErr, fmt.Errorf("nmap diagnostic output exceeded %d bytes", maxProgressOutput))
 	}

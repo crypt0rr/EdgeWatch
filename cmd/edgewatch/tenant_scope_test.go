@@ -133,7 +133,7 @@ func TestHostCommandsActOnlyOnTheDefaultTenant(t *testing.T) {
 	rawURL, calls := importStartupWebhook(t)
 	ownJob := seedTwoTenants(t, database, rawURL)
 	configPath := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(configPath, []byte("database: "+database+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("database: "+database+"\nscanner:\n  sandbox: off\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cli := func(args ...string) (string, error) {

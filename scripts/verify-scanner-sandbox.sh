@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # Run real Nmap TCP SYN and UDP scans and a Naabu discovery of local
-# listeners through EdgeWatch with the scanner sandbox enforced, with only
-# its Landlock restriction (the capabilities of a Compose file from before
-# v0.27.0), with an unprivileged identity but no Landlock, and with it off;
-# require the same results from all of them.
-# With the sandbox enforced, also require that a running Nmap is UID 65532
-# holding only NET_RAW, that cancelling it works, that the sandbox identity
+# listeners through EdgeWatch with the scanner sandbox enforced, with a
+# leased identity and seccomp but no Landlock, and with the scanner sandbox
+# explicitly off; require the same results from supported modes.
+# With the sandbox enforced, also require that a running Nmap uses a leased
+# per-invocation UID holding only the configured capabilities, that cancelling
+# it works, that one scanner identity
 # can neither list the data directory nor read the configuration, and that a
 # process restricted with Landlock cannot do so even as UID 0. Deliver a test
 # notification to a local webhook and require that the notification process
@@ -29,47 +29,7 @@ workdir=$(mktemp -d)
 container=
 listener_pid=
 webhook_pid=
-held_scanner_pid=
-held_scanner_start=
-held_scanner_name=
-
-# resume_held_scanner continues only the process whose PID and kernel start
-# time were recorded by hold_scanner_process. If it exited or its PID was
-# reused, there is no process left to resume.
-resume_held_scanner() {
-  [ -n "$held_scanner_pid" ] || return 0
-  local output
-  if output=$(docker exec "$container" /bin/sh -c '
-pid=$1
-expected_name=$2
-expected_start=$3
-status="/proc/$pid/status"
-[ -d "/proc/$pid" ] || exit 0
-[ -r "$status" ] || { echo "cannot read $status while resuming held scanner" >&2; exit 12; }
-start=$(awk "{print \$22}" "/proc/$pid/stat" 2>/dev/null) || { echo "cannot read /proc/$pid/stat while resuming held scanner" >&2; exit 12; }
-[ -n "$start" ] || { echo "empty process start time while resuming held scanner" >&2; exit 12; }
-[ "$start" = "$expected_start" ] || exit 0
-name=$(awk "/^Name:/{print \$2}" "$status" 2>/dev/null) || { echo "cannot read process name while resuming held scanner" >&2; exit 12; }
-[ "$name" = "$expected_name" ] || { echo "held scanner PID now names $name, expected $expected_name" >&2; exit 12; }
-if ! kill -CONT "$pid" 2>/dev/null; then
-  [ ! -d "/proc/$pid" ] && exit 0
-  echo "cannot resume held scanner PID $pid" >&2
-  exit 12
-fi
-' sh "$held_scanner_pid" "$held_scanner_name" "$held_scanner_start" 2>&1); then
-    held_scanner_pid=
-    held_scanner_start=
-    held_scanner_name=
-    return 0
-  fi
-  printf 'could not resume held scanner: %s\n' "$output" >&2
-  return 1
-}
-
 cleanup() {
-  if [ -n "$held_scanner_pid" ] && [ -n "$container" ]; then
-    resume_held_scanner >/dev/null 2>&1 || true
-  fi
   if [ -n "$container" ]; then
     docker logs "$container" >"$workdir/last-daemon.log" 2>&1 || true
     docker rm -f "$container" >/dev/null 2>&1 || true
@@ -283,6 +243,62 @@ def main():
     elif command == "create":
         name, tcp_ports = args
         print(create_job(base, state, name, tcp_ports, "", "conservative"))
+    elif command == "establish-baseline":
+        name, tcp_ports = args
+        job_id = create_job(base, state, name, tcp_ports, "", "fast")
+        request(base, state, "POST", f"/jobs/{job_id}/run")
+        scan = wait_for_scan(base, state, job_id, {"success", "incomplete", "failed", "timed_out", "canceled"})
+        if scan["status"] != "success":
+            raise SystemExit(f"baseline scan {scan['id']} ended {scan['status']}: {scan.get('error', '')}")
+        baseline = request(base, state, "GET", f"/jobs/{job_id}")["baseline"]
+        if baseline.get("status") != "complete" or not baseline.get("scan_id"):
+            raise SystemExit(f"baseline was not completed: {baseline}")
+        print(json.dumps({"job_id": job_id, "baseline": baseline}))
+    elif command == "expect-refused-run":
+        job_id, expected_baseline_path = args
+        with open(expected_baseline_path, encoding="utf-8") as baseline_file:
+            expected_baseline = json.load(baseline_file)
+        before = request(base, state, "GET", f"/jobs/{job_id}")["baseline"]
+        if before.get("status") != "complete" or not before.get("scan_id"):
+            raise SystemExit(f"refusal fixture has no completed baseline: {before}")
+        if before != expected_baseline:
+            raise SystemExit(f"baseline changed across the capability-only restart: before={expected_baseline}, after_restart={before}")
+        before_scans = request(base, state, "GET", f"/jobs/{job_id}/scans")["scans"]
+        before_ids = {scan["id"] for scan in before_scans}
+        request_error = ""
+        try:
+            request(base, state, "POST", f"/jobs/{job_id}/run")
+        except SystemExit as error:
+            request_error = str(error)
+
+        new_scans = []
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            scans = request(base, state, "GET", f"/jobs/{job_id}/scans")["scans"]
+            new_scans = [scan for scan in scans if scan["id"] not in before_ids]
+            active = request(base, state, "GET", "/scans/active")["scans"]
+            if new_scans and all(scan["status"] in {"failed", "canceled", "incomplete", "success", "timed_out"} for scan in new_scans):
+                break
+            if request_error and not any(scan.get("job_id") == job_id for scan in active):
+                break
+            time.sleep(0.5)
+
+        after = request(base, state, "GET", f"/jobs/{job_id}")["baseline"]
+        if before != after:
+            raise SystemExit(f"fail-closed launch changed the completed baseline: before={before}, after={after}")
+        if len(new_scans) > 1:
+            raise SystemExit(f"one refused launch created multiple scan records: {new_scans}")
+        detail = " ".join([request_error] + [scan.get("error", "") for scan in new_scans]).lower()
+        if not any(term in detail for term in ("unavailable", "fail closed", "could not start")):
+            raise SystemExit(f"launch refusal did not report the scanner sandbox failure: {detail!r}")
+        if new_scans and new_scans[0]["status"] == "success":
+            raise SystemExit(f"scanner ran successfully without the required identity capabilities: {new_scans[0]}")
+        active = request(base, state, "GET", "/scans/active")["scans"]
+        if any(scan.get("job_id") == job_id for scan in active):
+            raise SystemExit(f"refused launch left an active scan: {active}")
+        print(json.dumps({"baseline_unchanged": True, "baseline_scan_id": before["scan_id"],
+                          "new_scan_status": new_scans[0]["status"] if new_scans else None,
+                          "refusal": detail}))
     elif command == "notify":
         name, url = args
         request(base, state, "POST", "/notifications/destinations", {"name": name, "url": url, "enabled": True, "password": PASSWORD})
@@ -292,11 +308,14 @@ def main():
         for job in request(base, state, "GET", "/jobs")["jobs"]:
             print("job", job["id"], job["job"]["name"], "scan cycle:", json.dumps(request(base, state, "GET", f"/jobs/{job['id']}/scan-cycle")))
         return
-    elif command == "cancel":
+    elif command in ("cancel", "cancel-detail"):
         job_id, scan_id = args
         request(base, state, "POST", f"/scans/{scan_id}/cancel")
         scan = wait_for_scan(base, state, job_id, {"canceled", "success", "failed", "timed_out", "incomplete"}, timeout=60)
-        print(scan["status"])
+        if command == "cancel-detail":
+            print(json.dumps({"status": scan["status"], "error": scan.get("error", "")}))
+        else:
+            print(scan["status"])
     else:
         raise SystemExit(f"unknown command {command}")
     save(state_path, state)
@@ -315,7 +334,12 @@ bundled_caps=(NET_RAW SETUID SETGID KILL)
 # arguments in daemon_mounts.
 daemon_tmpdir=/var/lib/edgewatch/tmp
 daemon_landlock=auto
+daemon_scan_limit=1
 daemon_mounts=()
+daemon_data=
+daemon_config=
+daemon_port=
+daemon_runtime_tmpdir=
 run_daemon() {
   local name=$1 mode=$2
   shift 2
@@ -323,17 +347,19 @@ run_daemon() {
   for capability in "$@"; do
     caps+=(--cap-add "$capability")
   done
-  local data="$workdir/data-$name"
+  daemon_data="$workdir/data-$name"
   web_port=$(free_port)
-  install -d -m 0750 "$data"
-  ./scripts/prepare-container-smoke-data.sh "$image" "$data"
-  cat >"$workdir/config-$name.yaml" <<EOF
+  daemon_port=$web_port
+  install -d -m 0750 "$daemon_data"
+  ./scripts/prepare-container-smoke-data.sh "$image" "$daemon_data"
+  daemon_config="$workdir/config-$name.yaml"
+  cat >"$daemon_config" <<EOF
 database: /var/lib/edgewatch/edgewatch.db
 retention: 24h
 web:
   listen: 127.0.0.1:$web_port
 scheduler:
-  max_concurrent_scans: 1
+  max_concurrent_scans: $daemon_scan_limit
 scanner:
   target_exclusions: []
   sandbox: $mode
@@ -346,11 +372,12 @@ EOF
   if [ -n "$daemon_tmpdir" ]; then
     env=(--env "TMPDIR=$daemon_tmpdir")
   fi
+  daemon_runtime_tmpdir=$daemon_tmpdir
   container=$(docker run -d --network host --read-only --tmpfs /tmp:size=128m,mode=1777 \
     --cap-drop ALL "${caps[@]}" \
     --security-opt no-new-privileges:true "${env[@]}" "${daemon_mounts[@]}" \
-    --volume "$workdir/config-$name.yaml:/etc/edgewatch/config.yaml:ro" \
-    --volume "$data:/var/lib/edgewatch:rw" "$image" daemon --config /etc/edgewatch/config.yaml)
+    --volume "$daemon_config:/etc/edgewatch/config.yaml:ro" \
+    --volume "$daemon_data:/var/lib/edgewatch:rw" "$image" daemon --config /etc/edgewatch/config.yaml)
   base="http://127.0.0.1:$web_port"
   for attempt in $(seq 1 60); do
     if curl --fail --silent "$base/api/v1/setup/status" >/dev/null; then
@@ -375,11 +402,44 @@ stop_daemon() {
   container=
 }
 
+# restart_daemon_with_caps NAME CAPABILITY... reuses the current daemon's
+# database, configuration, and port while changing only its container
+# capabilities. This models a deployment restart with an older Compose file.
+restart_daemon_with_caps() {
+  local name=$1
+  shift
+  local caps=() env=()
+  for capability in "$@"; do
+    caps+=(--cap-add "$capability")
+  done
+  [ -n "$daemon_data" ] && [ -n "$daemon_config" ] && [ -n "$daemon_port" ] || fail "cannot restart $name without an existing daemon fixture"
+  stop_daemon
+  if [ -n "$daemon_runtime_tmpdir" ]; then
+    env=(--env "TMPDIR=$daemon_runtime_tmpdir")
+  fi
+  container=$(docker run -d --network host --read-only --tmpfs /tmp:size=128m,mode=1777 \
+    --cap-drop ALL "${caps[@]}" \
+    --security-opt no-new-privileges:true "${env[@]}" \
+    --volume "$daemon_config:/etc/edgewatch/config.yaml:ro" \
+    --volume "$daemon_data:/var/lib/edgewatch:rw" "$image" daemon --config /etc/edgewatch/config.yaml)
+  base="http://127.0.0.1:$daemon_port"
+  for attempt in $(seq 1 60); do
+    if curl --fail --silent "$base/api/v1/setup/status" >/dev/null; then
+      return
+    fi
+    if [ -z "$(docker ps -q --filter "id=$container")" ]; then
+      fail "the $name daemon exited during startup"
+    fi
+    sleep 1
+  done
+  fail "the $name daemon did not start serving requests"
+}
+
 # health_state prints the sandbox state, the scanner UID, the capabilities,
 # and the Landlock state that the health command reports.
 health_state() {
   docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml --output json |
-    python3 -c 'import json, sys; sandbox = json.load(sys.stdin)["scanner_sandbox"]; limits = sandbox.get("limits"); print(sandbox["state"], sandbox.get("process_uid"), ",".join(sandbox.get("capabilities") or []) or "-", "landlock:" + sandbox["landlock"]["state"], "seccomp:" + sandbox["seccomp"]["state"], "limits:" + ("%s,%s" % (limits["oom_score_adj"], limits["max_open_files"]) if limits else "-"))'
+    python3 -c 'import json, sys; sandbox = json.load(sys.stdin)["scanner_sandbox"]; limits = sandbox.get("limits"); pool = sandbox.get("identity_pool") or {}; print(sandbox["state"], sandbox.get("process_uid", "-"), ",".join(sandbox.get("capabilities") or []) or "-", "landlock:" + sandbox["landlock"]["state"], "seccomp:" + sandbox["seccomp"]["state"], "limits:" + ("%s,%s" % (limits["oom_score_adj"], limits["max_open_files"]) if limits else "-"), "pool:%s,%s,%s-%s,%s" % (pool.get("state", "-"), pool.get("strategy", "-"), pool.get("uid_start", "-"), pool.get("uid_end", "-"), pool.get("max_parallel", "-")))'
 }
 
 # process_limits PID prints the oom_score_adj and the soft and hard open file
@@ -421,150 +481,6 @@ scanner_pid() {
   printf '%s\n' "$pid"
 }
 
-# hold_scanner_process NAME stops one exact live scanner process before the
-# verifier makes separate /proc reads. Exit 10 from the container helper means
-# the process exited or changed while being found, so the bounded outer loop
-# retries. Other errors mean a live process could not be stopped or inspected
-# and fail the verifier instead of being mistaken for a short-lived scan.
-hold_scanner_process() {
-  local wanted=$1 output result_code
-  for attempt in $(seq 1 120); do
-    if output=$(docker exec "$container" /bin/sh -c '
-wanted=$1
-if [ ! -r /proc/self/status ]; then
-  echo "cannot inspect /proc/self/status in daemon container" >&2
-  exit 11
-fi
-for status in /proc/[0-9]*/status; do
-  [ -e "$status" ] || continue
-  if [ ! -r "$status" ]; then
-    procdir=${status%/status}
-    [ ! -d "$procdir" ] && continue
-    echo "cannot inspect live process status $status" >&2
-    exit 11
-  fi
-  name=$(awk "/^Name:/{print \$2}" "$status" 2>/dev/null) || {
-    procdir=${status%/status}
-    [ ! -d "$procdir" ] && continue
-    echo "cannot parse live process status $status" >&2
-    exit 11
-  }
-  [ "$name" = "$wanted" ] || continue
-  pid=${status#/proc/}
-  pid=${pid%/status}
-  [ -d "/proc/$pid" ] || exit 10
-  start=$(awk "{print \$22}" "/proc/$pid/stat" 2>/dev/null) || {
-    [ ! -d "/proc/$pid" ] && exit 10
-    echo "cannot read /proc/$pid/stat for live $wanted process" >&2
-    exit 11
-  }
-  [ -n "$start" ] || {
-    [ ! -d "/proc/$pid" ] && exit 10
-    echo "empty process start time for live $wanted process $pid" >&2
-    exit 11
-  }
-  # Install cleanup before SIGSTOP so a signal/error in the handoff window
-  # cannot strand a stopped scanner. The trap owns nothing until SIGSTOP
-  # succeeds; after that it resumes only the same PID/starttime pair.
-  owned_stop=0
-  cleanup_stopped_process() {
-    result=$?
-    trap - EXIT HUP INT TERM
-    if [ "$owned_stop" = 1 ]; then
-      if [ -d "/proc/$pid" ]; then
-        cleanup_start=$(awk "{print \$22}" "/proc/$pid/stat" 2>/dev/null) || cleanup_start=
-        if [ "$cleanup_start" = "$start" ]; then
-          if ! kill -CONT "$pid" 2>/dev/null && [ -d "/proc/$pid" ]; then
-            echo "could not resume exact held process $pid/$start during helper cleanup" >&2
-          fi
-        else
-          echo "held PID $pid changed identity during helper cleanup; not signalling it" >&2
-        fi
-        # Any live task after an early helper exit means ownership was not
-        # transferred. Fail so the outer verifier tears down its container.
-        result=12
-      elif [ "$result" -eq 0 ]; then
-        # A successful helper must have transferred a PID/starttime pair.
-        result=12
-      fi
-    fi
-    exit "$result"
-  }
-  trap cleanup_stopped_process EXIT HUP INT TERM
-
-  stop_error=$(kill -STOP "$pid" 2>&1)
-  if [ "$?" -ne 0 ]; then
-    [ ! -d "/proc/$pid" ] && exit 10
-    current_start=$(awk "{print \$22}" "/proc/$pid/stat" 2>/dev/null) || {
-      [ ! -d "/proc/$pid" ] && exit 10
-      echo "cannot read /proc/$pid/stat after failed SIGSTOP for live $wanted process" >&2
-      exit 11
-    }
-    [ -n "$current_start" ] || {
-      [ ! -d "/proc/$pid" ] && exit 10
-      echo "empty process start time after failed SIGSTOP for live $wanted process $pid" >&2
-      exit 11
-    }
-    [ "$current_start" = "$start" ] || exit 10
-    echo "SIGSTOP failed for live $wanted process $pid: $stop_error" >&2
-    exit 11
-  fi
-
-  # SIGSTOP succeeded. Until identity is handed to the outer shell, this
-  # helper owns resumption and only signals the same PID/starttime pair.
-  owned_stop=1
-
-  for check in 1 2 3 4 5 6 7 8 9 10; do
-    [ -d "/proc/$pid" ] || exit 10
-    [ -r "$status" ] || { echo "cannot read $status for live $wanted process" >&2; exit 11; }
-    current_start=$(awk "{print \$22}" "/proc/$pid/stat" 2>/dev/null) || { echo "cannot read /proc/$pid/stat after SIGSTOP" >&2; exit 11; }
-    current_name=$(awk "/^Name:/{print \$2}" "$status" 2>/dev/null) || { echo "cannot read process name after SIGSTOP" >&2; exit 11; }
-    current_state=$(awk "/^State:/{print \$2}" "$status" 2>/dev/null) || { echo "cannot read process state after SIGSTOP" >&2; exit 11; }
-    if [ "$current_start" != "$start" ]; then
-      echo "PID $pid changed identity after SIGSTOP; refusing to signal or retry it" >&2
-      exit 11
-    fi
-    if [ "$current_name" != "$wanted" ]; then
-      echo "PID $pid changed name after SIGSTOP; refusing to inspect it as $wanted" >&2
-      exit 11
-    fi
-    if [ "$current_state" = T ] || [ "$current_state" = t ]; then
-      # Drop the helper cleanup trap before emitting the identity. If output
-      # fails or the helper is interrupted now, the outer failure path removes
-      # the owned container rather than accepting an incomplete transfer.
-      trap - EXIT HUP INT TERM
-      owned_stop=0
-      if ! printf "%s %s\\n" "$pid" "$start"; then
-        echo "could not transfer held process identity to verifier" >&2
-        exit 11
-      fi
-      exit 0
-    fi
-    sleep 0.02
-  done
-  echo "live $wanted process $pid did not stop for inspection" >&2
-  exit 11
-done
-echo "could not find live process named $wanted in readable /proc entries" >&2
-exit 10
-' sh "$wanted" 2>&1); then
-      read -r held_scanner_pid held_scanner_start <<<"$output"
-      if [ -n "$held_scanner_pid" ] && [ -n "$held_scanner_start" ]; then
-        held_scanner_name=$wanted
-        return 0
-      fi
-      fail "the process hold returned an invalid identity for $wanted: $output"
-    else
-      result_code=$?
-      case "$result_code" in
-        10) sleep 0.25 ;;
-        *) fail "could not hold a live $wanted process for inspection (exit $result_code): $output" ;;
-      esac
-    fi
-  done
-  fail "no live $wanted process remained long enough to hold for inspection"
-}
-
 # scan_file PATTERN prints the path of a running scan's private file whose
 # name matches PATTERN, which the daemon keeps in the scanner files
 # directory.
@@ -583,14 +499,15 @@ scan_file() {
 # neither the sandbox identity nor a process restricted with Landlock can
 # open it.
 expect_private_scan_file() {
-  local name=$1 path output
-  path=$(scan_file "$2")
+  local name=$1 pid=$2 pattern=$3 path output uid
+  uid=$(scanner_uid "$pid")
+  path=$(scan_file "$pattern")
   [ -n "$path" ] || fail "no $name file was found in /var/lib/edgewatch/tmp/scanner"
   for open in "cat '$path'" "echo forged >>'$path'"; do
-    if output=$(docker exec --user 65532:65532 "$container" /bin/sh -c "$open" 2>&1); then
-      fail "UID 65532 succeeded at: $open"
+    if output=$(docker exec --user "$uid:$uid" "$container" /bin/sh -c "$open" 2>&1); then
+      fail "scanner UID $uid succeeded at: $open"
     fi
-    printf '%s\n' "$output" | grep -qi 'permission denied' || fail "'$open' as UID 65532 failed for another reason: $output"
+    printf '%s\n' "$output" | grep -qi 'permission denied' || fail "'$open' as scanner UID $uid failed for another reason: $output"
     if output=$(docker exec "$container" edgewatch sandbox-exec --profile scanner --files 0 -- /bin/sh -c "$open" 2>&1); then
       fail "a restricted process (--files 0) succeeded at: $open"
     fi
@@ -604,43 +521,64 @@ expect_private_scan_file() {
 # /proc/<pid>/environ across the UID boundary; the leaf artifacts prove the
 # configured TMPDIR is in use without adding that capability.
 expect_private_naabu_tmp() {
-  local pid=$1 namespaces namespace leaves leaf namespace_stat leaf_stat
-  local inputs input input_stat databases database database_stat current_stat manifest manifest_stat matches expected
+  local pid=$1 uid namespaces namespace leaves leaf namespace_stat leaf_stat candidate owner leaf_candidate
+  local inputs input input_stat databases database database_stat current_stat current_contents manifest manifest_stat descriptor_path descriptor_contents
   docker exec "$container" test -d "/proc/$pid" || fail "Naabu process $pid exited before its temporary files were inspected"
+  uid=$(scanner_uid "$pid")
   namespaces=$(docker exec "$container" find /tmp -mindepth 1 -maxdepth 1 -type d -name 'edgewatch-naabu-root-*' -print 2>/dev/null || true)
-  [ "$(printf '%s\n' "$namespaces" | grep -c .)" = 1 ] || fail "active Naabu has $(printf '%s\n' "$namespaces" | grep -c .) invocation namespaces: $namespaces"
-  namespace=$namespaces
-  [[ "$namespace" =~ ^/tmp/edgewatch-naabu-root-[a-f0-9]{32}$ ]] || fail "Naabu invocation namespace has an unexpected name: $namespace"
-  leaves=$(docker exec "$container" find "$namespace" -mindepth 1 -maxdepth 1 -type d -name 'edgewatch-naabu-*' -print 2>/dev/null || true)
-  [ "$(printf '%s\n' "$leaves" | grep -c .)" = 1 ] || fail "active Naabu namespace has $(printf '%s\n' "$leaves" | grep -c .) leaves: $leaves"
-  leaf=$leaves
-  [[ "$leaf" =~ ^/tmp/edgewatch-naabu-root-[a-f0-9]{32}/edgewatch-naabu-[a-f0-9]{32}$ ]] || fail "Naabu leaf has an unexpected name: $leaf"
+  namespace=
+  leaf=
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    [[ "$candidate" =~ ^/tmp/edgewatch-naabu-root-[a-f0-9]{32}$ ]] || fail "Naabu invocation namespace has an unexpected name: $candidate"
+    leaves=$(docker exec "$container" find "$candidate" -mindepth 1 -maxdepth 1 -type d -name 'edgewatch-naabu-*' -print 2>/dev/null || true)
+    while IFS= read -r leaf_candidate; do
+      [ -n "$leaf_candidate" ] || continue
+      [[ "$leaf_candidate" =~ ^/tmp/edgewatch-naabu-root-[a-f0-9]{32}/edgewatch-naabu-[a-f0-9]{32}$ ]] || fail "Naabu leaf has an unexpected name: $leaf_candidate"
+      owner=$(docker exec "$container" stat -c '%u %g' "$leaf_candidate")
+      if [ "$owner" = "$uid $uid" ]; then
+        [ -z "$leaf" ] || fail "scanner UID $uid owns multiple active Naabu leaves"
+        namespace=$candidate
+        leaf=$leaf_candidate
+      fi
+    done <<< "$leaves"
+  done <<< "$namespaces"
+  [ -n "$namespace" ] && [ -n "$leaf" ] || fail "no Naabu invocation leaf belongs to live scanner UID $uid: $namespaces"
   namespace_stat=$(docker exec "$container" stat -c '%a %u %g' "$namespace")
   leaf_stat=$(docker exec "$container" stat -c '%a %u %g' "$leaf")
-  [ "$namespace_stat" = "711 0 0" ] || fail "Naabu invocation namespace is '$namespace_stat', want '711 0 0'"
-  [ "$leaf_stat" = "1777 0 0" ] || fail "Naabu invocation leaf is '$leaf_stat', want '1777 0 0'"
-  inputs=$(docker exec --user 65532:65532 "$container" find "$leaf" -mindepth 1 -maxdepth 1 -type f -name 'stdin-input-*' -print 2>/dev/null || true)
+  [ "$namespace_stat" = "1733 0 0" ] || fail "Naabu invocation namespace is '$namespace_stat', want '1733 0 0'"
+  [ "$leaf_stat" = "700 $uid $uid" ] || fail "Naabu invocation leaf is '$leaf_stat', want '700 $uid $uid'"
+  inputs=$(docker exec --user "$uid:$uid" "$container" find "$leaf" -mindepth 1 -maxdepth 1 -type f -name 'stdin-input-*' -print 2>/dev/null || true)
   [ "$(printf '%s\n' "$inputs" | grep -c .)" = 1 ] || fail "Naabu created $(printf '%s\n' "$inputs" | grep -c .) temporary input files in its leaf: $inputs"
   input=$inputs
-  input_stat=$(docker exec --user 65532:65532 "$container" stat -c '%a %u %g' "$input")
-  [ "$input_stat" = "600 65532 65532" ] || fail "Naabu temporary input is '$input_stat', want '600 65532 65532'"
-  databases=$(docker exec --user 65532:65532 "$container" find "$leaf" -mindepth 1 -maxdepth 1 -type d -name 'naabu*' -print 2>/dev/null || true)
+  input_stat=$(docker exec --user "$uid:$uid" "$container" stat -c '%a %u %g' "$input")
+  [ "$input_stat" = "600 $uid $uid" ] || fail "Naabu temporary input is '$input_stat', want '600 $uid $uid'"
+  databases=$(docker exec --user "$uid:$uid" "$container" find "$leaf" -mindepth 1 -maxdepth 1 -type d -name 'naabu*' -print 2>/dev/null || true)
   [ "$(printf '%s\n' "$databases" | grep -c .)" = 1 ] || fail "Naabu created $(printf '%s\n' "$databases" | grep -c .) LevelDB directories in its leaf: $databases"
   database=$databases
   [[ "$database" =~ /naabu[0-9]+$ ]] || fail "Naabu LevelDB directory has an unexpected name: $database"
-  database_stat=$(docker exec --user 65532:65532 "$container" stat -c '%a %u %g' "$database")
-  [ "$database_stat" = "700 65532 65532" ] || fail "Naabu LevelDB directory is '$database_stat', want '700 65532 65532'"
-  docker exec --user 65532:65532 "$container" test -f "$database/CURRENT" || fail "Naabu LevelDB CURRENT file is missing from $database"
-  current_stat=$(docker exec --user 65532:65532 "$container" stat -c '%a %u %g' "$database/CURRENT")
-  [ "$current_stat" = "644 65532 65532" ] || fail "Naabu LevelDB CURRENT file is '$current_stat', want '644 65532 65532'"
-  manifest=$(docker exec --user 65532:65532 "$container" find "$database" -mindepth 1 -maxdepth 1 -type f -name 'MANIFEST-*' -print 2>/dev/null || true)
+  database_stat=$(docker exec --user "$uid:$uid" "$container" stat -c '%a %u %g' "$database")
+  [ "$database_stat" = "700 $uid $uid" ] || fail "Naabu LevelDB directory is '$database_stat', want '700 $uid $uid'"
+  docker exec --user "$uid:$uid" "$container" test -f "$database/CURRENT" || fail "Naabu LevelDB CURRENT file is missing from $database"
+  current_stat=$(docker exec --user "$uid:$uid" "$container" stat -c '%a %u %g' "$database/CURRENT")
+  [ "$current_stat" = "644 $uid $uid" ] || fail "Naabu LevelDB CURRENT file is '$current_stat', want '644 $uid $uid'"
+  current_contents=$(docker exec --user "$uid:$uid" "$container" cat "$database/CURRENT") || fail "scanner UID $uid could not read its own LevelDB CURRENT file"
+  manifest=$(docker exec --user "$uid:$uid" "$container" find "$database" -mindepth 1 -maxdepth 1 -type f -name 'MANIFEST-*' -print 2>/dev/null || true)
   [ "$(printf '%s\n' "$manifest" | grep -c .)" = 1 ] || fail "Naabu LevelDB manifest is missing or ambiguous in $database: $manifest"
-  manifest_stat=$(docker exec --user 65532:65532 "$container" stat -c '%a %u %g' "$manifest")
-  [ "$manifest_stat" = "644 65532 65532" ] || fail "Naabu LevelDB manifest is '$manifest_stat', want '644 65532 65532'"
-  matches=$(docker exec "$container" find /tmp -xdev \( -type f -name "${input##*/}" -o -type d -name "${database##*/}" \) -print 2>/dev/null || true)
-  expected=$(printf '%s\n%s\n' "$input" "$database" | sort)
-  [ "$(printf '%s\n' "$matches" | sort)" = "$expected" ] || fail "Naabu temporary input/LevelDB artifacts exist outside its active leaf: $matches"
+  [ "$current_contents" = "$(basename "$manifest")" ] || fail "Naabu CURRENT names '$current_contents', want its readable manifest $(basename "$manifest")"
+  manifest_stat=$(docker exec --user "$uid:$uid" "$container" stat -c '%a %u %g' "$manifest")
+  [ "$manifest_stat" = "644 $uid $uid" ] || fail "Naabu LevelDB manifest is '$manifest_stat', want '644 $uid $uid'"
+  descriptor_path=$(docker exec --user "$uid:$uid" "$container" readlink "/proc/$pid/fd/3") || fail "scanner UID $uid could not inspect its inherited target descriptor"
+  [ "$descriptor_path" = "$input" ] || fail "Naabu FD 3 points to '$descriptor_path', want its private input '$input'"
+  docker exec --user "$uid:$uid" "$container" test -r "/proc/$pid/fd/3" || fail "scanner UID $uid cannot read its live inherited target descriptor"
+  descriptor_contents=$(docker exec --user "$uid:$uid" "$container" cat "$input") || fail "scanner UID $uid could not read the file backing its inherited target descriptor"
+  printf '%s\n' "$descriptor_contents" | grep -Fxq '127.0.0.1' || fail "the private target input does not contain the expected authorized loopback target: $descriptor_contents"
   docker exec "$container" test -d "/proc/$pid" || fail "Naabu process $pid exited while its temporary files were inspected"
+  naabu_uid=$uid
+  naabu_namespace=$namespace
+  naabu_leaf=$leaf
+  naabu_input=$input
+  naabu_database=$database
   echo "verified live Naabu temporary artifacts: namespace=$namespace ($namespace_stat), leaf=$leaf ($leaf_stat), input=$input ($input_stat), LevelDB=$database ($database_stat), CURRENT=$current_stat, manifest=$manifest_stat"
 }
 
@@ -650,16 +588,102 @@ expect_no_naabu_temporary_namespaces() {
   [ -z "$remaining" ] || fail "Naabu left invocation namespaces behind: $remaining"
 }
 
+expect_no_naabu_target_inputs() {
+  local remaining
+  remaining=$(docker exec "$container" find /var/lib/edgewatch/tmp/scanner -mindepth 1 -maxdepth 1 -type f -name 'edgewatch-naabu-targets-*' -print 2>/dev/null || true)
+  [ -z "$remaining" ] || fail "Naabu left target inputs behind: $remaining"
+}
+
 expect_legacy_tmp_grant_rejected() {
   if docker exec "$container" edgewatch sandbox-exec --profile scanner --files 0 --tmp -- /bin/true >/dev/null 2>&1; then
     fail "sandbox-exec accepted the removed broad temporary-directory grant"
   fi
 }
 
+scanner_uid() {
+  docker exec "$container" awk '/^Uid:/{print $2; exit}' "/proc/$1/status"
+}
+
+scanner_pids() {
+  docker exec "$container" /bin/sh -c 'for status in /proc/[0-9]*/status; do if grep -q "^Name:[[:space:]]*$1$" "$status" 2>/dev/null; then pid=$(echo "$status" | awk -F/ "{print \$3}"); echo "$pid"; fi; done' sh "$1" 2>/dev/null | sort -n
+}
+
+scanner_pids_live() {
+  local pids pid state
+  pids=$(scanner_pids "$1")
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    state=$(docker exec "$container" awk '/^State:/{print $2; exit}' "/proc/$pid/status" 2>/dev/null || true)
+    [ "$state" = Z ] || printf '%s\n' "$pid"
+  done <<< "$pids"
+}
+
+wait_for_scanner_count() {
+  local name=$1 wanted=$2 pids count
+  for attempt in $(seq 1 120); do
+    pids=$(scanner_pids_live "$name")
+    count=$(printf '%s\n' "$pids" | grep -c . || true)
+    if [ "$count" -eq "$wanted" ]; then
+      printf '%s\n' "$pids"
+      return
+    fi
+    if [ "$count" -gt "$wanted" ]; then
+      fail "found $count live $name processes, expected $wanted: $pids"
+    fi
+    sleep 0.25
+  done
+  fail "found $count live $name processes after waiting for $wanted: $pids"
+}
+
+wait_for_new_scanner_pid() {
+  local name=$1 old_pid=$2 pids pid state
+  for attempt in $(seq 1 120); do
+    pids=$(scanner_pids_live "$name")
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      state=$(docker exec "$container" awk '/^State:/{print $2; exit}' "/proc/$pid/status" 2>/dev/null || true)
+      if [ "$pid" != "$old_pid" ] && [ "$state" != Z ]; then
+        printf '%s\n' "$pid"
+        return
+      fi
+    done <<< "$pids"
+    sleep 0.25
+  done
+  fail "no new live $name process appeared after quarantining scanner UID from PID $old_pid: $pids"
+}
+
 expect_scanner_identity() {
-  local got
-  got=$(docker exec "$container" /bin/sh -c 'awk "/^Uid:/{uid=\$2} /^Gid:/{gid=\$2} /^Groups:/{groups=\$2} /^CapEff:/{cap=\$2} END{print uid, gid, (groups == \"\" ? \"-\" : groups), cap}" "/proc/$1/status"' sh "$1")
-  [ "$got" = "65532 65532 - 0000000000002000" ] || fail "the identity-only Naabu process credentials are '$got', want '65532 65532 - 0000000000002000'"
+  local pid=$1 expected_caps=$2 got uid euid suid fsuid gid egid sgid fsgid groups cap
+  got=$(docker exec "$container" /bin/sh -c 'awk "/^Uid:/{uid=\$2; euid=\$3; suid=\$4; fsuid=\$5} /^Gid:/{gid=\$2; egid=\$3; sgid=\$4; fsgid=\$5} /^Groups:/{groups=\$2} /^CapEff:/{cap=\$2} END{print uid, euid, suid, fsuid, gid, egid, sgid, fsgid, (groups == \"\" ? \"-\" : groups), cap}" "/proc/$1/status"' sh "$pid")
+  read -r uid euid suid fsuid gid egid sgid fsgid groups cap <<< "$got"
+  [ "$uid" -ge 60000 ] && [ "$uid" -lt 60064 ] || fail "scanner process $pid has unleased UID '$uid': $got"
+  [ "$uid $euid $suid $fsuid $gid $egid $sgid $fsgid $groups $cap" = "$uid $uid $uid $uid $uid $uid $uid $uid - $expected_caps" ] ||
+    fail "scanner process $pid credentials are '$got', want one leased UID/GID with no supplementary groups and capabilities $expected_caps"
+}
+
+expect_peer_denied() {
+  local peer_uid=$1 path=$2 description=$3 output
+  if output=$(docker exec --user "$peer_uid:$peer_uid" "$container" /bin/sh -c "cat '$path' >/dev/null" 2>&1); then
+    fail "peer scanner UID $peer_uid read another invocation's $description at $path"
+  fi
+  printf '%s\n' "$output" | grep -Eqi 'permission denied|operation not permitted' ||
+    fail "peer scanner UID $peer_uid failed to read $description for an unexpected reason: $output"
+}
+
+scanner_supervisor_pid() {
+  local scanner_pid=$1 supervisor parent name children
+  supervisor=$(docker exec "$container" awk '/^PPid:/{print $2; exit}' "/proc/$scanner_pid/status")
+  [ -n "$supervisor" ] && [ "$supervisor" != 1 ] || fail "scanner PID $scanner_pid has no distinct supervisor parent"
+  name=$(docker exec "$container" awk '/^Name:/{print $2; exit}' "/proc/$supervisor/status")
+  parent=$(docker exec "$container" awk '/^PPid:/{print $2; exit}' "/proc/$supervisor/status")
+  [ "$name" = edgewatch ] || fail "scanner parent PID $supervisor is '$name', not the EdgeWatch supervisor"
+  [ "$parent" = 1 ] || fail "scanner supervisor PID $supervisor has parent $parent, want daemon PID 1"
+  children=$(docker exec "$container" cat "/proc/$supervisor/task/$supervisor/children")
+  case " $children " in
+    *" $scanner_pid "*) ;;
+    *) fail "scanner supervisor PID $supervisor does not list scanner PID $scanner_pid as its child: $children" ;;
+  esac
+  printf '%s\n' "$supervisor"
 }
 
 # expect_no_scanner_processes requires that no process of the sandbox
@@ -668,11 +692,11 @@ expect_scanner_identity() {
 expect_no_scanner_processes() {
   local left
   for attempt in $(seq 1 20); do
-    left=$(docker exec "$container" /bin/sh -c 'for status in /proc/[0-9]*/status; do awk "/^Name:/{name=\$2} /^State:/{state=\$2} /^Uid:/{uid=\$2} END{if (uid == 65532 && state != \"Z\") print name}" "$status" 2>/dev/null; done' | tr '\n' ' ')
+    left=$(docker exec "$container" /bin/sh -c 'for status in /proc/[0-9]*/status; do awk "/^Name:/{name=\$2} /^State:/{state=\$2} /^Uid:/{uid=\$2} END{if (uid >= 60000 && uid < 60064 && state != \"Z\") print name}" "$status" 2>/dev/null; done' | tr '\n' ' ')
     [ -z "$left" ] && return
     sleep 0.5
   done
-  fail "$1 left processes of UID 65532 running: $left"
+  fail "$1 left leased scanner processes running: $left"
 }
 
 # process_hardening PID prints the seccomp filter count, core file size limits,
@@ -705,6 +729,15 @@ expect_health() {
   local want=$1 got
   got=$(health_state)
   [ "$got" = "$want" ] || fail "health reports the sandbox as '$got', want '$want'"
+}
+
+expect_missing_identity_capabilities() {
+  local reason capability
+  reason=$(docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml --output json |
+    python3 -c 'import json, sys; print((json.load(sys.stdin)["scanner_sandbox"].get("identity_pool") or {}).get("reason", ""))')
+  for capability in SETUID SETGID KILL; do
+    [[ "$reason" == *"$capability"* ]] || fail "identity pool refusal reason '$reason' does not identify missing $capability"
+  done
 }
 
 # notification_health_state prints the notification sandbox state, its UID,
@@ -752,9 +785,10 @@ deliver_notification() {
 tcp_ports="$tcp_open,$tcp_closed"
 udp_ports="$udp_open"
 
-# The bundled Compose deployment: the sandbox keeps NET_RAW only.
+# The bundled Compose deployment: the scanner keeps NET_RAW only and uses a
+# distinct leased UID/GID for each invocation.
 run_daemon base auto "${bundled_caps[@]}"
-expect_health "enforced 65532 NET_RAW landlock:enforced seccomp:enforced limits:1000,65536"
+expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:1000,65536 pool:enforced,per_invocation,60000-60063,64"
 expect_legacy_tmp_grant_rejected
 daemon_hardening=$(process_hardening 1)
 read -r daemon_filters daemon_core_soft daemon_core_hard daemon_filter <<< "$daemon_hardening"
@@ -817,33 +851,32 @@ esac
 
 # The sandbox identity cannot list the data directory or reach the
 # configuration, whatever the files' own modes.
-if docker exec --user 65532:65532 "$container" ls /var/lib/edgewatch >/dev/null 2>&1; then
-  fail "UID 65532 listed the data directory"
+if docker exec --user 60000:60000 "$container" ls /var/lib/edgewatch >/dev/null 2>&1; then
+  fail "a scanner-pool UID listed the data directory"
 fi
-if docker exec --user 65532:65532 "$container" cat /etc/edgewatch/config.yaml >/dev/null 2>&1; then
-  fail "UID 65532 read the configuration"
+if docker exec --user 60000:60000 "$container" cat /etc/edgewatch/config.yaml >/dev/null 2>&1; then
+  fail "a scanner-pool UID read the configuration"
 fi
 
-# Observe a running Nmap: it must be UID 65532 with only NET_RAW effective,
+# Observe a running Nmap: it must use one leased UID/GID with only NET_RAW,
 # and cancelling the scan must stop it.
 started=$(python3 "$workdir/driver.py" start "$base" "$state" slow "1-20000")
 job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
-hold_scanner_process nmap
-nmap_pid=$held_scanner_pid
-expect_scanner_identity "$nmap_pid"
+nmap_pid=$(scanner_pid nmap)
+[ -n "$nmap_pid" ] || fail "running scan started no Nmap"
+expect_scanner_identity "$nmap_pid" "0000000000002000"
 expect_filtered Nmap "$(process_hardening "$nmap_pid")"
 expect_scanner_limits Nmap "$nmap_pid"
 expect_nmap_file_size_limit Nmap "$nmap_pid"
-resume_held_scanner || fail "could not resume the enforced Nmap process before cancellation"
 cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
 [ "$cancelled" = canceled ] || fail "the cancelled scan ended '$cancelled'"
-if docker exec "$container" /bin/sh -c 'grep -l "^Name:[[:space:]]*nmap$" /proc/[0-9]*/status' >/dev/null 2>&1; then
+if [ -n "$(scanner_pids nmap)" ]; then
   fail "Nmap kept running after the scan was cancelled"
 fi
 
 # A sandboxed Nmap that edgewatch scan started dies with it: the kernel keeps
-# the parent-death signal across the change to UID 65532 and the executions
+# the parent-death signal across the change to its leased UID and the executions
 # of sandbox-exec and Nmap.
 python3 "$workdir/driver.py" create "$base" "$state" orphaned "1-20000" >/dev/null
 docker exec -d "$container" edgewatch scan --config /etc/edgewatch/config.yaml --job orphaned
@@ -865,13 +898,15 @@ stop_daemon
 # does: the files of running scans still lie in the scanner files directory,
 # where another sandboxed process can open none of them.
 daemon_tmpdir=
+daemon_scan_limit=2
 run_daemon syn auto "${bundled_caps[@]}" NET_ADMIN
+daemon_scan_limit=1
 daemon_tmpdir=/var/lib/edgewatch/tmp
-expect_health "enforced 65532 NET_RAW,NET_ADMIN landlock:enforced seccomp:enforced limits:1000,65536"
+expect_health "enforced - NET_RAW,NET_ADMIN landlock:enforced seccomp:enforced limits:1000,65536 pool:enforced,per_invocation,60000-60063,64"
 started=$(python3 "$workdir/driver.py" start "$base" "$state" slow-files "1-20000")
 job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
-expect_private_scan_file "Nmap XML" 'edgewatch-nmap-*.xml'
+expect_private_scan_file "Nmap XML" "$(scanner_pid nmap)" 'edgewatch-nmap-*.xml'
 cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
 [ "$cancelled" = canceled ] || fail "the cancelled Nmap scan ended '$cancelled'"
 started=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" slow-naabu)
@@ -881,14 +916,124 @@ naabu_pid=$(scanner_pid naabu)
 [ -n "$naabu_pid" ] || fail "the slow Naabu scan started no Naabu"
 expect_scanner_limits Naabu "$naabu_pid"
 expect_private_naabu_tmp "$naabu_pid"
-expect_private_scan_file "Naabu target list" 'edgewatch-naabu-targets-*'
+expect_private_scan_file "Naabu target list" "$naabu_pid" 'edgewatch-naabu-targets-*'
 cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
 [ "$cancelled" = canceled ] || fail "the cancelled Naabu scan ended '$cancelled'"
 expect_no_scanner_processes "the cancelled Naabu scan"
 expect_no_naabu_temporary_namespaces
+expect_no_naabu_target_inputs
+
+# Two live Naabu invocations must receive separate leased identities and
+# private leaves. A peer UID must not reach the other's LevelDB files or its
+# inherited target-list descriptor through /proc.
+started_one=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" concurrent-naabu-one)
+job_one=$(printf '%s' "$started_one" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
+scan_one=$(printf '%s' "$started_one" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
+started_two=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" concurrent-naabu-two)
+job_two=$(printf '%s' "$started_two" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
+scan_two=$(printf '%s' "$started_two" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
+concurrent_pids=$(wait_for_scanner_count naabu 2)
+naabu_pid_one=$(printf '%s\n' "$concurrent_pids" | sed -n '1p')
+naabu_pid_two=$(printf '%s\n' "$concurrent_pids" | sed -n '2p')
+expect_scanner_identity "$naabu_pid_one" "0000000000003000"
+expect_scanner_identity "$naabu_pid_two" "0000000000003000"
+expect_filtered "concurrent Naabu one" "$(process_hardening "$naabu_pid_one")"
+expect_filtered "concurrent Naabu two" "$(process_hardening "$naabu_pid_two")"
+expect_private_naabu_tmp "$naabu_pid_one"
+naabu_uid_one=$naabu_uid
+naabu_leaf_one=$naabu_leaf
+naabu_input_one=$naabu_input
+naabu_database_one=$naabu_database
+expect_private_naabu_tmp "$naabu_pid_two"
+naabu_uid_two=$naabu_uid
+naabu_leaf_two=$naabu_leaf
+naabu_input_two=$naabu_input
+naabu_database_two=$naabu_database
+[ "$naabu_uid_one" != "$naabu_uid_two" ] || fail "concurrent scanners shared leased UID $naabu_uid_one"
+[ "$naabu_leaf_one" != "$naabu_leaf_two" ] || fail "concurrent scanners shared private leaf $naabu_leaf_one"
+[ "$naabu_input_one" != "$naabu_input_two" ] || fail "concurrent scanners shared target input $naabu_input_one"
+[ "$naabu_database_one" != "$naabu_database_two" ] || fail "concurrent scanners shared LevelDB directory $naabu_database_one"
+expect_peer_denied "$naabu_uid_two" "$naabu_database_one/CURRENT" "LevelDB CURRENT file"
+expect_peer_denied "$naabu_uid_one" "$naabu_database_two/CURRENT" "LevelDB CURRENT file"
+expect_peer_denied "$naabu_uid_two" "/proc/$naabu_pid_one/fd/3" "target-list descriptor"
+expect_peer_denied "$naabu_uid_one" "/proc/$naabu_pid_two/fd/3" "target-list descriptor"
+cancelled_one=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_one" "$scan_one")
+cancelled_two=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_two" "$scan_two")
+[ "$cancelled_one" = canceled ] || fail "the first concurrent Naabu scan ended '$cancelled_one'"
+[ "$cancelled_two" = canceled ] || fail "the second concurrent Naabu scan ended '$cancelled_two'"
+expect_no_scanner_processes "the concurrent Naabu scans"
+expect_no_naabu_temporary_namespaces
+expect_no_naabu_target_inputs
 naabu_sandboxed=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-sandboxed "$tcp_open")
 expect_no_naabu_temporary_namespaces
-stop_daemon
+
+# Restart the same database under a Compose capability set that predates
+# per-invocation identities. A completed baseline must remain unchanged when
+# the next scanner launch is refused before creating any scanner process.
+baseline_fixture=$(python3 "$workdir/driver.py" establish-baseline "$base" "$state" legacy-baseline "$tcp_open")
+legacy_job=$(printf '%s' "$baseline_fixture" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
+printf '%s' "$baseline_fixture" | python3 -c 'import json, sys; json.dump(json.load(sys.stdin)["baseline"], open(sys.argv[1], "w"))' "$workdir/legacy-baseline.json"
+restart_daemon_with_caps legacy NET_RAW NET_ADMIN
+expect_health "unavailable - - landlock:enforced seccomp:enforced limits:1000,65536 pool:unavailable,per_invocation,60000-60063,64"
+expect_missing_identity_capabilities
+expect_notification_health "unavailable 0 landlock:enforced seccomp:enforced"
+deliver_notification legacy >/dev/null
+refusal=$(python3 "$workdir/driver.py" expect-refused-run "$base" "$state" "$legacy_job" "$workdir/legacy-baseline.json")
+printf '%s\n' "$refusal" | grep -q '"baseline_unchanged": true' || fail "legacy-capability refusal did not preserve its baseline: $refusal"
+expect_no_scanner_processes "a scan refused without scanner identity capabilities"
+expect_no_naabu_temporary_namespaces
+expect_no_naabu_target_inputs
+restart_daemon_with_caps restored "${bundled_caps[@]}"
+expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:1000,65536 pool:enforced,per_invocation,60000-60063,64"
+
+# Stop the trusted supervisor while a scanner is alive. Cancellation must
+# fail closed when the result channel cannot prove subtree cleanup: its
+# artifacts remain, and a later invocation receives a different leased UID.
+started=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" proof-timeout-naabu)
+job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
+scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
+naabu_pid=$(scanner_pid naabu)
+[ -n "$naabu_pid" ] || fail "the proof-timeout Naabu scan started no Naabu"
+expect_private_naabu_tmp "$naabu_pid"
+quarantined_uid=$naabu_uid
+quarantined_pid=$naabu_pid
+quarantined_namespace=$naabu_namespace
+quarantined_leaf=$naabu_leaf
+quarantined_input=$naabu_input
+quarantined_database=$naabu_database
+quarantined_target=$(scan_file 'edgewatch-naabu-targets-*')
+[ -n "$quarantined_target" ] || fail "the proof-timeout Naabu scan has no inherited target-list file"
+supervisor_pid=$(scanner_supervisor_pid "$naabu_pid")
+docker exec "$container" kill -STOP "$supervisor_pid" || fail "could not stop the verified scanner supervisor $supervisor_pid"
+cancel_detail=$(python3 "$workdir/driver.py" cancel-detail "$base" "$state" "$job_id" "$scan_id")
+cancel_status=$(printf '%s' "$cancel_detail" | python3 -c 'import json, sys; print(json.load(sys.stdin)["status"])')
+cancel_error=$(printf '%s' "$cancel_detail" | python3 -c 'import json, sys; print(json.load(sys.stdin)["error"])')
+[ "$cancel_status" != success ] || fail "a scan without supervisor cleanup proof was recorded successful"
+printf '%s\n' "$cancel_error" | grep -Eqi 'did not prove process-tree cleanup|process-tree cleanup is unproven|identity quarantined' ||
+  fail "supervisor proof timeout was not reported as a quarantined cleanup failure: $cancel_detail"
+docker exec "$container" test -d "$quarantined_namespace" || fail "proof failure removed the quarantined Naabu namespace"
+docker exec "$container" test -d "$quarantined_leaf" || fail "proof failure removed the quarantined Naabu leaf"
+docker exec "$container" test -f "$quarantined_input" || fail "proof failure removed the quarantined private input"
+docker exec "$container" test -f "$quarantined_database/CURRENT" || fail "proof failure removed the quarantined LevelDB files"
+docker exec "$container" test -f "$quarantined_target" || fail "proof failure removed the quarantined target-list file"
+
+started=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" after-proof-timeout-naabu)
+job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
+scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
+naabu_pid=$(wait_for_new_scanner_pid naabu "$quarantined_pid")
+expect_scanner_identity "$naabu_pid" "0000000000003000"
+followup_uid=$(scanner_uid "$naabu_pid")
+[ "$followup_uid" != "$quarantined_uid" ] || fail "post-timeout scanner reused quarantined UID $quarantined_uid"
+expect_private_naabu_tmp "$naabu_pid"
+followup_leaf=$naabu_leaf
+cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
+[ "$cancelled" = canceled ] || fail "the post-quarantine Naabu scan ended '$cancelled'"
+expect_no_scanner_processes "the post-quarantine Naabu scan"
+docker exec "$container" test ! -e "$followup_leaf" || fail "normal cleanup left the post-quarantine leaf $followup_leaf"
+remaining_namespaces=$(docker exec "$container" find /tmp -mindepth 1 -maxdepth 1 -type d -name 'edgewatch-naabu-root-*' -print 2>/dev/null || true)
+[ "$remaining_namespaces" = "$quarantined_namespace" ] || fail "the proof-timeout fixture left unexpected namespace state: $remaining_namespaces"
+remaining_inputs=$(docker exec "$container" find /var/lib/edgewatch/tmp/scanner -mindepth 1 -maxdepth 1 -type f -name 'edgewatch-naabu-targets-*' -print 2>/dev/null || true)
+[ "$remaining_inputs" = "$quarantined_target" ] || fail "the proof-timeout fixture left unexpected target-input state: $remaining_inputs"
 
 # A stand-in Nmap that leaves a background process that ignores the hangup of
 # its terminal, and tries to start another in a session of its own: the
@@ -905,7 +1050,7 @@ chmod 0755 "$workdir/forking-nmap"
 daemon_mounts=(--volume "$workdir/forking-nmap:/usr/bin/nmap:ro")
 run_daemon forking auto "${bundled_caps[@]}"
 daemon_mounts=()
-expect_health "enforced 65532 NET_RAW landlock:enforced seccomp:enforced limits:1000,65536"
+expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:1000,65536 pool:enforced,per_invocation,60000-60063,64"
 started=$(python3 "$workdir/driver.py" start "$base" "$state" forking "1-20000")
 job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
@@ -916,36 +1061,24 @@ cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$sca
 expect_no_scanner_processes "the cancelled forking scan"
 stop_daemon
 
-# A Compose file from before v0.27.0 grants no SETUID, SETGID, or KILL:
-# scanner processes stay UID 0, restricted only by Landlock.
-run_daemon legacy auto NET_RAW NET_ADMIN
-expect_health "unavailable 0 - landlock:enforced seccomp:enforced limits:1000,65536"
-expect_notification_health "unavailable 0 landlock:enforced seccomp:enforced"
-deliver_notification legacy >/dev/null
-landlock_only=$(python3 "$workdir/driver.py" scan "$base" "$state" landlock-only "$tcp_ports" "$udp_ports")
-naabu_landlock_only=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-landlock-only "$tcp_open")
-expect_no_naabu_temporary_namespaces
-stop_daemon
-
 # Keep identity confinement while disabling Landlock. Naabu still starts
-# through the temporary-directory helper as UID 65532; the helper path is
+# through the temporary-directory helper as a leased UID; the helper path is
 # required to create and clean the per-invocation directory even though files
 # elsewhere remain reachable under this explicit fallback.
 daemon_landlock=off
 run_daemon identity-only auto "${bundled_caps[@]}"
 daemon_landlock=auto
-expect_health "enforced 65532 NET_RAW landlock:disabled seccomp:disabled limits:-"
+expect_health "enforced - NET_RAW landlock:disabled seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
 identity_only_scan=$(python3 "$workdir/driver.py" scan "$base" "$state" identity-only "$tcp_ports" "$udp_ports")
 identity_only_naabu=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-identity-only "$tcp_open")
 expect_no_naabu_temporary_namespaces
 started=$(python3 "$workdir/driver.py" start "$base" "$state" slow-identity-only "1-20000")
 job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
-hold_scanner_process nmap
-nmap_pid=$held_scanner_pid
-expect_scanner_identity "$nmap_pid"
+nmap_pid=$(scanner_pid nmap)
+[ -n "$nmap_pid" ] || fail "the identity-only slow scan started no Nmap"
+expect_scanner_identity "$nmap_pid" "0000000000002000"
 expect_nmap_file_size_limit "identity-only Nmap" "$nmap_pid"
-resume_held_scanner || fail "could not resume the identity-only Nmap process before cancellation"
 cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
 [ "$cancelled" = canceled ] || fail "the identity-only Nmap scan ended '$cancelled'"
 expect_no_scanner_processes "the identity-only cancelled Nmap scan"
@@ -954,7 +1087,7 @@ job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
 naabu_pid=$(scanner_pid naabu)
 [ -n "$naabu_pid" ] || fail "the identity-only slow Naabu scan started no Naabu"
-expect_scanner_identity "$naabu_pid"
+expect_scanner_identity "$naabu_pid" "0000000000002000"
 expect_scanner_limits Naabu "$naabu_pid"
 expect_private_naabu_tmp "$naabu_pid"
 cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
@@ -964,15 +1097,13 @@ expect_no_naabu_temporary_namespaces
 stop_daemon
 
 run_daemon off off "${bundled_caps[@]}" NET_ADMIN
-expect_health "disabled 0 - landlock:disabled seccomp:disabled limits:-"
+expect_health "disabled 0 - landlock:disabled seccomp:disabled limits:- pool:disabled,per_invocation,60000-60063,64"
 unconfined=$(python3 "$workdir/driver.py" scan "$base" "$state" unconfined "$tcp_ports" "$udp_ports")
 naabu_unconfined=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-unconfined "$tcp_open")
 expect_no_naabu_temporary_namespaces
 stop_daemon
 
 [ "$sandboxed" = "$unconfined" ] || fail "sandboxed Nmap results $sandboxed differ from unconfined results $unconfined"
-[ "$landlock_only" = "$unconfined" ] || fail "Nmap results with only Landlock $landlock_only differ from unconfined results $unconfined"
-[ "$naabu_landlock_only" = "$naabu_unconfined" ] || fail "Naabu results with only Landlock $naabu_landlock_only differ from unconfined results $naabu_unconfined"
 [ "$identity_only_scan" = "$unconfined" ] || fail "identity-only Nmap results $identity_only_scan differ from unconfined results $unconfined"
 [ "$identity_only_naabu" = "$naabu_unconfined" ] || fail "identity-only Naabu results $identity_only_naabu differ from unconfined results $naabu_unconfined"
 printf '%s\n' "$sandboxed" | grep -q "\"tcp\", $tcp_open, \"open\"" || fail "the open TCP listener was not reported open: $sandboxed"

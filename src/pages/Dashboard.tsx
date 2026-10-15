@@ -48,9 +48,10 @@ export function Dashboard() {
   const telemetry = setup.data?.telemetry
   const scannerSandbox = setup.data?.scanner_sandbox
   const notificationSandbox = setup.data?.notification_sandbox
-  // Warn only when scanner processes run as UID 0: a daemon that runs as
-  // another user already starts them without root.
-  const scannerUnconfinedAsRoot = isAdmin && scannerSandbox?.state === 'unavailable' && scannerSandbox.process_uid === 0
+  // A pool failure is fail-closed in current daemons. Older daemons can report
+  // the root fallback instead, so keep that warning distinct and accurate.
+  const scannerIsolationUnavailable = isAdmin && scannerSandbox?.mode !== 'off' && scannerSandbox?.identity_pool?.state === 'unavailable'
+  const legacyRootScannerFallback = isAdmin && scannerSandbox?.mode !== 'off' && !scannerSandbox?.identity_pool && scannerSandbox?.state === 'unavailable' && scannerSandbox.process_uid === 0
   const jobsMetricState = metricState(jobs)
   const scansMetricState = metricState(scans, canReadScans && !!session.data)
   const incidentsMetricState = metricState(incidents, canReadIncidents && !!session.data)
@@ -93,7 +94,7 @@ export function Dashboard() {
   }
   return <section className="page">
     <div className="page-heading"><div><p className="eyebrow">Monitoring console</p><h1>Good day, {displayName}</h1><p className="muted">A calm view of your network’s expected surface. {!canOperate ? '' : notificationCount ? `${notificationCount} notification destination${notificationCount === 1 ? '' : 's'} configured.` : !canManageNotifications ? 'Notifications are configured by an administrator.' : ''} {policy}</p></div><div className="heading-actions">{canManageNotifications && <button className="button secondary" onClick={async () => { try { const value = await notificationTest(); setNotifyState(value.sent === 0 ? { text: 'No enabled notification destinations were tested.', state: 'warning' } : { text: `${value.sent} destination${value.sent === 1 ? '' : 's'} tested`, state: 'success' }) } catch (err) { setNotifyState({ text: err instanceof Error ? err.message : 'Notification test failed', state: 'error' }) } }}><Bell size={16} /> Test notifications</button>}{canOperate && <button className="button secondary" onClick={() => navigate('/jobs/new')}><Radar size={16} /> Set up a monitor</button>}</div></div>
-    {notifyState && <div className={notifyState.state === 'error' ? 'form-error' : notifyState.state === 'warning' ? 'notice warning' : 'success-banner'} role={notifyState.state === 'error' ? 'alert' : 'status'}>{notifyState.state === 'success' ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}{notifyState.text}</div>}{canManageNotifications && notificationCount === 0 && <div className="notice warning notification-warning" role="status"><AlertTriangle size={16} /><span>No active notification destinations — alerts are not being delivered. <Link to="/notifications">Add a destination</Link>.</span></div>}{runError && <div className="form-error banner" role="alert"><AlertTriangle size={16} />{runError}</div>}{setup.error && <QueryError message="Operational status could not be loaded. Some dashboard metrics may be unavailable." onRetry={() => setup.refetch()} />}{canReadScans && active.error && <QueryError message="Could not load scans in progress." onRetry={() => active.refetch()} />}{canReadIncidents && incidents.error && <QueryError message="Could not load the incident count." onRetry={() => incidents.refetch()} />}{canOperate && setup.data?.legacy_yaml_jobs?.length ? <div className="legacy-banner"><AlertTriangle size={17} /><span><strong>Legacy YAML jobs are inactive.</strong> Recreate {setup.data.legacy_yaml_jobs.join(', ')} in the console to resume scheduling.</span><button type="button" className="text-button legacy-banner-recheck" onClick={() => void setup.refetch()}>Check again</button></div> : null}<UntrustedProxyBanner proxy={setup.data?.untrusted_proxy} /><ScheduledBackupBanner backups={setup.data?.backups} />{scannerUnconfinedAsRoot && <div className="notice warning scanner-sandbox-warning" role="status"><ShieldAlert size={16} /><span><strong>{scannerSandbox?.landlock?.state === 'enforced' ? 'Scanner processes run as UID 0, restricted only by Landlock.' : 'Scanner processes run unconfined as UID 0.'}</strong> {scannerSandbox?.reason ? `${scannerSandbox.reason}.` : ''} See “Container runtime hardening” in the EdgeWatch documentation.</span></div>}
+    {notifyState && <div className={notifyState.state === 'error' ? 'form-error' : notifyState.state === 'warning' ? 'notice warning' : 'success-banner'} role={notifyState.state === 'error' ? 'alert' : 'status'}>{notifyState.state === 'success' ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}{notifyState.text}</div>}{canManageNotifications && notificationCount === 0 && <div className="notice warning notification-warning" role="status"><AlertTriangle size={16} /><span>No active notification destinations — alerts are not being delivered. <Link to="/notifications">Add a destination</Link>.</span></div>}{runError && <div className="form-error banner" role="alert"><AlertTriangle size={16} />{runError}</div>}{setup.error && <QueryError message="Operational status could not be loaded. Some dashboard metrics may be unavailable." onRetry={() => setup.refetch()} />}{canReadScans && active.error && <QueryError message="Could not load scans in progress." onRetry={() => active.refetch()} />}{canReadIncidents && incidents.error && <QueryError message="Could not load the incident count." onRetry={() => incidents.refetch()} />}{canOperate && setup.data?.legacy_yaml_jobs?.length ? <div className="legacy-banner"><AlertTriangle size={17} /><span><strong>Legacy YAML jobs are inactive.</strong> Recreate {setup.data.legacy_yaml_jobs.join(', ')} in the console to resume scheduling.</span><button type="button" className="text-button legacy-banner-recheck" onClick={() => void setup.refetch()}>Check again</button></div> : null}<UntrustedProxyBanner proxy={setup.data?.untrusted_proxy} /><ScheduledBackupBanner backups={setup.data?.backups} />{scannerIsolationUnavailable && <div className="notice warning scanner-sandbox-warning" role="status"><ShieldAlert size={16} /><span><strong>Scanner launches are unavailable because the required per-invocation identity and syscall restrictions could not be enforced.</strong> {(scannerSandbox?.identity_pool?.reason || scannerSandbox?.reason) ? `${scannerSandbox.identity_pool?.reason || scannerSandbox?.reason}.` : ''} See “Container runtime hardening” in the EdgeWatch documentation.</span></div>}{legacyRootScannerFallback && <div className="notice warning scanner-sandbox-warning" role="status"><ShieldAlert size={16} /><span><strong>{scannerSandbox?.landlock?.state === 'enforced' ? 'Older EdgeWatch is running scanner processes as UID 0, restricted only by Landlock.' : 'Older EdgeWatch is running scanner processes unconfined as UID 0.'}</strong> {scannerSandbox.reason ? `${scannerSandbox.reason}.` : ''} See “Container runtime hardening” in the EdgeWatch documentation.</span></div>}
     <div className="stat-grid"><Stat icon={<Radar />} label="Active jobs" value={activeJobs} detail={`${ready} baselines ready`} tone="blue" status={jobsMetricState} onRetry={() => jobs.refetch()} /><Stat icon={<CheckCircle2 />} label="Healthy baselines" value={ready} detail="Stable monitoring scopes" tone="green" status={jobsMetricState} onRetry={() => jobs.refetch()} />{canReadIncidents && <Stat icon={<AlertTriangle />} label="Open incidents" value={incidentTotal} detail="Confirmed changes" tone="amber" status={incidentsMetricState} onRetry={() => incidents.refetch()} />}<Stat icon={<Activity />} label="Scan history" value={scanTotal} detail="Retained scan records" tone="purple" status={scansMetricState} onRetry={() => scans.refetch()} /></div>
     {isAdmin && telemetry && <DeploymentFootprint telemetry={telemetry} scannerSandbox={scannerSandbox} notificationSandbox={notificationSandbox} />}
     {canReadScans && ((active.data?.scans.length ?? 0) > 0 || queuedRuns.length > 0) ? <div className="panel active-scans-panel"><div className="panel-heading"><div><h2>{queuedRuns.length ? 'Scans in progress or queued' : 'Scans in progress'}</h2><p className="muted">Broad scans can take time; progress follows Nmap task updates when available and reports process liveness between them.</p></div><Activity size={18} className="muted-icon" /></div><div className="active-scan-list">{queuedRuns.map(run => <QueuedRunRow key={run.job_id} run={run} cancelBusy={cancelBusy} onCancel={canRun ? cancelQueued : undefined} />)}{(active.data?.scans ?? []).map(scan => <ActiveScanRow key={scan.id} scan={scan} cancelBusy={cancelBusy} onCancel={canRun ? cancelActiveScan : undefined} />)}</div></div> : null}
@@ -198,7 +199,7 @@ const layerStateText: Record<string, string> = { enforced: 'enforced', disabled:
 function SandboxEntry({ name, status }: { name: string; status: ScannerSandboxStatus }) {
   const { label, tone, Icon } = sandboxPresentation(status)
   const layers = sandboxLayers(status)
-  const reasons = layerReasons(layers)
+  const reasons = layerReasons(layers, !status.identity_pool)
   return <li className="isolation-entry">
     <span className="isolation-name">{name}</span>
     <span className={`pill ${tone} isolation-state`}><Icon size={12} aria-hidden="true" />{label}</span>
@@ -218,8 +219,12 @@ function SandboxEntry({ name, status }: { name: string; status: ScannerSandboxSt
 // confine. Older daemons report no Landlock or seccomp state; those layers are
 // left out rather than shown as missing.
 function sandboxLayers(status: ScannerSandboxStatus): SandboxLayer[] {
+  const pool = status.identity_pool
+  const identityLabel = pool
+    ? `UID pool ${pool.uid_start}–${pool.uid_end} (${pool.max_parallel} max parallel)`
+    : status.state === 'enforced' ? `UID ${status.uid ?? status.process_uid}` : 'Identity'
   return [
-    { name: 'Identity', label: status.state === 'enforced' ? `UID ${status.uid ?? status.process_uid}` : 'Identity', state: status.state, reason: status.reason },
+    { name: 'Identity', label: identityLabel, state: pool?.state ?? status.state, reason: pool?.reason || status.reason },
     ...(status.landlock ? [{ name: 'Landlock', label: 'Landlock', state: status.landlock.state, reason: status.landlock.reason }] : []),
     ...(status.seccomp ? [{ name: 'seccomp', label: 'seccomp', state: status.seccomp.state, reason: status.seccomp.reason }] : []),
   ]
@@ -233,6 +238,7 @@ function sandboxPresentation(status: ScannerSandboxStatus) {
   const holding = layers.filter(layer => layer.state === 'enforced').length
   if (holding === layers.length) return { label: 'Enforced', tone: 'green', Icon: ShieldCheck }
   if (status.state === 'disabled' && holding === 0) return { label: 'Off', tone: 'gray', Icon: ShieldOff }
+  if (status.identity_pool?.state === 'unavailable') return { label: 'Unavailable', tone: 'red', Icon: ShieldX }
   if (holding > 0) return { label: 'Partial', tone: 'amber', Icon: ShieldHalf }
   return { label: 'Unavailable', tone: 'red', Icon: ShieldX }
 }
@@ -240,12 +246,12 @@ function sandboxPresentation(status: ScannerSandboxStatus) {
 // One line per reason, naming the layers it explains. The seccomp filter is
 // installed with Landlock, so while Landlock does not hold, seccomp shares its
 // reason; layers whose reasons are the same share one line.
-function layerReasons(layers: SandboxLayer[]) {
+function layerReasons(layers: SandboxLayer[], seccompWithLandlock = true) {
   const landlockHolds = layers.find(layer => layer.name === 'Landlock')?.state === 'enforced'
   const lines: { names: string[]; reason: string }[] = []
   for (const layer of layers) {
     if (layer.state === 'enforced') continue
-    const reason = (layer.name === 'seccomp' && !landlockHolds ? layers.find(candidate => candidate.name === 'Landlock')?.reason : layer.reason)?.trim()
+    const reason = (layer.name === 'seccomp' && seccompWithLandlock && !landlockHolds ? layers.find(candidate => candidate.name === 'Landlock')?.reason : layer.reason)?.trim()
     if (!reason) continue
     const line = lines.find(candidate => candidate.reason === reason)
     if (line) line.names.push(layer.name)

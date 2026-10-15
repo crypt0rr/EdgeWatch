@@ -19,7 +19,9 @@ const deploymentAlertsBudget = 5 * time.Second
 // the daemon itself does not run as root, and whether Landlock restricts
 // them.
 func sandboxHealthState(status sandbox.Status) string {
-	identity := status.State == sandbox.StateEnforced || status.ProcessUID != 0
+	processIdentity := status.ProcessUID != nil && *status.ProcessUID != 0
+	identityPool := status.IdentityPool != nil && status.IdentityPool.State == sandbox.StateEnforced
+	identity := status.State == sandbox.StateEnforced || identityPool || processIdentity
 	landlock := status.Landlock.State == sandbox.StateEnforced
 	switch {
 	case identity && landlock:

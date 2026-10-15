@@ -110,6 +110,9 @@ scheduler:
 scanner:
   # The deterministic fixture intentionally scans the local fake Nmap target.
   # Production configurations retain the safe loopback/link-local denylist.
+  # These browser tests exercise application behavior, not the Linux scanner
+  # identity boundary; that boundary has its own real-container verifier.
+  sandbox: off
   target_exclusions: []
 web:
   listen: 127.0.0.1:${port}

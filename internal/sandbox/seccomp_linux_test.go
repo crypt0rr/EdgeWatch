@@ -117,7 +117,7 @@ func TestSeccompFilterDecidesEachSystemCall(t *testing.T) {
 		if got := decide(clone, unix.CLONE_VM|unix.CLONE_FS|unix.CLONE_FILES|unix.CLONE_SIGHAND|unix.CLONE_THREAD); got != unix.SECCOMP_RET_ALLOW {
 			t.Errorf("%s clone of a thread = %#x, want allowed", goarch, got)
 		}
-		for _, flag := range []uint32{unix.CLONE_NEWUSER, unix.CLONE_NEWNS, unix.CLONE_NEWNET, unix.CLONE_NEWPID} {
+		for _, flag := range []uint32{unix.CLONE_NEWUSER, unix.CLONE_NEWNS, unix.CLONE_NEWNET, unix.CLONE_NEWPID, unix.CLONE_NEWTIME} {
 			if got := decide(clone, flag|unix.CLONE_VFORK); got != deny {
 				t.Errorf("%s clone with %#x = %#x, want EPERM", goarch, flag, got)
 			}

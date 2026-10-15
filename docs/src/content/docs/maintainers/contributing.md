@@ -120,6 +120,16 @@ image that a workflow step or the scan script starts is pinned by digest, in
 a form that Renovate updates. CI runs it, and so does the release; run
 `node --test scripts/release-workflow.test.mjs` after changing a workflow.
 
+The same checks keep dependency provenance current. Renovate reads the
+golangci-lint pin from `.golangci-lint-version` using GitHub Releases, and its
+Alpine package manager must match every Alpine minor version used by the
+Dockerfile. The workflow test parses continued `apk add` commands so every
+package stays version-pinned and Renovate-managed. It also compares the bundled
+Naabu version and immutable commit in `THIRD_PARTY_LICENSES.md` with the
+Dockerfile arguments. The release manifest takes its GoReleaser version from
+the release workflow's canonical pin; an explicit `GORELEASER_VERSION` must
+match that pin or manifest generation fails.
+
 For release helper scripts, run `./scripts/test-release-artifacts.sh`; it uses
 fixture binaries and does not build a release candidate. Follow the workflow's
 exact GoReleaser and candidate gates when changing release configuration.

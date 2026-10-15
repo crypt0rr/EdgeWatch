@@ -11,6 +11,9 @@ frontend_dist="${FRONTEND_DIST:-internal/webui/dist}"
 binary_dir="${RELEASE_BINARIES:-release-binaries}"
 manifest="${2:-$dist_dir/release-manifest.json}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd -- "$script_dir/.." && pwd)"
+release_workflow="$repository_root/.github/workflows/release.yml"
+dockerfile="$repository_root/Dockerfile"
 
 if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
   echo "invalid release tag: $tag" >&2
@@ -25,10 +28,28 @@ version="${tag#v}"
 commit="$(git rev-parse HEAD)"
 go_version="$(go env GOVERSION)"
 node_version="$(node --version)"
-goreleaser_version="${GORELEASER_VERSION:-v2.18.0}"
+goreleaser_version="$(awk '
+  $1 == "GORELEASER_VERSION:" {
+    count++
+    if (NF != 2 || $2 !~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/) invalid = 1
+    version = $2
+  }
+  END {
+    if (count != 1 || invalid) exit 1
+    print version
+  }
+' "$release_workflow")" || {
+  echo "expected exactly one valid GORELEASER_VERSION in .github/workflows/release.yml" >&2
+  exit 1
+}
+if [[ ${GORELEASER_VERSION+x} == x && "$GORELEASER_VERSION" != "$goreleaser_version" ]]; then
+  printf 'GORELEASER_VERSION=%s does not match .github/workflows/release.yml pin %s\n' \
+    "$GORELEASER_VERSION" "$goreleaser_version" >&2
+  exit 1
+fi
 repository="${GITHUB_REPOSITORY:-crypt0rr/EdgeWatch}"
-naabu_version="$(awk '$1 == "ARG" && $2 ~ /^NAABU_VERSION=/ { sub(/^NAABU_VERSION=/, "", $2); print $2; exit }' Dockerfile)"
-naabu_commit="$(awk '$1 == "ARG" && $2 ~ /^NAABU_COMMIT=/ { sub(/^NAABU_COMMIT=/, "", $2); print $2; exit }' Dockerfile)"
+naabu_version="$(awk '$1 == "ARG" && $2 ~ /^NAABU_VERSION=/ { sub(/^NAABU_VERSION=/, "", $2); print $2; exit }' "$dockerfile")"
+naabu_commit="$(awk '$1 == "ARG" && $2 ~ /^NAABU_COMMIT=/ { sub(/^NAABU_COMMIT=/, "", $2); print $2; exit }' "$dockerfile")"
 
 if [[ -z "$naabu_version" || -z "$naabu_commit" ]]; then
   echo "could not read the pinned Naabu inputs from Dockerfile" >&2

@@ -213,9 +213,10 @@ func TestPreparePrivateTemporaryCreateExecRejectsChangedParentAndLeafCollision(t
 				t.Fatalf("send initialization: n=%d err=%v", n, err)
 			}
 			rootFD, namespaceFD := int(temporary.root.Fd()), int(temporary.namespace.Fd())
-			if stage == "wrong root descriptor" {
+			switch stage {
+			case "wrong root descriptor":
 				rootFD = namespaceFD
-			} else if stage == "wrong namespace descriptor" {
+			case "wrong namespace descriptor":
 				namespaceFD = rootFD
 			}
 			_, err = preparePrivateTemporaryCreateExec(execRequest{privateRootFD: rootFD, privateNamespaceFD: namespaceFD, controlFD: pair[0]})

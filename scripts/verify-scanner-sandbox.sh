@@ -29,10 +29,20 @@ workdir=$(mktemp -d)
 container=
 listener_pid=
 webhook_pid=
+proc_fd_probe=
 cleanup() {
+  local container_removed=1
   if [ -n "$container" ]; then
     docker logs "$container" >"$workdir/last-daemon.log" 2>&1 || true
-    docker rm -f "$container" >/dev/null 2>&1 || true
+    # Force removal is the failure-path cleanup. If Docker cannot confirm it,
+    # make one bounded stop/remove attempt before preserving all bind sources.
+    if ! docker rm -f "$container" >/dev/null 2>&1; then
+      docker stop --timeout 10 "$container" >/dev/null 2>&1 || true
+      if ! docker rm -f "$container" >/dev/null 2>&1; then
+        container_removed=0
+        printf 'warning: verifier could not confirm removal of owned container %s\n' "$container" >&2
+      fi
+    fi
   fi
   if [ -n "$listener_pid" ]; then
     kill "$listener_pid" >/dev/null 2>&1 || true
@@ -40,12 +50,20 @@ cleanup() {
   if [ -n "$webhook_pid" ]; then
     kill "$webhook_pid" >/dev/null 2>&1 || true
   fi
-  for data in "$workdir"/data-*; do
-    [ -d "$data" ] || continue
-    docker run --rm --volume "$data:/data" --entrypoint /bin/sh "$image" \
-      -c 'rm -rf /data/* /data/.[!.]* /data/..?*' >/dev/null 2>&1 || true
-  done
-  rm -rf "$workdir"
+  if [ "$container_removed" = 1 ]; then
+    for data in "$workdir"/data-*; do
+      [ -d "$data" ] || continue
+      docker run --rm --volume "$data:/data" --entrypoint /bin/sh "$image" \
+        -c 'rm -rf /data/* /data/.[!.]* /data/..?*' >/dev/null 2>&1 || true
+    done
+  else
+    printf 'warning: leaving verifier data volumes intact because removal of owned container %s is unconfirmed\n' "$container" >&2
+  fi
+  if [ "$container_removed" = 1 ]; then
+    rm -rf "$workdir"
+  else
+    printf 'warning: preserving verifier work directory for owned container %s at %s\n' "$container" "$workdir" >&2
+  fi
 }
 trap cleanup EXIT
 fail() {
@@ -62,6 +80,267 @@ fail() {
   fi
   exit 1
 }
+
+# A plain `docker exec --user UID:UID` drops every capability, so it does not
+# model a sibling scanner. Build a small helper that launches a same-UID child
+# with the exact capability profile of the scanner under test, then verifies
+# that context before probing a path. It never adds SYS_PTRACE or DAC
+# capabilities.
+cat >"$workdir/proc-fd-probe.go" <<'GO'
+package main
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
+	"strings"
+	"syscall"
+
+	"golang.org/x/sys/unix"
+)
+
+type capabilityProfile struct {
+	launch string
+	post   string
+	ambient []uintptr
+}
+
+func profileFor(mask string) (capabilityProfile, error) {
+	switch mask {
+	case "0000000000002000": // NET_RAW-only daemon capability set.
+		return capabilityProfile{launch: mask, post: mask, ambient: []uintptr{13}}, nil
+	case "0000000000003000": // Explicit SYN scan: NET_ADMIN and NET_RAW.
+		return capabilityProfile{launch: mask, post: "0000000000002000", ambient: []uintptr{12, 13}}, nil
+	default:
+		return capabilityProfile{}, fmt.Errorf("unsupported exact scanner capability profile %q", mask)
+	}
+}
+
+func statusValue(status, name string) string {
+	for _, line := range strings.Split(status, "\n") {
+		if strings.HasPrefix(line, name+":") {
+			return strings.TrimSpace(strings.TrimPrefix(line, name+":"))
+		}
+	}
+	return ""
+}
+
+func requireScannerCredentials(uid uint32) (string, error) {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return "", fmt.Errorf("read probe status: %w", err)
+	}
+	status := string(data)
+	for _, field := range []string{"Uid", "Gid"} {
+		values := strings.Fields(statusValue(status, field))
+		if len(values) != 4 {
+			return "", fmt.Errorf("probe has malformed %s status", field)
+		}
+		for _, value := range values {
+			if value != strconv.FormatUint(uint64(uid), 10) {
+				return "", fmt.Errorf("probe %s is %q, want all credentials %d", field, value, uid)
+			}
+		}
+	}
+	if groups := statusValue(status, "Groups"); groups != "" {
+		return "", fmt.Errorf("probe has supplementary groups %q", groups)
+	}
+	return status, nil
+}
+
+func requireNaabuInitialCapabilities(status string, profile capabilityProfile) error {
+	for _, field := range []string{"CapPrm", "CapEff", "CapInh", "CapAmb"} {
+		if got := statusValue(status, field); got != profile.launch {
+			return fmt.Errorf("probe initial %s is %q, want exact launch capabilities %s", field, got, profile.launch)
+		}
+	}
+	if got := statusValue(status, "NoNewPrivs"); got != "1" {
+		return fmt.Errorf("probe NoNewPrivs is %q, want 1", got)
+	}
+	if got := statusValue(status, "Seccomp"); got != "2" {
+		return fmt.Errorf("probe Seccomp is %q, want 2", got)
+	}
+	return nil
+}
+
+// Naabu v2.6.1's pkg/privileges/privileges_linux.go reads the capability
+// state, replaces only Inheritable with CAP_NET_RAW, and writes it back. That
+// keeps both permitted/effective network caps while the kernel drops
+// CAP_NET_ADMIN from Ambient because ambient must remain a subset of
+// inheritable. Reproduce that exact transition before checking/probing.
+func applyNaabuCapabilityTransition() error {
+	header := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3, Pid: int32(os.Getpid())}
+	data := unix.CapUserData{}
+	if err := unix.Capget(&header, &data); err != nil {
+		return fmt.Errorf("read capability state: %w", err)
+	}
+	data.Inheritable = 1 << unix.CAP_NET_RAW
+	if err := unix.Capset(&header, &data); err != nil {
+		return fmt.Errorf("apply Naabu inheritable capability state: %w", err)
+	}
+	return nil
+}
+
+func requireScannerIdentity(uid uint32, profile capabilityProfile) error {
+	status, err := requireScannerCredentials(uid)
+	if err != nil {
+		return err
+	}
+	if got := statusValue(status, "CapPrm"); got != profile.launch {
+		return fmt.Errorf("probe CapPrm is %q, want exact scanner permitted capabilities %s", got, profile.launch)
+	}
+	if got := statusValue(status, "CapEff"); got != profile.launch {
+		return fmt.Errorf("probe CapEff is %q, want exact scanner effective capabilities %s", got, profile.launch)
+	}
+	for _, field := range []string{"CapInh", "CapAmb"} {
+		if got := statusValue(status, field); got != profile.post {
+			return fmt.Errorf("probe %s is %q, want exact post-transition inheritable/ambient capabilities %s", field, got, profile.post)
+		}
+	}
+	if got := statusValue(status, "NoNewPrivs"); got != "1" {
+		return fmt.Errorf("probe NoNewPrivs is %q, want 1", got)
+	}
+	if got := statusValue(status, "Seccomp"); got != "2" {
+		return fmt.Errorf("probe Seccomp is %q, want 2", got)
+	}
+	return nil
+}
+
+func child(args []string) int {
+	if len(args) != 5 || args[0] != "child" {
+		fmt.Fprintln(os.Stderr, "usage: child UID PROFILE OP PATH")
+		return 2
+	}
+	uid64, err := strconv.ParseUint(args[1], 10, 32)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid UID: %v\n", err)
+		return 2
+	}
+	profile, err := profileFor(args[2])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	// Keep the Go goroutine on the capability-adjusted OS thread through the
+	// path check; Linux capability sets are per-thread.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	status, err := requireScannerCredentials(uint32(uid64))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 3
+	}
+	if err := requireNaabuInitialCapabilities(status, profile); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 3
+	}
+	if err := applyNaabuCapabilityTransition(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 3
+	}
+	if err := requireScannerIdentity(uint32(uid64), profile); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 3
+	}
+	path := args[4]
+	switch args[3] {
+	case "readlink":
+		target, err := os.Readlink(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "readlink failed: %v\n", err)
+			return 11
+		}
+		fmt.Println(target)
+	case "open":
+		file, err := os.Open(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open failed: %v\n", err)
+			return 12
+		}
+		if err := file.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "close failed: %v\n", err)
+			return 13
+		}
+	case "read":
+		file, err := os.Open(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open failed: %v\n", err)
+			return 12
+		}
+		// /proc/<pid>/fd/N refers to the scanner's shared open-file
+		// description. ReadAt uses pread, so this positive control does not
+		// advance Naabu's target-list offset while it is scanning.
+		contents := make([]byte, 4096)
+		count, readErr := file.ReadAt(contents, 0)
+		closeErr := file.Close()
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			fmt.Fprintf(os.Stderr, "read failed: %v\n", readErr)
+			return 14
+		}
+		if closeErr != nil {
+			fmt.Fprintf(os.Stderr, "close failed: %v\n", closeErr)
+			return 13
+		}
+		if _, err := os.Stdout.Write(contents[:count]); err != nil {
+			fmt.Fprintf(os.Stderr, "write read result failed: %v\n", err)
+			return 14
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "unknown operation %q\n", args[2])
+		return 2
+	}
+	return 0
+}
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "child" {
+		os.Exit(child(os.Args[1:]))
+	}
+	if len(os.Args) != 5 {
+		fmt.Fprintln(os.Stderr, "usage: proc-fd-probe UID PROFILE OP PATH")
+		os.Exit(2)
+	}
+	uid64, err := strconv.ParseUint(os.Args[1], 10, 32)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid UID: %v\n", err)
+		os.Exit(2)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "resolve probe executable: %v\n", err)
+		os.Exit(2)
+	}
+	profile, err := profileFor(os.Args[2])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	command := exec.Command(executable, "child", os.Args[1], os.Args[2], os.Args[3], os.Args[4])
+	command.SysProcAttr = &syscall.SysProcAttr{
+		Credential:  &syscall.Credential{Uid: uint32(uid64), Gid: uint32(uid64), Groups: []uint32{}},
+		AmbientCaps: profile.ambient,
+	}
+	output, err := command.CombinedOutput()
+	if len(output) != 0 {
+		_, _ = os.Stdout.Write(output)
+	}
+	if err == nil {
+		return
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		os.Exit(exitErr.ExitCode())
+	}
+	fmt.Fprintf(os.Stderr, "start probe child: %v\n", err)
+	os.Exit(2)
+}
+GO
+CGO_ENABLED=0 go build -trimpath -o "$workdir/proc-fd-probe" "$workdir/proc-fd-probe.go" || fail "could not build the scanner-identity proc-fd probe"
+proc_fd_probe=/usr/local/bin/edgewatch-proc-fd-probe
 
 free_port() {
   python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
@@ -313,7 +592,10 @@ def main():
         request(base, state, "POST", f"/scans/{scan_id}/cancel")
         scan = wait_for_scan(base, state, job_id, {"canceled", "success", "failed", "timed_out", "incomplete"}, timeout=60)
         if command == "cancel-detail":
-            print(json.dumps({"status": scan["status"], "error": scan.get("error", "")}))
+            cycle_response = request(base, state, "GET", f"/jobs/{job_id}/scan-cycle")
+            cycle = cycle_response.get("cycle") or {}
+            print(json.dumps({"status": scan["status"], "error": scan.get("error", ""),
+                              "cycle_last_error": cycle.get("last_error", "")}))
         else:
             print(scan["status"])
     else:
@@ -343,6 +625,11 @@ daemon_runtime_tmpdir=
 run_daemon() {
   local name=$1 mode=$2
   shift 2
+  # Fixture transitions must not orphan the previous daemon when its
+  # database/configuration differs from the next run.
+  if [ -n "$container" ]; then
+    stop_daemon
+  fi
   local caps=()
   for capability in "$@"; do
     caps+=(--cap-add "$capability")
@@ -398,7 +685,16 @@ EOF
 }
 
 stop_daemon() {
-  docker rm -f "$container" >/dev/null
+  # Preserve the daemon's deferred database-lease release before restarting
+  # against the same volume. The production shutdown bound is six minutes;
+  # force removal is reserved for the EXIT cleanup path after a failed test.
+  local exit_code
+  if ! docker stop --time 360 "$container" >/dev/null; then
+    fail "the daemon did not stop within its six-minute graceful-shutdown bound"
+  fi
+  exit_code=$(docker inspect --format '{{.State.ExitCode}}' "$container") || fail "could not inspect the stopped daemon's exit status"
+  [ "$exit_code" = 0 ] || fail "the daemon did not complete graceful shutdown (exit code $exit_code); refusing to reuse its database"
+  docker rm "$container" >/dev/null
   container=
 }
 
@@ -408,7 +704,7 @@ stop_daemon() {
 restart_daemon_with_caps() {
   local name=$1
   shift
-  local caps=() env=()
+  local caps=() env=() probe_mount=(--volume "$workdir/proc-fd-probe:$proc_fd_probe:ro")
   for capability in "$@"; do
     caps+=(--cap-add "$capability")
   done
@@ -419,7 +715,7 @@ restart_daemon_with_caps() {
   fi
   container=$(docker run -d --network host --read-only --tmpfs /tmp:size=128m,mode=1777 \
     --cap-drop ALL "${caps[@]}" \
-    --security-opt no-new-privileges:true "${env[@]}" \
+    --security-opt no-new-privileges:true "${env[@]}" "${probe_mount[@]}" \
     --volume "$daemon_config:/etc/edgewatch/config.yaml:ro" \
     --volume "$daemon_data:/var/lib/edgewatch:rw" "$image" daemon --config /etc/edgewatch/config.yaml)
   base="http://127.0.0.1:$daemon_port"
@@ -515,16 +811,26 @@ expect_private_scan_file() {
   done
 }
 
-# expect_private_naabu_tmp checks the active generated leaf and the real
-# temporary input and LevelDB files a live production Naabu process created
-# there. Container root lacks CAP_SYS_PTRACE, so it cannot read a scanner's
-# /proc/<pid>/environ across the UID boundary; the leaf artifacts prove the
-# configured TMPDIR is in use without adding that capability.
+# expect_private_naabu_tmp checks the active generated leaf and Naabu's
+# temporary input and LevelDB files there. FD 3 remains the parent-created,
+# scanner target file passed through InheritFile; that helper sets its
+# descriptor-only read mode to 0604. Its parent run directory remains root
+# private, so another identity cannot reach it by path. Naabu copies its
+# contents into the leaf-local stdin-input file. Container root lacks
+# CAP_SYS_PTRACE, so these checks do not inspect a scanner's environ.
 expect_private_naabu_tmp() {
-  local pid=$1 uid namespaces namespace leaves leaf namespace_stat leaf_stat candidate owner leaf_candidate
-  local inputs input input_stat databases database database_stat current_stat current_contents manifest manifest_stat descriptor_path descriptor_contents
+  local pid=$1 expected_pe=$2 expected_ia=$3 profile=$2 pid_starttime uid namespaces namespace leaves leaf namespace_stat leaf_stat candidate owner leaf_candidate
+  local inputs input input_stat databases database database_stat current_stat current_contents manifest manifest_stat descriptor_path descriptor_stat descriptor_contents leaf_input_contents probe_output
+  case "$expected_pe/$expected_ia" in
+    0000000000002000/0000000000002000|0000000000003000/0000000000002000) ;;
+    *) fail "unsupported exact Naabu probe profile: permitted/effective=$expected_pe inheritable/ambient=$expected_ia" ;;
+  esac
   docker exec "$container" test -d "/proc/$pid" || fail "Naabu process $pid exited before its temporary files were inspected"
+  pid_starttime=$(scanner_process_starttime "$pid") || fail "Naabu PID $pid has no readable starttime before its temporary files were inspected"
+  [[ "$pid_starttime" =~ ^[0-9]+$ ]] || fail "Naabu PID $pid has an invalid starttime '$pid_starttime'"
+  expect_scanner_identity "$pid" "$expected_pe" "$expected_ia"
   uid=$(scanner_uid "$pid")
+  expect_scanner_starttime "$pid" "$pid_starttime" "after reading its UID"
   namespaces=$(docker exec "$container" find /tmp -mindepth 1 -maxdepth 1 -type d -name 'edgewatch-naabu-root-*' -print 2>/dev/null || true)
   namespace=
   leaf=
@@ -568,18 +874,32 @@ expect_private_naabu_tmp() {
   [ "$current_contents" = "$(basename "$manifest")" ] || fail "Naabu CURRENT names '$current_contents', want its readable manifest $(basename "$manifest")"
   manifest_stat=$(docker exec --user "$uid:$uid" "$container" stat -c '%a %u %g' "$manifest")
   [ "$manifest_stat" = "644 $uid $uid" ] || fail "Naabu LevelDB manifest is '$manifest_stat', want '644 $uid $uid'"
-  descriptor_path=$(docker exec --user "$uid:$uid" "$container" readlink "/proc/$pid/fd/3") || fail "scanner UID $uid could not inspect its inherited target descriptor"
-  [ "$descriptor_path" = "$input" ] || fail "Naabu FD 3 points to '$descriptor_path', want its private input '$input'"
-  docker exec --user "$uid:$uid" "$container" test -r "/proc/$pid/fd/3" || fail "scanner UID $uid cannot read its live inherited target descriptor"
-  descriptor_contents=$(docker exec --user "$uid:$uid" "$container" cat "$input") || fail "scanner UID $uid could not read the file backing its inherited target descriptor"
-  printf '%s\n' "$descriptor_contents" | grep -Fxq '127.0.0.1' || fail "the private target input does not contain the expected authorized loopback target: $descriptor_contents"
+  expect_scanner_starttime "$pid" "$pid_starttime" "before checking its inherited target descriptor"
+  descriptor_path=$(docker exec "$container" "$proc_fd_probe" "$uid" "$profile" readlink "/proc/$pid/fd/3" 2>&1) || fail "scanner UID $uid with scanner capabilities could not inspect its inherited target descriptor: $descriptor_path"
+  [[ "$descriptor_path" =~ ^/var/lib/edgewatch/tmp/scanner/run-[0-9]+/edgewatch-naabu-targets-[0-9]+$ ]] ||
+    fail "Naabu FD 3 points to unexpected source input '$descriptor_path'"
+  descriptor_stat=$(docker exec "$container" stat -c '%a %u %g' "$descriptor_path")
+  [ "$descriptor_stat" = "604 0 0" ] || fail "Naabu FD 3 source input is '$descriptor_stat', want parent-owned descriptor-read '604 0 0'"
+  expect_scanner_starttime "$pid" "$pid_starttime" "after reading its inherited target descriptor"
+  if ! probe_output=$(docker exec "$container" "$proc_fd_probe" "$uid" "$profile" open "/proc/$pid/fd/3" 2>&1); then
+    fail "scanner UID $uid with scanner capabilities cannot open its live inherited target descriptor: $probe_output"
+  fi
+  expect_scanner_starttime "$pid" "$pid_starttime" "after opening its inherited target descriptor"
+  expect_scanner_starttime "$pid" "$pid_starttime" "before reading its inherited target descriptor"
+  descriptor_contents=$(docker exec "$container" "$proc_fd_probe" "$uid" "$profile" read "/proc/$pid/fd/3" 2>&1) || fail "scanner UID $uid with scanner capabilities could not read its live inherited target descriptor: $descriptor_contents"
+  [ "$descriptor_contents" = '127.0.0.1' ] || fail "the inherited target descriptor contains unexpected targets: $descriptor_contents"
+  expect_scanner_starttime "$pid" "$pid_starttime" "after reading its inherited target descriptor"
+  leaf_input_contents=$(docker exec --user "$uid:$uid" "$container" cat "$input") || fail "scanner UID $uid could not read its leaf-local Naabu input"
+  [ "$leaf_input_contents" = '127.0.0.1' ] || fail "the leaf-local Naabu input contains unexpected targets: $leaf_input_contents"
   docker exec "$container" test -d "/proc/$pid" || fail "Naabu process $pid exited while its temporary files were inspected"
   naabu_uid=$uid
+  naabu_starttime=$pid_starttime
   naabu_namespace=$namespace
   naabu_leaf=$leaf
   naabu_input=$input
+  naabu_source_input=$descriptor_path
   naabu_database=$database
-  echo "verified live Naabu temporary artifacts: namespace=$namespace ($namespace_stat), leaf=$leaf ($leaf_stat), input=$input ($input_stat), LevelDB=$database ($database_stat), CURRENT=$current_stat, manifest=$manifest_stat"
+  echo "verified live Naabu temporary artifacts: namespace=$namespace ($namespace_stat), leaf=$leaf ($leaf_stat), inherited source input=$descriptor_path ($descriptor_stat), leaf input=$input ($input_stat), LevelDB=$database ($database_stat), CURRENT=$current_stat, manifest=$manifest_stat"
 }
 
 expect_no_naabu_temporary_namespaces() {
@@ -590,7 +910,7 @@ expect_no_naabu_temporary_namespaces() {
 
 expect_no_naabu_target_inputs() {
   local remaining
-  remaining=$(docker exec "$container" find /var/lib/edgewatch/tmp/scanner -mindepth 1 -maxdepth 1 -type f -name 'edgewatch-naabu-targets-*' -print 2>/dev/null || true)
+  remaining=$(docker exec "$container" find /var/lib/edgewatch/tmp/scanner -type f -name 'edgewatch-naabu-targets-*' -print 2>/dev/null || true)
   [ -z "$remaining" ] || fail "Naabu left target inputs behind: $remaining"
 }
 
@@ -602,6 +922,19 @@ expect_legacy_tmp_grant_rejected() {
 
 scanner_uid() {
   docker exec "$container" awk '/^Uid:/{print $2; exit}' "/proc/$1/status"
+}
+
+scanner_process_starttime() {
+  local starttime
+  starttime=$(docker exec "$container" /bin/sh -c 'stat=$(cat "/proc/$1/stat") || exit 1; rest=${stat##*) }; set -- $rest; [ "$#" -ge 20 ] || exit 1; printf "%s\n" "${20}"' sh "$1") || return 1
+  [[ "$starttime" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$starttime"
+}
+
+expect_scanner_starttime() {
+  local pid=$1 expected=$2 context=$3 got
+  got=$(scanner_process_starttime "$pid") || fail "Naabu PID $pid exited before its starttime was revalidated $context"
+  [ "$got" = "$expected" ] || fail "Naabu PID $pid changed starttime $context: got $got, expected $expected"
 }
 
 scanner_pids() {
@@ -653,21 +986,34 @@ wait_for_new_scanner_pid() {
 }
 
 expect_scanner_identity() {
-  local pid=$1 expected_caps=$2 got uid euid suid fsuid gid egid sgid fsgid groups cap
-  got=$(docker exec "$container" /bin/sh -c 'awk "/^Uid:/{uid=\$2; euid=\$3; suid=\$4; fsuid=\$5} /^Gid:/{gid=\$2; egid=\$3; sgid=\$4; fsgid=\$5} /^Groups:/{groups=\$2} /^CapEff:/{cap=\$2} END{print uid, euid, suid, fsuid, gid, egid, sgid, fsgid, (groups == \"\" ? \"-\" : groups), cap}" "/proc/$1/status"' sh "$pid")
-  read -r uid euid suid fsuid gid egid sgid fsgid groups cap <<< "$got"
+  local pid=$1 expected_pe=$2 expected_ia=$3 got uid euid suid fsuid gid egid sgid fsgid groups capprm capinh capeff capamb
+  got=$(docker exec "$container" /bin/sh -c 'awk "/^Uid:/{uid=\$2; euid=\$3; suid=\$4; fsuid=\$5} /^Gid:/{gid=\$2; egid=\$3; sgid=\$4; fsgid=\$5} /^Groups:/{groups=\$2} /^CapPrm:/{capprm=\$2} /^CapInh:/{capinh=\$2} /^CapEff:/{capeff=\$2} /^CapAmb:/{capamb=\$2} END{print uid, euid, suid, fsuid, gid, egid, sgid, fsgid, (groups == \"\" ? \"-\" : groups), capprm, capinh, capeff, capamb}" "/proc/$1/status"' sh "$pid")
+  read -r uid euid suid fsuid gid egid sgid fsgid groups capprm capinh capeff capamb <<< "$got"
   [ "$uid" -ge 60000 ] && [ "$uid" -lt 60064 ] || fail "scanner process $pid has unleased UID '$uid': $got"
-  [ "$uid $euid $suid $fsuid $gid $egid $sgid $fsgid $groups $cap" = "$uid $uid $uid $uid $uid $uid $uid $uid - $expected_caps" ] ||
-    fail "scanner process $pid credentials are '$got', want one leased UID/GID with no supplementary groups and capabilities $expected_caps"
+  [ "$uid $euid $suid $fsuid $gid $egid $sgid $fsgid $groups $capprm $capinh $capeff $capamb" = \
+    "$uid $uid $uid $uid $uid $uid $uid $uid - $expected_pe $expected_ia $expected_pe $expected_ia" ] ||
+    fail "scanner process $pid credentials/capabilities are '$got', want one leased UID/GID with no supplementary groups, permitted/effective capabilities $expected_pe, and inheritable/ambient capabilities $expected_ia"
 }
 
 expect_peer_denied() {
-  local peer_uid=$1 path=$2 description=$3 output
-  if output=$(docker exec --user "$peer_uid:$peer_uid" "$container" /bin/sh -c "cat '$path' >/dev/null" 2>&1); then
+  local peer_uid=$1 profile=$2 path=$3 description=$4 output operation=read
+  if [[ "$path" == /proc/*/fd/* ]]; then
+    operation=readlink
+  fi
+  if output=$(docker exec "$container" "$proc_fd_probe" "$peer_uid" "$profile" "$operation" "$path" 2>&1); then
     fail "peer scanner UID $peer_uid read another invocation's $description at $path"
   fi
   printf '%s\n' "$output" | grep -Eqi 'permission denied|operation not permitted' ||
     fail "peer scanner UID $peer_uid failed to read $description for an unexpected reason: $output"
+}
+
+expect_peer_denied_between_scanners() {
+  local peer_uid=$1 profile=$2 path=$3 description=$4 target_pid=$5 target_starttime=$6 peer_pid=$7 peer_starttime=$8
+  expect_scanner_starttime "$target_pid" "$target_starttime" "before the peer checks $description"
+  expect_scanner_starttime "$peer_pid" "$peer_starttime" "before the peer checks $description"
+  expect_peer_denied "$peer_uid" "$profile" "$path" "$description"
+  expect_scanner_starttime "$target_pid" "$target_starttime" "after the peer checks $description"
+  expect_scanner_starttime "$peer_pid" "$peer_starttime" "after the peer checks $description"
 }
 
 scanner_supervisor_pid() {
@@ -734,7 +1080,7 @@ expect_health() {
 expect_missing_identity_capabilities() {
   local reason capability
   reason=$(docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml --output json |
-    python3 -c 'import json, sys; print((json.load(sys.stdin)["scanner_sandbox"].get("identity_pool") or {}).get("reason", ""))')
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["scanner_sandbox"].get("reason", ""))')
   for capability in SETUID SETGID KILL; do
     [[ "$reason" == *"$capability"* ]] || fail "identity pool refusal reason '$reason' does not identify missing $capability"
   done
@@ -865,7 +1211,7 @@ job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
 nmap_pid=$(scanner_pid nmap)
 [ -n "$nmap_pid" ] || fail "running scan started no Nmap"
-expect_scanner_identity "$nmap_pid" "0000000000002000"
+expect_scanner_identity "$nmap_pid" "0000000000002000" "0000000000002000"
 expect_filtered Nmap "$(process_hardening "$nmap_pid")"
 expect_scanner_limits Nmap "$nmap_pid"
 expect_nmap_file_size_limit Nmap "$nmap_pid"
@@ -899,7 +1245,9 @@ stop_daemon
 # where another sandboxed process can open none of them.
 daemon_tmpdir=
 daemon_scan_limit=2
+daemon_mounts=(--volume "$workdir/proc-fd-probe:/usr/local/bin/edgewatch-proc-fd-probe:ro")
 run_daemon syn auto "${bundled_caps[@]}" NET_ADMIN
+daemon_mounts=()
 daemon_scan_limit=1
 daemon_tmpdir=/var/lib/edgewatch/tmp
 expect_health "enforced - NET_RAW,NET_ADMIN landlock:enforced seccomp:enforced limits:1000,65536 pool:enforced,per_invocation,60000-60063,64"
@@ -915,7 +1263,7 @@ scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load
 naabu_pid=$(scanner_pid naabu)
 [ -n "$naabu_pid" ] || fail "the slow Naabu scan started no Naabu"
 expect_scanner_limits Naabu "$naabu_pid"
-expect_private_naabu_tmp "$naabu_pid"
+expect_private_naabu_tmp "$naabu_pid" "0000000000003000" "0000000000002000"
 expect_private_scan_file "Naabu target list" "$naabu_pid" 'edgewatch-naabu-targets-*'
 cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
 [ "$cancelled" = canceled ] || fail "the cancelled Naabu scan ended '$cancelled'"
@@ -935,28 +1283,45 @@ scan_two=$(printf '%s' "$started_two" | python3 -c 'import json, sys; print(json
 concurrent_pids=$(wait_for_scanner_count naabu 2)
 naabu_pid_one=$(printf '%s\n' "$concurrent_pids" | sed -n '1p')
 naabu_pid_two=$(printf '%s\n' "$concurrent_pids" | sed -n '2p')
-expect_scanner_identity "$naabu_pid_one" "0000000000003000"
-expect_scanner_identity "$naabu_pid_two" "0000000000003000"
+expect_scanner_identity "$naabu_pid_one" "0000000000003000" "0000000000002000"
+expect_scanner_identity "$naabu_pid_two" "0000000000003000" "0000000000002000"
 expect_filtered "concurrent Naabu one" "$(process_hardening "$naabu_pid_one")"
 expect_filtered "concurrent Naabu two" "$(process_hardening "$naabu_pid_two")"
-expect_private_naabu_tmp "$naabu_pid_one"
+expect_private_naabu_tmp "$naabu_pid_one" "0000000000003000" "0000000000002000"
 naabu_uid_one=$naabu_uid
+naabu_starttime_one=$naabu_starttime
 naabu_leaf_one=$naabu_leaf
 naabu_input_one=$naabu_input
+naabu_source_input_one=$naabu_source_input
 naabu_database_one=$naabu_database
-expect_private_naabu_tmp "$naabu_pid_two"
+expect_private_naabu_tmp "$naabu_pid_two" "0000000000003000" "0000000000002000"
 naabu_uid_two=$naabu_uid
+naabu_starttime_two=$naabu_starttime
 naabu_leaf_two=$naabu_leaf
 naabu_input_two=$naabu_input
+naabu_source_input_two=$naabu_source_input
 naabu_database_two=$naabu_database
 [ "$naabu_uid_one" != "$naabu_uid_two" ] || fail "concurrent scanners shared leased UID $naabu_uid_one"
 [ "$naabu_leaf_one" != "$naabu_leaf_two" ] || fail "concurrent scanners shared private leaf $naabu_leaf_one"
 [ "$naabu_input_one" != "$naabu_input_two" ] || fail "concurrent scanners shared target input $naabu_input_one"
+[ "$naabu_source_input_one" != "$naabu_source_input_two" ] || fail "concurrent scanners shared inherited source input $naabu_source_input_one"
 [ "$naabu_database_one" != "$naabu_database_two" ] || fail "concurrent scanners shared LevelDB directory $naabu_database_one"
-expect_peer_denied "$naabu_uid_two" "$naabu_database_one/CURRENT" "LevelDB CURRENT file"
-expect_peer_denied "$naabu_uid_one" "$naabu_database_two/CURRENT" "LevelDB CURRENT file"
-expect_peer_denied "$naabu_uid_two" "/proc/$naabu_pid_one/fd/3" "target-list descriptor"
-expect_peer_denied "$naabu_uid_one" "/proc/$naabu_pid_two/fd/3" "target-list descriptor"
+expect_peer_denied_between_scanners "$naabu_uid_two" "0000000000003000" "$naabu_database_one/CURRENT" "LevelDB CURRENT file" \
+  "$naabu_pid_one" "$naabu_starttime_one" "$naabu_pid_two" "$naabu_starttime_two"
+expect_peer_denied_between_scanners "$naabu_uid_one" "0000000000003000" "$naabu_database_two/CURRENT" "LevelDB CURRENT file" \
+  "$naabu_pid_two" "$naabu_starttime_two" "$naabu_pid_one" "$naabu_starttime_one"
+expect_peer_denied_between_scanners "$naabu_uid_two" "0000000000003000" "$naabu_source_input_one" "inherited source target input" \
+  "$naabu_pid_one" "$naabu_starttime_one" "$naabu_pid_two" "$naabu_starttime_two"
+expect_peer_denied_between_scanners "$naabu_uid_one" "0000000000003000" "$naabu_source_input_two" "inherited source target input" \
+  "$naabu_pid_two" "$naabu_starttime_two" "$naabu_pid_one" "$naabu_starttime_one"
+expect_peer_denied_between_scanners "$naabu_uid_two" "0000000000003000" "$naabu_input_one" "leaf-local Naabu input" \
+  "$naabu_pid_one" "$naabu_starttime_one" "$naabu_pid_two" "$naabu_starttime_two"
+expect_peer_denied_between_scanners "$naabu_uid_one" "0000000000003000" "$naabu_input_two" "leaf-local Naabu input" \
+  "$naabu_pid_two" "$naabu_starttime_two" "$naabu_pid_one" "$naabu_starttime_one"
+expect_peer_denied_between_scanners "$naabu_uid_two" "0000000000003000" "/proc/$naabu_pid_one/fd/3" "target-list descriptor" \
+  "$naabu_pid_one" "$naabu_starttime_one" "$naabu_pid_two" "$naabu_starttime_two"
+expect_peer_denied_between_scanners "$naabu_uid_one" "0000000000003000" "/proc/$naabu_pid_two/fd/3" "target-list descriptor" \
+  "$naabu_pid_two" "$naabu_starttime_two" "$naabu_pid_one" "$naabu_starttime_one"
 cancelled_one=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_one" "$scan_one")
 cancelled_two=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_two" "$scan_two")
 [ "$cancelled_one" = canceled ] || fail "the first concurrent Naabu scan ended '$cancelled_one'"
@@ -974,7 +1339,7 @@ baseline_fixture=$(python3 "$workdir/driver.py" establish-baseline "$base" "$sta
 legacy_job=$(printf '%s' "$baseline_fixture" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
 printf '%s' "$baseline_fixture" | python3 -c 'import json, sys; json.dump(json.load(sys.stdin)["baseline"], open(sys.argv[1], "w"))' "$workdir/legacy-baseline.json"
 restart_daemon_with_caps legacy NET_RAW NET_ADMIN
-expect_health "unavailable - - landlock:enforced seccomp:enforced limits:1000,65536 pool:unavailable,per_invocation,60000-60063,64"
+expect_health "unavailable - - landlock:unavailable seccomp:enforced limits:- pool:unavailable,per_invocation,60000-60063,64"
 expect_missing_identity_capabilities
 expect_notification_health "unavailable 0 landlock:enforced seccomp:enforced"
 deliver_notification legacy >/dev/null
@@ -994,37 +1359,45 @@ job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
 naabu_pid=$(scanner_pid naabu)
 [ -n "$naabu_pid" ] || fail "the proof-timeout Naabu scan started no Naabu"
-expect_private_naabu_tmp "$naabu_pid"
+expect_private_naabu_tmp "$naabu_pid" "0000000000002000" "0000000000002000"
 quarantined_uid=$naabu_uid
 quarantined_pid=$naabu_pid
 quarantined_namespace=$naabu_namespace
 quarantined_leaf=$naabu_leaf
-quarantined_input=$naabu_input
-quarantined_database=$naabu_database
-quarantined_target=$(scan_file 'edgewatch-naabu-targets-*')
+quarantined_target=$naabu_source_input
 [ -n "$quarantined_target" ] || fail "the proof-timeout Naabu scan has no inherited target-list file"
 supervisor_pid=$(scanner_supervisor_pid "$naabu_pid")
 docker exec "$container" kill -STOP "$supervisor_pid" || fail "could not stop the verified scanner supervisor $supervisor_pid"
 cancel_detail=$(python3 "$workdir/driver.py" cancel-detail "$base" "$state" "$job_id" "$scan_id")
 cancel_status=$(printf '%s' "$cancel_detail" | python3 -c 'import json, sys; print(json.load(sys.stdin)["status"])')
 cancel_error=$(printf '%s' "$cancel_detail" | python3 -c 'import json, sys; print(json.load(sys.stdin)["error"])')
-[ "$cancel_status" != success ] || fail "a scan without supervisor cleanup proof was recorded successful"
-printf '%s\n' "$cancel_error" | grep -Eqi 'did not prove process-tree cleanup|process-tree cleanup is unproven|identity quarantined' ||
-  fail "supervisor proof timeout was not reported as a quarantined cleanup failure: $cancel_detail"
+cycle_last_error=$(printf '%s' "$cancel_detail" | python3 -c 'import json, sys; print(json.load(sys.stdin)["cycle_last_error"])')
+[ "$cancel_status" = canceled ] || fail "a scan without supervisor cleanup proof ended '$cancel_status'"
+[ "$cancel_error" = "scan canceled; progress was saved" ] || fail "proof-timeout cancellation returned unexpected public scan detail: $cancel_detail"
+printf '%s\n' "$cycle_last_error" | grep -Fq 'scanner process-tree proof failed' ||
+  fail "the resumable cycle did not retain the sanitized process-tree proof failure: $cancel_detail"
 docker exec "$container" test -d "$quarantined_namespace" || fail "proof failure removed the quarantined Naabu namespace"
 docker exec "$container" test -d "$quarantined_leaf" || fail "proof failure removed the quarantined Naabu leaf"
-docker exec "$container" test -f "$quarantined_input" || fail "proof failure removed the quarantined private input"
-docker exec "$container" test -f "$quarantined_database/CURRENT" || fail "proof failure removed the quarantined LevelDB files"
+quarantined_namespace_stat=$(docker exec "$container" stat -c '%a %u %g' "$quarantined_namespace")
+[ "$quarantined_namespace_stat" = "1733 0 0" ] || fail "proof failure changed the pinned Naabu namespace to '$quarantined_namespace_stat'"
+quarantined_leaf_stat=$(docker exec "$container" stat -c '%a %u %g' "$quarantined_leaf")
+[ "$quarantined_leaf_stat" = "700 $quarantined_uid $quarantined_uid" ] || fail "proof failure changed the pinned Naabu leaf to '$quarantined_leaf_stat'"
 docker exec "$container" test -f "$quarantined_target" || fail "proof failure removed the quarantined target-list file"
+quarantined_target_stat=$(docker exec "$container" stat -c '%a %u %g' "$quarantined_target")
+[ "$quarantined_target_stat" = "604 0 0" ] || fail "proof failure changed the parent-owned target-list file to '$quarantined_target_stat'"
+quarantined_journal_state=$(docker exec "$container" cat /var/lib/edgewatch/scanner-identities/leases.json | python3 -c 'import json, sys; journal=json.load(sys.stdin); print(journal.get("leases", {}).get(sys.argv[1], {}).get("state", "missing"))' "$quarantined_uid")
+[ "$quarantined_journal_state" = quarantined ] || fail "proof failure left scanner UID $quarantined_uid in journal state '$quarantined_journal_state'"
+child_leaf_contents=$(docker exec --user "$quarantined_uid:$quarantined_uid" "$container" find "$quarantined_leaf" -mindepth 1 -maxdepth 1 -print 2>/dev/null || true)
+echo "verified failed-proof quarantine: UID=$quarantined_uid journal=$quarantined_journal_state namespace=$quarantined_namespace ($quarantined_namespace_stat), leaf=$quarantined_leaf ($quarantined_leaf_stat), parent-owned source=$quarantined_target ($quarantined_target_stat), child-owned leaf entries=${child_leaf_contents:-<empty>}"
 
 started=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" after-proof-timeout-naabu)
 job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
 naabu_pid=$(wait_for_new_scanner_pid naabu "$quarantined_pid")
-expect_scanner_identity "$naabu_pid" "0000000000003000"
+expect_scanner_identity "$naabu_pid" "0000000000002000" "0000000000002000"
 followup_uid=$(scanner_uid "$naabu_pid")
 [ "$followup_uid" != "$quarantined_uid" ] || fail "post-timeout scanner reused quarantined UID $quarantined_uid"
-expect_private_naabu_tmp "$naabu_pid"
+expect_private_naabu_tmp "$naabu_pid" "0000000000002000" "0000000000002000"
 followup_leaf=$naabu_leaf
 cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
 [ "$cancelled" = canceled ] || fail "the post-quarantine Naabu scan ended '$cancelled'"
@@ -1032,7 +1405,7 @@ expect_no_scanner_processes "the post-quarantine Naabu scan"
 docker exec "$container" test ! -e "$followup_leaf" || fail "normal cleanup left the post-quarantine leaf $followup_leaf"
 remaining_namespaces=$(docker exec "$container" find /tmp -mindepth 1 -maxdepth 1 -type d -name 'edgewatch-naabu-root-*' -print 2>/dev/null || true)
 [ "$remaining_namespaces" = "$quarantined_namespace" ] || fail "the proof-timeout fixture left unexpected namespace state: $remaining_namespaces"
-remaining_inputs=$(docker exec "$container" find /var/lib/edgewatch/tmp/scanner -mindepth 1 -maxdepth 1 -type f -name 'edgewatch-naabu-targets-*' -print 2>/dev/null || true)
+remaining_inputs=$(docker exec "$container" find /var/lib/edgewatch/tmp/scanner -type f -name 'edgewatch-naabu-targets-*' -print 2>/dev/null || true)
 [ "$remaining_inputs" = "$quarantined_target" ] || fail "the proof-timeout fixture left unexpected target-input state: $remaining_inputs"
 
 # A stand-in Nmap that leaves a background process that ignores the hangup of
@@ -1066,7 +1439,9 @@ stop_daemon
 # required to create and clean the per-invocation directory even though files
 # elsewhere remain reachable under this explicit fallback.
 daemon_landlock=off
+daemon_mounts=(--volume "$workdir/proc-fd-probe:$proc_fd_probe:ro")
 run_daemon identity-only auto "${bundled_caps[@]}"
+daemon_mounts=()
 daemon_landlock=auto
 expect_health "enforced - NET_RAW landlock:disabled seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
 identity_only_scan=$(python3 "$workdir/driver.py" scan "$base" "$state" identity-only "$tcp_ports" "$udp_ports")
@@ -1077,7 +1452,7 @@ job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
 nmap_pid=$(scanner_pid nmap)
 [ -n "$nmap_pid" ] || fail "the identity-only slow scan started no Nmap"
-expect_scanner_identity "$nmap_pid" "0000000000002000"
+expect_scanner_identity "$nmap_pid" "0000000000002000" "0000000000002000"
 expect_nmap_file_size_limit "identity-only Nmap" "$nmap_pid"
 cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
 [ "$cancelled" = canceled ] || fail "the identity-only Nmap scan ended '$cancelled'"
@@ -1087,9 +1462,9 @@ job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
 naabu_pid=$(scanner_pid naabu)
 [ -n "$naabu_pid" ] || fail "the identity-only slow Naabu scan started no Naabu"
-expect_scanner_identity "$naabu_pid" "0000000000002000"
+expect_scanner_identity "$naabu_pid" "0000000000002000" "0000000000002000"
 expect_scanner_limits Naabu "$naabu_pid"
-expect_private_naabu_tmp "$naabu_pid"
+expect_private_naabu_tmp "$naabu_pid" "0000000000002000" "0000000000002000"
 cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
 [ "$cancelled" = canceled ] || fail "the identity-only Naabu scan ended '$cancelled'"
 expect_no_scanner_processes "the identity-only cancelled Naabu scan"

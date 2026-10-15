@@ -979,16 +979,36 @@ func TestPrepareLinuxScannerInvocationRejectsInvalidInputsBeforeLease(t *testing
 			command.Err = errors.New("invalid command")
 			return command
 		}},
+		{name: "nil command", ctx: context.Background(), policy: scannerPreparationPolicy(helper), command: func() *exec.Cmd { return nil }},
+		{name: "missing command arguments", ctx: context.Background(), policy: scannerPreparationPolicy(helper), command: func() *exec.Cmd {
+			return &exec.Cmd{Path: "/bin/true"}
+		}},
+		{name: "NUL in executable path", ctx: context.Background(), policy: scannerPreparationPolicy(helper), command: func() *exec.Cmd {
+			return &exec.Cmd{Path: "/bin/true\x00invalid", Args: []string{"/bin/true"}}
+		}},
 		{name: "too many inherited files", ctx: context.Background(), policy: scannerPreparationPolicy(helper), command: func() *exec.Cmd {
 			return &exec.Cmd{Path: "/bin/true", Args: []string{"/bin/true"}, ExtraFiles: make([]*os.File, maxInheritedFiles-1)}
 		}},
+		{name: "wrong process profile", ctx: context.Background(), policy: func() *Policy {
+			policy := scannerPreparationPolicy(helper)
+			policy.profile = Notifier
+			return policy
+		}(), command: func() *exec.Cmd { return exec.Command("/bin/true") }},
+		{name: "unenforced policy", ctx: context.Background(), policy: func() *Policy {
+			policy := scannerPreparationPolicy(helper)
+			policy.enforce = false
+			return policy
+		}(), command: func() *exec.Cmd { return exec.Command("/bin/true") }},
+		{name: "relative supervisor executable", ctx: context.Background(), policy: scannerPreparationPolicy("relative-helper"), command: func() *exec.Cmd { return exec.Command("/bin/true") }},
 		{name: "missing supervisor executable", ctx: context.Background(), policy: scannerPreparationPolicy("/does/not/exist/edgewatch"), command: func() *exec.Cmd { return exec.Command("/bin/true") }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var allocatorCalls int
-			test.policy.identityAllocator = func(context.Context) (identityLease, error) {
-				allocatorCalls++
-				return &supervisorTestLease{identityOK: true}, nil
+			if test.policy != nil {
+				test.policy.identityAllocator = func(context.Context) (identityLease, error) {
+					allocatorCalls++
+					return &supervisorTestLease{identityOK: true}, nil
+				}
 			}
 			invocation, err := prepareLinuxScannerInvocation(test.ctx, test.command(), test.policy, false)
 			if err == nil || invocation != nil {
@@ -999,6 +1019,31 @@ func TestPrepareLinuxScannerInvocationRejectsInvalidInputsBeforeLease(t *testing
 			}
 		})
 	}
+
+	t.Run("nil and explicit off policies leave command and allocator untouched", func(t *testing.T) {
+		for _, policy := range []*Policy{nil, {profile: Scanner, status: Status{Mode: ModeOff}}} {
+			command := exec.Command("/bin/true")
+			path, args := command.Path, append([]string(nil), command.Args...)
+			if invocation, err := prepareLinuxScannerInvocation(context.Background(), command, policy, false); err != nil || invocation != nil {
+				t.Fatalf("unconfined policy returned invocation %v, error %v", invocation, err)
+			}
+			if command.Path != path || !reflect.DeepEqual(command.Args, args) {
+				t.Fatalf("unconfined policy mutated command to %q %q", command.Path, command.Args)
+			}
+		}
+	})
+
+	t.Run("unavailable reservation refuses before acquiring a replacement lease", func(t *testing.T) {
+		policy := scannerPreparationPolicy(helper)
+		policy.identityReservation = &ScannerIdentityReservation{}
+		policy.identityAllocator = func(context.Context) (identityLease, error) {
+			t.Fatal("unavailable reservation acquired a replacement lease")
+			return nil, nil
+		}
+		if invocation, err := prepareLinuxScannerInvocation(context.Background(), exec.Command("/bin/true"), policy, false); err == nil || invocation != nil {
+			t.Fatalf("unavailable reservation returned invocation %v, error %v", invocation, err)
+		}
+	})
 }
 
 func TestPrepareLinuxScannerInvocationReleasesOrQuarantinesFailedSetupLease(t *testing.T) {

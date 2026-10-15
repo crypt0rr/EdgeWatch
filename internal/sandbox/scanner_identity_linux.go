@@ -639,9 +639,17 @@ func validateScannerIdentityParent(fd int) error {
 }
 
 func ensureScannerIdentityDirectory() error {
+	return ensureScannerIdentityDirectoryAt(scannerIdentityMarkerDir)
+}
+
+// ensureScannerIdentityDirectoryAt validates the durable state anchor before
+// the allocator creates or opens its private child directory. Production
+// supplies the fixed /var/lib/edgewatch path; the path parameter keeps the
+// ownership and mode contract testable with isolated directories.
+func ensureScannerIdentityDirectoryAt(path string) error {
 	// The allocator is durable state, not RuntimeDirectory state: a service
 	// restart must not erase leases for a same-boot orphaned process tree.
-	fd, err := unix.Open(scannerIdentityMarkerDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return errors.New("scanner identity allocator durable state directory is unavailable")
 	}
@@ -702,11 +710,18 @@ func lockScannerIdentity(ctx context.Context, fd int) error {
 }
 
 func validateScannerIdentityRangeMapping(uidStart, count uint32) error {
-	uidRanges, err := readIDMap("/proc/self/uid_map")
+	return validateScannerIdentityRangeMappingFromPaths(uidStart, count, "/proc/self/uid_map", "/proc/self/gid_map")
+}
+
+// validateScannerIdentityRangeMappingFromPaths checks every candidate UID and
+// GID against the mappings visible to this process. Keeping the paths explicit
+// makes the production preflight contract testable with isolated map fixtures.
+func validateScannerIdentityRangeMappingFromPaths(uidStart, count uint32, uidPath, gidPath string) error {
+	uidRanges, err := readIDMap(uidPath)
 	if err != nil {
 		return errors.New("scanner identity allocator: UID mapping is unavailable")
 	}
-	gidRanges, err := readIDMap("/proc/self/gid_map")
+	gidRanges, err := readIDMap(gidPath)
 	if err != nil {
 		return errors.New("scanner identity allocator: GID mapping is unavailable")
 	}
@@ -863,14 +878,28 @@ func currentPIDNamespaceInode() (uint64, error) {
 // It is deliberately only used for empty-journal scope transitions, never to
 // reclaim a lease or treat an occupied journal as safe.
 func currentPrivateScannerRuntime() (bool, error) {
-	if os.Getpid() != 1 {
+	return privateScannerRuntimeFor(os.Getpid(), currentPIDNamespaceInode, currentPrivateScannerNamespace)
+}
+
+// privateScannerRuntimeFor implements the PID 1 bootstrap rule. Production
+// passes the actual PID and fixed procfs probes above; non-PID1 callers cannot
+// establish a new persistent container scope, even if their own /tmp appears
+// private. Existing scopes are reused only through the locked journal path.
+func privateScannerRuntimeFor(processID int, namespaceInode func() (uint64, error), privateScope func(uint64) (bool, error)) (bool, error) {
+	if processID != 1 {
 		return false, nil
 	}
-	namespace, err := currentPIDNamespaceInode()
+	if namespaceInode == nil || privateScope == nil {
+		return false, errors.New("private scanner runtime probes are unavailable")
+	}
+	namespace, err := namespaceInode()
 	if err != nil {
 		return false, err
 	}
-	return currentPrivateScannerNamespace(namespace)
+	if namespace == 0 {
+		return false, errors.New("private scanner runtime namespace is unavailable")
+	}
+	return privateScope(namespace)
 }
 
 // currentPrivateScannerNamespace verifies that this process's own PID

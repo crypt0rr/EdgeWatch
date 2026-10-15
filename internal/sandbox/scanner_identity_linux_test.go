@@ -31,6 +31,12 @@ func usePrivateScannerRuntime(allocator *scannerIdentityAllocator) *scannerIdent
 	return allocator
 }
 
+func useAttestedPrivateScannerScope(allocator *scannerIdentityAllocator, namespace uint64) *scannerIdentityAllocator {
+	allocator.privateRuntime = func() (bool, error) { return false, nil }
+	allocator.privateScope = func(current uint64) (bool, error) { return current == namespace, nil }
+	return allocator
+}
+
 func TestScannerIdentityAllocatorDurableLeaseState(t *testing.T) {
 	allocator := newTestScannerIdentityAllocator(t, 2)
 	first, err := allocator.acquire(context.Background())
@@ -304,6 +310,92 @@ func TestScannerIdentityAllocatorChangesPrivateNamespaceOnlyWithEmptyJournal(t *
 		}
 		if err := next.release(); err != nil {
 			t.Fatal(err)
+		}
+	})
+}
+
+func TestScannerIdentityAllocatorReusesAttestedScopeFromNonPID1(t *testing.T) {
+	t.Run("same private namespace reuses PID1 attestation and finishes leases", func(t *testing.T) {
+		bootstrap := usePrivateScannerRuntime(newTestScannerIdentityAllocator(t, 2))
+		initial, err := bootstrap.acquire(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := initial.release(); err != nil {
+			t.Fatal(err)
+		}
+
+		cli := useAttestedPrivateScannerScope(newScannerIdentityAllocatorForTest(bootstrap.directory, bootstrap.uidStart, bootstrap.count, testScannerBootID, 17), 17)
+		reused, err := cli.acquire(context.Background())
+		if err != nil {
+			t.Fatalf("reuse PID1-established private scope from non-PID1 caller: %v", err)
+		}
+		if !reused.privateRuntime {
+			t.Fatal("non-PID1 lease lost the validated private-runtime scope")
+		}
+		if err := reused.release(); err != nil {
+			t.Fatalf("release non-PID1 lease in its attested scope: %v", err)
+		}
+
+		quarantined, err := cli.acquire(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := quarantined.quarantine(); err != nil {
+			t.Fatalf("quarantine non-PID1 lease in its attested scope: %v", err)
+		}
+		journal, err := readTestScannerIdentityJournal(cli)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !journal.PrivateRuntime || journal.PIDNamespace != 17 || journal.Leases[quarantined.uid].State != "quarantined" {
+			t.Fatalf("non-PID1 scope or quarantine was not preserved: %+v", journal)
+		}
+	})
+
+	t.Run("private marker does not attest a native caller without matching temp scope", func(t *testing.T) {
+		bootstrap := usePrivateScannerRuntime(newTestScannerIdentityAllocator(t, 1))
+		initial, err := bootstrap.acquire(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := initial.release(); err != nil {
+			t.Fatal(err)
+		}
+
+		native := newScannerIdentityAllocatorForTest(bootstrap.directory, bootstrap.uidStart, bootstrap.count, testScannerBootID, 17)
+		if _, err := native.acquire(context.Background()); err == nil {
+			t.Fatal("native caller without the attested private /tmp scope reused a private journal")
+		}
+		journal, err := readTestScannerIdentityJournal(bootstrap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !journal.PrivateRuntime || len(journal.Leases) != 0 {
+			t.Fatalf("failed native reuse changed private scope: %+v", journal)
+		}
+	})
+
+	t.Run("non-PID1 caller cannot transition a changed namespace", func(t *testing.T) {
+		bootstrap := usePrivateScannerRuntime(newTestScannerIdentityAllocator(t, 1))
+		initial, err := bootstrap.acquire(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := initial.release(); err != nil {
+			t.Fatal(err)
+		}
+
+		changed := useAttestedPrivateScannerScope(newScannerIdentityAllocatorForTest(bootstrap.directory, bootstrap.uidStart, bootstrap.count, testScannerBootID, 18), 18)
+		if _, err := changed.acquire(context.Background()); err == nil {
+			t.Fatal("non-PID1 caller established a new private namespace scope")
+		}
+		journal, err := readTestScannerIdentityJournal(bootstrap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !journal.PrivateRuntime || journal.PIDNamespace != 17 || len(journal.Leases) != 0 {
+			t.Fatalf("failed namespace transition changed the attested scope: %+v", journal)
 		}
 	})
 }

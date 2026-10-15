@@ -49,6 +49,7 @@ type scannerIdentityAllocator struct {
 	bootID         func() (string, error)
 	pidNamespace   func() (uint64, error)
 	privateRuntime func() (bool, error)
+	privateScope   func(uint64) (bool, error)
 	validateMap    func(uint32, uint32) error
 	inUse          func(uint32, uint32) (map[uint32]struct{}, error)
 }
@@ -87,6 +88,7 @@ func productionScannerIdentityAllocator() *scannerIdentityAllocator {
 		bootID:         currentBootID,
 		pidNamespace:   currentPIDNamespaceInode,
 		privateRuntime: currentPrivateScannerRuntime,
+		privateScope:   currentPrivateScannerNamespace,
 		validateMap:    validateScannerIdentityRangeMapping,
 		inUse:          scannerIdentitiesInUse,
 	}
@@ -98,6 +100,7 @@ func newScannerIdentityAllocatorForTest(directory string, uidStart, count uint32
 		bootID:         func() (string, error) { return bootID, nil },
 		pidNamespace:   func() (uint64, error) { return pidNamespace, nil },
 		privateRuntime: func() (bool, error) { return false, nil },
+		privateScope:   func(uint64) (bool, error) { return false, nil },
 		validateMap:    func(uint32, uint32) error { return nil },
 		inUse:          func(uint32, uint32) (map[uint32]struct{}, error) { return map[uint32]struct{}{}, nil },
 	}
@@ -111,7 +114,7 @@ func (allocator *scannerIdentityAllocator) acquire(ctx context.Context) (*scanne
 		return nil, err
 	}
 	if allocator == nil || allocator.directory == "" || allocator.markerDir == "" || allocator.count == 0 || allocator.uidStart == 0 ||
-		uint64(allocator.uidStart)+uint64(allocator.count) > 1<<32 || allocator.bootID == nil || allocator.pidNamespace == nil || allocator.privateRuntime == nil || allocator.validateMap == nil || allocator.inUse == nil {
+		uint64(allocator.uidStart)+uint64(allocator.count) > 1<<32 || allocator.bootID == nil || allocator.pidNamespace == nil || allocator.privateRuntime == nil || allocator.privateScope == nil || allocator.validateMap == nil || allocator.inUse == nil {
 		return nil, errors.New("acquire scanner identity: allocator is invalid")
 	}
 	bootID, err := allocator.bootID()
@@ -152,7 +155,7 @@ func (allocator *scannerIdentityAllocator) acquire(ctx context.Context) (*scanne
 		return nil, err
 	}
 
-	journal, err := allocator.loadOrInitialize(directoryFD, markerFD, bootID, pidNamespace, privateRuntime)
+	journal, privateRuntime, err := allocator.loadOrInitialize(directoryFD, markerFD, bootID, pidNamespace, privateRuntime)
 	if err != nil {
 		return nil, err
 	}
@@ -241,8 +244,11 @@ func (lease *scannerIdentityLease) release() error {
 		return errors.New("release scanner identity: boot changed while lease was active")
 	}
 	pidNamespace, err := allocator.pidNamespace()
-	privateRuntime, privateErr := allocator.privateRuntime()
-	if err != nil || pidNamespace != lease.pidNS || privateErr != nil || privateRuntime != lease.privateRuntime {
+	if err != nil || pidNamespace != lease.pidNS {
+		return errors.New("release scanner identity: PID namespace changed while lease was active")
+	}
+	privateRuntime, privateErr := allocator.privateRuntimeForLease(lease, bootID, pidNamespace)
+	if privateErr != nil || privateRuntime != lease.privateRuntime {
 		return errors.New("release scanner identity: PID namespace changed while lease was active")
 	}
 	marker, err := readScannerIdentityMarker(markerFD)
@@ -296,8 +302,11 @@ func (lease *scannerIdentityLease) update(state string) error {
 		return errors.New("update scanner identity: boot changed while lease was active")
 	}
 	pidNamespace, err := allocator.pidNamespace()
-	privateRuntime, privateErr := allocator.privateRuntime()
-	if err != nil || pidNamespace != lease.pidNS || privateErr != nil || privateRuntime != lease.privateRuntime {
+	if err != nil || pidNamespace != lease.pidNS {
+		return errors.New("update scanner identity: PID namespace changed while lease was active")
+	}
+	privateRuntime, privateErr := allocator.privateRuntimeForLease(lease, bootID, pidNamespace)
+	if privateErr != nil || privateRuntime != lease.privateRuntime {
 		return errors.New("update scanner identity: PID namespace changed while lease was active")
 	}
 	marker, err := readScannerIdentityMarker(markerFD)
@@ -326,49 +335,79 @@ func (lease *scannerIdentityLease) update(state string) error {
 	return nil
 }
 
-func (allocator *scannerIdentityAllocator) loadOrInitialize(directoryFD, markerFD int, bootID string, pidNamespace uint64, privateRuntime bool) (scannerIdentityJournal, error) {
+func (allocator *scannerIdentityAllocator) loadOrInitialize(directoryFD, markerFD int, bootID string, pidNamespace uint64, privateRuntime bool) (scannerIdentityJournal, bool, error) {
 	marker, markerErr := readScannerIdentityMarker(markerFD)
 	journal, journalErr := readScannerIdentityJournal(directoryFD)
+	if !privateRuntime && markerErr == nil && journalErr == nil &&
+		marker.Version == scannerIdentityVersion && journal.Version == scannerIdentityVersion &&
+		marker.BootID == bootID && journal.BootID == bootID &&
+		marker.PIDNamespace == pidNamespace && journal.PIDNamespace == pidNamespace &&
+		marker.PrivateRuntime && journal.PrivateRuntime && journal.Leases != nil {
+		// PID 1 establishes private-runtime scope. Other processes in the same
+		// namespace may reuse that attested scope only after validating both
+		// durable records under the allocator lock and confirming their current
+		// PID namespace and /tmp mount still match it.
+		if err := allocator.validateJournal(journal); err != nil {
+			return scannerIdentityJournal{}, false, err
+		}
+		matches, err := allocator.privateScope(pidNamespace)
+		if err != nil {
+			return scannerIdentityJournal{}, false, errors.New("scanner identity allocator: private runtime scope cannot be verified")
+		}
+		privateRuntime = matches
+	}
 	switch {
 	case errors.Is(markerErr, unix.ENOENT) && errors.Is(journalErr, unix.ENOENT):
-		return initializeScannerIdentityScope(directoryFD, markerFD, bootID, pidNamespace, privateRuntime, "initialize")
+		journal, err := initializeScannerIdentityScope(directoryFD, markerFD, bootID, pidNamespace, privateRuntime, "initialize")
+		return journal, privateRuntime, err
 	case markerErr != nil:
 		if errors.Is(markerErr, unix.ENOENT) && journalErr == nil {
 			if journal.Version == scannerIdentityVersion && journal.BootID == bootID && journal.PIDNamespace == pidNamespace && journal.PrivateRuntime == privateRuntime && journal.Leases != nil && len(journal.Leases) == 0 {
 				// A crash between the initial empty journal and marker commits is
 				// recoverable because no UID could have been handed out yet.
 				if err := allocator.validateJournal(journal); err != nil {
-					return scannerIdentityJournal{}, err
+					return scannerIdentityJournal{}, privateRuntime, err
 				}
 				if err := writeScannerIdentityMarker(markerFD, bootID, pidNamespace, privateRuntime); err != nil {
-					return scannerIdentityJournal{}, errors.New("complete scanner identity allocator initialization: durable marker write failed")
+					return scannerIdentityJournal{}, privateRuntime, errors.New("complete scanner identity allocator initialization: durable marker write failed")
 				}
-				return journal, nil
+				return journal, privateRuntime, nil
 			}
 			if journal.Version == scannerIdentityVersion && validBootID(journal.BootID) && journal.BootID != bootID {
 				// The journal itself records a prior kernel boot, so its scanner
 				// processes cannot still exist. Reinitialize durably before making
 				// the new scope visible in the anchor.
-				return initializeScannerIdentityScope(directoryFD, markerFD, bootID, pidNamespace, privateRuntime, "reset after boot change")
+				journal, err := initializeScannerIdentityScope(directoryFD, markerFD, bootID, pidNamespace, privateRuntime, "reset after boot change")
+				return journal, privateRuntime, err
 			}
 		}
-		return scannerIdentityJournal{}, errors.New("scanner identity allocator: boot marker is missing or invalid")
+		return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: boot marker is missing or invalid")
 	case marker.BootID != bootID:
 		// A changed kernel boot ID proves every process from the old lease set
 		// has exited. Reset only after recording the new scope under the lock.
-		return initializeScannerIdentityScope(directoryFD, markerFD, bootID, pidNamespace, privateRuntime, "reset after boot change")
+		journal, err := initializeScannerIdentityScope(directoryFD, markerFD, bootID, pidNamespace, privateRuntime, "reset after boot change")
+		return journal, privateRuntime, err
 	case journalErr != nil:
-		return scannerIdentityJournal{}, errors.New("scanner identity allocator: same-boot lease journal is missing or invalid")
+		return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: same-boot lease journal is missing or invalid")
 	case marker.PIDNamespace != pidNamespace:
-		return allocator.transitionEmptyPrivateScope(directoryFD, markerFD, bootID, pidNamespace, privateRuntime, marker, journal)
+		journal, err := allocator.transitionEmptyPrivateScope(directoryFD, markerFD, bootID, pidNamespace, privateRuntime, marker, journal)
+		return journal, privateRuntime, err
 	case journal.Version != scannerIdentityVersion || journal.BootID != bootID || journal.PIDNamespace != pidNamespace || journal.PrivateRuntime != privateRuntime || journal.Leases == nil:
-		return scannerIdentityJournal{}, errors.New("scanner identity allocator: journal scope or version is invalid")
+		return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: journal scope or version is invalid")
 	default:
 		if err := allocator.validateJournal(journal); err != nil {
-			return scannerIdentityJournal{}, err
+			return scannerIdentityJournal{}, privateRuntime, err
 		}
-		return journal, nil
+		return journal, privateRuntime, nil
 	}
+}
+
+func (allocator *scannerIdentityAllocator) privateRuntimeForLease(lease *scannerIdentityLease, bootID string, pidNamespace uint64) (bool, error) {
+	privateRuntime, err := allocator.privateRuntime()
+	if err != nil || privateRuntime || lease == nil || !lease.privateRuntime || bootID != lease.bootID || pidNamespace != lease.pidNS {
+		return privateRuntime, err
+	}
+	return allocator.privateScope(pidNamespace)
 }
 
 // transitionEmptyPrivateScope permits a same-boot PID namespace change only
@@ -818,6 +857,19 @@ func currentPrivateScannerRuntime() (bool, error) {
 	if os.Getpid() != 1 {
 		return false, nil
 	}
+	namespace, err := currentPIDNamespaceInode()
+	if err != nil {
+		return false, err
+	}
+	return currentPrivateScannerNamespace(namespace)
+}
+
+// currentPrivateScannerNamespace verifies that this process remains in the
+// attested PID namespace and that its /proc view and temporary mount still
+// match the private runtime established by PID 1. It does not establish a new
+// private scope; callers may use it only with a validated same-scope marker
+// and journal, or a lease created within that scope.
+func currentPrivateScannerNamespace(namespace uint64) (bool, error) {
 	var selfNS, initNS unix.Stat_t
 	if err := unix.Stat("/proc/self/ns/pid", &selfNS); err != nil {
 		return false, err
@@ -825,7 +877,7 @@ func currentPrivateScannerRuntime() (bool, error) {
 	if err := unix.Stat("/proc/1/ns/pid", &initNS); err != nil {
 		return false, err
 	}
-	if selfNS.Ino != initNS.Ino {
+	if selfNS.Ino != namespace || initNS.Ino != namespace {
 		return false, nil
 	}
 	mountInfo, err := os.ReadFile("/proc/self/mountinfo")

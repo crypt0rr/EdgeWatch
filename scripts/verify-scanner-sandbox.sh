@@ -51,7 +51,7 @@ trap cleanup EXIT
 fail() {
   echo "scanner sandbox check failed: $*" >&2
   if [ -n "$container" ]; then
-    docker logs "$container" 2>&1 | tail -80 >&2 || true
+    docker logs "$container" 2>&1 | sed -E 's/("setup_token"[[:space:]]*:[[:space:]]*")[^"]*"/\1[REDACTED]"/g' | tail -80 >&2 || true
     # What was running, and what the daemon thought it was doing, when the
     # check gave up.
     echo "processes in the daemon container (name state ppid uid):" >&2

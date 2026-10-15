@@ -7,9 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -418,6 +421,52 @@ func TestHasPrivateScannerTemporaryMount(t *testing.T) {
 				t.Fatalf("hasPrivateScannerTemporaryMount() = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestMatchesPrivateScannerScope(t *testing.T) {
+	privateMount := []byte("40 30 0:35 / /tmp rw,nosuid,nodev - tmpfs tmpfs rw,size=131072k\n")
+	sharedMount := []byte("40 30 0:35 / /tmp rw shared:1 - tmpfs tmpfs rw\n")
+	for _, test := range []struct {
+		name              string
+		expectedNamespace uint64
+		currentNamespace  uint64
+		mountInfo         []byte
+		want              bool
+	}{
+		{name: "same attested namespace and private temp mount", expectedNamespace: 17, currentNamespace: 17, mountInfo: privateMount, want: true},
+		{name: "different current namespace", expectedNamespace: 17, currentNamespace: 18, mountInfo: privateMount},
+		{name: "shared temp mount", expectedNamespace: 17, currentNamespace: 17, mountInfo: sharedMount},
+		{name: "no attested namespace", currentNamespace: 17, mountInfo: privateMount},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := matchesPrivateScannerScope(test.expectedNamespace, test.currentNamespace, test.mountInfo); got != test.want {
+				t.Fatalf("matchesPrivateScannerScope() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCurrentPrivateScannerNamespaceAllowsNonDumpableCaller(t *testing.T) {
+	const helperEnv = "EDGEWATCH_TEST_NON_DUMPABLE_SCANNER_SCOPE"
+	if os.Getenv(helperEnv) == "1" {
+		namespace, err := currentPIDNamespaceInode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+			t.Fatalf("make helper process non-dumpable: %v", err)
+		}
+		if _, err := currentPrivateScannerNamespace(namespace); err != nil {
+			t.Fatalf("check same-namespace scope for non-dumpable caller: %v", err)
+		}
+		return
+	}
+
+	command := exec.Command(os.Args[0], "-test.run=^TestCurrentPrivateScannerNamespaceAllowsNonDumpableCaller$")
+	command.Env = append(os.Environ(), helperEnv+"=1")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("non-dumpable namespace check failed: %v\n%s", err, output)
 	}
 }
 

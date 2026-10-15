@@ -864,27 +864,27 @@ func currentPrivateScannerRuntime() (bool, error) {
 	return currentPrivateScannerNamespace(namespace)
 }
 
-// currentPrivateScannerNamespace verifies that this process remains in the
-// attested PID namespace and that its /proc view and temporary mount still
-// match the private runtime established by PID 1. It does not establish a new
+// currentPrivateScannerNamespace verifies that this process's own PID
+// namespace and temporary mount still match the private runtime established
+// by PID 1. It does not inspect /proc/1: the daemon is deliberately
+// non-dumpable, so a separate health process may be denied access to that
+// proc entry even in the same PID namespace. This does not establish a new
 // private scope; callers may use it only with a validated same-scope marker
 // and journal, or a lease created within that scope.
 func currentPrivateScannerNamespace(namespace uint64) (bool, error) {
-	var selfNS, initNS unix.Stat_t
-	if err := unix.Stat("/proc/self/ns/pid", &selfNS); err != nil {
+	currentNamespace, err := currentPIDNamespaceInode()
+	if err != nil {
 		return false, err
-	}
-	if err := unix.Stat("/proc/1/ns/pid", &initNS); err != nil {
-		return false, err
-	}
-	if selfNS.Ino != namespace || initNS.Ino != namespace {
-		return false, nil
 	}
 	mountInfo, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {
 		return false, err
 	}
-	return hasPrivateScannerTemporaryMount(mountInfo), nil
+	return matchesPrivateScannerScope(namespace, currentNamespace, mountInfo), nil
+}
+
+func matchesPrivateScannerScope(expectedNamespace, currentNamespace uint64, mountInfo []byte) bool {
+	return expectedNamespace != 0 && currentNamespace == expectedNamespace && hasPrivateScannerTemporaryMount(mountInfo)
 }
 
 func hasPrivateScannerTemporaryMount(mountInfo []byte) bool {

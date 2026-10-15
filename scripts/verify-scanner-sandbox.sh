@@ -29,7 +29,47 @@ workdir=$(mktemp -d)
 container=
 listener_pid=
 webhook_pid=
+held_scanner_pid=
+held_scanner_start=
+held_scanner_name=
+
+# resume_held_scanner continues only the process whose PID and kernel start
+# time were recorded by hold_scanner_process. If it exited or its PID was
+# reused, there is no process left to resume.
+resume_held_scanner() {
+  [ -n "$held_scanner_pid" ] || return 0
+  local output
+  if output=$(docker exec "$container" /bin/sh -c '
+pid=$1
+expected_name=$2
+expected_start=$3
+status="/proc/$pid/status"
+[ -d "/proc/$pid" ] || exit 0
+[ -r "$status" ] || { echo "cannot read $status while resuming held scanner" >&2; exit 12; }
+start=$(awk "{print \$22}" "/proc/$pid/stat" 2>/dev/null) || { echo "cannot read /proc/$pid/stat while resuming held scanner" >&2; exit 12; }
+[ -n "$start" ] || { echo "empty process start time while resuming held scanner" >&2; exit 12; }
+[ "$start" = "$expected_start" ] || exit 0
+name=$(awk "/^Name:/{print \$2}" "$status" 2>/dev/null) || { echo "cannot read process name while resuming held scanner" >&2; exit 12; }
+[ "$name" = "$expected_name" ] || { echo "held scanner PID now names $name, expected $expected_name" >&2; exit 12; }
+if ! kill -CONT "$pid" 2>/dev/null; then
+  [ ! -d "/proc/$pid" ] && exit 0
+  echo "cannot resume held scanner PID $pid" >&2
+  exit 12
+fi
+' sh "$held_scanner_pid" "$held_scanner_name" "$held_scanner_start" 2>&1); then
+    held_scanner_pid=
+    held_scanner_start=
+    held_scanner_name=
+    return 0
+  fi
+  printf 'could not resume held scanner: %s\n' "$output" >&2
+  return 1
+}
+
 cleanup() {
+  if [ -n "$held_scanner_pid" ] && [ -n "$container" ]; then
+    resume_held_scanner >/dev/null 2>&1 || true
+  fi
   if [ -n "$container" ]; then
     docker logs "$container" >"$workdir/last-daemon.log" 2>&1 || true
     docker rm -f "$container" >/dev/null 2>&1 || true
@@ -381,6 +421,150 @@ scanner_pid() {
   printf '%s\n' "$pid"
 }
 
+# hold_scanner_process NAME stops one exact live scanner process before the
+# verifier makes separate /proc reads. Exit 10 from the container helper means
+# the process exited or changed while being found, so the bounded outer loop
+# retries. Other errors mean a live process could not be stopped or inspected
+# and fail the verifier instead of being mistaken for a short-lived scan.
+hold_scanner_process() {
+  local wanted=$1 output result_code
+  for attempt in $(seq 1 120); do
+    if output=$(docker exec "$container" /bin/sh -c '
+wanted=$1
+if [ ! -r /proc/self/status ]; then
+  echo "cannot inspect /proc/self/status in daemon container" >&2
+  exit 11
+fi
+for status in /proc/[0-9]*/status; do
+  [ -e "$status" ] || continue
+  if [ ! -r "$status" ]; then
+    procdir=${status%/status}
+    [ ! -d "$procdir" ] && continue
+    echo "cannot inspect live process status $status" >&2
+    exit 11
+  fi
+  name=$(awk "/^Name:/{print \$2}" "$status" 2>/dev/null) || {
+    procdir=${status%/status}
+    [ ! -d "$procdir" ] && continue
+    echo "cannot parse live process status $status" >&2
+    exit 11
+  }
+  [ "$name" = "$wanted" ] || continue
+  pid=${status#/proc/}
+  pid=${pid%/status}
+  [ -d "/proc/$pid" ] || exit 10
+  start=$(awk "{print \$22}" "/proc/$pid/stat" 2>/dev/null) || {
+    [ ! -d "/proc/$pid" ] && exit 10
+    echo "cannot read /proc/$pid/stat for live $wanted process" >&2
+    exit 11
+  }
+  [ -n "$start" ] || {
+    [ ! -d "/proc/$pid" ] && exit 10
+    echo "empty process start time for live $wanted process $pid" >&2
+    exit 11
+  }
+  # Install cleanup before SIGSTOP so a signal/error in the handoff window
+  # cannot strand a stopped scanner. The trap owns nothing until SIGSTOP
+  # succeeds; after that it resumes only the same PID/starttime pair.
+  owned_stop=0
+  cleanup_stopped_process() {
+    result=$?
+    trap - EXIT HUP INT TERM
+    if [ "$owned_stop" = 1 ]; then
+      if [ -d "/proc/$pid" ]; then
+        cleanup_start=$(awk "{print \$22}" "/proc/$pid/stat" 2>/dev/null) || cleanup_start=
+        if [ "$cleanup_start" = "$start" ]; then
+          if ! kill -CONT "$pid" 2>/dev/null && [ -d "/proc/$pid" ]; then
+            echo "could not resume exact held process $pid/$start during helper cleanup" >&2
+          fi
+        else
+          echo "held PID $pid changed identity during helper cleanup; not signalling it" >&2
+        fi
+        # Any live task after an early helper exit means ownership was not
+        # transferred. Fail so the outer verifier tears down its container.
+        result=12
+      elif [ "$result" -eq 0 ]; then
+        # A successful helper must have transferred a PID/starttime pair.
+        result=12
+      fi
+    fi
+    exit "$result"
+  }
+  trap cleanup_stopped_process EXIT HUP INT TERM
+
+  stop_error=$(kill -STOP "$pid" 2>&1)
+  if [ "$?" -ne 0 ]; then
+    [ ! -d "/proc/$pid" ] && exit 10
+    current_start=$(awk "{print \$22}" "/proc/$pid/stat" 2>/dev/null) || {
+      [ ! -d "/proc/$pid" ] && exit 10
+      echo "cannot read /proc/$pid/stat after failed SIGSTOP for live $wanted process" >&2
+      exit 11
+    }
+    [ -n "$current_start" ] || {
+      [ ! -d "/proc/$pid" ] && exit 10
+      echo "empty process start time after failed SIGSTOP for live $wanted process $pid" >&2
+      exit 11
+    }
+    [ "$current_start" = "$start" ] || exit 10
+    echo "SIGSTOP failed for live $wanted process $pid: $stop_error" >&2
+    exit 11
+  fi
+
+  # SIGSTOP succeeded. Until identity is handed to the outer shell, this
+  # helper owns resumption and only signals the same PID/starttime pair.
+  owned_stop=1
+
+  for check in 1 2 3 4 5 6 7 8 9 10; do
+    [ -d "/proc/$pid" ] || exit 10
+    [ -r "$status" ] || { echo "cannot read $status for live $wanted process" >&2; exit 11; }
+    current_start=$(awk "{print \$22}" "/proc/$pid/stat" 2>/dev/null) || { echo "cannot read /proc/$pid/stat after SIGSTOP" >&2; exit 11; }
+    current_name=$(awk "/^Name:/{print \$2}" "$status" 2>/dev/null) || { echo "cannot read process name after SIGSTOP" >&2; exit 11; }
+    current_state=$(awk "/^State:/{print \$2}" "$status" 2>/dev/null) || { echo "cannot read process state after SIGSTOP" >&2; exit 11; }
+    if [ "$current_start" != "$start" ]; then
+      echo "PID $pid changed identity after SIGSTOP; refusing to signal or retry it" >&2
+      exit 11
+    fi
+    if [ "$current_name" != "$wanted" ]; then
+      echo "PID $pid changed name after SIGSTOP; refusing to inspect it as $wanted" >&2
+      exit 11
+    fi
+    if [ "$current_state" = T ] || [ "$current_state" = t ]; then
+      # Drop the helper cleanup trap before emitting the identity. If output
+      # fails or the helper is interrupted now, the outer failure path removes
+      # the owned container rather than accepting an incomplete transfer.
+      trap - EXIT HUP INT TERM
+      owned_stop=0
+      if ! printf "%s %s\\n" "$pid" "$start"; then
+        echo "could not transfer held process identity to verifier" >&2
+        exit 11
+      fi
+      exit 0
+    fi
+    sleep 0.02
+  done
+  echo "live $wanted process $pid did not stop for inspection" >&2
+  exit 11
+done
+echo "could not find live process named $wanted in readable /proc entries" >&2
+exit 10
+' sh "$wanted" 2>&1); then
+      read -r held_scanner_pid held_scanner_start <<<"$output"
+      if [ -n "$held_scanner_pid" ] && [ -n "$held_scanner_start" ]; then
+        held_scanner_name=$wanted
+        return 0
+      fi
+      fail "the process hold returned an invalid identity for $wanted: $output"
+    else
+      result_code=$?
+      case "$result_code" in
+        10) sleep 0.25 ;;
+        *) fail "could not hold a live $wanted process for inspection (exit $result_code): $output" ;;
+      esac
+    fi
+  done
+  fail "no live $wanted process remained long enough to hold for inspection"
+}
+
 # scan_file PATTERN prints the path of a running scan's private file whose
 # name matches PATTERN, which the daemon keeps in the scanner files
 # directory.
@@ -645,18 +829,13 @@ fi
 started=$(python3 "$workdir/driver.py" start "$base" "$state" slow "1-20000")
 job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
-nmap_identity=
-for attempt in $(seq 1 60); do
-  nmap_identity=$(docker exec "$container" /bin/sh -c 'for status in /proc/[0-9]*/status; do if grep -q "^Name:[[:space:]]*nmap$" "$status" 2>/dev/null; then awk "/^Uid:/{uid=\$2} /^Gid:/{gid=\$2} /^Groups:/{groups=\$2} /^CapEff:/{cap=\$2} END{print uid, gid, (groups == \"\" ? \"-\" : groups), cap}" "$status"; pid=${status#/proc/}; echo "${pid%/status}"; break; fi; done' 2>/dev/null || true)
-  [ -n "$nmap_identity" ] && break
-  sleep 0.5
-done
-nmap_pid=$(printf '%s\n' "$nmap_identity" | tail -1)
-nmap_identity=$(printf '%s\n' "$nmap_identity" | head -1)
-[ "$nmap_identity" = "65532 65532 - 0000000000002000" ] || fail "running Nmap identity is '$nmap_identity', want '65532 65532 - 0000000000002000'"
+hold_scanner_process nmap
+nmap_pid=$held_scanner_pid
+expect_scanner_identity "$nmap_pid"
 expect_filtered Nmap "$(process_hardening "$nmap_pid")"
 expect_scanner_limits Nmap "$nmap_pid"
 expect_nmap_file_size_limit Nmap "$nmap_pid"
+resume_held_scanner || fail "could not resume the enforced Nmap process before cancellation"
 cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
 [ "$cancelled" = canceled ] || fail "the cancelled scan ended '$cancelled'"
 if docker exec "$container" /bin/sh -c 'grep -l "^Name:[[:space:]]*nmap$" /proc/[0-9]*/status' >/dev/null 2>&1; then
@@ -762,10 +941,11 @@ expect_no_naabu_temporary_namespaces
 started=$(python3 "$workdir/driver.py" start "$base" "$state" slow-identity-only "1-20000")
 job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
-nmap_pid=$(scanner_pid nmap)
-[ -n "$nmap_pid" ] || fail "the identity-only slow scan started no Nmap"
+hold_scanner_process nmap
+nmap_pid=$held_scanner_pid
 expect_scanner_identity "$nmap_pid"
 expect_nmap_file_size_limit "identity-only Nmap" "$nmap_pid"
+resume_held_scanner || fail "could not resume the identity-only Nmap process before cancellation"
 cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
 [ "$cancelled" = canceled ] || fail "the identity-only Nmap scan ended '$cancelled'"
 expect_no_scanner_processes "the identity-only cancelled Nmap scan"

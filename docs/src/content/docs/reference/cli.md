@@ -134,10 +134,12 @@ so before it saves a scan, the daemon renews its heartbeat for as long as
 saving that scan may take. With a valid `--output json`, health prints one JSON
 document on success and on command failures: an unhealthy result includes
 `"status": "unhealthy"` and the reason in `error`; failures before a full
-health report is available include those same fields. The command still exits
-non-zero on failure. Invalid flags or output values are rejected before the
-health report is produced. Text output prints nothing on stdout when health is
-unhealthy or the configuration/database cannot be read. A healthy or starting
+health report is available include those same fields. For configuration-load
+failures, JSON and stderr use a generic error message so malformed values are
+not echoed; the command still exits non-zero.
+Invalid flags or output values are rejected before the health report is
+produced. Text output prints nothing on stdout when health is unhealthy or the
+configuration/database cannot be read. A healthy or starting
 daemon prints its status, and `warnings` list
 actions that do not stop EdgeWatch, such as removing imported notification URLs
 from `config.yaml`, or scanner or notification processes that run as UID 0

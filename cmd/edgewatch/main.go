@@ -174,7 +174,7 @@ func run(args []string) error {
 	}
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
-		return reportHealthCommandFailure(cmd, *output, err)
+		return reportHealthConfigurationFailure(cmd, *output, err)
 	}
 	if cmd == "daemon" {
 		// Refuse an unusable key file or notification URL before the
@@ -884,6 +884,29 @@ func reportHealthCommandFailure(cmd, output string, err error) error {
 		return errors.Join(err, fmt.Errorf("print health failure report: %w", printErr))
 	}
 	return err
+}
+
+// Configuration decoding errors can contain the offending YAML scalar. Keep
+// that value out of machine-readable health output and the CLI's stderr while
+// preserving the original cause for errors.Is and errors.As.
+func reportHealthConfigurationFailure(cmd, output string, err error) error {
+	if err == nil || cmd != "health" || output != "json" {
+		return err
+	}
+	safeErr := healthConfigurationLoadError{cause: err}
+	return reportHealthCommandFailure(cmd, output, safeErr)
+}
+
+type healthConfigurationLoadError struct {
+	cause error
+}
+
+func (e healthConfigurationLoadError) Error() string {
+	return "configuration could not be loaded"
+}
+
+func (e healthConfigurationLoadError) Unwrap() error {
+	return e.cause
 }
 
 // healthReport is the health command's document: the daemon's health, how

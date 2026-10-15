@@ -766,16 +766,17 @@ func TestHealthCommandNamesMissingDaemonHeartbeat(t *testing.T) {
 		name        string
 		configPath  string
 		wantMessage string
+		wantJSONErr string
 		database    string
 		wantFloor   bool
 	}{
-		{name: "missing configuration", configPath: filepath.Join(dir, "missing-config.yaml")},
-		{name: "invalid configuration", configPath: invalidConfigPath, wantMessage: "definitely_unknown"},
+		{name: "missing configuration", configPath: filepath.Join(dir, "absent-config.yaml"), wantJSONErr: "configuration could not be loaded"},
+		{name: "invalid configuration", configPath: invalidConfigPath, wantJSONErr: "configuration could not be loaded"},
 		{name: "missing database", configPath: writeHealthConfig(t, dir, "missing", filepath.Join(dir, "missing.db")), wantMessage: "database", database: filepath.Join(dir, "missing.db")},
 		{name: "below upgrade floor", configPath: writeHealthConfig(t, dir, "below-floor", belowFloorDB), wantMessage: "older than schema", database: belowFloorDB, wantFloor: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			stdout, err := captureHealthJSONFailure(t, tc.configPath)
+			stdout, err := captureHealthJSONFailure(t, tc.configPath, tc.wantJSONErr)
 			if tc.wantMessage != "" && !strings.Contains(err.Error(), tc.wantMessage) {
 				t.Fatalf("health error = %v, want it to contain %q", err, tc.wantMessage)
 			}
@@ -815,7 +816,7 @@ func writeHealthConfig(t *testing.T, dir, name, database string) string {
 	return path
 }
 
-func captureHealthJSONFailure(t *testing.T, configPath string) (string, error) {
+func captureHealthJSONFailure(t *testing.T, configPath, wantJSONError string) (string, error) {
 	t.Helper()
 	stdout, _, err := captureCLIOutput(t, func() error {
 		return run([]string{"health", "--config", configPath, "--output", "json"})
@@ -827,10 +828,31 @@ func captureHealthJSONFailure(t *testing.T, configPath string) (string, error) {
 	if decodeErr := json.Unmarshal([]byte(stdout), &document); decodeErr != nil {
 		t.Fatalf("health failure output is not exactly one JSON document: %v\n%s", decodeErr, stdout)
 	}
-	if document.Status != "unhealthy" || document.Error != err.Error() {
-		t.Fatalf("health failure document = %+v, want status unhealthy and error %q", document, err)
+	if wantJSONError == "" {
+		wantJSONError = err.Error()
+	}
+	if document.Status != "unhealthy" || document.Error != wantJSONError {
+		t.Fatalf("health failure document = %+v, want status unhealthy and error %q", document, wantJSONError)
 	}
 	return stdout, err
+}
+
+func TestHealthJSONConfigFailureDoesNotEchoMalformedSecret(t *testing.T) {
+	const secret = "s3cret"
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	contents := "database: /tmp/edgewatch-health.db\nnotifications:\n  urls: " + secret + "\n"
+	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, err := captureHealthJSONFailure(t, configPath, "configuration could not be loaded")
+	cause := errors.Unwrap(err)
+	if cause == nil || !strings.Contains(cause.Error(), secret) {
+		t.Fatalf("test fixture did not produce a decoder error containing the sentinel: %v", err)
+	}
+	if strings.Contains(stdout, secret) || strings.Contains(err.Error(), secret) {
+		t.Fatalf("health CLI exposed a malformed configuration scalar: output=%q error=%v", stdout, err)
+	}
 }
 
 func TestRunVerifyPreservesResultWhenAuditStoreIsReadOnly(t *testing.T) {

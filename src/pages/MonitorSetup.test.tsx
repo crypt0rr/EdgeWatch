@@ -372,14 +372,23 @@ describe('guided monitor creation', () => {
   })
 
   it('keeps an unknown guided create locked when switching to the advanced editor', async () => {
-    vi.mocked(createJob).mockRejectedValueOnce(new TypeError('connection lost'))
+    let rejectCreate!: (error: unknown) => void
+    vi.mocked(createJob).mockImplementationOnce(() => new Promise<Job>((_resolve, reject) => { rejectCreate = reject }))
     renderJourney()
     await goToReview()
     fireEvent.click(screen.getByRole('button', { name: 'Create without starting' }))
+    await screen.findAllByRole('button', { name: 'Creating…' })
+    const advancedLink = screen.getByRole('link', { name: /Open full editor/ })
+    expect(advancedLink).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(advancedLink)
+    expect(screen.getByTestId('route-location')).toHaveTextContent('"path":"/jobs/new"')
+
+    rejectCreate(new TypeError('connection lost'))
     expect(await screen.findByText(/did not confirm whether this monitor was created/)).toBeInTheDocument()
     expect(createJob).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(advancedLink).toHaveAttribute('aria-disabled', 'false'))
 
-    fireEvent.click(screen.getByRole('link', { name: /Open full editor/ }))
+    fireEvent.click(advancedLink)
     await screen.findByRole('heading', { name: 'Create a monitoring job' })
     expect(screen.getByRole('button', { name: 'Create job' })).toBeDisabled()
     expect(screen.getByText(/create result is still unknown/)).toBeInTheDocument()

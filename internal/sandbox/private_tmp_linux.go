@@ -658,10 +658,18 @@ func (temporary *linuxPrivateTemporaryDirectory) Cleanup(ctx context.Context) er
 		if err := temporary.cleanupWithHelper(ctx, &leaf); err != nil {
 			return err
 		}
+		// The helper has the leaf owner's credentials and its bounded traversal
+		// returned only after reading the directory through EOF. The daemon may
+		// lack DAC_OVERRIDE, so it cannot necessarily enumerate a 0700 leaf
+		// owned by the scanner. Recheck the pinned identities here, then let the
+		// kernel's AT_REMOVEDIR operation atomically reject any entry that
+		// appeared after the helper's successful cleanup.
+		if err := temporary.verifyLeafPinned(&leaf); err != nil {
+			return err
+		}
 	} else if err := cleanPrivateDirectoryContents(int(temporary.leaf.Fd()), &leaf, temporary.uid, temporary.gid); err != nil {
 		return fmt.Errorf("cleanup Naabu temporary directory: safe removal failed: %w", err)
-	}
-	if err := temporary.verifyLeafEmptyAndPinned(&leaf); err != nil {
+	} else if err := temporary.verifyLeafEmptyAndPinned(&leaf); err != nil {
 		return err
 	}
 	if err := unix.Unlinkat(int(temporary.namespace.Fd()), temporary.name, unix.AT_REMOVEDIR); err != nil {
@@ -706,6 +714,13 @@ func (temporary *linuxPrivateTemporaryDirectory) verifyLeafRemoved() error {
 }
 
 func (temporary *linuxPrivateTemporaryDirectory) verifyLeafEmptyAndPinned(expected *unix.Stat_t) error {
+	if err := temporary.verifyLeafPinned(expected); err != nil {
+		return err
+	}
+	return temporary.ensureDirectoryEmpty(temporary.leaf)
+}
+
+func (temporary *linuxPrivateTemporaryDirectory) verifyLeafPinned(expected *unix.Stat_t) error {
 	var current unix.Stat_t
 	if err := unix.Fstat(int(temporary.leaf.Fd()), &current); err != nil || !sameObject(expected, &current) || current.Mode != expected.Mode {
 		return errors.New("cleanup Naabu temporary directory: pinned leaf changed during cleanup")
@@ -717,7 +732,7 @@ func (temporary *linuxPrivateTemporaryDirectory) verifyLeafEmptyAndPinned(expect
 	if err := unix.Fstatat(int(temporary.namespace.Fd()), temporary.name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(expected, &named) || named.Mode != expected.Mode {
 		return errors.New("cleanup Naabu temporary directory: leaf entry changed during cleanup")
 	}
-	return temporary.ensureDirectoryEmpty(temporary.leaf)
+	return nil
 }
 
 func (temporary *linuxPrivateTemporaryDirectory) ensureDirectoryEmpty(directory *os.File) error {

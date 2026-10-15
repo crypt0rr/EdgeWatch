@@ -346,9 +346,25 @@ func (invocation *scannerSupervisorInvocation) verifyProcessTree() error {
 	}
 	message := make([]byte, 16)
 	n, _, flags, _, err := unix.Recvmsg(int(invocation.resultRead.Fd()), message, nil, 0)
-	if err != nil || flags&unix.MSG_TRUNC != 0 || n != len(message) || string(message[:8]) != scannerSupervisorMagic || message[8] != 1 {
+	if err != nil || flags&unix.MSG_TRUNC != 0 || n != len(message) || validateScannerSupervisorResult(message) != nil {
 		invocation.proofErr = errors.New("scanner supervisor did not prove process-tree cleanup")
 		return invocation.proofErr
+	}
+	return nil
+}
+
+// validateScannerSupervisorResult accepts only the complete success frame
+// emitted by the trusted supervisor. The fixed private socketpair binds the
+// response to this invocation; reserved bytes must stay zero so malformed or
+// future protocol frames fail closed until explicitly versioned.
+func validateScannerSupervisorResult(message []byte) error {
+	if len(message) != 16 || string(message[:8]) != scannerSupervisorMagic || message[8] != 1 {
+		return errors.New("invalid scanner supervisor completion frame")
+	}
+	for _, value := range message[9:] {
+		if value != 0 {
+			return errors.New("invalid scanner supervisor completion frame")
+		}
 	}
 	return nil
 }
@@ -467,19 +483,9 @@ func execScannerSupervisor(args []string) error {
 	if err != nil || len(configuration) == 0 || len(configuration) > scannerSupervisorMaxConfig {
 		return errors.New("scanner supervisor: launch request is unavailable or too large")
 	}
-	var launch scannerLaunchRequest
-	decoder := json.NewDecoder(strings.NewReader(string(configuration)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&launch); err != nil {
-		return errors.New("scanner supervisor: launch request is malformed")
-	}
-	var trailing any
-	if !errors.Is(decoder.Decode(&trailing), io.EOF) || launch.Version != 1 || !filepath.IsAbs(launch.Path) || len(launch.Args) == 0 || launch.Args[0] != launch.Path ||
-		launch.Files != request.files || launch.UID < scannerIdentityStart || launch.UID >= scannerIdentityStart+scannerIdentityCount || launch.GID != launch.UID {
-		return errors.New("scanner supervisor: launch request is invalid")
-	}
-	if launch.Args[0] == "" || strings.ContainsRune(launch.Path, '\x00') || len(launch.AmbientCaps) > 8 {
-		return errors.New("scanner supervisor: launch request is invalid")
+	launch, err := decodeScannerLaunchRequest(configuration, request)
+	if err != nil {
+		return fmt.Errorf("scanner supervisor: %w", err)
 	}
 	result := os.NewFile(uintptr(request.resultFD), "scanner supervisor result")
 	defer result.Close()
@@ -490,6 +496,52 @@ func execScannerSupervisor(args []string) error {
 		fd := 3 + index
 		childFiles[index] = os.NewFile(uintptr(fd), fmt.Sprintf("scanner data descriptor %d", index))
 	}
+	child := buildScannerChildCommand(launch, childFiles)
+
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	defer signal.Stop(signals)
+	if err := child.Start(); err != nil {
+		_ = sendScannerSupervisorResult(request.resultFD, true)
+		return fmt.Errorf("scanner supervisor: start scanner child: %w", err)
+	}
+	for _, file := range childFiles {
+		_ = file.Close()
+	}
+	interrupted := false
+	watchdog := time.NewTicker(20 * time.Millisecond)
+	defer watchdog.Stop()
+	interrupted, childErr, err := superviseScannerChild(child, request.resultFD, signals, watchdog.C, scannerSupervisorOps{
+		waitForExit: func(pid int) (bool, error) {
+			var info unix.Siginfo
+			err := unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOHANG|unix.WNOWAIT, nil)
+			return info.Signo != 0, err
+		},
+		killGroup: func(pid int, signal syscall.Signal) error {
+			return syscall.Kill(-pid, signal)
+		},
+		waitChild:    func(child *exec.Cmd) error { return child.Wait() },
+		reapChildren: reapScannerChildren,
+		sendResult:   sendScannerSupervisorResult,
+		now:          time.Now,
+	})
+	if err != nil {
+		return err
+	}
+	if interrupted {
+		return errors.New("scanner supervisor: scanner process tree was cancelled")
+	}
+	if childErr != nil {
+		return fmt.Errorf("scanner supervisor: scanner exited unsuccessfully: %w", childErr)
+	}
+	return nil
+}
+
+// buildScannerChildCommand turns a validated request into the exact process
+// attributes used by the trusted supervisor. Keeping this construction
+// separate lets tests assert the child identity, descriptor, capability, and
+// parent-death contracts without executing an alternate test-only path.
+func buildScannerChildCommand(launch scannerLaunchRequest, childFiles []*os.File) *exec.Cmd {
 	child := exec.Command(launch.Path, launch.Args[1:]...)
 	child.Args = append([]string(nil), launch.Args...)
 	child.Env, child.Dir = append([]string(nil), launch.Env...), launch.Dir
@@ -505,65 +557,32 @@ func execScannerSupervisor(args []string) error {
 	} else {
 		child.SysProcAttr.Setpgid = true
 	}
+	return child
+}
 
-	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-	defer signal.Stop(signals)
-	if err := child.Start(); err != nil {
-		_ = sendScannerSupervisorResult(request.resultFD, true)
-		return fmt.Errorf("scanner supervisor: start scanner child: %w", err)
+// decodeScannerLaunchRequest validates the bounded parent-to-supervisor
+// protocol without changing thread or process state. Keep this separate from
+// execScannerSupervisor's subreaper and dumpability setup so its input contract
+// can be exercised directly without weakening those process protections.
+func decodeScannerLaunchRequest(configuration []byte, request scannerSupervisorRequest) (scannerLaunchRequest, error) {
+	if len(configuration) == 0 || len(configuration) > scannerSupervisorMaxConfig {
+		return scannerLaunchRequest{}, errors.New("launch request is unavailable or too large")
 	}
-	for _, file := range childFiles {
-		_ = file.Close()
+	var launch scannerLaunchRequest
+	decoder := json.NewDecoder(strings.NewReader(string(configuration)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&launch); err != nil {
+		return scannerLaunchRequest{}, errors.New("launch request is malformed")
 	}
-	interrupted := false
-	var cancellationDeadline time.Time
-	watchdog := time.NewTicker(20 * time.Millisecond)
-	defer watchdog.Stop()
-	for {
-		if !cancellationDeadline.IsZero() && !time.Now().Before(cancellationDeadline) {
-			_ = syscall.Kill(-child.Process.Pid, syscall.SIGKILL)
-			return errors.New("scanner supervisor: scanner did not exit before the cancellation deadline; process-tree cleanup is unproven")
-		}
-		var info unix.Siginfo
-		err := unix.Waitid(unix.P_PID, child.Process.Pid, &info, unix.WEXITED|unix.WNOHANG|unix.WNOWAIT, nil)
-		if err != nil && !errors.Is(err, unix.EINTR) {
-			_ = syscall.Kill(-child.Process.Pid, syscall.SIGKILL)
-			return fmt.Errorf("scanner supervisor: wait for scanner exit: %w", err)
-		}
-		if info.Signo != 0 {
-			break
-		}
-		select {
-		case <-signals:
-			interrupted = true
-			if cancellationDeadline.IsZero() {
-				cancellationDeadline = time.Now().Add(scannerSupervisorTimeout)
-			}
-			_ = syscall.Kill(-child.Process.Pid, syscall.SIGKILL)
-		case <-watchdog.C:
-		}
+	var trailing any
+	if !errors.Is(decoder.Decode(&trailing), io.EOF) || launch.Version != 1 || !filepath.IsAbs(launch.Path) || len(launch.Args) == 0 || launch.Args[0] != launch.Path ||
+		launch.Files != request.files || launch.UID < scannerIdentityStart || launch.UID >= scannerIdentityStart+scannerIdentityCount || launch.GID != launch.UID {
+		return scannerLaunchRequest{}, errors.New("launch request is invalid")
 	}
-	// Keep the leader unreaped until its process group is killed, so the group
-	// ID cannot be recycled between observing exit and terminating descendants.
-	if err := syscall.Kill(-child.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		_ = child.Wait()
-		return fmt.Errorf("scanner supervisor: terminate scanner process group: %w", err)
+	if launch.Args[0] == "" || strings.ContainsRune(launch.Path, '\x00') || len(launch.AmbientCaps) > 8 {
+		return scannerLaunchRequest{}, errors.New("launch request is invalid")
 	}
-	childErr := child.Wait()
-	if err := reapScannerChildren(scannerSupervisorTimeout); err != nil {
-		return fmt.Errorf("scanner supervisor: descendant cleanup is unproven: %w", err)
-	}
-	if err := sendScannerSupervisorResult(request.resultFD, true); err != nil {
-		return fmt.Errorf("scanner supervisor: send cleanup proof: %w", err)
-	}
-	if interrupted {
-		return errors.New("scanner supervisor: scanner process tree was cancelled")
-	}
-	if childErr != nil {
-		return fmt.Errorf("scanner supervisor: scanner exited unsuccessfully: %w", childErr)
-	}
-	return nil
+	return launch, nil
 }
 
 func reapScannerChildren(timeout time.Duration) error {
@@ -598,4 +617,62 @@ func sendScannerSupervisorResult(fd int, clean bool) error {
 		return errors.New("scanner supervisor: result channel write failed")
 	}
 	return nil
+}
+
+type scannerSupervisorOps struct {
+	waitForExit  func(pid int) (bool, error)
+	killGroup    func(pid int, signal syscall.Signal) error
+	waitChild    func(*exec.Cmd) error
+	reapChildren func(time.Duration) error
+	sendResult   func(fd int, clean bool) error
+	now          func() time.Time
+}
+
+// superviseScannerChild owns the process-tree proof ordering after Start:
+// observe leader exit without reaping it, kill its process group, wait the
+// leader, reap adopted descendants, then send the success frame. Keeping the
+// per-call operations explicit lets unit tests exercise cancellation and
+// failure ordering without starting a second supervisor process.
+func superviseScannerChild(child *exec.Cmd, resultFD int, signals <-chan os.Signal, watchdog <-chan time.Time, ops scannerSupervisorOps) (interrupted bool, childErr error, err error) {
+	if child == nil || child.Process == nil || ops.waitForExit == nil || ops.killGroup == nil || ops.waitChild == nil || ops.reapChildren == nil || ops.sendResult == nil || ops.now == nil {
+		return false, nil, errors.New("scanner supervisor: process lifecycle is unavailable")
+	}
+	var cancellationDeadline time.Time
+	for {
+		if !cancellationDeadline.IsZero() && !ops.now().Before(cancellationDeadline) {
+			_ = ops.killGroup(child.Process.Pid, syscall.SIGKILL)
+			return interrupted, nil, errors.New("scanner supervisor: scanner did not exit before the cancellation deadline; process-tree cleanup is unproven")
+		}
+		exited, waitErr := ops.waitForExit(child.Process.Pid)
+		if waitErr != nil && !errors.Is(waitErr, unix.EINTR) {
+			_ = ops.killGroup(child.Process.Pid, syscall.SIGKILL)
+			return interrupted, nil, fmt.Errorf("scanner supervisor: wait for scanner exit: %w", waitErr)
+		}
+		if exited {
+			break
+		}
+		select {
+		case <-signals:
+			interrupted = true
+			if cancellationDeadline.IsZero() {
+				cancellationDeadline = ops.now().Add(scannerSupervisorTimeout)
+			}
+			_ = ops.killGroup(child.Process.Pid, syscall.SIGKILL)
+		case <-watchdog:
+		}
+	}
+	// Keep the leader unreaped until its process group is killed, so the group
+	// ID cannot be recycled between observing exit and terminating descendants.
+	if killErr := ops.killGroup(child.Process.Pid, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+		_ = ops.waitChild(child)
+		return interrupted, nil, fmt.Errorf("scanner supervisor: terminate scanner process group: %w", killErr)
+	}
+	childErr = ops.waitChild(child)
+	if reapErr := ops.reapChildren(scannerSupervisorTimeout); reapErr != nil {
+		return interrupted, childErr, fmt.Errorf("scanner supervisor: descendant cleanup is unproven: %w", reapErr)
+	}
+	if sendErr := ops.sendResult(resultFD, true); sendErr != nil {
+		return interrupted, childErr, fmt.Errorf("scanner supervisor: send cleanup proof: %w", sendErr)
+	}
+	return interrupted, childErr, nil
 }

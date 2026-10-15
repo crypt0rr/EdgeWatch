@@ -760,15 +760,23 @@ func idMapped(ranges []idMapRange, id uint32) bool {
 }
 
 func scannerIdentitiesInUse(uidStart, count uint32) (map[uint32]struct{}, error) {
+	return scannerIdentitiesInUseAt("/proc", "/etc/passwd", "/etc/group", uidStart, count)
+}
+
+// scannerIdentitiesInUseAt reads one process/account snapshot. Production
+// always supplies the fixed procfs and local account paths above; keeping the
+// reader explicit also lets tests exercise the live-process fail-closed rule
+// against a controlled proc-like tree.
+func scannerIdentitiesInUseAt(procRoot, passwdPath, groupPath string, uidStart, count uint32) (map[uint32]struct{}, error) {
 	// Do not take an identity already present in the current namespace. The
 	// install documentation must reserve the fixed pool against services that
 	// may be launched later by the host's account manager.
-	entries, err := os.ReadDir("/proc")
+	entries, err := os.ReadDir(procRoot)
 	if err != nil {
 		return nil, err
 	}
 	used := make(map[uint32]struct{})
-	if err := addScannerLocalAccountsInUse("/etc/passwd", "/etc/group", uidStart, count, used); err != nil {
+	if err := addScannerLocalAccountsInUse(passwdPath, groupPath, uidStart, count, used); err != nil {
 		return nil, err
 	}
 	for _, entry := range entries {
@@ -778,9 +786,10 @@ func scannerIdentitiesInUse(uidStart, count uint32) (map[uint32]struct{}, error)
 		if _, err := strconv.ParseUint(entry.Name(), 10, 32); err != nil {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "status"))
+		processPath := filepath.Join(procRoot, entry.Name())
+		data, err := os.ReadFile(filepath.Join(processPath, "status"))
 		if err != nil {
-			if _, statErr := os.Stat(filepath.Join("/proc", entry.Name())); statErr == nil {
+			if _, statErr := os.Stat(processPath); statErr == nil {
 				return nil, errors.New("a live process status is unreadable")
 			}
 			continue

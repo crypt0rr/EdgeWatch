@@ -40,6 +40,20 @@ func useAttestedPrivateScannerScope(allocator *scannerIdentityAllocator, namespa
 	return allocator
 }
 
+type cancelAfterScannerLeaseIsDurable struct {
+	context.Context
+	allocator *scannerIdentityAllocator
+	cancel    context.CancelFunc
+}
+
+func (ctx *cancelAfterScannerLeaseIsDurable) Err() error {
+	journal, err := readTestScannerIdentityJournal(ctx.allocator)
+	if err == nil && len(journal.Leases) != 0 {
+		ctx.cancel()
+	}
+	return ctx.Context.Err()
+}
+
 func TestScannerIdentityAllocatorDurableLeaseState(t *testing.T) {
 	allocator := newTestScannerIdentityAllocator(t, 2)
 	first, err := allocator.acquire(context.Background())
@@ -130,6 +144,24 @@ func TestScannerIdentityAllocatorFirstInitAndMissingStateFailClosed(t *testing.T
 	}
 	if _, err := allocator.acquire(context.Background()); err == nil {
 		t.Fatal("same-boot missing marker was treated as first initialization")
+	}
+}
+
+func TestScannerIdentityAllocatorCancellationRollsBackDurableReservation(t *testing.T) {
+	allocator := newTestScannerIdentityAllocator(t, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	controlledCtx := &cancelAfterScannerLeaseIsDurable{Context: ctx, allocator: allocator, cancel: cancel}
+	lease, err := allocator.acquire(controlledCtx)
+	if lease != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("acquire canceled after durable reservation = lease %v, error %v; want nil lease and context.Canceled", lease, err)
+	}
+	journal, err := readTestScannerIdentityJournal(allocator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(journal.Leases) != 0 {
+		t.Fatalf("canceled durable reservation was not rolled back: %+v", journal.Leases)
 	}
 }
 
@@ -600,6 +632,114 @@ func TestScannerIdentityIDMapAndAccountRangeValidation(t *testing.T) {
 	}
 	if err := addScannerAccountsInUse(passwdPath, 3, 61000, 2, make(map[uint32]struct{})); err == nil {
 		t.Fatal("malformed account database did not fail closed")
+	}
+}
+
+func TestScannerIdentitiesInUseFromControlledProcSnapshot(t *testing.T) {
+	root := t.TempDir()
+	procRoot := filepath.Join(root, "proc")
+	accountRoot := filepath.Join(root, "accounts")
+	for _, path := range []string{procRoot, accountRoot} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	passwdPath := filepath.Join(accountRoot, "passwd")
+	groupPath := filepath.Join(accountRoot, "group")
+	if err := os.WriteFile(passwdPath, []byte("edgewatch:x:61000:61000::/nonexistent:/sbin/nologin\nother:x:62000:62000::/:/sbin/nologin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(groupPath, []byte("edgewatch:x:61003:scanner\nother:x:62003:\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for pid, status := range map[string]string{
+		"101": "Name:\tscanner\nUid:\t61001\t0\t0\t0\nGid:\t0\t61002\t0\t0\n",
+		"202": "Name:\tother\nUid:\t62001\t62001\t62001\t62001\nGid:\t62002\t62002\t62002\t62002\n",
+	} {
+		processDir := filepath.Join(procRoot, pid)
+		if err := os.Mkdir(processDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(processDir, "status"), []byte(status), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(procRoot, "self"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(procRoot, "not-a-pid"), []byte("ignored"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	used, err := scannerIdentitiesInUseAt(procRoot, passwdPath, groupPath, 61000, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []uint32{61000, 61001, 61002, 61003} {
+		if _, ok := used[id]; !ok {
+			t.Errorf("identity %d was not reserved from the account/process snapshot: %v", id, used)
+		}
+	}
+	if _, ok := used[62001]; ok {
+		t.Errorf("identity outside the configured pool was returned as occupied: %v", used)
+	}
+}
+
+func TestScannerIdentitiesInUseFailsClosedForUnreadableLiveStatus(t *testing.T) {
+	root := t.TempDir()
+	procRoot := filepath.Join(root, "proc")
+	accountRoot := filepath.Join(root, "accounts")
+	for _, path := range []string{procRoot, accountRoot} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(accountRoot, "passwd"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(accountRoot, "group"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	processDir := filepath.Join(procRoot, "303")
+	if err := os.Mkdir(processDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A directory at the status path makes the status read fail while the
+	// numeric process directory remains present, modeling an unreadable live
+	// proc entry rather than a process that exited during enumeration.
+	if err := os.Mkdir(filepath.Join(processDir, "status"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scannerIdentitiesInUseAt(procRoot, filepath.Join(accountRoot, "passwd"), filepath.Join(accountRoot, "group"), 61000, 4); err == nil {
+		t.Fatal("unreadable live process status did not fail closed")
+	}
+}
+
+func TestProductionScannerIdentityRuntimeInputs(t *testing.T) {
+	allocator := productionScannerIdentityAllocator()
+	if allocator == nil || allocator.directory != scannerIdentityDirectory || allocator.markerDir != scannerIdentityMarkerDir ||
+		allocator.uidStart != ScannerIdentityPoolUIDStart || allocator.count != ScannerIdentityPoolCapacity ||
+		allocator.bootID == nil || allocator.pidNamespace == nil || allocator.privateRuntime == nil || allocator.privateScope == nil ||
+		allocator.validateMap == nil || allocator.inUse == nil {
+		t.Fatalf("production allocator is not bound to the fixed pool/runtime sources: %+v", allocator)
+	}
+	bootID, err := currentBootID()
+	if err != nil || !validBootID(bootID) {
+		t.Fatalf("current kernel boot ID = %q, %v; want a valid boot UUID", bootID, err)
+	}
+	namespace, err := currentPIDNamespaceInode()
+	if err != nil || namespace == 0 {
+		t.Fatalf("current PID namespace inode = %d, %v; want a nonzero inode", namespace, err)
+	}
+	if _, err := currentPrivateScannerNamespace(namespace); err != nil {
+		t.Fatalf("inspect current namespace /tmp mount scope: %v", err)
+	}
+	privateRuntime, err := currentPrivateScannerRuntime()
+	if err != nil {
+		t.Fatalf("inspect container bootstrap scope: %v", err)
+	}
+	if os.Getpid() != 1 && privateRuntime {
+		t.Fatal("non-PID1 process established a new private scanner runtime scope")
 	}
 }
 

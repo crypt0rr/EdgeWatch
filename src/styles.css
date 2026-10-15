@@ -993,7 +993,7 @@
 .isolation-layer-row { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; min-width: 0; }
 .isolation-layers { display: flex; flex-wrap: wrap; gap: 5px; margin: 0; padding: 0; list-style: none; }
 .isolation-capabilities { color: var(--muted); font-size: 12px; line-height: 22px; white-space: nowrap; }
-.isolation-layer { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px 2px 6px; border-radius: 6px; background: #10233a; color: #c3d2e3; font-size: 12px; line-height: 18px; white-space: nowrap; }
+.isolation-layer { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0; padding: 2px 8px 2px 6px; border-radius: 6px; background: #10233a; color: #c3d2e3; font-size: 12px; line-height: 18px; white-space: normal; overflow-wrap: anywhere; }
 .isolation-layer.holds svg { color: var(--green); }
 .isolation-layer.fails { background: rgba(243, 125, 131, .1); color: #f4b6ba; }
 .isolation-layer.fails svg { color: var(--red); }

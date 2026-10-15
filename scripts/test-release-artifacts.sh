@@ -32,8 +32,20 @@ cmp "$root/repro-a.tar.gz" "$root/repro-b.tar.gz"
 )
 ./scripts/prepare-release-binaries.sh "$root/dist" "$root/release-binaries"
 fixture_commit="$(git rev-parse HEAD)"
-DIST_DIR="$root/dist" FRONTEND_DIST="$root/frontend-dist" RELEASE_BINARIES="$root/release-binaries" \
+canonical_goreleaser="$(awk '$1 == "GORELEASER_VERSION:" { print $2 }' .github/workflows/release.yml)"
+test -n "$canonical_goreleaser"
+env -u GORELEASER_VERSION DIST_DIR="$root/dist" FRONTEND_DIST="$root/frontend-dist" RELEASE_BINARIES="$root/release-binaries" \
   ./scripts/generate-release-manifest.sh v0.0.0 "$root/dist/release-manifest.json"
+test "$(jq -r '.toolchain.goreleaser' "$root/dist/release-manifest.json")" = "$canonical_goreleaser"
+GORELEASER_VERSION="$canonical_goreleaser" DIST_DIR="$root/dist" FRONTEND_DIST="$root/frontend-dist" RELEASE_BINARIES="$root/release-binaries" \
+  ./scripts/generate-release-manifest.sh v0.0.0 "$root/dist/release-manifest-explicit.json"
+test "$(jq -r '.toolchain.goreleaser' "$root/dist/release-manifest-explicit.json")" = "$canonical_goreleaser"
+if GORELEASER_VERSION=v0.0.0 DIST_DIR="$root/dist" FRONTEND_DIST="$root/frontend-dist" RELEASE_BINARIES="$root/release-binaries" \
+  ./scripts/generate-release-manifest.sh v0.0.0 "$root/dist/release-manifest-mismatch.json" >"$root/goreleaser-mismatch.log" 2>&1; then
+  echo "manifest accepted a GoReleaser version that differs from the release workflow pin" >&2
+  exit 1
+fi
+grep -Fq "GORELEASER_VERSION=v0.0.0 does not match .github/workflows/release.yml pin $canonical_goreleaser" "$root/goreleaser-mismatch.log"
 FRONTEND_DIST="$root/frontend-dist" ./scripts/verify-release-artifacts.sh \
   "$root/dist" "$root/dist/release-manifest.json" v0.0.0 "$fixture_commit" "$root/release-binaries"
 test -x "$root/release-binaries/linux_amd64/edgewatch"

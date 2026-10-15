@@ -86,6 +86,44 @@ mkfifo "$TMPDIR/unsupported-entry"
 	defer os.RemoveAll(filepath.Dir(temporaryPath))
 }
 
+func TestNaabuCancellationRetainsSanitizedLifecycleFailure(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		kind naabuLifecycleFailureKind
+		want string
+	}{
+		{name: "process-tree proof", kind: naabuLifecycleProcessTreeProof, want: "scanner process-tree proof failed"},
+		{name: "temporary cleanup", kind: naabuLifecycleTemporaryCleanup, want: "naabu temporary directory cleanup failed"},
+		{name: "target input cleanup", kind: naabuLifecycleInputCleanup, want: "naabu target input cleanup failed"},
+		{name: "lease finalization", kind: naabuLifecycleIdentityFinalize, want: "scanner identity finalization failed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctxErr := context.Canceled
+			privateCause := errors.New("failed at /var/lib/edgewatch/tmp/scanner/run-private 192.0.2.9 setup_token=do-not-log")
+			invocationErr := errors.Join(ctxErr, withNaabuLifecycleFailure(test.kind, privateCause))
+			got := naabuCancellationError(ctxErr, invocationErr)
+			if !errors.Is(got, context.Canceled) {
+				t.Fatalf("sanitized cancellation error %v lost context.Canceled", got)
+			}
+			if !strings.Contains(got.Error(), test.want) {
+				t.Fatalf("sanitized cancellation error %q does not identify lifecycle stage %q", got, test.want)
+			}
+			for _, forbidden := range []string{"/var/lib/edgewatch", "192.0.2.9", "setup_token", "do-not-log"} {
+				if strings.Contains(got.Error(), forbidden) {
+					t.Fatalf("sanitized cancellation error leaked %q: %v", forbidden, got)
+				}
+			}
+		})
+	}
+
+	t.Run("ordinary cancellation keeps its existing wording", func(t *testing.T) {
+		got := naabuCancellationError(context.DeadlineExceeded, context.DeadlineExceeded)
+		if !errors.Is(got, context.DeadlineExceeded) || strings.Contains(got.Error(), "lifecycle") {
+			t.Fatalf("ordinary cancellation error = %v", got)
+		}
+	})
+}
+
 func TestRunNaabuSerializesStatusCallbacksAcrossOutputAndHeartbeat(t *testing.T) {
 	script := "printf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":22,\"protocol\":\"tcp\"}'\ni=0\nwhile [ \"$i\" -lt 500 ]; do\n  printf 'progress %s\\n' \"$i\" >&2\n  i=$((i + 1))\ndone\n"
 	n := NewWithNaabu("missing-nmap", writeNaabuFixture(t, script))

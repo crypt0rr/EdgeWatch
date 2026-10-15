@@ -42,6 +42,64 @@ const (
 	maxNaabuLineBytes = 1 << 20
 )
 
+type naabuLifecycleFailureKind uint8
+
+const (
+	naabuLifecycleProcessTreeProof naabuLifecycleFailureKind = iota + 1
+	naabuLifecycleTemporaryCleanup
+	naabuLifecycleInputCleanup
+	naabuLifecycleIdentityFinalize
+)
+
+// naabuLifecycleFailure retains an internal cause for errors.Is/errors.As,
+// while its Error string stays safe for cancellation paths that intentionally
+// suppress scanner diagnostics. The caller reports only the fixed stage.
+type naabuLifecycleFailure struct {
+	kind  naabuLifecycleFailureKind
+	cause error
+}
+
+func (failure *naabuLifecycleFailure) Error() string {
+	if failure == nil {
+		return "scanner lifecycle failed"
+	}
+	switch failure.kind {
+	case naabuLifecycleProcessTreeProof:
+		return "scanner process-tree proof failed"
+	case naabuLifecycleTemporaryCleanup:
+		return "naabu temporary directory cleanup failed"
+	case naabuLifecycleInputCleanup:
+		return "naabu target input cleanup failed"
+	case naabuLifecycleIdentityFinalize:
+		return "scanner identity finalization failed"
+	default:
+		return "scanner lifecycle failed"
+	}
+}
+
+func (failure *naabuLifecycleFailure) Unwrap() error {
+	if failure == nil {
+		return nil
+	}
+	return failure.cause
+}
+
+func withNaabuLifecycleFailure(kind naabuLifecycleFailureKind, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &naabuLifecycleFailure{kind: kind, cause: err}
+}
+
+func naabuCancellationError(ctxErr, invocationErr error) error {
+	canceled := fmt.Errorf("naabu discovery canceled or timed out: %w", ctxErr)
+	var failure *naabuLifecycleFailure
+	if errors.As(invocationErr, &failure) {
+		return fmt.Errorf("%w; %s", canceled, failure.Error())
+	}
+	return canceled
+}
+
 // Naabu emits one JSON object per discovered port, and v2.6.1 prints every
 // result twice: once when found and again when the scan ends. EdgeWatch
 // parses the stream as it arrives and keeps one bit per distinct
@@ -210,7 +268,7 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 		})
 		if err != nil {
 			if ctx.Err() != nil {
-				return partialSnapshot(), fmt.Errorf("naabu discovery canceled or timed out: %w", ctx.Err())
+				return partialSnapshot(), naabuCancellationError(ctx.Err(), err)
 			}
 			return partialSnapshot(), fmt.Errorf("naabu discovery failed: %w: %s", err, sanitizeStderr(stderr))
 		}
@@ -336,7 +394,7 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 		})
 		if err != nil {
 			if ctx.Err() != nil {
-				return partialSnapshot(), fmt.Errorf("naabu discovery canceled or timed out: %w", ctx.Err())
+				return partialSnapshot(), naabuCancellationError(ctx.Err(), err)
 			}
 			return partialSnapshot(), fmt.Errorf("naabu discovery failed: %w: %s", err, sanitizeStderr(stderr))
 		}
@@ -769,14 +827,14 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 				if cleanupErr != nil || closeErr != nil {
 					cleanupSucceeded = false
 					result = naabuDiscovery{}
-					resultErr = errors.Join(resultErr, fmt.Errorf("naabu temporary directory cleanup failed: %w", errors.Join(cleanupErr, closeErr)))
+					resultErr = errors.Join(resultErr, withNaabuLifecycleFailure(naabuLifecycleTemporaryCleanup, errors.Join(cleanupErr, closeErr)))
 				}
 				temporary = nil
 			}
 			if cleanupErr := cleanupInput(); cleanupErr != nil {
 				cleanupSucceeded = false
 				result = naabuDiscovery{}
-				resultErr = errors.Join(resultErr, cleanupErr)
+				resultErr = errors.Join(resultErr, withNaabuLifecycleFailure(naabuLifecycleInputCleanup, cleanupErr))
 			}
 		} else {
 			cleanupSucceeded = false
@@ -797,9 +855,9 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 			} else {
 				finishErr = invocation.StartFailed(cleanupSucceeded)
 			}
-			resultErr = errors.Join(resultErr, finishErr)
+			resultErr = errors.Join(resultErr, withNaabuLifecycleFailure(naabuLifecycleIdentityFinalize, finishErr))
 		} else if reservation != nil {
-			resultErr = errors.Join(resultErr, reservation.Finish(cleanupSucceeded))
+			resultErr = errors.Join(resultErr, withNaabuLifecycleFailure(naabuLifecycleIdentityFinalize, reservation.Finish(cleanupSucceeded)))
 		}
 	}()
 	if err := file.Chmod(0o600); err != nil {
@@ -917,14 +975,14 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	if err := invocation.Started(); err != nil {
 		_ = invocation.Cancel(cmd)
 		waitErr := waitProcessGroup(cmd)
-		proofErr := invocation.VerifyProcessTree()
+		proofErr := withNaabuLifecycleFailure(naabuLifecycleProcessTreeProof, invocation.VerifyProcessTree())
 		processTreeVerified = proofErr == nil
 		return naabuDiscovery{}, stderr.String(), errors.Join(fmt.Errorf("start supervised naabu invocation: %w", err), waitErr, proofErr)
 	}
 	if err := temporary.Started(); err != nil {
 		_ = invocation.Cancel(cmd)
 		waitErr := waitProcessGroup(cmd)
-		proofErr := invocation.VerifyProcessTree()
+		proofErr := withNaabuLifecycleFailure(naabuLifecycleProcessTreeProof, invocation.VerifyProcessTree())
 		processTreeVerified = proofErr == nil
 		return naabuDiscovery{}, stderr.String(), errors.Join(
 			fmt.Errorf("naabu temporary directory startup failed: %w", err),
@@ -935,7 +993,7 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	if err := temporary.WaitReady(ctx); err != nil {
 		_ = invocation.Cancel(cmd)
 		waitErr := waitProcessGroup(cmd)
-		proofErr := invocation.VerifyProcessTree()
+		proofErr := withNaabuLifecycleFailure(naabuLifecycleProcessTreeProof, invocation.VerifyProcessTree())
 		processTreeVerified = proofErr == nil
 		return naabuDiscovery{}, stderr.String(), errors.Join(
 			fmt.Errorf("naabu temporary directory startup failed: %w", err),
@@ -965,7 +1023,7 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 		close(heartbeatDone)
 	}
 	waitErr := scannerWaitError("naabu", waitProcessGroup(cmd))
-	proofErr := invocation.VerifyProcessTree()
+	proofErr := withNaabuLifecycleFailure(naabuLifecycleProcessTreeProof, invocation.VerifyProcessTree())
 	processTreeVerified = proofErr == nil
 	close(heartbeatStop)
 	if status != nil {

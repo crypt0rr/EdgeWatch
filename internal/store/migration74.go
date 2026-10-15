@@ -76,23 +76,23 @@ LIMIT ?`, batchSize)
 			return err
 		}
 		batch := make([]budgetSkipAlertProjectionRow, 0, batchSize)
-		for rows.Next() {
-			var item budgetSkipAlertProjectionRow
-			if err := rows.Scan(&item.jobID, &item.key); err != nil {
-				_ = rows.Close()
-				_ = tx.Rollback()
+		readErr := func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var item budgetSkipAlertProjectionRow
+				if err := rows.Scan(&item.jobID, &item.key); err != nil {
+					return err
+				}
+				batch = append(batch, item)
+			}
+			if err := rows.Err(); err != nil {
 				return err
 			}
-			batch = append(batch, item)
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
+			return rows.Close()
+		}()
+		if readErr != nil {
 			_ = tx.Rollback()
-			return err
-		}
-		if err := rows.Close(); err != nil {
-			_ = tx.Rollback()
-			return err
+			return readErr
 		}
 		for _, item := range batch {
 			if _, err := tx.ExecContext(ctx, `UPDATE job_runtime_meta SET budget_skip_alert_key=? WHERE job_id=? AND budget_skip_alert_key IS NULL`, item.key, item.jobID); err != nil {

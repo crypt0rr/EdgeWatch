@@ -55,6 +55,19 @@ function insideWorkTree() {
   }
 }
 
+function ignoredByGit(path) {
+  try {
+    execFileSync('git', ['check-ignore', '--no-index', '-q', '--', path], {
+      cwd: repositoryRoot,
+      stdio: 'ignore',
+    })
+    return true
+  } catch (error) {
+    if (error.status === 1) return false
+    throw error
+  }
+}
+
 test('the executable header check recognizes native binaries and leaves text alone', () => {
   assert.equal(executableFormat(Buffer.from([0x7f, 0x45, 0x4c, 0x46])), 'ELF')
   assert.equal(executableFormat(Buffer.from('MZ\x90\x00', 'latin1')), 'PE')
@@ -88,4 +101,31 @@ test('no compiled binary or oversized file is committed', { skip: !insideWorkTre
     if (stats.size > maxTrackedFileBytes) problems.push(`${path} is ${stats.size} bytes, more than ${maxTrackedFileBytes}`)
   }
   assert.deepEqual(problems, [], 'remove build output from Git and keep it ignored in .gitignore')
+})
+
+test('documented host secret paths stay out of Git and Docker build contexts', async () => {
+  assert.equal(trackedFiles().some((path) => path.startsWith('secrets/')), false, 'the ignore rule must not hide existing tracked files')
+  const paths = [
+    'config.yaml',
+    'notification-urls.txt',
+    'auth.key',
+    'notification-encryption.key',
+    'data/auth.key',
+    'data/notification.key',
+    'data/edgewatch.db',
+    'data/edgewatch.db-shm',
+    'data/edgewatch.db-wal',
+    'secrets/metrics.token',
+  ]
+  for (const path of paths) {
+    assert.equal(ignoredByGit(path), true, `${path} must be ignored by Git`)
+  }
+
+  const dockerignore = await readFile(resolve(repositoryRoot, '.dockerignore'), 'utf8')
+  for (const pattern of ['config.yaml', 'notification-urls.txt', '*.key', '*.db*', 'data', '/secrets/']) {
+    assert.ok(dockerignore.split(/\r?\n/).includes(pattern), `.dockerignore must exclude ${pattern}`)
+  }
+
+  const configuration = await readFile(resolve(repositoryRoot, 'docs/src/content/docs/reference/configuration.md'), 'utf8')
+  assert.match(configuration, /install -d -m 0700 \.\/secrets\s+umask 077\s+openssl rand -hex 32 > \.\/secrets\/metrics\.token/)
 })

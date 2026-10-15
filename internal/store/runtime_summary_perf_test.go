@@ -141,6 +141,10 @@ func TestRuntimeStateSummariesDoNotReadCurrentRuntimeJSON(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE job_runtime_meta SET baseline_scan_id='',projection_version=0 WHERE job_id=?`, collecting); err != nil {
 		t.Fatal(err)
 	}
+	const budgetSkipKey = "f8e9927be275627cc15ca86af789a03c4ec916ed6cc829a2c117a66837af6571|65536"
+	if _, err := s.DB.ExecContext(ctx, `UPDATE job_runtime_meta SET budget_skip_alert_key=? WHERE job_id=?`, budgetSkipKey, indexed[0]); err != nil {
+		t.Fatal(err)
+	}
 	want := map[string]int{modified: 2, collecting: 0}
 	for _, id := range indexed {
 		want[id] = 7
@@ -169,6 +173,13 @@ func TestRuntimeStateSummariesDoNotReadCurrentRuntimeJSON(t *testing.T) {
 		if summary.BaselineHostCount != hosts || summary.HasBaseline != (id != collecting) {
 			t.Errorf("summary of %s = %#v, want %d baseline hosts", id, summary, hosts)
 		}
+		wantKey := ""
+		if id == indexed[0] {
+			wantKey = budgetSkipKey
+		}
+		if summary.BudgetSkipAlertKey != wantKey {
+			t.Errorf("summary of %s has budget skip key %q, want %q", id, summary.BudgetSkipAlertKey, wantKey)
+		}
 	}
 
 	// The list costs about as much as reading the metadata alone. The
@@ -193,6 +204,67 @@ func TestRuntimeStateSummariesDoNotReadCurrentRuntimeJSON(t *testing.T) {
 	if list > 50*metadata+250*time.Millisecond {
 		t.Fatalf("RuntimeStateSummaries took %s, metadata alone %s", list, metadata)
 	}
+}
+
+func TestRuntimeBudgetSkipProjectionFollowsCanonicalRuntimeWrites(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("budget-projection-writer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeKey := func(key string) error {
+		_, err := s.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+			state.BudgetSkipAlertKey = key
+			return nil, nil
+		})
+		return err
+	}
+	const firstKey = "scope-hash|65536"
+	if err := writeKey(firstKey); err != nil {
+		t.Fatal(err)
+	}
+	assertProjection := func(want string) {
+		t.Helper()
+		summary, err := defaultTenant(s).RuntimeStateSummary(ctx, record.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if summary.BudgetSkipAlertKey != want {
+			t.Fatalf("runtime summary budget key = %q, want %q", summary.BudgetSkipAlertKey, want)
+		}
+		all, err := defaultTenant(s).RuntimeStateSummaries(ctx, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if all[record.ID].BudgetSkipAlertKey != want {
+			t.Fatalf("batched runtime summary budget key = %q, want %q", all[record.ID].BudgetSkipAlertKey, want)
+		}
+		state, err := defaultTenant(s).RuntimeState(ctx, record.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.BudgetSkipAlertKey != want {
+			t.Fatalf("runtime state budget key = %q, want %q", state.BudgetSkipAlertKey, want)
+		}
+	}
+	assertProjection(firstKey)
+
+	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER reject_second_budget_skip BEFORE UPDATE OF budget_skip_alert_key ON job_runtime_meta WHEN NEW.budget_skip_alert_key='scope-hash|32768' BEGIN SELECT RAISE(ABORT,'injected projection failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeKey("scope-hash|32768"); err == nil {
+		t.Fatal("runtime writer succeeded despite the projection update failure")
+	}
+	assertProjection(firstKey)
+	if _, err := s.DB.ExecContext(ctx, `DROP TRIGGER reject_second_budget_skip`); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeKey(""); err != nil {
+		t.Fatal(err)
+	}
+	assertProjection("")
 }
 
 // BenchmarkRuntimeStateSummariesLargeRuntimeJSON compares the job list, the

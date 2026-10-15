@@ -5,7 +5,7 @@ description: Understand the current SQLite schema, the oldest schema that upgrad
 
 ## Current schema and rollback
 
-The current schema is version 73. Schema 31 records terminal notification
+The current schema is version 74. Schema 31 records terminal notification
 deliveries and marks rows that had already exhausted the original eight
 attempts. Schema 63 repairs databases that had already passed schema 31 by
 marking still-unsent rows with at least eight attempts and a scheduled retry
@@ -116,6 +116,18 @@ window rows without changing their state, summaries, or evidence. Its duration
 and temporary WAL depend on the retained change-window history size. An older
 release refuses the upgraded database; restore the matching pre-upgrade
 `./data` backup to roll back.
+
+## Schema 74
+
+Schema 74 adds a bounded scalar copy of a scheduled probe-budget skip to the
+job runtime metadata used by the Jobs list. A partial index identifies rows
+that still need the copy. The daemon backfills those rows in restartable
+batches of 250, validates legacy JSON, and records progress in startup status;
+malformed or oversized values become empty markers. The migration does not
+rewrite scan history, runtime snapshots, or baselines. Its duration and
+temporary WAL depend on the number of runtime metadata rows. An older release
+refuses the upgraded database; restore the matching pre-upgrade `./data`
+backup to roll back.
 
 ## Upgrade floor
 

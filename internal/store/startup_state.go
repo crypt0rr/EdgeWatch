@@ -77,14 +77,29 @@ func ensureStartupStateContext(ctx context.Context, db *sql.DB) error {
 	return err
 }
 
-func markMigrationStarted(ctx context.Context, db *sql.DB, version, total int) error {
+func markMigrationStarted(ctx context.Context, db *sql.DB, version, total int) (string, string, error) {
+	tx, err := beginWriteTx(ctx, db)
+	if err != nil {
+		return "", "", err
+	}
+	var previousState, previousPhase string
+	if err := tx.QueryRowContext(ctx, `SELECT state,phase FROM startup_state WHERE id=1`).Scan(&previousState, &previousPhase); err != nil {
+		_ = tx.Rollback()
+		return "", "", err
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := db.ExecContext(ctx, `INSERT INTO startup_state(id,state,owner,phase,started_at,updated_at,progress,total,last_error)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO startup_state(id,state,owner,phase,started_at,updated_at,progress,total,last_error)
 VALUES(1,'migrating',?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET state=excluded.state,owner=excluded.owner,phase=excluded.phase,
 started_at=excluded.started_at,updated_at=excluded.updated_at,progress=excluded.progress,
-total=excluded.total,last_error=excluded.last_error`, migrationOwner(), "schema", now, now, version, total, "")
-	return err
+total=excluded.total,last_error=excluded.last_error`, migrationOwner(), "schema", now, now, version, total, ""); err != nil {
+		_ = tx.Rollback()
+		return "", "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", "", err
+	}
+	return previousState, previousPhase, nil
 }
 
 func updateMigrationStatus(ctx context.Context, db *sql.DB, phase string, progress, total int64) error {

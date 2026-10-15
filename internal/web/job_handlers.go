@@ -501,6 +501,7 @@ func (s *Server) listJobsWithSession(w http.ResponseWriter, r *http.Request, ses
 		monitoring := jobMonitoringSummary(
 			j,
 			executions[j.ID],
+			summaries[j.ID].BudgetSkipAlertKey,
 			executionErr == nil && historyExists,
 			activityByJob[j.ID],
 			activityAvailable,

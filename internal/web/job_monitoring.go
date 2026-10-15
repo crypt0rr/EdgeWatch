@@ -35,6 +35,7 @@ type jobMonitoringSummaryView struct {
 func jobMonitoringSummary(
 	record store.JobRecord,
 	execution store.JobExecutionSummary,
+	budgetSkipAlertKey string,
 	historyAvailable bool,
 	appActivity string,
 	appActivityAvailable bool,
@@ -106,6 +107,10 @@ func jobMonitoringSummary(
 	case view.Activity != nil && (*view.Activity == "queued" || *view.Activity == "running"):
 		// Only current queued/running work supersedes an older result. An
 		// unavailable activity lookup cannot erase a known outcome.
+	case budgetSkipAlertKey != "":
+		// This persisted marker records the last scheduled budget skip; it does
+		// not predict whether changed DNS answers or budgets block the next run.
+		view.AttentionReason = "probe_budget_skipped"
 	case historyAvailable && execution.LatestAttempt != nil:
 		switch execution.LatestAttempt.Status {
 		case "failed", "timed_out":

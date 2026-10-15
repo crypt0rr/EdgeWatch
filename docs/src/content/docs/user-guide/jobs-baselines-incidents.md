@@ -240,6 +240,10 @@ the future. **Follow-up due** includes investigations whose follow-up instant
 has arrived or passed. **All active** shows every active incident. Returning an
 incident to **Needs review** clears its follow-up time but keeps its note.
 
+When an investigation's follow-up becomes due, an open, visible inbox refreshes
+once at that time. If the page is hidden then, it refreshes when you return to
+it. Far-future follow-ups do not cause periodic polling.
+
 The inbox can filter by job, severity, and change kind. It orders matching
 incidents by severity (critical, warning, then info), oldest opening time,
 and stable tie-breakers before paging, so pages preserve the same priority

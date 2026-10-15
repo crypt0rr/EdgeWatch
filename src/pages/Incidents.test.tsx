@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { useQueryClient } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLocation } from 'react-router-dom'
@@ -28,6 +28,16 @@ const pagination = { limit: 20, offset: 0, total: 1, has_more: false, next_offse
 const page = (items: IncidentInboxItem[] = [item], total = items.length, offset = 0, activeCount = items.length): Omit<IncidentInboxPage, 'incidents'> & { incidents: IncidentInboxItem[] } => ({ incidents: items, pagination: { ...pagination, offset, total, has_more: offset + items.length < total, next_offset: offset + items.length < total ? offset + 20 : null }, truncated: false, active_count: activeCount })
 const job = { id: 'job-1', revision: 1, enabled: true, archived: false, security_hash: '', created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z', job: { name: 'Production', schedule: '', timezone: 'UTC', targets: ['192.0.2.10'], max_expanded_hosts: 1, timing: 'balanced', timeout: '1h', baseline_samples: 1, change_confirmations: 1 }, baseline: { status: 'complete' } }
 const administrator = { user_id: 'admin-1', username: 'admin', display_name: 'Riley Reviewer', role: 'administrator', permissions: ['incidents.read', 'incidents.manage'], csrf_token: '', totp_enabled: true, password_requirements: { minimum_length: 12 }, scope: 'unit', unit: { id: 'unit-1', name: 'Default', slug: 'default' }, multi_unit: false }
+const dayMs = 24 * 60 * 60 * 1000
+const nativeTimeoutMax = 2_147_483_647
+
+function investigatingItem(followUpAt: string, viewStatus: IncidentInboxItem['view_status'] = 'investigating'): IncidentInboxItem {
+  return {
+    ...item,
+    view_status: viewStatus,
+    review: { ...review, status: 'investigating', reviewer_label: 'Riley Reviewer', reviewed_at: '2026-10-13T11:00:00Z', follow_up_at: followUpAt, revision: 1 },
+  }
+}
 
 function LocationOutput() {
   const location = useLocation()
@@ -61,6 +71,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.clearAllMocks()
   setDisplayTimeZone(null)
 })
@@ -313,6 +324,155 @@ describe('shared review workflow', () => {
     expect(note).toHaveValue('My draft')
     fireEvent.click(within(panel).getByRole('button', { name: 'Save review' }))
     await waitFor(() => expect(updateIncidentReview).toHaveBeenLastCalledWith('job-1', expect.objectContaining({ expected_revision: 2, note: 'My draft' })))
+  })
+})
+
+describe('follow-up due refresh', () => {
+  const start = new Date('2026-10-14T12:00:00.000Z')
+
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.setSystemTime(start)
+  })
+
+  it('refreshes once at the loaded row’s due boundary', async () => {
+    const dueAt = start.getTime() + 5 * 60_000
+    const future = investigatingItem(new Date(dueAt).toISOString())
+    const due = investigatingItem(new Date(dueAt).toISOString(), 'follow_up_due')
+    vi.mocked(listIncidents).mockResolvedValueOnce(page([future]) as never).mockResolvedValue(page([due]) as never)
+    renderInbox(['/incidents?view=all_active'])
+    await waitForInbox()
+    expect(listIncidents).toHaveBeenCalledTimes(1)
+
+    const remaining = dueAt - Date.now()
+    expect(remaining).toBeGreaterThan(1)
+    await act(async () => { await vi.advanceTimersByTimeAsync(remaining - 1) })
+    expect(listIncidents).toHaveBeenCalledTimes(1)
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(2))
+    expect(await screen.findByRole('cell', { name: 'Follow-up due' })).toBeInTheDocument()
+  })
+
+  it('refreshes a cached investigating row whose follow-up is already past due', async () => {
+    const overdue = investigatingItem(new Date(start.getTime() - 60_000).toISOString())
+    const due = investigatingItem(new Date(start.getTime() - 60_000).toISOString(), 'follow_up_due')
+    vi.mocked(listIncidents).mockResolvedValueOnce(page([overdue]) as never).mockResolvedValue(page([due]) as never)
+    renderInbox(['/incidents?view=all_active'])
+    await waitForInbox()
+    await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(2))
+    expect(await screen.findByRole('cell', { name: 'Follow-up due' })).toBeInTheDocument()
+    await act(async () => { await vi.advanceTimersByTimeAsync(dayMs) })
+    expect(listIncidents).toHaveBeenCalledTimes(2)
+  })
+
+  it('re-arms at the native timeout cap without polling for a far-future follow-up', async () => {
+    const future = investigatingItem(new Date(start.getTime() + 30 * dayMs).toISOString())
+    vi.mocked(listIncidents).mockResolvedValue(page([future]) as never)
+    const rendered = renderInbox(['/incidents?view=all_active'])
+    await waitForInbox()
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(nativeTimeoutMax + 5_000) })
+    expect(listIncidents).toHaveBeenCalledTimes(1)
+    rendered.unmount()
+    await act(async () => { await vi.advanceTimersByTimeAsync(6 * dayMs) })
+    expect(listIncidents).toHaveBeenCalledTimes(1)
+  })
+
+  it('refreshes a due row once when the page becomes visible again', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+    const dueAt = start.getTime() + 5 * 60_000
+    const future = investigatingItem(new Date(dueAt).toISOString())
+    const due = investigatingItem(new Date(dueAt).toISOString(), 'follow_up_due')
+    vi.mocked(listIncidents).mockResolvedValueOnce(page([future]) as never).mockResolvedValue(page([due]) as never)
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+    try {
+      renderInbox(['/incidents?view=all_active'])
+      await waitForInbox()
+      await act(async () => { await vi.advanceTimersByTimeAsync(dueAt - Date.now()) })
+      expect(listIncidents).toHaveBeenCalledTimes(1)
+
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+      await act(async () => { window.dispatchEvent(new Event('visibilitychange')) })
+      await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(2))
+      expect(await screen.findByRole('cell', { name: 'Follow-up due' })).toBeInTheDocument()
+    } finally {
+      if (descriptor) Object.defineProperty(document, 'visibilityState', descriptor)
+      else Reflect.deleteProperty(document, 'visibilityState')
+    }
+  })
+
+  it('does not let a failed earlier due refresh suppress a later overdue row on resume', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+    const firstDueAt = start.getTime() + 60_000
+    const secondDueAt = start.getTime() + 2 * 60_000
+    const firstFuture = investigatingItem(new Date(firstDueAt).toISOString())
+    const secondFuture = { ...investigatingItem(new Date(secondDueAt).toISOString()), incident: { ...item.incident, change: { ...item.incident.change, key: 'port|192.0.2.11|tcp|8443', target: '192.0.2.11', port: 8443 } }, occurrence_token: 'occurrence-2' }
+    const firstDue = { ...firstFuture, view_status: 'follow_up_due' as const }
+    const secondDue = { ...secondFuture, view_status: 'follow_up_due' as const }
+    vi.mocked(listIncidents)
+      .mockResolvedValueOnce(page([firstFuture, secondFuture]) as never)
+      .mockRejectedValueOnce(new Error('temporary inbox failure'))
+      .mockResolvedValue(page([firstDue, secondDue]) as never)
+    try {
+      renderInbox(['/incidents?view=all_active'])
+      await waitForInbox()
+      await act(async () => { await vi.advanceTimersByTimeAsync(firstDueAt - Date.now()) })
+      await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(2))
+
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+      await act(async () => { window.dispatchEvent(new Event('visibilitychange')) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(secondDueAt - Date.now()) })
+      expect(listIncidents).toHaveBeenCalledTimes(2)
+
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+      await act(async () => { window.dispatchEvent(new Event('visibilitychange')) })
+      await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(3))
+      expect(await screen.findAllByRole('cell', { name: 'Follow-up due' })).toHaveLength(2)
+    } finally {
+      if (descriptor) Object.defineProperty(document, 'visibilityState', descriptor)
+      else Reflect.deleteProperty(document, 'visibilityState')
+    }
+  })
+
+  it('cancels a stale due timer when filters change and when the inbox unmounts', async () => {
+    const firstDueAt = start.getTime() + 5 * 60_000
+    const future = investigatingItem(new Date(firstDueAt).toISOString())
+    vi.mocked(listIncidents).mockResolvedValueOnce(page([future]) as never).mockResolvedValue(page([]) as never)
+    const rendered = renderInbox(['/incidents?view=all_active'])
+    await waitForInbox()
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter by review view' }), { target: { value: 'needs_review' } })
+    await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(2))
+    await act(async () => { await vi.advanceTimersByTimeAsync(firstDueAt - Date.now()) })
+    expect(listIncidents).toHaveBeenCalledTimes(2)
+
+    const unmountDueAt = Date.now() + 60_000
+    const withDue = investigatingItem(new Date(unmountDueAt).toISOString())
+    vi.mocked(listIncidents).mockResolvedValue(page([withDue]) as never)
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter by review view' }), { target: { value: 'all_active' } })
+    await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(3))
+    rendered.unmount()
+    await act(async () => { await vi.advanceTimersByTimeAsync(unmountDueAt - Date.now()) })
+    expect(listIncidents).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not poll an already-due row or retry repeatedly after a due refresh fails', async () => {
+    const alreadyDue = investigatingItem(new Date(start.getTime() - 60_000).toISOString(), 'follow_up_due')
+    vi.mocked(listIncidents).mockResolvedValue(page([alreadyDue]) as never)
+    const alreadyDueView = renderInbox(['/incidents?view=all_active'])
+    await waitForInbox()
+    await act(async () => { await vi.advanceTimersByTimeAsync(dayMs) })
+    expect(listIncidents).toHaveBeenCalledTimes(1)
+    alreadyDueView.unmount()
+
+    const retryDueAt = Date.now() + 60_000
+    const future = investigatingItem(new Date(retryDueAt).toISOString())
+    vi.mocked(listIncidents).mockResolvedValueOnce(page([future]) as never).mockRejectedValue(new Error('temporary inbox failure'))
+    renderInbox(['/incidents?view=all_active'])
+    await waitForInbox()
+    await act(async () => { await vi.advanceTimersByTimeAsync(retryDueAt - Date.now()) })
+    await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(3))
+    await act(async () => { await vi.advanceTimersByTimeAsync(dayMs) })
+    expect(listIncidents).toHaveBeenCalledTimes(3)
   })
 })
 

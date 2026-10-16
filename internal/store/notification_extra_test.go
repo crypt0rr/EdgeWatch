@@ -240,7 +240,7 @@ func TestManagedNotificationRotationPreservesNonWindowDeliveryBehavior(t *testin
 	}
 }
 
-func TestManagedNotificationRotationRetainsStartedWindowEventForReview(t *testing.T) {
+func TestManagedNotificationRotationRetainsStartedActiveWindowEventForReview(t *testing.T) {
 	for _, keepPending := range []bool{false, true} {
 		name := "discard"
 		if keepPending {
@@ -266,6 +266,12 @@ func TestManagedNotificationRotationRetainsStartedWindowEventForReview(t *testin
 				t.Fatalf("claim window-linked event = %d, %v", len(claimed), err)
 			}
 			if err := s.System().BeginDeliveryAttempt(ctx, claimed[0].ID, claimed[0].ClaimToken); err != nil {
+				t.Fatal(err)
+			}
+			// The attempt starts before the scheduled window, then the rotation
+			// occurs after that window has become active. This keeps the test's
+			// setup deliverable while exercising active-window retention.
+			if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET start_at=?,status='active' WHERE id=?`, sqliteTimestamp(time.Now().UTC().Add(-time.Second)), window.ID); err != nil {
 				t.Fatal(err)
 			}
 			current, err := ts.GetManagedNotification(ctx, destination.ID)
@@ -295,6 +301,108 @@ func TestManagedNotificationRotationRetainsStartedWindowEventForReview(t *testin
 			summary, changed, err := ts.ExpireChangeWindow(ctx, window.ID, func() time.Time { return closeAt }, nil)
 			if err != nil || !changed || summary.UnknownOutcomeEventCount != 1 || summary.InFlightEventCount != 0 {
 				t.Fatalf("window review after rotation/recovery = %+v, changed %v, err %v", summary, changed, err)
+			}
+		})
+	}
+}
+
+func TestManagedNotificationRotationTreatsFutureWindowAttemptAsUnlinked(t *testing.T) {
+	for _, outcome := range []string{"keep-failure", "keep-success", "discard-failure", "discard-hard-stop"} {
+		t.Run(outcome, func(t *testing.T) {
+			ctx := context.Background()
+			s := openTestStore(t)
+			ts := defaultTenant(s)
+			job := createWindowTestJob(t, ts, "rotation-future-"+outcome, "UTC")
+			destination, err := ts.CreateManagedNotification(ctx, "rotation-future-destination", "Ops", "generic", []byte{1}, []byte{2}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now().UTC().Add(7 * 24 * time.Hour).Truncate(time.Second)
+			window := createTestChangeWindow(t, ts, job.ID, start, start.Add(time.Hour))
+			event := model.Event{Type: "changes-detected", JobID: job.ID, TenantID: DefaultTenantID, ScanID: "rotation-future-event", CreatedAt: time.Now().UTC(), Changes: []model.Change{{Key: "rotation-future-change", Kind: "port", Port: 443}}}
+			if err := s.System().QueueEvent(ctx, managedNotificationKey(destination.ID, destination.Revision), event); err != nil {
+				t.Fatal(err)
+			}
+			claimed, err := s.System().ClaimDueDeliveries(ctx, 1, "rotation-future-"+outcome)
+			if err != nil || len(claimed) != 1 {
+				t.Fatalf("claim future-window event = %d, %v", len(claimed), err)
+			}
+			item := claimed[0]
+			if err := s.System().BeginDeliveryAttempt(ctx, item.ID, item.ClaimToken); err != nil {
+				t.Fatal(err)
+			}
+			var linkedWindowID string
+			if err := s.DB.QueryRowContext(ctx, `SELECT change_window_id FROM outbox WHERE id=?`, item.ID).Scan(&linkedWindowID); err != nil || linkedWindowID != window.ID {
+				t.Fatalf("attempt window association = %q, %v; want future window %q", linkedWindowID, err, window.ID)
+			}
+			current, err := ts.GetManagedNotification(ctx, destination.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			keepPending := strings.HasPrefix(outcome, "keep-")
+			if keepPending {
+				_, err = ts.UpdateManagedNotificationKeepingPendingWithAudit(ctx, destination.ID, current.Revision, current.Name, current.Provider, []byte{3}, []byte{4}, true, AuditEntry{Action: "notifications.updated"})
+			} else {
+				_, err = ts.UpdateManagedNotificationWithAudit(ctx, destination.ID, current.Revision, current.Name, current.Provider, []byte{3}, []byte{4}, true, AuditEntry{Action: "notifications.updated"})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var selector, claim, marker, coalesced string
+			var coalesceAfter int
+			if err := s.DB.QueryRowContext(ctx, `SELECT destination,claim_token,attempt_started_at,coalesce_after_attempt,coalesced_at FROM outbox WHERE id=?`, item.ID).Scan(&selector, &claim, &marker, &coalesceAfter, &coalesced); err != nil {
+				t.Fatal(err)
+			}
+			if keepPending {
+				wantSelector := managedNotificationKey(destination.ID, current.Revision+1)
+				if selector != wantSelector || claim != "" || marker != "" || coalesceAfter != 0 || coalesced != "" {
+					t.Fatalf("keep-pending future attempt after rotation = selector %q claim %q marker %q coalesce-after %d coalesced %q; want moved and retryable", selector, claim, marker, coalesceAfter, coalesced)
+				}
+				var resultErr error
+				if outcome == "keep-success" {
+					resultErr = s.System().DeliveryResultClaim(ctx, item.ID, item.ClaimToken, nil)
+				} else {
+					resultErr = s.System().DeliveryResultClaim(ctx, item.ID, item.ClaimToken, ErrDeliveryProvider)
+				}
+				if !errors.Is(resultErr, ErrDeliveryClaimLost) {
+					t.Fatalf("old provider result after selector rotation = %v; want lost claim", resultErr)
+				}
+				var sentAt string
+				if err := s.DB.QueryRowContext(ctx, `SELECT coalesce(sent_at,'') FROM outbox WHERE id=?`, item.ID).Scan(&sentAt); err != nil {
+					t.Fatal(err)
+				}
+				if sentAt != "" {
+					t.Fatalf("stale %s result marked rotated outbox row sent at %q", outcome, sentAt)
+				}
+				retry, err := s.System().ClaimDueDeliveries(ctx, 1, "rotation-future-retry")
+				if err != nil || len(retry) != 1 || retry[0].ID != item.ID || retry[0].Destination != wantSelector {
+					t.Fatalf("future-window alert retry = %+v, %v; want same row with new selector %q", retry, err, wantSelector)
+				}
+				return
+			}
+
+			if claim != item.ClaimToken || marker == "" || coalesceAfter != 1 || coalesced != "" {
+				t.Fatalf("discard future attempt before result/recovery = claim %q marker %q coalesce-after %d coalesced %q; want marked in-flight attempt", claim, marker, coalesceAfter, coalesced)
+			}
+			if outcome == "discard-failure" {
+				if err := s.System().DeliveryResultClaim(ctx, item.ID, item.ClaimToken, ErrDeliveryProvider); err != nil {
+					t.Fatal(err)
+				}
+			} else if released, err := s.System().ReleaseDeliveryClaims(ctx); err != nil || released != 1 {
+				t.Fatalf("release after simulated hard stop = %d claims, %v", released, err)
+			}
+			if err := s.DB.QueryRowContext(ctx, `SELECT claim_token,attempt_started_at,coalesce_after_attempt,coalesced_at FROM outbox WHERE id=?`, item.ID).Scan(&claim, &marker, &coalesceAfter, &coalesced); err != nil {
+				t.Fatal(err)
+			}
+			if claim != "" || marker != "" || coalesceAfter != 0 || coalesced == "" {
+				t.Fatalf("discarded future attempt after %s = claim %q marker %q coalesce-after %d coalesced %q; want immediately coalesced", outcome, claim, marker, coalesceAfter, coalesced)
+			}
+			if retry, err := s.System().ClaimDueDeliveries(ctx, 1, "rotation-future-no-retry"); err != nil || len(retry) != 0 {
+				t.Fatalf("coalesced future-window attempt became retryable: %+v, %v", retry, err)
+			}
+			summary, changed, err := ts.ExpireChangeWindow(ctx, window.ID, func() time.Time { return window.EndAt.Add(time.Second) }, nil)
+			if err != nil || !changed || summary.SuppressedEventCount != 0 || summary.InFlightEventCount != 0 || summary.UnknownOutcomeEventCount != 0 {
+				t.Fatalf("future window close after %s attempt = %+v, changed %v, err %v; want no linked outcome", outcome, summary, changed, err)
 			}
 		})
 	}

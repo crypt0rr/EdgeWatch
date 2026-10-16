@@ -129,12 +129,12 @@ func buildOutboxTransitionContracts() map[outboxTransitionName]outboxTransitionC
 			[]string{"destination", "attempts", "next_at", "deferrals", "terminal_at", "change_window_id", "attempt_started_at", "coalesce_after_attempt"},
 		),
 		outboxRecoverStartup: transitionContractPreservingSentAt(
-			nil, []string{"claim_token", "claim_until"}, []string{"attempt_started_at", "coalesced_at", "last_error"},
-			[]string{"destination", "attempts", "next_at", "deferrals", "terminal_at", "change_window_id", "coalesce_after_attempt"},
+			nil, []string{"claim_token", "claim_until"}, []string{"attempt_started_at", "coalesced_at", "last_error", "coalesce_after_attempt"},
+			[]string{"destination", "attempts", "next_at", "deferrals", "terminal_at", "change_window_id"},
 		),
 		outboxRecoverExpired: transitionContractPreservingSentAt(
-			nil, []string{"claim_token", "claim_until"}, []string{"attempt_started_at", "coalesced_at", "last_error"},
-			[]string{"destination", "attempts", "next_at", "deferrals", "terminal_at", "change_window_id", "coalesce_after_attempt"},
+			nil, []string{"claim_token", "claim_until"}, []string{"attempt_started_at", "coalesced_at", "last_error", "coalesce_after_attempt"},
+			[]string{"destination", "attempts", "next_at", "deferrals", "terminal_at", "change_window_id"},
 		),
 		outboxReleaseStartup: transitionContractPreservingSentAt(
 			nil, []string{"claim_token", "claim_until"}, nil,

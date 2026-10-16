@@ -36,7 +36,7 @@ func importStartupWebhook(t *testing.T) (string, *atomic.Int32) {
 func writeImportStartupConfig(t *testing.T, dir, database, listen, rawURL string) string {
 	t.Helper()
 	configPath := filepath.Join(dir, "config.yaml")
-	contents := fmt.Sprintf("database: %s\nweb:\n  listen: %s\nupdates:\n  enabled: false\nenrichment:\n  rdap:\n    enabled: false\nnotifications:\n  urls:\n    - %q\n", database, listen, rawURL)
+	contents := fmt.Sprintf("database: %s\nweb:\n  listen: %s\nscanner:\n  sandbox: off\nupdates:\n  enabled: false\nenrichment:\n  rdap:\n    enabled: false\nnotifications:\n  urls:\n    - %q\n", database, listen, rawURL)
 	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}

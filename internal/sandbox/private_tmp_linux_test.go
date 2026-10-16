@@ -2165,6 +2165,58 @@ func TestPrivateTemporaryCleanupHelperFailurePreservesArtifacts(t *testing.T) {
 	}
 }
 
+func TestPrivateTemporaryCleanupHelperUsesPinnedScannerLeafMode(t *testing.T) {
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	temporary := &linuxPrivateTemporaryDirectory{
+		filesystem:    realPrivateTemporaryFilesystemOps(),
+		helper:        helper,
+		uid:           uint32(os.Geteuid()),
+		gid:           uint32(os.Getegid()),
+		private:       true,
+		leafMode:      privateScannerTemporaryMode,
+		namespaceMode: privateScannerNamespaceMode,
+	}
+	if err := temporary.createNamespace(); err != nil {
+		t.Fatalf("create scanner invocation namespace: %v", err)
+	}
+	if err := temporary.createLeaf(); err != nil {
+		_ = temporary.Close()
+		t.Fatalf("create scanner-owned leaf: %v", err)
+	}
+	t.Cleanup(func() {
+		if !temporary.cleaned {
+			if err := temporary.Cleanup(context.Background()); err != nil {
+				t.Errorf("cleanup scanner-owned leaf: %v", err)
+			}
+		}
+		if err := temporary.Close(); err != nil {
+			t.Errorf("close scanner-owned temporary directory: %v", err)
+		}
+	})
+	artifact := filepath.Join(temporary.path(), "CURRENT")
+	if err := os.WriteFile(artifact, []byte("MANIFEST-000001\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var leaf unix.Stat_t
+	if err := unix.Fstat(int(temporary.leaf.Fd()), &leaf); err != nil {
+		t.Fatal(err)
+	}
+	if leaf.Mode != unix.S_IFDIR|privateScannerTemporaryMode {
+		t.Fatalf("scanner-owned leaf mode = %#o, want %#o", leaf.Mode, unix.S_IFDIR|privateScannerTemporaryMode)
+	}
+	if err := temporary.Cleanup(context.Background()); err != nil {
+		t.Fatalf("helper-backed cleanup of 0700 scanner leaf: %v", err)
+	}
+	for _, path := range []string{temporary.path(), filepath.Join("/tmp", temporary.namespaceName)} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("cleanup left %q: %v", path, err)
+		}
+	}
+}
+
 func TestPrivateTemporaryStartedReportsControlSetupFailures(t *testing.T) {
 	t.Run("closed child endpoint", func(t *testing.T) {
 		pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)

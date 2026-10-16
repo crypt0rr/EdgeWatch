@@ -188,7 +188,7 @@ func run(args []string) error {
 	// cannot confine those processes.
 	var scannerSandbox *sandbox.Policy
 	if cmd == "daemon" || cmd == "scan" {
-		scannerSandbox = sandbox.Detect(scannerSandboxOptions(cfg, *nmapPath))
+		scannerSandbox = sandbox.Detect(scannerSandboxOptions(cfg))
 		if err := scannerSandbox.Require(); err != nil {
 			return err
 		}
@@ -470,7 +470,7 @@ func run(args []string) error {
 		health, err := s.System().HealthStatus(ctx)
 		// The sandbox is detected for this container, which grants the
 		// health command the daemon's capabilities and configuration.
-		scannerSandbox := sandbox.Detect(scannerSandboxOptions(cfg, *nmapPath)).Status()
+		scannerSandbox := sandbox.Detect(scannerSandboxOptions(cfg)).Status()
 		notificationSandbox := sandbox.Detect(notificationSandboxOptions(cfg)).Status()
 		health.Warnings = append(health.Warnings, scannerSandboxWarnings(scannerSandbox)...)
 		health.Warnings = append(health.Warnings, notificationSandboxWarnings(notificationSandbox)...)
@@ -931,17 +931,14 @@ func scannerTemporaryDirectory(s *store.Store) string {
 	return filepath.Join(filepath.Dir(s.FilePath()), "tmp", "scanner")
 }
 
-// scannerSandboxOptions describes the configured sandbox and the scanner
-// command whose start with Landlock the sandbox confirms. Nmap loads shared
-// libraries, so its start shows whether the restriction allows the dynamic
-// loader and the libraries' paths. Naabu is a static binary below /usr, which
-// the restriction always allows, and its version command takes half a
-// second, too long for every health check.
-func scannerSandboxOptions(cfg *config.Config, nmapPath string) sandbox.Options {
+// scannerSandboxOptions describes the configured sandbox. Detect uses a
+// harmless /bin/true probe; it never starts a scanner binary outside an
+// invocation that has acquired its own identity lease.
+func scannerSandboxOptions(cfg *config.Config) sandbox.Options {
 	return sandbox.Options{
 		Mode:     cfg.Scanner.Sandbox,
 		Landlock: cfg.Scanner.Landlock,
-		Probes:   []sandbox.Probe{{Args: []string{nmapPath, "--version"}}},
+		Probes:   []sandbox.Probe{{Name: "the scanner identity probe", Args: []string{"/bin/true"}}},
 	}
 }
 
@@ -972,6 +969,9 @@ func notificationSandboxOptions(cfg *config.Config) sandbox.Options {
 // starts scanner processes as that user, which the sandbox would not improve
 // on.
 func scannerSandboxWarnings(status sandbox.Status) []string {
+	if status.Mode != sandbox.ModeOff && status.IdentityPool != nil && status.IdentityPool.State == sandbox.StateUnavailable {
+		return []string{"scanner launches are unavailable because the per-invocation identity pool could not be enforced: " + status.IdentityPool.Reason}
+	}
 	return unconfinedRootWarnings("scanner processes run", status)
 }
 
@@ -982,7 +982,8 @@ func notificationSandboxWarnings(status sandbox.Status) []string {
 }
 
 func unconfinedRootWarnings(subject string, status sandbox.Status) []string {
-	if status.State != sandbox.StateUnavailable || status.ProcessUID != 0 {
+	uid, ok := processUID(status)
+	if status.State != sandbox.StateUnavailable || !ok || uid != 0 {
 		return nil
 	}
 	if status.Landlock.State == sandbox.StateEnforced {
@@ -991,19 +992,27 @@ func unconfinedRootWarnings(subject string, status sandbox.Status) []string {
 	return []string{subject + " unconfined as UID 0: " + status.Reason}
 }
 
+func processUID(status sandbox.Status) (int, bool) {
+	if status.ProcessUID == nil {
+		return 0, false
+	}
+	return *status.ProcessUID, true
+}
+
 // logScannerSandbox records how scanner processes start.
 func logScannerSandbox(logger *slog.Logger, status sandbox.Status) {
 	switch {
 	case status.State == sandbox.StateEnforced:
-		logger.Info("scanner processes are sandboxed", "uid", status.UID, "gid", status.GID, "capabilities", status.Capabilities, "no_new_privileges", status.NoNewPrivileges)
-	case status.State == sandbox.StateUnavailable && status.ProcessUID == 0 && status.Landlock.State == sandbox.StateEnforced:
-		logger.Warn("scanner processes run as UID 0, restricted only by Landlock; see the container hardening guide", "reason", status.Reason)
-	case status.State == sandbox.StateUnavailable && status.ProcessUID == 0:
-		logger.Warn("scanner processes run unconfined as UID 0; see the container hardening guide", "reason", status.Reason)
+		if pool := status.IdentityPool; pool != nil {
+			logger.Info("scanner processes use per-invocation identities", "strategy", pool.Strategy, "uid_start", pool.UIDStart, "uid_end", pool.UIDEnd, "max_parallel", pool.MaxParallel, "capabilities", status.Capabilities, "no_new_privileges", status.NoNewPrivileges)
+		} else {
+			logger.Info("scanner processes are sandboxed", "uid", status.UID, "gid", status.GID, "capabilities", status.Capabilities, "no_new_privileges", status.NoNewPrivileges)
+		}
 	case status.State == sandbox.StateUnavailable:
-		logger.Info("scanner processes run as the daemon's user", "uid", status.ProcessUID, "reason", status.Reason)
+		logger.Warn("scanner launches are unavailable; see the container hardening guide", "reason", status.Reason)
 	default:
-		logger.Info("scanner sandbox is off; scanner processes run unconfined", "uid", status.ProcessUID)
+		uid, _ := processUID(status)
+		logger.Info("scanner sandbox is off; scanner processes run unconfined", "uid", uid)
 	}
 	switch {
 	case status.Landlock.State == sandbox.StateEnforced:
@@ -1017,17 +1026,18 @@ func logScannerSandbox(logger *slog.Logger, status sandbox.Status) {
 
 // logNotificationSandbox records how the notification process starts.
 func logNotificationSandbox(logger *slog.Logger, status sandbox.Status) {
+	uid, _ := processUID(status)
 	switch {
 	case status.State == sandbox.StateEnforced:
 		logger.Info("the notification process is sandboxed", "uid", status.UID, "gid", status.GID, "landlock", status.Landlock.State, "landlock_reason", status.Landlock.Reason, "seccomp", status.Seccomp.State)
-	case status.State == sandbox.StateUnavailable && status.ProcessUID == 0 && status.Landlock.State == sandbox.StateEnforced:
+	case status.State == sandbox.StateUnavailable && uid == 0 && status.Landlock.State == sandbox.StateEnforced:
 		logger.Warn("the notification process runs as UID 0, restricted only by Landlock; see the container hardening guide", "reason", status.Reason)
-	case status.State == sandbox.StateUnavailable && status.ProcessUID == 0:
+	case status.State == sandbox.StateUnavailable && uid == 0:
 		logger.Warn("the notification process runs unconfined as UID 0; see the container hardening guide", "reason", status.Reason)
 	case status.State == sandbox.StateUnavailable:
-		logger.Info("the notification process runs as the daemon's user", "uid", status.ProcessUID, "reason", status.Reason, "landlock", status.Landlock.State)
+		logger.Info("the notification process runs as the daemon's user", "uid", uid, "reason", status.Reason, "landlock", status.Landlock.State)
 	default:
-		logger.Info("notification sandbox is off; the notification process runs unconfined", "uid", status.ProcessUID)
+		logger.Info("notification sandbox is off; the notification process runs unconfined", "uid", uid)
 	}
 }
 

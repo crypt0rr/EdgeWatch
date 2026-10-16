@@ -3,14 +3,18 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/config"
+	"github.com/crypt0rr/edgewatch/internal/sandbox"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -147,6 +151,46 @@ func TestDaemonValidatesConfiguredAuthKeyBeforeMigration(t *testing.T) {
 	}
 	if err := run([]string{"daemon", "--config", configPath}); err == nil || !strings.Contains(err.Error(), "validate authentication key file") {
 		t.Fatalf("daemon error = %v, want an authentication key validation error", err)
+	}
+}
+
+func TestDaemonAutoSandboxStartsWhileScannerInvocationsFailClosed(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	database := filepath.Join(dir, "edgewatch.db")
+	configPath := filepath.Join(dir, "config.yaml")
+	listen := occupiedLoopbackAddress(t)
+	contents := fmt.Sprintf("database: %s\nweb:\n  listen: %s\nscanner:\n  sandbox: auto\n  landlock: off\nnotifications:\n  sandbox: off\nupdates:\n  enabled: false\nenrichment:\n  rdap:\n    enabled: false\n", database, listen)
+	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Auto keeps daemon startup available when this test binary cannot prove
+	// scanner isolation. The occupied listener gives startup a bounded terminal
+	// error after configuration and database initialization have succeeded.
+	err := run([]string{"daemon", "--config", configPath, "--nmap", "/bin/true"})
+	if err == nil || !strings.Contains(err.Error(), "address already in use") || errors.Is(err, sandbox.ErrUnavailable) {
+		t.Fatalf("daemon with an unavailable auto scanner sandbox = %v, want it to reach the occupied listener", err)
+	}
+	if info, statErr := os.Stat(database); statErr != nil || info.IsDir() {
+		t.Fatalf("auto daemon did not initialize its database: info=%v err=%v", info, statErr)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := sandbox.Detect(scannerSandboxOptions(cfg))
+	status := policy.Status()
+	if status.Mode != sandbox.ModeAuto || status.State != sandbox.StateUnavailable || status.IdentityPool == nil || status.IdentityPool.State != sandbox.StateUnavailable {
+		t.Fatalf("scanner sandbox status = %+v, want unavailable auto identity pool", status)
+	}
+	if err := policy.Require(); err != nil {
+		t.Fatalf("auto mode refused daemon startup: %v", err)
+	}
+	command := exec.CommandContext(context.Background(), "/bin/true")
+	if _, err := sandbox.PrepareScannerInvocation(context.Background(), command, policy, false); err == nil || !strings.Contains(err.Error(), "distinct scanner identity is unavailable") {
+		t.Fatalf("scanner invocation preparation = %v, want fail-closed unavailable identity", err)
 	}
 }
 

@@ -14,7 +14,7 @@ import (
 
 func TestSandboxHealthState(t *testing.T) {
 	t.Parallel()
-	enforced := sandbox.Status{State: sandbox.StateEnforced, ProcessUID: sandbox.UID}
+	enforced := sandbox.Status{State: sandbox.StateEnforced, ProcessUID: testUIDPointer(sandbox.UID)}
 	for _, test := range []struct {
 		name   string
 		status sandbox.Status
@@ -22,16 +22,19 @@ func TestSandboxHealthState(t *testing.T) {
 	}{
 		{"identity and Landlock", withLandlock(enforced), model.SandboxStateSandboxed},
 		{"identity only", enforced, model.SandboxStateIdentityOnly},
+		{"leased scanner identities", sandbox.Status{State: sandbox.StateEnforced, IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced}}, model.SandboxStateIdentityOnly},
 		{"Landlock as UID 0", withLandlock(sandbox.Status{State: sandbox.StateUnavailable}), model.SandboxStateLandlockOnly},
 		{"unconfined as UID 0", sandbox.Status{State: sandbox.StateUnavailable}, model.SandboxStateUnconfined},
 		{"off as UID 0", sandbox.Status{State: sandbox.StateDisabled}, model.SandboxStateUnconfined},
-		{"daemon that is not root", sandbox.Status{State: sandbox.StateUnavailable, ProcessUID: 1000}, model.SandboxStateIdentityOnly},
+		{"daemon that is not root", sandbox.Status{State: sandbox.StateUnavailable, ProcessUID: testUIDPointer(1000)}, model.SandboxStateIdentityOnly},
 	} {
 		if got := sandboxHealthState(test.status); got != test.want {
 			t.Errorf("%s: state = %s, want %s", test.name, got, test.want)
 		}
 	}
 }
+
+func testUIDPointer(uid int) *int { return &uid }
 
 // withLandlock returns the status with Landlock enforced.
 func withLandlock(status sandbox.Status) sandbox.Status {

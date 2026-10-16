@@ -46,7 +46,7 @@ func newTenantFlagFixture(t *testing.T) tenantFlagFixture {
 		// The units' destinations deliver to a webhook on the loopback
 		// address, which only the explicit override of the target
 		// exclusions allows a unit's destination to use.
-		if err := os.WriteFile(*config.path, []byte("database: "+database+"\nscanner:\n  target_exclusions: []\n"+config.extra+legacyCLIJobsYAML), 0o600); err != nil {
+		if err := os.WriteFile(*config.path, []byte("database: "+database+"\nscanner:\n  sandbox: off\n  target_exclusions: []\n"+config.extra+legacyCLIJobsYAML), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

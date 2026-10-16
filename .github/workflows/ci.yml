@@ -229,11 +229,11 @@ jobs:
             go-coverage-summary.txt
 
   # Branch protection requires this check. It fails unless the Go checks and
-  # every test shard succeeded, then applies the coverage gates to the merged
-  # profile of all shards.
+  # every test shard and the privileged container profile succeeded, then
+  # applies the coverage gates to the merged Go profile.
   test:
     if: always()
-    needs: [go-checks, go-test]
+    needs: [go-checks, go-test, container]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -241,9 +241,10 @@ jobs:
         env:
           CHECKS: ${{ needs.go-checks.result }}
           TESTS: ${{ needs.go-test.result }}
+          CONTAINER: ${{ needs.container.result }}
         run: |
-          if [ "$CHECKS" != success ] || [ "$TESTS" != success ]; then
-            echo "go-checks: $CHECKS, go-test: $TESTS" >&2
+          if [ "$CHECKS" != success ] || [ "$TESTS" != success ] || [ "$CONTAINER" != success ]; then
+            echo "go-checks: $CHECKS, go-test: $TESTS, container: $CONTAINER" >&2
             exit 1
           fi
       - name: Check out source
@@ -268,7 +269,7 @@ jobs:
       - name: Merge shard coverage
         run: |
           set -euo pipefail
-          for shard in store-1 store-2 store-3 other; do
+          for shard in store-1 store-2 store-3 other container-sandbox; do
             test -d "shards/go-coverage-$shard"
           done
           ./scripts/merge-go-coverage.sh coverage.out go-coverage-summary.txt shards/go-coverage-*
@@ -388,6 +389,15 @@ jobs:
         run: ./scripts/verify-container-runtime.sh edgewatch:prebuilt-amd64
       - name: Verify scanner sandbox with real scans
         run: ./scripts/verify-scanner-sandbox.sh edgewatch:prebuilt-amd64
+      - name: Collect privileged sandbox coverage
+        run: ./scripts/collect-sandbox-privileged-coverage.sh edgewatch:prebuilt-amd64 "$RUNNER_TEMP/go-coverage-container-sandbox"
+      - name: Upload privileged sandbox coverage
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: go-coverage-container-sandbox
+          if-no-files-found: error
+          retention-days: 1
+          path: ${{ runner.temp }}/go-coverage-container-sandbox/
       - name: Verify Compose deployment
         run: ./scripts/verify-compose-deployment.sh edgewatch:prebuilt-amd64
       - name: Build prebuilt ARM64 image

@@ -5,13 +5,13 @@ description: Review scanner capability requirements, runtime controls, and data 
 
 The EdgeWatch daemon runs as UID 0 inside the container, and the scanner
 processes it starts do not. Nmap, its NSE scripts, and Naabu parse responses
-from the networks they scan, so EdgeWatch starts each of them in a
-[sandbox](#scanner-sandbox): as the unprivileged UID 65532, with no
-supplementary groups and only the raw-packet capabilities a scan needs. A
-compromised scanner process cannot read the database or the encryption keys.
-When the kernel provides [Landlock](#landlock), EdgeWatch also limits each
-scanner process to the files a scan needs, and this holds even for a scanner
-process that runs as UID 0. A [seccomp filter](#seccomp-filter) refuses the
+from the networks they scan, so EdgeWatch starts each invocation in a
+[sandbox](#scanner-sandbox): with a distinct unprivileged UID and GID leased
+from 60000–60063, no supplementary groups, and only the raw-packet
+capabilities that scan needs. A compromised scanner process cannot read the
+database or the encryption keys. When the kernel provides
+[Landlock](#landlock), EdgeWatch also limits each scanner process to the files
+that scan needs. A [seccomp filter](#seccomp-filter) refuses the
 system calls no scanner needs, and [no EdgeWatch process dumps
 core](#core-dumps). The process that delivers notifications runs in a
 [sandbox](#notification-sandbox) of its own, without capabilities.
@@ -66,20 +66,24 @@ published, on AMD64 and on ARM64:
 
 | Runtime | Capabilities | Supported work | Result |
 | --- | --- | --- | --- |
-| UID 0 daemon, base Compose | `NET_RAW`, `SETUID`, `SETGID`, `KILL` | Nmap TCP SYN/connect, Nmap UDP, Naabu connect, each in the sandbox as UID 65532 with `NET_RAW`, restricted with Landlock and the seccomp filter | supported |
-| UID 0 daemon, `compose.syn.yaml` | the above and `NET_ADMIN` | Naabu SYN in addition to the base modes, in the sandbox with `NET_RAW` and `NET_ADMIN`, restricted with Landlock and the seccomp filter | supported |
-| UID 0 daemon, `NET_RAW` only | `NET_RAW` | the base modes as UID 0, restricted only with Landlock and the seccomp filter | supported; the identity sandbox is unavailable and EdgeWatch warns |
-| UID 65532, experimental probe | none effective (even when `NET_RAW` is requested) | Naabu connect and Nmap TCP connect only | supported for those modes; not a supported default |
-| UID 65532, experimental probe | none effective | Nmap SYN or UDP, Naabu SYN | rejected by the scanner or unavailable |
+| UID 0 daemon, base Compose | `NET_RAW`, `SETUID`, `SETGID`, `KILL` | Nmap TCP SYN/connect, Nmap UDP, and Naabu connect; each invocation uses its own leased UID/GID, `NET_RAW`, and the seccomp filter, with Landlock when available | supported |
+| UID 0 daemon, `compose.syn.yaml` | the above and `NET_ADMIN` | Naabu SYN in addition to the base modes, with a separate leased UID/GID, `NET_RAW`, `NET_ADMIN`, and the seccomp filter, with Landlock when available | supported |
+| UID 0 daemon, missing `SETUID`, `SETGID`, or `KILL` | `NET_RAW` and optional `NET_ADMIN` only | health reports the identity pool unavailable and scanner launches fail closed; no UID 0 scanner fallback | not supported for scanner launches |
+| UID 0 daemon, `scanner.sandbox: off` | the capabilities needed by the selected scan | scanners run unconfined as the daemon identity; identity leases, Landlock, and the scanner seccomp filter are disabled | explicit unconfined mode |
+| non-root daemon | any | cannot establish the required leased scanner identities | scanner launches unavailable |
 
 The matrix also runs the image with a disposable read-only root filesystem and
 a writable data bind mount owned by the identity mapped to container UID 0. It
 verifies that the normal root deployment can create SQLite state without
 world-writable permissions and that scanner capability checks fail closed
 instead of guessing from the UID. It runs real Nmap SYN, Nmap UDP and Naabu
-scans of local listeners through EdgeWatch with the sandbox enforced, with
-only Landlock, and with the sandbox off, and requires the same results from
-all three. It checks that the sandbox identity cannot read the data
+scans of local listeners through EdgeWatch with the identity pool, seccomp,
+and Landlock when available; with the identity pool and seccomp but Landlock
+disabled; and with the sandbox explicitly off. It requires matching results
+from these supported modes. It also checks concurrent invocations use distinct
+leased identities, that one invocation cannot read another's temporary files
+or target-list descriptor, and that an unproven cleanup quarantines its
+identity. It checks that a scanner identity cannot read the data
 directory, and that a process restricted with Landlock cannot read the
 database, list the data directory, read `config.yaml`, write to the data
 directory, or execute a file it wrote, even as UID 0. It requires that a
@@ -116,20 +120,30 @@ you have tested ownership and every configured scan mode with a copy of the
 data directory. Never use mode `0777` as a workaround; it masks ownership
 errors and weakens protection for databases and encryption keys.
 
+The scanner identity allocator also keeps a private lease journal under
+`/var/lib/edgewatch/scanner-identities` and a boot marker beside it. These are
+filesystem state, separate from the SQLite database: the `backup` and `restore`
+commands do not include or reset them, while a raw snapshot of the full `./data`
+directory includes them. Keep them with the same live data volume. Do not edit,
+delete, or restore the journal separately from that volume. If restoring a raw
+volume snapshot, stop the daemon and all scans first; an old journal may not
+match the current boot or private PID namespace, and EdgeWatch will fail closed
+rather than guess that a scanner identity is safe to reuse.
+
 ## Scanner sandbox
 
 `scanner.sandbox` in `config.yaml` selects how scanner processes start:
 
 | Value | Behaviour |
 | --- | --- |
-| `auto` (default) | Starts Nmap and Naabu in the sandbox when the container allows it. Otherwise they start as UID 0, restricted only with [Landlock](#landlock) when the kernel provides it, and EdgeWatch logs a warning, adds it to `edgewatch health`, shows it on the Overview for administrators, and, from v0.36.0, records a [deployment alert](#deployment-alerts). |
-| `required` | Refuses to start the daemon, or `edgewatch scan`, when the sandbox is unavailable. |
-| `off` | Starts scanner processes unconfined, as releases before the sandbox did, without Landlock. |
+| `auto` (default) | Starts the daemon even when the identity pool or required seccomp filter is unavailable. Health reports that state, and each scanner launch fails closed; EdgeWatch logs the reason, shows it on the Overview, and records a [deployment alert](#deployment-alerts). It never starts a scanner as UID 0. |
+| `required` | Refuses daemon startup and direct scan commands when the identity pool or required seccomp filter is unavailable. When `scanner.landlock: required` is also set, it also refuses startup or direct scan commands without Landlock. |
+| `off` | Starts scanner processes unconfined as the daemon identity, without scanner identity leases, Landlock, or the scanner seccomp filter. |
 
 A sandboxed scanner process:
 
-- runs as UID and GID 65532 (`edgewatch-scanner`) with no supplementary
-  groups;
+- runs with a distinct UID and matching GID leased from 60000–60063 for that
+  invocation, with no supplementary groups;
 - keeps `NET_RAW`, and `NET_ADMIN` when the container grants it, as ambient
   capabilities and no other capability;
 - cannot read or list `./data`, which belongs to UID 0 with mode `0750`, or
@@ -151,17 +165,25 @@ of starting scanner processes for each capabilities request. Host commands such
 as `notify test` and baseline review do not need scanner binaries and skip the
 probes when they create an application without a scanner policy.
 
-At startup EdgeWatch checks that the container grants `SETUID`, `SETGID` and
-`KILL`, and starts a short test process as UID 65532 to confirm that the
-runtime allows the change. Check the outcome with:
+At startup EdgeWatch checks that every UID/GID in the fixed scanner range is
+mapped, the container grants `SETUID`, `SETGID` and `KILL`, the durable lease
+state is safe to use, and the required seccomp filter can be installed. In
+`auto`, an unavailable pool or filter leaves the daemon running but prevents
+scanner launches; in `required`, it prevents daemon startup. Neither mode
+falls back to running a scanner as UID 0. Check the reported state with:
 
 ```sh
 docker compose exec edgewatch edgewatch health --config /etc/edgewatch/config.yaml --output json
 ```
 
 `scanner_sandbox.state` is `enforced`, `disabled` or `unavailable`, and
-`reason` explains a sandbox that is not enforced. `scanner_sandbox.landlock`
-reports [Landlock](#landlock) the same way.
+`reason` explains a sandbox that is not enforced. `scanner_sandbox.identity_pool`
+reports the pool state, the `per_invocation` strategy, the UID range, and its
+maximum parallel capacity of 64. That capacity is not a count of currently
+active, free, or quarantined leases. Since concurrent scans can use different
+identities, the scanner status does not report one `uid`, `gid`, or
+`process_uid`. The independent `scanner_sandbox.landlock` and
+`scanner_sandbox.seccomp` fields report those layers separately.
 
 Administrators see the same information on the Overview, in the deployment
 footprint's **Process isolation** section. Each sandbox has a status:
@@ -171,14 +193,14 @@ footprint's **Process isolation** section. Each sandbox has a status:
 - **Unavailable:** no layer holds.
 - **Off:** the setting turns the sandbox off.
 
-The section marks each layer (the sandbox identity, Landlock, and the
+The section marks each layer (the scanner identity pool, Landlock, and the
 [seccomp filter](#seccomp-filter)) as holding, unavailable, or off, and gives
 the reason for each layer that does not hold.
 
-The sandbox needs the user namespace of the container to map UID 65532. Standard
-rootful Docker, rootless Docker, and user-namespace remapping with a full
-subordinate range all do. A runtime that maps only a few UIDs reports the
-sandbox as unavailable.
+The scanner pool needs the container's user namespace to map every UID and GID
+from 60000 through 60063. Standard rootful Docker, rootless Docker, and
+user-namespace remapping with a full subordinate range provide the required
+mapping. A runtime that maps only part of the pool reports it unavailable.
 
 ### Landlock
 
@@ -201,20 +223,22 @@ place. The restricted process:
   its restriction, such as the daemon, or connect to their abstract UNIX
   sockets.
 
-The restriction applies whatever identity the process runs as. It therefore
-also protects a deployment whose `compose.yaml` does not grant `SETUID`,
-`SETGID` and `KILL`, where scanner processes still run as UID 0. A process
-cannot lift the restriction, and every process it starts inherits it.
+The restriction applies whatever identity the process runs as. A process
+cannot lift it, and every process it starts inherits it. Scanner launches do
+not fall back to UID 0 when the container lacks the capabilities required for
+the leased identity pool; they fail closed instead.
 
 `scanner.landlock` in `config.yaml` selects it. When Landlock is unavailable
-in `auto` mode, Naabu still gets a unique temporary leaf, but the kernel does
-not prevent another process of the same UID from accessing that leaf if it
-knows the path. `required` refuses to scan without Landlock.
+in `auto` mode, each invocation still uses its own leased UID/GID and seccomp
+filter. The different UID prevents another scanner invocation from opening
+that invocation's temporary leaf by path. Landlock adds a separate
+per-process file boundary. `required` refuses daemon startup and direct scan
+commands without Landlock.
 
 | Value | Behaviour |
 | --- | --- |
 | `auto` (default) | Restricts scanner processes when the kernel provides Landlock. Otherwise they start without it, and EdgeWatch logs why. |
-| `required` | Refuses to start the daemon, or `edgewatch scan`, when scanner processes cannot be restricted. |
+| `required` | Refuses daemon startup and direct scan commands when scanner processes cannot be restricted. |
 | `off` | Starts scanner processes without Landlock. |
 
 `scanner.sandbox: off` turns off Landlock too. At startup EdgeWatch runs
@@ -222,7 +246,8 @@ knows the path. `required` refuses to scan without Landlock.
 loads lies outside the allowed paths, this is found before any scan: Landlock
 is reported unavailable with the reason, and scans run without it.
 `scanner_sandbox.landlock.state` in `edgewatch health` reports the outcome,
-and `abi` the kernel's Landlock version.
+and `abi` the kernel's Landlock version. When Landlock is `required`, an
+unavailable result prevents daemon startup and direct scan commands.
 
 Docker's default seccomp profile permits the Landlock system calls. A custom
 profile must allow `landlock_create_ruleset`, `landlock_add_rule` and
@@ -230,9 +255,9 @@ profile must allow `landlock_create_ruleset`, `landlock_add_rule` and
 
 ### Seccomp filter
 
-With Landlock, the `sandbox-exec` command also installs a seccomp filter on
-top of the container's seccomp profile. The scanner keeps the filter, and so
-does every process the scanner starts. The filter:
+The `sandbox-exec` command installs a seccomp filter on top of the container's
+seccomp profile whether or not Landlock is enabled. The scanner keeps the
+filter, and so does every process the scanner starts. The filter:
 
 - refuses with `EPERM` the system calls no scanner or notification process
   needs. These trace another process or read its memory (`ptrace`,
@@ -252,10 +277,12 @@ does every process the scanner starts. The filter:
 Docker's default profile already refuses most of these calls. The filter
 keeps them refused under a runtime or profile that does not, and it refuses
 `ptrace` and io_uring, which recent Docker profiles allow. The startup probe
-runs Nmap with the filter. When Nmap cannot start that way, scanners run
-with Landlock alone. `scanner_sandbox.seccomp` in `edgewatch health` reports
-`enforced`, `unavailable` with the reason, or `disabled`. The filter applies
-only with Landlock: `scanner.landlock: off` turns it off too.
+runs Nmap with the filter. If the probe fails, scanner launches fail closed;
+they do not run with Landlock alone. `scanner_sandbox.seccomp` in
+`edgewatch health` reports `enforced`, `unavailable` with the reason, or
+`disabled`. The filter applies independently of Landlock:
+`scanner.landlock: off` leaves it enabled, while `scanner.sandbox: off`
+disables it.
 
 ### Scanner files
 
@@ -271,45 +298,39 @@ below it, which it locks while it runs. At startup the daemon, and
 the files of scans they were stopped in.
 
 Naabu also creates temporary target and address-map files of its own. EdgeWatch
-creates a separate invocation namespace below `/tmp` with mode `0711` before
-starting Naabu. When the sandbox helper is available, it creates and pins a
-parent-owned leaf with mode `01777`; any process that knows the path can list
-it and create entries, while the sticky bit prevents it from removing entries
-owned by another user. The mode is not private. With the sandbox disabled, the
-per-invocation leaf has mode `0700`, but another process running as the
-daemon's UID is not separated from it by a kernel scanner boundary. Landlock
-confines a scanner to its own leaf when available.
-Without Landlock, another process that runs as the same UID and knows the leaf
-path can access its contents. After Naabu exits, a fixed helper removes its
-nested temporary files and directories, and EdgeWatch removes the empty leaf
-and namespace. Cleanup failure fails the scan, so its results do not become a
-successful observation or advance the baseline.
+creates a root-owned invocation namespace below `/tmp` with mode `01733` and
+pins it before starting Naabu. A helper creates a mode `0700` leaf owned by
+that invocation's leased UID/GID; concurrent scanners use different identities
+and cannot open each other's leaves by path. When Landlock is available, it
+also confines each scanner to its own leaf. With the sandbox explicitly off,
+the daemon identity owns the leaf and no scanner isolation boundary applies.
+After Naabu exits, EdgeWatch removes the leaf's nested temporary files and
+then removes the empty leaf and namespace. Cleanup failure fails the scan, so
+its results do not become a successful observation or advance the baseline.
 
 A sandboxed scanner cannot list `./data` or reach a file below it by its name,
-and Landlock never grants the data directory to a scanner, even one that runs
-as UID 0. With Landlock, a scanner reaches only the files of its own scan,
-through the descriptors it inherits. That cross-scan protection requires
-Landlock: without it, scanners share UID 65532, and a same-UID process may be
-able to reopen another live scanner's inherited target-list or XML descriptor
-through `/proc/<pid>/fd/<n>`. The host's procfs and ptrace checks may deny that
-access, but EdgeWatch does not enforce or rely on such a denial. The bundled
-`compose.yaml` sets `TMPDIR` to
+and Landlock never grants the data directory to a scanner. With Landlock, a
+scanner reaches only the files of its own scan through the descriptors it
+inherits. Without Landlock, each concurrent invocation still has a distinct
+UID/GID, so DAC and procfs access checks separate its temporary leaf and
+inherited descriptors from peer scanner identities. Landlock remains the
+stronger per-process file boundary. The bundled `compose.yaml` sets `TMPDIR` to
 `/var/lib/edgewatch/tmp` for the daemon's other temporary files, such as
 SQLite's, so they share the data volume rather than the 128 MiB `/tmp`
 tmpfs.
 
 ### Stopping scanners
 
-Each Nmap and Naabu process leads a process group of its own; Nmap in the
-session of its private pseudo-terminal. When a scan is cancelled, times out,
-or a scanner exceeds an output bound, EdgeWatch kills the whole group, and
-when a scanner exits, EdgeWatch kills what is left in its group before it
-collects the scanner's exit status. A scanner can therefore leave no process
-behind that keeps probing or holds the scan open, such as a background process
-that ignores the hangup of the terminal. Once the scanner has exited,
-EdgeWatch waits at most five seconds, one deadline for all of them, for the
-scanner's output pipes and Nmap's terminal to close, and fails the scan when a
-process outside the group still holds one. The
+Each Nmap and Naabu invocation runs in its own process group under a supervisor;
+Nmap also uses its private pseudo-terminal. When a scan is cancelled, times
+out, or a scanner exceeds an output bound, EdgeWatch kills the whole group.
+When the scanner exits, its supervisor kills what remains in the group and
+reaps adopted descendants before returning a cleanup proof. EdgeWatch waits a
+bounded time for that proof and for the scanner's output pipes and Nmap's
+terminal to close. It fails the scan if the process tree cannot be proven gone,
+retains its temporary artifacts, and quarantines the leased identity for the
+rest of the kernel boot. It only removes scan files and releases the lease after
+the proof and cleanup succeed. The
 [seccomp filter](#seccomp-filter) refuses the calls that leave a process
 group. On Linux the kernel also kills a scanner whose EdgeWatch process dies,
 and `edgewatch scan` cancels its scan when its terminal hangs up, as it does on
@@ -380,8 +401,10 @@ without `CAP_SYS_PTRACE`.
 ### Upgrading an existing deployment
 
 A `compose.yaml` from an earlier release adds only `NET_RAW`. With it,
-`auto` keeps scanning as UID 0, restricted only with Landlock where the kernel
-provides it, and warns. Add the three capabilities to enable the sandbox:
+the daemon can start, but `scanner.sandbox: auto` reports the identity pool
+unavailable and refuses scanner launches; it does not run scanners as UID 0,
+even when Landlock is available. Add the three capabilities to enable the
+scanner identity pool:
 
 ```yaml
     cap_add:
@@ -391,32 +414,29 @@ provides it, and warns. Add the three capabilities to enable the sandbox:
       - KILL
 ```
 
-Then recreate the container with `docker compose up -d`. No data migration is
-needed; `./data` keeps its UID 0 ownership.
+Then recreate the container with `docker compose up -d`. No database schema
+migration is needed; `./data` keeps its UID 0 ownership. Keep the allocator
+journal and boot marker with that data directory. A clean container restart
+with an empty journal can move to its new private PID namespace. If a scanner's
+process-tree cleanup could not be proven, its lease is quarantined for the rest
+of the kernel boot and reduces pool capacity. A container restart does not
+clear that quarantine. After a host reboot, the allocator can reset leases
+from the previous boot when the durable boot marker proves the kernel changed.
+If the marker or journal is unreadable or invalid, the pool remains fail-closed
+and needs storage recovery. Do not delete journal entries to recover capacity.
 
 ### What the sandbox does not cover
 
 - The daemon, which serves the console and holds the database and keys, still
   runs as UID 0 with the container's capabilities.
-- All sandboxed scanner processes share UID 65532. Each Naabu invocation has
-  a separate temporary leaf, but the leaf is listable and another same-UID
-  process that knows its path can access it when Landlock is unavailable. The
-  XML output and target-list files remain in the
-  [scanner files directory](#scanner-files), outside scanner reach by path;
-  without Landlock, a same-UID process may still reopen another live
-  scanner's inherited descriptors through `/proc/<pid>/fd/<n>` if the host's
-  procfs and ptrace checks permit it. EdgeWatch does not enforce or rely on
-  those OS checks as cross-scan protection. Use `scanner.landlock: required`
-  when scans need that boundary.
-- Where the seccomp filter does not apply, such as on a kernel without
-  Landlock, a process that a compromised scanner starts can leave the
-  scanner's process group with `setsid` and outlive the scan. Without
-  Landlock, the general scanner helper does not apply the [resource
-  limits](#resource-limits). When the scanner sandbox and temporary helper are
-  enabled, Naabu's per-invocation launcher still applies the OOM score and
-  open-file limits before it execs Naabu, and Nmap's launcher also applies its
-  per-file output limit; `scanner.sandbox: off` disables those helpers as
-  well.
+- The identity pool has 64 scanner UIDs/GIDs. Concurrent invocations use
+  different identities, so filesystem ownership and procfs access checks
+  separate their temporary files and inherited descriptors even when
+  Landlock is unavailable. Landlock adds a per-process file boundary.
+- Seccomp is independent of Landlock and remains required in sandboxed scanner
+  modes. It prevents a scanner from creating namespaces or leaving its
+  supervised process group. If seccomp cannot be installed, scanner launches
+  fail closed. `scanner.sandbox: off` disables the pool, Landlock and seccomp.
 - A scanner process keeps its network access; target exclusions and probe
   budgets are enforced by EdgeWatch before it starts.
 - On a kernel without Landlock, a sandboxed process can read every file its
@@ -424,15 +444,16 @@ needed; `./data` keeps its UID 0 ownership.
 
 ## Deployment alerts
 
-A Compose edit that drops `SETUID`, `SETGID`, or `KILL`, or a kernel without
-Landlock, turns confinement off in `auto` mode without stopping EdgeWatch. So
-that this does not go unnoticed, the daemon compares, when it starts and with
-each heartbeat, how the scanner and notification processes start with the
-state that the last deployment alert reported. A sandbox that lost its
-identity without root, so that its processes run as UID 0, or lost Landlock,
-records one `application.health_alert` in the platform audit and sends it to
-the platform destinations selected for **Deployment alerts**; a sandbox that
-regains confinement records one recovery. A restart with the same state
+A Compose edit that drops `SETUID`, `SETGID`, or `KILL` makes the scanner pool
+unavailable and scanner launches fail closed. A kernel without Landlock
+removes that file-restriction layer but leaves the leased identity and seccomp
+filter in place. The daemon compares, when it starts and with each heartbeat,
+the scanner pool, Landlock, seccomp, and notification sandbox with the state
+that the last deployment alert reported. A scanner pool that becomes
+unavailable, or a sandbox that loses Landlock, records one
+`application.health_alert` in the platform audit and sends it to the platform
+destinations selected for **Deployment alerts**; a sandbox that regains a
+layer records one recovery. A restart with the same state
 records nothing, and each sandbox raises at most one alert an hour, so a
 restart loop cannot flood a destination. The first start of v0.36.0 records
 the current state and reports it once when it is already degraded. A daemon

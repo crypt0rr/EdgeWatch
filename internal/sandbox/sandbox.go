@@ -1,40 +1,42 @@
-// Package sandbox starts scanner processes as an unprivileged identity that
-// keeps only the network capabilities a scan needs, and restricts the files
-// they can open with Landlock. It confines the notification process the same
-// way, as its own identity and without capabilities.
+// Package sandbox starts every scanner invocation under a unique leased
+// unprivileged identity and a no-escape seccomp filter, keeping only the
+// network capabilities the scan needs. When available, Landlock further
+// restricts the files the scanner can open. The notification process uses its
+// own fixed identity without capabilities.
 //
 // Nmap, its NSE scripts, and Naabu parse responses from the networks they
-// scan. When the daemon runs as UID 0, as the container does, a scanner
-// process started the ordinary way inherits that identity and can read the
-// database and the encryption keys. A confined scanner process runs as UID
-// and GID 65532 with no supplementary groups. It holds the container's
-// NET_RAW, and NET_ADMIN when the container grants it, as ambient
-// capabilities and nothing else. The data directory and the key files belong
-// to UID 0, so a confined process can read none of them. The private files a
-// scanner reads or writes are passed to it as inherited descriptors.
+// scan. When the daemon runs as UID 0, a scanner process started the ordinary
+// way inherits that identity and can read the database and encryption keys.
+// Scanner invocations instead use a UID/GID pair leased from a bounded pool,
+// with no supplementary groups. The pool gives concurrent scans separate
+// filesystem identities; the seccomp filter prevents descendants from
+// escaping their process group. Scanner processes hold only the container's
+// NET_RAW and, when granted, NET_ADMIN capabilities. Private scanner files
+// are passed as inherited descriptors.
 //
-// When the kernel provides Landlock, a scanner process also starts through
-// the hidden sandbox-exec command, which restricts its own process to the
-// system files a scanner reads and the files it inherits, and then executes
-// the scanner in place. The restriction holds whatever identity the process
-// has, so it also covers a scanner process that keeps UID 0 because the
-// identity change is unavailable, or the identity of a daemon that runs as
-// another user and owns the database.
+// Failure to establish the leased identity or seccomp filter prevents a scan
+// from starting, including in auto mode. Landlock is independently optional
+// in auto mode. The explicit scanner.sandbox off mode disables all scanner
+// isolation. A trusted supervisor keeps the identity lease until it proves
+// the scanner process tree is gone and private artifact cleanup succeeds;
+// otherwise the lease is quarantined.
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 )
 
-// The scanner.sandbox and scanner.landlock modes. Auto confines scanner
-// processes when the runtime allows it and otherwise starts them as before.
-// Required refuses to start scanner work without confinement. Off never
-// confines them; scanner.sandbox off also turns off Landlock.
+// The scanner.sandbox and scanner.landlock modes. Auto and required both
+// require a leased scanner identity and no-escape seccomp. Auto can continue
+// without Landlock; required refuses scanner work unless Landlock is also
+// enforced. Off disables scanner isolation, including Landlock.
 const (
 	ModeAuto     = "auto"
 	ModeRequired = "required"
@@ -48,12 +50,23 @@ const (
 	StateUnavailable = "unavailable"
 )
 
-// UID and GID identify confined scanner processes. They own no file in the
-// image or the data directory; the container runtime matrix tests the image
-// with the same unprivileged identity.
+// UID and GID are the legacy scanner identity and the fixed notification
+// identity. Scanner invocations use ScannerIdentityPoolUIDStart through
+// ScannerIdentityPoolUIDEnd instead. Keep UID for code that handles the
+// legacy identity explicitly; it is not the identity reported by scanner
+// status or used by production scanner invocations.
 const (
 	UID = 65532
 	GID = 65532
+)
+
+// ScannerIdentityPoolUIDStart and ScannerIdentityPoolUIDEnd bound the
+// per-invocation scanner UID/GID pool. ScannerIdentityPoolCapacity is its
+// maximum concurrent scanner count, not the number of currently free leases.
+const (
+	ScannerIdentityPoolUIDStart = 60000
+	ScannerIdentityPoolUIDEnd   = 60063
+	ScannerIdentityPoolCapacity = ScannerIdentityPoolUIDEnd - ScannerIdentityPoolUIDStart + 1
 )
 
 // The resource limits of a scanner process restricted with Landlock, which
@@ -128,8 +141,8 @@ func profileOrScanner(profile Profile) Profile {
 	return profile
 }
 
-// seccompWithoutLandlock is why the seccomp filter does not apply: the
-// sandbox-exec command that installs it runs only with Landlock.
+// seccompWithoutLandlock is why the notifier's seccomp filter does not apply:
+// its existing sandbox-exec path installs the filter with Landlock.
 const seccompWithoutLandlock = "the seccomp filter applies only with Landlock"
 
 // ExecCommand is the hidden EdgeWatch command through which a process
@@ -146,12 +159,17 @@ type Status struct {
 	Mode string `json:"mode"`
 	// State is enforced, disabled, or unavailable.
 	State string `json:"state"`
-	// UID and GID are the identity of the confined processes.
+	// UID and GID identify a fixed confined identity, such as the notifier.
+	// Scanner processes use a per-invocation pool and leave these fields empty.
 	UID int `json:"uid,omitempty"`
 	GID int `json:"gid,omitempty"`
-	// ProcessUID is the UID the processes run as: UID when confined,
-	// otherwise the daemon's own.
-	ProcessUID int `json:"process_uid"`
+	// ProcessUID is the observed/configured UID for a process with one stable
+	// identity. It is omitted for scanner status because there is no single
+	// process UID across per-invocation leases.
+	ProcessUID *int `json:"process_uid,omitempty"`
+	// IdentityPool describes the scanner's fixed per-invocation identity
+	// strategy. It does not report current free or quarantined leases.
+	IdentityPool *ScannerIdentityPoolStatus `json:"identity_pool,omitempty"`
 	// Capabilities are the capabilities a confined process keeps.
 	Capabilities []string `json:"capabilities,omitempty"`
 	// NoNewPrivileges reports whether the processes run with
@@ -163,8 +181,8 @@ type Status struct {
 	// Landlock describes the restriction of the files the processes can
 	// open.
 	Landlock LandlockStatus `json:"landlock"`
-	// Seccomp describes the filter of the system calls the processes can
-	// make, which the Landlock restriction installs.
+	// Seccomp describes the filter of the system calls the processes can make.
+	// Scanner invocation seccomp is independent of Landlock.
 	Seccomp SeccompStatus `json:"seccomp"`
 	// Limits are the resource limits the Landlock restriction gives scanner
 	// processes. Nil when it does not apply them. Naabu's private-temporary
@@ -173,6 +191,32 @@ type Status struct {
 	// The Nmap-only per-file size limit is also not reported here.
 	Limits *ProcessLimits `json:"limits,omitempty"`
 }
+
+// ScannerIdentityPoolStatus describes the bounded scanner identity pool.
+// MaxParallel is the pool's fixed capacity; it is not a live free-slot count.
+type ScannerIdentityPoolStatus struct {
+	// State is enforced, disabled, or unavailable.
+	State string `json:"state"`
+	// Strategy identifies per-invocation leases.
+	Strategy string `json:"strategy"`
+	// UIDStart and UIDEnd are the inclusive scanner UID/GID range.
+	UIDStart int `json:"uid_start"`
+	UIDEnd   int `json:"uid_end"`
+	// MaxParallel is the maximum number of simultaneous scanner leases.
+	MaxParallel int `json:"max_parallel"`
+	// Reason explains a disabled or unavailable pool.
+	Reason string `json:"reason,omitempty"`
+}
+
+func scannerIdentityPoolStatus(state, reason string) *ScannerIdentityPoolStatus {
+	return &ScannerIdentityPoolStatus{
+		State: state, Strategy: "per_invocation",
+		UIDStart: ScannerIdentityPoolUIDStart, UIDEnd: ScannerIdentityPoolUIDEnd,
+		MaxParallel: ScannerIdentityPoolCapacity, Reason: reason,
+	}
+}
+
+func uidPointer(uid int) *int { return &uid }
 
 // ProcessLimits are the resource limits of a restricted scanner process.
 type ProcessLimits struct {
@@ -212,13 +256,14 @@ type Options struct {
 	Mode string
 	// Landlock is the Landlock mode, such as scanner.landlock.
 	Landlock string
-	// IdentityProbe is the command Detect runs as the confined identity,
-	// without Landlock, to confirm that the runtime allows the identity
-	// change. Empty runs the EdgeWatch version command.
+	// IdentityProbe is a short non-scanner command Detect runs as the confined
+	// identity, without Landlock, to confirm that the runtime allows the
+	// identity change. Empty uses /bin/true for scanners and the EdgeWatch
+	// version command for the notifier.
 	IdentityProbe Probe
-	// Probes are commands, such as a scanner's version command, that Detect
-	// runs confined as the processes would be, to confirm that each can
-	// start and work with the Landlock restriction.
+	// Probes are short non-scanner commands Detect runs confined as the
+	// processes would be, to confirm that the helpers and Landlock restriction
+	// work. Scanner binaries are only started through a leased invocation.
 	Probes []Probe
 }
 
@@ -242,12 +287,203 @@ type Probe struct {
 // reports the sandbox as unavailable, Confine leaves commands unchanged, and
 // Exec fails.
 var (
-	detectPlatform func(options Options) *Policy
-	confineProcess func(cmd *exec.Cmd, uid, gid int, ambient []uintptr)
-	nameCapability func(capability uintptr) string
-	execRestricted func(args []string) error
-	hardenProcess  func() error
+	detectPlatform           func(options Options) *Policy
+	confineProcess           func(cmd *exec.Cmd, uid, gid int, ambient []uintptr)
+	nameCapability           func(capability uintptr) string
+	execRestricted           func(args []string) error
+	hardenProcess            func() error
+	prepareScannerInvocation func(context.Context, *exec.Cmd, *Policy, bool) (*ScannerInvocation, error)
+	reserveScannerIdentity   func(context.Context, *Policy) (*ScannerIdentityReservation, error)
 )
+
+type identityLease interface {
+	identity() (int, int, bool)
+	release() error
+	quarantine() error
+}
+
+// ScannerIdentityReservation keeps a durable scanner identity reserved while
+// Naabu's invocation directory is prepared. PrepareScannerInvocation consumes
+// it and releases it only after the supervisor proves that the process tree
+// and temporary artifacts are gone.
+type ScannerIdentityReservation struct {
+	mu       sync.Mutex
+	lease    identityLease
+	claimed  bool
+	finished bool
+}
+
+// ReserveScannerIdentity reserves one scanner UID/GID before invocation
+// resources such as Naabu's leaf directory are created. A nil result means
+// that the policy explicitly runs unconfined.
+func ReserveScannerIdentity(ctx context.Context, policy *Policy) (*ScannerIdentityReservation, error) {
+	if policy == nil || policy.status.Mode == ModeOff {
+		return nil, nil
+	}
+	if reserveScannerIdentity == nil {
+		return nil, errors.New("scanner identity isolation is unavailable on this platform")
+	}
+	return reserveScannerIdentity(ctx, policy)
+}
+
+// Identity returns the reserved UID/GID for creation of per-invocation
+// scanner-owned resources.
+func (reservation *ScannerIdentityReservation) Identity() (uint32, uint32, bool) {
+	if reservation == nil {
+		return 0, 0, false
+	}
+	reservation.mu.Lock()
+	defer reservation.mu.Unlock()
+	if reservation.finished || reservation.lease == nil {
+		return 0, 0, false
+	}
+	uid, gid, ok := reservation.lease.identity()
+	return uint32(uid), uint32(gid), ok
+}
+
+// WithScannerIdentityReservation returns a policy copy associated with the
+// reservation. The original policy remains immutable.
+func (policy *Policy) WithScannerIdentityReservation(reservation *ScannerIdentityReservation) *Policy {
+	if policy == nil {
+		return nil
+	}
+	copied := *policy
+	copied.status.Capabilities = append([]string(nil), policy.status.Capabilities...)
+	copied.ambient = append([]uintptr(nil), policy.ambient...)
+	if reservation != nil {
+		if uid, gid, ok := reservation.Identity(); ok {
+			copied.status.UID, copied.status.GID = int(uid), int(gid)
+			// This reservation identifies a future invocation, not an observed
+			// scanner process.
+			copied.status.ProcessUID = nil
+		}
+	}
+	copied.identityReservation = reservation
+	return &copied
+}
+
+func (reservation *ScannerIdentityReservation) take() identityLease {
+	if reservation == nil {
+		return nil
+	}
+	reservation.mu.Lock()
+	defer reservation.mu.Unlock()
+	if reservation.finished || reservation.claimed || reservation.lease == nil {
+		return nil
+	}
+	reservation.claimed = true
+	return reservation.lease
+}
+
+// Finish releases an unclaimed reservation after setup failure, or quarantines
+// it if invocation-local cleanup could not be proven.
+func (reservation *ScannerIdentityReservation) Finish(cleanupSucceeded bool) error {
+	if reservation == nil {
+		return nil
+	}
+	reservation.mu.Lock()
+	defer reservation.mu.Unlock()
+	if reservation.finished || reservation.claimed || reservation.lease == nil {
+		return errors.New("scanner identity reservation is unavailable")
+	}
+	reservation.finished = true
+	if cleanupSucceeded {
+		if err := reservation.lease.release(); err != nil {
+			_ = reservation.lease.quarantine()
+			return err
+		}
+		return nil
+	}
+	return reservation.lease.quarantine()
+}
+
+// ScannerInvocation tracks one supervised scanner process tree. A Linux
+// policy uses it to reserve an invocation identity and release that identity
+// only after the trusted supervisor confirms that every scanner descendant
+// has exited and any invocation temporary files were cleaned. Other platforms
+// do not provide this guarantee.
+type ScannerInvocation struct {
+	implementation scannerInvocationImplementation
+}
+
+type scannerInvocationImplementation interface {
+	started() error
+	startFailed(cleanupSucceeded bool) error
+	cancel(*exec.Cmd) error
+	verifyProcessTree() error
+	finish(cleanupSucceeded bool) error
+}
+
+// PrepareScannerInvocation wraps a scanner command in the platform's
+// supervised process lifecycle. session requests a controlling terminal for
+// the scanner child, as Nmap uses for progress output. A nil result means the
+// policy explicitly leaves the command unconfined (or is nil).
+func PrepareScannerInvocation(ctx context.Context, cmd *exec.Cmd, policy *Policy, session bool) (*ScannerInvocation, error) {
+	if prepareScannerInvocation != nil {
+		return prepareScannerInvocation(ctx, cmd, policy, session)
+	}
+	if policy != nil && policy.status.Mode != ModeOff {
+		return nil, errors.New("scanner identity isolation is unavailable on this platform")
+	}
+	return nil, nil
+}
+
+// Started sends the bounded launch request after the wrapper process starts.
+func (invocation *ScannerInvocation) Started() error {
+	if invocation == nil || invocation.implementation == nil {
+		return nil
+	}
+	return invocation.implementation.started()
+}
+
+// StartFailed releases a reservation when the outer supervisor could not
+// start, so no scanner child could exist.
+func (invocation *ScannerInvocation) StartFailed(cleanupSucceeded bool) error {
+	if invocation == nil || invocation.implementation == nil {
+		return nil
+	}
+	return invocation.implementation.startFailed(cleanupSucceeded)
+}
+
+// Cancel asks the supervisor to terminate and reap the scanner process tree.
+func (invocation *ScannerInvocation) Cancel(cmd *exec.Cmd) error {
+	if invocation == nil || invocation.implementation == nil {
+		if cmd == nil || cmd.Process == nil {
+			return nil
+		}
+		return cmd.Process.Kill()
+	}
+	return invocation.implementation.cancel(cmd)
+}
+
+// VerifyProcessTree waits for the trusted supervisor's positive ECHILD proof
+// without releasing the identity lease. Callers that own invocation-local
+// files use it before cleanup, then call Finish with the cleanup result.
+func (invocation *ScannerInvocation) VerifyProcessTree() error {
+	if invocation == nil || invocation.implementation == nil {
+		return nil
+	}
+	return invocation.implementation.verifyProcessTree()
+}
+
+// InstallCancellation replaces the command's ordinary direct-child cancel
+// with the supervisor's bounded process-tree shutdown. Call it after the
+// scanner package configures its process group and before Start.
+func (invocation *ScannerInvocation) InstallCancellation(cmd *exec.Cmd) {
+	if invocation == nil || invocation.implementation == nil || cmd == nil {
+		return
+	}
+	cmd.Cancel = func() error { return invocation.Cancel(cmd) }
+}
+
+// Finish releases the identity only when the supervisor proves the process
+// tree is empty and the caller confirms invocation cleanup succeeded.
+func (invocation *ScannerInvocation) Finish(cleanupSucceeded bool) error {
+	if invocation == nil || invocation.implementation == nil {
+		return nil
+	}
+	return invocation.implementation.finish(cleanupSucceeded)
+}
 
 // HardenProcess sets Linux's core-file size limit and coredump filter, then
 // makes the calling process non-dumpable so that a process of the same
@@ -278,14 +514,23 @@ func Detect(options Options) *Policy {
 	}
 	spec := options.Profile.spec()
 	status := Status{
-		Mode: options.Mode, State: StateUnavailable, ProcessUID: os.Geteuid(), Reason: "the sandbox requires Linux",
+		Mode: options.Mode, State: StateUnavailable, Reason: "the sandbox requires Linux",
 		Landlock: LandlockStatus{Mode: options.Landlock, State: StateUnavailable, Reason: "Landlock requires Linux"},
-		Seccomp:  SeccompStatus{State: StateUnavailable, Reason: seccompWithoutLandlock},
+		Seccomp:  SeccompStatus{State: StateUnavailable, Reason: "scanner seccomp requires Linux"},
+	}
+	if options.Profile != Scanner {
+		status.ProcessUID = uidPointer(os.Geteuid())
+	} else if options.Mode == ModeOff {
+		status.IdentityPool = scannerIdentityPoolStatus(StateDisabled, "scanner.sandbox is off")
+	} else {
+		status.IdentityPool = scannerIdentityPoolStatus(StateUnavailable, "scanner identity leases require Linux")
 	}
 	switch {
 	case options.Mode == ModeOff:
+		status.ProcessUID = uidPointer(os.Geteuid())
 		status.State, status.Reason = StateDisabled, spec.sandboxSetting+" is off"
 		status.Landlock.State, status.Landlock.Reason = StateDisabled, spec.sandboxSetting+" is off"
+		status.Seccomp.State, status.Seccomp.Reason = StateDisabled, spec.sandboxSetting+" is off"
 	case options.Landlock == ModeOff:
 		status.Landlock.State, status.Landlock.Reason = StateDisabled, spec.landlockSetting+" is off"
 	}
@@ -353,7 +598,28 @@ func (p *Policy) confine(cmd *exec.Cmd) {
 	}
 	if p.helper != "" {
 		startThroughHelper(cmd, p.helper, p.profileName(), p.seccomp)
+		return
 	}
+	if p.identityOnlyHelper != "" {
+		startThroughIdentityOnlyHelper(cmd, p.identityOnlyHelper)
+	}
+}
+
+// startThroughIdentityOnlyHelper makes cmd start the EdgeWatch helper that
+// installs the scanner no-escape seccomp filter without applying Landlock.
+// Detect uses this only to verify that seccomp independently of the
+// Landlock-backed scanner helper.
+func startThroughIdentityOnlyHelper(cmd *exec.Cmd, helper string) {
+	if cmd.Err != nil {
+		return
+	}
+	if _, err := os.Stat(cmd.Path); err != nil {
+		cmd.Err = err
+		return
+	}
+	args := []string{helper, ExecCommand, "--profile", string(Scanner), "--files", strconv.Itoa(len(cmd.ExtraFiles)), "--identity-only", "--seccomp", "--", cmd.Path}
+	cmd.Args = append(args, cmd.Args[1:]...)
+	cmd.Path = helper
 }
 
 // startThroughHelper makes cmd start the sandbox-exec command of the EdgeWatch
@@ -403,9 +669,17 @@ type Policy struct {
 	status  Status
 	enforce bool
 	ambient []uintptr
+	// identityAllocator is unset in production. A scanner invocation then uses
+	// the fixed durable production allocator; tests may supply a per-policy
+	// allocator without a package-global hook.
+	identityAllocator   func(context.Context) (identityLease, error)
+	identityReservation *ScannerIdentityReservation
 	// helper is the EdgeWatch executable whose sandbox-exec command restricts
 	// the processes with Landlock. Empty starts them without it.
 	helper string
+	// identityOnlyHelper is used only by Detect's independent scanner-seccomp
+	// probe. It installs the no-escape filter without Landlock.
+	identityOnlyHelper string
 	// temporaryHelper is the EdgeWatch executable used to create and confine
 	// one Naabu invocation's temporary directory. It is available even when
 	// Landlock is not, so the helper can still create and later clean the
@@ -469,13 +743,19 @@ func NewEnforcedFor(profile Profile, ambient ...uintptr) *Policy {
 	for _, capability := range ambient {
 		names = append(names, capabilityName(capability))
 	}
+	status := Status{
+		Mode: ModeAuto, State: StateEnforced, UID: spec.uid, GID: spec.gid, ProcessUID: uidPointer(spec.uid), Capabilities: names,
+		Landlock: LandlockStatus{Mode: ModeOff, State: StateDisabled, Reason: spec.landlockSetting + " is off"},
+		Seccomp:  SeccompStatus{State: StateDisabled, Reason: seccompWithoutLandlock},
+	}
+	if profile == Scanner {
+		status.UID, status.GID, status.ProcessUID = 0, 0, nil
+		status.IdentityPool = scannerIdentityPoolStatus(StateEnforced, "")
+		status.Seccomp = SeccompStatus{State: StateEnforced}
+	}
 	return &Policy{
 		profile: profile,
-		status: Status{
-			Mode: ModeAuto, State: StateEnforced, UID: spec.uid, GID: spec.gid, ProcessUID: spec.uid, Capabilities: names,
-			Landlock: LandlockStatus{Mode: ModeOff, State: StateDisabled, Reason: spec.landlockSetting + " is off"},
-			Seccomp:  SeccompStatus{State: StateDisabled, Reason: seccompWithoutLandlock},
-		},
+		status:  status,
 		enforce: true,
 		ambient: append([]uintptr(nil), ambient...),
 	}
@@ -486,7 +766,7 @@ func NewEnforcedFor(profile Profile, ambient ...uintptr) *Policy {
 // them with Landlock ABI abi, without checking that the kernel allows it. A
 // nil p gives a policy that only restricts scanner processes with Landlock.
 func (p *Policy) WithLandlock(helper string, abi int) *Policy {
-	restricted := &Policy{profile: Scanner, status: Status{Mode: ModeOff, State: StateDisabled, ProcessUID: os.Geteuid(), Reason: "scanner.sandbox is off"}}
+	restricted := &Policy{profile: Scanner, status: Status{Mode: ModeOff, State: StateDisabled, ProcessUID: uidPointer(os.Geteuid()), Reason: "scanner.sandbox is off"}}
 	if p != nil {
 		copied := *p
 		copied.status.Capabilities = append([]string(nil), p.status.Capabilities...)
@@ -540,13 +820,17 @@ func (p *Policy) InheritsFiles() bool {
 func (p *Policy) Status() Status {
 	if p == nil {
 		return Status{
-			Mode: ModeOff, State: StateDisabled, ProcessUID: os.Geteuid(), Reason: "the processes are not confined",
+			Mode: ModeOff, State: StateDisabled, ProcessUID: uidPointer(os.Geteuid()), Reason: "the processes are not confined",
 			Landlock: LandlockStatus{Mode: ModeOff, State: StateDisabled, Reason: "the processes are not confined"},
 			Seccomp:  SeccompStatus{State: StateDisabled, Reason: "the processes are not confined"},
 		}
 	}
 	status := p.status
 	status.Capabilities = append([]string(nil), p.status.Capabilities...)
+	if p.status.IdentityPool != nil {
+		identityPool := *p.status.IdentityPool
+		status.IdentityPool = &identityPool
+	}
 	if p.status.Limits != nil {
 		limits := *p.status.Limits
 		status.Limits = &limits
@@ -554,13 +838,18 @@ func (p *Policy) Status() Status {
 	return status
 }
 
-// Require reports ErrUnavailable, with the reason, when the identity or the
-// Landlock mode is required and the processes cannot be confined that way.
+// Require reports ErrUnavailable, with the reason, when the configured
+// sandbox cannot meet its fail-closed contract. Scanner modes other than off
+// require the per-invocation identity and no-escape seccomp filter even when
+// their mode is auto; notifier auto mode retains its same-identity fallback.
 func (p *Policy) Require() error {
 	if p == nil {
 		return nil
 	}
 	spec := p.profileName().spec()
+	if p.profileName() == Scanner && p.status.Mode != ModeOff && !p.enforce && p.status.Mode != ModeAuto {
+		return fmt.Errorf("%w: %s; set %s to auto to keep the daemon available while scanner launches remain fail closed", ErrUnavailable, p.status.Reason, spec.sandboxSetting)
+	}
 	if p.status.Mode == ModeRequired && !p.enforce {
 		return fmt.Errorf("%w: %s; set %s to auto to start %s unconfined", ErrUnavailable, p.status.Reason, spec.sandboxSetting, spec.processes)
 	}

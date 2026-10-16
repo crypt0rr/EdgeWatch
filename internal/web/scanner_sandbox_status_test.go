@@ -3,10 +3,14 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/crypt0rr/edgewatch/internal/app"
+	"github.com/crypt0rr/edgewatch/internal/sandbox"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
@@ -48,5 +52,42 @@ func TestAdminStatusReportsTheScannerSandbox(t *testing.T) {
 		if _, ok := status(viewer)[key]; ok {
 			t.Fatalf("a viewer's status names %s", key)
 		}
+	}
+}
+
+func TestAdminStatusReportsScannerPoolWithoutAStableUID(t *testing.T) {
+	t.Parallel()
+	server, db, admin := newUsersTestServer(t)
+	confined, err := app.NewWithOptions(server.App.Config, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)), app.Options{Sandbox: sandbox.NewEnforced()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.App = confined
+	rec := httptest.NewRecorder()
+	server.adminStatus(rec, httptest.NewRequest(http.MethodGet, "/api/v1/status", nil), admin, defaultTenantStore(server))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Scanner struct {
+			UID          *int                               `json:"uid"`
+			GID          *int                               `json:"gid"`
+			ProcessUID   *int                               `json:"process_uid"`
+			IdentityPool *sandbox.ScannerIdentityPoolStatus `json:"identity_pool"`
+			Seccomp      sandbox.SeccompStatus              `json:"seccomp"`
+		} `json:"scanner_sandbox"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Scanner.UID != nil || body.Scanner.GID != nil || body.Scanner.ProcessUID != nil {
+		t.Fatalf("scanner status exposes a stable UID: %+v", body.Scanner)
+	}
+	pool := body.Scanner.IdentityPool
+	if pool == nil || pool.State != sandbox.StateEnforced || pool.Strategy != "per_invocation" || pool.UIDStart != sandbox.ScannerIdentityPoolUIDStart || pool.UIDEnd != sandbox.ScannerIdentityPoolUIDEnd || pool.MaxParallel != sandbox.ScannerIdentityPoolCapacity {
+		t.Fatalf("scanner identity pool = %+v", pool)
+	}
+	if body.Scanner.Seccomp.State != sandbox.StateEnforced {
+		t.Fatalf("scanner seccomp = %+v, want independently enforced", body.Scanner.Seccomp)
 	}
 }

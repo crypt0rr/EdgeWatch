@@ -289,12 +289,15 @@ func TestParseExecArgs(t *testing.T) {
 		"notifier file-size limit":          {"--profile", "notifier", "--files", "0", "--file-size-limit", "16777217", "--", "/usr/bin/edgewatch"},
 		"resource-only notifier":            {"--profile", "notifier", "--files", "0", "--resource-only", "--file-size-limit", "16777217", "--", "/usr/bin/edgewatch"},
 		"resource-only without limit":       {"--profile", "scanner", "--files", "0", "--resource-only", "--", "/usr/bin/nmap"},
-		"resource-only with seccomp":        {"--profile", "scanner", "--files", "0", "--resource-only", "--file-size-limit", "16777217", "--seccomp", "--", "/usr/bin/nmap"},
 		"file-size limit with private temp": {"--profile", "scanner", "--files", "0", "--file-size-limit", "16777217", "--private-tmp", "--private-root-fd", "3", "--private-leaf-fd", "4", "--control-fd", "5", "--", "/usr/local/bin/naabu"},
 	} {
 		if _, err := parseExecArgs(args); err == nil || !strings.Contains(err.Error(), "usage: sandbox-exec") {
 			t.Errorf("%s: parse = %v, want usage", name, err)
 		}
+	}
+	request, err = parseExecArgs([]string{"--profile", "scanner", "--files", "0", "--resource-only", "--file-size-limit", "16777217", "--seccomp", "--", "/usr/bin/nmap"})
+	if err != nil || !request.resourceOnly || !request.seccomp || request.fileSizeLimit != 16777217 || request.profile != Scanner {
+		t.Fatalf("identity-only resource limit with seccomp = %+v, %v; want valid scanner launch", request, err)
 	}
 	if _, err := parseExecArgs([]string{"--profile", "scanner", "--files", "0", "--", "nmap"}); err == nil || !strings.Contains(err.Error(), "not an absolute path") {
 		t.Fatalf("relative program = %v", err)

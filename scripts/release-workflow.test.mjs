@@ -444,6 +444,25 @@ test('release verification keeps schema, scanner, build, and race gates current'
   assert.match(stepBlock(verify, 'Test'), /go test -race -timeout=25m -coverprofile=coverage\.out \.\/\.\.\./)
 })
 
+test('CI requires and merges the privileged sandbox coverage profile', () => {
+  const container = ciJobBlock('container')
+  const collect = container.indexOf('Collect privileged sandbox coverage')
+  const upload = container.indexOf('Upload privileged sandbox coverage')
+  assert.ok(collect >= 0 && upload > collect, 'the container job must collect before uploading the profile')
+  assert.match(container, /collect-sandbox-privileged-coverage\.sh edgewatch:prebuilt-amd64/)
+  assert.match(container, /name: go-coverage-container-sandbox/)
+  assert.match(container, /if-no-files-found: error/)
+
+  const aggregate = ciJobBlock('test')
+  assert.ok(needsOf(aggregate).includes('container'), 'the required coverage job must wait for the container profile')
+  assert.match(aggregate, /CONTAINER: \$\{\{ needs\.container\.result \}\}/)
+  assert.match(aggregate, /\[ "\$CONTAINER" != success \]/)
+  assert.match(aggregate, /pattern: go-coverage-\*/)
+  assert.match(aggregate, /store-1 store-2 store-3 other container-sandbox/)
+  assert.match(aggregate, /check-go-coverage\.sh coverage\.out go-coverage-summary\.txt/)
+  assert.match(aggregate, /check-diff-coverage\.mjs --language go --coverage coverage\.out/)
+})
+
 // A partial re-run ("Re-run failed jobs") does not repeat the image job, and
 // github.run_attempt grows with every re-run. A candidate reference recomputed
 // in a later job would name a tag that was never pushed, so the reference must

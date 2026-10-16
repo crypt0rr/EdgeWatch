@@ -72,13 +72,24 @@ export type ScannerSandboxStatus = {
   state: string
   uid?: number
   gid?: number
-  process_uid: number
+  process_uid?: number
+  identity_pool?: ScannerIdentityPoolStatus
   capabilities?: string[]
   no_new_privileges?: boolean
   reason?: string
   landlock: ScannerLandlockStatus
   seccomp: ScannerSeccompStatus
   limits?: ScannerProcessLimits
+}
+
+// ScannerIdentityPoolStatus is sandbox.ScannerIdentityPoolStatus.
+export type ScannerIdentityPoolStatus = {
+  state: string
+  strategy: string
+  uid_start: number
+  uid_end: number
+  max_parallel: number
+  reason?: string
 }
 
 // ScannerLandlockStatus is sandbox.LandlockStatus.

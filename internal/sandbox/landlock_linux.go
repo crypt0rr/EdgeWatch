@@ -155,6 +155,9 @@ func handledScopes(abi int) uint64 {
 // capabilities, descriptors, and environment, and the daemon's handle on it
 // stays valid.
 func execLandlocked(args []string) error {
+	if len(args) > 0 && args[0] == scannerSupervisorFlag {
+		return execScannerSupervisor(args[1:])
+	}
 	if len(args) > 0 && args[0] == "--cleanup-private-tmp" {
 		request, err := parsePrivateTemporaryCleanupArgs(args[1:])
 		if err != nil {
@@ -175,11 +178,33 @@ func execLandlocked(args []string) error {
 		return execPrivateTemporary(request)
 	}
 	profile, files, argv := request.profile, request.files, request.argv
+	if request.identityOnly {
+		runtime.LockOSThread()
+		limitScannerResources()
+		if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+			return fmt.Errorf("%s: set no_new_privs: %w", ExecCommand, err)
+		}
+		if err := installSeccompFilter(); err != nil {
+			return fmt.Errorf("%s: %w", ExecCommand, err)
+		}
+		if err := syscall.Exec(argv[0], argv, os.Environ()); err != nil {
+			return fmt.Errorf("%s: execute %s: %w", ExecCommand, argv[0], err)
+		}
+		return nil
+	}
 	if request.resourceOnly {
 		runtime.LockOSThread()
 		limitScannerResources()
 		if err := setFileSizeLimit(request.fileSizeLimit); err != nil {
 			return fmt.Errorf("%s: set scanner file-size limit: %w", ExecCommand, err)
+		}
+		if request.seccomp {
+			if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+				return fmt.Errorf("%s: set no_new_privs: %w", ExecCommand, err)
+			}
+			if err := installSeccompFilter(); err != nil {
+				return fmt.Errorf("%s: %w", ExecCommand, err)
+			}
 		}
 		if err := syscall.Exec(argv[0], argv, os.Environ()); err != nil {
 			return fmt.Errorf("%s: execute %s: %w", ExecCommand, argv[0], err)
@@ -206,6 +231,11 @@ func execLandlocked(args []string) error {
 		return fmt.Errorf("%s: %w", ExecCommand, err)
 	}
 	if request.seccomp {
+		if !request.landlock {
+			if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+				return fmt.Errorf("%s: set no_new_privs: %w", ExecCommand, err)
+			}
+		}
 		if err := installSeccompFilter(); err != nil {
 			return fmt.Errorf("%s: %w", ExecCommand, err)
 		}
@@ -221,6 +251,9 @@ func execLandlocked(args []string) error {
 // to acknowledge readiness before Naabu can start. Control descriptors are
 // separate from scanner data descriptors and none reaches Naabu.
 func execPrivateTemporary(request execRequest) error {
+	if request.privateCreate {
+		return execPrivateTemporaryCreate(request)
+	}
 	runtime.LockOSThread()
 	limitScannerResources()
 	namespaceFD, leafFD, controlFD := request.privateRootFD, request.privateLeafFD, request.controlFD
@@ -249,6 +282,11 @@ func execPrivateTemporary(request execRequest) error {
 	}
 	namespaceFD, leafFD, controlFD = -1, -1, -1
 	if request.seccomp {
+		if !request.landlock {
+			if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+				return fmt.Errorf("%s: set no_new_privs: %w", ExecCommand, err)
+			}
+		}
 		if err := installSeccompFilter(); err != nil {
 			return fmt.Errorf("%s: %w", ExecCommand, err)
 		}
@@ -261,23 +299,26 @@ func execPrivateTemporary(request execRequest) error {
 
 // execRequest is what the sandbox-exec arguments ask for.
 type execRequest struct {
-	profile       Profile
-	files         int
-	privateTemp   bool
-	privateRootFD int
-	privateLeafFD int
-	controlFD     int
-	landlock      bool
-	seccomp       bool
-	fileSizeLimit uint64
-	resourceOnly  bool
-	argv          []string
+	profile            Profile
+	files              int
+	privateTemp        bool
+	privateCreate      bool
+	privateRootFD      int
+	privateLeafFD      int
+	privateNamespaceFD int
+	controlFD          int
+	landlock           bool
+	seccomp            bool
+	fileSizeLimit      uint64
+	resourceOnly       bool
+	identityOnly       bool
+	argv               []string
 }
 
 func parseExecArgs(args []string) (execRequest, error) {
-	usage := fmt.Errorf("usage: %s --profile scanner|notifier --files N [--file-size-limit BYTES] [--resource-only] [--private-tmp --private-root-fd FD --private-leaf-fd FD --control-fd FD [--landlock]] [--seccomp] -- PROGRAM [ARGUMENT...]", ExecCommand)
-	request := execRequest{files: -1, privateRootFD: -1, privateLeafFD: -1, controlFD: -1}
-	privateSeen, rootSeen, leafSeen, controlSeen, landlockSeen, seccompSeen, sizeLimitSeen, resourceOnlySeen := false, false, false, false, false, false, false, false
+	usage := fmt.Errorf("usage: %s --profile scanner|notifier --files N [--file-size-limit BYTES] [--resource-only] [--private-tmp --private-root-fd FD --private-leaf-fd FD --control-fd FD | --private-tmp --private-create --private-root-fd FD --private-namespace-fd FD --control-fd FD [--landlock]] [--seccomp] -- PROGRAM [ARGUMENT...]", ExecCommand)
+	request := execRequest{files: -1, privateRootFD: -1, privateLeafFD: -1, privateNamespaceFD: -1, controlFD: -1}
+	privateSeen, privateCreateSeen, rootSeen, leafSeen, namespaceSeen, controlSeen, landlockSeen, seccompSeen, sizeLimitSeen, resourceOnlySeen, identityOnlySeen := false, false, false, false, false, false, false, false, false, false, false
 	for index := 0; index < len(args); index++ {
 		switch args[index] {
 		case "--profile":
@@ -302,6 +343,12 @@ func parseExecArgs(args []string) (execRequest, error) {
 			}
 			request.privateTemp = true
 			privateSeen = true
+		case "--private-create":
+			if privateCreateSeen {
+				return execRequest{}, usage
+			}
+			request.privateCreate = true
+			privateCreateSeen = true
 		case "--private-root-fd":
 			if index+1 >= len(args) || rootSeen {
 				return execRequest{}, usage
@@ -324,6 +371,17 @@ func parseExecArgs(args []string) (execRequest, error) {
 			}
 			request.privateLeafFD = fd
 			leafSeen = true
+		case "--private-namespace-fd":
+			if index+1 >= len(args) || namespaceSeen {
+				return execRequest{}, usage
+			}
+			index++
+			fd, err := strconv.Atoi(args[index])
+			if err != nil || fd < 3 {
+				return execRequest{}, usage
+			}
+			request.privateNamespaceFD = fd
+			namespaceSeen = true
 		case "--control-fd":
 			if index+1 >= len(args) || controlSeen {
 				return execRequest{}, usage
@@ -364,6 +422,12 @@ func parseExecArgs(args []string) (execRequest, error) {
 			}
 			request.resourceOnly = true
 			resourceOnlySeen = true
+		case "--identity-only":
+			if identityOnlySeen {
+				return execRequest{}, usage
+			}
+			request.identityOnly = true
+			identityOnlySeen = true
 		case "--":
 			request.argv = args[index+1:]
 			index = len(args)
@@ -373,11 +437,14 @@ func parseExecArgs(args []string) (execRequest, error) {
 	}
 	if !request.profile.valid() || request.files < 0 || len(request.argv) == 0 ||
 		(request.landlock && !privateSeen) ||
-		(privateSeen && (request.profile != Scanner || request.privateRootFD != 3+request.files || request.privateLeafFD != request.privateRootFD+1 || request.controlFD != request.privateLeafFD+1 || !rootSeen || !leafSeen || !controlSeen)) ||
-		(!privateSeen && (rootSeen || leafSeen || request.privateRootFD != -1 || request.privateLeafFD != -1 || request.controlFD != -1 || request.landlock)) ||
-		(request.seccomp && privateSeen && !request.landlock) ||
+		(privateSeen && request.profile != Scanner) ||
+		(privateSeen && request.privateCreate && (!rootSeen || !namespaceSeen || leafSeen || request.privateRootFD != 3+request.files || request.privateNamespaceFD != request.privateRootFD+1 || request.controlFD != request.privateNamespaceFD+1 || !controlSeen)) ||
+		(privateSeen && !request.privateCreate && (!rootSeen || !leafSeen || namespaceSeen || request.privateRootFD != 3+request.files || request.privateLeafFD != request.privateRootFD+1 || request.controlFD != request.privateLeafFD+1 || !controlSeen)) ||
+		(!privateSeen && (privateCreateSeen || rootSeen || leafSeen || namespaceSeen || request.privateRootFD != -1 || request.privateLeafFD != -1 || request.privateNamespaceFD != -1 || request.controlFD != -1 || request.landlock)) ||
+		(privateCreateSeen && !privateSeen) ||
+		(request.identityOnly && (request.profile != Scanner || !request.seccomp || request.landlock || request.resourceOnly || request.fileSizeLimit > 0 || privateSeen)) ||
 		(request.fileSizeLimit > 0 && (request.profile != Scanner || privateSeen)) ||
-		(request.resourceOnly && (request.fileSizeLimit == 0 || request.profile != Scanner || request.seccomp || privateSeen)) {
+		(request.resourceOnly && (request.fileSizeLimit == 0 || request.profile != Scanner || privateSeen || request.identityOnly)) {
 		return execRequest{}, usage
 	}
 	if !filepath.IsAbs(request.argv[0]) {

@@ -134,6 +134,8 @@ var notAuditActions = map[string]bool{
 	"scanner.sandbox":             true,
 	"scanner.landlock":            true,
 	"notifications.sandbox":       true,
+	"leases.json":                 true, // Scanner identity allocator state file.
+	"allocator.lock":              true, // Scanner identity allocator lock file.
 	"banner.ports":                true, // NSE script arguments.
 	"banner.timeout":              true,
 }

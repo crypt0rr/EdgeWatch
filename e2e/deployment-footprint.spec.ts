@@ -10,12 +10,12 @@ const widths = [320, 390, 1000, 1280, 1440]
 const largeTelemetry = { collected_at: '2026-10-08T18:03:00Z', database_bytes: 1.2 * 1024 ** 4, jobs: 120, scans: 987_654, host_observations: 12_345_678, effective_hosts: 1_234_567, events: 99_999_999, scan_cycles: 4000, outbox_pending: 12_345, outbox_retrying: 0, outbox_failed: 0 }
 
 const degradedSandboxes = {
-  scanner_sandbox: { mode: 'auto', state: 'unavailable', process_uid: 0, reason: 'the container does not grant SETUID, SETGID, KILL, which EdgeWatch needs to start and stop scanner processes as UID 65532; add them to cap_add', landlock: { mode: 'auto', state: 'enforced', abi: 6 }, seccomp: { state: 'unavailable', reason: 'nmap could not start with the seccomp filter: signal: bad system call' } },
+  scanner_sandbox: { mode: 'auto', state: 'unavailable', identity_pool: { state: 'unavailable', strategy: 'per_invocation', uid_start: 60000, uid_end: 60063, max_parallel: 64, reason: 'the container does not grant SETUID, SETGID, or KILL' }, reason: 'the container does not grant SETUID, SETGID, or KILL', landlock: { mode: 'auto', state: 'unavailable', reason: 'scanner identity isolation is unavailable' }, seccomp: { state: 'unavailable', reason: 'the required scanner seccomp filter is unavailable' } },
   notification_sandbox: { mode: 'auto', state: 'unavailable', process_uid: 0, reason: 'a test notification process could not start as UID 65531: read SSL_CERT_FILE: permission denied', landlock: { mode: 'auto', state: 'unavailable', reason: 'the kernel does not provide Landlock' }, seccomp: { state: 'unavailable', reason: 'the seccomp filter applies only with Landlock' } },
 }
 
 const healthySandboxes = {
-  scanner_sandbox: { mode: 'auto', state: 'enforced', uid: 65532, gid: 65532, process_uid: 65532, capabilities: ['NET_RAW', 'NET_ADMIN'], no_new_privileges: true, landlock: { mode: 'auto', state: 'enforced', abi: 6 }, seccomp: { state: 'enforced' } },
+  scanner_sandbox: { mode: 'auto', state: 'enforced', identity_pool: { state: 'enforced', strategy: 'per_invocation', uid_start: 60000, uid_end: 60063, max_parallel: 64 }, capabilities: ['NET_RAW', 'NET_ADMIN'], no_new_privileges: true, landlock: { mode: 'auto', state: 'enforced', abi: 6 }, seccomp: { state: 'enforced' } },
   notification_sandbox: { mode: 'auto', state: 'enforced', uid: 65531, gid: 65531, process_uid: 65531, no_new_privileges: true, landlock: { mode: 'auto', state: 'enforced', abi: 6 }, seccomp: { state: 'enforced' } },
 }
 

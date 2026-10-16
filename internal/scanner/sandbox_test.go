@@ -132,38 +132,47 @@ func TestUnconfinedNmapKeepsItsArguments(t *testing.T) {
 	}
 }
 
-func TestConfinedNaabuReadsTargetsThroughItsDescriptor(t *testing.T) {
+func TestUnavailableScannerIdentityRefusesNaabuBeforeExecution(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		t.Skip("as UID 0 the confined start succeeds; the container matrix covers it")
-	}
-	helper, err := os.Executable()
-	if err != nil {
+	dir := t.TempDir()
+	workDir := filepath.Join(dir, "work")
+	if err := os.Mkdir(workDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	n := NewWithNaabu("nmap", "/bin/true")
-	n.SetSandbox(sandbox.NewEnforced(unix.CAP_NET_RAW).WithLandlock(helper, 6))
-	// An unprivileged test process cannot change identity, so the confined
-	// start is refused after the targets were shared, never run unconfined.
-	_, _, err = n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
-	if err == nil || !strings.Contains(err.Error(), "operation not permitted") {
-		t.Fatalf("confined Naabu start = %v, want the identity change refused", err)
-	}
-}
-
-func TestIdentityConfinedNaabuWithoutHelperFailsBeforeExecution(t *testing.T) {
-	dir := t.TempDir()
 	marker := filepath.Join(dir, "started")
 	naabu := filepath.Join(dir, "naabu")
 	writeScript(t, naabu, fmt.Sprintf("#!/bin/sh\nprintf ran > %q\n", marker))
 	n := NewWithNaabu("missing-nmap", naabu)
-	n.SetSandbox(sandbox.NewEnforced(unix.CAP_NET_RAW))
+	n.workDir = workDir
+	n.SetSandbox(sandbox.Detect(sandbox.Options{Mode: sandbox.ModeAuto}))
 	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
-	if err == nil || !strings.Contains(err.Error(), "sandbox helper is unavailable") {
-		t.Fatalf("identity-only Naabu without helper = results %#v, stderr %q, error %v", results, stderr, err)
+	if err == nil || !strings.Contains(err.Error(), "distinct scanner identity is unavailable") {
+		t.Fatalf("Naabu with unavailable identity = results %#v, stderr %q, error %v", results, stderr, err)
+	}
+	if len(results.ports) != 0 {
+		t.Fatalf("unavailable scanner returned results: %#v", results)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("Naabu executed without its required helper: %v", err)
+		t.Fatalf("Naabu executed without its required identity: %v", err)
+	}
+	entries, err := os.ReadDir(workDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("failed launch left invocation input files %v, %v", entries, err)
+	}
+}
+
+func TestUnavailableScannerIdentityRefusesVersionProbeBeforeExecution(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "started")
+	path := filepath.Join(dir, "nmap")
+	writeScript(t, path, fmt.Sprintf("#!/bin/sh\nprintf ran > %q\n", marker))
+	policy := sandbox.Detect(sandbox.Options{Mode: sandbox.ModeAuto})
+	if out, err := runScannerVersionProbe(context.Background(), path, policy, "--version"); err == nil {
+		t.Fatalf("version probe output %q, want unavailable-identity error", out)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("version probe executed without its required identity: %v", err)
 	}
 }
 

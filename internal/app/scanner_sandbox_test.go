@@ -34,8 +34,8 @@ func TestNewWithOptionsInstallsTheScannerSandbox(t *testing.T) {
 		return a
 	}
 	confined := newApp(Options{Sandbox: sandbox.NewEnforced()})
-	if got := confined.ScannerSandbox(); got.State != sandbox.StateEnforced || got.UID != sandbox.UID {
-		t.Fatalf("sandboxed application status = %+v", got)
+	if got := confined.ScannerSandbox(); got.State != sandbox.StateEnforced || got.UID != 0 || got.GID != 0 || got.ProcessUID != nil || got.IdentityPool == nil || got.IdentityPool.State != sandbox.StateEnforced {
+		t.Fatalf("sandboxed application status = %+v, want pool status without a stable UID", got)
 	}
 	if _, ok := confined.Scanner.(*scanner.Nmap); !ok {
 		t.Fatalf("scanner = %T, want the Nmap scanner that received the policy", confined.Scanner)

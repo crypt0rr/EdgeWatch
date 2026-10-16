@@ -51,6 +51,8 @@ const scan = {
   scanner_engine: 'nmap',
 } as ScanSummary
 
+const scannerIdentityPool = { state: 'enforced', strategy: 'per_invocation', uid_start: 60000, uid_end: 60063, max_parallel: 64 }
+
 const activeScan: ActiveScan = {
   id: 'active-1',
   job_id: 'job-1',
@@ -513,38 +515,49 @@ describe('dashboard', () => {
   })
 
   it('shows the enforced scanner sandbox in the deployment footprint', async () => {
-    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: sandboxWithoutLayers({ mode: 'auto', state: 'enforced', uid: 65532, gid: 65532, process_uid: 65532, capabilities: ['NET_RAW'], no_new_privileges: true }) })
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: sandboxWithoutLayers({ mode: 'auto', state: 'enforced', identity_pool: scannerIdentityPool, capabilities: ['NET_RAW'], no_new_privileges: true }) })
     await renderDashboard()
-    await vi.waitFor(() => expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Enforced', tone: 'green', icon: true, layers: ['UID 65532: enforced'], reasons: [], keeps: 'Keeps NET_RAW' }), { timeout: 1000 })
+    await vi.waitFor(() => expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Enforced', tone: 'green', icon: true, layers: ['UID pool 60000–60063 (64 max parallel): enforced'], reasons: [], keeps: 'Keeps NET_RAW' }), { timeout: 1000 })
     expect(isolationEntry(container, 'Notifications')).toBeUndefined()
     expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
   })
 
   it('shows the notification sandbox in the deployment footprint', async () => {
-    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: sandboxWithoutLayers({ mode: 'auto', state: 'enforced', process_uid: 65532, capabilities: ['NET_RAW'] }), notification_sandbox: sandboxWithoutLayers({ mode: 'auto', state: 'enforced', uid: 65531, gid: 65531, process_uid: 65531, no_new_privileges: true, landlock: { mode: 'auto', state: 'enforced', abi: 6 } }) })
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: sandboxWithoutLayers({ mode: 'auto', state: 'enforced', identity_pool: scannerIdentityPool, capabilities: ['NET_RAW'] }), notification_sandbox: sandboxWithoutLayers({ mode: 'auto', state: 'enforced', uid: 65531, gid: 65531, process_uid: 65531, no_new_privileges: true, landlock: { mode: 'auto', state: 'enforced', abi: 6 } }) })
     await renderDashboard()
     await vi.waitFor(() => expect(isolationEntry(container, 'Notifications')).toEqual({ state: 'Enforced', tone: 'green', icon: true, layers: ['UID 65531: enforced', 'Landlock: enforced'], reasons: [], keeps: '' }), { timeout: 1000 })
-    expect(isolationEntry(container, 'Scanners')).toMatchObject({ layers: ['UID 65532: enforced'], keeps: 'Keeps NET_RAW' })
+    expect(isolationEntry(container, 'Scanners')).toMatchObject({ layers: ['UID pool 60000–60063 (64 max parallel): enforced'], keeps: 'Keeps NET_RAW' })
   })
 
   it('shows Landlock beside the enforced scanner sandbox', async () => {
-    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'enforced', uid: 65532, gid: 65532, process_uid: 65532, capabilities: ['NET_RAW', 'NET_ADMIN'], no_new_privileges: true, landlock: { mode: 'auto', state: 'enforced', abi: 6 }, seccomp: { state: 'enforced' } } })
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'enforced', identity_pool: scannerIdentityPool, capabilities: ['NET_RAW', 'NET_ADMIN'], no_new_privileges: true, landlock: { mode: 'auto', state: 'enforced', abi: 6 }, seccomp: { state: 'enforced' } } })
     await renderDashboard()
-    await vi.waitFor(() => expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Enforced', tone: 'green', icon: true, layers: ['UID 65532: enforced', 'Landlock: enforced', 'seccomp: enforced'], reasons: [], keeps: 'Keeps NET_RAW, NET_ADMIN' }), { timeout: 1000 })
+    await vi.waitFor(() => expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Enforced', tone: 'green', icon: true, layers: ['UID pool 60000–60063 (64 max parallel): enforced', 'Landlock: enforced', 'seccomp: enforced'], reasons: [], keeps: 'Keeps NET_RAW, NET_ADMIN' }), { timeout: 1000 })
     expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
   })
 
-  it('warns an administrator when scanner processes run as UID 0 with only Landlock', async () => {
+  it('warns an administrator that scanner launches fail closed when the identity pool is unavailable', async () => {
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: {
+      mode: 'auto', state: 'unavailable', identity_pool: { ...scannerIdentityPool, state: 'unavailable', reason: 'the container does not grant SETUID, SETGID, or KILL' },
+      reason: 'the container does not grant SETUID, SETGID, or KILL', landlock: { mode: 'auto', state: 'enforced', abi: 6 }, seccomp: { state: 'enforced' },
+    } })
+    await renderDashboard()
+    await vi.waitFor(() => expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain('Scanner launches are unavailable because the required per-invocation identity and syscall restrictions could not be enforced.'), { timeout: 1000 })
+    expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain('the container does not grant SETUID, SETGID, or KILL')
+    expect(isolationEntry(container, 'Scanners')).toMatchObject({ state: 'Unavailable', layers: ['UID pool 60000–60063 (64 max parallel): unavailable', 'Landlock: enforced', 'seccomp: enforced'] })
+  })
+
+  it('warns when a legacy daemon reports the scanner root fallback with Landlock', async () => {
     vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: sandboxWithoutLayers({ mode: 'auto', state: 'unavailable', process_uid: 0, reason: 'the container does not grant KILL', landlock: { mode: 'auto', state: 'enforced', abi: 6 } }) })
     await renderDashboard()
-    await vi.waitFor(() => expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain('Scanner processes run as UID 0, restricted only by Landlock. the container does not grant KILL'), { timeout: 1000 })
+    await vi.waitFor(() => expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain('Older EdgeWatch is running scanner processes as UID 0, restricted only by Landlock. the container does not grant KILL'), { timeout: 1000 })
     expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Partial', tone: 'amber', icon: true, layers: ['Identity: unavailable', 'Landlock: enforced'], reasons: ['Identity: The container does not grant KILL.'], keeps: '' })
   })
 
-  it('warns an administrator when scanner processes run unconfined as UID 0', async () => {
+  it('warns when a legacy daemon reports the unconfined scanner root fallback', async () => {
     vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: sandboxWithoutLayers({ mode: 'auto', state: 'unavailable', process_uid: 0, reason: 'the container does not grant KILL, which EdgeWatch needs to start and stop scanner processes as UID 65532; add them to cap_add', landlock: { mode: 'auto', state: 'unavailable', reason: 'the kernel does not provide Landlock' } }) })
     await renderDashboard()
-    await vi.waitFor(() => expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain('Scanner processes run unconfined as UID 0. the container does not grant KILL'), { timeout: 1000 })
+    await vi.waitFor(() => expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain('Older EdgeWatch is running scanner processes unconfined as UID 0. the container does not grant KILL'), { timeout: 1000 })
     expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Unavailable', tone: 'red', icon: true, layers: ['Identity: unavailable', 'Landlock: unavailable'], reasons: ['Identity: The container does not grant KILL, which EdgeWatch needs to start and stop scanner processes as UID 65532; add them to cap_add.', 'Landlock: The kernel does not provide Landlock.'], keeps: '' })
   })
 
@@ -577,9 +590,9 @@ describe('dashboard', () => {
   })
 
   it('never shows a sandbox as enforced while one of its layers does not hold', async () => {
-    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'enforced', uid: 65532, gid: 65532, process_uid: 65532, capabilities: ['NET_RAW'], landlock: { mode: 'auto', state: 'enforced', abi: 6 }, seccomp: { state: 'unavailable', reason: 'nmap could not start with the seccomp filter: signal: bad system call' } } })
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { mode: 'auto', state: 'enforced', identity_pool: scannerIdentityPool, capabilities: ['NET_RAW'], landlock: { mode: 'auto', state: 'enforced', abi: 6 }, seccomp: { state: 'unavailable', reason: 'nmap could not start with the seccomp filter: signal: bad system call' } } })
     await renderDashboard()
-    await vi.waitFor(() => expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Partial', tone: 'amber', icon: true, layers: ['UID 65532: enforced', 'Landlock: enforced', 'seccomp: unavailable'], reasons: ['seccomp: Nmap could not start with the seccomp filter: signal: bad system call.'], keeps: 'Keeps NET_RAW' }), { timeout: 1000 })
+    await vi.waitFor(() => expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Partial', tone: 'amber', icon: true, layers: ['UID pool 60000–60063 (64 max parallel): enforced', 'Landlock: enforced', 'seccomp: unavailable'], reasons: ['seccomp: Nmap could not start with the seccomp filter: signal: bad system call.'], keeps: 'Keeps NET_RAW' }), { timeout: 1000 })
     expect(container.querySelector('.deployment-telemetry .panel-heading p')?.textContent).toBe('Storage, scale, and process isolation of this deployment.')
   })
 

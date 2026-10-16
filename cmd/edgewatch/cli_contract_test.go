@@ -195,7 +195,7 @@ func TestRunJSONOutputKeepsApplicationLogsOnStderr(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(configPath, []byte("database: "+database+"\n"+legacyCLIJobsYAML), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("database: "+database+"\nscanner:\n  sandbox: off\n"+legacyCLIJobsYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	nmap := writeFakeNmap(t, dir, false)
@@ -313,7 +313,7 @@ func TestRunScanRecordsHostAuditEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(configPath, []byte("database: "+database+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("database: "+database+"\nscanner:\n  sandbox: off\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	scan := func(job, nmap string) error {

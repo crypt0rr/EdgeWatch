@@ -21,8 +21,8 @@ validated schema.
 | `log.level` | YAML | Log verbosity: `debug`, `info`, `warn`, or `error`. |
 | `scheduler.*` | YAML | Concurrent scans and probe budgets. |
 | `scanner.target_exclusions` | YAML | Addresses that may never be scanned. |
-| `scanner.sandbox` | YAML | Whether Nmap and Naabu run as an unprivileged identity; see [the scanner sandbox](/deployment/container-hardening/#scanner-sandbox). |
-| `scanner.landlock` | YAML | Whether Landlock restricts the files Nmap and Naabu can open; see [Landlock](/deployment/container-hardening/#landlock). |
+| `scanner.sandbox` | YAML | Whether Nmap and Naabu use a leased per-invocation identity and seccomp filter; see [the scanner sandbox](/deployment/container-hardening/#scanner-sandbox). |
+| `scanner.landlock` | YAML | Whether Landlock independently restricts the files Nmap and Naabu can open; see [Landlock](/deployment/container-hardening/#landlock). |
 | `scanner.max_job_hosts` | YAML | The most addresses the targets of one job may expand to when it scans, for every unit. |
 | `enrichment.rdap.enabled` | YAML | Enable or disable on-demand public network-registration lookups. |
 | `updates.enabled` | YAML | Enable or disable the three-hour stable-release check. |
@@ -179,37 +179,49 @@ Jobs are configured in the console, which enforces these limits:
   whatever the list holds. An
   explicitly empty list, `[]`, allows every address for both; see
   [destination addresses](/user-guide/notifications/#destination-addresses).
-- `scanner.sandbox: auto` starts Nmap and Naabu as UID 65532 with only their
-  raw-packet capabilities when the container grants `SETUID`, `SETGID` and
-  `KILL`, as the bundled `compose.yaml` does. Otherwise they run as UID 0 and
-  EdgeWatch warns. Set `required` to refuse to scan without the sandbox.
-  `off` also turns off Landlock.
-- `scanner.landlock: auto` also restricts Nmap and Naabu with Landlock to the
+- `scanner.sandbox: auto` and `required` start each Nmap and Naabu invocation
+  with a distinct leased UID/GID from the bounded range 60000–60063, no
+  supplementary groups, and a no-escape seccomp filter. The daemon needs the
+  bundled Compose capabilities `SETUID`, `SETGID`, and `KILL` to establish and
+  supervise those identities; `NET_RAW` and the optional `NET_ADMIN` remain
+  the scanners' only ambient capabilities. Both modes fail closed when the
+  identity pool or seccomp filter is unavailable, exhausted, or has unsafe
+  state; they never fall back to running a scanner as the daemon. `required`
+  also requires Landlock when `scanner.landlock` is `required`. `off` is the
+  explicit unconfined mode and disables all scanner isolation.
+- The identity pool has a capacity of 64 concurrent reservations. The daemon
+  keeps its reservation journal and boot marker under
+  `/var/lib/edgewatch/scanner-identities*`, outside SQLite and its database
+  backups. Do not delete, copy, or restore these files independently. The
+  trusted supervisor releases an identity only after it proves the scanner's
+  process tree is gone and invocation cleanup succeeds. If that proof or
+  cleanup is uncertain, the identity is quarantined for the rest of the boot;
+  quarantined identities reduce the available capacity. Missing or damaged
+  same-boot state fails closed rather than reusing an identity whose process
+  may still exist. After a clean container restart, an empty journal can move
+  to the new private PID namespace. A restart with outstanding quarantines
+  fails closed until the host reboots.
+- `scanner.landlock: auto` independently restricts Nmap and Naabu to the
   system files a scan reads and the files EdgeWatch passes to them. Naabu can
   use only its per-invocation temporary leaf below `/tmp`; it cannot execute
-  files there. Without Landlock, a process of the same UID that knows the leaf
-  path can access its contents and may reopen another live scanner's inherited
-  files through `/proc/<pid>/fd/<n>` if the host's procfs and ptrace checks
-  permit it. EdgeWatch does not rely on those OS checks as cross-scan
-  protection. The setting also installs a seccomp filter
-  that refuses system calls no scanner needs and makes the kernel's
-  out-of-memory killer stop a scanner before the daemon.
-  Set `required` to refuse to scan without Landlock, or `off`, which turns off
-  the filter and its general scanner limits if a scanner needs files outside
-  those paths. When `scanner.sandbox` remains enabled, Naabu's temporary-path
-  helper still applies the out-of-memory and open-file limits to Naabu even
-  without Landlock; `scanner.sandbox: off` disables that helper too.
+  files there. The no-escape seccomp filter applies whether Landlock is
+  enabled or not; it prevents scanners from leaving their supervised process
+  group or creating namespaces. Landlock `required` refuses scanner work when
+  the kernel or container cannot enforce that file restriction. Landlock
+  `off` leaves the leased identity and seccomp protections enabled. The
+  `identity_pool` and `seccomp` fields in `edgewatch health` report these
+  controls independently.
 - EdgeWatch keeps the files it passes to scanners, Nmap's XML output and
   Naabu's target list, in `tmp/scanner` beside the database, which only the
   daemon can open, whatever `TMPDIR` names; see
   [scanner files](/deployment/container-hardening/#scanner-files).
-- Naabu's own temporary files use a parent-created leaf below `/tmp` for each
-  invocation. With the sandbox helper, the leaf is listable and writable by
-  path (`01777`); its sticky bit protects other users' entries. Landlock limits
-  access to the current leaf when available. With the sandbox off, the leaf has
-  mode `0700`, but another process running as the daemon's UID is not separated
-  from it by a kernel scanner boundary. Cleanup failure makes the scan fail
-  without advancing its baseline.
+- Naabu's own temporary files use a root-owned namespace below `/tmp` and a
+  `0700` leaf owned by that invocation's leased UID/GID. Another invocation
+  uses a different identity, so it cannot open the leaf or reopen the scanner's
+  inherited target-list descriptor. Landlock adds a per-process file boundary
+  when enabled. With the sandbox off there is no scanner boundary. Cleanup
+  failure makes the scan fail without advancing its baseline and keeps the
+  identity reserved or quarantined.
 - `scanner.max_job_hosts`, 65,536 by default, a /16, caps the addresses the
   targets of one job expand to when it scans, whatever the job's own
   `max_expanded_hosts` allows: a scan keeps a scope and a result for every

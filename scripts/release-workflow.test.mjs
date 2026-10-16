@@ -34,6 +34,9 @@ const composeScript = await readRepositoryFile('scripts/verify-compose-deploymen
 const binaryImageScript = await readRepositoryFile('scripts/verify-release-image-binary.sh')
 const prebuiltFrontendTest = await readRepositoryFile('scripts/test-prebuilt-frontend-fails-closed.sh')
 const lintBaseScript = await readRepositoryFile('scripts/resolve-lint-base.sh')
+const scannerSandboxVerifier = await readRepositoryFile('scripts/verify-scanner-sandbox.sh')
+const scannerPidSelector = await readRepositoryFile('scripts/scanner-pid-selector.sh')
+const scannerProcessHold = await readRepositoryFile('scripts/scanner-process-hold.sh')
 
 async function createLintBaseFixture({ withParent = true, originMain = 'head' } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'edgewatch-lint-base-'))
@@ -442,6 +445,86 @@ test('release verification keeps schema, scanner, build, and race gates current'
   assert.match(stepBlock(verify, 'Verify pinned Naabu release'), /\.\/scripts\/verify-naabu-pin\.sh/)
   assert.match(stepBlock(verify, 'Build'), /go build -trimpath \.\/cmd\/edgewatch/)
   assert.match(stepBlock(verify, 'Test'), /go test -race -timeout=25m -coverprofile=coverage\.out \.\/\.\.\./)
+})
+
+test('scanner sandbox verification selects the live Nmap scan and pins it while inspecting proc', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'edgewatch-scanner-pid-selector-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const proc = join(directory, 'proc')
+  const selector = join(directory, 'scanner-pid-selector.sh')
+  await mkdir(proc)
+  await writeFile(selector, scannerPidSelector, { mode: 0o755 })
+
+  async function addProcess(pid, state, argv) {
+    const process = join(proc, String(pid))
+    await mkdir(process)
+    await writeFile(join(process, 'status'), `Name:\tnmap\nState:\t${state}\n`)
+    await writeFile(join(process, 'cmdline'), Buffer.from(`${argv.join('\0')}\0`))
+  }
+  // The first `nmap` process is only the version probe. The scan is held and
+  // selected by its scan-only progress option; zombies are never selected.
+  await addProcess(101, 'S (sleeping)', ['nmap', '--version'])
+  await addProcess(202, 'T (stopped)', ['nmap', '-n', '--stats-every', '1s'])
+  await addProcess(303, 'Z (zombie)', ['nmap', '--stats-every', '1s'])
+
+  const byName = execFileSync(selector, [proc, 'nmap'], { encoding: 'utf8' }).trim()
+  const activeScan = execFileSync(selector, [proc, 'nmap', '--stats-every'], { encoding: 'utf8' }).trim()
+  assert.equal(byName, '101', 'a name-only lookup reproduces the version-probe ambiguity')
+  assert.equal(activeScan, '202', 'the selector returns the live scan rather than the version probe or zombie')
+  const absent = spawnSync(selector, [proc, 'nmap', '--missing-scan-argument'], { encoding: 'utf8' })
+  assert.equal(absent.status, 1, 'the selector fails when no live Nmap scan matches the required argument')
+
+  assert.match(scannerSandboxVerifier, /scanner_pid_selector_source=\$script_directory\/scanner-pid-selector\.sh/)
+  assert.equal((scannerSandboxVerifier.match(/hold_scanner_process nmap --stats-every/g) ?? []).length, 4,
+    'all long Nmap /proc checks pin the process selected by its scan-only argument')
+  assert.doesNotMatch(scannerSandboxVerifier, /scanner_pid\s+nmap(?:\s*\)|\s*\|)/,
+    'the verifier must not select a Nmap PID by comm alone')
+  assert.ok((scannerSandboxVerifier.match(/daemon_scan_limit=2/g) ?? []).length >= 2,
+    'Landlock and identity-only runs allow the required concurrent Nmap/Naabu pair')
+  assert.ok((scannerSandboxVerifier.match(/expect_private_nmap_xml\s+"\$nmap_pid"/g) ?? []).length >= 2,
+    'both Landlock and identity-only modes verify the owner XML descriptor')
+  assert.ok((scannerSandboxVerifier.match(/Nmap XML descriptor write-open/g) ?? []).length >= 2,
+    'both modes check that a peer cannot reopen the XML descriptor for writing')
+  assert.match(scannerSandboxVerifier, /case "open-write":/)
+  assert.match(scannerSandboxVerifier, /resume_held_scanner\n?\s*cancelled=/)
+  assert.equal((scannerSandboxVerifier.match(/^hold_scanner_process nmap --stats-every$/gm) ?? []).length, 4,
+    'the mutable PID state must be set in the verifier shell, not a command-substitution subshell')
+  assert.doesNotMatch(scannerSandboxVerifier, /nmap_pid=\$\(hold_scanner_process/)
+
+  const marker = join(directory, 'resumed-on-exit')
+  const lifecycle = spawnSync('bash', ['-c', `
+    set -euo pipefail
+    source "$1"
+    container=fixture
+    mock_state=R
+    scanner_pid() { printf '4242\\n'; }
+    scanner_process_starttime() { printf '987654\\n'; }
+    expect_scanner_starttime() { [ "$1" = 4242 ] && [ "$2" = 987654 ]; }
+    scanner_process_state() { printf '%s\\n' "$mock_state"; }
+    docker() {
+      [ "$1" = exec ] && [ "$2" = fixture ] && [ "$3" = kill ] || return 90
+      case "$4" in
+        -STOP) mock_state=T ;;
+        -CONT) mock_state=R ;;
+        *) return 91 ;;
+      esac
+    }
+    fail() { printf '%s\\n' "$*" >&2; exit 92; }
+    cleanup() {
+      local marker_path=$1
+      resume_held_scanner
+      [ "$mock_state" = R ] || exit 93
+      [ -z "$held_scanner_pid" ] && [ -z "$held_scanner_starttime" ] || exit 94
+      printf resumed > "$marker_path"
+    }
+    trap 'cleanup "$2"' EXIT
+    hold_scanner_process nmap --stats-every
+    nmap_pid=$held_scanner_pid
+    [ "$nmap_pid" = 4242 ] && [ "$held_scanner_starttime" = 987654 ]
+    false
+  `, 'scanner-hold-regression', join(scriptDirectory, 'scanner-process-hold.sh'), marker], { encoding: 'utf8' })
+  assert.equal(lifecycle.status, 1, `the harness must preserve the forced failure: ${lifecycle.stderr}`)
+  assert.equal((await readFile(marker, 'utf8')), 'resumed', 'EXIT cleanup resumes the pinned process and clears state')
 })
 
 test('CI requires and merges the privileged sandbox coverage profile', () => {

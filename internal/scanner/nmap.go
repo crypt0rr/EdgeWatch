@@ -1795,7 +1795,9 @@ func (p *nmapXMLProgressParser) feed(data []byte, emit func(string, float64)) {
 		fragment := p.pending[:end+endLength]
 		p.pending = p.pending[end+endLength:]
 		var progress nmapTaskProgress
-		if err := xml.Unmarshal([]byte(fragment), &progress); err != nil {
+		attributeGuard := newNmapXMLAttributeLimitReader(context.Background(), strings.NewReader(fragment))
+		decoder := xml.NewDecoder(attributeGuard)
+		if err := decoder.Decode(&progress); err != nil {
 			continue
 		}
 		if progress.Percent < 0 {
@@ -2284,6 +2286,7 @@ func (r nmapXMLContextReader) Read(buffer []byte) (int, error) {
 }
 
 var errNmapXMLAttributeLimit = fmt.Errorf("nmap XML element exceeded %d attribute safety limit", maxNmapXMLAttributes)
+var errNmapXMLInternalSubset = errors.New("nmap XML internal DTD subsets are unsupported")
 
 type nmapXMLLexState uint8
 
@@ -2323,7 +2326,6 @@ type nmapXMLAttributeLimitReader struct {
 	commentDashRun     int
 	cdataCloseRun      int
 	declarationQuote   byte
-	declarationDepth   int
 	declarationPrefix  int
 	declarationComment bool
 	declarationDashes  int
@@ -2417,7 +2419,7 @@ func (r *nmapXMLAttributeLimitReader) consume(value byte) error {
 			r.commentDashRun = 0
 		}
 	case nmapXMLLexDeclaration:
-		r.consumeDeclaration(value)
+		return r.consumeDeclaration(value)
 	case nmapXMLLexStartTagName:
 		return r.consumeStartTagName(value)
 	case nmapXMLLexStartTagAttributes:
@@ -2534,13 +2536,15 @@ func (r *nmapXMLAttributeLimitReader) consumeBang(value byte) error {
 	}
 	r.state = nmapXMLLexDeclaration
 	for _, prefixByte := range probe {
-		r.consumeDeclaration(prefixByte)
+		if err := r.consumeDeclaration(prefixByte); err != nil {
+			return err
+		}
 	}
 	r.bangProbeLength = 0
 	return nil
 }
 
-func (r *nmapXMLAttributeLimitReader) consumeDeclaration(value byte) {
+func (r *nmapXMLAttributeLimitReader) consumeDeclaration(value byte) error {
 	if r.declarationPI {
 		if value == '>' && r.declarationPIQMark {
 			r.declarationPI = false
@@ -2548,7 +2552,7 @@ func (r *nmapXMLAttributeLimitReader) consumeDeclaration(value byte) {
 		} else {
 			r.declarationPIQMark = value == '?'
 		}
-		return
+		return nil
 	}
 	if r.declarationComment {
 		if value == '>' && r.declarationDashes >= 2 {
@@ -2559,13 +2563,13 @@ func (r *nmapXMLAttributeLimitReader) consumeDeclaration(value byte) {
 		} else {
 			r.declarationDashes = 0
 		}
-		return
+		return nil
 	}
 	if r.declarationQuote != 0 {
 		if value == r.declarationQuote {
 			r.declarationQuote = 0
 		}
-		return
+		return nil
 	}
 	if r.declarationPrefix != 0 {
 		switch r.declarationPrefix {
@@ -2573,55 +2577,53 @@ func (r *nmapXMLAttributeLimitReader) consumeDeclaration(value byte) {
 			switch value {
 			case '!':
 				r.declarationPrefix = 2
-				return
+				return nil
 			case '?':
 				r.declarationPrefix = 0
 				r.declarationPI = true
 				r.declarationPIQMark = false
-				return
+				return nil
 			default:
 				r.declarationPrefix = 0
 			}
 		case 2:
 			if value == '-' {
 				r.declarationPrefix = 3
-				return
+				return nil
 			}
 		case 3:
 			if value == '-' {
 				r.declarationPrefix = 0
 				r.declarationComment = true
 				r.declarationDashes = 0
-				return
+				return nil
 			}
 		}
 		if value == '<' {
 			r.declarationPrefix = 1
-			return
+			return nil
 		}
 		r.declarationPrefix = 0
 	}
 	if value == '<' {
 		r.declarationPrefix = 1
-		return
+		return nil
 	}
 	if value == '\'' || value == '"' {
 		r.declarationQuote = value
-		return
+		return nil
 	}
 	switch value {
 	case '[':
-		r.declarationDepth++
-	case ']':
-		if r.declarationDepth > 0 {
-			r.declarationDepth--
-		}
+		// encoding/xml terminates a Directive at the first unquoted '>'. It
+		// does not parse internal subsets, so the lexer must reject one before
+		// the decoder can resume at a following start tag with uncounted attrs.
+		return errNmapXMLInternalSubset
 	case '>':
-		if r.declarationDepth == 0 {
-			r.state = nmapXMLLexText
-			r.declarationPrefix = 0
-		}
+		r.state = nmapXMLLexText
+		r.declarationPrefix = 0
 	}
+	return nil
 }
 
 func nmapXMLPrefixOf(prefix string, value []byte) bool {
@@ -2812,6 +2814,9 @@ func indexNmapXML(ctx context.Context, data []byte, protocol string, scannedPort
 			}
 			if errors.Is(err, errNmapXMLAttributeLimit) {
 				return "", nil, errNmapXMLAttributeLimit
+			}
+			if errors.Is(err, errNmapXMLInternalSubset) {
+				return "", nil, errNmapXMLInternalSubset
 			}
 			return "", nil, fmt.Errorf("parse nmap XML: %w", err)
 		}

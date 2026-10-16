@@ -706,6 +706,44 @@ func TestParseXMLAttributeGuardBoundsLargeAttributeListAllocation(t *testing.T) 
 	runtime.KeepAlive(data)
 }
 
+func TestParseXMLRejectsInternalSubsetBeforeLargeAttributeAllocation(t *testing.T) {
+	const attributeCount = 200_000
+	const prefix = `<!DOCTYPE nmaprun [><nmaprun`
+	const attribute = ` a="x"`
+	const suffix = `></nmaprun>`
+	var input strings.Builder
+	input.Grow(len(prefix) + attributeCount*len(attribute) + len(suffix))
+	input.WriteString(prefix)
+	for range attributeCount {
+		input.WriteString(attribute)
+	}
+	input.WriteString(suffix)
+	data := []byte(input.String())
+	input.Reset()
+	if len(data) >= maxNmapOutput {
+		t.Fatalf("internal-subset fixture unexpectedly reached the XML byte cap: %d bytes", len(data))
+	}
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	stats := nmapXMLParseStats{}
+	_, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "443"}, []string{"192.0.2.1"}, 1, &stats)
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	if !errors.Is(err, errNmapXMLInternalSubset) {
+		t.Fatalf("internal-subset error = %v, want early unsupported-subset rejection (allocated %d bytes)", err, allocated)
+	}
+	if allocated > 2<<20 {
+		t.Fatalf("internal-subset rejection allocated %d bytes for %d attributes", allocated, attributeCount)
+	}
+	if stats.Tokens != 0 || stats.MaterializedHosts != 0 || stats.SelectedHostSpans != 0 {
+		t.Fatalf("internal-subset input reached XML tokenization/materialization: %#v", stats)
+	}
+	runtime.KeepAlive(data)
+}
+
 type nmapXMLChunkReader struct {
 	reader *bytes.Reader
 	chunk  int
@@ -724,7 +762,7 @@ func TestNmapXMLAttributeGuardStopsBeforeExcessAttributeAcrossReads(t *testing.T
 		fmt.Fprintf(&decoyAttrs, ` a%d="x"`, index)
 	}
 	var input strings.Builder
-	input.WriteString(`<?xml version="1.0"?><?probe <ignored` + decoyAttrs.String() + `?><!DOCTYPE nmaprun [<!ELEMENT nmaprun ANY><!ENTITY marker "a > b [ c ]"><!-- ] <ignored` + decoyAttrs.String() + ` -->]><nmaprun`)
+	input.WriteString(`<?xml version="1.0"?><?probe <ignored` + decoyAttrs.String() + `?><!DOCTYPE nmaprun><nmaprun`)
 	for index := 0; index <= maxNmapXMLAttributes; index++ {
 		fmt.Fprintf(&input, ` a%d="x"`, index)
 	}
@@ -754,7 +792,7 @@ func TestNmapXMLAttributeGuardStopsBeforeExcessAttributeAcrossReads(t *testing.T
 }
 
 func TestParseXMLAttributeGuardSkipsNonTagMarkupAndQuotedValues(t *testing.T) {
-	data := []byte(`<?xml version="1.0"?><?probe <ignored a="1" b="2"?><!-- <ignored a="1" b="2"> --><!DOCTYPE nmaprun [<!ELEMENT nmaprun ANY><!-- ] <ignored a="1" b="2"> -->]><nmaprun note="a > b"><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><trace><![CDATA[<ignored a="1" b="2">]]></trace></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	data := []byte(`<?xml version="1.0"?><?probe <ignored a="1" b="2"?><!-- <ignored a="1" b="2"> --><!DOCTYPE nmaprun><nmaprun scanner="nmap" args="nmap -oX - 192.0.2.1" start="0" version="7.99" xmloutputversion="1.05"><scaninfo type="connect" protocol="tcp" numservices="1" services="443"/><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><trace><![CDATA[<ignored a="1" b="2">]]></trace></host><runstats><finished exit="success"/></runstats></nmaprun>`)
 	parsed, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "443"}, []string{"192.0.2.1"}, 1, nil)
 	if err != nil {
 		t.Fatalf("valid Nmap DOCTYPE or markup decoy was rejected: %v", err)
@@ -2146,6 +2184,71 @@ func TestNmapXMLProgressParserHandlesSplitRecords(t *testing.T) {
 	parser.feed([]byte(` Scan" percent="125.0"/></nmaprun>`), emit)
 	if len(got) != 1 || got[0].fraction != 1 || !strings.Contains(got[0].line, "100.00%") {
 		t.Fatalf("split XML progress = %#v", got)
+	}
+}
+
+func TestNmapXMLProgressParserAcceptsAttributeLimit(t *testing.T) {
+	const extraAttributes = maxNmapXMLAttributes - 2
+	var input strings.Builder
+	input.Grow(len(`<taskprogress task="Connect Scan" percent="37.5"`) + extraAttributes*len(` extra="x"`) + len(`/>`))
+	input.WriteString(`<taskprogress task="Connect Scan" percent="37.5"`)
+	for range extraAttributes {
+		input.WriteString(` extra="x"`)
+	}
+	input.WriteString(`/>`)
+
+	parser := &nmapXMLProgressParser{}
+	var got []struct {
+		line     string
+		fraction float64
+	}
+	parser.feed([]byte(input.String()), func(line string, fraction float64) {
+		got = append(got, struct {
+			line     string
+			fraction float64
+		}{line: line, fraction: fraction})
+	})
+	if len(got) != 1 || got[0].fraction != 0.375 || got[0].line != "Nmap Connect Scan: 37.50% complete" {
+		t.Fatalf("taskprogress at the attribute limit = %#v", got)
+	}
+}
+
+func TestNmapXMLProgressParserBoundsAttributeAllocation(t *testing.T) {
+	const attributeCount = 200_000
+	const attribute = ` a="x"`
+
+	var input strings.Builder
+	input.Grow(len(`<taskprogress task="Connect" percent="37.5"`) + attributeCount*len(attribute) + len(`/>`))
+	input.WriteString(`<taskprogress task="Connect" percent="37.5"`)
+	for range attributeCount {
+		input.WriteString(attribute)
+	}
+	input.WriteString(`/><taskprogress task="Connect Scan" percent="37.5"/>`)
+	data := []byte(input.String())
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	parser := &nmapXMLProgressParser{}
+	var got []struct {
+		line     string
+		fraction float64
+	}
+	parser.feed(data, func(line string, fraction float64) {
+		got = append(got, struct {
+			line     string
+			fraction float64
+		}{line: line, fraction: fraction})
+	})
+	runtime.ReadMemStats(&after)
+	runtime.KeepAlive(data)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	if len(got) != 1 || got[0].fraction != 0.375 || got[0].line != "Nmap Connect Scan: 37.50% complete" {
+		t.Fatalf("over-limit progress was not discarded while later valid progress remained visible: %#v", got)
+	}
+	maxAllocation := uint64(len(data))*3 + 512<<10
+	if allocated > maxAllocation {
+		t.Fatalf("taskprogress attribute guard allocated %d bytes for %d raw attributes, limit %d", allocated, attributeCount, maxAllocation)
 	}
 }
 

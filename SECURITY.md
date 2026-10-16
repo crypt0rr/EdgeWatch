@@ -52,6 +52,10 @@ privileged default; SYN discovery additionally requires the explicitly opted-in
 Nmap XML is checked as a token stream before EdgeWatch builds observations.
 Each invocation is limited to 16 MiB, 1,000,000 XML tokens, 128 levels of
 nesting, 64 attributes per element, and 500,000 top-level Nmap host records.
+The standard Nmap `<!DOCTYPE nmaprun>` declaration is accepted; internal DTD
+subsets are rejected before XML decoding so their markup cannot bypass the
+attribute bound. The same 64-attribute guard applies to incremental
+`taskprogress` tags; malformed or over-limit progress updates are discarded.
 On Linux, when the scanner helper is available, Nmap also inherits a soft and
 hard `RLIMIT_FSIZE` of 16 MiB plus one byte, in both Landlock and identity-only
 helper modes. The extra byte makes a too-large XML file detectable even when

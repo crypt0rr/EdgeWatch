@@ -188,6 +188,12 @@ observations for the addresses in that invocation. The parser also caps XML comp
 500,000 top-level Nmap host records, while decoding at most the 128 host
 records selected for a scanner batch. Foreign host subtrees are checked as
 tokens without building host or port objects.
+The standard Nmap `<!DOCTYPE nmaprun>` declaration is accepted; internal DTD
+subsets are rejected before decoding so the attribute limit is enforced before
+the decoder allocates the following element's attributes. Incremental
+`taskprogress` tags use the same guard; malformed or over-limit progress is
+ignored for progress reporting, while the completed XML document is still
+validated by the full parser.
 The selected addresses in one invocation share a 65,536-slot limit: the
 number of unique selected addresses present in the result multiplied by the
 configured scanned-port count cannot exceed that value. Missing targets,

@@ -858,10 +858,15 @@ active-incident projection in restartable batches; it does not change scan
 results or baselines. Review notes are retained with active incidents and
 closed reviews are pruned under the configured history retention.
 Schema 69 adds tenant-scoped planned change windows and compact references for
-their closing reviews. Existing outbox payloads are inspected only when valid
-JSON, and malformed payloads leave empty event metadata without blocking the
-migration. Window summaries preserve aggregate counts while bounding stored
-detail lists; old truncated event payloads remain explicitly incomplete.
+their closing reviews. For unsent outbox rows, a valid JSON payload supplies
+the event type and job ID; malformed payloads leave empty metadata without
+blocking migration. Sent rows remain unchanged: they can have empty metadata
+after a direct schema-68 upgrade or populated metadata from an earlier v0.39
+upgrade. This does not change delivery state. The migration builds two
+pending-delivery indexes over all outbox rows, so duration and temporary WAL
+depend on total outbox size even though the payload update targets only unsent
+rows. Window summaries preserve aggregate counts while bounding stored detail
+lists; old truncated event payloads remain explicitly incomplete.
 Unreviewed due summaries are retained past the normal history cutoff, while
 other closed windows and their evidence expire in bounded batches. The daemon
 continues scanning and recording incidents during quiet windows; only the
@@ -880,9 +885,9 @@ next and releases its raw and decoded snapshot, so it does not retain all
 distinct page snapshots together or hold a shared read connection during
 decode. It changes no scan results or baselines.
 Schema 71 adds an all-row index on outbox tenant and row ID. Tenant deletion
-uses it to select bounded batches, including sent history whose event metadata
-is intentionally blank, without reading or rewriting payloads or changing
-delivery state.
+uses it to select bounded batches of every delivery, including sent history
+whose event metadata may be blank or populated by an earlier upgrade. It does
+not read or rewrite payloads or change delivery state.
 Schema 72 replaces the tenant event-order index and adds tenant-qualified
 indexes for legacy job-name and stable job-ID history lookups. Counts use
 covering indexes; ordered pages apply purge filtering and pagination before

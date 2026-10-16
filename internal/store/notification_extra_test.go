@@ -307,7 +307,7 @@ func TestManagedNotificationRotationRetainsStartedActiveWindowEventForReview(t *
 }
 
 func TestManagedNotificationRotationTreatsFutureWindowAttemptAsUnlinked(t *testing.T) {
-	for _, outcome := range []string{"keep-failure", "keep-success", "discard-failure", "discard-hard-stop"} {
+	for _, outcome := range []string{"keep-failure", "keep-success", "discard-failure", "discard-hard-stop", "discard-hard-stop-after-end"} {
 		t.Run(outcome, func(t *testing.T) {
 			ctx := context.Background()
 			s := openTestStore(t)
@@ -388,8 +388,17 @@ func TestManagedNotificationRotationTreatsFutureWindowAttemptAsUnlinked(t *testi
 				if err := s.System().DeliveryResultClaim(ctx, item.ID, item.ClaimToken, ErrDeliveryProvider); err != nil {
 					t.Fatal(err)
 				}
-			} else if released, err := s.System().ReleaseDeliveryClaims(ctx); err != nil || released != 1 {
-				t.Fatalf("release after simulated hard stop = %d claims, %v", released, err)
+			} else {
+				if outcome == "discard-hard-stop-after-end" {
+					end := time.Now().UTC().Add(-2 * time.Second).Truncate(time.Second)
+					start := end.Add(-time.Hour)
+					if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET start_at=?,end_at=?,status='expired' WHERE id=?`, sqliteTimestamp(start), sqliteTimestamp(end), window.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if released, err := s.System().ReleaseDeliveryClaims(ctx); err != nil || released != 1 {
+					t.Fatalf("release after simulated hard stop = %d claims, %v", released, err)
+				}
 			}
 			if err := s.DB.QueryRowContext(ctx, `SELECT claim_token,attempt_started_at,coalesce_after_attempt,coalesced_at FROM outbox WHERE id=?`, item.ID).Scan(&claim, &marker, &coalesceAfter, &coalesced); err != nil {
 				t.Fatal(err)

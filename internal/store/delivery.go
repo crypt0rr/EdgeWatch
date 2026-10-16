@@ -681,10 +681,12 @@ func recoverStartedDeliveryTx(ctx context.Context, tx *sql.Tx, id int64, claim, 
 				// uncertain outcome to a window that has not started.
 				coalesce = coalesceAfter != 0
 			case !now.Before(scanTime(endRaw)):
-				// An expired but not-yet-closed window no longer holds a provider
-				// outcome. Retry the attempt normally; delayed summary generation
-				// must not erase or coalesce a result that completes after end_at.
+				// An expired but not-yet-closed window no longer holds an ordinary
+				// provider outcome, so retry it normally. A discard rotation is
+				// different: consume its marker now rather than leaving the row
+				// permanently ineligible while summary generation is delayed.
 				clearMarker = true
+				coalesce = coalesceAfter != 0
 			default:
 				// An active [start_at,end_at) window preserves the provider-outcome
 				// uncertainty until its close summary commits.

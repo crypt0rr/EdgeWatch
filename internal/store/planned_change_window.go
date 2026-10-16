@@ -24,6 +24,18 @@ const (
 	changeWindowSummaryMaxBytes = 128 * 1024
 )
 
+const (
+	// The schema 71 tenant-purge index is for actual tenant erasure. These
+	// selective window queries must keep SQLite on their schema 69 event/window
+	// indexes instead of walking every retained outbox row for one tenant.
+	outboxAssignWindowWhere        = `event_job_id=? AND +tenant_id=? AND event_type IN ('changes-detected','changes-reminder','changes-recovered') AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND (change_window_id='' OR (attempt_started_at='' AND EXISTS (SELECT 1 FROM change_windows AS previous JOIN jobs AS j ON j.id=previous.job_id WHERE previous.id=outbox.change_window_id AND previous.job_id=? AND previous.closed_at='' AND previous.start_at>? AND j.tenant_id=? AND j.tenant_id=outbox.tenant_id)))`
+	outboxCancelPendingWindowWhere = `change_window_id=? AND +tenant_id=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at=''`
+	outboxClosePendingWindowWhere  = `change_window_id=? AND +tenant_id=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at=''`
+	outboxCloseInFlightWindowWhere = `change_window_id=? AND +tenant_id=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at<>''`
+	outboxCloseOrphanWindowWhere   = `change_window_id=? AND +tenant_id=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at<>'' AND claim_token=''`
+	capturePendingWindowRowsQuery  = `SELECT id,payload_json,attempt_started_at,claim_token,claim_until FROM outbox WHERE change_window_id=? AND +tenant_id=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND id>? ORDER BY id LIMIT ?`
+)
+
 var (
 	ErrDeliveryWindowHeld        = errors.New("notification is held by a planned change window")
 	ErrDeliveryAttemptNotStarted = errors.New("notification provider invocation was not started")
@@ -193,7 +205,7 @@ func (ts *TenantStore) CreateChangeWindow(ctx context.Context, jobID string, sta
 	// They become summary references only if still pending when the window is
 	// closed; rows delivered before start do not inflate the summary.
 	if _, err := applyOutboxTransition(ctx, tx, outboxAssignWindow,
-		`event_job_id=? AND tenant_id=? AND event_type IN ('changes-detected','changes-reminder','changes-recovered') AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND (change_window_id='' OR (attempt_started_at='' AND EXISTS (SELECT 1 FROM change_windows AS previous JOIN jobs AS j ON j.id=previous.job_id WHERE previous.id=outbox.change_window_id AND previous.job_id=? AND previous.closed_at='' AND previous.start_at>? AND j.tenant_id=? AND j.tenant_id=outbox.tenant_id)))`,
+		outboxAssignWindowWhere,
 		[]any{jobID, ts.scope.id, jobID, sqliteTimestamp(startUTC), ts.scope.id},
 		outboxChange("change_window_id", outboxSet, "?", id),
 	); err != nil {
@@ -511,7 +523,7 @@ func (ts *TenantStore) CancelChangeWindow(ctx context.Context, jobID, id, actorU
 			return ChangeWindow{}, false, err
 		}
 		if _, err := applyOutboxTransition(ctx, tx, outboxCancelPending,
-			`change_window_id=? AND tenant_id=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at=''`,
+			outboxCancelPendingWindowWhere,
 			[]any{id, ts.scope.id},
 			outboxChange("change_window_id", outboxConditional, `COALESCE((SELECT candidate.id FROM change_windows AS candidate JOIN jobs AS candidate_job ON candidate_job.id=candidate.job_id WHERE candidate.job_id=outbox.event_job_id AND candidate.closed_at='' AND candidate.end_at>? AND candidate_job.tenant_id=outbox.tenant_id ORDER BY candidate.start_at,candidate.id LIMIT 1),'')`, stamp),
 		); err != nil {
@@ -712,7 +724,7 @@ func closeChangeWindowTx(ctx context.Context, tx *sql.Tx, scope TenantScope, id 
 	// its outcome arrives, but is marked so a failed result cannot retry or
 	// penalize destination health after close.
 	if _, err := applyOutboxTransition(ctx, tx, outboxClosePending,
-		`change_window_id=? AND tenant_id=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at=''`,
+		outboxClosePendingWindowWhere,
 		[]any{id, scope.id},
 		outboxChange("coalesced_at", outboxSet, "?", stamp),
 		outboxChange("last_error", outboxReset, "''"),
@@ -722,7 +734,7 @@ func closeChangeWindowTx(ctx context.Context, tx *sql.Tx, scope TenantScope, id 
 		return summary, false, err
 	}
 	if _, err := applyOutboxTransition(ctx, tx, outboxCloseInFlight,
-		`change_window_id=? AND tenant_id=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at<>''`,
+		outboxCloseInFlightWindowWhere,
 		[]any{id, scope.id},
 		outboxChange("coalesce_after_attempt", outboxSet, "1"),
 	); err != nil {
@@ -732,7 +744,7 @@ func closeChangeWindowTx(ctx context.Context, tx *sql.Tx, scope TenantScope, id 
 	// summary above preserves its in-flight evidence, so close can now finish
 	// coalescing those orphaned attempts immediately.
 	if _, err := applyOutboxTransition(ctx, tx, outboxCloseOrphan,
-		`change_window_id=? AND tenant_id=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at<>'' AND claim_token=''`,
+		outboxCloseOrphanWindowWhere,
 		[]any{id, scope.id},
 		outboxChange("coalesced_at", outboxSet, "?", stamp),
 		outboxChange("attempt_started_at", outboxReset, "''"),
@@ -759,7 +771,7 @@ func closeChangeWindowTx(ctx context.Context, tx *sql.Tx, scope TenantScope, id 
 func capturePendingWindowRowsTx(ctx context.Context, tx *sql.Tx, windowID, tenantID, closeAt string) error {
 	var after int64
 	for {
-		rows, err := tx.QueryContext(ctx, `SELECT id,payload_json,attempt_started_at,claim_token,claim_until FROM outbox WHERE change_window_id=? AND tenant_id=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND id>? ORDER BY id LIMIT ?`, windowID, tenantID, after, changeWindowBatchSize)
+		rows, err := tx.QueryContext(ctx, capturePendingWindowRowsQuery, windowID, tenantID, after, changeWindowBatchSize)
 		if err != nil {
 			return err
 		}

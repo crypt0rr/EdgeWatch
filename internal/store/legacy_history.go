@@ -240,6 +240,10 @@ func (ts *TenantStore) ListScanSummariesPage(ctx context.Context, job string, li
 // PlatformStore.
 const historyTenantSQL = `tenant_id=?`
 
+// Keep tenant outbox reads on their state/history indexes rather than the
+// all-row tenant purge index introduced in schema 71.
+const tenantFailedDeliveriesQuery = `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND coalesced_at='' AND (attempts >= ? OR terminal_at <> '') AND +tenant_id=?`
+
 // eventsFromSQL is the FROM clause that selects the tenant's events, in
 // order from the tenant index. It takes one argument, the tenant ID.
 const eventsFromSQL = `FROM events WHERE ` + historyTenantSQL + ` AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=events.tenant_id AND purge.job_id=events.job_id)`
@@ -409,7 +413,7 @@ func (ts *TenantStore) FailedDeliveries(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	var count int
-	err := ts.store.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND coalesced_at='' AND (attempts >= ? OR terminal_at <> '') AND `+historyTenantSQL, deliveryMaxAttempts, ts.scope.id).Scan(&count)
+	err := ts.store.reader().QueryRowContext(ctx, tenantFailedDeliveriesQuery, deliveryMaxAttempts, ts.scope.id).Scan(&count)
 	return count, err
 }
 

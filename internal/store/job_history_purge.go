@@ -92,8 +92,9 @@ var jobHistoryPurgeSteps = []jobHistoryPurgeStep{
 	{jobPurgePhaseLeases, "job_leases", `SELECT rowid FROM job_leases WHERE job=?2 ORDER BY rowid`},
 	// These bounded selectors use schema 69's structured event and window
 	// metadata rather than decoding tenant payload blobs to find a small page.
-	{jobPurgePhaseWindowOutboxJob, "outbox", `SELECT rowid FROM outbox WHERE tenant_id=?1 AND event_job_id=?2`},
-	{jobPurgePhaseWindowOutboxLinks, "outbox", `SELECT rowid FROM outbox WHERE tenant_id=?1 AND change_window_id IN (SELECT w.id FROM change_windows AS w JOIN jobs AS j ON j.id=w.job_id WHERE j.tenant_id=?1 AND j.id=?2)`},
+	// Unary + keeps the schema 71 all-row tenant index for tenant erasure only.
+	{jobPurgePhaseWindowOutboxJob, "outbox", `SELECT rowid FROM outbox WHERE +tenant_id=?1 AND event_job_id=?2`},
+	{jobPurgePhaseWindowOutboxLinks, "outbox", `SELECT rowid FROM outbox WHERE +tenant_id=?1 AND change_window_id IN (SELECT w.id FROM change_windows AS w JOIN jobs AS j ON j.id=w.job_id WHERE j.tenant_id=?1 AND j.id=?2)`},
 	{jobPurgePhaseWindowRefs, "change_window_refs", `SELECT r.rowid FROM change_window_refs AS r WHERE r.window_id IN (SELECT w.id FROM change_windows AS w JOIN jobs AS j ON j.id=w.job_id WHERE j.tenant_id=?1 AND j.id=?2)`},
 	{jobPurgePhaseWindowEvents, "change_window_events", `SELECT e.rowid FROM change_window_events AS e WHERE e.window_id IN (SELECT w.id FROM change_windows AS w JOIN jobs AS j ON j.id=w.job_id WHERE j.tenant_id=?1 AND j.id=?2)`},
 	{jobPurgePhaseWindows, "change_windows", `SELECT w.rowid FROM change_windows AS w JOIN jobs AS j ON j.id=w.job_id WHERE j.tenant_id=?1 AND j.id=?2`},

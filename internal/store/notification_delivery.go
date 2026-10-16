@@ -370,6 +370,18 @@ const MaxTerminalDeliveriesPage = 100
 const terminalDeliverySQL = `o.destination LIKE 'managed:' || m.id || ':%' AND o.sent_at IS NULL AND o.terminal_at<>'' AND o.coalesced_at=''
   AND CAST(substr(o.destination, length(m.id)+10) AS INTEGER) >= m.credential_revision`
 
+const (
+	tenantTerminalDeliveriesQuery = `SELECT o.id,
+  CASE WHEN json_valid(CAST(o.payload_json AS TEXT)) THEN COALESCE(json_extract(CAST(o.payload_json AS TEXT),'$.type'),'') ELSE '' END,
+  CASE WHEN json_valid(CAST(o.payload_json AS TEXT)) THEN COALESCE(json_extract(CAST(o.payload_json AS TEXT),'$.job'),'') ELSE '' END,
+  CASE WHEN json_valid(CAST(o.payload_json AS TEXT)) THEN COALESCE(json_extract(CAST(o.payload_json AS TEXT),'$.created_at'),'') ELSE '' END,
+  o.terminal_at,o.attempts,o.deferrals,o.last_error
+FROM outbox AS o JOIN managed_notifications AS m ON m.id=? AND m.tenant_id=?
+WHERE ` + terminalDeliverySQL + ` AND +o.tenant_id=? AND (?=0 OR o.id<?)
+ORDER BY o.id DESC LIMIT ?`
+	tenantRedeliverableTerminalIDsQuery = `SELECT o.id FROM outbox AS o JOIN managed_notifications AS m ON m.id=? AND m.tenant_id=? WHERE ` + terminalDeliverySQL + ` AND +o.tenant_id=?`
+)
+
 // ListTerminalDeliveries returns, newest first, up to limit alerts that the
 // tenant's destination dropped for good and that RedeliverTerminalDeliveries
 // would queue again. A positive before pages to the alerts with smaller IDs.
@@ -390,14 +402,7 @@ func (ts *TenantStore) ListTerminalDeliveries(ctx context.Context, destinationID
 	if exists == 0 {
 		return nil, fmt.Errorf("%w: notification %s", ErrNotFound, destinationID)
 	}
-	rows, err := reader.QueryContext(ctx, `SELECT o.id,
-  CASE WHEN json_valid(CAST(o.payload_json AS TEXT)) THEN COALESCE(json_extract(CAST(o.payload_json AS TEXT),'$.type'),'') ELSE '' END,
-  CASE WHEN json_valid(CAST(o.payload_json AS TEXT)) THEN COALESCE(json_extract(CAST(o.payload_json AS TEXT),'$.job'),'') ELSE '' END,
-  CASE WHEN json_valid(CAST(o.payload_json AS TEXT)) THEN COALESCE(json_extract(CAST(o.payload_json AS TEXT),'$.created_at'),'') ELSE '' END,
-  o.terminal_at,o.attempts,o.deferrals,o.last_error
-FROM outbox AS o JOIN managed_notifications AS m ON m.id=? AND m.tenant_id=?
-WHERE `+terminalDeliverySQL+` AND o.tenant_id=? AND (?=0 OR o.id<?)
-ORDER BY o.id DESC LIMIT ?`, destinationID, ts.scope.id, ts.scope.id, before, before, limit)
+	rows, err := reader.QueryContext(ctx, tenantTerminalDeliveriesQuery, destinationID, ts.scope.id, ts.scope.id, before, before, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -446,7 +451,7 @@ func (ts *TenantStore) RedeliverTerminalDeliveries(ctx context.Context, destinat
 		return 0, err
 	}
 	now := time.Now().UTC()
-	where := `id IN (SELECT o.id FROM outbox AS o JOIN managed_notifications AS m ON m.id=? AND m.tenant_id=? WHERE ` + terminalDeliverySQL + ` AND o.tenant_id=?`
+	where := `id IN (` + tenantRedeliverableTerminalIDsQuery
 	whereArgs := []any{destinationID, ts.scope.id, ts.scope.id}
 	if ids != nil {
 		if len(ids) == 0 {

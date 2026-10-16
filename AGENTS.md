@@ -131,6 +131,7 @@ Report the checks you ran and any failures or checks you could not run.
   Never edit `baselineSchemaStatements`, `baselineSchemaRows`, or `internal/store/testdata/schema54-migration-chain.golden`; change the schema with a new migration, and test a step on a database at the schema before it, as `reapplyMigration` does.
   List a version that rebuilds a table other tables reference in `foreignKeysOffMigrations`; `applyMigration` refuses its `DROP TABLE` otherwise.
   Begin a startup phase that reads before it writes with `beginWriteTx`, so a concurrent host command delays it instead of failing the start.
+- Change runtime `outbox` state only through `applyOutboxTransition` with a named contract. The schema contract classifies every column for each transition, and `TestRuntimeOutboxUpdatesUseNamedTransitions` rejects direct runtime `UPDATE outbox` statements outside the transition builder and schema migrations.
 - When the schema changes, update [database compatibility](docs/src/content/docs/reference/database-compatibility.md) and `SECURITY.md`.
 - Keep runtime configuration, databases, keys, and generated assets out of source control.
 

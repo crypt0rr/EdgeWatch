@@ -205,6 +205,16 @@ with the four race-enabled test shards. This exercises credential and helper
 paths that need the scanner control capabilities; it does not replace the
 race-enabled suite or change its coverage gates.
 
+Runtime changes to notification delivery rows go through
+`applyOutboxTransition` in `internal/store/outbox_transitions.go`, using a
+named transition whose column dispositions are checked against the migrated
+`outbox` schema. `TestRuntimeOutboxUpdatesUseNamedTransitions` scans the
+store's non-test Go source and rejects direct `UPDATE outbox` SQL literals;
+schema migration backfills remain separate because they are one-time data
+transforms, not runtime delivery transitions. Its regression fixture is parsed
+from source text, so it tests the lint itself rather than relying on a Go
+overlay that a filesystem-based source scan cannot see.
+
 Install Chromium before the first browser test:
 
 ```sh

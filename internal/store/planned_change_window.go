@@ -230,11 +230,11 @@ func (ts *TenantStore) CreateChangeWindow(ctx context.Context, jobID string, sta
 }
 
 // ListChangeWindows ranks active, expired-unclosed, scheduled, due-review, and
-// reviewed-history rows. Each group contributes at most one page to a small
-// final merge, so retained review history is not sorted with open windows.
-// Active windows are bounded by their enforced 24-hour maximum duration.
-// Expired-unclosed windows have no age cutoff because delayed expiry work may
-// leave them visible indefinitely.
+// reviewed-history rows. Each group contributes at most 100 rows to a bounded
+// merge, so a busy class cannot hide rows from another class. Active windows
+// are bounded by their enforced 24-hour maximum duration. Expired-unclosed
+// windows have no age cutoff because delayed expiry work may leave them visible
+// indefinitely.
 const listChangeWindowsQuery = `WITH candidates(id, priority, start_at) AS MATERIALIZED (
 	SELECT id, 0, start_at FROM (
 		SELECT id,start_at FROM change_windows INDEXED BY change_windows_open_latest
@@ -272,7 +272,7 @@ FROM candidates CROSS JOIN change_windows
 WHERE candidates.id=change_windows.id AND change_windows.job_id=?1
 	AND EXISTS (SELECT 1 FROM jobs WHERE jobs.id=change_windows.job_id AND jobs.tenant_id=?2)
 ORDER BY candidates.priority, CASE WHEN candidates.priority=2 THEN candidates.start_at END ASC, candidates.start_at DESC, candidates.id DESC
-LIMIT 100`
+`
 
 // ListChangeWindows returns retained windows for one of the tenant's jobs.
 func (ts *TenantStore) ListChangeWindows(ctx context.Context, jobID string) ([]ChangeWindow, error) {
@@ -379,13 +379,7 @@ func (ts *TenantStore) LatestChangeWindowSummaries(ctx context.Context, includeA
 		now = time.Now().UTC()
 	}
 	nowText := sqliteTimestamp(now)
-	rows, err := ts.store.reader().QueryContext(ctx, `SELECT w.job_id,w.id,w.start_at,w.end_at,w.timezone,w.reason,w.status,w.end_reason,w.closed_at,w.review_state,w.new_count,w.recovered_count,w.still_open_count,w.suppressed_event_count,w.in_flight_event_count,w.unknown_outcome_event_count,w.incomplete_event_count,w.revision
-FROM change_windows AS w JOIN jobs AS j ON j.id=w.job_id AND j.tenant_id=?
-WHERE (? OR j.archived=0) AND (w.closed_at='' OR w.review_state='due')
- AND w.id=(SELECT candidate.id FROM change_windows AS candidate WHERE candidate.job_id=w.job_id AND (candidate.closed_at='' OR candidate.review_state='due')
- ORDER BY CASE WHEN candidate.closed_at='' AND candidate.start_at<=?3 AND candidate.end_at>?3 THEN 0 WHEN candidate.closed_at='' AND candidate.end_at<=?3 THEN 1 WHEN candidate.closed_at='' THEN 2 ELSE 3 END,
- CASE WHEN candidate.closed_at='' AND candidate.start_at>?3 THEN candidate.start_at END ASC,candidate.start_at DESC,candidate.id DESC LIMIT 1)
-ORDER BY w.job_id`, ts.scope.id, boolInt(includeArchived), nowText)
+	rows, err := ts.store.reader().QueryContext(ctx, latestChangeWindowSummariesQuery, ts.scope.id, boolInt(includeArchived), nowText)
 	if err != nil {
 		return nil, err
 	}
@@ -421,6 +415,22 @@ ORDER BY w.job_id`, ts.scope.id, boolInt(includeArchived), nowText)
 	}
 	return out, rows.Err()
 }
+
+// latestChangeWindowSummariesQuery ranks relevant windows once per job. The
+// tenant join and archive filter happen before the window function so rows
+// from another tenant never participate in a job's projection.
+const latestChangeWindowSummariesQuery = `WITH ranked AS (
+	SELECT w.job_id,w.id,w.start_at,w.end_at,w.timezone,w.reason,w.status,w.end_reason,w.closed_at,w.review_state,w.new_count,w.recovered_count,w.still_open_count,w.suppressed_event_count,w.in_flight_event_count,w.unknown_outcome_event_count,w.incomplete_event_count,w.revision,
+		ROW_NUMBER() OVER (PARTITION BY w.job_id ORDER BY
+			CASE WHEN w.closed_at='' AND w.start_at<=?3 AND w.end_at>?3 THEN 0 WHEN w.closed_at='' AND w.end_at<=?3 THEN 1 WHEN w.closed_at='' THEN 2 ELSE 3 END,
+			CASE WHEN w.closed_at='' AND w.start_at>?3 THEN w.start_at END ASC,
+			w.start_at DESC,w.id DESC) AS rn
+	FROM change_windows AS w
+	JOIN jobs AS j ON j.id=w.job_id AND j.tenant_id=?1
+	WHERE (?2 OR j.archived=0) AND (w.closed_at='' OR w.review_state='due')
+)
+SELECT job_id,id,start_at,end_at,timezone,reason,status,end_reason,closed_at,review_state,new_count,recovered_count,still_open_count,suppressed_event_count,in_flight_event_count,unknown_outcome_event_count,incomplete_event_count,revision
+FROM ranked WHERE rn=1 ORDER BY job_id`
 
 func validJobZoneInstant(value time.Time, location *time.Location) bool {
 	if value.IsZero() || location == nil {
@@ -506,6 +516,17 @@ func (ts *TenantStore) expireChangeWindow(ctx context.Context, id string, clock 
 // started. An active cancellation ends at the transaction's actual close
 // time and creates a summary only when the window contains change evidence.
 func (ts *TenantStore) CancelChangeWindow(ctx context.Context, jobID, id, actorUserID, actorLabel string, destinations []string, audit AuditEntry) (ChangeWindow, bool, error) {
+	return ts.cancelChangeWindow(ctx, jobID, id, actorUserID, actorLabel, destinations, audit, false)
+}
+
+// CancelScheduledChangeWindow cancels only a window that is still strictly
+// before its start after this method acquires the database write lock. It does
+// not need notification destinations because it creates no closing summary.
+func (ts *TenantStore) CancelScheduledChangeWindow(ctx context.Context, jobID, id, actorUserID, actorLabel string, audit AuditEntry) (ChangeWindow, bool, error) {
+	return ts.cancelChangeWindow(ctx, jobID, id, actorUserID, actorLabel, nil, audit, true)
+}
+
+func (ts *TenantStore) cancelChangeWindow(ctx context.Context, jobID, id, actorUserID, actorLabel string, destinations []string, audit AuditEntry, beforeStartOnly bool) (ChangeWindow, bool, error) {
 	if err := ts.ready(); err != nil {
 		return ChangeWindow{}, false, err
 	}
@@ -525,6 +546,9 @@ func (ts *TenantStore) CancelChangeWindow(ctx context.Context, jobID, id, actorU
 		return ChangeWindow{}, false, err
 	}
 	if closedAt != "" {
+		return ChangeWindow{}, false, ErrConflict
+	}
+	if beforeStartOnly && !closeAt.Before(scanTime(startRaw)) {
 		return ChangeWindow{}, false, ErrConflict
 	}
 	windowTenant = ts.scope

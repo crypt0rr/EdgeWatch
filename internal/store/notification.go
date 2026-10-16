@@ -492,8 +492,11 @@ func (ts *TenantStore) updateManagedNotificationWithAudits(ctx context.Context, 
 		// with the new credentials.
 		stamp := now.Format(time.RFC3339Nano)
 		moved, err := applyOutboxTransition(ctx, tx, outboxKeepPending,
-			`destination LIKE ? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND (attempt_started_at='' OR change_window_id='')`+ownedDestinationSQL,
-			[]any{"managed:" + id + ":%", id, ts.scope.id},
+			`destination LIKE ? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND (attempt_started_at='' OR change_window_id='' OR EXISTS (
+				SELECT 1 FROM change_windows AS w JOIN jobs AS j ON j.id=w.job_id
+				WHERE w.id=outbox.change_window_id AND j.tenant_id=outbox.tenant_id AND w.start_at>?
+			))`+ownedDestinationSQL,
+			[]any{"managed:" + id + ":%", sqliteTimestamp(now), id, ts.scope.id},
 			outboxChange("destination", outboxSet, "?", newKey),
 			outboxChange("attempts", outboxReset, "0"),
 			outboxChange("deferrals", outboxReset, "0"),

@@ -98,7 +98,6 @@ Incident details and evidence links require `incidents.read`; marking the
 review complete requires `incidents.manage`. Canceling before a scheduled
 window starts produces no closing review. Canceling an active window closes it
 early and produces the same durable review as an expiry.
-
 If EdgeWatch cannot read the job's notification destinations when an expired
 window is due, it keeps the window open and its alerts held while retrying the
 lookup for up to one hour after the window ends. If destinations become
@@ -112,9 +111,10 @@ provider attempt already in flight keeps its claim; a later failure remains
 retryable. The closing review remains available even though no summary was
 sent.
 
-If EdgeWatch cannot load the job's notification destinations while canceling an
-active window, the request fails and leaves the window open with its held
-alerts unchanged. Retry the cancellation when the destinations are available.
+If EdgeWatch cannot load the job's notification destinations, it can still
+cancel a window that is strictly before its scheduled start because that path
+creates no closing summary. If the window has started or expired, cancellation
+fails and leaves it unchanged; retry when destinations are available.
 Creation errors remain by the form, cancellation errors stay in the open
 confirmation dialog so the operator can retry, and review errors remain beside
 the affected window.
@@ -127,10 +127,11 @@ from one whose monitoring summary could not be read. Missing schedule, paused,
 manual-only, and archived states do not create attention by themselves.
 The list shows an active change window first, then an expired but unclosed
 window, then the nearest scheduled window. Unclosed windows remain ahead of a
-due review, which appears when no window remains open. The next scheduled run
-is shown in the job's scheduler timezone displayed beside it. Job details list
-up to 100 windows, with unclosed windows and due reviews ahead of reviewed
-history.
+due review in the Jobs list. In job details, due reviews remain visible even
+when many windows are still open or scheduled. The next scheduled run is shown
+in the job's scheduler timezone displayed beside it. Job details list up to
+500 windows: at most 100 active, expired-unclosed, scheduled, due-review, and
+reviewed-history rows each, in that order.
 
 Choose **Needs attention** to filter the full tenant job list to jobs whose
 latest attempt failed or was incomplete, whose saved scan cycle stalled, or

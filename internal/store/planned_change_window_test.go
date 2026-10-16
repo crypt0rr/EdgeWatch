@@ -206,6 +206,132 @@ func TestLatestChangeWindowProjectionKeepsOlderDueReviewVisible(t *testing.T) {
 	}
 }
 
+func TestLatestChangeWindowSummariesMatchesPriorWinnerOrdering(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	activeJob := createWindowTestJob(t, ts, "projection-equivalence-active", "UTC")
+	expiredJob := createWindowTestJob(t, ts, "projection-equivalence-expired", "UTC")
+	scheduledJob := createWindowTestJob(t, ts, "projection-equivalence-scheduled", "UTC")
+	dueJob := createWindowTestJob(t, ts, "projection-equivalence-due", "UTC")
+	archivedJob := createWindowTestJob(t, ts, "projection-equivalence-archived", "UTC")
+	insertSecondTenant(t, s)
+	const otherTenantJobID = "projection-equivalence-other-tenant"
+	insertSecondTenantJob(t, s, scheduledJob.ID, otherTenantJobID)
+	if err := ts.SetJobArchived(ctx, archivedJob.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	insert := func(jobID, id string, start, end time.Time, closedAt, reviewState string) {
+		t.Helper()
+		status, endReason := "active", ""
+		if closedAt != "" {
+			status, endReason = "closed", "expired"
+		} else if start.After(now) {
+			status = "scheduled"
+		}
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO change_windows(id,job_id,start_at,end_at,timezone,reason,actor_label,created_at,status,end_reason,closed_at,review_state) VALUES (?,?,?,?,'UTC','projection fixture','Operator',?,?,?,?,?)`, id, jobID, sqliteTimestamp(start), sqliteTimestamp(end), sqliteTimestamp(now), status, endReason, closedAt, reviewState); err != nil {
+			t.Fatalf("insert window %s: %v", id, err)
+		}
+	}
+	closed := func(at time.Time) string { return sqliteTimestamp(at) }
+	insert(activeJob.ID, "active-winner", now.Add(-time.Minute), now.Add(time.Hour), "", "none")
+	insert(activeJob.ID, "expired-loser", now.Add(-3*time.Hour), now.Add(-2*time.Hour), "", "none")
+	insert(activeJob.ID, "scheduled-loser", now.Add(time.Hour), now.Add(2*time.Hour), "", "none")
+	insert(activeJob.ID, "due-loser", now.Add(-4*time.Hour), now.Add(-3*time.Hour), closed(now.Add(-3*time.Hour)), "due")
+	insert(expiredJob.ID, "expired-winner", now.Add(-3*time.Hour), now.Add(-2*time.Hour), "", "none")
+	insert(expiredJob.ID, "scheduled-loser-2", now.Add(time.Hour), now.Add(2*time.Hour), "", "none")
+	insert(expiredJob.ID, "due-loser-2", now.Add(-4*time.Hour), now.Add(-3*time.Hour), closed(now.Add(-3*time.Hour)), "due")
+	insert(scheduledJob.ID, "scheduled-far", now.Add(3*time.Hour), now.Add(4*time.Hour), "", "none")
+	insert(scheduledJob.ID, "scheduled-near", now.Add(time.Hour), now.Add(2*time.Hour), "", "none")
+	insert(scheduledJob.ID, "due-loser-3", now.Add(-4*time.Hour), now.Add(-3*time.Hour), closed(now.Add(-3*time.Hour)), "due")
+	tieStart := now.Add(-6 * time.Hour)
+	insert(dueJob.ID, "due-tie-a", tieStart, tieStart.Add(time.Minute), closed(tieStart.Add(time.Minute)), "due")
+	insert(dueJob.ID, "due-tie-z", tieStart, tieStart.Add(time.Minute), closed(tieStart.Add(time.Minute)), "due")
+	insert(dueJob.ID, "reviewed-newer", now.Add(-time.Hour), now.Add(-time.Minute), closed(now), "reviewed")
+	insert(archivedJob.ID, "archived-scheduled", now.Add(time.Hour), now.Add(2*time.Hour), "", "none")
+	insert(otherTenantJobID, "other-tenant-window", now.Add(time.Hour), now.Add(2*time.Hour), "", "none")
+
+	// Keep the old scalar-subquery implementation as a test oracle so this
+	// fixture proves the ranked query preserves the complete winner ordering.
+	legacyWinnerIDs := func(scope TenantScope, includeArchived bool) map[string]string {
+		t.Helper()
+		rows, err := s.DB.QueryContext(ctx, `SELECT w.job_id,w.id
+FROM change_windows AS w JOIN jobs AS j ON j.id=w.job_id AND j.tenant_id=?1
+WHERE (?2 OR j.archived=0) AND (w.closed_at='' OR w.review_state='due')
+	AND w.id=(SELECT candidate.id FROM change_windows AS candidate
+		WHERE candidate.job_id=w.job_id AND (candidate.closed_at='' OR candidate.review_state='due')
+		ORDER BY CASE WHEN candidate.closed_at='' AND candidate.start_at<=?3 AND candidate.end_at>?3 THEN 0 WHEN candidate.closed_at='' AND candidate.end_at<=?3 THEN 1 WHEN candidate.closed_at='' THEN 2 ELSE 3 END,
+			CASE WHEN candidate.closed_at='' AND candidate.start_at>?3 THEN candidate.start_at END ASC,candidate.start_at DESC,candidate.id DESC LIMIT 1)
+ORDER BY w.job_id`, scope.ID(), boolInt(includeArchived), sqliteTimestamp(now))
+		if err != nil {
+			t.Fatalf("run prior projection query for tenant %s: %v", scope.ID(), err)
+		}
+		defer rows.Close()
+		winners := make(map[string]string)
+		for rows.Next() {
+			var jobID, windowID string
+			if err := rows.Scan(&jobID, &windowID); err != nil {
+				t.Fatalf("scan prior projection query: %v", err)
+			}
+			winners[jobID] = windowID
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("read prior projection query: %v", err)
+		}
+		return winners
+	}
+
+	for _, includeArchived := range []bool{false, true} {
+		got, err := ts.LatestChangeWindowSummaries(ctx, includeArchived, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]string{
+			activeJob.ID:    "active-winner",
+			expiredJob.ID:   "expired-winner",
+			scheduledJob.ID: "scheduled-near",
+			dueJob.ID:       "due-tie-z",
+		}
+		if includeArchived {
+			want[archivedJob.ID] = "archived-scheduled"
+		}
+		if len(got) != len(want) {
+			t.Fatalf("includeArchived=%v projection has %d jobs, want %d: %+v", includeArchived, len(got), len(want), got)
+		}
+		for jobID, id := range want {
+			if got[jobID].ID != id {
+				t.Errorf("includeArchived=%v winner for job %s = %q, want %q", includeArchived, jobID, got[jobID].ID, id)
+			}
+		}
+		legacy := legacyWinnerIDs(ts.scope, includeArchived)
+		if len(legacy) != len(got) {
+			t.Errorf("includeArchived=%v ranked projection has %d jobs, prior query has %d: ranked=%+v prior=%+v", includeArchived, len(got), len(legacy), got, legacy)
+		}
+		for jobID, item := range got {
+			if legacy[jobID] != item.ID {
+				t.Errorf("includeArchived=%v winner for job %s = %q, prior query chose %q", includeArchived, jobID, item.ID, legacy[jobID])
+			}
+		}
+	}
+	otherTenant := s.Tenant(TenantScope{id: secondTenantID})
+	otherGot, err := otherTenant.LatestChangeWindowSummaries(ctx, false, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherLegacy := legacyWinnerIDs(TenantScope{id: secondTenantID}, false)
+	if len(otherGot) != 1 || otherGot[otherTenantJobID].ID != "other-tenant-window" || len(otherLegacy) != len(otherGot) || otherLegacy[otherTenantJobID] != otherGot[otherTenantJobID].ID {
+		t.Fatalf("other tenant projection = %+v; prior query = %+v", otherGot, otherLegacy)
+	}
+
+	plan := queryPlan(t, s.DB, latestChangeWindowSummariesQuery, ts.scope.id, 0, sqliteTimestamp(now))
+	if strings.Contains(strings.ToUpper(plan), "CORRELATED SCALAR SUBQUERY") {
+		t.Fatalf("latest change-window projection still performs a correlated lookup: %s", plan)
+	}
+}
+
 func TestLatestChangeWindowSummariesPrioritizeActiveThenExpiredThenNearestScheduled(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -338,8 +464,8 @@ func TestListChangeWindowsKeepsActiveExpiredScheduledAndDueBeforeReviewedHistory
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(windows) != 100 {
-		t.Fatalf("visible window count = %d; want bounded page of 100", len(windows))
+	if len(windows) != 104 {
+		t.Fatalf("visible window count = %d; want active, expired, scheduled, due, and up to 100 reviewed rows", len(windows))
 	}
 	want := []struct{ id, status, review string }{
 		{"active-open", "active", "none"},
@@ -351,6 +477,53 @@ func TestListChangeWindowsKeepsActiveExpiredScheduledAndDueBeforeReviewedHistory
 		if windows[index].ID != check.id || windows[index].Status != check.status || windows[index].ReviewState != check.review {
 			t.Errorf("window %d = %+v; want id=%s status=%s review=%s", index, windows[index], check.id, check.status, check.review)
 		}
+	}
+	if windows[4].ID != "reviewed-000" || windows[len(windows)-1].ID != "reviewed-099" {
+		t.Fatalf("reviewed history bounds = %q..%q; want newest 100 reviewed rows", windows[4].ID, windows[len(windows)-1].ID)
+	}
+}
+
+func TestListChangeWindowsKeepsDueReviewsVisibleBeyondScheduledRows(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job := createWindowTestJob(t, ts, "window-list-due-after-scheduled", "UTC")
+	due := makeDueWindowForProjectionTest(t, ctx, s, ts, job.ID, "due-after-scheduled")
+	now := time.Now().UTC().Truncate(time.Second)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO change_windows(id,job_id,start_at,end_at,timezone,reason,actor_label,created_at,status,end_reason,closed_at,review_state) VALUES (?,?,?,?,'UTC','scheduled fixture','Operator',?,'scheduled','','','none')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stmt.Close()
+	for index := 0; index < 125; index++ {
+		start := now.Add(24*time.Hour + time.Duration(index)*24*time.Hour)
+		if _, err := stmt.ExecContext(ctx, fmt.Sprintf("scheduled-visible-%03d", index), job.ID, sqliteTimestamp(start), sqliteTimestamp(start.Add(time.Hour)), sqliteTimestamp(now)); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			t.Fatalf("insert scheduled row %d: %v", index, err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	windows, err := ts.ListChangeWindows(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windows) != 101 {
+		t.Fatalf("window count = %d, want 100 scheduled rows and one due review", len(windows))
+	}
+	if windows[0].ID != "scheduled-visible-000" || windows[99].ID != "scheduled-visible-099" || windows[100].ID != due.ID || windows[100].ReviewState != "due" {
+		t.Fatalf("due review was not retained after 100 scheduled rows: first=%q hundredth=%q last=%+v", windows[0].ID, windows[99].ID, windows[100])
 	}
 }
 

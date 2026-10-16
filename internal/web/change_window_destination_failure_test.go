@@ -158,3 +158,99 @@ func TestCancelChangeWindowKeepsHeldAlertsWhenDestinationsCannotBeLoaded(t *test
 		t.Fatalf("cancel audit count after healthy retry = %d; want one", cancelAudits)
 	}
 }
+
+func TestCancelScheduledChangeWindowSucceedsWhenDestinationsCannotBeLoaded(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, db, admin := newUsersTestServer(t)
+	server := newRoutingTestServer(t, db, "generic://localhost/edgewatch?disabletls=yes&template=json")
+	ts := defaultTenantStore(server)
+	job, err := ts.CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name: "cancel-scheduled-window-destination-failure", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	window, err := ts.CreateChangeWindow(ctx, job.ID, start, start.Add(time.Hour), false, "maintenance", admin.UserID, admin.Username)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.System().QueueEvent(ctx, "held-scheduled-change-alert", model.Event{
+		Type: "changes-detected", JobID: job.ID, Job: job.Job.Name, ScanID: "cancel-scheduled-window-read-failure",
+		Message: "change detected", CreatedAt: time.Now().UTC(),
+		Changes: []model.Change{{Key: "port|192.0.2.10|tcp|443", Kind: "port", Severity: "high", Target: "192.0.2.10", Protocol: "tcp", Port: 443}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const savedTable = "managed_notifications_saved_for_scheduled_cancel_test"
+	const brokenSource = "missing_managed_notifications_for_scheduled_cancel_test"
+	if _, err := db.DB.ExecContext(ctx, `ALTER TABLE managed_notifications RENAME TO `+savedTable); err != nil {
+		t.Fatal(err)
+	}
+	viewInstalled := false
+	restoreMetadata := func() error {
+		if _, err := db.DB.ExecContext(ctx, `DROP VIEW IF EXISTS managed_notifications`); err != nil {
+			return err
+		}
+		if _, err := db.DB.ExecContext(ctx, `ALTER TABLE `+savedTable+` RENAME TO managed_notifications`); err != nil {
+			return err
+		}
+		viewInstalled = false
+		return nil
+	}
+	t.Cleanup(func() {
+		if viewInstalled {
+			if err := restoreMetadata(); err != nil {
+				t.Errorf("restore destination schema: %v", err)
+			}
+		}
+	})
+	if _, err := db.DB.ExecContext(ctx, `CREATE VIEW managed_notifications(id,tenant_id,name,provider,ciphertext,nonce,enabled,revision,credential_revision,created_at,updated_at) AS SELECT NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL FROM `+brokenSource); err != nil {
+		t.Fatal(err)
+	}
+	viewInstalled = true
+	if _, err := server.App.Notifier.Tenant(ts).QueueDestinationsForJob(ctx, job.Job); err == nil {
+		t.Fatal("destination lookup succeeded with a broken metadata source")
+	}
+
+	body, err := json.Marshal(map[string]string{"window_id": window.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+job.ID+"/change-windows", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.cancelChangeWindow(response, req, admin, ts, job)
+	if response.Code != http.StatusOK {
+		t.Fatalf("scheduled cancel with unavailable destinations = %d: %s; want 200", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Window store.ChangeWindow `json:"window"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Window.ID != window.ID || payload.Window.Status != "cancelled" || payload.Window.EndReason != "cancelled-before-start" || payload.Window.ClosedAt == nil || payload.Window.ReviewState != "none" || payload.Window.Summary != nil {
+		t.Fatalf("scheduled cancel response = %+v; want cancelled-before-start without a closing review", payload.Window)
+	}
+	var linkedWindow, coalesced string
+	if err := db.DB.QueryRowContext(ctx, `SELECT change_window_id,coalesced_at FROM outbox WHERE destination='held-scheduled-change-alert' AND event_job_id=?`, job.ID).Scan(&linkedWindow, &coalesced); err != nil {
+		t.Fatal(err)
+	}
+	if linkedWindow != "" || coalesced != "" {
+		t.Fatalf("held alert after scheduled cancellation = window %q coalesced %q; want released unchanged", linkedWindow, coalesced)
+	}
+	var summaries, cancelAudits int
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE event_type='change-window-summary' AND event_job_id=?`, job.ID).Scan(&summaries); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE tenant_id=? AND action='change_window.cancelled'`, store.DefaultTenantID).Scan(&cancelAudits); err != nil {
+		t.Fatal(err)
+	}
+	if summaries != 0 || cancelAudits != 1 {
+		t.Fatalf("scheduled cancellation side effects: summaries=%d cancel audits=%d; want 0 and 1", summaries, cancelAudits)
+	}
+}

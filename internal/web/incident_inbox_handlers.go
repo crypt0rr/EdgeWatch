@@ -43,6 +43,15 @@ func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request, ts *store
 	})
 }
 
+func (s *Server) incidentInboxSummary(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
+	count, err := ts.CountActiveIncidents(r.Context())
+	if err != nil {
+		s.writeInternalError(w, r, "store", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, IncidentInboxSummary{ActiveCount: count})
+}
+
 type incidentReviewRequest struct {
 	Key              string  `json:"key"`
 	OccurrenceToken  string  `json:"occurrence_token"`

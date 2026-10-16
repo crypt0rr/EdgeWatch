@@ -5,14 +5,14 @@ import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQuery } from '@tanstack/react-query'
 import { useLocation } from 'react-router-dom'
-import { APIError, adminStatus, getSession, listEvents, listIncidents, listJobs, login, logout, recordActivity, setupStatus } from './api'
+import { APIError, adminStatus, getSession, incidentInboxSummary, listEvents, listIncidents, listJobs, login, logout, recordActivity, setupStatus } from './api'
 import { formatDateTimeInTimeZone, setDisplayTimeZone } from './format'
 import { AppContent, AuthRoutes, createQueryClient, Jobs, ProtectedApp, retryQuery, retryQueryDelay, Shell, unitBreadcrumb } from './main'
 import { renderWithProviders } from './test/test-utils'
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api')
-  return { ...actual, acceptIncident: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), listEvents: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), login: vi.fn(), logout: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), suppressIncident: vi.fn() }
+  return { ...actual, acceptIncident: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), incidentInboxSummary: vi.fn(), listEvents: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), login: vi.fn(), logout: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), suppressIncident: vi.fn() }
 })
 
 class EventSourceStub {
@@ -42,6 +42,7 @@ describe('application shell', () => {
   beforeEach(() => {
     vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.18.70', version_release_url: 'https://github.com/crypt0rr/EdgeWatch/releases/tag/v0.18.70', updates: { available: true, status: 'update_available', latest_version: 'v0.19.0', release_url: 'https://github.com/crypt0rr/EdgeWatch/releases/tag/v0.19.0' } } as never)
     vi.mocked(listEvents).mockResolvedValue({ events: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null } })
+    vi.mocked(incidentInboxSummary).mockResolvedValue({ active_count: 0 })
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 0, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] } as never)
     vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'incidents.read', 'incidents.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
@@ -56,7 +57,7 @@ describe('application shell', () => {
   afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks(); setDisplayTimeZone(undefined) })
 
   it('renders permission-aware navigation, update indicator, and incident count', async () => {
-    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 3, pagination: { limit: 1, offset: 0, total: 3, has_more: true, next_offset: 1 } })
+    vi.mocked(incidentInboxSummary).mockResolvedValue({ active_count: 3 })
     const onLogout = vi.fn()
     renderWithProviders(<Shell displayName="Alice" role="administrator" permissions={['overview.read', 'jobs.read', 'hosts.read', 'incidents.read', 'scans.read', 'stream.read']} onLogout={onLogout} />)
 
@@ -64,6 +65,8 @@ describe('application shell', () => {
     expect(screen.getByRole('link', { name: 'Overview' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Activity' })).toBeInTheDocument()
     await waitFor(() => expect(screen.getByLabelText('3 active incidents')).toBeInTheDocument())
+    expect(incidentInboxSummary).toHaveBeenCalledOnce()
+    expect(listIncidents).not.toHaveBeenCalledWith(0, 1)
     expect(screen.getByRole('link', { name: 'Incidents' })).toHaveAttribute('aria-describedby', 'active-incident-count')
     expect(screen.getByRole('link', { name: /Update available/ })).toHaveAttribute('href', 'https://github.com/crypt0rr/EdgeWatch/releases/tag/v0.19.0')
     const versionLink = screen.getByRole('link', { name: 'Release notes for EdgeWatch v0.18.70' })
@@ -375,7 +378,7 @@ describe('application shell', () => {
   })
 
   it('shows unavailable incident counts and handles status failures without hiding navigation', async () => {
-    vi.mocked(listIncidents).mockRejectedValue(new Error('incident service unavailable'))
+    vi.mocked(incidentInboxSummary).mockRejectedValue(new Error('incident service unavailable'))
     vi.mocked(adminStatus).mockRejectedValue(new Error('status unavailable'))
     renderWithProviders(<Shell displayName="Operator" role="operator" permissions={['overview.read', 'incidents.read', 'jobs.read']} onLogout={vi.fn()} />)
     await waitFor(() => expect(screen.getByLabelText('Active incident count unavailable; retrying')).toBeInTheDocument())

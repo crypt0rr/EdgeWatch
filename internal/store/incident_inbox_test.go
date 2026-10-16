@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -515,6 +517,21 @@ func TestIncidentInboxFullPageReadsAndDecodesLargeComparedSnapshotOnce(t *testin
 	}
 }
 
+func TestCountActiveIncidentsDoesNotReadScanSnapshots(t *testing.T) {
+	ctx := context.Background()
+	s, ts, _, _, _ := seedLargeIncidentInboxPage(t, 12, 10, 32)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scans SET snapshot_json='{'`); err != nil {
+		t.Fatal(err)
+	}
+	count, err := ts.CountActiveIncidents(ctx)
+	if err != nil {
+		t.Fatalf("count active incidents with corrupt snapshot evidence: %v", err)
+	}
+	if count != 12 {
+		t.Fatalf("active incident count = %d; want 12", count)
+	}
+}
+
 func TestIncidentInboxIncompleteNewerScanDoesNotReadItsSnapshot(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -820,13 +837,169 @@ func TestIncidentInboxSnapshotCacheStopsOnCancellation(t *testing.T) {
 		{item: IncidentInboxItem{Incident: model.Incident{Change: model.Change{Target: "second.example", Protocol: "tcp"}}}, uncertainty: IncidentObservationUncertainty{Status: IncidentObservationUnknown}},
 	}
 	calls := 0
+	decodeCalled := false
 	err := classifyIncidentInboxSnapshots(ctx, rowsBySnapshot, pending, func(context.Context, incidentInboxSnapshotKey) ([]byte, error) {
 		calls++
 		cancel()
 		return []byte(`{"scopes":[]}`), nil
+	}, func(raw []byte, snapshot *model.Snapshot) error {
+		decodeCalled = true
+		return json.Unmarshal(raw, snapshot)
+	})
+	if !errors.Is(err, context.Canceled) || calls != 1 || decodeCalled {
+		t.Fatalf("cancelled snapshot load = %v after %d reads (decode called %t); want cancellation after one read and before decode", err, calls, decodeCalled)
+	}
+}
+
+func TestIncidentInboxSnapshotDecodesAreSerializedAcrossRequests(t *testing.T) {
+	t.Parallel()
+	firstKey := incidentInboxSnapshotKey{tenantID: "tenant-a", jobID: "job", scanID: "large-scan-a"}
+	secondKey := incidentInboxSnapshotKey{tenantID: "tenant-b", jobID: "job", scanID: "large-scan-b"}
+	firstDecode := make(chan struct{})
+	secondDecode := make(chan struct{}, 1)
+	secondRead := make(chan struct{}, 1)
+	releaseFirst := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
+	t.Cleanup(release)
+	var decodeCalls atomic.Int32
+	var activeDecodes atomic.Int32
+	var maximumConcurrent atomic.Int32
+	decode := func(raw []byte, snapshot *model.Snapshot) error {
+		call := decodeCalls.Add(1)
+		active := activeDecodes.Add(1)
+		for current := maximumConcurrent.Load(); active > current && !maximumConcurrent.CompareAndSwap(current, active); current = maximumConcurrent.Load() {
+		}
+		defer activeDecodes.Add(-1)
+		if call == 1 {
+			close(firstDecode)
+			<-releaseFirst
+		} else {
+			secondDecode <- struct{}{}
+		}
+		return json.Unmarshal(raw, snapshot)
+	}
+	classify := func(key incidentInboxSnapshotKey) error {
+		pending := []incidentInboxPendingItem{{item: IncidentInboxItem{Incident: model.Incident{Change: model.Change{Target: "shared.example", Protocol: "tcp"}}}}}
+		return classifyIncidentInboxSnapshots(context.Background(), map[incidentInboxSnapshotKey][]int{key: {0}}, pending,
+			func(_ context.Context, key incidentInboxSnapshotKey) ([]byte, error) {
+				if key.tenantID == "tenant-b" {
+					secondRead <- struct{}{}
+				}
+				return []byte(`{"scopes":[]}`), nil
+			}, decode)
+	}
+	completed := make(chan error, 2)
+	go func() { completed <- classify(firstKey) }()
+	select {
+	case <-firstDecode:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first snapshot decode did not start")
+	}
+	go func() { completed <- classify(secondKey) }()
+	concurrent := false
+	select {
+	case <-secondRead:
+		concurrent = true
+	case <-time.After(30 * time.Millisecond):
+	}
+	release()
+	for range 2 {
+		if err := <-completed; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if concurrent || maximumConcurrent.Load() != 1 || decodeCalls.Load() != 2 {
+		t.Fatalf("second request read/decode overlapped the first (decodes %d, max %d); want one raw snapshot and decoder admitted at a time", decodeCalls.Load(), maximumConcurrent.Load())
+	}
+	select {
+	case <-secondDecode:
+	default:
+		t.Fatal("second request did not decode after the first released the slot")
+	}
+}
+
+func TestIncidentInboxSnapshotDecodeYieldsBetweenKeys(t *testing.T) {
+	t.Parallel()
+	firstRequest := map[incidentInboxSnapshotKey][]int{
+		{tenantID: "tenant-a", jobID: "job-one", scanID: "scan-one"}: {0},
+		{tenantID: "tenant-a", jobID: "job-two", scanID: "scan-two"}: {1},
+	}
+	secondRequest := map[incidentInboxSnapshotKey][]int{
+		{tenantID: "tenant-b", jobID: "job", scanID: "scan"}: {0},
+	}
+	firstPending := make([]incidentInboxPendingItem, 2)
+	secondPending := make([]incidentInboxPendingItem, 1)
+	firstDecodeStarted := make(chan struct{})
+	releaseFirstDecode := make(chan struct{})
+	secondRequestRead := make(chan struct{}, 1)
+	firstRequestSecondRead := make(chan struct{}, 1)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFirstDecode) }) }
+	t.Cleanup(release)
+	var firstRequestDecodes atomic.Int32
+	decode := func([]byte, *model.Snapshot) error {
+		if firstRequestDecodes.Add(1) == 1 {
+			close(firstDecodeStarted)
+			<-releaseFirstDecode
+		}
+		return nil
+	}
+	var firstRequestReads atomic.Int32
+	read := func(_ context.Context, key incidentInboxSnapshotKey) ([]byte, error) {
+		switch key.tenantID {
+		case "tenant-a":
+			if firstRequestReads.Add(1) == 2 {
+				firstRequestSecondRead <- struct{}{}
+			}
+		case "tenant-b":
+			secondRequestRead <- struct{}{}
+		}
+		return []byte(key.tenantID), nil
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- classifyIncidentInboxSnapshots(context.Background(), firstRequest, firstPending, read, decode)
+	}()
+	select {
+	case <-firstDecodeStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first request did not start its snapshot decode")
+	}
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- classifyIncidentInboxSnapshots(context.Background(), secondRequest, secondPending, read, decode)
+	}()
+	// Let the second request queue on the slot while the first decode is held.
+	time.Sleep(30 * time.Millisecond)
+	release()
+	select {
+	case <-secondRequestRead:
+	case <-firstRequestSecondRead:
+		t.Fatal("multi-snapshot page retained the admission slot between keys")
+	case <-time.After(5 * time.Second):
+		t.Fatal("neither request read resumed after the first decode released the slot")
+	}
+	for _, done := range []<-chan error{firstDone, secondDone} {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestIncidentInboxSnapshotDecodeWaitHonorsCancellation(t *testing.T) {
+	incidentInboxSnapshotDecodeSlot <- struct{}{}
+	defer func() { <-incidentInboxSnapshotDecodeSlot }()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	readCalled := false
+	key := incidentInboxSnapshotKey{tenantID: "tenant", jobID: "job", scanID: "cancelled-wait"}
+	err := classifyIncidentInboxSnapshots(ctx, map[incidentInboxSnapshotKey][]int{key: {0}}, []incidentInboxPendingItem{{}}, func(context.Context, incidentInboxSnapshotKey) ([]byte, error) {
+		readCalled = true
+		return []byte(`{}`), nil
 	}, func(raw []byte, snapshot *model.Snapshot) error { return json.Unmarshal(raw, snapshot) })
-	if !errors.Is(err, context.Canceled) || calls != 1 {
-		t.Fatalf("cancelled snapshot load = %v after %d reads; want context cancellation after one", err, calls)
+	if !errors.Is(err, context.Canceled) || readCalled {
+		t.Fatalf("cancelled snapshot wait = %v, reader called %t; want context cancellation before read", err, readCalled)
 	}
 }
 

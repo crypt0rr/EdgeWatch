@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { Activity, ArrowUp, Bell, Boxes, Building2, Code2, Gauge, Globe2, History, LogOut, Menu, ScrollText, Server, ShieldCheck, UserRound, Wifi, X } from 'lucide-react'
-import { adminStatus, APIError, getSession, listIncidents, listJobs, setCSRF, setForbiddenHandler, setupStatus, logout as apiLogout } from './api'
+import { adminStatus, APIError, getSession, incidentInboxSummary, listIncidents, listJobs, setCSRF, setForbiddenHandler, setupStatus, logout as apiLogout } from './api'
 import type { SessionUser, UnitRef } from './api'
 import { useActivityHeartbeat, useNavigationDrawer } from './components/navigation'
 import { ErrorNotice } from './components/ErrorNotice'
@@ -104,8 +104,8 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
   const versionReleaseURL = updateStatus.data?.version_release_url
   const update = updateStatus.data?.updates
   const updateAvailable = !!update && (update.available === true || update.status === 'update_available')
-  const incidentSummary = useQuery({ queryKey: ['incidents', 'navigation'], queryFn: () => listIncidents(0, 1), refetchInterval: 15000, enabled: hasPermission('incidents.read') })
-  const incidentCount = incidentSummary.data?.active_count ?? incidentSummary.data?.pagination.total ?? 0
+  const incidentSummary = useQuery({ queryKey: ['incidents', 'navigation'], queryFn: incidentInboxSummary, refetchInterval: 15000, enabled: hasPermission('incidents.read') })
+  const incidentCount = incidentSummary.data?.active_count ?? 0
   const incidentCountUnavailable = incidentSummary.isError
   useEffect(() => {
     if (!hasPermission('stream.read')) return

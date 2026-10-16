@@ -1,5 +1,5 @@
 import type { ActiveScan, ActivityEvent, BaselineHostsResponse, GlobalHostsResponse, HostDetailResponse, Job, JobForm, JobPreview, Pagination, PendingChange, QueuedRun, RdapResult, ScanComparison, NaabuOptions } from './types'
-import type { AdminStatus, Change, ChangeWindow, DeploymentLimits, IncidentInboxItem, IncidentInboxPage, IncidentReview, NotificationStatus, PlatformStatus, Scan, ScanSummary, Scope, Unit } from './generated/api-types'
+import type { AdminStatus, Change, ChangeWindow, DeploymentLimits, IncidentInboxItem, IncidentInboxPage, IncidentInboxSummary, IncidentReview, NotificationStatus, PlatformStatus, Scan, ScanSummary, Scope, Unit } from './generated/api-types'
 import { setDisplayTimeZone } from './format'
 
 export type NotificationDestination = {
@@ -249,6 +249,7 @@ export type IncidentInboxQuery = {
   limit?: number
   offset?: number
 }
+export const incidentInboxSummary = () => api<IncidentInboxSummary>('/incidents/summary')
 export type IncidentReviewUpdate = {
   key: string
   occurrence_token: string

@@ -154,6 +154,7 @@ var apiRoutes = withPathAlias("/scanner-profiles", "/scanner/profiles", []apiRou
 	// Global inventories.
 	{Method: http.MethodGet, Template: "/hosts", Permission: auth.PermissionHostsRead, Example: "/hosts", Handle: tenantHandler((*Server).listHosts)},
 	{Method: http.MethodGet, Template: "/incidents", Permission: auth.PermissionIncidentsRead, Example: "/incidents", Handle: tenantHandler((*Server).listIncidents)},
+	{Method: http.MethodGet, Template: "/incidents/summary", Permission: auth.PermissionIncidentsRead, Example: "/incidents/summary", Handle: tenantHandler((*Server).incidentInboxSummary)},
 	{Method: http.MethodGet, Template: "/events", Permission: auth.PermissionScansRead, Example: "/events", Handle: func(s *Server, w http.ResponseWriter, r *http.Request, c routeCall) {
 		s.listEvents(w, r, c.tenant, r.URL.Query().Get("job"))
 	}},

@@ -52,6 +52,7 @@ func ResponseTypes() []apitypes.Type {
 		{Name: "IncidentInboxItem", Value: store.IncidentInboxItem{}},
 		{Name: "IncidentInboxPagination", Value: store.IncidentInboxPagination{}},
 		{Name: "IncidentInboxPage", Value: IncidentInboxPage{}},
+		{Name: "IncidentInboxSummary", Value: IncidentInboxSummary{}},
 		{Name: "ChangeWindowSummary", Value: store.ChangeWindowSummary{}},
 		{Name: "ChangeWindow", Value: store.ChangeWindow{}},
 		{Name: "ChangeWindowStatus", Value: store.ChangeWindowStatus{}},

@@ -3,7 +3,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { activate, activeScans, adminStatus, APIError, getSession, listIncidents, listJobs, listScans, listUnits, logout, platformStatus, recordActivity, setupStatus } from './api'
+import { activate, activeScans, adminStatus, APIError, getSession, incidentInboxSummary, listIncidents, listJobs, listScans, listUnits, logout, platformStatus, recordActivity, setupStatus } from './api'
 import type { SessionUser } from './api'
 import { App, createQueryClient } from './main'
 import { deploymentLimits, platformSession } from './test/platform-fixtures'
@@ -11,7 +11,7 @@ import { developmentBuildUpdates } from './test/status-fixtures'
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api')
-  return { ...actual, activate: vi.fn(), activeScans: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listScans: vi.fn(), listUnits: vi.fn(), logout: vi.fn(), platformStatus: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn() }
+  return { ...actual, activate: vi.fn(), activeScans: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), incidentInboxSummary: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listScans: vi.fn(), listUnits: vi.fn(), logout: vi.fn(), platformStatus: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn() }
 })
 
 class EventSourceStub {
@@ -48,6 +48,7 @@ describe('a one-time account link opened in a browser that holds a session', { t
     vi.mocked(activate).mockResolvedValue(undefined)
     vi.mocked(setupStatus).mockResolvedValue({ configured: true, password_requirements: { minimum_length: 12 } })
     vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.20.7', updates: developmentBuildUpdates })
+    vi.mocked(incidentInboxSummary).mockResolvedValue({ active_count: 0 })
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 0, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] })
     vi.mocked(listScans).mockResolvedValue({ scans: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null } })

@@ -10,3 +10,9 @@ type IncidentInboxPage struct {
 	Truncated   bool                          `json:"truncated"`
 	ActiveCount int                           `json:"active_count"`
 }
+
+// IncidentInboxSummary is the count-only response used by the console's
+// navigation badge. It deliberately contains no incident or scan evidence.
+type IncidentInboxSummary struct {
+	ActiveCount int `json:"active_count"`
+}

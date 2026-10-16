@@ -53,7 +53,7 @@ test('mobile navigation is modal and incident cards fit the viewport', async ({ 
           review: { status: 'needs_review', reviewer_label: null, reviewed_at: null, note: '', follow_up_at: null, revision: 0 },
           observation_uncertainty: { status: 'unknown', reason: 'no_newer_observation' },
         }],
-        pagination: { limit: 20, offset: 0, total: 1, has_more: false, next_offset: null }, truncated: false, active_count: 1,
+        pagination: { limit: 20, offset: 0, total: 1, has_more: false, next_offset: null }, truncated: false, active_count: 1, server_now: new Date().toISOString(), next_follow_up_at: null,
       })
       return
     }

@@ -132,31 +132,16 @@ function openingTime(item: IncidentInboxItem) {
 function rowKey(item: IncidentInboxItem) {
   return item.occurrence_token
 }
-function reviewViewStatus(review: IncidentReview) {
+function reviewViewStatus(review: IncidentReview, now = Date.now()) {
   if (review.status === 'needs_review') return 'needs_review'
-  if (review.follow_up_at && Date.parse(review.follow_up_at) <= Date.now()) return 'follow_up_due'
+  if (review.follow_up_at && Date.parse(review.follow_up_at) <= now) return 'follow_up_due'
   return 'investigating'
 }
-function followUpTimestamp(item: IncidentInboxItem) {
-  if (item.review.status !== 'investigating' || !item.review.follow_up_at) return null
-  const timestamp = Date.parse(item.review.follow_up_at)
-  return Number.isFinite(timestamp) ? timestamp : null
-}
-function earliestFutureFollowUpAt(items: IncidentInboxItem[], now: number) {
-  let earliest: number | null = null
-  for (const item of items) {
-    const timestamp = followUpTimestamp(item)
-    if (timestamp !== null && timestamp > now && (earliest === null || timestamp < earliest)) earliest = timestamp
-  }
-  return earliest
-}
-function earliestDueFollowUpAt(items: IncidentInboxItem[], now: number, handled: ReadonlySet<number> = new Set()) {
-  let earliest: number | null = null
-  for (const item of items) {
-    const timestamp = followUpTimestamp(item)
-    if (timestamp !== null && timestamp <= now && item.view_status !== 'follow_up_due' && !handled.has(timestamp) && (earliest === null || timestamp < earliest)) earliest = timestamp
-  }
-  return earliest
+const maxDueRefreshAttempts = 3
+const dueRefreshSafetyMarginMs = 250
+
+function dueRefreshKey(queryID: string, nextFollowUpAt: string | null | undefined) {
+  return nextFollowUpAt ? `${queryID}:${nextFollowUpAt}` : null
 }
 function openEvidencePath(path: string, label: string) {
   return <a className="incident-evidence-link" href={path} target="_blank" rel="noopener noreferrer">{label} <span>(opens in new tab)</span><ExternalLink size={13} aria-hidden="true" /></a>
@@ -203,61 +188,77 @@ export function Incidents() {
   const jobs = useQuery({ queryKey: ['jobs', true], queryFn: () => listJobs(true), enabled: canRead })
   const exactLookup = lookupOccurrenceParam && jobID && view === 'all_active' ? lookupOccurrenceParam : ''
   const filters: IncidentInboxQuery = { view, limit: exactLookup ? 1 : pageSize, offset: exactLookup ? 0 : offset, ...(jobID ? { job_id: jobID } : {}), ...(exactLookup ? { occurrence_token: exactLookup } : {}), ...(severity ? { severity } : {}), ...(kind ? { kind } : {}) }
-  const pageQueryKey = ['incidents', 'inbox', view, jobID, exactLookup, severity, kind, offset] as const
+  const sessionScopeKey = JSON.stringify([session.data?.user_id ?? null, session.data?.scope ?? null, session.data?.unit?.id ?? null])
+  const pageQueryKey = ['incidents', 'inbox', sessionScopeKey, view, jobID, exactLookup, severity, kind, offset] as const
   const pageQueryID = JSON.stringify(pageQueryKey)
-  const handledDueRefreshesRef = useRef(new Set<number>())
-  const handledDueRefreshQueryRef = useRef(pageQueryID)
-  if (handledDueRefreshQueryRef.current !== pageQueryID) {
-    handledDueRefreshQueryRef.current = pageQueryID
-    handledDueRefreshesRef.current.clear()
-  }
-  const scheduledDueRefreshRef = useRef<{ key: string; dueAt: number; queryID: string } | null>(null)
+  const dueRefreshAttemptsRef = useRef<{ key: string | null; count: number }>({ key: null, count: 0 })
+  const scheduledDueRefreshRef = useRef<{ key: string; attemptKey: string; deadline: number; queryID: string } | null>(null)
   const incidents = useQuery({
     queryKey: pageQueryKey,
-    queryFn: () => listIncidents(filters),
+    queryFn: async () => ({ ...(await listIncidents(filters)), receivedAtPerformance: performance.now() }),
     enabled: canRead,
     refetchOnWindowFocus: query => {
-      const data = query.state.data as { incidents?: IncidentInboxItem[] } | undefined
-      const rows = data?.incidents ?? []
-      const now = Date.now()
-      if (earliestDueFollowUpAt(rows, now) === null) return true
-      const dueAt = earliestDueFollowUpAt(rows, now, handledDueRefreshesRef.current)
-      if (dueAt === null) return false
-      handledDueRefreshesRef.current.add(dueAt)
+      const data = query.state.data as { next_follow_up_at?: string | null } | undefined
+      const schedule = scheduledDueRefreshRef.current
+      if (!schedule || schedule.queryID !== pageQueryID || performance.now() < schedule.deadline) return true
+      const key = dueRefreshKey(pageQueryID, data?.next_follow_up_at)
+      if (!key || key !== schedule.attemptKey) return true
+      const attempts = dueRefreshAttemptsRef.current.key === key ? dueRefreshAttemptsRef.current.count : 0
+      if (attempts >= maxDueRefreshAttempts) return true
+      dueRefreshAttemptsRef.current = { key, count: attempts + 1 }
       return 'always'
     },
   })
   const rows = incidents.data?.incidents ?? []
-  const now = Date.now()
-  const futureDueAt = canRead && incidents.data ? earliestFutureFollowUpAt(rows, now) : null
-  const alreadyDueAt = canRead && incidents.data ? earliestDueFollowUpAt(rows, now, handledDueRefreshesRef.current) : null
-  const candidateDueAt = alreadyDueAt ?? futureDueAt
-  const priorDue = scheduledDueRefreshRef.current
-  const priorStillPending = !!priorDue && priorDue.queryID === pageQueryID && !handledDueRefreshesRef.current.has(priorDue.dueAt) && rows.some(item => followUpTimestamp(item) === priorDue.dueAt)
-  const nextDueAt = priorStillPending && (candidateDueAt === null || priorDue.dueAt < candidateDueAt) ? priorDue.dueAt : candidateDueAt
-  const nextDueKey = nextDueAt === null ? null : `${pageQueryID}:${nextDueAt}`
-  scheduledDueRefreshRef.current = nextDueAt === null || nextDueKey === null ? null : { key: nextDueKey, dueAt: nextDueAt, queryID: pageQueryID }
+  const nextFollowUpAt = incidents.data?.next_follow_up_at ?? null
+  const serverNow = incidents.data?.server_now
+  const receivedAtPerformance = incidents.data?.receivedAtPerformance ?? Number.NaN
+  const nextDueTimestamp = nextFollowUpAt ? Date.parse(nextFollowUpAt) : NaN
+  const serverNowTimestamp = serverNow ? Date.parse(serverNow) : NaN
+  const estimatedServerNow = Number.isFinite(serverNowTimestamp) && Number.isFinite(receivedAtPerformance)
+    ? serverNowTimestamp + Math.max(0, performance.now() - receivedAtPerformance)
+    : Date.now()
+  const nextDueAttemptKey = dueRefreshKey(pageQueryID, nextFollowUpAt)
+  if (dueRefreshAttemptsRef.current.key !== nextDueAttemptKey) {
+    dueRefreshAttemptsRef.current = { key: nextDueAttemptKey, count: 0 }
+  }
+  const nextDueKey = Number.isFinite(nextDueTimestamp) && Number.isFinite(serverNowTimestamp) && Number.isFinite(receivedAtPerformance) && nextDueTimestamp > serverNowTimestamp
+    ? `${pageQueryID}:${nextFollowUpAt}:${serverNow}:${receivedAtPerformance}`
+    : null
+  if (!canRead || !incidents.data || !nextDueKey || !nextDueAttemptKey) {
+    scheduledDueRefreshRef.current = null
+  } else if (scheduledDueRefreshRef.current?.key !== nextDueKey) {
+    const attempts = dueRefreshAttemptsRef.current.count
+    scheduledDueRefreshRef.current = attempts >= maxDueRefreshAttempts ? null : {
+      key: nextDueKey,
+      attemptKey: nextDueAttemptKey,
+      queryID: pageQueryID,
+      deadline: receivedAtPerformance + Math.max(0, nextDueTimestamp - serverNowTimestamp + dueRefreshSafetyMarginMs),
+    }
+  }
+  const scheduledDueRefresh = scheduledDueRefreshRef.current
   const incidentsRefetchRef = useRef(incidents.refetch)
   incidentsRefetchRef.current = incidents.refetch
   useEffect(() => {
-    if (!canRead || !incidents.data || nextDueAt === null || nextDueKey === null) return
-    const key = nextDueKey
-    const dueAt = nextDueAt
+    if (!canRead || !incidents.data || !scheduledDueRefresh) return
+    const { key, attemptKey, deadline } = scheduledDueRefresh
     let timer: number
     const checkDue = () => {
       if (scheduledDueRefreshRef.current?.key !== key) return
-      const remaining = dueAt - Date.now()
+      const remaining = deadline - performance.now()
       if (remaining > 0) {
         timer = window.setTimeout(checkDue, Math.min(remaining, maxTimeoutMs))
         return
       }
-      if (document.visibilityState !== 'visible' || handledDueRefreshesRef.current.has(dueAt)) return
-      handledDueRefreshesRef.current.add(dueAt)
+      if (document.visibilityState !== 'visible') return
+      const attempts = dueRefreshAttemptsRef.current.key === attemptKey ? dueRefreshAttemptsRef.current.count : 0
+      if (attempts >= maxDueRefreshAttempts) return
+      dueRefreshAttemptsRef.current = { key: attemptKey, count: attempts + 1 }
       void incidentsRefetchRef.current()
     }
-    timer = window.setTimeout(checkDue, Math.min(Math.max(dueAt - Date.now(), 0), maxTimeoutMs))
+    timer = window.setTimeout(checkDue, Math.min(Math.max(deadline - performance.now(), 0), maxTimeoutMs))
     return () => window.clearTimeout(timer)
-  }, [canRead, incidents.data !== undefined, nextDueAt, nextDueKey])
+  }, [canRead, incidents.data !== undefined, scheduledDueRefresh?.key])
   const selectedRow = rows.find(row => row.occurrence_token === selectedOccurrence)
   const conflictRefresh = conflictRefreshes[selectedOccurrence] ?? null
   const hasConflictRefresh = !!conflictRefresh
@@ -271,7 +272,7 @@ export function Incidents() {
   const lookupOccurrence = useCallback(async (token: string, selectedJobID: string, expectedRevision: number | null) => {
     const generation = (conflictLookupGenerationRef.current[token] ?? 0) + 1
     conflictLookupGenerationRef.current[token] = generation
-    const pageQueryID = JSON.stringify(['incidents', 'inbox', view, jobID, exactLookup, severity, kind, offset])
+    const pageQueryID = JSON.stringify(['incidents', 'inbox', sessionScopeKey, view, jobID, exactLookup, severity, kind, offset])
     const pageDataUpdatedAt = incidents.dataUpdatedAt
     setConflictRefreshes(current => ({ ...current, [token]: { token, status: 'loading', expectedRevision, pageQueryID, pageDataUpdatedAt } }))
     try {
@@ -284,7 +285,7 @@ export function Incidents() {
       if (conflictLookupGenerationRef.current[token] !== generation) return
       setConflictRefreshes(refreshes => ({ ...refreshes, [token]: { token, status: 'error', expectedRevision, pageQueryID, pageDataUpdatedAt } }))
     }
-  }, [incidents.dataUpdatedAt, view, jobID, exactLookup, severity, kind, offset])
+  }, [incidents.dataUpdatedAt, view, jobID, exactLookup, severity, kind, offset, sessionScopeKey])
 
   useEffect(() => {
     const normalized = normalizeSearch(search)
@@ -468,7 +469,7 @@ export function Incidents() {
               {hasConflictRefresh && conflictRefresh.status === 'missing' && <p className="incident-context-notice" role="status">This occurrence is no longer active. Your draft is kept for reference, but it cannot be saved because the active occurrence has changed or closed.</p>}
               {hasConflictRefresh && conflictRefresh.status === 'error' && <div className="incident-context-notice" role="status"><p>Could not verify the latest active occurrence. Your draft is kept, and saving is disabled until the exact lookup succeeds.</p><button className="button secondary" type="button" onClick={() => evidenceItem && void lookupOccurrence(evidenceItem.occurrence_token, evidenceItem.job_id, conflictRefresh.expectedRevision)}>Retry exact occurrence check</button></div>}
               {selectionOutOfResults && !hasConflictRefresh && <p className="incident-context-notice" role="status">This incident is no longer in the selected view or page. Its evidence stays open here; close the panel to keep your filters and page, or use All active to locate it again.</p>}
-              <EvidencePanel item={evidenceItem} canManage={canManage} readOnly={selectionOutOfResults || (!!conflictRefresh && conflictRefresh.status !== 'found')} draft={reviewDrafts[evidenceItem.occurrence_token]} onDraftChange={updateReviewDraft} conflictRefresh={conflictRefresh} onConflictCheck={lookupOccurrence} onClearConflict={clearConflict} onAction={actionFor} onSaved={review => setSelectedSnapshot(current => current?.occurrence_token === evidenceItem.occurrence_token ? { ...current, review, view_status: reviewViewStatus(review) } : current)} />
+              <EvidencePanel item={evidenceItem} canManage={canManage} readOnly={selectionOutOfResults || (!!conflictRefresh && conflictRefresh.status !== 'found')} draft={reviewDrafts[evidenceItem.occurrence_token]} onDraftChange={updateReviewDraft} conflictRefresh={conflictRefresh} onConflictCheck={lookupOccurrence} onClearConflict={clearConflict} onAction={actionFor} onSaved={review => setSelectedSnapshot(current => current?.occurrence_token === evidenceItem.occurrence_token ? { ...current, review, view_status: reviewViewStatus(review, estimatedServerNow) } : current)} />
             </> : <div className="inline-empty" role="status">This occurrence is not available in the selected view or page. Close the panel or use All active to locate it again.</div>}
           </aside>}
         </div>

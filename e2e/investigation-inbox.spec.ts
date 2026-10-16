@@ -25,10 +25,12 @@ async function installInboxAPI(page: Page, conflict: 'revision-move' | 'occurren
   let occurrenceChanged = false
   let replacedOccurrence = ''
   let lastSeenAt = ''
+  let serverNow = new Date().toISOString()
   const writes: Record<string, unknown>[] = []
   const lookups: string[] = []
   await page.route(url => new URL(url).pathname === '/api/v1/incidents', async route => {
     const url = new URL(route.request().url())
+    serverNow = new Date().toISOString()
     const offset = Number(url.searchParams.get('offset')) || 0
     const limit = Number(url.searchParams.get('limit')) || 20
     const token = url.searchParams.get('occurrence_token')
@@ -36,6 +38,17 @@ async function installInboxAPI(page: Page, conflict: 'revision-move' | 'occurren
       const token = `occurrence-${index}`
       return incident(index, index === 35 ? currentReview : review0, occurrenceChanged && token === replacedOccurrence ? 'occurrence-replacement' : token, index === 35 ? lastSeenAt || undefined : undefined)
     })
+    const metadataRows = all.filter(row => {
+      if (url.searchParams.get('job_id') && row.job_id !== url.searchParams.get('job_id')) return false
+      if (token && row.occurrence_token !== token) return false
+      if (url.searchParams.get('severity') && row.incident.change.severity !== url.searchParams.get('severity')) return false
+      if (url.searchParams.get('kind') && row.incident.change.kind !== url.searchParams.get('kind')) return false
+      return true
+    })
+    const nextFollowUpAt = metadataRows
+      .filter(row => row.review.status === 'investigating' && !!row.review.follow_up_at && Date.parse(row.review.follow_up_at) > Date.parse(serverNow))
+      .map(row => row.review.follow_up_at as string)
+      .sort((left, right) => Date.parse(left) - Date.parse(right))[0] ?? null
     if (token) {
       lookups.push(token)
       if (conflict === 'lookup-error' && token === 'occurrence-35') {
@@ -43,15 +56,16 @@ async function installInboxAPI(page: Page, conflict: 'revision-move' | 'occurren
         return
       }
       const selected = all.filter(row => row.occurrence_token === token).slice(0, limit)
-      await route.fulfill({ json: { incidents: selected, pagination: pagination(0, selected.length, selected.length), truncated: false, active_count: total } })
+      await route.fulfill({ json: { incidents: selected, pagination: pagination(0, selected.length, selected.length), truncated: false, active_count: total, server_now: serverNow, next_follow_up_at: nextFollowUpAt } })
       return
     }
     const view = url.searchParams.get('view') ?? 'all_active'
     const byView = view === 'needs_review' ? all.filter(row => row.review.status === 'needs_review')
-      : view === 'investigating' ? all.filter(row => row.review.status === 'investigating')
+      : view === 'investigating' ? all.filter(row => row.review.status === 'investigating' && (!row.review.follow_up_at || Date.parse(row.review.follow_up_at) > Date.parse(serverNow)))
+        : view === 'follow_up_due' ? all.filter(row => row.review.status === 'investigating' && !!row.review.follow_up_at && Date.parse(row.review.follow_up_at) <= Date.parse(serverNow))
         : all
     const selected = byView.slice(offset, offset + limit)
-    await route.fulfill({ json: { incidents: selected, pagination: pagination(offset, byView.length, selected.length), truncated: false, active_count: total } })
+    await route.fulfill({ json: { incidents: selected, pagination: pagination(offset, byView.length, selected.length), truncated: false, active_count: total, server_now: serverNow, next_follow_up_at: nextFollowUpAt } })
   })
   await page.route('**/api/v1/jobs/job-1/incidents/review', async route => {
     if (route.request().method() !== 'PUT') return route.fallback()
@@ -104,7 +118,7 @@ async function installEventSourceStub(page: Page) {
 }
 
 test.describe('investigation inbox browser behavior', () => {
-  test('refreshes a visible follow-up at its due boundary without polling afterward', async ({ page }, testInfo) => {
+  test('refreshes an empty due view when its follow-up reaches the due boundary without polling afterward', async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== 'desktop', 'The follow-up due timer runs once in the desktop browser.')
     const now = new Date('2026-10-14T12:00:00Z')
     const dueAt = new Date(now.getTime() + 60_000).toISOString()
@@ -117,14 +131,20 @@ test.describe('investigation inbox browser behavior', () => {
       if (new URL(route.request().url()).searchParams.get('limit') === '1') return route.fallback()
       incidentRequests++
       const review = { status: 'investigating', reviewer_label: 'Administrator', reviewed_at: now.toISOString(), note: '', follow_up_at: dueAt, revision: 1 }
-      const row = { ...incident(0, review), view_status: incidentRequests === 1 ? 'investigating' : 'follow_up_due' }
-      await route.fulfill({ json: { incidents: [row], truncated: false, active_count: 1, pagination: pagination(0, 1, 1) } })
+      if (incidentRequests === 1) {
+        await route.fulfill({ json: { incidents: [], truncated: false, active_count: 1, pagination: pagination(0, 0, 0), server_now: now.toISOString(), next_follow_up_at: dueAt } })
+        return
+      }
+      const row = { ...incident(0, review), view_status: 'follow_up_due' }
+      await route.fulfill({ json: { incidents: [row], truncated: false, active_count: 1, pagination: pagination(0, 1, 1), server_now: new Date(now.getTime() + 60_250).toISOString(), next_follow_up_at: null } })
     })
-    await page.goto('/incidents?view=all_active')
+    await page.goto('/incidents?view=follow_up_due')
 
-    await expect(page.locator('.inbox-desktop-table')).toContainText('Investigating')
+    await expect(page.getByRole('heading', { name: 'No matching incidents' })).toBeVisible()
     expect(incidentRequests).toBe(1)
-    await page.clock.fastForward(60_000)
+    await page.clock.fastForward(59_000)
+    expect(incidentRequests).toBe(1)
+    await page.clock.fastForward(1_250)
     await expect(page.locator('.inbox-desktop-table')).toContainText('Follow-up due')
     await expect.poll(() => incidentRequests).toBe(2)
     await page.clock.fastForward(10 * 60_000)
@@ -163,14 +183,14 @@ test.describe('investigation inbox browser behavior', () => {
     await page.route(url => new URL(url).pathname === '/api/v1/incidents', async route => {
       const url = new URL(route.request().url())
       if (url.searchParams.get('limit') === '1') {
-        await route.fulfill({ json: { incidents: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null }, truncated: false, active_count: 21 } })
+        await route.fulfill({ json: { incidents: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null }, truncated: false, active_count: 21, server_now: new Date().toISOString(), next_follow_up_at: null } })
         return
       }
       expect(url.searchParams.get('view')).toBe('needs_review')
       expect(url.searchParams.get('severity')).toBeNull()
       expect(url.searchParams.get('kind')).toBeNull()
       expect(url.searchParams.get('occurrence_token')).toBeNull()
-      await route.fulfill({ json: { incidents: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null }, truncated: false, active_count: 21 } })
+      await route.fulfill({ json: { incidents: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null }, truncated: false, active_count: 21, server_now: new Date().toISOString(), next_follow_up_at: null } })
     })
     await page.goto('/incidents?view=unknown&job_id=foreign-job&severity=urgent&kind=bad&offset=-1&lookup_occurrence=orphan-token')
     await expect(page.getByRole('heading', { name: 'No matching incidents' })).toBeVisible()

@@ -82,7 +82,7 @@ async function installIssue1128Fixtures(page: import('@playwright/test').Page) {
       return
     }
     if (path === '/api/v1/incidents') {
-      await route.fulfill({ json: { incidents, pagination: { limit: 20, offset: 0, total: incidents.length, has_more: false, next_offset: null }, truncated: false, active_count: incidents.length } })
+      await route.fulfill({ json: { incidents, pagination: { limit: 20, offset: 0, total: incidents.length, has_more: false, next_offset: null }, truncated: false, active_count: incidents.length, server_now: new Date().toISOString(), next_follow_up_at: null } })
       return
     }
     if (path.endsWith('/rdap')) {

@@ -734,7 +734,7 @@ test.describe('responsive issue regressions', () => {
     }))
     await page.route(url => new URL(url).pathname === '/api/v1/incidents', async route => {
       if (route.request().method() !== 'GET') return route.fallback()
-      await route.fulfill({ json: { incidents: rows, pagination: { limit: 20, offset: 0, total: rows.length, has_more: false, next_offset: null }, truncated: false, active_count: rows.length } })
+      await route.fulfill({ json: { incidents: rows, pagination: { limit: 20, offset: 0, total: rows.length, has_more: false, next_offset: null }, truncated: false, active_count: rows.length, server_now: new Date().toISOString(), next_follow_up_at: null } })
     })
 
     for (const width of [375, 820, 1024, 1280, 1920]) {
@@ -808,7 +808,7 @@ test.describe('responsive issue regressions', () => {
     let activeScenario: typeof staleScenarios[number] = staleScenarios[0]
     await page.route(url => new URL(url).pathname === '/api/v1/incidents', async route => {
       if (route.request().method() !== 'GET') return route.fallback()
-      await route.fulfill({ json: { incidents: rows, pagination: { limit: 20, offset: 0, total: rows.length, has_more: false, next_offset: null }, truncated: false, active_count: rows.length } })
+      await route.fulfill({ json: { incidents: rows, pagination: { limit: 20, offset: 0, total: rows.length, has_more: false, next_offset: null }, truncated: false, active_count: rows.length, server_now: new Date().toISOString(), next_follow_up_at: null } })
     })
     await page.route('**/api/v1/jobs/job-1/incidents/accept', async route => {
       await route.fulfill({ status: activeScenario.status, json: { error: { code: activeScenario.code, message: 'incident changed' } } })

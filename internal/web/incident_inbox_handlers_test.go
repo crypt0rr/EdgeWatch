@@ -155,6 +155,41 @@ func TestIncidentInboxRoutesExposeReviewAndConflictContract(t *testing.T) {
 	if duePage.Code != http.StatusOK || json.Unmarshal(duePage.Body.Bytes(), &duePayload) != nil || len(duePayload.Incidents) != 1 || duePayload.Incidents[0].ViewStatus != "follow_up_due" {
 		t.Fatalf("follow-up-due inbox = %d: %s", duePage.Code, duePage.Body.String())
 	}
+	futureIncident := model.Incident{
+		Change: model.Change{Key: "host|future-follow-up", Kind: "host", Severity: "warning", Target: "future.example", Old: "absent", New: "present"},
+		ScanID: "future-follow-up-scan", OpenedAt: now, LastSeenAt: now,
+	}
+	if _, err := db.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Incidents[futureIncident.Change.Key] = futureIncident
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	futureList := call(http.MethodGet, "/api/v1/incidents?view=all_active&job_id="+job.ID+"&kind=host", "", false)
+	var futurePayload IncidentInboxPage
+	if futureList.Code != http.StatusOK || json.Unmarshal(futureList.Body.Bytes(), &futurePayload) != nil || len(futurePayload.Incidents) != 1 {
+		t.Fatalf("future follow-up source inbox = %d: %s", futureList.Code, futureList.Body.String())
+	}
+	futureAt := time.Now().UTC().Add(2 * time.Minute).Truncate(time.Second)
+	futureBody, err := json.Marshal(map[string]any{
+		"key": futureIncident.Change.Key, "occurrence_token": futurePayload.Incidents[0].OccurrenceToken, "expected_revision": int64(0),
+		"status": "investigating", "note": "", "follow_up_at": futureAt.Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	futureUpdate := call(http.MethodPut, "/api/v1/jobs/"+job.ID+"/incidents/review", string(futureBody), true)
+	if futureUpdate.Code != http.StatusOK {
+		t.Fatalf("future follow-up review update = %d: %s", futureUpdate.Code, futureUpdate.Body.String())
+	}
+	emptyDue := call(http.MethodGet, "/api/v1/incidents?view=follow_up_due&job_id="+job.ID+"&kind=host", "", false)
+	var emptyDuePayload IncidentInboxPage
+	if emptyDue.Code != http.StatusOK || json.Unmarshal(emptyDue.Body.Bytes(), &emptyDuePayload) != nil || len(emptyDuePayload.Incidents) != 0 || emptyDuePayload.NextFollowUpAt == nil || !emptyDuePayload.NextFollowUpAt.Equal(futureAt) {
+		t.Fatalf("empty due inbox omitted its upcoming follow-up = %d: %s", emptyDue.Code, emptyDue.Body.String())
+	}
+	if emptyDuePayload.ServerNow.IsZero() || !emptyDuePayload.ServerNow.Before(futureAt) {
+		t.Fatalf("empty due inbox server clock = %s; want a timestamp before %s", emptyDuePayload.ServerNow, futureAt)
+	}
 
 	staleBody := strings.Replace(string(body), `"expected_revision":0`, `"expected_revision":0`, 1)
 	stale := call(http.MethodPut, "/api/v1/jobs/"+job.ID+"/incidents/review", staleBody, true)

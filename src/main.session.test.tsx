@@ -33,7 +33,7 @@ const configured = { configured: true, password_requirements: { minimum_length: 
 // A busy machine renders a whole console slowly; wait longer for it than
 // the default second.
 const loaded = { timeout: 5000 }
-const noIncidents = { incidents: [], truncated: false, active_count: 0, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } }
+const noIncidents = { incidents: [], truncated: false, active_count: 0, server_now: new Date().toISOString(), next_follow_up_at: null, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } }
 
 const riley: SessionUser = { user_id: 'acct-riley', username: 'riley', display_name: 'Riley Novak', role: 'administrator', permissions: administratorPermissions, csrf_token: 'csrf-riley', totp_enabled: true, password_requirements: { minimum_length: 12 }, scope: 'unit', unit: { id: 'unit-retail', name: 'Retail', slug: 'retail' }, multi_unit: true }
 const bo: SessionUser = { ...riley, user_id: 'acct-bo', username: 'bo', display_name: 'Bo Lindqvist', csrf_token: 'csrf-bo', unit: { id: 'unit-logistics', name: 'Logistics', slug: 'logistics' } }

@@ -61,13 +61,14 @@ type IncidentInboxFilter struct {
 // IncidentInboxResult contains the filtered page and the unfiltered active
 // count for the tenant.
 type IncidentInboxResult struct {
-	Items       []IncidentInboxItem
-	Total       int
-	ActiveCount int
-	Limit       int
-	Offset      int
-	HasMore     bool
-	NextOffset  *int
+	Items          []IncidentInboxItem
+	Total          int
+	ActiveCount    int
+	Limit          int
+	Offset         int
+	HasMore        bool
+	NextOffset     *int
+	NextFollowUpAt *time.Time
 }
 
 type incidentInboxSnapshotKey struct {
@@ -244,27 +245,29 @@ func (ts *TenantStore) listIncidentInboxWithSnapshotAccess(ctx context.Context, 
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	args := []any{ts.scope.id}
-	where := []string{`NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`}
+	filterArgs := []any{ts.scope.id}
+	filterWhere := []string{`NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`}
 	if filter.JobID != "" {
-		where = append(where, `j.id=?`)
-		args = append(args, filter.JobID)
+		filterWhere = append(filterWhere, `j.id=?`)
+		filterArgs = append(filterArgs, filter.JobID)
 	}
 	if filter.OccurrenceToken != "" {
 		if filter.JobID == "" {
 			return IncidentInboxResult{}, fmt.Errorf("%w: occurrence_token requires job_id", ErrIncidentReviewInvalid)
 		}
-		where = append(where, `i.occurrence_token=?`)
-		args = append(args, filter.OccurrenceToken)
+		filterWhere = append(filterWhere, `i.occurrence_token=?`)
+		filterArgs = append(filterArgs, filter.OccurrenceToken)
 	}
 	if filter.Severity != "" {
-		where = append(where, `i.severity=?`)
-		args = append(args, filter.Severity)
+		filterWhere = append(filterWhere, `i.severity=?`)
+		filterArgs = append(filterArgs, filter.Severity)
 	}
 	if filter.Kind != "" {
-		where = append(where, `i.kind=?`)
-		args = append(args, filter.Kind)
+		filterWhere = append(filterWhere, `i.kind=?`)
+		filterArgs = append(filterArgs, filter.Kind)
 	}
+	where := append([]string(nil), filterWhere...)
+	args := append([]any(nil), filterArgs...)
 	switch filter.View {
 	case "needs_review":
 		where = append(where, `(r.job_id IS NULL OR r.status='needs_review')`)
@@ -289,6 +292,23 @@ func (ts *TenantStore) listIncidentInboxWithSnapshotAccess(ctx context.Context, 
 	defer func() { _ = tx.Rollback() }()
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_incidents AS i JOIN jobs AS j ON j.id=i.job_id AND j.tenant_id=? WHERE NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, ts.scope.id).Scan(&result.ActiveCount); err != nil {
 		return result, err
+	}
+	nextFollowUpWhere := append([]string(nil), filterWhere...)
+	nextFollowUpWhere = append(nextFollowUpWhere, `r.status='investigating'`, `r.follow_up_at<>''`, `r.follow_up_at>?`)
+	nextFollowUpArgs := append(append([]any(nil), filterArgs...), sqliteTimestamp(now))
+	var nextFollowUpAt sql.NullString
+	nextFollowUpFrom := `FROM runtime_incidents AS i
+		JOIN jobs AS j ON j.id=i.job_id AND j.tenant_id=?
+		JOIN incident_reviews AS r ON r.job_id=i.job_id AND r.occurrence_token=i.occurrence_token
+		WHERE ` + strings.Join(nextFollowUpWhere, ` AND `)
+	if err := tx.QueryRowContext(ctx, `SELECT MIN(r.follow_up_at) `+nextFollowUpFrom, nextFollowUpArgs...).Scan(&nextFollowUpAt); err != nil {
+		return result, err
+	}
+	if nextFollowUpAt.Valid {
+		value := scanTime(nextFollowUpAt.String)
+		if !value.IsZero() {
+			result.NextFollowUpAt = &value
+		}
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) `+from, args...).Scan(&result.Total); err != nil {
 		return result, err

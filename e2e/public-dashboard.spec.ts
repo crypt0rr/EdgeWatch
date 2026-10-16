@@ -29,7 +29,7 @@ test('public status controls remain interactive and navigation leaves the page',
     if (path === '/setup/status') return json({ configured: true, public_dashboard_enabled: false })
     if (path === '/auth/session') return json({ username: 'admin', display_name: 'admin', role: 'administrator', permissions: adminPermissions, csrf_token: 'public-csrf', totp_enabled: false })
     if (path === '/status') return json({ configured: true, version: 'v0.11.2', updates: {} })
-    if (path === '/incidents') return json({ incidents: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null }, truncated: false, active_count: 0 })
+    if (path === '/incidents') return json({ incidents: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null }, truncated: false, active_count: 0, server_now: new Date().toISOString(), next_follow_up_at: null })
     if (path === '/incidents/summary') return json({ active_count: 0 })
     if (path === '/public-dashboard' && method === 'GET') return json(dashboard)
     if (path === '/public-dashboard' && method === 'PUT') {

@@ -90,6 +90,7 @@ func TestRemovePrivateDirectoryContentsRejectsUnexpectedOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer unix.Close(duplicate)
 	if err := removePrivateDirectoryContents(duplicate, uint64(stat.Dev), wrongOwner, stat.Gid, 0, &cleanupBudget{}); err == nil || !strings.Contains(err.Error(), "ownership changed") {
 		t.Fatalf("cleanup with mismatched owner error = %v", err)
 	}
@@ -120,6 +121,7 @@ func TestRemovePrivateDirectoryContentsRejectsUnreadableSubdirectory(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer unix.Close(duplicate)
 	if err := removePrivateDirectoryContents(duplicate, uint64(stat.Dev), stat.Uid, stat.Gid, 0, &cleanupBudget{}); err == nil || !strings.Contains(err.Error(), "open private temporary subdirectory failed") {
 		t.Fatalf("cleanup of unreadable child error = %v", err)
 	}

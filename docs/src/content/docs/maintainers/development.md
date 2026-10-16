@@ -197,6 +197,14 @@ guarded.
 types, and runs `make security`. It does not replace frontend builds,
 frontend tests, browser tests, or container checks.
 
+CI also collects an atomic coverage profile for the sandbox supervisor and
+private-temporary helpers in its existing AMD64 container job. The job runs
+`scripts/collect-sandbox-privileged-coverage.sh IMAGE OUTPUT_DIRECTORY` against
+the image it just built, then the required Go coverage job merges that profile
+with the four race-enabled test shards. This exercises credential and helper
+paths that need the scanner control capabilities; it does not replace the
+race-enabled suite or change its coverage gates.
+
 Install Chromium before the first browser test:
 
 ```sh

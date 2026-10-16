@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { act } from 'react'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { activeScans, adminStatus, api, APIError, getSession, listIncidents, listJobs, listScans, login, recordActivity, setupStatus } from './api'
+import { activeScans, adminStatus, api, APIError, getSession, incidentInboxSummary, listIncidents, listJobs, listScans, login, recordActivity, setupStatus } from './api'
 import type { SessionUser } from './api'
 import { App, createQueryClient } from './main'
 import { signInReturnPath } from './pages/Auth'
@@ -13,7 +13,7 @@ import { developmentBuildUpdates } from './test/status-fixtures'
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api')
-  return { ...actual, activeScans: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listScans: vi.fn(), login: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn() }
+  return { ...actual, activeScans: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), incidentInboxSummary: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listScans: vi.fn(), login: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn() }
 })
 
 class EventSourceStub {
@@ -70,6 +70,7 @@ describe('returning to the requested page after signing in', () => {
       return { username: session.username, display_name: session.display_name, role: session.role, permissions: session.permissions, csrf_token: 'csrf', totp_required: false }
     })
     vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.19.0', updates: developmentBuildUpdates })
+    vi.mocked(incidentInboxSummary).mockResolvedValue({ active_count: 0 })
     vi.mocked(listIncidents).mockResolvedValue(noIncidents)
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] })
     vi.mocked(listScans).mockResolvedValue({ scans: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null } })
@@ -108,12 +109,12 @@ describe('returning to the requested page after signing in', () => {
     // refused with 401, and the console shows the sign-in page.
     session = null
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'authentication required' } }), { status: 401, headers: { 'Content-Type': 'application/json' } })))
-    vi.mocked(listIncidents).mockImplementation(() => api('/incidents?view=needs_review&limit=50&offset=0'))
+    vi.mocked(incidentInboxSummary).mockImplementation(() => api('/incidents/summary'))
     await act(async () => { await client.refetchQueries({ queryKey: ['incidents', 'navigation'] }) })
     expect(await screen.findByRole('heading', { name: /Sign in to EdgeWatch/ })).toBeInTheDocument()
     expect(currentAddress()).toBe('/login')
 
-    vi.mocked(listIncidents).mockResolvedValue(noIncidents)
+    vi.mocked(incidentInboxSummary).mockResolvedValue({ active_count: 0 })
     await signIn('admin')
     expect(currentAddress()).toBe('/incidents?view=needs_review&offset=0')
     expect(await screen.findByRole('heading', { name: 'Investigation inbox', level: 1 })).toBeInTheDocument()

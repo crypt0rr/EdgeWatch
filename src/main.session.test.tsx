@@ -5,7 +5,7 @@ import { focusManager, type QueryClient } from '@tanstack/react-query'
 import { act } from 'react'
 import { useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { activeScans, adminStatus, api, APIError, getSession, listIncidents, listJobs, listScans, recordActivity, setCSRF, setupStatus } from './api'
+import { activeScans, adminStatus, api, APIError, getSession, incidentInboxSummary, listIncidents, listJobs, listScans, recordActivity, setCSRF, setupStatus } from './api'
 import type { SessionUser } from './api'
 import { AppContent, createQueryClient } from './main'
 import type { Job } from './types'
@@ -14,7 +14,7 @@ import { developmentBuildUpdates } from './test/status-fixtures'
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api')
-  return { ...actual, activeScans: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listScans: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn() }
+  return { ...actual, activeScans: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), incidentInboxSummary: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listScans: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn() }
 })
 
 class EventSourceStub {
@@ -60,6 +60,7 @@ describe('the console session', { timeout: 20_000 }, () => {
   beforeEach(() => {
     vi.mocked(setupStatus).mockResolvedValue(configured)
     vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.20.7', updates: developmentBuildUpdates })
+    vi.mocked(incidentInboxSummary).mockResolvedValue({ active_count: 0 })
     vi.mocked(listIncidents).mockResolvedValue(noIncidents)
     vi.mocked(listJobs).mockResolvedValue({ jobs: [retailJob] })
     vi.mocked(listScans).mockResolvedValue({ scans: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null } })

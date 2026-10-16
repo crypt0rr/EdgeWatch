@@ -57,6 +57,10 @@ test('mobile navigation is modal and incident cards fit the viewport', async ({ 
       })
       return
     }
+    if (path === '/incidents/summary') {
+      await json({ active_count: 1 })
+      return
+    }
     if (path === '/jobs') {
       await json({ jobs: [] })
       return

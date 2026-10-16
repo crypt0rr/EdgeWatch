@@ -4,7 +4,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { act } from 'react'
 import { useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { activeScans, adminStatus, api, APIError, createUnit, getPublicDashboard, getPublicDashboardConfig, getSession, getUnit, getUnitCapacity, listHosts, listIncidents, listJobs, listScans, listUnits, login, platformStatus, recordActivity, setupStatus, unitAudit } from './api'
+import { activeScans, adminStatus, api, APIError, createUnit, getPublicDashboard, getPublicDashboardConfig, getSession, getUnit, getUnitCapacity, incidentInboxSummary, listHosts, listIncidents, listJobs, listScans, listUnits, login, platformStatus, recordActivity, setupStatus, unitAudit } from './api'
 import type { SessionUser } from './api'
 import { AppContent, createQueryClient, ProtectedApp } from './main'
 import type { Job } from './types'
@@ -14,7 +14,7 @@ import { developmentBuildUpdates } from './test/status-fixtures'
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api')
-  return { ...actual, activeScans: vi.fn(), adminStatus: vi.fn(), createUnit: vi.fn(), getPublicDashboard: vi.fn(), getPublicDashboardConfig: vi.fn(), getSession: vi.fn(), getUnit: vi.fn(), getUnitCapacity: vi.fn(), listHosts: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listScans: vi.fn(), listUnits: vi.fn(), login: vi.fn(), platformStatus: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), unitAudit: vi.fn() }
+  return { ...actual, activeScans: vi.fn(), adminStatus: vi.fn(), createUnit: vi.fn(), getPublicDashboard: vi.fn(), getPublicDashboardConfig: vi.fn(), getSession: vi.fn(), getUnit: vi.fn(), getUnitCapacity: vi.fn(), incidentInboxSummary: vi.fn(), listHosts: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listScans: vi.fn(), listUnits: vi.fn(), login: vi.fn(), platformStatus: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), unitAudit: vi.fn() }
 })
 
 class EventSourceStub {
@@ -50,6 +50,7 @@ describe('business units in the console', () => {
   beforeEach(() => {
     vi.mocked(setupStatus).mockResolvedValue({ configured: true, password_requirements: { minimum_length: 12 } })
     vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.19.0', updates: developmentBuildUpdates })
+    vi.mocked(incidentInboxSummary).mockResolvedValue({ active_count: 0 })
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 0, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] })
     vi.mocked(listUnits).mockResolvedValue({ limits: deploymentLimits, units: [] })
@@ -71,7 +72,7 @@ describe('business units in the console', () => {
     expect(await screen.findByRole('heading', { name: 'Business units' })).toBeInTheDocument()
     expect(screen.getByText('Morgan Reyes')).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Incidents' })).not.toBeInTheDocument()
-    for (const unitRequest of [listIncidents, listJobs, adminStatus]) expect(unitRequest).not.toHaveBeenCalled()
+    for (const unitRequest of [incidentInboxSummary, listIncidents, listJobs, adminStatus]) expect(unitRequest).not.toHaveBeenCalled()
     expect(EventSourceStub.instances).toBe(0)
   })
 
@@ -126,7 +127,7 @@ describe('business units in the console', () => {
     expect(await screen.findByRole('heading', { name: 'Set up an authenticator' })).toBeInTheDocument()
     await waitFor(() => expect(screen.getByTestId('current-path')).toHaveTextContent('/security'))
     expect(screen.queryByRole('link', { name: 'Jobs' })).not.toBeInTheDocument()
-    for (const request of [listJobs, listIncidents, adminStatus]) expect(request).not.toHaveBeenCalled()
+    for (const request of [listJobs, incidentInboxSummary, listIncidents, adminStatus]) expect(request).not.toHaveBeenCalled()
     expect(EventSourceStub.instances).toBe(0)
 
     // Enabling TOTP lifts the requirement; the screen stays until sign-out.
@@ -229,7 +230,7 @@ describe('business units in the console', () => {
     // Retail is disabled, which ends Riley's session. The shell's incident
     // poll, not a request of the page, is the first to be refused.
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'authentication required' } }), { status: 401, headers: { 'Content-Type': 'application/json' } })))
-    vi.mocked(listIncidents).mockImplementation(() => api('/incidents?limit=1&offset=0'))
+    vi.mocked(incidentInboxSummary).mockImplementation(() => api('/incidents/summary'))
     await act(async () => { await client.refetchQueries({ queryKey: ['incidents', 'navigation'] }) })
     expect(await screen.findByRole('heading', { name: /Sign in to EdgeWatch/ })).toBeInTheDocument()
     // The sign-in page still knows the page to return to.
@@ -241,7 +242,7 @@ describe('business units in the console', () => {
 
     // Bo, a Logistics administrator, signs in on the same tab while
     // Logistics' jobs are still loading.
-    vi.mocked(listIncidents).mockResolvedValue(noIncidents)
+    vi.mocked(incidentInboxSummary).mockResolvedValue({ active_count: 0 })
     vi.mocked(getSession).mockResolvedValue(unitAdministrator({ user_id: 'acct-bo', username: 'bo', display_name: 'Bo Lindqvist', unit: { id: 'unit-logistics', name: 'Logistics', slug: 'logistics' } }))
     vi.mocked(login).mockResolvedValue({ username: 'bo', display_name: 'Bo Lindqvist', role: 'administrator', permissions: administratorPermissions, csrf_token: 'csrf', totp_required: false })
     vi.mocked(listJobs).mockReset().mockImplementation(() => new Promise(() => {}))

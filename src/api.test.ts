@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
-import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, cancelJobChangeWindow, createJobChangeWindow, createNotificationDestination, createPlatformNotification, createUser, getJobChangeWindow, getPublicDashboard, getScan, getScanSummary, historicalScanHost, issueUserActivation, issueUserPasswordReset, jobChangeWindows, listHosts, listIncidents, listScans, listUsers, login, recordActivity, reviewJobChangeWindow, revokeUserSessions, scheduleSuggestion, setCSRF, setForbiddenHandler, setup, setupStatus, suppressIncident, updateIncidentReview, updateNotificationDestination, updatePlatformNotification, updateUser } from './api'
+import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, cancelJobChangeWindow, createJobChangeWindow, createNotificationDestination, createPlatformNotification, createUser, getJobChangeWindow, getPublicDashboard, getScan, getScanSummary, historicalScanHost, incidentInboxSummary, issueUserActivation, issueUserPasswordReset, jobChangeWindows, listHosts, listIncidents, listScans, listUsers, login, recordActivity, reviewJobChangeWindow, revokeUserSessions, scheduleSuggestion, setCSRF, setForbiddenHandler, setup, setupStatus, suppressIncident, updateIncidentReview, updateNotificationDestination, updatePlatformNotification, updateUser } from './api'
 import * as apiRoutes from './api'
 import { getDisplayTimeZone, setDisplayTimeZone } from './format'
 import type { Scan, ScanSummary } from './generated/api-types'
@@ -10,6 +10,14 @@ afterEach(() => {
 })
 
 describe('investigation inbox API contract', () => {
+  it('requests the count-only incident summary without page or snapshot fields', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify({ active_count: 7 }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(incidentInboxSummary()).resolves.toEqual({ active_count: 7 })
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/incidents/summary')
+  })
+
   it('encodes validated inbox filters while retaining the active count and pagination', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify({
       incidents: [], truncated: false, active_count: 7,

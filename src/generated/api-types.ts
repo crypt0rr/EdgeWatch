@@ -379,6 +379,11 @@ export type IncidentInboxPage = {
   active_count: number
 }
 
+// IncidentInboxSummary is web.IncidentInboxSummary.
+export type IncidentInboxSummary = {
+  active_count: number
+}
+
 // ChangeWindowSummary is store.ChangeWindowSummary.
 export type ChangeWindowSummary = {
   new_count: number

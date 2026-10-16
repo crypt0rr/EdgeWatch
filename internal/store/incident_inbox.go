@@ -26,6 +26,7 @@ var (
 	ErrIncidentReviewInvalid          = errors.New("invalid incident review")
 	ErrIncidentOccurrenceChanged      = errors.New("incident occurrence changed since it was loaded")
 	ErrIncidentReviewRevisionConflict = errors.New("incident review revision changed since it was loaded")
+	incidentInboxSnapshotDecodeSlot   = make(chan struct{}, 1)
 )
 
 // newestIncidentEvidenceScanIDSQL seeks one same-job, same-tenant scan after
@@ -198,6 +199,24 @@ func incidentViewStatus(review IncidentReview, now time.Time) string {
 // paginating. Every query carries the tenant predicate on the owning job.
 func (ts *TenantStore) ListIncidentInbox(ctx context.Context, filter IncidentInboxFilter) (IncidentInboxResult, error) {
 	return ts.listIncidentInboxWithSnapshotAccess(ctx, filter, nil, nil)
+}
+
+// CountActiveIncidents returns the tenant's active incident count without
+// loading incident details or scan snapshots. It is used by the navigation
+// badge, which only needs a number.
+func (ts *TenantStore) CountActiveIncidents(ctx context.Context) (int, error) {
+	if err := ts.ready(); err != nil {
+		return 0, err
+	}
+	var count int
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT COUNT(*)
+		FROM runtime_incidents AS i
+		JOIN jobs AS j ON j.id=i.job_id AND j.tenant_id=?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM job_history_purges AS purge
+			WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id
+		)`, ts.scope.id).Scan(&count)
+	return count, err
 }
 
 // listIncidentInboxWithSnapshotAccess keeps the storage path testable for
@@ -466,37 +485,59 @@ func incidentObservationUncertaintyFromSnapshot(uncertainty IncidentObservationU
 // the page's aggregate evidence. Retention can delete a scan between metadata
 // selection and this read; a missing fixed key remains unclassifiable.
 func classifyIncidentInboxSnapshots(ctx context.Context, rowsBySnapshot map[incidentInboxSnapshotKey][]int, pending []incidentInboxPendingItem, read incidentInboxSnapshotReader, decode incidentInboxSnapshotDecoder) error {
-	for key, rowIndexes := range rowsBySnapshot {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		raw, readErr := read(ctx, key)
-		if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
-			return readErr
-		}
-		var snapshot model.Snapshot
-		decodeErr := readErr
-		if decodeErr == nil {
-			decodeErr = decode(raw, &snapshot)
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		for _, rowIndex := range rowIndexes {
-			if rowIndex < 0 || rowIndex >= len(pending) {
-				return fmt.Errorf("incident inbox snapshot row index %d is out of bounds", rowIndex)
-			}
-			entry := &pending[rowIndex]
-			if decodeErr != nil {
-				entry.uncertainty.Reason = IncidentReasonLatestScanUnclassifiable
-			} else {
-				entry.uncertainty = incidentObservationUncertaintyFromSnapshot(entry.uncertainty, entry.item.Incident.Change, snapshot)
-			}
-		}
-		// Do not retain snapshots for the rest of the page. Each iteration
-		// keeps at most one raw blob and one decoded model live.
-		snapshot = model.Snapshot{}
+	if len(rowsBySnapshot) == 0 {
+		return nil
 	}
+	for key, rowIndexes := range rowsBySnapshot {
+		if err := classifyIncidentInboxSnapshot(ctx, key, rowIndexes, pending, read, decode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func classifyIncidentInboxSnapshot(ctx context.Context, key incidentInboxSnapshotKey, rowIndexes []int, pending []incidentInboxPendingItem, read incidentInboxSnapshotReader, decode incidentInboxSnapshotDecoder) error {
+	// A decoded /16 snapshot can temporarily occupy well over 100 MiB. Keep
+	// only one such read/decode in flight across concurrent inbox requests, and
+	// release the slot after each key so a large page cannot monopolize it.
+	select {
+	case incidentInboxSnapshotDecodeSlot <- struct{}{}:
+		defer func() { <-incidentInboxSnapshotDecodeSlot }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	raw, readErr := read(ctx, key)
+	if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
+		return readErr
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var snapshot model.Snapshot
+	decodeErr := readErr
+	if decodeErr == nil {
+		decodeErr = decode(raw, &snapshot)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for _, rowIndex := range rowIndexes {
+		if rowIndex < 0 || rowIndex >= len(pending) {
+			return fmt.Errorf("incident inbox snapshot row index %d is out of bounds", rowIndex)
+		}
+		entry := &pending[rowIndex]
+		if decodeErr != nil {
+			entry.uncertainty.Reason = IncidentReasonLatestScanUnclassifiable
+		} else {
+			entry.uncertainty = incidentObservationUncertaintyFromSnapshot(entry.uncertainty, entry.item.Incident.Change, snapshot)
+		}
+	}
+	// These per-key locals are no longer live when this function returns, before
+	// its deferred slot release lets another request begin decoding.
+	snapshot = model.Snapshot{}
 	return nil
 }
 

@@ -183,6 +183,17 @@ var tenantHistoryLeakCases = map[string]tenantLeakCase{
 			}
 		}
 	}},
+	"CountActiveIncidents": {run: func(t *testing.T, f tenantFixture) {
+		for _, scope := range []TenantScope{f.a, f.b} {
+			count, err := f.store.Tenant(scope).CountActiveIncidents(context.Background())
+			if err != nil {
+				t.Fatalf("count incidents for tenant %s: %v", scope.ID(), err)
+			}
+			if count != 1 {
+				t.Errorf("tenant %s active incident count = %d; want only its one incident", scope.ID(), count)
+			}
+		}
+	}},
 	"ListIncidentInbox": {run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
 		for _, check := range []struct {

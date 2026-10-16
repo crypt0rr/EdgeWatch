@@ -74,6 +74,12 @@ func TestIncidentInboxRoutesExposeReviewAndConflictContract(t *testing.T) {
 	if len(page.Incidents) != 1 || page.Incidents[0].OccurrenceToken == "" || !page.Incidents[0].OpeningScanAvailable || page.Incidents[0].Review.Revision != 0 || page.Incidents[0].ViewStatus != "needs_review" || page.Pagination.Total != 1 || page.ActiveCount != 1 {
 		t.Fatalf("needs-review inbox response = %+v", page)
 	}
+	summary := call(http.MethodGet, "/api/v1/incidents/summary", "", false)
+	var summaryPayload map[string]json.RawMessage
+	var activeCount int
+	if summary.Code != http.StatusOK || json.Unmarshal(summary.Body.Bytes(), &summaryPayload) != nil || json.Unmarshal(summaryPayload["active_count"], &activeCount) != nil || activeCount != 1 || len(summaryPayload) != 1 {
+		t.Fatalf("count-only incident summary = %d: %s; want only active_count=1", summary.Code, summary.Body.String())
+	}
 	item := page.Incidents[0]
 	exact := call(http.MethodGet, "/api/v1/incidents?view=all_active&job_id="+job.ID+"&occurrence_token="+item.OccurrenceToken, "", false)
 	var exactPayload IncidentInboxPage

@@ -371,6 +371,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
       const hasMore = offset + limit < matching.length
       await json({ incidents: matching.slice(offset, offset + limit), truncated: false, active_count: incidents.length, pagination: { limit, offset, total: matching.length, has_more: hasMore, next_offset: hasMore ? offset + limit : null } }); return
     }
+    if (path === '/incidents/summary' && method === 'GET') { await json({ active_count: incidents.length }); return }
     if (path === '/hosts' && method === 'GET') {
       const hosts = [{ ...host, job_id: 'job-1', job: 'fixture-job', scan_id: 'scan-1', scanned_at: scan.finished_at, open_ports: 1, open_filtered_ports: 0, has_open_ports: true, data_quality: 'detailed' }]
       await json({ hosts, pagination: pagination(hosts.length) }); return

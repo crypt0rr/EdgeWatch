@@ -14,12 +14,16 @@ import (
 )
 
 func createWindowTestJob(t *testing.T, ts *TenantStore, name, timezone string) JobRecord {
+	return createWindowTestJobWithContext(context.Background(), t, ts, name, timezone)
+}
+
+func createWindowTestJobWithContext(ctx context.Context, t *testing.T, ts *TenantStore, name, timezone string) JobRecord {
 	t.Helper()
 	job := config.NormalizeJob(config.Job{
 		Name: name, Schedule: "0 * * * *", Timezone: timezone,
 		Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"},
 	})
-	record, err := ts.CreateJob(context.Background(), job)
+	record, err := ts.CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,8 +31,12 @@ func createWindowTestJob(t *testing.T, ts *TenantStore, name, timezone string) J
 }
 
 func createTestChangeWindow(t *testing.T, ts *TenantStore, jobID string, start, end time.Time) ChangeWindow {
+	return createTestChangeWindowWithContext(context.Background(), t, ts, jobID, start, end)
+}
+
+func createTestChangeWindowWithContext(ctx context.Context, t *testing.T, ts *TenantStore, jobID string, start, end time.Time) ChangeWindow {
 	t.Helper()
-	window, err := ts.CreateChangeWindow(context.Background(), jobID, start, end, false, "maintenance", "test-actor", "Test Operator")
+	window, err := ts.CreateChangeWindow(ctx, jobID, start, end, false, "maintenance", "test-actor", "Test Operator")
 	if err != nil {
 		t.Fatal(err)
 	}

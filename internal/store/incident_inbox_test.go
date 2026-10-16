@@ -863,7 +863,9 @@ func TestIncidentInboxSnapshotCacheStopsOnCancellation(t *testing.T) {
 }
 
 func TestIncidentInboxSnapshotDecodesAreSerializedAcrossRequests(t *testing.T) {
-	t.Parallel()
+	// This test exercises the package-wide decode slot. Run it in the sequential
+	// phase so unrelated parallel inbox tests cannot occupy that slot before the
+	// first decode reaches its synchronization point.
 	firstKey := incidentInboxSnapshotKey{tenantID: "tenant-a", jobID: "job", scanID: "large-scan-a"}
 	secondKey := incidentInboxSnapshotKey{tenantID: "tenant-b", jobID: "job", scanID: "large-scan-b"}
 	firstDecode := make(chan struct{})

@@ -14,9 +14,9 @@ func TestBeginDeliveryAttemptDoesNotHoldAlertsForExpiredUnclosedWindow(t *testin
 	ctx := context.Background()
 	for _, mode := range []string{"linked-before-window", "queued-after-window-end"} {
 		t.Run(mode, func(t *testing.T) {
-			s := openTestStore(t)
+			s := openTestStoreWithContext(ctx, t)
 			ts := defaultTenant(s)
-			job := createWindowTestJob(t, ts, "expired-window-gate-"+mode, "UTC")
+			job := createWindowTestJobWithContext(ctx, t, ts, "expired-window-gate-"+mode, "UTC")
 			now := time.Now().UTC().Truncate(time.Second)
 			var early *ChangeWindow
 			if mode == "linked-before-window" {
@@ -27,7 +27,7 @@ func TestBeginDeliveryAttemptDoesNotHoldAlertsForExpiredUnclosedWindow(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			later := createTestChangeWindow(t, ts, job.ID, firstEnd.Add(time.Minute), firstEnd.Add(2*time.Hour))
+			later := createTestChangeWindowWithContext(ctx, t, ts, job.ID, firstEnd.Add(time.Minute), firstEnd.Add(2*time.Hour))
 			if mode == "queued-after-window-end" {
 				if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET end_at=? WHERE id=?`, sqliteTimestamp(now.Add(-time.Second)), first.ID); err != nil {
 					t.Fatal(err)

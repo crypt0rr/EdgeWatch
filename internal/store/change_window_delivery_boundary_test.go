@@ -11,6 +11,16 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
+func openTestStoreWithContext(ctx context.Context, t *testing.T) *Store {
+	t.Helper()
+	s, err := openWithOptionsContext(ctx, freshTestDatabasePath(t), openOptions{create: true, migrate: true, configureWAL: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
 func TestBeginDeliveryAttemptRechecksActiveWindowAfterClaim(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -286,12 +296,12 @@ func TestReleaseDeliveryClaimsUsesExactWindowIntervalForStartedAttempts(t *testi
 		{name: "expired unclosed window retries", endOffset: -time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := openTestStore(t)
+			s := openTestStoreWithContext(ctx, t)
 			ts := defaultTenant(s)
-			job := createWindowTestJob(t, ts, "window-recovery-"+strings.ReplaceAll(tc.name, " ", "-"), "UTC")
+			job := createWindowTestJobWithContext(ctx, t, ts, "window-recovery-"+strings.ReplaceAll(tc.name, " ", "-"), "UTC")
 			queueWindowTestEvent(t, ctx, s, "window-recovery-"+job.ID, job.ID, "changes-detected", "scan-window-recovery-"+job.ID, time.Now().UTC(), []model.Change{{Key: "new:window-recovery-" + job.ID, Kind: "port", Target: "192.0.2.14", Port: 443}}, false, 0)
 			start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
-			window := createTestChangeWindow(t, ts, job.ID, start, start.Add(time.Hour))
+			window := createTestChangeWindowWithContext(ctx, t, ts, job.ID, start, start.Add(time.Hour))
 			claimed, err := s.System().ClaimDueDeliveries(ctx, 1, "window-recovery-owner-"+job.ID)
 			if err != nil || len(claimed) != 1 {
 				t.Fatalf("claim before future window = %+v, %v", claimed, err)

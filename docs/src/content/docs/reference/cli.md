@@ -129,9 +129,14 @@ refuses `--tenant`.
 `health` exits non-zero when the configuration or database cannot be read, or
 when migrations or the daemon heartbeat are unhealthy, and writes the reason
 to stderr. The heartbeat is stale two minutes after the daemon last renewed
-it. Saving the result of a very large scan can hold the database for longer,
-so before it saves a scan, the daemon renews its heartbeat for as long as
-saving that scan may take. With a valid `--output json`, health prints one JSON
+it. Before saving its own large scan result, the daemon renews its heartbeat
+for the expected finalization interval. A host process holding SQLite's writer
+lock for more than two minutes can still block heartbeats long enough for the
+lease to become stale. Once the writer releases the lock, a second daemon can
+take over and reclaim the first daemon's job leases; the first daemon stops
+its scans when its next heartbeat detects lease loss. Check `health` before
+starting a replacement daemon if a host write has been held open for a long
+time. With a valid `--output json`, health prints one JSON
 document on success and on command failures: an unhealthy result includes
 `"status": "unhealthy"` and the reason in `error`; failures before a full
 health report is available include those same fields. For configuration-load

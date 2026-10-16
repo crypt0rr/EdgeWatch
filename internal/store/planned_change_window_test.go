@@ -499,6 +499,7 @@ func TestListChangeWindowsKeepsDueReviewsVisibleBeyondScheduledRows(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer stmt.Close()
 	for index := 0; index < 125; index++ {
 		start := now.Add(24*time.Hour + time.Duration(index)*24*time.Hour)
 		if _, err := stmt.ExecContext(ctx, fmt.Sprintf("scheduled-visible-%03d", index), job.ID, sqliteTimestamp(start), sqliteTimestamp(start.Add(time.Hour)), sqliteTimestamp(now)); err != nil {

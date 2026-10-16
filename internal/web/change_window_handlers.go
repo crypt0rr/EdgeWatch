@@ -98,18 +98,34 @@ func (s *Server) cancelChangeWindow(w http.ResponseWriter, r *http.Request, sess
 		return
 	}
 	destinations := []string{}
+	destinationsUnavailable := false
 	if notifier := s.tenantNotifier(ts); notifier != nil {
 		selected, err := notifier.QueueDestinationsForJob(r.Context(), job.Job)
 		if err != nil {
+			destinationsUnavailable = true
+		} else {
+			destinations = selected
+		}
+	}
+	var window store.ChangeWindow
+	var changed bool
+	var err error
+	audit := actorAudit(session, "change_window.cancelled", "")
+	if destinationsUnavailable {
+		// A scheduled cancellation creates no closing summary, so it does not
+		// need destination metadata. This method rechecks the start time after
+		// acquiring the writer lock to prevent a preflight/start race.
+		window, changed, err = ts.CancelScheduledChangeWindow(r.Context(), job.ID, input.WindowID, session.UserID, session.Username, audit)
+		if err != nil || !changed {
 			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
 			return
 		}
-		destinations = selected
-	}
-	window, changed, err := ts.CancelChangeWindow(r.Context(), job.ID, input.WindowID, session.UserID, session.Username, destinations, actorAudit(session, "change_window.cancelled", ""))
-	if err != nil {
-		s.writeChangeWindowError(w, r, err)
-		return
+	} else {
+		window, changed, err = ts.CancelChangeWindow(r.Context(), job.ID, input.WindowID, session.UserID, session.Username, destinations, audit)
+		if err != nil {
+			s.writeChangeWindowError(w, r, err)
+			return
+		}
 	}
 	if !changed {
 		writeError(w, http.StatusConflict, "conflict", "change window is already closed", nil)

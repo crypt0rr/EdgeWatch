@@ -535,9 +535,8 @@ func classifyIncidentInboxSnapshot(ctx context.Context, key incidentInboxSnapsho
 			entry.uncertainty = incidentObservationUncertaintyFromSnapshot(entry.uncertainty, entry.item.Incident.Change, snapshot)
 		}
 	}
-	// Do not retain large raw or decoded snapshots while waiting for another
-	// request's turn at the global admission slot.
-	raw = nil
+	// These per-key locals are no longer live when this function returns, before
+	// its deferred slot release lets another request begin decoding.
 	snapshot = model.Snapshot{}
 	return nil
 }

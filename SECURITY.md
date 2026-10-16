@@ -785,9 +785,12 @@ prohibited A or AAAA answer before Go can connect. Literal addresses and
 hosts-file results are checked in the child's preflight; the DNS packet filter
 does not inspect hosts-file lookups. The system resolver and hosts file are
 host-operator-controlled, and their configuration is assumed stable for the
-short send. DNS errors, empty answers, malformed responses, and unverifiable
-targets fail closed and remain retryable; only a confirmed prohibited address
-is classified `destination_excluded`. An explicitly empty
+short send. While the policy is active, saving a destination or replacing its
+URL also requires the host to resolve. A DNS error, empty answer, or lookup
+timeout is a fixed, redacted `400 validation_failed` response and saves
+nothing. During delivery, DNS errors, empty answers, malformed responses, and
+unverifiable targets still fail closed and remain retryable; only a confirmed
+prohibited address is classified `destination_excluded`. An explicitly empty
 `scanner.target_exclusions` is the one override, as it is for scans. Platform
 destinations, URLs that config.yaml lists, and a destination imported from
 config.yaml until a unit administrator replaces its URL are not checked,

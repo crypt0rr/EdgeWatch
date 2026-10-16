@@ -248,8 +248,10 @@ func execLandlocked(args []string) error {
 		return fmt.Errorf("%s: %w", ExecCommand, err)
 	}
 	if request.seccomp {
-		if err := validateScannerLivenessDescriptor(request.livenessFD); err != nil {
-			return fmt.Errorf("%s: scanner liveness reference is invalid", ExecCommand)
+		if request.profile == Scanner {
+			if err := validateScannerLivenessDescriptor(request.livenessFD); err != nil {
+				return fmt.Errorf("%s: scanner liveness reference is invalid", ExecCommand)
+			}
 		}
 		if !request.landlock {
 			if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {

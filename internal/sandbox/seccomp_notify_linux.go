@@ -389,9 +389,13 @@ func (broker *seccompNotificationBroker) serveOne() error {
 		return errors.New("poll seccomp notification listener failed")
 	}
 	if poll[0].Revents&unix.POLLIN == 0 {
-		if poll[0].Revents&(unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0 {
+		if poll[0].Revents&(unix.POLLERR|unix.POLLNVAL) != 0 {
 			return errors.New("seccomp notification listener failed")
 		}
+		// POLLHUP without POLLIN means no task still uses this filter, so
+		// there can be no further notification to service. This is not process-
+		// tree cleanup proof: the supervisor still observes the leader, kills
+		// its process group, waits, and reaps descendants before proving cleanup.
 		return nil
 	}
 	var notification seccompNotificationRequest

@@ -4,6 +4,8 @@ package sandbox
 
 import (
 	"os"
+	"os/exec"
+	"syscall"
 	"testing"
 	"time"
 
@@ -41,5 +43,83 @@ func TestReceiveSeccompNotificationListenerSetsCloseOnExec(t *testing.T) {
 	flags, err := unix.FcntlInt(uintptr(listenerFD), unix.F_GETFD, 0)
 	if err != nil || flags&unix.FD_CLOEXEC == 0 {
 		t.Fatalf("received listener descriptor flags = %#x, %v; want FD_CLOEXEC", flags, err)
+	}
+}
+
+func TestSeccompNotificationBrokerTreatsExitedFilterAsEOF(t *testing.T) {
+	if err := seccompNotificationSupport(); err != nil {
+		t.Skipf("kernel seccomp notification support is unavailable: %v", err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveness := scannerLivenessTestFile(t)
+	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := os.NewFile(uintptr(pair[0]), "seccomp EOF test parent")
+	childSocket := os.NewFile(uintptr(pair[1]), "seccomp EOF test child")
+	if err := unix.SetsockoptInt(pair[0], unix.SOL_SOCKET, unix.SO_PASSCRED, 1); err != nil {
+		_ = parent.Close()
+		_ = childSocket.Close()
+		t.Fatal(err)
+	}
+	command := exec.Command(executable, ExecCommand,
+		"--profile", string(Scanner), "--files", "1", "--identity-only", "--seccomp",
+		"--liveness-fd", "3", "--seccomp-notify-fd", "4", "--", "/bin/true")
+	command.Env = []string{}
+	command.Dir = "/"
+	command.ExtraFiles = []*os.File{liveness, childSocket}
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	if err := command.Start(); err != nil {
+		_ = parent.Close()
+		_ = childSocket.Close()
+		t.Fatalf("start scanner helper: %v", err)
+	}
+	_ = childSocket.Close()
+	waited := false
+	t.Cleanup(func() {
+		_ = parent.Close()
+		if !waited {
+			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+			_ = command.Wait()
+		}
+	})
+	listenerFD, err := receiveSeccompNotificationListener(pair[0], command.Process.Pid,
+		uint32(os.Geteuid()), uint32(os.Getegid()), scannerSupervisorTimeout)
+	if err != nil {
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		_ = command.Wait()
+		waited = true
+		t.Fatalf("receive scanner seccomp listener: %v", err)
+	}
+	defer unix.Close(listenerFD)
+	if err := command.Wait(); err != nil {
+		waited = true
+		t.Fatalf("scanner helper /bin/true exit: %v", err)
+	}
+	waited = true
+	deadline := time.Now().Add(scannerSupervisorTimeout)
+	for {
+		poll := []unix.PollFd{{Fd: int32(listenerFD), Events: unix.POLLIN | unix.POLLHUP | unix.POLLERR}}
+		ready, pollErr := unix.Poll(poll, 100)
+		if pollErr != nil && pollErr != unix.EINTR {
+			t.Fatalf("poll exited scanner filter listener: %v", pollErr)
+		}
+		if ready > 0 {
+			if poll[0].Revents&unix.POLLHUP == 0 || poll[0].Revents&(unix.POLLIN|unix.POLLERR|unix.POLLNVAL) != 0 {
+				t.Fatalf("exited scanner filter listener events = %#x, want HUP only", poll[0].Revents)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("exited scanner filter listener did not report POLLHUP")
+		}
+	}
+	broker := seccompNotificationBroker{listenerFD: listenerFD}
+	if err := broker.serveOne(); err != nil {
+		t.Fatalf("closed filter listener should be ordinary EOF after child exit, got %v", err)
 	}
 }

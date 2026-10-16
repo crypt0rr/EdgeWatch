@@ -20,6 +20,54 @@ import (
 const scannerLivenessCloseChildEnv = "EDGEWATCH_TEST_SCANNER_LIVENESS_CLOSE_CHILD"
 const scannerLivenessNetlinkChildEnv = "EDGEWATCH_TEST_SCANNER_LIVENESS_NETLINK_CHILD"
 
+func TestNotifierLandlockAndSeccompExecWithoutScannerLease(t *testing.T) {
+	if _, err := landlockVersion(); err != nil {
+		t.Skipf("kernel cannot apply Landlock: %v", err)
+	}
+	if err := seccompSupport(); err != nil {
+		t.Skipf("kernel cannot install the seccomp filter: %v", err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(executable, ExecCommand,
+		"--profile", string(Notifier), "--files", "0", "--seccomp", "--", "/bin/true")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("notifier Landlock+seccomp helper without scanner lease failed: %v; output=%q", err, output)
+	}
+}
+
+func TestScannerSeccompExecStillRequiresValidLivenessLease(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("missing lease", func(t *testing.T) {
+		command := exec.Command(executable, ExecCommand,
+			"--profile", string(Scanner), "--files", "0", "--identity-only", "--seccomp", "--", "/bin/true")
+		output, err := command.CombinedOutput()
+		if err == nil || !strings.Contains(string(output), "usage: sandbox-exec") {
+			t.Fatalf("scanner helper without a lease = %v, output=%q; want fail-closed usage error", err, output)
+		}
+	})
+	t.Run("invalid lease", func(t *testing.T) {
+		invalidLease, err := os.Open(os.DevNull)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer invalidLease.Close()
+		command := exec.Command(executable, ExecCommand,
+			"--profile", string(Scanner), "--files", "1", "--identity-only", "--seccomp", "--liveness-fd", "3", "--", "/bin/true")
+		command.ExtraFiles = []*os.File{invalidLease}
+		output, err := command.CombinedOutput()
+		if err == nil || !strings.Contains(string(output), "scanner liveness reference is invalid") {
+			t.Fatalf("scanner helper with an invalid lease = %v, output=%q; want fail-closed liveness error", err, output)
+		}
+	})
+}
+
 // TestScannerLivenessSeccompCloseChild runs inside a test binary already
 // confined by sandbox-exec. Calling unix.Close directly verifies the kernel
 // returns EPERM for the protected descriptor while it remains usable.

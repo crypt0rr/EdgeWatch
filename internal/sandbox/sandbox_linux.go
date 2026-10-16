@@ -299,6 +299,16 @@ func detectIdentity(profile Profile, mode string, status Status, probe Probe, en
 	if env.capErr != nil {
 		return unavailable(fmt.Sprintf("the daemon's capabilities could not be read: %v", env.capErr))
 	}
+	if profile == Scanner && env.ensureScannerRuntime != nil {
+		// Retain the current scope before the capability check so the independent
+		// seccomp health probe can inherit a real liveness reference even when
+		// identity setup is unavailable. This validates the scope and records no
+		// scanner lease that survives the probe; missing control capabilities
+		// still prevent scanner identity probes and scanner launches below.
+		if err := env.ensureScannerRuntime(); err != nil {
+			return unavailable(fmt.Sprintf("the scanner identity runtime scope could not be retained: %v", err))
+		}
+	}
 	var missing []string
 	for _, capability := range controlCapabilities {
 		if env.effective&(1<<capability) == 0 {
@@ -307,11 +317,6 @@ func detectIdentity(profile Profile, mode string, status Status, probe Probe, en
 	}
 	if len(missing) > 0 {
 		return unavailable(fmt.Sprintf("the container does not grant %s, which EdgeWatch needs to start and stop %s under %s; add them to cap_add", strings.Join(missing, ", "), spec.processes, identityTarget))
-	}
-	if profile == Scanner && env.ensureScannerRuntime != nil {
-		if err := env.ensureScannerRuntime(); err != nil {
-			return unavailable(fmt.Sprintf("the scanner identity runtime scope could not be retained: %v", err))
-		}
 	}
 	var ambient []uintptr
 	for _, capability := range networkCapabilities {

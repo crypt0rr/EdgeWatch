@@ -297,6 +297,96 @@ func TestScannerDetectRetainsRuntimeReferenceBeforeProbes(t *testing.T) {
 	}
 }
 
+func TestScannerSeccompProbeKeepsLivenessWhenIdentityCapabilitiesAreMissing(t *testing.T) {
+	t.Parallel()
+	if err := seccompSupport(); err != nil {
+		t.Skipf("scanner seccomp support is unavailable: %v", err)
+	}
+	env, _ := containerEnvironment(unix.CAP_NET_ADMIN)
+	// Model the legacy scanner capability profile: networking remains available,
+	// but the daemon cannot set scanner credentials or signal their processes.
+	env.effective = capabilityMask(unix.CAP_NET_RAW, unix.CAP_NET_ADMIN)
+
+	allocator := usePrivateScannerRuntime(newTestScannerIdentityAllocator(t, 1))
+	allocator.persistRuntimeLiveness = true
+	var ensured bool
+	env.ensureScannerRuntime = func() error {
+		if ensured {
+			t.Fatal("scanner runtime liveness was established more than once")
+		}
+		ensured = true
+		return retainScannerIdentityRuntimeReference(context.Background(), allocator)
+	}
+	env.scannerRuntimeLivenessFile = allocator.runtimeLivenessFile
+	probeCalls := 0
+	env.run = func(policy *Policy, command, _ []string) error {
+		probeCalls++
+		if policy.identityOnlyHelper == "" || !policy.seccomp || policy.enforce || policy.Restricted() {
+			t.Fatalf("identity-unavailable seccomp probe policy = %+v; want only the independent seccomp probe", policy)
+		}
+		if !reflect.DeepEqual(command, []string{"/bin/true"}) {
+			t.Fatalf("seccomp health probe command = %q, want /bin/true", command)
+		}
+		file, err := policy.identityOnlyLivenessFile()
+		if err != nil {
+			t.Fatalf("seccomp health probe did not receive the retained liveness reference: %v", err)
+		}
+		flags, err := unix.FcntlInt(file.Fd(), unix.F_GETFL, 0)
+		if err != nil || flags&unix.O_ACCMODE != unix.O_RDONLY {
+			t.Fatalf("seccomp probe liveness descriptor flags = %#x, %v; want read-only", flags, err)
+		}
+		directoryFD, markerFD, err := openScannerIdentityDirectories(allocator.directory, allocator.markerDir)
+		if err != nil {
+			t.Fatalf("open probe scope for liveness check: %v", err)
+		}
+		defer unix.Close(directoryFD)
+		defer unix.Close(markerFD)
+		writer, err := openScannerIdentityLivenessFile(directoryFD, true)
+		if err != nil {
+			t.Fatalf("open independent liveness writer: %v", err)
+		}
+		defer writer.Close()
+		if err := setScannerIdentityOFDLock(int(writer.Fd()), unix.F_WRLCK, true); !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EACCES) {
+			t.Fatalf("seccomp probe's retained liveness reference did not block exclusive recovery: %v", err)
+		}
+		return runConfined(policy, command, nil)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.executable, env.executableErr = executable, nil
+
+	policy := detect(Options{}, env)
+	status := policy.Status()
+	if policy.Enforced() || policy.Restricted() || status.State != StateUnavailable || status.IdentityPool.State != StateUnavailable {
+		t.Fatalf("missing identity capabilities unexpectedly enabled scanners: %+v", status)
+	}
+	if status.Seccomp.State != StateEnforced || !ensured || probeCalls != 1 {
+		t.Fatalf("seccomp was not independently verified with retained liveness: status=%+v ensured=%t probes=%d", status, ensured, probeCalls)
+	}
+
+	allocator.runtimeLivenessMu.Lock()
+	keeper := allocator.runtimeLivenessReference
+	allocator.runtimeLivenessReference = nil
+	allocator.runtimeLivenessMu.Unlock()
+	if keeper == nil {
+		t.Fatal("identity-unavailable detection discarded the process-lifetime liveness reference")
+	}
+	defer keeper.Close()
+
+	directoryFD, markerFD, err := openScannerIdentityDirectories(allocator.directory, allocator.markerDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(directoryFD)
+	defer unix.Close(markerFD)
+	journal, err := readScannerIdentityJournal(directoryFD)
+	if err != nil || len(journal.Leases) != 0 {
+		t.Fatalf("seccomp health probe left a scanner lease behind: %+v, %v", journal, err)
+	}
+}
+
 func TestDetectAddsTheSeccompFilterWhenItWorks(t *testing.T) {
 	t.Parallel()
 	nmap := []Probe{{Args: []string{"/usr/bin/nmap", "--version"}}}
@@ -376,7 +466,7 @@ func TestDetectConfinesTheNotificationProcessWithoutCapabilities(t *testing.T) {
 	check := Probe{Name: "the notification process", Self: true, Args: []string{"notify-check"}, Env: []string{"SSL_CERT_FILE=/etc/ca.pem"}}
 	policy := detect(Options{Profile: Notifier, Mode: ModeRequired, Landlock: ModeAuto, IdentityProbe: check, Probes: []Probe{check}}, env)
 	status := policy.Status()
-	if !policy.Enforced() || !policy.Restricted() || status.UID != NotifierUID || status.GID != NotifierGID || len(status.Capabilities) != 0 || status.Landlock.State != StateEnforced || policy.Require() != nil {
+	if !policy.Enforced() || !policy.Restricted() || status.UID != NotifierUID || status.GID != NotifierGID || len(status.Capabilities) != 0 || status.Landlock.State != StateEnforced || status.Seccomp.State != StateEnforced || policy.Require() != nil {
 		t.Fatalf("notification policy = %+v", status)
 	}
 	want := []string{"/usr/local/bin/edgewatch", "notify-check"}

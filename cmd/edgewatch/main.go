@@ -342,9 +342,9 @@ func run(args []string) error {
 	}
 	if cmd == "admin" {
 		if action == "platform-setup-token" {
-			return platformSetupToken(context.Background(), s, *force, os.Stdout)
+			return platformSetupTokenWithFormat(context.Background(), s, *force, *output, os.Stdout)
 		}
-		options := adminRecoveryOptions{force: *force, out: os.Stdout}
+		options := adminRecoveryOptions{force: *force, output: *output, out: os.Stdout}
 		if tenantSlug != "" {
 			unit, _, err := hostUnit(context.Background(), s, tenantSlug)
 			if err != nil {
@@ -606,16 +606,23 @@ type accountRecovery interface {
 }
 
 // platformSetupToken prints a one-time token, valid for 15 minutes, that
-// creates a platform administrator. It is refused once an enabled platform
-// administrator exists and before the first administrator setup. An unused
-// token that is still valid is replaced only with --force.
+// creates a platform administrator in text format. It is refused once an
+// enabled platform administrator exists and before the first administrator
+// setup. An unused token that is still valid is replaced only with --force.
 func platformSetupToken(ctx context.Context, s *store.Store, force bool, out io.Writer) error {
+	return platformSetupTokenWithFormat(ctx, s, force, "text", out)
+}
+
+func platformSetupTokenWithFormat(ctx context.Context, s *store.Store, force bool, format string, out io.Writer) error {
 	token, err := auth.NewManager(s).IssuePlatformSetupToken(ctx, force)
 	if errors.Is(err, store.ErrSetupTokenOutstanding) {
 		return fmt.Errorf("%w; a new platform setup token replaces it, pass --force to confirm", err)
 	}
 	if err != nil {
 		return err
+	}
+	if format == "json" {
+		return writeJSONOutput(out, map[string]any{"token": token, "expires_in_seconds": int((15 * time.Minute).Seconds())})
 	}
 	fmt.Fprintln(out, "EdgeWatch platform setup token (valid for 15 minutes):", token)
 	return nil
@@ -634,12 +641,16 @@ func adminActionForUser(ctx context.Context, action string, s *store.Store, pass
 type adminRecoveryOptions struct {
 	// force confirms the replacement of the current setup token.
 	force bool
+	// output selects the result format for the host CLI. An empty value
+	// preserves the text behavior used by direct callers and tests.
+	output string
 	// unit, when set, is the business unit that --tenant named, which the
 	// account must belong to: the command changes nothing for an account of
 	// another unit or of the platform.
 	unit *store.Tenant
-	// out, when set, receives the account, its unit (or the platform) and
-	// its role before the command acts.
+	// out, when set, receives command output. Text recovery commands print
+	// the account summary before acting; JSON commands print one result after
+	// the state change succeeds.
 	out io.Writer
 }
 
@@ -655,7 +666,10 @@ func adminRecovery(ctx context.Context, action string, s *store.Store, passwordF
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(os.Stdout, "EdgeWatch setup token (valid for 15 minutes):", token)
+		if options.output == "json" {
+			return writeJSONOutput(adminRecoveryOutput(options.out), map[string]any{"token": token, "expires_in_seconds": int((15 * time.Minute).Seconds())})
+		}
+		fmt.Fprintln(adminRecoveryOutput(options.out), "EdgeWatch setup token (valid for 15 minutes):", token)
 		return nil
 	}
 	username = strings.TrimSpace(username)
@@ -717,9 +731,11 @@ func adminRecovery(ctx context.Context, action string, s *store.Store, passwordF
 				return adminErr
 			}
 			admin.PasswordHash, admin.UpdatedAt = hash, user.UpdatedAt
-			return s.SaveAdminSecurityWithAudit(ctx, admin, nil, false, true, store.AuditEntry{Action: "admin.password_reset", Detail: detail, ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
+			err = s.SaveAdminSecurityWithAudit(ctx, admin, nil, false, true, store.AuditEntry{Action: "admin.password_reset", Detail: detail, ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
+		} else {
+			err = accounts.SaveUserSecurity(ctx, user, nil, false, true, store.AuditEntry{Action: "user.password_reset", Detail: detail, ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
 		}
-		return accounts.SaveUserSecurity(ctx, user, nil, false, true, store.AuditEntry{Action: "user.password_reset", Detail: detail, ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
+		return adminRecoveryResult(options, user, where, action, err)
 	case "disable-totp":
 		where, err := confirmAccountUnit(ctx, s, user, options)
 		if err != nil {
@@ -733,9 +749,11 @@ func adminRecovery(ctx context.Context, action string, s *store.Store, passwordF
 				return adminErr
 			}
 			admin.TOTPEnabled, admin.TOTPSecret, admin.UpdatedAt = false, "", user.UpdatedAt
-			return s.SaveAdminSecurityWithAudit(ctx, admin, []string{}, true, true, store.AuditEntry{Action: "admin.totp_disabled", Detail: detail, ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
+			err = s.SaveAdminSecurityWithAudit(ctx, admin, []string{}, true, true, store.AuditEntry{Action: "admin.totp_disabled", Detail: detail, ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
+		} else {
+			err = accounts.SaveUserSecurity(ctx, user, []string{}, true, true, store.AuditEntry{Action: "user.totp_disabled", Detail: detail, ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
 		}
-		return accounts.SaveUserSecurity(ctx, user, []string{}, true, true, store.AuditEntry{Action: "user.totp_disabled", Detail: detail, ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
+		return adminRecoveryResult(options, user, where, action, err)
 	default:
 		return errors.New("expected: admin reset-password|disable-totp")
 	}
@@ -1043,12 +1061,7 @@ func logNotificationSandbox(logger *slog.Logger, status sandbox.Status) {
 
 func printValue(format string, v any) error {
 	if format == "json" {
-		b, err := json.MarshalIndent(v, "", "  ")
-		if err != nil {
-			return err
-		}
-		fmt.Println(string(b))
-		return nil
+		return writeJSONOutput(os.Stdout, v)
 	}
 	switch x := v.(type) {
 	case string:
@@ -1061,6 +1074,44 @@ func printValue(format string, v any) error {
 		fmt.Println(string(b))
 	}
 	return nil
+}
+
+func writeJSONOutput(w io.Writer, v any) error {
+	if w == nil {
+		w = os.Stdout
+	}
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	n, err := w.Write(b)
+	if err == nil && n != len(b) {
+		err = io.ErrShortWrite
+	}
+	return err
+}
+
+func adminRecoveryOutput(w io.Writer) io.Writer {
+	if w == nil {
+		return os.Stdout
+	}
+	return w
+}
+
+func adminRecoveryResult(options adminRecoveryOptions, user store.User, where, action string, err error) error {
+	if err != nil {
+		return err
+	}
+	if options.output != "json" {
+		return nil
+	}
+	return writeJSONOutput(adminRecoveryOutput(options.out), map[string]string{
+		"username": user.Username,
+		"scope":    where,
+		"role":     user.Role,
+		"action":   action,
+	})
 }
 
 // validateStartupConfig checks the configured key files, the notification

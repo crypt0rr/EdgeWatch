@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -792,6 +793,11 @@ func TestHealthCommandNamesMissingDaemonHeartbeat(t *testing.T) {
 				}
 			}
 			if tc.wantFloor {
+				var full unhealthyStatus
+				decodeHealthDocument(t, stdout, &full)
+				if full.Status != "unhealthy" || full.Error != err.Error() {
+					t.Fatalf("below-floor health report = status %q, error %q", full.Status, full.Error)
+				}
 				after, readErr := os.ReadFile(tc.database)
 				if readErr != nil {
 					t.Fatal(readErr)
@@ -804,6 +810,67 @@ func TestHealthCommandNamesMissingDaemonHeartbeat(t *testing.T) {
 				t.Fatal("health --output json returned no document")
 			}
 		})
+	}
+	belowFloorConfig := writeHealthConfig(t, dir, "below-floor-text", belowFloorDB)
+	belowFloorText, _, belowFloorErr := captureCLIOutput(t, func() error {
+		return run([]string{"health", "--config", belowFloorConfig})
+	})
+	if belowFloorErr == nil || belowFloorText != "" {
+		t.Fatalf("below-floor text health = (%q, %v), want nonzero exit and no health document", belowFloorText, belowFloorErr)
+	}
+
+	newerDB := storetest.FreshPath(t)
+	newerVersion := sqliteUserVersion(t, newerDB) + 1
+	setSQLiteUserVersion(t, newerDB, newerVersion)
+	newerConfig := writeHealthConfig(t, dir, "newer-schema", newerDB)
+	newerJSON, newerErr := captureHealthJSONFailure(t, newerConfig, "no daemon heartbeat recorded; the daemon is not running")
+	if strings.Contains(newerErr.Error(), "newer than supported") || strings.Contains(newerErr.Error(), "newer than schema") {
+		t.Fatalf("health refused newer schema %d instead of reporting daemon state: %v", newerVersion, newerErr)
+	}
+	var newerUnhealthy unhealthyStatus
+	decodeHealthDocument(t, newerJSON, &newerUnhealthy)
+	if newerUnhealthy.Status != "unhealthy" || newerUnhealthy.Error != newerErr.Error() {
+		t.Fatalf("newer-schema health report = status %q, error %q; want full unhealthy daemon-state report", newerUnhealthy.Status, newerUnhealthy.Error)
+	}
+
+	newerLeasedDB := storetest.FreshPath(t)
+	owner, err := store.Open(newerLeasedDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.System().AcquireDaemonLease(context.Background(), "newer-schema-health-test"); err != nil {
+		owner.Close()
+		t.Fatal(err)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	newerLeasedVersion := sqliteUserVersion(t, newerLeasedDB) + 1
+	setSQLiteUserVersion(t, newerLeasedDB, newerLeasedVersion)
+	newerLeasedConfig := writeHealthConfig(t, dir, "newer-schema-leased", newerLeasedDB)
+	newerHealthyJSON, _, err := captureCLIOutput(t, func() error {
+		return run([]string{"health", "--config", newerLeasedConfig, "--output", "json"})
+	})
+	if err != nil {
+		t.Fatalf("health refused newer schema %d with a fresh lease: %v", newerLeasedVersion, err)
+	}
+	var newerHealthy healthReport
+	decodeHealthDocument(t, newerHealthyJSON, &newerHealthy)
+	if newerHealthy.Status != "ready" {
+		t.Fatalf("newer-schema health with a fresh lease = %q, want ready", newerHealthy.Status)
+	}
+}
+
+func decodeHealthDocument(t *testing.T, raw string, result any) {
+	t.Helper()
+	decoder := json.NewDecoder(bytes.NewBufferString(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(result); err != nil {
+		t.Fatalf("health output is not the documented full JSON shape: %v\n%s", err, raw)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		t.Fatalf("health output contains more than one JSON document (trailing error %v)", err)
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -186,15 +188,116 @@ func TestFullScanAdmissionWaitBudgetUsesRequestStartAndContextDeadline(t *testin
 }
 
 func TestFullScanAdmissionDoesNotReadAfterResponseWriteBudgetExpires(t *testing.T) {
-	server, _, _ := newUsersTestServer(t)
-	server.writeTimeout = 100 * time.Millisecond
-	started := time.Now().Add(-100 * time.Millisecond)
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/scans/no-scan", nil)
+	server, db, _ := newUsersTestServer(t)
+	server.writeTimeout = 200 * time.Millisecond
+	db.ReadDB.SetMaxOpenConns(1)
+	conn, err := db.ReadDB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	readWaits := db.ReadDB.Stats().WaitCount
+	started := time.Now().Add(-server.writeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/scans/no-scan", nil).WithContext(ctx)
 	request = request.WithContext(context.WithValue(request.Context(), fullScanRequestStartContextKey{}, started))
-	response := &countingResponseWriter{header: make(http.Header)}
+	response := httptest.NewRecorder()
 	server.getScan(response, request, defaultTenantStore(server), "no-scan")
-	if response.status != 0 || response.written != 0 {
-		t.Fatalf("late request wrote a response or read the missing scan: %d, %d bytes", response.status, response.written)
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != fullScanRetryAfterSeconds || !strings.Contains(response.Body.String(), `"code":"scan_slots_busy"`) {
+		t.Fatalf("late request = %d Retry-After %q body %q; want bounded 503 without a document read", response.Code, response.Header().Get("Retry-After"), response.Body.String())
+	}
+	if got := db.ReadDB.Stats().WaitCount; got != readWaits {
+		t.Fatalf("late request waited for the document reader %d times; before=%d after=%d", got-readWaits, readWaits, got)
+	}
+}
+
+func TestFullScanAdmissionCancellationDoesNotWriteBusyOrLeakPermit(t *testing.T) {
+	server, _, _ := newUsersTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/scans/no-scan", nil)
+	request = request.WithContext(context.WithValue(ctx, fullScanRequestStartContextKey{}, time.Now()))
+	response := httptest.NewRecorder()
+	server.getScan(response, request, defaultTenantStore(server), "no-scan")
+	if response.Body.Len() != 0 || response.Header().Get("Retry-After") != "" {
+		t.Fatalf("canceled request wrote a response: status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+	}
+	server.fullScanAdmission.mu.Lock()
+	active, waiting := server.fullScanAdmission.active, server.fullScanAdmission.waiting
+	server.fullScanAdmission.mu.Unlock()
+	if active != 0 || waiting != 0 {
+		t.Fatalf("canceled request left admission state active=%d waiting=%d", active, waiting)
+	}
+}
+
+type admissionSignalContext struct {
+	context.Context
+	acquireChecked chan struct{}
+	checks         atomic.Int32
+}
+
+func (c *admissionSignalContext) Err() error {
+	if c.checks.Add(1) == 2 {
+		close(c.acquireChecked)
+	}
+	return c.Context.Err()
+}
+
+func TestFullScanAdmissionRefusesAfterAdmissionWhenWriteBudgetExpires(t *testing.T) {
+	server, db, _ := newUsersTestServer(t)
+	server.writeTimeout = 400 * time.Millisecond
+	db.ReadDB.SetMaxOpenConns(1)
+	conn, err := db.ReadDB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	readWaits := db.ReadDB.Stats().WaitCount
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	signalCtx := &admissionSignalContext{Context: ctx, acquireChecked: make(chan struct{})}
+	started := time.Now()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/scans/no-scan", nil)
+	request = request.WithContext(context.WithValue(signalCtx, fullScanRequestStartContextKey{}, started))
+
+	server.fullScanAdmission.mu.Lock()
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		server.getScan(response, request, defaultTenantStore(server), "no-scan")
+		close(done)
+	}()
+	select {
+	case <-signalCtx.acquireChecked:
+	case <-time.After(time.Second):
+		server.fullScanAdmission.mu.Unlock()
+		t.Fatal("request did not reach admission after its initial budget check")
+	}
+	cutoff := started.Add(server.httpWriteTimeout() - fullScanWriteReserve(server.httpWriteTimeout()))
+	if delay := time.Until(cutoff.Add(5 * time.Millisecond)); delay > 0 {
+		timer := time.NewTimer(delay)
+		<-timer.C
+	}
+	server.fullScanAdmission.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("request did not finish after admission mutex was released")
+	}
+
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != fullScanRetryAfterSeconds || !strings.Contains(response.Body.String(), `"code":"scan_slots_busy"`) {
+		t.Fatalf("admitted late request = %d Retry-After %q body %q; want bounded 503", response.Code, response.Header().Get("Retry-After"), response.Body.String())
+	}
+	if got := db.ReadDB.Stats().WaitCount; got != readWaits {
+		t.Fatalf("admitted late request waited for the document reader %d times; before=%d after=%d", got-readWaits, readWaits, got)
+	}
+	server.fullScanAdmission.mu.Lock()
+	active := server.fullScanAdmission.active
+	server.fullScanAdmission.mu.Unlock()
+	if active != 0 {
+		t.Fatalf("late admission retained %d full-scan permits after refusal", active)
 	}
 }
 
@@ -251,5 +354,77 @@ func TestFullScanAdmissionWaitIsClampedToRealListenerWriteTimeout(t *testing.T) 
 	}
 	if elapsed := time.Since(started); elapsed >= server.httpWriteTimeout() {
 		t.Fatalf("busy response took %s, beyond WriteTimeout %s", elapsed, server.httpWriteTimeout())
+	}
+}
+
+func TestFullScanLateListenerRequestNeverReturnsSuccess(t *testing.T) {
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	server.writeTimeout = time.Second
+	record := runtimeTestJob(t, db, "late-full-scan")
+	scan := fullScanFixture(record, "late-full-scan", nil)
+	if err := db.System().SaveScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+	if err := storetest.CreateSession(ctx, db, admin.UserID, digest("late-full-scan-session"), "csrf", time.Now().UTC(), time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	inner := server.Handler()
+	entered := make(chan struct{})
+	completed := make(chan struct{})
+	const handlerDelay = 970 * time.Millisecond
+	listenerHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		ctx, cancel := context.WithDeadline(r.Context(), started.Add(handlerDelay+100*time.Millisecond))
+		defer cancel()
+		ctx = context.WithValue(ctx, fullScanRequestStartContextKey{}, started)
+		r = r.WithContext(ctx)
+		close(entered)
+		timer := time.NewTimer(handlerDelay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			inner.ServeHTTP(w, r)
+		case <-r.Context().Done():
+		}
+		close(completed)
+	})
+	httpServer := httptest.NewUnstartedServer(listenerHandler)
+	httpServer.Config.WriteTimeout = server.httpWriteTimeout()
+	httpServer.Start()
+	defer httpServer.Close()
+
+	request, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/scans/"+scan.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(&http.Cookie{Name: "edgewatch_session", Value: "late-full-scan-session"})
+	client := &http.Client{Timeout: 3 * time.Second}
+	requestStarted := time.Now()
+	response, requestErr := client.Do(request)
+	select {
+	case <-entered:
+	default:
+		t.Fatal("request never reached the listener handler")
+	}
+	select {
+	case <-completed:
+	case <-time.After(time.Second):
+		t.Fatal("listener handler did not finish the late request")
+	}
+	if requestErr != nil {
+		// A response may be lost when the listener deadline expires under
+		// scheduling pressure. It must never turn into a successful empty 200.
+		if time.Since(requestStarted) < handlerDelay-100*time.Millisecond {
+			t.Fatalf("late listener request failed before its controlled handler delay: %v", requestErr)
+		}
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("late full-scan request returned %d instead of a bounded 503 refusal", response.StatusCode)
+	}
+	if response.Header.Get("Retry-After") != fullScanRetryAfterSeconds {
+		t.Fatalf("late refusal Retry-After = %q, want %q", response.Header.Get("Retry-After"), fullScanRetryAfterSeconds)
 	}
 }

@@ -140,9 +140,11 @@ at most one for each business unit. A bounded number of requests can wait
 briefly for admission. If the queue is full or capacity remains unavailable,
 the endpoint returns `503 scan_slots_busy` with `Retry-After: 1` while there is
 time left to write that refusal. Admission waits at most two seconds and never
-extends the listener's response-write budget. If that budget is already spent,
-the handler does not load the scan result and the listener may close the
-connection without a response.
+extends the listener's response-write budget. If the admission budget is spent,
+the handler does not load the scan result and attempts the same bounded `503`
+refusal while the request and listener still allow a write. If the listener's
+write deadline has already expired, it may close the connection without a
+response.
 
 ## Job baseline pages
 

@@ -867,8 +867,11 @@ func (s *Server) getScan(w http.ResponseWriter, r *http.Request, ts *store.Tenan
 	}
 	wait, withinWriteBudget := fullScanAdmissionWaitBudget(r.Context(), time.Now(), started, s.httpWriteTimeout(), waitLimit)
 	if !withinWriteBudget {
-		// There is no response-write budget left for a refusal. In particular,
-		// do not open the scan document after the listener deadline is spent.
+		if r.Context().Err() == nil {
+			// Do not open the scan document after admission has become too late
+			// to safely return the full result. A canceled request needs no reply.
+			writeFullScanAdmissionBusy(w)
+		}
 		return
 	}
 	release, result := s.fullScanAdmission.acquire(r.Context(), scope.ID(), wait)
@@ -881,6 +884,9 @@ func (s *Server) getScan(w http.ResponseWriter, r *http.Request, ts *store.Tenan
 	}
 	if _, withinWriteBudget = fullScanAdmissionWaitBudget(r.Context(), time.Now(), started, s.httpWriteTimeout(), waitLimit); !withinWriteBudget {
 		release()
+		if r.Context().Err() == nil {
+			writeFullScanAdmissionBusy(w)
+		}
 		return
 	}
 	defer release()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -386,6 +387,56 @@ func TestJobHistoryPurgeRejectsUnknownPhaseAndReportsClosedStore(t *testing.T) {
 }
 
 func TestJobHistoryPurgeCoversJobOwnedTablesAndWindowChildren(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	triggerTables := jobHistoryPurgeTriggerTables()
+	if err := verifyJobHistoryPurgeTriggerTables(context.Background(), s, triggerTables); err != nil {
+		t.Fatal(err)
+	}
+	if problems := jobHistoryPurgeRegistryProblems(tenancyTables, jobHistoryPurgeSteps, triggerTables); len(problems) != 0 {
+		t.Fatalf("job history purge registry problems: %s", strings.Join(problems, "; "))
+	}
+
+	for _, table := range []string{"incident_review_history", "scan_cycle_units", "scan_cycle_discovery_checkpoints"} {
+		t.Run("missing_"+table, func(t *testing.T) {
+			steps := withoutJobHistoryPurgeStep(jobHistoryPurgeSteps, table)
+			want := "job-owned table " + table + " has no bounded job-history purge phase"
+			if problems := jobHistoryPurgeRegistryProblems(tenancyTables, steps, triggerTables); !containsProblem(problems, want) {
+				t.Fatalf("registry problems after removing %s: %v; want %q", table, problems, want)
+			}
+		})
+	}
+
+	t.Run("new_change_window_child_without_step", func(t *testing.T) {
+		tables := cloneTenancyTableRegistry(tenancyTables)
+		tables["zz_test_change_window_child"] = viaTable("change_windows")
+		want := "job-owned table zz_test_change_window_child has no bounded job-history purge phase"
+		if problems := jobHistoryPurgeRegistryProblems(tables, jobHistoryPurgeSteps, triggerTables); !containsProblem(problems, want) {
+			t.Fatalf("registry problems after adding an unpurged change-window child: %v; want %q", problems, want)
+		}
+	})
+
+	t.Run("child_before_parent_order", func(t *testing.T) {
+		steps := append([]jobHistoryPurgeStep(nil), jobHistoryPurgeSteps...)
+		child, parent := -1, -1
+		for i, step := range steps {
+			switch step.table {
+			case "incident_review_history":
+				child = i
+			case "incident_reviews":
+				parent = i
+			}
+		}
+		if child < 0 || parent < 0 {
+			t.Fatal("fixture is missing the incident review purge phases")
+		}
+		steps[child], steps[parent] = steps[parent], steps[child]
+		want := "job-owned child incident_review_history is purged after parent incident_reviews"
+		if problems := jobHistoryPurgeRegistryProblems(tenancyTables, steps, triggerTables); !containsProblem(problems, want) {
+			t.Fatalf("registry problems after reversing child and parent: %v; want %q", problems, want)
+		}
+	})
+
 	positions := make(map[string]int, len(jobHistoryPurgeSteps))
 	phasePositions := make(map[string]int, len(jobHistoryPurgeSteps))
 	for i, step := range jobHistoryPurgeSteps {
@@ -394,25 +445,133 @@ func TestJobHistoryPurgeCoversJobOwnedTablesAndWindowChildren(t *testing.T) {
 			positions[step.table] = i
 		}
 	}
-	for table, tenancy := range tenancyTables {
-		if tenancy.class != tenancyVia || tenancy.parent != "jobs" {
-			continue
-		}
-		if _, ok := positions[table]; !ok {
-			t.Errorf("job-owned table %s has no bounded job-history purge phase", table)
-		}
-	}
-	for _, table := range []string{"change_window_refs", "change_window_events", "change_windows"} {
-		if _, ok := positions[table]; !ok {
-			t.Errorf("change-window table %s has no bounded job-history purge phase", table)
-		}
-	}
-	for _, child := range []string{"change_window_refs", "change_window_events"} {
-		if positions[child] >= positions["change_windows"] {
-			t.Errorf("job-history purge deletes change-window parent before child %s", child)
-		}
-	}
 	if phasePositions[jobPurgePhaseWindowOutboxLinks] >= positions["change_window_refs"] || phasePositions[jobPurgePhaseWindowOutboxJob] >= positions["change_window_refs"] {
 		t.Error("job-history purge deletes change-window evidence before linked outbox deliveries")
 	}
+}
+
+func jobHistoryPurgeRegistryProblems(tables map[string]tableTenancy, steps []jobHistoryPurgeStep, triggerTables map[string]string) []string {
+	owned := map[string]struct{}{"jobs": {}}
+	for changed := true; changed; {
+		changed = false
+		for table, tenancy := range tables {
+			if tenancy.class != tenancyVia {
+				continue
+			}
+			if _, parentOwned := owned[tenancy.parent]; !parentOwned {
+				continue
+			}
+			if _, alreadyOwned := owned[table]; alreadyOwned {
+				continue
+			}
+			owned[table] = struct{}{}
+			changed = true
+		}
+	}
+	delete(owned, "jobs")
+
+	positions := make(map[string]int, len(steps))
+	for i, step := range steps {
+		if _, exists := positions[step.table]; !exists {
+			positions[step.table] = i
+		}
+	}
+
+	tablesInOrder := make([]string, 0, len(owned))
+	for table := range owned {
+		tablesInOrder = append(tablesInOrder, table)
+	}
+	sort.Strings(tablesInOrder)
+
+	var problems []string
+	for _, table := range tablesInOrder {
+		tenancy := tables[table]
+		if trigger, triggerManaged := triggerTables[table]; triggerManaged {
+			if trigger == "" {
+				problems = append(problems, fmt.Sprintf("trigger-maintained job-owned table %s has no trigger name", table))
+			} else if _, parentHasStep := positions[tenancy.parent]; !parentHasStep {
+				problems = append(problems, fmt.Sprintf("trigger-maintained job-owned table %s has no bounded parent phase for %s", table, tenancy.parent))
+			}
+			continue
+		}
+
+		childPosition, hasStep := positions[table]
+		if !hasStep {
+			problems = append(problems, fmt.Sprintf("job-owned table %s has no bounded job-history purge phase", table))
+			continue
+		}
+
+		parent := tenancy.parent
+		for parent != "" && parent != "jobs" {
+			parentTenancy, knownParent := tables[parent]
+			if !knownParent {
+				break
+			}
+			if parentPosition, parentHasStep := positions[parent]; parentHasStep {
+				if childPosition >= parentPosition {
+					problems = append(problems, fmt.Sprintf("job-owned child %s is purged after parent %s", table, parent))
+				}
+				break
+			}
+			if _, triggerManaged := triggerTables[parent]; !triggerManaged {
+				break
+			}
+			parent = parentTenancy.parent
+		}
+	}
+	return problems
+}
+
+func jobHistoryPurgeTriggerTables() map[string]string {
+	triggers := make(map[string]string)
+	for _, step := range tenantPurgeSteps {
+		if step.trigger != "" {
+			triggers[step.table] = step.trigger
+		}
+	}
+	return triggers
+}
+
+func verifyJobHistoryPurgeTriggerTables(ctx context.Context, s *Store, triggerTables map[string]string) error {
+	for table, trigger := range triggerTables {
+		tenancy, ok := tenancyTables[table]
+		if !ok || tenancy.class != tenancyVia {
+			continue
+		}
+		var definition string
+		if err := s.DB.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='trigger' AND name=? AND tbl_name=?`, trigger, tenancy.parent).Scan(&definition); err != nil {
+			return fmt.Errorf("lookup job-owned purge trigger %s for %s: %w", trigger, table, err)
+		}
+		if !strings.Contains(definition, "AFTER DELETE ON "+tenancy.parent) || !strings.Contains(definition, "DELETE FROM "+table+" WHERE rowid=OLD.rowid") {
+			return fmt.Errorf("trigger %s does not remove job-owned rows from %s through parent %s: %s", trigger, table, tenancy.parent, definition)
+		}
+	}
+	return nil
+}
+
+func withoutJobHistoryPurgeStep(steps []jobHistoryPurgeStep, table string) []jobHistoryPurgeStep {
+	filtered := make([]jobHistoryPurgeStep, 0, len(steps))
+	for _, step := range steps {
+		if step.table != table {
+			filtered = append(filtered, step)
+		}
+	}
+	return filtered
+}
+
+func cloneTenancyTableRegistry(tables map[string]tableTenancy) map[string]tableTenancy {
+	cloned := make(map[string]tableTenancy, len(tables))
+	for table, tenancy := range tables {
+		cloned[table] = tenancy
+	}
+	return cloned
+}
+
+func containsProblem(problems []string, want string) bool {
+	for _, problem := range problems {
+		if problem == want {
+			return true
+		}
+	}
+	return false
 }

@@ -271,10 +271,14 @@ stale backlog. A provider handoff that started before the window can still
 finish during it. If its claim is live at close, the review records it as in
 flight; if it was released or recovered without a result, the review records an
 unknown prior outcome instead. Neither is counted as an alert held during the
-window. When a summary is queued, a later failure does not replay the
-individual alert or amend the closing snapshot. Alerts linked to a future window are released for retry
-before that window starts; an alert whose provider attempt is still uncertain
-inside an active window remains held for the close review. Redelivering a
+window, and a later failure does not replay the individual alert or amend the
+closing snapshot. Alerts linked to a future window are released for retry
+before that window starts. Credential replacement treats an in-flight alert
+linked to a window that has not started like an unlinked alert: **Keep queued
+alerts** moves it to the replacement destination, while a discarded attempt
+is coalesced after recovery instead of appearing as an unknown outcome in that
+future window. An alert whose provider attempt is still uncertain inside an
+active window remains held for the close review. Redelivering a
 terminal change alert clears its old window association, then the final send
 gate checks whether a window is active now. See [Planned change windows](/user-guide/jobs-baselines-incidents/#planned-change-windows)
 for scheduling, cancellation, and the closing review. If there was change

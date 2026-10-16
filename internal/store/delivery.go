@@ -675,11 +675,11 @@ func recoverStartedDeliveryTx(ctx context.Context, tx *sql.Tx, id int64, claim, 
 			case closedAt != "":
 				coalesce = true
 			case now.Before(scanTime(startRaw)):
-				// Ordinary pre-start attempts must be retryable before the
-				// window. A credential rotation explicitly prevents retrying
-				// against the new destination, so retain that uncertain handoff
-				// for the scheduled window's review and coalesce it at close.
-				clearMarker = coalesceAfter == 0
+				// Ordinary pre-start attempts are retryable before the window.
+				// A discard rotation marks its in-flight attempt for coalescing,
+				// so recovery consumes that marker now instead of attaching an
+				// uncertain outcome to a window that has not started.
+				coalesce = coalesceAfter != 0
 			case !now.Before(scanTime(endRaw)):
 				// An expired but not-yet-closed window no longer holds a provider
 				// outcome. Retry the attempt normally; delayed summary generation
@@ -698,6 +698,7 @@ func recoverStartedDeliveryTx(ctx context.Context, tx *sql.Tx, id int64, claim, 
 		outboxChange("attempt_started_at", outboxConditional, "CASE WHEN ? THEN '' ELSE attempt_started_at END", clearMarker),
 		outboxChange("coalesced_at", outboxConditional, "CASE WHEN ? THEN CASE WHEN coalesced_at='' THEN ? ELSE coalesced_at END ELSE coalesced_at END", coalesce, sqliteTimestamp(now)),
 		outboxChange("last_error", outboxConditional, "CASE WHEN ? THEN '' ELSE last_error END", coalesce),
+		outboxChange("coalesce_after_attempt", outboxConditional, "CASE WHEN ? THEN 0 ELSE coalesce_after_attempt END", coalesce),
 	}
 	where := `id=? AND claim_token=? AND attempt_started_at<>'' ` + extraFence
 	args := []any{id, claim}

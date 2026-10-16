@@ -228,12 +228,22 @@ func TestMigration73IndexesPrioritizedChangeWindowQueries(t *testing.T) {
 	wantDue := append([]string{}, activeIDs...)
 	wantDue = append(wantDue, expiredIDs[:25]...)
 	wantDue = append(wantDue, scheduledIDs...)
-	wantDue = append(wantDue, dueIDs[:48]...)
+	wantDue = append(wantDue, dueIDs[:100]...)
+	for i := 0; i < 100; i++ {
+		wantDue = append(wantDue, fmt.Sprintf("history-heavy-%03d", i))
+	}
 	assertIDs(dueJob.ID, wantDue)
-	wantExpired := make([]string, 0, 100)
+	wantExpired := make([]string, 0, 401)
 	wantExpired = append(wantExpired, "expired-heavy-active")
-	for i := 0; i < 99; i++ {
-		wantExpired = append(wantExpired, expiredHeavyIDs[i])
+	wantExpired = append(wantExpired, expiredHeavyIDs[:100]...)
+	for i := 0; i < 100; i++ {
+		wantExpired = append(wantExpired, fmt.Sprintf("expired-scheduled-heavy-%05d", i))
+	}
+	for i := 0; i < 100; i++ {
+		wantExpired = append(wantExpired, fmt.Sprintf("expired-due-%03d", i))
+	}
+	for i := 0; i < 100; i++ {
+		wantExpired = append(wantExpired, fmt.Sprintf("expired-history-%03d", i))
 	}
 	assertIDs(expiredJob.ID, wantExpired)
 	assertIDs(mixedJob.ID, []string{"mixed-active", "mixed-expired", "mixed-scheduled", "mixed-due", "mixed-due-tie-z", "mixed-due-tie-a", "mixed-reviewed"})

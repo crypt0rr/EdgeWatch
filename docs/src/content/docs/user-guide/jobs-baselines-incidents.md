@@ -127,10 +127,11 @@ from one whose monitoring summary could not be read. Missing schedule, paused,
 manual-only, and archived states do not create attention by themselves.
 The list shows an active change window first, then an expired but unclosed
 window, then the nearest scheduled window. Unclosed windows remain ahead of a
-due review, which appears when no window remains open. The next scheduled run
-is shown in the job's scheduler timezone displayed beside it. Job details list
-up to 100 windows, with unclosed windows and due reviews ahead of reviewed
-history.
+due review in the Jobs list. In job details, due reviews remain visible even
+when many windows are still open or scheduled. The next scheduled run is shown
+in the job's scheduler timezone displayed beside it. Job details list up to
+500 windows: at most 100 active, expired-unclosed, scheduled, due-review, and
+reviewed-history rows each, in that order.
 
 Choose **Needs attention** to filter the full tenant job list to jobs whose
 latest attempt failed or was incomplete, whose saved scan cycle stalled, or

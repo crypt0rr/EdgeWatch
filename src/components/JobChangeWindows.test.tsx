@@ -203,6 +203,27 @@ describe('planned change windows', () => {
     expect(getJobChangeWindow).not.toHaveBeenCalled()
   })
 
+  it('keeps a due review actionable after 100 scheduled windows', async () => {
+    const scheduled = Array.from({ length: 100 }, (_, index) => ({
+      ...windowRecord,
+      id: `scheduled-${index}`,
+      reason: `Future maintenance ${index}`,
+      status: 'scheduled',
+      end_reason: '',
+      closed_at: null,
+      effective_end: null,
+      review_state: 'none',
+      reviewed_at: null,
+      revision: 1,
+    }))
+    vi.mocked(jobChangeWindows).mockResolvedValue({ windows: [...scheduled, windowRecord] } as never)
+    renderWindows({ canManageIncidents: true })
+
+    expect(await screen.findByText('Future maintenance 99')).toBeInTheDocument()
+    expect(screen.getByText('Router replacement')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Mark review complete' })).toBeInTheDocument()
+  })
+
   it('shows a rejected archived-window review beside that window', async () => {
     vi.mocked(jobChangeWindows).mockResolvedValue({ windows: [windowRecord] } as never)
     vi.mocked(reviewJobChangeWindow).mockRejectedValue(new Error('The review could not be saved.'))

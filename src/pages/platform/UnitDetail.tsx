@@ -52,7 +52,7 @@ async function refreshUnit(client: ReturnType<typeof useQueryClient>, id: string
 
 function UnitOverview({ unit }: { unit: BusinessUnit }) {
   const client = useQueryClient()
-  const { draft, setDraft, baseRevision, remoteChanged, adopt, markSaved } = useServerDraft(
+  const { draft, setDraft, baseRevision, remoteChanged, adopt, rebase, markSaved } = useServerDraft(
     { name: unit.name, slug: unit.slug },
     unit.revision,
     { createDraft: () => ({}), mergeDraft: (server, edits) => ({ ...server, ...edits }) },
@@ -69,6 +69,11 @@ function UnitOverview({ unit }: { unit: BusinessUnit }) {
     setError('')
     setMessage('')
     void refreshUnit(client, unit.id)
+  }
+  function keepMyEdits() {
+    rebase(unit.revision)
+    setError('')
+    setMessage(`Your edits now use revision ${unit.revision}. Review the latest values, then save again.`)
   }
   async function save(event: FormEvent) {
     event.preventDefault()
@@ -88,7 +93,7 @@ function UnitOverview({ unit }: { unit: BusinessUnit }) {
       // another unit uses answers with that field.
       const stale = isConflict(err) && err instanceof APIError && !!err.details?.current
       if (stale) await refreshUnit(client, unit.id)
-      setError(stale ? 'Another platform administrator changed this unit. Your edits are kept; load theirs or review them before saving again.' : errorMessage(err, 'The unit could not be saved.'))
+      setError(stale ? 'Another platform administrator changed this unit. Your edits are kept; review the latest values, then keep your edits or load theirs.' : errorMessage(err, 'The unit could not be saved.'))
     } finally {
       setBusy(false)
     }
@@ -97,7 +102,7 @@ function UnitOverview({ unit }: { unit: BusinessUnit }) {
     <div className="panel"><div className="panel-heading"><div><h2>Name and public link</h2><p className="muted">Members see the name in their console. The slug is part of the unit’s public status address.</p></div></div>
       {message && <div className="success-banner" role="status">{message}</div>}
       {error && <div className="form-error" role="alert">{error}</div>}
-      {remoteChanged && <div className="notice warning" role="status"><span><strong>Another platform administrator changed this unit.</strong> Your edits are kept. Saving still uses revision {baseRevision}.</span><button type="button" className="text-button" onClick={loadTheirs}>Load theirs</button></div>}
+      {remoteChanged && <div className="notice warning"><span role="status"><strong>Another platform administrator changed this unit.</strong> Your edits are kept, but saving still uses revision {baseRevision}. The latest values are <strong>{unit.name}</strong> and <code>{unit.slug}</code>. Choose “Keep my edits” to save your draft on revision {unit.revision}, or load the latest values and discard your draft.</span><button type="button" className="text-button" onClick={keepMyEdits}>Keep my edits</button><button type="button" className="text-button" onClick={loadTheirs}>Load theirs</button></div>}
       <form className="settings-form" onSubmit={save}>
         <label>Unit name<input value={name} onChange={event => setDraft(current => ({ ...current, name: event.target.value }))} maxLength={80} required /></label>
         <label>Slug<input value={slug} onChange={event => setDraft(current => ({ ...current, slug: event.target.value.toLowerCase() }))} maxLength={40} required autoComplete="off" spellCheck={false} /><small>Lowercase letters, digits, and hyphens. Public address: {publicURL(slug || '…')}</small></label>

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"os"
 	"os/exec"
@@ -21,8 +22,9 @@ const scannerSupervisorPrivilegedCoverageChildEnv = "EDGEWATCH_TEST_PRIVILEGED_S
 const scannerSupervisorPrivilegedCoverageExpectedErrorEnv = "EDGEWATCH_TEST_PRIVILEGED_SCANNER_SUPERVISOR_EXPECTED_ERROR"
 
 type privilegedSupervisorCoverageLease struct {
-	releases    int
-	quarantines int
+	releases     int
+	quarantines  int
+	livenessFile *os.File
 }
 
 func (lease *privilegedSupervisorCoverageLease) identity() (int, int, bool) {
@@ -37,6 +39,13 @@ func (lease *privilegedSupervisorCoverageLease) release() error {
 func (lease *privilegedSupervisorCoverageLease) quarantine() error {
 	lease.quarantines++
 	return nil
+}
+
+func (lease *privilegedSupervisorCoverageLease) inheritedScannerLivenessFile() (*os.File, error) {
+	if lease == nil || lease.livenessFile == nil {
+		return nil, errors.New("test liveness reference is unavailable")
+	}
+	return lease.livenessFile, nil
 }
 
 // TestScannerSupervisorPrivilegedCoverageChild re-enters the production
@@ -96,21 +105,24 @@ func TestScannerSupervisorPrivilegedLifecycleCoverage(t *testing.T) {
 
 func runPrivilegedScannerSupervisorCase(t *testing.T, executable string, program []string, expectedError string, cancelSupervisor bool) {
 	t.Helper()
-	launchArgs := []string{executable, ExecCommand, "--profile", string(Scanner), "--files", "0", "--identity-only", "--seccomp", "--"}
+	livenessFile := scannerLivenessTestFile(t)
+	launchArgs := []string{executable, ExecCommand, "--profile", string(Scanner), "--files", "1", "--identity-only", "--seccomp", "--liveness-fd", "3", "--"}
 	launchArgs = append(launchArgs, program...)
 	launch := scannerLaunchRequest{
-		Version: 1,
-		Path:    executable,
-		Args:    launchArgs,
-		Env:     []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent"},
-		UID:     uint32(ScannerIdentityPoolUIDStart),
-		GID:     uint32(ScannerIdentityPoolUIDStart),
+		Version:    1,
+		Path:       executable,
+		Args:       launchArgs,
+		Env:        []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent"},
+		Files:      1,
+		LivenessFD: 3,
+		UID:        uint32(ScannerIdentityPoolUIDStart),
+		GID:        uint32(ScannerIdentityPoolUIDStart),
 	}
 	configuration, err := json.Marshal(launch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := parseScannerSupervisorArgs([]string{"--files", "0", "--request-fd", "3", "--result-fd", "4"})
+	request, err := parseScannerSupervisorArgs([]string{"--files", "1", "--request-fd", "4", "--result-fd", "5"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +141,7 @@ func runPrivilegedScannerSupervisorCase(t *testing.T, executable string, program
 	}
 	resultRead := os.NewFile(uintptr(resultFDs[0]), "privileged scanner supervisor result")
 	resultWrite := os.NewFile(uintptr(resultFDs[1]), "privileged scanner supervisor child result")
-	lease := &privilegedSupervisorCoverageLease{}
+	lease := &privilegedSupervisorCoverageLease{livenessFile: livenessFile}
 	implementation := &scannerSupervisorInvocation{
 		lease: lease, request: launch, config: configuration,
 		configRead: configRead, configWrite: configWrite,
@@ -143,10 +155,10 @@ func runPrivilegedScannerSupervisorCase(t *testing.T, executable string, program
 	if coverageDir := currentTestCoverageDirectory(); coverageDir != "" {
 		testArgs = append(testArgs, "-test.gocoverdir="+coverageDir)
 	}
-	testArgs = append(testArgs, "--", "--files", "0", "--request-fd", "3", "--result-fd", "4")
+	testArgs = append(testArgs, "--", "--files", "1", "--request-fd", "4", "--result-fd", "5")
 	command := exec.CommandContext(ctx, executable, testArgs...)
 	command.Env = append(os.Environ(), scannerSupervisorPrivilegedCoverageChildEnv+"=1", scannerSupervisorPrivilegedCoverageExpectedErrorEnv+"="+expectedError)
-	command.ExtraFiles = []*os.File{configRead, resultWrite}
+	command.ExtraFiles = []*os.File{livenessFile, configRead, resultWrite}
 	command.Stdout, command.Stderr = &stdout, &stderr
 	command.WaitDelay = time.Second
 	var waited bool

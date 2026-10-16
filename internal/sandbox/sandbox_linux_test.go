@@ -238,6 +238,65 @@ func TestDetectUsesHarmlessProbeInsteadOfStartingScannerBinaries(t *testing.T) {
 	}
 }
 
+func TestScannerDetectRetainsRuntimeReferenceBeforeProbes(t *testing.T) {
+	t.Parallel()
+	env, _ := containerEnvironment()
+	allocator := newTestScannerIdentityAllocator(t, 1)
+	allocator.persistRuntimeLiveness = true
+	var ensured bool
+	env.ensureScannerRuntime = func() error {
+		if ensured {
+			t.Fatal("scanner runtime liveness was established more than once")
+		}
+		ensured = true
+		return retainScannerIdentityRuntimeReference(context.Background(), allocator)
+	}
+	probeCalls := 0
+	env.run = func(_ *Policy, _, _ []string) error {
+		if !ensured {
+			t.Fatal("scanner probe ran before the startup liveness reference was retained")
+		}
+		probeCalls++
+		return nil
+	}
+
+	policy := detect(Options{}, env)
+	if !policy.Enforced() || !ensured || probeCalls == 0 {
+		t.Fatalf("scanner Detect did not establish liveness before reporting enforced: policy=%+v ensured=%t probes=%d", policy.Status(), ensured, probeCalls)
+	}
+	if systemEnvironment().ensureScannerRuntime == nil {
+		t.Fatal("production scanner environment does not install the startup liveness hook")
+	}
+
+	allocator.runtimeLivenessMu.Lock()
+	keeper := allocator.runtimeLivenessReference
+	allocator.runtimeLivenessReference = nil
+	allocator.runtimeLivenessMu.Unlock()
+	if keeper == nil {
+		t.Fatal("scanner probe release closed the process-lifetime liveness reference")
+	}
+	defer keeper.Close()
+
+	directoryFD, markerFD, err := openScannerIdentityDirectories(allocator.directory, allocator.markerDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(directoryFD)
+	defer unix.Close(markerFD)
+	journal, err := readScannerIdentityJournal(directoryFD)
+	if err != nil || len(journal.Leases) != 0 {
+		t.Fatalf("startup validation lease was not released: %+v, %v", journal, err)
+	}
+	probe, err := openScannerIdentityLivenessFile(directoryFD, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probe.Close()
+	if err := setScannerIdentityOFDLock(int(probe.Fd()), unix.F_WRLCK, true); !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EACCES) {
+		t.Fatalf("runtime reference did not block recovery after Detect returned: %v", err)
+	}
+}
+
 func TestDetectAddsTheSeccompFilterWhenItWorks(t *testing.T) {
 	t.Parallel()
 	nmap := []Probe{{Args: []string{"/usr/bin/nmap", "--version"}}}

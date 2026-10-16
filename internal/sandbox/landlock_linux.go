@@ -158,6 +158,9 @@ func execLandlocked(args []string) error {
 	if len(args) > 0 && args[0] == scannerSupervisorFlag {
 		return execScannerSupervisor(args[1:])
 	}
+	if len(args) > 0 && args[0] == seccompNotificationProbeFlag {
+		return execSeccompNotificationProbe(args[1:])
+	}
 	if len(args) > 0 && args[0] == "--cleanup-private-tmp" {
 		request, err := parsePrivateTemporaryCleanupArgs(args[1:])
 		if err != nil {
@@ -174,6 +177,14 @@ func execLandlocked(args []string) error {
 	if err != nil {
 		return err
 	}
+	if request.profile == Scanner && request.seccomp {
+		if err := validateScannerLivenessDescriptor(request.livenessFD); err != nil {
+			return fmt.Errorf("%s: scanner liveness reference is invalid", ExecCommand)
+		}
+		if err := validateScannerSocketDescriptorsForRequest(request); err != nil {
+			return fmt.Errorf("%s: %w", ExecCommand, err)
+		}
+	}
 	if request.privateTemp {
 		return execPrivateTemporary(request)
 	}
@@ -184,10 +195,13 @@ func execLandlocked(args []string) error {
 		if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 			return fmt.Errorf("%s: set no_new_privs: %w", ExecCommand, err)
 		}
-		if err := installSeccompFilter(); err != nil {
+		if err := installScannerSeccomp(request); err != nil {
 			return fmt.Errorf("%s: %w", ExecCommand, err)
 		}
 		if err := syscall.Exec(argv[0], argv, os.Environ()); err != nil {
+			if request.notifyFD > 0 {
+				unix.Exit(126)
+			}
 			return fmt.Errorf("%s: execute %s: %w", ExecCommand, argv[0], err)
 		}
 		return nil
@@ -202,11 +216,14 @@ func execLandlocked(args []string) error {
 			if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 				return fmt.Errorf("%s: set no_new_privs: %w", ExecCommand, err)
 			}
-			if err := installSeccompFilter(); err != nil {
+			if err := installScannerSeccomp(request); err != nil {
 				return fmt.Errorf("%s: %w", ExecCommand, err)
 			}
 		}
 		if err := syscall.Exec(argv[0], argv, os.Environ()); err != nil {
+			if request.notifyFD > 0 {
+				unix.Exit(126)
+			}
 			return fmt.Errorf("%s: execute %s: %w", ExecCommand, argv[0], err)
 		}
 		return nil
@@ -231,16 +248,25 @@ func execLandlocked(args []string) error {
 		return fmt.Errorf("%s: %w", ExecCommand, err)
 	}
 	if request.seccomp {
+		if err := validateScannerLivenessDescriptor(request.livenessFD); err != nil {
+			return fmt.Errorf("%s: scanner liveness reference is invalid", ExecCommand)
+		}
 		if !request.landlock {
 			if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 				return fmt.Errorf("%s: set no_new_privs: %w", ExecCommand, err)
 			}
 		}
-		if err := installSeccompFilter(); err != nil {
+		if err := installScannerSeccomp(request); err != nil {
 			return fmt.Errorf("%s: %w", ExecCommand, err)
 		}
 	}
 	if err := syscall.Exec(argv[0], argv, os.Environ()); err != nil {
+		if request.notifyFD > 0 {
+			// The listener is already installed on this thread. A failed exec
+			// cannot return through the Go runtime, which may have other
+			// unfiltered threads; terminate the whole helper process at once.
+			unix.Exit(126)
+		}
 		return fmt.Errorf("%s: execute %s: %w", ExecCommand, argv[0], err)
 	}
 	return nil
@@ -287,11 +313,14 @@ func execPrivateTemporary(request execRequest) error {
 				return fmt.Errorf("%s: set no_new_privs: %w", ExecCommand, err)
 			}
 		}
-		if err := installSeccompFilter(); err != nil {
+		if err := installScannerSeccomp(request); err != nil {
 			return fmt.Errorf("%s: %w", ExecCommand, err)
 		}
 	}
 	if err := syscall.Exec(request.argv[0], request.argv, setup.environment); err != nil {
+		if request.notifyFD > 0 {
+			unix.Exit(126)
+		}
 		return fmt.Errorf("%s: execute %s: %w", ExecCommand, request.argv[0], err)
 	}
 	return nil
@@ -307,6 +336,8 @@ type execRequest struct {
 	privateLeafFD      int
 	privateNamespaceFD int
 	controlFD          int
+	livenessFD         int
+	notifyFD           int
 	landlock           bool
 	seccomp            bool
 	fileSizeLimit      uint64
@@ -316,9 +347,9 @@ type execRequest struct {
 }
 
 func parseExecArgs(args []string) (execRequest, error) {
-	usage := fmt.Errorf("usage: %s --profile scanner|notifier --files N [--file-size-limit BYTES] [--resource-only] [--private-tmp --private-root-fd FD --private-leaf-fd FD --control-fd FD | --private-tmp --private-create --private-root-fd FD --private-namespace-fd FD --control-fd FD [--landlock]] [--seccomp] -- PROGRAM [ARGUMENT...]", ExecCommand)
-	request := execRequest{files: -1, privateRootFD: -1, privateLeafFD: -1, privateNamespaceFD: -1, controlFD: -1}
-	privateSeen, privateCreateSeen, rootSeen, leafSeen, namespaceSeen, controlSeen, landlockSeen, seccompSeen, sizeLimitSeen, resourceOnlySeen, identityOnlySeen := false, false, false, false, false, false, false, false, false, false, false
+	usage := fmt.Errorf("usage: %s --profile scanner|notifier --files N [--liveness-fd FD] [--seccomp-notify-fd FD] [--file-size-limit BYTES] [--resource-only] [--private-tmp --private-root-fd FD --private-leaf-fd FD --control-fd FD | --private-tmp --private-create --private-root-fd FD --private-namespace-fd FD --control-fd FD [--landlock]] [--seccomp] -- PROGRAM [ARGUMENT...]", ExecCommand)
+	request := execRequest{files: -1, privateRootFD: -1, privateLeafFD: -1, privateNamespaceFD: -1, controlFD: -1, livenessFD: -1}
+	privateSeen, privateCreateSeen, rootSeen, leafSeen, namespaceSeen, controlSeen, livenessSeen, notifySeen, landlockSeen, seccompSeen, sizeLimitSeen, resourceOnlySeen, identityOnlySeen := false, false, false, false, false, false, false, false, false, false, false, false, false
 	for index := 0; index < len(args); index++ {
 		switch args[index] {
 		case "--profile":
@@ -393,6 +424,28 @@ func parseExecArgs(args []string) (execRequest, error) {
 			}
 			request.controlFD = fd
 			controlSeen = true
+		case "--liveness-fd":
+			if index+1 >= len(args) || livenessSeen {
+				return execRequest{}, usage
+			}
+			index++
+			fd, err := strconv.Atoi(args[index])
+			if err != nil || fd < 3 {
+				return execRequest{}, usage
+			}
+			request.livenessFD = fd
+			livenessSeen = true
+		case "--seccomp-notify-fd":
+			if index+1 >= len(args) || notifySeen {
+				return execRequest{}, usage
+			}
+			index++
+			fd, err := strconv.Atoi(args[index])
+			if err != nil || fd < 3 {
+				return execRequest{}, usage
+			}
+			request.notifyFD = fd
+			notifySeen = true
 		case "--landlock":
 			if landlockSeen {
 				return execRequest{}, usage
@@ -443,6 +496,9 @@ func parseExecArgs(args []string) (execRequest, error) {
 		(!privateSeen && (privateCreateSeen || rootSeen || leafSeen || namespaceSeen || request.privateRootFD != -1 || request.privateLeafFD != -1 || request.privateNamespaceFD != -1 || request.controlFD != -1 || request.landlock)) ||
 		(privateCreateSeen && !privateSeen) ||
 		(request.identityOnly && (request.profile != Scanner || !request.seccomp || request.landlock || request.resourceOnly || request.fileSizeLimit > 0 || privateSeen)) ||
+		(livenessSeen && (request.profile != Scanner || request.livenessFD >= 3+request.files)) ||
+		(request.profile == Scanner && request.seccomp != livenessSeen) ||
+		(notifySeen && (request.profile != Scanner || !request.seccomp || request.notifyFD != 3+request.files+scannerPrivateControlFDCount(request))) ||
 		(request.fileSizeLimit > 0 && (request.profile != Scanner || privateSeen)) ||
 		(request.resourceOnly && (request.fileSizeLimit == 0 || request.profile != Scanner || privateSeen || request.identityOnly)) {
 		return execRequest{}, usage
@@ -451,6 +507,15 @@ func parseExecArgs(args []string) (execRequest, error) {
 		return execRequest{}, fmt.Errorf("%s: the program %q is not an absolute path", ExecCommand, request.argv[0])
 	}
 	return request, nil
+}
+
+func scannerPrivateControlFDCount(request execRequest) int {
+	if request.privateTemp {
+		// The namespace/root, pinned leaf, and readiness socket are the three
+		// helper-only descriptors following the scanner data files.
+		return 3
+	}
+	return 0
 }
 
 // setFileSizeLimit sets both the soft and hard per-file limit. Lowering the

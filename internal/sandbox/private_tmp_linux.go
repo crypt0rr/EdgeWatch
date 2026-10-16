@@ -57,6 +57,8 @@ type linuxPrivateTemporaryDirectory struct {
 	leaf          *os.File
 	parent        *os.File
 	child         *os.File
+	livenessFile  *os.File
+	livenessFD    int
 	helper        string
 	uid           uint32
 	gid           uint32
@@ -135,6 +137,7 @@ func prepareLinuxPrivateTemporaryDirectoryWithFilesystem(ctx context.Context, cm
 		uid:           uint32(os.Geteuid()),
 		gid:           uint32(os.Getegid()),
 		namespaceMode: privateNamespaceMode,
+		livenessFD:    -1,
 	}
 	if policy != nil && policy.Enforced() {
 		temporary.uid, temporary.gid = uint32(policy.status.UID), uint32(policy.status.GID)
@@ -173,6 +176,20 @@ func prepareLinuxPrivateTemporaryDirectoryWithFilesystem(ctx context.Context, cm
 		}
 	} else {
 		temporary.leafMode = privateTemporaryFallbackMode
+	}
+	if temporary.private && policy != nil && policy.Enforced() {
+		if policy.identityReservation == nil {
+			return nil, errors.New("prepare Naabu temporary directory: scanner liveness reservation is unavailable")
+		}
+		file, err := policy.identityReservation.livenessFile()
+		if err != nil {
+			return nil, errors.New("prepare Naabu temporary directory: scanner liveness reference is unavailable")
+		}
+		temporary.livenessFile = file
+		temporary.livenessFD, err = appendScannerLivenessFile(cmd, file)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := temporary.createNamespace(); err != nil {
 		_ = temporary.Close()
@@ -388,7 +405,7 @@ func (temporary *linuxPrivateTemporaryDirectory) path() string {
 }
 
 func (temporary *linuxPrivateTemporaryDirectory) configureCommand(cmd *exec.Cmd, policy *Policy) error {
-	if temporary.child == nil || temporary.namespace == nil || (!temporary.childCreates && temporary.leaf == nil) || len(cmd.ExtraFiles) > maxInheritedFiles {
+	if temporary.child == nil || temporary.namespace == nil || (!temporary.childCreates && temporary.leaf == nil) || len(cmd.ExtraFiles)+3 > maxInheritedFiles {
 		return errors.New("prepare Naabu temporary directory: too many inherited descriptors")
 	}
 	originalPath := cmd.Path
@@ -417,8 +434,11 @@ func (temporary *linuxPrivateTemporaryDirectory) configureCommand(cmd *exec.Cmd,
 	if temporary.landlocked {
 		args = append(args, "--landlock")
 	}
-	if policy != nil && policy.seccomp && temporary.landlocked {
+	if policy != nil && (policy.seccomp || policy.Enforced()) {
 		args = append(args, "--seccomp")
+	}
+	if temporary.livenessFD >= 0 {
+		args = append(args, "--liveness-fd", strconv.Itoa(temporary.livenessFD))
 	}
 	args = append(args, "--", originalPath)
 	args = append(args, originalArgs[1:]...)
@@ -781,6 +801,9 @@ func (temporary *linuxPrivateTemporaryDirectory) cleanupWithHelper(ctx context.C
 	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/nonexistent", "XDG_CONFIG_HOME=/nonexistent"}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, io.Discard, io.Discard
 	cmd.ExtraFiles = []*os.File{temporary.leaf}
+	if temporary.livenessFile != nil {
+		cmd.ExtraFiles = append(cmd.ExtraFiles, temporary.livenessFile)
+	}
 	if uint32(os.Geteuid()) != temporary.uid || uint32(os.Getegid()) != temporary.gid {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: temporary.uid, Gid: temporary.gid, Groups: []uint32{}}}
 	}

@@ -295,9 +295,12 @@ func TestParseExecArgs(t *testing.T) {
 			t.Errorf("%s: parse = %v, want usage", name, err)
 		}
 	}
-	request, err = parseExecArgs([]string{"--profile", "scanner", "--files", "0", "--resource-only", "--file-size-limit", "16777217", "--seccomp", "--", "/usr/bin/nmap"})
+	request, err = parseExecArgs([]string{"--profile", "scanner", "--files", "1", "--liveness-fd", "3", "--resource-only", "--file-size-limit", "16777217", "--seccomp", "--", "/usr/bin/nmap"})
 	if err != nil || !request.resourceOnly || !request.seccomp || request.fileSizeLimit != 16777217 || request.profile != Scanner {
 		t.Fatalf("identity-only resource limit with seccomp = %+v, %v; want valid scanner launch", request, err)
+	}
+	if _, err := parseExecArgs([]string{"--profile", "scanner", "--files", "0", "--identity-only", "--seccomp", "--", "/usr/bin/nmap"}); err == nil || !strings.Contains(err.Error(), "usage: sandbox-exec") {
+		t.Fatal("scanner seccomp request without an inherited liveness descriptor was accepted")
 	}
 	if _, err := parseExecArgs([]string{"--profile", "scanner", "--files", "0", "--", "nmap"}); err == nil || !strings.Contains(err.Error(), "not an absolute path") {
 		t.Fatalf("relative program = %v", err)

@@ -24,7 +24,7 @@ func TestPrepareLinuxScannerInvocationUsesConfiguredHelperFallback(t *testing.T)
 		{name: "current executable"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			lease := &supervisorTestLease{identityOK: true}
+			lease := &supervisorTestLease{identityOK: true, livenessFile: scannerLivenessTestFile(t)}
 			policy := scannerPreparationPolicy("")
 			policy.temporaryHelper = test.temporaryHelper
 			policy.identityAllocator = func(context.Context) (identityLease, error) { return lease, nil }
@@ -36,10 +36,10 @@ func TestPrepareLinuxScannerInvocationUsesConfiguredHelperFallback(t *testing.T)
 			if err != nil {
 				t.Fatalf("prepare using helper fallback: %v", err)
 			}
-			if invocation == nil || command.Path != executable || len(command.ExtraFiles) != 2 || command.SysProcAttr != nil {
+			if invocation == nil || command.Path != executable || len(command.ExtraFiles) != 3 || command.SysProcAttr != nil {
 				t.Fatalf("prepared invocation=%v path=%q extra=%d sysproc=%+v", invocation, command.Path, len(command.ExtraFiles), command.SysProcAttr)
 			}
-			if !reflect.DeepEqual(command.Args, []string{executable, ExecCommand, scannerSupervisorFlag, "--files", "0", "--request-fd", "3", "--result-fd", "4"}) {
+			if !reflect.DeepEqual(command.Args, []string{executable, ExecCommand, scannerSupervisorFlag, "--files", "1", "--request-fd", "4", "--result-fd", "5"}) {
 				t.Fatalf("supervisor wrapper args = %q", command.Args)
 			}
 			if err := invocation.StartFailed(true); err != nil {

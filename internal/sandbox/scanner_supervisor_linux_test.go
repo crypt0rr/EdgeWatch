@@ -25,6 +25,7 @@ type supervisorTestLease struct {
 	releaseErr    error
 	quarantineErr error
 	identityOK    bool
+	livenessFile  *os.File
 	events        *[]string
 }
 
@@ -49,6 +50,13 @@ func (lease *supervisorTestLease) quarantine() error {
 		*lease.events = append(*lease.events, "quarantine")
 	}
 	return lease.quarantineErr
+}
+
+func (lease *supervisorTestLease) inheritedScannerLivenessFile() (*os.File, error) {
+	if lease == nil || lease.livenessFile == nil {
+		return nil, errors.New("test liveness reference is unavailable")
+	}
+	return lease.livenessFile, nil
 }
 
 func newTestSupervisorInvocation(t *testing.T, lease identityLease) (*scannerSupervisorInvocation, *os.File, string) {
@@ -427,15 +435,15 @@ func TestScannerSupervisorProtocolParsersFailClosed(t *testing.T) {
 
 	t.Run("launch request", func(t *testing.T) {
 		valid := scannerLaunchRequest{
-			Version: 1, Path: "/usr/bin/nmap", Args: []string{"/usr/bin/nmap", "-V"},
-			Files: 1, UID: scannerIdentityStart, GID: scannerIdentityStart,
+			Version: 1, Path: "/usr/bin/edgewatch", Args: []string{"/usr/bin/edgewatch", ExecCommand, "--profile", string(Scanner), "--files", "1", "--identity-only", "--seccomp", "--liveness-fd", "3", "--", "/bin/true"},
+			Files: 1, LivenessFD: 3, UID: scannerIdentityStart, GID: scannerIdentityStart,
 		}
 		encoded, err := json.Marshal(valid)
 		if err != nil {
 			t.Fatal(err)
 		}
 		request := scannerSupervisorRequest{files: 1, requestFD: 4, resultFD: 5}
-		if got, err := decodeScannerLaunchRequest(encoded, request); err != nil || got.Path != valid.Path || len(got.Args) != 2 {
+		if got, err := decodeScannerLaunchRequest(encoded, request); err != nil || got.Path != valid.Path || !reflect.DeepEqual(got.Args, valid.Args) || got.LivenessFD != valid.LivenessFD {
 			t.Fatalf("decode valid launch request = %+v, %v", got, err)
 		}
 		if _, err := decodeScannerLaunchRequest(nil, request); err == nil || !strings.Contains(err.Error(), "unavailable or too large") {
@@ -458,6 +466,7 @@ func TestScannerSupervisorProtocolParsersFailClosed(t *testing.T) {
 			{name: "relative path", change: func(request *scannerLaunchRequest) { request.Path = "nmap"; request.Args[0] = "nmap" }},
 			{name: "argv path mismatch", change: func(request *scannerLaunchRequest) { request.Args[0] = "/usr/bin/other" }},
 			{name: "descriptor count", change: func(request *scannerLaunchRequest) { request.Files++ }},
+			{name: "liveness descriptor outside files", change: func(request *scannerLaunchRequest) { request.LivenessFD = 4 }},
 			{name: "uid outside lease pool", change: func(request *scannerLaunchRequest) { request.UID = scannerIdentityStart - 1 }},
 			{name: "gid differs from uid", change: func(request *scannerLaunchRequest) { request.GID++ }},
 			{name: "too many ambient capabilities", change: func(request *scannerLaunchRequest) { request.AmbientCaps = make([]uintptr, 9) }},
@@ -490,6 +499,74 @@ func TestScannerSupervisorProtocolParsersFailClosed(t *testing.T) {
 			if err := validateScannerSupervisorResult(frame); err == nil {
 				t.Errorf("validate malformed completion frame %x succeeded", frame)
 			}
+		}
+	})
+
+	t.Run("notification descriptor follows data and private control descriptors", func(t *testing.T) {
+		baseArgs := []string{"/usr/local/bin/edgewatch", ExecCommand, "--profile", string(Scanner), "--files", "1", "--identity-only", "--seccomp", "--liveness-fd", "3", "--", "/bin/true"}
+		updated, err := appendSeccompNotificationControl(baseArgs, 4)
+		if err != nil {
+			t.Fatalf("append identity-only notification descriptor: %v", err)
+		}
+		identity, err := parseExecArgs(updated[2:])
+		if err != nil || identity.notifyFD != 4 || identity.files != 1 {
+			t.Fatalf("identity-only request = %+v, %v; want data=1 notify=4", identity, err)
+		}
+
+		privateArgs := []string{"/usr/local/bin/edgewatch", ExecCommand, "--profile", string(Scanner), "--files", "1", "--private-tmp", "--private-root-fd", "4", "--private-leaf-fd", "5", "--control-fd", "6", "--seccomp", "--liveness-fd", "3", "--", "/usr/local/bin/naabu"}
+		updated, err = appendSeccompNotificationControl(privateArgs, 7)
+		if err != nil {
+			t.Fatalf("append private-temporary notification descriptor: %v", err)
+		}
+		private, err := parseExecArgs(updated[2:])
+		if err != nil || private.notifyFD != 7 || private.files != 1 || private.controlFD != 6 {
+			t.Fatalf("private request = %+v, %v; want data=1 control=6 notify=7", private, err)
+		}
+		launch := scannerLaunchRequest{
+			Version: 1, Path: privateArgs[0], Args: updated, Files: 4, LivenessFD: 3,
+			UID: scannerIdentityStart, GID: scannerIdentityStart,
+		}
+		encoded, err := json.Marshal(launch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := decodeScannerLaunchRequest(encoded, scannerSupervisorRequest{files: 4}); err == nil {
+			t.Fatal("parent launch request containing supervisor-only notification fd was accepted")
+		}
+		launch.Args = privateArgs
+		encoded, err = json.Marshal(launch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := decodeScannerLaunchRequest(encoded, scannerSupervisorRequest{files: 4}); err != nil {
+			t.Fatalf("decode private helper request with separate controls: %v", err)
+		}
+	})
+
+	t.Run("private helper keeps data count separate from setup controls", func(t *testing.T) {
+		helper := "/usr/local/bin/edgewatch"
+		command := &exec.Cmd{
+			Path:       helper,
+			Args:       []string{helper, ExecCommand, "--profile", string(Scanner), "--files", "1", "--private-tmp", "--private-root-fd", "4", "--private-leaf-fd", "5", "--control-fd", "6", "--seccomp", "--liveness-fd", "3", "--", "/usr/local/bin/naabu"},
+			ExtraFiles: make([]*os.File, 4),
+		}
+		if err := addScannerNoEscapeHelper(command, helper, 3); err != nil {
+			t.Fatalf("preserve private helper descriptor layout: %v", err)
+		}
+		request, err := parseExecArgs(command.Args[2:])
+		if err != nil || request.files != 1 || request.controlFD != 6 || request.livenessFD != 3 {
+			t.Fatalf("private helper request = %+v, %v; want data=1, liveness=3, control=6", request, err)
+		}
+	})
+
+	t.Run("append rejects unexpected or wrong-offset notification fd", func(t *testing.T) {
+		args := []string{"/usr/local/bin/edgewatch", ExecCommand, "--profile", string(Scanner), "--files", "1", "--identity-only", "--seccomp", "--liveness-fd", "3", "--", "/bin/true"}
+		if _, err := appendSeccompNotificationControl(args, 5); err == nil {
+			t.Fatal("wrong notification descriptor offset was accepted")
+		}
+		withNotify := append(append([]string(nil), args[:len(args)-2]...), "--seccomp-notify-fd", "4", "--", "/bin/true")
+		if _, err := appendSeccompNotificationControl(withNotify, 4); err == nil {
+			t.Fatal("duplicate notification descriptor was accepted")
 		}
 	})
 }
@@ -640,6 +717,31 @@ func TestScannerSupervisorChildProofOrderingAndFailurePaths(t *testing.T) {
 		want := []string{"observe-exit", "kill-group", "wait-leader", "reap-descendants", "send-proof"}
 		if !equalStrings(events, want) {
 			t.Fatalf("supervisor ordering = %v, want %v", events, want)
+		}
+	})
+
+	t.Run("notification failure kills and proves the process tree before returning error", func(t *testing.T) {
+		var events []string
+		ops := baseOps(&events)
+		observations := 0
+		ops.waitForExit = func(int) (bool, error) {
+			events = append(events, "observe-exit")
+			observations++
+			return observations > 1, nil
+		}
+		ops.serviceNotifications = func() error {
+			events = append(events, "service-notification")
+			return errors.New("unexpected notification")
+		}
+		watchdog := make(chan time.Time, 1)
+		watchdog <- time.Now()
+		interrupted, childErr, err := superviseScannerChild(child, 9, nil, watchdog, ops)
+		if err == nil || !strings.Contains(err.Error(), "seccomp notification failed") || interrupted || childErr != nil {
+			t.Fatalf("supervise unexpected notification = interrupted %t, child error %v, error %v", interrupted, childErr, err)
+		}
+		want := []string{"observe-exit", "service-notification", "kill-group", "observe-exit", "kill-group", "wait-leader", "reap-descendants", "send-proof"}
+		if !equalStrings(events, want) {
+			t.Fatalf("notification failure cleanup = %v, want %v", events, want)
 		}
 	})
 
@@ -862,7 +964,7 @@ func TestPrepareLinuxScannerInvocationBuildsBoundLaunchRequestBeforeStart(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease := &supervisorTestLease{identityOK: true}
+	lease := &supervisorTestLease{identityOK: true, livenessFile: scannerLivenessTestFile(t)}
 	allocatorCalls := 0
 	policy := &Policy{
 		profile: Scanner,
@@ -890,7 +992,7 @@ func TestPrepareLinuxScannerInvocationBuildsBoundLaunchRequestBeforeStart(t *tes
 		t.Fatalf("invocation implementation is %T, want scanner supervisor", invocation.implementation)
 	}
 	if allocatorCalls != 1 || implementation.request.UID != 61000 || implementation.request.GID != 61000 ||
-		!implementation.request.Session || implementation.request.Files != 0 ||
+		!implementation.request.Session || implementation.request.Files != 1 || implementation.request.LivenessFD != 3 ||
 		!reflect.DeepEqual(implementation.request.Env, command.Env) || implementation.request.Dir != command.Dir ||
 		!reflect.DeepEqual(implementation.request.AmbientCaps, wantAmbientCaps) {
 		t.Fatalf("launch request does not preserve invocation identity/session/environment: calls=%d request=%+v", allocatorCalls, implementation.request)
@@ -899,7 +1001,7 @@ func TestPrepareLinuxScannerInvocationBuildsBoundLaunchRequestBeforeStart(t *tes
 	if err := json.Unmarshal(implementation.config, &encoded); err != nil || !reflect.DeepEqual(encoded, implementation.request) {
 		t.Fatalf("bounded launch config = %+v, %v; want %+v", encoded, err, implementation.request)
 	}
-	if command.Path != helper || len(command.Args) != 9 || command.Args[1] != ExecCommand || command.Args[2] != scannerSupervisorFlag || command.SysProcAttr != nil || len(command.ExtraFiles) != 2 {
+	if command.Path != helper || len(command.Args) != 9 || command.Args[1] != ExecCommand || command.Args[2] != scannerSupervisorFlag || command.SysProcAttr != nil || len(command.ExtraFiles) != 3 || command.Args[4] != "1" || command.Args[6] != "4" || command.Args[8] != "5" {
 		t.Fatalf("outer command = path %q args %q sysproc %#v extra files %d; want supervisor wrapper before Start", command.Path, command.Args, command.SysProcAttr, len(command.ExtraFiles))
 	}
 	if err := invocation.StartFailed(true); err != nil {
@@ -916,7 +1018,8 @@ func TestBuildScannerChildCommandPreservesValidatedIsolationContract(t *testing.
 		t.Fatal(err)
 	}
 	defer dataFile.Close()
-	childFiles := []*os.File{dataFile}
+	livenessFile := scannerLivenessTestFile(t)
+	childFiles := []*os.File{dataFile, livenessFile}
 	for _, session := range []bool{false, true} {
 		name := "process group"
 		if session {
@@ -924,8 +1027,8 @@ func TestBuildScannerChildCommandPreservesValidatedIsolationContract(t *testing.
 		}
 		t.Run(name, func(t *testing.T) {
 			launch := scannerLaunchRequest{
-				Version: 1, Path: "/bin/true", Args: []string{"/bin/true", "--fixed-arg"},
-				Env: []string{"EDGEWATCH_CHILD=isolated"}, Dir: t.TempDir(), Files: len(childFiles),
+				Version: 1, Path: "/usr/bin/edgewatch", Args: []string{"/usr/bin/edgewatch", ExecCommand, "--profile", string(Scanner), "--files", "2", "--identity-only", "--seccomp", "--liveness-fd", "4", "--", "/bin/true", "--fixed-arg"},
+				Env: []string{"EDGEWATCH_CHILD=isolated"}, Dir: t.TempDir(), Files: len(childFiles), LivenessFD: 4,
 				UID: scannerIdentityStart + 3, GID: scannerIdentityStart + 3,
 				AmbientCaps: []uintptr{unix.CAP_NET_RAW, unix.CAP_NET_ADMIN}, Session: session,
 			}
@@ -1052,7 +1155,7 @@ func TestPrepareLinuxScannerInvocationReleasesOrQuarantinesFailedSetupLease(t *t
 		t.Fatal(err)
 	}
 	t.Run("oversized serialized request releases unreserved lease", func(t *testing.T) {
-		lease := &supervisorTestLease{identityOK: true}
+		lease := &supervisorTestLease{identityOK: true, livenessFile: scannerLivenessTestFile(t)}
 		policy := scannerPreparationPolicy(helper)
 		policy.identityAllocator = func(context.Context) (identityLease, error) { return lease, nil }
 		command := exec.Command("/bin/true")
@@ -1078,7 +1181,7 @@ func TestPrepareLinuxScannerInvocationReleasesOrQuarantinesFailedSetupLease(t *t
 	})
 
 	t.Run("malformed wrapped command releases unreserved lease", func(t *testing.T) {
-		lease := &supervisorTestLease{identityOK: true}
+		lease := &supervisorTestLease{identityOK: true, livenessFile: scannerLivenessTestFile(t)}
 		policy := scannerPreparationPolicy(helper)
 		policy.identityAllocator = func(context.Context) (identityLease, error) { return lease, nil }
 		command := &exec.Cmd{Path: helper, Args: []string{helper, ExecCommand, "--files", "0"}}

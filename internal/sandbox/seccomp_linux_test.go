@@ -38,7 +38,7 @@ func TestSeccompNumbersMatchTheSystemCallTables(t *testing.T) {
 			number, _ := strconv.ParseUint(match[2], 10, 32)
 			table[strings.ToLower(match[1])] = uint32(number)
 		}
-		names := append(append([]string{"clone", "clone3"}, seccompDenied...), seccompDeniedX86...)
+		names := append(append([]string{"clone", "clone3", "close", "close_range", "dup", "dup2", "dup3", "fcntl", "ioctl", "socket", "socketpair", "sendmsg", "sendmmsg", "flock"}, seccompDenied...), seccompDeniedX86...)
 		for _, name := range names {
 			want, exists := table[name]
 			got, listed := arch.numbers[name]
@@ -58,13 +58,15 @@ func runBPF(t *testing.T, filter []unix.SockFilter, data [64]byte) uint32 {
 		switch instruction.Code {
 		case unix.BPF_LD | unix.BPF_W | unix.BPF_ABS:
 			accumulator = binary.LittleEndian.Uint32(data[instruction.K:])
-		case unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, unix.BPF_JMP | unix.BPF_JGE | unix.BPF_K, unix.BPF_JMP | unix.BPF_JSET | unix.BPF_K:
+		case unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, unix.BPF_JMP | unix.BPF_JGE | unix.BPF_K, unix.BPF_JMP | unix.BPF_JGT | unix.BPF_K, unix.BPF_JMP | unix.BPF_JSET | unix.BPF_K:
 			var taken bool
 			switch instruction.Code &^ (unix.BPF_JMP | unix.BPF_K) {
 			case unix.BPF_JEQ:
 				taken = accumulator == instruction.K
 			case unix.BPF_JGE:
 				taken = accumulator >= instruction.K
+			case unix.BPF_JGT:
+				taken = accumulator > instruction.K
 			default:
 				taken = accumulator&instruction.K != 0
 			}
@@ -87,8 +89,154 @@ func seccompData(arch, number, firstArg uint32) [64]byte {
 	var data [64]byte
 	binary.LittleEndian.PutUint32(data[seccompNumber:], number)
 	binary.LittleEndian.PutUint32(data[seccompArch:], arch)
-	binary.LittleEndian.PutUint32(data[seccompFirstArgLow:], firstArg)
+	binary.LittleEndian.PutUint32(data[seccompArg0Low:], firstArg)
 	return data
+}
+
+func seccompDataArgs(arch, number uint32, args ...uint32) [64]byte {
+	data := seccompData(arch, number, 0)
+	for index, value := range args {
+		binary.LittleEndian.PutUint32(data[int(seccompArg0Low)+index*8:], value)
+	}
+	return data
+}
+
+func seccompDataWideArgs(arch, number uint32, args ...uint64) [64]byte {
+	var data [64]byte
+	binary.LittleEndian.PutUint32(data[seccompNumber:], number)
+	binary.LittleEndian.PutUint32(data[seccompArch:], arch)
+	for index, value := range args {
+		binary.LittleEndian.PutUint64(data[int(seccompArg0Low)+index*8:], value)
+	}
+	return data
+}
+
+func TestSeccompFilterProtectsInheritedLivenessDescriptor(t *testing.T) {
+	t.Parallel()
+	const protectedFD = uint32(7)
+	deny := unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM)
+	for goarch, arch := range seccompArchitectures {
+		filter, err := seccompFilterForLivenessFD(arch, int(protectedFD))
+		if err != nil {
+			t.Fatalf("%s liveness filter: %v", goarch, err)
+		}
+		decide := func(name string, args ...uint64) uint32 {
+			t.Helper()
+			return runBPF(t, filter, seccompDataWideArgs(arch.audit, arch.numbers[name], args...))
+		}
+		cases := []struct {
+			name       string
+			call       string
+			args       []uint64
+			wantResult uint32
+		}{
+			{name: "close protected descriptor", call: "close", args: []uint64{uint64(protectedFD)}, wantResult: deny},
+			{name: "close another descriptor", call: "close", args: []uint64{uint64(protectedFD + 1)}, wantResult: unix.SECCOMP_RET_ALLOW},
+			{name: "close range includes protected start", call: "close_range", args: []uint64{uint64(protectedFD), ^uint64(0), 0}, wantResult: deny},
+			{name: "close range includes protected end", call: "close_range", args: []uint64{0, uint64(protectedFD), 0}, wantResult: deny},
+			{name: "close range excludes protected below", call: "close_range", args: []uint64{0, uint64(protectedFD - 1), 0}, wantResult: unix.SECCOMP_RET_ALLOW},
+			{name: "close range excludes protected above", call: "close_range", args: []uint64{uint64(protectedFD + 1), ^uint64(0), 0}, wantResult: unix.SECCOMP_RET_ALLOW},
+			{name: "close range low words include protected despite high bits", call: "close_range", args: []uint64{1<<32 | uint64(protectedFD), 1<<32 | uint64(protectedFD), unix.CLOSE_RANGE_CLOEXEC}, wantResult: deny},
+			{name: "close range unshare cannot split protected descriptor", call: "close_range", args: []uint64{uint64(protectedFD), uint64(protectedFD), unix.CLOSE_RANGE_UNSHARE}, wantResult: deny},
+			{name: "dup2 cannot replace protected descriptor", call: "dup2", args: []uint64{8, uint64(protectedFD)}, wantResult: deny},
+			{name: "dup allocates a separate descriptor", call: "dup", args: []uint64{uint64(protectedFD)}, wantResult: unix.SECCOMP_RET_ALLOW},
+			{name: "dup3 cannot replace protected descriptor", call: "dup3", args: []uint64{8, uint64(protectedFD), 0}, wantResult: deny},
+			{name: "OFD lock change denied through alias", call: "fcntl", args: []uint64{uint64(protectedFD + 1), seccompFOFDSetLK}, wantResult: deny},
+			{name: "blocking OFD lock change denied globally", call: "fcntl", args: []uint64{uint64(protectedFD + 1), seccompFOFDSetLKW}, wantResult: deny},
+			{name: "cannot mark protected descriptor close on exec", call: "fcntl", args: []uint64{uint64(protectedFD), seccompFSetFD, uint64(unix.FD_CLOEXEC)}, wantResult: deny},
+			{name: "other descriptor may change close on exec", call: "fcntl", args: []uint64{uint64(protectedFD + 1), seccompFSetFD, uint64(unix.FD_CLOEXEC)}, wantResult: unix.SECCOMP_RET_ALLOW},
+			{name: "FIOCLEX denied on protected descriptor", call: "ioctl", args: []uint64{uint64(protectedFD), seccompFIOCLEX, 0}, wantResult: deny},
+			{name: "other ioctl remains available", call: "ioctl", args: []uint64{uint64(protectedFD), 0x5401, 0}, wantResult: unix.SECCOMP_RET_ALLOW},
+			{name: "Unix socket creation denied", call: "socket", args: []uint64{seccompAFUnix, uint64(unix.SOCK_STREAM), 0}, wantResult: deny},
+			{name: "Unix socket domain low word remains denied", call: "socket", args: []uint64{1<<32 | seccompAFUnix, uint64(unix.SOCK_STREAM), 0}, wantResult: deny},
+			{name: "network socket creation remains available", call: "socket", args: []uint64{unix.AF_INET, uint64(unix.SOCK_DGRAM), 0}, wantResult: unix.SECCOMP_RET_ALLOW},
+			{name: "Unix socketpair creation denied", call: "socketpair", args: []uint64{seccompAFUnix, uint64(unix.SOCK_SEQPACKET), 0, 0}, wantResult: deny},
+			{name: "Unix socketpair domain low word remains denied", call: "socketpair", args: []uint64{1<<32 | seccompAFUnix, uint64(unix.SOCK_SEQPACKET), 0, 0}, wantResult: deny},
+			{name: "sendmsg remains available for netlink", call: "sendmsg", args: []uint64{0, 0, 0}, wantResult: unix.SECCOMP_RET_ALLOW},
+			{name: "sendmmsg remains available for netlink", call: "sendmmsg", args: []uint64{0, 0, 0, 0}, wantResult: unix.SECCOMP_RET_ALLOW},
+			{name: "Naabu flock remains available", call: "flock", args: []uint64{uint64(protectedFD + 1), uint64(unix.LOCK_EX)}, wantResult: unix.SECCOMP_RET_ALLOW},
+		}
+		for _, test := range cases {
+			if _, exists := arch.numbers[test.call]; !exists {
+				continue
+			}
+			if got := decide(test.call, test.args...); got != test.wantResult {
+				t.Errorf("%s %s = %#x, want %#x", goarch, test.name, got, test.wantResult)
+			}
+		}
+	}
+}
+
+func TestSeccompNotificationFilterMediatesOnlyExactNmapDatagramRequest(t *testing.T) {
+	t.Parallel()
+	const protectedFD = uint32(7)
+	deny := unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM)
+	for goarch, arch := range seccompArchitectures {
+		filter, err := seccompFilterWithNotification(arch, int(protectedFD), true)
+		if err != nil {
+			t.Fatalf("%s notification filter: %v", goarch, err)
+		}
+		decide := func(name string, args ...uint64) uint32 {
+			t.Helper()
+			return runBPF(t, filter, seccompDataWideArgs(arch.audit, arch.numbers[name], args...))
+		}
+		cases := []struct {
+			name string
+			call string
+			args []uint64
+			want uint32
+		}{
+			{name: "exact Nmap AF_UNIX datagram", call: "socket", args: []uint64{unix.AF_UNIX, seccompNotificationSocketType, 0}, want: unix.SECCOMP_RET_USER_NOTIF},
+			{name: "Unix stream denied", call: "socket", args: []uint64{unix.AF_UNIX, unix.SOCK_STREAM, 0}, want: deny},
+			{name: "Unix datagram without cloexec denied", call: "socket", args: []uint64{unix.AF_UNIX, unix.SOCK_DGRAM, 0}, want: deny},
+			{name: "Unix datagram with nonzero protocol denied", call: "socket", args: []uint64{unix.AF_UNIX, seccompNotificationSocketType, 1}, want: deny},
+			{name: "network datagram allowed", call: "socket", args: []uint64{unix.AF_INET, seccompNotificationSocketType, 0}, want: unix.SECCOMP_RET_ALLOW},
+			{name: "Unix socketpair denied", call: "socketpair", args: []uint64{unix.AF_UNIX, unix.SOCK_SEQPACKET, 0, 0}, want: deny},
+			{name: "liveness close remains denied", call: "close", args: []uint64{uint64(protectedFD)}, want: deny},
+			{name: "liveness lock conversion remains denied", call: "fcntl", args: []uint64{uint64(protectedFD + 1), seccompFOFDSetLK}, want: deny},
+		}
+		for _, test := range cases {
+			if _, exists := arch.numbers[test.call]; !exists {
+				continue
+			}
+			if got := decide(test.call, test.args...); got != test.want {
+				t.Errorf("%s %s: %s = %#x, want %#x", goarch, test.name, test.call, got, test.want)
+			}
+		}
+	}
+	if _, err := seccompFilterWithNotification(seccompArchitectures["amd64"], -1, true); err != nil {
+		t.Fatalf("notification filter without liveness reference: %v", err)
+	}
+}
+
+func TestValidateScannerSocketDescriptors(t *testing.T) {
+	if err := validateScannerSocketDescriptors(0); err != nil {
+		t.Fatalf("standard descriptors without Unix sockets: %v", err)
+	}
+	unixPair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateScannerSocketDescriptor(unixPair[0]); err == nil || !strings.Contains(err.Error(), "Unix socket") {
+		_ = unix.Close(unixPair[0])
+		_ = unix.Close(unixPair[1])
+		t.Fatalf("inherited Unix socket validation = %v, want refusal", err)
+	}
+	if err := unix.Close(unixPair[0]); err != nil {
+		_ = unix.Close(unixPair[1])
+		t.Fatal(err)
+	}
+	if err := unix.Close(unixPair[1]); err != nil {
+		t.Fatal(err)
+	}
+	netlinkFD, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.NETLINK_ROUTE)
+	if err != nil {
+		t.Skipf("kernel does not permit an unprivileged route-netlink socket: %v", err)
+	}
+	defer unix.Close(netlinkFD)
+	if err := validateScannerSocketDescriptor(netlinkFD); err != nil {
+		t.Fatalf("route-netlink descriptor was refused: %v", err)
+	}
 }
 
 func TestSeccompFilterDecidesEachSystemCall(t *testing.T) {
@@ -202,7 +350,7 @@ func TestInstalledSeccompFilterRefusesTheDeniedCalls(t *testing.T) {
 			results <- map[string]error{"no_new_privs": err}
 			return
 		}
-		if err := installSeccompFilter(); err != nil {
+		if err := installSeccompFilter(-1); err != nil {
 			results <- map[string]error{"install": err}
 			return
 		}

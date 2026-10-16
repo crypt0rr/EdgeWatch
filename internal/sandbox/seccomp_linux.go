@@ -24,7 +24,7 @@ import (
 // then reaches every process the scanner started.
 var seccompDenied = []string{
 	"ptrace", "process_vm_readv", "process_vm_writev", "kcmp", "setsid", "setpgid",
-	"io_uring_setup", "io_uring_enter", "io_uring_register",
+	"io_uring_setup", "io_uring_enter", "io_uring_register", "pidfd_getfd",
 	"userfaultfd", "perf_event_open", "bpf",
 	"keyctl", "add_key", "request_key",
 	"kexec_load", "kexec_file_load", "init_module", "finit_module", "delete_module",
@@ -64,7 +64,9 @@ type seccompArchitecture struct {
 var seccompArchitectures = map[string]seccompArchitecture{
 	"amd64": {audit: unix.AUDIT_ARCH_X86_64, x32: true, numbers: map[string]uint32{
 		"ptrace": 101, "process_vm_readv": 310, "process_vm_writev": 311, "kcmp": 312, "setsid": 112, "setpgid": 109,
-		"io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
+		"io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427, "pidfd_getfd": 438,
+		"close": 3, "close_range": 436, "dup": 32, "dup2": 33, "dup3": 292, "fcntl": 72, "ioctl": 16, "socket": 41, "socketpair": 53, "flock": 73,
+		"sendmsg": 46, "sendmmsg": 307,
 		"userfaultfd": 323, "perf_event_open": 298, "bpf": 321,
 		"keyctl": 250, "add_key": 248, "request_key": 249,
 		"kexec_load": 246, "kexec_file_load": 320, "init_module": 175, "finit_module": 313, "delete_module": 176,
@@ -77,7 +79,9 @@ var seccompArchitectures = map[string]seccompArchitecture{
 	}},
 	"arm64": {audit: unix.AUDIT_ARCH_AARCH64, numbers: map[string]uint32{
 		"ptrace": 117, "process_vm_readv": 270, "process_vm_writev": 271, "kcmp": 272, "setsid": 157, "setpgid": 154,
-		"io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
+		"io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427, "pidfd_getfd": 438,
+		"close": 57, "close_range": 436, "dup": 23, "dup3": 24, "fcntl": 25, "ioctl": 29, "socket": 198, "socketpair": 199, "flock": 32,
+		"sendmsg": 211, "sendmmsg": 269,
 		"userfaultfd": 282, "perf_event_open": 241, "bpf": 280,
 		"keyctl": 219, "add_key": 217, "request_key": 218,
 		"kexec_load": 104, "kexec_file_load": 294, "init_module": 105, "finit_module": 273, "delete_module": 106,
@@ -93,9 +97,21 @@ var seccompArchitectures = map[string]seccompArchitecture{
 // architectures are little-endian, so the clone flags are the low word of the
 // first argument.
 const (
-	seccompNumber      = 0
-	seccompArch        = 4
-	seccompFirstArgLow = 16
+	seccompNumber  = 0
+	seccompArch    = 4
+	seccompArg0Low = 16
+	seccompArg1Low = 24
+	seccompArg2Low = 32
+)
+
+const (
+	seccompFSetFD      = 2
+	seccompFOFDSetLK   = 37
+	seccompFOFDSetLKW  = 38
+	seccompFIOCLEX     = 0x5451
+	seccompAFUnix      = 1
+	seccompSockDgram   = 2
+	seccompSockCloexec = 0x80000
 )
 
 // bpfStep is one filter instruction whose conditional jumps name labels; an
@@ -111,8 +127,34 @@ type bpfStep struct {
 // kills the process, a denied call or a namespace-creating clone fails with
 // EPERM, clone3 fails with ENOSYS, and every other call is allowed.
 func seccompFilter(arch seccompArchitecture) ([]unix.SockFilter, error) {
+	return seccompFilterForLivenessFD(arch, -1)
+}
+
+// seccompFilterForLivenessFD refuses descriptor operations that could close,
+// replace, mark close-on-exec, or unlock the inherited scanner-scope OFD. It
+// leaves ordinary flock available because Naabu uses flock for its own files.
+// A negative descriptor builds the compatibility filter used by short,
+// identity-only Detect probes that do not launch scanner descendants.
+func seccompFilterForLivenessFD(arch seccompArchitecture, livenessFD int) ([]unix.SockFilter, error) {
+	return seccompFilterWithNotification(arch, livenessFD, false)
+}
+
+// seccompFilterWithNotification optionally routes only the exact AF_UNIX
+// datagram socket request used by Nmap's SIOCGIFNAME ioctl through a trusted
+// seccomp user-notification broker. Every other AF_UNIX socket request is
+// denied in the filter. The broker injects an AF_INET datagram descriptor, so
+// the scanner never receives a Unix socket over which it could pass FDs.
+func seccompFilterWithNotification(arch seccompArchitecture, livenessFD int, notifyUnixDatagram bool) ([]unix.SockFilter, error) {
+	if livenessFD != -1 && (livenessFD < 3 || livenessFD >= 3+maxInheritedFiles) {
+		return nil, errors.New("scanner liveness descriptor is outside the inherited range")
+	}
 	load := func(offset uint32) bpfStep {
 		return bpfStep{instruction: unix.SockFilter{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: offset}}
+	}
+	loadLabel := func(label string, offset uint32) bpfStep {
+		step := load(offset)
+		step.label = label
+		return step
 	}
 	jump := func(code uint16, value uint32, jumpTrue, jumpFalse string) bpfStep {
 		return bpfStep{instruction: unix.SockFilter{Code: unix.BPF_JMP | code | unix.BPF_K, K: value}, jumpTrue: jumpTrue, jumpFalse: jumpFalse}
@@ -127,18 +169,30 @@ func seccompFilter(arch seccompArchitecture) ([]unix.SockFilter, error) {
 		}
 		return value, nil
 	}
-	steps := []bpfStep{load(seccompArch), jump(unix.BPF_JEQ, arch.audit, "", "kill"), load(seccompNumber)}
+	steps := []bpfStep{
+		load(seccompArch),
+		jump(unix.BPF_JEQ, arch.audit, "load_syscall_number", "kill_architecture_mismatch"),
+		result("kill_architecture_mismatch", unix.SECCOMP_RET_KILL_PROCESS),
+		loadLabel("load_syscall_number", seccompNumber),
+	}
 	denied := seccompDenied
 	if arch.x32 {
-		steps = append(steps, jump(unix.BPF_JGE, x32Bit, "deny", ""))
+		steps = append(steps,
+			jump(unix.BPF_JGE, x32Bit, "deny_x32", "check_syscall_denylist"),
+			result("deny_x32", unix.SECCOMP_RET_ERRNO|uint32(unix.EPERM)),
+		)
 		denied = append(append([]string(nil), seccompDenied...), seccompDeniedX86...)
 	}
-	for _, name := range denied {
+	for index, name := range denied {
 		value, err := number(name)
 		if err != nil {
 			return nil, err
 		}
-		steps = append(steps, jump(unix.BPF_JEQ, value, "deny", ""))
+		step := jump(unix.BPF_JEQ, value, "deny", "")
+		if index == 0 && arch.x32 {
+			step.label = "check_syscall_denylist"
+		}
+		steps = append(steps, step)
 	}
 	clone3, err := number("clone3")
 	if err != nil {
@@ -148,17 +202,155 @@ func seccompFilter(arch seccompArchitecture) ([]unix.SockFilter, error) {
 	if err != nil {
 		return nil, err
 	}
+	postClone := "check_socket_syscalls"
+	if livenessFD < 0 && !notifyUnixDatagram {
+		postClone = "allow"
+	}
 	steps = append(steps,
 		jump(unix.BPF_JEQ, clone3, "nosys", ""),
-		jump(unix.BPF_JEQ, clone, "", "allow"),
-		load(seccompFirstArgLow),
-		jump(unix.BPF_JSET, cloneNamespaceFlags, "deny", "allow"),
+		jump(unix.BPF_JEQ, clone, "check_clone_flags", postClone),
+		loadLabel("check_clone_flags", seccompArg0Low),
+		jump(unix.BPF_JSET, cloneNamespaceFlags, "deny", postClone),
+	)
+	if livenessFD < 0 && !notifyUnixDatagram {
+		steps = append(steps,
+			result("allow", unix.SECCOMP_RET_ALLOW),
+			result("deny", unix.SECCOMP_RET_ERRNO|uint32(unix.EPERM)),
+			result("nosys", unix.SECCOMP_RET_ERRNO|uint32(unix.ENOSYS)),
+			result("kill", unix.SECCOMP_RET_KILL_PROCESS),
+		)
+		return resolveBPF(steps)
+	}
+	labels := make(map[string]string, 8)
+	if livenessFD >= 0 {
+		protected := uint32(livenessFD)
+		fdSyscalls := []string{"close", "close_range", "dup2", "dup3", "fcntl", "ioctl"}
+		for index, name := range fdSyscalls {
+			value, ok := arch.numbers[name]
+			if !ok {
+				if name == "dup2" {
+					// Linux arm64 has dup(23) and dup3(24), but no dup2 syscall.
+					continue
+				}
+				return nil, fmt.Errorf("no system call number for %s", name)
+			}
+			label := "check_" + name
+			labels[name] = label
+			step := jump(unix.BPF_JEQ, value, label, "")
+			if index == 0 {
+				step.label = "check_socket_syscalls"
+			}
+			steps = append(steps, step)
+		}
+		steps = append(steps, jump(unix.BPF_JGE, 0, "check_socket_dispatch", "check_socket_dispatch"))
+		steps = append(steps,
+			loadLabel(labels["close"], seccompArg0Low),
+			jump(unix.BPF_JEQ, protected, "deny", "allow"),
+			loadLabel(labels["close_range"], seccompArg0Low),
+			jump(unix.BPF_JGT, protected, "allow", ""),
+			load(seccompArg1Low),
+			jump(unix.BPF_JGE, protected, "deny", "allow"),
+		)
+		if label, ok := labels["dup2"]; ok {
+			steps = append(steps, loadLabel(label, seccompArg1Low), jump(unix.BPF_JEQ, protected, "deny", "allow"))
+		}
+		steps = append(steps,
+			loadLabel(labels["dup3"], seccompArg1Low),
+			jump(unix.BPF_JEQ, protected, "deny", "allow"),
+			loadLabel(labels["fcntl"], seccompArg1Low),
+			jump(unix.BPF_JEQ, seccompFOFDSetLK, "deny", ""),
+			jump(unix.BPF_JEQ, seccompFOFDSetLKW, "deny", ""),
+			load(seccompArg0Low),
+			jump(unix.BPF_JEQ, protected, "check_protected_fcntl", "allow"),
+			loadLabel("check_protected_fcntl", seccompArg1Low),
+			jump(unix.BPF_JEQ, seccompFSetFD, "deny", "allow"),
+			loadLabel(labels["ioctl"], seccompArg0Low),
+			jump(unix.BPF_JEQ, protected, "check_protected_ioctl", "allow"),
+			loadLabel("check_protected_ioctl", seccompArg1Low),
+			jump(unix.BPF_JEQ, seccompFIOCLEX, "deny", "allow"),
+		)
+	} else if notifyUnixDatagram {
+		steps = append(steps, loadLabel("check_socket_syscalls", seccompNumber))
+	}
+	socket, err := number("socket")
+	if err != nil {
+		return nil, err
+	}
+	socketpair, err := number("socketpair")
+	if err != nil {
+		return nil, err
+	}
+	steps = append(steps,
+		loadLabel("check_socket_dispatch", seccompNumber),
+		jump(unix.BPF_JEQ, socket, "check_unix_socket", "check_socketpair"),
+		loadLabel("check_unix_socket", seccompArg0Low),
+		jump(unix.BPF_JEQ, seccompAFUnix, "check_unix_socket_type", "check_socketpair"),
+	)
+	if notifyUnixDatagram {
+		steps = append(steps,
+			loadLabel("check_unix_socket_type", seccompArg1Low),
+			jump(unix.BPF_JEQ, seccompSockDgram|seccompSockCloexec, "check_unix_socket_proto", "deny"),
+			loadLabel("check_unix_socket_proto", seccompArg2Low),
+			jump(unix.BPF_JEQ, 0, "notify_unix_datagram", "deny"),
+			result("notify_unix_datagram", unix.SECCOMP_RET_USER_NOTIF),
+		)
+	} else {
+		steps = append(steps,
+			loadLabel("check_unix_socket_type", seccompNumber),
+			result("deny_unix_socket", unix.SECCOMP_RET_ERRNO|uint32(unix.EPERM)),
+		)
+	}
+	steps = append(steps,
+		loadLabel("check_socketpair", seccompNumber),
+		jump(unix.BPF_JEQ, socketpair, "check_unix_socketpair", "allow"),
+		loadLabel("check_unix_socketpair", seccompArg0Low),
+		jump(unix.BPF_JEQ, seccompAFUnix, "deny", "allow"),
+	)
+	steps = append(steps,
 		result("allow", unix.SECCOMP_RET_ALLOW),
 		result("deny", unix.SECCOMP_RET_ERRNO|uint32(unix.EPERM)),
 		result("nosys", unix.SECCOMP_RET_ERRNO|uint32(unix.ENOSYS)),
 		result("kill", unix.SECCOMP_RET_KILL_PROCESS),
 	)
 	return resolveBPF(steps)
+}
+
+// validateScannerSocketDescriptors refuses inherited Unix sockets before the
+// scanner seccomp filter is installed. SCM_RIGHTS is transported over Unix
+// sockets, while scanners need sendmsg/sendmmsg for netlink route discovery.
+// Seccomp prevents creating new Unix sockets; this check closes the inherited
+// descriptor path before allowing those send APIs.
+func validateScannerSocketDescriptors(files int) error {
+	if files < 0 || files > maxInheritedFiles {
+		return errors.New("scanner inherited descriptor count is invalid")
+	}
+	for fd := 0; fd < 3+files; fd++ {
+		if err := validateScannerSocketDescriptor(fd); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateScannerSocketDescriptor(fd int) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		if errors.Is(err, unix.EBADF) {
+			return nil
+		}
+		return errors.New("scanner inherited descriptor could not be verified")
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK {
+		return nil
+	}
+	domain, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_DOMAIN)
+	if err != nil {
+		return errors.New("scanner inherited socket domain could not be verified")
+	}
+	if domain == unix.AF_UNIX {
+		return errors.New("scanner inherited Unix socket descriptor is not allowed")
+	}
+	return nil
 }
 
 // resolveBPF turns the labels of steps into the forward jump offsets that
@@ -216,7 +408,7 @@ func seccompSupport() error {
 			return errno
 		}
 	}
-	return nil
+	return seccompNotificationSupport()
 }
 
 // seccompUnavailableReason explains why the filter cannot be used.
@@ -233,12 +425,12 @@ func seccompUnavailableReason(err error) string {
 
 // installSeccompFilter installs the filter on the calling thread, which must
 // have no_new_privs set. The program it executes inherits the filter.
-func installSeccompFilter() error {
+func installSeccompFilter(livenessFD int) error {
 	arch, err := currentSeccompArchitecture()
 	if err != nil {
 		return err
 	}
-	filter, err := seccompFilter(arch)
+	filter, err := seccompFilterForLivenessFD(arch, livenessFD)
 	if err != nil {
 		return err
 	}
@@ -247,4 +439,31 @@ func installSeccompFilter() error {
 		return fmt.Errorf("install the seccomp filter: %w", errno)
 	}
 	return nil
+}
+
+// installSeccompNotificationFilter installs the scanner filter with a
+// listener for Nmap's one required AF_UNIX datagram socket request. The
+// caller must be locked to its OS thread and must close the returned listener
+// after sending it to the trusted supervisor, before execing the scanner.
+func installSeccompNotificationFilter(livenessFD int) (int, error) {
+	arch, err := currentSeccompArchitecture()
+	if err != nil {
+		return -1, err
+	}
+	filter, err := seccompFilterWithNotification(arch, livenessFD, true)
+	if err != nil {
+		return -1, err
+	}
+	program := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
+	listener, _, errno := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER, unix.SECCOMP_FILTER_FLAG_NEW_LISTENER, uintptr(unsafe.Pointer(&program)))
+	if errno != 0 {
+		return -1, fmt.Errorf("install the scanner seccomp notification filter: %w", errno)
+	}
+	if listener > uintptr(^uint(0)>>1) {
+		_ = unix.Close(int(listener))
+		return -1, errors.New("scanner seccomp notification listener descriptor is invalid")
+	}
+	fd := int(listener)
+	unix.CloseOnExec(fd)
+	return fd, nil
 }

@@ -287,19 +287,24 @@ type Probe struct {
 // reports the sandbox as unavailable, Confine leaves commands unchanged, and
 // Exec fails.
 var (
-	detectPlatform           func(options Options) *Policy
-	confineProcess           func(cmd *exec.Cmd, uid, gid int, ambient []uintptr)
-	nameCapability           func(capability uintptr) string
-	execRestricted           func(args []string) error
-	hardenProcess            func() error
-	prepareScannerInvocation func(context.Context, *exec.Cmd, *Policy, bool) (*ScannerInvocation, error)
-	reserveScannerIdentity   func(context.Context, *Policy) (*ScannerIdentityReservation, error)
+	detectPlatform              func(options Options) *Policy
+	confineProcess              func(cmd *exec.Cmd, uid, gid int, ambient []uintptr)
+	nameCapability              func(capability uintptr) string
+	execRestricted              func(args []string) error
+	hardenProcess               func() error
+	prepareScannerInvocation    func(context.Context, *exec.Cmd, *Policy, bool) (*ScannerInvocation, error)
+	reserveScannerIdentity      func(context.Context, *Policy) (*ScannerIdentityReservation, error)
+	recoverScannerIdentityState func(bool) error
 )
 
 type identityLease interface {
 	identity() (int, int, bool)
 	release() error
 	quarantine() error
+}
+
+type scannerLivenessLease interface {
+	inheritedScannerLivenessFile() (*os.File, error)
 }
 
 // ScannerIdentityReservation keeps a durable scanner identity reserved while
@@ -339,6 +344,26 @@ func (reservation *ScannerIdentityReservation) Identity() (uint32, uint32, bool)
 	}
 	uid, gid, ok := reservation.lease.identity()
 	return uint32(uid), uint32(gid), ok
+}
+
+// livenessFile returns the lease's exact read-only OFD reference so launchers
+// can pass that open file description through the supervisor and scanner
+// helper. The reservation remains the owner and closes it only after its
+// process-tree proof and artifact cleanup finish.
+func (reservation *ScannerIdentityReservation) livenessFile() (*os.File, error) {
+	if reservation == nil {
+		return nil, errors.New("scanner identity reservation is unavailable")
+	}
+	reservation.mu.Lock()
+	defer reservation.mu.Unlock()
+	if reservation.finished || reservation.lease == nil {
+		return nil, errors.New("scanner identity reservation is unavailable")
+	}
+	lease, ok := reservation.lease.(scannerLivenessLease)
+	if !ok {
+		return nil, errors.New("scanner identity liveness reference is unavailable")
+	}
+	return lease.inheritedScannerLivenessFile()
 }
 
 // WithScannerIdentityReservation returns a policy copy associated with the
@@ -501,6 +526,17 @@ func HardenProcess() error {
 	return hardenProcess()
 }
 
+// RecoverScannerIdentityStateOffline migrates an occupied legacy scanner
+// identity journal only after the operator confirms that every process using
+// the volume has stopped. New-format live scanner trees are additionally
+// protected by the kernel liveness lock; older processes did not hold it.
+func RecoverScannerIdentityStateOffline(confirmAllVolumeUsersStopped bool) error {
+	if recoverScannerIdentityState == nil {
+		return errors.New("scanner identity recovery requires Linux")
+	}
+	return recoverScannerIdentityState(confirmAllVolumeUsersStopped)
+}
+
 // Detect decides how the processes of a profile start in this runtime for the
 // configured modes. Unless a mode is off, it starts short-lived confined
 // processes to confirm that the runtime allows the identity change, the
@@ -601,7 +637,7 @@ func (p *Policy) confine(cmd *exec.Cmd) {
 		return
 	}
 	if p.identityOnlyHelper != "" {
-		startThroughIdentityOnlyHelper(cmd, p.identityOnlyHelper)
+		startThroughIdentityOnlyHelper(cmd, p.identityOnlyHelper, p.identityOnlyLivenessFile)
 	}
 }
 
@@ -609,7 +645,10 @@ func (p *Policy) confine(cmd *exec.Cmd) {
 // installs the scanner no-escape seccomp filter without applying Landlock.
 // Detect uses this only to verify that seccomp independently of the
 // Landlock-backed scanner helper.
-func startThroughIdentityOnlyHelper(cmd *exec.Cmd, helper string) {
+func startThroughIdentityOnlyHelper(cmd *exec.Cmd, helper string, livenessProvider func() (*os.File, error)) {
+	if cmd == nil {
+		return
+	}
 	if cmd.Err != nil {
 		return
 	}
@@ -617,7 +656,21 @@ func startThroughIdentityOnlyHelper(cmd *exec.Cmd, helper string) {
 		cmd.Err = err
 		return
 	}
-	args := []string{helper, ExecCommand, "--profile", string(Scanner), "--files", strconv.Itoa(len(cmd.ExtraFiles)), "--identity-only", "--seccomp", "--", cmd.Path}
+	if livenessProvider == nil {
+		cmd.Err = errors.New("scanner seccomp probe has no liveness reference")
+		return
+	}
+	livenessFile, err := livenessProvider()
+	if err != nil || validateScannerLivenessParentFile(livenessFile) != nil {
+		cmd.Err = errors.New("scanner seccomp probe liveness reference is unavailable")
+		return
+	}
+	livenessFD, err := appendScannerLivenessFile(cmd, livenessFile)
+	if err != nil {
+		cmd.Err = errors.New("scanner seccomp probe liveness reference is invalid")
+		return
+	}
+	args := []string{helper, ExecCommand, "--profile", string(Scanner), "--files", strconv.Itoa(len(cmd.ExtraFiles)), "--identity-only", "--seccomp", "--liveness-fd", strconv.Itoa(livenessFD), "--", cmd.Path}
 	cmd.Args = append(args, cmd.Args[1:]...)
 	cmd.Path = helper
 }
@@ -679,7 +732,8 @@ type Policy struct {
 	helper string
 	// identityOnlyHelper is used only by Detect's independent scanner-seccomp
 	// probe. It installs the no-escape filter without Landlock.
-	identityOnlyHelper string
+	identityOnlyHelper       string
+	identityOnlyLivenessFile func() (*os.File, error)
 	// temporaryHelper is the EdgeWatch executable used to create and confine
 	// one Naabu invocation's temporary directory. It is available even when
 	// Landlock is not, so the helper can still create and later clean the

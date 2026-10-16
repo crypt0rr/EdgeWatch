@@ -134,15 +134,40 @@ filesystem state outside the SQLite database. The built-in `backup` and
 `restore` commands neither include nor reset it; a raw snapshot of the full
 `./data` directory does include it. Keep the journal and marker with the same
 live data volume and never copy, edit, or restore them separately. Stop the
-daemon and scans before taking or restoring a raw volume snapshot. A clean
-container restart can move an empty journal into its new private PID namespace.
-If the supervisor cannot prove the scanner process tree is gone, the scan
-fails, its artifacts are retained, and its UID is quarantined for the rest of
-the kernel boot. A restart does not clear quarantines; they reduce the pool's
-capacity. After a host reboot, the allocator can reset leases from the prior
-boot when the durable boot marker proves that the kernel changed. If the marker
-or journal is unreadable or invalid, the pool remains fail-closed and needs
-storage recovery; do not delete journal entries to recover capacity.
+daemon and scans before taking or restoring a raw volume snapshot. The v3
+allocator passes a read-only kernel liveness reference through the scanner
+supervisor and every scanner/helper process. A private PID namespace can move
+to a new scope only after the kernel confirms no process retains that
+reference; the allocator archives any old journal before resetting it. If the
+supervisor cannot prove the scanner process tree is gone, the scan fails, its
+artifacts are retained, and its UID is quarantined. If the reference or durable
+state is uncertain, the pool remains fail-closed. A host reboot proves that
+processes from the previous boot cannot survive, so the allocator archives and
+resets prior-boot state.
+
+Releases through v0.40.0 used a v2 journal and did not give scanner processes
+the kernel liveness reference. After upgrading, a nonempty same-boot v2 journal
+cannot be reclaimed automatically because it cannot prove whether an old
+scanner descendant still uses an identity. Keep the pool fail-closed until an
+operator has stopped every EdgeWatch process/container using the volume and
+explicitly migrates it with `edgewatch scanner-identities recover
+--confirm-all-volume-users-stopped`. The command takes an exclusive liveness
+lock, requires root as PID 1 in the private scanner runtime, and preserves
+hash-named copies of the old journal and marker before writing an empty v3
+scope. The Compose deployment provides this runtime through the one-off
+container command in the deployment guide; do not run recovery from a host
+shell. It never overwrites an occupied v3 liveness lock. The flag is an
+operator assertion: the command cannot discover old processes in another PID
+namespace. If the state files are malformed or their metadata is unsafe, do
+not delete them; preserve the volume and investigate or restore a complete
+matching snapshot.
+
+Per-invocation UIDs and Landlock protect scanner files, but do not hide scanner
+arguments. Nmap command lines include target addresses and ports; depending on
+the host's procfs policy, another process may read them through
+`/proc/<pid>/cmdline`. The scanners retain `NET_RAW` where the selected mode
+needs it, so processes able to observe the host network may also observe their
+traffic.
 
 EdgeWatch creates Nmap XML and Naabu target-list files in `tmp/scanner` beside
 the database, a daemon-owned `0700` directory. Concurrent scans have different

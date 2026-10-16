@@ -55,6 +55,13 @@ type environment struct {
 	// run starts command confined by policy in environment and reports
 	// whether it succeeded.
 	run func(policy *Policy, command, environment []string) error
+	// ensureScannerRuntime pins the current scanner scope before Detect can
+	// report a usable scanner policy. Test environments can leave it nil when
+	// they model only the policy decision.
+	ensureScannerRuntime func() error
+	// scannerRuntimeLivenessFile returns the retained process-lifetime OFD
+	// reference for Detect's controlled seccomp probe.
+	scannerRuntimeLivenessFile func() (*os.File, error)
 }
 
 // command returns the command line of probe.
@@ -301,6 +308,11 @@ func detectIdentity(profile Profile, mode string, status Status, probe Probe, en
 	if len(missing) > 0 {
 		return unavailable(fmt.Sprintf("the container does not grant %s, which EdgeWatch needs to start and stop %s under %s; add them to cap_add", strings.Join(missing, ", "), spec.processes, identityTarget))
 	}
+	if profile == Scanner && env.ensureScannerRuntime != nil {
+		if err := env.ensureScannerRuntime(); err != nil {
+			return unavailable(fmt.Sprintf("the scanner identity runtime scope could not be retained: %v", err))
+		}
+	}
 	var ambient []uintptr
 	for _, capability := range networkCapabilities {
 		if spec.keepsNetwork && env.permitted&(1<<capability) != 0 {
@@ -359,6 +371,7 @@ func detectScannerSeccomp(policy *Policy, probe Probe, env environment) *Policy 
 	candidate.enforce = false
 	candidate.helper = ""
 	candidate.identityOnlyHelper = env.executable
+	candidate.identityOnlyLivenessFile = env.scannerRuntimeLivenessFile
 	candidate.seccomp = true
 	candidate.status.Seccomp = SeccompStatus{State: StateEnforced}
 	if err := env.runProbe(&candidate, probe); err != nil {
@@ -465,7 +478,18 @@ func confineLinux(cmd *exec.Cmd, uid, gid int, ambient []uintptr) {
 }
 
 func systemEnvironment() environment {
-	env := environment{euid: os.Geteuid(), run: runConfined}
+	env := environment{
+		euid: os.Geteuid(),
+		run:  runConfined,
+		ensureScannerRuntime: func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+			defer cancel()
+			return retainScannerIdentityRuntimeReference(ctx, productionScannerIdentityAllocator())
+		},
+		scannerRuntimeLivenessFile: func() (*os.File, error) {
+			return productionScannerIdentityAllocator().runtimeLivenessFile()
+		},
+	}
 	env.identityRangeErr = validateScannerIdentityRangeMapping(scannerIdentityStart, scannerIdentityCount)
 	env.landlockABI, env.landlockErr = landlockVersion()
 	env.seccompErr = seccompSupport()

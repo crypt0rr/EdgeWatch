@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -268,4 +269,16 @@ func TestDaemonOpenCancellationDoesNotRecoverHotJournal(t *testing.T) {
 		t.Fatalf("daemon open with canceled context = %v, want context.Canceled", err)
 	}
 	requireSidecars(t, path, "canceled daemon open did not recover the journal", "-journal")
+}
+
+func TestHotJournalRecoveryDoesNotCreateMissingDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.db")
+
+	err := recoverHotJournalForDaemonLeaseCheck(context.Background(), path)
+	if err == nil || !strings.HasPrefix(err.Error(), "database not found:") {
+		t.Fatalf("recovery of missing database = %v, want database not found error", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing database after recovery attempt: stat error = %v, want file to remain absent", err)
+	}
 }

@@ -620,6 +620,10 @@ Some signals cross units by design:
 - The scan slots and the scanning host are shared: a unit's scans can wait
   while other units' scans hold the slots, and every unit's probes leave from
   the same host. A slot cap limits a unit but reserves nothing for it.
+- Full scan-result responses share two deployment-wide response slots in
+  addition to each unit's own limit. A GET may receive `503 scan_slots_busy`
+  with `Retry-After: 1` while both are occupied; the refused request does not
+  read the stored scan document.
 - Live-update event IDs, the replay window, and the deployment-wide stream
   limit are shared; see
   [Live-update streams and session revocation](#live-update-streams-and-session-revocation).
@@ -636,14 +640,14 @@ Some signals cross units by design:
   default unit's audit with its source address, because the token names no
   account.
 
-Other signals are closed. Once more than one unit exists, a unit's status
-leaves out the deployment-wide live-update counters, and it leaves them out
-too when the units cannot be counted. A
-unit's status counts, notification totals, and telemetry cover its own rows
-only, its scan slots and probe budgets are its own limits, the Hosts view
-keeps each unit's newest observation of an address apart, and a public slug
-does not reveal whether a unit has it. The inactive YAML jobs in config.yaml
-belong to the default unit, so only its status names them.
+The remaining status and data signals are scoped. Once more than one unit
+exists, a unit's status leaves out the deployment-wide live-update counters,
+and it leaves them out too when the units cannot be counted. A unit's status
+counts, notification totals, and telemetry cover its own rows only, its scan
+slots and probe budgets are its own limits, the Hosts view keeps each unit's
+newest observation of an address apart, and a public slug does not reveal
+whether a unit has it. The inactive YAML jobs in config.yaml belong to the
+default unit, so only its status names them.
 The unit status keeps release-check failures visible but replaces the raw
 diagnostic with the fixed `update_check_failed` category; only platform status
 retains the raw diagnostic, which can include proxy, resolver, peer, or TLS

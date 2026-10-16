@@ -388,6 +388,7 @@ export type IncidentInboxSummary = {
 
 // ChangeWindowSummary is store.ChangeWindowSummary.
 export type ChangeWindowSummary = {
+  summary_notification_status?: string
   new_count: number
   recovered_count: number
   still_open_count: number

@@ -271,8 +271,8 @@ stale backlog. A provider handoff that started before the window can still
 finish during it. If its claim is live at close, the review records it as in
 flight; if it was released or recovered without a result, the review records an
 unknown prior outcome instead. Neither is counted as an alert held during the
-window, and a later failure does not replay the individual alert or amend the
-closing snapshot. Alerts linked to a future window are released for retry
+window. When a summary is queued, a later failure does not replay the
+individual alert or amend the closing snapshot. Alerts linked to a future window are released for retry
 before that window starts; an alert whose provider attempt is still uncertain
 inside an active window remains held for the close review. Redelivering a
 terminal change alert clears its old window association, then the final send
@@ -280,6 +280,15 @@ gate checks whether a window is active now. See [Planned change windows](/user-g
 for scheduling, cancellation, and the closing review. If there was change
 activity, closing the window queues one summary for the job's configured
 destinations and leaves its review due even when delivery later fails.
+If destination metadata cannot be read when an expired window is processed,
+EdgeWatch retries for up to one hour after the end time. If the lookup still
+fails at that bound, it closes the review without queueing a summary and
+releases eligible held alerts for individual delivery, or links them to a later
+open window. The review summary exposes
+`summary_notification_status: "not_queued_destinations_unavailable"`; active
+provider claims remain intact, and a later failure remains retryable. A
+successful destination lookup before the bound follows the normal summary
+notification path.
 Definitive provider failures
 are retried durably for up to 15 attempts over roughly 77 hours; the delay
 doubles from two minutes and caps at 12 hours. A restart preserves each

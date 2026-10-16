@@ -17,7 +17,8 @@ func (a *App) expireChangeWindows(ctx context.Context, system *store.SystemStore
 	if a == nil || a.Store == nil || system == nil {
 		return
 	}
-	due, err := system.DueChangeWindows(ctx, a.nowUTC(), changeWindowExpiryBatchSize)
+	now := a.nowUTC()
+	due, err := system.DueChangeWindows(ctx, now, changeWindowExpiryBatchSize)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
 			a.maintenanceLogger().Error("planned change window expiry lookup failed", "startup", startup, "error", err)
@@ -44,17 +45,30 @@ func (a *App) expireChangeWindows(ctx context.Context, system *store.SystemStore
 			continue
 		}
 		destinations := []string{}
+		summaryNotificationUnavailable := false
 		if a.Notifier != nil {
 			selected, selectErr := a.Notifier.Tenant(ts).QueueDestinationsForJob(ctx, job.Job)
 			if selectErr != nil {
-				// Review state is more important than its optional delivery. A later
-				// event cannot be replayed, but the due review remains in storage.
-				a.maintenanceLogger().Warn("planned change window summary destinations could not be loaded", "window_id", item.ID, "error", selectErr)
+				summaryNotificationUnavailable = true
+				now = a.nowUTC()
+				if now.Before(item.EndAt.Add(store.ChangeWindowSummaryDestinationGrace)) {
+					// Preserve the due window and its held alerts. The regular heartbeat
+					// retries this read until its documented one-hour bound.
+					a.maintenanceLogger().Warn("planned change window summary destinations are temporarily unavailable", "window_id", item.ID)
+					continue
+				}
+				a.maintenanceLogger().Warn("planned change window summary notification not queued after destination retry grace", "window_id", item.ID)
 			} else {
 				destinations = selected
 			}
 		}
-		summary, changed, err := ts.ExpireChangeWindow(ctx, item.ID, a.nowUTC, destinations)
+		var summary store.ChangeWindowSummary
+		var changed bool
+		if summaryNotificationUnavailable {
+			summary, changed, err = ts.ExpireChangeWindowWithoutSummaryNotification(ctx, item.ID, a.nowUTC)
+		} else {
+			summary, changed, err = ts.ExpireChangeWindow(ctx, item.ID, a.nowUTC, destinations)
+		}
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				a.maintenanceLogger().Error("planned change window expiry failed", "window_id", item.ID, "error", err)

@@ -125,6 +125,23 @@ describe('planned change windows', () => {
     expect(screen.queryByText('private-scan')).not.toBeInTheDocument()
   })
 
+  it('explains when destination failure releases alerts instead of queuing a close summary', async () => {
+    vi.mocked(jobChangeWindows).mockResolvedValue({ windows: [windowRecord] } as never)
+    vi.mocked(getJobChangeWindow).mockResolvedValue({
+      window: {
+        ...windowRecord,
+        summary: { ...fullSummary, summary_notification_status: 'not_queued_destinations_unavailable' },
+      },
+    } as never)
+    renderWindows({ canReadIncidents: true })
+
+    fireEvent.click(await screen.findByRole('button', { name: 'View closing summary' }))
+
+    expect(await screen.findByText(/summary notification was not queued because notification destinations remained unavailable for one hour/)).toBeInTheDocument()
+    expect(screen.getByText(/a later provider failure leaves the individual alert retryable/)).toBeInTheDocument()
+    expect(screen.getByText(/the alert remains eligible for normal outbox recovery and retry/)).toBeInTheDocument()
+  })
+
   it('hides cached incident evidence immediately when incidents.read is revoked', async () => {
     vi.mocked(jobChangeWindows).mockResolvedValue({ windows: [windowRecord] } as never)
     function PermissionChangeHarness() {

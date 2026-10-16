@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -226,6 +227,110 @@ func TestDeliveredInFlightChangeAfterWindowCloseRecordsSuccessOnly(t *testing.T)
 	}
 	if health, err := ts.ListDeliveryHealth(ctx); err != nil || health["late-success-destination"].TerminalFailures != 0 || !health["late-success-destination"].LastFailureAt.IsZero() {
 		t.Fatalf("successful late result health = %+v, %v", health, err)
+	}
+}
+
+func TestProviderSuccessAfterWindowEndSurvivesDelayedExpiry(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job := createWindowTestJob(t, ts, "window-late-success-before-close", "UTC")
+	queueWindowTestEvent(t, ctx, s, "late-success-before-close-destination", job.ID, "changes-detected", "scan-late-success-before-close", time.Now().UTC(), []model.Change{{Key: "new:late-success-before-close", Kind: "port", Target: "192.0.2.13", Port: 443}}, false, 0)
+	start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	window := createTestChangeWindow(t, ts, job.ID, start, start.Add(time.Hour))
+	deliveries, err := s.System().ClaimDueDeliveries(ctx, 1, "late-success-before-close-owner")
+	if err != nil || len(deliveries) != 1 {
+		t.Fatalf("claim before future window = %d deliveries, %v", len(deliveries), err)
+	}
+	item := deliveries[0]
+	if err := s.System().BeginDeliveryAttempt(ctx, item.ID, item.ClaimToken); err != nil {
+		t.Fatal(err)
+	}
+	endedAt := time.Now().UTC().Add(-time.Second).Truncate(time.Second)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET start_at=?,end_at=? WHERE id=?`, sqliteTimestamp(endedAt.Add(-time.Hour)), sqliteTimestamp(endedAt), window.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.System().DeliveryResultClaim(ctx, item.ID, item.ClaimToken, nil); err != nil {
+		t.Fatalf("record successful provider result after end_at: %v", err)
+	}
+	var sentAt, coalesced, claim, marker string
+	if err := s.DB.QueryRowContext(ctx, `SELECT sent_at,coalesced_at,claim_token,attempt_started_at FROM outbox WHERE id=?`, item.ID).Scan(&sentAt, &coalesced, &claim, &marker); err != nil {
+		t.Fatal(err)
+	}
+	if sentAt == "" || coalesced != "" || claim != "" || marker != "" {
+		t.Fatalf("post-end success before close sent=%q coalesced=%q claim=%q marker=%q", sentAt, coalesced, claim, marker)
+	}
+
+	if summary, changed, err := ts.ExpireChangeWindow(ctx, window.ID, func() time.Time { return endedAt.Add(time.Second) }, nil); err != nil || !changed {
+		t.Fatalf("delayed window expiry = %+v changed=%v err=%v", summary, changed, err)
+	}
+	var afterSent, afterCoalesced string
+	if err := s.DB.QueryRowContext(ctx, `SELECT sent_at,coalesced_at FROM outbox WHERE id=?`, item.ID).Scan(&afterSent, &afterCoalesced); err != nil {
+		t.Fatal(err)
+	}
+	if afterSent != sentAt || afterCoalesced != "" {
+		t.Fatalf("delayed expiry changed provider result sent=%q→%q coalesced=%q; want sent result preserved", sentAt, afterSent, afterCoalesced)
+	}
+}
+
+func TestReleaseDeliveryClaimsUsesExactWindowIntervalForStartedAttempts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name       string
+		endOffset  time.Duration
+		wantMarker bool
+	}{
+		{name: "active window retains unknown outcome", endOffset: time.Hour, wantMarker: true},
+		{name: "expired unclosed window retries", endOffset: -time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openTestStore(t)
+			ts := defaultTenant(s)
+			job := createWindowTestJob(t, ts, "window-recovery-"+strings.ReplaceAll(tc.name, " ", "-"), "UTC")
+			queueWindowTestEvent(t, ctx, s, "window-recovery-"+job.ID, job.ID, "changes-detected", "scan-window-recovery-"+job.ID, time.Now().UTC(), []model.Change{{Key: "new:window-recovery-" + job.ID, Kind: "port", Target: "192.0.2.14", Port: 443}}, false, 0)
+			start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+			window := createTestChangeWindow(t, ts, job.ID, start, start.Add(time.Hour))
+			claimed, err := s.System().ClaimDueDeliveries(ctx, 1, "window-recovery-owner-"+job.ID)
+			if err != nil || len(claimed) != 1 {
+				t.Fatalf("claim before future window = %+v, %v", claimed, err)
+			}
+			item := claimed[0]
+			if err := s.System().BeginDeliveryAttempt(ctx, item.ID, item.ClaimToken); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC().Truncate(time.Second)
+			if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET start_at=?,end_at=? WHERE id=?`, sqliteTimestamp(now.Add(-time.Hour)), sqliteTimestamp(now.Add(tc.endOffset)), window.ID); err != nil {
+				t.Fatal(err)
+			}
+			if released, err := s.System().ReleaseDeliveryClaims(ctx); err != nil || released != 1 {
+				t.Fatalf("release started delivery = %d, %v", released, err)
+			}
+			var marker, coalesced, claim string
+			if err := s.DB.QueryRowContext(ctx, `SELECT attempt_started_at,coalesced_at,claim_token FROM outbox WHERE id=?`, item.ID).Scan(&marker, &coalesced, &claim); err != nil {
+				t.Fatal(err)
+			}
+			if (marker != "") != tc.wantMarker || coalesced != "" || claim != "" {
+				t.Fatalf("recovered attempt marker=%q coalesced=%q claim=%q; want marker=%t and no coalescing/claim", marker, coalesced, claim, tc.wantMarker)
+			}
+			retry, err := s.System().ClaimDueDeliveries(ctx, 1, "window-recovery-retry-"+job.ID)
+			if tc.wantMarker {
+				if err != nil || len(retry) != 0 {
+					t.Fatalf("active-window attempt was released for retry: %+v, %v", retry, err)
+				}
+				return
+			}
+			if err != nil || len(retry) != 1 || retry[0].ID != item.ID {
+				t.Fatalf("expired-window attempt is not retryable: %+v, %v", retry, err)
+			}
+			if err := s.System().BeginDeliveryAttempt(ctx, retry[0].ID, retry[0].ClaimToken); err != nil {
+				t.Fatalf("expired-window retry was held: %v", err)
+			}
+			if err := s.System().DeliveryResultClaim(ctx, retry[0].ID, retry[0].ClaimToken, nil); err != nil {
+				t.Fatalf("complete expired-window retry: %v", err)
+			}
+		})
 	}
 }
 

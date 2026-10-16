@@ -224,12 +224,11 @@ const (
 const heldDeliverySQL = `(due.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants WHERE tenants.id=due.tenant_id AND tenants.state='` + TenantStateActive + `'))
 AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=due.tenant_id AND purge.job_id=CASE WHEN json_valid(CAST(due.payload_json AS TEXT)) THEN COALESCE(json_extract(CAST(due.payload_json AS TEXT),'$.job_id'),'') ELSE '' END)`
 
-// changeWindowDeliverySQL keeps a pending change alert out of a claim while
-// its associated window has started but the close transaction has not yet
-// committed. The caller supplies the time after it acquired the writer.
+// changeWindowDeliverySQL keeps a pending change alert out of a claim only
+// while its associated open window's interval contains the writer timestamp.
 const changeWindowDeliverySQL = `(due.change_window_id='' OR NOT EXISTS (
  SELECT 1 FROM change_windows AS quiet
- WHERE quiet.id=due.change_window_id AND quiet.closed_at='' AND quiet.start_at<=?
+ WHERE quiet.id=due.change_window_id AND quiet.closed_at='' AND quiet.start_at<=? AND quiet.end_at>?
 )) AND due.coalesced_at='' AND due.coalesce_after_attempt=0 AND due.attempt_started_at=''`
 
 // ClaimDueDeliveries atomically leases due outbox rows to one drain owner.
@@ -300,7 +299,7 @@ WHERE sent_at IS NULL AND terminal_at='' AND next_at<=?
 ORDER BY id LIMIT ?`
 	// The first timestamp is the due cutoff and the last timestamp before the
 	// destination list is the claim-expiry cutoff.
-	args := []any{nowText, deliveryMaxAttempts, deliveryMaxDeferrals, nowText, windowNowText}
+	args := []any{nowText, deliveryMaxAttempts, deliveryMaxDeferrals, nowText, windowNowText, windowNowText}
 	for _, destination := range unique {
 		args = append(args, destination)
 	}
@@ -426,7 +425,7 @@ func (ss *SystemStore) claimDueDeliveries(ctx context.Context, limit int, owner 
 	nowText := now.Format(time.RFC3339Nano)
 	windowNowText := sqliteTimestamp(now)
 	where := `id IN (SELECT id FROM outbox AS due WHERE sent_at IS NULL AND terminal_at='' AND attempts < ? AND next_at <= ? AND (claim_token='' OR claim_until='' OR claim_until <= ?) AND ` + heldDeliverySQL + ` AND ` + changeWindowDeliverySQL
-	whereArgs := []any{deliveryMaxAttempts, nowText, nowText, windowNowText}
+	whereArgs := []any{deliveryMaxAttempts, nowText, nowText, windowNowText, windowNowText}
 	if len(excluded) > 0 {
 		placeholders := make([]string, 0, len(excluded))
 		for _, destination := range excluded {
@@ -536,9 +535,9 @@ func (ss *SystemStore) failInvalidDeliveryPayload(ctx context.Context, id int64,
 // ReleaseDeliveryClaims clears all active outbox leases. It is used when a
 // daemon starts (or shuts down cleanly) so rows claimed by a previous process
 // do not remain unavailable for the full claim lease. Attempt markers for a
-// future scheduled window are cleared so the alert is retryable before the
-// window starts; a started attempt in an active window remains unknown until
-// that window closes.
+// future scheduled window and an expired-but-unclosed window are cleared so
+// the alert is retryable; a started attempt in an active window remains
+// unknown until that window closes.
 func (ss *SystemStore) ReleaseDeliveryClaims(ctx context.Context) (int64, error) {
 	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
@@ -599,9 +598,10 @@ func (ss *SystemStore) ReleaseDeliveryClaims(ctx context.Context) (int64, error)
 
 // RecoverExpiredDeliveryClaims recovers a bounded page of deliveries whose
 // provider invocation marker outlived its lease. Change alerts linked to a
-// future window may retry after recovery; an active window keeps the marker
-// for its close summary. A dangling nonempty window link is an invariant error;
-// the transaction rolls back instead of recovering a row without its policy.
+// future or expired-but-unclosed window may retry after recovery; an active
+// window keeps the marker for its close summary. A dangling nonempty window
+// link is an invariant error; the transaction rolls back instead of recovering
+// a row without its policy.
 func (ss *SystemStore) RecoverExpiredDeliveryClaims(ctx context.Context) (int64, error) {
 	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
@@ -657,9 +657,9 @@ func expiredDeliveryClaimsTx(ctx context.Context, tx *sql.Tx, nowText string) ([
 func recoverStartedDeliveryTx(ctx context.Context, tx *sql.Tx, id int64, claim, windowID, eventType string, coalesceAfter int, tenantID string, now time.Time, nowText string, transition outboxTransitionName, extraFence string) error {
 	clearMarker := true
 	coalesce := false
-	var startRaw, closedAt string
+	var startRaw, endRaw, closedAt string
 	if windowID != "" {
-		err := tx.QueryRowContext(ctx, `SELECT quiet.start_at,quiet.closed_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.id=? AND j.tenant_id=?`, windowID, tenantID).Scan(&startRaw, &closedAt)
+		err := tx.QueryRowContext(ctx, `SELECT quiet.start_at,quiet.end_at,quiet.closed_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.id=? AND j.tenant_id=?`, windowID, tenantID).Scan(&startRaw, &endRaw, &closedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("outbox delivery %d references missing linked change window %q: %w", id, windowID, err)
 		}
@@ -680,9 +680,14 @@ func recoverStartedDeliveryTx(ctx context.Context, tx *sql.Tx, id int64, claim, 
 				// against the new destination, so retain that uncertain handoff
 				// for the scheduled window's review and coalesce it at close.
 				clearMarker = coalesceAfter == 0
+			case !now.Before(scanTime(endRaw)):
+				// An expired but not-yet-closed window no longer holds a provider
+				// outcome. Retry the attempt normally; delayed summary generation
+				// must not erase or coalesce a result that completes after end_at.
+				clearMarker = true
 			default:
-				// An active (or overdue but not yet closed) window preserves the
-				// provider-outcome uncertainty until its close summary commits.
+				// An active [start_at,end_at) window preserves the provider-outcome
+				// uncertainty until its close summary commits.
 				clearMarker = false
 			}
 		}
@@ -789,9 +794,8 @@ func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim 
 	}
 	defer func() { _ = tx.Rollback() }()
 	var attempts, deferrals, coalesceAfter int
-	var destination, windowID, eventType, jobID, tenantID string
-	var payload []byte
-	if err := tx.QueryRowContext(ctx, `SELECT attempts,deferrals,destination,change_window_id,event_type,event_job_id,payload_json,coalesce_after_attempt,COALESCE(tenant_id,'') FROM outbox WHERE id=? AND sent_at IS NULL AND terminal_at='' AND claim_token=?`, id, claim).Scan(&attempts, &deferrals, &destination, &windowID, &eventType, &jobID, &payload, &coalesceAfter, &tenantID); err != nil {
+	var destination, windowID, eventType, tenantID string
+	if err := tx.QueryRowContext(ctx, `SELECT attempts,deferrals,destination,change_window_id,event_type,coalesce_after_attempt,COALESCE(tenant_id,'') FROM outbox WHERE id=? AND sent_at IS NULL AND terminal_at='' AND claim_token=?`, id, claim).Scan(&attempts, &deferrals, &destination, &windowID, &eventType, &coalesceAfter, &tenantID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrDeliveryClaimLost
 		}
@@ -842,38 +846,6 @@ func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim 
 				return err
 			}
 			return tx.Commit()
-		}
-		if windowID != "" {
-			var endRaw, closedAt string
-			err := tx.QueryRowContext(ctx, `SELECT quiet.end_at,quiet.closed_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.id=? AND j.tenant_id=?`, windowID, tenantID).Scan(&endRaw, &closedAt)
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("outbox delivery %d references missing linked change window %q: %w", id, windowID, err)
-			}
-			if err != nil {
-				return err
-			}
-			if closedAt == "" && !now.Before(scanTime(endRaw)) {
-				var event model.Event
-				if json.Unmarshal(payload, &event) == nil {
-					if event.JobID == "" {
-						event.JobID = jobID
-					}
-					if err := recordChangeWindowEventTx(ctx, tx, windowID, tenantID, event); err != nil {
-						return err
-					}
-				}
-				if _, err := applyOutboxTransition(ctx, tx, outboxHoldClosedWindow,
-					`id=? AND sent_at IS NULL AND claim_token=?`, []any{id, claim},
-					outboxChange("next_at", outboxSet, "?", scanTime(endRaw).Format(time.RFC3339Nano)),
-					outboxChange("last_error", outboxReset, "''"),
-					outboxChange("claim_token", outboxReset, "''"),
-					outboxChange("claim_until", outboxReset, "''"),
-					outboxChange("attempt_started_at", outboxReset, "''"),
-				); err != nil {
-					return err
-				}
-				return tx.Commit()
-			}
 		}
 	}
 	if sendErr == nil {

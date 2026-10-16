@@ -39,9 +39,15 @@ commit them.
 
 Schema 69 adds tenant-scoped `change_windows`, compact per-window event and
 change references, and delivery metadata for planned quiet windows. The
-migration backfills each existing outbox row's event type and job ID from a
-valid JSON payload; malformed payloads keep empty metadata and do not block
-the upgrade. It does not resend, rewrite, or remove existing notifications.
+For an outbox row that is still unsent, the migration reads a valid JSON
+payload to fill its event type and job ID; malformed payloads keep empty
+metadata and do not block the upgrade. Sent rows are left unchanged. A direct
+upgrade from schema 68 therefore leaves sent-history metadata empty, while a
+database previously upgraded by a v0.39 release may already have metadata on
+those rows. This difference is only in optional metadata: it does not resend,
+rewrite, or remove notifications. The migration builds two pending-delivery
+indexes over all outbox rows, so its duration and temporary WAL depend on total
+outbox size even though the payload update targets only unsent rows.
 New window references are captured before the existing event-payload size
 bound, so later event pruning does not erase a retained closing review.
 
@@ -87,10 +93,11 @@ matching pre-upgrade `./data` backup to roll back.
 
 Schema 71 adds an all-row index on outbox tenant and row ID. Tenant deletion
 uses it to select bounded batches of every delivery, including sent history
-whose event metadata is intentionally blank and rows without event metadata.
-The migration does not read or rewrite payloads or change delivery state. It
-builds the index over existing outbox rows, so its duration depends on outbox
-size. An older release refuses the upgraded database; restore the matching
+and rows without event metadata. Sent rows may have empty or populated event
+metadata depending on the upgrade path described under schema 69. The
+migration does not read or rewrite payloads or change delivery state. It builds
+the index over existing outbox rows, so its duration depends on outbox size.
+An older release refuses the upgraded database; restore the matching
 pre-upgrade `./data` backup to roll back.
 
 ## Schema 72

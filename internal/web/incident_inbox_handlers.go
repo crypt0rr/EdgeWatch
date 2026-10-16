@@ -17,9 +17,10 @@ func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request, ts *store
 		return
 	}
 	query := r.URL.Query()
+	serverNow := time.Now().UTC()
 	result, err := ts.ListIncidentInbox(r.Context(), store.IncidentInboxFilter{
 		View: query.Get("view"), JobID: query.Get("job_id"), OccurrenceToken: query.Get("occurrence_token"), Severity: query.Get("severity"), Kind: query.Get("kind"),
-		Limit: queryLimit(r), Offset: offset, Now: time.Now().UTC(),
+		Limit: queryLimit(r), Offset: offset, Now: serverNow,
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrIncidentReviewInvalid) {
@@ -39,7 +40,7 @@ func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request, ts *store
 		Incidents: result.Items,
 		Pagination: store.IncidentInboxPagination{Limit: result.Limit, Offset: result.Offset, Total: result.Total,
 			HasMore: result.HasMore, NextOffset: result.NextOffset},
-		Truncated: false, ActiveCount: result.ActiveCount,
+		Truncated: false, ActiveCount: result.ActiveCount, ServerNow: serverNow, NextFollowUpAt: result.NextFollowUpAt,
 	})
 }
 

@@ -20,7 +20,7 @@ describe('investigation inbox API contract', () => {
 
   it('encodes validated inbox filters while retaining the active count and pagination', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify({
-      incidents: [], truncated: false, active_count: 7,
+      incidents: [], truncated: false, active_count: 7, server_now: '2026-10-14T12:00:00Z', next_follow_up_at: null,
       pagination: { limit: 20, offset: 40, total: 62, has_more: true, next_offset: 60 },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     vi.stubGlobal('fetch', fetchMock)
@@ -28,13 +28,15 @@ describe('investigation inbox API contract', () => {
     const response = await listIncidents({ view: 'follow_up_due', job_id: 'job 1', severity: 'critical', kind: 'port-address', limit: 20, offset: 40 })
 
     expect(response.active_count).toBe(7)
+    expect(response.server_now).toBe('2026-10-14T12:00:00Z')
+    expect(response.next_follow_up_at).toBeNull()
     expect(response.pagination.total).toBe(62)
     expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/incidents?view=follow_up_due&limit=20&offset=40&job_id=job+1&severity=critical&kind=port-address')
   })
 
   it('keeps legacy summary calls on the unfiltered active view', async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({
-      incidents: [], truncated: false, active_count: 3,
+      incidents: [], truncated: false, active_count: 3, server_now: '2026-10-14T12:00:00Z', next_follow_up_at: null,
       pagination: { limit: 1, offset: 0, total: 3, has_more: true, next_offset: 1 },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     vi.stubGlobal('fetch', fetchMock)
@@ -46,7 +48,7 @@ describe('investigation inbox API contract', () => {
 
   it('supports a bounded exact occurrence refresh scoped to one job', async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({
-      incidents: [], truncated: false, active_count: 4,
+      incidents: [], truncated: false, active_count: 4, server_now: '2026-10-14T12:00:00Z', next_follow_up_at: null,
       pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     vi.stubGlobal('fetch', fetchMock)

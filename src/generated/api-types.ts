@@ -377,6 +377,8 @@ export type IncidentInboxPage = {
   pagination: IncidentInboxPagination
   truncated: boolean
   active_count: number
+  server_now: string
+  next_follow_up_at: string | null
 }
 
 // IncidentInboxSummary is web.IncidentInboxSummary.

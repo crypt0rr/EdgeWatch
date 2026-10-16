@@ -31,7 +31,7 @@ function account(overrides: Partial<SessionUser> = {}): SessionUser {
 }
 
 const unauthenticated = () => new APIError('authentication required', 'unauthorized', undefined, 401)
-const noIncidents = { incidents: [], truncated: false, active_count: 0, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } }
+const noIncidents = { incidents: [], truncated: false, active_count: 0, server_now: new Date().toISOString(), next_follow_up_at: null, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } }
 
 /**
  * Renders the console as the browser bootstrap does, with the production

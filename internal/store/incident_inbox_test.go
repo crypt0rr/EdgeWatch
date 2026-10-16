@@ -239,8 +239,16 @@ func TestIncidentInboxDefaultKindAndInvestigatingFilters(t *testing.T) {
 		t.Fatalf("save future follow-up: %v", err)
 	}
 	page, err = ts.ListIncidentInbox(ctx, IncidentInboxFilter{View: "investigating", Kind: "port", Now: now})
-	if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].Review.FollowUpAt == nil || !page.Items[0].Review.FollowUpAt.Equal(due) {
+	if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].Review.FollowUpAt == nil || !page.Items[0].Review.FollowUpAt.Equal(due) || page.NextFollowUpAt == nil || !page.NextFollowUpAt.Equal(due) {
 		t.Fatalf("future follow-up remained in investigating view = %+v, %v", page, err)
+	}
+	upcomingDueView, err := ts.ListIncidentInbox(ctx, IncidentInboxFilter{View: "follow_up_due", Kind: "port", Now: now})
+	if err != nil || upcomingDueView.Total != 0 || len(upcomingDueView.Items) != 0 || upcomingDueView.NextFollowUpAt == nil || !upcomingDueView.NextFollowUpAt.Equal(due) {
+		t.Fatalf("future follow-up metadata for empty due view = %+v, %v; want the next port follow-up", upcomingDueView, err)
+	}
+	wrongKind, err := ts.ListIncidentInbox(ctx, IncidentInboxFilter{View: "follow_up_due", Kind: "service", Now: now})
+	if err != nil || wrongKind.NextFollowUpAt != nil {
+		t.Fatalf("future follow-up escaped the kind filter: %+v, %v", wrongKind, err)
 	}
 	pastDue := time.Now().UTC().Add(-time.Minute)
 	write.ExpectedRevision = 2
@@ -251,6 +259,9 @@ func TestIncidentInboxDefaultKindAndInvestigatingFilters(t *testing.T) {
 	defaultNow, err := ts.ListIncidentInbox(ctx, IncidentInboxFilter{Kind: "port"})
 	if err != nil || defaultNow.Total != 1 || len(defaultNow.Items) != 1 || defaultNow.Items[0].ViewStatus != "follow_up_due" {
 		t.Fatalf("omitted timestamp did not use current time for past-due follow-up: %+v, %v", defaultNow, err)
+	}
+	if defaultNow.NextFollowUpAt != nil {
+		t.Fatalf("already due follow-up was reported as upcoming: %+v", defaultNow.NextFollowUpAt)
 	}
 }
 
@@ -1121,6 +1132,39 @@ func TestIncidentInboxNewerEvidenceStaysWithinJobAndTenant(t *testing.T) {
 	pageB, err := tenantB.ListIncidentInbox(ctx, IncidentInboxFilter{View: "all_active", Limit: 10, Now: lastSeen.Add(time.Hour)})
 	if err != nil || pageB.Total != 1 || len(pageB.Items) != 1 || pageB.Items[0].JobID != jobB.ID || pageB.Items[0].ObservationUncertainty.ScanID != "tenant-b-scan" {
 		t.Fatalf("tenant B inbox = %+v, %v; want only tenant B's own job and scan", pageB, err)
+	}
+	followUpA := lastSeen.Add(2 * time.Hour)
+	followUpB := lastSeen.Add(3 * time.Hour)
+	var tenantAItem IncidentInboxItem
+	for _, item := range pageA.Items {
+		if item.JobID == jobA.ID {
+			tenantAItem = item
+			break
+		}
+	}
+	if tenantAItem.JobID == "" {
+		t.Fatal("tenant A inbox did not include the target job")
+	}
+	for _, candidate := range []struct {
+		tenant *TenantStore
+		job    JobRecord
+		item   IncidentInboxItem
+		due    time.Time
+	}{{tenantA, jobA, tenantAItem, followUpA}, {tenantB, jobB, pageB.Items[0], followUpB}} {
+		if _, err := candidate.tenant.SaveIncidentReview(ctx, candidate.job.ID, IncidentReviewWrite{
+			Key: candidate.item.Incident.Change.Key, OccurrenceToken: candidate.item.OccurrenceToken,
+			Status: "investigating", FollowUpAt: &candidate.due,
+		}, "reviewer", "Reviewer", AuditEntry{}); err != nil {
+			t.Fatalf("save tenant %s follow-up: %v", candidate.tenant.scope.id, err)
+		}
+	}
+	upcomingA, err := tenantA.ListIncidentInbox(ctx, IncidentInboxFilter{View: "follow_up_due", JobID: jobA.ID, Now: lastSeen.Add(time.Hour)})
+	if err != nil || len(upcomingA.Items) != 0 || upcomingA.NextFollowUpAt == nil || !upcomingA.NextFollowUpAt.Equal(followUpA) {
+		t.Fatalf("tenant A upcoming follow-up = %+v, %v; want only its own empty due view and schedule", upcomingA, err)
+	}
+	upcomingB, err := tenantB.ListIncidentInbox(ctx, IncidentInboxFilter{View: "follow_up_due", JobID: jobB.ID, Now: lastSeen.Add(time.Hour)})
+	if err != nil || len(upcomingB.Items) != 0 || upcomingB.NextFollowUpAt == nil || !upcomingB.NextFollowUpAt.Equal(followUpB) {
+		t.Fatalf("tenant B upcoming follow-up = %+v, %v; want only its own empty due view and schedule", upcomingB, err)
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +19,42 @@ import (
 
 type cliStartupState struct {
 	state, owner, startedAt string
+}
+
+const daemonHotJournalWriterPathEnv = "EDGEWATCH_TEST_DAEMON_HOT_JOURNAL_WRITER_PATH"
+
+const daemonHotJournalProbeTable = "daemon_hot_journal_probe"
+
+// TestDaemonHotJournalWriterProcess is re-executed by the CLI regression so
+// SIGKILL leaves a real rollback journal instead of allowing SQLite to roll
+// the interrupted transaction back during a normal close.
+func TestDaemonHotJournalWriterProcess(t *testing.T) {
+	path := os.Getenv(daemonHotJournalWriterPathEnv)
+	if path == "" {
+		return
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, statement := range []string{
+		"PRAGMA busy_timeout=5000",
+		"PRAGMA cache_size=8",
+		"BEGIN IMMEDIATE",
+		`UPDATE ` + daemonHotJournalProbeTable + ` SET detail='UPDATED'||hex(randomblob(1500))`,
+	} {
+		if _, err := conn.ExecContext(context.Background(), statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	_, _ = fmt.Fprintln(os.Stdout, "EDGEWATCH_DAEMON_HOT_JOURNAL_READY")
+	select {}
 }
 
 func readCLIStartupState(t *testing.T, database string) cliStartupState {
@@ -189,4 +228,102 @@ func TestDaemonStartsWithoutLiveLease(t *testing.T) {
 			t.Fatalf("startup_state = %#v, want ready", state)
 		}
 	})
+}
+
+func TestDaemonCommandRecoversHotRollbackJournal(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	database := filepath.Join(dir, "edgewatch.db")
+	seed, err := store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.DB.Exec(`CREATE TABLE ` + daemonHotJournalProbeTable + ` (id INTEGER PRIMARY KEY, detail TEXT NOT NULL)`); err != nil {
+		seed.Close()
+		t.Fatal(err)
+	}
+	for i := 0; i < 400; i++ {
+		if _, err := seed.DB.Exec(`INSERT INTO `+daemonHotJournalProbeTable+`(detail) VALUES(?)`, fmt.Sprintf("original-%d", i)); err != nil {
+			seed.Close()
+			t.Fatal(err)
+		}
+	}
+	supported := sqliteUserVersion(t, database)
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var journalMode string
+	if err := raw.QueryRow(`PRAGMA journal_mode=DELETE`).Scan(&journalMode); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if journalMode != "delete" {
+		t.Fatalf("journal_mode = %q, want delete", journalMode)
+	}
+	setSQLiteUserVersion(t, database, supported-1)
+
+	writerCtx, cancelWriter := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelWriter()
+	command := exec.CommandContext(writerCtx, os.Args[0], "-test.run=^TestDaemonHotJournalWriterProcess$", "-test.count=1")
+	command.Env = append(os.Environ(), daemonHotJournalWriterPathEnv+"="+database)
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ready := false
+	for scanner := bufio.NewScanner(stdout); scanner.Scan(); {
+		if scanner.Text() == "EDGEWATCH_DAEMON_HOT_JOURNAL_READY" {
+			ready = true
+			break
+		}
+	}
+	if !ready {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		t.Fatalf("hot-journal writer exited before spilling its transaction; stderr: %s", stderr.String())
+	}
+	if _, err := os.Stat(database + "-journal"); err != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		t.Fatalf("writer did not spill a rollback journal: %v", err)
+	}
+	if err := command.Process.Kill(); err != nil {
+		_ = command.Wait()
+		t.Fatalf("kill hot-journal writer: %v", err)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("hot-journal writer exited successfully after SIGKILL")
+	}
+
+	// The occupied listener makes run daemon return only after its database
+	// startup, including the guarded lease check and migration, has completed.
+	configPath := writeDaemonLeaseConfig(t, dir, database)
+	err = run([]string{"daemon", "--config", configPath})
+	if err == nil || !strings.Contains(err.Error(), "address already in use") {
+		t.Fatalf("daemon error = %v, want startup to reach the occupied listener", err)
+	}
+	if got := sqliteUserVersion(t, database); got != supported {
+		t.Fatalf("user_version after recovered daemon startup = %d, want %d", got, supported)
+	}
+	if got := countCLIRows(t, database, daemonHotJournalProbeTable); got != 400 {
+		t.Fatalf("probe rows after daemon recovered interrupted transaction = %d, want 400", got)
+	}
+	if got := countCLIRows(t, database, daemonHotJournalProbeTable+` WHERE detail LIKE 'UPDATED%'`); got != 0 {
+		t.Fatalf("rows from interrupted transaction after daemon startup = %d, want 0", got)
+	}
+	if _, err := os.Stat(database + "-journal"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rollback journal after daemon startup: %v", err)
+	}
 }

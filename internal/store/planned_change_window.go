@@ -506,6 +506,17 @@ func (ts *TenantStore) expireChangeWindow(ctx context.Context, id string, clock 
 // started. An active cancellation ends at the transaction's actual close
 // time and creates a summary only when the window contains change evidence.
 func (ts *TenantStore) CancelChangeWindow(ctx context.Context, jobID, id, actorUserID, actorLabel string, destinations []string, audit AuditEntry) (ChangeWindow, bool, error) {
+	return ts.cancelChangeWindow(ctx, jobID, id, actorUserID, actorLabel, destinations, audit, false)
+}
+
+// CancelScheduledChangeWindow cancels only a window that is still strictly
+// before its start after this method acquires the database write lock. It does
+// not need notification destinations because it creates no closing summary.
+func (ts *TenantStore) CancelScheduledChangeWindow(ctx context.Context, jobID, id, actorUserID, actorLabel string, audit AuditEntry) (ChangeWindow, bool, error) {
+	return ts.cancelChangeWindow(ctx, jobID, id, actorUserID, actorLabel, nil, audit, true)
+}
+
+func (ts *TenantStore) cancelChangeWindow(ctx context.Context, jobID, id, actorUserID, actorLabel string, destinations []string, audit AuditEntry, beforeStartOnly bool) (ChangeWindow, bool, error) {
 	if err := ts.ready(); err != nil {
 		return ChangeWindow{}, false, err
 	}
@@ -525,6 +536,9 @@ func (ts *TenantStore) CancelChangeWindow(ctx context.Context, jobID, id, actorU
 		return ChangeWindow{}, false, err
 	}
 	if closedAt != "" {
+		return ChangeWindow{}, false, ErrConflict
+	}
+	if beforeStartOnly && !closeAt.Before(scanTime(startRaw)) {
 		return ChangeWindow{}, false, ErrConflict
 	}
 	windowTenant = ts.scope

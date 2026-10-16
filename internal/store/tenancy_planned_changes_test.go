@@ -71,6 +71,22 @@ func init() {
 				}
 			}
 		}},
+		"CancelScheduledChangeWindow": {writes: true, run: func(t *testing.T, f tenantFixture) {
+			ctx := context.Background()
+			start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+			a := createTenantWindow(t, f.store.Tenant(f.a), f.jobA, start)
+			b := createTenantWindow(t, f.store.Tenant(f.b), f.jobB, start)
+			before := tenantJobDigest(t, f.store, f.a)
+			if _, _, err := f.store.Tenant(f.b).CancelScheduledChangeWindow(ctx, f.jobA, a.ID, "actor", "Operator", AuditEntry{}); !errors.Is(err, ErrNotFound) {
+				t.Errorf("tenant B cancelled tenant A's scheduled window: %v, want ErrNotFound", err)
+			}
+			if tenantJobDigest(t, f.store, f.a) != before {
+				t.Fatal("tenant B's refused scheduled cancel changed tenant A's rows")
+			}
+			if _, changed, err := f.store.Tenant(f.b).CancelScheduledChangeWindow(ctx, f.jobB, b.ID, "actor", "Operator", AuditEntry{}); err != nil || !changed {
+				t.Errorf("tenant B cancelled its own scheduled window: changed %v, err %v", changed, err)
+			}
+		}},
 		"CancelChangeWindow": {writes: true, run: func(t *testing.T, f tenantFixture) {
 			ctx := context.Background()
 			start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)

@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"os"
@@ -742,6 +743,29 @@ func TestParseXMLRejectsInternalSubsetBeforeLargeAttributeAllocation(t *testing.
 		t.Fatalf("internal-subset input reached XML tokenization/materialization: %#v", stats)
 	}
 	runtime.KeepAlive(data)
+}
+
+func TestNmapXMLDeclarationGuardIgnoresBracketDecoys(t *testing.T) {
+	input := `<!DOCTYPE nmaprun SYSTEM "urn:example:[quoted]" <<!-- [comment] --> <?target [processing]?> ><nmaprun a="ok"/>`
+	guard := newNmapXMLAttributeLimitReader(context.Background(), strings.NewReader(input))
+	got, err := io.ReadAll(guard)
+	if err != nil {
+		t.Fatalf("declaration decoy brackets were rejected: %v", err)
+	}
+	if string(got) != input {
+		t.Fatalf("guard changed declaration bytes: %q", got)
+	}
+	if guard.attributeCount != 1 || guard.state != nmapXMLLexText {
+		t.Fatalf("guard state after declaration and root tag = count %d, state %d; want count 1 and text", guard.attributeCount, guard.state)
+	}
+}
+
+func TestNmapXMLDeclarationGuardRejectsMalformedBangSubset(t *testing.T) {
+	guard := newNmapXMLAttributeLimitReader(context.Background(), strings.NewReader(`<![conditional`))
+	_, err := io.ReadAll(guard)
+	if !errors.Is(err, errNmapXMLInternalSubset) {
+		t.Fatalf("malformed declaration subset error = %v, want %v", err, errNmapXMLInternalSubset)
+	}
 }
 
 type nmapXMLChunkReader struct {

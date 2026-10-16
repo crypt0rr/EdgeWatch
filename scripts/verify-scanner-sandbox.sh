@@ -25,6 +25,10 @@ set -euo pipefail
 # dies with the edgewatch scan command that started it.
 image=${1:?usage: verify-scanner-sandbox.sh IMAGE}
 
+script_directory=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+scanner_pid_selector_source=$script_directory/scanner-pid-selector.sh
+scanner_pid_selector=/usr/local/bin/edgewatch-scanner-pid-selector
+source "$script_directory/scanner-process-hold.sh"
 workdir=$(mktemp -d)
 container=
 listener_pid=
@@ -32,6 +36,7 @@ webhook_pid=
 proc_fd_probe=
 cleanup() {
   local container_removed=1
+  resume_held_scanner || true
   if [ -n "$container" ]; then
     docker logs "$container" >"$workdir/last-daemon.log" 2>&1 || true
     # Force removal is the failure-path cleanup. If Docker cannot confirm it,
@@ -104,17 +109,20 @@ import (
 )
 
 type capabilityProfile struct {
-	launch string
-	post   string
-	ambient []uintptr
+	launch                  string
+	post                    string
+	ambient                 []uintptr
+	applyNaabuCapTransition bool
 }
 
 func profileFor(mask string) (capabilityProfile, error) {
 	switch mask {
 	case "0000000000002000": // NET_RAW-only daemon capability set.
-		return capabilityProfile{launch: mask, post: mask, ambient: []uintptr{13}}, nil
+		return capabilityProfile{launch: mask, post: mask, ambient: []uintptr{13}, applyNaabuCapTransition: true}, nil
 	case "0000000000003000": // Explicit SYN scan: NET_ADMIN and NET_RAW.
-		return capabilityProfile{launch: mask, post: "0000000000002000", ambient: []uintptr{12, 13}}, nil
+		return capabilityProfile{launch: mask, post: "0000000000002000", ambient: []uintptr{12, 13}, applyNaabuCapTransition: true}, nil
+	case "nmap-0000000000003000": // Nmap keeps the full explicit SYN capability profile.
+		return capabilityProfile{launch: "0000000000003000", post: "0000000000003000", ambient: []uintptr{12, 13}}, nil
 	default:
 		return capabilityProfile{}, fmt.Errorf("unsupported exact scanner capability profile %q", mask)
 	}
@@ -152,7 +160,7 @@ func requireScannerCredentials(uid uint32) (string, error) {
 	return status, nil
 }
 
-func requireNaabuInitialCapabilities(status string, profile capabilityProfile) error {
+func requireProbeInitialCapabilities(status string, profile capabilityProfile) error {
 	for _, field := range []string{"CapPrm", "CapEff", "CapInh", "CapAmb"} {
 		if got := statusValue(status, field); got != profile.launch {
 			return fmt.Errorf("probe initial %s is %q, want exact launch capabilities %s", field, got, profile.launch)
@@ -234,13 +242,15 @@ func child(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 3
 	}
-	if err := requireNaabuInitialCapabilities(status, profile); err != nil {
+	if err := requireProbeInitialCapabilities(status, profile); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 3
 	}
-	if err := applyNaabuCapabilityTransition(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 3
+	if profile.applyNaabuCapTransition {
+		if err := applyNaabuCapabilityTransition(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 3
+		}
 	}
 	if err := requireScannerIdentity(uint32(uid64), profile); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -255,6 +265,16 @@ func child(args []string) int {
 			return 11
 		}
 		fmt.Println(target)
+	case "open-write":
+		file, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "write-open failed: %v\n", err)
+			return 12
+		}
+		if err := file.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "close failed: %v\n", err)
+			return 13
+		}
 	case "open":
 		file, err := os.Open(path)
 		if err != nil {
@@ -630,7 +650,7 @@ run_daemon() {
   if [ -n "$container" ]; then
     stop_daemon
   fi
-  local caps=()
+  local caps=() mounts=(--volume "$scanner_pid_selector_source:$scanner_pid_selector:ro" "${daemon_mounts[@]}")
   for capability in "$@"; do
     caps+=(--cap-add "$capability")
   done
@@ -662,7 +682,7 @@ EOF
   daemon_runtime_tmpdir=$daemon_tmpdir
   container=$(docker run -d --network host --read-only --tmpfs /tmp:size=128m,mode=1777 \
     --cap-drop ALL "${caps[@]}" \
-    --security-opt no-new-privileges:true "${env[@]}" "${daemon_mounts[@]}" \
+    --security-opt no-new-privileges:true "${env[@]}" "${mounts[@]}" \
     --volume "$daemon_config:/etc/edgewatch/config.yaml:ro" \
     --volume "$daemon_data:/var/lib/edgewatch:rw" "$image" daemon --config /etc/edgewatch/config.yaml)
   base="http://127.0.0.1:$web_port"
@@ -704,7 +724,8 @@ stop_daemon() {
 restart_daemon_with_caps() {
   local name=$1
   shift
-  local caps=() env=() probe_mount=(--volume "$workdir/proc-fd-probe:$proc_fd_probe:ro")
+  local caps=() env=() probe_mount=(--volume "$workdir/proc-fd-probe:$proc_fd_probe:ro" \
+    --volume "$scanner_pid_selector_source:$scanner_pid_selector:ro")
   for capability in "$@"; do
     caps+=(--cap-add "$capability")
   done
@@ -766,15 +787,25 @@ expect_nmap_file_size_limit() {
   [ "$got" = "16777217 16777217" ] || fail "the $name process has Max file size '$got', want '16777217 16777217'"
 }
 
-# scanner_pid NAME prints the ID of the running process with that name.
+# scanner_pid NAME [REQUIRED_ARG] prints the first matching live process ID.
+# Nmap version-probe processes have the same comm as scans, so scanner checks
+# require the scan-only --stats-every argument.
 scanner_pid() {
-  local pid=
+  local name=$1 required_arg=${2-} pid=
   for attempt in $(seq 1 120); do
-    pid=$(docker exec "$container" /bin/sh -c 'for status in /proc/[0-9]*/status; do if grep -q "^Name:[[:space:]]*$1$" "$status" 2>/dev/null; then pid=${status#/proc/}; echo "${pid%/status}"; break; fi; done' sh "$1" 2>/dev/null || true)
+    if [ -n "$required_arg" ]; then
+      pid=$(docker exec "$container" "$scanner_pid_selector" /proc "$name" "$required_arg" 2>/dev/null || true)
+    else
+      pid=$(docker exec "$container" "$scanner_pid_selector" /proc "$name" 2>/dev/null || true)
+    fi
     [ -n "$pid" ] && break
     sleep 0.5
   done
   printf '%s\n' "$pid"
+}
+
+scanner_process_state() {
+  docker exec "$container" awk '/^State:/{print $2; exit}' "/proc/$1/status" 2>/dev/null
 }
 
 # scan_file PATTERN prints the path of a running scan's private file whose
@@ -809,6 +840,26 @@ expect_private_scan_file() {
     fi
     printf '%s\n' "$output" | grep -qi 'permission denied' || fail "'$open' restricted (--files 0) failed for another reason: $output"
   done
+}
+
+# expect_private_nmap_xml checks the exact inherited XML descriptor for a live
+# scan. The scanner must be able to open it for writing; its peer must not be
+# able to inspect or reopen it through /proc, even when both scans run at once.
+expect_private_nmap_xml() {
+  local pid=$1 profile=$2 uid=$3 starttime=$4 path target output
+  expect_scanner_starttime "$pid" "$starttime" "before the Nmap XML descriptor check"
+  path=$(scan_file 'edgewatch-nmap-*.xml')
+  [ -n "$path" ] || fail "no Nmap XML output file was found in the scanner files directory"
+  target=$(docker exec "$container" "$proc_fd_probe" "$uid" "$profile" readlink "/proc/$pid/fd/3" 2>&1) ||
+    fail "Nmap UID $uid could not inspect its inherited XML descriptor: $target"
+  [ "$target" = "$path" ] || fail "Nmap fd 3 points to '$target', want its private XML file '$path'"
+  if ! output=$(docker exec "$container" "$proc_fd_probe" "$uid" "$profile" open-write "/proc/$pid/fd/3" 2>&1); then
+    fail "Nmap UID $uid could not open its inherited XML descriptor for writing: $output"
+  fi
+  expect_scanner_starttime "$pid" "$starttime" "after the Nmap XML descriptor check"
+  nmap_xml_path=$path
+  nmap_xml_starttime=$starttime
+  nmap_xml_uid=$uid
 }
 
 # expect_private_naabu_tmp checks the active generated leaf and Naabu's
@@ -996,9 +1047,11 @@ expect_scanner_identity() {
 }
 
 expect_peer_denied() {
-  local peer_uid=$1 profile=$2 path=$3 description=$4 output operation=read
-  if [[ "$path" == /proc/*/fd/* ]]; then
+  local peer_uid=$1 profile=$2 path=$3 description=$4 operation=${5-} output
+  if [ -z "$operation" ] && [[ "$path" == /proc/*/fd/* ]]; then
     operation=readlink
+  elif [ -z "$operation" ]; then
+    operation=read
   fi
   if output=$(docker exec "$container" "$proc_fd_probe" "$peer_uid" "$profile" "$operation" "$path" 2>&1); then
     fail "peer scanner UID $peer_uid read another invocation's $description at $path"
@@ -1008,10 +1061,10 @@ expect_peer_denied() {
 }
 
 expect_peer_denied_between_scanners() {
-  local peer_uid=$1 profile=$2 path=$3 description=$4 target_pid=$5 target_starttime=$6 peer_pid=$7 peer_starttime=$8
+  local peer_uid=$1 profile=$2 path=$3 description=$4 target_pid=$5 target_starttime=$6 peer_pid=$7 peer_starttime=$8 operation=${9-}
   expect_scanner_starttime "$target_pid" "$target_starttime" "before the peer checks $description"
   expect_scanner_starttime "$peer_pid" "$peer_starttime" "before the peer checks $description"
-  expect_peer_denied "$peer_uid" "$profile" "$path" "$description"
+  expect_peer_denied "$peer_uid" "$profile" "$path" "$description" "$operation"
   expect_scanner_starttime "$target_pid" "$target_starttime" "after the peer checks $description"
   expect_scanner_starttime "$peer_pid" "$peer_starttime" "after the peer checks $description"
 }
@@ -1209,12 +1262,15 @@ fi
 started=$(python3 "$workdir/driver.py" start "$base" "$state" slow "1-20000")
 job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
-nmap_pid=$(scanner_pid nmap)
+hold_scanner_process nmap --stats-every
+nmap_pid=$held_scanner_pid
 [ -n "$nmap_pid" ] || fail "running scan started no Nmap"
+nmap_starttime=$held_scanner_starttime
 expect_scanner_identity "$nmap_pid" "0000000000002000" "0000000000002000"
 expect_filtered Nmap "$(process_hardening "$nmap_pid")"
 expect_scanner_limits Nmap "$nmap_pid"
 expect_nmap_file_size_limit Nmap "$nmap_pid"
+resume_held_scanner
 cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
 [ "$cancelled" = canceled ] || fail "the cancelled scan ended '$cancelled'"
 if [ -n "$(scanner_pids nmap)" ]; then
@@ -1226,10 +1282,12 @@ fi
 # of sandbox-exec and Nmap.
 python3 "$workdir/driver.py" create "$base" "$state" orphaned "1-20000" >/dev/null
 docker exec -d "$container" edgewatch scan --config /etc/edgewatch/config.yaml --job orphaned
-nmap_pid=$(scanner_pid nmap)
+hold_scanner_process nmap --stats-every
+nmap_pid=$held_scanner_pid
 [ -n "$nmap_pid" ] || fail "edgewatch scan started no Nmap"
 scan_pid=$(docker exec "$container" awk '/^PPid:/{print $2}' "/proc/$nmap_pid/status")
 docker exec "$container" kill -9 "$scan_pid"
+resume_held_scanner
 for attempt in $(seq 1 20); do
   docker exec "$container" test -d "/proc/$nmap_pid" || break
   [ "$(docker exec "$container" awk '/^State:/{print $2}' "/proc/$nmap_pid/status" 2>/dev/null)" = Z ] && break
@@ -1248,28 +1306,42 @@ daemon_scan_limit=2
 daemon_mounts=(--volume "$workdir/proc-fd-probe:/usr/local/bin/edgewatch-proc-fd-probe:ro")
 run_daemon syn auto "${bundled_caps[@]}" NET_ADMIN
 daemon_mounts=()
-daemon_scan_limit=1
 daemon_tmpdir=/var/lib/edgewatch/tmp
 expect_health "enforced - NET_RAW,NET_ADMIN landlock:enforced seccomp:enforced limits:1000,65536 pool:enforced,per_invocation,60000-60063,64"
 started=$(python3 "$workdir/driver.py" start "$base" "$state" slow-files "1-20000")
-job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
-scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
-expect_private_scan_file "Nmap XML" "$(scanner_pid nmap)" 'edgewatch-nmap-*.xml'
-cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
-[ "$cancelled" = canceled ] || fail "the cancelled Nmap scan ended '$cancelled'"
+landlock_nmap_job=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
+landlock_nmap_scan=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
+hold_scanner_process nmap --stats-every
+nmap_pid=$held_scanner_pid
+nmap_starttime=$held_scanner_starttime
+nmap_uid=$(scanner_uid "$nmap_pid")
+expect_scanner_identity "$nmap_pid" "0000000000003000" "0000000000003000"
+expect_nmap_file_size_limit "Landlock Nmap" "$nmap_pid"
+expect_private_scan_file "Nmap XML" "$nmap_pid" 'edgewatch-nmap-*.xml'
+expect_private_nmap_xml "$nmap_pid" "nmap-0000000000003000" "$nmap_uid" "$nmap_starttime"
 started=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" slow-naabu)
-job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
-scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
+landlock_naabu_job=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
+landlock_naabu_scan=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
 naabu_pid=$(scanner_pid naabu)
 [ -n "$naabu_pid" ] || fail "the slow Naabu scan started no Naabu"
 expect_scanner_limits Naabu "$naabu_pid"
 expect_private_naabu_tmp "$naabu_pid" "0000000000003000" "0000000000002000"
 expect_private_scan_file "Naabu target list" "$naabu_pid" 'edgewatch-naabu-targets-*'
-cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
-[ "$cancelled" = canceled ] || fail "the cancelled Naabu scan ended '$cancelled'"
+expect_peer_denied_between_scanners "$naabu_uid" "0000000000003000" "/proc/$nmap_pid/fd/3" "Nmap XML descriptor" \
+  "$nmap_pid" "$nmap_starttime" "$naabu_pid" "$naabu_starttime"
+expect_peer_denied_between_scanners "$naabu_uid" "0000000000003000" "/proc/$nmap_pid/fd/3" "Nmap XML descriptor write-open" \
+  "$nmap_pid" "$nmap_starttime" "$naabu_pid" "$naabu_starttime" open-write
+expect_peer_denied_between_scanners "$nmap_uid" "nmap-0000000000003000" "/proc/$naabu_pid/fd/3" "Naabu target descriptor" \
+  "$naabu_pid" "$naabu_starttime" "$nmap_pid" "$nmap_starttime"
+resume_held_scanner
+cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$landlock_nmap_job" "$landlock_nmap_scan")
+[ "$cancelled" = canceled ] || fail "the cancelled Landlock Nmap scan ended '$cancelled'"
+cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$landlock_naabu_job" "$landlock_naabu_scan")
+[ "$cancelled" = canceled ] || fail "the cancelled Landlock Naabu scan ended '$cancelled'"
 expect_no_scanner_processes "the cancelled Naabu scan"
 expect_no_naabu_temporary_namespaces
 expect_no_naabu_target_inputs
+daemon_scan_limit=1
 
 # Two live Naabu invocations must receive separate leased identities and
 # private leaves. A peer UID must not reach the other's LevelDB files or its
@@ -1440,6 +1512,7 @@ stop_daemon
 # elsewhere remain reachable under this explicit fallback.
 daemon_landlock=off
 daemon_mounts=(--volume "$workdir/proc-fd-probe:$proc_fd_probe:ro")
+daemon_scan_limit=2
 run_daemon identity-only auto "${bundled_caps[@]}"
 daemon_mounts=()
 daemon_landlock=auto
@@ -1448,27 +1521,38 @@ identity_only_scan=$(python3 "$workdir/driver.py" scan "$base" "$state" identity
 identity_only_naabu=$(python3 "$workdir/driver.py" naabu "$base" "$state" naabu-identity-only "$tcp_open")
 expect_no_naabu_temporary_namespaces
 started=$(python3 "$workdir/driver.py" start "$base" "$state" slow-identity-only "1-20000")
-job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
-scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
-nmap_pid=$(scanner_pid nmap)
+nmap_job=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
+nmap_scan=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
+hold_scanner_process nmap --stats-every
+nmap_pid=$held_scanner_pid
 [ -n "$nmap_pid" ] || fail "the identity-only slow scan started no Nmap"
+nmap_starttime=$held_scanner_starttime
+nmap_uid=$(scanner_uid "$nmap_pid")
 expect_scanner_identity "$nmap_pid" "0000000000002000" "0000000000002000"
 expect_nmap_file_size_limit "identity-only Nmap" "$nmap_pid"
-cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
-[ "$cancelled" = canceled ] || fail "the identity-only Nmap scan ended '$cancelled'"
-expect_no_scanner_processes "the identity-only cancelled Nmap scan"
+expect_private_nmap_xml "$nmap_pid" "0000000000002000" "$nmap_uid" "$nmap_starttime"
 started=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" slow-naabu-identity-only)
-job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
-scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
+naabu_job=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
+naabu_scan=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
 naabu_pid=$(scanner_pid naabu)
 [ -n "$naabu_pid" ] || fail "the identity-only slow Naabu scan started no Naabu"
 expect_scanner_identity "$naabu_pid" "0000000000002000" "0000000000002000"
 expect_scanner_limits Naabu "$naabu_pid"
 expect_private_naabu_tmp "$naabu_pid" "0000000000002000" "0000000000002000"
-cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
+expect_peer_denied_between_scanners "$naabu_uid" "0000000000002000" "/proc/$nmap_pid/fd/3" "identity-only Nmap XML descriptor" \
+  "$nmap_pid" "$nmap_starttime" "$naabu_pid" "$naabu_starttime"
+expect_peer_denied_between_scanners "$naabu_uid" "0000000000002000" "/proc/$nmap_pid/fd/3" "identity-only Nmap XML descriptor write-open" \
+  "$nmap_pid" "$nmap_starttime" "$naabu_pid" "$naabu_starttime" open-write
+expect_peer_denied_between_scanners "$nmap_uid" "0000000000002000" "/proc/$naabu_pid/fd/3" "identity-only Naabu target descriptor" \
+  "$naabu_pid" "$naabu_starttime" "$nmap_pid" "$nmap_starttime"
+resume_held_scanner
+cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$nmap_job" "$nmap_scan")
+[ "$cancelled" = canceled ] || fail "the identity-only Nmap scan ended '$cancelled'"
+cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$naabu_job" "$naabu_scan")
 [ "$cancelled" = canceled ] || fail "the identity-only Naabu scan ended '$cancelled'"
 expect_no_scanner_processes "the identity-only cancelled Naabu scan"
 expect_no_naabu_temporary_namespaces
+daemon_scan_limit=1
 stop_daemon
 
 run_daemon off off "${bundled_caps[@]}" NET_ADMIN

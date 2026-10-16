@@ -223,6 +223,14 @@ The service therefore starts at once after a restore, and a repeated restore
 onto the stopped service is not refused. The active-daemon check reads only
 the lease in the database that is being replaced.
 
+If a write-capable host command is interrupted during a transaction on a
+rollback-journal database before the daemon's first start, SQLite can leave a
+hot `-journal` file beside the database. The daemon lets SQLite roll back that
+incomplete transaction before it checks the daemon lease and continues startup
+only when the lease is not live. A live or malformed lease still blocks
+startup. `edgewatch verify` remains read-only and does not recover the live
+database; see [Upgrade or restore needs migration](/operations/troubleshooting/#upgrade-or-restore-needs-migration).
+
 ### Restore a backup of an older release
 
 A restore accepts a backup of schema 54, the schema of v0.20.0, or of a later

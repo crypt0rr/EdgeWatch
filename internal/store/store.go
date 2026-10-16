@@ -16,6 +16,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 type Store struct {
@@ -340,8 +341,22 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 		// work, but another daemon may claim the lease between that read and
 		// this guarded open. Any read error is fail-closed: startup must not
 		// migrate or rewrite startup_state when lease ownership is unknown.
+		// The one recoverable exception is SQLite's exact READONLY_ROLLBACK
+		// result: a read-only lease probe cannot undo a hot rollback journal.
+		// The migration guard is already held here, so a non-migrating
+		// write-capable open may perform only SQLite's journal recovery before
+		// the lease is checked again. No migration or startup phase runs until
+		// that second read-only check establishes that the lease is not live.
 		if err := CheckDaemonLeaseBeforeStartup(ctx, path); err != nil {
-			return nil, err
+			if !isSQLiteHotJournalReadOnlyError(err) {
+				return nil, err
+			}
+			if err := recoverHotJournalForDaemonLeaseCheck(ctx, path); err != nil {
+				return nil, fmt.Errorf("recover SQLite hot journal before daemon lease check: %w", err)
+			}
+			if err := CheckDaemonLeaseBeforeStartup(ctx, path); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if !memoryDatabase && releaseOpen == nil {
@@ -519,6 +534,23 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 		migrationGuardTransferred = migrationGuardUnlock != nil
 	}
 	return store, nil
+}
+
+func isSQLiteHotJournalReadOnlyError(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlite3.SQLITE_READONLY_ROLLBACK
+}
+
+// recoverHotJournalForDaemonLeaseCheck opens an existing database without
+// migration or WAL configuration. SQLite performs hot-journal rollback on
+// the first read; the caller repeats the read-only lease check after closing
+// this connection and before allowing any daemon migration or startup write.
+func recoverHotJournalForDaemonLeaseCheck(ctx context.Context, path string) error {
+	recovery, err := OpenExistingContext(ctx, path)
+	if err != nil {
+		return err
+	}
+	return recovery.Close()
 }
 
 // FilePath returns the on-disk SQLite database file, with any file: URI

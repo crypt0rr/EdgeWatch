@@ -392,7 +392,7 @@ func TestManagedNotificationRotationTreatsFutureWindowAttemptAsUnlinked(t *testi
 				if outcome == "discard-hard-stop-after-end" {
 					end := time.Now().UTC().Add(-2 * time.Second).Truncate(time.Second)
 					start := end.Add(-time.Hour)
-					if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET start_at=?,end_at=?,status='expired' WHERE id=?`, sqliteTimestamp(start), sqliteTimestamp(end), window.ID); err != nil {
+					if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET start_at=?,end_at=? WHERE id=?`, sqliteTimestamp(start), sqliteTimestamp(end), window.ID); err != nil {
 						t.Fatal(err)
 					}
 				}

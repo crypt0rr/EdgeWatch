@@ -327,9 +327,9 @@ One process migrates a database at a time. From v0.36.0, the daemon holds an
 advisory lock on the database directory from before it opens the database
 until its migration and startup phases have finished and it has acquired its
 daemon lease. Restores of that directory use the same lock. The daemon runs
-only on Linux because this directory-lock implementation is Linux-only; a
-non-Linux daemon build fails closed before migration, even on a filesystem
-that supports `flock`. On Linux, a second daemon on the same data volume exits
+only on Linux because this directory-lock implementation is Linux-only; an
+attempt to start it on a non-Linux system fails closed before migration, even
+on a filesystem that supports `flock`. On Linux, a second daemon on the same data volume exits
 with `another EdgeWatch process is migrating or restoring the database in
 this directory` while the current daemon lease is live, and a restore waits
 until startup has finished. Each migration step also checks, in its own

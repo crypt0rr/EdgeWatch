@@ -86,10 +86,12 @@ Then invite the unit's first administrator from the unit's **Accounts** tab.
 
 When you edit a unit's name or slug, the form keeps the revision it first
 loaded. If another platform administrator changes the unit while you are
-editing, the form keeps your entries and warns that the revision is stale.
-Compare your edits with the latest values before saving; a stale save cannot
-silently replace the newer unit. Choose **Load theirs** to discard your edits
-and reload the current values.
+editing, the form keeps your entries and warns that the revision is stale. The
+warning shows the latest name and slug, including when a capacity change only
+advanced the revision. Compare those values with your draft before choosing
+**Keep my edits** to rebase the draft onto the current revision, or **Load
+theirs** to discard your edits and reload the current values. Saving a rebased
+draft can replace the latest name or slug with the values you kept.
 
 The platform administrator invites and resets only unit administrators, and
 receives each one-time link to pass on. It does both only while the unit is

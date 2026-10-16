@@ -49,7 +49,7 @@ describe('a one-time account link opened in a browser that holds a session', { t
     vi.mocked(setupStatus).mockResolvedValue({ configured: true, password_requirements: { minimum_length: 12 } })
     vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.20.7', updates: developmentBuildUpdates })
     vi.mocked(incidentInboxSummary).mockResolvedValue({ active_count: 0 })
-    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 0, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
+    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 0, server_now: new Date().toISOString(), next_follow_up_at: null, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] })
     vi.mocked(listScans).mockResolvedValue({ scans: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(activeScans).mockResolvedValue({ scans: [] })

@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -10,7 +11,9 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -29,6 +32,7 @@ import (
 	"time"
 
 	"github.com/containrrr/shoutrrr/pkg/router"
+	"github.com/containrrr/shoutrrr/pkg/types"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"golang.org/x/net/dns/dnsmessage"
@@ -42,6 +46,113 @@ func useDestinationSendHooks(t *testing.T, lookup func(context.Context, string) 
 	t.Cleanup(func() {
 		destinationLookup, destinationTargetDial, destinationProxyLookup = previousLookup, previousDial, previousProxy
 	})
+}
+
+func TestTeamsHostQueryIsCheckedAtProviderAndFinalDial(t *testing.T) {
+	globals := captureDestinationGuardProcessGlobals(t)
+	var connections, requests atomic.Int32
+	newConnection := make(chan struct{}, 8)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+			select {
+			case newConnection <- struct{}{}:
+			default:
+			}
+		}
+	}
+	server.Config.ErrorLog = log.New(io.Discard, "", 0)
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	address := server.Listener.Addr().String()
+	oldDefaultTransport := http.DefaultTransport
+	oldClientTransport := http.DefaultClient.Transport
+	transport := &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, network, target string) (net.Conn, error) {
+		if target != address {
+			return nil, errors.New("test refused an unapproved Teams target")
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, target)
+	}}
+	http.DefaultTransport = transport
+	http.DefaultClient.Transport = nil
+	t.Cleanup(func() {
+		http.DefaultTransport = oldDefaultTransport
+		http.DefaultClient.Transport = oldClientTransport
+		globals.assertRestored(t)
+	})
+
+	port := server.Listener.Addr().(*net.TCPAddr).Port
+	rawURL := fmt.Sprintf("teams+https://203.0.113.10/webhookb2/11111111-4444-4444-8444-cccccccccccc@22222222-4444-4444-8444-cccccccccccc/IncomingWebhook/33333333012222222222333333333344/44444444-4444-4444-8444-cccccccccccc?host=probe@127.0.0.1:%d", port)
+
+	// Without a policy, the provider must honor its host override and reach
+	// only the controlled loopback TLS listener. The untrusted test cert
+	// prevents an HTTP request from completing.
+	baselineErr := sendInProcess(rawURL, "controlled Teams target")
+	if baselineErr == nil {
+		t.Fatal("Teams test unexpectedly trusted the fixture TLS certificate")
+	}
+	select {
+	case <-newConnection:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Teams host override did not connect to the controlled listener: %v", baselineErr)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("fixture received %d HTTP requests before TLS verification", got)
+	}
+	if got := connections.Load(); got != 1 {
+		t.Fatalf("baseline opened %d connections, want exactly the controlled loopback connection", got)
+	}
+
+	policy := destinationTestPolicy(t)
+	if err := policy.check(context.Background(), rawURL); !errors.Is(err, ErrDestinationExcluded) {
+		t.Fatalf("Teams preflight = %v, want loopback excluded", err)
+	}
+	if got := connections.Load(); got != 1 {
+		t.Fatalf("preflight opened another connection: %d", got)
+	}
+
+	service, err := (&router.ServiceRouter{}).Locate(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guarded, _ := service.(guardedHTTPClient)
+	restore, err := installDestinationGuards(policy, guarded, &blockedDNSNames{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerErr := service.Send("guarded Teams target", &types.Params{"title": "EdgeWatch"})
+	restore()
+	if !providerRefusedDestination(providerErr) {
+		t.Fatalf("final-dial guard error = %v, want destination excluded", providerErr)
+	}
+	if got := connections.Load(); got != 1 {
+		t.Fatalf("final-dial guard opened another connection: %d", got)
+	}
+
+	if err := sendInProcessWithPolicy(context.Background(), rawURL, "guarded Teams target", policy); !errors.Is(err, ErrDestinationExcluded) {
+		t.Fatalf("policy-bearing in-process send = %v, want destination excluded", err)
+	}
+	if got := connections.Load(); got != 1 {
+		t.Fatalf("policy-bearing send opened another connection: %d", got)
+	}
+
+	payload, err := json.Marshal(notificationProcessRequest{URL: rawURL, Message: "guarded Teams target", TargetExclusions: policy.exclusionCIDRs()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childErr := runSendChildInProcess(bytes.NewReader(payload))
+	var exitErr *ChildExitError
+	if !errors.As(childErr, &exitErr) || exitErr.ExitCode() != childExitExcluded || !errors.Is(childErr, ErrDestinationExcluded) {
+		t.Fatalf("child send = %v, want destination-excluded child status", childErr)
+	}
+	if got := connections.Load(); got != 1 {
+		t.Fatalf("policy-bearing child opened another connection: %d", got)
+	}
 }
 
 func destinationTestPolicy(t *testing.T, cidrs ...string) *destinationPolicy {

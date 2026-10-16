@@ -369,7 +369,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
       const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0)
       const matching = incidents
       const hasMore = offset + limit < matching.length
-      await json({ incidents: matching.slice(offset, offset + limit), truncated: false, active_count: incidents.length, pagination: { limit, offset, total: matching.length, has_more: hasMore, next_offset: hasMore ? offset + limit : null } }); return
+      await json({ incidents: matching.slice(offset, offset + limit), truncated: false, active_count: incidents.length, server_now: new Date().toISOString(), next_follow_up_at: null, pagination: { limit, offset, total: matching.length, has_more: hasMore, next_offset: hasMore ? offset + limit : null } }); return
     }
     if (path === '/incidents/summary' && method === 'GET') { await json({ active_count: incidents.length }); return }
     if (path === '/hosts' && method === 'GET') {

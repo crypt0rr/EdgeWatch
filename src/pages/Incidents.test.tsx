@@ -25,11 +25,25 @@ const item: IncidentInboxItem = {
   observation_uncertainty: { status: 'unknown', reason: 'legacy_origin_unknown' },
 }
 const pagination = { limit: 20, offset: 0, total: 1, has_more: false, next_offset: null }
-const page = (items: IncidentInboxItem[] = [item], total = items.length, offset = 0, activeCount = items.length): Omit<IncidentInboxPage, 'incidents'> & { incidents: IncidentInboxItem[] } => ({ incidents: items, pagination: { ...pagination, offset, total, has_more: offset + items.length < total, next_offset: offset + items.length < total ? offset + 20 : null }, truncated: false, active_count: activeCount })
+const page = (items: IncidentInboxItem[] = [item], total = items.length, offset = 0, activeCount = items.length, schedule: { serverNow?: string; nextFollowUpAt?: string | null } = {}): IncidentInboxPage & { incidents: IncidentInboxItem[] } => {
+  const serverNow = schedule.serverNow ?? new Date().toISOString()
+  const upcoming = items.map(row => row.review.status === 'investigating' ? row.review.follow_up_at : null)
+    .filter((value): value is string => !!value && Date.parse(value) > Date.parse(serverNow))
+    .sort((left, right) => Date.parse(left) - Date.parse(right))[0] ?? null
+  return {
+    incidents: items,
+    pagination: { ...pagination, offset, total, has_more: offset + items.length < total, next_offset: offset + items.length < total ? offset + 20 : null },
+    truncated: false,
+    active_count: activeCount,
+    server_now: serverNow,
+    next_follow_up_at: schedule.nextFollowUpAt === undefined ? upcoming : schedule.nextFollowUpAt,
+  }
+}
 const job = { id: 'job-1', revision: 1, enabled: true, archived: false, security_hash: '', created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z', job: { name: 'Production', schedule: '', timezone: 'UTC', targets: ['192.0.2.10'], max_expanded_hosts: 1, timing: 'balanced', timeout: '1h', baseline_samples: 1, change_confirmations: 1 }, baseline: { status: 'complete' } }
 const administrator = { user_id: 'admin-1', username: 'admin', display_name: 'Riley Reviewer', role: 'administrator', permissions: ['incidents.read', 'incidents.manage'], csrf_token: '', totp_enabled: true, password_requirements: { minimum_length: 12 }, scope: 'unit', unit: { id: 'unit-1', name: 'Default', slug: 'default' }, multi_unit: false }
 const dayMs = 24 * 60 * 60 * 1000
 const nativeTimeoutMax = 2_147_483_647
+const dueRefreshSafetyMarginForTest = 250
 
 function investigatingItem(followUpAt: string, viewStatus: IncidentInboxItem['view_status'] = 'investigating'): IncidentInboxItem {
   return {
@@ -47,8 +61,12 @@ function RefreshIncidentsButton() {
   const client = useQueryClient()
   return <button type="button" onClick={() => void client.invalidateQueries({ queryKey: ['incidents'] })}>Refresh incidents</button>
 }
-function renderInbox(route = ['/incidents'], includeRefresh = false) {
-  return renderWithProviders(<><Incidents />{includeRefresh && <RefreshIncidentsButton />}<LocationOutput /></>, { route })
+function RefreshSessionButton() {
+  const client = useQueryClient()
+  return <button type="button" onClick={() => void client.invalidateQueries({ queryKey: ['session'] })}>Refresh session</button>
+}
+function renderInbox(route = ['/incidents'], includeRefresh = false, includeSessionRefresh = false) {
+  return renderWithProviders(<><Incidents />{includeRefresh && <RefreshIncidentsButton />}{includeSessionRefresh && <RefreshSessionButton />}<LocationOutput /></>, { route })
 }
 function locationSearch() {
   return new URL(screen.getByTestId('location').textContent || '/incidents', 'http://example.test').searchParams
@@ -335,47 +353,91 @@ describe('follow-up due refresh', () => {
     vi.setSystemTime(start)
   })
 
-  it('refreshes once at the loaded row’s due boundary', async () => {
-    const dueAt = start.getTime() + 5 * 60_000
-    const future = investigatingItem(new Date(dueAt).toISOString())
-    const due = investigatingItem(new Date(dueAt).toISOString(), 'follow_up_due')
-    vi.mocked(listIncidents).mockResolvedValueOnce(page([future]) as never).mockResolvedValue(page([due]) as never)
-    renderInbox(['/incidents?view=all_active'])
-    await waitForInbox()
+  it('refreshes an empty due view when its upcoming follow-up becomes due', async () => {
+    const dueAt = start.getTime() + 60_000
+    const dueAtISO = new Date(dueAt).toISOString()
+    const due = investigatingItem(dueAtISO, 'follow_up_due')
+    vi.mocked(listIncidents).mockResolvedValueOnce(page([], 0, 0, 0, { serverNow: start.toISOString(), nextFollowUpAt: dueAtISO }) as never)
+      .mockResolvedValue(page([due], 1, 0, 1, { serverNow: new Date(dueAt + 250).toISOString() }) as never)
+    renderInbox(['/incidents?view=follow_up_due'])
+    await screen.findByRole('heading', { name: 'No matching incidents' })
     expect(listIncidents).toHaveBeenCalledTimes(1)
 
-    const remaining = dueAt - Date.now()
-    expect(remaining).toBeGreaterThan(1)
-    await act(async () => { await vi.advanceTimersByTimeAsync(remaining - 1) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(59_000) })
     expect(listIncidents).toHaveBeenCalledTimes(1)
-    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_250) })
     await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(2))
     expect(await screen.findByRole('cell', { name: 'Follow-up due' })).toBeInTheDocument()
   })
 
-  it('refreshes a cached investigating row whose follow-up is already past due', async () => {
-    const overdue = investigatingItem(new Date(start.getTime() - 60_000).toISOString())
-    const due = investigatingItem(new Date(start.getTime() - 60_000).toISOString(), 'follow_up_due')
-    vi.mocked(listIncidents).mockResolvedValueOnce(page([overdue]) as never).mockResolvedValue(page([due]) as never)
+  it.each([1, 30])('uses server time when the browser clock is %i seconds ahead', async skewSeconds => {
+    const serverNow = start
+    const dueAt = serverNow.getTime() + 60_000
+    vi.setSystemTime(new Date(serverNow.getTime() + skewSeconds * 1000))
+    const future = investigatingItem(new Date(dueAt).toISOString())
+    const due = investigatingItem(new Date(dueAt).toISOString(), 'follow_up_due')
+    vi.mocked(listIncidents).mockResolvedValueOnce(page([future], 1, 0, 1, { serverNow: serverNow.toISOString(), nextFollowUpAt: future.review.follow_up_at }) as never)
+      .mockResolvedValue(page([due], 1, 0, 1, { serverNow: new Date(dueAt + 250).toISOString() }) as never)
     renderInbox(['/incidents?view=all_active'])
     await waitForInbox()
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000 - skewSeconds * 1000) })
+    expect(listIncidents).toHaveBeenCalledTimes(1)
+    await act(async () => { await vi.advanceTimersByTimeAsync(skewSeconds * 1000 + dueRefreshSafetyMarginForTest) })
     await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(2))
     expect(await screen.findByRole('cell', { name: 'Follow-up due' })).toBeInTheDocument()
-    await act(async () => { await vi.advanceTimersByTimeAsync(dayMs) })
-    expect(listIncidents).toHaveBeenCalledTimes(2)
+  })
+
+  it('retries an overdue refresh on tab return after one request fails', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+    const dueAt = start.getTime() + 5 * 60_000
+    const dueAtISO = new Date(dueAt).toISOString()
+    const future = investigatingItem(new Date(dueAt).toISOString())
+    const due = investigatingItem(new Date(dueAt).toISOString(), 'follow_up_due')
+    vi.mocked(listIncidents).mockResolvedValueOnce(page([future], 1, 0, 1, { serverNow: start.toISOString(), nextFollowUpAt: dueAtISO }) as never)
+      .mockRejectedValueOnce(new Error('temporary inbox failure'))
+      .mockResolvedValue(page([due], 1, 0, 1, { serverNow: new Date(dueAt + 250).toISOString() }) as never)
+    try {
+      renderInbox(['/incidents?view=all_active'])
+      await waitForInbox()
+      await act(async () => { await vi.advanceTimersByTimeAsync(dueAt - start.getTime() + 250) })
+      await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(2))
+      expect(screen.getByRole('alert')).toHaveTextContent('Could not load investigation inbox items.')
+
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+      await act(async () => { window.dispatchEvent(new Event('visibilitychange')) })
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+      await act(async () => { window.dispatchEvent(new Event('visibilitychange')) })
+      await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(3))
+      expect(await screen.findByRole('cell', { name: 'Follow-up due' })).toBeInTheDocument()
+      await act(async () => { await vi.advanceTimersByTimeAsync(dayMs) })
+      expect(listIncidents).toHaveBeenCalledTimes(3)
+    } finally {
+      if (descriptor) Object.defineProperty(document, 'visibilityState', descriptor)
+      else Reflect.deleteProperty(document, 'visibilityState')
+    }
   })
 
   it('re-arms at the native timeout cap without polling for a far-future follow-up', async () => {
-    const future = investigatingItem(new Date(start.getTime() + 30 * dayMs).toISOString())
-    vi.mocked(listIncidents).mockResolvedValue(page([future]) as never)
+    const dueAt = start.getTime() + 30 * dayMs
+    const dueAtISO = new Date(dueAt).toISOString()
+    const future = investigatingItem(dueAtISO)
+    const due = investigatingItem(dueAtISO, 'follow_up_due')
+    vi.mocked(listIncidents).mockResolvedValueOnce(page([future], 1, 0, 1, { serverNow: start.toISOString(), nextFollowUpAt: dueAtISO }) as never)
+      .mockResolvedValue(page([due], 1, 0, 1, { serverNow: new Date(dueAt + 250).toISOString() }) as never)
     const rendered = renderInbox(['/incidents?view=all_active'])
     await waitForInbox()
 
     await act(async () => { await vi.advanceTimersByTimeAsync(nativeTimeoutMax + 5_000) })
     expect(listIncidents).toHaveBeenCalledTimes(1)
+    const untilDue = dueAt - start.getTime() + dueRefreshSafetyMarginForTest - (nativeTimeoutMax + 5_000)
+    await act(async () => { await vi.advanceTimersByTimeAsync(untilDue - 1_000) })
+    expect(listIncidents).toHaveBeenCalledTimes(1)
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000) })
+    await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(2))
     rendered.unmount()
     await act(async () => { await vi.advanceTimersByTimeAsync(6 * dayMs) })
-    expect(listIncidents).toHaveBeenCalledTimes(1)
+    expect(listIncidents).toHaveBeenCalledTimes(2)
   })
 
   it('refreshes a due row once when the page becomes visible again', async () => {
@@ -388,7 +450,7 @@ describe('follow-up due refresh', () => {
     try {
       renderInbox(['/incidents?view=all_active'])
       await waitForInbox()
-      await act(async () => { await vi.advanceTimersByTimeAsync(dueAt - Date.now()) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(dueAt - Date.now() + dueRefreshSafetyMarginForTest) })
       expect(listIncidents).toHaveBeenCalledTimes(1)
 
       Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
@@ -401,8 +463,7 @@ describe('follow-up due refresh', () => {
     }
   })
 
-  it('does not let a failed earlier due refresh suppress a later overdue row on resume', async () => {
-    const descriptor = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+  it('arms the next upcoming follow-up after the current one becomes due', async () => {
     const firstDueAt = start.getTime() + 60_000
     const secondDueAt = start.getTime() + 2 * 60_000
     const firstFuture = investigatingItem(new Date(firstDueAt).toISOString())
@@ -410,28 +471,18 @@ describe('follow-up due refresh', () => {
     const firstDue = { ...firstFuture, view_status: 'follow_up_due' as const }
     const secondDue = { ...secondFuture, view_status: 'follow_up_due' as const }
     vi.mocked(listIncidents)
-      .mockResolvedValueOnce(page([firstFuture, secondFuture]) as never)
-      .mockRejectedValueOnce(new Error('temporary inbox failure'))
-      .mockResolvedValue(page([firstDue, secondDue]) as never)
-    try {
-      renderInbox(['/incidents?view=all_active'])
-      await waitForInbox()
-      await act(async () => { await vi.advanceTimersByTimeAsync(firstDueAt - Date.now()) })
-      await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(2))
+      .mockResolvedValueOnce(page([firstFuture, secondFuture], 2, 0, 2, { serverNow: start.toISOString(), nextFollowUpAt: new Date(firstDueAt).toISOString() }) as never)
+      .mockResolvedValueOnce(page([firstDue, secondFuture], 2, 0, 2, { serverNow: new Date(firstDueAt + dueRefreshSafetyMarginForTest).toISOString(), nextFollowUpAt: new Date(secondDueAt).toISOString() }) as never)
+      .mockResolvedValue(page([firstDue, secondDue], 2, 0, 2, { serverNow: new Date(secondDueAt + dueRefreshSafetyMarginForTest).toISOString(), nextFollowUpAt: null }) as never)
+    renderInbox(['/incidents?view=all_active'])
+    await waitForInbox()
+    await act(async () => { await vi.advanceTimersByTimeAsync(firstDueAt - start.getTime() + dueRefreshSafetyMarginForTest) })
+    await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(2))
+    expect(await screen.findByRole('cell', { name: 'Follow-up due' })).toBeInTheDocument()
 
-      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
-      await act(async () => { window.dispatchEvent(new Event('visibilitychange')) })
-      await act(async () => { await vi.advanceTimersByTimeAsync(secondDueAt - Date.now()) })
-      expect(listIncidents).toHaveBeenCalledTimes(2)
-
-      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
-      await act(async () => { window.dispatchEvent(new Event('visibilitychange')) })
-      await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(3))
-      expect(await screen.findAllByRole('cell', { name: 'Follow-up due' })).toHaveLength(2)
-    } finally {
-      if (descriptor) Object.defineProperty(document, 'visibilityState', descriptor)
-      else Reflect.deleteProperty(document, 'visibilityState')
-    }
+    await act(async () => { await vi.advanceTimersByTimeAsync(secondDueAt - firstDueAt) })
+    await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(3))
+    expect(await screen.findAllByRole('cell', { name: 'Follow-up due' })).toHaveLength(2)
   })
 
   it('cancels a stale due timer when filters change and when the inbox unmounts', async () => {
@@ -455,7 +506,7 @@ describe('follow-up due refresh', () => {
     expect(listIncidents).toHaveBeenCalledTimes(3)
   })
 
-  it('does not poll an already-due row or retry repeatedly after a due refresh fails', async () => {
+  it('does not poll an already-due row', async () => {
     const alreadyDue = investigatingItem(new Date(start.getTime() - 60_000).toISOString(), 'follow_up_due')
     vi.mocked(listIncidents).mockResolvedValue(page([alreadyDue]) as never)
     const alreadyDueView = renderInbox(['/incidents?view=all_active'])
@@ -463,16 +514,24 @@ describe('follow-up due refresh', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(dayMs) })
     expect(listIncidents).toHaveBeenCalledTimes(1)
     alreadyDueView.unmount()
+  })
 
-    const retryDueAt = Date.now() + 60_000
-    const future = investigatingItem(new Date(retryDueAt).toISOString())
-    vi.mocked(listIncidents).mockResolvedValueOnce(page([future]) as never).mockRejectedValue(new Error('temporary inbox failure'))
-    renderInbox(['/incidents?view=all_active'])
+  it('cancels a pending due timer when the authenticated tenant changes', async () => {
+    const dueAt = start.getTime() + 60_000
+    const dueAtISO = new Date(dueAt).toISOString()
+    const future = investigatingItem(dueAtISO)
+    vi.mocked(getSession)
+      .mockResolvedValueOnce(administrator as never)
+      .mockResolvedValueOnce({ ...administrator, unit: { id: 'unit-2', name: 'Second', slug: 'second' } } as never)
+    vi.mocked(listIncidents)
+      .mockResolvedValueOnce(page([future], 1, 0, 1, { serverNow: start.toISOString(), nextFollowUpAt: dueAtISO }) as never)
+      .mockResolvedValue(page([]) as never)
+    renderInbox(['/incidents?view=all_active'], false, true)
     await waitForInbox()
-    await act(async () => { await vi.advanceTimersByTimeAsync(retryDueAt - Date.now()) })
-    await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(3))
-    await act(async () => { await vi.advanceTimersByTimeAsync(dayMs) })
-    expect(listIncidents).toHaveBeenCalledTimes(3)
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh session' }))
+    await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(2))
+    await act(async () => { await vi.advanceTimersByTimeAsync(dueAt - start.getTime() + dueRefreshSafetyMarginForTest) })
+    expect(listIncidents).toHaveBeenCalledTimes(2)
   })
 })
 

@@ -353,14 +353,16 @@ describe('business unit detail', () => {
     })
 
     it('renames without sending an unchanged slug, and explains conflicts', async () => {
+      const latest = businessUnit({ name: 'Another name', slug: 'shops', revision: 4 })
+      vi.mocked(getUnit).mockResolvedValueOnce(businessUnit()).mockResolvedValue(latest)
       vi.mocked(renameUnit)
-        .mockRejectedValueOnce(new APIError('the business unit was modified; reload and try again', 'conflict', { current: businessUnit() }))
+        .mockRejectedValueOnce(new APIError('the business unit was modified; reload and try again', 'conflict', { current: latest }))
         .mockRejectedValueOnce(new APIError('name in use', 'conflict', { name: 'the name is used by another business unit' }))
       renderUnit('overview')
       const name = await screen.findByLabelText('Unit name')
       fireEvent.change(name, { target: { value: 'Stores' } })
       fireEvent.submit(name.closest('form')!)
-      expect(await screen.findByText(/Another platform administrator changed this unit/)).toBeInTheDocument()
+      expect(await screen.findByRole('status')).toHaveTextContent('The latest values are Another name and shops.')
       expect(renameUnit).toHaveBeenLastCalledWith('unit-retail', { revision: 3, name: 'Stores' })
       await waitFor(() => expect(getUnit).toHaveBeenCalledTimes(2))
       fireEvent.change(screen.getByLabelText('Unit name'), { target: { value: 'Stores' } })
@@ -389,16 +391,74 @@ describe('business unit detail', () => {
         expect(screen.getByLabelText('Unit name')).toHaveValue('My stores')
         expect(screen.getByLabelText(/^Slug/)).toHaveValue('shops')
       })
-      expect(screen.getByText(/Your edits are kept\. Saving still uses revision 3/)).toBeInTheDocument()
+      expect(screen.getByRole('status').textContent).toContain('Your edits are kept, but saving still uses revision 3.')
+      expect(screen.getByRole('status').textContent).toContain('The latest values are Another name and shops.')
       fireEvent.submit(name.closest('form')!)
-      expect(await screen.findByRole('alert')).toHaveTextContent('Your edits are kept; load theirs or review them before saving again.')
+      expect(await screen.findByRole('alert')).toHaveTextContent('Another platform administrator changed this unit. Your edits are kept; review the latest values, then keep your edits or load theirs.')
       expect(renameUnit).toHaveBeenCalledWith('unit-retail', { revision: 3, name: 'My stores' })
       expect(name).toHaveValue('My stores')
 
       fireEvent.click(screen.getByRole('button', { name: 'Load theirs' }))
       await waitFor(() => expect(name).toHaveValue('Another name'))
       expect(slug).toHaveValue('shops')
-      expect(screen.queryByText(/Saving still uses revision 3/)).not.toBeInTheDocument()
+      expect(document.querySelector('.notice.warning')).not.toBeInTheDocument()
+    })
+
+    it.each([
+      {
+        label: 'a concurrent rename',
+        first: businessUnit({ name: 'Another name', slug: 'shops', revision: 4 }),
+        second: businessUnit({ name: 'Second update', slug: 'retail-v2', revision: 5 }),
+      },
+      {
+        label: 'a revision-only capacity change',
+        first: businessUnit({ revision: 4 }),
+        second: businessUnit({ revision: 5 }),
+      },
+    ])('rebases kept edits to the latest revision after $label', async ({ first, second }) => {
+      let current = businessUnit()
+      vi.mocked(getUnit).mockImplementation(async () => current)
+      vi.mocked(renameUnit)
+        .mockImplementationOnce(async () => {
+          current = first
+          throw new APIError('the business unit was modified; reload and try again', 'conflict', { current: first })
+        })
+        .mockImplementationOnce(async () => {
+          current = second
+          throw new APIError('the business unit was modified; reload and try again', 'conflict', { current: second })
+        })
+        .mockResolvedValueOnce(businessUnit({ ...second, name: 'My stores', revision: 6 }))
+      const { client } = renderUnit('overview')
+      const form = (await screen.findByLabelText('Unit name')).closest('form')!
+      fireEvent.change(screen.getByLabelText('Unit name'), { target: { value: 'My stores' } })
+
+      fireEvent.submit(form)
+      await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Your edits are kept, but saving still uses revision 3.'))
+      expect(screen.getByLabelText('Unit name')).toHaveValue('My stores')
+      expect(screen.getByRole('status').textContent).toContain(`The latest values are ${first.name} and ${first.slug}.`)
+      expect(renameUnit).toHaveBeenNthCalledWith(1, 'unit-retail', { revision: 3, name: 'My stores' })
+
+      fireEvent.click(screen.getByRole('button', { name: 'Keep my edits' }))
+      expect(await screen.findByText('Your edits now use revision 4. Review the latest values, then save again.')).toBeInTheDocument()
+      expect(screen.getByLabelText('Unit name')).toHaveValue('My stores')
+      expect(document.querySelector('.notice.warning')).not.toBeInTheDocument()
+
+      // The server may advance again after the draft is rebased. The next
+      // stale save refreshes the latest values without losing the draft.
+      fireEvent.submit(form)
+      await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Your edits are kept, but saving still uses revision 4.'))
+      expect(screen.getByRole('status').textContent).toContain(`The latest values are ${second.name} and ${second.slug}.`)
+      expect(screen.getByLabelText('Unit name')).toHaveValue('My stores')
+      expect(renameUnit).toHaveBeenNthCalledWith(2, 'unit-retail', { revision: 4, name: 'My stores' })
+
+      fireEvent.click(screen.getByRole('button', { name: 'Keep my edits' }))
+      expect(await screen.findByText('Your edits now use revision 5. Review the latest values, then save again.')).toBeInTheDocument()
+      expect(screen.getByLabelText('Unit name')).toHaveValue('My stores')
+
+      fireEvent.submit(form)
+      await waitFor(() => expect(renameUnit).toHaveBeenCalledTimes(3))
+      expect(renameUnit).toHaveBeenNthCalledWith(3, 'unit-retail', { revision: 5, name: 'My stores' })
+      expect(await screen.findByText('Saved.')).toBeInTheDocument()
     })
 
     it('shows the unit’s stored scans with its other counts', async () => {

@@ -245,9 +245,14 @@ the future. **Follow-up due** includes investigations whose follow-up instant
 has arrived or passed. **All active** shows every active incident. Returning an
 incident to **Needs review** clears its follow-up time but keeps its note.
 
-When an investigation's follow-up becomes due, an open, visible inbox refreshes
-once at that time. If the page is hidden then, it refreshes when you return to
-it. Far-future follow-ups do not cause periodic polling.
+When an investigation's follow-up becomes due, the inbox API supplies the next
+upcoming instant and its server time, including when the **Follow-up due** view
+is currently empty. The console schedules one refresh from that server-time
+pair, so a browser clock that is ahead does not mark a follow-up due early. An
+open, visible inbox refreshes when the instant arrives; if the page is hidden
+then or a refresh fails, it retries when you return to the page. The console
+does not poll while waiting, including for follow-ups scheduled up to 30 days
+away.
 
 The inbox can filter by job, severity, and change kind. It orders matching
 incidents by severity (critical, warning, then info), oldest opening time,

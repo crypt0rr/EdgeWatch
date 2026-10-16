@@ -585,6 +585,10 @@ func (s *Server) writeNotificationError(w http.ResponseWriter, err error) {
 		// The message is fixed: it names neither the URL nor the address.
 		const message = "notification URL points to an address that this deployment does not allow"
 		writeError(w, http.StatusBadRequest, "validation_failed", message, map[string]string{"url": "use a destination outside scanner.target_exclusions and the loopback, link-local, and unspecified addresses"})
+	case errors.Is(err, notify.ErrDestinationUnresolved):
+		// Save-time DNS failures are validation failures, not provider
+		// delivery failures. Keep the hostname and resolver details private.
+		writeError(w, http.StatusBadRequest, "validation_failed", "destination host could not be resolved", map[string]string{"url": "check the hostname or try again when DNS is available"})
 	case errors.Is(err, notify.ErrNotificationSendIndeterminate), errors.Is(err, context.DeadlineExceeded):
 		// A test that the provider did not answer in time saved nothing,
 		// and the provider may still deliver the message.

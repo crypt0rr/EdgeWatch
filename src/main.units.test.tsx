@@ -51,7 +51,7 @@ describe('business units in the console', () => {
     vi.mocked(setupStatus).mockResolvedValue({ configured: true, password_requirements: { minimum_length: 12 } })
     vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.19.0', updates: developmentBuildUpdates })
     vi.mocked(incidentInboxSummary).mockResolvedValue({ active_count: 0 })
-    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 0, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
+    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 0, server_now: new Date().toISOString(), next_follow_up_at: null, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] })
     vi.mocked(listUnits).mockResolvedValue({ limits: deploymentLimits, units: [] })
     vi.mocked(platformStatus).mockRejectedValue(new Error('not needed'))
@@ -212,7 +212,7 @@ describe('business units in the console', () => {
   })
 
   it('forgets the cached data of a session that ends, so the next account to sign in on the tab never sees it', async () => {
-    const noIncidents = { incidents: [], truncated: false, active_count: 0, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } }
+    const noIncidents = { incidents: [], truncated: false, active_count: 0, server_now: new Date().toISOString(), next_follow_up_at: null, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } }
     const retailJob = { id: 'job-retail', revision: 1, enabled: true, archived: false, job: { name: 'Retail POS network', targets: ['198.51.100.20'], tcp: { ports: '443' }, schedule: '0 * * * *' }, baseline: { status: 'complete', samples: 1 } } as unknown as Job
     vi.mocked(getSession).mockResolvedValue(unitAdministrator())
     vi.mocked(listJobs).mockResolvedValue({ jobs: [retailJob] })

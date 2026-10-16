@@ -160,6 +160,8 @@ func TestDestinationHostsFollowTheProvider(t *testing.T) {
 		"teams://group@tenant/alt/owner?host=":                                   {teamsDefaultHost},
 		"teams+https://safe.example/hook":                                        {"safe.example"},
 		"teams+https://safe.example/hook?host=excluded.example":                  {"excluded.example"},
+		"teams+https://203.0.113.10/hook?host=probe@127.0.0.1:8443":              {"127.0.0.1"},
+		"teams+https://203.0.113.10/hook?host=probe@203.0.113.20:8443":           {"203.0.113.20"},
 		"teams+https://safe.example/hook?host=":                                  {teamsDefaultHost},
 		"teams://group@tenant/alt/owner?host=safe.example&HOST=excluded.example": {"excluded.example", "safe.example"},
 		"teams://group@tenant/alt/owner?host=first.example&host=second.example":  {"first.example"},
@@ -171,6 +173,75 @@ func TestDestinationHostsFollowTheProvider(t *testing.T) {
 		if got := destinationHosts(raw); !reflect.DeepEqual(got, want) {
 			t.Errorf("destinationHosts(%q) = %v, want %v", raw, got, want)
 		}
+	}
+}
+
+func TestDestinationSaveMapsResolutionFailuresToFixedError(t *testing.T) {
+	policy := destinationTestPolicy(t)
+	for name, lookupErr := range map[string]error{
+		"NXDOMAIN":         &net.DNSError{Err: "no such host", Name: "private.example", IsNotFound: true},
+		"resolver timeout": &net.DNSError{Err: "i/o timeout", Name: "private.example", IsTimeout: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			previousLookup := destinationLookup
+			destinationLookup = func(context.Context, string) ([]netip.Addr, error) {
+				return nil, lookupErr
+			}
+			t.Cleanup(func() { destinationLookup = previousLookup })
+			err := checkDestinationForSave(context.Background(), policy, "generic://private.example/hook")
+			if !errors.Is(err, ErrDestinationUnresolved) {
+				t.Fatalf("save check = %v, want fixed unresolved error", err)
+			}
+			if strings.Contains(err.Error(), "private.example") || strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "no such host") {
+				t.Fatalf("save error leaked resolver or host detail: %v", err)
+			}
+		})
+	}
+	t.Run("empty answer", func(t *testing.T) {
+		previousLookup := destinationLookup
+		destinationLookup = func(context.Context, string) ([]netip.Addr, error) { return nil, nil }
+		t.Cleanup(func() { destinationLookup = previousLookup })
+		if err := checkDestinationForSave(context.Background(), policy, "generic://private.example/hook"); !errors.Is(err, ErrDestinationUnresolved) {
+			t.Fatalf("empty answer = %v, want fixed unresolved error", err)
+		}
+	})
+	t.Run("caller cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		previousLookup := destinationLookup
+		destinationLookup = func(context.Context, string) ([]netip.Addr, error) {
+			cancel()
+			return nil, context.Canceled
+		}
+		t.Cleanup(func() { destinationLookup = previousLookup })
+		if err := checkDestinationForSave(ctx, policy, "generic://private.example/hook"); !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled save check = %v, want context.Canceled", err)
+		}
+	})
+	t.Run("excluded address remains distinct", func(t *testing.T) {
+		previousLookup := destinationLookup
+		destinationLookup = func(context.Context, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+		}
+		t.Cleanup(func() { destinationLookup = previousLookup })
+		if err := checkDestinationForSave(context.Background(), policy, "generic://private.example/hook"); !errors.Is(err, ErrDestinationExcluded) {
+			t.Fatalf("excluded save check = %v, want destination exclusion", err)
+		}
+	})
+}
+
+func TestDestinationSaveResolutionErrorDoesNotChangeDeliveryClassification(t *testing.T) {
+	previousLookup := destinationLookup
+	destinationLookup = func(context.Context, string) ([]netip.Addr, error) {
+		return nil, &net.DNSError{Err: "no such host", Name: "private.example", IsNotFound: true}
+	}
+	t.Cleanup(func() { destinationLookup = previousLookup })
+	policy := destinationTestPolicy(t)
+	url := "generic://private.example/hook"
+	if err := checkDestinationForSave(context.Background(), policy, url); !errors.Is(err, ErrDestinationUnresolved) {
+		t.Fatalf("save error = %v, want unresolved validation error", err)
+	}
+	if err := policy.check(context.Background(), url); !errors.Is(err, store.ErrDeliveryProvider) {
+		t.Fatalf("delivery preflight error = %v, want retryable provider DNS error", err)
 	}
 }
 

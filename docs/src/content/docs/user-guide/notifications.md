@@ -38,15 +38,21 @@ A unit's destinations cannot point the daemon at the addresses that the
 scanner refuses to scan. EdgeWatch refuses a destination whose host is, or
 resolves to, an address in `scanner.target_exclusions` or an unspecified,
 loopback, link-local, or interface-local multicast address, such as
-`127.0.0.1`, `::1`, or the `169.254.169.254` cloud metadata endpoint. It checks the host when a
-destination is created or its URL is replaced, and again before each delivery
-and test, so a name whose DNS answer changes to such an address afterwards is
-not contacted either. The notification child checks literal IPs and the
-daemon's hosts-file results in its preflight, filters DNS answers used by SMTP,
-and checks each HTTP redirect and the final direct connection. A failed or
-empty DNS lookup fails closed and remains retryable; only a resolved address
-that the policy refuses gets the error code `destination_excluded`. Errors
-never repeat the URL, address, or resolver details.
+`127.0.0.1`, `::1`, or the `169.254.169.254` cloud metadata endpoint. It checks
+the host when a destination is created or its URL is replaced, and again
+before each delivery and test, so a name whose DNS answer changes to such an
+address afterwards is not contacted either. The notification child checks
+literal IPs and the daemon's hosts-file results in its preflight, filters DNS
+answers used by SMTP, and checks each HTTP redirect and the final direct
+connection. While this
+policy is active, creating a destination or replacing its URL requires a
+successful DNS lookup; an unresolved name, empty answer, or lookup timeout is
+refused with a fixed `400 validation_failed` response and nothing is saved.
+The response never includes the hostname or resolver details. During delivery,
+DNS errors and empty answers still fail closed and remain retryable; only a
+resolved address that the policy refuses gets the error code
+`destination_excluded`. Errors never repeat the URL, address, or resolver
+details.
 
 The check uses the host that the provider connects to: the host of the URL
 for providers such as the generic webhook, ntfy, Gotify, Matrix, Mattermost,

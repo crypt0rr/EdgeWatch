@@ -2,6 +2,7 @@ package notify
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"net/url"
@@ -17,6 +18,11 @@ import (
 // resolves to, an address that the deployment's target policy refuses. Its
 // text is fixed and never names the URL or the address.
 var ErrDestinationExcluded = store.ErrDeliveryDestinationExcluded
+
+// ErrDestinationUnresolved reports that a destination could not be resolved
+// while it was being saved under an active address policy. Its text is fixed
+// so resolver details and destination names never reach the API.
+var ErrDestinationUnresolved = errors.New("notification destination host could not be resolved")
 
 // destinationLookupTimeout bounds each lookup of a destination host.
 const destinationLookupTimeout = 5 * time.Second
@@ -160,6 +166,24 @@ func (p *destinationPolicy) check(ctx context.Context, rawURL string) error {
 	return nil
 }
 
+// checkDestinationForSave keeps save-time resolution failures distinct from
+// provider delivery failures. Delivery still uses check directly and retains
+// its retryable DNS error classification. If the caller itself has been
+// canceled, preserve that cancellation instead of reporting a validation
+// error.
+func checkDestinationForSave(ctx context.Context, policy *destinationPolicy, rawURL string) error {
+	if err := policy.check(ctx, rawURL); err != nil {
+		if errors.Is(err, ErrDestinationExcluded) {
+			return err
+		}
+		if ctx != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return ErrDestinationUnresolved
+	}
+	return nil
+}
+
 func destinationDNSFailure() error {
 	return &store.DeliveryFailure{Err: store.ErrDeliveryProvider, Class: store.DeliveryClassDNS}
 }
@@ -245,11 +269,11 @@ func providerHostname(value string) string {
 	if address, err := netip.ParseAddr(strings.Trim(value, "[]")); err == nil {
 		return address.String()
 	}
-	if host, _, err := net.SplitHostPort(value); err == nil {
-		return strings.Trim(strings.TrimSpace(host), "[]")
-	}
 	if parsed, err := url.Parse("//" + value); err == nil && parsed.Hostname() != "" {
 		return parsed.Hostname()
+	}
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		return strings.Trim(strings.TrimSpace(host), "[]")
 	}
 	return strings.Trim(value, "[]")
 }

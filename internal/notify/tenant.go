@@ -638,7 +638,7 @@ func (tn *TenantNotifier) createManaged(ctx context.Context, name, rawURL string
 	if err != nil {
 		return DestinationView{}, err
 	}
-	if err := tn.n.destinationPolicy().check(ctx, rawURL); err != nil {
+	if err := checkDestinationForSave(ctx, tn.n.destinationPolicy(), rawURL); err != nil {
 		return DestinationView{}, err
 	}
 	// Snapshot the tenant's destinations that exist before this endpoint is
@@ -727,7 +727,7 @@ func (tn *TenantNotifier) updateManagedKeeping(ctx context.Context, id string, e
 		if err != nil {
 			return DestinationView{}, err
 		}
-		if err := n.destinationPolicy().check(ctx, *rawURL); err != nil {
+		if err := checkDestinationForSave(ctx, n.destinationPolicy(), *rawURL); err != nil {
 			return DestinationView{}, err
 		}
 		key, keyErr := n.ensureKey(ctx)

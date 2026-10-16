@@ -627,7 +627,7 @@ function formatRunInZone(value: string, zone: string) {
   try {
     return `${date.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', timeZone: zone })} (${zone})`
   } catch {
-    return `${formatDateTime(date)} (${getDisplayTimeZone() || zone})`
+    return `${formatDateTime(date)} (${getDisplayTimeZone() || Intl.DateTimeFormat().resolvedOptions().timeZone})`
   }
 }
 

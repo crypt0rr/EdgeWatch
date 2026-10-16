@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, BUILTIN_NAABU_PROFILE_ID, createJob, createNotificationDestination, getJob, getSession, listNotificationDestinations, listScannerProfiles, previewJob, scannerCapabilities, scheduleSuggestion, testNotificationDestination, updateJob } from '../api'
 import type { NotificationDestination } from '../api'
 import type { Job, JobForm, JobPreview } from '../types'
+import { setDisplayTimeZone } from '../format'
 import { JobCreationDraftProvider, useOptionalJobCreationDraft } from '../job-creation-draft'
 import { consumeFirstScanIntent } from '../firstScanIntent'
 import { renderWithProviders } from '../test/test-utils'
@@ -120,7 +121,34 @@ describe('guided monitor creation', () => {
 
   afterEach(() => {
     vi.clearAllMocks()
+    setDisplayTimeZone(undefined)
     window.history.replaceState(null, '', '/')
+  })
+
+  it('labels browser-zone fallback times with the zone used in both schedule notices', async () => {
+    setDisplayTimeZone(undefined)
+    const runAt = '2026-10-13T07:00:00Z'
+    const unsupportedZone = 'Factory'
+    expect(() => new Intl.DateTimeFormat(undefined, { timeZone: unsupportedZone })).toThrow()
+    vi.mocked(scheduleSuggestion).mockResolvedValue({
+      suggested: true,
+      suggested_schedule: '0 4 * * *',
+      offset_minutes: 60,
+      nearest: { id: 'job-neighbour', name: 'Factory neighbour', schedule: '0 3 * * *', timezone: unsupportedZone, next_run: runAt },
+      draft_next_run: runAt,
+      gap_minutes: 60,
+    })
+
+    renderJourney()
+    await goToSchedule()
+    fireEvent.change(screen.getByLabelText(/^Timezone/), { target: { value: unsupportedZone } })
+
+    const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    const firstRunLocal = new Date(runAt).toLocaleString(undefined, { timeZone: browserZone })
+    await waitFor(() => {
+      expect(screen.getByText(/first scheduled scan is expected at/)).toHaveTextContent(`${firstRunLocal} (${browserZone})`)
+      expect(screen.getByText(/Factory neighbour is next at/)).toHaveTextContent(`${firstRunLocal} (${browserZone})`)
+    })
   })
 
   it('counts guided monitor names by Unicode code point', async () => {

@@ -200,6 +200,25 @@ var tenantStoreLeakCases = map[string]tenantLeakCase{
 			}
 		}
 	}},
+	"ExpireChangeWindowWithoutSummaryNotification": {writes: true, run: func(t *testing.T, f tenantFixture) {
+		ctx := context.Background()
+		now := time.Now().UTC().Truncate(time.Second)
+		window, err := f.store.Tenant(f.a).CreateChangeWindow(ctx, f.jobA, time.Time{}, now.Add(time.Hour), true, "tenant A", "actor", "Tenant A")
+		if err != nil {
+			t.Fatal(err)
+		}
+		endedAt := now.Add(-time.Hour)
+		if _, err := f.store.DB.ExecContext(ctx, `UPDATE change_windows SET end_at=? WHERE id=?`, sqliteTimestamp(endedAt), window.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, changed, err := f.store.Tenant(f.b).ExpireChangeWindowWithoutSummaryNotification(ctx, window.ID, func() time.Time { return endedAt.Add(ChangeWindowSummaryDestinationGrace) }); !errors.Is(err, ErrNotFound) || changed {
+			t.Fatalf("tenant B expired tenant A's window: changed=%v err=%v; want ErrNotFound", changed, err)
+		}
+		var closedAt string
+		if err := f.store.DB.QueryRowContext(ctx, `SELECT closed_at FROM change_windows WHERE id=?`, window.ID).Scan(&closedAt); err != nil || closedAt != "" {
+			t.Fatalf("tenant A window after tenant B attempt: closed_at=%q err=%v", closedAt, err)
+		}
+	}},
 	"Scope": {run: func(t *testing.T, f tenantFixture) {
 		// Each store names its own tenant, never another.
 		for _, scope := range []TenantScope{f.a, f.b} {

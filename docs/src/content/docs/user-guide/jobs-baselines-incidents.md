@@ -76,8 +76,8 @@ its claim is still live at close, the review records it separately as in
 flight. If its claim was released or recovered without a recorded result, the
 review records an unknown prior outcome instead; this does not claim that a
 provider is still running. Neither category counts as an alert held during the
-window, and a later provider failure does not replay that stale individual
-alert or change the closing snapshot.
+window. When a summary is queued, a later provider failure does not replay that
+stale individual alert or change the closing snapshot.
 
 When there was change activity, closing the window creates one summary
 notification for the job's configured destinations and a durable review task.
@@ -98,6 +98,20 @@ Incident details and evidence links require `incidents.read`; marking the
 review complete requires `incidents.manage`. Canceling before a scheduled
 window starts produces no closing review. Canceling an active window closes it
 early and produces the same durable review as an expiry.
+
+If EdgeWatch cannot read the job's notification destinations when an expired
+window is due, it keeps the window open and its alerts held while retrying the
+lookup for up to one hour after the window ends. If destinations become
+available during that period, expiry creates the normal summary notification
+and review. If they remain unavailable at the one-hour bound, EdgeWatch closes
+the window with a durable review but does not queue a summary notification.
+The summary includes `summary_notification_status` set to
+`not_queued_destinations_unavailable`. Eligible held alerts are released for
+individual delivery, or linked to a later open window when one applies. A
+provider attempt already in flight keeps its claim; a later failure remains
+retryable. The closing review remains available even though no summary was
+sent.
+
 If EdgeWatch cannot load the job's notification destinations while canceling an
 active window, the request fails and leaves the window open with its held
 alerts unchanged. Retry the cancellation when the destinations are available.

@@ -2,9 +2,9 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -438,36 +438,62 @@ func prepareLinkedWindowDelivery(t *testing.T, label string, started bool) (*Sto
 	return s, window, item
 }
 
-func TestLateWindowDeliveryEvidenceFailureRollsBackProviderResult(t *testing.T) {
+func TestLateWindowProviderSuccessSurvivesExpiredWindowSideEffects(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	s, _, window, item := prepareLateWindowDeliveryResult(t, "window-result-evidence-failure")
-	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER fail_late_window_result_evidence BEFORE INSERT ON change_window_events WHEN NEW.window_id='`+window.ID+`' BEGIN SELECT RAISE(ABORT,'synthetic evidence write failure'); END`); err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		name    string
+		trigger func(*testing.T, *Store, ChangeWindow, Delivery)
+	}{
+		{
+			name: "summary evidence insertion is not part of the provider result",
+			trigger: func(t *testing.T, s *Store, window ChangeWindow, _ Delivery) {
+				if _, err := s.DB.ExecContext(context.Background(), `CREATE TRIGGER fail_late_window_result_evidence BEFORE INSERT ON change_window_events WHEN NEW.window_id='`+window.ID+`' BEGIN SELECT RAISE(ABORT,'synthetic evidence write failure'); END`); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "window rescheduling is not part of the provider result",
+			trigger: func(t *testing.T, s *Store, _ ChangeWindow, item Delivery) {
+				if _, err := s.DB.ExecContext(context.Background(), `CREATE TRIGGER fail_late_window_result_schedule BEFORE UPDATE OF next_at ON outbox WHEN OLD.id=`+strconv.FormatInt(item.ID, 10)+` BEGIN SELECT RAISE(ABORT,'synthetic scheduling failure'); END`); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s, ts, window, item := prepareLateWindowDeliveryResult(t, "window-late-result-"+strings.ReplaceAll(tc.name, " ", "-"))
+			tc.trigger(t, s, window, item)
+			if err := s.System().DeliveryResultClaim(ctx, item.ID, item.ClaimToken, nil); err != nil {
+				t.Fatalf("record provider success after window end: %v", err)
+			}
+			var sentAt, claim, started, coalesced string
+			var attempts int
+			if err := s.DB.QueryRowContext(ctx, `SELECT COALESCE(sent_at,''),claim_token,attempt_started_at,coalesced_at,attempts FROM outbox WHERE id=?`, item.ID).Scan(&sentAt, &claim, &started, &coalesced, &attempts); err != nil {
+				t.Fatal(err)
+			}
+			if sentAt == "" || claim != "" || started != "" || coalesced != "" || attempts != 0 {
+				t.Fatalf("late provider success sent=%q claim=%q marker=%q coalesced=%q attempts=%d", sentAt, claim, started, coalesced, attempts)
+			}
+			if countRows(t, s.DB, `SELECT COUNT(*) FROM change_window_events WHERE window_id=?`, window.ID) != 0 {
+				t.Fatal("a delivered post-end alert was retained as suppressed window evidence")
+			}
+			if _, changed, err := ts.ExpireChangeWindow(ctx, window.ID, func() time.Time { return window.EndAt.Add(time.Second) }, nil); err != nil || !changed {
+				t.Fatalf("delayed expiry = changed %v, err %v", changed, err)
+			}
+			var afterSent, afterCoalesced string
+			if err := s.DB.QueryRowContext(ctx, `SELECT COALESCE(sent_at,''),coalesced_at FROM outbox WHERE id=?`, item.ID).Scan(&afterSent, &afterCoalesced); err != nil {
+				t.Fatal(err)
+			}
+			if afterSent != sentAt || afterCoalesced != "" {
+				t.Fatalf("delayed expiry changed successful provider result: sent=%q→%q coalesced=%q", sentAt, afterSent, afterCoalesced)
+			}
+			if retries, err := s.System().ClaimDueDeliveries(ctx, 1, "late-success-no-duplicate"); err != nil || len(retries) != 0 {
+				t.Fatalf("successful post-end delivery became claimable again: %+v, %v", retries, err)
+			}
+		})
 	}
-	if err := s.System().DeliveryResultClaim(ctx, item.ID, item.ClaimToken, nil); err == nil {
-		t.Fatal("late provider success committed after change evidence insertion failed")
-	}
-	if countRows(t, s.DB, `SELECT COUNT(*) FROM change_window_events WHERE window_id=?`, window.ID) != 0 {
-		t.Fatal("failed evidence insertion persisted a window event")
-	}
-	assertLateWindowDeliveryUnchanged(t, s, item)
-}
-
-func TestLateWindowDeliveryScheduleFailureRollsBackProviderEvidence(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	s, _, window, item := prepareLateWindowDeliveryResult(t, "window-result-schedule-failure")
-	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER fail_late_window_result_schedule BEFORE UPDATE OF next_at ON outbox WHEN OLD.id=`+strconv.FormatInt(item.ID, 10)+` BEGIN SELECT RAISE(ABORT,'synthetic scheduling failure'); END`); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.System().DeliveryResultClaim(ctx, item.ID, item.ClaimToken, nil); err == nil {
-		t.Fatal("late provider success committed after window scheduling failed")
-	}
-	if countRows(t, s.DB, `SELECT COUNT(*) FROM change_window_events WHERE window_id=?`, window.ID) != 0 {
-		t.Fatal("failed reschedule nevertheless persisted window evidence")
-	}
-	assertLateWindowDeliveryUnchanged(t, s, item)
 }
 
 func TestDeliveryResultLostConditionalUpdateDoesNotMarkSuccess(t *testing.T) {
@@ -522,41 +548,11 @@ func prepareLateWindowDeliveryResult(t *testing.T, name string) (*Store, *Tenant
 	}
 	start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 	window := createTestChangeWindow(t, ts, job.ID, start, start.Add(time.Hour))
-	var raw []byte
-	if err := s.DB.QueryRowContext(ctx, `SELECT payload_json FROM outbox WHERE id=?`, item.ID).Scan(&raw); err != nil {
-		t.Fatal(err)
-	}
-	var event model.Event
-	if err := json.Unmarshal(raw, &event); err != nil {
-		t.Fatal(err)
-	}
-	// Older durable payloads may omit job_id even when the outbox's bounded
-	// routing columns still retain it; the final result path restores it before
-	// recording the event reference.
-	event.JobID = ""
-	updated, err := json.Marshal(event)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET payload_json=? WHERE id=?`, updated, item.ID); err != nil {
-		t.Fatal(err)
-	}
 	end := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 	if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET start_at=?,end_at=? WHERE id=?`, sqliteTimestamp(end.Add(-time.Hour)), sqliteTimestamp(end), window.ID); err != nil {
 		t.Fatal(err)
 	}
+	window.StartAt = end.Add(-time.Hour)
+	window.EndAt = end
 	return s, ts, window, item
-}
-
-func assertLateWindowDeliveryUnchanged(t *testing.T, s *Store, item Delivery) {
-	t.Helper()
-	ctx := context.Background()
-	var sentAt, claim, startedAt, coalescedAt, nextAt string
-	var attempts, deferrals int
-	if err := s.DB.QueryRowContext(ctx, `SELECT COALESCE(sent_at,''),claim_token,attempt_started_at,coalesced_at,next_at,attempts,deferrals FROM outbox WHERE id=?`, item.ID).Scan(&sentAt, &claim, &startedAt, &coalescedAt, &nextAt, &attempts, &deferrals); err != nil {
-		t.Fatal(err)
-	}
-	if sentAt != "" || claim != item.ClaimToken || startedAt == "" || coalescedAt != "" || attempts != 0 || deferrals != 0 {
-		t.Fatalf("late result transaction partially committed sent=%q claim=%q marker=%q coalesced=%q next=%q attempts=%d deferrals=%d", sentAt, claim, startedAt, coalescedAt, nextAt, attempts, deferrals)
-	}
 }

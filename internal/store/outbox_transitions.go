@@ -55,37 +55,37 @@ type outboxColumnChange struct {
 }
 
 const (
-	outboxClaimDue           outboxTransitionName = "claim_due"
-	outboxBeginAttempt       outboxTransitionName = "begin_attempt"
-	outboxHoldInWindow       outboxTransitionName = "hold_in_window"
-	outboxReleaseClaim       outboxTransitionName = "release_claim"
-	outboxReleaseHeldClaim   outboxTransitionName = "release_held_claim"
-	outboxCoalesceHeld       outboxTransitionName = "coalesce_held_change"
-	outboxRecoverStartup     outboxTransitionName = "recover_startup_attempt"
-	outboxRecoverExpired     outboxTransitionName = "recover_expired_attempt"
-	outboxReleaseStartup     outboxTransitionName = "release_startup_claims"
-	outboxRedeliverTerminal  outboxTransitionName = "redeliver_terminal"
-	outboxAssignWindow       outboxTransitionName = "assign_pending_window"
-	outboxClosePending       outboxTransitionName = "close_pending_window_row"
-	outboxCloseInFlight      outboxTransitionName = "close_in_flight_window_row"
-	outboxCloseOrphan        outboxTransitionName = "close_orphaned_window_row"
-	outboxCancelPending      outboxTransitionName = "cancel_pending_window_row"
-	outboxRenameDestination  outboxTransitionName = "rename_destination"
-	outboxAgeLocked          outboxTransitionName = "age_locked_delivery"
-	outboxWakeLocked         outboxTransitionName = "wake_locked_delivery"
-	outboxInvalidPayload     outboxTransitionName = "invalid_payload_terminal"
-	outboxCompleteSent       outboxTransitionName = "complete_sent_delivery"
-	outboxCompleteCoalesced  outboxTransitionName = "complete_sent_after_coalesce"
-	outboxCoalesceCompleted  outboxTransitionName = "coalesce_completed_attempt"
-	outboxHoldClosedWindow   outboxTransitionName = "hold_closed_window_delivery"
-	outboxDeferIndeterminate outboxTransitionName = "defer_indeterminate_delivery"
-	outboxRecordSendFailure  outboxTransitionName = "record_send_failure"
-	outboxCoalesceDeferred   outboxTransitionName = "coalesce_deferred_attempt"
-	outboxKeepPending        outboxTransitionName = "keep_pending_after_credential_rotation"
-	outboxMarkInflight       outboxTransitionName = "mark_in_flight_for_coalescing"
-	outboxMoveTerminal       outboxTransitionName = "move_terminal_delivery_selector"
-	outboxImportMerge        outboxTransitionName = "merge_imported_delivery_state"
-	outboxImportMove         outboxTransitionName = "move_imported_delivery_selector"
+	outboxClaimDue            outboxTransitionName = "claim_due"
+	outboxBeginAttempt        outboxTransitionName = "begin_attempt"
+	outboxHoldInWindow        outboxTransitionName = "hold_in_window"
+	outboxReleaseClaim        outboxTransitionName = "release_claim"
+	outboxReleaseHeldClaim    outboxTransitionName = "release_held_claim"
+	outboxCoalesceHeld        outboxTransitionName = "coalesce_held_change"
+	outboxRecoverStartup      outboxTransitionName = "recover_startup_attempt"
+	outboxRecoverExpired      outboxTransitionName = "recover_expired_attempt"
+	outboxReleaseStartup      outboxTransitionName = "release_startup_claims"
+	outboxRedeliverTerminal   outboxTransitionName = "redeliver_terminal"
+	outboxAssignWindow        outboxTransitionName = "assign_pending_window"
+	outboxClosePending        outboxTransitionName = "close_pending_window_row"
+	outboxCloseInFlight       outboxTransitionName = "close_in_flight_window_row"
+	outboxCloseOrphan         outboxTransitionName = "close_orphaned_window_row"
+	outboxCancelPending       outboxTransitionName = "cancel_pending_window_row"
+	outboxReleaseWindowAlerts outboxTransitionName = "release_alerts_without_summary_notification"
+	outboxRenameDestination   outboxTransitionName = "rename_destination"
+	outboxAgeLocked           outboxTransitionName = "age_locked_delivery"
+	outboxWakeLocked          outboxTransitionName = "wake_locked_delivery"
+	outboxInvalidPayload      outboxTransitionName = "invalid_payload_terminal"
+	outboxCompleteSent        outboxTransitionName = "complete_sent_delivery"
+	outboxCompleteCoalesced   outboxTransitionName = "complete_sent_after_coalesce"
+	outboxCoalesceCompleted   outboxTransitionName = "coalesce_completed_attempt"
+	outboxDeferIndeterminate  outboxTransitionName = "defer_indeterminate_delivery"
+	outboxRecordSendFailure   outboxTransitionName = "record_send_failure"
+	outboxCoalesceDeferred    outboxTransitionName = "coalesce_deferred_attempt"
+	outboxKeepPending         outboxTransitionName = "keep_pending_after_credential_rotation"
+	outboxMarkInflight        outboxTransitionName = "mark_in_flight_for_coalescing"
+	outboxMoveTerminal        outboxTransitionName = "move_terminal_delivery_selector"
+	outboxImportMerge         outboxTransitionName = "merge_imported_delivery_state"
+	outboxImportMove          outboxTransitionName = "move_imported_delivery_selector"
 )
 
 // These identity and event-content columns do not change in any named delivery
@@ -164,6 +164,10 @@ func buildOutboxTransitionContracts() map[outboxTransitionName]outboxTransitionC
 			nil, nil, []string{"change_window_id"},
 			[]string{"destination", "attempts", "next_at", "last_error", "claim_token", "claim_until", "deferrals", "terminal_at", "coalesced_at", "attempt_started_at", "coalesce_after_attempt"},
 		),
+		outboxReleaseWindowAlerts: transitionContractPreservingSentAt(
+			nil, nil, []string{"change_window_id", "claim_token", "claim_until"},
+			[]string{"destination", "attempts", "next_at", "last_error", "deferrals", "terminal_at", "attempt_started_at", "coalesce_after_attempt", "coalesced_at"},
+		),
 		outboxRenameDestination: transitionContractPreservingSentAt(
 			[]string{"destination"}, nil, nil,
 			[]string{"attempts", "next_at", "last_error", "claim_token", "claim_until", "deferrals", "terminal_at", "change_window_id", "attempt_started_at", "coalesce_after_attempt", "coalesced_at"},
@@ -191,10 +195,6 @@ func buildOutboxTransitionContracts() map[outboxTransitionName]outboxTransitionC
 		outboxCoalesceCompleted: transitionContractPreservingSentAt(
 			[]string{"coalesced_at"}, []string{"last_error", "claim_token", "claim_until", "attempt_started_at", "coalesce_after_attempt"}, nil,
 			[]string{"destination", "attempts", "next_at", "deferrals", "terminal_at", "change_window_id"},
-		),
-		outboxHoldClosedWindow: transitionContractPreservingSentAt(
-			[]string{"next_at"}, []string{"last_error", "claim_token", "claim_until", "attempt_started_at"}, nil,
-			[]string{"destination", "attempts", "deferrals", "terminal_at", "change_window_id", "coalesce_after_attempt", "coalesced_at"},
 		),
 		outboxDeferIndeterminate: transitionContractPreservingSentAt(
 			[]string{"deferrals", "next_at", "last_error", "terminal_at"}, []string{"claim_token", "claim_until", "attempt_started_at"}, nil,

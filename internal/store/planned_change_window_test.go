@@ -14,12 +14,16 @@ import (
 )
 
 func createWindowTestJob(t *testing.T, ts *TenantStore, name, timezone string) JobRecord {
+	return createWindowTestJobWithContext(context.Background(), t, ts, name, timezone)
+}
+
+func createWindowTestJobWithContext(ctx context.Context, t *testing.T, ts *TenantStore, name, timezone string) JobRecord {
 	t.Helper()
 	job := config.NormalizeJob(config.Job{
 		Name: name, Schedule: "0 * * * *", Timezone: timezone,
 		Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"},
 	})
-	record, err := ts.CreateJob(context.Background(), job)
+	record, err := ts.CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,8 +31,12 @@ func createWindowTestJob(t *testing.T, ts *TenantStore, name, timezone string) J
 }
 
 func createTestChangeWindow(t *testing.T, ts *TenantStore, jobID string, start, end time.Time) ChangeWindow {
+	return createTestChangeWindowWithContext(context.Background(), t, ts, jobID, start, end)
+}
+
+func createTestChangeWindowWithContext(ctx context.Context, t *testing.T, ts *TenantStore, jobID string, start, end time.Time) ChangeWindow {
 	t.Helper()
-	window, err := ts.CreateChangeWindow(context.Background(), jobID, start, end, false, "maintenance", "test-actor", "Test Operator")
+	window, err := ts.CreateChangeWindow(ctx, jobID, start, end, false, "maintenance", "test-actor", "Test Operator")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +519,7 @@ func TestChangeWindowCloseDedupeBoundsSummaryAndCoalescesAlerts(t *testing.T) {
 	}
 }
 
-func TestDelayedWindowExpiryHoldsOnlyLinkedBacklog(t *testing.T) {
+func TestDelayedWindowExpiryExcludesAlertsDeliveredAfterWindowEnd(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -532,23 +540,30 @@ func TestDelayedWindowExpiryHoldsOnlyLinkedBacklog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(deliveries) != 1 || deliveries[0].Event.ScanID != "scan-after" {
-		t.Fatalf("before-expiry claim = %+v; want only the post-end event", deliveries)
+	if len(deliveries) != 2 {
+		t.Fatalf("before-expiry claim = %+v; want both pending alerts released at the window end", deliveries)
 	}
-	if err := s.System().DeliveryResultClaim(ctx, deliveries[0].ID, deliveries[0].ClaimToken, nil); err != nil {
-		t.Fatal(err)
+	seen := map[string]bool{}
+	for _, delivery := range deliveries {
+		seen[delivery.Event.ScanID] = true
+		if err := s.System().DeliveryResultClaim(ctx, delivery.ID, delivery.ClaimToken, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !seen["scan-before"] || !seen["scan-after"] {
+		t.Fatalf("before-expiry claim scans = %v; want scan-before and scan-after", seen)
 	}
 	if _, changed, err := ts.ExpireChangeWindow(ctx, window.ID, func() time.Time { return time.Now().UTC() }, []string{"summary-destination"}); err != nil || !changed {
 		t.Fatalf("delayed expiry: changed %v, err %v", changed, err)
 	}
-	if countRows(t, s.DB, `SELECT COUNT(*) FROM outbox WHERE event_job_id=? AND event_type='changes-detected' AND change_window_id=? AND coalesced_at<>''`, job.ID, window.ID) != 1 {
-		t.Fatal("linked pre-window alert was not coalesced at expiry")
+	if countRows(t, s.DB, `SELECT COUNT(*) FROM outbox WHERE event_job_id=? AND event_type='changes-detected' AND change_window_id=? AND coalesced_at<>''`, job.ID, window.ID) != 0 {
+		t.Fatal("delivered post-end alerts were coalesced at delayed expiry")
 	}
-	if countRows(t, s.DB, `SELECT COUNT(*) FROM outbox WHERE event_job_id=? AND event_type='changes-detected' AND change_window_id='' AND sent_at IS NOT NULL`, job.ID) != 1 {
-		t.Fatal("post-end event was omitted or attached to the old window")
+	if countRows(t, s.DB, `SELECT COUNT(*) FROM outbox WHERE event_job_id=? AND event_type='changes-detected' AND sent_at IS NOT NULL`, job.ID) != 2 {
+		t.Fatal("both alerts were not individually delivered at delayed expiry")
 	}
-	if countRows(t, s.DB, `SELECT COUNT(*) FROM change_window_refs WHERE window_id=? AND category='new'`, window.ID) != 1 {
-		t.Fatal("the closing summary omitted the linked pre-window event")
+	if countRows(t, s.DB, `SELECT COUNT(*) FROM change_window_refs WHERE window_id=? AND category='new'`, window.ID) != 0 {
+		t.Fatal("the closing summary included alerts already delivered after window end")
 	}
 }
 
@@ -915,7 +930,7 @@ func TestExpireChangeWindowSamplesClockAfterWriterAndIsIdempotent(t *testing.T) 
 	}
 }
 
-func TestDeliveryResultAfterExactSecondWindowEndKeepsRetryTimestampFormat(t *testing.T) {
+func TestDeliveryFailureAfterWindowEndUsesNormalRetrySchedule(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -938,12 +953,14 @@ func TestDeliveryResultAfterExactSecondWindowEndKeepsRetryTimestampFormat(t *tes
 	if err := s.System().DeliveryResultClaim(ctx, deliveries[0].ID, deliveries[0].ClaimToken, ErrDeliveryProviderTimeout); err != nil {
 		t.Fatal(err)
 	}
-	var next string
-	if err := s.DB.QueryRowContext(ctx, `SELECT next_at FROM outbox WHERE id=?`, deliveries[0].ID).Scan(&next); err != nil {
+	var next, lastError, claim, started, coalesced string
+	var attempts int
+	if err := s.DB.QueryRowContext(ctx, `SELECT next_at,last_error,claim_token,attempt_started_at,coalesced_at,attempts FROM outbox WHERE id=?`, deliveries[0].ID).Scan(&next, &lastError, &claim, &started, &coalesced, &attempts); err != nil {
 		t.Fatal(err)
 	}
-	if next != exactEnd.Format(time.RFC3339Nano) {
-		t.Fatalf("held row next_at = %q; want outbox-format %q", next, exactEnd.Format(time.RFC3339Nano))
+	nextAt, err := time.Parse(time.RFC3339Nano, next)
+	if err != nil || !nextAt.After(time.Now().UTC()) || next == exactEnd.Format(time.RFC3339Nano) || lastError != "provider_timeout" || claim != "" || started != "" || coalesced != "" || attempts != 1 {
+		t.Fatalf("post-end provider failure next=%q parseErr=%v error=%q claim=%q marker=%q coalesced=%q attempts=%d; want normal future retry with one recorded attempt", next, err, lastError, claim, started, coalesced, attempts)
 	}
 }
 

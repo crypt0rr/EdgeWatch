@@ -22,6 +22,9 @@ const (
 	changeWindowBatchSize       = 64
 	changeWindowDetailLimit     = 20
 	changeWindowSummaryMaxBytes = 128 * 1024
+	// ChangeWindowSummaryDestinationGrace bounds how long expiry leaves a
+	// window open while its configured notification destinations are unreadable.
+	ChangeWindowSummaryDestinationGrace = time.Hour
 )
 
 const (
@@ -33,6 +36,7 @@ const (
 	outboxClosePendingWindowWhere  = `change_window_id=? AND +tenant_id=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at=''`
 	outboxCloseInFlightWindowWhere = `change_window_id=? AND +tenant_id=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at<>''`
 	outboxCloseOrphanWindowWhere   = `change_window_id=? AND +tenant_id=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND attempt_started_at<>'' AND claim_token=''`
+	outboxReleaseWindowAlertsWhere = `change_window_id=? AND +tenant_id=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND coalesce_after_attempt=0`
 	capturePendingWindowRowsQuery  = `SELECT id,payload_json,attempt_started_at,claim_token,claim_until FROM outbox WHERE change_window_id=? AND +tenant_id=? AND sent_at IS NULL AND terminal_at='' AND coalesced_at='' AND id>? ORDER BY id LIMIT ?`
 )
 
@@ -46,6 +50,10 @@ var (
 // which exact identities cannot be recovered. NewCount and RecoveredCount
 // are unique per category and window, not event or destination counts.
 type ChangeWindowSummary struct {
+	// SummaryNotificationStatus is populated when the durable review could not
+	// be queued to destinations. Empty retains the historical/normal summary
+	// representation.
+	SummaryNotificationStatus     string           `json:"summary_notification_status,omitempty"`
 	NewCount                      int              `json:"new_count"`
 	RecoveredCount                int              `json:"recovered_count"`
 	StillOpenCount                int              `json:"still_open_count"`
@@ -121,6 +129,7 @@ type DueChangeWindow struct {
 	TenantID string
 	JobID    string
 	JobName  string
+	EndAt    time.Time
 }
 
 // CreateChangeWindow creates one job-scoped window and attaches currently
@@ -436,7 +445,7 @@ func (ss *SystemStore) DueChangeWindows(ctx context.Context, now time.Time, limi
 	if limit < 1 {
 		limit = changeWindowBatchSize
 	}
-	rows, err := ss.store.reader().QueryContext(ctx, `SELECT w.id,j.tenant_id,w.job_id,j.name FROM change_windows AS w JOIN jobs AS j ON j.id=w.job_id WHERE w.closed_at='' AND w.end_at<=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id) ORDER BY w.end_at,w.id LIMIT ?`, sqliteTimestamp(now), limit)
+	rows, err := ss.store.reader().QueryContext(ctx, `SELECT w.id,j.tenant_id,w.job_id,j.name,w.end_at FROM change_windows AS w JOIN jobs AS j ON j.id=w.job_id WHERE w.closed_at='' AND w.end_at<=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id) ORDER BY w.end_at,w.id LIMIT ?`, sqliteTimestamp(now), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -444,9 +453,11 @@ func (ss *SystemStore) DueChangeWindows(ctx context.Context, now time.Time, limi
 	var out []DueChangeWindow
 	for rows.Next() {
 		var item DueChangeWindow
-		if err := rows.Scan(&item.ID, &item.TenantID, &item.JobID, &item.JobName); err != nil {
+		var endAt string
+		if err := rows.Scan(&item.ID, &item.TenantID, &item.JobID, &item.JobName, &endAt); err != nil {
 			return nil, err
 		}
+		item.EndAt = scanTime(endAt)
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -455,6 +466,18 @@ func (ss *SystemStore) DueChangeWindows(ctx context.Context, now time.Time, limi
 // ExpireChangeWindow closes a due window in the job's tenant and queues its
 // one summary in the same transaction as the durable review state.
 func (ts *TenantStore) ExpireChangeWindow(ctx context.Context, id string, clock func() time.Time, destinations []string) (ChangeWindowSummary, bool, error) {
+	return ts.expireChangeWindow(ctx, id, clock, destinations, false)
+}
+
+// ExpireChangeWindowWithoutSummaryNotification records the close review when
+// destination metadata remained unavailable through the bounded retry grace.
+// It releases eligible held alerts for individual delivery instead of
+// coalescing them into an undelivered summary.
+func (ts *TenantStore) ExpireChangeWindowWithoutSummaryNotification(ctx context.Context, id string, clock func() time.Time) (ChangeWindowSummary, bool, error) {
+	return ts.expireChangeWindow(ctx, id, clock, nil, true)
+}
+
+func (ts *TenantStore) expireChangeWindow(ctx context.Context, id string, clock func() time.Time, destinations []string, summaryNotificationUnavailable bool) (ChangeWindowSummary, bool, error) {
 	if err := ts.ready(); err != nil {
 		return ChangeWindowSummary{}, false, err
 	}
@@ -469,7 +492,7 @@ func (ts *TenantStore) ExpireChangeWindow(ctx context.Context, id string, clock 
 	// Sample only after beginWriteTx acquires SQLite's writer. This lets the
 	// commit order of expiry and scan finalization define the event boundary.
 	closeAt := clock().UTC()
-	summary, changed, err := closeChangeWindowTx(ctx, tx, ts.scope, id, closeAt, "expired", destinations)
+	summary, changed, err := closeChangeWindowTx(ctx, tx, ts.scope, id, closeAt, "expired", destinations, summaryNotificationUnavailable)
 	if err != nil {
 		return ChangeWindowSummary{}, false, err
 	}
@@ -508,12 +531,12 @@ func (ts *TenantStore) CancelChangeWindow(ctx context.Context, jobID, id, actorU
 	startAt, endAt := scanTime(startRaw), scanTime(endRaw)
 	changed := false
 	if !closeAt.Before(startAt) && closeAt.Before(endAt) {
-		_, changed, err = closeChangeWindowTx(ctx, tx, windowTenant, id, closeAt, "cancelled", destinations)
+		_, changed, err = closeChangeWindowTx(ctx, tx, windowTenant, id, closeAt, "cancelled", destinations, false)
 		if err != nil {
 			return ChangeWindow{}, false, err
 		}
 	} else if !closeAt.Before(endAt) {
-		_, changed, err = closeChangeWindowTx(ctx, tx, windowTenant, id, closeAt, "expired", destinations)
+		_, changed, err = closeChangeWindowTx(ctx, tx, windowTenant, id, closeAt, "expired", destinations, false)
 		if err != nil {
 			return ChangeWindow{}, false, err
 		}
@@ -594,7 +617,7 @@ func (ts *TenantStore) ReviewChangeWindow(ctx context.Context, jobID, id string,
 	return ts.GetChangeWindow(ctx, jobID, id)
 }
 
-func closeChangeWindowTx(ctx context.Context, tx *sql.Tx, scope TenantScope, id string, closeAt time.Time, reason string, destinations []string) (ChangeWindowSummary, bool, error) {
+func closeChangeWindowTx(ctx context.Context, tx *sql.Tx, scope TenantScope, id string, closeAt time.Time, reason string, destinations []string, summaryNotificationUnavailable bool) (ChangeWindowSummary, bool, error) {
 	var jobID, jobName, startRaw, endRaw, windowStatus, closedAt string
 	var tenantID string
 	if err := tx.QueryRowContext(ctx, `SELECT w.job_id,j.name,j.tenant_id,w.start_at,w.end_at,w.status,w.closed_at FROM change_windows AS w JOIN jobs AS j ON j.id=w.job_id AND j.tenant_id=? WHERE w.id=? AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)`, scope.id, id).Scan(&jobID, &jobName, &tenantID, &startRaw, &endRaw, &windowStatus, &closedAt); err != nil {
@@ -608,6 +631,9 @@ func closeChangeWindowTx(ctx context.Context, tx *sql.Tx, scope TenantScope, id 
 	}
 	startAt, endAt := scanTime(startRaw), scanTime(endRaw)
 	if reason == "expired" && closeAt.Before(endAt) {
+		return ChangeWindowSummary{}, false, ErrConflict
+	}
+	if summaryNotificationUnavailable && (reason != "expired" || closeAt.Before(endAt.Add(ChangeWindowSummaryDestinationGrace))) {
 		return ChangeWindowSummary{}, false, ErrConflict
 	}
 	if reason == "cancelled" && closeAt.Before(startAt) {
@@ -698,6 +724,9 @@ func closeChangeWindowTx(ctx context.Context, tx *sql.Tx, scope TenantScope, id 
 	reviewState := "none"
 	var summaryEvent *model.Event
 	if hasEvidence {
+		if summaryNotificationUnavailable {
+			summary.SummaryNotificationStatus = "not_queued_destinations_unavailable"
+		}
 		summaryJSON, err = marshalBoundedChangeWindowSummary(&summary)
 		if err != nil {
 			return summary, false, err
@@ -713,6 +742,9 @@ func closeChangeWindowTx(ctx context.Context, tx *sql.Tx, scope TenantScope, id 
 		if summary.IncompleteEventCount > 0 {
 			message += fmt.Sprintf("; details incomplete for %d older truncated event(s)", summary.IncompleteEventCount)
 		}
+		if summaryNotificationUnavailable {
+			message += "; the summary notification was not queued because destination metadata was unavailable; eligible individual alerts remain retryable"
+		}
 		event := model.Event{Type: "change-window-summary", JobID: jobID, Job: jobName, Message: message, Reason: reason, CreatedAt: closeAt.UTC(), TenantID: tenantID}
 		summaryEvent = &event
 	}
@@ -723,6 +755,17 @@ func closeChangeWindowTx(ctx context.Context, tx *sql.Tx, scope TenantScope, id 
 	// coalesced now. A provider call already handed off keeps its lease until
 	// its outcome arrives, but is marked so a failed result cannot retry or
 	// penalize destination health after close.
+	if summaryNotificationUnavailable {
+		if _, err := applyOutboxTransition(ctx, tx, outboxReleaseWindowAlerts,
+			outboxReleaseWindowAlertsWhere,
+			[]any{id, scope.id},
+			outboxChange("change_window_id", outboxConditional, `COALESCE((SELECT candidate.id FROM change_windows AS candidate JOIN jobs AS candidate_job ON candidate_job.id=candidate.job_id WHERE candidate.job_id=outbox.event_job_id AND candidate.closed_at='' AND candidate.end_at>? AND candidate_job.tenant_id=outbox.tenant_id ORDER BY candidate.start_at,candidate.id LIMIT 1),'')`, sqliteTimestamp(closeAt)),
+			outboxChange("claim_token", outboxConditional, `CASE WHEN attempt_started_at='' THEN '' ELSE claim_token END`),
+			outboxChange("claim_until", outboxConditional, `CASE WHEN attempt_started_at='' THEN '' ELSE claim_until END`),
+		); err != nil {
+			return summary, false, err
+		}
+	}
 	if _, err := applyOutboxTransition(ctx, tx, outboxClosePending,
 		outboxClosePendingWindowWhere,
 		[]any{id, scope.id},
@@ -761,8 +804,10 @@ func closeChangeWindowTx(ctx context.Context, tx *sql.Tx, scope TenantScope, id 
 		if err := insertEventExec(ctx, tx, bounded, payload, closeAt.UTC()); err != nil {
 			return summary, false, err
 		}
-		if err := queueEventsTx(ctx, tx, []model.Event{bounded}, destinations); err != nil {
-			return summary, false, err
+		if !summaryNotificationUnavailable {
+			if err := queueEventsTx(ctx, tx, []model.Event{bounded}, destinations); err != nil {
+				return summary, false, err
+			}
 		}
 	}
 	return summary, true, nil
@@ -1070,11 +1115,9 @@ func (ss *SystemStore) BeginDeliveryAttempt(ctx context.Context, id int64, claim
 			}
 		}
 		startAt, endAt := scanTime(startRaw), scanTime(endRaw)
-		// An unclosed due window continues to hold the row until the
-		// expiry worker commits its summary and coalesces the backlog.
 		if closedAt == "" && now.Before(startAt) {
 			var activeID, activeEndRaw string
-			activeErr := tx.QueryRowContext(ctx, `SELECT quiet.id,quiet.end_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.job_id=? AND j.tenant_id=? AND quiet.closed_at='' AND quiet.start_at<=? ORDER BY quiet.start_at,quiet.id LIMIT 1`, jobID, tenantID, sqliteTimestamp(now)).Scan(&activeID, &activeEndRaw)
+			activeErr := tx.QueryRowContext(ctx, `SELECT quiet.id,quiet.end_at FROM change_windows AS quiet JOIN jobs AS j ON j.id=quiet.job_id WHERE quiet.job_id=? AND j.tenant_id=? AND quiet.closed_at='' AND quiet.start_at<=? AND quiet.end_at>? ORDER BY quiet.start_at,quiet.id LIMIT 1`, jobID, tenantID, sqliteTimestamp(now), sqliteTimestamp(now)).Scan(&activeID, &activeEndRaw)
 			if activeErr != nil && !errors.Is(activeErr, sql.ErrNoRows) {
 				return fmt.Errorf("%w: %v", ErrDeliveryAttemptNotStarted, activeErr)
 			}
@@ -1105,7 +1148,7 @@ func (ss *SystemStore) BeginDeliveryAttempt(ctx context.Context, id int64, claim
 				return ErrDeliveryWindowHeld
 			}
 		}
-		if closedAt == "" && !now.Before(startAt) {
+		if closedAt == "" && !now.Before(startAt) && now.Before(endAt) {
 			var event model.Event
 			if json.Unmarshal(payload, &event) == nil {
 				if event.JobID == "" {

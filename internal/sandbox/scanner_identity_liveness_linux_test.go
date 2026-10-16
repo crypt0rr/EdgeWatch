@@ -171,7 +171,7 @@ func TestScannerIdentityScopeLockEnforcesGateLivenessAllocatorOrder(t *testing.T
 
 func TestScannerIdentityLivenessSurvivesParentCloseInExecChild(t *testing.T) {
 	directoryFD := scannerIdentityLockTestDirectory(t)
-	keeper, inherited, exclusive, err := acquireScannerIdentityLiveness(context.Background(), directoryFD)
+	keeper, _, exclusive, err := acquireScannerIdentityLiveness(context.Background(), directoryFD)
 	if err != nil {
 		t.Fatal(err)
 	}

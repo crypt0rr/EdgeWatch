@@ -335,7 +335,9 @@ func (lease *scannerIdentityLease) release() error {
 		return errors.New("release scanner identity: durable release failed")
 	}
 	lease.finished = true
-	lease.closeLivenessReference()
+	if err := lease.closeLivenessReference(); err != nil {
+		return errors.New("release scanner identity: liveness reference close failed")
+	}
 	return nil
 }
 

@@ -223,6 +223,12 @@ func seccompFilterWithNotification(arch seccompArchitecture, livenessFD int, not
 	}
 	labels := make(map[string]string, 8)
 	if livenessFD >= 0 {
+		// The filter compares the descriptor against a 32-bit syscall argument.
+		// Keep this narrowing guard adjacent to the conversion as well as the
+		// inherited-range validation above, so no caller can truncate a wider FD.
+		if uint64(livenessFD) > uint64(^uint32(0)) {
+			return nil, errors.New("scanner liveness descriptor exceeds the seccomp argument width")
+		}
 		protected := uint32(livenessFD)
 		fdSyscalls := []string{"close", "close_range", "dup2", "dup3", "fcntl", "ioctl"}
 		for index, name := range fdSyscalls {

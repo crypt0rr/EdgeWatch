@@ -215,7 +215,9 @@ func TestScannerIdentityAllocatorBootAndNamespaceScope(t *testing.T) {
 
 	// Simulate reboot by closing every old-boot userspace reference. Real reboot
 	// closes these kernel OFD locks before the new boot ID is observable.
-	oldLease.closeLivenessReference()
+	if err := oldLease.closeLivenessReference(); err != nil {
+		t.Fatal(err)
+	}
 	// A new kernel boot proves that no process holding the old lease survived.
 	newBoot := newScannerIdentityAllocatorForTest(allocator.directory, allocator.uidStart, allocator.count, testScannerBootID2, 18)
 	newLease, err := newBoot.acquire(context.Background())

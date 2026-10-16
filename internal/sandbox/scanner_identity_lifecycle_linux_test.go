@@ -343,7 +343,11 @@ func TestScannerIdentityPrivateScopeRecoveryArchivesPriorJournal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recover new private namespace after all inherited refs closed: %v", err)
 	}
-	defer newLease.release()
+	t.Cleanup(func() {
+		if err := newLease.release(); err != nil {
+			t.Errorf("release recovered lease: %v", err)
+		}
+	})
 
 	hash := sha256.Sum256(prior)
 	archivePath := filepath.Join(allocator.directory, "leases.recovery-"+hex.EncodeToString(hash[:])+".json")
@@ -412,7 +416,11 @@ func TestScannerIdentityLegacyMigrationCompletesJournalFirstNamespaceCrash(t *te
 	if err != nil {
 		t.Fatalf("complete journal-first v2-to-v3 migration: %v", err)
 	}
-	defer lease.release()
+	t.Cleanup(func() {
+		if err := lease.release(); err != nil {
+			t.Errorf("release migrated lease: %v", err)
+		}
+	})
 	marker, err := readScannerIdentityMarkerAtPath(allocator.markerDir)
 	if err != nil || marker.Version != scannerIdentityVersion || marker.PIDNamespace != 18 || !marker.PrivateRuntime {
 		t.Fatalf("completed migration marker = %+v, %v", marker, err)

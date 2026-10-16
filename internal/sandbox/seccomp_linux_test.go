@@ -93,14 +93,6 @@ func seccompData(arch, number, firstArg uint32) [64]byte {
 	return data
 }
 
-func seccompDataArgs(arch, number uint32, args ...uint32) [64]byte {
-	data := seccompData(arch, number, 0)
-	for index, value := range args {
-		binary.LittleEndian.PutUint32(data[int(seccompArg0Low)+index*8:], value)
-	}
-	return data
-}
-
 func seccompDataWideArgs(arch, number uint32, args ...uint64) [64]byte {
 	var data [64]byte
 	binary.LittleEndian.PutUint32(data[seccompNumber:], number)

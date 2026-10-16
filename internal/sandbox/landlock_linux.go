@@ -431,11 +431,11 @@ func parseExecArgs(args []string) (execRequest, error) {
 				return execRequest{}, usage
 			}
 			index++
-			fd, err := strconv.Atoi(args[index])
-			if err != nil || fd < 3 {
+			fd, err := strconv.ParseUint(args[index], 10, 32)
+			if err != nil || fd < 3 || fd >= uint64(3+maxInheritedFiles) {
 				return execRequest{}, usage
 			}
-			request.livenessFD = fd
+			request.livenessFD = int(fd)
 			livenessSeen = true
 		case "--seccomp-notify-fd":
 			if index+1 >= len(args) || notifySeen {

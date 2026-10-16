@@ -206,17 +206,17 @@ func insertUpgradeBudgetRepresentativeRows(t *testing.T, db *sql.DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer metaInsert.Close()
 	runtimeInsert, err := tx.PrepareContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?)`)
 	if err != nil {
-		_ = metaInsert.Close()
 		t.Fatal(err)
 	}
+	defer runtimeInsert.Close()
 	incidentInsert, err := tx.PrepareContext(ctx, `INSERT INTO runtime_incidents(job_id,key,incident_json) VALUES(?,?,?)`)
 	if err != nil {
-		_ = metaInsert.Close()
-		_ = runtimeInsert.Close()
 		t.Fatal(err)
 	}
+	defer incidentInsert.Close()
 	for i := 0; i < upgradeBudgetProjectionRows; i++ {
 		jobID := fmt.Sprintf("floor-projection-%03d", i)
 		key := fmt.Sprintf("floor-budget-skip-%03d|32768", i)
@@ -253,9 +253,9 @@ func insertUpgradeBudgetRepresentativeRows(t *testing.T, db *sql.DB) {
 		_ = tx.Rollback()
 		t.Fatal(err)
 	}
+	defer eventInsert.Close()
 	for i := 0; i < upgradeBudgetBulkRows; i++ {
 		if _, err := eventInsert.ExecContext(ctx, "changes-detected", "floor upgrade fixture", "floor-indexed-scan", bulkPayload, stamp, "floor-upgrade-job", DefaultTenantID); err != nil {
-			_ = eventInsert.Close()
 			_ = tx.Rollback()
 			t.Fatalf("insert bulk event %d: %v", i, err)
 		}
@@ -277,13 +277,13 @@ func insertUpgradeBudgetRepresentativeRows(t *testing.T, db *sql.DB) {
 		_ = tx.Rollback()
 		t.Fatal(err)
 	}
+	defer outboxInsert.Close()
 	for i := 0; i < upgradeBudgetBulkRows; i++ {
 		sentAt := any(nil)
 		if i%2 == 0 {
 			sentAt = stamp
 		}
 		if _, err := outboxInsert.ExecContext(ctx, fmt.Sprintf("floor-bulk-%05d", i), bulkPayload, 1, stamp, sentAt, DefaultTenantID); err != nil {
-			_ = outboxInsert.Close()
 			_ = tx.Rollback()
 			t.Fatalf("insert bulk outbox row %d: %v", i, err)
 		}
@@ -315,9 +315,9 @@ func insertUpgradeBudgetRepresentativeRows(t *testing.T, db *sql.DB) {
 		_ = tx.Rollback()
 		t.Fatal(err)
 	}
+	defer unitInsert.Close()
 	for i := 0; i < upgradeBudgetCycleUnitRows; i++ {
 		if _, err := unitInsert.ExecContext(ctx, "floor-budget-cycle", i, []byte(`{}`), stamp, stamp); err != nil {
-			_ = unitInsert.Close()
 			_ = tx.Rollback()
 			t.Fatalf("insert scan cycle unit %d: %v", i, err)
 		}
@@ -344,6 +344,7 @@ func insertUpgradeChangeWindowRows(t *testing.T, db *sql.DB) {
 		_ = tx.Rollback()
 		t.Fatal(err)
 	}
+	defer stmt.Close()
 	for _, kind := range []string{"active", "scheduled", "due", "reviewed"} {
 		for i := 0; i < 100; i++ {
 			id := fmt.Sprintf("floor-window-%s-%03d", kind, i)
@@ -357,7 +358,6 @@ func insertUpgradeChangeWindowRows(t *testing.T, db *sql.DB) {
 				status, closedAt, review = "closed", stamp, "reviewed"
 			}
 			if _, err := stmt.ExecContext(ctx, id, start, end, stamp, status, closedAt, review); err != nil {
-				_ = stmt.Close()
 				_ = tx.Rollback()
 				t.Fatalf("insert %s window %d: %v", kind, i, err)
 			}

@@ -7,6 +7,12 @@ import (
 	"time"
 )
 
+const (
+	tenantOutboxPendingCountQuery  = `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND coalesced_at='' AND +tenant_id=?`
+	tenantOutboxRetryingCountQuery = `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND coalesced_at='' AND terminal_at='' AND attempts > 0 AND attempts < ? AND +tenant_id=?`
+	tenantOutboxFailedCountQuery   = `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND coalesced_at='' AND (attempts >= ? OR terminal_at <> '') AND +tenant_id=?`
+)
+
 // DeploymentTelemetry is a bounded, point-in-time summary of the data held by
 // an EdgeWatch deployment. It contains aggregate counters and SQLite's
 // allocated page size only; scan and event payloads are never decoded.
@@ -103,9 +109,9 @@ type TenantTelemetry struct {
 
 // Telemetry returns the tenant's aggregate counters, for the tenant's own
 // console. Host observations are counted through the tenant's scans and scan
-// cycles through its jobs. The events and deliveries are the tenant's own,
-// counted from the tenant index; the platform's, such as its copies of the
-// update alerts, are not. The default tenant alone reports the database
+// cycles through its jobs. The events and deliveries are the tenant's own;
+// platform rows, such as its copies of the update alerts, are not included.
+// The default tenant alone reports the database
 // size. Callers should cache the value, as they cache DeploymentTelemetry.
 func (ts *TenantStore) Telemetry(ctx context.Context) (TenantTelemetry, error) {
 	if err := ts.ready(); err != nil {
@@ -120,9 +126,9 @@ func (ts *TenantStore) Telemetry(ctx context.Context) (TenantTelemetry, error) {
 		COALESCE((SELECT COUNT(*) FROM latest_scan_hosts WHERE tenant_id=?),0),
 		COALESCE((SELECT COUNT(*) FROM events WHERE `+historyTenantSQL+`),0),
 		COALESCE((SELECT COUNT(*) FROM scan_cycles AS c JOIN jobs AS j ON j.id=c.job_id AND j.tenant_id=?),0),
-		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND coalesced_at='' AND `+historyTenantSQL+`),0),
-		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND coalesced_at='' AND terminal_at='' AND attempts > 0 AND attempts < ? AND `+historyTenantSQL+`),0),
-		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND coalesced_at='' AND (attempts >= ? OR terminal_at <> '') AND `+historyTenantSQL+`),0)`,
+		COALESCE((`+tenantOutboxPendingCountQuery+`),0),
+		COALESCE((`+tenantOutboxRetryingCountQuery+`),0),
+		COALESCE((`+tenantOutboxFailedCountQuery+`),0)`,
 		id, id, id, id, id, id, id, deliveryMaxAttempts, id, deliveryMaxAttempts, id).
 		Scan(&telemetry.Jobs, &telemetry.Scans, &telemetry.HostObservations, &telemetry.EffectiveHosts, &telemetry.Events, &telemetry.ScanCycles, &telemetry.OutboxPending, &telemetry.OutboxRetrying, &telemetry.OutboxFailed); err != nil {
 		return TenantTelemetry{}, err

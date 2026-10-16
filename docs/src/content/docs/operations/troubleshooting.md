@@ -228,3 +228,9 @@ An older binary refuses a database upgraded beyond its supported version.
 Rollback requires a matching pre-upgrade backup; do not replace a live database.
 Follow [Database compatibility](/reference/database-compatibility/) and
 [Backup and recovery](/operations/backup-recovery/).
+
+If a write-capable host command was interrupted during a transaction on a
+rollback-journal database, SQLite may leave a hot `-journal` file. The next
+daemon start rolls back that incomplete transaction before checking the daemon
+lease; it still refuses startup if the lease is live or malformed. The
+read-only `edgewatch verify` command does not recover the live database.

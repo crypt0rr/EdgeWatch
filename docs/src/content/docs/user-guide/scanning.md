@@ -103,10 +103,10 @@ the next daily retention pass. The dashboard shows scanner
 phase, heartbeat, completed probes, ports found, and the last sanitized output.
 A completed cycle whose result repeatedly fails during finalization is retried
 once from its saved work. After a second persisted finalization failure,
-EdgeWatch discards that cycle and plans a fresh scan on the next trigger. A
-destination lookup failure is not counted as a finalization failure, and a
-restart between cycle completion and scan-history insertion still recovers the
-completed result.
+the next trigger discards that cycle and plans a fresh scan. The server log
+records a WARN with the discarded cycle ID. A destination lookup failure is
+not counted as a finalization failure, and a restart between cycle completion
+and scan-history insertion still recovers the completed result.
 A resumed cycle keeps the scanner-profile arguments it started with, and its
 scans record that job and profile revision; a profile change applies from the
 next cycle. Accepting an incident, approving or resetting the baseline, or

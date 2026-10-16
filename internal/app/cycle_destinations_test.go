@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strconv"
@@ -133,7 +134,8 @@ func TestRepeatedCompletedCycleFinalizationFailuresPlanFreshCycle(t *testing.T) 
 	t.Parallel()
 	ctx := context.Background()
 	probe := &completingCycleScanner{}
-	a, db := newLifecycleTestApp(t, probe, nil)
+	var logs bytes.Buffer
+	a, db := newLifecycleTestApp(t, probe, &logs)
 	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("cycle-finalization-retry-limit"))
 	if err != nil {
 		t.Fatal(err)
@@ -159,10 +161,20 @@ func TestRepeatedCompletedCycleFinalizationFailuresPlanFreshCycle(t *testing.T) 
 			t.Fatalf("retry changed cycle before the failure bound: first=%q second=%q", failedCycleID, scan.CycleID)
 		}
 	}
+	if strings.Contains(logs.String(), "completed scan cycle discarded after repeated result finalization failures") {
+		t.Fatal("cycle discard warning was emitted before the retry bound was handled")
+	}
 
 	scan, _, runErr := a.runJobRecord(ctx, record, false)
 	if runErr != nil || scan.Status != "success" || scan.CycleStatus != "completed" || scan.CycleID == failedCycleID {
 		t.Fatalf("run after repeated finalization failures = %#v, %v", scan, runErr)
+	}
+	warning := logs.String()
+	if !strings.Contains(warning, "level=WARN") ||
+		!strings.Contains(warning, "completed scan cycle discarded after repeated result finalization failures; planning a fresh scan") ||
+		!strings.Contains(warning, "cycle_id="+failedCycleID) ||
+		!strings.Contains(warning, "finalization_failures=2") {
+		t.Fatalf("retry-bound discard warning does not identify the old cycle: %s", warning)
 	}
 	oldCycle, err := defaultTenant(db).GetScanCycle(ctx, failedCycleID)
 	if err != nil || oldCycle.Status != "discarded" {

@@ -180,7 +180,7 @@ func TestDaemonAutoSandboxStartsWhileScannerInvocationsFailClosed(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy := sandbox.Detect(scannerSandboxOptions(cfg))
+	policy := sandbox.Detect(scannerSandboxOptions(cfg, "/usr/bin/nmap"))
 	status := policy.Status()
 	if status.Mode != sandbox.ModeAuto || status.State != sandbox.StateUnavailable || status.IdentityPool == nil || status.IdentityPool.State != sandbox.StateUnavailable {
 		t.Fatalf("scanner sandbox status = %+v, want unavailable auto identity pool", status)

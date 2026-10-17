@@ -77,6 +77,11 @@ func (env environment) runProbe(policy *Policy, probe Probe) error {
 	if len(command) == 0 {
 		return nil
 	}
+	if probe.Required {
+		if _, err := os.Stat(command[0]); err != nil {
+			return fmt.Errorf("%s executable is unavailable", probeName(probe))
+		}
+	}
 	return env.run(policy, command, probe.Env)
 }
 
@@ -256,8 +261,9 @@ func detect(options Options, env environment) *Policy {
 }
 
 func scannerSandboxProbe() Probe {
-	// Never run Nmap or Naabu from Detect: version checks and other scanner
-	// commands must acquire their own invocation identity lease.
+	// This cheap command verifies the scanner identity and seccomp paths.
+	// Configured scanner compatibility probes use fixed commands such as
+	// `nmap --version` and run through their own invocation identity lease.
 	return Probe{Name: "the scanner identity probe", Args: []string{"/bin/true"}}
 }
 
@@ -380,6 +386,7 @@ func detectScannerSeccomp(policy *Policy, probe Probe, env environment) *Policy 
 	}
 	setUnavailable := func(reason string) *Policy {
 		policy.status.Seccomp = SeccompStatus{State: StateUnavailable, Reason: reason}
+		policy.status.Capabilities = nil
 		if policy.enforce {
 			policy.enforce = false
 			policy.status.State = StateUnavailable
@@ -412,7 +419,8 @@ func detectScannerSeccomp(policy *Policy, probe Probe, env environment) *Policy 
 }
 
 // detectLandlock decides whether the processes also start restricted with
-// Landlock. When they cannot, policy keeps its identity confinement.
+// Landlock. Scanner probes first confirm the actual command under its
+// mandatory identity and seccomp policy before allowing a Landlock fallback.
 func detectLandlock(policy *Policy, options Options, env environment) *Policy {
 	spec := policy.profileName().spec()
 	scanner := policy.profileName() == Scanner
@@ -426,25 +434,30 @@ func detectLandlock(policy *Policy, options Options, env environment) *Policy {
 		}
 		return policy
 	}
-	if scanner && mode != ModeOff && !policy.enforce {
-		return unrestricted(StateUnavailable, "scanner identity isolation is unavailable")
+	if scanner && (!policy.enforce || !policy.seccomp || policy.status.Seccomp.State != StateEnforced) {
+		reason := "scanner identity isolation is unavailable"
+		if policy.enforce {
+			reason = "scanner seccomp isolation is unavailable"
+		}
+		policy.enforce = false
+		policy.helper = ""
+		policy.identityOnlyHelper = ""
+		policy.temporaryHelper = ""
+		policy.status.Capabilities = nil
+		if policy.status.Seccomp.State != StateEnforced {
+			policy.seccomp = false
+		}
+		if policy.status.State != StateUnavailable {
+			policy.status.State = StateUnavailable
+			policy.status.Reason = reason
+		}
+		if mode == ModeOff {
+			policy.status.Landlock = LandlockStatus{Mode: mode, State: StateDisabled, Reason: spec.landlockSetting + " is off"}
+			return policy
+		}
+		return unrestricted(StateUnavailable, reason)
 	}
-	switch {
-	case mode == ModeOff:
-		return unrestricted(StateDisabled, spec.landlockSetting+" is off")
-	case !ValidMode(mode):
-		return unrestricted(StateUnavailable, fmt.Sprintf("%s %q is not auto, required, or off", spec.landlockSetting, mode))
-	case env.landlockErr != nil:
-		return unrestricted(StateUnavailable, landlockUnavailableReason(env.landlockErr))
-	case env.executableErr != nil:
-		return unrestricted(StateUnavailable, fmt.Sprintf("the EdgeWatch executable cannot start %s with Landlock: %v", spec.processes, env.executableErr))
-	}
-	restricted := policy.WithLandlock(env.executable, env.landlockABI)
-	restricted.status.Landlock.Mode = mode
 	probes := options.Probes
-	if scanner {
-		probes = []Probe{scannerSandboxProbe()}
-	}
 	probe := func(candidate *Policy) (string, error) {
 		for _, probe := range probes {
 			if err := env.runProbe(candidate, probe); err != nil {
@@ -453,6 +466,62 @@ func detectLandlock(policy *Policy, options Options, env environment) *Policy {
 		}
 		return "", nil
 	}
+	scannerProbeUnavailable := func(name string) *Policy {
+		reason := "the scanner compatibility probe could not start with the required identity and seccomp policy; scanner launches are unavailable"
+		if strings.EqualFold(name, "nmap") {
+			reason = "nmap could not start with the required identity and seccomp policy; scanner launches are unavailable"
+		}
+		policy.enforce = false
+		policy.helper = ""
+		policy.identityOnlyHelper = ""
+		policy.temporaryHelper = ""
+		policy.status.Capabilities = nil
+		policy.status.State = StateUnavailable
+		policy.status.Reason = reason
+		if mode != ModeOff {
+			policy.status.Landlock = LandlockStatus{Mode: mode, State: StateUnavailable, Reason: reason}
+		}
+		return policy
+	}
+	scannerLandlockUnavailable := func(name string) *Policy {
+		reason := "the scanner compatibility probe could not start with Landlock and seccomp"
+		if strings.EqualFold(name, "nmap") {
+			reason = "nmap could not start with Landlock and seccomp"
+		}
+		policy.status.Landlock = LandlockStatus{Mode: mode, State: StateUnavailable, Reason: reason}
+		policy.temporaryHelper = env.executable
+		return policy
+	}
+	switch {
+	case mode == ModeOff:
+		fallback := unrestricted(StateDisabled, spec.landlockSetting+" is off")
+		if scanner {
+			if name, err := probe(policy); err != nil {
+				return scannerProbeUnavailable(name)
+			}
+		}
+		return fallback
+	case !ValidMode(mode):
+		fallback := unrestricted(StateUnavailable, fmt.Sprintf("%s %q is not auto, required, or off", spec.landlockSetting, mode))
+		if scanner {
+			if name, err := probe(policy); err != nil {
+				return scannerProbeUnavailable(name)
+			}
+		}
+		return fallback
+	case env.landlockErr != nil:
+		fallback := unrestricted(StateUnavailable, landlockUnavailableReason(env.landlockErr))
+		if scanner {
+			if name, err := probe(policy); err != nil {
+				return scannerProbeUnavailable(name)
+			}
+		}
+		return fallback
+	case env.executableErr != nil:
+		return unrestricted(StateUnavailable, fmt.Sprintf("the EdgeWatch executable cannot start %s with Landlock: %v", spec.processes, env.executableErr))
+	}
+	restricted := policy.WithLandlock(env.executable, env.landlockABI)
+	restricted.status.Landlock.Mode = mode
 	// Scanner seccomp is also tested without Landlock because the supervisor
 	// needs the no-escape filter on kernels where Landlock is unavailable.
 	// Notifier seccomp remains part of the Landlock helper path.
@@ -465,18 +534,19 @@ func detectLandlock(policy *Policy, options Options, env environment) *Policy {
 		if err == nil {
 			return filtered
 		}
+		if scanner {
+			// The compatibility probe uses the actual configured scanner binary.
+			// Confirm that the same executable starts with the mandatory identity
+			// and seccomp policy before allowing auto mode to omit Landlock.
+			if controlName, controlErr := probe(policy); controlErr != nil {
+				return scannerProbeUnavailable(controlName)
+			}
+			return scannerLandlockUnavailable(name)
+		}
 		seccompReason = fmt.Sprintf("%s could not start with the seccomp filter: %v", name, err)
 	}
 	if name, err := probe(restricted); err != nil {
 		return unrestricted(StateUnavailable, fmt.Sprintf("%s could not start with Landlock: %v", name, err))
-	}
-	if scanner && policy.status.Seccomp.State == StateEnforced {
-		// The filter itself works, but its combination with Landlock did not.
-		// Auto can safely fall back to the identity-only helper. Required
-		// Landlock remains unavailable and Policy.Require refuses startup.
-		policy.status.Landlock = LandlockStatus{Mode: mode, State: StateUnavailable, Reason: "the scanner helper could not combine Landlock with the required seccomp filter"}
-		policy.temporaryHelper = env.executable
-		return policy
 	}
 	restricted.status.Seccomp = SeccompStatus{State: StateUnavailable, Reason: seccompReason}
 	return restricted
@@ -576,7 +646,7 @@ func runConfined(policy *Policy, command, environment []string) error {
 		cmd.Env = defaultProbeEnvironment
 	}
 	cmd.Stdout = io.Discard
-	diagnostic := &boundedBuffer{limit: maxProbeDiagnostic}
+	diagnostic := &boundedBuffer{limit: maxProbeDiagnostic, onExceeded: cancel}
 	cmd.Stderr = diagnostic
 	policy.Confine(cmd)
 	var invocation *ScannerInvocation
@@ -592,10 +662,16 @@ func runConfined(policy *Policy, command, environment []string) error {
 			return fmt.Errorf("%w: scanner identity isolation is unavailable", ErrUnavailable)
 		}
 		if err := cmd.Run(); err != nil {
+			if diagnostic.exceeded {
+				return errors.Join(fmt.Errorf("scanner probe diagnostic exceeded %d bytes", maxProbeDiagnostic), err)
+			}
 			if detail := lastLine(diagnostic.String()); detail != "" {
 				return fmt.Errorf("%w: %s", err, detail)
 			}
 			return err
+		}
+		if diagnostic.exceeded {
+			return fmt.Errorf("scanner probe diagnostic exceeded %d bytes", maxProbeDiagnostic)
 		}
 		return nil
 	}
@@ -614,23 +690,43 @@ func runConfined(policy *Policy, command, environment []string) error {
 	proofErr := invocation.VerifyProcessTree()
 	finishErr := invocation.Finish(proofErr == nil)
 	if err := errors.Join(waitErr, proofErr, finishErr); err != nil {
+		if diagnostic.exceeded {
+			return errors.Join(fmt.Errorf("scanner probe diagnostic exceeded %d bytes", maxProbeDiagnostic), err)
+		}
 		if detail := lastLine(diagnostic.String()); detail != "" {
 			return fmt.Errorf("%w: %s", err, detail)
 		}
 		return err
+	}
+	if diagnostic.exceeded {
+		return fmt.Errorf("scanner probe diagnostic exceeded %d bytes", maxProbeDiagnostic)
 	}
 	return nil
 }
 
 // boundedBuffer keeps the first limit bytes written to it.
 type boundedBuffer struct {
-	limit int
-	data  []byte
+	limit      int
+	data       []byte
+	exceeded   bool
+	onExceeded func()
 }
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
 	if room := b.limit - len(b.data); room > 0 {
-		b.data = append(b.data, p[:min(room, len(p))]...)
+		written := min(room, len(p))
+		b.data = append(b.data, p[:written]...)
+		if written < len(p) && !b.exceeded {
+			b.exceeded = true
+			if b.onExceeded != nil {
+				b.onExceeded()
+			}
+		}
+	} else if len(p) > 0 && !b.exceeded {
+		b.exceeded = true
+		if b.onExceeded != nil {
+			b.onExceeded()
+		}
 	}
 	return len(p), nil
 }

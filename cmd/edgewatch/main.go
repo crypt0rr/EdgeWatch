@@ -188,7 +188,7 @@ func run(args []string) error {
 	// cannot confine those processes.
 	var scannerSandbox *sandbox.Policy
 	if cmd == "daemon" || cmd == "scan" {
-		scannerSandbox = sandbox.Detect(scannerSandboxOptions(cfg))
+		scannerSandbox = sandbox.Detect(scannerSandboxOptions(cfg, *nmapPath))
 		if err := scannerSandbox.Require(); err != nil {
 			return err
 		}
@@ -470,7 +470,7 @@ func run(args []string) error {
 		health, err := s.System().HealthStatus(ctx)
 		// The sandbox is detected for this container, which grants the
 		// health command the daemon's capabilities and configuration.
-		scannerSandbox := sandbox.Detect(scannerSandboxOptions(cfg)).Status()
+		scannerSandbox := sandbox.Detect(scannerSandboxOptions(cfg, *nmapPath)).Status()
 		notificationSandbox := sandbox.Detect(notificationSandboxOptions(cfg)).Status()
 		health.Warnings = append(health.Warnings, scannerSandboxWarnings(scannerSandbox)...)
 		health.Warnings = append(health.Warnings, notificationSandboxWarnings(notificationSandbox)...)
@@ -949,14 +949,14 @@ func scannerTemporaryDirectory(s *store.Store) string {
 	return filepath.Join(filepath.Dir(s.FilePath()), "tmp", "scanner")
 }
 
-// scannerSandboxOptions describes the configured sandbox. Detect uses a
-// harmless /bin/true probe; it never starts a scanner binary outside an
-// invocation that has acquired its own identity lease.
-func scannerSandboxOptions(cfg *config.Config) sandbox.Options {
+// scannerSandboxOptions describes the configured sandbox. The fixed Nmap
+// version command checks scanner compatibility without probing a target; the
+// sandbox runs it under a leased identity like every other scanner command.
+func scannerSandboxOptions(cfg *config.Config, nmapPath string) sandbox.Options {
 	return sandbox.Options{
 		Mode:     cfg.Scanner.Sandbox,
 		Landlock: cfg.Scanner.Landlock,
-		Probes:   []sandbox.Probe{{Name: "the scanner identity probe", Args: []string{"/bin/true"}}},
+		Probes:   []sandbox.Probe{{Name: "nmap", Args: []string{nmapPath, "--version"}, Required: true}},
 	}
 }
 
@@ -989,6 +989,12 @@ func notificationSandboxOptions(cfg *config.Config) sandbox.Options {
 func scannerSandboxWarnings(status sandbox.Status) []string {
 	if status.Mode != sandbox.ModeOff && status.IdentityPool != nil && status.IdentityPool.State == sandbox.StateUnavailable {
 		return []string{"scanner launches are unavailable because the per-invocation identity pool could not be enforced: " + status.IdentityPool.Reason}
+	}
+	if status.Mode != sandbox.ModeOff && status.State == sandbox.StateUnavailable {
+		return []string{"scanner launches are unavailable: " + status.Reason}
+	}
+	if status.Mode != sandbox.ModeOff && status.Landlock.Mode != sandbox.ModeOff && status.Landlock.State == sandbox.StateUnavailable {
+		return []string{"scanner processes start with identity isolation and seccomp but without Landlock: " + status.Landlock.Reason}
 	}
 	return unconfinedRootWarnings("scanner processes run", status)
 }
@@ -1036,7 +1042,11 @@ func logScannerSandbox(logger *slog.Logger, status sandbox.Status) {
 	case status.Landlock.State == sandbox.StateEnforced:
 		logger.Info("scanner processes are restricted with Landlock", "abi", status.Landlock.ABI, "seccomp", status.Seccomp.State, "seccomp_reason", status.Seccomp.Reason)
 	case status.Landlock.State == sandbox.StateUnavailable:
-		logger.Info("scanner processes start without Landlock", "reason", status.Landlock.Reason)
+		if status.State == sandbox.StateEnforced {
+			logger.Warn("scanner processes start with identity isolation and seccomp but without Landlock; see the container hardening guide", "reason", status.Landlock.Reason)
+		} else {
+			logger.Info("scanner processes start without Landlock", "reason", status.Landlock.Reason)
+		}
 	case status.State != sandbox.StateDisabled:
 		logger.Info("scanner.landlock is off; scanner processes start without Landlock")
 	}

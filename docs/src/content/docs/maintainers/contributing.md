@@ -125,7 +125,10 @@ on the exact image build action, or at the final stage when no target is set.
 It analyzes the file selected by that action and requires the repository-root
 context (`context: .`) with the default `Dockerfile` or explicit
 `file: Dockerfile`. Dynamic or alternate contexts and files, and an unexpected
-inline Dockerfile input, fail closed.
+inline Dockerfile input, fail closed. The test accepts only the reviewed plain
+build-step fields and action-input keys, plus the literal `build-args` block;
+quoted keys or values, flow syntax, anchors, merge keys, duplicate fields or
+inputs, and unexpected indentation fail closed.
 It follows stage inheritance, `COPY --from`, and `RUN --mount=from`. For every
 reachable stage, the test approves the exact ordered list of complete `RUN`
 instructions in the current Dockerfile. An added, removed, reordered,

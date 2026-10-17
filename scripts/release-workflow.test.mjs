@@ -282,55 +282,134 @@ function dockerfileArg(name) {
 }
 
 function releaseImageBuildStep(workflowText = workflow) {
-  const image = jobsOf(workflowText).find(({ name }) => name === 'image')
-  assert.ok(image, 'release workflow must define an image job')
+  const images = jobsOf(workflowText).filter(({ name }) => name === 'image')
+  assert.equal(images.length, 1, 'release workflow must define exactly one image job')
+  const image = images[0]
   const builds = stepsOf(image.block).filter((step) => /^ {6}- name: Build and push image$/m.test(step))
   assert.equal(builds.length, 1, 'release image job must define exactly one Build and push image step')
   assert.match(builds[0], /^ {8}uses: docker\/build-push-action@/m,
     'Build and push image must be the Docker image build action')
+  const buildActions = [...image.block.matchAll(/docker\/build-push-action@/g)]
+  assert.equal(buildActions.length, 1, 'release image job must define exactly one Docker image build action')
   return builds[0]
 }
 
-function releaseImageInput(workflowText, inputName) {
+const reviewedReleaseImageInputNames = new Set([
+  'context', 'push', 'no-cache', 'platforms', 'tags', 'labels', 'build-args',
+  'provenance', 'sbom', 'target', 'file', 'dockerfile-inline',
+])
+
+function releaseImageActionInputs(workflowText = workflow) {
   const build = releaseImageBuildStep(workflowText)
-  const withBlocks = [...build.matchAll(/^ {8}with:\s*$/gm)]
-  assert.equal(withBlocks.length, 1, 'release image build action must define exactly one with block')
-  const withBlock = build.slice(withBlocks[0].index + withBlocks[0][0].length)
-  const inputPattern = new RegExp(`^ {10}${inputName}:\\s*(.*?)\\s*$`, 'gm')
-  const matches = [...withBlock.matchAll(inputPattern)]
-  assert.ok(matches.length <= 1, `release image build action must not define multiple ${inputName} inputs`)
-  if (matches.length === 0) return undefined
-  return unquoteDockerfileValue(matches[0][1].replace(/\s+#.*$/, '').trim())
+  const stepLines = build.replace(/\r\n/g, '\n').split('\n')
+  assert.equal(stepLines[0], '      - name: Build and push image',
+    'release image build step must use the reviewed plain name field')
+  const stepFields = new Map()
+  let inputStart = -1
+  let inputEnd = stepLines.length
+  for (let index = 1; index < stepLines.length; index++) {
+    const line = stepLines[index]
+    if (!line.trim() || /^\s*#/.test(line)) continue
+    if (inputStart > 0 && /^ {9,}\S/.test(line)) continue
+    const field = /^ {8}([a-z][a-z0-9-]*):(?:[ \t]*(.*))?$/.exec(line)
+    assert.ok(field, 'unsupported release image build step syntax at line: ' + line)
+    const [, name, rawValue = ''] = field
+    assert.ok(['uses', 'id', 'with'].includes(name), 'unreviewed release image build step field: ' + name)
+    assert.ok(!stepFields.has(name), 'release image build step must not define duplicate ' + name + ' fields')
+    const value = rawValue.replace(/[ \t]+#.*$/, '').trim()
+    stepFields.set(name, value)
+    if (name === 'with') {
+      assert.equal(value, '', 'release image build step with field must use the reviewed block form')
+      inputStart = index + 1
+      inputEnd = stepLines.length
+    }
+  }
+  assert.equal(stepFields.get('uses')?.startsWith('docker/build-push-action@'), true,
+    'Build and push image must use the Docker image build action')
+  assert.match(stepFields.get('uses'), /^docker\/build-push-action@[0-9a-f]{40}$/,
+    'release image build action must use an immutable pinned revision')
+  assert.equal(stepFields.get('id'), 'push', 'release image build step must retain its reviewed id')
+  assert.ok(inputStart > 0, 'release image build action must define exactly one with block')
+  for (let index = inputStart; index < stepLines.length; index++) {
+    if (/^ {8}\S/.test(stepLines[index]) && !/^\s*#/.test(stepLines[index])) {
+      inputEnd = index
+      break
+    }
+  }
+  const lines = stepLines.slice(inputStart, inputEnd)
+  const inputs = new Map()
+  let index = 0
+  while (index < lines.length) {
+    const line = lines[index]
+    if (!line.trim() || /^\s*#/.test(line)) {
+      index++
+      continue
+    }
+
+    const entry = /^ {10}([a-z][a-z0-9-]*):(?:[ \t]*(.*))?$/.exec(line)
+    assert.ok(entry, 'unsupported release image action input syntax at line: ' + line)
+    const [, name, rawValue = ''] = entry
+    assert.ok(reviewedReleaseImageInputNames.has(name), 'unreviewed release image action input: ' + name)
+    assert.notEqual(name, 'dockerfile-inline', 'release image build must not add an inline Dockerfile input')
+    assert.ok(!inputs.has(name), 'release image build action must not define duplicate ' + name + ' inputs')
+    const value = rawValue.replace(/[ \t]+#.*$/, '').trim()
+
+    if (name === 'build-args') {
+      assert.equal(value, '|', 'release build-args must use the reviewed literal block form')
+      const argumentLines = []
+      index++
+      while (index < lines.length && /^ {12}\S/.test(lines[index])) {
+        const argument = lines[index].slice(12)
+        assert.ok(!/["'&*]/.test(argument), 'quoted or aliased build-arg syntax is not reviewed')
+        argumentLines.push(argument)
+        index++
+      }
+      assert.ok(argumentLines.length > 0, 'release build-args block must not be empty')
+      inputs.set(name, argumentLines.join('\n'))
+      continue
+    }
+
+    assert.ok(!/^["'[{|>]/.test(value), 'quoted, flow, or multiline release action values are not reviewed: ' + name)
+    assert.ok(!/(?:^|\s)[&*][A-Za-z0-9_-]+/.test(value), 'YAML anchors and aliases are not reviewed: ' + name)
+    inputs.set(name, value)
+    index++
+  }
+  return inputs
+}
+
+function releaseImageInput(workflowText, inputName) {
+  return releaseImageActionInputs(workflowText).get(inputName)
 }
 
 function releaseImageDockerfilePath(workflowText = workflow) {
-  const context = releaseImageInput(workflowText, 'context')
+  const inputs = releaseImageActionInputs(workflowText)
+  const context = inputs.get('context')
   assert.equal(context, '.', 'release image build must use the static repository root as its context')
-  const file = releaseImageInput(workflowText, 'file')
+  const file = inputs.get('file')
   assert.ok(file === undefined || file === 'Dockerfile',
     'release image build must use Dockerfile at the root of its repository context')
-  assert.equal(releaseImageInput(workflowText, 'dockerfile-inline'), undefined,
+  assert.equal(inputs.get('dockerfile-inline'), undefined,
     'release image build must not add an inline Dockerfile input')
   return file ?? 'Dockerfile'
 }
 
 function releaseImageBuildArgs(workflowText = workflow) {
-  const build = releaseImageBuildStep(workflowText)
-  const match = /^ {10}build-args:\s*\|\n((?: {12}[^\n]*\n?)+)/m.exec(build)
-  assert.ok(match, 'release image build must define its Docker build arguments')
-  const entries = [...match[1].matchAll(/^ {12}([A-Za-z_][A-Za-z0-9_]*)=(.*)$/gm)]
-  assert.ok(entries.length > 0, 'release image build arguments must not be empty')
-  return Object.fromEntries(entries.map(([, name, value]) => [name, value]))
+  const buildArgs = releaseImageActionInputs(workflowText).get('build-args')
+  assert.ok(buildArgs, 'release image build must define its Docker build arguments')
+  const entries = new Map()
+  for (const line of buildArgs.split('\n')) {
+    const entry = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line)
+    assert.ok(entry, 'unreviewed release Docker build argument: ' + line)
+    assert.ok(!entries.has(entry[1]), 'release image build must not define duplicate build argument ' + entry[1])
+    entries.set(entry[1], entry[2])
+  }
+  assert.ok(entries.size > 0, 'release image build arguments must not be empty')
+  return Object.fromEntries(entries)
 }
 
 function releaseImageTargetStage(workflowText = workflow) {
-  const build = releaseImageBuildStep(workflowText)
-  assert.match(build, /^ {8}with:\s*$/m, 'release image build action must define its inputs')
-  const matches = [...build.matchAll(/^ {10}target:\s*(.*?)\s*$/gm)]
-  assert.ok(matches.length <= 1, 'release image build action must not define multiple target inputs')
-  if (matches.length === 0) return undefined
-
-  const raw = matches[0][1].replace(/\s+#.*$/, '').trim()
+  const raw = releaseImageActionInputs(workflowText).get('target')
+  if (raw === undefined) return undefined
   const target = unquoteDockerfileValue(raw)
   assert.match(target, /^(?:[A-Za-z0-9_.-]+|\d+)$/,
     'release image build target must be a static Dockerfile stage name or index')
@@ -816,6 +895,12 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
     assert.ok(pattern.test(workflowText), 'release image action input marker is missing: ' + input)
     return workflowText.replace(pattern, '          ' + input + ': ' + replacement)
   }
+  const replaceImageBuildStep = (workflowText, replacement) => {
+    const step = releaseImageBuildStep(workflowText)
+    const start = workflowText.indexOf(step)
+    assert.notEqual(start, -1, 'release image build step must be present before mutation')
+    return workflowText.slice(0, start) + replacement(step) + workflowText.slice(start + step.length)
+  }
   const staticUnsafeFile = workflow.replace(
     '          context: .\n',
     '          context: .\n          file: scripts/fixtures/Dockerfile-1517-ae82e4f\n',
@@ -823,6 +908,12 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   assert.notEqual(staticUnsafeFile, workflow, 'static alternate Dockerfile mutation marker must exist')
   assert.throws(() => releaseImageDockerfilePath(staticUnsafeFile), /Dockerfile at the root/,
     'a static alternate Dockerfile with historical npm RUNs must fail closed')
+  const quotedFile = workflow.replace(
+    '          context: .\n',
+    '          context: .\n          "file": scripts/fixtures/Dockerfile-1517-ae82e4f\n',
+  )
+  assert.throws(() => releaseImageDockerfilePath(quotedFile), /unsupported release image action input syntax/,
+    'a quoted alternate file key must not be ignored')
   const dynamicFile = workflow.replace(
     '          context: .\n',
     '          context: .\n          file: ${{ inputs.dockerfile }}\n',
@@ -833,6 +924,45 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
     /static repository root/, 'a dynamic Docker build context must fail closed')
   assert.throws(() => releaseImageDockerfilePath(replaceImageInput(workflow, 'context', 'scripts/fixtures')),
     /static repository root/, 'an alternate Docker build context must fail closed')
+  assert.throws(() => releaseImageDockerfilePath(workflow.replace('          context: .', '          "context": .')),
+    /unsupported release image action input syntax/, 'a quoted context key must not be ignored')
+  assert.throws(() => releaseImageBuildArgs(workflow.replace('          build-args: |', '          "build-args": |')),
+    /unsupported release image action input syntax/, 'a quoted build-args key must not be ignored')
+  assert.throws(() => releaseImageActionInputs(replaceImageBuildStep(workflow,
+    (step) => step.replace('        with:\n', '        "with":\n'))),
+    /unsupported release image build step syntax/, 'a quoted step-level with key must not be ignored')
+  assert.throws(() => releaseImageActionInputs(replaceImageBuildStep(workflow,
+    (step) => step.replace('        with:\n', '        with:\n        with:\n'))),
+  /duplicate with fields/, 'a duplicate step-level with key must fail closed')
+  assert.throws(() => releaseImageActionInputs(workflow.replace(
+    '        uses: docker/build-push-action@', '        "uses": docker/build-push-action@',
+  )), /Build and push image must be the Docker image build action/,
+  'a quoted step-level uses key must not be treated as a reviewed build action')
+  assert.throws(() => releaseImageActionInputs(workflow.replace(
+    '      - name: Build and push image', '      - "name": Build and push image',
+  )), /exactly one Build and push image step/,
+  'a quoted build step name must not be skipped while selecting the action inputs')
+  assert.throws(() => releaseImageActionInputs(workflow.replace(
+    '      - name: Build and push image', '      - name: Build image',
+  )), /exactly one Build and push image step/,
+  'renaming the build step must require updating the reviewed selector')
+  assert.throws(() => releaseImageActionInputs(workflow.replace(
+    '      - name: Build and push image\n',
+    '      - { name: Hidden build, uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc, with: {context: ., file: scripts/fixtures/Dockerfile-1517-ae82e4f} }\n      - name: Build and push image\n',
+  )), /exactly one Docker image build action/,
+  'a flow-style second image build must not be skipped by the reviewed step selector')
+  for (const [name, unsupported] of [
+    ['flow-style with block', replaceImageBuildStep(workflow, (step) => step.replace('        with:\n', '        with: {context: ., push: true}\n'))],
+    ['YAML anchor', replaceImageInput(workflow, 'context', '&root .')],
+    ['YAML merge key', workflow.replace('          context: .\n', '          <<: *shared\n          context: .\n')],
+    ['multiline input key', workflow.replace('          context: .\n', '          con\n          text: .\n')],
+    ['unexpected indentation', workflow.replace('          context: .\n', '           context: .\n')],
+    ['duplicate context key', workflow.replace('          context: .\n', '          context: .\n          context: .\n')],
+  ]) {
+    assert.notEqual(unsupported, workflow, name + ' mutation marker must exist')
+    assert.throws(() => releaseImageActionInputs(unsupported), /with block|with field|unsupported|unreviewed|duplicate|anchors|aliases/,
+      name + ' must fail closed rather than be skipped by the input parser')
+  }
   assert.throws(() => releaseImageDockerfilePath(workflow.replace(
     '          context: .\n',
     '          context: .\n          dockerfile-inline: |\n            FROM node:24\n',
@@ -1120,6 +1250,12 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   )
   assert.notEqual(targetedWorkflow, workflow, 'image build target mutation marker must exist')
   assert.equal(releaseImageTargetStage(targetedWorkflow), 'release-audit-target')
+  const quotedTargetWorkflow = targetedWorkflow.replace(
+    '          target: release-audit-target',
+    '          "target": release-audit-target',
+  )
+  assert.throws(() => releaseImageTargetStage(quotedTargetWorkflow), /unsupported release image action input syntax/,
+    'a quoted target key must not be ignored while selecting the analyzed Dockerfile stage')
   assert.ok(runViolations(targetedDockerfile, buildArgs, releaseImageTargetStage(targetedWorkflow))
     .some((run) => run.stage === 'release-audit-target'),
   'the graph root must follow target from the exact image build action')

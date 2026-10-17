@@ -24,6 +24,12 @@ func TestScannerIdentityRecoveryCommandRequiresConfirmationAndBypassesConfig(t *
 	if called {
 		t.Fatal("recovery hook ran without explicit operator confirmation")
 	}
+	if err := run([]string{"scanner-identities", "status"}); err == nil || !strings.Contains(err.Error(), "expected: scanner-identities recover") {
+		t.Fatalf("unsupported scanner-identity action = %v; want usage error", err)
+	}
+	if called {
+		t.Fatal("recovery hook ran for an unsupported scanner-identity action")
+	}
 	if err := run([]string{"scanner-identities", "recover", "--config", "/does/not/exist"}); err == nil || !strings.Contains(err.Error(), "--config does not apply") {
 		t.Fatalf("recovery accepted config flag = %v", err)
 	}

@@ -90,10 +90,82 @@ func TestRecoverLegacyScannerIdentityScopeArchivesAndMigratesV2(t *testing.T) {
 	}
 }
 
+func TestRecoverLegacyScannerIdentityScopeDoesNotMigrateWhenArchiveConflicts(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		archive   func(int, []byte) error
+		archiveN  func([]byte) string
+		data      func(scannerIdentityRecoveryFixture) []byte
+		directory func(scannerIdentityRecoveryFixture) string
+		wantError string
+	}{
+		{
+			name:      "journal archive conflict",
+			archive:   archiveScannerIdentityJournal,
+			archiveN:  scannerIdentityJournalArchiveName,
+			data:      func(f scannerIdentityRecoveryFixture) []byte { return f.journalBytes },
+			directory: func(f scannerIdentityRecoveryFixture) string { return f.allocator.directory },
+			wantError: "could not preserve the legacy journal",
+		},
+		{
+			name:      "marker archive conflict",
+			archive:   archiveScannerIdentityMarker,
+			archiveN:  scannerIdentityMarkerArchiveName,
+			data:      func(f scannerIdentityRecoveryFixture) []byte { return f.markerBytes },
+			directory: func(f scannerIdentityRecoveryFixture) string { return f.allocator.markerDir },
+			wantError: "could not preserve the legacy marker",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newScannerIdentityRecoveryFixture(t)
+			conflict := []byte("preserve conflicting archive evidence")
+			archivePath := filepath.Join(test.directory(fixture), test.archiveN(test.data(fixture)))
+			if err := os.WriteFile(archivePath, conflict, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := recoverLegacyScannerIdentityScope(context.Background(), fixture.allocator, true, 1)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("offline recovery with conflicting archive = %v; want %q", err, test.wantError)
+			}
+			marker, markerErr := os.ReadFile(filepath.Join(fixture.allocator.markerDir, scannerIdentityMarker))
+			journal, journalErr := os.ReadFile(filepath.Join(fixture.allocator.directory, scannerIdentityJournalName))
+			if markerErr != nil || !bytes.Equal(marker, fixture.markerBytes) || journalErr != nil || !bytes.Equal(journal, fixture.journalBytes) {
+				t.Fatalf("refused archive conflict changed legacy source state: marker=%v journal=%v", markerErr, journalErr)
+			}
+			gotConflict, err := os.ReadFile(archivePath)
+			if err != nil || !bytes.Equal(gotConflict, conflict) {
+				t.Fatalf("refused archive conflict replaced evidence: %q, %v", gotConflict, err)
+			}
+			if test.name == "marker archive conflict" {
+				assertScannerIdentityArchive(t, fixture.allocator.directory, scannerIdentityJournalArchiveName(fixture.journalBytes), fixture.journalBytes)
+			}
+		})
+	}
+}
+
 func TestOfflineScannerIdentityRecoveryRequiresOperatorConfirmation(t *testing.T) {
 	err := recoverScannerIdentityStateOfflineLinux(false)
 	if err == nil || !strings.Contains(err.Error(), "--confirm-all-volume-users-stopped") {
 		t.Fatalf("offline recovery without explicit confirmation = %v; want confirmation requirement", err)
+	}
+}
+
+func TestOfflineScannerIdentityRecoveryRequiresRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root-only recovery preflight is not applicable to root test runs")
+	}
+	err := recoverScannerIdentityStateOfflineLinux(true)
+	if err == nil || !strings.Contains(err.Error(), "requires root") {
+		t.Fatalf("offline recovery as an unprivileged process = %v; want root refusal", err)
+	}
+}
+
+func TestOfflineScannerIdentityRecoveryRequiresPlatformHook(t *testing.T) {
+	previous := recoverScannerIdentityState
+	recoverScannerIdentityState = nil
+	t.Cleanup(func() { recoverScannerIdentityState = previous })
+	if err := RecoverScannerIdentityStateOffline(true); err == nil || !strings.Contains(err.Error(), "requires Linux") {
+		t.Fatalf("offline recovery without a platform hook = %v; want Linux-only refusal", err)
 	}
 }
 
@@ -145,6 +217,239 @@ func TestRecoverLegacyScannerIdentityScopeRejectsUnavailablePreflightInputs(t *t
 			}
 			if test.name != "missing state directory" {
 				assertUnchangedRecoverySource(t, fixture)
+			}
+		})
+	}
+}
+
+func TestRecoverLegacyScannerIdentityScopeRejectsSymlinkTrustedParentWithoutMutation(t *testing.T) {
+	fixture := newScannerIdentityRecoveryFixture(t)
+	alias := filepath.Join(filepath.Dir(fixture.allocator.markerDir), "trusted-parent-alias")
+	if err := os.Symlink(fixture.allocator.markerDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	fixture.allocator.directory = filepath.Join(alias, filepath.Base(fixture.allocator.directory))
+	fixture.allocator.markerDir = alias
+
+	err := recoverLegacyScannerIdentityScope(context.Background(), fixture.allocator, true, 1)
+	if err == nil || !strings.Contains(err.Error(), "cannot open the trusted state directory") {
+		t.Fatalf("recovery through a symlinked trusted parent = %v; want fail-closed refusal", err)
+	}
+	assertUnchangedRecoverySource(t, fixture)
+}
+
+func TestRecoverLegacyScannerIdentityScopeRejectsUnprovenDurableStates(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*testing.T, *scannerIdentityRecoveryFixture) context.Context
+		want    string
+	}{
+		{
+			name: "cancellation after preflight census",
+			prepare: func(t *testing.T, fixture *scannerIdentityRecoveryFixture) context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				fixture.allocator.inUse = func(uint32, uint32) (map[uint32]struct{}, error) {
+					cancel()
+					return map[uint32]struct{}{}, nil
+				}
+				return ctx
+			},
+			want: "canceled before state inspection",
+		},
+		{
+			name: "second census finds a running scanner",
+			prepare: func(t *testing.T, fixture *scannerIdentityRecoveryFixture) context.Context {
+				calls := 0
+				fixture.allocator.inUse = func(uint32, uint32) (map[uint32]struct{}, error) {
+					calls++
+					if calls == 1 {
+						return map[uint32]struct{}{}, nil
+					}
+					return map[uint32]struct{}{60000: {}}, nil
+				}
+				return context.Background()
+			},
+			want: "in-use or uninspectable",
+		},
+		{
+			name: "second census becomes uninspectable",
+			prepare: func(t *testing.T, fixture *scannerIdentityRecoveryFixture) context.Context {
+				calls := 0
+				fixture.allocator.inUse = func(uint32, uint32) (map[uint32]struct{}, error) {
+					calls++
+					if calls == 1 {
+						return map[uint32]struct{}{}, nil
+					}
+					return nil, errors.New("private census details")
+				}
+				return context.Background()
+			},
+			want: "in-use or uninspectable",
+		},
+		{
+			name: "missing marker",
+			prepare: func(t *testing.T, fixture *scannerIdentityRecoveryFixture) context.Context {
+				if err := os.Remove(filepath.Join(fixture.allocator.markerDir, scannerIdentityMarker)); err != nil {
+					t.Fatal(err)
+				}
+				return context.Background()
+			},
+			want: "marker is missing",
+		},
+		{
+			name: "malformed marker",
+			prepare: func(t *testing.T, fixture *scannerIdentityRecoveryFixture) context.Context {
+				if err := os.WriteFile(filepath.Join(fixture.allocator.markerDir, scannerIdentityMarker), []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return context.Background()
+			},
+			want: "marker is invalid",
+		},
+		{
+			name: "missing journal",
+			prepare: func(t *testing.T, fixture *scannerIdentityRecoveryFixture) context.Context {
+				if err := os.Remove(filepath.Join(fixture.allocator.directory, scannerIdentityJournalName)); err != nil {
+					t.Fatal(err)
+				}
+				return context.Background()
+			},
+			want: "journal is missing",
+		},
+		{
+			name: "malformed journal",
+			prepare: func(t *testing.T, fixture *scannerIdentityRecoveryFixture) context.Context {
+				if err := os.WriteFile(filepath.Join(fixture.allocator.directory, scannerIdentityJournalName), []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return context.Background()
+			},
+			want: "journal is missing",
+		},
+		{
+			name: "invalid legacy lease",
+			prepare: func(t *testing.T, fixture *scannerIdentityRecoveryFixture) context.Context {
+				journal, err := json.Marshal(scannerIdentityJournal{
+					Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true,
+					Leases: map[uint32]scannerIdentityJournalEntry{60000: {GID: 60001, Token: "not-a-token", State: "active"}},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(fixture.allocator.directory, scannerIdentityJournalName), journal, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return context.Background()
+			},
+			want: "journal entries are invalid",
+		},
+		{
+			name: "empty legacy journal is not an offline recovery target",
+			prepare: func(t *testing.T, fixture *scannerIdentityRecoveryFixture) context.Context {
+				journal, err := json.Marshal(scannerIdentityJournal{
+					Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true,
+					Leases: make(map[uint32]scannerIdentityJournalEntry),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(fixture.allocator.directory, scannerIdentityJournalName), journal, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return context.Background()
+			},
+			want: "not an occupied same-boot v2 journal",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newScannerIdentityRecoveryFixture(t)
+			ctx := context.Background()
+			if test.prepare != nil {
+				ctx = test.prepare(t, &fixture)
+			}
+			beforeMarker, markerErr := os.ReadFile(filepath.Join(fixture.allocator.markerDir, scannerIdentityMarker))
+			beforeJournal, journalErr := os.ReadFile(filepath.Join(fixture.allocator.directory, scannerIdentityJournalName))
+			err := recoverLegacyScannerIdentityScope(ctx, fixture.allocator, true, 1)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("recovery error = %v, want %q", err, test.want)
+			}
+			afterMarker, afterMarkerErr := os.ReadFile(filepath.Join(fixture.allocator.markerDir, scannerIdentityMarker))
+			afterJournal, afterJournalErr := os.ReadFile(filepath.Join(fixture.allocator.directory, scannerIdentityJournalName))
+			if (markerErr == nil) != (afterMarkerErr == nil) || markerErr == nil && !bytes.Equal(beforeMarker, afterMarker) {
+				t.Fatalf("refusal changed marker: %v", afterMarkerErr)
+			}
+			if (journalErr == nil) != (afterJournalErr == nil) || journalErr == nil && !bytes.Equal(beforeJournal, afterJournal) {
+				t.Fatalf("refusal changed journal: %v", afterJournalErr)
+			}
+			if matches, err := filepath.Glob(filepath.Join(fixture.allocator.directory, "leases.recovery-*.json")); err != nil || len(matches) != 0 {
+				t.Fatalf("refusal left recovery archives %v (err %v)", matches, err)
+			}
+		})
+	}
+}
+
+func TestRecoverLegacyScannerIdentityScopeFailsClosedOnLockRaces(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		lockName  string
+		busy      bool
+		wantError string
+	}{
+		{name: "busy transition gate", lockName: scannerIdentityTransitionLock, busy: true, wantError: "transition lock is busy"},
+		{name: "transition lock symlink", lockName: scannerIdentityTransitionLock, wantError: "transition lock is unavailable"},
+		{name: "liveness lock symlink", lockName: scannerIdentityLivenessLock, wantError: "liveness lock is unavailable"},
+		{name: "busy allocator lock", lockName: scannerIdentityLock, busy: true, wantError: "allocator lock is busy"},
+		{name: "allocator lock symlink", lockName: scannerIdentityLock, wantError: "allocator lock is unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newScannerIdentityRecoveryFixture(t)
+			beforeMarker, err := os.ReadFile(filepath.Join(fixture.allocator.markerDir, scannerIdentityMarker))
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeJournal, err := os.ReadFile(filepath.Join(fixture.allocator.directory, scannerIdentityJournalName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			directoryFD, _, err := openScannerIdentityDirectories(fixture.allocator.directory, fixture.allocator.markerDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unix.Close(directoryFD)
+			lockPath := filepath.Join(fixture.allocator.directory, test.lockName)
+			if test.busy {
+				var fd int
+				if test.lockName == scannerIdentityTransitionLock {
+					fd, err = openScannerIdentityTransitionLock(directoryFD)
+				} else {
+					fd, err = openScannerIdentityLock(directoryFD)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer unix.Close(fd)
+				if err := unix.Flock(fd, unix.LOCK_EX); err != nil {
+					t.Fatal(err)
+				}
+				defer func() {
+					if err := unix.Flock(fd, unix.LOCK_UN); err != nil {
+						t.Errorf("unlock recovery lock: %v", err)
+					}
+				}()
+			} else if err := os.Symlink(os.DevNull, lockPath); err != nil {
+				t.Fatal(err)
+			}
+
+			err = recoverLegacyScannerIdentityScope(context.Background(), fixture.allocator, true, 1)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("recovery lock error = %v, want %q", err, test.wantError)
+			}
+			afterMarker, markerErr := os.ReadFile(filepath.Join(fixture.allocator.markerDir, scannerIdentityMarker))
+			afterJournal, journalErr := os.ReadFile(filepath.Join(fixture.allocator.directory, scannerIdentityJournalName))
+			if markerErr != nil || !bytes.Equal(beforeMarker, afterMarker) || journalErr != nil || !bytes.Equal(beforeJournal, afterJournal) {
+				t.Fatalf("lock refusal changed source records: marker=%v journal=%v", markerErr, journalErr)
 			}
 		})
 	}
@@ -349,6 +654,175 @@ func TestScannerIdentityArchiveInstallPreservesConflictingFinalEvidence(t *testi
 			}
 		})
 	}
+}
+
+func TestScannerIdentityArchiveVerifiersRejectUnsafeEvidence(t *testing.T) {
+	data := []byte("exact scanner identity evidence")
+	directory := t.TempDir()
+	directoryFD, err := unix.Open(directory, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(directoryFD)
+
+	if err := archiveScannerIdentityJournal(-1, data); err == nil {
+		t.Fatal("journal archive accepted a negative directory descriptor")
+	}
+	if err := archiveScannerIdentityJournal(directoryFD, bytes.Repeat([]byte{'x'}, scannerIdentityMaxBytes+1)); err == nil {
+		t.Fatal("journal archive accepted data beyond its bound")
+	}
+	if err := archiveScannerIdentityMarker(-1, data); err == nil {
+		t.Fatal("marker archive accepted a negative directory descriptor")
+	}
+	if err := archiveScannerIdentityMarker(directoryFD, bytes.Repeat([]byte{'x'}, 257)); err == nil {
+		t.Fatal("marker archive accepted data beyond its bound")
+	}
+	if err := installScannerIdentityArchive(-1, "archive.json", data, int64(len(data))); err == nil {
+		t.Fatal("archive installer accepted a negative directory descriptor")
+	}
+	if err := installScannerIdentityArchive(directoryFD, "", data, int64(len(data))); err == nil {
+		t.Fatal("archive installer accepted an empty archive name")
+	}
+	if err := installScannerIdentityArchive(directoryFD, "oversized.json", data, -1); err == nil {
+		t.Fatal("archive installer accepted a negative size bound")
+	}
+	if err := installScannerIdentityArchive(directoryFD, "oversized.json", data, int64(len(data)-1)); err == nil {
+		t.Fatal("archive installer accepted data beyond its size bound")
+	}
+	if err := verifyScannerIdentityArchive(directoryFD, "missing.json", data, int64(len(data))); !errors.Is(err, unix.ENOENT) {
+		t.Fatalf("missing archive verification = %v, want ENOENT", err)
+	}
+
+	for _, test := range []struct {
+		name string
+		make func(string) error
+	}{
+		{
+			name: "symlink archive",
+			make: func(path string) error { return os.Symlink("missing-target", path) },
+		},
+		{
+			name: "directory archive",
+			make: func(path string) error { return os.Mkdir(path, 0o700) },
+		},
+		{
+			name: "unsafe mode",
+			make: func(path string) error { return os.WriteFile(path, data, 0o644) },
+		},
+		{
+			name: "content mismatch",
+			make: func(path string) error { return os.WriteFile(path, []byte("different evidence"), 0o600) },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(directory, test.name)
+			if err := test.make(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := verifyScannerIdentityArchive(directoryFD, test.name, data, int64(len(data))); err == nil {
+				t.Fatal("unsafe archive evidence was accepted")
+			}
+		})
+	}
+
+	archiveName := scannerIdentityJournalArchiveName(data)
+	archivePath := filepath.Join(directory, archiveName)
+	if err := os.WriteFile(archivePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(archivePath, archivePath+".alias"); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyScannerIdentityArchive(directoryFD, archiveName, data, int64(len(data))); err == nil {
+		t.Fatal("multiply linked archive evidence was accepted")
+	}
+}
+
+func TestScannerIdentityArchiveInstallFailsClosedWhenDirectoryIsReadOnly(t *testing.T) {
+	fixture := newScannerIdentityRecoveryFixture(t)
+	directoryFD, _, err := openScannerIdentityDirectories(fixture.allocator.directory, fixture.allocator.markerDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(directoryFD)
+
+	if err := os.Chmod(fixture.allocator.directory, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(fixture.allocator.directory, 0o700); err != nil {
+			t.Errorf("restore archive test directory mode: %v", err)
+		}
+	})
+
+	err = installScannerIdentityArchive(directoryFD, "read-only.json", []byte("evidence"), 32)
+	if err == nil || !strings.Contains(err.Error(), "temporary file cannot be created") {
+		t.Fatalf("archive install in a read-only state directory = %v; want fail-closed create error", err)
+	}
+	if _, err := os.Lstat(filepath.Join(fixture.allocator.directory, "read-only.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed archive install created final evidence: %v", err)
+	}
+}
+
+func TestVerifyArchivedLegacyScannerIdentityJournalFailsClosedOnCandidates(t *testing.T) {
+	fixture := newScannerIdentityRecoveryFixture(t)
+	marker := scannerIdentityScope{
+		Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true,
+	}
+	if err := verifyArchivedLegacyScannerIdentityJournal(-1, marker, testScannerBootID, fixture.allocator); err == nil {
+		t.Fatal("legacy archive verifier accepted an invalid directory descriptor")
+	}
+	regular, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyArchivedLegacyScannerIdentityJournal(int(regular.Fd()), marker, testScannerBootID, fixture.allocator); err == nil {
+		_ = regular.Close()
+		t.Fatal("legacy archive verifier accepted a non-directory descriptor")
+	}
+	_ = regular.Close()
+
+	directoryFD, markerFD, err := openScannerIdentityDirectories(fixture.allocator.directory, fixture.allocator.markerDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(markerFD)
+	if err := writeScannerIdentityFile(directoryFD, "leases.recovery-not-a-digest.json", []byte("untrusted candidate")); err != nil {
+		_ = unix.Close(directoryFD)
+		t.Fatal(err)
+	}
+	malformed := []byte("{")
+	if err := writeScannerIdentityFile(directoryFD, scannerIdentityJournalArchiveName(malformed), malformed); err != nil {
+		_ = unix.Close(directoryFD)
+		t.Fatal(err)
+	}
+	_ = unix.Close(directoryFD)
+	if fd, markerFD, openErr := openScannerIdentityDirectories(fixture.allocator.directory, fixture.allocator.markerDir); openErr != nil {
+		t.Fatal(openErr)
+	} else {
+		if err := verifyArchivedLegacyScannerIdentityJournal(fd, marker, testScannerBootID, fixture.allocator); err == nil {
+			_ = unix.Close(fd)
+			_ = unix.Close(markerFD)
+			t.Fatal("unrelated and malformed archives established migration evidence")
+		}
+		_ = unix.Close(fd)
+		_ = unix.Close(markerFD)
+	}
+
+	fd, markerFD, err := openScannerIdentityDirectories(fixture.allocator.directory, fixture.allocator.markerDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(markerFD)
+	if err := archiveScannerIdentityJournal(fd, fixture.journalBytes); err != nil {
+		_ = unix.Close(fd)
+		t.Fatal(err)
+	}
+	if err := verifyArchivedLegacyScannerIdentityJournal(fd, marker, testScannerBootID, fixture.allocator); err != nil {
+		_ = unix.Close(fd)
+		t.Fatalf("exact archived v2 journal was rejected: %v", err)
+	}
+	_ = unix.Close(fd)
 }
 
 func TestRecoverLegacyScannerIdentityScopeRejectsUnprovenContextWithoutStateChanges(t *testing.T) {

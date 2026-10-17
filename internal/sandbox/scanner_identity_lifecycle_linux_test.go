@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -87,6 +88,30 @@ func TestScannerIdentityLeaseLifecycleFailsClosedOnChangedScope(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestScannerIdentityLeaseReleaseReportsUnexpectedLivenessClose(t *testing.T) {
+	allocator := newTestScannerIdentityAllocator(t, 1)
+	lease, err := allocator.acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.livenessRef.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lease.inheritedScannerLivenessFile(); err == nil {
+		t.Fatal("closed liveness descriptor remained transferable")
+	}
+	if err := lease.release(); err == nil || !strings.Contains(err.Error(), "liveness reference close failed") {
+		t.Fatalf("release after unexpected reference close = %v; want a liveness-close error", err)
+	}
+	if !lease.finished || lease.livenessRef != nil {
+		t.Fatalf("durably released lease state = finished %t, reference %v", lease.finished, lease.livenessRef)
+	}
+	journal := readTestScannerIdentityJournalOrFatal(t, allocator)
+	if _, present := journal.Leases[lease.uid]; present {
+		t.Fatalf("durably released lease %d remains reserved", lease.uid)
 	}
 }
 
@@ -451,6 +476,444 @@ func TestScannerIdentityScopeInitializationRecoversOnlyEmptyJournal(t *testing.T
 	}
 	if err := lease.release(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestScannerIdentityLoadOrInitializeHandlesLegacyScopeTransitions(t *testing.T) {
+	tests := []struct {
+		name            string
+		marker          scannerIdentityScope
+		journal         scannerIdentityJournal
+		pidNamespace    uint64
+		privateRuntime  bool
+		exclusive       bool
+		wantError       string
+		wantPrivate     bool
+		wantInitialized bool
+	}{
+		{
+			name:         "shared reference refuses legacy state",
+			marker:       scannerIdentityScope{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			journal:      scannerIdentityJournal{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{}},
+			pidNamespace: 17, privateRuntime: true, wantError: "requires exclusive offline migration",
+		},
+		{
+			name:         "same scope empty v2 journal migrates",
+			marker:       scannerIdentityScope{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			journal:      scannerIdentityJournal{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{}},
+			pidNamespace: 17, privateRuntime: true, exclusive: true, wantPrivate: true, wantInitialized: true,
+		},
+		{
+			name:         "private namespace empty v2 journal migrates",
+			marker:       scannerIdentityScope{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			journal:      scannerIdentityJournal{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{}},
+			pidNamespace: 18, privateRuntime: true, exclusive: true, wantPrivate: true, wantInitialized: true,
+		},
+		{
+			name:   "occupied v2 journal refuses automatic reset",
+			marker: scannerIdentityScope{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			journal: scannerIdentityJournal{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{
+				60000: {GID: 60000, Token: "0123456789abcdef0123456789abcdef", State: "active"},
+			}},
+			pidNamespace: 18, privateRuntime: true, exclusive: true, wantError: "same-boot legacy leases require offline migration",
+		},
+		{
+			name:         "marker and journal scope disagreement refuses",
+			marker:       scannerIdentityScope{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			journal:      scannerIdentityJournal{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 18, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{}},
+			pidNamespace: 18, privateRuntime: true, exclusive: true, wantError: "legacy scope records disagree",
+		},
+		{
+			name:         "same namespace cannot regain private attestation",
+			marker:       scannerIdentityScope{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			journal:      scannerIdentityJournal{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{}},
+			pidNamespace: 17, privateRuntime: false, exclusive: true, wantError: "private runtime cannot be re-attested",
+		},
+		{
+			name:         "namespace change requires private runtime",
+			marker:       scannerIdentityScope{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			journal:      scannerIdentityJournal{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{}},
+			pidNamespace: 18, privateRuntime: false, exclusive: true, wantError: "PID namespace migration requires a private runtime",
+		},
+		{
+			name:   "invalid legacy lease is refused",
+			marker: scannerIdentityScope{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			journal: scannerIdentityJournal{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{
+				60000: {GID: 60001, Token: "0123456789abcdef0123456789abcdef", State: "active"},
+			}},
+			pidNamespace: 17, privateRuntime: true, exclusive: true, wantError: "journal contains an invalid lease",
+		},
+		{
+			name:         "missing lease map refuses legacy transition",
+			marker:       scannerIdentityScope{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			journal:      scannerIdentityJournal{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			pidNamespace: 17, privateRuntime: true, exclusive: true, wantError: "migration state is inconsistent",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newScannerIdentityRecoveryFixture(t)
+			markerBytes, err := json.Marshal(test.marker)
+			if err != nil {
+				t.Fatal(err)
+			}
+			journalBytes, err := json.Marshal(test.journal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(fixture.allocator.markerDir, scannerIdentityMarker), markerBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(fixture.allocator.directory, scannerIdentityJournalName), journalBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			directoryFD, markerFD, err := openScannerIdentityDirectories(fixture.allocator.directory, fixture.allocator.markerDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unix.Close(directoryFD)
+			defer unix.Close(markerFD)
+			journal, privateRuntime, err := fixture.allocator.loadOrInitializeWithLiveness(
+				directoryFD, markerFD, testScannerBootID, test.pidNamespace, test.privateRuntime, test.exclusive,
+			)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("legacy scope result = %+v private=%t error=%v; want error containing %q", journal, privateRuntime, err, test.wantError)
+				}
+				gotMarker, markerErr := os.ReadFile(filepath.Join(fixture.allocator.markerDir, scannerIdentityMarker))
+				gotJournal, journalErr := os.ReadFile(filepath.Join(fixture.allocator.directory, scannerIdentityJournalName))
+				if markerErr != nil || journalErr != nil || !bytes.Equal(gotMarker, markerBytes) || !bytes.Equal(gotJournal, journalBytes) {
+					t.Fatalf("refused legacy transition changed durable state: marker=%v journal=%v", markerErr, journalErr)
+				}
+				return
+			}
+			if err != nil || privateRuntime != test.wantPrivate || !test.wantInitialized {
+				t.Fatalf("legacy scope migration = %+v private=%t error=%v", journal, privateRuntime, err)
+			}
+			persistedMarker, markerErr := readScannerIdentityMarkerAtPath(fixture.allocator.markerDir)
+			persistedJournal, journalErr := readTestScannerIdentityJournal(fixture.allocator)
+			if markerErr != nil || journalErr != nil || persistedMarker.Version != scannerIdentityVersion || persistedJournal.Version != scannerIdentityVersion ||
+				persistedMarker.PIDNamespace != test.pidNamespace || persistedJournal.PIDNamespace != test.pidNamespace || len(persistedJournal.Leases) != 0 {
+				t.Fatalf("migrated scope marker=%+v (%v) journal=%+v (%v)", persistedMarker, markerErr, persistedJournal, journalErr)
+			}
+		})
+	}
+}
+
+func TestScannerIdentityLoadOrInitializeRecoversOnlyProvenStaleScopes(t *testing.T) {
+	tests := []struct {
+		name             string
+		marker           *scannerIdentityScope
+		journal          scannerIdentityJournal
+		journalRaw       []byte
+		bootID           string
+		pidNamespace     uint64
+		privateRuntime   bool
+		exclusive        bool
+		wantError        string
+		wantArchive      bool
+		wantJournalBoot  string
+		wantJournalPIDNS uint64
+		wantLeaseCount   int
+	}{
+		{
+			name:   "same scope retains active leases when shared",
+			marker: &scannerIdentityScope{Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			journal: scannerIdentityJournal{Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{
+				60000: {GID: 60000, Token: "0123456789abcdef0123456789abcdef", State: "active"},
+			}},
+			bootID: testScannerBootID, pidNamespace: 17, privateRuntime: true, wantJournalBoot: testScannerBootID, wantJournalPIDNS: 17, wantLeaseCount: 1,
+		},
+		{
+			name:   "exclusive same scope archives and clears stale lease",
+			marker: &scannerIdentityScope{Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			journal: scannerIdentityJournal{Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{
+				60000: {GID: 60000, Token: "0123456789abcdef0123456789abcdef", State: "quarantined"},
+			}},
+			bootID: testScannerBootID, pidNamespace: 17, privateRuntime: true, exclusive: true, wantArchive: true, wantJournalBoot: testScannerBootID, wantJournalPIDNS: 17,
+		},
+		{
+			name:   "exclusive private namespace change archives old scope",
+			marker: &scannerIdentityScope{Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			journal: scannerIdentityJournal{Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{
+				60000: {GID: 60000, Token: "0123456789abcdef0123456789abcdef", State: "active"},
+			}},
+			bootID: testScannerBootID, pidNamespace: 18, privateRuntime: true, exclusive: true, wantArchive: true, wantJournalBoot: testScannerBootID, wantJournalPIDNS: 18,
+		},
+		{
+			name:    "shared reference refuses private namespace change",
+			marker:  &scannerIdentityScope{Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			journal: scannerIdentityJournal{Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{}},
+			bootID:  testScannerBootID, pidNamespace: 18, privateRuntime: true, wantError: "exclusive private-scope proof",
+		},
+		{
+			name:    "native runtime cannot reset private namespace",
+			marker:  &scannerIdentityScope{Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			journal: scannerIdentityJournal{Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{}},
+			bootID:  testScannerBootID, pidNamespace: 18, privateRuntime: false, exclusive: true, wantError: "exclusive private-scope proof",
+		},
+		{
+			name:   "prior boot marker archives leases before reset",
+			marker: &scannerIdentityScope{Version: scannerIdentityVersion, BootID: testScannerBootID2, PIDNamespace: 17, PrivateRuntime: true},
+			journal: scannerIdentityJournal{Version: scannerIdentityVersion, BootID: testScannerBootID2, PIDNamespace: 17, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{
+				60000: {GID: 60000, Token: "0123456789abcdef0123456789abcdef", State: "active"},
+			}},
+			bootID: testScannerBootID, pidNamespace: 18, privateRuntime: true, exclusive: true, wantArchive: true, wantJournalBoot: testScannerBootID, wantJournalPIDNS: 18,
+		},
+		{
+			name:    "prior boot marker refuses shared liveness reference",
+			marker:  &scannerIdentityScope{Version: scannerIdentityVersion, BootID: testScannerBootID2, PIDNamespace: 17, PrivateRuntime: true},
+			journal: scannerIdentityJournal{Version: scannerIdentityVersion, BootID: testScannerBootID2, PIDNamespace: 17, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{}},
+			bootID:  testScannerBootID, pidNamespace: 18, privateRuntime: true, wantError: "requires exclusive recovery",
+		},
+		{
+			name: "missing marker with prior boot journal archives before reset",
+			journal: scannerIdentityJournal{Version: scannerIdentityVersion, BootID: testScannerBootID2, PIDNamespace: 17, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{
+				60000: {GID: 60000, Token: "0123456789abcdef0123456789abcdef", State: "active"},
+			}},
+			bootID: testScannerBootID, pidNamespace: 18, privateRuntime: true, exclusive: true, wantArchive: true, wantJournalBoot: testScannerBootID, wantJournalPIDNS: 18,
+		},
+		{
+			name:       "malformed prior boot journal is archived before safe reset",
+			marker:     &scannerIdentityScope{Version: scannerIdentityVersion, BootID: testScannerBootID2, PIDNamespace: 17, PrivateRuntime: true},
+			journalRaw: []byte(`{"version":3,"boot_id":"not-a-boot-id","pid_namespace":17,"private_runtime":true,"leases":{"60000":{"gid":60000,"token":"damaged","state":"active"}}}`),
+			bootID:     testScannerBootID, pidNamespace: 18, privateRuntime: true, exclusive: true, wantArchive: true, wantJournalBoot: testScannerBootID, wantJournalPIDNS: 18,
+		},
+		{
+			name:    "journal first v2 transition completes only empty target",
+			marker:  &scannerIdentityScope{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			journal: scannerIdentityJournal{Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 18, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{}},
+			bootID:  testScannerBootID, pidNamespace: 18, privateRuntime: true, exclusive: true, wantJournalBoot: testScannerBootID, wantJournalPIDNS: 18,
+		},
+		{
+			name:    "journal first transition refuses mismatched target",
+			marker:  &scannerIdentityScope{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true},
+			journal: scannerIdentityJournal{Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 18, PrivateRuntime: true, Leases: map[uint32]scannerIdentityJournalEntry{}},
+			bootID:  testScannerBootID, pidNamespace: 18, privateRuntime: false, exclusive: true, wantError: "migration state is inconsistent",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newScannerIdentityRecoveryFixture(t)
+			var markerBytes []byte
+			if test.marker != nil {
+				var err error
+				markerBytes, err = json.Marshal(test.marker)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(fixture.allocator.markerDir, scannerIdentityMarker), markerBytes, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Remove(filepath.Join(fixture.allocator.markerDir, scannerIdentityMarker)); err != nil {
+				t.Fatal(err)
+			}
+			journalBytes := test.journalRaw
+			if journalBytes == nil {
+				var err error
+				journalBytes, err = json.Marshal(test.journal)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(fixture.allocator.directory, scannerIdentityJournalName), journalBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			directoryFD, markerFD, err := openScannerIdentityDirectories(fixture.allocator.directory, fixture.allocator.markerDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unix.Close(directoryFD)
+			defer unix.Close(markerFD)
+			journal, privateRuntime, err := fixture.allocator.loadOrInitializeWithLiveness(
+				directoryFD, markerFD, test.bootID, test.pidNamespace, test.privateRuntime, test.exclusive,
+			)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("scope transition = %+v private=%t error=%v; want %q", journal, privateRuntime, err, test.wantError)
+				}
+				return
+			}
+			if err != nil || !privateRuntime && test.privateRuntime || journal.Version != scannerIdentityVersion ||
+				journal.BootID != test.wantJournalBoot || journal.PIDNamespace != test.wantJournalPIDNS || len(journal.Leases) != test.wantLeaseCount {
+				t.Fatalf("scope transition = %+v private=%t error=%v", journal, privateRuntime, err)
+			}
+			persistedMarker, markerErr := readScannerIdentityMarkerAtPath(fixture.allocator.markerDir)
+			if markerErr != nil || persistedMarker.Version != scannerIdentityVersion || persistedMarker.BootID != test.wantJournalBoot || persistedMarker.PIDNamespace != test.wantJournalPIDNS {
+				t.Fatalf("persisted marker = %+v, %v", persistedMarker, markerErr)
+			}
+			if test.wantArchive {
+				assertScannerIdentityArchive(t, fixture.allocator.directory, scannerIdentityJournalArchiveName(journalBytes), journalBytes)
+			}
+		})
+	}
+}
+
+func TestScannerIdentityAcquirePreservesLeasesWhenArchiveOrResetCannotCommit(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		private       bool
+		priorPIDNS    uint64
+		wantError     string
+		archiveAction string
+	}{
+		{name: "ordinary stale lease archive conflict", priorPIDNS: 18, wantError: "stale lease journal archive failed", archiveAction: "conflict"},
+		{name: "private namespace archive conflict", private: true, priorPIDNS: 17, wantError: "stale private journal archive failed", archiveAction: "conflict"},
+		{name: "stale lease reset write failure", priorPIDNS: 18, wantError: "stale lease recovery failed", archiveAction: "readonly"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newScannerIdentityRecoveryFixture(t)
+			allocator := fixture.allocator
+			allocator.privateRuntime = func() (bool, error) { return test.private, nil }
+			allocator.pidNamespace = func() (uint64, error) { return 18, nil }
+			writeTestScannerIdentityMarker(t, allocator, testScannerBootID, test.priorPIDNS, test.private)
+			journal := scannerIdentityJournal{
+				Version: scannerIdentityVersion, BootID: testScannerBootID,
+				PIDNamespace: test.priorPIDNS, PrivateRuntime: test.private,
+				Leases: map[uint32]scannerIdentityJournalEntry{
+					60000: {GID: 60000, Token: "0123456789abcdef0123456789abcdef", State: "active"},
+				},
+			}
+			writeTestScannerIdentityJournalOrFatal(t, allocator, journal)
+			journalBytes, err := os.ReadFile(filepath.Join(allocator.directory, scannerIdentityJournalName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			archiveName := scannerIdentityJournalArchiveName(journalBytes)
+			archivePath := filepath.Join(allocator.directory, archiveName)
+			switch test.archiveAction {
+			case "conflict":
+				if err := os.WriteFile(archivePath, []byte("preserve conflicting evidence"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "readonly":
+				directoryFD, _, err := openScannerIdentityDirectories(allocator.directory, allocator.markerDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := archiveScannerIdentityJournal(directoryFD, journalBytes); err != nil {
+					_ = unix.Close(directoryFD)
+					t.Fatal(err)
+				}
+				if err := unix.Close(directoryFD); err != nil {
+					t.Fatal(err)
+				}
+				allocator.inUse = func(uint32, uint32) (map[uint32]struct{}, error) {
+					if err := os.Chmod(allocator.directory, 0o500); err != nil {
+						return nil, err
+					}
+					return map[uint32]struct{}{}, nil
+				}
+				t.Cleanup(func() {
+					if err := os.Chmod(allocator.directory, 0o700); err != nil {
+						t.Errorf("restore scanner identity directory mode: %v", err)
+					}
+				})
+			}
+
+			if lease, err := allocator.acquire(context.Background()); err == nil || lease != nil || !strings.Contains(err.Error(), test.wantError) {
+				if lease != nil {
+					_ = lease.quarantine()
+				}
+				t.Fatalf("acquire with uncommittable stale-state transition = lease %v, error %v; want %q", lease, err, test.wantError)
+			}
+			if err := os.Chmod(allocator.directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			gotJournal, err := os.ReadFile(filepath.Join(allocator.directory, scannerIdentityJournalName))
+			if err != nil || !bytes.Equal(gotJournal, journalBytes) {
+				t.Fatalf("refused stale transition changed lease journal: %v", err)
+			}
+			if test.archiveAction == "conflict" {
+				gotArchive, err := os.ReadFile(archivePath)
+				if err != nil || string(gotArchive) != "preserve conflicting evidence" {
+					t.Fatalf("refused stale transition changed conflicting archive: %q, %v", gotArchive, err)
+				}
+			} else {
+				assertScannerIdentityArchive(t, allocator.directory, archiveName, journalBytes)
+			}
+			assertScannerIdentityLeaseStillReserved(t, allocator, 60000, "active")
+		})
+	}
+}
+
+func TestScannerIdentityLoadOrInitializeRefusesUnpreservablePriorBootState(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		unreadable bool
+	}{
+		{name: "unreadable journal", unreadable: true},
+		{name: "conflicting prior-boot archive"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newScannerIdentityRecoveryFixture(t)
+			allocator := fixture.allocator
+			allocator.privateRuntime = func() (bool, error) { return true, nil }
+			allocator.pidNamespace = func() (uint64, error) { return 18, nil }
+			writeTestScannerIdentityMarker(t, allocator, testScannerBootID2, 17, true)
+			journal := scannerIdentityJournal{
+				Version: scannerIdentityVersion, BootID: testScannerBootID2, PIDNamespace: 17, PrivateRuntime: true,
+				Leases: map[uint32]scannerIdentityJournalEntry{
+					60000: {GID: 60000, Token: "0123456789abcdef0123456789abcdef", State: "active"},
+				},
+			}
+			writeTestScannerIdentityJournalOrFatal(t, allocator, journal)
+			journalPath := filepath.Join(allocator.directory, scannerIdentityJournalName)
+			var journalBytes []byte
+			var archivePath string
+			if test.unreadable {
+				if err := os.Remove(journalPath); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(journalPath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				var err error
+				journalBytes, err = os.ReadFile(journalPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				archivePath = filepath.Join(allocator.directory, scannerIdentityJournalArchiveName(journalBytes))
+				if err := os.WriteFile(archivePath, []byte("preserve conflicting prior-boot evidence"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			directoryFD, markerFD, err := openScannerIdentityDirectories(allocator.directory, allocator.markerDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unix.Close(directoryFD)
+			defer unix.Close(markerFD)
+			_, _, err = allocator.loadOrInitializeWithLiveness(directoryFD, markerFD, testScannerBootID, 18, true, true)
+			want := "prior-boot journal archive failed"
+			if test.unreadable {
+				want = "unreadable prior-boot journal cannot be replaced"
+			}
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("prior-boot recovery with unpreservable evidence = %v; want %q", err, want)
+			}
+			marker, markerErr := readScannerIdentityMarkerAtPath(allocator.markerDir)
+			if markerErr != nil || marker.BootID != testScannerBootID2 || marker.PIDNamespace != 17 {
+				t.Fatalf("refused recovery changed the old marker: %+v, %v", marker, markerErr)
+			}
+			if test.unreadable {
+				if info, err := os.Lstat(journalPath); err != nil || !info.IsDir() {
+					t.Fatalf("refused recovery changed unreadable journal evidence: %v", err)
+				}
+			} else {
+				got, err := os.ReadFile(journalPath)
+				if err != nil || !bytes.Equal(got, journalBytes) {
+					t.Fatalf("refused recovery changed prior-boot journal: %v", err)
+				}
+				archive, err := os.ReadFile(archivePath)
+				if err != nil || string(archive) != "preserve conflicting prior-boot evidence" {
+					t.Fatalf("refused recovery changed conflicting archive: %q, %v", archive, err)
+				}
+			}
+		})
 	}
 }
 

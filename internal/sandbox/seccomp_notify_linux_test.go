@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -488,5 +489,246 @@ func TestSeccompNotificationProbeReapsTraceeAfterPostInjectionReplyFailure(t *te
 	}
 	if err := syscall.Kill(int(traceeTID), 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("tracee task remained after probe cleanup: %v", err)
+	}
+}
+
+func TestSeccompNotificationBrokerRejectsInvalidListenerAndBoundsAddFDRetries(t *testing.T) {
+	var unavailable *seccompNotificationBroker
+	if err := unavailable.serveOne(); err == nil || !strings.Contains(err.Error(), "listener is unavailable") {
+		t.Fatalf("nil broker result = %v; want unavailable listener", err)
+	}
+	if err := (&seccompNotificationBroker{listenerFD: -1}).serveOne(); err == nil || !strings.Contains(err.Error(), "listener is unavailable") {
+		t.Fatalf("negative listener result = %v; want unavailable listener", err)
+	}
+	if err := (&seccompNotificationBroker{listenerFD: 1 << 20}).serveOne(); err == nil || !strings.Contains(err.Error(), "listener failed") {
+		t.Fatalf("invalid listener descriptor result = %v; want fail-closed poll result", err)
+	}
+
+	tests := []struct {
+		name       string
+		addFD      func(int) (uintptr, syscall.Errno)
+		wantError  string
+		wantCalls  int
+		afterAddFD func(uint64, uint32, int, int) error
+	}{
+		{
+			name:      "non-interrupted kernel error is returned",
+			addFD:     func(int) (uintptr, syscall.Errno) { return 0, syscall.EIO },
+			wantError: "inject broker datagram socket: input/output error", wantCalls: 1,
+		},
+		{
+			name:      "interrupted injection stops at its fixed retry bound",
+			addFD:     func(int) (uintptr, syscall.Errno) { return 0, syscall.EINTR },
+			wantError: "interrupted retry limit exceeded", wantCalls: seccompNotificationAddFDRetryLimit,
+		},
+		{
+			name:      "out of range kernel descriptor is rejected",
+			addFD:     func(int) (uintptr, syscall.Errno) { return uintptr(^uint(0)>>1) + 1, 0 },
+			wantError: "invalid scanner socket descriptor", wantCalls: 1,
+		},
+		{
+			name:      "pre-reply failure does not send a response",
+			addFD:     func(int) (uintptr, syscall.Errno) { return 42, 0 },
+			wantError: "pre-reply hook failed", wantCalls: 1,
+			afterAddFD: func(_ uint64, _ uint32, sourceFD, targetFD int) error {
+				if targetFD != 42 {
+					return errors.New("unexpected returned target descriptor")
+				}
+				if _, err := unix.FcntlInt(uintptr(sourceFD), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+					return errors.New("broker source descriptor remained open after addfd")
+				}
+				return errors.New("injected pre-reply failure")
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls, replies, sourceFD := 0, 0, -1
+			broker := &seccompNotificationBroker{listenerFD: 9, afterAddFD: test.afterAddFD}
+			broker.ioctl = func(_ int, request uintptr, argument unsafe.Pointer) (uintptr, syscall.Errno) {
+				switch request {
+				case unix.SECCOMP_IOCTL_NOTIF_ADDFD:
+					calls++
+					add := (*seccompNotificationAddFD)(argument)
+					sourceFD = int(add.SourceFD)
+					if add.TargetFlag != unix.O_CLOEXEC || add.Flags != 0 || add.TargetFD != 0 {
+						t.Fatalf("ADDFD request = %+v; want dynamic close-on-exec target", *add)
+					}
+					return test.addFD(calls)
+				case unix.SECCOMP_IOCTL_NOTIF_SEND:
+					replies++
+					response := (*seccompNotificationResponse)(argument)
+					if response.ID != 17 {
+						t.Fatalf("reply ID = %d, want notification ID 17", response.ID)
+					}
+				}
+				return 0, 0
+			}
+			err := broker.injectINETDatagram(17, 23)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("injection result = %v, want %q", err, test.wantError)
+			}
+			if calls != test.wantCalls || replies != 0 {
+				t.Fatalf("ioctl calls = addfd %d, reply %d; want %d and 0", calls, replies, test.wantCalls)
+			}
+			if sourceFD < 0 {
+				t.Fatal("ADDFD source descriptor was not captured")
+			}
+			if _, err := unix.FcntlInt(uintptr(sourceFD), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+				t.Fatalf("broker source descriptor %d remained open after failure: %v", sourceFD, err)
+			}
+		})
+	}
+}
+
+func runMalformedSeccompNotificationTestChild(shape string) error {
+	if err := seccompNotificationSizesSupported(); err != nil {
+		return err
+	}
+	arch, err := currentSeccompArchitecture()
+	if err != nil {
+		return err
+	}
+	runtime.LockOSThread()
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		return err
+	}
+	filter := []unix.SockFilter{
+		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: seccompArch},
+		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 1, K: arch.audit},
+		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_KILL_PROCESS},
+		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: seccompNumber},
+		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jf: 1, K: arch.numbers["socket"]},
+		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_USER_NOTIF},
+		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ALLOW},
+	}
+	program := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
+	listener, _, errno := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER, unix.SECCOMP_FILTER_FLAG_NEW_LISTENER, uintptr(unsafe.Pointer(&program)))
+	if errno != 0 {
+		return errno
+	}
+	if err := sendSeccompNotificationListener(3, int(listener)); err != nil {
+		_ = unix.Close(int(listener))
+		return err
+	}
+	if err := unix.Close(int(listener)); err != nil {
+		return err
+	}
+	if err := unix.Close(3); err != nil {
+		return err
+	}
+	domain, socketType := unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC
+	switch shape {
+	case "wrong-domain":
+		// The default AF_INET socket is intentionally outside the broker's
+		// exact AF_UNIX datagram request contract.
+	case "wrong-type":
+		domain, socketType = unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC
+	case "wrong-protocol":
+		domain, socketType = unix.AF_UNIX, seccompNotificationSocketType
+		_, err := unix.Socket(domain, socketType, 1)
+		return err
+	default:
+		return errors.New("malformed seccomp notification test child shape is invalid")
+	}
+	_, err = unix.Socket(domain, socketType, 0)
+	return err
+}
+
+func TestSeccompNotificationBrokerRejectsUnexpectedSocketArguments(t *testing.T) {
+	if err := seccompNotificationSupport(); err != nil {
+		t.Skipf("kernel seccomp notification support is unavailable: %v", err)
+	}
+	for _, shape := range []string{"wrong-domain", "wrong-type", "wrong-protocol"} {
+		t.Run(shape, func(t *testing.T) {
+			pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parent := os.NewFile(uintptr(pair[0]), "malformed notification parent")
+			childSocket := os.NewFile(uintptr(pair[1]), "malformed notification child")
+			if err := unix.SetsockoptInt(pair[0], unix.SOL_SOCKET, unix.SO_PASSCRED, 1); err != nil {
+				_ = parent.Close()
+				_ = childSocket.Close()
+				t.Fatal(err)
+			}
+			command := exec.Command(os.Args[0], malformedSeccompNotificationChild, shape)
+			command.Env = []string{}
+			command.ExtraFiles = []*os.File{childSocket}
+			command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+			if err := command.Start(); err != nil {
+				_ = parent.Close()
+				_ = childSocket.Close()
+				t.Fatalf("start malformed-notification child: %v", err)
+			}
+			_ = childSocket.Close()
+			listenerFD, receiveErr := receiveSeccompNotificationListener(pair[0], command.Process.Pid,
+				uint32(os.Geteuid()), uint32(os.Getegid()), scannerSupervisorTimeout)
+			if receiveErr != nil {
+				_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+				_ = command.Wait()
+				_ = parent.Close()
+				t.Fatalf("receive malformed-notification listener: %v", receiveErr)
+			}
+			if err := waitForSeccompNotificationReady(listenerFD); err != nil {
+				_ = unix.Close(listenerFD)
+				_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+				_ = command.Wait()
+				_ = parent.Close()
+				t.Fatalf("wait for malformed seccomp request: %v", err)
+			}
+			broker := seccompNotificationBroker{listenerFD: listenerFD}
+			serveErr := broker.serveOne()
+			_ = unix.Close(listenerFD)
+			_ = parent.Close()
+			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+			waitErr := command.Wait()
+			if serveErr == nil || !strings.Contains(serveErr.Error(), "unexpected seccomp notification request") {
+				t.Fatalf("broker result for %s = %v; want fail-closed request rejection", shape, serveErr)
+			}
+			if waitErr == nil {
+				t.Fatalf("malformed-request child %s exited successfully after broker refusal", shape)
+			}
+		})
+	}
+}
+
+func waitForSeccompNotificationReady(listenerFD int) error {
+	deadline := time.Now().Add(time.Second)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return errors.New("malformed-notification child did not issue its seccomp request")
+		}
+		wait := int((remaining + time.Millisecond - 1) / time.Millisecond)
+		if wait > int(seccompNotificationPollTimeout/time.Millisecond) {
+			wait = int(seccompNotificationPollTimeout / time.Millisecond)
+		}
+		poll := []unix.PollFd{{Fd: int32(listenerFD), Events: unix.POLLIN | unix.POLLHUP | unix.POLLERR}}
+		_, err := unix.Poll(poll, wait)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if poll[0].Revents&unix.POLLIN != 0 {
+			return nil
+		}
+		if poll[0].Revents&(unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0 {
+			return errors.New("malformed-notification listener closed before a request")
+		}
+	}
+}
+
+func TestSeccompNotificationProbeStopsAtBrokerRequestLimit(t *testing.T) {
+	if err := seccompNotificationSupport(); err != nil {
+		t.Skipf("kernel seccomp notification support is unavailable: %v", err)
+	}
+	err := probeSeccompNotificationSupportWithBrokerFactory(func(listenerFD int) *seccompNotificationBroker {
+		return &seccompNotificationBroker{listenerFD: listenerFD, served: seccompNotificationLimit}
+	})
+	if err == nil || !strings.Contains(err.Error(), "seccomp notification request limit exceeded") {
+		t.Fatalf("probe past broker request limit = %v; want fail-closed request-limit error", err)
 	}
 }

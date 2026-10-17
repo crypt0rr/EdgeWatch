@@ -201,6 +201,52 @@ func TestSeccompNotificationFilterMediatesOnlyExactNmapDatagramRequest(t *testin
 	}
 }
 
+func TestSeccompFilterFailsClosedWithoutRequiredSystemCallNumbers(t *testing.T) {
+	for _, invalidFD := range []int{-2, 2, 3 + maxInheritedFiles} {
+		if _, err := seccompFilterWithNotification(seccompArchitectures["amd64"], invalidFD, true); err == nil || !strings.Contains(err.Error(), "outside the inherited range") {
+			t.Errorf("notification filter with liveness fd %d = %v; want range refusal", invalidFD, err)
+		}
+	}
+
+	for _, test := range []struct {
+		name     string
+		missing  string
+		liveness int
+		notify   bool
+	}{
+		{name: "protected close map entry", missing: "close", liveness: 3, notify: true},
+		{name: "protected close-range map entry", missing: "close_range", liveness: 3, notify: true},
+		{name: "protected dup3 map entry", missing: "dup3", liveness: 3, notify: true},
+		{name: "protected fcntl map entry", missing: "fcntl", liveness: 3, notify: true},
+		{name: "protected ioctl map entry", missing: "ioctl", liveness: 3, notify: true},
+		{name: "socket map entry", missing: "socket", liveness: -1, notify: true},
+		{name: "socketpair map entry", missing: "socketpair", liveness: -1, notify: true},
+		{name: "optional arm64 dup2 entry", missing: "dup2", liveness: 3, notify: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for goarch, original := range seccompArchitectures {
+				numbers := make(map[string]uint32, len(original.numbers))
+				for name, number := range original.numbers {
+					numbers[name] = number
+				}
+				delete(numbers, test.missing)
+				arch := original
+				arch.numbers = numbers
+				_, err := seccompFilterWithNotification(arch, test.liveness, test.notify)
+				if test.missing == "dup2" {
+					if err != nil {
+						t.Errorf("%s filter without optional dup2 = %v; want supported filter", goarch, err)
+					}
+					continue
+				}
+				if err == nil || !strings.Contains(err.Error(), "no system call number for "+test.missing) {
+					t.Errorf("%s filter without %s = %v; want fail-closed missing-number error", goarch, test.missing, err)
+				}
+			}
+		})
+	}
+}
+
 func TestValidateScannerSocketDescriptors(t *testing.T) {
 	if err := validateScannerSocketDescriptors(0); err != nil {
 		t.Fatalf("standard descriptors without Unix sockets: %v", err)

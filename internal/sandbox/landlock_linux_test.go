@@ -31,9 +31,22 @@ const nonzeroCoredumpFilter = 0x1
 
 const privateTemporaryProcFDCheck = "private-temporary-proc-fd-check"
 
+const malformedSeccompNotificationChild = "--test-malformed-seccomp-notification"
+
 // TestMain lets the test binary stand in for the EdgeWatch executable as the
 // sandbox-exec command, and harden a process of its own.
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == malformedSeccompNotificationChild {
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "malformed seccomp notification test child arguments")
+			os.Exit(1)
+		}
+		if err := runMalformedSeccompNotificationTestChild(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && os.Args[1] == hardenZeroLandlock {
 		if err := HardenProcess(); err != nil {
 			fmt.Fprintln(os.Stderr, err)

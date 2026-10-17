@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -191,6 +192,268 @@ func TestScannerIdentityScopeLockEnforcesGateLivenessAllocatorOrder(t *testing.T
 		t.Fatalf("recovery could not acquire the released scope lock: %v", err)
 	}
 	_ = probe.Close()
+}
+
+func TestScannerIdentityScopeLockAllocatorFailuresRetainTransitionGate(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*testing.T, int) func()
+		ctx   func() (context.Context, context.CancelFunc)
+	}{
+		{
+			name: "unsafe allocator path",
+			setup: func(t *testing.T, directoryFD int) func() {
+				if err := unix.Symlinkat("/dev/null", directoryFD, scannerIdentityLock); err != nil {
+					t.Fatal(err)
+				}
+				return func() {}
+			},
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+		},
+		{
+			name: "allocator contention canceled",
+			setup: func(t *testing.T, directoryFD int) func() {
+				fd, err := openScannerIdentityLock(directoryFD)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+					_ = unix.Close(fd)
+					t.Fatal(err)
+				}
+				return func() {
+					_ = unix.Flock(fd, unix.LOCK_UN)
+					_ = unix.Close(fd)
+				}
+			},
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), 35*time.Millisecond)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directoryFD := scannerIdentityLockTestDirectory(t)
+			releaseCompetingLock := test.setup(t, directoryFD)
+
+			ownedDirectoryFD, err := unix.Dup(directoryFD)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gateFD, err := openScannerIdentityTransitionLock(directoryFD)
+			if err != nil {
+				_ = unix.Close(ownedDirectoryFD)
+				t.Fatal(err)
+			}
+			if err := unix.Flock(gateFD, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+				_ = unix.Close(gateFD)
+				_ = unix.Close(ownedDirectoryFD)
+				t.Fatal(err)
+			}
+			keeper, err := openScannerIdentityLivenessFile(directoryFD, true)
+			if err != nil {
+				_ = unix.Flock(gateFD, unix.LOCK_UN)
+				_ = unix.Close(gateFD)
+				_ = unix.Close(ownedDirectoryFD)
+				t.Fatal(err)
+			}
+			if err := setScannerIdentityOFDLock(int(keeper.Fd()), unix.F_WRLCK, true); err != nil {
+				_ = keeper.Close()
+				_ = unix.Flock(gateFD, unix.LOCK_UN)
+				_ = unix.Close(gateFD)
+				_ = unix.Close(ownedDirectoryFD)
+				t.Fatal(err)
+			}
+			scope := &scannerIdentityScopeLock{
+				directoryFD: ownedDirectoryFD,
+				markerFD:    -1,
+				gateFD:      gateFD,
+				allocatorFD: -1,
+				keeper:      keeper,
+				lockedGate:  true,
+			}
+			t.Cleanup(scope.close)
+
+			ctx, cancel := test.ctx()
+			defer cancel()
+			err = scope.lockAllocator(ctx)
+			if err == nil {
+				t.Fatal("allocator lock unexpectedly succeeded")
+			}
+			if test.name == "unsafe allocator path" && err.Error() != "scanner identity allocator lock is unavailable" {
+				t.Fatalf("unsafe allocator path error = %v", err)
+			}
+			if test.name == "allocator contention canceled" && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("allocator contention error = %v; want deadline exceeded", err)
+			}
+			if scope.allocatorFD != -1 || scope.lockedAlloc {
+				t.Fatalf("failed allocator lock was published: fd=%d locked=%t", scope.allocatorFD, scope.lockedAlloc)
+			}
+
+			probeFD, err := openScannerIdentityTransitionLock(directoryFD)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = unix.Flock(probeFD, unix.LOCK_EX|unix.LOCK_NB)
+			_ = unix.Close(probeFD)
+			if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
+				t.Fatalf("failed allocator transition released its gate: %v", err)
+			}
+
+			if test.name == "allocator contention canceled" {
+				// The failed waiter must close its descriptor. After the competing
+				// owner releases the lock, a fresh descriptor can acquire it.
+				releaseCompetingLock()
+				allocatorProbeFD, err := openScannerIdentityLock(directoryFD)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer unix.Close(allocatorProbeFD)
+				if err := unix.Flock(allocatorProbeFD, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+					t.Fatalf("failed allocator waiter retained a lock: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestScannerIdentityRuntimeReferenceRetainPreservesExistingKeeper(t *testing.T) {
+	directoryFD := scannerIdentityLockTestDirectory(t)
+	seed, err := openScannerIdentityLivenessFile(directoryFD, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	existing, err := openScannerIdentityLivenessFile(directoryFD, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setScannerIdentityOFDLock(int(existing.Fd()), unix.F_RDLCK, true); err != nil {
+		_ = existing.Close()
+		t.Fatal(err)
+	}
+	pending, err := openScannerIdentityLivenessFile(directoryFD, false)
+	if err != nil {
+		_ = existing.Close()
+		t.Fatal(err)
+	}
+	if err := setScannerIdentityOFDLock(int(pending.Fd()), unix.F_RDLCK, true); err != nil {
+		_ = existing.Close()
+		_ = pending.Close()
+		t.Fatal(err)
+	}
+	allocator := &scannerIdentityAllocator{runtimeLivenessReference: existing}
+	scope := &scannerIdentityScopeLock{directoryFD: -1, markerFD: -1, gateFD: -1, allocatorFD: -1, keeper: pending}
+	if err := scope.retainRuntimeReference(allocator); err != nil {
+		t.Fatalf("retain duplicate process-lifetime reference: %v", err)
+	}
+	if allocator.runtimeLivenessReference != existing || scope.keeper != pending {
+		t.Fatal("duplicate runtime retain replaced the existing keeper or lost scope ownership")
+	}
+	scope.close()
+	if scope.keeper != nil {
+		t.Fatal("scope close retained its duplicate keeper")
+	}
+
+	writer, err := openScannerIdentityLivenessFile(directoryFD, true)
+	if err != nil {
+		_ = existing.Close()
+		t.Fatal(err)
+	}
+	if err := setScannerIdentityOFDLock(int(writer.Fd()), unix.F_WRLCK, true); !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EACCES) {
+		_ = writer.Close()
+		_ = existing.Close()
+		t.Fatalf("existing keeper stopped protecting the scope after duplicate retain: %v", err)
+	}
+	if err := existing.Close(); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if _, err := allocator.runtimeLivenessFile(); err == nil {
+		_ = writer.Close()
+		t.Fatal("closed process-lifetime reference was returned as valid")
+	}
+	if err := setScannerIdentityOFDLock(int(writer.Fd()), unix.F_WRLCK, true); err != nil {
+		_ = writer.Close()
+		t.Fatalf("scope lock remained held after the final keeper closed: %v", err)
+	}
+	_ = writer.Close()
+}
+
+func TestScannerIdentityScopeDowngradeAndStartRejectUnsafeLockState(t *testing.T) {
+	directoryFD := scannerIdentityLockTestDirectory(t)
+	closed, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	scope := &scannerIdentityScopeLock{keeper: closed}
+	if err := scope.downgradeLiveness(directoryFD); err == nil || scope.keeper != closed || scope.inherited != nil {
+		t.Fatalf("downgrade with closed exclusive keeper = %v, keeper %v, inherited %v", err, scope.keeper, scope.inherited)
+	}
+
+	if err := unix.Symlinkat("/dev/null", directoryFD, scannerIdentityTransitionLock); err != nil {
+		t.Fatal(err)
+	}
+	ownedDirectoryFD, err := unix.Dup(directoryFD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownedMarkerFD, err := unix.Dup(directoryFD)
+	if err != nil {
+		_ = unix.Close(ownedDirectoryFD)
+		t.Fatal(err)
+	}
+	if _, _, err := beginScannerIdentityScopeLock(context.Background(), ownedDirectoryFD, ownedMarkerFD); err == nil {
+		_ = unix.Close(ownedDirectoryFD)
+		_ = unix.Close(ownedMarkerFD)
+		t.Fatal("symlink transition gate was accepted")
+	}
+	_ = unix.Close(ownedDirectoryFD)
+	_ = unix.Close(ownedMarkerFD)
+	var stat unix.Stat_t
+	if err := unix.Fstatat(directoryFD, scannerIdentityTransitionLock, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFLNK {
+		t.Fatalf("failed transition-lock validation changed the symlink evidence: mode=%#o err=%v", stat.Mode, err)
+	}
+}
+
+func TestScannerIdentityScopeStartReleasesGateWhenLivenessPathIsNotAFile(t *testing.T) {
+	directoryFD := scannerIdentityLockTestDirectory(t)
+	if err := unix.Mkdirat(directoryFD, scannerIdentityLivenessLock, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ownedDirectoryFD, err := unix.Dup(directoryFD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownedMarkerFD, err := unix.Dup(directoryFD)
+	if err != nil {
+		_ = unix.Close(ownedDirectoryFD)
+		t.Fatal(err)
+	}
+	if _, _, err := beginScannerIdentityScopeLock(context.Background(), ownedDirectoryFD, ownedMarkerFD); err == nil || !strings.Contains(err.Error(), "liveness lock is unavailable") {
+		_ = unix.Close(ownedDirectoryFD)
+		_ = unix.Close(ownedMarkerFD)
+		t.Fatalf("scope start with directory at liveness path = %v; want fail-closed refusal", err)
+	}
+	_ = unix.Close(ownedDirectoryFD)
+	_ = unix.Close(ownedMarkerFD)
+
+	gateFD, err := openScannerIdentityTransitionLock(directoryFD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(gateFD)
+	if err := unix.Flock(gateFD, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatalf("failed scope start left the transition gate held: %v", err)
+	}
 }
 
 func TestScannerIdentityLivenessSurvivesParentCloseInExecChild(t *testing.T) {
@@ -408,6 +671,7 @@ func TestScannerIdentityLockFilesRejectUnsafeMetadata(t *testing.T) {
 		name string
 		open func(int) (int, error)
 	}{
+		{name: scannerIdentityLock, open: openScannerIdentityLock},
 		{name: scannerIdentityTransitionLock, open: openScannerIdentityTransitionLock},
 		{name: scannerIdentityLivenessLock, open: func(directoryFD int) (int, error) {
 			file, err := openScannerIdentityLivenessFile(directoryFD, true)
@@ -470,6 +734,18 @@ func TestScannerIdentityLockFilesRejectUnsafeMetadata(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestScannerIdentityLockOpenersRejectInvalidDirectoryDescriptors(t *testing.T) {
+	if _, err := openScannerIdentityLock(-1); err == nil {
+		t.Fatal("allocator lock opener accepted an invalid directory descriptor")
+	}
+	if _, err := openScannerIdentityTransitionLock(-1); err == nil {
+		t.Fatal("transition lock opener accepted an invalid directory descriptor")
+	}
+	if _, err := openScannerIdentityNamedLock(-1, scannerIdentityTransitionLock); err == nil {
+		t.Fatal("named transition lock opener accepted an invalid directory descriptor")
 	}
 }
 

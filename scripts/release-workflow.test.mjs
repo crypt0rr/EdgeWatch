@@ -1426,6 +1426,58 @@ test('CI requires and merges the privileged sandbox coverage profile', () => {
   assert.match(aggregate, /check-diff-coverage\.mjs --language go --coverage coverage\.out/)
 })
 
+test('pull request titles are checked on edit and gate the required CI check', () => {
+  assert.match(ciWorkflow, /^ {2}pull_request:\n {4}types: \[opened, synchronize, reopened, ready_for_review, edited\]$/m,
+    'title edits must rerun the workflow that produces the required CI check')
+
+  const titleJob = ciJobBlock('pr-title')
+  assert.deepEqual(permissionsOf(titleJob, 4), { contents: 'read' },
+    'the title job must have read-only repository access')
+  assert.match(titleJob, /^ {4}if: github\.event_name == 'pull_request'$/m)
+  assert.match(titleJob, /node --test scripts\/check-pr-title\.test\.mjs/)
+  const validateTitle = stepBlock(titleJob, 'Validate pull request title')
+  assert.match(validateTitle, /^ {10}PR_TITLE: \$\{\{ github\.event\.pull_request\.title \}\}$/m,
+    'the untrusted title must be passed as environment data')
+  assert.match(validateTitle, /^ {8}run: node scripts\/check-pr-title\.mjs$/m)
+  assert.doesNotMatch(titleJob, /npm (?:ci|install|run)/,
+    'the title job must not install or run project packages')
+  const titleActions = [...titleJob.matchAll(/^ {8}uses: ([^\s]+)/gm)].map(([, action]) => action)
+  assert.deepEqual(titleActions, [
+    'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+    'actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1',
+  ], 'the title job must use only pinned GitHub-maintained actions')
+  assert.match(titleJob, /^ {10}persist-credentials: false$/m)
+  assert.match(titleJob, /^ {10}package-manager-cache: false$/m)
+
+  const aggregate = ciJobBlock('test')
+  assert.ok(needsOf(aggregate).includes('pr-title'), 'the branch-protection aggregate must wait for the title check')
+  assert.match(aggregate, /PR_TITLE_CHECK: \$\{\{ needs\.pr-title\.result \}\}/)
+  assert.match(aggregate, /\[ \"\$GITHUB_EVENT_NAME\" = pull_request \] && \[ \"\$PR_TITLE_CHECK\" != success \]/)
+
+  const gate = stepBlock(aggregate, 'Require Go checks and test shards')
+  const shell = /^ {8}run: \|\n((?: {10}.*(?:\n|$))+)/m.exec(gate)
+  assert.ok(shell, 'the required-check aggregate must have an executable gate step')
+  const gateScript = shell[1].split('\n').map((line) => line.slice(10)).join('\n')
+  const runGate = (eventName, titleResult) => spawnSync('bash', ['-c', gateScript], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      CHECKS: 'success',
+      TESTS: 'success',
+      CONTAINER: 'success',
+      GITHUB_EVENT_NAME: eventName,
+      PR_TITLE_CHECK: titleResult,
+    },
+  })
+  assert.equal(runGate('pull_request', 'success').status, 0)
+  assert.equal(runGate('pull_request', 'failure').status, 1,
+    'the existing required check must fail when the title check fails')
+  assert.equal(runGate('pull_request', 'skipped').status, 1,
+    'the title check must not be skipped for a pull request')
+  assert.equal(runGate('push', 'skipped').status, 0,
+    'a skipped pull request-only title job must not fail a push check')
+})
+
 // A partial re-run ("Re-run failed jobs") does not repeat the image job, and
 // github.run_attempt grows with every re-run. A candidate reference recomputed
 // in a later job would name a tag that was never pushed, so the reference must

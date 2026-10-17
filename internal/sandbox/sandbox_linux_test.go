@@ -130,6 +130,7 @@ func TestDetectReportsActionableScannerIdentityPoolReasons(t *testing.T) {
 	t.Parallel()
 	for name, test := range map[string]struct {
 		change      func(*environment)
+		mode        string
 		want        string
 		wantSeccomp string
 		forbid      []string
@@ -158,6 +159,25 @@ func TestDetectReportsActionableScannerIdentityPoolReasons(t *testing.T) {
 			change:      func(env *environment) { env.euid = 1000 },
 			want:        "EdgeWatch runs as UID 1000",
 			wantSeccomp: StateEnforced,
+		},
+		"invalid daemon UID is sanitized": {
+			change:      func(env *environment) { env.euid = -1 },
+			want:        "scanner identity isolation requires EdgeWatch to run as UID 0",
+			wantSeccomp: StateEnforced,
+			forbid:      []string{"UID -1"},
+		},
+		"invalid scanner mode": {
+			mode:        "unexpected",
+			want:        "scanner.sandbox must be auto, required, or off",
+			wantSeccomp: StateEnforced,
+		},
+		"capability read failure is sanitized": {
+			change: func(env *environment) {
+				env.capErr = errors.New("read /private/capabilities: secret-token")
+			},
+			want:        "the daemon's capabilities could not be verified",
+			wantSeccomp: StateEnforced,
+			forbid:      []string{"/private", "secret-token"},
 		},
 		"pre-v3 allocator refuses unsafe namespace transition": {
 			change: func(env *environment) {
@@ -197,7 +217,7 @@ func TestDetectReportsActionableScannerIdentityPoolReasons(t *testing.T) {
 			if test.change != nil {
 				test.change(&env)
 			}
-			status := detect(Options{}, env).Status()
+			status := detect(Options{Mode: test.mode}, env).Status()
 			if status.State != StateUnavailable || status.IdentityPool == nil || status.IdentityPool.State != StateUnavailable {
 				t.Fatalf("status = %+v, want unavailable scanner identity pool", status)
 			}

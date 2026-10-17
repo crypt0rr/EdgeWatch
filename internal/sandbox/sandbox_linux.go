@@ -277,9 +277,7 @@ func scannerIdentityRangeUnavailableReason(err error) string {
 }
 
 func scannerIdentityProbeUnavailableReason(err error) string {
-	if err == nil {
-		return "the scanner identity probe could not start under a leased identity; check the allocator state, UID/GID mappings, and SETUID, SETGID, and KILL capabilities"
-	}
+	// detectIdentity calls this only after the probe returns a non-nil error.
 	switch err.Error() {
 	case "scanner identity allocator: PID namespace changed with unsafe or occupied scope":
 		return "the scanner identity allocator could not verify an empty prior scope after a PID namespace change; stop other EdgeWatch processes using the data volume and preserve the lease journal and boot marker. For pre-v3 lease state, a host reboot may be needed before the allocator can prove prior-boot processes are gone; do not delete or edit state files"

@@ -281,6 +281,216 @@ function dockerfileArg(name) {
   return dockerfileArgFrom(dockerfile, name)
 }
 
+function releaseImageBuildArgs() {
+  const build = stepBlock(jobBlock('image'), 'Build and push image')
+  const match = /^ {10}build-args:\s*\|\n((?: {12}[^\n]*\n?)+)/m.exec(build)
+  assert.ok(match, 'release image build must define its Docker build arguments')
+  const entries = [...match[1].matchAll(/^ {12}([A-Za-z_][A-Za-z0-9_]*)=(.*)$/gm)]
+  assert.ok(entries.length > 0, 'release image build arguments must not be empty')
+  return Object.fromEntries(entries.map(([, name, value]) => [name, value]))
+}
+
+function dockerfileInstructions(source) {
+  const instructions = []
+  let pending = ''
+  let startLine = 0
+
+  for (const [index, physicalLine] of source.replace(/\r\n/g, '\n').split('\n').entries()) {
+    const line = physicalLine.trim()
+    if (line.startsWith('#') || (!pending && !line)) continue
+    if (!pending) startLine = index + 1
+
+    const continues = /\\$/.test(line)
+    pending = pending + (pending ? ' ' : '') + (continues ? line.slice(0, -1).trimEnd() : line)
+    if (continues) continue
+
+    const match = /^([A-Z]+)(?:\s+([\s\S]*))?$/.exec(pending)
+    assert.ok(match, 'unrecognized Dockerfile instruction at line ' + startLine + ': ' + pending)
+    instructions.push({ name: match[1], args: match[2] ?? '', line: startLine })
+    pending = ''
+    startLine = 0
+  }
+
+  assert.equal(pending, '', 'Dockerfile ends with an unfinished continuation')
+  return instructions
+}
+
+function expandDockerfileValue(value, variables) {
+  let unresolved = false
+  const expanded = value.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g, (_match, braced, plain) => {
+    const name = braced ?? plain
+    if (!variables.has(name) || variables.get(name) === undefined) {
+      unresolved = true
+      return ''
+    }
+    return String(variables.get(name))
+  })
+  return unresolved ? undefined : expanded
+}
+
+function unquoteDockerfileValue(value) {
+  return value.replace(/^(['"])(.*)\1$/, '$2')
+}
+
+function dockerfileStageGraph(source, buildArgs) {
+  const stages = []
+  const aliases = new Map()
+  const globalArgs = new Map()
+  let currentStage = null
+
+  for (const instruction of dockerfileInstructions(source)) {
+    if (instruction.name === 'FROM') {
+      const tokens = instruction.args.match(/"(?:[^"]*)"|'(?:[^']*)'|[^\s]+/g) ?? []
+      let tokenIndex = 0
+      while (tokens[tokenIndex]?.startsWith('--')) {
+        tokenIndex++
+        if (!tokens[tokenIndex - 1].includes('=')) tokenIndex++
+      }
+      const image = tokens[tokenIndex]
+      assert.ok(image, 'FROM at line ' + instruction.line + ' has no image')
+      const asIndex = tokens.findIndex((token, index) => index > tokenIndex && token.toLowerCase() === 'as')
+      const alias = asIndex === -1 ? null : tokens[asIndex + 1]
+      const stage = {
+        index: stages.length,
+        name: alias ?? '#' + stages.length,
+        dependencies: new Set(),
+        variables: new Map(),
+        runs: [],
+      }
+      const baseStage = aliases.get(image.toLowerCase())
+      if (baseStage) stage.dependencies.add(baseStage)
+      if (alias) {
+        assert.ok(!aliases.has(alias.toLowerCase()), 'Dockerfile stage alias ' + alias + ' is duplicated')
+        aliases.set(alias.toLowerCase(), stage)
+      }
+      stages.push(stage)
+      currentStage = stage
+      continue
+    }
+
+    if (instruction.name === 'ARG') {
+      const match = /^([A-Za-z_][A-Za-z0-9_]*)(?:=(.*))?$/.exec(instruction.args.trim())
+      assert.ok(match, 'invalid ARG at line ' + instruction.line + ': ' + instruction.args)
+      const [, name, rawDefault] = match
+      if (currentStage) {
+        const defaultValue = rawDefault === undefined ? undefined : expandDockerfileValue(unquoteDockerfileValue(rawDefault), currentStage.variables)
+        const value = Object.hasOwn(buildArgs, name)
+          ? String(buildArgs[name])
+          : rawDefault !== undefined
+            ? defaultValue
+            : globalArgs.has(name) ? globalArgs.get(name) : ''
+        currentStage.variables.set(name, value)
+      } else {
+        const defaultValue = rawDefault === undefined ? undefined : expandDockerfileValue(unquoteDockerfileValue(rawDefault), globalArgs)
+        const value = Object.hasOwn(buildArgs, name)
+          ? String(buildArgs[name])
+          : rawDefault !== undefined ? defaultValue : ''
+        globalArgs.set(name, value)
+      }
+      continue
+    }
+
+    if (!currentStage) continue
+
+    if (instruction.name === 'ENV') {
+      const tokens = instruction.args.match(/"(?:[^"]*)"|'(?:[^']*)'|[^\s]+/g) ?? []
+      const assignments = tokens.every((token) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(token))
+      if (assignments) {
+        for (const token of tokens) {
+          const separator = token.indexOf('=')
+          const name = token.slice(0, separator)
+          const value = expandDockerfileValue(unquoteDockerfileValue(token.slice(separator + 1)), currentStage.variables)
+          currentStage.variables.set(name, value)
+        }
+      } else if (tokens.length >= 2 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(tokens[0])) {
+        const value = expandDockerfileValue(unquoteDockerfileValue(instruction.args.slice(tokens[0].length).trim()), currentStage.variables)
+        currentStage.variables.set(tokens[0], value)
+      } else {
+        currentStage.variables.set('*UNRESOLVED_ENV*', undefined)
+      }
+      continue
+    }
+
+    if (instruction.name === 'COPY') {
+      const match = /(?:^|\s)--from(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s]+))/.exec(instruction.args)
+      if (match) {
+        const sourceStage = match[1] ?? match[2] ?? match[3]
+        const dependency = /^\d+$/.test(sourceStage)
+          ? stages[Number(sourceStage)]
+          : aliases.get(sourceStage.toLowerCase())
+        if (dependency) currentStage.dependencies.add(dependency)
+      }
+      continue
+    }
+
+    if (instruction.name === 'RUN') {
+      for (const match of instruction.args.matchAll(/(?:^|\s)--mount(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s]+))/g)) {
+        const mount = match[1] ?? match[2] ?? match[3]
+        const from = /(?:^|,)from=([^,]+)/.exec(mount)?.[1]
+        if (!from) continue
+        const dependency = /^\d+$/.test(from) ? stages[Number(from)] : aliases.get(from.toLowerCase())
+        if (dependency) currentStage.dependencies.add(dependency)
+      }
+      currentStage.runs.push({
+        line: instruction.line,
+        command: instruction.args,
+        args: new Map(currentStage.variables),
+      })
+    }
+  }
+
+  assert.ok(stages.length > 0, 'Dockerfile has no build stages')
+  return { stages, aliases }
+}
+
+function releaseShellBranch(command, args) {
+  const guard = /\bif\s+\[\s*["']?\$([A-Za-z_][A-Za-z0-9_]*)["']?\s*(=|==|!=)\s*(["']?)([^"'\s\]]+)\3\s*\]\s*;\s*then\b([\s\S]*?)(?:;\s*else\b([\s\S]*?))?;\s*fi\b/g
+  let active = command
+  for (let iteration = 0; iteration < 20; iteration++) {
+    let matched = false
+    let changed = false
+    active = active.replace(guard, (whole, name, operator, _quote, expected, thenBranch, elseBranch = '') => {
+      matched = true
+      if (!args.has(name) || args.get(name) === undefined) return whole
+      changed = true
+      const equal = String(args.get(name)) === expected
+      return (operator === '!=' ? !equal : equal) ? thenBranch : elseBranch
+    })
+    if (!matched || !changed) break
+  }
+  return active
+}
+
+function reachableReleaseNpmRuns(source, buildArgs, targetName) {
+  const { stages, aliases } = dockerfileStageGraph(source, buildArgs)
+  const target = targetName ? aliases.get(targetName.toLowerCase()) : stages.at(-1)
+  assert.ok(target, 'Dockerfile target stage ' + (targetName ?? '(final)') + ' does not exist')
+
+  const reachable = new Set()
+  function visit(stage) {
+    if (reachable.has(stage)) return
+    reachable.add(stage)
+    for (const dependency of stage.dependencies) visit(dependency)
+  }
+  visit(target)
+
+  const violations = []
+  for (const stage of stages) {
+    if (!reachable.has(stage)) continue
+    for (const run of stage.runs) {
+      const active = releaseShellBranch(run.command, run.args)
+      if (/\b(?:npm|npx)\b/.test(active)) {
+        violations.push({
+          stage: stage.name,
+          line: run.line,
+          command: active.trim(),
+        })
+      }
+    }
+  }
+  return violations
+}
+
 function apkPackagePins(source) {
   const logicalLines = source.replace(/\\\r?\n[ \t]*/g, ' ')
   return [...logicalLines.matchAll(/^RUN[ \t]+apk add --no-cache[ \t]+([^\n]*)/gm)].flatMap((match) => {
@@ -371,20 +581,130 @@ test('the published image is built from scratch without imported caches', () => 
   }
 })
 
-test('prebuilt Docker builds skip npm and fail when frontend assets are missing', () => {
-  const frontendEnd = dockerfile.indexOf('\nFROM --platform=$BUILDPLATFORM golang:', dockerfile.indexOf(' AS frontend'))
-  assert.notEqual(frontendEnd, -1, 'Dockerfile is missing the frontend stage boundary')
-  const frontend = dockerfile.slice(0, frontendEnd)
-  assert.match(frontend, /RUN if \[ "\$PREBUILT_FRONTEND" != "1" \]; then npm ci; fi/)
-  assert.match(frontend, /RUN if \[ "\$PREBUILT_FRONTEND" = "1" \]; then \\\n\s+test -f \.\/prebuilt-dist\/index\.html \|\| \{ echo "prebuilt frontend is missing index\.html" >&2; exit 1; \};/)
-  assert.match(frontend, /else \\\n\s+npm run build;/)
-  assert.doesNotMatch(frontend, /^RUN npm ci$/m)
-
+test('prebuilt Docker builds fail when frontend assets are missing', () => {
   const container = ciJobBlock('container')
   assert.match(stepBlock(container, 'Reject missing prebuilt frontend assets'), /test-prebuilt-frontend-fails-closed\.sh/)
   assert.match(prebuiltFrontendTest, /docker buildx build --no-cache --progress=plain --target frontend/)
   assert.match(prebuiltFrontendTest, /PREBUILT_FRONTEND=1/)
   assert.match(prebuiltFrontendTest, /prebuilt frontend is missing index\.html/)
+})
+
+test('release image checks npm execution across its reachable Dockerfile stage graph', async () => {
+  const buildArgs = releaseImageBuildArgs()
+  assert.deepEqual(reachableReleaseNpmRuns(dockerfile, buildArgs), [], 'the release image must not execute npm or npx')
+  const defaultArgs = { ...buildArgs }
+  delete defaultArgs.PREBUILT_FRONTEND
+  assert.ok(
+    reachableReleaseNpmRuns(dockerfile, defaultArgs).some((run) => run.stage === 'frontend'),
+    'the frontend stage ARG default must select the local npm path when no release build arg is supplied',
+  )
+
+  const oldDockerfile = await readRepositoryFile('scripts/fixtures/Dockerfile-1517-ae82e4f')
+  assert.ok(reachableReleaseNpmRuns(oldDockerfile, buildArgs).length > 0, 'the historical Dockerfile must be rejected')
+
+  function replaceOnce(source, marker, replacement, name) {
+    assert.ok(source.includes(marker), name + ' mutation marker is missing')
+    return source.replace(marker, replacement)
+  }
+
+  const npmInstall = 'RUN if [ "$PREBUILT_FRONTEND" != "1" ]; then npm ci; fi'
+  const m1 = replaceOnce(
+    dockerfile,
+    'COPY scripts/check-node-runtime.mjs ./scripts/check-node-runtime.mjs',
+    'COPY scripts/check-node-runtime.mjs ./scripts/check-node-runtime.mjs\nRUN npx --yes license-checker-rseidelsohn --summary',
+    'M1',
+  )
+  assert.ok(reachableReleaseNpmRuns(m1, buildArgs).some((run) => run.stage === 'frontend'), 'M1 must be rejected in the reached frontend stage')
+
+  const buildStage = 'FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine3.24@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS build'
+  const auditStage = [
+    'FROM --platform=$BUILDPLATFORM node:24.21.0-alpine3.24 AS frontend-audit',
+    'WORKDIR /src',
+    'COPY package.json package-lock.json ./',
+    'RUN npm ci --no-audit && npm ls --all > /deps.txt',
+    '',
+  ].join('\n')
+  let m2 = replaceOnce(dockerfile, buildStage, auditStage + buildStage, 'M2')
+  const frontendArtifactCopy = 'COPY --from=frontend /src/internal/webui/dist ./internal/webui/dist'
+  m2 = replaceOnce(m2, frontendArtifactCopy, frontendArtifactCopy + '\nCOPY --from=frontend-audit /deps.txt ./release-dependencies.txt', 'M2 copy')
+  const m2Runs = reachableReleaseNpmRuns(m2, buildArgs)
+  assert.ok(m2Runs.some((run) => run.stage === 'frontend-audit'), 'M2 must be rejected through its COPY --from dependency')
+  let m2Mount = replaceOnce(dockerfile, buildStage, auditStage + buildStage, 'M2 mount')
+  const mountRun = 'RUN --mount=type=bind,from=frontend-audit,source=/deps.txt,target=/deps.txt,ro true'
+  m2Mount = replaceOnce(m2Mount, frontendArtifactCopy, mountRun + '\n' + frontendArtifactCopy, 'M2 mount dependency')
+  assert.ok(
+    reachableReleaseNpmRuns(m2Mount, buildArgs).some((run) => run.stage === 'frontend-audit'),
+    'a RUN --mount=from dependency must also reach its source stage',
+  )
+  const m2IndexCopy = replaceOnce(
+    m2,
+    'COPY --from=frontend-audit /deps.txt ./release-dependencies.txt',
+    'COPY --from=2 /deps.txt ./release-dependencies.txt',
+    'M2 numeric stage reference',
+  )
+  assert.ok(
+    reachableReleaseNpmRuns(m2IndexCopy, buildArgs).some((run) => run.stage === 'frontend-audit'),
+    'numeric COPY --from references must reach their source stage',
+  )
+
+  const m3 = replaceOnce(
+    dockerfile,
+    '      test -f ./prebuilt-dist/index.html',
+    '      npm ci --ignore-scripts && npm run lint; test -f ./prebuilt-dist/index.html',
+    'M3',
+  )
+  assert.ok(reachableReleaseNpmRuns(m3, buildArgs).length > 0, 'M3 must be rejected inside the active prebuilt branch')
+
+  const unresolvedGuard = replaceOnce(
+    dockerfile,
+    'ARG PREBUILT_FRONTEND=0',
+    'ARG PREBUILT_FRONTEND=0\nRUN if [ "$UNKNOWN_RELEASE_FLAG" = "1" ]; then npm ci; fi',
+    'unresolved argument guard',
+  )
+  assert.ok(
+    reachableReleaseNpmRuns(unresolvedGuard, buildArgs).length > 0,
+    'an unresolved condition must fail closed when it guards npm or npx',
+  )
+  const environmentOverride = replaceOnce(
+    dockerfile,
+    'ARG PREBUILT_FRONTEND=0',
+    'ARG PREBUILT_FRONTEND=0\nENV PREBUILT_FRONTEND=0',
+    'ENV override',
+  )
+  assert.ok(
+    reachableReleaseNpmRuns(environmentOverride, buildArgs).some((run) => run.stage === 'frontend'),
+    'a later ENV value must override the build ARG for RUN conditions',
+  )
+
+  const m4 = replaceOnce(
+    dockerfile,
+    npmInstall + '\n',
+    npmInstall + '\nRUN npm ci --no-audit\n',
+    'M4',
+  )
+  assert.ok(reachableReleaseNpmRuns(m4, buildArgs).length > 0, 'M4 must be rejected as an additional frontend RUN')
+
+  const finalStage = 'FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6'
+  const unreachableNpmStage = [
+    'FROM --platform=$BUILDPLATFORM node:24.21.0-alpine3.24 AS unused-audit',
+    'RUN npm ci --no-audit',
+    '',
+  ].join('\n')
+  const unusedStage = replaceOnce(dockerfile, finalStage, unreachableNpmStage + finalStage, 'unreachable npm stage')
+  assert.deepEqual(reachableReleaseNpmRuns(unusedStage, buildArgs), [], 'unreachable stages must not affect the release target')
+
+  const fromDependency = [
+    'FROM node:24.21.0-alpine3.24 AS npm-source',
+    'RUN npm ci --no-audit',
+    'FROM npm-source AS inherited',
+    'RUN true',
+    'FROM alpine:3.24.2 AS final',
+    'COPY --from=inherited /src /src',
+  ].join('\n')
+  assert.ok(
+    reachableReleaseNpmRuns(fromDependency, buildArgs).some((run) => run.stage === 'npm-source'),
+    'FROM references to earlier stages must reach their source stage',
+  )
 })
 
 test('release manifests bind archive members to extracted and image executables', () => {

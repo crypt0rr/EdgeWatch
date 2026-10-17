@@ -588,9 +588,9 @@ function hasOpaqueShellScriptExecution(command, depth = 0) {
   const scriptPath = (word) => {
     const value = unquoteDockerfileValue(word)
     const name = value.split('/').at(-1)
-    return /\.(?:sh|bash|ash|dash)$/i.test(name) ||
-      (!value.startsWith('/') && value.includes('/')) ||
-      /^(?:\.{1,2}\/|\/(?:tmp|src|app|workspace|work|opt|usr\/local\/(?:bin|sbin))\/)/.test(value)
+    // Any explicit path may name a copied or generated executable. Do not
+    // infer safety from its root or filename extension.
+    return value.includes('/') || /\.(?:sh|bash|ash|dash)$/i.test(name)
   }
   const segments = command.split(/&&|\|\||[;|\n]/)
   for (let segment of segments) {
@@ -989,6 +989,11 @@ test('release image checks npm execution across its reachable Dockerfile stage g
     ['busybox wrapper', 'busybox sh /tmp/setup.sh'],
     ['direct local script', './setup', './setup'],
     ['direct nested local script', 'scripts/fixtures/release-opaque-npm-setup', 'scripts/fixtures/release-opaque-npm-setup'],
+    ['direct absolute extensionless script', '/var/tmp/setup', '/var/tmp/setup'],
+    ['direct script under another absolute root', '/home/build/tools/setup', '/home/build/tools/setup'],
+    ['env wrapper with absolute script', 'env /var/tmp/setup', '/var/tmp/setup'],
+    ['sudo wrapper with absolute script', 'sudo -u root /opt/release/setup', '/opt/release/setup'],
+    ['timeout wrapper with absolute script', 'timeout 10 /home/build/tools/setup', '/home/build/tools/setup'],
     ['env split-string wrapper', "env -S 'sh /tmp/setup.sh'"],
     ['shell script operand before -c', "sh /tmp/setup.sh -c 'echo ignored'"],
   ]) {

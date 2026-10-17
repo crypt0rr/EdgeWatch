@@ -122,21 +122,25 @@ a form that Renovate updates. CI runs it, and so does the release; run
 
 The release npm guard roots its Dockerfile stage graph at the target configured
 on the exact image build action, or at the final stage when no target is set.
-It follows stage inheritance, `COPY --from`, and `RUN --mount=from`, and
-resolves static `ARG` and `ENV` values used by reachable `RUN` commands.
-Triggered `ONBUILD` instructions are rejected conservatively because their
-execution can add commands or hidden stage dependencies. The guard examines
-inline command text; it does not parse build-context scripts, so reachable
-executable paths fail closed regardless of their root or filename extension,
-including when passed through recognized wrappers. An untriggered `ONBUILD`
-instruction remains dormant in that build. The guard allows only the
-Dockerfile's reviewed `git rev-parse` and Go ELF-interpreter command
-substitutions; other `$()`, backtick, or process-substitution syntax fails
-closed anywhere in a reachable `RUN`, including arguments. This is a bounded
-policy check rather than a general shell parser or an isolation boundary: it
-does not resolve bare command names through `PATH` or inspect the binaries
-those names select. The check relies on the pinned stage images for those
-tools; adding custom executables to a `PATH` requires extending the guard.
+It follows stage inheritance, `COPY --from`, and `RUN --mount=from`. For every
+reachable stage, the test approves the exact ordered list of complete `RUN`
+instructions in the current Dockerfile. An added, removed, reordered,
+duplicated, or changed reachable `RUN` fails closed, even when its command does
+not mention npm. The test resolves the two reviewed release conditionals using
+the build arguments from that image action and checks stage `ARG` defaults and
+values against their allowed forms. A reachable `ENV` or `SHELL`, a global
+`ARG`, or a dynamic base or stage dependency also fails closed. Triggered
+`ONBUILD` instructions fail because they can add commands or hidden stage
+dependencies; an untriggered `ONBUILD` remains dormant in that build.
+
+This is a static contract for the checked-in Dockerfile, target, and build
+arguments, including the pinned Dockerfile syntax directive. It does not
+emulate a general shell, resolve bare command names
+through `PATH`, parse copied scripts, inspect binaries, or protect against a
+malicious pinned base image or executable replacement. It relies on the pinned
+stage images and does not prove BuildKit isolation. Any change to a reachable
+`RUN`, its `ARG` declarations, or the image build target needs a matching guard
+review and regression case.
 
 The same checks keep dependency provenance current. Renovate reads the
 golangci-lint pin from `.golangci-lint-version` using GitHub Releases, and its

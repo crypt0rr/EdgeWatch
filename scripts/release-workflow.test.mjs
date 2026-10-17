@@ -21,7 +21,6 @@ const workflows = await Promise.all(
 )
 const readRepositoryFile = (path) => readFile(resolve(repositoryRoot, path), 'utf8')
 const dockerfile = await readRepositoryFile('Dockerfile')
-const opaqueNpmSetupScript = await readRepositoryFile('scripts/fixtures/release-opaque-npm-setup.sh')
 const makefile = await readRepositoryFile('Makefile')
 const golangciLintVersion = await readRepositoryFile('.golangci-lint-version')
 const renovate = JSON.parse(await readRepositoryFile('renovate.json'))
@@ -361,6 +360,7 @@ function dockerfileStageGraph(source, buildArgs) {
   const stages = []
   const aliases = new Map()
   const globalArgs = new Map()
+  const globalArgDeclarations = []
   let currentStage = null
 
   for (const instruction of dockerfileInstructions(source)) {
@@ -378,8 +378,14 @@ function dockerfileStageGraph(source, buildArgs) {
       const stage = {
         index: stages.length,
         name: alias ?? '#' + stages.length,
+        alias,
         dependencies: new Set(),
         variables: new Map(),
+        argDeclarations: [],
+        environmentDeclarations: [],
+        shellDeclarations: [],
+        dynamicBase: /\$/.test(image),
+        dynamicDependency: false,
         runs: [],
         onbuildTriggers: [],
       }
@@ -411,6 +417,7 @@ function dockerfileStageGraph(source, buildArgs) {
       assert.ok(match, 'invalid ARG at line ' + instruction.line + ': ' + instruction.args)
       const [, name, rawDefault] = match
       if (currentStage) {
+        currentStage.argDeclarations.push({ name, rawDefault, line: instruction.line })
         const defaultValue = rawDefault === undefined ? undefined : expandDockerfileValue(unquoteDockerfileValue(rawDefault), currentStage.variables)
         const value = Object.hasOwn(buildArgs, name)
           ? String(buildArgs[name])
@@ -419,6 +426,7 @@ function dockerfileStageGraph(source, buildArgs) {
             : globalArgs.has(name) ? globalArgs.get(name) : dockerAutomaticArgs.has(name) ? undefined : ''
         currentStage.variables.set(name, value)
       } else {
+        globalArgDeclarations.push({ name, rawDefault, line: instruction.line })
         const defaultValue = rawDefault === undefined ? undefined : expandDockerfileValue(unquoteDockerfileValue(rawDefault), globalArgs)
         const value = Object.hasOwn(buildArgs, name)
           ? String(buildArgs[name])
@@ -440,6 +448,7 @@ function dockerfileStageGraph(source, buildArgs) {
     }
 
     if (instruction.name === 'ENV') {
+      currentStage.environmentDeclarations.push({ args: instruction.args, line: instruction.line })
       const tokens = instruction.args.match(/"(?:[^"]*)"|'(?:[^']*)'|[^\s]+/g) ?? []
       const assignments = tokens.every((token) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(token))
       if (assignments) {
@@ -458,10 +467,19 @@ function dockerfileStageGraph(source, buildArgs) {
       continue
     }
 
+    if (instruction.name === 'SHELL') {
+      currentStage.shellDeclarations.push({ args: instruction.args, line: instruction.line })
+      continue
+    }
+
     if (instruction.name === 'COPY') {
       const match = /(?:^|\s)--from(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s]+))/.exec(instruction.args)
       if (match) {
         const sourceStage = match[1] ?? match[2] ?? match[3]
+        if (/\$/.test(sourceStage)) {
+          currentStage.dynamicDependency = true
+          continue
+        }
         const dependency = /^\d+$/.test(sourceStage)
           ? stages[Number(sourceStage)]
           : aliases.get(sourceStage.toLowerCase())
@@ -475,6 +493,10 @@ function dockerfileStageGraph(source, buildArgs) {
         const mount = match[1] ?? match[2] ?? match[3]
         const from = /(?:^|,)from=([^,]+)/.exec(mount)?.[1]
         if (!from) continue
+        if (/\$/.test(from)) {
+          currentStage.dynamicDependency = true
+          continue
+        }
         const dependency = /^\d+$/.test(from) ? stages[Number(from)] : aliases.get(from.toLowerCase())
         if (dependency) currentStage.dependencies.add(dependency)
       }
@@ -487,13 +509,14 @@ function dockerfileStageGraph(source, buildArgs) {
   }
 
   assert.ok(stages.length > 0, 'Dockerfile has no build stages')
-  return { stages, aliases }
+  return { stages, aliases, globalArgDeclarations }
 }
 
 const dockerAutomaticArgs = new Set([
   'BUILDPLATFORM', 'BUILDOS', 'BUILDARCH', 'BUILDVARIANT',
   'TARGETPLATFORM', 'TARGETOS', 'TARGETARCH', 'TARGETVARIANT',
 ])
+const reviewedDockerfileSyntax = '# syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b'
 
 function releaseShellBranch(command, args) {
   const guard = /\bif\s+\[\s*["']?\$([A-Za-z_][A-Za-z0-9_]*)["']?\s*(=|==|!=)\s*(["']?)([^"'\s\]]+)\3\s*\]\s*;\s*then\b([\s\S]*?)(?:;\s*else\b([\s\S]*?))?;\s*fi\b/g
@@ -521,155 +544,81 @@ function expandedRunCommand(command, args) {
     })
 }
 
-function stripRunOptions(command) {
-  let remaining = command.trimStart()
-  while (remaining.startsWith('--')) {
-    const option = /^(--[A-Za-z0-9-]+)(?:=([^\s]+))?/.exec(remaining)
-    if (!option) break
-    remaining = remaining.slice(option[0].length).trimStart()
-    if (option[2] === undefined && /^(?:--mount|--network|--security|--device)$/.test(option[1])) {
-      remaining = remaining.replace(/^[^\s]+\s*/, '')
-    }
-  }
-  return remaining
+const reviewedReleaseRunForms = new Map([
+  ['frontend', [
+    'if [ "$PREBUILT_FRONTEND" != "1" ]; then npm ci; fi',
+    'if [ "$PREBUILT_FRONTEND" = "1" ]; then test -f ./prebuilt-dist/index.html || { echo "prebuilt frontend is missing index.html" >&2; exit 1; }; rm -rf ./internal/webui/dist && mkdir -p ./internal/webui/dist && cp -a ./prebuilt-dist/. ./internal/webui/dist/; else npm run build; fi',
+  ]],
+  ['naabu', [
+    'apk add --no-cache ca-certificates=20260909-r0 git=2.54.0-r0',
+    'git init . && git remote add origin https://github.com/projectdiscovery/naabu.git && git fetch --depth 1 origin ${NAABU_COMMIT} && git fetch --depth 1 origin refs/tags/${NAABU_VERSION}:refs/tags/${NAABU_VERSION} && test "$(git rev-parse ${NAABU_VERSION}^{commit})" = "${NAABU_COMMIT}" && git checkout --detach ${NAABU_COMMIT}',
+    'case "${TARGETARCH}" in amd64) loader=/lib/ld-musl-x86_64.so.1 ;; arm64) loader=/lib/ld-musl-aarch64.so.1 ;; *) echo "no musl loader known for ${TARGETARCH}" >&2; exit 1 ;; esac && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -I ${loader}" -o /out/naabu ./cmd/naabu && printf \'%s\\n\' \'package main\' \'import ("debug/elf"; "fmt"; "os")\' \'func main() { f, err := elf.Open(os.Args[1]); if err != nil { panic(err) }; for _, p := range f.Progs { if p.Type == elf.PT_INTERP { b := make([]byte, p.Filesz); if _, err := p.ReadAt(b, 0); err != nil { panic(err) }; fmt.Print(string(b[:len(b)-1])) } } }\' >/tmp/interp.go && interp="$(go run /tmp/interp.go /out/naabu)" && if [ -n "${interp}" ] && [ "${interp}" != "${loader}" ]; then echo "naabu names ${interp}, not ${loader}" >&2; exit 1; fi',
+  ]],
+  ['build', [
+    'apk add --no-cache ca-certificates=20260909-r0 git=2.54.0-r0',
+    'go mod download',
+    'if [ "$PREBUILT_EDGEWATCH" = "1" ]; then test -f "/src/release-binaries/linux_${TARGETARCH}/edgewatch" && mkdir -p /out && install -m 0755 "/src/release-binaries/linux_${TARGETARCH}/edgewatch" /out/edgewatch; else CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/edgewatch ./cmd/edgewatch; fi',
+  ]],
+  ['final', [
+    'apk add --no-cache ca-certificates=20260909-r0 gcompat=1.1.0-r4 nmap=7.99-r0 nmap-scripts=7.99-r0 tzdata=2026e-r0 zlib=1.3.2-r1 && mkdir -p /etc/edgewatch /var/lib/edgewatch /run/secrets && chmod 0750 /etc/edgewatch /var/lib/edgewatch /run/secrets && addgroup -S -g 65532 edgewatch-scanner && adduser -S -D -H -u 65532 -G edgewatch-scanner -h /nonexistent -s /sbin/nologin edgewatch-scanner && addgroup -S -g 65531 edgewatch-notify && adduser -S -D -H -u 65531 -G edgewatch-notify -h /nonexistent -s /sbin/nologin edgewatch-notify',
+  ]],
+])
+
+const reviewedStageArguments = new Map([
+  ['frontend', new Map([
+    ['PREBUILT_FRONTEND', { default: '0', value: /^(?:0|1)$/ }],
+  ])],
+  ['naabu', new Map([
+    ['NAABU_VERSION', { default: /^v[0-9]+\.[0-9]+\.[0-9]+$/, value: /^v[0-9]+\.[0-9]+\.[0-9]+$/ }],
+    ['NAABU_COMMIT', { default: /^[0-9a-f]{40}$/, value: /^[0-9a-f]{40}$/ }],
+    ['TARGETOS', { automatic: true, value: /^linux$/ }],
+    ['TARGETARCH', { automatic: true, value: /^(?:amd64|arm64)$/ }],
+  ])],
+  ['build', new Map([
+    ['VERSION', { default: 'dev', value: /^(?:dev|v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$/ }],
+    ['PREBUILT_EDGEWATCH', { default: '0', value: /^(?:0|1)$/ }],
+    ['TARGETOS', { automatic: true, value: /^linux$/ }],
+    ['TARGETARCH', { automatic: true, value: /^(?:amd64|arm64)$/ }],
+  ])],
+])
+
+function reviewedStageKey(stage, stages) {
+  if (stage.alias) return stage.name
+  return stage.index === stages.length - 1 ? 'final' : stage.name
 }
 
-function hasUnresolvedCommandPosition(command, depth = 0) {
-  // This intentionally handles the shell forms used by our Dockerfiles and
-  // fails closed when a dynamic executable name remains. It is not a shell
-  // interpreter: unsupported command expressions at an execution position
-  // are treated as unsafe rather than guessed.
-  if (depth > 8 || /<<-?\s*[A-Za-z_][A-Za-z0-9_]*/.test(command)) return true
-  const segments = command.split(/&&|\|\||[;|\n]/)
-  for (let segment of segments) {
-    segment = segment.trim().replace(/^[(){}\s]+|[(){}\s]+$/g, '')
-    segment = segment.replace(/^(?:(?:if|then|else|elif|do|while|until|time|!|\{)\s+)+/, '')
-    if (!segment) continue
+function reviewedStageInputs(stage, stageKey) {
+  const expected = reviewedStageArguments.get(stageKey) ?? new Map()
+  if (stage.argDeclarations.length !== expected.size) return false
+  const seen = new Set()
+  for (const declaration of stage.argDeclarations) {
+    const policy = expected.get(declaration.name)
+    if (!policy || seen.has(declaration.name)) return false
+    seen.add(declaration.name)
 
-    const words = segment.match(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s]+/g) ?? []
-    let index = 0
-    while (index < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index])) index++
-    while (index < words.length && /^(?:command|exec|sudo|busybox)$/.test(words[index])) {
-      if (words.slice(index + 1).some((word) => /\$|`/.test(word))) return true
-      index++
-    }
-    if (words[index] === 'env') {
-      index++
-      while (index < words.length && (/^-[A-Za-z]/.test(words[index]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]))) index++
-    }
-    const executable = words[index]
-    if (executable && /\$(?:\{|\(|[A-Za-z_])|`/.test(executable)) return true
-
-    const executableName = executable && unquoteDockerfileValue(executable).split('/').at(-1)
-    if (['sh', 'ash', 'bash', 'dash', 'eval'].includes(executableName)) {
-      const commandSwitch = words.findIndex((word, wordIndex) =>
-        wordIndex > index && /^-[A-Za-z]*c[A-Za-z]*$/.test(word))
-      const codeIndex = executableName === 'eval' ? index + 1 : commandSwitch + 1
-      if (codeIndex > index && words[codeIndex] &&
-          hasUnresolvedCommandPosition(unquoteDockerfileValue(words[codeIndex]), depth + 1)) return true
-    }
-    if (executableName === 'xargs' && words.slice(index + 1).some((word) => /\$|`/.test(word))) return true
-    if (executableName === 'find') {
-      const executeIndex = words.findIndex((word, wordIndex) =>
-        wordIndex > index && /^(?:-exec|-execdir|-ok|-okdir)$/.test(word))
-      if (executeIndex !== -1 && words.slice(executeIndex + 1).some((word) => /\$|`/.test(word))) return true
-    }
-  }
-  return false
-}
-
-function hasOpaqueShellScriptExecution(command, depth = 0) {
-  // This guard parses Dockerfile RUN command text, not files copied into the
-  // build context. Explicit script execution is therefore rejected rather
-  // than assumed safe. The supported inline shell form remains inspectable.
-  if (depth > 8) return true
-  const shellNames = new Set(['sh', 'ash', 'bash', 'dash'])
-  const wrappers = new Set(['command', 'exec', 'sudo', 'busybox', 'env', 'timeout', 'nice', 'nohup', 'setsid', 'stdbuf'])
-  const scriptPath = (word) => {
-    const value = unquoteDockerfileValue(word)
-    const name = value.split('/').at(-1)
-    // Any explicit path may name a copied or generated executable. Do not
-    // infer safety from its root or filename extension.
-    return value.includes('/') || /\.(?:sh|bash|ash|dash)$/i.test(name)
-  }
-  const segments = command.split(/&&|\|\||[;|\n]/)
-  for (let segment of segments) {
-    segment = segment.trim().replace(/^[(){}\s]+|[(){}\s]+$/g, '')
-    segment = segment.replace(/^(?:(?:if|then|else|elif|do|while|until|time|!|\{)\s+)+/, '')
-    if (!segment) continue
-    const words = segment.match(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s]+/g) ?? []
-    let index = 0
-    while (index < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index])) index++
-    const executable = words[index]
-    if (!executable) continue
-    const executableName = unquoteDockerfileValue(executable).split('/').at(-1)
-
-    function shellAt(shellIndex) {
-      let optionIndex = shellIndex + 1
-      while (optionIndex < words.length && words[optionIndex].startsWith('-')) {
-        if (/^-[A-Za-z]*c[A-Za-z]*$/.test(words[optionIndex])) {
-          if (!words[optionIndex + 1]) return true
-          return hasOpaqueShellScriptExecution(unquoteDockerfileValue(words[optionIndex + 1]), depth + 1)
-        }
-        if (words[optionIndex] === '--') return true
-        optionIndex++
-      }
-      return true
+    if (policy.automatic) {
+      if (declaration.rawDefault !== undefined) return false
+    } else {
+      if (declaration.rawDefault === undefined) return false
+      const defaultValue = unquoteDockerfileValue(declaration.rawDefault)
+      const defaultIsValid = policy.default instanceof RegExp
+        ? policy.default.test(defaultValue)
+        : defaultValue === policy.default
+      if (!defaultIsValid) return false
     }
 
-    if (shellNames.has(executableName)) {
-      if (shellAt(index)) return true
+    const resolvedValue = stage.variables.get(declaration.name)
+    if (resolvedValue === undefined) {
+      if (!policy.automatic) return false
       continue
     }
-    if (['source', '.'].includes(executableName) || executableName === 'eval' || scriptPath(executable)) return true
-
-    if (wrappers.has(executableName)) {
-      // The wrapper options vary across utilities; inspect each remaining
-      // operand for an explicit shell or local script and fail closed there.
-      if (executableName === 'env' && words.slice(index + 1).some((word) =>
-        /^-S(?:$|.)/.test(word) || /^--split-string(?:=|$)/.test(word))) return true
-      for (let operandIndex = index + 1; operandIndex < words.length; operandIndex++) {
-        const operand = words[operandIndex]
-        const operandName = unquoteDockerfileValue(operand).split('/').at(-1)
-        if (shellNames.has(operandName) && shellAt(operandIndex)) return true
-        if (['source', '.'].includes(operandName) || operandName === 'eval' || scriptPath(operand)) return true
-      }
-    }
+    if (!policy.value.test(String(resolvedValue))) return false
   }
-  return false
+  return seen.size === expected.size
 }
 
-function hasUnsupportedShellSubstitution(command, args) {
-  // RUN text isn't parsed as a complete shell grammar. Keep the two reviewed
-  // substitutions used by this Dockerfile explicit and reject every other
-  // command, backtick, and process substitution wherever it appears.
-  const allowed = new Set(['go run /tmp/interp.go /out/naabu'])
-  const naabuVersion = args.get('NAABU_VERSION')
-  if (typeof naabuVersion === 'string' && /^v[0-9]+\.[0-9]+\.[0-9]+$/.test(naabuVersion)) {
-    allowed.add('git rev-parse ' + naabuVersion + '^{commit}')
-  }
-
-  for (let index = 0; index < command.length; index++) {
-    if (command[index] === '`' || command.startsWith('<(', index) || command.startsWith('>(', index)) return true
-    if (!command.startsWith('$(', index)) continue
-
-    let nesting = 1
-    let end = index + 2
-    for (; end < command.length && nesting > 0; end++) {
-      if (command[end] === '(') nesting++
-      if (command[end] === ')') nesting--
-    }
-    if (nesting !== 0) return true
-
-    const body = command.slice(index + 2, end - 1).trim()
-    if (!allowed.has(body)) return true
-    index = end - 1
-  }
-  return false
-}
-
-function reachableReleaseNpmRuns(source, buildArgs, targetName) {
-  const { stages, aliases } = dockerfileStageGraph(source, buildArgs)
+function releaseDockerfileRunViolations(source, buildArgs, targetName) {
+  const { stages, aliases, globalArgDeclarations } = dockerfileStageGraph(source, buildArgs)
   const target = targetName === undefined
     ? stages.at(-1)
     : /^\d+$/.test(targetName)
@@ -686,21 +635,50 @@ function reachableReleaseNpmRuns(source, buildArgs, targetName) {
   visit(target)
 
   const violations = []
+  const firstLine = source.replace(/\r\n/g, '\n').split('\n', 1)[0]?.trim()
+  const parserDirectives = source.replace(/\r\n/g, '\n').split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /^#\s*(?:syntax|escape|check)\s*=/i.test(line))
+  if (firstLine !== reviewedDockerfileSyntax || parserDirectives.length !== 1 ||
+      parserDirectives[0] !== reviewedDockerfileSyntax) {
+    violations.push({ stage: '#dockerfile', line: 1, command: 'unreviewed Dockerfile parser directive' })
+  }
+  for (const declaration of globalArgDeclarations) {
+    violations.push({ stage: 'global', line: declaration.line, command: 'ARG ' + declaration.name })
+  }
   for (const stage of stages) {
     if (!reachable.has(stage)) continue
-    for (const run of stage.runs) {
+    const stageKey = reviewedStageKey(stage, stages)
+    if (stage.dynamicBase || stage.dynamicDependency) {
+      violations.push({ stage: stage.name, line: stage.runs[0]?.line ?? 0, command: 'dynamic stage or dependency reference' })
+    }
+    if (stage.environmentDeclarations.length > 0 || stage.shellDeclarations.length > 0) {
+      for (const declaration of [...stage.environmentDeclarations, ...stage.shellDeclarations]) {
+        violations.push({ stage: stage.name, line: declaration.line, command: declaration.args })
+      }
+    }
+    if (!reviewedStageInputs(stage, stageKey)) {
+      violations.push({ stage: stage.name, line: stage.argDeclarations[0]?.line ?? 0, command: 'unreviewed ARG declarations or values' })
+    }
+
+    const expectedRuns = reviewedReleaseRunForms.get(stageKey) ?? []
+    if (stage.runs.length !== expectedRuns.length) {
+      violations.push({ stage: stage.name, line: stage.runs[0]?.line ?? 0, command: 'unreviewed reachable RUN count' })
+    }
+    for (let index = 0; index < Math.max(stage.runs.length, expectedRuns.length); index++) {
+      const run = stage.runs[index]
+      const expected = expectedRuns[index]
+      if (!run || run.command !== expected) {
+        violations.push({ stage: stage.name, line: run?.line ?? 0, command: run?.command.trim() ?? 'missing reviewed RUN' })
+        continue
+      }
+
+      // Only exact reviewed instruction forms reach this small branch evaluator.
+      // Input values have already passed the stage-specific allowlists above.
       const active = releaseShellBranch(run.command, run.args)
       const expanded = expandedRunCommand(active, run.args)
-      const command = stripRunOptions(expanded)
-      if (/\b(?:npm|npx)\b/.test(expanded) ||
-          hasUnresolvedCommandPosition(command) ||
-          hasOpaqueShellScriptExecution(command) ||
-          hasUnsupportedShellSubstitution(expanded, run.args)) {
-        violations.push({
-          stage: stage.name,
-          line: run.line,
-          command: active.trim(),
-        })
+      if (/\b(?:npm|npx)\b/.test(expanded)) {
+        violations.push({ stage: stage.name, line: run.line, command: active.trim() })
       }
     }
   }
@@ -805,21 +783,35 @@ test('prebuilt Docker builds fail when frontend assets are missing', () => {
   assert.match(prebuiltFrontendTest, /prebuilt frontend is missing index\.html/)
 })
 
-test('release image checks npm execution across its reachable Dockerfile stage graph', async () => {
+test('release image accepts only reviewed RUN forms on its reachable Dockerfile stage graph', async () => {
   const buildArgs = releaseImageBuildArgs()
   const targetStage = releaseImageTargetStage()
   assert.equal(targetStage, undefined, 'the image build must use Dockerfile default target when the build action omits target')
-  const npmRuns = (source, args = buildArgs, target = targetStage) => reachableReleaseNpmRuns(source, args, target)
-  assert.deepEqual(npmRuns(dockerfile), [], 'the release image must not execute npm or npx')
+  const runViolations = (source, args = buildArgs, target = targetStage) => releaseDockerfileRunViolations(source, args, target)
+  assert.deepEqual(runViolations(dockerfile), [], 'the release image must not execute npm or npx')
+  assert.match(buildArgs.VERSION, /^v?0\.0\.0-ci$/, 'the current snapshot release version must remain an allowed value')
+  for (const TARGETARCH of ['amd64', 'arm64']) {
+    assert.deepEqual(
+      runViolations(dockerfile, { ...buildArgs, TARGETOS: 'linux', TARGETARCH }),
+      [],
+      'current automatic platform values must remain allowed for linux/' + TARGETARCH,
+    )
+  }
+  assert.ok(runViolations(dockerfile, { ...buildArgs, TARGETOS: 'windows', TARGETARCH: 'amd64' }).length > 0,
+    'unsupported automatic operating systems must fail closed')
+  assert.ok(runViolations(dockerfile.replace(reviewedDockerfileSyntax + '\n', '')).length > 0,
+    'removing the reviewed Dockerfile syntax directive must fail closed')
+  assert.ok(runViolations(dockerfile.replace(reviewedDockerfileSyntax, '# escape=`')).length > 0,
+    'changing the Dockerfile escape directive must fail closed')
   const defaultArgs = { ...buildArgs }
   delete defaultArgs.PREBUILT_FRONTEND
   assert.ok(
-    npmRuns(dockerfile, defaultArgs).some((run) => run.stage === 'frontend'),
+    runViolations(dockerfile, defaultArgs).some((run) => run.stage === 'frontend'),
     'the frontend stage ARG default must select the local npm path when no release build arg is supplied',
   )
 
   const oldDockerfile = await readRepositoryFile('scripts/fixtures/Dockerfile-1517-ae82e4f')
-  assert.ok(npmRuns(oldDockerfile).length > 0, 'the historical Dockerfile must be rejected')
+  assert.ok(runViolations(oldDockerfile).length > 0, 'the historical Dockerfile must be rejected')
 
   function replaceOnce(source, marker, replacement, name) {
     assert.ok(source.includes(marker), name + ' mutation marker is missing')
@@ -833,7 +825,7 @@ test('release image checks npm execution across its reachable Dockerfile stage g
     'COPY scripts/check-node-runtime.mjs ./scripts/check-node-runtime.mjs\nRUN npx --yes license-checker-rseidelsohn --summary',
     'M1',
   )
-  assert.ok(npmRuns(m1).some((run) => run.stage === 'frontend'), 'M1 must be rejected in the reached frontend stage')
+  assert.ok(runViolations(m1).some((run) => run.stage === 'frontend'), 'M1 must be rejected in the reached frontend stage')
 
   const buildStage = 'FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine3.24@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS build'
   const auditStage = [
@@ -846,13 +838,13 @@ test('release image checks npm execution across its reachable Dockerfile stage g
   let m2 = replaceOnce(dockerfile, buildStage, auditStage + buildStage, 'M2')
   const frontendArtifactCopy = 'COPY --from=frontend /src/internal/webui/dist ./internal/webui/dist'
   m2 = replaceOnce(m2, frontendArtifactCopy, frontendArtifactCopy + '\nCOPY --from=frontend-audit /deps.txt ./release-dependencies.txt', 'M2 copy')
-  const m2Runs = npmRuns(m2)
+  const m2Runs = runViolations(m2)
   assert.ok(m2Runs.some((run) => run.stage === 'frontend-audit'), 'M2 must be rejected through its COPY --from dependency')
   let m2Mount = replaceOnce(dockerfile, buildStage, auditStage + buildStage, 'M2 mount')
   const mountRun = 'RUN --mount=type=bind,from=frontend-audit,source=/deps.txt,target=/deps.txt,ro true'
   m2Mount = replaceOnce(m2Mount, frontendArtifactCopy, mountRun + '\n' + frontendArtifactCopy, 'M2 mount dependency')
   assert.ok(
-    npmRuns(m2Mount).some((run) => run.stage === 'frontend-audit'),
+    runViolations(m2Mount).some((run) => run.stage === 'frontend-audit'),
     'a RUN --mount=from dependency must also reach its source stage',
   )
   const m2IndexCopy = replaceOnce(
@@ -862,7 +854,7 @@ test('release image checks npm execution across its reachable Dockerfile stage g
     'M2 numeric stage reference',
   )
   assert.ok(
-    npmRuns(m2IndexCopy).some((run) => run.stage === 'frontend-audit'),
+    runViolations(m2IndexCopy).some((run) => run.stage === 'frontend-audit'),
     'numeric COPY --from references must reach their source stage',
   )
 
@@ -872,7 +864,7 @@ test('release image checks npm execution across its reachable Dockerfile stage g
     '      npm ci --ignore-scripts && npm run lint; test -f ./prebuilt-dist/index.html',
     'M3',
   )
-  assert.ok(npmRuns(m3).length > 0, 'M3 must be rejected inside the active prebuilt branch')
+  assert.ok(runViolations(m3).length > 0, 'M3 must be rejected inside the active prebuilt branch')
 
   const unresolvedGuard = replaceOnce(
     dockerfile,
@@ -881,8 +873,8 @@ test('release image checks npm execution across its reachable Dockerfile stage g
     'unresolved argument guard',
   )
   assert.ok(
-    npmRuns(unresolvedGuard).length > 0,
-    'an unresolved condition must fail closed when it guards npm or npx',
+    runViolations(unresolvedGuard).length > 0,
+    'a new conditional RUN must fail because its complete form is not reviewed',
   )
   const environmentOverride = replaceOnce(
     dockerfile,
@@ -891,9 +883,20 @@ test('release image checks npm execution across its reachable Dockerfile stage g
     'ENV override',
   )
   assert.ok(
-    npmRuns(environmentOverride).some((run) => run.stage === 'frontend'),
-    'a later ENV value must override the build ARG for RUN conditions',
+    runViolations(environmentOverride).some((run) => run.stage === 'frontend'),
+    'an ENV declaration in a reached stage must fail closed',
   )
+
+  for (const [name, instruction] of [
+    ['PATH override', 'ENV PATH=/tmp'],
+    ['BASH_ENV override', 'ENV BASH_ENV=/tmp/setup.sh'],
+    ['custom shell', 'SHELL ["/bin/bash", "-c"]'],
+    ['command alias ARG', 'ARG PM=npm'],
+  ]) {
+    const changedContext = replaceOnce(dockerfile, 'WORKDIR /src', 'WORKDIR /src\n' + instruction, name)
+    assert.ok(runViolations(changedContext).some((run) => run.stage === 'frontend'),
+      name + ' must require explicit policy review in a reached stage')
+  }
 
   const m4 = replaceOnce(
     dockerfile,
@@ -901,7 +904,10 @@ test('release image checks npm execution across its reachable Dockerfile stage g
     npmInstall + '\nRUN npm ci --no-audit\n',
     'M4',
   )
-  assert.ok(npmRuns(m4).length > 0, 'M4 must be rejected as an additional frontend RUN')
+  assert.ok(runViolations(m4).length > 0, 'M4 must be rejected as an additional frontend RUN')
+  const duplicatedRun = replaceOnce(dockerfile, npmInstall + '\n', npmInstall + '\n' + npmInstall + '\n', 'duplicate reviewed RUN')
+  assert.ok(runViolations(duplicatedRun).length > 0,
+    'an extra copy of an otherwise reviewed RUN must fail closed')
 
   const finalStage = 'FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6'
   const unreachableNpmStage = [
@@ -910,7 +916,7 @@ test('release image checks npm execution across its reachable Dockerfile stage g
     '',
   ].join('\n')
   const unusedStage = replaceOnce(dockerfile, finalStage, unreachableNpmStage + finalStage, 'unreachable npm stage')
-  assert.deepEqual(npmRuns(unusedStage), [], 'unreachable stages must not affect the release target')
+  assert.deepEqual(runViolations(unusedStage), [], 'unreachable stages must not affect the release target')
 
   const fromDependency = [
     'FROM node:24.21.0-alpine3.24 AS npm-source',
@@ -921,7 +927,7 @@ test('release image checks npm execution across its reachable Dockerfile stage g
     'COPY --from=inherited /src /src',
   ].join('\n')
   assert.ok(
-    npmRuns(fromDependency).some((run) => run.stage === 'npm-source'),
+    runViolations(fromDependency).some((run) => run.stage === 'npm-source'),
     'FROM references to earlier stages must reach their source stage',
   )
 
@@ -931,115 +937,56 @@ test('release image checks npm execution across its reachable Dockerfile stage g
     'ARG PREBUILT_FRONTEND=0\nARG PM=npm\nRUN $PM ci --no-audit',
     'ARG command alias',
   )
-  assert.ok(npmRuns(argAlias).some((run) => run.stage === 'frontend'), 'an ARG command alias for npm must be rejected')
+  assert.ok(runViolations(argAlias).some((run) => run.stage === 'frontend'), 'an ARG command alias for npm must be rejected')
   const envAlias = replaceOnce(
     dockerfile,
     'ARG PREBUILT_FRONTEND=0',
     'ARG PREBUILT_FRONTEND=0\nENV PM=npx\nRUN "$PM" --yes license-checker-rseidelsohn',
     'ENV command alias',
   )
-  assert.ok(npmRuns(envAlias).some((run) => run.stage === 'frontend'), 'an ENV command alias for npx must be rejected')
-  const unresolvedCommand = replaceOnce(
-    dockerfile,
-    'ARG PREBUILT_FRONTEND=0',
-    'ARG PREBUILT_FRONTEND=0\nRUN $UNKNOWN_PM ci',
-    'unresolved command alias',
-  )
-  assert.ok(npmRuns(unresolvedCommand).length > 0, 'an unresolved executable substitution must fail closed')
-  const unresolvedCommandAfterRunOption = replaceOnce(
-    dockerfile,
-    'ARG PREBUILT_FRONTEND=0',
-    'ARG PREBUILT_FRONTEND=0\nRUN --mount=type=cache,target=/root/.npm $UNKNOWN_PM ci',
-    'unresolved command after RUN option',
-  )
-  assert.ok(npmRuns(unresolvedCommandAfterRunOption).length > 0,
-    'an unresolved executable after Docker RUN options must fail closed')
-  const unresolvedCommandSubstitution = replaceOnce(
-    dockerfile,
-    'ARG PREBUILT_FRONTEND=0',
-    'ARG PREBUILT_FRONTEND=0\nRUN "$(printf \'%s\' "$UNKNOWN_PM")" ci',
-    'unresolved command substitution',
-  )
-  assert.ok(npmRuns(unresolvedCommandSubstitution).length > 0,
-    'a command substitution in executable position must fail closed when unresolved')
-  const unresolvedShellCode = replaceOnce(
-    dockerfile,
-    'ARG PREBUILT_FRONTEND=0',
-    'ARG PREBUILT_FRONTEND=0\nRUN sh -c "$UNKNOWN_PM ci"',
-    'unresolved nested shell command',
-  )
-  assert.ok(npmRuns(unresolvedShellCode).length > 0,
-    'an unresolved executable inside sh -c code must fail closed')
-
-  assert.match(opaqueNpmSetupScript, /^npm ci\b/m,
-    'the opaque-script fixture must model npm execution the Dockerfile parser cannot inspect')
-  const opaqueSetupCopy = 'COPY scripts/fixtures/release-opaque-npm-setup.sh /tmp/setup.sh'
-  const opaqueSetupDockerfile = (command, destination = '/tmp/setup.sh') => replaceOnce(
+  assert.ok(runViolations(envAlias).some((run) => run.stage === 'frontend'), 'an ENV command alias for npx must be rejected')
+  const opaqueSetupCopy = 'COPY scripts/fixtures/release-opaque-npm-setup.sh /var/tmp/setup.sh'
+  const opaqueRunMutation = (command, name) => replaceOnce(
     dockerfile,
     'WORKDIR /src',
-    'WORKDIR /src\n' + opaqueSetupCopy.replace('/tmp/setup.sh', destination) + '\nRUN ' + command,
-    'opaque shell script execution',
+    'WORKDIR /src\n' + opaqueSetupCopy + '\nRUN ' + command,
+    name,
   )
-  for (const [name, command, destination = '/tmp/setup.sh'] of [
-    ['sh interpreter', 'sh /tmp/setup.sh'],
-    ['source builtin', 'source /tmp/setup.sh'],
-    ['dot builtin', '. /tmp/setup.sh'],
-    ['environment wrapper', 'env sh /tmp/setup.sh'],
-    ['sudo wrapper', 'sudo -u root sh /tmp/setup.sh'],
-    ['busybox wrapper', 'busybox sh /tmp/setup.sh'],
-    ['direct local script', './setup', './setup'],
-    ['direct nested local script', 'scripts/fixtures/release-opaque-npm-setup', 'scripts/fixtures/release-opaque-npm-setup'],
-    ['direct absolute extensionless script', '/var/tmp/setup', '/var/tmp/setup'],
-    ['direct script under another absolute root', '/home/build/tools/setup', '/home/build/tools/setup'],
-    ['env wrapper with absolute script', 'env /var/tmp/setup', '/var/tmp/setup'],
-    ['sudo wrapper with absolute script', 'sudo -u root /opt/release/setup', '/opt/release/setup'],
-    ['timeout wrapper with absolute script', 'timeout 10 /home/build/tools/setup', '/home/build/tools/setup'],
-    ['env split-string wrapper', "env -S 'sh /tmp/setup.sh'"],
-    ['shell script operand before -c', "sh /tmp/setup.sh -c 'echo ignored'"],
-  ]) {
-    assert.ok(npmRuns(opaqueSetupDockerfile(command, destination)).length > 0,
-      name + ' must fail closed because copied build-context scripts are not parsed')
+  const wrapperCases = [
+    ['reviewer find wrapper', 'find /var/tmp -maxdepth 1 -exec sh /var/tmp/setup.sh {} +'],
+    ["xargs script wrapper", "printf '%s\\n' /var/tmp/setup.sh | xargs sh"],
+    ['Python system wrapper', "python3 -c 'import os; os.system(\"npm ci\")'"],
+    ['awk system wrapper', "awk 'BEGIN { system(\"npm ci\") }'"],
+    ['direct script execution', '/var/tmp/setup.sh'],
+  ]
+  for (const [name, command] of wrapperCases) {
+    assert.ok(runViolations(opaqueRunMutation(command, name)).length > 0,
+      name + ' must fail because no complete RUN form was reviewed')
   }
-  assert.deepEqual(npmRuns(opaqueSetupDockerfile("sh -c 'echo inline is inspectable'")), [],
-    'supported inline shell code remains eligible for command inspection')
+  assert.ok(runViolations(opaqueRunMutation('echo harmless', 'unknown harmless RUN')).length > 0,
+    'an unknown RUN form must fail even when its text contains no npm or npx')
 
-  for (const [name, command] of [
-    ['reviewer nested shell example', "sh -c 'echo $(sh /tmp/setup.sh)'"],
-    ['command substitution in an echo argument', 'echo checking $(sh /tmp/setup.sh)'],
-    ['legacy backtick in an argument', 'echo `sh /tmp/setup.sh`'],
-    ['process substitution input', 'cat <(sh /tmp/setup.sh)'],
-    ['process substitution output', 'tee >(sh /tmp/setup.sh)'],
-    ['unterminated command substitution', 'echo $(sh /tmp/setup.sh'],
-    ['literal substitution-shaped text', "echo 'documentation says $(sh /tmp/setup.sh)'"],
-  ]) {
-    assert.ok(npmRuns(opaqueSetupDockerfile(command)).length > 0,
-      name + ' must fail closed wherever substitution syntax appears')
-  }
-
-  const argAliasedSubstitution = replaceOnce(
-    opaqueSetupDockerfile('echo "$($PM /tmp/setup.sh)"'),
-    'ARG PREBUILT_FRONTEND=0',
-    'ARG PREBUILT_FRONTEND=0\nARG PM=sh',
-    'ARG inside command substitution',
-  )
-  assert.ok(npmRuns(argAliasedSubstitution).length > 0,
-    'a Docker ARG alias nested inside a command substitution must fail closed')
-  const envAliasedSubstitution = replaceOnce(
-    opaqueSetupDockerfile('echo "$($PM /tmp/setup.sh)"'),
-    'ARG PREBUILT_FRONTEND=0',
-    'ARG PREBUILT_FRONTEND=0\nENV PM=sh',
-    'ENV inside command substitution',
-  )
-  assert.ok(npmRuns(envAliasedSubstitution).length > 0,
-    'a Docker ENV alias nested inside a command substitution must fail closed')
-  const unsafeSubstitutionArgument = replaceOnce(
-    opaqueSetupDockerfile('echo setup is copied'),
+  const unsafeNaabuVersion = replaceOnce(
+    dockerfile,
     'ARG NAABU_VERSION=v2.6.1',
-    'ARG NAABU_VERSION=$(sh /tmp/setup.sh)',
-    'substitution allowlist argument validation',
+    'ARG NAABU_VERSION=$(npm ci)',
+    'Naabu version validation',
   )
-  assert.ok(npmRuns(unsafeSubstitutionArgument).length > 0,
-    'an unsafe Docker ARG value must not widen the exact git substitution allowlist')
+  assert.ok(runViolations(unsafeNaabuVersion).some((run) => run.stage === 'naabu'),
+    'an unchecked version value must not enter an approved command form')
+  assert.ok(runViolations(dockerfile, { ...buildArgs, VERSION: '$(npm ci)' }).some((run) => run.stage === 'build'),
+    'an unchecked release version build argument must fail closed')
+  assert.ok(runViolations(dockerfile, { ...buildArgs, TARGETARCH: '$(npm ci)' }).some((run) => run.stage === 'naabu'),
+    'an unchecked automatic architecture value must fail closed')
+
+  const dynamicBase = replaceOnce(
+    dockerfile,
+    'FROM --platform=$BUILDPLATFORM node:24.21.0-alpine3.24@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS frontend',
+    'FROM --platform=$BUILDPLATFORM $NODE_IMAGE AS frontend',
+    'dynamic base image',
+  )
+  assert.ok(runViolations(dynamicBase).some((run) => run.stage === 'frontend'),
+    'a dynamic base image must fail closed in a reachable stage')
 
   const onbuildNpm = [
     'FROM node:24.21.0-alpine3.24 AS npm-source',
@@ -1049,7 +996,7 @@ test('release image checks npm execution across its reachable Dockerfile stage g
     'FROM alpine:3.24.2 AS final',
     'COPY --from=inherited /out /out',
   ].join('\n')
-  assert.ok(npmRuns(onbuildNpm).some((run) => run.stage === 'inherited'),
+  assert.ok(runViolations(onbuildNpm).some((run) => run.stage === 'inherited'),
     'an inherited ONBUILD RUN trigger must fail closed in the derived reachable stage')
 
   const onbuildMountDependency = [
@@ -1062,7 +1009,7 @@ test('release image checks npm execution across its reachable Dockerfile stage g
     'FROM alpine:3.24.2 AS final',
     'COPY --from=inherited /out /out',
   ].join('\n')
-  assert.ok(npmRuns(onbuildMountDependency).some((run) => run.stage === 'inherited'),
+  assert.ok(runViolations(onbuildMountDependency).some((run) => run.stage === 'inherited'),
     'an inherited ONBUILD RUN mount trigger must fail closed without omitting its hidden source edge')
 
   const onbuildCopyDependency = [
@@ -1075,14 +1022,16 @@ test('release image checks npm execution across its reachable Dockerfile stage g
     'FROM alpine:3.24.2 AS final',
     'COPY --from=inherited /out /out',
   ].join('\n')
-  assert.ok(npmRuns(onbuildCopyDependency).some((run) => run.stage === 'inherited'),
+  assert.ok(runViolations(onbuildCopyDependency).some((run) => run.stage === 'inherited'),
     'an inherited ONBUILD COPY trigger must fail closed without omitting its hidden source edge')
 
-  const dormantOnbuild = [
-    'FROM alpine:3.24.2 AS final',
-    'ONBUILD RUN npm ci --no-audit',
-  ].join('\n')
-  assert.deepEqual(npmRuns(dormantOnbuild), [],
+  const dormantOnbuild = replaceOnce(
+    dockerfile,
+    'ENTRYPOINT ["edgewatch"]',
+    'ONBUILD RUN npm ci --no-audit\nENTRYPOINT ["edgewatch"]',
+    'dormant ONBUILD trigger',
+  )
+  assert.deepEqual(runViolations(dormantOnbuild), [],
     'an ONBUILD trigger that no later FROM consumes is dormant and does not execute in this build')
 
   const unrelatedTarget = workflow.replace(
@@ -1105,7 +1054,7 @@ test('release image checks npm execution across its reachable Dockerfile stage g
   )
   assert.notEqual(targetedWorkflow, workflow, 'image build target mutation marker must exist')
   assert.equal(releaseImageTargetStage(targetedWorkflow), 'release-audit-target')
-  assert.ok(npmRuns(targetedDockerfile, buildArgs, releaseImageTargetStage(targetedWorkflow))
+  assert.ok(runViolations(targetedDockerfile, buildArgs, releaseImageTargetStage(targetedWorkflow))
     .some((run) => run.stage === 'release-audit-target'),
   'the graph root must follow target from the exact image build action')
   const dynamicTargetWorkflow = targetedWorkflow.replace(

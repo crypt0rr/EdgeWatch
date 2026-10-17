@@ -1331,6 +1331,15 @@ test('release verification keeps schema, scanner, build, and race gates current'
   assert.match(stepBlock(verify, 'Test'), /go test -race -timeout=25m -coverprofile=coverage\.out \.\/\.\.\./)
 })
 
+test('release Node setup matches the frontend image base', () => {
+  const frontendNodeVersion = /^FROM --platform=\$BUILDPLATFORM node:([0-9]+\.[0-9]+\.[0-9]+)-alpine/m.exec(dockerfile)?.[1]
+  const releaseNodeVersion = /^  NODE_VERSION: ([0-9]+\.[0-9]+\.[0-9]+)$/m.exec(workflow)?.[1]
+  assert.ok(frontendNodeVersion, 'Dockerfile must declare the frontend Node version')
+  assert.ok(releaseNodeVersion, 'release workflow must declare its Node version')
+  assert.equal(releaseNodeVersion, frontendNodeVersion,
+    'release verification and builds must use the same Node version as the frontend image')
+})
+
 test('scanner sandbox verification selects the live Nmap scan and pins it while inspecting proc', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'edgewatch-scanner-pid-selector-'))
   t.after(() => rm(directory, { recursive: true, force: true }))

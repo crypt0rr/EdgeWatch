@@ -141,9 +141,10 @@ func hostScanPausedError(unit store.Tenant, scan model.Scan, err error) error {
 
 // confirmAccountUnit runs before a recovery command changes the account.
 // When --tenant named a business unit, it stops the command unless the
-// account belongs to that unit. It then prints the account, its unit (or
-// the platform) and its role, and returns where the account belongs, as
-// "unit SLUG" or "platform", for the command's audit record.
+// account belongs to that unit. In text mode it prints the account, its unit
+// (or the platform) and its role before the change. It returns where the
+// account belongs, as "unit SLUG" or "platform", for the command's audit
+// record and the JSON success result.
 func confirmAccountUnit(ctx context.Context, s *store.Store, user store.User, options adminRecoveryOptions) (string, error) {
 	where := "platform"
 	if user.Role != store.RolePlatformAdmin {
@@ -156,7 +157,7 @@ func confirmAccountUnit(ctx context.Context, s *store.Store, user store.User, op
 	if named := options.unit; named != nil && (user.Role == store.RolePlatformAdmin || user.TenantID != named.ID) {
 		return "", fmt.Errorf("user %q belongs to the %s, not to business unit %q; nothing was changed", user.Username, where, named.Slug)
 	}
-	if options.out == nil {
+	if options.out == nil || options.output == "json" {
 		return where, nil
 	}
 	if _, err := fmt.Fprintf(options.out, "user %q (%s, %s)\n", user.Username, where, user.Role); err != nil {

@@ -69,6 +69,17 @@ defaults.
 See [Account recovery](/operations/backup-recovery/#account-recovery) for
 copyable `admin reset-password` and `admin disable-totp` commands.
 
+Successful `admin setup-token`, `admin reissue-setup-token`, and
+`admin platform-setup-token` commands with `--output json` print one object on
+stdout with `token` and `expires_in_seconds` (900). Treat that output as a
+secret: the token permits administrator creation and remains valid for 15
+minutes. Successful
+`admin reset-password` and `admin disable-totp` commands print one object with
+`username`, `scope`, `role`, and `action`; for example, `scope` is `unit
+default` for the default business unit or `platform` for a platform account.
+Text mode retains the readable account summary. Errors remain on stderr and
+do not print a success object.
+
 ## Configuration validation
 
 `config validate` runs every check of the daemon's startup that needs no
@@ -168,11 +179,14 @@ outcome: the newest good backup with `last_success_at` and
 `last_success_age_seconds`, and the latest failure with `last_error` and
 `consecutive_failures`. A failed scheduled backup adds a warning without
 making the daemon unhealthy; see
-[Scheduled backups](/operations/backup-recovery/#scheduled-backups). A
-database below the oldest schema this release upgrades, or newer than this
-release, still fails before its health report is available; JSON mode reports
-that refusal in the compact failure document, and text mode prints no health
-document.
+[Scheduled backups](/operations/backup-recovery/#scheduled-backups). Health
+refuses a database below the oldest schema this release upgrades. JSON mode
+prints the full unhealthy health document, including the schema error,
+sandbox states, and backup status when available; text mode exits non-zero and
+prints no health document. Health does not refuse a newer schema: it reports
+the migration state and daemon lease recorded in that database, so a fresh
+lease from a newer daemon can produce a healthy report. The daemon and
+write-capable host commands refuse a newer schema before changing it.
 
 `health` needs shell access to the container. From v0.36.0, a monitor
 outside it can poll `GET /healthz` on the console's listener instead, which

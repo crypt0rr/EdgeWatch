@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   workflow_dispatch:
 
 concurrency:
@@ -19,6 +20,30 @@ env:
   DOCKER_BUILD_RECORD_UPLOAD: "false"
 
 jobs:
+  pr-title:
+    name: Pull request title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Test pull request title policy
+        run: node --test scripts/check-pr-title.test.mjs
+      - name: Validate pull request title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: node scripts/check-pr-title.mjs
+
   frontend:
     runs-on: ubuntu-latest
     # Playwright's --with-deps step downloads and installs OS packages; slow
@@ -233,7 +258,7 @@ jobs:
   # applies the coverage gates to the merged Go profile.
   test:
     if: always()
-    needs: [go-checks, go-test, container]
+    needs: [go-checks, go-test, container, pr-title]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -242,7 +267,12 @@ jobs:
           CHECKS: ${{ needs.go-checks.result }}
           TESTS: ${{ needs.go-test.result }}
           CONTAINER: ${{ needs.container.result }}
+          PR_TITLE_CHECK: ${{ needs.pr-title.result }}
         run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ] && [ "$PR_TITLE_CHECK" != success ]; then
+            echo "pull-request-title: $PR_TITLE_CHECK" >&2
+            exit 1
+          fi
           if [ "$CHECKS" != success ] || [ "$TESTS" != success ] || [ "$CONTAINER" != success ]; then
             echo "go-checks: $CHECKS, go-test: $TESTS, container: $CONTAINER" >&2
             exit 1

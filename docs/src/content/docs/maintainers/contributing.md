@@ -65,6 +65,12 @@ or `feat:`. Describe the resulting behavior and validation in the pull request,
 including compatibility changes and any unresolved failures. Review the diff
 for secrets, unrelated edits, and generated assets before committing.
 
+Pull request titles become the default squash-merge subjects and appear in
+release notes. Start each title with `feat`, `fix`, `perf`, `test`, `docs`,
+`chore`, `refactor`, `ci`, or `build`, optionally followed by a nonempty scope
+in parentheses, then a colon and a space. CI checks the title when a pull
+request is opened or edited.
+
 ## Required documentation updates
 
 Documentation updates are mandatory when a change introduces a feature or

@@ -21,6 +21,7 @@ const workflows = await Promise.all(
 )
 const readRepositoryFile = (path) => readFile(resolve(repositoryRoot, path), 'utf8')
 const dockerfile = await readRepositoryFile('Dockerfile')
+const opaqueNpmSetupScript = await readRepositoryFile('scripts/fixtures/release-opaque-npm-setup.sh')
 const makefile = await readRepositoryFile('Makefile')
 const golangciLintVersion = await readRepositoryFile('.golangci-lint-version')
 const renovate = JSON.parse(await readRepositoryFile('renovate.json'))
@@ -380,9 +381,22 @@ function dockerfileStageGraph(source, buildArgs) {
         dependencies: new Set(),
         variables: new Map(),
         runs: [],
+        onbuildTriggers: [],
       }
       const baseStage = aliases.get(image.toLowerCase())
-      if (baseStage) stage.dependencies.add(baseStage)
+      if (baseStage) {
+        stage.dependencies.add(baseStage)
+        for (const trigger of baseStage.onbuildTriggers) {
+          stage.runs.push({
+            line: trigger.line,
+            // A triggered ONBUILD instruction can execute code or add stage
+            // dependencies (including RUN mounts and COPY sources). Reject
+            // the inherited trigger instead of partially emulating Docker.
+            command: '$UNSUPPORTED_ONBUILD_TRIGGER_' + trigger.name,
+            args: new Map(stage.variables),
+          })
+        }
+      }
       if (alias) {
         assert.ok(!aliases.has(alias.toLowerCase()), 'Dockerfile stage alias ' + alias + ' is duplicated')
         aliases.set(alias.toLowerCase(), stage)
@@ -415,6 +429,15 @@ function dockerfileStageGraph(source, buildArgs) {
     }
 
     if (!currentStage) continue
+
+    if (instruction.name === 'ONBUILD') {
+      const trigger = /^([A-Z]+)(?:\s+([\s\S]*))?$/.exec(instruction.args.trim())
+      assert.ok(trigger?.[2], 'invalid ONBUILD trigger at line ' + instruction.line + ': ' + instruction.args)
+      assert.ok(!['FROM', 'ONBUILD'].includes(trigger[1]),
+        'unsupported nested ONBUILD trigger at line ' + instruction.line + ': ' + instruction.args)
+      currentStage.onbuildTriggers.push({ name: trigger[1], args: trigger[2], line: instruction.line })
+      continue
+    }
 
     if (instruction.name === 'ENV') {
       const tokens = instruction.args.match(/"(?:[^"]*)"|'(?:[^']*)'|[^\s]+/g) ?? []
@@ -555,6 +578,67 @@ function hasUnresolvedCommandPosition(command, depth = 0) {
   return false
 }
 
+function hasOpaqueShellScriptExecution(command, depth = 0) {
+  // This guard parses Dockerfile RUN command text, not files copied into the
+  // build context. Explicit script execution is therefore rejected rather
+  // than assumed safe. The supported inline shell form remains inspectable.
+  if (depth > 8) return true
+  const shellNames = new Set(['sh', 'ash', 'bash', 'dash'])
+  const wrappers = new Set(['command', 'exec', 'sudo', 'busybox', 'env', 'timeout', 'nice', 'nohup', 'setsid', 'stdbuf'])
+  const scriptPath = (word) => {
+    const value = unquoteDockerfileValue(word)
+    const name = value.split('/').at(-1)
+    return /\.(?:sh|bash|ash|dash)$/i.test(name) ||
+      (!value.startsWith('/') && value.includes('/')) ||
+      /^(?:\.{1,2}\/|\/(?:tmp|src|app|workspace|work|opt|usr\/local\/(?:bin|sbin))\/)/.test(value)
+  }
+  const segments = command.split(/&&|\|\||[;|\n]/)
+  for (let segment of segments) {
+    segment = segment.trim().replace(/^[(){}\s]+|[(){}\s]+$/g, '')
+    segment = segment.replace(/^(?:(?:if|then|else|elif|do|while|until|time|!|\{)\s+)+/, '')
+    if (!segment) continue
+    const words = segment.match(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s]+/g) ?? []
+    let index = 0
+    while (index < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index])) index++
+    const executable = words[index]
+    if (!executable) continue
+    const executableName = unquoteDockerfileValue(executable).split('/').at(-1)
+
+    function shellAt(shellIndex) {
+      let optionIndex = shellIndex + 1
+      while (optionIndex < words.length && words[optionIndex].startsWith('-')) {
+        if (/^-[A-Za-z]*c[A-Za-z]*$/.test(words[optionIndex])) {
+          if (!words[optionIndex + 1]) return true
+          return hasOpaqueShellScriptExecution(unquoteDockerfileValue(words[optionIndex + 1]), depth + 1)
+        }
+        if (words[optionIndex] === '--') return true
+        optionIndex++
+      }
+      return true
+    }
+
+    if (shellNames.has(executableName)) {
+      if (shellAt(index)) return true
+      continue
+    }
+    if (['source', '.'].includes(executableName) || executableName === 'eval' || scriptPath(executable)) return true
+
+    if (wrappers.has(executableName)) {
+      // The wrapper options vary across utilities; inspect each remaining
+      // operand for an explicit shell or local script and fail closed there.
+      if (executableName === 'env' && words.slice(index + 1).some((word) =>
+        /^-S(?:$|.)/.test(word) || /^--split-string(?:=|$)/.test(word))) return true
+      for (let operandIndex = index + 1; operandIndex < words.length; operandIndex++) {
+        const operand = words[operandIndex]
+        const operandName = unquoteDockerfileValue(operand).split('/').at(-1)
+        if (shellNames.has(operandName) && shellAt(operandIndex)) return true
+        if (['source', '.'].includes(operandName) || operandName === 'eval' || scriptPath(operand)) return true
+      }
+    }
+  }
+  return false
+}
+
 function reachableReleaseNpmRuns(source, buildArgs, targetName) {
   const { stages, aliases } = dockerfileStageGraph(source, buildArgs)
   const target = targetName === undefined
@@ -579,7 +663,9 @@ function reachableReleaseNpmRuns(source, buildArgs, targetName) {
       const active = releaseShellBranch(run.command, run.args)
       const expanded = expandedRunCommand(active, run.args)
       const command = stripRunOptions(expanded)
-      if (/\b(?:npm|npx)\b/.test(expanded) || hasUnresolvedCommandPosition(command)) {
+      if (/\b(?:npm|npx)\b/.test(expanded) ||
+          hasUnresolvedCommandPosition(command) ||
+          hasOpaqueShellScriptExecution(command)) {
         violations.push({
           stage: stage.name,
           line: run.line,
@@ -854,6 +940,78 @@ test('release image checks npm execution across its reachable Dockerfile stage g
   )
   assert.ok(npmRuns(unresolvedShellCode).length > 0,
     'an unresolved executable inside sh -c code must fail closed')
+
+  assert.match(opaqueNpmSetupScript, /^npm ci\b/m,
+    'the opaque-script fixture must model npm execution the Dockerfile parser cannot inspect')
+  const opaqueSetupCopy = 'COPY scripts/fixtures/release-opaque-npm-setup.sh /tmp/setup.sh'
+  const opaqueSetupDockerfile = (command, destination = '/tmp/setup.sh') => replaceOnce(
+    dockerfile,
+    'WORKDIR /src',
+    'WORKDIR /src\n' + opaqueSetupCopy.replace('/tmp/setup.sh', destination) + '\nRUN ' + command,
+    'opaque shell script execution',
+  )
+  for (const [name, command, destination = '/tmp/setup.sh'] of [
+    ['sh interpreter', 'sh /tmp/setup.sh'],
+    ['source builtin', 'source /tmp/setup.sh'],
+    ['dot builtin', '. /tmp/setup.sh'],
+    ['environment wrapper', 'env sh /tmp/setup.sh'],
+    ['sudo wrapper', 'sudo -u root sh /tmp/setup.sh'],
+    ['busybox wrapper', 'busybox sh /tmp/setup.sh'],
+    ['direct local script', './setup', './setup'],
+    ['direct nested local script', 'scripts/fixtures/release-opaque-npm-setup', 'scripts/fixtures/release-opaque-npm-setup'],
+    ['env split-string wrapper', "env -S 'sh /tmp/setup.sh'"],
+    ['shell script operand before -c', "sh /tmp/setup.sh -c 'echo ignored'"],
+  ]) {
+    assert.ok(npmRuns(opaqueSetupDockerfile(command, destination)).length > 0,
+      name + ' must fail closed because copied build-context scripts are not parsed')
+  }
+  assert.deepEqual(npmRuns(opaqueSetupDockerfile("sh -c 'echo inline is inspectable'")), [],
+    'supported inline shell code remains eligible for command inspection')
+
+  const onbuildNpm = [
+    'FROM node:24.21.0-alpine3.24 AS npm-source',
+    'ONBUILD RUN npm ci --no-audit',
+    'FROM npm-source AS inherited',
+    'RUN true',
+    'FROM alpine:3.24.2 AS final',
+    'COPY --from=inherited /out /out',
+  ].join('\n')
+  assert.ok(npmRuns(onbuildNpm).some((run) => run.stage === 'inherited'),
+    'an inherited ONBUILD RUN trigger must fail closed in the derived reachable stage')
+
+  const onbuildMountDependency = [
+    'FROM node:24.21.0-alpine3.24 AS npm-audit',
+    'RUN npm ci --no-audit',
+    'FROM alpine:3.24.2 AS trigger-source',
+    'ONBUILD RUN --mount=type=bind,from=npm-audit,source=/deps,target=/deps,ro true',
+    'FROM trigger-source AS inherited',
+    'RUN true',
+    'FROM alpine:3.24.2 AS final',
+    'COPY --from=inherited /out /out',
+  ].join('\n')
+  assert.ok(npmRuns(onbuildMountDependency).some((run) => run.stage === 'inherited'),
+    'an inherited ONBUILD RUN mount trigger must fail closed without omitting its hidden source edge')
+
+  const onbuildCopyDependency = [
+    'FROM node:24.21.0-alpine3.24 AS npm-audit',
+    'RUN npm ci --no-audit',
+    'FROM alpine:3.24.2 AS trigger-source',
+    'ONBUILD COPY --from=npm-audit /deps /deps',
+    'FROM trigger-source AS inherited',
+    'RUN true',
+    'FROM alpine:3.24.2 AS final',
+    'COPY --from=inherited /out /out',
+  ].join('\n')
+  assert.ok(npmRuns(onbuildCopyDependency).some((run) => run.stage === 'inherited'),
+    'an inherited ONBUILD COPY trigger must fail closed without omitting its hidden source edge')
+
+  const dormantOnbuild = [
+    'FROM alpine:3.24.2 AS final',
+    'ONBUILD RUN npm ci --no-audit',
+  ].join('\n')
+  assert.deepEqual(npmRuns(dormantOnbuild), [],
+    'an ONBUILD trigger that no later FROM consumes is dormant and does not execute in this build')
+
   const unrelatedTarget = workflow.replace(
     '          images: ${{ env.REGISTRY_IMAGE }}',
     '          images: ${{ env.REGISTRY_IMAGE }}\n          target: release-audit-target',

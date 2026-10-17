@@ -120,6 +120,16 @@ image that a workflow step or the scan script starts is pinned by digest, in
 a form that Renovate updates. CI runs it, and so does the release; run
 `node --test scripts/release-workflow.test.mjs` after changing a workflow.
 
+The release npm guard roots its Dockerfile stage graph at the target configured
+on the exact image build action, or at the final stage when no target is set.
+It follows stage inheritance, `COPY --from`, and `RUN --mount=from`, and
+resolves static `ARG` and `ENV` values used by reachable `RUN` commands.
+Triggered `ONBUILD` instructions are rejected conservatively because their
+execution can add commands or hidden stage dependencies. The guard examines
+inline command text; it does not parse build-context scripts, so reachable
+explicit shell, source, or direct local-script execution fails closed. An
+untriggered `ONBUILD` instruction remains dormant in that build.
+
 The same checks keep dependency provenance current. Renovate reads the
 golangci-lint pin from `.golangci-lint-version` using GitHub Releases, and its
 Alpine package manager must match every Alpine minor version used by the

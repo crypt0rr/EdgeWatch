@@ -126,6 +126,159 @@ func TestScannerStatusJSONReportsPoolWithoutAStableInvocationUID(t *testing.T) {
 	}
 }
 
+func TestDetectReportsActionableScannerIdentityPoolReasons(t *testing.T) {
+	t.Parallel()
+	for name, test := range map[string]struct {
+		change      func(*environment)
+		mode        string
+		want        string
+		wantSeccomp string
+		forbid      []string
+	}{
+		"missing control capabilities": {
+			change: func(env *environment) {
+				env.effective &^= capabilityMask(unix.CAP_SETUID, unix.CAP_SETGID, unix.CAP_KILL)
+			},
+			want:        "SETUID, SETGID, KILL",
+			wantSeccomp: StateEnforced,
+		},
+		"partially mapped pool": {
+			change: func(env *environment) {
+				env.identityRangeErr = scannerIdentityUnmappedError{id: ScannerIdentityPoolUIDStart}
+			},
+			want:        "60000 is not mapped",
+			wantSeccomp: StateEnforced,
+		},
+		"unverifiable map does not expose its error": {
+			change:      func(env *environment) { env.identityRangeErr = errors.New("read /private/uid_map: secret-token") },
+			want:        "check the runtime's UID/GID mappings",
+			wantSeccomp: StateEnforced,
+			forbid:      []string{"/private", "secret-token"},
+		},
+		"non-root daemon": {
+			change:      func(env *environment) { env.euid = 1000 },
+			want:        "EdgeWatch runs as UID 1000",
+			wantSeccomp: StateEnforced,
+		},
+		"invalid daemon UID is sanitized": {
+			change:      func(env *environment) { env.euid = -1 },
+			want:        "scanner identity isolation requires EdgeWatch to run as UID 0",
+			wantSeccomp: StateEnforced,
+			forbid:      []string{"UID -1"},
+		},
+		"invalid scanner mode": {
+			mode:        "unexpected",
+			want:        "scanner.sandbox must be auto, required, or off",
+			wantSeccomp: StateEnforced,
+		},
+		"capability read failure is sanitized": {
+			change: func(env *environment) {
+				env.capErr = errors.New("read /private/capabilities: secret-token")
+			},
+			want:        "the daemon's capabilities could not be verified",
+			wantSeccomp: StateEnforced,
+			forbid:      []string{"/private", "secret-token"},
+		},
+		"pre-v3 allocator refuses unsafe namespace transition": {
+			change: func(env *environment) {
+				env.run = failing(func(*Policy) bool { return true }, errors.New("scanner identity allocator: PID namespace changed with unsafe or occupied scope"))
+			},
+			want:        "PID namespace change",
+			wantSeccomp: StateUnavailable,
+		},
+		"v3 allocator waits for exclusive private-scope proof": {
+			change: func(env *environment) {
+				env.run = failing(func(*Policy) bool { return true }, errors.New("scanner identity allocator: PID namespace changed without exclusive private-scope proof"))
+			},
+			want:        "stop all other EdgeWatch processes and containers using the data volume",
+			wantSeccomp: StateUnavailable,
+			forbid:      []string{"host reboot", "/private"},
+		},
+		"v3 refusal lookalike stays generic and sanitized": {
+			change: func(env *environment) {
+				env.run = failing(func(*Policy) bool { return true }, errors.New("scanner identity allocator: PID namespace changed without exclusive private-scope proof at /private/journal: secret-token"))
+			},
+			want:        "check the allocator state",
+			wantSeccomp: StateUnavailable,
+			forbid:      []string{"/private", "secret-token", "inherited liveness references"},
+		},
+		"probe error does not expose a path": {
+			change: func(env *environment) {
+				env.run = failing(func(*Policy) bool { return true }, errors.New("open /private/config.yaml: secret-token"))
+			},
+			want:        "check the allocator state",
+			wantSeccomp: StateUnavailable,
+			forbid:      []string{"/private", "secret-token"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env, _ := containerEnvironment()
+			if test.change != nil {
+				test.change(&env)
+			}
+			status := detect(Options{Mode: test.mode}, env).Status()
+			if status.State != StateUnavailable || status.IdentityPool == nil || status.IdentityPool.State != StateUnavailable {
+				t.Fatalf("status = %+v, want unavailable scanner identity pool", status)
+			}
+			if status.Landlock.State != StateUnavailable || status.Seccomp.State != test.wantSeccomp {
+				t.Fatalf("Landlock = %+v, seccomp = %+v, want Landlock unavailable and seccomp %q independently", status.Landlock, status.Seccomp, test.wantSeccomp)
+			}
+			if status.Reason != status.IdentityPool.Reason || !strings.Contains(status.IdentityPool.Reason, test.want) {
+				t.Fatalf("status reason = %q, pool reason = %q, want both to contain %q", status.Reason, status.IdentityPool.Reason, test.want)
+			}
+			for _, forbidden := range test.forbid {
+				if strings.Contains(status.IdentityPool.Reason, forbidden) || strings.Contains(status.Reason, forbidden) || strings.Contains(status.Seccomp.Reason, forbidden) {
+					t.Fatalf("scanner status %+v exposed %q", status, forbidden)
+				}
+			}
+		})
+	}
+}
+
+func TestDetectSanitizesKnownAllocatorFailuresFromRealProbePath(t *testing.T) {
+	previousPrepare := prepareScannerInvocation
+	t.Cleanup(func() { prepareScannerInvocation = previousPrepare })
+	for _, test := range []struct {
+		name, allocatorError, want string
+	}{
+		{
+			name:           "pre-v3 unsafe scope",
+			allocatorError: "scanner identity allocator: PID namespace changed with unsafe or occupied scope",
+			want:           "For pre-v3 lease state, a host reboot may be needed",
+		},
+		{
+			name:           "v3 missing exclusive proof",
+			allocatorError: "scanner identity allocator: PID namespace changed without exclusive private-scope proof",
+			want:           "stop all other EdgeWatch processes and containers using the data volume",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prepareCalls := 0
+			prepareScannerInvocation = func(context.Context, *exec.Cmd, *Policy, bool) (*ScannerInvocation, error) {
+				prepareCalls++
+				return nil, errors.New(test.allocatorError)
+			}
+			env, _ := containerEnvironment()
+			env.run = runConfined
+			// Keep the second, independent seccomp probe out of this test. It is
+			// covered separately; this exercises the allocator failure through
+			// runConfined -> PrepareScannerInvocation -> detectIdentity.
+			env.seccompErr = errors.New("skip independent seccomp probe")
+			status := detect(Options{}, env).Status()
+			if prepareCalls != 1 {
+				t.Fatalf("PrepareScannerInvocation calls = %d, want one actual scanner probe", prepareCalls)
+			}
+			if status.State != StateUnavailable || status.IdentityPool == nil || status.IdentityPool.State != StateUnavailable {
+				t.Fatalf("status = %+v, want unavailable scanner identity pool", status)
+			}
+			if status.Reason != status.IdentityPool.Reason || !strings.Contains(status.Reason, test.want) {
+				t.Fatalf("status reason = %q, pool reason = %q, want both to contain %q", status.Reason, status.IdentityPool.Reason, test.want)
+			}
+		})
+	}
+}
+
 func TestAutoAllowsDaemonButUnavailableScannerPolicyFailsClosed(t *testing.T) {
 	t.Parallel()
 	notRoot, _ := containerEnvironment()

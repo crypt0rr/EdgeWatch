@@ -728,10 +728,16 @@ func validateScannerIdentityRangeMappingFromPaths(uidStart, count uint32, uidPat
 	for offset := uint32(0); offset < count; offset++ {
 		id := uidStart + offset
 		if !idMapped(uidRanges, id) || !idMapped(gidRanges, id) {
-			return fmt.Errorf("scanner identity allocator: required UID/GID %d is not mapped", id)
+			return scannerIdentityUnmappedError{id: id}
 		}
 	}
 	return nil
+}
+
+type scannerIdentityUnmappedError struct{ id uint32 }
+
+func (err scannerIdentityUnmappedError) Error() string {
+	return fmt.Sprintf("scanner identity allocator: required UID/GID %d is not mapped", err.id)
 }
 
 type idMapRange struct{ inside, outside, length uint64 }

@@ -184,6 +184,8 @@ active, free, or quarantined leases. Since concurrent scans can use different
 identities, the scanner status does not report one `uid`, `gid`, or
 `process_uid`. The independent `scanner_sandbox.landlock` and
 `scanner_sandbox.seccomp` fields report those layers separately.
+When required capabilities are missing, the reason lists their names; when a
+UID/GID mapping is incomplete, it identifies the first unmapped scanner ID.
 
 Administrators see the same information on the Overview, in the deployment
 footprint's **Process isolation** section. Each sandbox has a status:

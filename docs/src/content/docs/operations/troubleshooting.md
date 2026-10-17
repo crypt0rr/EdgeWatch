@@ -68,25 +68,38 @@ private to their owner. Run the actual read/write preflight in
 Docker mode. Stop the service before correcting an existing directory's
 ownership. World-readable or world-writable permissions are not a remedy.
 
-## Scanner processes run unconfined as UID 0
+## Scanner launches are unavailable
 
-EdgeWatch logs this warning, adds it to `edgewatch health`, and shows it on the
-Overview when `scanner.sandbox` is `auto` and Nmap and Naabu cannot run in the
-[scanner sandbox](/deployment/container-hardening/#scanner-sandbox). The
-reason names the cause:
+When `scanner.sandbox` is `auto`, EdgeWatch keeps the daemon running but fails
+scanner launches closed if the [scanner identity pool](/deployment/container-hardening/#scanner-sandbox)
+cannot be enforced. The reason appears in `edgewatch health`, the Overview,
+and the deployment footprint. Follow the action it names:
 
 - **The container does not grant SETUID, SETGID, KILL.** Your `compose.yaml`
-  predates the sandbox. Add the three capabilities to `cap_add`, as in the
-  bundled file, and recreate the container with `docker compose up -d`.
-- **A test process could not start as UID 65532.** The container runtime does
-  not map UID 65532 into the container's user namespace. Use a full
-  subordinate UID range for rootless Docker or user-namespace remapping.
+  predates the scanner identity pool. Add the three capabilities to `cap_add`,
+  as in the bundled file, and recreate the container with
+  `docker compose up -d`.
+- **Scanner UID/GID 60000 is not mapped.** The user namespace does not map the
+  complete scanner range, 60000–60063. Configure the full subordinate UID and
+  GID ranges for rootless Docker or user-namespace remapping, then recreate
+  the container.
+- **The scanner identity allocator could not verify an empty prior scope
+  after a PID namespace change.** Stop other EdgeWatch processes using the
+  data volume and preserve the lease journal and boot marker. With pre-v3 lease
+  state, a host reboot may be needed before the allocator can prove that
+  previous-boot scanner processes are gone. Do not delete or edit the state
+  files.
+- **The scanner identity allocator could not prove the previous private scope
+  safe after a PID namespace change.** When using the v3 allocator, ensure the
+  supported private scanner runtime is active. Stop every other EdgeWatch
+  process or container using the data volume, including direct host commands,
+  so inherited liveness references close, then retry. Once it has exclusive
+  proof, the allocator can archive and reset the prior scope without a host
+  reboot. Preserve the journal and boot marker; do not delete or edit them.
 
-Scans keep working as UID 0 in either case. Where the kernel provides
-[Landlock](/deployment/container-hardening/#landlock), the warning reads
-"scanner processes run as UID 0, restricted only by Landlock": scanner
-processes still cannot read the database, keys, or configuration. Set
-`scanner.sandbox: required` to refuse to scan without the sandbox instead.
+EdgeWatch does not run scanners as UID 0 when the pool is unavailable. Set
+`scanner.sandbox: required` if the daemon should also refuse startup until the
+identity pool and required seccomp filter are available.
 
 ## The notification process runs unconfined as UID 0
 

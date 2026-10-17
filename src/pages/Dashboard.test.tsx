@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { activeScans, adminStatus, cancelQueuedRun, cancelScan, getSession, listIncidents, listJobs, listScans, notificationTest, runJob } from '../api'
 import type { SessionUser } from '../api'
 import type { ActiveScan, Job } from '../types'
-import type { AdminStatus, ScanSummary } from '../generated/api-types'
+import type { AdminStatus, ScanSummary, ScannerSandboxStatus } from '../generated/api-types'
 import { Dashboard } from './Dashboard'
 import { defaultUnitScope } from '../test/test-utils'
 import { developmentBuildUpdates, sandboxWithoutLayers } from '../test/status-fixtures'
@@ -52,6 +52,14 @@ const scan = {
 } as ScanSummary
 
 const scannerIdentityPool = { state: 'enforced', strategy: 'per_invocation', uid_start: 60000, uid_end: 60063, max_parallel: 64 }
+const unavailableScannerSandbox = (reason: string): ScannerSandboxStatus => ({
+  mode: 'auto',
+  state: 'unavailable',
+  identity_pool: { ...scannerIdentityPool, state: 'unavailable', reason },
+  reason,
+  landlock: { mode: 'auto', state: 'unavailable', reason: 'scanner identity isolation is unavailable' },
+  seccomp: { state: 'enforced' },
+})
 
 const activeScan: ActiveScan = {
   id: 'active-1',
@@ -537,14 +545,21 @@ describe('dashboard', () => {
   })
 
   it('warns an administrator that scanner launches fail closed when the identity pool is unavailable', async () => {
-    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: {
-      mode: 'auto', state: 'unavailable', identity_pool: { ...scannerIdentityPool, state: 'unavailable', reason: 'the container does not grant SETUID, SETGID, or KILL' },
-      reason: 'the container does not grant SETUID, SETGID, or KILL', landlock: { mode: 'auto', state: 'enforced', abi: 6 }, seccomp: { state: 'enforced' },
-    } })
+    const reason = 'the container does not grant SETUID, SETGID, KILL, which EdgeWatch needs to start and stop scanner processes under a leased scanner identity; add them to cap_add'
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: unavailableScannerSandbox(reason) })
     await renderDashboard()
     await vi.waitFor(() => expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain('Scanner launches are unavailable because the required per-invocation identity and syscall restrictions could not be enforced.'), { timeout: 1000 })
-    expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain('the container does not grant SETUID, SETGID, or KILL')
-    expect(isolationEntry(container, 'Scanners')).toMatchObject({ state: 'Unavailable', layers: ['UID pool 60000–60063 (64 max parallel): unavailable', 'Landlock: enforced', 'seccomp: enforced'] })
+    expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain(reason)
+    expect(isolationEntry(container, 'Scanners')).toMatchObject({ state: 'Unavailable', layers: ['UID pool 60000–60063 (64 max parallel): unavailable', 'Landlock: unavailable', 'seccomp: enforced'] })
+    expect(container.querySelector('.isolation-reasons')?.textContent).toContain('SETUID, SETGID, KILL')
+  })
+
+  it('shows the unmapped scanner UID from the detect status in the deployment footprint', async () => {
+    const reason = 'scanner UID/GID 60000 is not mapped; map the full UID/GID range 60000–60063 in the container user namespace'
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: unavailableScannerSandbox(reason) })
+    await renderDashboard()
+    await vi.waitFor(() => expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain(reason), { timeout: 1000 })
+    expect(container.querySelector('.isolation-reasons')?.textContent).toContain('60000 is not mapped')
   })
 
   it('warns when a legacy daemon reports the scanner root fallback with Landlock', async () => {

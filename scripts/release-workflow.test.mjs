@@ -890,6 +890,10 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   assert.equal(releaseImageInput(workflow, 'file'), undefined,
     'the current image action intentionally uses its default Dockerfile path')
   const sourceDockerfile = await readRepositoryFile(dockerfilePath)
+  const frontendBase = /^FROM --platform=\$BUILDPLATFORM (node:\S+) AS frontend$/m.exec(sourceDockerfile)
+  assert.ok(frontendBase, 'the current frontend Node base image marker must exist')
+  const frontendImage = frontendBase[1]
+  const frontendImageTag = frontendImage.split('@', 1)[0]
   const replaceImageInput = (workflowText, input, replacement) => {
     const pattern = new RegExp(`^ {10}${input}:.*$`, 'm')
     assert.ok(pattern.test(workflowText), 'release image action input marker is missing: ' + input)
@@ -1018,7 +1022,7 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
 
   const buildStage = 'FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine3.24@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS build'
   const auditStage = [
-    'FROM --platform=$BUILDPLATFORM node:24.21.0-alpine3.24 AS frontend-audit',
+    `FROM --platform=$BUILDPLATFORM ${frontendImage} AS frontend-audit`,
     'WORKDIR /src',
     'COPY package.json package-lock.json ./',
     'RUN npm ci --no-audit && npm ls --all > /deps.txt',
@@ -1100,7 +1104,7 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
 
   const finalStage = 'FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6'
   const unreachableNpmStage = [
-    'FROM --platform=$BUILDPLATFORM node:24.21.0-alpine3.24 AS unused-audit',
+    `FROM --platform=$BUILDPLATFORM ${frontendImage} AS unused-audit`,
     'RUN npm ci --no-audit',
     '',
   ].join('\n')
@@ -1108,7 +1112,7 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   assert.deepEqual(runViolations(unusedStage), [], 'unreachable stages must not affect the release target')
 
   const fromDependency = [
-    'FROM node:24.21.0-alpine3.24 AS npm-source',
+    `FROM ${frontendImageTag} AS npm-source`,
     'RUN npm ci --no-audit',
     'FROM npm-source AS inherited',
     'RUN true',
@@ -1170,7 +1174,7 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
 
   const dynamicBase = replaceOnce(
     sourceDockerfile,
-    'FROM --platform=$BUILDPLATFORM node:24.21.0-alpine3.24@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS frontend',
+    frontendBase[0],
     'FROM --platform=$BUILDPLATFORM $NODE_IMAGE AS frontend',
     'dynamic base image',
   )
@@ -1724,9 +1728,18 @@ test('Renovate tracks golangci-lint from its GitHub Releases repository', () => 
 
 test('the Alpine package repository stays aligned with every Dockerfile base image', () => {
   assertAlpineRepologyMatchesBases(dockerfile)
-  const mismatchedBase = dockerfile.replace('node:24.21.0-alpine3.24@', 'node:24.21.0-alpine3.25@')
+  const frontendBase = /^FROM --platform=\$BUILDPLATFORM (node:\S+) AS frontend$/m.exec(dockerfile)
+  assert.ok(frontendBase, 'the current frontend Node base image marker must exist')
+  const currentAlpineMinor = /-alpine3\.(\d+)(?=\.|@|$)/.exec(frontendBase[1])?.[1]
+  assert.ok(currentAlpineMinor, 'the frontend Node base image must specify its Alpine minor')
+  const mismatchedAlpineMinor = currentAlpineMinor === '24' ? '25' : '24'
+  const mismatchedImage = frontendBase[1].replace(
+    /-alpine3\.\d+(?=\.|@|$)/,
+    `-alpine3.${mismatchedAlpineMinor}`,
+  )
+  const mismatchedBase = dockerfile.replace(frontendBase[0], frontendBase[0].replace(frontendBase[1], mismatchedImage))
   assert.notEqual(mismatchedBase, dockerfile, 'the mismatch fixture must change one actual Dockerfile base')
-  assert.throws(() => assertAlpineRepologyMatchesBases(mismatchedBase), /must match Renovate's alpine_3_24 package repository/)
+  assert.throws(() => assertAlpineRepologyMatchesBases(mismatchedBase), /must match Renovate's alpine_3_\d+ package repository/)
 })
 
 test('the apk pin check sees unpinned packages on Dockerfile continuation lines', () => {

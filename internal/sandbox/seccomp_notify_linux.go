@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	seccompNotificationProbeFlag = "--seccomp-notification-probe"
-	seccompNotificationControlFD = 3
+	seccompNotificationProbeFlag    = "--seccomp-notification-probe"
+	seccompNotificationControlFD    = 3
+	seccompNotificationProbeGODEBUG = "asyncpreemptoff=1"
 )
 
 var (
@@ -85,6 +86,9 @@ func execSeccompNotificationProbe(args []string) error {
 	if len(args) != 2 || args[0] != "--control-fd" || args[1] != strconv.Itoa(seccompNotificationControlFD) {
 		return errors.New("seccomp notification probe arguments are invalid")
 	}
+	if os.Getenv("GODEBUG") != seccompNotificationProbeGODEBUG {
+		return errors.New("seccomp notification probe requires async preemption to be disabled")
+	}
 	runtime.LockOSThread()
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("seccomp notification probe set no_new_privs: %w", err)
@@ -143,7 +147,7 @@ func probeSeccompNotificationSupportWithBrokerFactory(brokerFactory func(listene
 		return fmt.Errorf("enable seccomp notification probe credentials: %w", err)
 	}
 	command := exec.Command(executable, ExecCommand, seccompNotificationProbeFlag, "--control-fd", strconv.Itoa(seccompNotificationControlFD))
-	command.Env = []string{}
+	command.Env = []string{"GODEBUG=" + seccompNotificationProbeGODEBUG}
 	command.Dir = "/"
 	command.ExtraFiles = []*os.File{child}
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}

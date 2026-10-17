@@ -207,6 +207,14 @@ func TestSeccompNotificationListenerSendAndProbeRejectInvalidContracts(t *testin
 	}
 }
 
+func TestSeccompNotificationProbeRequiresAsyncPreemptionOff(t *testing.T) {
+	t.Setenv("GODEBUG", "")
+	err := execSeccompNotificationProbe([]string{"--control-fd", "3"})
+	if err == nil || !strings.Contains(err.Error(), "async preemption to be disabled") {
+		t.Fatalf("probe without its required runtime setting = %v, want async-preemption refusal", err)
+	}
+}
+
 func TestSeccompNotificationProbeCleansUpInvalidBrokerFactory(t *testing.T) {
 	if err := seccompNotificationSupport(); err != nil {
 		t.Skipf("kernel seccomp notification support is unavailable: %v", err)

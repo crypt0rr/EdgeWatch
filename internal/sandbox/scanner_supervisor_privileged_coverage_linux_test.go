@@ -29,6 +29,7 @@ const scannerSupervisorPrivilegedCoverageExpectedErrorEnv = "EDGEWATCH_TEST_PRIV
 const scannerSupervisorPrivilegedBrokerModeEnv = "EDGEWATCH_TEST_PRIVILEGED_SCANNER_BROKER_MODE"
 const scannerSupervisorPrivilegedBrokerControlFDEnv = "EDGEWATCH_TEST_PRIVILEGED_SCANNER_BROKER_CONTROL_FD"
 const scannerSupervisorPrivilegedBrokerStaleReplyMode = "stale-reply-after-injection"
+const scannerSupervisorPrivilegedBrokerInvalidMode = "invalid-listener"
 const scannerSupervisorPrivilegedCoverageExpectNotificationENOENT = "notification-reply-enoent"
 const scannerSupervisorPrivilegedBrokerEventSize = 16
 
@@ -71,7 +72,8 @@ func TestScannerSupervisorPrivilegedCoverageChild(t *testing.T) {
 		return
 	}
 	var err error
-	if os.Getenv(scannerSupervisorPrivilegedBrokerModeEnv) == scannerSupervisorPrivilegedBrokerStaleReplyMode {
+	switch os.Getenv(scannerSupervisorPrivilegedBrokerModeEnv) {
+	case scannerSupervisorPrivilegedBrokerStaleReplyMode:
 		controlFD, parseErr := strconv.Atoi(os.Getenv(scannerSupervisorPrivilegedBrokerControlFDEnv))
 		if parseErr != nil || controlFD < 3 {
 			t.Fatalf("invalid privileged broker control descriptor: %v", parseErr)
@@ -105,7 +107,11 @@ func TestScannerSupervisorPrivilegedCoverageChild(t *testing.T) {
 				},
 			}
 		})
-	} else {
+	case scannerSupervisorPrivilegedBrokerInvalidMode:
+		err = execScannerSupervisorWithBrokerFactory(flag.Args(), func(listenerFD int) *seccompNotificationBroker {
+			return &seccompNotificationBroker{listenerFD: listenerFD + 1}
+		})
+	default:
 		err = execScannerSupervisor(flag.Args())
 	}
 	expected := os.Getenv(scannerSupervisorPrivilegedCoverageExpectedErrorEnv)
@@ -150,13 +156,15 @@ func TestScannerSupervisorPrivilegedLifecycleCoverage(t *testing.T) {
 		program          []string
 		supervisorError  string
 		cancelSupervisor bool
+		brokerMode       string
 	}{
 		{name: "successful child exit", program: []string{"/bin/true"}},
 		{name: "failed scanner still proves cleanup", program: []string{"/bin/false"}, supervisorError: "scanner exited unsuccessfully"},
 		{name: "cancellation kills and reaps child", program: []string{"/bin/sleep", "10"}, supervisorError: "scanner process tree was cancelled", cancelSupervisor: true},
+		{name: "invalid broker listener kills and reaps child", program: []string{"/bin/sleep", "10"}, supervisorError: "scanner supervisor: seccomp notification broker is invalid", brokerMode: scannerSupervisorPrivilegedBrokerInvalidMode},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			runPrivilegedScannerSupervisorCase(t, executable, test.program, test.supervisorError, test.cancelSupervisor)
+			runPrivilegedScannerSupervisorCase(t, executable, test.program, test.supervisorError, test.cancelSupervisor, test.brokerMode)
 		})
 	}
 	t.Run("failed real notification reply reaps descendants before lease release", func(t *testing.T) {
@@ -497,7 +505,7 @@ func waitPrivilegedProcessExit(pid int, start uint64, timeout time.Duration) err
 	return fmt.Errorf("process %d did not exit before deadline", pid)
 }
 
-func runPrivilegedScannerSupervisorCase(t *testing.T, executable string, program []string, expectedError string, cancelSupervisor bool) {
+func runPrivilegedScannerSupervisorCase(t *testing.T, executable string, program []string, expectedError string, cancelSupervisor bool, brokerMode string) {
 	t.Helper()
 	livenessFile := scannerLivenessTestFile(t)
 	launchArgs := []string{executable, ExecCommand, "--profile", string(Scanner), "--files", "1", "--identity-only", "--seccomp", "--liveness-fd", "3", "--"}
@@ -551,7 +559,11 @@ func runPrivilegedScannerSupervisorCase(t *testing.T, executable string, program
 	}
 	testArgs = append(testArgs, "--", "--files", "1", "--request-fd", "4", "--result-fd", "5")
 	command := exec.CommandContext(ctx, executable, testArgs...)
-	command.Env = append(os.Environ(), scannerSupervisorPrivilegedCoverageChildEnv+"=1", scannerSupervisorPrivilegedCoverageExpectedErrorEnv+"="+expectedError)
+	command.Env = append(os.Environ(),
+		scannerSupervisorPrivilegedCoverageChildEnv+"=1",
+		scannerSupervisorPrivilegedCoverageExpectedErrorEnv+"="+expectedError,
+		scannerSupervisorPrivilegedBrokerModeEnv+"="+brokerMode,
+	)
 	command.ExtraFiles = []*os.File{livenessFile, configRead, resultWrite}
 	command.Stdout, command.Stderr = &stdout, &stderr
 	command.WaitDelay = time.Second

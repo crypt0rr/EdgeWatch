@@ -107,6 +107,30 @@ func TestScannerIdentityLivenessSharedReferencesBlockRecovery(t *testing.T) {
 	}
 }
 
+func TestScannerIdentityLeaseExposesOnlyItsReadOnlyLivenessReference(t *testing.T) {
+	lease, err := newTestScannerIdentityAllocator(t, 1).acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := lease.inheritedScannerLivenessFile()
+	if err != nil {
+		t.Fatalf("read-only inherited liveness reference: %v", err)
+	}
+	if file != lease.livenessRef {
+		t.Fatal("lease returned a different liveness reference")
+	}
+	flags, err := unix.FcntlInt(file.Fd(), unix.F_GETFL, 0)
+	if err != nil || flags&unix.O_ACCMODE != unix.O_RDONLY {
+		t.Fatalf("inherited liveness reference flags = %#x, %v; want read-only", flags, err)
+	}
+	if err := lease.release(); err != nil {
+		t.Fatalf("release liveness lease: %v", err)
+	}
+	if _, err := lease.inheritedScannerLivenessFile(); err == nil {
+		t.Fatal("finished lease still exposed its liveness reference")
+	}
+}
+
 func TestScannerIdentityScopeLockEnforcesGateLivenessAllocatorOrder(t *testing.T) {
 	directoryFD := scannerIdentityLockTestDirectory(t)
 	ownedDirectoryFD, err := unix.Dup(directoryFD)
@@ -376,5 +400,286 @@ func TestScannerIdentityScopeLocksArePermanentValidatedFiles(t *testing.T) {
 		if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Nlink != 1 || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0o7777 != 0o600 || stat.Size != 0 {
 			t.Fatalf("permanent lock %s has unsafe metadata: %+v", name, stat)
 		}
+	}
+}
+
+func TestScannerIdentityLockFilesRejectUnsafeMetadata(t *testing.T) {
+	for _, lock := range []struct {
+		name string
+		open func(int) (int, error)
+	}{
+		{name: scannerIdentityTransitionLock, open: openScannerIdentityTransitionLock},
+		{name: scannerIdentityLivenessLock, open: func(directoryFD int) (int, error) {
+			file, err := openScannerIdentityLivenessFile(directoryFD, true)
+			if err != nil {
+				return -1, err
+			}
+			fd := int(file.Fd())
+			if err := file.Close(); err != nil {
+				return -1, err
+			}
+			return fd, nil
+		}},
+	} {
+		for _, metadata := range []string{"symlink", "wrong mode", "hard link", "nonempty"} {
+			t.Run(lock.name+"/"+metadata, func(t *testing.T) {
+				parent := t.TempDir()
+				if err := os.Chmod(parent, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				directory := filepath.Join(parent, "scanner-identities")
+				if err := os.Mkdir(directory, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				directoryFD, err := unix.Open(directory, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer unix.Close(directoryFD)
+				path := filepath.Join(directory, lock.name)
+				outside := filepath.Join(parent, "outside")
+				mode := os.FileMode(0o600)
+				if metadata == "wrong mode" {
+					mode = 0o640
+				}
+				contents := []byte(nil)
+				if metadata == "nonempty" {
+					contents = []byte("not a lock file")
+				}
+				if metadata == "symlink" {
+					if err := os.WriteFile(outside, contents, mode); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(outside, path); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := os.WriteFile(path, contents, mode); err != nil {
+						t.Fatal(err)
+					}
+					if metadata == "hard link" {
+						if err := os.Link(path, outside); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				fd, err := lock.open(directoryFD)
+				if err == nil {
+					_ = unix.Close(fd)
+					t.Fatalf("accepted lock file with %s metadata", metadata)
+				}
+			})
+		}
+	}
+}
+
+func TestScannerLivenessDescriptorValidationEnforcesTheInheritedFileContract(t *testing.T) {
+	path := filepath.Join(t.TempDir(), scannerIdentityLivenessLock)
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	readOnly, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readOnly.Close()
+	fd := int(readOnly.Fd())
+	if fd < 3 || fd >= 3+maxInheritedFiles {
+		t.Skipf("test liveness fd %d is outside the scanner launch descriptor range", fd)
+	}
+	if err := validateScannerLivenessParentFile(readOnly); err != nil {
+		t.Fatalf("valid daemon reference: %v", err)
+	}
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateScannerLivenessDescriptor(fd); err != nil {
+		t.Fatalf("valid inherited descriptor: %v", err)
+	}
+
+	if err := validateScannerLivenessDescriptor(-1); err == nil {
+		t.Fatal("negative descriptor was accepted")
+	}
+	outside, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 3+maxInheritedFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(outside)
+	if err := validateScannerLivenessDescriptor(outside); err == nil {
+		t.Fatal("descriptor outside the inherited range was accepted")
+	}
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateScannerLivenessDescriptor(fd); err == nil {
+		t.Fatal("close-on-exec liveness descriptor was accepted")
+	}
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	writable, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writable.Close()
+	if err := validateScannerLivenessDescriptor(int(writable.Fd())); err == nil {
+		t.Fatal("writable inherited liveness descriptor was accepted")
+	}
+	if err := validateScannerLivenessParentFile(writable); err == nil {
+		t.Fatal("writable daemon liveness descriptor was accepted")
+	}
+	if err := validateScannerLivenessParentFile(nil); err == nil {
+		t.Fatal("missing daemon liveness descriptor was accepted")
+	}
+
+	device, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.Close()
+	deviceFD, err := unix.FcntlInt(device.Fd(), unix.F_DUPFD, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(deviceFD)
+	if deviceFD < 3 || deviceFD >= 3+maxInheritedFiles {
+		t.Skipf("test device fd %d is outside the scanner launch descriptor range", deviceFD)
+	}
+	if err := validateScannerLivenessDescriptor(deviceFD); err == nil {
+		t.Fatal("non-regular liveness descriptor was accepted")
+	}
+}
+
+func TestScannerIdentityLivenessMethodsFailClosedOnInvalidInputs(t *testing.T) {
+	var nilContext context.Context
+	directoryFD := scannerIdentityLockTestDirectory(t)
+	if _, _, _, err := acquireScannerIdentityLiveness(nilContext, directoryFD); err == nil {
+		t.Fatal("nil liveness context was accepted")
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, _, err := acquireScannerIdentityLiveness(canceled, directoryFD); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled liveness acquisition = %v, want context canceled", err)
+	}
+	if _, _, err := beginScannerIdentityScopeLock(nilContext, directoryFD, directoryFD); err == nil {
+		t.Fatal("nil scope-lock context was accepted")
+	}
+	if _, _, err := beginScannerIdentityScopeLock(context.Background(), -1, directoryFD); err == nil {
+		t.Fatal("invalid scope-lock directory was accepted")
+	}
+	if _, err := (*scannerIdentityScopeLock)(nil).takeInheritedLivenessFile(); err == nil {
+		t.Fatal("nil scope returned an inherited descriptor")
+	}
+	if _, err := (&scannerIdentityScopeLock{}).takeInheritedLivenessFile(); err == nil {
+		t.Fatal("scope without inherited descriptor returned one")
+	}
+	if err := (*scannerIdentityScopeLock)(nil).downgradeLiveness(directoryFD); err == nil {
+		t.Fatal("nil scope downgraded its liveness lock")
+	}
+	if err := (*scannerIdentityScopeLock)(nil).releaseTransitionGate(); err == nil {
+		t.Fatal("nil scope released a transition gate")
+	}
+	if err := (&scannerIdentityScopeLock{gateFD: -1}).releaseTransitionGate(); err == nil {
+		t.Fatal("unlocked scope released a transition gate")
+	}
+	if err := (&scannerIdentityScopeLock{directoryFD: -1, allocatorFD: -1}).lockAllocator(context.Background()); err == nil {
+		t.Fatal("invalid scope acquired the allocator lock")
+	}
+	if err := (*scannerIdentityScopeLock)(nil).retainRuntimeReference(nil); err == nil {
+		t.Fatal("nil scope retained a runtime liveness reference")
+	}
+	if _, err := (*scannerIdentityAllocator)(nil).runtimeLivenessFile(); err == nil {
+		t.Fatal("nil allocator returned a runtime liveness file")
+	}
+	if err := retainScannerIdentityRuntimeReference(context.Background(), nil); err == nil {
+		t.Fatal("nil allocator retained a runtime reference")
+	}
+}
+
+func TestScannerIdentityLivenessTransitionsFailClosedAtBoundaries(t *testing.T) {
+	var nilContext context.Context
+	directoryFD := scannerIdentityLockTestDirectory(t)
+	if _, _, _, err := acquireScannerIdentityLiveness(context.Background(), -1); err == nil {
+		t.Fatal("liveness acquisition accepted an invalid state directory")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := beginScannerIdentityScopeLock(ctx, directoryFD, directoryFD); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled transition-gate acquisition = %v, want context canceled", err)
+	}
+	if err := retainScannerIdentityRuntimeReference(nilContext, &scannerIdentityAllocator{persistRuntimeLiveness: true}); err == nil {
+		t.Fatal("runtime liveness retention accepted a nil context")
+	}
+	if _, err := (&scannerIdentityAllocator{}).runtimeLivenessFile(); err == nil {
+		t.Fatal("allocator without its process-lifetime reference returned a file")
+	}
+
+	writable, err := openScannerIdentityLivenessFile(directoryFD, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setScannerIdentityOFDLock(int(writable.Fd()), unix.F_WRLCK, true); err != nil {
+		_ = writable.Close()
+		t.Fatal(err)
+	}
+	if _, err := (&scannerIdentityScopeLock{inherited: writable}).takeInheritedLivenessFile(); err == nil {
+		_ = writable.Close()
+		t.Fatal("writable inherited reference was transferred to a scanner")
+	}
+	if _, _, err := downgradeScannerIdentityLiveness(directoryFD, nil); err == nil {
+		_ = writable.Close()
+		t.Fatal("nil keeper was downgraded")
+	}
+	closed, err := os.Open(os.DevNull)
+	if err != nil {
+		_ = writable.Close()
+		t.Fatal(err)
+	}
+	if err := closed.Close(); err != nil {
+		_ = writable.Close()
+		t.Fatal(err)
+	}
+	if _, _, err := downgradeScannerIdentityLiveness(directoryFD, closed); err == nil {
+		_ = writable.Close()
+		t.Fatal("closed keeper was downgraded")
+	}
+	if err := writable.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	keeper, err := openScannerIdentityLivenessFile(directoryFD, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setScannerIdentityOFDLock(int(keeper.Fd()), unix.F_WRLCK, true); err != nil {
+		_ = keeper.Close()
+		t.Fatal(err)
+	}
+	if err := unix.Unlinkat(directoryFD, scannerIdentityLivenessLock, 0); err != nil {
+		_ = keeper.Close()
+		t.Fatal(err)
+	}
+	if _, _, err := downgradeScannerIdentityLiveness(directoryFD, keeper); err == nil {
+		_ = keeper.Close()
+		t.Fatal("missing inherited-reference file allowed a downgrade")
+	}
+	if err := keeper.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	gateFD, err := openScannerIdentityTransitionLock(directoryFD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(gateFD, unix.LOCK_EX); err != nil {
+		_ = unix.Close(gateFD)
+		t.Fatal(err)
+	}
+	if err := unix.Close(gateFD); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&scannerIdentityScopeLock{gateFD: gateFD, lockedGate: true}).releaseTransitionGate(); err == nil {
+		t.Fatal("transition gate release succeeded on a closed descriptor")
 	}
 }

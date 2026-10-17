@@ -29,6 +29,12 @@ type supervisorTestLease struct {
 	events        *[]string
 }
 
+type supervisorLeaseWithoutLiveness struct{}
+
+func (supervisorLeaseWithoutLiveness) identity() (int, int, bool) { return 61000, 61000, true }
+func (supervisorLeaseWithoutLiveness) release() error             { return nil }
+func (supervisorLeaseWithoutLiveness) quarantine() error          { return nil }
+
 func (lease *supervisorTestLease) identity() (int, int, bool) {
 	if lease == nil || !lease.identityOK {
 		return 0, 0, false
@@ -57,6 +63,72 @@ func (lease *supervisorTestLease) inheritedScannerLivenessFile() (*os.File, erro
 		return nil, errors.New("test liveness reference is unavailable")
 	}
 	return lease.livenessFile, nil
+}
+
+func TestScannerLivenessLeaseAndArgumentDescriptorContracts(t *testing.T) {
+	if _, err := scannerLivenessFileForLease(nil); err == nil {
+		t.Fatal("nil identity lease returned a liveness reference")
+	}
+	if _, err := scannerLivenessFileForLease(supervisorLeaseWithoutLiveness{}); err == nil {
+		t.Fatal("identity lease without liveness support was accepted")
+	}
+	if _, err := scannerLivenessFileForLease(&supervisorTestLease{}); err == nil {
+		t.Fatal("lease without an inherited liveness reference was accepted")
+	}
+	device, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.Close()
+	if _, err := scannerLivenessFileForLease(&supervisorTestLease{livenessFile: device}); err == nil {
+		t.Fatal("non-lock file was accepted as the lease liveness reference")
+	}
+
+	cmd := exec.Command("/bin/true")
+	if fd, err := appendScannerLivenessFile(nil, scannerLivenessTestFile(t)); err == nil || fd != -1 {
+		t.Fatalf("nil command liveness append = fd %d, %v", fd, err)
+	}
+	if fd, err := appendScannerLivenessFile(cmd, nil); err == nil || fd != -1 {
+		t.Fatalf("nil liveness file append = fd %d, %v", fd, err)
+	}
+
+	file := scannerLivenessTestFile(t)
+	if fd, err := appendScannerLivenessFile(cmd, file); err != nil || fd != 3 {
+		t.Fatalf("append first liveness file = fd %d, %v; want fd 3", fd, err)
+	}
+	if fd, err := appendScannerLivenessFile(cmd, file); err != nil || fd != 3 {
+		t.Fatalf("reuse identical liveness file = fd %d, %v; want fd 3", fd, err)
+	}
+	cmd.ExtraFiles = append(cmd.ExtraFiles, file)
+	if fd, err := appendScannerLivenessFile(cmd, file); err == nil || fd != -1 {
+		t.Fatalf("duplicate liveness file references = fd %d, %v", fd, err)
+	}
+	cmd.ExtraFiles = cmd.ExtraFiles[:1]
+
+	alias, err := os.Open(file.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer alias.Close()
+	cmd.ExtraFiles = append(cmd.ExtraFiles, alias)
+	if fd, err := appendScannerLivenessFile(cmd, file); err == nil || fd != -1 {
+		t.Fatalf("aliased liveness file descriptor = fd %d, %v", fd, err)
+	}
+	cmd.ExtraFiles = nil
+	closed, err := os.Open(file.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if fd, err := appendScannerLivenessFile(cmd, closed); err == nil || fd != -1 {
+		t.Fatalf("closed liveness file = fd %d, %v", fd, err)
+	}
+	cmd.ExtraFiles = []*os.File{nil}
+	if fd, err := appendScannerLivenessFile(cmd, file); err == nil || fd != -1 {
+		t.Fatalf("nil existing inherited file = fd %d, %v", fd, err)
+	}
 }
 
 func newTestSupervisorInvocation(t *testing.T, lease identityLease) (*scannerSupervisorInvocation, *os.File, string) {
@@ -105,6 +177,177 @@ func sendSupervisorTestFrame(t *testing.T, peer *os.File, frame []byte) {
 	if err != nil || n != len(frame) {
 		t.Fatalf("send completion frame wrote %d bytes, %v; want %d", n, err, len(frame))
 	}
+}
+
+func TestTerminateAndReapScannerChildOnlyReportsVerifiedCleanup(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		resultFD  bool
+		wantError string
+	}{
+		{name: "result delivered", resultFD: true},
+		{name: "result channel failure", wantError: "cleanup proof write failed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			child := exec.Command("/bin/sleep", "30")
+			child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if err := child.Start(); err != nil {
+				t.Fatal(err)
+			}
+			pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+			if err != nil {
+				_ = syscall.Kill(-child.Process.Pid, syscall.SIGKILL)
+				_ = child.Wait()
+				t.Fatal(err)
+			}
+			defer unix.Close(pair[0])
+			defer unix.Close(pair[1])
+			resultFD := 1 << 20
+			if test.resultFD {
+				resultFD = pair[0]
+			}
+			cause := errors.New("injected broker reply failure")
+			gotErr := terminateAndReapScannerChild(child, resultFD, cause)
+			if gotErr == nil || !strings.Contains(gotErr.Error(), cause.Error()) {
+				t.Fatalf("cleanup result = %v, want wrapped cause", gotErr)
+			}
+			if test.wantError != "" {
+				if !strings.Contains(gotErr.Error(), test.wantError) {
+					t.Fatalf("cleanup result = %v, want %q", gotErr, test.wantError)
+				}
+				return
+			}
+			var frame [16]byte
+			n, _, _, _, recvErr := unix.Recvmsg(pair[1], frame[:], nil, 0)
+			if recvErr != nil || n != len(frame) || string(frame[:8]) != scannerSupervisorMagic || frame[8] != 1 {
+				t.Fatalf("cleanup proof frame = %x, bytes %d, err %v", frame, n, recvErr)
+			}
+			if err := syscall.Kill(-child.Process.Pid, 0); !errors.Is(err, syscall.ESRCH) {
+				t.Fatalf("scanner process group remains after proof: %v", err)
+			}
+		})
+	}
+}
+
+func TestReceiveScannerNotificationListenerHandlesChannelAndCancellationStates(t *testing.T) {
+	t.Run("invalid parameters", func(t *testing.T) {
+		if _, interrupted, err := receiveScannerNotificationListener(-1, nil, 0, 0, nil, time.Second); err == nil || interrupted {
+			t.Fatalf("invalid listener wait = interrupted %v, error %v", interrupted, err)
+		}
+		if _, interrupted, err := receiveScannerNotificationListener(3, &exec.Cmd{}, 0, 0, nil, time.Second); err == nil || interrupted {
+			t.Fatalf("missing child process = interrupted %v, error %v", interrupted, err)
+		}
+		if _, interrupted, err := receiveScannerNotificationListener(3, &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}, 0, 0, nil, 0); err == nil || interrupted {
+			t.Fatalf("zero timeout = interrupted %v, error %v", interrupted, err)
+		}
+	})
+
+	t.Run("valid authenticated frame", func(t *testing.T) {
+		pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(pair[0])
+		defer unix.Close(pair[1])
+		if err := unix.SetsockoptInt(pair[0], unix.SOL_SOCKET, unix.SO_PASSCRED, 1); err != nil {
+			t.Fatal(err)
+		}
+		passed, err := os.Open(os.DevNull)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer passed.Close()
+		if err := sendSeccompNotificationListener(pair[1], int(passed.Fd())); err != nil {
+			t.Fatal(err)
+		}
+		child := &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+		fd, interrupted, err := receiveScannerNotificationListener(pair[0], child, uint32(os.Geteuid()), uint32(os.Getegid()), nil, time.Second)
+		if err != nil || interrupted {
+			t.Fatalf("valid listener frame = fd %d, interrupted %v, error %v", fd, interrupted, err)
+		}
+		defer unix.Close(fd)
+	})
+
+	t.Run("cancellation before listener frame", func(t *testing.T) {
+		pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(pair[0])
+		defer unix.Close(pair[1])
+		child := startNotificationWaitChild(t)
+		defer stopNotificationWaitChild(child)
+		signals := make(chan os.Signal, 1)
+		signals <- syscall.SIGTERM
+		fd, interrupted, err := receiveScannerNotificationListener(pair[0], child, uint32(os.Geteuid()), uint32(os.Getegid()), signals, time.Second)
+		if err == nil || !interrupted {
+			if fd >= 0 {
+				_ = unix.Close(fd)
+			}
+			t.Fatalf("canceled listener wait = fd %d, interrupted %v, error %v", fd, interrupted, err)
+		}
+	})
+
+	t.Run("closed helper channel", func(t *testing.T) {
+		pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(pair[0])
+		if err := unix.Close(pair[1]); err != nil {
+			t.Fatal(err)
+		}
+		child := startNotificationWaitChild(t)
+		defer stopNotificationWaitChild(child)
+		if fd, interrupted, err := receiveScannerNotificationListener(pair[0], child, uint32(os.Geteuid()), uint32(os.Getegid()), nil, time.Second); err == nil || interrupted {
+			if fd >= 0 {
+				_ = unix.Close(fd)
+			}
+			t.Fatalf("closed helper channel = fd %d, interrupted %v, error %v", fd, interrupted, err)
+		}
+	})
+
+	t.Run("helper exits without frame", func(t *testing.T) {
+		pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(pair[0])
+		defer unix.Close(pair[1])
+		child := exec.Command("/bin/true")
+		if err := child.Start(); err != nil {
+			t.Fatal(err)
+		}
+		if fd, interrupted, err := receiveScannerNotificationListener(pair[0], child, uint32(os.Geteuid()), uint32(os.Getegid()), nil, time.Second); err == nil || interrupted {
+			if fd >= 0 {
+				_ = unix.Close(fd)
+			}
+			_ = child.Process.Kill()
+			_ = child.Wait()
+			t.Fatalf("exited helper channel = fd %d, interrupted %v, error %v", fd, interrupted, err)
+		}
+		if err := child.Wait(); err != nil {
+			t.Fatalf("reap helper that exited before listener handoff: %v", err)
+		}
+	})
+}
+
+func startNotificationWaitChild(t *testing.T) *exec.Cmd {
+	t.Helper()
+	child := exec.Command("/bin/sleep", "30")
+	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	return child
+}
+
+func stopNotificationWaitChild(child *exec.Cmd) {
+	if child == nil || child.Process == nil {
+		return
+	}
+	_ = syscall.Kill(-child.Process.Pid, syscall.SIGKILL)
+	_ = child.Wait()
 }
 
 func validSupervisorTestFrame() []byte {

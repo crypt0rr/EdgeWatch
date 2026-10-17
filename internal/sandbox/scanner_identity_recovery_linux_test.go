@@ -90,6 +90,95 @@ func TestRecoverLegacyScannerIdentityScopeArchivesAndMigratesV2(t *testing.T) {
 	}
 }
 
+func TestOfflineScannerIdentityRecoveryRequiresOperatorConfirmation(t *testing.T) {
+	err := recoverScannerIdentityStateOfflineLinux(false)
+	if err == nil || !strings.Contains(err.Error(), "--confirm-all-volume-users-stopped") {
+		t.Fatalf("offline recovery without explicit confirmation = %v; want confirmation requirement", err)
+	}
+}
+
+func TestRecoverLegacyScannerIdentityScopeRejectsUnavailablePreflightInputs(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(scannerIdentityRecoveryFixture) (context.Context, *scannerIdentityAllocator)
+		want  string
+	}{
+		{name: "nil context", setup: func(f scannerIdentityRecoveryFixture) (context.Context, *scannerIdentityAllocator) {
+			return nil, f.allocator
+		}, want: "inputs are unavailable"},
+		{name: "canceled context", setup: func(f scannerIdentityRecoveryFixture) (context.Context, *scannerIdentityAllocator) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx, f.allocator
+		}, want: "inputs are unavailable"},
+		{name: "nil allocator", setup: func(scannerIdentityRecoveryFixture) (context.Context, *scannerIdentityAllocator) {
+			return context.Background(), nil
+		}, want: "inputs are unavailable"},
+		{name: "invalid boot ID", setup: func(f scannerIdentityRecoveryFixture) (context.Context, *scannerIdentityAllocator) {
+			f.allocator.bootID = func() (string, error) { return "invalid", nil }
+			return context.Background(), f.allocator
+		}, want: "verify the kernel boot"},
+		{name: "unavailable PID namespace", setup: func(f scannerIdentityRecoveryFixture) (context.Context, *scannerIdentityAllocator) {
+			f.allocator.pidNamespace = func() (uint64, error) { return 0, nil }
+			return context.Background(), f.allocator
+		}, want: "verify the PID namespace"},
+		{name: "unavailable private runtime", setup: func(f scannerIdentityRecoveryFixture) (context.Context, *scannerIdentityAllocator) {
+			f.allocator.privateRuntime = func() (bool, error) { return false, errors.New("private probe detail") }
+			return context.Background(), f.allocator
+		}, want: "requires the private scanner runtime"},
+		{name: "unavailable UID map", setup: func(f scannerIdentityRecoveryFixture) (context.Context, *scannerIdentityAllocator) {
+			f.allocator.validateMap = func(uint32, uint32) error { return errors.New("map probe detail") }
+			return context.Background(), f.allocator
+		}, want: "verify the scanner UID mapping"},
+		{name: "missing state directory", setup: func(f scannerIdentityRecoveryFixture) (context.Context, *scannerIdentityAllocator) {
+			f.allocator.directory = filepath.Join(filepath.Dir(f.allocator.directory), "missing-state")
+			return context.Background(), f.allocator
+		}, want: "requires existing legacy state"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newScannerIdentityRecoveryFixture(t)
+			ctx, allocator := test.setup(fixture)
+			err := recoverLegacyScannerIdentityScope(ctx, allocator, true, 1)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("recovery preflight error = %v, want %q", err, test.want)
+			}
+			if test.name != "missing state directory" {
+				assertUnchangedRecoverySource(t, fixture)
+			}
+		})
+	}
+}
+
+func TestLockScannerIdentityOfflineIsNonblocking(t *testing.T) {
+	if err := lockScannerIdentityOffline(-1); err == nil {
+		t.Fatal("negative lock descriptor was accepted")
+	}
+	file, err := os.CreateTemp(t.TempDir(), "offline-lock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lockScannerIdentityOffline(int(file.Fd())); err != nil {
+		t.Fatalf("acquire empty offline lock: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := unix.Flock(int(file.Fd()), unix.LOCK_UN); err != nil {
+			t.Errorf("unlock offline recovery test descriptor: %v", err)
+		}
+		if err := file.Close(); err != nil {
+			t.Errorf("close offline recovery test descriptor: %v", err)
+		}
+	})
+	second, err := unix.Open(filepath.Join(filepath.Dir(file.Name()), filepath.Base(file.Name())), unix.O_RDWR|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(second)
+	if err := lockScannerIdentityOffline(second); err == nil {
+		t.Fatal("busy offline lock blocked or was accepted")
+	}
+}
+
 func TestRecoverLegacyScannerIdentityScopeResumesOnlyArchivedJournalFirstState(t *testing.T) {
 	fixture := newScannerIdentityRecoveryFixture(t)
 	directoryFD, markerFD, err := openScannerIdentityDirectories(fixture.allocator.directory, fixture.allocator.markerDir)

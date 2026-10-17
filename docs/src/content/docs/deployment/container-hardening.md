@@ -158,12 +158,26 @@ process other than UID 0 cannot send raw packets and falls back to connect
 scans. Naabu detects its capabilities itself. Scan results are the same as
 without the sandbox.
 
-Nmap and Naabu version probes use this same scanner policy when a scanner-enabled
-application starts. The daemon and `scan` command capture their bounded version
-strings once at startup; the console serves the daemon's cached values instead
-of starting scanner processes for each capabilities request. Host commands such
-as `notify test` and baseline review do not need scanner binaries and skip the
-probes when they create an application without a scanner policy.
+When `scanner.sandbox` is `auto` or `required`, before the daemon or `scan`
+command opens storage or initializes keys, the sandbox detector runs the
+configured Nmap executable with the fixed `--version` argument through a
+leased scanner identity. This checks the actual binary and its runtime
+libraries with the identity, seccomp, and Landlock restrictions the scanner
+will use; it does not contact a target. If the Landlock check fails but the
+same command succeeds with identity isolation and seccomp, `auto` continues
+without Landlock and reports the fallback in health and startup warnings.
+`required` refuses startup. If the identity-and-seccomp control also fails,
+scanner launches are unavailable even in `auto`; EdgeWatch never falls back to
+UID 0 or drops seccomp. Probe errors are bounded and sanitized. With
+`scanner.sandbox: off`, detection skips these checks and disables those
+confinement layers.
+
+The daemon and `scan` command separately capture the Nmap and Naabu version
+strings once when the application starts; the console serves the daemon's
+cached values instead of starting scanner processes for each capabilities
+request. Host commands such as `notify test` and baseline review do not need
+scanner binaries and skip these version checks when they create an application
+without a scanner policy.
 
 At startup EdgeWatch checks that every UID/GID in the fixed scanner range is
 mapped, the container grants `SETUID`, `SETGID` and `KILL`, the durable lease
@@ -249,10 +263,14 @@ commands without Landlock.
 | `required` | Refuses daemon startup and direct scan commands when scanner processes cannot be restricted. |
 | `off` | Starts scanner processes without Landlock. |
 
-`scanner.sandbox: off` turns off Landlock too. At startup EdgeWatch runs
-`nmap --version` restricted, as scans would run it. When Nmap or a library it
-loads lies outside the allowed paths, this is found before any scan: Landlock
-is reported unavailable with the reason, and scans run without it.
+`scanner.sandbox: off` turns off Landlock too and skips the sandbox
+compatibility checks. With sandboxing enabled, the startup check runs the
+configured Nmap executable with only `--version`, without a target. When this
+command fails under Landlock, `auto` verifies it again with the mandatory
+identity and seccomp restrictions before continuing without Landlock. If that
+control fails too, scanner launches are unavailable rather than running with a
+weaker policy. `required` refuses daemon startup and direct scan commands when
+Landlock is unavailable.
 `scanner_sandbox.landlock.state` in `edgewatch health` reports the outcome,
 and `abi` the kernel's Landlock version. When Landlock is `required`, an
 unavailable result prevents daemon startup and direct scan commands.
@@ -284,11 +302,14 @@ filter, and so does every process the scanner starts. The filter:
 
 Docker's default profile already refuses most of these calls. The filter
 keeps them refused under a runtime or profile that does not, and it refuses
-`ptrace` and io_uring, which recent Docker profiles allow. The startup probe
-runs Nmap with the filter. If the probe fails, scanner launches fail closed;
-they do not run with Landlock alone. `scanner_sandbox.seccomp` in
-`edgewatch health` reports `enforced`, `unavailable` with the reason, or
-`disabled`. The filter applies independently of Landlock:
+`ptrace` and io_uring, which recent Docker profiles allow. With sandboxing
+enabled, startup first checks the filter with a harmless command, then runs the
+configured Nmap compatibility command with it. If Nmap fails under both
+Landlock and the identity-and-seccomp control, scanner launches fail closed;
+EdgeWatch does not run without seccomp. `scanner_sandbox.seccomp` in
+`edgewatch health` reports whether the filter itself was verified as
+`enforced`, `unavailable` with the reason, or `disabled`. The filter applies
+independently of Landlock:
 `scanner.landlock: off` leaves it enabled, while `scanner.sandbox: off`
 disables it.
 

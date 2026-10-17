@@ -261,14 +261,15 @@ type Options struct {
 	// identity change. Empty uses /bin/true for scanners and the EdgeWatch
 	// version command for the notifier.
 	IdentityProbe Probe
-	// Probes are short non-scanner commands Detect runs confined as the
-	// processes would be, to confirm that the helpers and Landlock restriction
-	// work. Scanner binaries are only started through a leased invocation.
+	// Probes are short fixed commands Detect runs confined as the processes
+	// would be, to confirm compatibility with the configured restrictions.
+	// Scanner identity and seccomp are checked separately with a harmless
+	// command; scanner compatibility probes run through a leased invocation.
 	Probes []Probe
 }
 
 // Probe is a short-lived command that Detect runs confined. A probe whose
-// executable does not exist is skipped.
+// executable does not exist is skipped unless Required is true.
 type Probe struct {
 	// Name names the probed process in reasons. Empty uses the
 	// executable's name.
@@ -277,6 +278,10 @@ type Probe struct {
 	// arguments of the EdgeWatch executable.
 	Args []string
 	Self bool
+	// Required makes a missing executable a failed probe. Optional scanner
+	// programs can remain absent without preventing the other probes from
+	// passing.
+	Required bool
 	// Env is the command's environment. Nil gives it only a fixed PATH and
 	// HOME.
 	Env []string

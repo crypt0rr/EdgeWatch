@@ -370,24 +370,263 @@ func TestConfineWithFileSizeLimitFallbacks(t *testing.T) {
 	}
 }
 
-func TestDetectUsesHarmlessProbeInsteadOfStartingScannerBinaries(t *testing.T) {
+func TestDetectChecksConfiguredNmapVersionWithTheScannerPolicy(t *testing.T) {
 	t.Parallel()
 	env, _ := containerEnvironment()
-	var commands [][]string
+	nmap := filepath.Join(t.TempDir(), "nmap")
+	if err := os.WriteFile(nmap, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	type observed struct {
+		policy  *Policy
+		command []string
+	}
+	var runs []observed
 	env.run = func(policy *Policy, command, _ []string) error {
-		commands = append(commands, append([]string(nil), command...))
-		if policy.identityOnlyHelper != "" {
-			return nil
-		}
-		if policy.Restricted() && (!policy.Enforced() || policy.helper != "/usr/local/bin/edgewatch") {
-			t.Errorf("probe policy = %+v, want the scanner policy", policy.Status())
+		runs = append(runs, observed{policy: policy, command: append([]string(nil), command...)})
+		return nil
+	}
+	policy := detect(Options{Probes: []Probe{{Name: "nmap", Args: []string{nmap, "--version"}, Required: true}}}, env)
+	want := [][]string{{"/bin/true"}, {"/bin/true"}, {nmap, "--version"}}
+	var commands [][]string
+	for _, run := range runs {
+		commands = append(commands, run.command)
+	}
+	if !policy.Enforced() || !policy.Restricted() || !reflect.DeepEqual(commands, want) {
+		t.Fatalf("probe commands = %q, policy %+v; want identity/seccomp controls and the configured Nmap version command %q", commands, policy.Status(), want)
+	}
+	if !runs[2].policy.Enforced() || !runs[2].policy.Restricted() || !runs[2].policy.seccomp || runs[2].policy.helper != env.executable {
+		t.Fatalf("Nmap compatibility policy = %+v, want leased scanner identity with Landlock and seccomp", runs[2].policy.Status())
+	}
+}
+
+func TestNmapLandlockFallbackRequiresIdentityControlCompatibility(t *testing.T) {
+	for _, mode := range []string{ModeAuto, ModeRequired} {
+		t.Run(mode, func(t *testing.T) {
+			env, _ := containerEnvironment()
+			nmap := filepath.Join(t.TempDir(), "nmap")
+			if err := os.WriteFile(nmap, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			var nmapRuns []bool
+			env.run = func(policy *Policy, command, _ []string) error {
+				if command[0] == nmap {
+					nmapRuns = append(nmapRuns, policy.Restricted())
+					if policy.Restricted() {
+						return errors.New("denied /private/secret-token")
+					}
+				}
+				return nil
+			}
+			policy := detect(Options{Landlock: mode, Probes: []Probe{{Name: "nmap", Args: []string{nmap, "--version"}, Required: true}}}, env)
+			status := policy.Status()
+			if !reflect.DeepEqual(nmapRuns, []bool{true, false}) || status.State != StateEnforced || status.Landlock.State != StateUnavailable || status.Seccomp.State != StateEnforced {
+				t.Fatalf("Nmap fallback runs=%v status=%+v; want Landlock attempt then identity+seccomp control and truthful enforced status", nmapRuns, status)
+			}
+			if strings.Contains(status.Landlock.Reason, "/private") || strings.Contains(status.Landlock.Reason, "secret-token") {
+				t.Fatalf("Landlock reason leaked probe details: %q", status.Landlock.Reason)
+			}
+			if mode == ModeRequired {
+				if err := policy.Require(); !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), "set scanner.landlock to auto") {
+					t.Fatalf("required Landlock policy = %v, want refusal before startup writes", err)
+				}
+			}
+		})
+	}
+}
+
+func TestNmapIdentityControlFailureDisablesScannerEvenInAutoMode(t *testing.T) {
+	t.Parallel()
+	env, _ := containerEnvironment()
+	nmap := filepath.Join(t.TempDir(), "nmap")
+	if err := os.WriteFile(nmap, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var nmapRuns []bool
+	env.run = func(policy *Policy, command, _ []string) error {
+		if command[0] == nmap {
+			nmapRuns = append(nmapRuns, policy.Restricted())
+			return errors.New("incompatible binary at /private/secret-token")
 		}
 		return nil
 	}
-	policy := detect(Options{Probes: []Probe{{Args: []string{"/usr/bin/nmap", "--version"}}, {Args: []string{"/usr/local/bin/naabu", "-version"}}}}, env)
-	want := [][]string{{"/bin/true"}, {"/bin/true"}, {"/bin/true"}}
-	if !policy.Restricted() || !reflect.DeepEqual(commands, want) {
-		t.Fatalf("probe commands = %q, policy %+v; want only harmless probes %q", commands, policy.Status(), want)
+	policy := detect(Options{Landlock: ModeAuto, Probes: []Probe{{Name: "nmap", Args: []string{nmap, "--version"}, Required: true}}}, env)
+	status := policy.Status()
+	if !reflect.DeepEqual(nmapRuns, []bool{true, false}) || status.State != StateUnavailable || status.IdentityPool == nil || status.IdentityPool.State != StateEnforced || status.Seccomp.State != StateEnforced {
+		t.Fatalf("Nmap runs=%v status=%+v; want scanner unavailable while independent identity and seccomp remain truthful", nmapRuns, status)
+	}
+	if strings.Contains(status.Reason, "/private") || strings.Contains(status.Reason, "secret-token") {
+		t.Fatalf("scanner reason leaked probe details: %q", status.Reason)
+	}
+	if policy.temporaryHelper != "" || policy.Enforced() || policy.Restricted() {
+		t.Fatalf("failed scanner policy retained a launch helper: enforced=%t restricted=%t temporaryHelper=%q", policy.Enforced(), policy.Restricted(), policy.temporaryHelper)
+	}
+	marker := filepath.Join(t.TempDir(), "scanner-started")
+	err := runConfined(policy, []string{"/bin/sh", "-c", "printf started > \"$MARKER\""}, []string{"MARKER=" + marker})
+	if err == nil {
+		t.Fatal("scanner start with a failed Nmap identity+seccomp control succeeded")
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("scanner child ran after compatibility control failed: marker stat error = %v", statErr)
+	}
+}
+
+func TestDetectDoesNotProbeNmapWithoutMandatoryControls(t *testing.T) {
+	for name, change := range map[string]func(*environment){
+		"identity unavailable": func(env *environment) { env.capErr = errors.New("unreadable") },
+		"seccomp unavailable":  func(env *environment) { env.seccompErr = unix.ENOSYS },
+	} {
+		t.Run(name, func(t *testing.T) {
+			env, _ := containerEnvironment()
+			change(&env)
+			nmap := filepath.Join(t.TempDir(), "nmap")
+			if err := os.WriteFile(nmap, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			var commands [][]string
+			env.run = func(_ *Policy, command, _ []string) error {
+				commands = append(commands, append([]string(nil), command...))
+				return nil
+			}
+			status := detect(Options{Probes: []Probe{{Name: "nmap", Args: []string{nmap, "--version"}, Required: true}}}, env).Status()
+			for _, command := range commands {
+				if command[0] == nmap {
+					t.Fatalf("started Nmap without mandatory controls: %q", commands)
+				}
+			}
+			if status.State != StateUnavailable {
+				t.Fatalf("status = %+v, want fail-closed scanner state", status)
+			}
+		})
+	}
+}
+
+func TestDetectLandlockRefusesToProbeWithoutMandatoryControls(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		landlock string
+		policy   func(string) *Policy
+		wantLL   string
+		wantSec  string
+	}{
+		{
+			name:     "identity unavailable with Landlock off",
+			landlock: ModeOff,
+			policy: func(helper string) *Policy {
+				policy := NewEnforced()
+				policy.status.State = StateUnavailable
+				policy.status.Reason = "scanner identity is unavailable"
+				policy.status.IdentityPool = scannerIdentityPoolStatus(StateUnavailable, "scanner identity is unavailable")
+				policy.enforce = false
+				policy.temporaryHelper = helper
+				return policy
+			},
+			wantLL: StateDisabled, wantSec: StateEnforced,
+		},
+		{
+			name:     "seccomp unavailable with identity intact",
+			landlock: ModeAuto,
+			policy: func(helper string) *Policy {
+				policy := NewEnforced()
+				policy.status.State = StateUnavailable
+				policy.status.Reason = "scanner seccomp is unavailable"
+				policy.status.Seccomp = SeccompStatus{State: StateUnavailable, Reason: "filter unavailable"}
+				policy.seccomp = false
+				policy.temporaryHelper = helper
+				return policy
+			},
+			wantLL: StateUnavailable, wantSec: StateUnavailable,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			env, _ := containerEnvironment()
+			var commands [][]string
+			env.run = func(_ *Policy, command, _ []string) error {
+				commands = append(commands, append([]string(nil), command...))
+				return nil
+			}
+			nmap := filepath.Join(t.TempDir(), "nmap")
+			if err := os.WriteFile(nmap, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			policy := test.policy(env.executable)
+			policy.helper = env.executable
+			policy.identityOnlyHelper = env.executable
+			policy.status.Capabilities = []string{"NET_RAW"}
+			policy = detectLandlock(policy, Options{Landlock: test.landlock, Probes: []Probe{{Name: "nmap", Args: []string{nmap, "--version"}, Required: true}}}, env)
+			status := policy.Status()
+			if status.State != StateUnavailable || status.Landlock.State != test.wantLL || status.Seccomp.State != test.wantSec || len(status.Capabilities) != 0 {
+				t.Fatalf("status = %+v; want overall unavailable, Landlock %q, seccomp %q", status, test.wantLL, test.wantSec)
+			}
+			for _, command := range commands {
+				if command[0] == nmap {
+					t.Fatalf("probed configured Nmap without mandatory controls: %q", commands)
+				}
+			}
+			if policy.Enforced() || policy.Restricted() || policy.helper != "" || policy.identityOnlyHelper != "" || policy.temporaryHelper != "" {
+				t.Fatalf("unsafe launch helper survived missing mandatory controls: %+v", policy)
+			}
+		})
+	}
+}
+
+func TestDetectNmapCompatibilityFailureWithLandlockDisabledFailsClosed(t *testing.T) {
+	t.Parallel()
+	env, _ := containerEnvironment()
+	nmap := filepath.Join(t.TempDir(), "nmap")
+	if err := os.WriteFile(nmap, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var nmapRuns int
+	env.run = func(_ *Policy, command, _ []string) error {
+		if command[0] == nmap {
+			nmapRuns++
+			return errors.New("nmap cannot start")
+		}
+		return nil
+	}
+	policy := detect(Options{Landlock: ModeOff, Probes: []Probe{{Name: "nmap", Args: []string{nmap, "--version"}, Required: true}}}, env)
+	status := policy.Status()
+	if nmapRuns != 1 || policy.Enforced() || status.State != StateUnavailable || status.Landlock.State != StateDisabled || status.IdentityPool == nil || status.IdentityPool.State != StateEnforced || status.Seccomp.State != StateEnforced {
+		t.Fatalf("Nmap runs=%d policy=%+v; want failed scanner compatibility and disabled Landlock, with mandatory control status preserved", nmapRuns, status)
+	}
+}
+
+func TestDetectNmapCompatibilityFailureWhenLandlockUnavailableFailsClosed(t *testing.T) {
+	t.Parallel()
+	env, _ := containerEnvironment()
+	env.landlockErr = unix.ENOSYS
+	nmap := filepath.Join(t.TempDir(), "nmap")
+	if err := os.WriteFile(nmap, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var nmapRuns int
+	env.run = func(_ *Policy, command, _ []string) error {
+		if command[0] == nmap {
+			nmapRuns++
+			return errors.New("nmap cannot start")
+		}
+		return nil
+	}
+	policy := detect(Options{Landlock: ModeAuto, Probes: []Probe{{Name: "nmap", Args: []string{nmap, "--version"}, Required: true}}}, env)
+	status := policy.Status()
+	if nmapRuns != 1 || policy.Enforced() || status.State != StateUnavailable || status.Landlock.State != StateUnavailable || status.IdentityPool == nil || status.IdentityPool.State != StateEnforced || status.Seccomp.State != StateEnforced || len(status.Capabilities) != 0 {
+		t.Fatalf("Nmap runs=%d policy=%+v; want fail-closed scanner state and independently enforced identity+seccomp", nmapRuns, status)
+	}
+}
+
+func TestRequiredNmapProbeRejectsAMissingExecutable(t *testing.T) {
+	t.Parallel()
+	called := false
+	env := environment{run: func(*Policy, []string, []string) error {
+		called = true
+		return nil
+	}}
+	missing := filepath.Join(t.TempDir(), "missing-nmap")
+	err := env.runProbe(NewEnforced(), Probe{Name: "nmap", Args: []string{missing, "--version"}, Required: true})
+	if err == nil || err.Error() != "nmap executable is unavailable" || called {
+		t.Fatalf("required missing Nmap probe = %v, run called=%t; want sanitized missing-executable error without running", err, called)
 	}
 }
 
@@ -516,7 +755,7 @@ func TestDetectExplainsWhyLandlockIsUnavailable(t *testing.T) {
 		"executable":  {change: func(env *environment) { env.executableErr = errors.New("no /proc") }, state: StateUnavailable, reason: "scanner identity isolation is unavailable", noIdentity: true},
 		"probe failed": {mode: ModeRequired, change: func(env *environment) {
 			env.run = failing(withLandlock, errors.New("exit status 1: denied"))
-		}, state: StateUnavailable, reason: "the scanner identity probe could not start with Landlock: exit status 1: denied"},
+		}, state: StateUnavailable, reason: "nmap could not start with Landlock and seccomp"},
 		"unknown mode": {mode: "strict", state: StateUnavailable, reason: `scanner.landlock "strict" is not auto, required, or off`},
 		"off": {mode: ModeOff, change: func(env *environment) {
 			env.run = failing(withLandlock, errors.New("off mode started a Landlock probe"))

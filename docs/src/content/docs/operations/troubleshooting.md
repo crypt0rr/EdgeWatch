@@ -139,21 +139,31 @@ reports `scanner_sandbox.landlock.state` as `unavailable`, when
 - **Landlock is built into the kernel but not enabled.** Add `landlock` to
   the host's `lsm=` boot parameter, or to `CONFIG_LSM`, and reboot.
 - **nmap could not start with Landlock.** Nmap, or a library it loads, lies
-  outside the paths the restriction allows, as in a modified image. The
-  reason ends with Nmap's last diagnostic line.
+  outside the paths the restriction allows, as in a modified image. In
+  `scanner.sandbox: auto`, EdgeWatch retries the configured Nmap version
+  command with the mandatory identity and seccomp controls. If that succeeds,
+  scans continue without Landlock and startup/health report the fallback. If
+  that fails too, scanner launches are unavailable; they do not continue with
+  a weaker identity or without seccomp. The reported reason is sanitized and
+  does not include Nmap's raw diagnostic output. `scanner.landlock: required`
+  refuses startup instead.
 
-Scans keep working without Landlock, in the identity sandbox when it is
-enforced.
+When health reports Landlock unavailable but the scanner state is enforced,
+scans keep working with the leased identity and seccomp. When the scanner state
+is unavailable, the daemon can remain running in `auto`, but scans fail closed
+until the configured Nmap binary works with the mandatory controls.
 
 `scanner_sandbox.seccomp.state` is `unavailable` when the kernel offers no
-seccomp filters, the container's seccomp profile blocks them, or Nmap could
-not start with the [seccomp filter](/deployment/container-hardening/#seccomp-filter).
-The reason names the cause. In `scanner.sandbox: auto` and `required`, scanner
-launches fail closed even if Landlock is enforced or disabled; Landlock alone
-is not used as a fallback. `scanner.landlock: required` controls Landlock only.
-Setting `scanner.landlock: off` does not disable seccomp. Restore seccomp
-support, or set `scanner.sandbox: off` only when you intend to run scanners
-without the identity, Landlock, and seccomp layers.
+seccomp filters or the container's seccomp profile blocks the filter probe.
+The configured Nmap compatibility command is also checked with seccomp. If
+that command cannot start even with identity isolation and seccomp, the overall
+scanner state becomes unavailable while the seccomp field continues to report
+the filter's independently verified status. In `scanner.sandbox: auto` and
+`required`, scanner launches fail closed; Landlock alone is never a fallback.
+`scanner.landlock: required` controls Landlock only. Setting
+`scanner.landlock: off` does not disable seccomp. Restore seccomp support, or
+set `scanner.sandbox: off` only when you intend to run scanners without the
+identity, Landlock, and seccomp layers.
 
 ## Proxy hostname rejected
 

@@ -59,10 +59,10 @@ func TestSandboxExecIsHandledBeforeFlagParsing(t *testing.T) {
 	}
 }
 
-func TestScannerSandboxOptionsUsesAHarmlessProbe(t *testing.T) {
+func TestScannerSandboxOptionsProbesTheConfiguredNmapVersion(t *testing.T) {
 	t.Parallel()
-	options := scannerSandboxOptions(&config.Config{Scanner: config.ScannerConfig{Sandbox: "required", Landlock: "off"}})
-	if options.Mode != "required" || options.Landlock != "off" || len(options.Probes) != 1 || strings.Join(options.Probes[0].Args, " ") != "/bin/true" || options.Probes[0].Self {
+	options := scannerSandboxOptions(&config.Config{Scanner: config.ScannerConfig{Sandbox: "required", Landlock: "off"}}, "/opt/edgewatch/nmap")
+	if options.Mode != "required" || options.Landlock != "off" || len(options.Probes) != 1 || strings.Join(options.Probes[0].Args, " ") != "/opt/edgewatch/nmap --version" || !options.Probes[0].Required || options.Probes[0].Self {
 		t.Fatalf("sandbox options = %+v", options)
 	}
 }
@@ -118,6 +118,25 @@ func TestScannerSandboxWarningsFailClosedWhenThePoolIsUnavailable(t *testing.T) 
 	restricted.Landlock = sandbox.LandlockStatus{State: sandbox.StateEnforced, ABI: 6}
 	if got := scannerSandboxWarnings(restricted); len(got) != 1 || got[0] != "scanner launches are unavailable because the per-invocation identity pool could not be enforced: the container does not grant KILL" {
 		t.Fatalf("root warnings with Landlock = %q", got)
+	}
+	fallback := sandbox.Status{
+		Mode: sandbox.ModeAuto, State: sandbox.StateEnforced,
+		IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced},
+		Landlock:     sandbox.LandlockStatus{Mode: sandbox.ModeAuto, State: sandbox.StateUnavailable, Reason: "nmap could not start with Landlock and seccomp"},
+		Seccomp:      sandbox.SeccompStatus{State: sandbox.StateEnforced},
+	}
+	if got := scannerSandboxWarnings(fallback); len(got) != 1 || got[0] != "scanner processes start with identity isolation and seccomp but without Landlock: nmap could not start with Landlock and seccomp" {
+		t.Fatalf("Landlock fallback warnings = %q", got)
+	}
+	controlFailure := sandbox.Status{
+		Mode: sandbox.ModeAuto, State: sandbox.StateUnavailable,
+		IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced},
+		Landlock:     sandbox.LandlockStatus{Mode: sandbox.ModeAuto, State: sandbox.StateUnavailable},
+		Seccomp:      sandbox.SeccompStatus{State: sandbox.StateEnforced},
+		Reason:       "nmap could not start with the required identity and seccomp policy; scanner launches are unavailable",
+	}
+	if got := scannerSandboxWarnings(controlFailure); len(got) != 1 || got[0] != "scanner launches are unavailable: nmap could not start with the required identity and seccomp policy; scanner launches are unavailable" {
+		t.Fatalf("Nmap control failure warnings = %q", got)
 	}
 	rootNotification := sandbox.Status{Mode: sandbox.ModeAuto, State: sandbox.StateUnavailable, ProcessUID: sandboxUIDPointer(0), Reason: "the container does not grant KILL"}
 	if got := notificationSandboxWarnings(rootNotification); len(got) != 1 || got[0] != "the notification process runs unconfined as UID 0: the container does not grant KILL" {
@@ -177,7 +196,7 @@ func TestLogScannerSandboxNamesTheOutcome(t *testing.T) {
 		"Landlock": {status: sandbox.NewEnforced().WithLandlock("/usr/local/bin/edgewatch", 6).WithSeccomp().Status(), want: `"level":"INFO","msg":"scanner processes are restricted with Landlock","abi":6,"seccomp":"enforced"`},
 		"no Landlock": {
 			status: sandbox.Status{State: sandbox.StateEnforced, Landlock: sandbox.LandlockStatus{State: sandbox.StateUnavailable, Reason: "old kernel"}},
-			want:   `"level":"INFO","msg":"scanner processes start without Landlock","reason":"old kernel"`,
+			want:   `"level":"WARN","msg":"scanner processes start with identity isolation and seccomp but without Landlock; see the container hardening guide","reason":"old kernel"`,
 		},
 		"Landlock off": {status: sandbox.NewEnforced().Status(), want: `"msg":"scanner.landlock is off; scanner processes start without Landlock"`},
 	} {

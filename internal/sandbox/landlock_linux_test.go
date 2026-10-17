@@ -813,12 +813,24 @@ func TestSandboxExecReportsAProgramThatCannotStart(t *testing.T) {
 
 func TestBoundedBufferKeepsTheFirstBytes(t *testing.T) {
 	t.Parallel()
-	buffer := &boundedBuffer{limit: 4}
+	cancellations := 0
+	buffer := &boundedBuffer{limit: 4, onExceeded: func() { cancellations++ }}
 	if n, err := buffer.Write([]byte("abc")); n != 3 || err != nil {
 		t.Fatalf("write = %d, %v", n, err)
 	}
 	if n, err := buffer.Write([]byte("defg")); n != 4 || err != nil || buffer.String() != "abcd" {
 		t.Fatalf("write past the limit = %d, %v, %q", n, err, buffer.String())
+	}
+	if n, err := buffer.Write([]byte("h")); n != 1 || err != nil || !buffer.exceeded || cancellations != 1 {
+		t.Fatalf("write after the limit = %d, %v, exceeded=%t cancellations=%d; want one cancellation", n, err, buffer.exceeded, cancellations)
+	}
+	exactLimitCancellations := 0
+	exactLimit := &boundedBuffer{limit: 3, onExceeded: func() { exactLimitCancellations++ }}
+	if n, err := exactLimit.Write([]byte("abc")); n != 3 || err != nil || exactLimit.exceeded {
+		t.Fatalf("write exactly to the limit = %d, %v, exceeded=%t", n, err, exactLimit.exceeded)
+	}
+	if n, err := exactLimit.Write([]byte("d")); n != 1 || err != nil || !exactLimit.exceeded || exactLimitCancellations != 1 {
+		t.Fatalf("write after exact limit = %d, %v, exceeded=%t cancellations=%d; want one cancellation", n, err, exactLimit.exceeded, exactLimitCancellations)
 	}
 	if lastLine("") != "" || lastLine("one\ntwo\n") != "two" {
 		t.Fatal("lastLine")

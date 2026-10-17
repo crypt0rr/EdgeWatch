@@ -1137,6 +1137,116 @@ expect_health() {
   [ "$got" = "$want" ] || fail "health reports the sandbox as '$got', want '$want'"
 }
 
+# Verify that the configured Nmap really starts under the scanner restrictions.
+# The compatibility fixture opens a read-only file that is outside the
+# Landlock allowlist. Its world-readable mode lets the identity-only control
+# succeed, proving that only Landlock caused the first failure.
+mkdir -m 0755 "$workdir/nmap-landlock-probe"
+printf 'landlock-only denial\n' >"$workdir/nmap-landlock-probe/marker"
+chmod 0644 "$workdir/nmap-landlock-probe/marker"
+cat >"$workdir/landlock-incompatible-nmap" <<'SH'
+#!/bin/sh
+if [ "$1" = --version ]; then
+  /bin/cat /opt/edgewatch-nmap-probe/marker >/dev/null 2>&1 || exit 73
+  echo 'Nmap version 7.99 ( https://nmap.org )'
+  exit 0
+fi
+exit 2
+SH
+chmod 0755 "$workdir/landlock-incompatible-nmap"
+daemon_mounts=(--volume "$workdir/landlock-incompatible-nmap:/usr/bin/nmap:ro"
+  --volume "$workdir/nmap-landlock-probe:/opt/edgewatch-nmap-probe:ro")
+daemon_landlock=auto
+run_daemon nmap-landlock-fallback auto "${bundled_caps[@]}"
+expect_health "enforced - NET_RAW landlock:unavailable seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
+fallback_warning=$(docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml --output json |
+  python3 -c 'import json, sys; warnings=json.load(sys.stdin).get("warnings") or []; print(any("scanner processes start with identity isolation and seccomp but without Landlock" in value for value in warnings))')
+[ "$fallback_warning" = True ] || fail "health did not warn that Landlock is unavailable after the identity-only Nmap control passed"
+stop_daemon
+daemon_mounts=()
+
+# If the identity+seccomp control also fails, Auto must keep the scanner
+# unavailable. The private marker is unreadable to the leased scanner UID;
+# the /tmp marker proves the identity-only retry ran (Landlock denies that
+# write before it can reach the private marker).
+mkdir -m 0755 "$workdir/nmap-identity-control"
+printf 'identity control must not read this\n' >"$workdir/nmap-identity-control/private-marker"
+chmod 0600 "$workdir/nmap-identity-control/private-marker"
+cat >"$workdir/identity-incompatible-nmap" <<'SH'
+#!/bin/sh
+if [ "$1" = --version ]; then
+  : > /tmp/edgewatch-nmap-identity-control-ran 2>/dev/null || exit 73
+  /bin/cat /opt/edgewatch-nmap-control/private-marker >/dev/null 2>&1 || exit 74
+  echo 'Nmap version 7.99 ( https://nmap.org )'
+  exit 0
+fi
+exit 2
+SH
+chmod 0755 "$workdir/identity-incompatible-nmap"
+daemon_mounts=(--volume "$workdir/identity-incompatible-nmap:/usr/bin/nmap:ro"
+  --volume "$workdir/nmap-identity-control:/opt/edgewatch-nmap-control:ro")
+daemon_landlock=auto
+run_daemon nmap-identity-control-failure auto "${bundled_caps[@]}"
+expect_health "unavailable - - landlock:unavailable seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
+docker exec "$container" test -f /tmp/edgewatch-nmap-identity-control-ran ||
+  fail "the identity+seccomp Nmap control was not attempted"
+control_reason=$(docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml --output json |
+  python3 -c 'import json, sys; print(json.load(sys.stdin)["scanner_sandbox"].get("reason", ""))')
+[[ "$control_reason" == *"nmap could not start with the required identity and seccomp policy"* ]] ||
+  fail "health did not report the sanitized Nmap identity+seccomp control failure"
+[[ "$control_reason" != *"permission denied"* && "$control_reason" != *"private-marker"* ]] ||
+  fail "health exposed raw Nmap probe diagnostics: $control_reason"
+stop_daemon
+daemon_mounts=()
+
+# The required-Landlock path must refuse before opening or changing the
+# database and configured key, even though the identity-only Nmap control can
+# start. Prepare sentinel files in the same container ownership model first.
+required_data="$workdir/data-nmap-landlock-required"
+install -d -m 0750 "$required_data"
+./scripts/prepare-container-smoke-data.sh "$image" "$required_data"
+docker run --rm --read-only --tmpfs /tmp:size=16m,mode=1777 --cap-drop ALL --cap-add CHOWN \
+  --security-opt no-new-privileges:true --volume "$required_data:/var/lib/edgewatch:rw" \
+  --entrypoint /bin/sh "$image" -ec 'printf DB_SENTINEL_UNMODIFIED > /var/lib/edgewatch/edgewatch.db; printf 0123456789abcdef0123456789abcdef > /var/lib/edgewatch/auth.key; chmod 0600 /var/lib/edgewatch/auth.key'
+required_port=$(free_port)
+required_config="$workdir/config-nmap-landlock-required.yaml"
+cat >"$required_config" <<EOF
+database: /var/lib/edgewatch/edgewatch.db
+web:
+  listen: 127.0.0.1:$required_port
+  auth_key_file: /var/lib/edgewatch/auth.key
+scanner:
+  sandbox: auto
+  landlock: required
+updates:
+  enabled: false
+EOF
+chmod 0644 "$required_config"
+required_sentinel_hashes() {
+  docker run --rm --read-only --cap-drop ALL \
+    --volume "$required_data:/var/lib/edgewatch:ro" --entrypoint /bin/sh "$image" -ec \
+    'sha256sum /var/lib/edgewatch/edgewatch.db /var/lib/edgewatch/auth.key'
+}
+required_sentinel_hashes >"$workdir/nmap-required-sentinels.before"
+required_caps=()
+for capability in "${bundled_caps[@]}"; do
+  required_caps+=(--cap-add "$capability")
+done
+if docker run --rm --network host --read-only --tmpfs /tmp:size=128m,mode=1777 --cap-drop ALL \
+  "${required_caps[@]}" --security-opt no-new-privileges:true --env TMPDIR=/var/lib/edgewatch/tmp \
+  --volume "$workdir/landlock-incompatible-nmap:/usr/bin/nmap:ro" \
+  --volume "$workdir/nmap-landlock-probe:/opt/edgewatch-nmap-probe:ro" \
+  --volume "$required_config:/etc/edgewatch/config.yaml:ro" \
+  --volume "$required_data:/var/lib/edgewatch:rw" "$image" daemon --config /etc/edgewatch/config.yaml \
+  >"$workdir/nmap-required.log" 2>&1; then
+  fail "the required-Landlock daemon started with an Nmap binary that cannot run under Landlock"
+fi
+grep -Fq 'nmap could not start with Landlock and seccomp' "$workdir/nmap-required.log" ||
+  fail "the required-Landlock startup did not report the Nmap compatibility failure"
+required_sentinel_hashes >"$workdir/nmap-required-sentinels.after"
+cmp -s "$workdir/nmap-required-sentinels.before" "$workdir/nmap-required-sentinels.after" ||
+  fail "required-Landlock refusal changed the database or configured authentication key"
+
 expect_missing_identity_capabilities() {
   local reason capability
   reason=$(docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml --output json |

@@ -141,8 +141,8 @@ func TestRunConfinedBoundsReturnedDiagnostic(t *testing.T) {
 	t.Parallel()
 	command := []string{"/bin/sh", "-c", `printf '%05000d' 0 >&2; printf 'TAIL_SENTINEL\n' >&2; exit 7`}
 	err := runConfined(nil, command, nil)
-	if err == nil || !strings.Contains(err.Error(), "exit status 7") {
-		t.Fatalf("runConfined() error = %v, want exit status 7", err)
+	if err == nil || !strings.Contains(err.Error(), "diagnostic exceeded 4096 bytes") {
+		t.Fatalf("runConfined() error = %v, want a bounded-output failure", err)
 	}
 	if strings.Contains(err.Error(), "TAIL_SENTINEL") || len(err.Error()) > maxProbeDiagnostic+128 {
 		t.Fatalf("runConfined() returned unbounded diagnostic: length=%d contains_tail=%t", len(err.Error()), strings.Contains(err.Error(), "TAIL_SENTINEL"))

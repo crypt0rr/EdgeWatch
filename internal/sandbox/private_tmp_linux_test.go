@@ -854,16 +854,22 @@ func TestPreparePrivateTemporaryDirectoryKeepsControlFDOutsideDataFiles(t *testi
 	cmd := exec.Command("/bin/true")
 	cmd.ExtraFiles = []*os.File{data}
 	policy := NewEnforced().WithLandlock(helper, 6).WithSeccomp()
+	// The test process cannot switch to the production scanner UID outside a
+	// root container. Keep the temporary-directory cleanup helper on this
+	// process identity so the test exercises Cleanup before Close in either
+	// environment.
+	policy.status.UID, policy.status.GID = os.Geteuid(), os.Getegid()
 	temporary, err := PreparePrivateTemporaryDirectory(context.Background(), cmd, policy)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := temporary.Cleanup(t.Context()); err != nil {
+		cleanupErr := temporary.Cleanup(context.Background())
+		closeErr := temporary.Close()
+		if err := errors.Join(cleanupErr, closeErr); err != nil {
 			t.Errorf("cleanup private temporary directory: %v", err)
 		}
 	})
-	defer temporary.Close()
 
 	wantPrefix := []string{helper, ExecCommand, "--profile", "scanner", "--files", "1", "--private-tmp", "--private-root-fd", "4", "--private-leaf-fd", "5", "--control-fd", "6"}
 	if len(cmd.Args) < len(wantPrefix) || !reflect.DeepEqual(cmd.Args[:len(wantPrefix)], wantPrefix) {

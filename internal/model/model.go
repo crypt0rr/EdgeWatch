@@ -498,10 +498,10 @@ type AlertDetail struct {
 	// Subject names the part of the deployment a health alert is about,
 	// such as scanner or notification for a sandbox.
 	Subject string `json:"subject,omitempty"`
-	// Count is the number of sign-in attempts represented by an aggregated
-	// authentication alert, the additional events held by a security-alert
-	// summary, or, for failed deliveries, the alerts that failed. PlatformCount
-	// is the part of failed deliveries that the platform owns.
+	// Count is the number of events in a security-alert summary, or the
+	// additional events held by an alert window on a first alert; for failed
+	// deliveries, it is the alerts that failed. PlatformCount is the part of
+	// failed deliveries that the platform owns.
 	Count         int `json:"count,omitempty"`
 	PlatformCount int `json:"platform_count,omitempty"`
 	// Since is when the events that Count reports began.

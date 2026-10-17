@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/engine"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
@@ -52,6 +53,11 @@ func TestRepeatedRateLimitRefusalsCoalesceSecurityAlertsByKind(t *testing.T) {
 			if attempt >= authFailureThreshold && !errors.Is(err, ErrRateLimited) {
 				t.Fatalf("attempt %d from %s = %v, want ErrRateLimited", attempt, address, err)
 			}
+		}
+		// The rate-limit audit is queued asynchronously. Drain it before the
+		// next client so this test's "first client" expectation is deterministic.
+		if err := m.WaitForRateLimitRecords(ctx); err != nil {
+			t.Fatal(err)
 		}
 	}
 	if err := m.WaitForRateLimitRecords(ctx); err != nil {
@@ -102,8 +108,13 @@ func TestRepeatedRateLimitRefusalsCoalesceSecurityAlertsByKind(t *testing.T) {
 		t.Errorf("rate-limit alert = %+v, want one sign-in alert for the first client", rateLimited)
 	}
 	aggregate, ok := payloads[model.SecurityAlertAccountSignInFailures]
-	if !ok || aggregate.Alert.Account != "bravo-admin" || aggregate.Alert.Count != model.SecurityAlertAccountSignInFailureCount || aggregate.Alert.Source != "" {
-		t.Errorf("account-wide alert = %+v, want count-only alert without source attribution", aggregate)
+	if !ok || aggregate.Alert.Account != "bravo-admin" || aggregate.Alert.Count != 0 || aggregate.Alert.Source != "" {
+		t.Errorf("account-wide alert = %+v, want threshold alert without a held count or source attribution", aggregate)
+	} else {
+		formatted := engine.FormatEvent(aggregate)
+		if !strings.Contains(formatted, "at least 5 wrong passwords within five minutes") || strings.Contains(formatted, "Also: 5 more") {
+			t.Errorf("account-wide alert wording = %q", formatted)
+		}
 	}
 	for kind, payload := range payloadJSON {
 		for _, leak := range []string{wrong, "://", "203.0.113.12", "203.0.113.13"} {

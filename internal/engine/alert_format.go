@@ -13,6 +13,8 @@ func securityAlertHeadline(kind string) string {
 	switch kind {
 	case model.SecurityAlertRateLimited:
 		return "authentication attempts were rate limited"
+	case model.SecurityAlertAccountSignInFailures:
+		return "an account received at least " + strconv.Itoa(model.SecurityAlertAccountSignInFailureCount) + " wrong passwords within five minutes"
 	case model.SecurityAlertSecondFactorLocked:
 		return "an account's one-time codes were locked after repeated wrong codes"
 	case model.SecurityAlertRecoveryCodeUsed:
@@ -34,6 +36,8 @@ func securityAlertPhrase(kind string) string {
 	switch kind {
 	case model.SecurityAlertRateLimited:
 		return "rate-limit episodes"
+	case model.SecurityAlertAccountSignInFailures:
+		return "account-wide wrong-password bursts"
 	case model.SecurityAlertSecondFactorLocked:
 		return "second-factor lockouts"
 	case model.SecurityAlertRecoveryCodeUsed:

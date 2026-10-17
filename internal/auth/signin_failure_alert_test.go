@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/engine"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
@@ -65,8 +66,12 @@ func TestKnownAccountWrongPasswordsAggregateAcrossClientsAndSurviveSuccess(t *te
 	if err := json.Unmarshal([]byte(alert.payload), &event); err != nil {
 		t.Fatal(err)
 	}
-	if event.Type != model.EventSecurityAlert || event.Alert == nil || event.Alert.Kind != model.SecurityAlertAccountSignInFailures || event.Alert.Account != admin.Username || event.Alert.Count != model.SecurityAlertAccountSignInFailureCount {
+	if event.Type != model.EventSecurityAlert || event.Alert == nil || event.Alert.Kind != model.SecurityAlertAccountSignInFailures || event.Alert.Account != admin.Username || event.Alert.Count != 0 {
 		t.Errorf("aggregate alert = %+v", event)
+	}
+	formatted := engine.FormatEvent(event)
+	if !strings.Contains(formatted, "at least 5 wrong passwords within five minutes") || strings.Contains(formatted, "Also: 5 more") {
+		t.Errorf("aggregate alert wording = %q", formatted)
 	}
 	for _, secret := range []string{"wrong-secret-never-in-alert", "198.51.100.", "request-5"} {
 		if strings.Contains(alert.payload, secret) {
@@ -167,8 +172,12 @@ func TestAccountSignInFailureAlertsStayInTheirUnitOrPlatformScope(t *testing.T) 
 		if err := json.Unmarshal([]byte(alert.payload), &event); err != nil {
 			t.Fatal(err)
 		}
-		if event.Alert == nil || event.Alert.Kind != model.SecurityAlertAccountSignInFailures || event.Alert.Count != model.SecurityAlertAccountSignInFailureCount {
+		if event.Alert == nil || event.Alert.Kind != model.SecurityAlertAccountSignInFailures || event.Alert.Count != 0 {
 			t.Errorf("alert detail = %+v", event.Alert)
+		}
+		formatted := engine.FormatEvent(event)
+		if !strings.Contains(formatted, "at least 5 wrong passwords within five minutes") || strings.Contains(formatted, "Also: 5 more") {
+			t.Errorf("alert wording = %q", formatted)
 		}
 		for _, secret := range []string{"bad-pass-not-retained", "203.0.113.", "unknown-name", "disabled-bravo"} {
 			if strings.Contains(alert.payload, secret) {

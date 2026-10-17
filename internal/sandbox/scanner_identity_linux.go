@@ -473,7 +473,7 @@ func (allocator *scannerIdentityAllocator) loadOrInitializeWithLiveness(director
 				return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: legacy PID namespace migration requires a private runtime")
 			}
 			if journal.PIDNamespace != pidNamespace {
-				if marker.PIDNamespace == pidNamespace || !privateRuntime || !marker.PrivateRuntime || !journal.PrivateRuntime {
+				if !privateRuntime || !marker.PrivateRuntime || !journal.PrivateRuntime {
 					return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: legacy scope migration state is inconsistent")
 				}
 				journal, err := initializeScannerIdentityScope(directoryFD, markerFD, bootID, pidNamespace, true, "resume empty legacy scope migration")
@@ -538,7 +538,8 @@ func (allocator *scannerIdentityAllocator) loadOrInitializeWithLiveness(director
 		return journal, privateRuntime, err
 	case journalErr != nil:
 		return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: same-boot lease journal is missing or invalid")
-	case marker.PIDNamespace != pidNamespace:
+	case marker.PIDNamespace != pidNamespace ||
+		(marker.Version == scannerIdentityVersion && journal.Version == scannerIdentityVersion && journal.PIDNamespace != pidNamespace):
 		if !exclusiveLiveness || !privateRuntime || !marker.PrivateRuntime || !journal.PrivateRuntime ||
 			marker.Version != scannerIdentityVersion || journal.Version != scannerIdentityVersion ||
 			journal.BootID != marker.BootID || journal.PrivateRuntime != marker.PrivateRuntime || journal.PIDNamespace == 0 || journal.Leases == nil {

@@ -841,16 +841,19 @@ func TestScannerIdentityChangedNamespaceCompletesOnlyProvenEmptyIntermediateScop
 	tests := []struct {
 		name          string
 		markerVersion int
+		pidNamespace  uint64
 	}{
-		{name: "v3 scope rollover", markerVersion: scannerIdentityVersion},
-		{name: "empty v2 migration rollover", markerVersion: scannerIdentityLegacyVersion},
+		{name: "v3 scope rollover", markerVersion: scannerIdentityVersion, pidNamespace: 19},
+		{name: "v3 scope rollover reuses marker namespace inode", markerVersion: scannerIdentityVersion, pidNamespace: 17},
+		{name: "empty v2 migration rollover", markerVersion: scannerIdentityLegacyVersion, pidNamespace: 19},
+		{name: "empty v2 migration rollover reuses marker namespace inode", markerVersion: scannerIdentityLegacyVersion, pidNamespace: 17},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newScannerIdentityRecoveryFixture(t)
 			allocator := fixture.allocator
-			allocator.pidNamespace = func() (uint64, error) { return 19, nil }
+			allocator.pidNamespace = func() (uint64, error) { return test.pidNamespace, nil }
 			markerBytes, err := json.Marshal(scannerIdentityScope{
 				Version: test.markerVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true,
 			})
@@ -881,11 +884,11 @@ func TestScannerIdentityChangedNamespaceCompletesOnlyProvenEmptyIntermediateScop
 				}
 			})
 			marker, err := readScannerIdentityMarkerAtPath(allocator.markerDir)
-			if err != nil || marker.Version != scannerIdentityVersion || marker.BootID != testScannerBootID || marker.PIDNamespace != 19 || !marker.PrivateRuntime {
+			if err != nil || marker.Version != scannerIdentityVersion || marker.BootID != testScannerBootID || marker.PIDNamespace != test.pidNamespace || !marker.PrivateRuntime {
 				t.Fatalf("recovered marker = %+v, %v", marker, err)
 			}
 			journal, err := readTestScannerIdentityJournal(allocator)
-			if err != nil || journal.Version != scannerIdentityVersion || journal.BootID != testScannerBootID || journal.PIDNamespace != 19 || !journal.PrivateRuntime || len(journal.Leases) != 1 {
+			if err != nil || journal.Version != scannerIdentityVersion || journal.BootID != testScannerBootID || journal.PIDNamespace != test.pidNamespace || !journal.PrivateRuntime || len(journal.Leases) != 1 {
 				t.Fatalf("recovered journal = %+v, %v", journal, err)
 			}
 		})
@@ -895,7 +898,7 @@ func TestScannerIdentityChangedNamespaceCompletesOnlyProvenEmptyIntermediateScop
 func TestScannerIdentityAutomaticRecoveryRequiresExplicitOfflineV2Evidence(t *testing.T) {
 	fixture := newScannerIdentityRecoveryFixture(t)
 	allocator := fixture.allocator
-	allocator.pidNamespace = func() (uint64, error) { return 19, nil }
+	allocator.pidNamespace = func() (uint64, error) { return 17, nil }
 	directoryFD, markerFD, err := openScannerIdentityDirectories(allocator.directory, allocator.markerDir)
 	if err != nil {
 		t.Fatal(err)
@@ -952,11 +955,11 @@ func TestScannerIdentityAutomaticRecoveryRequiresExplicitOfflineV2Evidence(t *te
 		t.Fatalf("confirmed offline recovery of archived v2 state: %v", err)
 	}
 	marker, err := readScannerIdentityMarkerAtPath(allocator.markerDir)
-	if err != nil || marker.Version != scannerIdentityVersion || marker.BootID != testScannerBootID || marker.PIDNamespace != 19 || !marker.PrivateRuntime {
+	if err != nil || marker.Version != scannerIdentityVersion || marker.BootID != testScannerBootID || marker.PIDNamespace != 17 || !marker.PrivateRuntime {
 		t.Fatalf("offline recovered marker = %+v, %v", marker, err)
 	}
 	journal, err := readTestScannerIdentityJournal(allocator)
-	if err != nil || journal.Version != scannerIdentityVersion || journal.BootID != testScannerBootID || journal.PIDNamespace != 19 || !journal.PrivateRuntime || len(journal.Leases) != 0 {
+	if err != nil || journal.Version != scannerIdentityVersion || journal.BootID != testScannerBootID || journal.PIDNamespace != 17 || !journal.PrivateRuntime || len(journal.Leases) != 0 {
 		t.Fatalf("offline recovered journal = %+v, %v", journal, err)
 	}
 	assertScannerIdentityArchive(t, allocator.directory, scannerIdentityJournalArchiveName(fixture.journalBytes), fixture.journalBytes)

@@ -122,6 +122,10 @@ a form that Renovate updates. CI runs it, and so does the release; run
 
 The release npm guard roots its Dockerfile stage graph at the target configured
 on the exact image build action, or at the final stage when no target is set.
+It analyzes the file selected by that action and requires the repository-root
+context (`context: .`) with the default `Dockerfile` or explicit
+`file: Dockerfile`. Dynamic or alternate contexts and files, and an unexpected
+inline Dockerfile input, fail closed.
 It follows stage inheritance, `COPY --from`, and `RUN --mount=from`. For every
 reachable stage, the test approves the exact ordered list of complete `RUN`
 instructions in the current Dockerfile. An added, removed, reordered,

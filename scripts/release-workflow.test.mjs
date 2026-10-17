@@ -291,6 +291,29 @@ function releaseImageBuildStep(workflowText = workflow) {
   return builds[0]
 }
 
+function releaseImageInput(workflowText, inputName) {
+  const build = releaseImageBuildStep(workflowText)
+  const withBlocks = [...build.matchAll(/^ {8}with:\s*$/gm)]
+  assert.equal(withBlocks.length, 1, 'release image build action must define exactly one with block')
+  const withBlock = build.slice(withBlocks[0].index + withBlocks[0][0].length)
+  const inputPattern = new RegExp(`^ {10}${inputName}:\\s*(.*?)\\s*$`, 'gm')
+  const matches = [...withBlock.matchAll(inputPattern)]
+  assert.ok(matches.length <= 1, `release image build action must not define multiple ${inputName} inputs`)
+  if (matches.length === 0) return undefined
+  return unquoteDockerfileValue(matches[0][1].replace(/\s+#.*$/, '').trim())
+}
+
+function releaseImageDockerfilePath(workflowText = workflow) {
+  const context = releaseImageInput(workflowText, 'context')
+  assert.equal(context, '.', 'release image build must use the static repository root as its context')
+  const file = releaseImageInput(workflowText, 'file')
+  assert.ok(file === undefined || file === 'Dockerfile',
+    'release image build must use Dockerfile at the root of its repository context')
+  assert.equal(releaseImageInput(workflowText, 'dockerfile-inline'), undefined,
+    'release image build must not add an inline Dockerfile input')
+  return file ?? 'Dockerfile'
+}
+
 function releaseImageBuildArgs(workflowText = workflow) {
   const build = releaseImageBuildStep(workflowText)
   const match = /^ {10}build-args:\s*\|\n((?: {12}[^\n]*\n?)+)/m.exec(build)
@@ -784,29 +807,65 @@ test('prebuilt Docker builds fail when frontend assets are missing', () => {
 })
 
 test('release image accepts only reviewed RUN forms on its reachable Dockerfile stage graph', async () => {
+  const dockerfilePath = releaseImageDockerfilePath()
+  assert.equal(releaseImageInput(workflow, 'file'), undefined,
+    'the current image action intentionally uses its default Dockerfile path')
+  const sourceDockerfile = await readRepositoryFile(dockerfilePath)
+  const replaceImageInput = (workflowText, input, replacement) => {
+    const pattern = new RegExp(`^ {10}${input}:.*$`, 'm')
+    assert.ok(pattern.test(workflowText), 'release image action input marker is missing: ' + input)
+    return workflowText.replace(pattern, '          ' + input + ': ' + replacement)
+  }
+  const staticUnsafeFile = workflow.replace(
+    '          context: .\n',
+    '          context: .\n          file: scripts/fixtures/Dockerfile-1517-ae82e4f\n',
+  )
+  assert.notEqual(staticUnsafeFile, workflow, 'static alternate Dockerfile mutation marker must exist')
+  assert.throws(() => releaseImageDockerfilePath(staticUnsafeFile), /Dockerfile at the root/,
+    'a static alternate Dockerfile with historical npm RUNs must fail closed')
+  const dynamicFile = workflow.replace(
+    '          context: .\n',
+    '          context: .\n          file: ${{ inputs.dockerfile }}\n',
+  )
+  assert.throws(() => releaseImageDockerfilePath(dynamicFile), /Dockerfile at the root/,
+    'a dynamic Dockerfile path must fail closed')
+  assert.throws(() => releaseImageDockerfilePath(replaceImageInput(workflow, 'context', '${{ inputs.context }}')),
+    /static repository root/, 'a dynamic Docker build context must fail closed')
+  assert.throws(() => releaseImageDockerfilePath(replaceImageInput(workflow, 'context', 'scripts/fixtures')),
+    /static repository root/, 'an alternate Docker build context must fail closed')
+  assert.throws(() => releaseImageDockerfilePath(workflow.replace(
+    '          context: .\n',
+    '          context: .\n          dockerfile-inline: |\n            FROM node:24\n',
+  )), /inline Dockerfile input/, 'unexpected inline Dockerfile input must fail closed')
+  const explicitRootDockerfile = workflow.replace(
+    '          context: .\n',
+    '          context: .\n          file: Dockerfile\n',
+  )
+  assert.equal(releaseImageDockerfilePath(explicitRootDockerfile), 'Dockerfile',
+    'an explicit root Dockerfile must resolve to the same reviewed source')
   const buildArgs = releaseImageBuildArgs()
   const targetStage = releaseImageTargetStage()
   assert.equal(targetStage, undefined, 'the image build must use Dockerfile default target when the build action omits target')
   const runViolations = (source, args = buildArgs, target = targetStage) => releaseDockerfileRunViolations(source, args, target)
-  assert.deepEqual(runViolations(dockerfile), [], 'the release image must not execute npm or npx')
+  assert.deepEqual(runViolations(sourceDockerfile), [], 'the release image must not execute npm or npx')
   assert.match(buildArgs.VERSION, /^v?0\.0\.0-ci$/, 'the current snapshot release version must remain an allowed value')
   for (const TARGETARCH of ['amd64', 'arm64']) {
     assert.deepEqual(
-      runViolations(dockerfile, { ...buildArgs, TARGETOS: 'linux', TARGETARCH }),
+      runViolations(sourceDockerfile, { ...buildArgs, TARGETOS: 'linux', TARGETARCH }),
       [],
       'current automatic platform values must remain allowed for linux/' + TARGETARCH,
     )
   }
-  assert.ok(runViolations(dockerfile, { ...buildArgs, TARGETOS: 'windows', TARGETARCH: 'amd64' }).length > 0,
+  assert.ok(runViolations(sourceDockerfile, { ...buildArgs, TARGETOS: 'windows', TARGETARCH: 'amd64' }).length > 0,
     'unsupported automatic operating systems must fail closed')
-  assert.ok(runViolations(dockerfile.replace(reviewedDockerfileSyntax + '\n', '')).length > 0,
+  assert.ok(runViolations(sourceDockerfile.replace(reviewedDockerfileSyntax + '\n', '')).length > 0,
     'removing the reviewed Dockerfile syntax directive must fail closed')
-  assert.ok(runViolations(dockerfile.replace(reviewedDockerfileSyntax, '# escape=`')).length > 0,
+  assert.ok(runViolations(sourceDockerfile.replace(reviewedDockerfileSyntax, '# escape=`')).length > 0,
     'changing the Dockerfile escape directive must fail closed')
   const defaultArgs = { ...buildArgs }
   delete defaultArgs.PREBUILT_FRONTEND
   assert.ok(
-    runViolations(dockerfile, defaultArgs).some((run) => run.stage === 'frontend'),
+    runViolations(sourceDockerfile, defaultArgs).some((run) => run.stage === 'frontend'),
     'the frontend stage ARG default must select the local npm path when no release build arg is supplied',
   )
 
@@ -820,7 +879,7 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
 
   const npmInstall = 'RUN if [ "$PREBUILT_FRONTEND" != "1" ]; then npm ci; fi'
   const m1 = replaceOnce(
-    dockerfile,
+    sourceDockerfile,
     'COPY scripts/check-node-runtime.mjs ./scripts/check-node-runtime.mjs',
     'COPY scripts/check-node-runtime.mjs ./scripts/check-node-runtime.mjs\nRUN npx --yes license-checker-rseidelsohn --summary',
     'M1',
@@ -835,12 +894,12 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
     'RUN npm ci --no-audit && npm ls --all > /deps.txt',
     '',
   ].join('\n')
-  let m2 = replaceOnce(dockerfile, buildStage, auditStage + buildStage, 'M2')
+  let m2 = replaceOnce(sourceDockerfile, buildStage, auditStage + buildStage, 'M2')
   const frontendArtifactCopy = 'COPY --from=frontend /src/internal/webui/dist ./internal/webui/dist'
   m2 = replaceOnce(m2, frontendArtifactCopy, frontendArtifactCopy + '\nCOPY --from=frontend-audit /deps.txt ./release-dependencies.txt', 'M2 copy')
   const m2Runs = runViolations(m2)
   assert.ok(m2Runs.some((run) => run.stage === 'frontend-audit'), 'M2 must be rejected through its COPY --from dependency')
-  let m2Mount = replaceOnce(dockerfile, buildStage, auditStage + buildStage, 'M2 mount')
+  let m2Mount = replaceOnce(sourceDockerfile, buildStage, auditStage + buildStage, 'M2 mount')
   const mountRun = 'RUN --mount=type=bind,from=frontend-audit,source=/deps.txt,target=/deps.txt,ro true'
   m2Mount = replaceOnce(m2Mount, frontendArtifactCopy, mountRun + '\n' + frontendArtifactCopy, 'M2 mount dependency')
   assert.ok(
@@ -859,7 +918,7 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   )
 
   const m3 = replaceOnce(
-    dockerfile,
+    sourceDockerfile,
     '      test -f ./prebuilt-dist/index.html',
     '      npm ci --ignore-scripts && npm run lint; test -f ./prebuilt-dist/index.html',
     'M3',
@@ -867,7 +926,7 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   assert.ok(runViolations(m3).length > 0, 'M3 must be rejected inside the active prebuilt branch')
 
   const unresolvedGuard = replaceOnce(
-    dockerfile,
+    sourceDockerfile,
     'ARG PREBUILT_FRONTEND=0',
     'ARG PREBUILT_FRONTEND=0\nRUN if [ "$UNKNOWN_RELEASE_FLAG" = "1" ]; then npm ci; fi',
     'unresolved argument guard',
@@ -877,7 +936,7 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
     'a new conditional RUN must fail because its complete form is not reviewed',
   )
   const environmentOverride = replaceOnce(
-    dockerfile,
+    sourceDockerfile,
     'ARG PREBUILT_FRONTEND=0',
     'ARG PREBUILT_FRONTEND=0\nENV PREBUILT_FRONTEND=0',
     'ENV override',
@@ -893,19 +952,19 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
     ['custom shell', 'SHELL ["/bin/bash", "-c"]'],
     ['command alias ARG', 'ARG PM=npm'],
   ]) {
-    const changedContext = replaceOnce(dockerfile, 'WORKDIR /src', 'WORKDIR /src\n' + instruction, name)
+    const changedContext = replaceOnce(sourceDockerfile, 'WORKDIR /src', 'WORKDIR /src\n' + instruction, name)
     assert.ok(runViolations(changedContext).some((run) => run.stage === 'frontend'),
       name + ' must require explicit policy review in a reached stage')
   }
 
   const m4 = replaceOnce(
-    dockerfile,
+    sourceDockerfile,
     npmInstall + '\n',
     npmInstall + '\nRUN npm ci --no-audit\n',
     'M4',
   )
   assert.ok(runViolations(m4).length > 0, 'M4 must be rejected as an additional frontend RUN')
-  const duplicatedRun = replaceOnce(dockerfile, npmInstall + '\n', npmInstall + '\n' + npmInstall + '\n', 'duplicate reviewed RUN')
+  const duplicatedRun = replaceOnce(sourceDockerfile, npmInstall + '\n', npmInstall + '\n' + npmInstall + '\n', 'duplicate reviewed RUN')
   assert.ok(runViolations(duplicatedRun).length > 0,
     'an extra copy of an otherwise reviewed RUN must fail closed')
 
@@ -915,7 +974,7 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
     'RUN npm ci --no-audit',
     '',
   ].join('\n')
-  const unusedStage = replaceOnce(dockerfile, finalStage, unreachableNpmStage + finalStage, 'unreachable npm stage')
+  const unusedStage = replaceOnce(sourceDockerfile, finalStage, unreachableNpmStage + finalStage, 'unreachable npm stage')
   assert.deepEqual(runViolations(unusedStage), [], 'unreachable stages must not affect the release target')
 
   const fromDependency = [
@@ -932,14 +991,14 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   )
 
   const argAlias = replaceOnce(
-    dockerfile,
+    sourceDockerfile,
     'ARG PREBUILT_FRONTEND=0',
     'ARG PREBUILT_FRONTEND=0\nARG PM=npm\nRUN $PM ci --no-audit',
     'ARG command alias',
   )
   assert.ok(runViolations(argAlias).some((run) => run.stage === 'frontend'), 'an ARG command alias for npm must be rejected')
   const envAlias = replaceOnce(
-    dockerfile,
+    sourceDockerfile,
     'ARG PREBUILT_FRONTEND=0',
     'ARG PREBUILT_FRONTEND=0\nENV PM=npx\nRUN "$PM" --yes license-checker-rseidelsohn',
     'ENV command alias',
@@ -947,7 +1006,7 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   assert.ok(runViolations(envAlias).some((run) => run.stage === 'frontend'), 'an ENV command alias for npx must be rejected')
   const opaqueSetupCopy = 'COPY scripts/fixtures/release-opaque-npm-setup.sh /var/tmp/setup.sh'
   const opaqueRunMutation = (command, name) => replaceOnce(
-    dockerfile,
+    sourceDockerfile,
     'WORKDIR /src',
     'WORKDIR /src\n' + opaqueSetupCopy + '\nRUN ' + command,
     name,
@@ -967,20 +1026,20 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
     'an unknown RUN form must fail even when its text contains no npm or npx')
 
   const unsafeNaabuVersion = replaceOnce(
-    dockerfile,
+    sourceDockerfile,
     'ARG NAABU_VERSION=v2.6.1',
     'ARG NAABU_VERSION=$(npm ci)',
     'Naabu version validation',
   )
   assert.ok(runViolations(unsafeNaabuVersion).some((run) => run.stage === 'naabu'),
     'an unchecked version value must not enter an approved command form')
-  assert.ok(runViolations(dockerfile, { ...buildArgs, VERSION: '$(npm ci)' }).some((run) => run.stage === 'build'),
+  assert.ok(runViolations(sourceDockerfile, { ...buildArgs, VERSION: '$(npm ci)' }).some((run) => run.stage === 'build'),
     'an unchecked release version build argument must fail closed')
-  assert.ok(runViolations(dockerfile, { ...buildArgs, TARGETARCH: '$(npm ci)' }).some((run) => run.stage === 'naabu'),
+  assert.ok(runViolations(sourceDockerfile, { ...buildArgs, TARGETARCH: '$(npm ci)' }).some((run) => run.stage === 'naabu'),
     'an unchecked automatic architecture value must fail closed')
 
   const dynamicBase = replaceOnce(
-    dockerfile,
+    sourceDockerfile,
     'FROM --platform=$BUILDPLATFORM node:24.21.0-alpine3.24@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS frontend',
     'FROM --platform=$BUILDPLATFORM $NODE_IMAGE AS frontend',
     'dynamic base image',
@@ -1026,7 +1085,7 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
     'an inherited ONBUILD COPY trigger must fail closed without omitting its hidden source edge')
 
   const dormantOnbuild = replaceOnce(
-    dockerfile,
+    sourceDockerfile,
     'ENTRYPOINT ["edgewatch"]',
     'ONBUILD RUN npm ci --no-audit\nENTRYPOINT ["edgewatch"]',
     'dormant ONBUILD trigger',
@@ -1041,13 +1100,20 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   assert.notEqual(unrelatedTarget, workflow, 'unrelated target mutation marker must exist')
   assert.equal(releaseImageTargetStage(unrelatedTarget), undefined,
     'target inputs on other actions must not select a Dockerfile stage')
+  const unrelatedDockerfile = workflow.replace(
+    '          images: ${{ env.REGISTRY_IMAGE }}',
+    '          images: ${{ env.REGISTRY_IMAGE }}\n          file: scripts/fixtures/Dockerfile-1517-ae82e4f',
+  )
+  assert.notEqual(unrelatedDockerfile, workflow, 'unrelated Dockerfile input mutation marker must exist')
+  assert.equal(releaseImageDockerfilePath(unrelatedDockerfile), 'Dockerfile',
+    'Dockerfile inputs on other workflow actions must not select the analyzed source')
 
   const targetNpmStage = [
     'FROM --platform=$BUILDPLATFORM node:24.21.0-alpine3.24 AS release-audit-target',
     'RUN npm ci --no-audit',
     '',
   ].join('\n')
-  const targetedDockerfile = replaceOnce(dockerfile, finalStage, targetNpmStage + finalStage, 'release target mutation stage')
+  const targetedDockerfile = replaceOnce(sourceDockerfile, finalStage, targetNpmStage + finalStage, 'release target mutation stage')
   const targetedWorkflow = workflow.replace(
     '          context: .\n          push: true',
     '          context: .\n          target: release-audit-target\n          push: true',

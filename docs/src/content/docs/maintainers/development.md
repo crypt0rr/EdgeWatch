@@ -12,6 +12,12 @@ and builds, but is not included in the production image.
 The project uses Go 1.27.2 or newer and Node.js 24.16.0 or newer within the
 Node 24 release line. CI and the container build are pinned to 24.21.0; local
 version managers can use [.node-version](https://github.com/crypt0rr/EdgeWatch/blob/main/.node-version).
+The daemon and real-stack browser tests run on Linux. The migration and
+restore directory lock required for safe daemon startup is implemented only
+on Linux; attempting to start the daemon on macOS, BSD, or another non-Linux
+system fails closed before migration, even when that platform provides
+`flock`. Use a Linux host or Linux container to run the daemon and real-stack
+tests.
 
 Use the commands in the repository’s Makefile, package.json, and CI. Read the
 [agent guide](https://github.com/crypt0rr/EdgeWatch/blob/main/AGENTS.md) for repository conventions and the
@@ -247,7 +253,9 @@ For documentation authoring and Cloudflare Pages setup, read
 
 Create a local configuration from `config.example.yaml`, keep the listener on
 `127.0.0.1:8080`, and use a private data directory with ownership appropriate
-to the local process. After building the console and binary:
+to the local process. Run this daemon on Linux; an attempt to start it on a
+non-Linux system intentionally fails closed because the cross-process
+migration lock is Linux-only. After building the console and binary:
 
 ```sh
 ./edgewatch daemon --config config.yaml

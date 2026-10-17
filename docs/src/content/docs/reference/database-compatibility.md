@@ -326,19 +326,20 @@ again; it can run while the daemon is running.
 One process migrates a database at a time. From v0.36.0, the daemon holds an
 advisory lock on the database directory from before it opens the database
 until its migration and startup phases have finished and it has acquired its
-daemon lease. Restores of that directory use the same lock. A second daemon
-on the same data volume exits with `another EdgeWatch process is migrating or
-restoring the database in this directory` and changes nothing, and a restore
-waits until startup has finished. Each migration step also checks, in its own
+daemon lease. Restores of that directory use the same lock. The daemon runs
+only on Linux because this directory-lock implementation is Linux-only; an
+attempt to start it on a non-Linux system fails closed before migration, even
+on a filesystem that supports `flock`. On Linux, a second daemon on the same data volume exits
+with `another EdgeWatch process is migrating or restoring the database in
+this directory` while the current daemon lease is live, and a restore waits
+until startup has finished. Each migration step also checks, in its own
 transaction, that the schema version is still the one it upgrades from, so no
-step runs twice. The daemon requires a platform and database filesystem that
-support advisory locking; if the directory cannot be locked, it exits with
+step runs twice. The Linux database filesystem must support advisory
+directory locking; if the directory cannot be locked, startup exits with
 `daemon startup requires a lockable database directory` before migrating or
-changing startup state. It also requires a persistent, file-backed SQLite
-database; in-memory SQLite paths have no directory to lock and are refused
-before startup work. Move the database to a filesystem that supports advisory
-directory locks and configure a persistent database file, then start the
-daemon again.
+changing startup state. The daemon also requires a persistent, file-backed
+SQLite database; in-memory SQLite paths have no directory to lock and are
+refused before startup work.
 
 The startup phases that read their progress before they write, such as the
 backfills, take the database's write lock first, so a host command that writes
@@ -350,7 +351,14 @@ through SQLite's busy timeout instead of causing a failed read-to-write
 upgrade. During service, a heartbeat that receives `SQLITE_BUSY` retries on
 the next heartbeat tick without counting it as a missed heartbeat; lease loss,
 `SQLITE_LOCKED`, and other database errors keep their existing failure
-behavior. A daemon shutdown signal cancels context-aware startup work;
+behavior. A host process holding SQLite's writer lock for more than two
+minutes can still prevent a successful heartbeat long enough for the daemon
+lease to become stale. If a second daemon acquires the database after that
+writer releases the lock, it can take over and reclaim the first daemon's job
+leases while the first process is still alive. The first daemon detects lease
+loss at its next heartbeat and stops its scans. Avoid suspending or otherwise
+leaving a host write open for this long; check `health` before starting a
+replacement daemon. A daemon shutdown signal cancels context-aware startup work;
 completed migration steps and backfill batches remain committed, and the next
 start resumes the remaining work.
 The daemon also opens its listener before it migrates, so `GET /healthz`

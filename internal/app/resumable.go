@@ -134,6 +134,13 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, ts *store.Tenant
 					if !discarded {
 						return a.recoverCompletedCycle(stateCtx, scan, run, latest)
 					}
+					if a.Logger != nil {
+						a.Logger.Warn("completed scan cycle discarded after repeated result finalization failures; planning a fresh scan",
+							"job", job.Name,
+							"cycle_id", latest.ID,
+							"finalization_failures", scanCycleMaxFinalizationFailures,
+						)
+					}
 				}
 			} else {
 				// A completed but unpromoted cycle from an older baseline is

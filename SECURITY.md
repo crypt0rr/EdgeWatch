@@ -620,6 +620,10 @@ Some signals cross units by design:
 - The scan slots and the scanning host are shared: a unit's scans can wait
   while other units' scans hold the slots, and every unit's probes leave from
   the same host. A slot cap limits a unit but reserves nothing for it.
+- Full scan-result responses share two deployment-wide response slots in
+  addition to each unit's own limit. A GET may receive `503 scan_slots_busy`
+  with `Retry-After: 1` while both are occupied; the refused request does not
+  read the stored scan document.
 - Live-update event IDs, the replay window, and the deployment-wide stream
   limit are shared; see
   [Live-update streams and session revocation](#live-update-streams-and-session-revocation).
@@ -636,14 +640,14 @@ Some signals cross units by design:
   default unit's audit with its source address, because the token names no
   account.
 
-Other signals are closed. Once more than one unit exists, a unit's status
-leaves out the deployment-wide live-update counters, and it leaves them out
-too when the units cannot be counted. A
-unit's status counts, notification totals, and telemetry cover its own rows
-only, its scan slots and probe budgets are its own limits, the Hosts view
-keeps each unit's newest observation of an address apart, and a public slug
-does not reveal whether a unit has it. The inactive YAML jobs in config.yaml
-belong to the default unit, so only its status names them.
+The remaining status and data signals are scoped. Once more than one unit
+exists, a unit's status leaves out the deployment-wide live-update counters,
+and it leaves them out too when the units cannot be counted. A unit's status
+counts, notification totals, and telemetry cover its own rows only, its scan
+slots and probe budgets are its own limits, the Hosts view keeps each unit's
+newest observation of an address apart, and a public slug does not reveal
+whether a unit has it. The inactive YAML jobs in config.yaml belong to the
+default unit, so only its status names them.
 The unit status keeps release-check failures visible but replaces the raw
 diagnostic with the fixed `update_check_failed` category; only platform status
 retains the raw diagnostic, which can include proxy, resolver, peer, or TLS
@@ -906,13 +910,15 @@ runtime snapshots, or baselines.
 Only the daemon migrates, and only one process at a time: from v0.36.0 the
 daemon holds an advisory lock on the database directory, which restores take
 too, from before it opens the database until migration and startup finish and
-the daemon lease is committed. A second daemon on the same data volume exits
-without writing, and each migration step checks the schema version inside
-its own transaction. The daemon refuses startup before migration if the
-platform or filesystem cannot lock the database directory; move the database
-to a filesystem that supports advisory directory locks, then restart it. The
-daemon also requires a persistent file-backed SQLite database: in-memory
-SQLite paths have no directory to lock and are refused before startup work.
+the daemon lease is committed. The daemon runs only on Linux because this
+directory lock is implemented only there; non-Linux daemon startup fails
+closed before migration. A second daemon on the same data volume exits without
+writing while the existing daemon lease is live, and each migration step
+checks the schema version inside its own transaction. The daemon also needs a
+Linux database filesystem that supports advisory directory locks; if it
+cannot lock the directory, startup fails before changing state. The daemon
+requires a persistent file-backed SQLite database too: in-memory SQLite
+paths have no directory to lock and are refused before startup work.
 Startup work uses the daemon's signal context. Completed migration steps and
 backfill batches remain committed, while unfinished transactions roll back
 and the next start resumes the remaining work. Startup phases that read
@@ -921,7 +927,14 @@ delays them instead of failing the start. Daemon and scheduled-job lease
 acquisition likewise reserve the write lock before reading ownership or job
 revision. A heartbeat that receives `SQLITE_BUSY` retries at the next tick
 without counting as missed; lease loss, `SQLITE_LOCKED`, and other database
-errors keep their existing failure behavior. The host commands that act on
+errors keep their existing failure behavior. A host process that holds
+SQLite's writer lock for more than two minutes can still prevent a successful
+heartbeat long enough for the daemon lease to become stale. After that writer
+releases the lock, a second daemon can take over and reclaim the first
+daemon's job leases. The first daemon may remain alive until its next
+heartbeat detects lease loss; it then stops its scans. Taking over a stale
+lease means a second daemon is not always refused merely because
+the first process is still running. The host commands that act on
 business units or accounts (`admin`, `scan`, `status`, `history`, `baseline`, and `notify
 test`) refuse a schema that the daemon has not upgraded yet, such as a
 restored backup of an older release, before they read or write anything, so

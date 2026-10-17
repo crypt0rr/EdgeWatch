@@ -160,12 +160,15 @@ starts a fresh cycle. Read [Scanning and profiles](/user-guide/scanning/)
 and [Host commands](/reference/cli/) before changing scan scope or retrying.
 
 If a completed cycle's result cannot be finalized, EdgeWatch retries promotion
-from the saved work once. A second persisted finalization failure discards the
-cycle, and the next trigger plans a fresh scan. Notification-destination lookup
-failures do not count toward this limit; after correcting the destination
-configuration, the next trigger can still promote the completed result. A
-process restart between cycle completion and scan-history insertion also keeps
-the existing recovery path.
+from the saved work once. After the second persisted finalization failure, the
+cycle remains available until its next trigger. That trigger discards the saved
+work and plans a fresh scan; the server log records a WARN with the discarded
+cycle ID. Repeated warnings mean the merged result still cannot be finalized;
+reduce the job's scan scope or address the reported storage problem.
+Notification-destination lookup failures do not count toward this limit; after
+correcting the destination configuration, the next trigger can still promote
+the completed result. A process restart between cycle completion and
+scan-history insertion also keeps the existing recovery path.
 
 A scan that fails with `expanded targets exceed scanner.max_job_hosts=65536`
 covers more addresses than one job may scan; split its targets into several
@@ -228,3 +231,9 @@ An older binary refuses a database upgraded beyond its supported version.
 Rollback requires a matching pre-upgrade backup; do not replace a live database.
 Follow [Database compatibility](/reference/database-compatibility/) and
 [Backup and recovery](/operations/backup-recovery/).
+
+If a write-capable host command was interrupted during a transaction on a
+rollback-journal database, SQLite may leave a hot `-journal` file. The next
+daemon start rolls back that incomplete transaction before checking the daemon
+lease; it still refuses startup if the lease is live or malformed. The
+read-only `edgewatch verify` command does not recover the live database.

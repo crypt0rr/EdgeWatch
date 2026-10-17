@@ -120,6 +120,35 @@ image that a workflow step or the scan script starts is pinned by digest, in
 a form that Renovate updates. CI runs it, and so does the release; run
 `node --test scripts/release-workflow.test.mjs` after changing a workflow.
 
+The release npm guard roots its Dockerfile stage graph at the target configured
+on the exact image build action, or at the final stage when no target is set.
+It analyzes the file selected by that action and requires the repository-root
+context (`context: .`) with the default `Dockerfile` or explicit
+`file: Dockerfile`. Dynamic or alternate contexts and files, and an unexpected
+inline Dockerfile input, fail closed. The test accepts only the reviewed plain
+build-step fields and action-input keys, plus the literal `build-args` block;
+quoted keys or values, flow syntax, anchors, merge keys, duplicate fields or
+inputs, and unexpected indentation fail closed.
+It follows stage inheritance, `COPY --from`, and `RUN --mount=from`. For every
+reachable stage, the test approves the exact ordered list of complete `RUN`
+instructions in the current Dockerfile. An added, removed, reordered,
+duplicated, or changed reachable `RUN` fails closed, even when its command does
+not mention npm. The test resolves the two reviewed release conditionals using
+the build arguments from that image action and checks stage `ARG` defaults and
+values against their allowed forms. A reachable `ENV` or `SHELL`, a global
+`ARG`, or a dynamic base or stage dependency also fails closed. Triggered
+`ONBUILD` instructions fail because they can add commands or hidden stage
+dependencies; an untriggered `ONBUILD` remains dormant in that build.
+
+This is a static contract for the checked-in Dockerfile, target, and build
+arguments, including the pinned Dockerfile syntax directive. It does not
+emulate a general shell, resolve bare command names
+through `PATH`, parse copied scripts, inspect binaries, or protect against a
+malicious pinned base image or executable replacement. It relies on the pinned
+stage images and does not prove BuildKit isolation. Any change to a reachable
+`RUN`, its `ARG` declarations, or the image build target needs a matching guard
+review and regression case.
+
 The same checks keep dependency provenance current. Renovate reads the
 golangci-lint pin from `.golangci-lint-version` using GitHub Releases, and its
 Alpine package manager must match every Alpine minor version used by the

@@ -223,9 +223,152 @@ func requireScannerIdentity(uid uint32, profile capabilityProfile) error {
 	return nil
 }
 
+func processStarttime(pid int) (string, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return "", fmt.Errorf("read process %d stat: %w", pid, err)
+	}
+	end := strings.LastIndexByte(string(data), ')')
+	if end < 0 {
+		return "", fmt.Errorf("process %d stat has no command delimiter", pid)
+	}
+	fields := strings.Fields(string(data[end+1:]))
+	if len(fields) <= 19 || !isDecimal(fields[19]) {
+		return "", fmt.Errorf("process %d stat has no valid starttime", pid)
+	}
+	return fields[19], nil
+}
+
+func isDecimal(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func assertInheritedLivenessFD(pidText, expectedIdentity, lockPath string) error {
+	pid := os.Getpid()
+	if pidText != "self" {
+		parsed, err := strconv.Atoi(pidText)
+		if err != nil || parsed <= 0 {
+			return fmt.Errorf("invalid target process ID %q", pidText)
+		}
+		pid = parsed
+	}
+	identity := strings.Split(expectedIdentity, ":")
+	if len(identity) != 3 {
+		return fmt.Errorf("invalid expected process/lock identity %q", expectedIdentity)
+	}
+	selfMode := identity[0] == "self-absent" || identity[0] == "self-required"
+	if (!selfMode && !isDecimal(identity[0])) || !isDecimal(identity[1]) || !isDecimal(identity[2]) || (selfMode && pidText != "self") {
+		return fmt.Errorf("invalid expected process/lock identity %q", expectedIdentity)
+	}
+	dev, err := strconv.ParseUint(identity[1], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid expected liveness device: %w", err)
+	}
+	ino, err := strconv.ParseUint(identity[2], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid expected liveness inode: %w", err)
+	}
+	if lockPath != "/var/lib/edgewatch/scanner-identities/liveness.lock" {
+		return fmt.Errorf("unexpected liveness lock path %q", lockPath)
+	}
+	before, err := processStarttime(pid)
+	if err != nil {
+		return fmt.Errorf("inspect target before liveness descriptor scan: %w", err)
+	}
+	if !selfMode && before != identity[0] {
+		return fmt.Errorf("target process %d starttime changed before liveness descriptor scan: got %s, want %s", pid, before, identity[0])
+	}
+	entries, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
+	if err != nil {
+		return fmt.Errorf("cannot inspect target process %d descriptor table (dumpability or proc access denied): %w", pid, err)
+	}
+	var matches []string
+	var inspectionErrors []string
+	for _, entry := range entries {
+		fd := entry.Name()
+		if !isDecimal(fd) {
+			continue
+		}
+		fdPath := fmt.Sprintf("/proc/%d/fd/%s", pid, fd)
+		target, linkErr := os.Readlink(fdPath)
+		if linkErr != nil {
+			if errors.Is(linkErr, os.ErrNotExist) {
+				continue
+			}
+			inspectionErrors = append(inspectionErrors, fmt.Sprintf("fd %s readlink: %v", fd, linkErr))
+			continue
+		}
+		if target != lockPath {
+			continue
+		}
+		info, statErr := os.Stat(fdPath)
+		if statErr != nil {
+			inspectionErrors = append(inspectionErrors, fmt.Sprintf("fd %s stat: %v", fd, statErr))
+			continue
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			inspectionErrors = append(inspectionErrors, fmt.Sprintf("fd %s has no Linux stat identity", fd))
+			continue
+		}
+		if uint64(stat.Dev) != dev || stat.Ino != ino || !info.Mode().IsRegular() {
+			inspectionErrors = append(inspectionErrors, fmt.Sprintf("fd %s names the lock path but its device/inode/type does not match", fd))
+			continue
+		}
+		fdinfo, readErr := os.ReadFile(fmt.Sprintf("/proc/%d/fdinfo/%s", pid, fd))
+		if readErr != nil {
+			inspectionErrors = append(inspectionErrors, fmt.Sprintf("fd %s info: %v", fd, readErr))
+			continue
+		}
+		var flags uint64
+		foundFlags := false
+		for _, line := range strings.Split(string(fdinfo), "\n") {
+			if value, ok := strings.CutPrefix(line, "flags:"); ok {
+				flags, err = strconv.ParseUint(strings.TrimSpace(value), 8, 64)
+				foundFlags = err == nil
+				break
+			}
+		}
+		if !foundFlags {
+			inspectionErrors = append(inspectionErrors, fmt.Sprintf("fd %s info has no valid octal flags", fd))
+			continue
+		}
+		if flags&uint64(unix.O_ACCMODE) != uint64(unix.O_RDONLY) || flags&uint64(unix.O_CLOEXEC) != 0 {
+			inspectionErrors = append(inspectionErrors, fmt.Sprintf("fd %s is not an inherited read-only, non-CLOEXEC descriptor", fd))
+			continue
+		}
+		matches = append(matches, fd)
+	}
+	after, err := processStarttime(pid)
+	if err != nil || after != before {
+		return fmt.Errorf("target process %d identity changed during liveness descriptor scan: before=%s after=%s error=%v", pid, before, after, err)
+	}
+	if len(inspectionErrors) != 0 {
+		return fmt.Errorf("could not conclusively inspect target process %d liveness descriptor: %s", pid, strings.Join(inspectionErrors, "; "))
+	}
+	if identity[0] == "self-absent" {
+		if len(matches) != 0 {
+			return fmt.Errorf("negative control process %d unexpectedly has liveness descriptor(s) %s", pid, strings.Join(matches, ","))
+		}
+		return nil
+	}
+	if len(matches) == 0 {
+		return fmt.Errorf("target process %d has no inherited read-only liveness descriptor for %s at device/inode %s:%s", pid, lockPath, identity[1], identity[2])
+	}
+	return nil
+}
+
 func child(args []string) int {
-	if len(args) != 5 || args[0] != "child" {
-		fmt.Fprintln(os.Stderr, "usage: child UID PROFILE OP PATH")
+	if (len(args) != 5 && len(args) != 7) || args[0] != "child" {
+		fmt.Fprintln(os.Stderr, "usage: child UID PROFILE OP PATH [PID EXPECTED_STARTTIME:DEVICE:INODE]")
 		return 2
 	}
 	uid64, err := strconv.ParseUint(args[1], 10, 32)
@@ -314,6 +457,23 @@ func child(args []string) int {
 			fmt.Fprintf(os.Stderr, "write read result failed: %v\n", err)
 			return 14
 		}
+	case "assert-liveness-fd":
+		if len(args) != 7 {
+			fmt.Fprintln(os.Stderr, "liveness descriptor inspection requires PID and starttime/device/inode")
+			return 2
+		}
+		if err := assertInheritedLivenessFD(args[5], args[6], path); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			if strings.Contains(err.Error(), "no inherited read-only liveness descriptor") {
+				return 15
+			}
+			return 16
+		}
+		if args[5] == "self" {
+			fmt.Fprintln(os.Stdout, "self liveness descriptor expectation verified")
+		} else {
+			fmt.Fprintf(os.Stdout, "target PID %s has inherited read-only liveness descriptor for %s\n", args[5], path)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown operation %q\n", args[2])
 		return 2
@@ -325,8 +485,8 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "child" {
 		os.Exit(child(os.Args[1:]))
 	}
-	if len(os.Args) != 5 {
-		fmt.Fprintln(os.Stderr, "usage: proc-fd-probe UID PROFILE OP PATH")
+	if len(os.Args) != 5 && len(os.Args) != 7 {
+		fmt.Fprintln(os.Stderr, "usage: proc-fd-probe UID PROFILE OP PATH [PID EXPECTED_STARTTIME:DEVICE:INODE]")
 		os.Exit(2)
 	}
 	uid64, err := strconv.ParseUint(os.Args[1], 10, 32)
@@ -344,7 +504,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	command := exec.Command(executable, "child", os.Args[1], os.Args[2], os.Args[3], os.Args[4])
+	commandArgs := []string{"child", os.Args[1], os.Args[2], os.Args[3], os.Args[4]}
+	if len(os.Args) == 7 {
+		commandArgs = append(commandArgs, os.Args[5], os.Args[6])
+	}
+	command := exec.Command(executable, commandArgs...)
 	command.SysProcAttr = &syscall.SysProcAttr{
 		Credential:  &syscall.Credential{Uid: uint32(uid64), Gid: uint32(uid64), Groups: []uint32{}},
 		AmbientCaps: profile.ambient,
@@ -2009,7 +2173,8 @@ fi
 if [ "${EDGEWATCH_SCANNER_LIFECYCLE_ONLY:-0}" = 1 ]; then
   daemon_landlock=off
   daemon_scan_limit=1
-  daemon_mounts=(--volume "$lifecycle_entrypoint:/usr/local/bin/edgewatch-lifecycle-entrypoint:ro")
+  daemon_mounts=(--volume "$workdir/proc-fd-probe:$proc_fd_probe:ro"
+    --volume "$lifecycle_entrypoint:/usr/local/bin/edgewatch-lifecycle-entrypoint:ro")
   daemon_entrypoint=/usr/local/bin/edgewatch-lifecycle-entrypoint
   run_daemon lifecycle-base auto "${bundled_caps[@]}"
   daemon_mounts=()
@@ -2048,7 +2213,70 @@ lifecycle_top=$workdir/lifecycle-a-top.txt
 capture_container_processes "$container" "$lifecycle_processes" "$lifecycle_top" || fail "could not capture container A's host process identities"
 assert_captured_container_processes "$lifecycle_processes" "$lifecycle_nmap_pid" "$lifecycle_supervisor_pid" 1 ||
   fail "container A's live Nmap/supervisor/daemon tree was not captured by host PID and starttime"
+read -r lifecycle_nmap_host_pid lifecycle_nmap_host_starttime < <(python3 - "$lifecycle_processes" "$lifecycle_nmap_pid" <<'PY'
+import sys
+from pathlib import Path
+
+capture, expected_inner_pid = sys.argv[1:]
+matches = []
+for line in Path(capture).read_text().splitlines():
+    host_pid, starttime, state, inner_pid, command = line.split("\t", 4)
+    if inner_pid == expected_inner_pid:
+        matches.append((host_pid, starttime, state, command))
+if len(matches) != 1:
+    raise SystemExit(f"expected one captured host identity for Nmap PID {expected_inner_pid}, found {len(matches)}")
+host_pid, starttime, state, command = matches[0]
+if state in {"Z", "X"} or not starttime.isdigit():
+    raise SystemExit(f"captured Nmap host process {host_pid} is not live: state={state} starttime={starttime}")
+try:
+    data = Path(f"/proc/{host_pid}/stat").read_text()
+    fields = data[data.rfind(")") + 2:].split()
+    if len(fields) <= 19 or fields[19] != starttime or fields[0] in {"Z", "X"}:
+        raise SystemExit(f"captured Nmap host PID {host_pid} no longer matches starttime/state")
+except (OSError, IndexError) as error:
+    raise SystemExit(f"could not verify captured Nmap host PID {host_pid}: {error}")
+print(f"{host_pid}\t{starttime}")
+PY
+) || fail "could not bind Nmap's container PID to its live host PID/starttime"
+[[ "$lifecycle_nmap_host_pid" =~ ^[0-9]+$ && "$lifecycle_nmap_host_starttime" =~ ^[0-9]+$ ]] ||
+  fail "captured Nmap host PID/starttime is malformed: $lifecycle_nmap_host_pid/$lifecycle_nmap_host_starttime"
+[[ "$lifecycle_nmap_host_starttime" = "$lifecycle_nmap_starttime" ]] ||
+  fail "Nmap host/container starttime differs: host=$lifecycle_nmap_host_starttime container=$lifecycle_nmap_starttime"
 assert_container_mount "$container" "$daemon_data_source" /var/lib/edgewatch
+lifecycle_lock_device_inode=$(docker exec "$container" stat -Lc '%d:%i' /var/lib/edgewatch/scanner-identities/liveness.lock) ||
+  fail "could not stat the mounted scanner liveness lock from container A"
+[[ "$lifecycle_lock_device_inode" =~ ^([0-9]+):([0-9]+)$ ]] ||
+  fail "container A returned a malformed scanner liveness lock identity: $lifecycle_lock_device_inode"
+lifecycle_lock_device=${BASH_REMATCH[1]}
+lifecycle_lock_inode=${BASH_REMATCH[2]}
+lifecycle_lock_identity="$lifecycle_nmap_host_starttime:$lifecycle_lock_device:$lifecycle_lock_inode"
+lifecycle_lock_path=/var/lib/edgewatch/scanner-identities/liveness.lock
+# A helper process without the inherited scanner FD must satisfy the negative
+# form, and fail the positive form with the explicit absent-FD result. This
+# proves the live Nmap assertion does not pass merely because proc inspection
+# returned no entries.
+docker exec "$container" "$proc_fd_probe" "$lifecycle_nmap_uid" "0000000000002000" \
+  assert-liveness-fd "$lifecycle_lock_path" self "self-absent:$lifecycle_lock_device:$lifecycle_lock_inode" >"$workdir/lifecycle-liveness-negative.log" 2>&1 ||
+  fail "liveness descriptor inspection could not establish its no-FD negative control: $(cat "$workdir/lifecycle-liveness-negative.log")"
+grep -Fxq 'self liveness descriptor expectation verified' "$workdir/lifecycle-liveness-negative.log" ||
+  fail "no-FD self control did not report the expected absence check: $(cat "$workdir/lifecycle-liveness-negative.log")"
+if docker exec "$container" "$proc_fd_probe" "$lifecycle_nmap_uid" "0000000000002000" \
+  assert-liveness-fd "$lifecycle_lock_path" self "self-required:$lifecycle_lock_device:$lifecycle_lock_inode" >"$workdir/lifecycle-liveness-negative-required.log" 2>&1; then
+  fail "liveness descriptor inspection accepted a process with no inherited lock FD"
+else
+  lifecycle_liveness_negative_status=$?
+fi
+[ "$lifecycle_liveness_negative_status" = 15 ] ||
+  fail "missing-FD assertion exited $lifecycle_liveness_negative_status, want its dedicated failure status 15"
+grep -Fq 'has no inherited read-only liveness descriptor' "$workdir/lifecycle-liveness-negative-required.log" ||
+  fail "the no-FD positive assertion failed for an inspection error instead of a missing lock: $(cat "$workdir/lifecycle-liveness-negative-required.log")"
+echo "verified liveness-FD negative control: no-lock self passes absence check; required-presence check rejects it (exit=$lifecycle_liveness_negative_status)"
+if ! lifecycle_liveness_probe=$(docker exec "$container" "$proc_fd_probe" "$lifecycle_nmap_uid" "0000000000002000" \
+  assert-liveness-fd "$lifecycle_lock_path" "$lifecycle_nmap_pid" "$lifecycle_lock_identity" 2>&1); then
+  fail "could not prove live Nmap inherited the exact read-only liveness lock (host PID $lifecycle_nmap_host_pid, starttime $lifecycle_nmap_host_starttime): $lifecycle_liveness_probe"
+fi
+expect_scanner_starttime "$lifecycle_nmap_pid" "$lifecycle_nmap_starttime" "after inherited liveness-FD inspection"
+echo "verified live Nmap inherited scanner liveness lock: host PID=$lifecycle_nmap_host_pid container PID=$lifecycle_nmap_pid starttime=$lifecycle_nmap_host_starttime device/inode=$lifecycle_lock_device_inode; $lifecycle_liveness_probe"
 scanner_scope_snapshot "$container" >"$workdir/lifecycle-scope-before-b.tsv"
 
 namespace_probe_database_dir=$workdir/data-namespace-probe-db

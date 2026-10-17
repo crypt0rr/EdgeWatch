@@ -22,9 +22,9 @@ services:
     cap_drop:
       - ALL
     # NET_RAW is the raw-packet privilege of Nmap and Naabu. SETUID and SETGID
-    # let EdgeWatch start them as the unprivileged sandbox identity (UID
-    # 65532), which keeps only NET_RAW and cannot read ./data, and KILL lets
-    # it stop them; without these three they run unconfined as UID 0.
+    # let EdgeWatch lease each scanner a distinct UID/GID from 60000–60063;
+    # KILL lets it stop them. Without these three sandbox-control capabilities,
+    # the identity pool is unavailable and scanner launches fail closed.
     cap_add:
       - NET_RAW
       - SETUID

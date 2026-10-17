@@ -83,21 +83,22 @@ scanner:
     - 169.254.0.0/16
     - ::1/128
     - fe80::/10
-  # Nmap and Naabu run as the unprivileged UID 65532 with only their raw-packet
-  # capabilities, so they cannot read the database or the keys. auto (the
-  # default) does so when the container grants SETUID, SETGID and KILL, as the
-  # bundled compose.yaml does, and otherwise runs them as UID 0 with a
-  # warning. required refuses to scan without the sandbox; off never
-  # uses it, nor Landlock.
+  # Nmap and Naabu use distinct leased UIDs/GIDs from 60000–60063, with only
+  # their raw-packet capabilities. Reserve these host IDs for scanner use; with
+  # rootless Docker or user-namespace remapping, reserve the corresponding
+  # mapped host IDs. auto (the default) keeps the daemon running but refuses
+  # scanner launches if the pool or required seccomp filter is unavailable.
+  # required also refuses daemon startup and direct scan commands; off disables
+  # scanner isolation.
   sandbox: auto
-  # Landlock limits Nmap and Naabu, whatever their UID, to the system files a
-  # scan reads and the files EdgeWatch passes to them; only Naabu may also
-  # create files, below /tmp. It also gives them a seccomp filter and makes
-  # the out-of-memory killer stop a scanner before the daemon. auto (the
-  # default) applies it when the kernel provides Landlock; required refuses
-  # to scan without it; off never applies it. EdgeWatch keeps the files it
-  # passes to scanners in tmp/scanner beside the database, whatever TMPDIR
-  # names.
+  # Landlock limits Nmap and Naabu to the system files a scan reads and the
+  # files EdgeWatch passes to them; only Naabu may also create files, below
+  # /tmp. The scanner seccomp filter is independent of Landlock and remains
+  # required in sandboxed modes; without it scanner launches fail closed.
+  # auto (the default) permits scans without Landlock when identity and seccomp
+  # are enforced; required refuses scanner work without Landlock; off disables
+  # only Landlock. EdgeWatch keeps passed files in tmp/scanner beside the
+  # database, whatever TMPDIR names.
   landlock: auto
   # The most addresses the targets of one job may expand to when it scans,
   # in every unit. A scan keeps every address in the daemon's memory: a /16

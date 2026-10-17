@@ -115,10 +115,10 @@ default `scanner.sandbox: auto` and bundled Compose capabilities
 (`NET_RAW`, `SETUID`, `SETGID`, `KILL`), EdgeWatch starts each Nmap and Naabu
 invocation with a distinct UID and GID leased from 60000–60063, no
 supplementary groups, and only `NET_RAW` (and `NET_ADMIN` when granted) as
-ambient capabilities. The pool holds at most 64 concurrent identities. A
-scanner reads its target list and writes its results through inherited file
-descriptors; it cannot list the UID 0 data directory or reach `config.yaml`,
-and so cannot read the database or encryption keys. If the container lacks a
+ambient capabilities. The pool holds at most 64 concurrent identities. EdgeWatch
+passes private scanner files through inherited file descriptors; a scanner
+cannot list the UID 0 data directory or reach `config.yaml`, and so cannot read
+the database or encryption keys. If the container lacks a
 required control capability, UID/GID mapping, safe lease state, or the
 required seccomp filter, `auto` lets the daemon start and reports the identity
 pool unavailable in health, records a deployment alert, and refuses each
@@ -148,7 +148,13 @@ EdgeWatch creates Nmap XML and Naabu target-list files in `tmp/scanner` beside
 the database, a daemon-owned `0700` directory. Concurrent scans have different
 UIDs, so filesystem ownership and procfs access checks prevent one scanner
 from opening another invocation's files or inherited descriptors. Landlock
-adds a per-process file boundary when available. In identity-isolated mode,
+adds a per-process file boundary when available. These file boundaries do not
+hide Nmap command lines: Nmap's arguments include its target addresses and port
+list, which another scanner can read from `/proc/<pid>/cmdline` without ptrace
+access. A compromised scanner can learn the scope of concurrent Nmap scans.
+When deployed with host networking, scanners retain `NET_RAW`, so separate
+identities do not isolate scan traffic; a compromised scanner may be able to
+observe packets from concurrent scans. In identity-isolated mode,
 Naabu's own temporary files start in a daemon-owned `0731` namespace below
 `/tmp` while a helper creates an invocation-owned `0700` leaf. The namespace's
 write-enabled group is that invocation's unique leased GID; the helper has no

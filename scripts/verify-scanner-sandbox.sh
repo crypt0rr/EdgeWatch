@@ -31,12 +31,17 @@ scanner_pid_selector=/usr/local/bin/edgewatch-scanner-pid-selector
 source "$script_directory/scanner-process-hold.sh"
 workdir=$(mktemp -d)
 container=
+namespace_probe_container=
 listener_pid=
 webhook_pid=
 proc_fd_probe=
 cleanup() {
-  local container_removed=1
+  local script_status=$? container_removed=1
   resume_held_scanner || true
+  if [ -n "$namespace_probe_container" ]; then
+    docker rm -f "$namespace_probe_container" >/dev/null 2>&1 || true
+    namespace_probe_container=
+  fi
   if [ -n "$container" ]; then
     docker logs "$container" >"$workdir/last-daemon.log" 2>&1 || true
     # Force removal is the failure-path cleanup. If Docker cannot confirm it,
@@ -56,18 +61,18 @@ cleanup() {
     kill "$webhook_pid" >/dev/null 2>&1 || true
   fi
   if [ "$container_removed" = 1 ]; then
-    for data in "$workdir"/data-*; do
-      [ -d "$data" ] || continue
-      docker run --rm --volume "$data:/data" --entrypoint /bin/sh "$image" \
-        -c 'rm -rf /data/* /data/.[!.]* /data/..?*' >/dev/null 2>&1 || true
-    done
+    if [ "$script_status" = 0 ]; then
+      for data in "$workdir"/data-*; do
+        [ -d "$data" ] || continue
+        docker run --rm --volume "$data:/data" --entrypoint /bin/sh "$image" \
+          -c 'rm -rf /data/* /data/.[!.]* /data/..?*' >/dev/null 2>&1 || true
+      done
+      rm -rf "$workdir"
+    else
+      printf 'preserving verifier data and work directory after failure at %s\n' "$workdir" >&2
+    fi
   else
-    printf 'warning: leaving verifier data volumes intact because removal of owned container %s is unconfirmed\n' "$container" >&2
-  fi
-  if [ "$container_removed" = 1 ]; then
-    rm -rf "$workdir"
-  else
-    printf 'warning: preserving verifier work directory for owned container %s at %s\n' "$container" "$workdir" >&2
+    printf 'warning: preserving verifier data and work directory because removal of owned container %s is unconfirmed at %s\n' "$container" "$workdir" >&2
   fi
 }
 trap cleanup EXIT
@@ -79,8 +84,8 @@ fail() {
     # check gave up.
     echo "processes in the daemon container (name state ppid uid):" >&2
     docker exec "$container" /bin/sh -c 'for status in /proc/[0-9]*/status; do awk "/^Name:/{n=\$2} /^State:/{s=\$2} /^PPid:/{p=\$2} /^Uid:/{u=\$2} END{print n, s, p, u}" "$status" 2>/dev/null; done' >&2 || true
-    if [ -n "${base:-}" ] && [ -n "${state:-}" ]; then
-      python3 "$workdir/driver.py" diagnose "$base" "$state" >&2 || true
+    if [ -n "${base:-}" ] && [ -s "${daemon_state_path:-}" ]; then
+      python3 "$workdir/driver.py" diagnose "$base" "$daemon_state_path" >&2 || true
     fi
   fi
   exit 1
@@ -218,9 +223,152 @@ func requireScannerIdentity(uid uint32, profile capabilityProfile) error {
 	return nil
 }
 
+func processStarttime(pid int) (string, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return "", fmt.Errorf("read process %d stat: %w", pid, err)
+	}
+	end := strings.LastIndexByte(string(data), ')')
+	if end < 0 {
+		return "", fmt.Errorf("process %d stat has no command delimiter", pid)
+	}
+	fields := strings.Fields(string(data[end+1:]))
+	if len(fields) <= 19 || !isDecimal(fields[19]) {
+		return "", fmt.Errorf("process %d stat has no valid starttime", pid)
+	}
+	return fields[19], nil
+}
+
+func isDecimal(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func assertInheritedLivenessFD(pidText, expectedIdentity, lockPath string) error {
+	pid := os.Getpid()
+	if pidText != "self" {
+		parsed, err := strconv.Atoi(pidText)
+		if err != nil || parsed <= 0 {
+			return fmt.Errorf("invalid target process ID %q", pidText)
+		}
+		pid = parsed
+	}
+	identity := strings.Split(expectedIdentity, ":")
+	if len(identity) != 3 {
+		return fmt.Errorf("invalid expected process/lock identity %q", expectedIdentity)
+	}
+	selfMode := identity[0] == "self-absent" || identity[0] == "self-required"
+	if (!selfMode && !isDecimal(identity[0])) || !isDecimal(identity[1]) || !isDecimal(identity[2]) || (selfMode && pidText != "self") {
+		return fmt.Errorf("invalid expected process/lock identity %q", expectedIdentity)
+	}
+	dev, err := strconv.ParseUint(identity[1], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid expected liveness device: %w", err)
+	}
+	ino, err := strconv.ParseUint(identity[2], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid expected liveness inode: %w", err)
+	}
+	if lockPath != "/var/lib/edgewatch/scanner-identities/liveness.lock" {
+		return fmt.Errorf("unexpected liveness lock path %q", lockPath)
+	}
+	before, err := processStarttime(pid)
+	if err != nil {
+		return fmt.Errorf("inspect target before liveness descriptor scan: %w", err)
+	}
+	if !selfMode && before != identity[0] {
+		return fmt.Errorf("target process %d starttime changed before liveness descriptor scan: got %s, want %s", pid, before, identity[0])
+	}
+	entries, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
+	if err != nil {
+		return fmt.Errorf("cannot inspect target process %d descriptor table (dumpability or proc access denied): %w", pid, err)
+	}
+	var matches []string
+	var inspectionErrors []string
+	for _, entry := range entries {
+		fd := entry.Name()
+		if !isDecimal(fd) {
+			continue
+		}
+		fdPath := fmt.Sprintf("/proc/%d/fd/%s", pid, fd)
+		target, linkErr := os.Readlink(fdPath)
+		if linkErr != nil {
+			if errors.Is(linkErr, os.ErrNotExist) {
+				continue
+			}
+			inspectionErrors = append(inspectionErrors, fmt.Sprintf("fd %s readlink: %v", fd, linkErr))
+			continue
+		}
+		if target != lockPath {
+			continue
+		}
+		info, statErr := os.Stat(fdPath)
+		if statErr != nil {
+			inspectionErrors = append(inspectionErrors, fmt.Sprintf("fd %s stat: %v", fd, statErr))
+			continue
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			inspectionErrors = append(inspectionErrors, fmt.Sprintf("fd %s has no Linux stat identity", fd))
+			continue
+		}
+		if uint64(stat.Dev) != dev || stat.Ino != ino || !info.Mode().IsRegular() {
+			inspectionErrors = append(inspectionErrors, fmt.Sprintf("fd %s names the lock path but its device/inode/type does not match", fd))
+			continue
+		}
+		fdinfo, readErr := os.ReadFile(fmt.Sprintf("/proc/%d/fdinfo/%s", pid, fd))
+		if readErr != nil {
+			inspectionErrors = append(inspectionErrors, fmt.Sprintf("fd %s info: %v", fd, readErr))
+			continue
+		}
+		var flags uint64
+		foundFlags := false
+		for _, line := range strings.Split(string(fdinfo), "\n") {
+			if value, ok := strings.CutPrefix(line, "flags:"); ok {
+				flags, err = strconv.ParseUint(strings.TrimSpace(value), 8, 64)
+				foundFlags = err == nil
+				break
+			}
+		}
+		if !foundFlags {
+			inspectionErrors = append(inspectionErrors, fmt.Sprintf("fd %s info has no valid octal flags", fd))
+			continue
+		}
+		if flags&uint64(unix.O_ACCMODE) != uint64(unix.O_RDONLY) || flags&uint64(unix.O_CLOEXEC) != 0 {
+			inspectionErrors = append(inspectionErrors, fmt.Sprintf("fd %s is not an inherited read-only, non-CLOEXEC descriptor", fd))
+			continue
+		}
+		matches = append(matches, fd)
+	}
+	after, err := processStarttime(pid)
+	if err != nil || after != before {
+		return fmt.Errorf("target process %d identity changed during liveness descriptor scan: before=%s after=%s error=%v", pid, before, after, err)
+	}
+	if len(inspectionErrors) != 0 {
+		return fmt.Errorf("could not conclusively inspect target process %d liveness descriptor: %s", pid, strings.Join(inspectionErrors, "; "))
+	}
+	if identity[0] == "self-absent" {
+		if len(matches) != 0 {
+			return fmt.Errorf("negative control process %d unexpectedly has liveness descriptor(s) %s", pid, strings.Join(matches, ","))
+		}
+		return nil
+	}
+	if len(matches) == 0 {
+		return fmt.Errorf("target process %d has no inherited read-only liveness descriptor for %s at device/inode %s:%s", pid, lockPath, identity[1], identity[2])
+	}
+	return nil
+}
+
 func child(args []string) int {
-	if len(args) != 5 || args[0] != "child" {
-		fmt.Fprintln(os.Stderr, "usage: child UID PROFILE OP PATH")
+	if (len(args) != 5 && len(args) != 7) || args[0] != "child" {
+		fmt.Fprintln(os.Stderr, "usage: child UID PROFILE OP PATH [PID EXPECTED_STARTTIME:DEVICE:INODE]")
 		return 2
 	}
 	uid64, err := strconv.ParseUint(args[1], 10, 32)
@@ -309,6 +457,23 @@ func child(args []string) int {
 			fmt.Fprintf(os.Stderr, "write read result failed: %v\n", err)
 			return 14
 		}
+	case "assert-liveness-fd":
+		if len(args) != 7 {
+			fmt.Fprintln(os.Stderr, "liveness descriptor inspection requires PID and starttime/device/inode")
+			return 2
+		}
+		if err := assertInheritedLivenessFD(args[5], args[6], path); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			if strings.Contains(err.Error(), "no inherited read-only liveness descriptor") {
+				return 15
+			}
+			return 16
+		}
+		if args[5] == "self" {
+			fmt.Fprintln(os.Stdout, "self liveness descriptor expectation verified")
+		} else {
+			fmt.Fprintf(os.Stdout, "target PID %s has inherited read-only liveness descriptor for %s\n", args[5], path)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown operation %q\n", args[2])
 		return 2
@@ -320,8 +485,8 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "child" {
 		os.Exit(child(os.Args[1:]))
 	}
-	if len(os.Args) != 5 {
-		fmt.Fprintln(os.Stderr, "usage: proc-fd-probe UID PROFILE OP PATH")
+	if len(os.Args) != 5 && len(os.Args) != 7 {
+		fmt.Fprintln(os.Stderr, "usage: proc-fd-probe UID PROFILE OP PATH [PID EXPECTED_STARTTIME:DEVICE:INODE]")
 		os.Exit(2)
 	}
 	uid64, err := strconv.ParseUint(os.Args[1], 10, 32)
@@ -339,7 +504,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	command := exec.Command(executable, "child", os.Args[1], os.Args[2], os.Args[3], os.Args[4])
+	commandArgs := []string{"child", os.Args[1], os.Args[2], os.Args[3], os.Args[4]}
+	if len(os.Args) == 7 {
+		commandArgs = append(commandArgs, os.Args[5], os.Args[6])
+	}
+	command := exec.Command(executable, commandArgs...)
 	command.SysProcAttr = &syscall.SysProcAttr{
 		Credential:  &syscall.Credential{Uid: uint32(uid64), Gid: uint32(uid64), Groups: []uint32{}},
 		AmbientCaps: profile.ambient,
@@ -542,6 +711,12 @@ def main():
     elif command == "create":
         name, tcp_ports = args
         print(create_job(base, state, name, tcp_ports, "", "conservative"))
+    elif command == "assert-active":
+        job_id, scan_id = args
+        active = request(base, state, "GET", "/scans/active")["scans"]
+        if not any(scan.get("job_id") == job_id and scan.get("id") == scan_id for scan in active):
+            raise SystemExit(f"scan {scan_id} for job {job_id} stopped being active")
+        print("active")
     elif command == "establish-baseline":
         name, tcp_ports = args
         job_id = create_job(base, state, name, tcp_ports, "", "fast")
@@ -603,6 +778,9 @@ def main():
         request(base, state, "POST", "/notifications/destinations", {"name": name, "url": url, "enabled": True, "password": PASSWORD})
         print(json.dumps(request(base, state, "POST", "/notifications/test")))
     elif command == "diagnose":
+        status = request(base, state, "GET", "/status")
+        sandbox = status.get("scanner_sandbox") or {}
+        print("scanner sandbox:", json.dumps(sandbox, sort_keys=True))
         print("active scans:", json.dumps(request(base, state, "GET", "/scans/active")))
         for job in request(base, state, "GET", "/jobs")["jobs"]:
             print("job", job["id"], job["job"]["name"], "scan cycle:", json.dumps(request(base, state, "GET", f"/jobs/{job['id']}/scan-cycle")))
@@ -642,6 +820,8 @@ daemon_data=
 daemon_config=
 daemon_port=
 daemon_runtime_tmpdir=
+daemon_state_path=
+daemon_entrypoint=
 run_daemon() {
   local name=$1 mode=$2
   shift 2
@@ -650,11 +830,15 @@ run_daemon() {
   if [ -n "$container" ]; then
     stop_daemon
   fi
-  local caps=() mounts=(--volume "$scanner_pid_selector_source:$scanner_pid_selector:ro" "${daemon_mounts[@]}")
+  local caps=() entrypoint_args=() mounts=(--volume "$scanner_pid_selector_source:$scanner_pid_selector:ro" "${daemon_mounts[@]}")
+  if [ -n "$daemon_entrypoint" ]; then
+    entrypoint_args=(--entrypoint "$daemon_entrypoint")
+  fi
   for capability in "$@"; do
     caps+=(--cap-add "$capability")
   done
   daemon_data="$workdir/data-$name"
+  daemon_state_path="$workdir/state-$name.json"
   web_port=$(free_port)
   daemon_port=$web_port
   install -d -m 0750 "$daemon_data"
@@ -682,7 +866,7 @@ EOF
   daemon_runtime_tmpdir=$daemon_tmpdir
   container=$(docker run -d --network host --read-only --tmpfs /tmp:size=128m,mode=1777 \
     --cap-drop ALL "${caps[@]}" \
-    --security-opt no-new-privileges:true "${env[@]}" "${mounts[@]}" \
+    --security-opt no-new-privileges:true "${env[@]}" "${mounts[@]}" "${entrypoint_args[@]}" \
     --volume "$daemon_config:/etc/edgewatch/config.yaml:ro" \
     --volume "$daemon_data:/var/lib/edgewatch:rw" "$image" daemon --config /etc/edgewatch/config.yaml)
   base="http://127.0.0.1:$web_port"
@@ -700,8 +884,8 @@ EOF
   done
   token=$(docker logs "$container" 2>&1 | sed -n 's/.*"setup_token":"\([A-Z0-9]*\)".*/\1/p' | tail -1)
   [ -n "$token" ] || fail "the $name daemon logged no setup token"
-  state="$workdir/state-$name.json"
-  python3 "$workdir/driver.py" setup "$base" "$state" "$token"
+  state="$daemon_state_path"
+  python3 "$workdir/driver.py" setup "$base" "$daemon_state_path" "$token"
 }
 
 stop_daemon() {
@@ -1092,6 +1276,296 @@ scanner_supervisor_pid() {
   printf '%s\n' "$supervisor"
 }
 
+# scanner_scope_snapshot emits the exact marker, journal, lock-file identities,
+# and any content-addressed archives. A competing PID namespace must not
+# rewrite or archive this evidence while another namespace holds the scope.
+scanner_scope_snapshot() {
+  local id=$1
+  # The bind mount is root-owned in rootful Docker. Read the evidence through
+  # the daemon's own read-only container view instead of depending on host
+  # permissions or weakening the fixture's directory mode.
+  docker exec "$id" /bin/sh -ec '
+root=$1
+{
+  printf "%s\n" "$root/scanner-identities.boot" "$root/scanner-identities"
+  find "$root/scanner-identities" -mindepth 1 -maxdepth 1 -print
+  find "$root" -maxdepth 1 -name "scanner-identities.boot.recovery-*" -print
+} | sort -u | while IFS= read -r path; do
+  relative=${path#"$root"/}
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    printf "%s\tmissing\n" "$relative"
+    continue
+  fi
+  metadata=$(stat -c "%F\t%a\t%u\t%g\t%d\t%i\t%h\t%s\t%y\t%z" "$path")
+  digest=-
+  if [ -f "$path" ] && [ ! -L "$path" ]; then
+    digest=$(sha256sum "$path")
+    digest=${digest%% *}
+  fi
+  printf "%s\t%s\t%s\n" "$relative" "$metadata" "$digest"
+done
+' sh /var/lib/edgewatch
+}
+
+# capture_container_processes writes PID, starttime, and command for every
+# process visible through Docker's host PID mapping. Starttime prevents a
+# later PID reuse from satisfying the shutdown check.
+capture_container_processes() {
+  local id=$1 output=$2 top=$3
+  docker top "$id" -eo pid,ppid,args >"$top" || return 1
+  python3 - "$top" >"$output" <<'PY'
+import sys
+from pathlib import Path
+
+top_path = Path(sys.argv[1])
+lines = top_path.read_text().splitlines()
+if not lines:
+    raise SystemExit("docker top returned no process table")
+for line in lines[1:]:
+    columns = line.strip().split(None, 2)
+    if len(columns) < 3 or not columns[0].isdigit():
+        continue
+    pid = int(columns[0])
+    try:
+        data = Path(f"/proc/{pid}/stat").read_text()
+        fields = data[data.rfind(")") + 2:].split()
+        state = fields[0]
+        starttime = fields[19]
+        status = Path(f"/proc/{pid}/status").read_text().splitlines()
+        nspids = next((line.split()[1:] for line in status if line.startswith("NSpid:")), [])
+        inner_pid = nspids[-1] if nspids else ""
+    except (OSError, IndexError):
+        continue
+    if not inner_pid.isdigit():
+        continue
+    print(f"{pid}\t{starttime}\t{state}\t{inner_pid}\t{columns[2]}")
+PY
+}
+
+container_processes_inactive() {
+  python3 - "$1" <<'PY'
+import sys
+from pathlib import Path
+
+remaining = []
+for line in Path(sys.argv[1]).read_text().splitlines():
+    pid_text, expected_start, _, _, command = line.split("\t", 4)
+    try:
+        data = Path(f"/proc/{pid_text}/stat").read_text()
+        fields = data[data.rfind(")") + 2:].split()
+        state, starttime = fields[0], fields[19]
+    except (OSError, IndexError):
+        continue
+    # A zombie has exited and has released every descriptor. Treat it as
+    # inactive, but never accept a live or stopped process with the same start.
+    if starttime == expected_start and state not in {"Z", "X"}:
+        remaining.append(f"{pid_text}:{state}:{command}")
+if remaining:
+    print("\n".join(remaining))
+    raise SystemExit(1)
+PY
+}
+
+assert_captured_container_processes() {
+  python3 - "$1" "$2" "$3" "$4" <<'PY'
+import sys
+from pathlib import Path
+
+capture, nmap_pid, supervisor_pid, daemon_pid = sys.argv[1:]
+by_inner = {}
+for line in Path(capture).read_text().splitlines():
+    host_pid, starttime, state, inner_pid, command = line.split("\t", 4)
+    by_inner.setdefault(inner_pid, []).append((host_pid, starttime, state, command))
+for expected, label in ((nmap_pid, "Nmap"), (supervisor_pid, "scanner supervisor"), (daemon_pid, "daemon")):
+    rows = by_inner.get(str(expected), [])
+    if len(rows) != 1:
+        raise SystemExit(f"captured {len(rows)} host processes for container {label} PID {expected}, want exactly one")
+    host_pid, starttime, state, command = rows[0]
+    if not starttime.isdigit() or state in {"Z", "X"}:
+        raise SystemExit(f"container {label} PID {expected} was not live at capture: host={host_pid} state={state}")
+    if label == "Nmap" and ("nmap" not in command.lower() or "--stats-every" not in command):
+        raise SystemExit(f"captured Nmap PID {expected} has unexpected command: {command}")
+    if label != "Nmap" and "edgewatch" not in command.lower():
+        raise SystemExit(f"captured {label} PID {expected} has unexpected command: {command}")
+print(f"captured live daemon/supervisor/Nmap host identities: {daemon_pid}, {supervisor_pid}, {nmap_pid}")
+PY
+}
+
+assert_container_mount() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+container, expected_source, destination = sys.argv[1:]
+expected_source = os.path.realpath(expected_source)
+raw = subprocess.check_output(["docker", "inspect", container], text=True)
+mounts = json.loads(raw)[0]["Mounts"]
+matches = [m for m in mounts if m.get("Destination") == destination]
+if len(matches) != 1 or os.path.realpath(matches[0].get("Source", "")) != expected_source:
+    raise SystemExit(f"container {container} mount {destination!r} is not the expected isolated source {expected_source!r}: {matches!r}")
+PY
+}
+
+scanner_pid_namespace_inode() {
+  local namespace=$1 inode
+  [[ "$namespace" =~ ^pid:\[([0-9]+)\]$ ]] || fail "could not parse PID namespace identity '$namespace'"
+  inode=${BASH_REMATCH[1]}
+  [ "$inode" -gt 0 ] || fail "PID namespace identity '$namespace' is zero"
+  printf '%s\n' "$inode"
+}
+
+# Read the namespace marker printed by the init wrapper before EdgeWatch
+# hardens the process, then bind it to Docker's host init PID and starttime.
+container_pid_namespace() {
+  python3 - "$1" <<'PY'
+import subprocess
+import sys
+from pathlib import Path
+
+container = sys.argv[1]
+try:
+    host_pid_text = subprocess.check_output(
+        ["docker", "inspect", "--format", "{{.State.Pid}}", container],
+        text=True,
+        stderr=subprocess.PIPE,
+    ).strip()
+    if not host_pid_text.isdigit() or int(host_pid_text) <= 1:
+        raise RuntimeError(f"Docker reported invalid host init PID {host_pid_text!r}")
+    host_pid = int(host_pid_text)
+
+    logs = subprocess.check_output(["docker", "logs", container], text=True, stderr=subprocess.PIPE)
+    markers = [line for line in logs.splitlines() if line.startswith("edgewatch-lifecycle-pidns=")]
+    if len(markers) != 1:
+        raise RuntimeError(f"expected one init namespace marker in container logs, found {len(markers)}")
+    marker, starttime_text = markers[0].split(" starttime=", 1)
+    namespace = marker.removeprefix("edgewatch-lifecycle-pidns=")
+    if not starttime_text.isdigit():
+        raise RuntimeError(f"invalid init starttime marker {starttime_text!r}")
+
+    def snapshot():
+        stat = Path(f"/proc/{host_pid}/stat").read_text()
+        fields = stat[stat.rfind(")") + 2:].split()
+        state, starttime = fields[0], fields[19]
+        status = Path(f"/proc/{host_pid}/status").read_text().splitlines()
+        nspids = next((line.split()[1:] for line in status if line.startswith("NSpid:")), [])
+        return state, starttime, nspids
+
+    before = snapshot()
+    after = snapshot()
+    if before[1] != after[1] or before[1] != starttime_text:
+        raise RuntimeError(f"host init PID {host_pid} starttime changed or does not match init marker: {before[1]} vs {starttime_text}")
+    if before[0] in {"Z", "X"} or not before[2] or before[2][-1] != "1":
+        raise RuntimeError(f"host PID {host_pid} is not a live container init process: state={before[0]} NSpid={before[2]}")
+    if not namespace.startswith("pid:[") or not namespace.endswith("]"):
+        raise RuntimeError(f"invalid PID namespace marker {namespace!r}")
+    print(namespace)
+except (OSError, IndexError, subprocess.CalledProcessError, RuntimeError) as error:
+    print(f"could not read a stable PID namespace for container {container}: {error}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+assert_scanner_identity_scope() {
+  python3 - "$1" "$2" "$3" "$4" <<'PY'
+import json
+import subprocess
+import sys
+
+container, namespace_text, expected_uid, mode = sys.argv[1:]
+namespace = int(namespace_text)
+root = "/var/lib/edgewatch"
+try:
+    marker_raw = subprocess.check_output(
+        ["docker", "exec", container, "cat", f"{root}/scanner-identities.boot"],
+        stderr=subprocess.DEVNULL,
+    )
+    journal_raw = subprocess.check_output(
+        ["docker", "exec", container, "cat", f"{root}/scanner-identities/leases.json"],
+        stderr=subprocess.DEVNULL,
+    )
+    marker = json.loads(marker_raw)
+    journal = json.loads(journal_raw)
+except (subprocess.CalledProcessError, json.JSONDecodeError) as error:
+    raise SystemExit(f"could not read valid scanner identity state inside container {container}: {error}")
+
+def summary(value):
+    leases = value.get("leases")
+    return {
+        "version": value.get("version"),
+        "pid_namespace_inode": value.get("pid_namespace_inode"),
+        "private_runtime": value.get("private_runtime"),
+        "lease_count": len(leases) if isinstance(leases, dict) else "invalid",
+        "lease_states": sorted(entry.get("state", "invalid") for entry in leases.values() if isinstance(entry, dict))
+        if isinstance(leases, dict) else [],
+    }
+
+marker_info = summary(marker)
+journal_info = summary(journal)
+if marker_info["version"] != 3 or journal_info["version"] != 3:
+    raise SystemExit(f"scanner identity scope is not v3: marker={marker_info}, journal={journal_info}")
+if marker_info["pid_namespace_inode"] != namespace or journal_info["pid_namespace_inode"] != namespace:
+    raise SystemExit(f"scanner identity scope PID namespace does not match {namespace}: marker={marker_info}, journal={journal_info}")
+if marker.get("boot_id") != journal.get("boot_id") or not marker_info["private_runtime"] or not journal_info["private_runtime"]:
+    raise SystemExit(f"scanner identity scope is not a matching private runtime: marker={marker_info}, journal={journal_info}")
+leases = journal.get("leases")
+if not isinstance(leases, dict):
+    raise SystemExit(f"scanner identity journal has no lease map: {journal_info}")
+if mode == "active":
+    entry = leases.get(expected_uid)
+    if not isinstance(entry, dict) or entry.get("state") != "active":
+        raise SystemExit(f"Nmap UID {expected_uid} is not an active durable lease: journal={journal_info}")
+elif mode == "empty":
+    if leases:
+        raise SystemExit(f"recovered scanner identity journal still has leases: {journal_info}")
+else:
+    raise SystemExit(f"unknown scope assertion mode {mode!r}")
+print(f"verified v3 private scanner scope pidns={namespace} leases={len(leases)} mode={mode}")
+PY
+}
+
+wait_for_owned_container_exit() {
+  local id=$1 running=unknown
+  for attempt in $(seq 1 100); do
+    running=$(docker inspect --format '{{.State.Running}}' "$id") || fail "could not inspect owned namespace probe container $id"
+    [ "$running" = false ] && return 0
+    sleep 0.1
+  done
+  fail "the competing PID-namespace daemon did not refuse startup within 10 seconds"
+}
+
+wait_for_captured_processes_inactive() {
+  local capture=$1
+  for attempt in $(seq 1 100); do
+    if container_processes_inactive "$capture"; then
+      python3 - "$capture" <<'PY'
+import sys
+from pathlib import Path
+
+for line in Path(sys.argv[1]).read_text().splitlines():
+    pid_text, expected_start, _, inner_pid, command = line.split("\t", 4)
+    try:
+        data = Path(f"/proc/{pid_text}/stat").read_text()
+        fields = data[data.rfind(")") + 2:].split()
+        state, current_start = fields[0], fields[19]
+    except (OSError, IndexError):
+        print(f"host_pid={pid_text} container_pid={inner_pid} state=exited command={command}")
+        continue
+    if current_start != expected_start:
+        print(f"host_pid={pid_text} container_pid={inner_pid} state=pid-reused command={command}")
+    elif state in {"Z", "X"}:
+        print(f"host_pid={pid_text} container_pid={inner_pid} state={state} command={command}")
+    else:
+        raise SystemExit(f"captured host PID {pid_text} is still live in state {state}: {command}")
+PY
+      return 0
+    fi
+    sleep 0.1
+  done
+  container_processes_inactive "$capture" || fail "a captured daemon/supervisor/scanner process survived docker stop"
+}
+
 # expect_no_scanner_processes requires that no process of the sandbox
 # identity is left, other than zombies: the daemon, which is the container's
 # PID 1, does not reap processes that it did not start.
@@ -1137,6 +1611,22 @@ expect_health() {
   [ "$got" = "$want" ] || fail "health reports the sandbox as '$got', want '$want'"
 }
 
+# Record the init process's namespace before EdgeWatch applies its dumpability
+# hardening. Exec keeps the PID and starttime, which are checked against the
+# host process identity when the lifecycle scenario reads this marker.
+lifecycle_entrypoint="$workdir/lifecycle-entrypoint"
+cat >"$lifecycle_entrypoint" <<'SH'
+#!/bin/sh
+namespace=$(readlink /proc/1/ns/pid) || exit 125
+starttime=$(awk '{sub(/^.*\) /, ""); print $20}' /proc/1/stat) || exit 125
+case "$namespace" in pid:\[*\]) ;; *) exit 125 ;; esac
+case "$starttime" in ''|*[!0-9]*) exit 125 ;; esac
+printf 'edgewatch-lifecycle-pidns=%s starttime=%s\n' "$namespace" "$starttime"
+exec /usr/local/bin/edgewatch "$@"
+SH
+chmod 0755 "$lifecycle_entrypoint"
+
+if [ "${EDGEWATCH_SCANNER_LIFECYCLE_ONLY:-0}" != 1 ]; then
 # Verify that the configured Nmap really starts under the scanner restrictions.
 # The compatibility fixture opens a read-only file that is outside the
 # Landlock allowlist. Its world-readable mode lets the identity-only control
@@ -1629,10 +2119,13 @@ stop_daemon
 # required to create and clean the per-invocation directory even though files
 # elsewhere remain reachable under this explicit fallback.
 daemon_landlock=off
-daemon_mounts=(--volume "$workdir/proc-fd-probe:$proc_fd_probe:ro")
+daemon_mounts=(--volume "$workdir/proc-fd-probe:$proc_fd_probe:ro"
+  --volume "$lifecycle_entrypoint:/usr/local/bin/edgewatch-lifecycle-entrypoint:ro")
+daemon_entrypoint=/usr/local/bin/edgewatch-lifecycle-entrypoint
 daemon_scan_limit=2
 run_daemon identity-only auto "${bundled_caps[@]}"
 daemon_mounts=()
+daemon_entrypoint=
 daemon_landlock=auto
 expect_health "enforced - NET_RAW landlock:disabled seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
 identity_only_scan=$(python3 "$workdir/driver.py" scan "$base" "$state" identity-only "$tcp_ports" "$udp_ports")
@@ -1671,7 +2164,266 @@ cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$naabu_job" "$
 expect_no_scanner_processes "the identity-only cancelled Naabu scan"
 expect_no_naabu_temporary_namespaces
 daemon_scan_limit=1
+fi
+
+# A lifecycle-only run skips the earlier compatibility, notification, and
+# scanner matrix while exercising the exact same A/B/C acceptance section.
+# This is only a diagnostic entry point; the default verifier path remains the
+# complete suite used by CI and release validation.
+if [ "${EDGEWATCH_SCANNER_LIFECYCLE_ONLY:-0}" = 1 ]; then
+  daemon_landlock=off
+  daemon_scan_limit=1
+  daemon_mounts=(--volume "$workdir/proc-fd-probe:$proc_fd_probe:ro"
+    --volume "$lifecycle_entrypoint:/usr/local/bin/edgewatch-lifecycle-entrypoint:ro")
+  daemon_entrypoint=/usr/local/bin/edgewatch-lifecycle-entrypoint
+  run_daemon lifecycle-base auto "${bundled_caps[@]}"
+  daemon_mounts=()
+  daemon_entrypoint=
+  expect_health "enforced - NET_RAW landlock:disabled seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
+fi
+
+# Keep one real Nmap invocation, its supervisor, and the daemon alive in
+# container A while a second PID namespace attempts to join the same durable
+# scanner scope. The competing daemon gets a separate database bind so a
+# refused scope cannot be confused with SQLite's single-writer lease.
+daemon_data_source=$(realpath "$daemon_data")
+daemon_database=/var/lib/edgewatch/edgewatch.db
+grep -Fxq "database: $daemon_database" "$daemon_config" || fail "container A does not use the expected database path $daemon_database"
+a_pidns=$(container_pid_namespace "$container") || fail "could not capture container A's host PID namespace identity"
+a_pidns_inode=$(scanner_pid_namespace_inode "$a_pidns")
+assert_container_mount "$container" "$daemon_data_source" /var/lib/edgewatch
+assert_scanner_identity_scope "$container" "$a_pidns_inode" "" empty
+
+started=$(python3 "$workdir/driver.py" start "$base" "$state" namespace-stop-nmap "1-20000")
+lifecycle_job=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
+lifecycle_scan=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
+hold_scanner_process nmap --stats-every
+lifecycle_nmap_pid=$held_scanner_pid
+lifecycle_nmap_starttime=$held_scanner_starttime
+active=$(python3 "$workdir/driver.py" assert-active "$base" "$state" "$lifecycle_job" "$lifecycle_scan")
+[ "$active" = active ] || fail "container A scan was not observably active after Nmap entered its held state"
+lifecycle_nmap_uid=$(scanner_uid "$lifecycle_nmap_pid")
+lifecycle_supervisor_pid=$(scanner_supervisor_pid "$lifecycle_nmap_pid")
+expect_scanner_identity "$lifecycle_nmap_pid" "0000000000002000" "0000000000002000"
+expect_scanner_starttime "$lifecycle_nmap_pid" "$lifecycle_nmap_starttime" "before the cross-namespace check"
+assert_scanner_identity_scope "$container" "$a_pidns_inode" "$lifecycle_nmap_uid" active
+
+lifecycle_processes=$workdir/lifecycle-a-processes.tsv
+lifecycle_top=$workdir/lifecycle-a-top.txt
+capture_container_processes "$container" "$lifecycle_processes" "$lifecycle_top" || fail "could not capture container A's host process identities"
+assert_captured_container_processes "$lifecycle_processes" "$lifecycle_nmap_pid" "$lifecycle_supervisor_pid" 1 ||
+  fail "container A's live Nmap/supervisor/daemon tree was not captured by host PID and starttime"
+read -r lifecycle_nmap_host_pid lifecycle_nmap_host_starttime < <(python3 - "$lifecycle_processes" "$lifecycle_nmap_pid" <<'PY'
+import sys
+from pathlib import Path
+
+capture, expected_inner_pid = sys.argv[1:]
+matches = []
+for line in Path(capture).read_text().splitlines():
+    host_pid, starttime, state, inner_pid, command = line.split("\t", 4)
+    if inner_pid == expected_inner_pid:
+        matches.append((host_pid, starttime, state, command))
+if len(matches) != 1:
+    raise SystemExit(f"expected one captured host identity for Nmap PID {expected_inner_pid}, found {len(matches)}")
+host_pid, starttime, state, command = matches[0]
+if state in {"Z", "X"} or not starttime.isdigit():
+    raise SystemExit(f"captured Nmap host process {host_pid} is not live: state={state} starttime={starttime}")
+try:
+    data = Path(f"/proc/{host_pid}/stat").read_text()
+    fields = data[data.rfind(")") + 2:].split()
+    if len(fields) <= 19 or fields[19] != starttime or fields[0] in {"Z", "X"}:
+        raise SystemExit(f"captured Nmap host PID {host_pid} no longer matches starttime/state")
+except (OSError, IndexError) as error:
+    raise SystemExit(f"could not verify captured Nmap host PID {host_pid}: {error}")
+print(f"{host_pid}\t{starttime}")
+PY
+) || fail "could not bind Nmap's container PID to its live host PID/starttime"
+[[ "$lifecycle_nmap_host_pid" =~ ^[0-9]+$ && "$lifecycle_nmap_host_starttime" =~ ^[0-9]+$ ]] ||
+  fail "captured Nmap host PID/starttime is malformed: $lifecycle_nmap_host_pid/$lifecycle_nmap_host_starttime"
+[[ "$lifecycle_nmap_host_starttime" = "$lifecycle_nmap_starttime" ]] ||
+  fail "Nmap host/container starttime differs: host=$lifecycle_nmap_host_starttime container=$lifecycle_nmap_starttime"
+assert_container_mount "$container" "$daemon_data_source" /var/lib/edgewatch
+lifecycle_lock_device_inode=$(docker exec "$container" stat -Lc '%d:%i' /var/lib/edgewatch/scanner-identities/liveness.lock) ||
+  fail "could not stat the mounted scanner liveness lock from container A"
+[[ "$lifecycle_lock_device_inode" =~ ^([0-9]+):([0-9]+)$ ]] ||
+  fail "container A returned a malformed scanner liveness lock identity: $lifecycle_lock_device_inode"
+lifecycle_lock_device=${BASH_REMATCH[1]}
+lifecycle_lock_inode=${BASH_REMATCH[2]}
+lifecycle_lock_identity="$lifecycle_nmap_host_starttime:$lifecycle_lock_device:$lifecycle_lock_inode"
+lifecycle_lock_path=/var/lib/edgewatch/scanner-identities/liveness.lock
+# A helper process without the inherited scanner FD must satisfy the negative
+# form, and fail the positive form with the explicit absent-FD result. This
+# proves the live Nmap assertion does not pass merely because proc inspection
+# returned no entries.
+docker exec "$container" "$proc_fd_probe" "$lifecycle_nmap_uid" "0000000000002000" \
+  assert-liveness-fd "$lifecycle_lock_path" self "self-absent:$lifecycle_lock_device:$lifecycle_lock_inode" >"$workdir/lifecycle-liveness-negative.log" 2>&1 ||
+  fail "liveness descriptor inspection could not establish its no-FD negative control: $(cat "$workdir/lifecycle-liveness-negative.log")"
+grep -Fxq 'self liveness descriptor expectation verified' "$workdir/lifecycle-liveness-negative.log" ||
+  fail "no-FD self control did not report the expected absence check: $(cat "$workdir/lifecycle-liveness-negative.log")"
+if docker exec "$container" "$proc_fd_probe" "$lifecycle_nmap_uid" "0000000000002000" \
+  assert-liveness-fd "$lifecycle_lock_path" self "self-required:$lifecycle_lock_device:$lifecycle_lock_inode" >"$workdir/lifecycle-liveness-negative-required.log" 2>&1; then
+  fail "liveness descriptor inspection accepted a process with no inherited lock FD"
+else
+  lifecycle_liveness_negative_status=$?
+fi
+[ "$lifecycle_liveness_negative_status" = 15 ] ||
+  fail "missing-FD assertion exited $lifecycle_liveness_negative_status, want its dedicated failure status 15"
+grep -Fq 'has no inherited read-only liveness descriptor' "$workdir/lifecycle-liveness-negative-required.log" ||
+  fail "the no-FD positive assertion failed for an inspection error instead of a missing lock: $(cat "$workdir/lifecycle-liveness-negative-required.log")"
+echo "verified liveness-FD negative control: no-lock self passes absence check; required-presence check rejects it (exit=$lifecycle_liveness_negative_status)"
+if ! lifecycle_liveness_probe=$(docker exec "$container" "$proc_fd_probe" "$lifecycle_nmap_uid" "0000000000002000" \
+  assert-liveness-fd "$lifecycle_lock_path" "$lifecycle_nmap_pid" "$lifecycle_lock_identity" 2>&1); then
+  fail "could not prove live Nmap inherited the exact read-only liveness lock (host PID $lifecycle_nmap_host_pid, starttime $lifecycle_nmap_host_starttime): $lifecycle_liveness_probe"
+fi
+expect_scanner_starttime "$lifecycle_nmap_pid" "$lifecycle_nmap_starttime" "after inherited liveness-FD inspection"
+echo "verified live Nmap inherited scanner liveness lock: host PID=$lifecycle_nmap_host_pid container PID=$lifecycle_nmap_pid starttime=$lifecycle_nmap_host_starttime device/inode=$lifecycle_lock_device_inode; $lifecycle_liveness_probe"
+scanner_scope_snapshot "$container" >"$workdir/lifecycle-scope-before-b.tsv"
+
+namespace_probe_database_dir=$workdir/data-namespace-probe-db
+install -d -m 0750 "$namespace_probe_database_dir"
+namespace_probe_database_identity_before=$(stat -c '%d:%i:%u:%g:%a:%s:%Y:%Z' "$namespace_probe_database_dir")
+namespace_probe_config=$workdir/config-namespace-probe.yaml
+namespace_probe_port=$(free_port)
+lifecycle_cap_args=()
+for capability in "${bundled_caps[@]}"; do lifecycle_cap_args+=(--cap-add "$capability"); done
+cat >"$namespace_probe_config" <<EOF
+database: /var/lib/edgewatch-probe/edgewatch.db
+retention: 24h
+web:
+  listen: 127.0.0.1:$namespace_probe_port
+scheduler:
+  max_concurrent_scans: 1
+scanner:
+  target_exclusions: []
+  sandbox: required
+  landlock: off
+updates:
+  enabled: false
+EOF
+chmod 0644 "$namespace_probe_config"
+grep -Fxq 'database: /var/lib/edgewatch-probe/edgewatch.db' "$namespace_probe_config" || fail "container B does not use its isolated database path"
+namespace_probe_name="edgewatch-liveness-b-$$-$RANDOM"
+namespace_probe_container=$(docker run -d --name "$namespace_probe_name" --network host --read-only --tmpfs /tmp:size=128m,mode=1777 \
+  --cap-drop ALL "${lifecycle_cap_args[@]}" --security-opt no-new-privileges:true --env TMPDIR=/var/lib/edgewatch/tmp \
+  --volume "$scanner_pid_selector_source:$scanner_pid_selector:ro" \
+  --volume "$namespace_probe_config:/etc/edgewatch/config.yaml:ro" \
+  --volume "$daemon_data_source:/var/lib/edgewatch:rw" \
+  --volume "$namespace_probe_database_dir:/var/lib/edgewatch-probe:rw" \
+  --entrypoint /bin/sh "$image" -ec 'printf "lifecycle-probe-pidns=%s\n" "$(readlink /proc/1/ns/pid)"; exec edgewatch daemon --config /etc/edgewatch/config.yaml') ||
+  fail "could not start the competing PID-namespace daemon"
+assert_container_mount "$namespace_probe_container" "$daemon_data_source" /var/lib/edgewatch
+assert_container_mount "$namespace_probe_container" "$namespace_probe_database_dir" /var/lib/edgewatch-probe
+wait_for_owned_container_exit "$namespace_probe_container"
+namespace_probe_exit=$(docker inspect --format '{{.State.ExitCode}}' "$namespace_probe_container")
+[ "$namespace_probe_exit" != 0 ] || fail "container B unexpectedly started while container A held the scanner scope"
+docker logs "$namespace_probe_container" >"$workdir/lifecycle-b.log" 2>&1 || fail "could not read container B's refusal log"
+b_pidns=$(sed -n 's/^lifecycle-probe-pidns=//p' "$workdir/lifecycle-b.log" | head -1)
+[ -n "$b_pidns" ] || fail "container B did not report its PID namespace before startup"
+b_pidns_inode=$(scanner_pid_namespace_inode "$b_pidns")
+[ "$b_pidns_inode" != "$a_pidns_inode" ] || fail "containers A and B unexpectedly share PID namespace $a_pidns"
+grep -Fq 'scanner identity runtime scope could not be retained' "$workdir/lifecycle-b.log" ||
+  fail "container B did not refuse because its scanner identity runtime scope was live: $(tail -40 "$workdir/lifecycle-b.log")"
+grep -Eqi 'liveness lock is unavailable|PID namespace changed' "$workdir/lifecycle-b.log" ||
+  fail "container B's refusal log did not identify the live liveness scope: $(tail -40 "$workdir/lifecycle-b.log")"
+if find "$namespace_probe_database_dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+  fail "container B touched its isolated database directory before refusing the live scanner scope"
+fi
+namespace_probe_database_identity_after=$(stat -c '%d:%i:%u:%g:%a:%s:%Y:%Z' "$namespace_probe_database_dir")
+[ "$namespace_probe_database_identity_after" = "$namespace_probe_database_identity_before" ] ||
+  fail "container B changed the isolated database directory metadata before refusing the live scanner scope"
+scanner_scope_snapshot "$container" >"$workdir/lifecycle-scope-after-b.tsv"
+cmp -s "$workdir/lifecycle-scope-before-b.tsv" "$workdir/lifecycle-scope-after-b.tsv" ||
+  fail "container B changed the shared scanner marker, journal, lock metadata, or archives while refusing"
+docker rm "$namespace_probe_container" >/dev/null || fail "could not remove the stopped owned container B"
+namespace_probe_container=
+echo "verified live-scope refusal: A pidns=$a_pidns_inode holds UID=$lifecycle_nmap_uid; B pidns=$b_pidns_inode refused without DB or scanner-state mutation"
+
+# Stop container A while the API reports its scan active and Nmap is stopped
+# only after its exact PID/starttime was pinned. Docker's PID-namespace teardown
+# must remove every captured process before container C can acquire the same
+# durable scanner volume and recover the old empty-or-stale lease journal.
+docker stop --time 3 "$container" >"$workdir/lifecycle-a-stop.log" 2>&1 || fail "docker stop failed while the Nmap scan was still active"
+held_scanner_pid=
+held_scanner_starttime=
+a_exit=$(docker inspect --format '{{.State.ExitCode}}' "$container") || fail "could not inspect container A after docker stop"
+docker rm "$container" >/dev/null || fail "could not remove stopped container A"
+container=
+wait_for_captured_processes_inactive "$lifecycle_processes"
+echo "verified docker stop of active scan: container A exit=$a_exit; captured host PID/starttime set is gone or zombie before restart"
+
+# Container C reuses A's state+database bind, but receives a new PID namespace.
+# A successful required-sandbox startup proves the stale scope can be safely
+# recovered only after all A processes have exited.
+daemon_port=$(free_port)
+base="http://127.0.0.1:$daemon_port"
+daemon_config=$workdir/config-namespace-restart.yaml
+cat >"$daemon_config" <<EOF
+database: $daemon_database
+retention: 24h
+web:
+  listen: 127.0.0.1:$daemon_port
+scheduler:
+  max_concurrent_scans: 1
+scanner:
+  target_exclusions: []
+  sandbox: required
+  landlock: off
+updates:
+  enabled: false
+EOF
+chmod 0644 "$daemon_config"
+daemon_landlock=off
+daemon_runtime_tmpdir=/var/lib/edgewatch/tmp
+daemon_tmpdir=/var/lib/edgewatch/tmp
+container=$(docker run -d --network host --read-only --tmpfs /tmp:size=128m,mode=1777 \
+  --cap-drop ALL "${lifecycle_cap_args[@]}" --security-opt no-new-privileges:true --env TMPDIR=/var/lib/edgewatch/tmp \
+  --volume "$scanner_pid_selector_source:$scanner_pid_selector:ro" \
+  --volume "$lifecycle_entrypoint:/usr/local/bin/edgewatch-lifecycle-entrypoint:ro" \
+  --volume "$daemon_config:/etc/edgewatch/config.yaml:ro" \
+  --volume "$daemon_data_source:/var/lib/edgewatch:rw" --entrypoint /usr/local/bin/edgewatch-lifecycle-entrypoint \
+  "$image" daemon --config /etc/edgewatch/config.yaml) ||
+  fail "container C could not start against container A's recovered state and database"
+for attempt in $(seq 1 60); do
+  if curl --fail --silent "$base/api/v1/setup/status" >/dev/null; then
+    break
+  fi
+  if [ -z "$(docker ps -q --filter "id=$container")" ]; then
+    fail "container C exited while recovering container A's scanner scope"
+  fi
+  sleep 1
+  if [ "$attempt" = 60 ]; then
+    fail "container C did not start after container A's process tree exited"
+  fi
+done
+assert_container_mount "$container" "$daemon_data_source" /var/lib/edgewatch
+expect_health "enforced - NET_RAW landlock:disabled seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
+c_pidns=$(container_pid_namespace "$container") || fail "could not capture container C's host PID namespace identity"
+c_pidns_inode=$(scanner_pid_namespace_inode "$c_pidns")
+assert_scanner_identity_scope "$container" "$c_pidns_inode" "" empty
+
+started=$(python3 "$workdir/driver.py" start "$base" "$state" namespace-restart-nmap "1-20000")
+restarted_job=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
+restarted_scan=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
+hold_scanner_process nmap --stats-every
+restarted_nmap_pid=$held_scanner_pid
+active=$(python3 "$workdir/driver.py" assert-active "$base" "$state" "$restarted_job" "$restarted_scan")
+[ "$active" = active ] || fail "container C's recovered scan was not observably active"
+restarted_uid=$(scanner_uid "$restarted_nmap_pid")
+[ "$restarted_uid" = "$lifecycle_nmap_uid" ] || fail "container C did not safely reuse released UID $lifecycle_nmap_uid after all captured A processes exited (got $restarted_uid)"
+assert_scanner_identity_scope "$container" "$c_pidns_inode" "$restarted_uid" active
+resume_held_scanner
+cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$restarted_job" "$restarted_scan")
+[ "$cancelled" = canceled ] || fail "container C's post-recovery scan ended '$cancelled'"
+expect_no_scanner_processes "the post-recovery Nmap scan"
+assert_scanner_identity_scope "$container" "$c_pidns_inode" "" empty
+echo "verified scanner scope recovery on shared volume: A pidns=$a_pidns_inode, B pidns=$b_pidns_inode refused live scope, C pidns=$c_pidns_inode started after tree teardown and safely reused UID=$restarted_uid"
+
 stop_daemon
+
+if [ "${EDGEWATCH_SCANNER_LIFECYCLE_ONLY:-0}" = 1 ]; then
+  echo "completed scanner lifecycle-only acceptance"
+  exit 0
+fi
 
 run_daemon off off "${bundled_caps[@]}" NET_ADMIN
 expect_health "disabled 0 - landlock:disabled seccomp:disabled limits:- pool:disabled,per_invocation,60000-60063,64"

@@ -66,6 +66,7 @@ func TestScannerSupervisorReexecCoverageAndFailClosedStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	livenessFile := scannerLivenessTestFile(t)
 	configRead, configWrite, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -80,13 +81,14 @@ func TestScannerSupervisorReexecCoverageAndFailClosedStart(t *testing.T) {
 	resultWrite := os.NewFile(uintptr(resultFDs[1]), "scanner supervisor coverage child result")
 	lease := &scannerSupervisorCoverageLease{}
 	launch := scannerLaunchRequest{
-		Version: 1,
-		Path:    executable,
-		Args:    []string{executable, ExecCommand, "--profile", string(Scanner), "--files", "0", "--identity-only", "--seccomp", "--", "/bin/true"},
-		Env:     []string{"PATH=/usr/bin:/bin"},
-		Files:   0,
-		UID:     uint32(ScannerIdentityPoolUIDStart),
-		GID:     uint32(ScannerIdentityPoolUIDStart),
+		Version:    1,
+		Path:       executable,
+		Args:       []string{executable, ExecCommand, "--profile", string(Scanner), "--files", "1", "--identity-only", "--seccomp", "--liveness-fd", "3", "--", "/bin/true"},
+		Env:        []string{"PATH=/usr/bin:/bin"},
+		Files:      1,
+		LivenessFD: 3,
+		UID:        uint32(ScannerIdentityPoolUIDStart),
+		GID:        uint32(ScannerIdentityPoolUIDStart),
 	}
 	configuration, err := json.Marshal(launch)
 	if err != nil {
@@ -96,7 +98,7 @@ func TestScannerSupervisorReexecCoverageAndFailClosedStart(t *testing.T) {
 		_ = resultWrite.Close()
 		t.Fatal(err)
 	}
-	request, err := parseScannerSupervisorArgs([]string{"--files", "0", "--request-fd", "3", "--result-fd", "4"})
+	request, err := parseScannerSupervisorArgs([]string{"--files", "1", "--request-fd", "4", "--result-fd", "5"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,10 +118,10 @@ func TestScannerSupervisorReexecCoverageAndFailClosedStart(t *testing.T) {
 	if coverageDir := currentTestCoverageDirectory(); coverageDir != "" {
 		args = append(args, "-test.gocoverdir="+coverageDir)
 	}
-	args = append(args, "--", "--files", "0", "--request-fd", "3", "--result-fd", "4")
+	args = append(args, "--", "--files", "1", "--request-fd", "4", "--result-fd", "5")
 	command := exec.CommandContext(ctx, executable, args...)
 	command.Env = append(os.Environ(), scannerSupervisorCoverageChildEnv+"=1")
-	command.ExtraFiles = []*os.File{configRead, resultWrite}
+	command.ExtraFiles = []*os.File{livenessFile, configRead, resultWrite}
 	command.Stdout, command.Stderr = &stdout, &stderr
 	command.WaitDelay = time.Second
 	var waited bool
@@ -175,12 +177,14 @@ func TestScannerSupervisorReexecCoverageAndFailClosedStart(t *testing.T) {
 
 func TestScannerSupervisorReexecRejectsMalformedControlInput(t *testing.T) {
 	validLaunch := scannerLaunchRequest{
-		Version: 1,
-		Path:    "/bin/true",
-		Args:    []string{"/bin/true"},
-		Env:     []string{"PATH=/usr/bin:/bin"},
-		UID:     uint32(ScannerIdentityPoolUIDStart),
-		GID:     uint32(ScannerIdentityPoolUIDStart),
+		Version:    1,
+		Path:       "/usr/bin/edgewatch",
+		Args:       []string{"/usr/bin/edgewatch", ExecCommand, "--profile", string(Scanner), "--files", "1", "--identity-only", "--seccomp", "--liveness-fd", "3", "--", "/bin/true"},
+		Env:        []string{"PATH=/usr/bin:/bin"},
+		Files:      1,
+		LivenessFD: 3,
+		UID:        uint32(ScannerIdentityPoolUIDStart),
+		GID:        uint32(ScannerIdentityPoolUIDStart),
 	}
 	validConfiguration, err := json.Marshal(validLaunch)
 	if err != nil {
@@ -200,9 +204,9 @@ func TestScannerSupervisorReexecRejectsMalformedControlInput(t *testing.T) {
 		wantError     string
 	}{
 		{name: "invalid argument frame", args: []string{"--files", "0"}, wantError: "usage: sandbox-exec"},
-		{name: "empty configuration", args: []string{"--files", "0", "--request-fd", "3", "--result-fd", "4"}, wantError: "launch request is unavailable or too large"},
-		{name: "malformed JSON", args: []string{"--files", "0", "--request-fd", "3", "--result-fd", "4"}, configuration: []byte("{"), wantError: "launch request is malformed"},
-		{name: "invalid lease identity", args: []string{"--files", "0", "--request-fd", "3", "--result-fd", "4"}, configuration: wrongIdentityConfiguration, wantError: "launch request is invalid"},
+		{name: "empty configuration", args: []string{"--files", "1", "--request-fd", "4", "--result-fd", "5"}, wantError: "launch request is unavailable or too large"},
+		{name: "malformed JSON", args: []string{"--files", "1", "--request-fd", "4", "--result-fd", "5"}, configuration: []byte("{"), wantError: "launch request is malformed"},
+		{name: "invalid lease identity", args: []string{"--files", "1", "--request-fd", "4", "--result-fd", "5"}, configuration: wrongIdentityConfiguration, wantError: "launch request is invalid"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runScannerSupervisorCoverageChild(t, test.args, test.configuration, test.wantError, false)
@@ -211,7 +215,7 @@ func TestScannerSupervisorReexecRejectsMalformedControlInput(t *testing.T) {
 	// A valid request reaches child.Start. Rootless CI cannot change to the
 	// leased UID/GID because Go must clear supplementary groups, so the existing
 	// start-failure path is expected to prove that no scanner child was started.
-	runScannerSupervisorCoverageChild(t, []string{"--files", "0", "--request-fd", "3", "--result-fd", "4"}, validConfiguration, "scanner supervisor: start scanner child:", true)
+	runScannerSupervisorCoverageChild(t, []string{"--files", "1", "--request-fd", "4", "--result-fd", "5"}, validConfiguration, "scanner supervisor: start scanner child:", true)
 }
 
 func runScannerSupervisorCoverageChild(t *testing.T, helperArgs []string, configuration []byte, expectedError string, wantCleanProof bool) {
@@ -220,6 +224,7 @@ func runScannerSupervisorCoverageChild(t *testing.T, helperArgs []string, config
 	if err != nil {
 		t.Fatal(err)
 	}
+	livenessFile := scannerLivenessTestFile(t)
 	configRead, configWrite, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -255,7 +260,7 @@ func runScannerSupervisorCoverageChild(t *testing.T, helperArgs []string, config
 	defer cancel()
 	command := exec.CommandContext(ctx, executable, args...)
 	command.Env = append(os.Environ(), scannerSupervisorCoverageChildEnv+"=1", scannerSupervisorCoverageExpectedErrorEnv+"="+expectedError)
-	command.ExtraFiles = []*os.File{configRead, resultWrite}
+	command.ExtraFiles = []*os.File{livenessFile, configRead, resultWrite}
 	command.WaitDelay = time.Second
 	if err := command.Start(); err != nil {
 		if finishErr := invocation.StartFailed(true); finishErr != nil {

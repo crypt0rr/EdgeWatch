@@ -26,8 +26,8 @@ func TestScannerIdentityAcquireCancellationAndUnsafeLockFailClosed(t *testing.T)
 		}
 	})
 
-	for _, call := range []int{2, 3} {
-		t.Run(map[int]string{2: "before process census", 3: "after process census"}[call], func(t *testing.T) {
+	for _, call := range []int{3, 5} {
+		t.Run(map[int]string{3: "before process census", 5: "after process census"}[call], func(t *testing.T) {
 			allocator := newTestScannerIdentityAllocator(t, 1)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -180,7 +180,7 @@ func TestScannerIdentityAcquireDurableWriteFailuresPreserveReservationContract(t
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		controlled := &scannerIdentityModeChangeContext{
-			Context: ctx, directory: allocator.directory, changeOnCall: 4,
+			Context: ctx, directory: allocator.directory, changeOnCall: 6,
 		}
 		lease, err := allocator.acquire(controlled)
 		if controlled.calls != controlled.changeOnCall || controlled.changeErr != nil {
@@ -223,7 +223,7 @@ func TestScannerIdentityAcquireDurableWriteFailuresPreserveReservationContract(t
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		controlled := &scannerIdentityModeChangeContext{
-			Context: ctx, cancel: cancel, directory: allocator.directory, changeOnCall: 5, cancelOnChange: true,
+			Context: ctx, cancel: cancel, directory: allocator.directory, changeOnCall: 7, cancelOnChange: true,
 		}
 		lease, err := allocator.acquire(controlled)
 		if controlled.calls != controlled.changeOnCall || controlled.changeErr != nil {
@@ -420,7 +420,7 @@ func TestScannerIdentityMarkerCommitFailuresPreserveRecoverableState(t *testing.
 			}
 			t.Fatalf("read-only mode did not block transition marker writes, but acquire returned %v, %v", next, err)
 		}
-		if next != nil || err == nil || !strings.Contains(err.Error(), "empty private scope transition marker failed") {
+		if next != nil || err == nil || !strings.Contains(err.Error(), "durable marker write failed") {
 			t.Fatalf("namespace transition with marker refusal = %v, %v; want no lease and recoverable failure", next, err)
 		}
 		journal, err := readTestScannerIdentityJournal(transition)

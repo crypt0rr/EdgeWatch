@@ -29,6 +29,7 @@ var commandFlagAllowlist = map[string]map[string]struct{}{
 	"verify":                     allowedFlags("config", "output", "from", "allow-key-mismatch"),
 	"health":                     allowedFlags("config", "output"),
 	"notify test":                allowedFlags("config", "output", "tenant"),
+	"scanner-identities recover": allowedFlags("confirm-all-volume-users-stopped"),
 	"admin setup-token":          allowedFlags("config", "output", "force"),
 	"admin reissue-setup-token":  allowedFlags("config", "output", "force"),
 	"admin platform-setup-token": allowedFlags("config", "output", "force"),

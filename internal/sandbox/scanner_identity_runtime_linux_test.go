@@ -323,7 +323,7 @@ func TestScannerIdentityAcquireRejectsUnavailableInputsAndUsesSnapshotSafely(t *
 		allocator := newTestScannerIdentityAllocator(t, 1)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		controlled := &cancelOnErrCallContext{Context: ctx, cancel: cancel, call: 4}
+		controlled := &cancelOnErrCallContext{Context: ctx, cancel: cancel, call: 6}
 		lease, err := allocator.acquire(controlled)
 		if lease != nil || !errors.Is(err, context.Canceled) {
 			t.Fatalf("canceled pre-reservation acquire = %v, %v; want context.Canceled", lease, err)

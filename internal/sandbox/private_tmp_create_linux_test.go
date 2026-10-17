@@ -68,6 +68,7 @@ func TestPrivateTemporaryCreateExecChild(t *testing.T) {
 
 type privateTemporaryCreateTestLease struct {
 	uid, gid       int
+	livenessFile   *os.File
 	released       bool
 	quarantined    bool
 	releaseCalls   int
@@ -76,6 +77,13 @@ type privateTemporaryCreateTestLease struct {
 
 func (lease *privateTemporaryCreateTestLease) identity() (int, int, bool) {
 	return lease.uid, lease.gid, true
+}
+
+func (lease *privateTemporaryCreateTestLease) inheritedScannerLivenessFile() (*os.File, error) {
+	if lease == nil || lease.livenessFile == nil {
+		return nil, errors.New("test liveness reference is unavailable")
+	}
+	return lease.livenessFile, nil
 }
 
 func (lease *privateTemporaryCreateTestLease) release() error {
@@ -96,7 +104,7 @@ func privateTemporaryCreatePolicy(t *testing.T) (*Policy, *ScannerIdentityReserv
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease := &privateTemporaryCreateTestLease{uid: os.Geteuid(), gid: os.Getegid()}
+	lease := &privateTemporaryCreateTestLease{uid: os.Geteuid(), gid: os.Getegid(), livenessFile: scannerLivenessTestFile(t)}
 	reservation := &ScannerIdentityReservation{lease: lease}
 	policy := (&Policy{
 		profile:         Scanner,

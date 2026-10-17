@@ -19,18 +19,18 @@ func TestParseExecArgsAcceptsDistinctLaunchContracts(t *testing.T) {
 	}{
 		{
 			name: "private scanner leaf",
-			args: []string{"--profile", "scanner", "--files", "1", "--private-tmp", "--private-root-fd", "4", "--private-leaf-fd", "5", "--control-fd", "6", "--landlock", "--seccomp", "--", "/usr/local/bin/naabu", "-version"},
-			want: execRequest{profile: Scanner, files: 1, privateTemp: true, privateRootFD: 4, privateLeafFD: 5, privateNamespaceFD: -1, controlFD: 6, landlock: true, seccomp: true, argv: []string{"/usr/local/bin/naabu", "-version"}},
+			args: []string{"--profile", "scanner", "--files", "1", "--liveness-fd", "3", "--private-tmp", "--private-root-fd", "4", "--private-leaf-fd", "5", "--control-fd", "6", "--landlock", "--seccomp", "--", "/usr/local/bin/naabu", "-version"},
+			want: execRequest{profile: Scanner, files: 1, livenessFD: 3, privateTemp: true, privateRootFD: 4, privateLeafFD: 5, privateNamespaceFD: -1, controlFD: 6, landlock: true, seccomp: true, argv: []string{"/usr/local/bin/naabu", "-version"}},
 		},
 		{
 			name: "private namespace creator",
-			args: []string{"--profile", "scanner", "--files", "0", "--private-tmp", "--private-create", "--private-root-fd", "3", "--private-namespace-fd", "4", "--control-fd", "5", "--landlock", "--", "/usr/local/bin/edgewatch", "create-private-tmp"},
-			want: execRequest{profile: Scanner, files: 0, privateTemp: true, privateCreate: true, privateRootFD: 3, privateLeafFD: -1, privateNamespaceFD: 4, controlFD: 5, landlock: true, argv: []string{"/usr/local/bin/edgewatch", "create-private-tmp"}},
+			args: []string{"--profile", "scanner", "--files", "1", "--liveness-fd", "3", "--private-tmp", "--private-create", "--private-root-fd", "4", "--private-namespace-fd", "5", "--control-fd", "6", "--landlock", "--seccomp", "--", "/usr/local/bin/edgewatch", "create-private-tmp"},
+			want: execRequest{profile: Scanner, files: 1, livenessFD: 3, seccomp: true, privateTemp: true, privateCreate: true, privateRootFD: 4, privateLeafFD: -1, privateNamespaceFD: 5, controlFD: 6, landlock: true, argv: []string{"/usr/local/bin/edgewatch", "create-private-tmp"}},
 		},
 		{
 			name: "identity-only scanner",
-			args: []string{"--profile", "scanner", "--files", "0", "--identity-only", "--seccomp", "--", "/usr/bin/nmap", "-n"},
-			want: execRequest{profile: Scanner, files: 0, privateRootFD: -1, privateLeafFD: -1, privateNamespaceFD: -1, controlFD: -1, seccomp: true, identityOnly: true, argv: []string{"/usr/bin/nmap", "-n"}},
+			args: []string{"--profile", "scanner", "--files", "1", "--liveness-fd", "3", "--identity-only", "--seccomp", "--", "/usr/bin/nmap", "-n"},
+			want: execRequest{profile: Scanner, files: 1, livenessFD: 3, privateRootFD: -1, privateLeafFD: -1, privateNamespaceFD: -1, controlFD: -1, seccomp: true, identityOnly: true, argv: []string{"/usr/bin/nmap", "-n"}},
 		},
 	}
 	for _, test := range tests {
@@ -49,8 +49,8 @@ func TestParseExecArgsAcceptsDistinctLaunchContracts(t *testing.T) {
 
 func TestParseExecArgsRejectsMalformedPrivateAndIdentityRequests(t *testing.T) {
 	t.Parallel()
-	validPrivate := []string{"--profile", "scanner", "--files", "0", "--private-tmp", "--private-root-fd", "3", "--private-leaf-fd", "4", "--control-fd", "5", "--", "/usr/local/bin/naabu"}
-	validCreate := []string{"--profile", "scanner", "--files", "0", "--private-tmp", "--private-create", "--private-root-fd", "3", "--private-namespace-fd", "4", "--control-fd", "5", "--", "/usr/local/bin/edgewatch"}
+	validPrivate := []string{"--profile", "scanner", "--files", "1", "--liveness-fd", "3", "--private-tmp", "--private-root-fd", "4", "--private-leaf-fd", "5", "--control-fd", "6", "--", "/usr/local/bin/naabu"}
+	validCreate := []string{"--profile", "scanner", "--files", "1", "--liveness-fd", "3", "--private-tmp", "--private-create", "--private-root-fd", "4", "--private-namespace-fd", "5", "--control-fd", "6", "--", "/usr/local/bin/edgewatch"}
 	tests := []struct {
 		name string
 		args []string
@@ -123,7 +123,8 @@ while IFS=: read -r key value; do
     NoNewPrivs|Seccomp) printf '%s:%s\n' "$key" "$value" >> "$EDGEWATCH_POLICY_OUTPUT" ;;
   esac
 done < /proc/self/status`
-	policy := &Policy{profile: Scanner, status: Status{Mode: ModeAuto}, identityOnlyHelper: helper}
+	livenessFile := scannerLivenessTestFile(t)
+	policy := &Policy{profile: Scanner, status: Status{Mode: ModeAuto}, identityOnlyHelper: helper, identityOnlyLivenessFile: func() (*os.File, error) { return livenessFile, nil }}
 	environment := []string{"PATH=/usr/local/bin:/usr/bin:/bin", "EDGEWATCH_POLICY_OUTPUT=" + outputPath, "EDGEWATCH_POLICY_OUTSIDE=" + outsidePath}
 	if err := runConfined(policy, []string{"/bin/sh", "-c", script}, environment); err != nil {
 		t.Fatalf("runConfined() identity-only helper = %v", err)

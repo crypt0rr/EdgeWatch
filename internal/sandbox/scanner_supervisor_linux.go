@@ -35,6 +35,7 @@ type scannerLaunchRequest struct {
 	Env         []string  `json:"env"`
 	Dir         string    `json:"dir,omitempty"`
 	Files       int       `json:"files"`
+	LivenessFD  int       `json:"liveness_fd"`
 	UID         uint32    `json:"uid"`
 	GID         uint32    `json:"gid"`
 	AmbientCaps []uintptr `json:"ambient_caps,omitempty"`
@@ -65,6 +66,7 @@ type scannerSupervisorRequest struct {
 func init() {
 	prepareScannerInvocation = prepareLinuxScannerInvocation
 	reserveScannerIdentity = reserveLinuxScannerIdentity
+	recoverScannerIdentityState = recoverScannerIdentityStateOfflineLinux
 }
 
 func reserveLinuxScannerIdentity(ctx context.Context, policy *Policy) (*ScannerIdentityReservation, error) {
@@ -141,12 +143,17 @@ func prepareLinuxScannerInvocation(ctx context.Context, cmd *exec.Cmd, policy *P
 	var uid, gid int
 	var err error
 	reservation := policy.identityReservation
+	var livenessFile *os.File
 	if reservation != nil {
 		reservedUID, reservedGID, ok := reservation.Identity()
 		if !ok {
 			return nil, errors.New("prepare scanner invocation: reserved identity is unavailable")
 		}
 		uid, gid = int(reservedUID), int(reservedGID)
+		livenessFile, err = reservation.livenessFile()
+		if err != nil {
+			return nil, errors.New("prepare scanner invocation: scanner liveness reference is unavailable")
+		}
 	} else {
 		lease, err = acquireScannerIdentity(ctx, policy)
 		if err != nil {
@@ -158,13 +165,23 @@ func prepareLinuxScannerInvocation(ctx context.Context, cmd *exec.Cmd, policy *P
 			_ = lease.quarantine()
 			return nil, errors.New("prepare scanner invocation: identity lease is unavailable")
 		}
+		livenessFile, err = scannerLivenessFileForLease(lease)
+		if err != nil {
+			_ = lease.quarantine()
+			return nil, errors.New("prepare scanner invocation: scanner liveness reference is unavailable")
+		}
 	}
 	releaseUnreservedLease := func() {
 		if lease != nil {
 			_ = lease.release()
 		}
 	}
-	if err := addScannerNoEscapeHelper(cmd, helper); err != nil {
+	livenessFD, err := appendScannerLivenessFile(cmd, livenessFile)
+	if err != nil {
+		releaseUnreservedLease()
+		return nil, err
+	}
+	if err := addScannerNoEscapeHelper(cmd, helper, livenessFD); err != nil {
 		releaseUnreservedLease()
 		return nil, err
 	}
@@ -175,7 +192,7 @@ func prepareLinuxScannerInvocation(ctx context.Context, cmd *exec.Cmd, policy *P
 	}
 	request := scannerLaunchRequest{
 		Version: 1, Path: cmd.Path, Args: append([]string(nil), cmd.Args...), Env: append([]string(nil), cmd.Env...),
-		Dir: cmd.Dir, Files: len(cmd.ExtraFiles), UID: uint32(uid), GID: uint32(gid),
+		Dir: cmd.Dir, Files: len(cmd.ExtraFiles), LivenessFD: livenessFD, UID: uint32(uid), GID: uint32(gid),
 		AmbientCaps: ambient, Session: session,
 	}
 	configuration, err := json.Marshal(request)
@@ -232,33 +249,192 @@ func prepareLinuxScannerInvocation(ctx context.Context, cmd *exec.Cmd, policy *P
 	return &ScannerInvocation{implementation: invocation}, nil
 }
 
-func addScannerNoEscapeHelper(cmd *exec.Cmd, helper string) error {
+func addScannerNoEscapeHelper(cmd *exec.Cmd, helper string, livenessFD int) error {
 	if cmd.Path == helper && len(cmd.Args) >= 2 && cmd.Args[1] == ExecCommand {
 		separator := -1
+		filesIndex, livenessIndex, seccompIndex := -1, -1, -1
+		privateTemporary := false
 		for index := 2; index < len(cmd.Args); index++ {
 			if cmd.Args[index] == "--" {
 				separator = index
 				break
 			}
-			if cmd.Args[index] == "--seccomp" {
-				return nil
+			switch cmd.Args[index] {
+			case "--private-tmp":
+				privateTemporary = true
+			case "--files":
+				if filesIndex >= 0 || index+1 >= len(cmd.Args) {
+					return errors.New("prepare scanner invocation: sandbox helper file count is invalid")
+				}
+				filesIndex = index + 1
+				index++
+			case "--liveness-fd":
+				if livenessIndex >= 0 || index+1 >= len(cmd.Args) {
+					return errors.New("prepare scanner invocation: sandbox helper liveness descriptor is invalid")
+				}
+				livenessIndex = index + 1
+				index++
+			case "--seccomp":
+				if seccompIndex >= 0 {
+					return errors.New("prepare scanner invocation: sandbox helper seccomp flag is duplicated")
+				}
+				seccompIndex = index
+			case "--seccomp-notify-fd":
+				return errors.New("prepare scanner invocation: helper notification descriptor is already set")
 			}
 		}
-		if separator < 0 {
+		if separator < 0 || filesIndex < 0 {
 			return errors.New("prepare scanner invocation: sandbox helper arguments are invalid")
 		}
-		cmd.Args = append(cmd.Args[:separator], append([]string{"--seccomp"}, cmd.Args[separator:]...)...)
+		if privateTemporary {
+			dataFiles, err := strconv.Atoi(cmd.Args[filesIndex])
+			if err != nil || dataFiles < 0 || dataFiles+scannerPrivateControlFDCount(execRequest{privateTemp: true}) != len(cmd.ExtraFiles) {
+				return errors.New("prepare scanner invocation: private temporary descriptor layout is invalid")
+			}
+		} else {
+			cmd.Args[filesIndex] = strconv.Itoa(len(cmd.ExtraFiles))
+		}
+		if livenessIndex >= 0 {
+			if cmd.Args[livenessIndex] != strconv.Itoa(livenessFD) {
+				return errors.New("prepare scanner invocation: sandbox helper liveness descriptor changed")
+			}
+		} else {
+			cmd.Args = append(cmd.Args[:separator], append([]string{"--liveness-fd", strconv.Itoa(livenessFD)}, cmd.Args[separator:]...)...)
+			separator += 2
+		}
+		if seccompIndex < 0 {
+			cmd.Args = append(cmd.Args[:separator], append([]string{"--seccomp"}, cmd.Args[separator:]...)...)
+		}
 		return nil
 	}
 	originalPath := cmd.Path
 	originalArgs := append([]string(nil), cmd.Args...)
 	files := len(cmd.ExtraFiles)
-	args := []string{helper, ExecCommand, "--profile", string(Scanner), "--files", strconv.Itoa(files), "--identity-only", "--seccomp", "--", originalPath}
+	args := []string{helper, ExecCommand, "--profile", string(Scanner), "--files", strconv.Itoa(files), "--identity-only", "--seccomp", "--liveness-fd", strconv.Itoa(livenessFD), "--", originalPath}
 	if len(originalArgs) > 1 {
 		args = append(args, originalArgs[1:]...)
 	}
 	cmd.Path, cmd.Args = helper, args
 	return nil
+}
+
+func appendSeccompNotificationControl(args []string, notifyFD int) ([]string, error) {
+	if notifyFD < 3 || len(args) < 3 || args[1] != ExecCommand {
+		return nil, errors.New("scanner helper notification descriptor is invalid")
+	}
+	request, err := parseExecArgs(args[2:])
+	if err != nil || request.profile != Scanner || !request.seccomp || request.notifyFD != 0 {
+		return nil, errors.New("scanner helper request cannot accept a notification descriptor")
+	}
+	separator := -1
+	for index := 2; index < len(args); index++ {
+		if args[index] == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 || notifyFD != 3+request.files+scannerPrivateControlFDCount(request) {
+		return nil, errors.New("scanner helper notification descriptor layout is invalid")
+	}
+	updated := append([]string(nil), args[:separator]...)
+	updated = append(updated, "--seccomp-notify-fd", strconv.Itoa(notifyFD))
+	updated = append(updated, args[separator:]...)
+	return updated, nil
+}
+
+func receiveScannerNotificationListener(controlFD int, child *exec.Cmd, uid, gid uint32, signals <-chan os.Signal, timeout time.Duration) (int, bool, error) {
+	if controlFD < 0 || child == nil || child.Process == nil || timeout <= 0 {
+		return -1, false, errors.New("scanner supervisor: notification listener wait is unavailable")
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return -1, false, errors.New("seccomp notification listener startup timed out")
+		}
+		wait := int((remaining + time.Millisecond - 1) / time.Millisecond)
+		if wait > int(seccompNotificationPollTimeout/time.Millisecond) {
+			wait = int(seccompNotificationPollTimeout / time.Millisecond)
+		}
+		poll := []unix.PollFd{{Fd: int32(controlFD), Events: unix.POLLIN | unix.POLLHUP | unix.POLLERR}}
+		_, err := unix.Poll(poll, wait)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return -1, false, errors.New("poll seccomp notification listener channel failed")
+		}
+		if poll[0].Revents&unix.POLLIN != 0 {
+			listenerFD, receiveErr := receiveSeccompNotificationListenerPacket(controlFD, child.Process.Pid, uid, gid)
+			return listenerFD, false, receiveErr
+		}
+		if poll[0].Revents&(unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0 {
+			return -1, false, errors.New("scanner helper exited before sending its seccomp notification listener")
+		}
+		select {
+		case <-signals:
+			return -1, true, errors.New("scanner process tree was cancelled during sandbox setup")
+		default:
+		}
+		var info unix.Siginfo
+		waitErr := unix.Waitid(unix.P_PID, child.Process.Pid, &info, unix.WEXITED|unix.WNOHANG|unix.WNOWAIT, nil)
+		if waitErr != nil && !errors.Is(waitErr, unix.EINTR) {
+			return -1, false, errors.New("scanner helper exit could not be verified")
+		}
+		if info.Signo != 0 {
+			return -1, false, errors.New("scanner helper exited before sending its seccomp notification listener")
+		}
+	}
+}
+
+func scannerLivenessFileForLease(lease identityLease) (*os.File, error) {
+	provider, ok := lease.(scannerLivenessLease)
+	if !ok {
+		return nil, errors.New("scanner identity lease has no liveness reference")
+	}
+	file, err := provider.inheritedScannerLivenessFile()
+	if err != nil || file == nil {
+		return nil, errors.New("scanner identity lease has no liveness reference")
+	}
+	if err := validateScannerLivenessParentFile(file); err != nil {
+		return nil, errors.New("scanner identity lease liveness reference is invalid")
+	}
+	return file, nil
+}
+
+func appendScannerLivenessFile(cmd *exec.Cmd, file *os.File) (int, error) {
+	if cmd == nil || file == nil {
+		return -1, errors.New("prepare scanner invocation: scanner liveness reference is unavailable")
+	}
+	if len(cmd.ExtraFiles) >= maxInheritedFiles {
+		return -1, errors.New("prepare scanner invocation: too many inherited scanner descriptors")
+	}
+	index := -1
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return -1, errors.New("prepare scanner invocation: scanner liveness reference is unavailable")
+	}
+	for current, existing := range cmd.ExtraFiles {
+		if existing == nil {
+			return -1, errors.New("prepare scanner invocation: inherited scanner descriptor is unavailable")
+		}
+		if existing == file {
+			if index >= 0 {
+				return -1, errors.New("prepare scanner invocation: scanner liveness reference is duplicated")
+			}
+			index = current
+			continue
+		}
+		otherInfo, statErr := existing.Stat()
+		if statErr == nil && os.SameFile(fileInfo, otherInfo) {
+			return -1, errors.New("prepare scanner invocation: scanner liveness reference has an alias")
+		}
+	}
+	if index < 0 {
+		index = len(cmd.ExtraFiles)
+		cmd.ExtraFiles = append(cmd.ExtraFiles, file)
+	}
+	return 3 + index, nil
 }
 
 func (invocation *scannerSupervisorInvocation) started() error {
@@ -463,6 +639,14 @@ func parseScannerSupervisorArgs(args []string) (scannerSupervisorRequest, error)
 }
 
 func execScannerSupervisor(args []string) error {
+	return execScannerSupervisorWithBrokerFactory(args, nil)
+}
+
+// execScannerSupervisorWithBrokerFactory keeps the production supervisor
+// control flow identical while allowing privileged re-exec tests to pause at
+// the real ADDFD/NOTIF_SEND boundary. A nil factory selects the production
+// broker; the test factory is confined to a separate test-binary process.
+func execScannerSupervisorWithBrokerFactory(args []string, brokerFactory func(listenerFD int) *seccompNotificationBroker) error {
 	request, err := parseScannerSupervisorArgs(args)
 	if err != nil {
 		return err
@@ -487,6 +671,9 @@ func execScannerSupervisor(args []string) error {
 	if err != nil {
 		return fmt.Errorf("scanner supervisor: %w", err)
 	}
+	if err := validateScannerLivenessDescriptor(launch.LivenessFD); err != nil {
+		return errors.New("scanner supervisor: inherited liveness descriptor is invalid")
+	}
 	result := os.NewFile(uintptr(request.resultFD), "scanner supervisor result")
 	defer result.Close()
 	unix.CloseOnExec(request.resultFD)
@@ -496,19 +683,70 @@ func execScannerSupervisor(args []string) error {
 		fd := 3 + index
 		childFiles[index] = os.NewFile(uintptr(fd), fmt.Sprintf("scanner data descriptor %d", index))
 	}
+	childArgs, err := appendSeccompNotificationControl(launch.Args, 3+launch.Files)
+	if err != nil {
+		for _, file := range childFiles {
+			_ = file.Close()
+		}
+		_ = sendScannerSupervisorResult(request.resultFD, true)
+		return fmt.Errorf("scanner supervisor: %w", err)
+	}
+	channels, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		for _, file := range childFiles {
+			_ = file.Close()
+		}
+		_ = sendScannerSupervisorResult(request.resultFD, true)
+		return errors.New("scanner supervisor: seccomp notification channel is unavailable")
+	}
+	notificationRead := channels[0]
+	if err := unix.SetsockoptInt(notificationRead, unix.SOL_SOCKET, unix.SO_PASSCRED, 1); err != nil {
+		_ = unix.Close(channels[0])
+		_ = unix.Close(channels[1])
+		for _, file := range childFiles {
+			_ = file.Close()
+		}
+		_ = sendScannerSupervisorResult(request.resultFD, true)
+		return errors.New("scanner supervisor: seccomp notification credentials are unavailable")
+	}
+	notificationWrite := os.NewFile(uintptr(channels[1]), "scanner seccomp notification channel child")
+	childFiles = append(childFiles, notificationWrite)
+	launch.Args = childArgs
 	child := buildScannerChildCommand(launch, childFiles)
 
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	defer signal.Stop(signals)
 	if err := child.Start(); err != nil {
+		_ = unix.Close(notificationRead)
+		for _, file := range childFiles {
+			_ = file.Close()
+		}
 		_ = sendScannerSupervisorResult(request.resultFD, true)
 		return fmt.Errorf("scanner supervisor: start scanner child: %w", err)
 	}
 	for _, file := range childFiles {
 		_ = file.Close()
 	}
+	listenerFD, startupInterrupted, err := receiveScannerNotificationListener(notificationRead, child, launch.UID, launch.GID, signals, scannerSupervisorTimeout)
+	if err != nil {
+		_ = unix.Close(notificationRead)
+		cleanupErr := terminateAndReapScannerChild(child, request.resultFD, err)
+		if startupInterrupted {
+			return fmt.Errorf("scanner supervisor: scanner process tree was cancelled during sandbox setup: %w", cleanupErr)
+		}
+		return cleanupErr
+	}
+	defer unix.Close(notificationRead)
+	defer unix.Close(listenerFD)
 	interrupted := false
+	broker := &seccompNotificationBroker{listenerFD: listenerFD}
+	if brokerFactory != nil {
+		broker = brokerFactory(listenerFD)
+	}
+	if broker == nil || broker.listenerFD != listenerFD {
+		return terminateAndReapScannerChild(child, request.resultFD, errors.New("scanner supervisor: seccomp notification broker is invalid"))
+	}
 	watchdog := time.NewTicker(20 * time.Millisecond)
 	defer watchdog.Stop()
 	interrupted, childErr, err := superviseScannerChild(child, request.resultFD, signals, watchdog.C, scannerSupervisorOps{
@@ -520,10 +758,11 @@ func execScannerSupervisor(args []string) error {
 		killGroup: func(pid int, signal syscall.Signal) error {
 			return syscall.Kill(-pid, signal)
 		},
-		waitChild:    func(child *exec.Cmd) error { return child.Wait() },
-		reapChildren: reapScannerChildren,
-		sendResult:   sendScannerSupervisorResult,
-		now:          time.Now,
+		waitChild:            func(child *exec.Cmd) error { return child.Wait() },
+		reapChildren:         reapScannerChildren,
+		sendResult:           sendScannerSupervisorResult,
+		now:                  time.Now,
+		serviceNotifications: broker.serveOne,
 	})
 	if err != nil {
 		return err
@@ -579,10 +818,38 @@ func decodeScannerLaunchRequest(configuration []byte, request scannerSupervisorR
 		launch.Files != request.files || launch.UID < scannerIdentityStart || launch.UID >= scannerIdentityStart+scannerIdentityCount || launch.GID != launch.UID {
 		return scannerLaunchRequest{}, errors.New("launch request is invalid")
 	}
-	if launch.Args[0] == "" || strings.ContainsRune(launch.Path, '\x00') || len(launch.AmbientCaps) > 8 {
+	if launch.Args[0] == "" || strings.ContainsRune(launch.Path, '\x00') || len(launch.AmbientCaps) > 8 || launch.LivenessFD < 3 || launch.LivenessFD >= 3+launch.Files || len(launch.Args) < 3 || launch.Args[1] != ExecCommand {
+		return scannerLaunchRequest{}, errors.New("launch request is invalid")
+	}
+	helperRequest, err := parseExecArgs(launch.Args[2:])
+	if err != nil || helperRequest.profile != Scanner || !helperRequest.seccomp || helperRequest.notifyFD != 0 ||
+		helperRequest.files+scannerPrivateControlFDCount(helperRequest) != launch.Files || helperRequest.livenessFD != launch.LivenessFD {
 		return scannerLaunchRequest{}, errors.New("launch request is invalid")
 	}
 	return launch, nil
+}
+
+func terminateAndReapScannerChild(child *exec.Cmd, resultFD int, cause error) error {
+	if child == nil || child.Process == nil {
+		return fmt.Errorf("scanner supervisor: child process is unavailable: %w", cause)
+	}
+	killErr := syscall.Kill(-child.Process.Pid, syscall.SIGKILL)
+	if errors.Is(killErr, syscall.ESRCH) {
+		killErr = nil
+	}
+	waitErr := child.Wait()
+	var exitError *exec.ExitError
+	if errors.As(waitErr, &exitError) {
+		waitErr = nil
+	}
+	reapErr := reapScannerChildren(scannerSupervisorTimeout)
+	if killErr == nil && waitErr == nil && reapErr == nil {
+		if sendErr := sendScannerSupervisorResult(resultFD, true); sendErr != nil {
+			return fmt.Errorf("scanner supervisor: cleanup proof write failed after %v: %w", cause, sendErr)
+		}
+		return fmt.Errorf("scanner supervisor: %w", cause)
+	}
+	return fmt.Errorf("scanner supervisor: %v; process-tree cleanup is unproven (kill=%v wait=%v reap=%v)", cause, killErr, waitErr, reapErr)
 }
 
 func reapScannerChildren(timeout time.Duration) error {
@@ -620,12 +887,13 @@ func sendScannerSupervisorResult(fd int, clean bool) error {
 }
 
 type scannerSupervisorOps struct {
-	waitForExit  func(pid int) (bool, error)
-	killGroup    func(pid int, signal syscall.Signal) error
-	waitChild    func(*exec.Cmd) error
-	reapChildren func(time.Duration) error
-	sendResult   func(fd int, clean bool) error
-	now          func() time.Time
+	waitForExit          func(pid int) (bool, error)
+	killGroup            func(pid int, signal syscall.Signal) error
+	waitChild            func(*exec.Cmd) error
+	reapChildren         func(time.Duration) error
+	sendResult           func(fd int, clean bool) error
+	now                  func() time.Time
+	serviceNotifications func() error
 }
 
 // superviseScannerChild owns the process-tree proof ordering after Start:
@@ -638,6 +906,7 @@ func superviseScannerChild(child *exec.Cmd, resultFD int, signals <-chan os.Sign
 		return false, nil, errors.New("scanner supervisor: process lifecycle is unavailable")
 	}
 	var cancellationDeadline time.Time
+	var notificationErr error
 	for {
 		if !cancellationDeadline.IsZero() && !ops.now().Before(cancellationDeadline) {
 			_ = ops.killGroup(child.Process.Pid, syscall.SIGKILL)
@@ -650,6 +919,15 @@ func superviseScannerChild(child *exec.Cmd, resultFD int, signals <-chan os.Sign
 		}
 		if exited {
 			break
+		}
+		if notificationErr == nil && ops.serviceNotifications != nil {
+			if err := ops.serviceNotifications(); err != nil {
+				notificationErr = err
+				_ = ops.killGroup(child.Process.Pid, syscall.SIGKILL)
+				if cancellationDeadline.IsZero() {
+					cancellationDeadline = ops.now().Add(scannerSupervisorTimeout)
+				}
+			}
 		}
 		select {
 		case <-signals:
@@ -673,6 +951,9 @@ func superviseScannerChild(child *exec.Cmd, resultFD int, signals <-chan os.Sign
 	}
 	if sendErr := ops.sendResult(resultFD, true); sendErr != nil {
 		return interrupted, childErr, fmt.Errorf("scanner supervisor: send cleanup proof: %w", sendErr)
+	}
+	if notificationErr != nil {
+		return interrupted, childErr, fmt.Errorf("scanner supervisor: seccomp notification failed: %w", notificationErr)
 	}
 	return interrupted, childErr, nil
 }

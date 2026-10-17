@@ -526,11 +526,16 @@ func (allocator *scannerIdentityAllocator) loadOrInitializeWithLiveness(director
 	case journalErr != nil:
 		return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: same-boot lease journal is missing or invalid")
 	case marker.PIDNamespace != pidNamespace:
-		if !exclusiveLiveness || !privateRuntime || !marker.PrivateRuntime || !journal.PrivateRuntime {
+		if !exclusiveLiveness || !privateRuntime || !marker.PrivateRuntime || !journal.PrivateRuntime ||
+			marker.Version != scannerIdentityVersion || journal.Version != scannerIdentityVersion ||
+			journal.BootID != marker.BootID || journal.PrivateRuntime != marker.PrivateRuntime || journal.Leases == nil {
 			return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: PID namespace changed without exclusive private-scope proof")
 		}
 		if err := allocator.validateJournal(journal); err != nil {
 			return scannerIdentityJournal{}, privateRuntime, err
+		}
+		if journal.PIDNamespace != marker.PIDNamespace && (journal.PIDNamespace != pidNamespace || len(journal.Leases) != 0) {
+			return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: PID namespace changed without matching old lease scope")
 		}
 		if journalHasLeases(journal) {
 			if err := archiveScannerIdentityJournal(directoryFD, journalData); err != nil {

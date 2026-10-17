@@ -751,6 +751,92 @@ func TestScannerIdentityLoadOrInitializeRecoversOnlyProvenStaleScopes(t *testing
 	}
 }
 
+func TestScannerIdentityChangedNamespaceRejectsUnprovenJournalScope(t *testing.T) {
+	tests := []struct {
+		name    string
+		journal scannerIdentityJournal
+	}{
+		{
+			name: "v3 marker cannot prove nonempty v2 leases are stale",
+			journal: scannerIdentityJournal{
+				Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true,
+				Leases: map[uint32]scannerIdentityJournalEntry{
+					60000: {GID: 60000, Token: "0123456789abcdef0123456789abcdef", State: "active"},
+				},
+			},
+		},
+		{
+			name: "unknown journal version cannot prove old scope",
+			journal: scannerIdentityJournal{
+				Version: scannerIdentityVersion + 1, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true,
+				Leases: map[uint32]scannerIdentityJournalEntry{
+					60000: {GID: 60000, Token: "0123456789abcdef0123456789abcdef", State: "active"},
+				},
+			},
+		},
+		{
+			name: "v3 journal scope must match its marker",
+			journal: scannerIdentityJournal{
+				Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 19, PrivateRuntime: true,
+				Leases: map[uint32]scannerIdentityJournalEntry{
+					60000: {GID: 60000, Token: "0123456789abcdef0123456789abcdef", State: "active"},
+				},
+			},
+		},
+		{
+			name: "nonempty target-scope v3 journal is not an interrupted empty transition",
+			journal: scannerIdentityJournal{
+				Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 18, PrivateRuntime: true,
+				Leases: map[uint32]scannerIdentityJournalEntry{
+					60000: {GID: 60000, Token: "0123456789abcdef0123456789abcdef", State: "active"},
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newScannerIdentityRecoveryFixture(t)
+			allocator := fixture.allocator
+			markerBytes, err := json.Marshal(scannerIdentityScope{
+				Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			journalBytes, err := json.Marshal(test.journal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(allocator.markerDir, scannerIdentityMarker), markerBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(allocator.directory, scannerIdentityJournalName), journalBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			lease, err := allocator.acquire(context.Background())
+			if err == nil || lease != nil {
+				t.Fatalf("acquire from an unproven old scope = lease %v, error %v; want refusal without a lease", lease, err)
+			}
+			gotMarker, markerErr := os.ReadFile(filepath.Join(allocator.markerDir, scannerIdentityMarker))
+			gotJournal, journalErr := os.ReadFile(filepath.Join(allocator.directory, scannerIdentityJournalName))
+			if markerErr != nil || journalErr != nil || !bytes.Equal(gotMarker, markerBytes) || !bytes.Equal(gotJournal, journalBytes) {
+				t.Fatalf("refused namespace recovery changed source records: marker=%v journal=%v", markerErr, journalErr)
+			}
+			entries, err := os.ReadDir(allocator.directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), "leases.recovery-") {
+					t.Fatalf("refused namespace recovery created journal archive %q", entry.Name())
+				}
+			}
+		})
+	}
+}
+
 func TestScannerIdentityAcquirePreservesLeasesWhenArchiveOrResetCannotCommit(t *testing.T) {
 	for _, test := range []struct {
 		name          string

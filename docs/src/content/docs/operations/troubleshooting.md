@@ -83,10 +83,19 @@ and the deployment footprint. Follow the action it names:
   complete scanner range, 60000–60063. Configure the full subordinate UID and
   GID ranges for rootless Docker or user-namespace remapping, then recreate
   the container.
-- **The scanner identity allocator refused leases after a PID namespace
-  change.** Keep its journal and boot marker intact. The allocator retries the
-  transition only when the previous scope is safe to discard; after a host
-  reboot it can recognize and reset leases from the previous boot.
+- **The scanner identity allocator could not verify an empty prior scope
+  after a PID namespace change.** Stop other EdgeWatch processes using the
+  data volume and preserve the lease journal and boot marker. With pre-v3 lease
+  state, a host reboot may be needed before the allocator can prove that
+  previous-boot scanner processes are gone. Do not delete or edit the state
+  files.
+- **The scanner identity allocator could not prove the previous private scope
+  safe after a PID namespace change.** When using the v3 allocator, ensure the
+  supported private scanner runtime is active. Stop every other EdgeWatch
+  process or container using the data volume, including direct host commands,
+  so inherited liveness references close, then retry. Once it has exclusive
+  proof, the allocator can archive and reset the prior scope without a host
+  reboot. Preserve the journal and boot marker; do not delete or edit them.
 
 EdgeWatch does not run scanners as UID 0 when the pool is unavailable. Set
 `scanner.sandbox: required` if the daemon should also refuse startup until the

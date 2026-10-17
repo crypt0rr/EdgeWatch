@@ -277,8 +277,14 @@ func scannerIdentityRangeUnavailableReason(err error) string {
 }
 
 func scannerIdentityProbeUnavailableReason(err error) string {
-	if err != nil && strings.Contains(err.Error(), "scanner identity allocator: PID namespace changed with unsafe or occupied scope") {
-		return "the scanner identity allocator refused leases after a PID namespace change because the previous lease scope is unsafe or occupied; preserve the lease journal and retry after a host reboot"
+	if err == nil {
+		return "the scanner identity probe could not start under a leased identity; check the allocator state, UID/GID mappings, and SETUID, SETGID, and KILL capabilities"
+	}
+	switch err.Error() {
+	case "scanner identity allocator: PID namespace changed with unsafe or occupied scope":
+		return "the scanner identity allocator could not verify an empty prior scope after a PID namespace change; stop other EdgeWatch processes using the data volume and preserve the lease journal and boot marker. For pre-v3 lease state, a host reboot may be needed before the allocator can prove prior-boot processes are gone; do not delete or edit state files"
+	case "scanner identity allocator: PID namespace changed without exclusive private-scope proof":
+		return "the scanner identity allocator could not prove the previous private scope safe after a PID namespace change; ensure the supported private scanner runtime is active, stop all other EdgeWatch processes and containers using the data volume so inherited liveness references close, then retry. The v3 allocator can archive and reset the prior scope once it proves exclusivity; preserve the journal and boot marker and do not delete or edit state files"
 	}
 	return "the scanner identity probe could not start under a leased identity; check the allocator state, UID/GID mappings, and SETUID, SETGID, and KILL capabilities"
 }

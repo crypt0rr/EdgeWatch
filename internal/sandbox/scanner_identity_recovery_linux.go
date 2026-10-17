@@ -140,9 +140,11 @@ func recoverLegacyScannerIdentityScope(ctx context.Context, allocator *scannerId
 	if marker.Version == scannerIdentityLegacyVersion && journal.Version == scannerIdentityVersion {
 		// The journal is committed before the marker. Resume only the exact
 		// empty current-scope journal whose old marker and archived v2 source
-		// records match. Never infer a migration from inode or procfs evidence.
-		if marker.BootID != bootID || journal.BootID != bootID || marker.PIDNamespace == 0 ||
-			journal.PIDNamespace != pidNamespace ||
+		// records match. If the runtime namespace changed again while the
+		// explicit migration was interrupted, retarget the empty journal only
+		// after the same archived-source checks and operator confirmation. Never
+		// infer a migration from inode or procfs evidence.
+		if marker.BootID != bootID || journal.BootID != bootID || marker.PIDNamespace == 0 || journal.PIDNamespace == 0 ||
 			!journal.PrivateRuntime || journal.Leases == nil || len(journal.Leases) != 0 {
 			return errors.New("scanner identity recovery journal-first migration state is inconsistent")
 		}
@@ -154,6 +156,12 @@ func recoverLegacyScannerIdentityScope(ctx context.Context, allocator *scannerId
 		}
 		if err := verifyArchivedLegacyScannerIdentityJournal(directoryFD, marker, bootID, allocator); err != nil {
 			return errors.New("scanner identity recovery archived legacy journal is missing or invalid")
+		}
+		if journal.PIDNamespace != pidNamespace {
+			if _, err := initializeScannerIdentityScope(directoryFD, markerFD, bootID, pidNamespace, true, "resume offline legacy migration"); err != nil {
+				return err
+			}
+			return nil
 		}
 		if err := writeScannerIdentityMarker(markerFD, bootID, pidNamespace, true); err != nil {
 			return errors.New("scanner identity recovery could not commit the migrated marker")

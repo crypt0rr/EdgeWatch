@@ -837,6 +837,177 @@ func TestScannerIdentityChangedNamespaceRejectsUnprovenJournalScope(t *testing.T
 	}
 }
 
+func TestScannerIdentityChangedNamespaceCompletesOnlyProvenEmptyIntermediateScopes(t *testing.T) {
+	tests := []struct {
+		name          string
+		markerVersion int
+	}{
+		{name: "v3 scope rollover", markerVersion: scannerIdentityVersion},
+		{name: "empty v2 migration rollover", markerVersion: scannerIdentityLegacyVersion},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newScannerIdentityRecoveryFixture(t)
+			allocator := fixture.allocator
+			allocator.pidNamespace = func() (uint64, error) { return 19, nil }
+			markerBytes, err := json.Marshal(scannerIdentityScope{
+				Version: test.markerVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			journalBytes, err := json.Marshal(scannerIdentityJournal{
+				Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 18, PrivateRuntime: true,
+				Leases: make(map[uint32]scannerIdentityJournalEntry),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(allocator.markerDir, scannerIdentityMarker), markerBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(allocator.directory, scannerIdentityJournalName), journalBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			lease, err := allocator.acquire(context.Background())
+			if err != nil || lease == nil {
+				t.Fatalf("complete safe empty intermediate scope: lease=%v error=%v", lease, err)
+			}
+			t.Cleanup(func() {
+				if err := lease.release(); err != nil {
+					t.Errorf("release recovered scanner identity: %v", err)
+				}
+			})
+			marker, err := readScannerIdentityMarkerAtPath(allocator.markerDir)
+			if err != nil || marker.Version != scannerIdentityVersion || marker.BootID != testScannerBootID || marker.PIDNamespace != 19 || !marker.PrivateRuntime {
+				t.Fatalf("recovered marker = %+v, %v", marker, err)
+			}
+			journal, err := readTestScannerIdentityJournal(allocator)
+			if err != nil || journal.Version != scannerIdentityVersion || journal.BootID != testScannerBootID || journal.PIDNamespace != 19 || !journal.PrivateRuntime || len(journal.Leases) != 1 {
+				t.Fatalf("recovered journal = %+v, %v", journal, err)
+			}
+		})
+	}
+}
+
+func TestScannerIdentityAutomaticRecoveryRequiresExplicitOfflineV2Evidence(t *testing.T) {
+	fixture := newScannerIdentityRecoveryFixture(t)
+	allocator := fixture.allocator
+	allocator.pidNamespace = func() (uint64, error) { return 19, nil }
+	directoryFD, markerFD, err := openScannerIdentityDirectories(allocator.directory, allocator.markerDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := archiveScannerIdentityJournal(directoryFD, fixture.journalBytes); err != nil {
+		_ = unix.Close(directoryFD)
+		_ = unix.Close(markerFD)
+		t.Fatal(err)
+	}
+	if err := archiveScannerIdentityMarker(markerFD, fixture.markerBytes); err != nil {
+		_ = unix.Close(directoryFD)
+		_ = unix.Close(markerFD)
+		t.Fatal(err)
+	}
+	intermediate, err := json.Marshal(scannerIdentityJournal{
+		Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 18, PrivateRuntime: true,
+		Leases: make(map[uint32]scannerIdentityJournalEntry),
+	})
+	if err != nil {
+		_ = unix.Close(directoryFD)
+		_ = unix.Close(markerFD)
+		t.Fatal(err)
+	}
+	if err := writeScannerIdentityFile(directoryFD, scannerIdentityJournalName, intermediate); err != nil {
+		_ = unix.Close(directoryFD)
+		_ = unix.Close(markerFD)
+		t.Fatal(err)
+	}
+	_ = unix.Close(directoryFD)
+	_ = unix.Close(markerFD)
+
+	lease, err := allocator.acquire(context.Background())
+	if err == nil || lease != nil {
+		t.Fatalf("automatic recovery of an offline nonempty-v2 migration = lease %v error %v; want explicit offline confirmation", lease, err)
+	}
+	gotMarker, markerErr := os.ReadFile(filepath.Join(allocator.markerDir, scannerIdentityMarker))
+	gotJournal, journalErr := os.ReadFile(filepath.Join(allocator.directory, scannerIdentityJournalName))
+	if markerErr != nil || journalErr != nil || !bytes.Equal(gotMarker, fixture.markerBytes) || !bytes.Equal(gotJournal, intermediate) {
+		t.Fatalf("automatic refusal changed offline migration source: marker=%v journal=%v", markerErr, journalErr)
+	}
+	assertScannerIdentityArchive(t, allocator.directory, scannerIdentityJournalArchiveName(fixture.journalBytes), fixture.journalBytes)
+	assertScannerIdentityArchive(t, allocator.markerDir, scannerIdentityMarkerArchiveName(fixture.markerBytes), fixture.markerBytes)
+
+	if err := recoverLegacyScannerIdentityScope(context.Background(), allocator, false, 1); err == nil {
+		t.Fatal("offline recovery without explicit confirmation succeeded")
+	}
+	gotMarker, markerErr = os.ReadFile(filepath.Join(allocator.markerDir, scannerIdentityMarker))
+	gotJournal, journalErr = os.ReadFile(filepath.Join(allocator.directory, scannerIdentityJournalName))
+	if markerErr != nil || journalErr != nil || !bytes.Equal(gotMarker, fixture.markerBytes) || !bytes.Equal(gotJournal, intermediate) {
+		t.Fatalf("unconfirmed offline recovery changed source: marker=%v journal=%v", markerErr, journalErr)
+	}
+
+	if err := recoverLegacyScannerIdentityScope(context.Background(), allocator, true, 1); err != nil {
+		t.Fatalf("confirmed offline recovery of archived v2 state: %v", err)
+	}
+	marker, err := readScannerIdentityMarkerAtPath(allocator.markerDir)
+	if err != nil || marker.Version != scannerIdentityVersion || marker.BootID != testScannerBootID || marker.PIDNamespace != 19 || !marker.PrivateRuntime {
+		t.Fatalf("offline recovered marker = %+v, %v", marker, err)
+	}
+	journal, err := readTestScannerIdentityJournal(allocator)
+	if err != nil || journal.Version != scannerIdentityVersion || journal.BootID != testScannerBootID || journal.PIDNamespace != 19 || !journal.PrivateRuntime || len(journal.Leases) != 0 {
+		t.Fatalf("offline recovered journal = %+v, %v", journal, err)
+	}
+	assertScannerIdentityArchive(t, allocator.directory, scannerIdentityJournalArchiveName(fixture.journalBytes), fixture.journalBytes)
+	assertScannerIdentityArchive(t, allocator.markerDir, scannerIdentityMarkerArchiveName(fixture.markerBytes), fixture.markerBytes)
+}
+
+func TestScannerIdentityAutomaticRecoveryRefusesCorruptLegacyMarkerArchive(t *testing.T) {
+	fixture := newScannerIdentityRecoveryFixture(t)
+	allocator := fixture.allocator
+	allocator.pidNamespace = func() (uint64, error) { return 19, nil }
+	directoryFD, markerFD, err := openScannerIdentityDirectories(allocator.directory, allocator.markerDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(directoryFD)
+	defer unix.Close(markerFD)
+	if err := archiveScannerIdentityJournal(directoryFD, fixture.journalBytes); err != nil {
+		t.Fatal(err)
+	}
+	intermediate, err := json.Marshal(scannerIdentityJournal{
+		Version: scannerIdentityVersion, BootID: testScannerBootID, PIDNamespace: 18, PrivateRuntime: true,
+		Leases: make(map[uint32]scannerIdentityJournalEntry),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeScannerIdentityFile(directoryFD, scannerIdentityJournalName, intermediate); err != nil {
+		t.Fatal(err)
+	}
+	corruptArchive := []byte(`{"not":"the archived marker"}`)
+	archivePath := filepath.Join(allocator.markerDir, scannerIdentityMarkerArchiveName(fixture.markerBytes))
+	if err := os.WriteFile(archivePath, corruptArchive, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := allocator.acquire(context.Background())
+	if err == nil || lease != nil {
+		t.Fatalf("automatic recovery with a corrupt legacy marker archive = lease %v error %v; want fail-closed refusal", lease, err)
+	}
+	if !strings.Contains(err.Error(), "legacy migration archive cannot be verified") {
+		t.Fatalf("automatic recovery error = %v, want archive verification failure", err)
+	}
+	gotMarker, markerErr := os.ReadFile(filepath.Join(allocator.markerDir, scannerIdentityMarker))
+	gotJournal, journalErr := os.ReadFile(filepath.Join(allocator.directory, scannerIdentityJournalName))
+	gotArchive, archiveErr := os.ReadFile(archivePath)
+	if markerErr != nil || journalErr != nil || archiveErr != nil ||
+		!bytes.Equal(gotMarker, fixture.markerBytes) || !bytes.Equal(gotJournal, intermediate) || !bytes.Equal(gotArchive, corruptArchive) {
+		t.Fatalf("refused automatic recovery changed source evidence: marker=%v journal=%v archive=%v", markerErr, journalErr, archiveErr)
+	}
+}
+
 func TestScannerIdentityAcquirePreservesLeasesWhenArchiveOrResetCannotCommit(t *testing.T) {
 	for _, test := range []struct {
 		name          string

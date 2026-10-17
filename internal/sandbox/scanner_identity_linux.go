@@ -451,20 +451,33 @@ func (allocator *scannerIdentityAllocator) loadOrInitializeWithLiveness(director
 		return journal, privateRuntime, err
 	}
 	if markerErr == nil && journalErr == nil && marker.Version == scannerIdentityLegacyVersion && journal.Version == scannerIdentityVersion {
-		// Migration atomically replaces the empty v2 journal with an empty v3
-		// journal before replacing the marker. If the process stops between
-		// those commits, the journal records the requested target scope while
-		// the old marker still records the source scope. Complete only that
-		// empty, validated, exclusive-lock-proven migration state.
-		if exclusiveLiveness && marker.BootID == bootID && journal.BootID == bootID && journal.PIDNamespace == pidNamespace && journal.PrivateRuntime == privateRuntime && journal.Leases != nil && len(journal.Leases) == 0 {
+		// Automatic v2 migration starts only from an empty v2 journal. An
+		// interrupted offline migration of a nonempty v2 journal is distinct:
+		// its exact source marker was archived first and it must be resumed only
+		// through the explicitly confirmed offline command.
+		if exclusiveLiveness && marker.BootID == bootID && journal.BootID == bootID && journal.PIDNamespace != 0 && journal.PrivateRuntime == privateRuntime && journal.Leases != nil && len(journal.Leases) == 0 {
 			if err := allocator.validateJournal(journal); err != nil {
 				return scannerIdentityJournal{}, privateRuntime, err
+			}
+			archived, err := hasArchivedScannerIdentityMarker(markerFD)
+			if err != nil {
+				return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: legacy migration archive cannot be verified")
+			}
+			if archived {
+				return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: archived legacy migration requires explicit offline recovery")
 			}
 			if marker.PIDNamespace == pidNamespace && marker.PrivateRuntime != privateRuntime {
 				return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: legacy private runtime cannot be re-attested")
 			}
 			if marker.PIDNamespace != pidNamespace && (!privateRuntime || !marker.PrivateRuntime || !journal.PrivateRuntime) {
 				return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: legacy PID namespace migration requires a private runtime")
+			}
+			if journal.PIDNamespace != pidNamespace {
+				if marker.PIDNamespace == pidNamespace || !privateRuntime || !marker.PrivateRuntime || !journal.PrivateRuntime {
+					return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: legacy scope migration state is inconsistent")
+				}
+				journal, err := initializeScannerIdentityScope(directoryFD, markerFD, bootID, pidNamespace, true, "resume empty legacy scope migration")
+				return journal, true, err
 			}
 			if err := writeScannerIdentityMarker(markerFD, bootID, pidNamespace, privateRuntime); err != nil {
 				return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: migrated marker write failed")
@@ -528,13 +541,13 @@ func (allocator *scannerIdentityAllocator) loadOrInitializeWithLiveness(director
 	case marker.PIDNamespace != pidNamespace:
 		if !exclusiveLiveness || !privateRuntime || !marker.PrivateRuntime || !journal.PrivateRuntime ||
 			marker.Version != scannerIdentityVersion || journal.Version != scannerIdentityVersion ||
-			journal.BootID != marker.BootID || journal.PrivateRuntime != marker.PrivateRuntime || journal.Leases == nil {
+			journal.BootID != marker.BootID || journal.PrivateRuntime != marker.PrivateRuntime || journal.PIDNamespace == 0 || journal.Leases == nil {
 			return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: PID namespace changed without exclusive private-scope proof")
 		}
 		if err := allocator.validateJournal(journal); err != nil {
 			return scannerIdentityJournal{}, privateRuntime, err
 		}
-		if journal.PIDNamespace != marker.PIDNamespace && (journal.PIDNamespace != pidNamespace || len(journal.Leases) != 0) {
+		if journalHasLeases(journal) && journal.PIDNamespace != marker.PIDNamespace {
 			return scannerIdentityJournal{}, privateRuntime, errors.New("scanner identity allocator: PID namespace changed without matching old lease scope")
 		}
 		if journalHasLeases(journal) {
@@ -565,6 +578,21 @@ func (allocator *scannerIdentityAllocator) loadOrInitializeWithLiveness(director
 		}
 		return journal, privateRuntime, nil
 	}
+}
+
+func hasArchivedScannerIdentityMarker(markerFD int) (bool, error) {
+	markerBytes, err := readScannerIdentityFile(markerFD, scannerIdentityMarker, 256)
+	if err != nil {
+		return false, err
+	}
+	archivedBytes, err := readScannerIdentityFile(markerFD, scannerIdentityMarkerArchiveName(markerBytes), 256)
+	if errors.Is(err, unix.ENOENT) {
+		return false, nil
+	}
+	if err != nil || !bytes.Equal(archivedBytes, markerBytes) {
+		return false, errors.New("scanner identity marker archive is invalid")
+	}
+	return true, nil
 }
 
 func (allocator *scannerIdentityAllocator) privateRuntimeForLease(lease *scannerIdentityLease, bootID string, pidNamespace uint64) (bool, error) {

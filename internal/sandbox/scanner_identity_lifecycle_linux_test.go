@@ -4,6 +4,8 @@ package sandbox
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -305,6 +307,123 @@ func TestScannerIdentityPrivateScopeTransitionPersistsJournalBeforeMarker(t *tes
 	}
 	if err := lease.release(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestScannerIdentityPrivateScopeRecoveryArchivesPriorJournal(t *testing.T) {
+	allocator := usePrivateScannerRuntime(newTestScannerIdentityAllocator(t, 1))
+	oldLease, err := allocator.acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior, err := os.ReadFile(filepath.Join(allocator.directory, scannerIdentityJournalName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := oldLease.closeLivenessReference(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a process crash after the archive is durable but before the
+	// journal reset. The same archive must be verified and reused on retry.
+	directoryFD, markerFD, err := openScannerIdentityDirectories(allocator.directory, allocator.markerDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := archiveScannerIdentityJournal(directoryFD, prior); err != nil {
+		_ = unix.Close(directoryFD)
+		_ = unix.Close(markerFD)
+		t.Fatal(err)
+	}
+	_ = unix.Close(directoryFD)
+	_ = unix.Close(markerFD)
+
+	restarted := usePrivateScannerRuntime(newScannerIdentityAllocatorForTest(allocator.directory, allocator.uidStart, allocator.count, testScannerBootID, 18))
+	newLease, err := restarted.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("recover new private namespace after all inherited refs closed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := newLease.release(); err != nil {
+			t.Errorf("release recovered lease: %v", err)
+		}
+	})
+
+	hash := sha256.Sum256(prior)
+	archivePath := filepath.Join(allocator.directory, "leases.recovery-"+hex.EncodeToString(hash[:])+".json")
+	archived, err := os.ReadFile(archivePath)
+	if err != nil || string(archived) != string(prior) {
+		t.Fatalf("prior journal archive differs from exact source bytes: err=%v", err)
+	}
+	var archiveStat unix.Stat_t
+	if err := unix.Lstat(archivePath, &archiveStat); err != nil {
+		t.Fatal(err)
+	}
+	if archiveStat.Mode&unix.S_IFMT != unix.S_IFREG || archiveStat.Nlink != 1 || archiveStat.Uid != uint32(os.Geteuid()) || archiveStat.Mode&0o7777 != 0o600 {
+		t.Fatalf("journal archive has unsafe metadata: %+v", archiveStat)
+	}
+	journal, err := readTestScannerIdentityJournal(restarted)
+	if err != nil || journal.PIDNamespace != 18 || len(journal.Leases) != 1 {
+		t.Fatalf("recovered journal = %+v, %v", journal, err)
+	}
+}
+
+func TestScannerIdentityLegacyMigrationCompletesJournalFirstNamespaceCrash(t *testing.T) {
+	allocator := usePrivateScannerRuntime(newTestScannerIdentityAllocator(t, 1))
+	directoryFD, markerFD, err := openScannerIdentityDirectories(allocator.directory, allocator.markerDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(directoryFD)
+	defer unix.Close(markerFD)
+
+	legacyMarker, err := json.Marshal(scannerIdentityScope{Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17, PrivateRuntime: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeScannerIdentityFile(markerFD, scannerIdentityMarker, legacyMarker); err != nil {
+		t.Fatal(err)
+	}
+	legacyJournal, err := json.Marshal(scannerIdentityJournal{
+		Version: scannerIdentityLegacyVersion, BootID: testScannerBootID, PIDNamespace: 17,
+		PrivateRuntime: true, Leases: make(map[uint32]scannerIdentityJournalEntry),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeScannerIdentityFile(directoryFD, scannerIdentityJournalName, legacyJournal); err != nil {
+		t.Fatal(err)
+	}
+
+	// This is the durable state left when the v3 journal commit for a private
+	// namespace migration reached disk but the old v2 marker remained.
+	procFD := openProcDirectoryOrFatal(t)
+	if _, err := initializeScannerIdentityScope(directoryFD, procFD, testScannerBootID, 18, true, "interrupted migration"); err == nil {
+		t.Fatal("migration fixture unexpectedly wrote a marker through /proc")
+	}
+	_ = unix.Close(procFD)
+	markerAfterCrash, err := readScannerIdentityMarker(markerFD)
+	if err != nil || markerAfterCrash.Version != scannerIdentityLegacyVersion || markerAfterCrash.PIDNamespace != 17 {
+		t.Fatalf("migration marker fixture = %+v, %v", markerAfterCrash, err)
+	}
+	journalAfterCrash, err := readScannerIdentityJournal(directoryFD)
+	if err != nil || journalAfterCrash.Version != scannerIdentityVersion || journalAfterCrash.PIDNamespace != 18 || !journalAfterCrash.PrivateRuntime || len(journalAfterCrash.Leases) != 0 {
+		t.Fatalf("migration journal fixture = %+v, %v", journalAfterCrash, err)
+	}
+
+	restarted := usePrivateScannerRuntime(newScannerIdentityAllocatorForTest(allocator.directory, allocator.uidStart, allocator.count, testScannerBootID, 18))
+	lease, err := restarted.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("complete journal-first v2-to-v3 migration: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := lease.release(); err != nil {
+			t.Errorf("release migrated lease: %v", err)
+		}
+	})
+	marker, err := readScannerIdentityMarkerAtPath(allocator.markerDir)
+	if err != nil || marker.Version != scannerIdentityVersion || marker.PIDNamespace != 18 || !marker.PrivateRuntime {
+		t.Fatalf("completed migration marker = %+v, %v", marker, err)
 	}
 }
 

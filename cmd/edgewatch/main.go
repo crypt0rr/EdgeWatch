@@ -39,8 +39,9 @@ var exitProcess = os.Exit
 // startup test can stop the daemon without a signal and pause its
 // migration at one of its log records.
 var (
-	commandContext = context.Background
-	wrapLogHandler = func(handler slog.Handler) slog.Handler { return handler }
+	commandContext                = context.Background
+	wrapLogHandler                = func(handler slog.Handler) slog.Handler { return handler }
+	recoverScannerIdentityOffline = sandbox.RecoverScannerIdentityStateOffline
 )
 
 // Final scan persistence is allowed up to five minutes for a large host
@@ -99,7 +100,7 @@ func run(args []string) error {
 	cmd := args[0]
 	action := ""
 	rest := args[1:]
-	if cmd == "config" || cmd == "baseline" || cmd == "notify" || cmd == "admin" {
+	if cmd == "config" || cmd == "baseline" || cmd == "notify" || cmd == "admin" || cmd == "scanner-identities" {
 		if len(rest) == 0 {
 			return usage()
 		}
@@ -125,6 +126,7 @@ func run(args []string) error {
 	username := fs.String("username", "admin", "username for administrator recovery actions")
 	force := fs.Bool("force", false, "confirm replacement of the current setup token")
 	tenantFlag := fs.String("tenant", "", "slug of the business unit a host command acts on")
+	confirmAllVolumeUsersStopped := fs.Bool("confirm-all-volume-users-stopped", false, "confirm every process using the scanner state volume has stopped")
 	fs.SetOutput(io.Discard)
 	if err := fs.Parse(rest); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -145,6 +147,19 @@ func run(args []string) error {
 	}
 	if err := validateOutputFormat(cmd, action, *output); err != nil {
 		return err
+	}
+	if cmd == "scanner-identities" {
+		if action != "recover" {
+			return errors.New("expected: scanner-identities recover")
+		}
+		if !*confirmAllVolumeUsersStopped {
+			return errors.New("scanner identity recovery requires --confirm-all-volume-users-stopped")
+		}
+		if err := recoverScannerIdentityOffline(*confirmAllVolumeUsersStopped); err != nil {
+			return err
+		}
+		fmt.Println("Scanner identity state recovered.")
+		return nil
 	}
 	if cmd == "history" && (*limit < 1 || *limit > 1000) {
 		return errors.New("--limit must be between 1 and 1000")
@@ -505,7 +520,7 @@ func run(args []string) error {
 }
 
 const usageText = `Usage: edgewatch <command> [options]
-Commands: daemon, config validate, scan, status, history, baseline approve|reset|export, backup, restore, verify, notify test, admin setup-token|reissue-setup-token|platform-setup-token|reset-password|disable-totp, health, version, help
+Commands: daemon, config validate, scan, status, history, baseline approve|reset|export, backup, restore, verify, notify test, scanner-identities recover, admin setup-token|reissue-setup-token|platform-setup-token|reset-password|disable-totp, health, version, help
 Run edgewatch <command> --help for the options of one command.
 Admin recovery actions accept --username (default admin) and require host access.
 scan, status, history, baseline, and notify test accept --tenant SLUG to act on that business unit instead of the default one, and admin reset-password and disable-totp accept it to stop unless the account belongs to that unit.`

@@ -47,9 +47,10 @@ func TestPrivateTemporaryPrivilegedCoverageChild(t *testing.T) {
 	case "create":
 		err := execPrivateTemporaryCreate(execRequest{
 			privateCreate:      true,
-			privateRootFD:      3,
-			privateNamespaceFD: 4,
-			controlFD:          5,
+			livenessFD:         3,
+			privateRootFD:      4,
+			privateNamespaceFD: 5,
+			controlFD:          6,
 			seccomp:            true,
 			argv:               []string{"/edgewatch-private-temp-coverage-executable-does-not-exist"},
 		})
@@ -58,22 +59,23 @@ func TestPrivateTemporaryPrivilegedCoverageChild(t *testing.T) {
 		}
 	case "populate":
 		setup, err := preparePrivateTemporaryCreateExec(execRequest{
-			privateRootFD:      3,
-			privateNamespaceFD: 4,
-			controlFD:          5,
+			livenessFD:         3,
+			privateRootFD:      4,
+			privateNamespaceFD: 5,
+			controlFD:          6,
 		})
 		if err != nil {
 			t.Fatalf("prepare private-temp leaf as scanner identity: %v", err)
 		}
 		leafPath := filepath.Join("/tmp", setup.initialization.namespaceName, setup.initialization.name)
 		var leaf unix.Stat_t
-		if err := unix.Fstatat(4, setup.initialization.name, &leaf, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if err := unix.Fstatat(5, setup.initialization.name, &leaf, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			t.Fatalf("inspect created private-temp leaf: %v", err)
 		}
 		if leaf.Uid != privateTemporaryPrivilegedCoverageUID || leaf.Gid != privateTemporaryPrivilegedCoverageGID || leaf.Mode != unix.S_IFDIR|privateScannerTemporaryMode {
 			t.Fatalf("created private-temp leaf identity = %+v", leaf)
 		}
-		if err := helperSendPrivateTemporaryCreateReady(5, setup.initialization.name, setup.initialization.nonce, &leaf); err != nil {
+		if err := helperSendPrivateTemporaryCreateReady(6, setup.initialization.name, setup.initialization.nonce, &leaf); err != nil {
 			t.Fatalf("complete controlled private-temp handshake: %v", err)
 		}
 		if err := os.Chmod(leafPath, 0o755); err != nil {
@@ -112,9 +114,10 @@ func TestPrivateTemporaryPrivilegedCoverageChild(t *testing.T) {
 	case "exec":
 		err := execPrivateTemporary(execRequest{
 			privateTemp:   true,
-			privateRootFD: 3,
-			privateLeafFD: 4,
-			controlFD:     5,
+			livenessFD:    3,
+			privateRootFD: 4,
+			privateLeafFD: 5,
+			controlFD:     6,
 			seccomp:       true,
 			argv:          []string{"/edgewatch-private-temp-coverage-executable-does-not-exist"},
 		})
@@ -394,6 +397,7 @@ func newPrivilegedPrivateTemporaryExecFixture(t *testing.T) *linuxPrivateTempora
 
 func runPrivateTemporaryPrivilegedCreateChild(t *testing.T, executable, coverageDir string, temporary *linuxPrivateTemporaryDirectory, mode string) error {
 	t.Helper()
+	_, livenessReference := newPrivateTemporaryCoverageLivenessReference(t)
 	packet := privateTemporaryCreateInitPacket(t, temporary)
 	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
@@ -406,7 +410,7 @@ func runPrivateTemporaryPrivilegedCreateChild(t *testing.T, executable, coverage
 	if n, err := unix.SendmsgN(int(parentControl.Fd()), packet, nil, nil, 0); err != nil || n != len(packet) {
 		return fmt.Errorf("send private-temp privileged initialization: wrote %d bytes: %w", n, err)
 	}
-	command, stdout, stderr, cancel, err := privateTemporaryPrivilegedCommand(t, executable, coverageDir, mode, []*os.File{temporary.root, temporary.namespace, childControl})
+	command, stdout, stderr, cancel, err := privateTemporaryPrivilegedCommand(t, executable, coverageDir, mode, []*os.File{livenessReference, temporary.root, temporary.namespace, childControl})
 	if err != nil {
 		return err
 	}
@@ -529,6 +533,7 @@ func runPrivateTemporaryPrivilegedCleanupChild(t *testing.T, executable, coverag
 
 func runPrivateTemporaryPrivilegedExecChild(t *testing.T, executable, coverageDir string, temporary *linuxPrivateTemporaryDirectory) error {
 	t.Helper()
+	_, livenessReference := newPrivateTemporaryCoverageLivenessReference(t)
 	var namespace, leaf unix.Stat_t
 	if err := unix.Fstat(int(temporary.namespace.Fd()), &namespace); err != nil {
 		return fmt.Errorf("inspect private-temp namespace for helper exec: %w", err)
@@ -551,7 +556,7 @@ func runPrivateTemporaryPrivilegedExecChild(t *testing.T, executable, coverageDi
 	if n, err := unix.SendmsgN(int(parentControl.Fd()), packet, nil, nil, 0); err != nil || n != len(packet) {
 		return fmt.Errorf("send private-temp helper initialization: wrote %d bytes: %w", n, err)
 	}
-	command, stdout, stderr, cancel, err := privateTemporaryPrivilegedCommand(t, executable, coverageDir, "exec", []*os.File{temporary.namespace, temporary.leaf, childControl})
+	command, stdout, stderr, cancel, err := privateTemporaryPrivilegedCommand(t, executable, coverageDir, "exec", []*os.File{livenessReference, temporary.namespace, temporary.leaf, childControl})
 	if err != nil {
 		return err
 	}
@@ -596,6 +601,44 @@ func runPrivateTemporaryPrivilegedExecChild(t *testing.T, executable, coverageDi
 		return fmt.Errorf("private-temp exec helper child pid %d emitted no coverage counters", childPID)
 	}
 	return nil
+}
+
+// newPrivateTemporaryCoverageLivenessReference creates the same read-only OFD
+// lock references passed by the daemon and supervisor. The child receives the
+// inherited reference as its first scanner data descriptor; the parent keeps
+// its own shared keeper until the test has finished.
+func newPrivateTemporaryCoverageLivenessReference(t *testing.T) (keeper, inherited *os.File) {
+	t.Helper()
+	directoryFD := scannerIdentityLockTestDirectory(t)
+	keeper, inherited, exclusive, err := acquireScannerIdentityLiveness(context.Background(), directoryFD)
+	if err != nil {
+		t.Fatalf("acquire private-temp coverage liveness references: %v", err)
+	}
+	if exclusive {
+		oldKeeper := keeper
+		keeper, inherited, err = downgradeScannerIdentityLiveness(directoryFD, oldKeeper)
+		if closeErr := oldKeeper.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			if keeper != nil {
+				_ = keeper.Close()
+			}
+			if inherited != nil {
+				_ = inherited.Close()
+			}
+			t.Fatalf("downgrade private-temp coverage liveness references: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		if err := inherited.Close(); err != nil {
+			t.Errorf("close inherited private-temp coverage liveness reference: %v", err)
+		}
+		if err := keeper.Close(); err != nil {
+			t.Errorf("close private-temp coverage liveness keeper: %v", err)
+		}
+	})
+	return keeper, inherited
 }
 
 func privateTemporaryPrivilegedCommand(t *testing.T, executable, coverageDir, mode string, files []*os.File) (*exec.Cmd, *strings.Builder, *strings.Builder, context.CancelFunc, error) {

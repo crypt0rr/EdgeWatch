@@ -126,9 +126,38 @@ filesystem state, separate from the SQLite database: the `backup` and `restore`
 commands do not include or reset them, while a raw snapshot of the full `./data`
 directory includes them. Keep them with the same live data volume. Do not edit,
 delete, or restore the journal separately from that volume. If restoring a raw
-volume snapshot, stop the daemon and all scans first; an old journal may not
-match the current boot or private PID namespace, and EdgeWatch will fail closed
-rather than guess that a scanner identity is safe to reuse.
+volume snapshot, stop the daemon and all scans first. The v3 allocator passes a
+read-only kernel liveness reference through the supervisor and every scanner
+and helper process. It may move a nonempty journal to a new private PID
+namespace only after the kernel proves that no process holds that reference;
+before reset it archives the previous journal. A host reboot similarly proves
+that no process from the old boot remains, so prior-boot state is archived
+before reset.
+
+Releases through v0.40.0 used a v2 journal and did not pass a liveness
+reference to scanner processes. A nonempty same-boot v2 journal cannot be
+reclaimed automatically after that upgrade. Stop every EdgeWatch container and
+host process using the volume, including direct `edgewatch scan` commands, and
+make a complete backup of `./data`. Then run the explicit one-off migration:
+
+```sh
+docker compose stop edgewatch
+docker compose run --rm --no-deps --entrypoint edgewatch edgewatch \
+  scanner-identities recover --confirm-all-volume-users-stopped
+docker compose up -d edgewatch
+```
+
+The command requires this operator assertion because it cannot see old
+processes in another PID namespace. It also requires the private PID-1 runtime,
+an exclusive kernel liveness lock, and valid owned state-file metadata. It
+preserves hash-named copies of the old journal and marker before writing an
+empty v3 scope. It refuses malformed or unsafe files and never overwrites a
+live v3 lock. Do not delete or hand-edit state files to recover capacity. If
+the command refuses, preserve the volume and investigate or restore a complete
+matching snapshot. Run it from the Compose one-off container shown above, not
+from a host shell. Native installations that cannot provide this same private
+PID-1 runtime must keep the pool fail-closed and preserve the state volume
+while arranging a compatible isolated recovery environment.
 
 ## Scanner sandbox
 
@@ -299,6 +328,15 @@ filter, and so does every process the scanner starts. The filter:
   in the process group that EdgeWatch [stops](#stopping-scanners);
 - refuses the x32 ABI on x86-64, and kills a process that makes a system call
   of another architecture.
+
+Except for one brokered request shape, the filter refuses Unix sockets and
+socket pairs. Nmap's interface-name lookup uses a specific Unix datagram socket
+request, so the supervisor handles that request and gives Nmap a verified IPv4
+datagram socket for the ioctl.
+Scanners receive no Unix socket through their inherited descriptors. If the
+broker cannot complete the reply, the supervisor kills and reaps the process
+tree before it can prove cleanup and release the identity; an unproven cleanup
+keeps the identity quarantined.
 
 Docker's default profile already refuses most of these calls. The filter
 keeps them refused under a runtime or profile that does not, and it refuses

@@ -297,17 +297,24 @@ below it, which it locks while it runs. At startup the daemon, and
 `edgewatch scan`, remove the directories of processes that no longer run, with
 the files of scans they were stopped in.
 
-Naabu also creates temporary target and address-map files of its own. EdgeWatch
-creates a root-owned invocation namespace below `/tmp` with mode `01733` while
-a helper creates the mode `0700` leaf owned by that invocation's leased
-UID/GID. After the helper reports readiness, the daemon changes the pinned
+Naabu also creates temporary target and address-map files of its own. With
+scanner identity isolation enabled, EdgeWatch creates a daemon-owned
+invocation namespace below `/tmp` with mode `0731` while a helper creates the
+mode `0700` leaf owned by that invocation's leased UID/GID. The namespace group
+is the invocation's unique leased GID, and the helper has no supplementary
+groups; the daemon verifies the namespace owner, group, and mode before use.
+It creates this group-writable namespace only when the pinned `/tmp` directory
+is not setgid, so parent group inheritance cannot grant a different group
+write access. The daemon sets the filesystem GID on a locked OS thread for the
+namespace creation syscall and verifies restoration before that thread can be
+reused. After the helper reports readiness, the daemon changes the pinned
 namespace to mode `0711` before acknowledging startup. The daemon remains its
 owner and can remove the leaf; other identities can search the namespace but
 cannot add sibling entries. With identity isolation enabled, concurrent
 scanners use different identities and cannot open each other's randomly named
 leaves by path. When Landlock is available, it also confines each scanner to
-its own leaf. With the sandbox explicitly off, the daemon identity owns the
-leaf and no scanner isolation boundary applies.
+its own leaf. With the sandbox explicitly off, the daemon uses a normal
+`0711` namespace and owns its `0700` leaf, with no scanner isolation boundary.
 
 In sandboxed mode the scanner controls the permissions and contents of its own
 leaf. After the supervisor proves the process tree exited and was reaped, the

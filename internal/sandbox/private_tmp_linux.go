@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -22,22 +23,22 @@ import (
 )
 
 const (
-	privateTemporaryPrefix          = "edgewatch-naabu-"
-	privateNamespacePrefix          = "edgewatch-naabu-root-"
-	privateNamespaceMode            = 0o711
-	privateScannerNamespaceMode     = 0o1733
-	privateTemporaryMode            = 0o1777
-	privateScannerTemporaryMode     = 0o700
-	privateTemporaryFallbackMode    = 0o700
-	privateTemporaryNonceSize       = 16
-	privateTemporaryInitMagic       = "EWTINI01"
-	privateTemporaryCreateInitMagic = "EWTINI02"
-	privateTemporaryMessageMagic    = "EWTMP001"
-	privateTemporaryCreateMagic     = "EWTMP002"
-	privateTemporaryMessageMax      = 256
-	privateTemporaryStartupTimeout  = 5 * time.Second
-	privateTemporaryCleanupTimeout  = 5 * time.Second
-	privateTemporaryCleanupEntries  = 100000
+	privateTemporaryPrefix           = "edgewatch-naabu-"
+	privateNamespacePrefix           = "edgewatch-naabu-root-"
+	privateNamespaceMode             = 0o711
+	privateScannerNamespaceSetupMode = 0o731
+	privateTemporaryMode             = 0o1777
+	privateScannerTemporaryMode      = 0o700
+	privateTemporaryFallbackMode     = 0o700
+	privateTemporaryNonceSize        = 16
+	privateTemporaryInitMagic        = "EWTINI01"
+	privateTemporaryCreateInitMagic  = "EWTINI02"
+	privateTemporaryMessageMagic     = "EWTMP001"
+	privateTemporaryCreateMagic      = "EWTMP002"
+	privateTemporaryMessageMax       = 256
+	privateTemporaryStartupTimeout   = 5 * time.Second
+	privateTemporaryCleanupTimeout   = 5 * time.Second
+	privateTemporaryCleanupEntries   = 100000
 )
 
 var errPrivateTemporaryLeafAbsent = errors.New("scanner-owned temporary leaf was not created")
@@ -168,7 +169,7 @@ func prepareLinuxPrivateTemporaryDirectoryWithFilesystem(ctx context.Context, cm
 		temporary.childCreates = policy != nil && policy.identityReservation != nil
 		if temporary.childCreates {
 			temporary.leafMode = privateScannerTemporaryMode
-			temporary.namespaceMode = privateScannerNamespaceMode
+			temporary.namespaceMode = privateScannerNamespaceSetupMode
 		}
 	} else {
 		temporary.leafMode = privateTemporaryFallbackMode
@@ -309,9 +310,18 @@ func (temporary *linuxPrivateTemporaryDirectory) createLeafNamed() error {
 func (temporary *linuxPrivateTemporaryDirectory) createNamespace() error {
 	if temporary.namespaceMode == 0 {
 		temporary.namespaceMode = privateNamespaceMode
+		if temporary.childCreates {
+			temporary.namespaceMode = privateScannerNamespaceSetupMode
+		}
+	}
+	if temporary.childCreates && temporary.namespaceMode != privateScannerNamespaceSetupMode {
+		return errors.New("prepare Naabu temporary directory: scanner namespace setup mode is invalid")
 	}
 	if err := temporary.openTemporaryRoot(); err != nil {
 		return err
+	}
+	if temporary.childCreates && !validPrivateTemporaryRoot(&temporary.rootStat) {
+		return errors.New("prepare Naabu temporary directory: temporary root has unsafe ownership semantics")
 	}
 	rootFD := int(temporary.root.Fd())
 	for attempt := 0; attempt < 8; attempt++ {
@@ -320,9 +330,19 @@ func (temporary *linuxPrivateTemporaryDirectory) createNamespace() error {
 			return errors.New("prepare Naabu temporary directory: random namespace unavailable")
 		}
 		name := privateNamespacePrefix + hex.EncodeToString(random[:])
-		if err := temporary.filesystem.mkdirat(rootFD, name, 0o700); errors.Is(err, unix.EEXIST) {
+		created, mkdirErr := false, error(nil)
+		if temporary.childCreates {
+			created, mkdirErr = mkdiratWithFilesystemGroup(temporary.filesystem.mkdirat, rootFD, name, 0o700, temporary.gid)
+		} else {
+			mkdirErr = temporary.filesystem.mkdirat(rootFD, name, 0o700)
+			created = mkdirErr == nil
+		}
+		if errors.Is(mkdirErr, unix.EEXIST) {
 			continue
-		} else if err != nil {
+		} else if mkdirErr != nil {
+			if created {
+				_ = temporary.filesystem.unlinkat(rootFD, name, unix.AT_REMOVEDIR)
+			}
 			return errors.New("prepare Naabu temporary directory: create invocation namespace failed")
 		}
 		fd, err := temporary.filesystem.openat(rootFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
@@ -336,12 +356,16 @@ func (temporary *linuxPrivateTemporaryDirectory) createNamespace() error {
 			return errors.New("prepare Naabu temporary directory: restrict invocation namespace failed")
 		}
 		var stat, named unix.Stat_t
-		if err := temporary.filesystem.fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Mode&0o7777 != temporary.namespaceMode || stat.Uid != uint32(os.Geteuid()) || stat.Gid != uint32(os.Getegid()) {
+		wantGID := uint32(os.Getegid())
+		if temporary.childCreates {
+			wantGID = temporary.gid
+		}
+		if err := temporary.filesystem.fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Mode&0o7777 != temporary.namespaceMode || stat.Uid != uint32(os.Geteuid()) || stat.Gid != wantGID {
 			_ = temporary.filesystem.close(fd)
 			_ = temporary.filesystem.unlinkat(rootFD, name, unix.AT_REMOVEDIR)
 			return errors.New("prepare Naabu temporary directory: invocation namespace identity is unexpected")
 		}
-		if err := temporary.filesystem.fstatat(rootFD, name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&stat, &named) {
+		if err := temporary.filesystem.fstatat(rootFD, name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&stat, &named) || named.Mode != stat.Mode || named.Uid != stat.Uid || named.Gid != stat.Gid {
 			_ = temporary.filesystem.close(fd)
 			_ = temporary.filesystem.unlinkat(rootFD, name, unix.AT_REMOVEDIR)
 			return errors.New("prepare Naabu temporary directory: invocation namespace entry changed")
@@ -352,6 +376,62 @@ func (temporary *linuxPrivateTemporaryDirectory) createNamespace() error {
 		return nil
 	}
 	return errors.New("prepare Naabu temporary directory: unique invocation namespace unavailable")
+}
+
+func validPrivateTemporaryRoot(stat *unix.Stat_t) bool {
+	return stat != nil && stat.Mode&unix.S_IFMT == unix.S_IFDIR && stat.Mode&unix.S_ISGID == 0
+}
+
+// mkdiratWithFilesystemGroup creates a namespace with the lease GID as its
+// filesystem group. Linux credentials are per-thread, so the change is made
+// only on a dedicated, locked OS thread and is verified both before use and
+// after restoration. If restoration cannot be proven, the locked worker
+// goroutine exits without unlocking so the runtime retires that OS thread.
+func mkdiratWithFilesystemGroup(mkdirat func(int, string, uint32) error, dirFD int, name string, mode, gid uint32) (bool, error) {
+	type mkdirResult struct {
+		created bool
+		err     error
+	}
+	finished := make(chan mkdirResult, 1)
+	go func() {
+		runtime.LockOSThread()
+		previous, err := unix.SetfsgidRetGid(-1)
+		if err != nil {
+			runtime.UnlockOSThread()
+			finished <- mkdirResult{err: errors.New("filesystem group unavailable")}
+			return
+		}
+		restore := func() error {
+			_, setErr := unix.SetfsgidRetGid(previous)
+			verifiedPrevious, verifyErr := unix.SetfsgidRetGid(previous)
+			if setErr != nil || verifyErr != nil || verifiedPrevious != previous {
+				return errors.New("filesystem group restoration could not be verified")
+			}
+			return nil
+		}
+		prior, setErr := unix.SetfsgidRetGid(int(gid))
+		verifiedPrior, verifyErr := unix.SetfsgidRetGid(int(gid))
+		if setErr != nil || verifyErr != nil || prior != previous || verifiedPrior != int(gid) {
+			restoreErr := restore()
+			if restoreErr == nil {
+				runtime.UnlockOSThread()
+			}
+			finished <- mkdirResult{err: errors.New("filesystem group change could not be verified")}
+			return
+		}
+		mkdirErr := mkdirat(dirFD, name, mode)
+		created := mkdirErr == nil
+		_, restoreErr := unix.SetfsgidRetGid(previous)
+		verifiedPrevious, verifyRestoreErr := unix.SetfsgidRetGid(previous)
+		if restoreErr != nil || verifyRestoreErr != nil || verifiedPrevious != previous {
+			finished <- mkdirResult{created: created, err: errors.New("filesystem group restoration could not be verified")}
+			return
+		}
+		runtime.UnlockOSThread()
+		finished <- mkdirResult{created: created, err: mkdirErr}
+	}()
+	completed := <-finished
+	return completed.created, completed.err
 }
 
 func (temporary *linuxPrivateTemporaryDirectory) openTemporaryRoot() error {
@@ -543,22 +623,24 @@ func (temporary *linuxPrivateTemporaryDirectory) sealScannerNamespace() error {
 	}
 	var namespace, named unix.Stat_t
 	if err := unix.Fstat(int(temporary.namespace.Fd()), &namespace); err != nil ||
-		!sameObject(&temporary.namespaceStat, &namespace) || namespace.Mode != unix.S_IFDIR|privateScannerNamespaceMode {
+		!sameObject(&temporary.namespaceStat, &namespace) || namespace.Mode != unix.S_IFDIR|privateScannerNamespaceSetupMode ||
+		namespace.Uid != temporary.namespaceStat.Uid || namespace.Gid != temporary.gid {
 		return errors.New("prepare Naabu temporary directory: scanner namespace changed before sealing")
 	}
 	if err := unix.Fstatat(int(temporary.root.Fd()), temporary.namespaceName, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
-		!sameObject(&namespace, &named) || named.Mode != namespace.Mode {
+		!sameObject(&namespace, &named) || named.Mode != namespace.Mode || named.Uid != namespace.Uid || named.Gid != namespace.Gid {
 		return errors.New("prepare Naabu temporary directory: scanner namespace entry changed before sealing")
 	}
 	if err := unix.Fchmod(int(temporary.namespace.Fd()), privateNamespaceMode); err != nil {
 		return errors.New("prepare Naabu temporary directory: seal scanner namespace failed")
 	}
 	if err := unix.Fstat(int(temporary.namespace.Fd()), &namespace); err != nil ||
-		!sameObject(&temporary.namespaceStat, &namespace) || namespace.Mode != unix.S_IFDIR|privateNamespaceMode {
+		!sameObject(&temporary.namespaceStat, &namespace) || namespace.Mode != unix.S_IFDIR|privateNamespaceMode ||
+		namespace.Uid != temporary.namespaceStat.Uid || namespace.Gid != temporary.gid {
 		return errors.New("prepare Naabu temporary directory: sealed scanner namespace identity is unexpected")
 	}
 	if err := unix.Fstatat(int(temporary.root.Fd()), temporary.namespaceName, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
-		!sameObject(&namespace, &named) || named.Mode != namespace.Mode {
+		!sameObject(&namespace, &named) || named.Mode != namespace.Mode || named.Uid != namespace.Uid || named.Gid != namespace.Gid {
 		return errors.New("prepare Naabu temporary directory: sealed scanner namespace entry changed")
 	}
 	temporary.namespaceMode = privateNamespaceMode
@@ -727,13 +809,14 @@ func (temporary *linuxPrivateTemporaryDirectory) checkNamespaceEntry() error {
 	}
 	defer unix.Close(currentRoot)
 	var root unix.Stat_t
-	if err := unix.Fstat(currentRoot, &root); err != nil || !sameObject(&temporary.rootStat, &root) {
+	if err := unix.Fstat(currentRoot, &root); err != nil || !sameObject(&temporary.rootStat, &root) ||
+		(temporary.childCreates && !validPrivateTemporaryRoot(&root)) || root.Mode != temporary.rootStat.Mode || root.Uid != temporary.rootStat.Uid || root.Gid != temporary.rootStat.Gid {
 		return errors.New("cleanup Naabu temporary directory: temporary root identity changed")
 	}
-	if err := unix.Fstat(int(temporary.namespace.Fd()), &namespace); err != nil || !sameObject(&temporary.namespaceStat, &namespace) || namespace.Mode&unix.S_IFMT != unix.S_IFDIR || namespace.Mode&0o7777 != temporary.namespaceMode {
+	if err := unix.Fstat(int(temporary.namespace.Fd()), &namespace); err != nil || !sameObject(&temporary.namespaceStat, &namespace) || namespace.Mode&unix.S_IFMT != unix.S_IFDIR || namespace.Mode&0o7777 != temporary.namespaceMode || namespace.Uid != temporary.namespaceStat.Uid || namespace.Gid != temporary.namespaceStat.Gid {
 		return errors.New("cleanup Naabu temporary directory: invocation namespace identity changed")
 	}
-	if err := unix.Fstatat(int(temporary.root.Fd()), temporary.namespaceName, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&namespace, &named) || named.Mode&0o7777 != temporary.namespaceMode {
+	if err := unix.Fstatat(int(temporary.root.Fd()), temporary.namespaceName, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&namespace, &named) || named.Mode&0o7777 != temporary.namespaceMode || named.Uid != namespace.Uid || named.Gid != namespace.Gid {
 		return errors.New("cleanup Naabu temporary directory: invocation namespace entry changed")
 	}
 	return nil
@@ -946,7 +1029,7 @@ func decodePrivateTemporaryInit(message []byte) (privateTemporaryInit, error) {
 
 func encodePrivateTemporaryCreateInit(namespaceName, name string, nonce [privateTemporaryNonceSize]byte, root, namespace *unix.Stat_t) ([]byte, error) {
 	if !validPrivateNamespaceName(namespaceName) || !validPrivateTemporaryName(name) || root == nil || namespace == nil ||
-		root.Mode&unix.S_IFMT != unix.S_IFDIR || namespace.Mode != unix.S_IFDIR|privateScannerNamespaceMode ||
+		!validPrivateTemporaryRoot(root) || namespace.Mode != unix.S_IFDIR|privateScannerNamespaceSetupMode ||
 		root.Dev != namespace.Dev {
 		return nil, errors.New("invalid scanner-owned temporary initialization")
 	}
@@ -991,7 +1074,7 @@ func decodePrivateTemporaryCreateInit(message []byte) (privateTemporaryInit, err
 	namespace, index := decodeTemporaryStat(message, index)
 	var nonce [privateTemporaryNonceSize]byte
 	copy(nonce[:], message[index:])
-	if root.Mode&unix.S_IFMT != unix.S_IFDIR || namespace.Mode != unix.S_IFDIR|privateScannerNamespaceMode || root.Dev != namespace.Dev {
+	if !validPrivateTemporaryRoot(&root) || namespace.Mode != unix.S_IFDIR|privateScannerNamespaceSetupMode || root.Dev != namespace.Dev {
 		return privateTemporaryInit{}, errors.New("unexpected scanner-owned temporary root or namespace")
 	}
 	return privateTemporaryInit{namespaceName: namespaceName, name: name, nonce: nonce, root: root, namespace: namespace, childCreates: true}, nil

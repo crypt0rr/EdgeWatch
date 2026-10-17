@@ -36,8 +36,12 @@ func TestPrivateTemporaryPrivilegedCoverageChild(t *testing.T) {
 	if mode == "" {
 		return
 	}
-	if os.Geteuid() != privateTemporaryPrivilegedCoverageUID || os.Getegid() != privateTemporaryPrivilegedCoverageGID {
-		t.Fatalf("private-temp helper identity = %d:%d, want %d:%d", os.Geteuid(), os.Getegid(), privateTemporaryPrivilegedCoverageUID, privateTemporaryPrivilegedCoverageGID)
+	wantUID, wantGID := privateTemporaryPrivilegedCoverageUID, privateTemporaryPrivilegedCoverageGID
+	if mode == "foreign-create" {
+		wantUID, wantGID = 60001, 60001
+	}
+	if os.Geteuid() != wantUID || os.Getegid() != wantGID {
+		t.Fatalf("private-temp helper identity = %d:%d, want %d:%d", os.Geteuid(), os.Getegid(), wantUID, wantGID)
 	}
 	switch mode {
 	case "create":
@@ -85,13 +89,25 @@ func TestPrivateTemporaryPrivilegedCoverageChild(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(nestedPath, "artifact"), []byte("coverage fixture\n"), 0o600); err != nil {
 			t.Fatalf("write controlled scanner artifact: %v", err)
 		}
-	case "peer-create":
+	case "peer-create", "foreign-create":
 		path := os.Getenv(privateTemporaryPrivilegedPeerPathEnv)
 		if path == "" {
 			t.Fatal("peer namespace-entry test path is unavailable")
 		}
 		if err := unix.Mkdir(path, 0o700); !errors.Is(err, unix.EACCES) {
-			t.Fatalf("peer mkdir in sealed namespace = %v, want permission denied", err)
+			t.Fatalf("peer mkdir in protected namespace = %v, want permission denied", err)
+		}
+	case "lease-create", "lease-denied":
+		path := os.Getenv(privateTemporaryPrivilegedPeerPathEnv)
+		if path == "" {
+			t.Fatal("leased identity namespace-entry test path is unavailable")
+		}
+		if mode == "lease-denied" {
+			if err := unix.Mkdir(path, 0o700); !errors.Is(err, unix.EACCES) {
+				t.Fatalf("late same-lease mkdir in sealed namespace = %v, want permission denied", err)
+			}
+		} else if err := unix.Mkdir(path, 0o700); err != nil {
+			t.Fatalf("trusted leased helper mkdir = %v, want success", err)
 		}
 	case "exec":
 		err := execPrivateTemporary(execRequest{
@@ -191,12 +207,125 @@ func TestPrivateTemporaryPrivilegedLifecycleCoverage(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	t.Run("leased group namespace creation and pre-ACK boundary", func(t *testing.T) {
+		assertLeasedGroupNamespacePreAckPrototype(t, executable, coverageDir)
+	})
 	t.Run("normal private-temp helper handshake and controlled exec failure", func(t *testing.T) {
 		temporary := newPrivilegedPrivateTemporaryExecFixture(t)
 		if err := runPrivateTemporaryPrivilegedExecChild(t, executable, coverageDir, temporary); err != nil {
 			t.Fatal(err)
 		}
 	})
+}
+
+func assertLeasedGroupNamespacePreAckPrototype(t *testing.T, executable, coverageDir string) {
+	t.Helper()
+	const leasedGID = privateTemporaryPrivilegedCoverageGID
+	const setupMode = 0o731
+	env := systemEnvironment()
+	required := capabilityMask(unix.CAP_SETUID, unix.CAP_SETGID)
+	forbidden := capabilityMask(unix.CAP_CHOWN, unix.CAP_DAC_OVERRIDE, unix.CAP_DAC_READ_SEARCH)
+	if env.euid != 0 || env.effective&required != required || env.effective&forbidden != 0 {
+		t.Fatalf("leased-group prototype credentials/capabilities = euid:%d effective:%#x, want root with SETUID/SETGID and no CHOWN/DAC override", env.euid, env.effective)
+	}
+	rootFD, err := unix.Open("/tmp", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("open temporary root: %v", err)
+	}
+	var random [privateTemporaryNonceSize]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		t.Fatalf("create prototype namespace name: %v", err)
+	}
+	name := privateNamespacePrefix + fmt.Sprintf("%x", random[:])
+	path := filepath.Join("/tmp", name)
+	created := false
+	defer func() {
+		if created {
+			for _, entry := range []string{"helper-leaf", "late-sibling"} {
+				if err := unix.Unlinkat(rootFD, filepath.Join(name, entry), unix.AT_REMOVEDIR); err != nil && !errors.Is(err, unix.ENOENT) {
+					t.Errorf("remove leased-group prototype entry %q: %v", entry, err)
+				}
+			}
+			if err := unix.Unlinkat(rootFD, name, unix.AT_REMOVEDIR); err != nil {
+				t.Errorf("remove leased-group prototype namespace: %v", err)
+			}
+		}
+		_ = unix.Close(rootFD)
+	}()
+
+	createdByLease, mkdirErr := mkdiratWithFilesystemGroup(unix.Mkdirat, rootFD, name, 0o700, leasedGID)
+	created = createdByLease
+	if mkdirErr != nil {
+		t.Fatalf("create leased-group prototype namespace: %v", mkdirErr)
+	}
+	if !createdByLease {
+		t.Fatal("leased-group namespace mkdir returned success without creating the directory")
+	}
+	if err := unix.Fchmodat(rootFD, name, setupMode, 0); err != nil {
+		t.Fatalf("set leased-group prototype namespace mode: %v", err)
+	}
+	namespaceFD, err := unix.Openat(rootFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("open leased-group prototype namespace: %v", err)
+	}
+	defer unix.Close(namespaceFD)
+	var namespace unix.Stat_t
+	if err := unix.Fstat(namespaceFD, &namespace); err != nil {
+		t.Fatal(err)
+	}
+	if namespace.Uid != 0 || namespace.Gid != leasedGID || namespace.Mode != unix.S_IFDIR|setupMode {
+		t.Fatalf("leased-group namespace identity = %d:%d mode=%#o, want 0:%d mode=%#o", namespace.Uid, namespace.Gid, namespace.Mode, leasedGID, unix.S_IFDIR|setupMode)
+	}
+	assertNamespaceEntryAttempt(t, executable, coverageDir, "lease-create", filepath.Join(path, "helper-leaf"), leasedGID, leasedGID, true)
+	assertNamespaceEntryAttempt(t, executable, coverageDir, "foreign-create", filepath.Join(path, "peer-before-ready"), 60001, 60001, false)
+	if err := unix.Fstat(namespaceFD, &namespace); err != nil || namespace.Mode != unix.S_IFDIR|setupMode || namespace.Gid != leasedGID {
+		t.Fatalf("pre-ACK foreign peer changed namespace: stat=%d:%d mode=%#o err=%v", namespace.Uid, namespace.Gid, namespace.Mode, err)
+	}
+	if err := unix.Fchmod(namespaceFD, privateNamespaceMode); err != nil {
+		t.Fatalf("seal leased-group prototype namespace: %v", err)
+	}
+	assertNamespaceEntryAttempt(t, executable, coverageDir, "foreign-create", filepath.Join(path, "peer-after-ready"), 60001, 60001, false)
+	assertNamespaceEntryAttempt(t, executable, coverageDir, "lease-denied", filepath.Join(path, "late-sibling"), leasedGID, leasedGID, false)
+	if err := unix.Unlinkat(namespaceFD, "helper-leaf", unix.AT_REMOVEDIR); err != nil {
+		t.Fatalf("daemon owner cannot remove leased helper leaf: %v", err)
+	}
+}
+
+func assertNamespaceEntryAttempt(t *testing.T, executable, coverageDir, mode, path string, uid, gid uint32, wantSuccess bool) {
+	t.Helper()
+	command, stdout, stderr, cancel, err := privateTemporaryPrivilegedCommand(t, executable, coverageDir, mode, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	command.Env = replaceTestEnv(command.Env, privateTemporaryPrivilegedPeerPathEnv, path)
+	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: gid, Groups: []uint32{}}}
+	if uid != privateTemporaryPrivilegedCoverageUID {
+		// The peer must have no supplementary coverage group. Its kernel access
+		// check is the evidence; it does not need to flush Go counters.
+		command.Args = filterTestArgument(command.Args, "-test.gocoverdir=")
+		command.Env = removeTestEnv(command.Env, "GOCOVERDIR")
+	}
+	if err := command.Start(); err != nil {
+		t.Fatalf("start namespace-entry child: %v", err)
+	}
+	pid := command.Process.Pid
+	if err := command.Wait(); err != nil {
+		t.Fatalf("namespace-entry child: %v; stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	if uid == privateTemporaryPrivilegedCoverageUID && !privateTemporaryCoverageCountersContainPID(coverageDir, pid) {
+		t.Fatalf("namespace-entry child pid %d emitted no coverage counters", pid)
+	}
+	_, statErr := os.Lstat(path)
+	if wantSuccess {
+		if statErr != nil {
+			t.Fatalf("leased namespace entry was not created: %v", statErr)
+		}
+		return
+	}
+	if !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("refused namespace entry exists: %v", statErr)
+	}
 }
 
 func newPrivilegedPrivateTemporaryFixture(t *testing.T) *linuxPrivateTemporaryDirectory {
@@ -206,7 +335,7 @@ func newPrivilegedPrivateTemporaryFixture(t *testing.T) *linuxPrivateTemporaryDi
 		uid:           privateTemporaryPrivilegedCoverageUID,
 		gid:           privateTemporaryPrivilegedCoverageGID,
 		leafMode:      privateScannerTemporaryMode,
-		namespaceMode: privateScannerNamespaceMode,
+		namespaceMode: privateScannerNamespaceSetupMode,
 		childCreates:  true,
 	}
 	if err := temporary.createNamespace(); err != nil {
@@ -316,6 +445,7 @@ func runPrivateTemporaryPrivilegedCreateChild(t *testing.T, executable, coverage
 	if err := temporary.pinChildCreatedLeaf(message[:n]); err != nil {
 		return fmt.Errorf("pin private-temp privileged leaf: %w", err)
 	}
+	assertPrivilegedForeignPeerCannotCreateBeforeReady(t, executable, coverageDir, temporary)
 	if err := temporary.sealScannerNamespace(); err != nil {
 		return fmt.Errorf("seal private-temp privileged namespace: %w", err)
 	}
@@ -362,6 +492,19 @@ func assertPrivilegedPeerCannotCreateNamespaceEntry(t *testing.T, executable, co
 	if _, err := os.Lstat(peerPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("peer entry exists in sealed namespace: %v", err)
 	}
+}
+
+func assertPrivilegedForeignPeerCannotCreateBeforeReady(t *testing.T, executable, coverageDir string, temporary *linuxPrivateTemporaryDirectory) {
+	t.Helper()
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(temporary.namespace.Fd()), &stat); err != nil {
+		t.Fatal(err)
+	}
+	if stat.Mode != unix.S_IFDIR|privateScannerNamespaceSetupMode || stat.Uid != 0 || stat.Gid != temporary.gid {
+		t.Fatalf("pre-ACK namespace identity = %d:%d mode=%#o, want 0:%d mode=%#o", stat.Uid, stat.Gid, stat.Mode, temporary.gid, unix.S_IFDIR|privateScannerNamespaceSetupMode)
+	}
+	peerPath := filepath.Join("/tmp", temporary.namespaceName, "foreign-peer-entry-before-ack")
+	assertNamespaceEntryAttempt(t, executable, coverageDir, "foreign-create", peerPath, 60001, 60001, false)
 }
 
 func runPrivateTemporaryPrivilegedCleanupChild(t *testing.T, executable, coverageDir string, leaf *os.File) error {

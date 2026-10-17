@@ -2218,7 +2218,7 @@ func TestPrivateTemporaryCleanupHelperUsesPinnedScannerLeafMode(t *testing.T) {
 		gid:           uint32(os.Getegid()),
 		private:       true,
 		leafMode:      privateScannerTemporaryMode,
-		namespaceMode: privateScannerNamespaceMode,
+		namespaceMode: privateScannerNamespaceSetupMode,
 	}
 	if err := temporary.createNamespace(); err != nil {
 		t.Fatalf("create scanner invocation namespace: %v", err)

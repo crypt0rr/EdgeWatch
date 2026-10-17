@@ -137,7 +137,7 @@ func newPrivateTemporaryCreateFixture(t *testing.T) *linuxPrivateTemporaryDirect
 		uid:           uint32(os.Geteuid()),
 		gid:           uint32(os.Getegid()),
 		leafMode:      privateScannerTemporaryMode,
-		namespaceMode: privateScannerNamespaceMode,
+		namespaceMode: privateScannerNamespaceSetupMode,
 		childCreates:  true,
 	}
 	if err := temporary.createNamespace(); err != nil {
@@ -157,6 +157,94 @@ func newPrivateTemporaryCreateFixture(t *testing.T) *linuxPrivateTemporaryDirect
 		}
 	})
 	return temporary
+}
+
+func TestPrivateTemporaryScannerNamespaceRejectsSetgidRoot(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.Chmod(rootPath, 0o2700); err != nil {
+		t.Fatalf("set test root setgid mode: %v", err)
+	}
+	info, err := os.Stat(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSetgid == 0 {
+		t.Skip("test filesystem does not preserve the directory setgid bit")
+	}
+	filesystem := realPrivateTemporaryFilesystemOps()
+	open := filesystem.open
+	filesystem.open = func(path string, flags int, mode uint32) (int, error) {
+		if path == "/tmp" {
+			path = rootPath
+		}
+		return open(path, flags, mode)
+	}
+	temporary := &linuxPrivateTemporaryDirectory{
+		filesystem:    filesystem,
+		uid:           uint32(os.Geteuid()),
+		gid:           uint32(os.Getegid()),
+		leafMode:      privateScannerTemporaryMode,
+		namespaceMode: privateScannerNamespaceSetupMode,
+		childCreates:  true,
+	}
+	if err := temporary.createNamespace(); err == nil {
+		_ = temporary.Close()
+		t.Fatal("namespace creation accepted a setgid temporary root")
+	}
+	if err := temporary.Close(); err != nil {
+		t.Fatalf("close rejected namespace root: %v", err)
+	}
+	entries, err := os.ReadDir(rootPath)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("setgid root entries after rejected namespace creation = %v, %v; want empty", entries, err)
+	}
+}
+
+func TestPrivateTemporaryNormalNamespaceAllowsSetgidRoot(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.Chmod(rootPath, 0o2700); err != nil {
+		t.Fatalf("set test root setgid mode: %v", err)
+	}
+	info, err := os.Stat(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSetgid == 0 {
+		t.Skip("test filesystem does not preserve the directory setgid bit")
+	}
+	filesystem := realPrivateTemporaryFilesystemOps()
+	open := filesystem.open
+	filesystem.open = func(path string, flags int, mode uint32) (int, error) {
+		if path == "/tmp" {
+			path = rootPath
+		}
+		return open(path, flags, mode)
+	}
+	temporary := &linuxPrivateTemporaryDirectory{
+		filesystem:    filesystem,
+		uid:           uint32(os.Geteuid()),
+		gid:           uint32(os.Getegid()),
+		leafMode:      privateTemporaryFallbackMode,
+		namespaceMode: privateNamespaceMode,
+	}
+	if err := temporary.createNamespace(); err != nil {
+		_ = temporary.Close()
+		t.Fatalf("normal namespace creation rejected a setgid temporary root: %v", err)
+	}
+	var namespace unix.Stat_t
+	if err := unix.Fstat(int(temporary.namespace.Fd()), &namespace); err != nil {
+		t.Fatal(err)
+	}
+	if namespace.Mode != unix.S_IFDIR|privateNamespaceMode || namespace.Uid != uint32(os.Geteuid()) || namespace.Gid != uint32(os.Getegid()) {
+		t.Fatalf("normal namespace under setgid root = %d:%d mode=%#o; want %d:%d mode=%#o", namespace.Uid, namespace.Gid, namespace.Mode, os.Geteuid(), os.Getegid(), unix.S_IFDIR|privateNamespaceMode)
+	}
+	if err := filesystem.unlinkat(int(temporary.root.Fd()), temporary.namespaceName, unix.AT_REMOVEDIR); err != nil {
+		_ = temporary.Close()
+		t.Fatalf("remove normal namespace under setgid root: %v", err)
+	}
+	if err := temporary.Close(); err != nil {
+		t.Fatalf("close normal namespace under setgid root: %v", err)
+	}
 }
 
 func privateTemporaryCreateInitPacket(t *testing.T, temporary *linuxPrivateTemporaryDirectory) []byte {
@@ -396,7 +484,7 @@ func TestPrivateTemporaryChildReadinessRejectsChangedIdentityAndReclaimsOnlyAfte
 				uid:           uint32(os.Geteuid()),
 				gid:           uint32(os.Getegid()),
 				leafMode:      privateScannerTemporaryMode,
-				namespaceMode: privateScannerNamespaceMode,
+				namespaceMode: privateScannerNamespaceSetupMode,
 				childCreates:  true,
 				private:       true,
 			}

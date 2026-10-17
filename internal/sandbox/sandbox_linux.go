@@ -261,6 +261,35 @@ func scannerSandboxProbe() Probe {
 	return Probe{Name: "the scanner identity probe", Args: []string{"/bin/true"}}
 }
 
+func scannerIdentityRootUnavailableReason(uid int) string {
+	if uid < 0 || uint64(uid) > uint64(^uint32(0)) {
+		return "scanner identity isolation requires EdgeWatch to run as UID 0"
+	}
+	return fmt.Sprintf("EdgeWatch runs as UID %d rather than UID 0, so it cannot start scanner processes under leased identities", uid)
+}
+
+func scannerIdentityRangeUnavailableReason(err error) string {
+	var unmapped scannerIdentityUnmappedError
+	if errors.As(err, &unmapped) && unmapped.id >= ScannerIdentityPoolUIDStart && unmapped.id <= ScannerIdentityPoolUIDEnd {
+		return fmt.Sprintf("scanner UID/GID %d is not mapped; map the full UID/GID range %d–%d in the container user namespace", unmapped.id, ScannerIdentityPoolUIDStart, ScannerIdentityPoolUIDEnd)
+	}
+	return fmt.Sprintf("the scanner UID/GID range %d–%d cannot be verified in the container user namespace; check the runtime's UID/GID mappings", ScannerIdentityPoolUIDStart, ScannerIdentityPoolUIDEnd)
+}
+
+func scannerIdentityProbeUnavailableReason(err error) string {
+	if err != nil && strings.Contains(err.Error(), "scanner identity allocator: PID namespace changed with unsafe or occupied scope") {
+		return "the scanner identity allocator refused leases after a PID namespace change because the previous lease scope is unsafe or occupied; preserve the lease journal and retry after a host reboot"
+	}
+	return "the scanner identity probe could not start under a leased identity; check the allocator state, UID/GID mappings, and SETUID, SETGID, and KILL capabilities"
+}
+
+func scannerSeccompProbeUnavailableReason(err error) string {
+	if err != nil && strings.Contains(err.Error(), "signal: bad system call") {
+		return "the scanner identity probe could not start with the required seccomp filter (signal: bad system call); check the runtime's seccomp policy"
+	}
+	return "the scanner identity probe could not start with the required seccomp filter; check the runtime's seccomp policy"
+}
+
 // detectIdentity decides whether the processes of profile start as its
 // confined identity.
 func detectIdentity(profile Profile, mode string, status Status, probe Probe, env environment) *Policy {
@@ -273,23 +302,32 @@ func detectIdentity(profile Profile, mode string, status Status, probe Probe, en
 		status.State = StateUnavailable
 		status.Reason = reason
 		if profile == Scanner {
-			status.IdentityPool = scannerIdentityPoolStatus(StateUnavailable, "scanner identity isolation is unavailable")
+			status.IdentityPool = scannerIdentityPoolStatus(StateUnavailable, reason)
 		}
 		return &Policy{profile: profile, status: status}
 	}
 	if !ValidMode(mode) {
+		if profile == Scanner {
+			return unavailable("scanner.sandbox must be auto, required, or off")
+		}
 		return unavailable(fmt.Sprintf("%s %q is not auto, required, or off", spec.sandboxSetting, mode))
 	}
 	if env.euid != 0 {
+		if profile == Scanner {
+			return unavailable(scannerIdentityRootUnavailableReason(env.euid))
+		}
 		return unavailable(fmt.Sprintf("EdgeWatch runs as UID %d rather than 0, so it cannot start %s under %s", env.euid, spec.processes, identityTarget))
 	}
 	if profile == Scanner && env.identityRangeErr != nil {
-		return unavailable("the scanner identity pool is not available in this runtime")
+		return unavailable(scannerIdentityRangeUnavailableReason(env.identityRangeErr))
 	}
 	if profile == Scanner && env.executableErr != nil {
-		return unavailable("the EdgeWatch executable cannot supervise scanner identity leases")
+		return unavailable("the EdgeWatch executable is unavailable for scanner identity supervision")
 	}
 	if env.capErr != nil {
+		if profile == Scanner {
+			return unavailable("the daemon's capabilities could not be verified; check the container runtime's capability settings")
+		}
 		return unavailable(fmt.Sprintf("the daemon's capabilities could not be read: %v", env.capErr))
 	}
 	var missing []string
@@ -315,7 +353,7 @@ func detectIdentity(profile Profile, mode string, status Status, probe Probe, en
 	policy := NewEnforcedFor(profile, ambient...)
 	if err := env.runProbe(policy, probe); err != nil {
 		if profile == Scanner {
-			return unavailable(fmt.Sprintf("%s could not start under the scanner identity lease: %v", spec.testProcess, err))
+			return unavailable(scannerIdentityProbeUnavailableReason(err))
 		}
 		return unavailable(fmt.Sprintf("%s could not start as UID %d: %v", spec.testProcess, spec.uid, err))
 	}
@@ -362,7 +400,7 @@ func detectScannerSeccomp(policy *Policy, probe Probe, env environment) *Policy 
 	candidate.seccomp = true
 	candidate.status.Seccomp = SeccompStatus{State: StateEnforced}
 	if err := env.runProbe(&candidate, probe); err != nil {
-		return setUnavailable(fmt.Sprintf("%s could not start with the required scanner seccomp filter: %v", probeName(probe), err))
+		return setUnavailable(scannerSeccompProbeUnavailableReason(err))
 	}
 	policy.seccomp = true
 	policy.status.Seccomp = SeccompStatus{State: StateEnforced}

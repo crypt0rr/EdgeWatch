@@ -126,6 +126,81 @@ func TestScannerStatusJSONReportsPoolWithoutAStableInvocationUID(t *testing.T) {
 	}
 }
 
+func TestDetectReportsActionableScannerIdentityPoolReasons(t *testing.T) {
+	t.Parallel()
+	for name, test := range map[string]struct {
+		change      func(*environment)
+		want        string
+		wantSeccomp string
+		forbid      []string
+	}{
+		"missing control capabilities": {
+			change: func(env *environment) {
+				env.effective &^= capabilityMask(unix.CAP_SETUID, unix.CAP_SETGID, unix.CAP_KILL)
+			},
+			want:        "SETUID, SETGID, KILL",
+			wantSeccomp: StateEnforced,
+		},
+		"partially mapped pool": {
+			change: func(env *environment) {
+				env.identityRangeErr = scannerIdentityUnmappedError{id: ScannerIdentityPoolUIDStart}
+			},
+			want:        "60000 is not mapped",
+			wantSeccomp: StateEnforced,
+		},
+		"unverifiable map does not expose its error": {
+			change:      func(env *environment) { env.identityRangeErr = errors.New("read /private/uid_map: secret-token") },
+			want:        "check the runtime's UID/GID mappings",
+			wantSeccomp: StateEnforced,
+			forbid:      []string{"/private", "secret-token"},
+		},
+		"non-root daemon": {
+			change:      func(env *environment) { env.euid = 1000 },
+			want:        "EdgeWatch runs as UID 1000",
+			wantSeccomp: StateEnforced,
+		},
+		"allocator refuses unsafe namespace transition": {
+			change: func(env *environment) {
+				env.run = failing(func(*Policy) bool { return true }, errors.New("scanner identity allocator: PID namespace changed with unsafe or occupied scope at /private/journal"))
+			},
+			want:        "PID namespace change",
+			wantSeccomp: StateUnavailable,
+			forbid:      []string{"/private", "/private/journal"},
+		},
+		"probe error does not expose a path": {
+			change: func(env *environment) {
+				env.run = failing(func(*Policy) bool { return true }, errors.New("open /private/config.yaml: secret-token"))
+			},
+			want:        "check the allocator state",
+			wantSeccomp: StateUnavailable,
+			forbid:      []string{"/private", "secret-token"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env, _ := containerEnvironment()
+			if test.change != nil {
+				test.change(&env)
+			}
+			status := detect(Options{}, env).Status()
+			if status.State != StateUnavailable || status.IdentityPool == nil || status.IdentityPool.State != StateUnavailable {
+				t.Fatalf("status = %+v, want unavailable scanner identity pool", status)
+			}
+			if status.Landlock.State != StateUnavailable || status.Seccomp.State != test.wantSeccomp {
+				t.Fatalf("Landlock = %+v, seccomp = %+v, want Landlock unavailable and seccomp %q independently", status.Landlock, status.Seccomp, test.wantSeccomp)
+			}
+			if status.Reason != status.IdentityPool.Reason || !strings.Contains(status.IdentityPool.Reason, test.want) {
+				t.Fatalf("status reason = %q, pool reason = %q, want both to contain %q", status.Reason, status.IdentityPool.Reason, test.want)
+			}
+			for _, forbidden := range test.forbid {
+				if strings.Contains(status.IdentityPool.Reason, forbidden) || strings.Contains(status.Reason, forbidden) || strings.Contains(status.Seccomp.Reason, forbidden) {
+					t.Fatalf("scanner status %+v exposed %q", status, forbidden)
+				}
+			}
+		})
+	}
+}
+
 func TestAutoAllowsDaemonButUnavailableScannerPolicyFailsClosed(t *testing.T) {
 	t.Parallel()
 	notRoot, _ := containerEnvironment()

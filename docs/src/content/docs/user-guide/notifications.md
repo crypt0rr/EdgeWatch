@@ -119,7 +119,7 @@ These audit records send a security alert:
 | Event | Audit action | The alert names |
 | --- | --- | --- |
 | A client became rate limited on sign-in, password or TOTP confirmation, activation, or setup | `auth.rate_limited` | the operation, the client's address, and, for a sign-in, the unit's account |
-| Five wrong passwords were entered for the same known, enabled account within five minutes, across client addresses | `auth.sign_in_failures` | the account and the threshold count, without a client address |
+| Five wrong passwords were entered for the same known, enabled account within five minutes, across client addresses | `auth.sign_in_failures` | the account and fixed wording that states the threshold, without a client address |
 | An account's one-time and recovery codes were locked after ten wrong codes | `auth.second_factor_locked` | the account and the address of the code that started the lockout |
 | An account signed in with a recovery code | `auth.recovery_code_used` | the account and the client's address |
 | A platform administrator invited a unit administrator | `user.created` with the `platform` actor | the invited account and the platform administrator |
@@ -151,11 +151,14 @@ action or its audit record; the daemon logs a warning instead.
 
 The wrong-password threshold is separate from per-client rate limiting. It
 counts attempts for one enabled account across client addresses, does not lock
-the account, and a successful sign-in does not reset it. Unknown and disabled
-accounts are not aggregated. Its in-memory detector is bounded and local to
-the daemon process, so a daemon restart clears its current window and
-cooldown. The aggregate audit record and alert omit the client address; the
-ordinary failed-login audit records retain their existing attribution.
+the account, and a successful sign-in does not reset it. Its alert says that
+an account received at least five wrong passwords within five minutes. That
+threshold is fixed alert wording, not a count of additional events held by
+the alert window. Unknown and disabled accounts are not aggregated. Its
+in-memory detector is bounded and local to the daemon process, so a daemon
+restart clears its current window and cooldown. The aggregate audit record
+and alert omit the client address; the ordinary failed-login audit records
+retain their existing attribution.
 
 The platform has security alerts of its own, for the records in platform
 scope: the rate limits, account-wide wrong-password bursts, lockouts, and

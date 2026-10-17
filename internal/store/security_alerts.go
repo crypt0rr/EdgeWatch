@@ -94,7 +94,6 @@ func securityAlertDetail(entry AuditEntry, kind string, platform bool) model.Ale
 		detail.Source = strings.TrimSpace(entry.SourceIP)
 	case model.SecurityAlertAccountSignInFailures:
 		detail.Account = alertUsername(entry.ActorUsername)
-		detail.Count = model.SecurityAlertAccountSignInFailureCount
 	default:
 		detail.Account = alertUsername(entry.alertAccount)
 		detail.Actor = alertUsername(entry.ActorUsername)

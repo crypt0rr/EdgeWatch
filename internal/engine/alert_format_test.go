@@ -31,6 +31,19 @@ func TestFormatSecurityAlerts(t *testing.T) {
 				"Review the security audit for details.",
 		},
 		{
+			name:  "account-wide wrong-password threshold",
+			alert: &model.AlertDetail{Kind: model.SecurityAlertAccountSignInFailures, Account: "alice"},
+			want: "🔐 EdgeWatch security alert: an account received at least 5 wrong passwords within five minutes\n" +
+				"Account: alice\nReview the security audit for details.",
+		},
+		{
+			name:  "account-wide wrong-password burst with held events",
+			alert: &model.AlertDetail{Kind: model.SecurityAlertAccountSignInFailures, Account: "alice", Count: 2, Since: since},
+			want: "🔐 EdgeWatch security alert: an account received at least 5 wrong passwords within five minutes\n" +
+				"Account: alice\nAlso: 2 more account-wide wrong-password bursts since 2026-10-10 12:30 UTC\n" +
+				"Review the security audit for details.",
+		},
+		{
 			name:  "summary",
 			alert: &model.AlertDetail{Kind: model.SecurityAlertSummary, Subject: model.SecurityAlertPlatformAccountActions, Unit: "Finance", Count: 2, Since: since},
 			want: "🔐 EdgeWatch security alert: 2 more platform administrator actions on the unit's accounts since 2026-10-10 12:30 UTC\n" +
@@ -55,7 +68,24 @@ func TestFormatSecurityAlerts(t *testing.T) {
 			}
 		})
 	}
-	for _, kind := range []string{model.SecurityAlertRecoveryCodeUsed, model.SecurityAlertPlatformInvitation, model.SecurityAlertPlatformSessionsEnded} {
+	// Keep the complete vocabulary together so every emitted kind is checked
+	// for a specific headline. The summary and platform coalescing kind are
+	// included too; they are report/window values rather than event headlines.
+	securityAlertKinds := []string{
+		model.SecurityAlertRateLimited,
+		model.SecurityAlertAccountSignInFailures,
+		model.SecurityAlertSecondFactorLocked,
+		model.SecurityAlertRecoveryCodeUsed,
+		model.SecurityAlertPlatformInvitation,
+		model.SecurityAlertPlatformPasswordReset,
+		model.SecurityAlertPlatformSessionsEnded,
+		model.SecurityAlertPlatformAccountActions,
+		model.SecurityAlertSummary,
+	}
+	for _, kind := range securityAlertKinds {
+		if kind == model.SecurityAlertPlatformAccountActions || kind == model.SecurityAlertSummary {
+			continue
+		}
 		if got := FormatEvent(model.Event{Type: model.EventSecurityAlert, Alert: &model.AlertDetail{Kind: kind}}); strings.Contains(got, "security event") {
 			t.Errorf("kind %s has no headline: %q", kind, got)
 		}

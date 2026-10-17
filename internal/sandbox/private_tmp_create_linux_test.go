@@ -159,6 +159,30 @@ func newPrivateTemporaryCreateFixture(t *testing.T) *linuxPrivateTemporaryDirect
 	return temporary
 }
 
+func TestValidPrivateTemporaryRoot(t *testing.T) {
+	tests := []struct {
+		name string
+		mode uint32
+		uid  uint32
+		want bool
+	}{
+		{name: "root-owned sticky shared temporary root", mode: unix.S_IFDIR | 0o1777, uid: 0, want: true},
+		{name: "root-owned private temporary root", mode: unix.S_IFDIR | 0o700, uid: 0, want: true},
+		{name: "root-owned writable non-sticky temporary root", mode: unix.S_IFDIR | 0o777, uid: 0},
+		{name: "untrusted sticky temporary root", mode: unix.S_IFDIR | 0o1777, uid: 1000},
+		{name: "root-owned setgid temporary root", mode: unix.S_IFDIR | unix.S_ISGID | 0o1777, uid: 0},
+		{name: "non-directory root", mode: unix.S_IFREG | 0o600, uid: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stat := &unix.Stat_t{Mode: test.mode, Uid: test.uid}
+			if got := validPrivateTemporaryRoot(stat); got != test.want {
+				t.Fatalf("validPrivateTemporaryRoot(%#o, uid %d) = %t, want %t", test.mode, test.uid, got, test.want)
+			}
+		})
+	}
+}
+
 func TestPrivateTemporaryScannerNamespaceRejectsSetgidRoot(t *testing.T) {
 	rootPath := t.TempDir()
 	if err := os.Chmod(rootPath, 0o2700); err != nil {
@@ -172,6 +196,16 @@ func TestPrivateTemporaryScannerNamespaceRejectsSetgidRoot(t *testing.T) {
 		t.Skip("test filesystem does not preserve the directory setgid bit")
 	}
 	filesystem := realPrivateTemporaryFilesystemOps()
+	fstat := filesystem.fstat
+	filesystem.fstat = func(fd int, stat *unix.Stat_t) error {
+		if err := fstat(fd, stat); err != nil {
+			return err
+		}
+		// Model a trusted root-owned /tmp so this integration check reaches the
+		// setgid rejection even when the test runs as an unprivileged user.
+		stat.Uid = 0
+		return nil
+	}
 	open := filesystem.open
 	filesystem.open = func(path string, flags int, mode uint32) (int, error) {
 		if path == "/tmp" {

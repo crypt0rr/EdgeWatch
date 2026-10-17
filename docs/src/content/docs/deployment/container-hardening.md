@@ -304,11 +304,14 @@ mode `0700` leaf owned by that invocation's leased UID/GID. The namespace group
 is the invocation's unique leased GID, and the helper has no supplementary
 groups; the daemon verifies the namespace owner, group, and mode before use.
 It creates this group-writable namespace only when the pinned `/tmp` directory
-is not setgid, so parent group inheritance cannot grant a different group
-write access. The daemon sets the filesystem GID on a locked OS thread for the
-namespace creation syscall and verifies restoration before that thread can be
-reused. After the helper reports readiness, the daemon changes the pinned
-namespace to mode `0711` before acknowledging startup. The daemon remains its
+is root-owned, is not setgid, and either grants no group/other write access or
+has the sticky bit set. These checks keep scanner peers from renaming another
+namespace in a writable parent and ensure parent group inheritance cannot
+grant a different group write access. The daemon sets the filesystem GID on a
+locked OS thread for the namespace creation syscall and verifies restoration
+before that thread can be reused. After the helper reports readiness, the
+daemon changes the pinned namespace to mode `0711` before acknowledging
+startup. The daemon remains its
 owner and can remove the leaf; other identities can search the namespace but
 cannot add sibling entries. With identity isolation enabled, concurrent
 scanners use different identities and cannot open each other's randomly named

@@ -870,7 +870,7 @@ expect_private_nmap_xml() {
 # contents into the leaf-local stdin-input file. Container root lacks
 # CAP_SYS_PTRACE, so these checks do not inspect a scanner's environ.
 expect_private_naabu_tmp() {
-  local pid=$1 expected_pe=$2 expected_ia=$3 profile=$2 pid_starttime uid namespaces namespace leaves leaf namespace_stat leaf_stat candidate owner leaf_candidate
+  local pid=$1 expected_pe=$2 expected_ia=$3 profile=$2 pid_starttime uid gid namespaces namespace leaves leaf namespace_stat leaf_stat candidate owner leaf_candidate
   local inputs input input_stat databases database database_stat current_stat current_contents manifest manifest_stat descriptor_path descriptor_stat descriptor_contents leaf_input_contents probe_output
   case "$expected_pe/$expected_ia" in
     0000000000002000/0000000000002000|0000000000003000/0000000000002000) ;;
@@ -881,6 +881,8 @@ expect_private_naabu_tmp() {
   [[ "$pid_starttime" =~ ^[0-9]+$ ]] || fail "Naabu PID $pid has an invalid starttime '$pid_starttime'"
   expect_scanner_identity "$pid" "$expected_pe" "$expected_ia"
   uid=$(scanner_uid "$pid")
+  gid=$(scanner_gid "$pid")
+  [ "$gid" = "$uid" ] || fail "scanner process $pid has leased UID/GID $uid:$gid, but the allocator requires one matching identity"
   expect_scanner_starttime "$pid" "$pid_starttime" "after reading its UID"
   namespaces=$(docker exec "$container" find /tmp -mindepth 1 -maxdepth 1 -type d -name 'edgewatch-naabu-root-*' -print 2>/dev/null || true)
   namespace=
@@ -893,7 +895,7 @@ expect_private_naabu_tmp() {
       [ -n "$leaf_candidate" ] || continue
       [[ "$leaf_candidate" =~ ^/tmp/edgewatch-naabu-root-[a-f0-9]{32}/edgewatch-naabu-[a-f0-9]{32}$ ]] || fail "Naabu leaf has an unexpected name: $leaf_candidate"
       owner=$(docker exec "$container" stat -c '%u %g' "$leaf_candidate")
-      if [ "$owner" = "$uid $uid" ]; then
+      if [ "$owner" = "$uid $gid" ]; then
         [ -z "$leaf" ] || fail "scanner UID $uid owns multiple active Naabu leaves"
         namespace=$candidate
         leaf=$leaf_candidate
@@ -903,28 +905,28 @@ expect_private_naabu_tmp() {
   [ -n "$namespace" ] && [ -n "$leaf" ] || fail "no Naabu invocation leaf belongs to live scanner UID $uid: $namespaces"
   namespace_stat=$(docker exec "$container" stat -c '%a %u %g' "$namespace")
   leaf_stat=$(docker exec "$container" stat -c '%a %u %g' "$leaf")
-  [ "$namespace_stat" = "1733 0 0" ] || fail "Naabu invocation namespace is '$namespace_stat', want '1733 0 0'"
-  [ "$leaf_stat" = "700 $uid $uid" ] || fail "Naabu invocation leaf is '$leaf_stat', want '700 $uid $uid'"
-  inputs=$(docker exec --user "$uid:$uid" "$container" find "$leaf" -mindepth 1 -maxdepth 1 -type f -name 'stdin-input-*' -print 2>/dev/null || true)
+  [ "$namespace_stat" = "711 0 $gid" ] || fail "Naabu invocation namespace is '$namespace_stat', want mode/owner/group '711 0 $gid' for active lease $uid:$gid"
+  [ "$leaf_stat" = "700 $uid $gid" ] || fail "Naabu invocation leaf is '$leaf_stat', want '700 $uid $gid' for active lease $uid:$gid"
+  inputs=$(docker exec --user "$uid:$gid" "$container" find "$leaf" -mindepth 1 -maxdepth 1 -type f -name 'stdin-input-*' -print 2>/dev/null || true)
   [ "$(printf '%s\n' "$inputs" | grep -c .)" = 1 ] || fail "Naabu created $(printf '%s\n' "$inputs" | grep -c .) temporary input files in its leaf: $inputs"
   input=$inputs
-  input_stat=$(docker exec --user "$uid:$uid" "$container" stat -c '%a %u %g' "$input")
-  [ "$input_stat" = "600 $uid $uid" ] || fail "Naabu temporary input is '$input_stat', want '600 $uid $uid'"
-  databases=$(docker exec --user "$uid:$uid" "$container" find "$leaf" -mindepth 1 -maxdepth 1 -type d -name 'naabu*' -print 2>/dev/null || true)
+  input_stat=$(docker exec --user "$uid:$gid" "$container" stat -c '%a %u %g' "$input")
+  [ "$input_stat" = "600 $uid $gid" ] || fail "Naabu temporary input is '$input_stat', want '600 $uid $gid'"
+  databases=$(docker exec --user "$uid:$gid" "$container" find "$leaf" -mindepth 1 -maxdepth 1 -type d -name 'naabu*' -print 2>/dev/null || true)
   [ "$(printf '%s\n' "$databases" | grep -c .)" = 1 ] || fail "Naabu created $(printf '%s\n' "$databases" | grep -c .) LevelDB directories in its leaf: $databases"
   database=$databases
   [[ "$database" =~ /naabu[0-9]+$ ]] || fail "Naabu LevelDB directory has an unexpected name: $database"
-  database_stat=$(docker exec --user "$uid:$uid" "$container" stat -c '%a %u %g' "$database")
-  [ "$database_stat" = "700 $uid $uid" ] || fail "Naabu LevelDB directory is '$database_stat', want '700 $uid $uid'"
-  docker exec --user "$uid:$uid" "$container" test -f "$database/CURRENT" || fail "Naabu LevelDB CURRENT file is missing from $database"
-  current_stat=$(docker exec --user "$uid:$uid" "$container" stat -c '%a %u %g' "$database/CURRENT")
-  [ "$current_stat" = "644 $uid $uid" ] || fail "Naabu LevelDB CURRENT file is '$current_stat', want '644 $uid $uid'"
-  current_contents=$(docker exec --user "$uid:$uid" "$container" cat "$database/CURRENT") || fail "scanner UID $uid could not read its own LevelDB CURRENT file"
-  manifest=$(docker exec --user "$uid:$uid" "$container" find "$database" -mindepth 1 -maxdepth 1 -type f -name 'MANIFEST-*' -print 2>/dev/null || true)
+  database_stat=$(docker exec --user "$uid:$gid" "$container" stat -c '%a %u %g' "$database")
+  [ "$database_stat" = "700 $uid $gid" ] || fail "Naabu LevelDB directory is '$database_stat', want '700 $uid $gid'"
+  docker exec --user "$uid:$gid" "$container" test -f "$database/CURRENT" || fail "Naabu LevelDB CURRENT file is missing from $database"
+  current_stat=$(docker exec --user "$uid:$gid" "$container" stat -c '%a %u %g' "$database/CURRENT")
+  [ "$current_stat" = "644 $uid $gid" ] || fail "Naabu LevelDB CURRENT file is '$current_stat', want '644 $uid $gid'"
+  current_contents=$(docker exec --user "$uid:$gid" "$container" cat "$database/CURRENT") || fail "scanner UID $uid could not read its own LevelDB CURRENT file"
+  manifest=$(docker exec --user "$uid:$gid" "$container" find "$database" -mindepth 1 -maxdepth 1 -type f -name 'MANIFEST-*' -print 2>/dev/null || true)
   [ "$(printf '%s\n' "$manifest" | grep -c .)" = 1 ] || fail "Naabu LevelDB manifest is missing or ambiguous in $database: $manifest"
   [ "$current_contents" = "$(basename "$manifest")" ] || fail "Naabu CURRENT names '$current_contents', want its readable manifest $(basename "$manifest")"
-  manifest_stat=$(docker exec --user "$uid:$uid" "$container" stat -c '%a %u %g' "$manifest")
-  [ "$manifest_stat" = "644 $uid $uid" ] || fail "Naabu LevelDB manifest is '$manifest_stat', want '644 $uid $uid'"
+  manifest_stat=$(docker exec --user "$uid:$gid" "$container" stat -c '%a %u %g' "$manifest")
+  [ "$manifest_stat" = "644 $uid $gid" ] || fail "Naabu LevelDB manifest is '$manifest_stat', want '644 $uid $gid'"
   expect_scanner_starttime "$pid" "$pid_starttime" "before checking its inherited target descriptor"
   descriptor_path=$(docker exec "$container" "$proc_fd_probe" "$uid" "$profile" readlink "/proc/$pid/fd/3" 2>&1) || fail "scanner UID $uid with scanner capabilities could not inspect its inherited target descriptor: $descriptor_path"
   [[ "$descriptor_path" =~ ^/var/lib/edgewatch/tmp/scanner/run-[0-9]+/edgewatch-naabu-targets-[0-9]+$ ]] ||
@@ -940,10 +942,11 @@ expect_private_naabu_tmp() {
   descriptor_contents=$(docker exec "$container" "$proc_fd_probe" "$uid" "$profile" read "/proc/$pid/fd/3" 2>&1) || fail "scanner UID $uid with scanner capabilities could not read its live inherited target descriptor: $descriptor_contents"
   [ "$descriptor_contents" = '127.0.0.1' ] || fail "the inherited target descriptor contains unexpected targets: $descriptor_contents"
   expect_scanner_starttime "$pid" "$pid_starttime" "after reading its inherited target descriptor"
-  leaf_input_contents=$(docker exec --user "$uid:$uid" "$container" cat "$input") || fail "scanner UID $uid could not read its leaf-local Naabu input"
+  leaf_input_contents=$(docker exec --user "$uid:$gid" "$container" cat "$input") || fail "scanner UID $uid could not read its leaf-local Naabu input"
   [ "$leaf_input_contents" = '127.0.0.1' ] || fail "the leaf-local Naabu input contains unexpected targets: $leaf_input_contents"
   docker exec "$container" test -d "/proc/$pid" || fail "Naabu process $pid exited while its temporary files were inspected"
   naabu_uid=$uid
+  naabu_gid=$gid
   naabu_starttime=$pid_starttime
   naabu_namespace=$namespace
   naabu_leaf=$leaf
@@ -973,6 +976,10 @@ expect_legacy_tmp_grant_rejected() {
 
 scanner_uid() {
   docker exec "$container" awk '/^Uid:/{print $2; exit}' "/proc/$1/status"
+}
+
+scanner_gid() {
+  docker exec "$container" awk '/^Gid:/{print $2; exit}' "/proc/$1/status"
 }
 
 scanner_process_starttime() {
@@ -1433,6 +1440,7 @@ naabu_pid=$(scanner_pid naabu)
 [ -n "$naabu_pid" ] || fail "the proof-timeout Naabu scan started no Naabu"
 expect_private_naabu_tmp "$naabu_pid" "0000000000002000" "0000000000002000"
 quarantined_uid=$naabu_uid
+quarantined_gid=$naabu_gid
 quarantined_pid=$naabu_pid
 quarantined_namespace=$naabu_namespace
 quarantined_leaf=$naabu_leaf
@@ -1451,9 +1459,9 @@ printf '%s\n' "$cycle_last_error" | grep -Fq 'scanner process-tree proof failed'
 docker exec "$container" test -d "$quarantined_namespace" || fail "proof failure removed the quarantined Naabu namespace"
 docker exec "$container" test -d "$quarantined_leaf" || fail "proof failure removed the quarantined Naabu leaf"
 quarantined_namespace_stat=$(docker exec "$container" stat -c '%a %u %g' "$quarantined_namespace")
-[ "$quarantined_namespace_stat" = "1733 0 0" ] || fail "proof failure changed the pinned Naabu namespace to '$quarantined_namespace_stat'"
+[ "$quarantined_namespace_stat" = "711 0 $quarantined_gid" ] || fail "proof failure changed the pinned Naabu namespace to '$quarantined_namespace_stat', want mode/owner/group '711 0 $quarantined_gid' for quarantined lease $quarantined_uid:$quarantined_gid"
 quarantined_leaf_stat=$(docker exec "$container" stat -c '%a %u %g' "$quarantined_leaf")
-[ "$quarantined_leaf_stat" = "700 $quarantined_uid $quarantined_uid" ] || fail "proof failure changed the pinned Naabu leaf to '$quarantined_leaf_stat'"
+[ "$quarantined_leaf_stat" = "700 $quarantined_uid $quarantined_gid" ] || fail "proof failure changed the pinned Naabu leaf to '$quarantined_leaf_stat'"
 docker exec "$container" test -f "$quarantined_target" || fail "proof failure removed the quarantined target-list file"
 quarantined_target_stat=$(docker exec "$container" stat -c '%a %u %g' "$quarantined_target")
 [ "$quarantined_target_stat" = "604 0 0" ] || fail "proof failure changed the parent-owned target-list file to '$quarantined_target_stat'"

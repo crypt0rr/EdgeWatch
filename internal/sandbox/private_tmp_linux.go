@@ -379,7 +379,14 @@ func (temporary *linuxPrivateTemporaryDirectory) createNamespace() error {
 }
 
 func validPrivateTemporaryRoot(stat *unix.Stat_t) bool {
-	return stat != nil && stat.Mode&unix.S_IFMT == unix.S_IFDIR && stat.Mode&unix.S_ISGID == 0
+	if stat == nil || stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != 0 || stat.Mode&unix.S_ISGID != 0 {
+		return false
+	}
+	// A leased scanner peer must not be able to rename another invocation's
+	// namespace. The trusted root owns /tmp; when it grants group or other
+	// write access, the sticky bit limits removal to the entry's owner.
+	writableByPeers := stat.Mode&0o022 != 0
+	return !writableByPeers || stat.Mode&unix.S_ISVTX != 0
 }
 
 // mkdiratWithFilesystemGroup creates a namespace with the lease GID as its

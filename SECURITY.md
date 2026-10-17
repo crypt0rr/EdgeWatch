@@ -153,10 +153,12 @@ Naabu's own temporary files start in a daemon-owned `0731` namespace below
 `/tmp` while a helper creates an invocation-owned `0700` leaf. The namespace's
 write-enabled group is that invocation's unique leased GID; the helper has no
 supplementary groups, and the daemon verifies the namespace owner, group, mode,
-and that `/tmp` is not setgid. It sets the filesystem GID only on a locked OS
-thread for namespace creation and verifies restoration before that thread is
-reused. Once the helper reports readiness, the daemon seals the pinned
-namespace to `0711` before acknowledging startup: the daemon owner retains
+and that `/tmp` is root-owned, is not setgid, and is sticky whenever group or
+other write access is enabled. This prevents scanner peers from renaming
+another namespace in a writable parent. It sets the filesystem GID only on a
+locked OS thread for namespace creation and verifies restoration before that
+thread is reused. Once the helper reports readiness, the daemon seals the
+pinned namespace to `0711` before acknowledging startup: the daemon owner retains
 write access for cleanup while other identities can search but cannot create
 sibling entries. With the scanner sandbox off, Naabu uses a daemon-owned
 `0711` namespace and a `0700` leaf without an isolation boundary. In

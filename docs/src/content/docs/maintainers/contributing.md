@@ -128,7 +128,11 @@ Triggered `ONBUILD` instructions are rejected conservatively because their
 execution can add commands or hidden stage dependencies. The guard examines
 inline command text; it does not parse build-context scripts, so reachable
 explicit shell, source, or direct local-script execution fails closed. An
-untriggered `ONBUILD` instruction remains dormant in that build.
+untriggered `ONBUILD` instruction remains dormant in that build. The guard
+allows only the Dockerfile's reviewed `git rev-parse` and Go ELF-interpreter
+command substitutions; other `$()`, backtick, or process-substitution syntax
+fails closed anywhere in a reachable `RUN`, including arguments. This is a
+bounded policy check rather than a general shell parser.
 
 The same checks keep dependency provenance current. Renovate reads the
 golangci-lint pin from `.golangci-lint-version` using GitHub Releases, and its

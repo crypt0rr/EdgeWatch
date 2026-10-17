@@ -639,6 +639,35 @@ function hasOpaqueShellScriptExecution(command, depth = 0) {
   return false
 }
 
+function hasUnsupportedShellSubstitution(command, args) {
+  // RUN text isn't parsed as a complete shell grammar. Keep the two reviewed
+  // substitutions used by this Dockerfile explicit and reject every other
+  // command, backtick, and process substitution wherever it appears.
+  const allowed = new Set(['go run /tmp/interp.go /out/naabu'])
+  const naabuVersion = args.get('NAABU_VERSION')
+  if (typeof naabuVersion === 'string' && /^v[0-9]+\.[0-9]+\.[0-9]+$/.test(naabuVersion)) {
+    allowed.add('git rev-parse ' + naabuVersion + '^{commit}')
+  }
+
+  for (let index = 0; index < command.length; index++) {
+    if (command[index] === '`' || command.startsWith('<(', index) || command.startsWith('>(', index)) return true
+    if (!command.startsWith('$(', index)) continue
+
+    let nesting = 1
+    let end = index + 2
+    for (; end < command.length && nesting > 0; end++) {
+      if (command[end] === '(') nesting++
+      if (command[end] === ')') nesting--
+    }
+    if (nesting !== 0) return true
+
+    const body = command.slice(index + 2, end - 1).trim()
+    if (!allowed.has(body)) return true
+    index = end - 1
+  }
+  return false
+}
+
 function reachableReleaseNpmRuns(source, buildArgs, targetName) {
   const { stages, aliases } = dockerfileStageGraph(source, buildArgs)
   const target = targetName === undefined
@@ -665,7 +694,8 @@ function reachableReleaseNpmRuns(source, buildArgs, targetName) {
       const command = stripRunOptions(expanded)
       if (/\b(?:npm|npx)\b/.test(expanded) ||
           hasUnresolvedCommandPosition(command) ||
-          hasOpaqueShellScriptExecution(command)) {
+          hasOpaqueShellScriptExecution(command) ||
+          hasUnsupportedShellSubstitution(expanded, run.args)) {
         violations.push({
           stage: stage.name,
           line: run.line,
@@ -967,6 +997,44 @@ test('release image checks npm execution across its reachable Dockerfile stage g
   }
   assert.deepEqual(npmRuns(opaqueSetupDockerfile("sh -c 'echo inline is inspectable'")), [],
     'supported inline shell code remains eligible for command inspection')
+
+  for (const [name, command] of [
+    ['reviewer nested shell example', "sh -c 'echo $(sh /tmp/setup.sh)'"],
+    ['command substitution in an echo argument', 'echo checking $(sh /tmp/setup.sh)'],
+    ['legacy backtick in an argument', 'echo `sh /tmp/setup.sh`'],
+    ['process substitution input', 'cat <(sh /tmp/setup.sh)'],
+    ['process substitution output', 'tee >(sh /tmp/setup.sh)'],
+    ['unterminated command substitution', 'echo $(sh /tmp/setup.sh'],
+    ['literal substitution-shaped text', "echo 'documentation says $(sh /tmp/setup.sh)'"],
+  ]) {
+    assert.ok(npmRuns(opaqueSetupDockerfile(command)).length > 0,
+      name + ' must fail closed wherever substitution syntax appears')
+  }
+
+  const argAliasedSubstitution = replaceOnce(
+    opaqueSetupDockerfile('echo "$($PM /tmp/setup.sh)"'),
+    'ARG PREBUILT_FRONTEND=0',
+    'ARG PREBUILT_FRONTEND=0\nARG PM=sh',
+    'ARG inside command substitution',
+  )
+  assert.ok(npmRuns(argAliasedSubstitution).length > 0,
+    'a Docker ARG alias nested inside a command substitution must fail closed')
+  const envAliasedSubstitution = replaceOnce(
+    opaqueSetupDockerfile('echo "$($PM /tmp/setup.sh)"'),
+    'ARG PREBUILT_FRONTEND=0',
+    'ARG PREBUILT_FRONTEND=0\nENV PM=sh',
+    'ENV inside command substitution',
+  )
+  assert.ok(npmRuns(envAliasedSubstitution).length > 0,
+    'a Docker ENV alias nested inside a command substitution must fail closed')
+  const unsafeSubstitutionArgument = replaceOnce(
+    opaqueSetupDockerfile('echo setup is copied'),
+    'ARG NAABU_VERSION=v2.6.1',
+    'ARG NAABU_VERSION=$(sh /tmp/setup.sh)',
+    'substitution allowlist argument validation',
+  )
+  assert.ok(npmRuns(unsafeSubstitutionArgument).length > 0,
+    'an unsafe Docker ARG value must not widen the exact git substitution allowlist')
 
   const onbuildNpm = [
     'FROM node:24.21.0-alpine3.24 AS npm-source',

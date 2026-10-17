@@ -38,10 +38,10 @@ func TestCleanPrivateDirectoryContentsRejectsInvalidOrChangedLeaf(t *testing.T) 
 	}{
 		{name: "missing expected identity", want: "invalid private temporary leaf"},
 		{
-			name: "unsupported mode",
+			name: "wrong file type",
 			want: "invalid private temporary leaf",
 			stat: func(stat unix.Stat_t) *unix.Stat_t {
-				stat.Mode = unix.S_IFDIR | 0o755
+				stat.Mode = unix.S_IFREG | 0o600
 				return &stat
 			},
 		},
@@ -91,7 +91,7 @@ func TestRemovePrivateDirectoryContentsRejectsUnexpectedOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer unix.Close(duplicate)
-	if err := removePrivateDirectoryContents(duplicate, uint64(stat.Dev), wrongOwner, stat.Gid, 0, &cleanupBudget{}); err == nil || !strings.Contains(err.Error(), "ownership changed") {
+	if err := removePrivateDirectoryContents(duplicate, uint64(stat.Dev), wrongOwner, stat.Gid, &cleanupBudget{}); err == nil || !strings.Contains(err.Error(), "ownership changed") {
 		t.Fatalf("cleanup with mismatched owner error = %v", err)
 	}
 	if contents, err := os.ReadFile(artifact); err != nil || string(contents) != "preserve" {
@@ -99,7 +99,7 @@ func TestRemovePrivateDirectoryContentsRejectsUnexpectedOwner(t *testing.T) {
 	}
 }
 
-func TestRemovePrivateDirectoryContentsRejectsUnreadableSubdirectory(t *testing.T) {
+func TestRemovePrivateDirectoryContentsRepairsUnreadableSubdirectory(t *testing.T) {
 	path, fd, stat := newPrivateTemporaryCleanupCoverageLeaf(t)
 	blocked := filepath.Join(path, "blocked")
 	if err := os.Mkdir(blocked, 0o700); err != nil {
@@ -112,23 +112,18 @@ func TestRemovePrivateDirectoryContentsRejectsUnreadableSubdirectory(t *testing.
 	if err := os.Chmod(blocked, 0); err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		if err := os.Chmod(blocked, 0o700); err != nil {
-			t.Errorf("restore blocked directory permissions: %v", err)
-		}
-	}()
 	duplicate, err := unix.Dup(fd)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer unix.Close(duplicate)
-	if err := removePrivateDirectoryContents(duplicate, uint64(stat.Dev), stat.Uid, stat.Gid, 0, &cleanupBudget{}); err == nil || !strings.Contains(err.Error(), "open private temporary subdirectory failed") {
-		t.Fatalf("cleanup of unreadable child error = %v", err)
+	if err := removePrivateDirectoryContents(duplicate, uint64(stat.Dev), stat.Uid, stat.Gid, &cleanupBudget{}); err != nil {
+		t.Fatalf("cleanup of unreadable child: %v", err)
 	}
-	if err := os.Chmod(blocked, 0o700); err != nil {
-		t.Fatal(err)
+	if _, err := os.Lstat(blocked); !os.IsNotExist(err) {
+		t.Fatalf("unreadable child remains after cleanup: %v", err)
 	}
-	if contents, err := os.ReadFile(marker); err != nil || string(contents) != "preserve" {
-		t.Fatalf("unreadable-child rejection changed nested artifact: %q, %v", contents, err)
+	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
+		t.Fatalf("nested artifact remains after cleanup: %v", err)
 	}
 }

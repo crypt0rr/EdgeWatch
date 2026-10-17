@@ -71,7 +71,8 @@ func preparePrivateTemporaryCreateExec(request execRequest) (privateTemporaryCre
 	if err := unix.Fstat(namespaceFD, &namespace); err != nil || !privateTemporaryStatMatches(&namespace,
 		uint64(initialization.namespace.Dev), initialization.namespace.Ino,
 		initialization.namespace.Uid, initialization.namespace.Gid, initialization.namespace.Mode) ||
-		namespace.Mode != unix.S_IFDIR|privateScannerNamespaceMode || namespace.Dev != root.Dev {
+		namespace.Mode != unix.S_IFDIR|privateScannerNamespaceSetupMode || namespace.Dev != root.Dev || namespace.Gid != uint32(os.Getegid()) ||
+		!validPrivateTemporaryRoot(&root) {
 		return privateTemporaryCreateExecSetup{}, errors.New("private temporary invocation namespace descriptor changed")
 	}
 	currentRootFD, err := unix.Open("/tmp", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
@@ -80,10 +81,11 @@ func preparePrivateTemporaryCreateExec(request execRequest) (privateTemporaryCre
 	}
 	defer unix.Close(currentRootFD)
 	var currentRoot, namedNamespace unix.Stat_t
-	if err := unix.Fstat(currentRootFD, &currentRoot); err != nil || !sameObject(&root, &currentRoot) {
+	if err := unix.Fstat(currentRootFD, &currentRoot); err != nil || !sameObject(&root, &currentRoot) ||
+		!validPrivateTemporaryRoot(&currentRoot) || currentRoot.Mode != root.Mode || currentRoot.Uid != root.Uid || currentRoot.Gid != root.Gid {
 		return privateTemporaryCreateExecSetup{}, errors.New("private temporary filesystem root changed")
 	}
-	if err := unix.Fstatat(rootFD, initialization.namespaceName, &namedNamespace, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&namespace, &namedNamespace) || namedNamespace.Mode != namespace.Mode {
+	if err := unix.Fstatat(rootFD, initialization.namespaceName, &namedNamespace, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&namespace, &namedNamespace) || namedNamespace.Mode != namespace.Mode || namedNamespace.Uid != namespace.Uid || namedNamespace.Gid != namespace.Gid {
 		return privateTemporaryCreateExecSetup{}, errors.New("private temporary invocation namespace entry changed")
 	}
 	var existing unix.Stat_t
@@ -134,6 +136,12 @@ func execPrivateTemporaryCreate(request execRequest) error {
 	setup, err := preparePrivateTemporaryCreateExec(request)
 	if err != nil {
 		return fmt.Errorf("%s: %w", ExecCommand, err)
+	}
+	if setup.namespaceStat.Uid != uint32(os.Geteuid()) {
+		groups, groupsErr := os.Getgroups()
+		if groupsErr != nil || len(groups) != 0 {
+			return errors.New("scanner-owned private temporary helper has unexpected supplementary groups")
+		}
 	}
 	var leafFD int
 	// The parent will pin the leaf itself from the namespace descriptor before

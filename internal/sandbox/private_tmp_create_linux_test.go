@@ -49,9 +49,17 @@ func TestPrivateTemporaryCreateExecChild(t *testing.T) {
 	if !ok || int(stat.Uid) != wantUID || int(stat.Gid) != wantGID {
 		t.Fatalf("inherited scanner leaf owner=%v, want uid/gid %d/%d", info.Sys(), wantUID, wantGID)
 	}
-	nested := filepath.Join(leaf, "ipranger-map", "leveldb")
-	if err := os.MkdirAll(nested, 0o700); err != nil {
-		t.Fatalf("create nested scanner artifacts: %v", err)
+	// The scanner controls its TMPDIR permissions and may create deeper trees
+	// than a recursive cleanup routine can safely walk.
+	if err := os.Chmod(leaf, 0o755); err != nil {
+		t.Fatalf("change scanner-owned TMPDIR mode: %v", err)
+	}
+	nested := leaf
+	for depth := 0; depth < 40; depth++ {
+		nested = filepath.Join(nested, "level")
+		if err := os.Mkdir(nested, 0o700); err != nil {
+			t.Fatalf("create scanner artifact directory at depth %d: %v", depth+1, err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(nested, "CURRENT"), []byte("MANIFEST-000001\n"), 0o600); err != nil {
 		t.Fatalf("write scanner artifact: %v", err)
@@ -105,6 +113,23 @@ func privateTemporaryCreatePolicy(t *testing.T) (*Policy, *ScannerIdentityReserv
 	return policy, reservation, lease
 }
 
+func TestPrivateTemporaryPrepareFailureReleasesUnusedScannerLease(t *testing.T) {
+	policy, reservation, lease := privateTemporaryCreatePolicy(t)
+	command := exec.Command(filepath.Join(t.TempDir(), "missing-naabu"))
+	if temporary, err := PreparePrivateTemporaryDirectory(context.Background(), command, policy); err == nil || temporary != nil {
+		if temporary != nil {
+			_ = temporary.Close()
+		}
+		t.Fatalf("prepare with missing Naabu executable = %v, %v; want failure before a child starts", temporary, err)
+	}
+	if err := reservation.Finish(true); err != nil {
+		t.Fatalf("release lease after pre-start Prepare failure: %v", err)
+	}
+	if !lease.released || lease.releaseCalls != 1 || lease.quarantined || lease.quarantineCall != 0 {
+		t.Fatalf("pre-start lease state = %+v; want one release and no quarantine", lease)
+	}
+}
+
 func newPrivateTemporaryCreateFixture(t *testing.T) *linuxPrivateTemporaryDirectory {
 	t.Helper()
 	temporary := &linuxPrivateTemporaryDirectory{
@@ -112,7 +137,7 @@ func newPrivateTemporaryCreateFixture(t *testing.T) *linuxPrivateTemporaryDirect
 		uid:           uint32(os.Geteuid()),
 		gid:           uint32(os.Getegid()),
 		leafMode:      privateScannerTemporaryMode,
-		namespaceMode: privateScannerNamespaceMode,
+		namespaceMode: privateScannerNamespaceSetupMode,
 		childCreates:  true,
 	}
 	if err := temporary.createNamespace(); err != nil {
@@ -132,6 +157,128 @@ func newPrivateTemporaryCreateFixture(t *testing.T) *linuxPrivateTemporaryDirect
 		}
 	})
 	return temporary
+}
+
+func TestValidPrivateTemporaryRoot(t *testing.T) {
+	tests := []struct {
+		name string
+		mode uint32
+		uid  uint32
+		want bool
+	}{
+		{name: "root-owned sticky shared temporary root", mode: unix.S_IFDIR | 0o1777, uid: 0, want: true},
+		{name: "root-owned private temporary root", mode: unix.S_IFDIR | 0o700, uid: 0, want: true},
+		{name: "root-owned writable non-sticky temporary root", mode: unix.S_IFDIR | 0o777, uid: 0},
+		{name: "untrusted sticky temporary root", mode: unix.S_IFDIR | 0o1777, uid: 1000},
+		{name: "root-owned setgid temporary root", mode: unix.S_IFDIR | unix.S_ISGID | 0o1777, uid: 0},
+		{name: "non-directory root", mode: unix.S_IFREG | 0o600, uid: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stat := &unix.Stat_t{Mode: test.mode, Uid: test.uid}
+			if got := validPrivateTemporaryRoot(stat); got != test.want {
+				t.Fatalf("validPrivateTemporaryRoot(%#o, uid %d) = %t, want %t", test.mode, test.uid, got, test.want)
+			}
+		})
+	}
+}
+
+func TestPrivateTemporaryScannerNamespaceRejectsSetgidRoot(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.Chmod(rootPath, 0o2700); err != nil {
+		t.Fatalf("set test root setgid mode: %v", err)
+	}
+	info, err := os.Stat(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSetgid == 0 {
+		t.Skip("test filesystem does not preserve the directory setgid bit")
+	}
+	filesystem := realPrivateTemporaryFilesystemOps()
+	fstat := filesystem.fstat
+	filesystem.fstat = func(fd int, stat *unix.Stat_t) error {
+		if err := fstat(fd, stat); err != nil {
+			return err
+		}
+		// Model a trusted root-owned /tmp so this integration check reaches the
+		// setgid rejection even when the test runs as an unprivileged user.
+		stat.Uid = 0
+		return nil
+	}
+	open := filesystem.open
+	filesystem.open = func(path string, flags int, mode uint32) (int, error) {
+		if path == "/tmp" {
+			path = rootPath
+		}
+		return open(path, flags, mode)
+	}
+	temporary := &linuxPrivateTemporaryDirectory{
+		filesystem:    filesystem,
+		uid:           uint32(os.Geteuid()),
+		gid:           uint32(os.Getegid()),
+		leafMode:      privateScannerTemporaryMode,
+		namespaceMode: privateScannerNamespaceSetupMode,
+		childCreates:  true,
+	}
+	if err := temporary.createNamespace(); err == nil {
+		_ = temporary.Close()
+		t.Fatal("namespace creation accepted a setgid temporary root")
+	}
+	if err := temporary.Close(); err != nil {
+		t.Fatalf("close rejected namespace root: %v", err)
+	}
+	entries, err := os.ReadDir(rootPath)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("setgid root entries after rejected namespace creation = %v, %v; want empty", entries, err)
+	}
+}
+
+func TestPrivateTemporaryNormalNamespaceAllowsSetgidRoot(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.Chmod(rootPath, 0o2700); err != nil {
+		t.Fatalf("set test root setgid mode: %v", err)
+	}
+	info, err := os.Stat(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSetgid == 0 {
+		t.Skip("test filesystem does not preserve the directory setgid bit")
+	}
+	filesystem := realPrivateTemporaryFilesystemOps()
+	open := filesystem.open
+	filesystem.open = func(path string, flags int, mode uint32) (int, error) {
+		if path == "/tmp" {
+			path = rootPath
+		}
+		return open(path, flags, mode)
+	}
+	temporary := &linuxPrivateTemporaryDirectory{
+		filesystem:    filesystem,
+		uid:           uint32(os.Geteuid()),
+		gid:           uint32(os.Getegid()),
+		leafMode:      privateTemporaryFallbackMode,
+		namespaceMode: privateNamespaceMode,
+	}
+	if err := temporary.createNamespace(); err != nil {
+		_ = temporary.Close()
+		t.Fatalf("normal namespace creation rejected a setgid temporary root: %v", err)
+	}
+	var namespace unix.Stat_t
+	if err := unix.Fstat(int(temporary.namespace.Fd()), &namespace); err != nil {
+		t.Fatal(err)
+	}
+	if namespace.Mode != unix.S_IFDIR|privateNamespaceMode || namespace.Uid != uint32(os.Geteuid()) || namespace.Gid != uint32(os.Getegid()) {
+		t.Fatalf("normal namespace under setgid root = %d:%d mode=%#o; want %d:%d mode=%#o", namespace.Uid, namespace.Gid, namespace.Mode, os.Geteuid(), os.Getegid(), unix.S_IFDIR|privateNamespaceMode)
+	}
+	if err := filesystem.unlinkat(int(temporary.root.Fd()), temporary.namespaceName, unix.AT_REMOVEDIR); err != nil {
+		_ = temporary.Close()
+		t.Fatalf("remove normal namespace under setgid root: %v", err)
+	}
+	if err := temporary.Close(); err != nil {
+		t.Fatalf("close normal namespace under setgid root: %v", err)
+	}
 }
 
 func privateTemporaryCreateInitPacket(t *testing.T, temporary *linuxPrivateTemporaryDirectory) []byte {
@@ -305,6 +452,13 @@ func TestPrivateTemporaryChildCreatesLeafThroughHelperAndParentPinsIt(t *testing
 	if !temporary.childCreates || temporary.leaf == nil || !temporary.accepted {
 		t.Fatalf("child-created handshake state: childCreates=%v leaf=%v accepted=%v", temporary.childCreates, temporary.leaf, temporary.accepted)
 	}
+	var namespace unix.Stat_t
+	if err := unix.Fstat(int(temporary.namespace.Fd()), &namespace); err != nil {
+		t.Fatal(err)
+	}
+	if namespace.Mode != unix.S_IFDIR|privateNamespaceMode || temporary.namespaceMode != privateNamespaceMode {
+		t.Fatalf("scanner namespace mode=%#o state=%#o, want sealed %#o", namespace.Mode, temporary.namespaceMode, unix.S_IFDIR|privateNamespaceMode)
+	}
 	var pinned, named unix.Stat_t
 	if err := unix.Fstat(int(temporary.leaf.Fd()), &pinned); err != nil {
 		t.Fatal(err)
@@ -318,7 +472,11 @@ func TestPrivateTemporaryChildCreatesLeafThroughHelperAndParentPinsIt(t *testing
 	if err := process.wait(); err != nil {
 		t.Fatalf("scanner child after readiness ACK: %v", err)
 	}
-	current := filepath.Join(temporary.path(), "ipranger-map", "leveldb", "CURRENT")
+	deep := temporary.path()
+	for depth := 0; depth < 40; depth++ {
+		deep = filepath.Join(deep, "level")
+	}
+	current := filepath.Join(deep, "CURRENT")
 	if got, err := os.ReadFile(current); err != nil || string(got) != "MANIFEST-000001\n" {
 		t.Fatalf("child-created artifact = %q, %v", got, err)
 	}
@@ -360,7 +518,7 @@ func TestPrivateTemporaryChildReadinessRejectsChangedIdentityAndReclaimsOnlyAfte
 				uid:           uint32(os.Geteuid()),
 				gid:           uint32(os.Getegid()),
 				leafMode:      privateScannerTemporaryMode,
-				namespaceMode: privateScannerNamespaceMode,
+				namespaceMode: privateScannerNamespaceSetupMode,
 				childCreates:  true,
 				private:       true,
 			}

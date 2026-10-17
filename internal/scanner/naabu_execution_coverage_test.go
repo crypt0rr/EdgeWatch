@@ -13,7 +13,23 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
+	"github.com/crypt0rr/edgewatch/internal/sandbox"
 )
+
+type trackedNaabuReservation struct {
+	finishCalls int
+	released    bool
+	quarantined bool
+}
+
+func (*trackedNaabuReservation) scannerReservation() *sandbox.ScannerIdentityReservation { return nil }
+
+func (reservation *trackedNaabuReservation) Finish(cleanupSucceeded bool) error {
+	reservation.finishCalls++
+	reservation.released = cleanupSucceeded
+	reservation.quarantined = !cleanupSucceeded
+	return nil
+}
 
 func testNaabuOptions() config.NaabuOptions {
 	options := config.NaabuOptions{ScanType: "connect", Rate: 1000, Workers: 25, Retries: 3, TimeoutMS: 1000, WarmUpSeconds: 2, AddressBatchSize: 16}
@@ -60,18 +76,18 @@ func TestRunNaabuSuccessParsesJSONAndReportsLiveness(t *testing.T) {
 	}
 }
 
-func TestRunNaabuCleanupFailureDiscardsCollectedResults(t *testing.T) {
+func TestRunNaabuCleanupRemovesScannerCreatedFIFOAndKeepsResults(t *testing.T) {
 	path := writeNaabuFixture(t, `printf 'tmp=%s\n' "$TMPDIR" >&2
 printf '%s\n' '{"ip":"192.0.2.1","port":443,"protocol":"tcp"}'
-mkfifo "$TMPDIR/unsupported-entry"
+mkfifo "$TMPDIR/scanner-fifo"
 `)
 	n := NewWithNaabu("missing-nmap", path)
 	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
-	if err == nil || !strings.Contains(err.Error(), "temporary directory cleanup failed") {
-		t.Fatalf("runNaabu cleanup failure = %v (stderr %q)", err, stderr)
+	if err != nil {
+		t.Fatalf("runNaabu cleanup = %v (stderr %q)", err, stderr)
 	}
-	if len(results.ports) != 0 || len(results.macs) != 0 || len(results.truncated) != 0 {
-		t.Fatalf("cleanup failure returned partial Naabu results: %#v", results)
+	if len(results.ports) != 1 || len(results.macs) != 0 || len(results.truncated) != 0 {
+		t.Fatalf("cleaned Naabu results = %#v, want the confirmed port", results)
 	}
 	var temporaryPath string
 	for _, line := range strings.Split(stderr, "\n") {
@@ -84,6 +100,9 @@ mkfifo "$TMPDIR/unsupported-entry"
 		t.Fatalf("cleanup test did not report its private temp path: %q", stderr)
 	}
 	defer os.RemoveAll(filepath.Dir(temporaryPath))
+	if _, err := os.Lstat(temporaryPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scanner temporary leaf remains after cleanup: %v", err)
+	}
 }
 
 func TestNaabuCancellationRetainsSanitizedLifecycleFailure(t *testing.T) {
@@ -161,6 +180,46 @@ func TestRunNaabuRejectsInvalidProfileAndStartFailures(t *testing.T) {
 	n.NaabuPath = ""
 	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true); err == nil || !IsConfigurationError(err) {
 		t.Fatalf("empty Naabu path error = %v, want typed configuration failure", err)
+	}
+}
+
+func TestRunNaabuMissingExecutableReleasesUnusedReservation(t *testing.T) {
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		policy *sandbox.Policy
+		want   string
+	}{
+		{
+			name:   "Prepare failure before start",
+			policy: sandbox.Detect(sandbox.Options{Mode: sandbox.ModeOff}).WithLandlock(helper, 6),
+			want:   "scanner executable is unavailable",
+		},
+		{
+			name:   "Start failure after Prepare succeeds",
+			policy: sandbox.Detect(sandbox.Options{Mode: sandbox.ModeOff}),
+			want:   "start scanner executable",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			n := NewWithNaabu("missing-nmap", filepath.Join(t.TempDir(), "missing-naabu"))
+			n.SetSandbox(test.policy)
+			lease := &trackedNaabuReservation{}
+			n.reserveNaabuIdentityFunc = func(context.Context, *sandbox.Policy) (naabuIdentityReservation, error) {
+				return lease, nil
+			}
+
+			_, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+			if err == nil || !IsConfigurationError(err) || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("missing Naabu executable error = %v, want permanent failure containing %q", err, test.want)
+			}
+			if lease.finishCalls != 1 || !lease.released || lease.quarantined {
+				t.Fatalf("unused identity finalization = %+v; want one clean release and no quarantine", lease)
+			}
+		})
 	}
 }
 

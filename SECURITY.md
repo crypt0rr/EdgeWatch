@@ -148,15 +148,31 @@ EdgeWatch creates Nmap XML and Naabu target-list files in `tmp/scanner` beside
 the database, a daemon-owned `0700` directory. Concurrent scans have different
 UIDs, so filesystem ownership and procfs access checks prevent one scanner
 from opening another invocation's files or inherited descriptors. Landlock
-adds a per-process file boundary when available. Naabu's own temporary files
-live in a root-owned `01733` namespace below `/tmp` and an invocation-owned
-`0700` leaf; another leased scanner UID cannot open the leaf by path. Cleanup
-occurs only after the supervisor proves the process tree exited and was
-reaped. Uncertain cleanup fails the scan and quarantines the UID rather than
-releasing it for reuse. Cancellation, timeout, and scanner output-limit
-failures terminate the invocation's process group; a lease is released only
-after the supervisor proves that descendant processes have been reaped and
-invocation cleanup succeeds.
+adds a per-process file boundary when available. In identity-isolated mode,
+Naabu's own temporary files start in a daemon-owned `0731` namespace below
+`/tmp` while a helper creates an invocation-owned `0700` leaf. The namespace's
+write-enabled group is that invocation's unique leased GID; the helper has no
+supplementary groups, and the daemon verifies the namespace owner, group, mode,
+and that `/tmp` is root-owned, is not setgid, and is sticky whenever group or
+other write access is enabled. This prevents scanner peers from renaming
+another namespace in a writable parent. It sets the filesystem GID only on a
+locked OS thread for namespace creation and verifies restoration before that
+thread is reused. Once the helper reports readiness, the daemon seals the
+pinned namespace to `0711` before acknowledging startup: the daemon owner retains
+write access for cleanup while other identities can search but cannot create
+sibling entries. With the scanner sandbox off, Naabu uses a daemon-owned
+`0711` namespace and a `0700` leaf without an isolation boundary. In
+identity-isolated modes, each leaf has an unpredictable name and a distinct
+leased UID/GID. The scanner controls its leaf's permissions and contents;
+after the supervisor proves the process tree
+exited and was reaped, the trusted cleaner validates the pinned identity,
+restores mode `0700`, and iteratively removes entries without following
+symlinks, with limits of 100,000 entries and five seconds. A cleanup or proof
+failure retains artifacts and quarantines the UID. A setup failure before any
+supervised scanner process starts releases its unused lease; after process
+start, a lease is released only after descendant reaping and cleanup are
+proven. Cancellation, timeout, and scanner output-limit failures terminate the
+invocation's process group.
 
 The default `scanner.landlock: auto` independently restricts scanner file
 access to the system files a scan needs and its inherited files; Naabu's leaf

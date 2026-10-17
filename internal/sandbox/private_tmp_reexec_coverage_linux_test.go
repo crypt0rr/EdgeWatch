@@ -224,3 +224,24 @@ func replaceTestEnv(environment []string, key, value string) []string {
 	}
 	return append(filtered, prefix+value)
 }
+
+func removeTestEnv(environment []string, key string) []string {
+	prefix := key + "="
+	filtered := make([]string, 0, len(environment))
+	for _, item := range environment {
+		if !strings.HasPrefix(item, prefix) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func filterTestArgument(arguments []string, prefix string) []string {
+	filtered := make([]string, 0, len(arguments))
+	for _, argument := range arguments {
+		if !strings.HasPrefix(argument, prefix) {
+			filtered = append(filtered, argument)
+		}
+	}
+	return filtered
+}

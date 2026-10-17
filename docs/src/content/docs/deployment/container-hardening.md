@@ -297,16 +297,41 @@ below it, which it locks while it runs. At startup the daemon, and
 `edgewatch scan`, remove the directories of processes that no longer run, with
 the files of scans they were stopped in.
 
-Naabu also creates temporary target and address-map files of its own. EdgeWatch
-creates a root-owned invocation namespace below `/tmp` with mode `01733` and
-pins it before starting Naabu. A helper creates a mode `0700` leaf owned by
-that invocation's leased UID/GID; concurrent scanners use different identities
-and cannot open each other's leaves by path. When Landlock is available, it
-also confines each scanner to its own leaf. With the sandbox explicitly off,
-the daemon identity owns the leaf and no scanner isolation boundary applies.
-After Naabu exits, EdgeWatch removes the leaf's nested temporary files and
-then removes the empty leaf and namespace. Cleanup failure fails the scan, so
-its results do not become a successful observation or advance the baseline.
+Naabu also creates temporary target and address-map files of its own. With
+scanner identity isolation enabled, EdgeWatch creates a daemon-owned
+invocation namespace below `/tmp` with mode `0731` while a helper creates the
+mode `0700` leaf owned by that invocation's leased UID/GID. The namespace group
+is the invocation's unique leased GID, and the helper has no supplementary
+groups; the daemon verifies the namespace owner, group, and mode before use.
+It creates this group-writable namespace only when the pinned `/tmp` directory
+is root-owned, is not setgid, and either grants no group/other write access or
+has the sticky bit set. These checks keep scanner peers from renaming another
+namespace in a writable parent and ensure parent group inheritance cannot
+grant a different group write access. The daemon sets the filesystem GID on a
+locked OS thread for the namespace creation syscall and verifies restoration
+before that thread can be reused. After the helper reports readiness, the
+daemon changes the pinned namespace to mode `0711` before acknowledging
+startup. The daemon remains its
+owner and can remove the leaf; other identities can search the namespace but
+cannot add sibling entries. With identity isolation enabled, concurrent
+scanners use different identities and cannot open each other's randomly named
+leaves by path. When Landlock is available, it also confines each scanner to
+its own leaf. With the sandbox explicitly off, the daemon uses a normal
+`0711` namespace and owns its `0700` leaf, with no scanner isolation boundary.
+
+In sandboxed mode the scanner controls the permissions and contents of its own
+leaf. After the supervisor proves the process tree exited and was reaped, the
+trusted cleanup helper verifies the pinned leaf's identity, restores its mode
+to `0700`, and removes nested entries without following symbolic links.
+Cleanup is iterative and bounded to 100,000 entries and five seconds. It then
+removes the empty leaf and namespace. If identity checks, traversal, or cleanup
+fail, the scan fails, its results do not become a successful observation or
+advance the baseline, artifacts remain, and the UID is quarantined rather than
+released for reuse.
+If setup fails before a supervised scanner process starts, the unused lease is
+released because no scanner process could have used it. For a started process,
+the lease is released only when the supervisor proves that descendants were
+reaped and invocation cleanup succeeds.
 
 A sandboxed scanner cannot list `./data` or reach a file below it by its name,
 and Landlock never grants the data directory to a scanner. With Landlock, a

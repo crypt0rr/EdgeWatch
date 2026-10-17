@@ -46,6 +46,10 @@ type Nmap struct {
 	targetExclusions []*net.IPNet
 	// sandbox confines scan processes. Nil starts them unconfined.
 	sandbox *sandbox.Policy
+	// reserveNaabuIdentityFunc replaces only Naabu's identity reservation
+	// seam in lifecycle tests. Production leaves it nil and uses the sandbox
+	// reservation implementation.
+	reserveNaabuIdentityFunc func(context.Context, *sandbox.Policy) (naabuIdentityReservation, error)
 	// workDir holds the private files of scans, and workDirLock keeps it
 	// from being removed as stale. Empty uses the system's temporary
 	// directory.

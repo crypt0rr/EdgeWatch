@@ -101,7 +101,10 @@ func TestNaabuTemporaryCleanupFailureDoesNotAdvanceBaseline(t *testing.T) {
 	dir := t.TempDir()
 	naabuPath := filepath.Join(dir, "naabu")
 	temporaryPathFile := filepath.Join(dir, "naabu-tmpdir")
-	naabu := "#!/bin/sh\nprintf '%s\\n' \"$TMPDIR\" > " + temporaryPathFile + "\nprintf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":443,\"protocol\":\"tcp\"}'\nmkfifo \"$TMPDIR/unsupported-entry\"\n"
+	// The unconfined test child shares the daemon's owner identity and can
+	// remove its empty leaf. Cleanup must detect that the pinned path moved and
+	// keep the prior baseline unchanged.
+	naabu := "#!/bin/sh\nprintf '%s\\n' \"$TMPDIR\" > " + temporaryPathFile + "\nprintf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":443,\"protocol\":\"tcp\"}'\nrmdir \"$TMPDIR\"\n"
 	if err := os.WriteFile(naabuPath, []byte(naabu), 0o700); err != nil {
 		t.Fatal(err)
 	}

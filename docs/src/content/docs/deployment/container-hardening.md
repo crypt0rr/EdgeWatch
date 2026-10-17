@@ -203,6 +203,12 @@ The scanner pool needs the container's user namespace to map every UID and GID
 from 60000 through 60063. Standard rootful Docker, rootless Docker, and
 user-namespace remapping with a full subordinate range provide the required
 mapping. A runtime that maps only part of the pool reports it unavailable.
+Reserve the corresponding host UIDs and GIDs for scanner use. With rootful
+Docker they are 60000–60063; with rootless Docker or user-namespace remapping,
+reserve the host IDs to which that container range maps. The allocator checks
+for identities in the container's own process and account tables, not for host
+processes. A host process with one of the same mapped identities can signal a
+scanner and disrupt its scan.
 
 ### Landlock
 
@@ -459,13 +465,20 @@ and needs storage recovery. Do not delete journal entries to recover capacity.
 - The identity pool has 64 scanner UIDs/GIDs. Concurrent invocations use
   different identities, so filesystem ownership and procfs access checks
   separate their temporary files and inherited descriptors even when
-  Landlock is unavailable. Landlock adds a per-process file boundary.
+  Landlock is unavailable. Landlock adds a per-process file boundary. These
+  file boundaries do not hide Nmap command lines: each invocation's arguments
+  include its target addresses and port list, which another scanner can read
+  from `/proc/<pid>/cmdline` without ptrace access. A compromised scanner can
+  learn the scope of concurrent Nmap scans.
 - Seccomp is independent of Landlock and remains required in sandboxed scanner
   modes. It prevents a scanner from creating namespaces or leaving its
   supervised process group. If seccomp cannot be installed, scanner launches
   fail closed. `scanner.sandbox: off` disables the pool, Landlock and seccomp.
 - A scanner process keeps its network access; target exclusions and probe
-  budgets are enforced by EdgeWatch before it starts.
+  budgets are enforced by EdgeWatch before it starts. When the container uses
+  host networking, scanners retain `NET_RAW`, so the sandbox does not isolate
+  scan traffic; a compromised scanner may be able to observe packets from
+  concurrent scans.
 - On a kernel without Landlock, a sandboxed process can read every file its
   identity may read.
 

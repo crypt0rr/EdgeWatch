@@ -178,8 +178,9 @@ Each deployment alert is also recorded in the platform audit as
 
 | Alert | When |
 | --- | --- |
-| A sandbox lost confinement | The scanner or notification processes start with less confinement than the last alert reported: they lost the sandbox identity and run as UID 0, or they lost Landlock. See [the container hardening guide](/deployment/container-hardening/). |
-| A sandbox regained confinement | They start with more confinement than the last alert reported, and lost none. |
+| A scanner sandbox lost confinement | The scanner's reported identity or Landlock confinement degraded. If the identity pool is unavailable in `scanner.sandbox: auto`, the daemon stays running but scanner launches fail closed; a seccomp failure also prevents launches. Scanners never fall back to UID 0. See [the container hardening guide](/deployment/container-hardening/). |
+| A notification sandbox lost confinement | The notification process lost its sandbox. In `notifications.sandbox: auto`, delivery continues as the daemon's user, which is UID 0 in the bundled container and may retain Landlock when available. See [the container hardening guide](/deployment/container-hardening/). |
+| A sandbox regained confinement | The scanner or notification sandbox regained a layer it had lost, and lost none. |
 | A version rollback | The daemon starts a version older than the installed one. |
 | Alerts failed for good | Alerts of any unit or the platform dropped after their retries ran out since the previous report. The alert gives their number and how many of them were the platform's, never a destination, a URL, or a provider's answer. |
 

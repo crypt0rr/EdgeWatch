@@ -156,14 +156,19 @@ not echoed; the command still exits non-zero.
 Invalid flags or output values are rejected before the health report is
 produced. Text output prints nothing on stdout when health is unhealthy or the
 configuration/database cannot be read. A healthy or starting
-daemon prints its status, and `warnings` list
-actions that do not stop EdgeWatch, such as removing imported notification URLs
-from `config.yaml`, or scanner or notification processes that run as UID 0
-outside their sandbox. Both
+daemon prints its status, and `warnings` list actions that do not stop
+EdgeWatch, such as removing imported notification URLs from `config.yaml` or a
+scanner identity-pool or seccomp failure. In `auto` mode, such a scanner failure
+prevents launches; it does not start scanners as UID 0. The scanner sandbox is
+unconfined only when `scanner.sandbox: off` is explicit. Notifications in
+`notifications.sandbox: auto` can fall back to the daemon's identity. Both
 documents include `scanner_sandbox`, which reports how scanner processes start
-in this container: `state` is `enforced`, `disabled`, or `unavailable`,
-`process_uid` is the UID they run as, `capabilities` lists what a sandboxed
-scanner keeps, and `reason` explains a sandbox that is not enforced. Its
+in this container: `state` is `enforced`, `disabled`, or `unavailable`;
+`identity_pool` reports the per-invocation strategy, UID/GID range, maximum
+parallel leases, and any pool reason. Scanner status has no single
+`process_uid`, because each invocation leases its own identity.
+`capabilities` lists what a sandboxed scanner keeps, and `reason` explains an
+unavailable sandbox. Its
 `landlock` object reports the Landlock restriction with its own `state` and
 `reason`, and `abi`, the kernel's Landlock version, and its `seccomp` object
 reports the seccomp filter with its `state` and `reason`. Its `limits` object,

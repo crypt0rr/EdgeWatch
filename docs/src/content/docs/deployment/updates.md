@@ -194,10 +194,11 @@ EdgeWatch can run Nmap and Naabu in the
 [scanner sandbox](/deployment/container-hardening/#scanner-sandbox), and the
 notification process in its
 [own sandbox](/deployment/container-hardening/#notification-sandbox). A
-`compose.yaml` from a release before v0.27.0 lacks the last three; add them
-when you update, or the scanners keep running as UID 0 and EdgeWatch warns.
-Where the kernel provides Landlock, EdgeWatch also restricts the files the
-scanners can open; this needs no Compose change. See
+`compose.yaml` from a release before v0.27.0 lacks the last three. Add them
+when you update; otherwise the scanner identity pool is unavailable and
+scanner launches fail closed. They do not fall back to UID 0. Where the kernel
+provides Landlock, EdgeWatch also restricts the files the scanners can open;
+this needs no Compose change. See
 [Landlock](/deployment/container-hardening/#landlock). Host networking is intentional, and the administration
 listener accepts only loopback addresses. Keep the service on the Docker host
 or reach it through an authenticated SSH tunnel.

@@ -72,8 +72,9 @@ ownership. World-readable or world-writable permissions are not a remedy.
 
 When `scanner.sandbox` is `auto`, EdgeWatch keeps the daemon running but fails
 scanner launches closed if the [scanner identity pool](/deployment/container-hardening/#scanner-sandbox)
-cannot be enforced. The reason appears in `edgewatch health`, the Overview,
-and the deployment footprint. Follow the action it names:
+or required seccomp filter cannot be enforced. The reason appears in
+`edgewatch health`, the Overview, and the deployment footprint. Follow the
+action it names:
 
 - **The container does not grant SETUID, SETGID, KILL.** Your `compose.yaml`
   predates the scanner identity pool. Add the three capabilities to `cap_add`,
@@ -145,10 +146,14 @@ Scans keep working without Landlock, in the identity sandbox when it is
 enforced.
 
 `scanner_sandbox.seccomp.state` is `unavailable` when the kernel offers no
-seccomp filters, or the container's seccomp profile blocks them, or when
-Nmap could not start with the [seccomp filter](/deployment/container-hardening/#seccomp-filter).
-In that case Landlock still applies alone, and the reason names the cause. Set `scanner.landlock: required` to refuse to scan without it
-instead, or `scanner.landlock: off` to stop trying.
+seccomp filters, the container's seccomp profile blocks them, or Nmap could
+not start with the [seccomp filter](/deployment/container-hardening/#seccomp-filter).
+The reason names the cause. In `scanner.sandbox: auto` and `required`, scanner
+launches fail closed even if Landlock is enforced or disabled; Landlock alone
+is not used as a fallback. `scanner.landlock: required` controls Landlock only.
+Setting `scanner.landlock: off` does not disable seccomp. Restore seccomp
+support, or set `scanner.sandbox: off` only when you intend to run scanners
+without the identity, Landlock, and seccomp layers.
 
 ## Proxy hostname rejected
 

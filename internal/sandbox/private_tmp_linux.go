@@ -38,7 +38,6 @@ const (
 	privateTemporaryStartupTimeout  = 5 * time.Second
 	privateTemporaryCleanupTimeout  = 5 * time.Second
 	privateTemporaryCleanupEntries  = 100000
-	privateTemporaryCleanupDepth    = 32
 )
 
 var errPrivateTemporaryLeafAbsent = errors.New("scanner-owned temporary leaf was not created")
@@ -509,6 +508,9 @@ func (temporary *linuxPrivateTemporaryDirectory) WaitReady(ctx context.Context) 
 		if err := temporary.pinChildCreatedLeaf(message[:n]); err != nil {
 			return err
 		}
+		if err := temporary.sealScannerNamespace(); err != nil {
+			return err
+		}
 	} else {
 		var leaf, named unix.Stat_t
 		if err := unix.Fstat(int(temporary.leaf.Fd()), &leaf); err != nil || !sameObject(&temporary.leafStat, &leaf) || leaf.Mode != temporary.leafStat.Mode || leaf.Uid != temporary.leafStat.Uid || leaf.Gid != temporary.leafStat.Gid {
@@ -529,6 +531,38 @@ func (temporary *linuxPrivateTemporaryDirectory) WaitReady(ctx context.Context) 
 		return errors.New("prepare Naabu temporary directory: helper acknowledgement failed")
 	}
 	temporary.accepted = true
+	return nil
+}
+
+// sealScannerNamespace removes the scanner's ability to add entries beside
+// its own leaf. The daemon retains owner write access so it can remove the
+// leaf and namespace after proving that the scanner process tree has exited.
+func (temporary *linuxPrivateTemporaryDirectory) sealScannerNamespace() error {
+	if temporary == nil || !temporary.childCreates || temporary.namespace == nil {
+		return errors.New("prepare Naabu temporary directory: scanner namespace is unavailable")
+	}
+	var namespace, named unix.Stat_t
+	if err := unix.Fstat(int(temporary.namespace.Fd()), &namespace); err != nil ||
+		!sameObject(&temporary.namespaceStat, &namespace) || namespace.Mode != unix.S_IFDIR|privateScannerNamespaceMode {
+		return errors.New("prepare Naabu temporary directory: scanner namespace changed before sealing")
+	}
+	if err := unix.Fstatat(int(temporary.root.Fd()), temporary.namespaceName, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
+		!sameObject(&namespace, &named) || named.Mode != namespace.Mode {
+		return errors.New("prepare Naabu temporary directory: scanner namespace entry changed before sealing")
+	}
+	if err := unix.Fchmod(int(temporary.namespace.Fd()), privateNamespaceMode); err != nil {
+		return errors.New("prepare Naabu temporary directory: seal scanner namespace failed")
+	}
+	if err := unix.Fstat(int(temporary.namespace.Fd()), &namespace); err != nil ||
+		!sameObject(&temporary.namespaceStat, &namespace) || namespace.Mode != unix.S_IFDIR|privateNamespaceMode {
+		return errors.New("prepare Naabu temporary directory: sealed scanner namespace identity is unexpected")
+	}
+	if err := unix.Fstatat(int(temporary.root.Fd()), temporary.namespaceName, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
+		!sameObject(&namespace, &named) || named.Mode != namespace.Mode {
+		return errors.New("prepare Naabu temporary directory: sealed scanner namespace entry changed")
+	}
+	temporary.namespaceMode = privateNamespaceMode
+	temporary.namespaceStat = namespace
 	return nil
 }
 
@@ -638,7 +672,7 @@ func (temporary *linuxPrivateTemporaryDirectory) Cleanup(ctx context.Context) er
 	if err := unix.Fstat(int(temporary.leaf.Fd()), &leaf); err != nil {
 		return errors.New("cleanup Naabu temporary directory: pinned directory is unavailable")
 	}
-	if leaf.Mode != unix.S_IFDIR|temporary.leafMode || !sameObject(&temporary.leafStat, &leaf) {
+	if leaf.Mode&unix.S_IFMT != unix.S_IFDIR || !sameObject(&temporary.leafStat, &leaf) {
 		return errors.New("cleanup Naabu temporary directory: pinned directory ownership changed")
 	}
 	if err := temporary.checkNamespaceEntry(); err != nil {
@@ -651,7 +685,7 @@ func (temporary *linuxPrivateTemporaryDirectory) Cleanup(ctx context.Context) er
 		}
 		return errors.New("cleanup Naabu temporary directory: directory entry is unavailable")
 	}
-	if !sameObject(&leaf, &named) || named.Mode != leaf.Mode {
+	if !sameObject(&leaf, &named) {
 		return errors.New("cleanup Naabu temporary directory: directory entry identity changed")
 	}
 	if temporary.private {
@@ -722,14 +756,16 @@ func (temporary *linuxPrivateTemporaryDirectory) verifyLeafEmptyAndPinned(expect
 
 func (temporary *linuxPrivateTemporaryDirectory) verifyLeafPinned(expected *unix.Stat_t) error {
 	var current unix.Stat_t
-	if err := unix.Fstat(int(temporary.leaf.Fd()), &current); err != nil || !sameObject(expected, &current) || current.Mode != expected.Mode {
+	if err := unix.Fstat(int(temporary.leaf.Fd()), &current); err != nil || !sameObject(expected, &current) ||
+		(current.Mode != expected.Mode && current.Mode != unix.S_IFDIR|privateScannerTemporaryMode) {
 		return errors.New("cleanup Naabu temporary directory: pinned leaf changed during cleanup")
 	}
 	if err := temporary.checkNamespaceEntry(); err != nil {
 		return err
 	}
 	var named unix.Stat_t
-	if err := unix.Fstatat(int(temporary.namespace.Fd()), temporary.name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(expected, &named) || named.Mode != expected.Mode {
+	if err := unix.Fstatat(int(temporary.namespace.Fd()), temporary.name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(expected, &named) ||
+		(named.Mode != expected.Mode && named.Mode != unix.S_IFDIR|privateScannerTemporaryMode) {
 		return errors.New("cleanup Naabu temporary directory: leaf entry changed during cleanup")
 	}
 	return nil
@@ -768,9 +804,13 @@ func (temporary *linuxPrivateTemporaryDirectory) cleanupWithHelper(ctx context.C
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), privateTemporaryCleanupTimeout)
 	defer cancel()
+	expectedLeafMode := temporary.leafMode
+	if expectedLeafMode == 0 {
+		expectedLeafMode = leaf.Mode & 0o7777
+	}
 	args := []string{temporary.helper, ExecCommand, "--cleanup-private-tmp", "--device", strconv.FormatUint(uint64(leaf.Dev), 10),
 		"--inode", strconv.FormatUint(leaf.Ino, 10), "--leaf-uid", strconv.FormatUint(uint64(leaf.Uid), 10),
-		"--leaf-gid", strconv.FormatUint(uint64(leaf.Gid), 10), "--leaf-mode", strconv.FormatUint(uint64(leaf.Mode&0o7777), 8),
+		"--leaf-gid", strconv.FormatUint(uint64(leaf.Gid), 10), "--leaf-mode", strconv.FormatUint(uint64(expectedLeafMode), 8),
 		"--uid", strconv.FormatUint(uint64(temporary.uid), 10),
 		"--gid", strconv.FormatUint(uint64(temporary.gid), 10)}
 	if temporary.landlocked {
@@ -1231,6 +1271,9 @@ func cleanupPrivateTemporaryDirectoryRequestWithDescriptor(request privateTempor
 	if err != nil {
 		return err
 	}
+	if err := normalizePrivateTemporaryDirectory(leafFD, &stat, request.device, request.uid, request.gid); err != nil {
+		return err
+	}
 	if request.landlock {
 		if err := restrictSelfWithPrivateDirectory(profilePaths(Scanner, os.Getenv), nil, leafFD); err != nil {
 			return fmt.Errorf("cleanup Naabu temporary directory: restrict cleaner: %w", err)
@@ -1248,6 +1291,9 @@ func cleanupPrivateTemporaryDirectoryFD(request privateTemporaryCleanupRequest, 
 	if err != nil {
 		return err
 	}
+	if err := normalizePrivateTemporaryDirectory(leafFD, &stat, request.device, request.uid, request.gid); err != nil {
+		return err
+	}
 	return cleanPrivateDirectoryContents(leafFD, &stat, request.uid, request.gid)
 }
 
@@ -1259,101 +1305,201 @@ func validatePrivateTemporaryCleanupLeaf(request privateTemporaryCleanupRequest,
 	if leafMode == 0 {
 		leafMode = privateTemporaryMode
 	}
+	if leafMode != privateTemporaryMode && leafMode != privateScannerTemporaryMode {
+		return unix.Stat_t{}, errors.New("cleanup Naabu temporary directory: invalid expected leaf mode")
+	}
 	var stat unix.Stat_t
-	if err := unix.Fstat(leafFD, &stat); err != nil || uint64(stat.Dev) != request.device || stat.Ino != request.inode || stat.Uid != request.leafUID || stat.Gid != request.leafGID || stat.Mode != unix.S_IFDIR|leafMode {
+	if err := unix.Fstat(leafFD, &stat); err != nil || uint64(stat.Dev) != request.device || stat.Ino != request.inode || stat.Uid != request.leafUID || stat.Gid != request.leafGID || stat.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return unix.Stat_t{}, errors.New("cleanup Naabu temporary directory: pinned directory identity changed")
 	}
 	return stat, nil
 }
 
-type cleanupBudget struct{ entries int }
+type cleanupBudget struct {
+	entries  int
+	deadline time.Time
+}
 
-func cleanPrivateDirectoryContents(leafFD int, expected *unix.Stat_t, owner, group uint32) error {
-	if expected == nil || (expected.Mode != unix.S_IFDIR|privateTemporaryMode && expected.Mode != unix.S_IFDIR|privateTemporaryFallbackMode) {
+func (budget *cleanupBudget) visit() error {
+	if budget.deadline.IsZero() {
+		budget.deadline = time.Now().Add(privateTemporaryCleanupTimeout)
+	}
+	if time.Now().After(budget.deadline) {
+		return errors.New("private temporary cleanup exceeded its time budget")
+	}
+	budget.entries++
+	if budget.entries > privateTemporaryCleanupEntries {
+		return errors.New("private temporary directory has too many entries")
+	}
+	return nil
+}
+
+func normalizePrivateTemporaryDirectory(fd int, expected *unix.Stat_t, device uint64, owner, group uint32) error {
+	if expected == nil {
 		return errors.New("invalid private temporary leaf")
 	}
 	var current unix.Stat_t
-	if err := unix.Fstat(leafFD, &current); err != nil || !sameObject(expected, &current) || current.Mode != expected.Mode {
+	if err := unix.Fstat(fd, &current); err != nil || !sameObject(expected, &current) || current.Mode&unix.S_IFMT != unix.S_IFDIR ||
+		uint64(current.Dev) != device || current.Uid != owner || current.Gid != group {
 		return errors.New("private temporary leaf identity changed")
+	}
+	if current.Mode != unix.S_IFDIR|privateScannerTemporaryMode {
+		if err := chmodPinnedPrivateDirectory(fd, privateScannerTemporaryMode); err != nil {
+			return errors.New("restore private temporary directory permissions failed")
+		}
+	}
+	if err := unix.Fstat(fd, &current); err != nil || !sameObject(expected, &current) || current.Mode != unix.S_IFDIR|privateScannerTemporaryMode ||
+		uint64(current.Dev) != device || current.Uid != owner || current.Gid != group {
+		return errors.New("private temporary leaf changed while restoring permissions")
+	}
+	*expected = current
+	return nil
+}
+
+// chmodPinnedPrivateDirectory changes permissions on the object held by fd.
+// Fchmodat2's AT_EMPTY_PATH handles O_PATH descriptors on current kernels;
+// the procfd fallback preserves the same pinned-object semantics on older
+// supported kernels that lack fchmodat2.
+func chmodPinnedPrivateDirectory(fd int, mode uint32) error {
+	if err := unix.Fchmodat(fd, "", mode, unix.AT_EMPTY_PATH); err == nil {
+		return nil
+	} else if !errors.Is(err, unix.ENOSYS) && !errors.Is(err, unix.EOPNOTSUPP) && !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.ENOENT) {
+		return err
+	}
+	return unix.Fchmodat(unix.AT_FDCWD, "/proc/self/fd/"+strconv.Itoa(fd), mode, 0)
+}
+
+func cleanPrivateDirectoryContents(leafFD int, expected *unix.Stat_t, owner, group uint32) error {
+	if expected == nil || expected.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return errors.New("invalid private temporary leaf")
+	}
+	if err := normalizePrivateTemporaryDirectory(leafFD, expected, uint64(expected.Dev), owner, group); err != nil {
+		return err
 	}
 	duplicate, err := unix.Openat(leafFD, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return errors.New("open private temporary directory failed")
 	}
-	budget := cleanupBudget{}
-	if err := removePrivateDirectoryContents(duplicate, expected.Dev, owner, group, 0, &budget); err != nil {
+	if err := removePrivateDirectoryContents(duplicate, uint64(expected.Dev), owner, group, &cleanupBudget{}); err != nil {
 		return err
 	}
-	if err := unix.Fstat(leafFD, &current); err != nil || !sameObject(expected, &current) || current.Mode != expected.Mode {
+	var current unix.Stat_t
+	if err := unix.Fstat(leafFD, &current); err != nil || !sameObject(expected, &current) || current.Mode != unix.S_IFDIR|privateScannerTemporaryMode {
 		return errors.New("private temporary leaf changed during cleanup")
 	}
 	return nil
 }
 
-func removePrivateDirectoryContents(fd int, device uint64, owner, group uint32, depth int, budget *cleanupBudget) error {
-	if depth > privateTemporaryCleanupDepth {
-		_ = unix.Close(fd)
-		return errors.New("private temporary directory is too deep")
+type privateTemporaryCleanupFrame struct {
+	directory *os.File
+	name      string
+	stat      unix.Stat_t
+	pending   []os.DirEntry
+	eof       bool
+}
+
+func removePrivateDirectoryContents(fd int, device uint64, owner, group uint32, budget *cleanupBudget) error {
+	if budget == nil {
+		budget = &cleanupBudget{}
 	}
-	directory := os.NewFile(uintptr(fd), "private temporary contents")
-	defer directory.Close()
-	for {
-		entries, err := directory.ReadDir(128)
-		for _, entry := range entries {
-			budget.entries++
-			if budget.entries > privateTemporaryCleanupEntries {
-				return errors.New("private temporary directory has too many entries")
+	root := os.NewFile(uintptr(fd), "private temporary contents")
+	stack := []privateTemporaryCleanupFrame{{directory: root}}
+	defer func() {
+		for _, frame := range stack {
+			if frame.directory != nil {
+				_ = frame.directory.Close()
 			}
-			if entry.Name() == "." || entry.Name() == ".." || strings.ContainsRune(entry.Name(), '/') || strings.ContainsRune(entry.Name(), '\x00') {
-				return errors.New("private temporary directory contains an invalid entry")
+		}
+	}()
+	for len(stack) > 0 {
+		frame := &stack[len(stack)-1]
+		if len(frame.pending) == 0 && !frame.eof {
+			entries, err := frame.directory.ReadDir(128)
+			if err != nil && !errors.Is(err, io.EOF) {
+				return errors.New("read private temporary directory failed")
 			}
-			var item unix.Stat_t
-			if err := unix.Fstatat(int(directory.Fd()), entry.Name(), &item, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-				return errors.New("inspect private temporary entry failed")
-			}
-			if uint64(item.Dev) != device || item.Uid != owner || item.Gid != group {
-				return errors.New("private temporary entry ownership changed")
-			}
-			if item.Mode&unix.S_IFMT == unix.S_IFDIR {
-				child, err := unix.Openat(int(directory.Fd()), entry.Name(), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-				if err != nil {
-					return errors.New("open private temporary subdirectory failed")
-				}
-				var opened unix.Stat_t
-				if err := unix.Fstat(child, &opened); err != nil || !sameObject(&item, &opened) {
-					_ = unix.Close(child)
-					return errors.New("private temporary subdirectory identity changed")
-				}
-				if err := removePrivateDirectoryContents(child, device, owner, group, depth+1, budget); err != nil {
-					return err
-				}
-				var current unix.Stat_t
-				if err := unix.Fstatat(int(directory.Fd()), entry.Name(), &current, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&item, &current) {
-					return errors.New("private temporary subdirectory changed during cleanup")
-				}
-				if err := unix.Unlinkat(int(directory.Fd()), entry.Name(), unix.AT_REMOVEDIR); err != nil {
-					return errors.New("remove private temporary subdirectory failed")
-				}
+			frame.pending = entries
+			frame.eof = errors.Is(err, io.EOF)
+		}
+		if len(frame.pending) == 0 {
+			if !frame.eof {
 				continue
 			}
-			if item.Mode&unix.S_IFMT != unix.S_IFREG && item.Mode&unix.S_IFMT != unix.S_IFLNK {
-				return errors.New("private temporary directory contains an unsupported entry")
+			if err := frame.directory.Close(); err != nil {
+				return errors.New("close private temporary directory failed")
 			}
-			var current unix.Stat_t
-			if err := unix.Fstatat(int(directory.Fd()), entry.Name(), &current, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&item, &current) {
-				return errors.New("private temporary entry changed during cleanup")
+			popped := *frame
+			stack[len(stack)-1] = privateTemporaryCleanupFrame{}
+			stack = stack[:len(stack)-1]
+			if popped.name != "" {
+				parent := stack[len(stack)-1].directory
+				var current unix.Stat_t
+				if err := unix.Fstatat(int(parent.Fd()), popped.name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&popped.stat, &current) || current.Mode != unix.S_IFDIR|privateScannerTemporaryMode {
+					return errors.New("private temporary subdirectory changed during cleanup")
+				}
+				if err := unix.Unlinkat(int(parent.Fd()), popped.name, unix.AT_REMOVEDIR); err != nil {
+					return errors.New("remove private temporary subdirectory failed")
+				}
 			}
-			if err := unix.Unlinkat(int(directory.Fd()), entry.Name(), 0); err != nil {
-				return errors.New("remove private temporary entry failed")
-			}
+			continue
 		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
+		entry := frame.pending[0]
+		frame.pending = frame.pending[1:]
+		if err := budget.visit(); err != nil {
+			return err
+		}
+		name := entry.Name()
+		if name == "." || name == ".." || strings.ContainsRune(name, '/') || strings.ContainsRune(name, '\x00') {
+			return errors.New("private temporary directory contains an invalid entry")
+		}
+		var item unix.Stat_t
+		if err := unix.Fstatat(int(frame.directory.Fd()), name, &item, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return errors.New("inspect private temporary entry failed")
+		}
+		if uint64(item.Dev) != device || item.Uid != owner || item.Gid != group {
+			return errors.New("private temporary entry ownership changed")
+		}
+		if item.Mode&unix.S_IFMT == unix.S_IFDIR {
+			pinned, err := unix.Openat(int(frame.directory.Fd()), name, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			if err != nil {
+				return errors.New("pin private temporary subdirectory failed")
 			}
-			return errors.New("read private temporary directory failed")
+			var opened unix.Stat_t
+			if err := unix.Fstat(pinned, &opened); err != nil || !sameObject(&item, &opened) || uint64(opened.Dev) != device || opened.Uid != owner || opened.Gid != group {
+				_ = unix.Close(pinned)
+				return errors.New("private temporary subdirectory identity changed")
+			}
+			if err := normalizePrivateTemporaryDirectory(pinned, &opened, device, owner, group); err != nil {
+				_ = unix.Close(pinned)
+				return err
+			}
+			child, err := unix.Openat(pinned, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+			_ = unix.Close(pinned)
+			if err != nil {
+				return errors.New("open private temporary subdirectory failed")
+			}
+			var readable unix.Stat_t
+			if err := unix.Fstat(child, &readable); err != nil || !sameObject(&opened, &readable) || readable.Mode != unix.S_IFDIR|privateScannerTemporaryMode {
+				_ = unix.Close(child)
+				return errors.New("private temporary subdirectory changed while opening")
+			}
+			stack = append(stack, privateTemporaryCleanupFrame{
+				directory: os.NewFile(uintptr(child), "private temporary nested contents"),
+				name:      name,
+				stat:      readable,
+			})
+			continue
+		}
+		var current unix.Stat_t
+		if err := unix.Fstatat(int(frame.directory.Fd()), name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&item, &current) ||
+			uint64(current.Dev) != device || current.Uid != owner || current.Gid != group {
+			return errors.New("private temporary entry changed during cleanup")
+		}
+		if err := unix.Unlinkat(int(frame.directory.Fd()), name, 0); err != nil {
+			return errors.New("remove private temporary entry failed")
 		}
 	}
+	return nil
 }
 
 func helperSendPrivateTemporaryReady(controlFD int, name string, nonce [privateTemporaryNonceSize]byte, stat *unix.Stat_t) error {

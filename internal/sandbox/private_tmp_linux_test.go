@@ -430,26 +430,17 @@ func TestPrivateTemporaryCleanupRejectsUnpinnedLeafThenRemovesEmptyNamespace(t *
 	}
 }
 
-func TestPrivateTemporaryCleanupFailsClosedOnUnsupportedEntryAndCanRetry(t *testing.T) {
+func TestPrivateTemporaryCleanupRemovesScannerControlledEntryTypes(t *testing.T) {
 	temporary, _, _ := newPrivateTemporaryProtocolFixture(t)
 	path := filepath.Join(temporary.path(), "unsupported-entry")
 	if err := unix.Mkfifo(path, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := temporary.Cleanup(context.Background()); err == nil {
-		t.Fatal("cleanup accepted an unsupported FIFO entry")
-	}
-	if _, err := os.Lstat(path); err != nil {
-		t.Fatalf("failed cleanup removed the unsupported entry: %v", err)
-	}
-	if _, err := os.Stat(temporary.path()); err != nil {
-		t.Fatalf("failed cleanup removed the pinned leaf: %v", err)
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove test-owned FIFO: %v", err)
-	}
 	if err := temporary.Cleanup(context.Background()); err != nil {
-		t.Fatalf("retry cleanup after removing unsupported entry: %v", err)
+		t.Fatalf("cleanup scanner-created FIFO: %v", err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleanup left the scanner-created FIFO: %v", err)
 	}
 }
 
@@ -825,14 +816,11 @@ func TestPrivateTemporaryCleanerRemovesOwnedNestedArtifactsAndFailsClosed(t *tes
 	if err := unix.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := cleanupPrivateTemporaryDirectoryFD(request, int(temporary.leaf.Fd())); err == nil {
-		t.Fatal("cleaner accepted an unsupported FIFO")
+	if err := cleanupPrivateTemporaryDirectoryFD(request, int(temporary.leaf.Fd())); err != nil {
+		t.Fatalf("clean FIFO entry: %v", err)
 	}
-	if info, err := os.Lstat(fifo); err != nil || info.Mode()&os.ModeNamedPipe == 0 {
-		t.Fatalf("failed cleanup removed or changed unsupported FIFO: %v, %v", info, err)
-	}
-	if err := os.Remove(fifo); err != nil {
-		t.Fatal(err)
+	if _, err := os.Lstat(fifo); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleaner left the FIFO entry behind: %v", err)
 	}
 }
 
@@ -1952,42 +1940,48 @@ func TestPrivateTemporaryReadinessHonorsCancellation(t *testing.T) {
 	}
 }
 
-func TestPrivateTemporaryCleanupFailureKeepsNamespaceForRetry(t *testing.T) {
+func TestPrivateTemporaryCleanupRemovesLandlockedScannerCreatedFIFO(t *testing.T) {
 	abi := requireLandlock(t)
 	helper, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	policy := (*Policy)(nil).WithLandlock(helper, abi)
-	command := exec.Command("/bin/sh", "-c", "IFS= read -r _")
+	command := exec.Command("/bin/sh", "-c", `
+chmod 0755 "$TMPDIR"
+directory="$TMPDIR"
+depth=0
+while [ "$depth" -lt 40 ]; do
+	 directory="$directory/nested"
+	 mkdir "$directory"
+	 depth=$((depth + 1))
+done
+mkfifo "$directory/unsupported-entry"
+: > "$TMPDIR/ready"
+sleep 30
+`)
 	command.Env = []string{"PATH=/bin:/usr/bin", "HOME=/nonexistent"}
-	if _, err := command.StdinPipe(); err != nil {
-		t.Fatal(err)
-	}
 	process := startPrivateTemporaryTestProcess(t, policy, command)
+	readyPath := filepath.Join(linuxTemporaryPath(t, process.temporary), "ready")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(readyPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = process.stop()
+			t.Fatalf("scanner stand-in did not create its mode/depth/FIFO fixtures: %q", readyPath)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err := process.stop(); err == nil {
-		t.Fatal("stopped scanner helper unexpectedly exited successfully")
+		t.Fatal("stopped scanner stand-in unexpectedly exited successfully")
 	}
-	fifo := filepath.Join(linuxTemporaryPath(t, process.temporary), "unsupported-entry")
-	if err := unix.Mkfifo(fifo, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := process.temporary.Cleanup(context.Background()); err == nil {
-		t.Fatal("cleanup accepted an unsupported entry instead of failing closed")
-	}
-	if _, err := os.Stat(linuxTemporaryPath(t, process.temporary)); err != nil {
-		t.Fatalf("failed cleanup removed the directory needed for a safe retry: %v", err)
-	}
-	if err := os.Remove(fifo); err != nil {
-		t.Fatal(err)
-	}
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := process.temporary.Cleanup(cancelled); err != nil {
-		t.Fatalf("retry cleanup after removing unsupported entry: %v", err)
+	if err := process.temporary.Cleanup(context.Background()); err != nil {
+		t.Fatalf("cleanup chmodded 40-deep scanner tree under Landlock: %v", err)
 	}
 	if _, err := os.Stat(linuxTemporaryPath(t, process.temporary)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("temporary directory remains after cleanup retry: %v", err)
+		t.Fatalf("temporary directory remains after cleanup: %v", err)
 	}
 }
 
@@ -2101,23 +2095,70 @@ func TestPrivateTemporaryCleanupRetainsNamespaceWhenItIsNotEmpty(t *testing.T) {
 	}
 }
 
-func TestPrivateTemporaryCleanupBoundsRecursionAndEntryCount(t *testing.T) {
-	t.Run("depth", func(t *testing.T) {
+func TestPrivateTemporaryCleanupBoundsEntryCountAndAllowsDeepTrees(t *testing.T) {
+	t.Run("batched siblings survive descent", func(t *testing.T) {
 		temporary, _, _ := newPrivateTemporaryProtocolFixture(t)
-		fd, err := unix.Openat(int(temporary.leaf.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-		if err != nil {
+		leafPath := temporary.path()
+		for index := 0; index < 5; index++ {
+			directory := filepath.Join(leafPath, fmt.Sprintf("nested-%03d", index))
+			if err := os.Mkdir(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(directory, "artifact"), []byte("remove"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for index := 0; index < 300; index++ {
+			path := filepath.Join(leafPath, fmt.Sprintf("artifact-%03d", index))
+			if err := os.WriteFile(path, []byte("remove"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var stat unix.Stat_t
+		if err := unix.Fstat(int(temporary.leaf.Fd()), &stat); err != nil {
+			t.Fatal(err)
+		}
+		request := privateTemporaryCleanupRequest{
+			device: uint64(stat.Dev), inode: stat.Ino, leafUID: stat.Uid, leafGID: stat.Gid,
+			leafMode: privateTemporaryMode, uid: uint32(os.Geteuid()), gid: uint32(os.Getegid()),
+		}
+		if err := cleanupPrivateTemporaryDirectoryFD(request, int(temporary.leaf.Fd())); err != nil {
+			t.Fatalf("clean batched siblings and nested directories: %v", err)
+		}
+		if entries, err := os.ReadDir(leafPath); err != nil || len(entries) != 0 {
+			t.Fatalf("batched cleanup left leaf contents: %v, %v", entries, err)
+		}
+	})
+
+	t.Run("depth 40", func(t *testing.T) {
+		temporary, _, _ := newPrivateTemporaryProtocolFixture(t)
+		leafPath := temporary.path()
+		if err := os.Chmod(leafPath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		deep := leafPath
+		for i := 0; i < 40; i++ {
+			deep = filepath.Join(deep, fmt.Sprintf("level-%02d", i))
+			if err := os.Mkdir(deep, 0o700); err != nil {
+				t.Fatalf("create depth %d: %v", i+1, err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(deep, "artifact"), []byte("keep inside only"), 0); err != nil {
 			t.Fatal(err)
 		}
 		var stat unix.Stat_t
-		if err := unix.Fstat(fd, &stat); err != nil {
-			_ = unix.Close(fd)
+		if err := unix.Fstat(int(temporary.leaf.Fd()), &stat); err != nil {
 			t.Fatal(err)
 		}
-		if err := removePrivateDirectoryContents(fd, uint64(stat.Dev), stat.Uid, stat.Gid, privateTemporaryCleanupDepth+1, &cleanupBudget{}); err == nil {
-			t.Fatal("cleaner accepted a directory beyond its recursion limit")
+		request := privateTemporaryCleanupRequest{
+			device: uint64(stat.Dev), inode: stat.Ino, leafUID: stat.Uid, leafGID: stat.Gid,
+			leafMode: privateScannerTemporaryMode, uid: uint32(os.Geteuid()), gid: uint32(os.Getegid()),
 		}
-		if entries, err := os.ReadDir(temporary.path()); err != nil || len(entries) != 0 {
-			t.Fatalf("depth rejection changed leaf contents: %v, %v", entries, err)
+		if err := cleanupPrivateTemporaryDirectoryFD(request, int(temporary.leaf.Fd())); err != nil {
+			t.Fatalf("clean 40-deep tree and repair leaf mode: %v", err)
+		}
+		if entries, err := os.ReadDir(leafPath); err != nil || len(entries) != 0 {
+			t.Fatalf("deep-tree cleanup left leaf contents: %v, %v", entries, err)
 		}
 	})
 
@@ -2137,7 +2178,7 @@ func TestPrivateTemporaryCleanupBoundsRecursionAndEntryCount(t *testing.T) {
 			t.Fatal(err)
 		}
 		budget := cleanupBudget{entries: privateTemporaryCleanupEntries}
-		if err := removePrivateDirectoryContents(fd, uint64(stat.Dev), stat.Uid, stat.Gid, 0, &budget); err == nil {
+		if err := removePrivateDirectoryContents(fd, uint64(stat.Dev), stat.Uid, stat.Gid, &budget); err == nil {
 			t.Fatal("cleaner accepted an entry beyond its total-entry limit")
 		}
 		if contents, err := os.ReadFile(artifact); err != nil || string(contents) != "keep on rejected cleanup" {

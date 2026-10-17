@@ -60,18 +60,18 @@ func TestRunNaabuSuccessParsesJSONAndReportsLiveness(t *testing.T) {
 	}
 }
 
-func TestRunNaabuCleanupFailureDiscardsCollectedResults(t *testing.T) {
+func TestRunNaabuCleanupRemovesScannerCreatedFIFOAndKeepsResults(t *testing.T) {
 	path := writeNaabuFixture(t, `printf 'tmp=%s\n' "$TMPDIR" >&2
 printf '%s\n' '{"ip":"192.0.2.1","port":443,"protocol":"tcp"}'
-mkfifo "$TMPDIR/unsupported-entry"
+mkfifo "$TMPDIR/scanner-fifo"
 `)
 	n := NewWithNaabu("missing-nmap", path)
 	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
-	if err == nil || !strings.Contains(err.Error(), "temporary directory cleanup failed") {
-		t.Fatalf("runNaabu cleanup failure = %v (stderr %q)", err, stderr)
+	if err != nil {
+		t.Fatalf("runNaabu cleanup = %v (stderr %q)", err, stderr)
 	}
-	if len(results.ports) != 0 || len(results.macs) != 0 || len(results.truncated) != 0 {
-		t.Fatalf("cleanup failure returned partial Naabu results: %#v", results)
+	if len(results.ports) != 1 || len(results.macs) != 0 || len(results.truncated) != 0 {
+		t.Fatalf("cleaned Naabu results = %#v, want the confirmed port", results)
 	}
 	var temporaryPath string
 	for _, line := range strings.Split(stderr, "\n") {
@@ -84,6 +84,9 @@ mkfifo "$TMPDIR/unsupported-entry"
 		t.Fatalf("cleanup test did not report its private temp path: %q", stderr)
 	}
 	defer os.RemoveAll(filepath.Dir(temporaryPath))
+	if _, err := os.Lstat(temporaryPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scanner temporary leaf remains after cleanup: %v", err)
+	}
 }
 
 func TestNaabuCancellationRetainsSanitizedLifecycleFailure(t *testing.T) {

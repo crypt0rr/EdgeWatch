@@ -816,9 +816,8 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	var invocation *sandbox.ScannerInvocation
 	var temporary *sandbox.PrivateTemporaryDirectory
 	childStarted, processTreeVerified := false, false
-	setupCleanupKnown := true
 	defer func() {
-		cleanupSucceeded := setupCleanupKnown
+		cleanupSucceeded := true
 		mayClean := !childStarted || processTreeVerified
 		if mayClean {
 			if temporary != nil {
@@ -853,11 +852,17 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 			if childStarted {
 				finishErr = invocation.Finish(processTreeVerified && cleanupSucceeded)
 			} else {
-				finishErr = invocation.StartFailed(cleanupSucceeded)
+				// Cmd.Start never succeeded, so no scanner supervisor or scanner
+				// child could have used this lease. Setup cleanup failures cannot
+				// make an unused identity unsafe to release.
+				finishErr = invocation.StartFailed(true)
 			}
 			resultErr = errors.Join(resultErr, withNaabuLifecycleFailure(naabuLifecycleIdentityFinalize, finishErr))
 		} else if reservation != nil {
-			resultErr = errors.Join(resultErr, withNaabuLifecycleFailure(naabuLifecycleIdentityFinalize, reservation.Finish(cleanupSucceeded)))
+			// A reserved identity has not been handed to a process until the
+			// supervisor is prepared and started. Release it on every earlier
+			// failure, even if daemon-owned setup cleanup needs a later retry.
+			resultErr = errors.Join(resultErr, withNaabuLifecycleFailure(naabuLifecycleIdentityFinalize, reservation.Finish(true)))
 		}
 	}()
 	if err := file.Chmod(0o600); err != nil {
@@ -918,7 +923,6 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	invocationPolicy := n.sandbox.WithScannerIdentityReservation(reservation)
 	temporary, err = sandbox.PreparePrivateTemporaryDirectory(ctx, cmd, invocationPolicy)
 	if err != nil {
-		setupCleanupKnown = false
 		return naabuDiscovery{}, "", ExecutableStartError(cmd.Path, err)
 	}
 	invocation, err = sandbox.PrepareScannerInvocation(ctx, cmd, invocationPolicy, false)

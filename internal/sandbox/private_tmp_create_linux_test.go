@@ -49,9 +49,17 @@ func TestPrivateTemporaryCreateExecChild(t *testing.T) {
 	if !ok || int(stat.Uid) != wantUID || int(stat.Gid) != wantGID {
 		t.Fatalf("inherited scanner leaf owner=%v, want uid/gid %d/%d", info.Sys(), wantUID, wantGID)
 	}
-	nested := filepath.Join(leaf, "ipranger-map", "leveldb")
-	if err := os.MkdirAll(nested, 0o700); err != nil {
-		t.Fatalf("create nested scanner artifacts: %v", err)
+	// The scanner controls its TMPDIR permissions and may create deeper trees
+	// than a recursive cleanup routine can safely walk.
+	if err := os.Chmod(leaf, 0o755); err != nil {
+		t.Fatalf("change scanner-owned TMPDIR mode: %v", err)
+	}
+	nested := leaf
+	for depth := 0; depth < 40; depth++ {
+		nested = filepath.Join(nested, "level")
+		if err := os.Mkdir(nested, 0o700); err != nil {
+			t.Fatalf("create scanner artifact directory at depth %d: %v", depth+1, err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(nested, "CURRENT"), []byte("MANIFEST-000001\n"), 0o600); err != nil {
 		t.Fatalf("write scanner artifact: %v", err)
@@ -103,6 +111,23 @@ func privateTemporaryCreatePolicy(t *testing.T) (*Policy, *ScannerIdentityReserv
 		}
 	})
 	return policy, reservation, lease
+}
+
+func TestPrivateTemporaryPrepareFailureReleasesUnusedScannerLease(t *testing.T) {
+	policy, reservation, lease := privateTemporaryCreatePolicy(t)
+	command := exec.Command(filepath.Join(t.TempDir(), "missing-naabu"))
+	if temporary, err := PreparePrivateTemporaryDirectory(context.Background(), command, policy); err == nil || temporary != nil {
+		if temporary != nil {
+			_ = temporary.Close()
+		}
+		t.Fatalf("prepare with missing Naabu executable = %v, %v; want failure before a child starts", temporary, err)
+	}
+	if err := reservation.Finish(true); err != nil {
+		t.Fatalf("release lease after pre-start Prepare failure: %v", err)
+	}
+	if !lease.released || lease.releaseCalls != 1 || lease.quarantined || lease.quarantineCall != 0 {
+		t.Fatalf("pre-start lease state = %+v; want one release and no quarantine", lease)
+	}
 }
 
 func newPrivateTemporaryCreateFixture(t *testing.T) *linuxPrivateTemporaryDirectory {
@@ -305,6 +330,13 @@ func TestPrivateTemporaryChildCreatesLeafThroughHelperAndParentPinsIt(t *testing
 	if !temporary.childCreates || temporary.leaf == nil || !temporary.accepted {
 		t.Fatalf("child-created handshake state: childCreates=%v leaf=%v accepted=%v", temporary.childCreates, temporary.leaf, temporary.accepted)
 	}
+	var namespace unix.Stat_t
+	if err := unix.Fstat(int(temporary.namespace.Fd()), &namespace); err != nil {
+		t.Fatal(err)
+	}
+	if namespace.Mode != unix.S_IFDIR|privateNamespaceMode || temporary.namespaceMode != privateNamespaceMode {
+		t.Fatalf("scanner namespace mode=%#o state=%#o, want sealed %#o", namespace.Mode, temporary.namespaceMode, unix.S_IFDIR|privateNamespaceMode)
+	}
 	var pinned, named unix.Stat_t
 	if err := unix.Fstat(int(temporary.leaf.Fd()), &pinned); err != nil {
 		t.Fatal(err)
@@ -318,7 +350,11 @@ func TestPrivateTemporaryChildCreatesLeafThroughHelperAndParentPinsIt(t *testing
 	if err := process.wait(); err != nil {
 		t.Fatalf("scanner child after readiness ACK: %v", err)
 	}
-	current := filepath.Join(temporary.path(), "ipranger-map", "leveldb", "CURRENT")
+	deep := temporary.path()
+	for depth := 0; depth < 40; depth++ {
+		deep = filepath.Join(deep, "level")
+	}
+	current := filepath.Join(deep, "CURRENT")
 	if got, err := os.ReadFile(current); err != nil || string(got) != "MANIFEST-000001\n" {
 		t.Fatalf("child-created artifact = %q, %v", got, err)
 	}

@@ -647,6 +647,50 @@ func (f *totpReplayFixture) login(otp string) error {
 	return err
 }
 
+// nextNonCollidingTOTPStep finds a time step where a code from the retired
+// secret cannot also be accepted for the replacement secret's ±1-step
+// verification window. Both secrets produce six-digit values, so a random
+// collision would otherwise make this replay test reject a valid replacement
+// code and then fail its next assertion as a replay.
+func nextNonCollidingTOTPStep(retiredSecret, replacementSecret string, firstStep int64) (int64, bool) {
+	const searchSteps = 32
+	for step := firstStep; step < firstStep+searchSteps; step++ {
+		retiredCode := coverageTOTPCode(retiredSecret, step)
+		collides := false
+		for offset := int64(-1); offset <= 1; offset++ {
+			if retiredCode == coverageTOTPCode(replacementSecret, step+offset) {
+				collides = true
+				break
+			}
+		}
+		if !collides {
+			return step, true
+		}
+	}
+	return 0, false
+}
+
+func TestNextNonCollidingTOTPStepSkipsReplacementWindowCollision(t *testing.T) {
+	const (
+		retiredSecret     = "JBSWY3DPEHPK3PXP"
+		replacementSecret = "AAAAAAAAAAAAIG5P"
+		firstStep         = int64(100000)
+	)
+	if retiredCode, replacementCode := coverageTOTPCode(retiredSecret, firstStep), coverageTOTPCode(replacementSecret, firstStep); retiredCode != replacementCode {
+		t.Fatalf("fixture no longer has a same-step collision: retired=%s replacement=%s", retiredCode, replacementCode)
+	}
+	step, ok := nextNonCollidingTOTPStep(retiredSecret, replacementSecret, firstStep)
+	if !ok || step != firstStep+1 {
+		t.Fatalf("collision-safe step = %d, %t; want %d, true", step, ok, firstStep+1)
+	}
+	retiredCode := coverageTOTPCode(retiredSecret, step)
+	for offset := int64(-1); offset <= 1; offset++ {
+		if replacementCode := coverageTOTPCode(replacementSecret, step+offset); retiredCode == replacementCode {
+			t.Fatalf("selected retired code %s is still accepted at replacement step %d", retiredCode, step+offset)
+		}
+	}
+}
+
 // A TOTP confirmation refuses the code that confirmed the TOTP enrolment:
 // the code is recorded as used for its time step, as a code accepted at
 // sign-in or for a TOTP confirmation is. The code of the next time step is
@@ -697,7 +741,12 @@ func TestSignInRefusesTheEnrolmentCode(t *testing.T) {
 			if err := f.login(code); err == nil || err.Error() != "one-time code is required" {
 				t.Errorf("sign-in with the replacement's enrolment code = %v; want one-time code is required", err)
 			}
-			if err := f.login(coverageTOTPCode(secret, f.step+1)); err == nil {
+			step, ok := nextNonCollidingTOTPStep(secret, replaced, f.step+1)
+			if !ok {
+				t.Fatal("could not find a collision-free TOTP step for the replaced authenticator")
+			}
+			f.step = step
+			if err := f.login(coverageTOTPCode(secret, step)); err == nil {
 				t.Error("sign-in with the replaced authenticator's code succeeded")
 			}
 			f.step++

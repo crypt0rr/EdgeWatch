@@ -853,36 +853,47 @@ func TestPreparePrivateTemporaryDirectoryKeepsControlFDOutsideDataFiles(t *testi
 	defer data.Close()
 	cmd := exec.Command("/bin/true")
 	cmd.ExtraFiles = []*os.File{data}
-	policy := NewEnforced().WithLandlock(helper, 6).WithSeccomp()
-	// The test process cannot switch to the production scanner UID outside a
-	// root container. Keep the temporary-directory cleanup helper on this
-	// process identity so the test exercises Cleanup before Close in either
-	// environment.
-	policy.status.UID, policy.status.GID = os.Geteuid(), os.Getegid()
+	// Use the test process identity so cleanup remains exercisable in rootless
+	// test containers, while carrying the same inherited liveness descriptor
+	// that production private-create helpers require.
+	lease := &privateTemporaryCreateTestLease{uid: os.Geteuid(), gid: os.Getegid(), livenessFile: scannerLivenessTestFile(t)}
+	reservation := &ScannerIdentityReservation{lease: lease}
+	policy := NewEnforced().WithLandlock(helper, 6).WithSeccomp().WithScannerIdentityReservation(reservation)
+	t.Cleanup(func() {
+		if !reservation.finished && !reservation.claimed {
+			if err := reservation.Finish(true); err != nil {
+				t.Errorf("finish temporary helper test reservation: %v", err)
+			}
+		}
+	})
 	temporary, err := PreparePrivateTemporaryDirectory(context.Background(), cmd, policy)
 	if err != nil {
 		t.Fatal(err)
 	}
+	namespacePath := filepath.Join("/tmp", linuxTemporaryState(t, temporary).namespaceName)
 	t.Cleanup(func() {
 		cleanupErr := temporary.Cleanup(context.Background())
 		closeErr := temporary.Close()
 		if err := errors.Join(cleanupErr, closeErr); err != nil {
 			t.Errorf("cleanup private temporary directory: %v", err)
 		}
+		if _, err := os.Lstat(namespacePath); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("temporary namespace remains after cleanup (lstat err = %v)", err)
+		}
 	})
 
-	wantPrefix := []string{helper, ExecCommand, "--profile", "scanner", "--files", "1", "--private-tmp", "--private-root-fd", "4", "--private-leaf-fd", "5", "--control-fd", "6"}
+	wantPrefix := []string{helper, ExecCommand, "--profile", "scanner", "--files", "2", "--private-tmp", "--private-create", "--private-root-fd", "5", "--private-namespace-fd", "6", "--control-fd", "7", "--landlock", "--seccomp", "--liveness-fd", "4"}
 	if len(cmd.Args) < len(wantPrefix) || !reflect.DeepEqual(cmd.Args[:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("helper argv prefix = %q, want %q", cmd.Args, wantPrefix)
 	}
-	if len(cmd.ExtraFiles) != 4 || cmd.ExtraFiles[0] != data || cmd.ExtraFiles[1] != linuxTemporaryState(t, temporary).namespace || cmd.ExtraFiles[2] != linuxTemporaryState(t, temporary).leaf || cmd.ExtraFiles[3] != linuxTemporaryState(t, temporary).child {
-		t.Fatalf("inherited descriptors = %v, want data FD followed by namespace, leaf, and control FDs", cmd.ExtraFiles)
+	if len(cmd.ExtraFiles) != 5 || cmd.ExtraFiles[0] != data || cmd.ExtraFiles[1] != lease.livenessFile || cmd.ExtraFiles[2] != linuxTemporaryState(t, temporary).root || cmd.ExtraFiles[3] != linuxTemporaryState(t, temporary).namespace || cmd.ExtraFiles[4] != linuxTemporaryState(t, temporary).child {
+		t.Fatalf("inherited descriptors = %v, want data and liveness FDs followed by root, namespace, and control FDs", cmd.ExtraFiles)
 	}
 	request, err := parseExecArgs(cmd.Args[2:])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.files != 1 || request.privateRootFD != 4 || request.privateLeafFD != 5 || request.controlFD != 6 || !request.landlock || !request.seccomp || !request.privateTemp {
+	if request.files != 2 || request.livenessFD != 4 || request.privateRootFD != 5 || request.privateNamespaceFD != 6 || request.controlFD != 7 || !request.landlock || !request.seccomp || !request.privateTemp || !request.privateCreate {
 		t.Fatalf("private temporary helper request = %+v", request)
 	}
 }
@@ -928,6 +939,12 @@ func TestDetectedIdentityOnlyPolicyKeepsTemporaryHelper(t *testing.T) {
 	if !policy.Enforced() || policy.Restricted() || policy.temporaryHelper != helper {
 		t.Fatalf("detected identity-only policy = %+v, temporary helper %q", policy.Status(), policy.temporaryHelper)
 	}
+	// This policy is detected with a synthetic root/container capability
+	// snapshot. Use the real process identity for the filesystem-group setup so
+	// the fixture remains executable in rootless test environments.
+	leaseUID, leaseGID := os.Geteuid(), os.Getegid()
+	lease := &privateTemporaryCreateTestLease{uid: leaseUID, gid: leaseGID, livenessFile: scannerLivenessTestFile(t)}
+	policy = policy.WithScannerIdentityReservation(&ScannerIdentityReservation{lease: lease})
 	command := exec.Command("/bin/true")
 	temporary, err := PreparePrivateTemporaryDirectory(context.Background(), command, policy)
 	if err != nil {
@@ -942,7 +959,7 @@ func TestDetectedIdentityOnlyPolicyKeepsTemporaryHelper(t *testing.T) {
 			t.Errorf("remove test namespace: %v", err)
 		}
 	})
-	if !linuxTemporaryState(t, temporary).private || linuxTemporaryState(t, temporary).landlocked || linuxTemporaryState(t, temporary).leafMode != privateTemporaryMode {
+	if !linuxTemporaryState(t, temporary).private || linuxTemporaryState(t, temporary).landlocked || linuxTemporaryState(t, temporary).leafMode != privateScannerTemporaryMode {
 		t.Fatalf("identity-only temp policy private=%v Landlock=%v leaf-mode=%#o", linuxTemporaryState(t, temporary).private, linuxTemporaryState(t, temporary).landlocked, linuxTemporaryState(t, temporary).leafMode)
 	}
 	if command.SysProcAttr == nil || command.SysProcAttr.Credential == nil || command.SysProcAttr.Credential.Uid != UID || command.SysProcAttr.Credential.Gid != GID || len(command.SysProcAttr.Credential.Groups) != 0 {
@@ -1307,6 +1324,8 @@ func TestDetectedIdentityOnlyPolicyUsesHelperAndCleansNestedArtifacts(t *testing
 	if !policy.Enforced() || policy.Restricted() || policy.temporaryHelper != helper {
 		t.Fatalf("identity-only detected policy = %+v, helper %q", policy.Status(), policy.temporaryHelper)
 	}
+	lease := &privateTemporaryCreateTestLease{uid: UID, gid: GID, livenessFile: scannerLivenessTestFile(t)}
+	policy = policy.WithScannerIdentityReservation(&ScannerIdentityReservation{lease: lease})
 
 	var inheritedLimit unix.Rlimit
 	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &inheritedLimit); err != nil {

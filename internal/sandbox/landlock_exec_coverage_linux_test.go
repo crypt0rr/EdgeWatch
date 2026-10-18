@@ -24,7 +24,7 @@ func TestLandlockExecCoverageChild(t *testing.T) {
 		return
 	}
 
-	args := []string{"--profile", "scanner", "--files", "0"}
+	args := []string{"--profile", "scanner", "--files", "1", "--liveness-fd", "3"}
 	switch mode {
 	case "resource-only":
 		args = append(args, "--resource-only", "--file-size-limit", "16777216", "--seccomp")
@@ -57,12 +57,14 @@ func TestLandlockExecSetupFailuresFlushChildCoverage(t *testing.T) {
 	}
 	for _, mode := range []string{"resource-only", "identity-only"} {
 		t.Run(mode, func(t *testing.T) {
+			livenessFile := scannerLivenessTestFile(t)
 			args := []string{"-test.run=^TestLandlockExecCoverageChild$"}
 			if coverageDir != "" {
 				args = append(args, "-test.gocoverdir="+coverageDir)
 			}
 			command := exec.Command(executable, args...)
 			command.Env = replaceTestEnv(os.Environ(), landlockExecCoverageChildEnv, mode)
+			command.ExtraFiles = []*os.File{livenessFile}
 			if coverageDir != "" {
 				command.Env = replaceTestEnv(command.Env, "GOCOVERDIR", coverageDir)
 			}

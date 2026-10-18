@@ -129,6 +129,11 @@ func preparePrivateTemporaryCreateExec(request execRequest) (privateTemporaryCre
 func execPrivateTemporaryCreate(request execRequest) error {
 	runtime.LockOSThread()
 	limitScannerResources()
+	if request.seccomp {
+		if err := validateScannerLivenessDescriptor(request.livenessFD); err != nil {
+			return fmt.Errorf("%s: scanner liveness reference is invalid", ExecCommand)
+		}
+	}
 	rootFD, namespaceFD, controlFD := request.privateRootFD, request.privateNamespaceFD, request.controlFD
 	defer func() {
 		_ = closePrivateTemporaryControlDescriptors(rootFD, namespaceFD, controlFD)
@@ -178,7 +183,7 @@ func execPrivateTemporaryCreate(request execRequest) error {
 				return fmt.Errorf("%s: set no_new_privs: %w", ExecCommand, err)
 			}
 		}
-		if err := installSeccompFilter(); err != nil {
+		if err := installScannerSeccomp(request); err != nil {
 			return fmt.Errorf("%s: %w", ExecCommand, err)
 		}
 	}

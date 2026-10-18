@@ -31,9 +31,22 @@ const nonzeroCoredumpFilter = 0x1
 
 const privateTemporaryProcFDCheck = "private-temporary-proc-fd-check"
 
+const malformedSeccompNotificationChild = "--test-malformed-seccomp-notification"
+
 // TestMain lets the test binary stand in for the EdgeWatch executable as the
 // sandbox-exec command, and harden a process of its own.
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == malformedSeccompNotificationChild {
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "malformed seccomp notification test child arguments")
+			os.Exit(1)
+		}
+		if err := runMalformedSeccompNotificationTestChild(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && os.Args[1] == hardenZeroLandlock {
 		if err := HardenProcess(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -264,40 +277,54 @@ func TestParseExecArgs(t *testing.T) {
 	if err != nil || request.fileSizeLimit != 16777217 || !request.resourceOnly {
 		t.Fatalf("resource-only file-size-limit parse = %+v %v", request, err)
 	}
+	request, err = parseExecArgs([]string{"--profile", "scanner", "--files", "16", "--seccomp", "--liveness-fd", "18", "--", "/usr/bin/nmap"})
+	if err != nil || request.livenessFD != 18 {
+		t.Fatalf("maximum in-range liveness descriptor = %+v, %v; want fd 18", request, err)
+	}
 	for name, args := range map[string][]string{
-		"empty":                             nil,
-		"no profile":                        {"--files", "0", "--", "/usr/bin/nmap", "-n", "x"},
-		"unknown profile":                   {"--profile", "daemon", "--files", "0", "--", "/usr/bin/nmap"},
-		"no program":                        {"--profile", "scanner", "--files", "0", "--"},
-		"no separator":                      {"--profile", "scanner", "--files", "0", "/usr/bin/nmap", "-n"},
-		"bad count":                         {"--profile", "scanner", "--files", "x", "--", "/usr/bin/nmap"},
-		"negative":                          {"--profile", "scanner", "--files", "-1", "--", "/usr/bin/nmap"},
-		"too many files":                    {"--profile", "scanner", "--files", "17", "--", "/usr/bin/nmap"},
-		"no count":                          {"--profile", "scanner", "--", "/usr/bin/nmap"},
-		"profile twice":                     {"--profile", "scanner", "--profile", "notifier", "--files", "0", "--", "/usr/bin/nmap"},
-		"count twice":                       {"--profile", "scanner", "--files", "0", "--files", "1", "--", "/usr/bin/nmap"},
-		"dangling flag":                     {"--profile"},
-		"dangling count":                    {"--profile", "scanner", "--files"},
-		"unknown flag":                      {"--profile", "scanner", "--files", "0", "--network", "--", "/usr/bin/nmap"},
-		"legacy global temporary grant":     {"--profile", "scanner", "--files", "0", "--tmp", "--", "/usr/local/bin/naabu"},
-		"private temporary notifier":        {"--profile", "notifier", "--files", "0", "--private-tmp", "--private-root-fd", "3", "--private-leaf-fd", "4", "--control-fd", "5", "--", "/usr/local/bin/edgewatch"},
-		"zero file-size limit":              {"--profile", "scanner", "--files", "0", "--file-size-limit", "0", "--", "/usr/bin/nmap"},
-		"negative file-size limit":          {"--profile", "scanner", "--files", "0", "--file-size-limit", "-1", "--", "/usr/bin/nmap"},
-		"missing file-size limit value":     {"--profile", "scanner", "--files", "0", "--file-size-limit"},
-		"duplicate file-size limit":         {"--profile", "scanner", "--files", "0", "--file-size-limit", "1", "--file-size-limit", "2", "--", "/usr/bin/nmap"},
-		"duplicate resource-only":           {"--profile", "scanner", "--files", "0", "--resource-only", "--resource-only", "--file-size-limit", "1", "--", "/usr/bin/nmap"},
-		"notifier file-size limit":          {"--profile", "notifier", "--files", "0", "--file-size-limit", "16777217", "--", "/usr/bin/edgewatch"},
-		"resource-only notifier":            {"--profile", "notifier", "--files", "0", "--resource-only", "--file-size-limit", "16777217", "--", "/usr/bin/edgewatch"},
-		"resource-only without limit":       {"--profile", "scanner", "--files", "0", "--resource-only", "--", "/usr/bin/nmap"},
-		"file-size limit with private temp": {"--profile", "scanner", "--files", "0", "--file-size-limit", "16777217", "--private-tmp", "--private-root-fd", "3", "--private-leaf-fd", "4", "--control-fd", "5", "--", "/usr/local/bin/naabu"},
+		"empty":                        nil,
+		"no profile":                   {"--files", "0", "--", "/usr/bin/nmap", "-n", "x"},
+		"unknown profile":              {"--profile", "daemon", "--files", "0", "--", "/usr/bin/nmap"},
+		"no program":                   {"--profile", "scanner", "--files", "0", "--"},
+		"no separator":                 {"--profile", "scanner", "--files", "0", "/usr/bin/nmap", "-n"},
+		"bad count":                    {"--profile", "scanner", "--files", "x", "--", "/usr/bin/nmap"},
+		"negative":                     {"--profile", "scanner", "--files", "-1", "--", "/usr/bin/nmap"},
+		"negative liveness descriptor": {"--profile", "scanner", "--files", "1", "--seccomp", "--liveness-fd", "-1", "--", "/usr/bin/nmap"},
+		"liveness descriptor above inherited range": {"--profile", "scanner", "--files", "1", "--seccomp", "--liveness-fd", "19", "--", "/usr/bin/nmap"},
+		"liveness descriptor uint32 maximum":        {"--profile", "scanner", "--files", "1", "--seccomp", "--liveness-fd", "4294967295", "--", "/usr/bin/nmap"},
+		"liveness descriptor uint32 overflow":       {"--profile", "scanner", "--files", "1", "--seccomp", "--liveness-fd", "4294967296", "--", "/usr/bin/nmap"},
+		"liveness descriptor high word alias":       {"--profile", "scanner", "--files", "1", "--seccomp", "--liveness-fd", "4294967299", "--", "/usr/bin/nmap"},
+		"liveness descriptor oversized text":        {"--profile", "scanner", "--files", "1", "--seccomp", "--liveness-fd", "18446744073709551616", "--", "/usr/bin/nmap"},
+		"liveness descriptor outside request files": {"--profile", "scanner", "--files", "1", "--seccomp", "--liveness-fd", "4", "--", "/usr/bin/nmap"},
+		"too many files":                            {"--profile", "scanner", "--files", "17", "--", "/usr/bin/nmap"},
+		"no count":                                  {"--profile", "scanner", "--", "/usr/bin/nmap"},
+		"profile twice":                             {"--profile", "scanner", "--profile", "notifier", "--files", "0", "--", "/usr/bin/nmap"},
+		"count twice":                               {"--profile", "scanner", "--files", "0", "--files", "1", "--", "/usr/bin/nmap"},
+		"dangling flag":                             {"--profile"},
+		"dangling count":                            {"--profile", "scanner", "--files"},
+		"unknown flag":                              {"--profile", "scanner", "--files", "0", "--network", "--", "/usr/bin/nmap"},
+		"legacy global temporary grant":             {"--profile", "scanner", "--files", "0", "--tmp", "--", "/usr/local/bin/naabu"},
+		"private temporary notifier":                {"--profile", "notifier", "--files", "0", "--private-tmp", "--private-root-fd", "3", "--private-leaf-fd", "4", "--control-fd", "5", "--", "/usr/local/bin/edgewatch"},
+		"zero file-size limit":                      {"--profile", "scanner", "--files", "0", "--file-size-limit", "0", "--", "/usr/bin/nmap"},
+		"negative file-size limit":                  {"--profile", "scanner", "--files", "0", "--file-size-limit", "-1", "--", "/usr/bin/nmap"},
+		"missing file-size limit value":             {"--profile", "scanner", "--files", "0", "--file-size-limit"},
+		"duplicate file-size limit":                 {"--profile", "scanner", "--files", "0", "--file-size-limit", "1", "--file-size-limit", "2", "--", "/usr/bin/nmap"},
+		"duplicate resource-only":                   {"--profile", "scanner", "--files", "0", "--resource-only", "--resource-only", "--file-size-limit", "1", "--", "/usr/bin/nmap"},
+		"notifier file-size limit":                  {"--profile", "notifier", "--files", "0", "--file-size-limit", "16777217", "--", "/usr/bin/edgewatch"},
+		"resource-only notifier":                    {"--profile", "notifier", "--files", "0", "--resource-only", "--file-size-limit", "16777217", "--", "/usr/bin/edgewatch"},
+		"resource-only without limit":               {"--profile", "scanner", "--files", "0", "--resource-only", "--", "/usr/bin/nmap"},
+		"file-size limit with private temp":         {"--profile", "scanner", "--files", "0", "--file-size-limit", "16777217", "--private-tmp", "--private-root-fd", "3", "--private-leaf-fd", "4", "--control-fd", "5", "--", "/usr/local/bin/naabu"},
 	} {
 		if _, err := parseExecArgs(args); err == nil || !strings.Contains(err.Error(), "usage: sandbox-exec") {
 			t.Errorf("%s: parse = %v, want usage", name, err)
 		}
 	}
-	request, err = parseExecArgs([]string{"--profile", "scanner", "--files", "0", "--resource-only", "--file-size-limit", "16777217", "--seccomp", "--", "/usr/bin/nmap"})
+	request, err = parseExecArgs([]string{"--profile", "scanner", "--files", "1", "--liveness-fd", "3", "--resource-only", "--file-size-limit", "16777217", "--seccomp", "--", "/usr/bin/nmap"})
 	if err != nil || !request.resourceOnly || !request.seccomp || request.fileSizeLimit != 16777217 || request.profile != Scanner {
 		t.Fatalf("identity-only resource limit with seccomp = %+v, %v; want valid scanner launch", request, err)
+	}
+	if _, err := parseExecArgs([]string{"--profile", "scanner", "--files", "0", "--identity-only", "--seccomp", "--", "/usr/bin/nmap"}); err == nil || !strings.Contains(err.Error(), "usage: sandbox-exec") {
+		t.Fatal("scanner seccomp request without an inherited liveness descriptor was accepted")
 	}
 	if _, err := parseExecArgs([]string{"--profile", "scanner", "--files", "0", "--", "nmap"}); err == nil || !strings.Contains(err.Error(), "not an absolute path") {
 		t.Fatalf("relative program = %v", err)

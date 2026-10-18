@@ -1355,8 +1355,35 @@ test('scanner sandbox verification selects the live Nmap scan and pins it while 
   assert.equal(absent.status, 1, 'the selector fails when no live Nmap scan matches the required argument')
 
   assert.match(scannerSandboxVerifier, /scanner_pid_selector_source=\$script_directory\/scanner-pid-selector\.sh/)
-  assert.equal((scannerSandboxVerifier.match(/hold_scanner_process nmap --stats-every/g) ?? []).length, 4,
-    'all long Nmap /proc checks pin the process selected by its scan-only argument')
+  const lifecycleStart = scannerSandboxVerifier.indexOf('# Keep one real Nmap invocation')
+  assert.notEqual(lifecycleStart, -1, 'the shared-volume lifecycle acceptance has an explicit section')
+  const nmapHoldCalls = (value) => value.match(/^hold_scanner_process nmap --stats-every$/gm) ?? []
+  assert.equal(nmapHoldCalls(scannerSandboxVerifier.slice(0, lifecycleStart)).length, 4,
+    'the scanner-mode Nmap /proc checks pin scans selected by their scan-only argument')
+  const lifecycleVerifier = scannerSandboxVerifier.slice(lifecycleStart)
+  assert.equal(nmapHoldCalls(lifecycleVerifier).length, 2,
+    'lifecycle containers A and C each hold one live Nmap scan')
+  assert.match(lifecycleVerifier, /read -r lifecycle_nmap_host_pid lifecycle_nmap_host_starttime < <\(python3/,
+    'the live container PID is bound to a host PID and process starttime')
+  assert.match(lifecycleVerifier, /lifecycle_lock_path=\/var\/lib\/edgewatch\/scanner-identities\/liveness\.lock/)
+  assert.match(lifecycleVerifier, /assert-liveness-fd "\$lifecycle_lock_path" "\$lifecycle_nmap_pid" "\$lifecycle_lock_identity"/,
+    'the actual live Nmap process is checked for the exact inherited liveness lock')
+  assert.match(lifecycleVerifier, /after inherited liveness-FD inspection/,
+    'the scanner starttime is rechecked after proc descriptor inspection')
+  assert.match(lifecycleVerifier, /self-absent:\$lifecycle_lock_device:\$lifecycle_lock_inode/,
+    'the descriptor inspector has an explicit missing-FD negative control')
+  assert.match(lifecycleVerifier, /self-required:\$lifecycle_lock_device:\$lifecycle_lock_inode/,
+    'the negative control must reject a missing descriptor as such')
+  assert.match(lifecycleVerifier, /lifecycle_liveness_negative_status.*= 15/s,
+    'the missing-FD control checks its dedicated failure status')
+  const probeDriver = scannerSandboxVerifier.match(/cat >"\$workdir\/proc-fd-probe\.go" <<'GO'\n([\s\S]*?)\nGO\nCGO_ENABLED=0 go build/)?.[1]
+  assert.ok(probeDriver, 'the verifier embeds the capability-scoped proc descriptor probe')
+  assert.match(probeDriver, /func assertInheritedLivenessFD/)
+  assert.match(probeDriver, /target != lockPath/)
+  assert.match(probeDriver, /uint64\(stat\.Dev\) != dev \|\| stat\.Ino != ino/,
+    'the descriptor check binds the lock by device and inode, not pathname alone')
+  assert.match(probeDriver, /flags&uint64\(unix\.O_ACCMODE\) != uint64\(unix\.O_RDONLY\)/)
+  assert.match(probeDriver, /flags&uint64\(unix\.O_CLOEXEC\) != 0/)
   assert.doesNotMatch(scannerSandboxVerifier, /scanner_pid\s+nmap(?:\s*\)|\s*\|)/,
     'the verifier must not select a Nmap PID by comm alone')
   assert.ok((scannerSandboxVerifier.match(/daemon_scan_limit=2/g) ?? []).length >= 2,
@@ -1367,9 +1394,8 @@ test('scanner sandbox verification selects the live Nmap scan and pins it while 
     'both modes check that a peer cannot reopen the XML descriptor for writing')
   assert.match(scannerSandboxVerifier, /case "open-write":/)
   assert.match(scannerSandboxVerifier, /resume_held_scanner\n?\s*cancelled=/)
-  assert.equal((scannerSandboxVerifier.match(/^hold_scanner_process nmap --stats-every$/gm) ?? []).length, 4,
+  assert.doesNotMatch(scannerSandboxVerifier, /^\s*[A-Za-z_]\w*=\$\(\s*hold_scanner_process nmap --stats-every/m,
     'the mutable PID state must be set in the verifier shell, not a command-substitution subshell')
-  assert.doesNotMatch(scannerSandboxVerifier, /nmap_pid=\$\(hold_scanner_process/)
 
   const marker = join(directory, 'resumed-on-exit')
   const lifecycle = spawnSync('bash', ['-c', `

@@ -185,12 +185,16 @@ func probeSeccompNotificationSupportWithBrokerFactory(brokerFactory func(listene
 		case <-ticker.C:
 			if err := broker.serveOne(); err != nil {
 				_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-				<-waitResult
+				if waitErr := <-waitResult; waitErr != nil {
+					return fmt.Errorf("seccomp notification probe broker failed: %w (probe cleanup: %v)", err, waitErr)
+				}
 				return fmt.Errorf("seccomp notification probe broker failed: %w", err)
 			}
 		case <-timer.C:
 			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-			<-waitResult
+			if waitErr := <-waitResult; waitErr != nil {
+				return fmt.Errorf("seccomp notification probe timed out (probe cleanup: %v)", waitErr)
+			}
 			return errors.New("seccomp notification probe timed out")
 		}
 	}

@@ -77,7 +77,10 @@ func TestDaemonCancellationDuringSchemaMigrationResumesFromCheckpoint(t *testing
 		cancel()
 		if !finished {
 			select {
-			case <-done:
+			case err := <-done:
+				if err != nil {
+					t.Errorf("daemon returned an error during cleanup: %v", err)
+				}
 			case <-time.After(30 * time.Second):
 				t.Error("daemon did not stop after the migration test was released and canceled")
 			}

@@ -500,6 +500,61 @@ func TestSeccompNotificationProbeReapsTraceeAfterPostInjectionReplyFailure(t *te
 	}
 }
 
+func TestSeccompNotificationProbeReportsWaitErrorWhenTimeoutKillsTracee(t *testing.T) {
+	if err := seccompNotificationSupport(); err != nil {
+		t.Skipf("kernel seccomp notification support is unavailable: %v", err)
+	}
+	var traceeTID uint32
+	var sourceFD int
+	addFDCalls, replyCalls := 0, 0
+	err := probeSeccompNotificationSupportWithBrokerFactory(func(listenerFD int) *seccompNotificationBroker {
+		return &seccompNotificationBroker{
+			listenerFD: listenerFD,
+			ioctl: func(_ int, request uintptr, argument unsafe.Pointer) (uintptr, syscall.Errno) {
+				switch request {
+				case unix.SECCOMP_IOCTL_NOTIF_ADDFD:
+					addFDCalls++
+					return 42, 0
+				case unix.SECCOMP_IOCTL_NOTIF_SEND:
+					replyCalls++
+					response := (*seccompNotificationResponse)(argument)
+					if response.Value != 42 {
+						t.Errorf("probe reply descriptor = %d, want injected descriptor 42", response.Value)
+					}
+					// Report a successful reply to the probe loop without waking the
+					// real tracee. This deterministically exercises timeout cleanup.
+					return 0, 0
+				default:
+					t.Errorf("unexpected seccomp notification ioctl %#x", request)
+					return 0, syscall.EIO
+				}
+			},
+			afterAddFD: func(_ uint64, tid uint32, source, _ int) error {
+				traceeTID, sourceFD = tid, source
+				if _, err := unix.FcntlInt(uintptr(source), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+					return errors.New("broker source descriptor remained open after injection")
+				}
+				return nil
+			},
+		}
+	})
+	if err == nil || !strings.Contains(err.Error(), "seccomp notification probe timed out (probe cleanup: signal: killed)") {
+		t.Fatalf("probe timeout result = %v, want timeout with killed-child cleanup error", err)
+	}
+	if addFDCalls != 1 || replyCalls != 1 {
+		t.Fatalf("probe ioctl counts = ADDFD %d, NOTIF_SEND %d; want 1 each", addFDCalls, replyCalls)
+	}
+	if traceeTID == 0 || sourceFD < 0 {
+		t.Fatalf("timeout cleanup did not reach the injected reply: tracee TID=%d source FD=%d", traceeTID, sourceFD)
+	}
+	if err := syscall.Kill(int(traceeTID), 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("tracee task remained after timeout cleanup: %v", err)
+	}
+	if _, err := unix.FcntlInt(uintptr(sourceFD), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("broker source descriptor %d remained open after timeout cleanup: %v", sourceFD, err)
+	}
+}
+
 func TestSeccompNotificationBrokerRejectsInvalidListenerAndBoundsAddFDRetries(t *testing.T) {
 	var unavailable *seccompNotificationBroker
 	if err := unavailable.serveOne(); err == nil || !strings.Contains(err.Error(), "listener is unavailable") {

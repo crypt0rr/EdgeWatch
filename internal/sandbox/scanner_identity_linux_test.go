@@ -150,6 +150,35 @@ func TestScannerIdentityAllocatorInspectionReportsQuarantineWithoutWriting(t *te
 	}
 }
 
+func TestScannerIdentityAllocatorInspectionAttestsPrivateScopeFromNonPID1(t *testing.T) {
+	bootstrap := usePrivateScannerRuntime(newTestScannerIdentityAllocator(t, 2))
+	lease, err := bootstrap.acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.release(); err != nil {
+		t.Fatal(err)
+	}
+
+	observer := useAttestedPrivateScannerScope(newScannerIdentityAllocatorForTest(
+		bootstrap.directory, bootstrap.uidStart, bootstrap.count, testScannerBootID, 17,
+	), 17)
+	status, err := observer.inspect(context.Background())
+	if err != nil {
+		t.Fatalf("inspect PID1-established private scope from non-PID1: %v", err)
+	}
+	if status.State != StateEnforced || status.Free != 2 || status.MaxParallel != 2 {
+		t.Fatalf("private scope inspection = %+v; want an enforced empty pool", status)
+	}
+
+	untrusted := newScannerIdentityAllocatorForTest(
+		bootstrap.directory, bootstrap.uidStart, bootstrap.count, testScannerBootID, 17,
+	)
+	if _, err := untrusted.inspect(context.Background()); err == nil {
+		t.Fatal("inspection accepted a private journal without a matching private /tmp scope")
+	}
+}
+
 func TestScannerIdentityPoolExhaustionErrorIncludesCountsAndRecovery(t *testing.T) {
 	allocator := newTestScannerIdentityAllocator(t, 1)
 	lease, err := allocator.acquire(context.Background())

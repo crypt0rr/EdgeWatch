@@ -271,7 +271,7 @@ func inspectProductionScannerIdentityPool(ctx context.Context) (*ScannerIdentity
 
 func (allocator *scannerIdentityAllocator) inspect(ctx context.Context) (*ScannerIdentityPoolStatus, error) {
 	if ctx == nil || allocator == nil || allocator.directory == "" || allocator.markerDir == "" || allocator.uidStart == 0 || allocator.count == 0 ||
-		allocator.bootID == nil || allocator.pidNamespace == nil || allocator.privateRuntime == nil || allocator.validateMap == nil || allocator.inUse == nil {
+		allocator.bootID == nil || allocator.pidNamespace == nil || allocator.privateScope == nil || allocator.validateMap == nil || allocator.inUse == nil {
 		return nil, errors.New("scanner identity allocator: inspection inputs are invalid")
 	}
 	bootID, err := allocator.bootID()
@@ -281,10 +281,6 @@ func (allocator *scannerIdentityAllocator) inspect(ctx context.Context) (*Scanne
 	pidNamespace, err := allocator.pidNamespace()
 	if err != nil || pidNamespace == 0 {
 		return nil, errors.New("scanner identity allocator: PID namespace identity is unavailable")
-	}
-	privateRuntime, err := allocator.privateRuntime()
-	if err != nil {
-		return nil, errors.New("scanner identity allocator: private runtime scope is unavailable")
 	}
 	if err := allocator.validateMap(allocator.uidStart, allocator.count); err != nil {
 		return nil, err
@@ -316,12 +312,24 @@ func (allocator *scannerIdentityAllocator) inspect(ctx context.Context) (*Scanne
 	if err != nil {
 		return nil, errors.New("scanner identity allocator: lease journal is unavailable")
 	}
-	if marker.BootID != bootID || marker.PIDNamespace != pidNamespace || marker.PrivateRuntime != privateRuntime ||
-		journal.Version != scannerIdentityVersion || journal.BootID != bootID || journal.PIDNamespace != pidNamespace || journal.PrivateRuntime != privateRuntime {
+	if marker.BootID != bootID || marker.PIDNamespace != pidNamespace || journal.Version != scannerIdentityVersion ||
+		journal.BootID != bootID || journal.PIDNamespace != pidNamespace || marker.PrivateRuntime != journal.PrivateRuntime {
 		return nil, errors.New("scanner identity allocator: PID namespace changed without exclusive private-scope proof")
 	}
 	if err := allocator.validateJournal(journal); err != nil {
 		return nil, err
+	}
+	// PID 1 establishes a private scanner runtime, while a health command or
+	// another process in that namespace can only attest that it still shares
+	// the namespace and private /tmp recorded by the validated marker. Inspect
+	// that scope after validating both durable records instead of requiring
+	// every read-only observer to be PID 1.
+	privateRuntime, err := allocator.privateScope(pidNamespace)
+	if err != nil {
+		return nil, errors.New("scanner identity allocator: private runtime scope cannot be verified")
+	}
+	if marker.PrivateRuntime != privateRuntime || journal.PrivateRuntime != privateRuntime {
+		return nil, errors.New("scanner identity allocator: PID namespace changed without exclusive private-scope proof")
 	}
 	return scannerIdentityPoolCounts(allocator, journal, identitiesInUse), nil
 }

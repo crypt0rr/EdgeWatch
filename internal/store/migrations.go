@@ -19,7 +19,7 @@ import (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 74
+const schemaVersion = 75
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -35,7 +35,7 @@ var foreignKeysOffMigrations = map[int]bool{}
 // run must not apply a second time. The function reads the schema in the
 // version's transaction and returns the statements to run after the fixed
 // ones. These versions run through applyMigration.
-var conditionalMigrationStatements = map[int]func(*sql.Tx) ([]string, error){
+var conditionalMigrationStatements = map[int]func(context.Context, *sql.Tx) ([]string, error){
 	// Schema 59's column may already be present in tests that reconstruct an
 	// older migration from a newer template.
 	59: migration59ConditionalStatements,
@@ -52,6 +52,7 @@ var conditionalMigrationStatements = map[int]func(*sql.Tx) ([]string, error){
 	66: migration66ConditionalStatements,
 	68: migration68ConditionalStatements,
 	74: migration74ConditionalStatements,
+	75: migration75ConditionalStatements,
 }
 
 // newerSchemaError is the refusal for a database that a newer release has
@@ -169,6 +170,18 @@ func migrateContextWithLogger(ctx context.Context, db *sql.DB, logger *slog.Logg
 			markMigrationFailed(ctx, db, err)
 			return fmt.Errorf("backfill probe-budget alert projection: %w", err)
 		}
+	}
+	if err := updateMigrationStatus(ctx, db, scanEvidenceProjectionPhase, 0, 0); err != nil {
+		markMigrationFailed(ctx, db, err)
+		return err
+	}
+	if err := backfillScanEvidenceProjections(ctx, db, func(processed int64) {
+		statusCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		_ = updateMigrationStatus(statusCtx, db, scanEvidenceProjectionPhase, processed, 0)
+		cancel()
+	}); err != nil {
+		markMigrationFailed(ctx, db, err)
+		return fmt.Errorf("backfill scan evidence projections: %w", err)
 	}
 	if err := updateMigrationStatus(ctx, db, "incident-inbox-projection", 0, 0); err != nil {
 		markMigrationFailed(ctx, db, err)
@@ -358,6 +371,9 @@ func schemaMigrationStatements() map[int][]string {
 		// The job list reads scheduled probe-budget skips from the compact
 		// runtime projection rather than decoding state_json. See migration74.go.
 		74: migration74Statements(),
+		// Results pages and Inbox recovery classification use compact scan
+		// projections instead of parsing the full immutable snapshot.
+		75: migration75Statements(),
 	}
 }
 
@@ -378,7 +394,7 @@ func applyMigration(ctx context.Context, db *sql.DB, version int, statements []s
 			if err := refuseReferencedTableDrop(ctx, tx, version, statement); err != nil {
 				return err
 			}
-			if err := execMigrationStatement(tx, statement); err != nil {
+			if err := execMigrationStatement(ctx, tx, statement); err != nil {
 				return err
 			}
 		}
@@ -388,7 +404,7 @@ func applyMigration(ctx context.Context, db *sql.DB, version int, statements []s
 		return err
 	}
 	if conditional := conditionalMigrationStatements[version]; conditional != nil {
-		extra, err := conditional(tx)
+		extra, err := conditional(ctx, tx)
 		if err != nil {
 			return err
 		}
@@ -545,7 +561,7 @@ func applyMigrationForeignKeysOff(ctx context.Context, db *sql.DB, version int, 
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("schema migration %d: %w", version, err)
 		}
-		if err := execMigrationStatement(tx, statement); err != nil {
+		if err := execMigrationStatement(ctx, tx, statement); err != nil {
 			return fmt.Errorf("schema migration %d: %w", version, err)
 		}
 	}
@@ -765,9 +781,9 @@ func (r sqliteTableRebuild) statements() []string {
 // the migration set (ALTER TABLE ... ADD COLUMN) by inspecting SQLite's
 // schema first. Suppressing arbitrary errors based on driver error text would
 // hide real migration failures and is not stable across SQLite versions.
-func execMigrationStatement(tx *sql.Tx, statement string) error {
+func execMigrationStatement(ctx context.Context, tx *sql.Tx, statement string) error {
 	if table, column, ok := parseAddColumnStatement(statement); ok {
-		exists, err := migrationColumnExists(tx, table, column)
+		exists, err := migrationColumnExists(ctx, tx, table, column)
 		if err != nil {
 			return err
 		}
@@ -775,7 +791,7 @@ func execMigrationStatement(tx *sql.Tx, statement string) error {
 			return nil
 		}
 	}
-	_, err := tx.Exec(statement)
+	_, err := tx.ExecContext(ctx, statement)
 	return err
 }
 
@@ -804,10 +820,10 @@ func validMigrationIdentifier(value string) bool {
 	return true
 }
 
-func migrationColumnExists(tx *sql.Tx, table, column string) (bool, error) {
+func migrationColumnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {
 	var count int
 	query := "SELECT COUNT(*) FROM pragma_table_info('" + table + "') WHERE name='" + column + "'"
-	if err := tx.QueryRow(query).Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, query).Scan(&count); err != nil {
 		return false, err
 	}
 	return count > 0, nil

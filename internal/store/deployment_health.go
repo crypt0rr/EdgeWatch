@@ -50,6 +50,8 @@ func sandboxConfinement(state string) (identity, landlock bool) {
 		return false, true
 	case model.SandboxStateUnconfined:
 		return false, false
+	case model.SandboxStateLaunchesRefused:
+		return false, false
 	default:
 		return true, true
 	}

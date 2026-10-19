@@ -60,6 +60,8 @@ func sandboxStateText(state string) string {
 		return "UID 0, restricted only by Landlock"
 	case model.SandboxStateUnconfined:
 		return "unconfined as UID 0"
+	case model.SandboxStateLaunchesRefused:
+		return "scanner launches refused (fail closed)"
 	default:
 		return "not recorded"
 	}

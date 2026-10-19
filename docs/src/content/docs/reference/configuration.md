@@ -195,12 +195,14 @@ Jobs are configured in the console, which enforces these limits:
   backups. Do not delete, copy, or restore these files independently. The
   trusted supervisor releases an identity only after it proves the scanner's
   process tree is gone and invocation cleanup succeeds. If that proof or
-  cleanup is uncertain, the identity is quarantined for the rest of the boot;
-  quarantined identities reduce the available capacity. Missing or damaged
-  same-boot state fails closed rather than reusing an identity whose process
-  may still exist. After a clean container restart, an empty journal can move
-  to the new private PID namespace. A restart with outstanding quarantines
-  fails closed until the host reboots.
+  cleanup is uncertain, the identity is quarantined while any process still
+  holds its liveness reference; quarantined identities reduce available
+  capacity. Missing or damaged same-boot state fails closed rather than
+  reusing an identity whose process may still exist. A clean container restart
+  can archive and reset the old scope after every EdgeWatch process using the
+  volume has exited and the new private PID namespace is verified. Older v2
+  state has no liveness references and may require a host reboot or the
+  documented recovery command.
 - `scanner.landlock: auto` independently restricts Nmap and Naabu to the
   system files a scan reads and the files EdgeWatch passes to them. Naabu can
   use only its per-invocation temporary leaf below `/tmp`; it cannot execute

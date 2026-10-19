@@ -1,6 +1,9 @@
 package store
 
-import "database/sql"
+import (
+	"context"
+	"database/sql"
+)
 
 // migration65ConditionalStatements adds the comparison outcome that a managed
 // scan records when it is finalized: compared, baseline_sample,
@@ -10,8 +13,8 @@ import "database/sql"
 // validated in Go rather than by a CHECK constraint, because changing such a
 // constraint later would require rebuilding the scans table. The column may
 // already exist in a test database reconstructed from a newer template.
-func migration65ConditionalStatements(tx *sql.Tx) ([]string, error) {
-	exists, err := migrationColumnExists(tx, "scans", "comparison")
+func migration65ConditionalStatements(ctx context.Context, tx *sql.Tx) ([]string, error) {
+	exists, err := migrationColumnExists(ctx, tx, "scans", "comparison")
 	if err != nil || exists {
 		return nil, err
 	}

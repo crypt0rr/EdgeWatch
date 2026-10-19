@@ -366,7 +366,7 @@ func runScannerVersionProbe(ctx context.Context, path string, policy *sandbox.Po
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = append([]string(nil), scannerProbeEnv...)
-	policy.Confine(cmd)
+	policy.WithScannerNetworkCapabilities(false, false).Confine(cmd)
 	invocation, err := sandbox.PrepareScannerInvocation(ctx, cmd, policy, false)
 	if err != nil {
 		return nil, err
@@ -1359,7 +1359,7 @@ func runNmapInvocationWithProgressPollInterval(ctx context.Context, cmd *exec.Cm
 	if err != nil {
 		return nil, "", err
 	}
-	policy = policy.WithScannerIdentityReservation(reservation)
+	policy = policy.WithScannerIdentityReservation(reservation).WithScannerNetworkCapabilities(true, false)
 	scannerPath := cmd.Path
 	xmlPath, releaseXML, err := prepareNmapXMLOutput(cmd, policy, dir)
 	if err != nil {
@@ -1538,7 +1538,7 @@ func runNmapInvocationWithProgressPollInterval(ctx context.Context, cmd *exec.Cm
 				stopForXML()
 				return
 			}
-			if err := pollNmapXMLProgress(xmlPath, progressParser, emitOutput); errors.Is(err, errNmapProgressOutputExceeded) {
+			if err := pollNmapXMLProgressContext(ctx, xmlPath, progressParser, emitOutput); errors.Is(err, errNmapProgressOutputExceeded) {
 				stopForXML()
 			}
 		}
@@ -1603,7 +1603,7 @@ func runNmapInvocationWithProgressPollInterval(ctx context.Context, cmd *exec.Cm
 		if exceeded, err := nmapXMLOutputExceeded(xmlPath, maxNmapOutput); err == nil && exceeded {
 			xmlExceeded.Store(true)
 		}
-		if err := pollNmapXMLProgress(xmlPath, progressParser, emitOutput); errors.Is(err, errNmapProgressOutputExceeded) {
+		if err := pollNmapXMLProgressContext(ctx, xmlPath, progressParser, emitOutput); errors.Is(err, errNmapProgressOutputExceeded) {
 			xmlExceeded.Store(true)
 		}
 		if data, exceeded, readErr := readCappedFile(xmlPath, maxNmapOutput); readErr == nil && len(data) > 0 {
@@ -1768,40 +1768,59 @@ type nmapXMLProgressParser struct {
 }
 
 func (p *nmapXMLProgressParser) feed(data []byte, emit func(string, float64)) {
+	_ = p.feedContext(context.Background(), data, emit)
+}
+
+func (p *nmapXMLProgressParser) feedContext(ctx context.Context, data []byte, emit func(string, float64)) error {
+	if ctx == nil {
+		return errors.New("nmap progress context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(data) == 0 {
-		return
+		return nil
 	}
 	p.pending += string(data)
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		start := strings.Index(p.pending, "<taskprogress")
 		if start < 0 {
 			// Keep a short suffix in case the next read completes a split tag.
 			if len(p.pending) > 64 {
 				p.pending = p.pending[len(p.pending)-64:]
 			}
-			return
+			return nil
 		}
 		if start > 0 {
 			p.pending = p.pending[start:]
+			start = 0
 		}
-		end := strings.Index(p.pending, "/>")
-		endLength := 2
-		if end < 0 {
-			end = strings.IndexByte(p.pending, '>')
-			endLength = 1
-		}
+		// Looking for "/>" across the full remaining buffer for every tag
+		// rescans all later tags when malformed records lack the slash. The
+		// first '>' bounds both valid and malformed records in one pass.
+		end := strings.IndexByte(p.pending[start:], '>')
 		if end < 0 {
 			if len(p.pending) > 4096 {
 				p.pending = p.pending[len(p.pending)-4096:]
 			}
-			return
+			return nil
 		}
-		fragment := p.pending[:end+endLength]
-		p.pending = p.pending[end+endLength:]
+		end += start
+		fragment := p.pending[:end+1]
+		p.pending = p.pending[end+1:]
+		if end == 0 || fragment[end-1] != '/' {
+			continue
+		}
 		var progress nmapTaskProgress
-		attributeGuard := newNmapXMLAttributeLimitReader(context.Background(), strings.NewReader(fragment))
+		attributeGuard := newNmapXMLAttributeLimitReader(ctx, strings.NewReader(fragment))
 		decoder := xml.NewDecoder(attributeGuard)
 		if err := decoder.Decode(&progress); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			continue
 		}
 		if progress.Percent < 0 {
@@ -1822,6 +1841,16 @@ func (p *nmapXMLProgressParser) feed(data []byte, emit func(string, float64)) {
 }
 
 func pollNmapXMLProgress(path string, parser *nmapXMLProgressParser, emit func(string, float64)) error {
+	return pollNmapXMLProgressContext(context.Background(), path, parser, emit)
+}
+
+func pollNmapXMLProgressContext(ctx context.Context, path string, parser *nmapXMLProgressParser, emit func(string, float64)) error {
+	if ctx == nil {
+		return errors.New("nmap progress context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -1858,8 +1887,7 @@ func pollNmapXMLProgress(path string, parser *nmapXMLProgressParser, emit func(s
 		return errNmapProgressOutputExceeded
 	}
 	parser.offset += int64(len(data))
-	parser.feed(data, emit)
-	return nil
+	return parser.feedContext(ctx, data, emit)
 }
 
 // progressOutputWriter lets os/exec (or the pty reader) own the stream-copy
@@ -1870,15 +1898,16 @@ func pollNmapXMLProgress(path string, parser *nmapXMLProgressParser, emit func(s
 // the writer stops retaining and passing on anything, unless streaming is
 // set: then it drops what it retained and keeps passing complete lines on.
 type progressOutputWriter struct {
-	mu         sync.Mutex
-	all        strings.Builder
-	pending    strings.Builder
-	limit      int
-	streaming  bool
-	exceeded   bool
-	onExceeded func()
-	exceedOnce sync.Once
-	emit       func(string)
+	mu          sync.Mutex
+	all         strings.Builder
+	pending     []byte
+	pendingScan int
+	limit       int
+	streaming   bool
+	exceeded    bool
+	onExceeded  func()
+	exceedOnce  sync.Once
+	emit        func(string)
 }
 
 // maxProgressLine bounds the unterminated line a progressOutputWriter keeps
@@ -1907,7 +1936,7 @@ func (w *progressOutputWriter) Write(data []byte) (int, error) {
 		if !w.exceeded || !w.streaming {
 			_, _ = w.all.Write(accepted)
 		}
-		_, _ = w.pending.Write(accepted)
+		w.pending = append(w.pending, accepted...)
 	}
 	lines := w.takeLinesLocked()
 	w.mu.Unlock()
@@ -1931,8 +1960,9 @@ func (w *progressOutputWriter) overflowed() bool {
 
 func (w *progressOutputWriter) Flush() {
 	w.mu.Lock()
-	line := w.pending.String()
-	w.pending.Reset()
+	line := string(w.pending)
+	w.pending = nil
+	w.pendingScan = 0
 	w.mu.Unlock()
 	if strings.TrimSpace(line) != "" && w.emit != nil {
 		w.emit(line)
@@ -1955,25 +1985,37 @@ func (w *progressOutputWriter) Bytes() []byte {
 // pending. CRLF is treated as one delimiter; a bare CR is also a delimiter so
 // terminal refreshes are surfaced promptly instead of waiting for a newline.
 func (w *progressOutputWriter) takeLinesLocked() []string {
-	value := w.pending.String()
-	w.pending.Reset()
-	lines := make([]string, 0, 2)
-	for len(value) > 0 {
-		index := strings.IndexAny(value, "\r\n")
+	var lines []string
+	consumed := 0
+	scanFrom := w.pendingScan
+	for scanFrom < len(w.pending) {
+		index := bytes.IndexAny(w.pending[scanFrom:], "\r\n")
 		if index < 0 {
-			w.pending.WriteString(value)
+			scanFrom = len(w.pending)
 			break
 		}
-		lines = append(lines, value[:index])
-		delimiter := value[index]
-		value = value[index+1:]
-		if delimiter == '\r' && strings.HasPrefix(value, "\n") {
-			value = value[1:]
+		index += scanFrom
+		lines = append(lines, string(w.pending[consumed:index]))
+		delimiter := w.pending[index]
+		next := index + 1
+		if delimiter == '\r' && next < len(w.pending) && w.pending[next] == '\n' {
+			next++
 		}
+		consumed, scanFrom = next, next
 	}
-	if w.pending.Len() > maxProgressLine {
-		lines = append(lines, w.pending.String())
-		w.pending.Reset()
+	if consumed > 0 {
+		copy(w.pending, w.pending[consumed:])
+		w.pending = w.pending[:len(w.pending)-consumed]
+		scanFrom -= consumed
+	}
+	if scanFrom > len(w.pending) {
+		scanFrom = len(w.pending)
+	}
+	w.pendingScan = scanFrom
+	if len(w.pending) > maxProgressLine {
+		lines = append(lines, string(w.pending))
+		w.pending = nil
+		w.pendingScan = 0
 	}
 	return lines
 }
@@ -2333,8 +2375,6 @@ type nmapXMLAttributeLimitReader struct {
 	declarationPrefix  int
 	declarationComment bool
 	declarationDashes  int
-	declarationPI      bool
-	declarationPIQMark bool
 	pendingErr         error
 }
 
@@ -2549,15 +2589,6 @@ func (r *nmapXMLAttributeLimitReader) consumeBang(value byte) error {
 }
 
 func (r *nmapXMLAttributeLimitReader) consumeDeclaration(value byte) error {
-	if r.declarationPI {
-		if value == '>' && r.declarationPIQMark {
-			r.declarationPI = false
-			r.declarationPIQMark = false
-		} else {
-			r.declarationPIQMark = value == '?'
-		}
-		return nil
-	}
 	if r.declarationComment {
 		if value == '>' && r.declarationDashes >= 2 {
 			r.declarationComment = false
@@ -2578,23 +2609,17 @@ func (r *nmapXMLAttributeLimitReader) consumeDeclaration(value byte) error {
 	if r.declarationPrefix != 0 {
 		switch r.declarationPrefix {
 		case 1:
-			switch value {
-			case '!':
+			if value == '!' {
 				r.declarationPrefix = 2
 				return nil
-			case '?':
-				r.declarationPrefix = 0
-				r.declarationPI = true
-				r.declarationPIQMark = false
-				return nil
-			default:
-				r.declarationPrefix = 0
 			}
+			return errNmapXMLInternalSubset
 		case 2:
 			if value == '-' {
 				r.declarationPrefix = 3
 				return nil
 			}
+			return errNmapXMLInternalSubset
 		case 3:
 			if value == '-' {
 				r.declarationPrefix = 0
@@ -2602,12 +2627,8 @@ func (r *nmapXMLAttributeLimitReader) consumeDeclaration(value byte) error {
 				r.declarationDashes = 0
 				return nil
 			}
+			return errNmapXMLInternalSubset
 		}
-		if value == '<' {
-			r.declarationPrefix = 1
-			return nil
-		}
-		r.declarationPrefix = 0
 	}
 	if value == '<' {
 		r.declarationPrefix = 1
@@ -2619,9 +2640,8 @@ func (r *nmapXMLAttributeLimitReader) consumeDeclaration(value byte) error {
 	}
 	switch value {
 	case '[':
-		// encoding/xml terminates a Directive at the first unquoted '>'. It
-		// does not parse internal subsets, so the lexer must reject one before
-		// the decoder can resume at a following start tag with uncounted attrs.
+		// Nmap emits no internal subsets. Reject them before encoding/xml can
+		// resume at a nested start tag with uncounted attributes.
 		return errNmapXMLInternalSubset
 	case '>':
 		r.state = nmapXMLLexText

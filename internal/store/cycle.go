@@ -1057,6 +1057,11 @@ func (ts *TenantStore) ScanCycleExpiryNotified(ctx context.Context, cycleID stri
 // count.
 const scanCycleHasScanQuery = `SELECT COUNT(*) FROM scans WHERE cycle_id=? AND tenant_id=? AND cycle_status='completed' AND status IN ('success','incomplete')`
 
+// scanCycleHasScanSystemQuery is the same indexed promotion check for the
+// system finalizer, which already established the job and cycle identity in
+// its write transaction.
+const scanCycleHasScanSystemQuery = `SELECT COUNT(*) FROM scans WHERE cycle_id=? AND cycle_status='completed' AND status IN ('success','incomplete')`
+
 // scanCycleFinalizationFailureCountQuery counts only a bounded prefix of the
 // exact fallback rows that identify a failed completed-cycle promotion. The
 // cycle outcome index narrows by cycle, state, and tenant before the residual

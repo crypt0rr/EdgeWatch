@@ -3,12 +3,14 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -106,6 +108,65 @@ func TestScannerIdentityAllocatorDurableLeaseState(t *testing.T) {
 	}
 	if err := reused.release(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestScannerIdentityAllocatorInspectionReportsQuarantineWithoutWriting(t *testing.T) {
+	allocator := newTestScannerIdentityAllocator(t, 4)
+	lease, err := allocator.acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.quarantine(); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(allocator.directory, scannerIdentityJournalName)
+	markerPath := filepath.Join(allocator.markerDir, scannerIdentityMarker)
+	beforeJournal, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeMarker, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := allocator.inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Active != 0 || status.Quarantined != 1 || status.InUseByOtherProcesses != 0 || status.Free != 3 || status.MaxParallel != 4 {
+		t.Fatalf("pool inspection = %+v; want one quarantined lease and three free", status)
+	}
+	afterJournal, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterMarker, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeJournal, afterJournal) || !bytes.Equal(beforeMarker, afterMarker) {
+		t.Fatal("read-only pool inspection changed the lease journal or boot marker")
+	}
+}
+
+func TestScannerIdentityPoolExhaustionErrorIncludesCountsAndRecovery(t *testing.T) {
+	allocator := newTestScannerIdentityAllocator(t, 1)
+	lease, err := allocator.acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.quarantine(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = allocator.acquire(context.Background())
+	if !errors.Is(err, errScannerIdentityPoolExhausted) {
+		t.Fatalf("exhausted acquire error = %v", err)
+	}
+	for _, want := range []string{"active=0", "quarantined=1", "free=0 of 1", "restart the container", "no other EdgeWatch process using the data volume"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("exhausted acquire error %q does not contain %q", err, want)
+		}
 	}
 }
 

@@ -64,6 +64,7 @@ func TestUnitDestinationRefusesExcludedAddresses(t *testing.T) {
 		"metadata.example": "169.254.169.254",
 		"mapped.example":   "::ffff:127.0.0.1",
 		"public.example":   "203.0.113.10",
+		"api.telegram.org": "203.0.113.11",
 	})
 	notifier, _, _, _ := twoTenantNotifier(t)
 	if err := notifier.SetTargetExclusions(config.DefaultTargetExclusions()); err != nil {
@@ -165,8 +166,8 @@ func TestDestinationHostsFollowTheProvider(t *testing.T) {
 		"teams+https://safe.example/hook?host=":                                  {teamsDefaultHost},
 		"teams://group@tenant/alt/owner?host=safe.example&HOST=excluded.example": {"excluded.example", "safe.example"},
 		"teams://group@tenant/alt/owner?host=first.example&host=second.example":  {"first.example"},
-		"discord://token@123456789":                                              nil,
-		"telegram://token@telegram?chats=@channel":                               nil,
+		"discord://token@123456789":                                              {"discord.com"},
+		"telegram://token@telegram?chats=@channel":                               {"api.telegram.org"},
 		"logger://": nil,
 		"%":         nil,
 	} {

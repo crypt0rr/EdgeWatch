@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
@@ -746,7 +747,7 @@ func TestParseXMLRejectsInternalSubsetBeforeLargeAttributeAllocation(t *testing.
 }
 
 func TestNmapXMLDeclarationGuardIgnoresBracketDecoys(t *testing.T) {
-	input := `<!DOCTYPE nmaprun SYSTEM "urn:example:[quoted]" <<!-- [comment] --> <?target [processing]?> ><nmaprun a="ok"/>`
+	input := `<!DOCTYPE nmaprun SYSTEM "urn:example:[quoted]"><nmaprun a="ok"/>`
 	guard := newNmapXMLAttributeLimitReader(context.Background(), strings.NewReader(input))
 	got, err := io.ReadAll(guard)
 	if err != nil {
@@ -758,6 +759,80 @@ func TestNmapXMLDeclarationGuardIgnoresBracketDecoys(t *testing.T) {
 	if guard.attributeCount != 1 || guard.state != nmapXMLLexText {
 		t.Fatalf("guard state after declaration and root tag = count %d, state %d; want count 1 and text", guard.attributeCount, guard.state)
 	}
+}
+
+func TestParseXMLRejectsNestedDirectiveBeforeLargeAttributeAllocation(t *testing.T) {
+	const attributeCount = 200_000
+	const prefix = `<!DOCTYPE nmaprun <a>'<z q="'>`
+	const attribute = ` a="x"`
+	var input strings.Builder
+	input.Grow(len(prefix) + attributeCount*len(attribute) + len(`><nmaprun/>`))
+	input.WriteString(prefix)
+	for range attributeCount {
+		input.WriteString(attribute)
+	}
+	input.WriteString(`><nmaprun/>`)
+	data := []byte(input.String())
+	input.Reset()
+	if len(data) >= maxNmapOutput {
+		t.Fatalf("nested-directive fixture unexpectedly reached the XML byte cap: %d bytes", len(data))
+	}
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	stats := nmapXMLParseStats{}
+	_, err := parseXMLWithPortCount(context.Background(), data, "tcp", config.Protocol{Ports: "443"}, []string{"192.0.2.1"}, 1, &stats)
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	if !errors.Is(err, errNmapXMLInternalSubset) && !errors.Is(err, errNmapXMLAttributeLimit) {
+		t.Fatalf("nested-directive error = %v, want early declaration or attribute rejection (allocated %d bytes)", err, allocated)
+	}
+	if allocated >= 2<<20 {
+		t.Fatalf("nested-directive rejection allocated %d bytes for %d attributes", allocated, attributeCount)
+	}
+	if stats.Tokens != 0 {
+		t.Fatalf("nested directive produced %d XML tokens before rejection", stats.Tokens)
+	}
+	runtime.KeepAlive(data)
+}
+
+func FuzzNmapXMLAttributeGuardMatchesRawToken(f *testing.F) {
+	for _, seed := range []string{
+		`<!DOCTYPE nmaprun><nmaprun a="x"/>`,
+		`<nmaprun><!-- <fake a="x"> --><host/>`,
+		`<!DOCTYPE nmaprun <nested>><nmaprun a="x"/>`,
+		`<nmaprun a="unterminated`,
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, input string) {
+		raw := []byte(input)
+		guard := newNmapXMLAttributeLimitReader(context.Background(), bytes.NewReader(raw))
+		guarded, guardErr := io.ReadAll(guard)
+		if guardErr != nil {
+			return // Unsupported or over-limit markup is intentionally rejected.
+		}
+		if !bytes.Equal(raw, guarded) {
+			t.Fatal("attribute guard changed XML bytes")
+		}
+		readTokens := func(data []byte) ([]xml.Token, error) {
+			decoder := xml.NewDecoder(bytes.NewReader(data))
+			var tokens []xml.Token
+			for {
+				token, err := decoder.RawToken()
+				if err != nil {
+					return tokens, err
+				}
+				tokens = append(tokens, token)
+			}
+		}
+		originalTokens, originalErr := readTokens(raw)
+		guardedTokens, guardedErr := readTokens(guarded)
+		if !reflect.DeepEqual(originalTokens, guardedTokens) || fmt.Sprint(originalErr) != fmt.Sprint(guardedErr) {
+			t.Fatalf("guarded RawToken stream differs: original (%d, %v), guarded (%d, %v)", len(originalTokens), originalErr, len(guardedTokens), guardedErr)
+		}
+	})
 }
 
 func TestNmapXMLDeclarationGuardRejectsMalformedBangSubset(t *testing.T) {
@@ -2208,6 +2283,51 @@ func TestNmapXMLProgressParserHandlesSplitRecords(t *testing.T) {
 	parser.feed([]byte(` Scan" percent="125.0"/></nmaprun>`), emit)
 	if len(got) != 1 || got[0].fraction != 1 || !strings.Contains(got[0].line, "100.00%") {
 		t.Fatalf("split XML progress = %#v", got)
+	}
+}
+
+func TestNmapXMLProgressParserScansMalformedRecordsLinearlyAndHonorsCancellation(t *testing.T) {
+	const malformedRecord = `<taskprogress percent="37.5">`
+	var input strings.Builder
+	input.Grow(2 << 20)
+	for input.Len() < 2<<20 {
+		input.WriteString(malformedRecord)
+	}
+	data := []byte(input.String())
+	input.Reset()
+	parser := &nmapXMLProgressParser{}
+	started := time.Now()
+	parser.feed(data, nil)
+	if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
+		t.Fatalf("2 MiB of malformed task progress took %s; want under 100 ms", elapsed)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	started = time.Now()
+	err := (&nmapXMLProgressParser{}).feedContext(ctx, bytes.Repeat([]byte(`<taskprogress task="scan" percent="1"/>`), 64<<10), func(string, float64) {
+		cancel()
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled progress feed = %v; want context.Canceled", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 50*time.Millisecond {
+		t.Fatalf("cancelled progress feed took %s; want under 50 ms", elapsed)
+	}
+}
+
+func TestProgressOutputWriterScansOnlyNewBytes(t *testing.T) {
+	writer := &progressOutputWriter{}
+	data := []byte{'x'}
+	started := time.Now()
+	for range 256 << 10 {
+		if _, err := writer.Write(data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if elapsed := time.Since(started); elapsed >= 2*time.Second {
+		// Race instrumentation adds substantial fixed overhead to each Write;
+		// this bound still catches rescanning the full unterminated prefix.
+		t.Fatalf("256 KiB of bytewise progress output took %s; want under 2 s", elapsed)
 	}
 }
 

@@ -78,6 +78,7 @@ type rowQueryer interface {
 }
 
 var ErrJobBusy = errors.New("job is already running")
+var ErrJobLeaseLost = errors.New("scan job lease lost")
 var ErrLeaseLost = errors.New("daemon lease lost")
 
 // sqlitePragmaConnector applies connection-scoped SQLite settings whenever

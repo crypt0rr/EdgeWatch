@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Globe2, LockKeyhole, ShieldCheck } from 'lucide-react'
 import { APIError, getPublicDashboard, getPublicDashboardConfig, listHosts, savePublicDashboardConfig } from '../api'
 import { Pagination } from '../components/Pagination'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { formatDateTime } from '../format'
+import { useServerDraft } from '../hooks/useServerDraft'
 
 const PUBLIC_TITLE_MAX_LENGTH = 120
 const PUBLIC_INTRODUCTION_MAX_LENGTH = 500
@@ -25,11 +26,10 @@ export function singleLine(value: string) {
  * /public/<slug>. Without it the preview opens the legacy /public page.
  */
 export function PublicDashboardAdmin({ publicSlug }: { publicSlug?: string } = {}) {
-  const client = useQueryClient(); const [hostOffset, setHostOffset] = useState(0); const config = useQuery({ queryKey: ['public-dashboard-config'], queryFn: getPublicDashboardConfig }); const hosts = useQuery({ queryKey: ['hosts', 'public-picker', hostOffset], queryFn: () => listHosts({ limit: 100, offset: hostOffset }) }); const { draft, setDraft, replaceDraft, remoteChanged, discardDraft } = usePublicDraft(config.data); const feedbackRef = useRef<HTMLDivElement>(null)
-  // The draft carries the loaded updated_at token. If another administrator
-  // saved in the meantime the server answers 409; reload the current state so
-  // a stale draft can never silently re-publish or change the page.
-  const save = useMutation({ mutationFn: () => savePublicDashboardConfig({ ...draft, hosts: draft.hosts.map(({ job_id, address }) => ({ job_id, address })) }), onSuccess: value => { replaceDraft({ enabled: value.enabled, title: value.title, introduction: value.introduction, hosts: value.hosts, updated_at: value.updated_at }); void client.invalidateQueries({ queryKey: ['public-dashboard-config'] }) }, onError: error => { if (isConflict(error)) discardDraft() } })
+  const client = useQueryClient(); const [hostOffset, setHostOffset] = useState(0); const config = useQuery({ queryKey: ['public-dashboard-config'], queryFn: getPublicDashboardConfig }); const hosts = useQuery({ queryKey: ['hosts', 'public-picker', hostOffset], queryFn: () => listHosts({ limit: 100, offset: hostOffset }) }); const fallback: PublicDraft = { enabled: false, title: 'EdgeWatch public status', introduction: '', hosts: [], updated_at: '' }; const server = config.data ? { enabled: config.data.enabled, title: config.data.title, introduction: config.data.introduction, hosts: config.data.hosts, updated_at: config.data.updated_at } : fallback; const { draft, setDraft, baseRevision, hasDraft, remoteChanged, rebase, adopt, markSaved } = useServerDraft<PublicDraft, PublicDraft, string>(server, server.updated_at); const feedbackRef = useRef<HTMLDivElement>(null)
+  // A stale save keeps its pinned revision and draft. The GET after a 409
+  // supplies the current revision; administrators can then rebase or adopt.
+  const save = useMutation({ mutationFn: () => savePublicDashboardConfig({ ...draft, updated_at: baseRevision, hosts: draft.hosts.map(({ job_id, address }) => ({ job_id, address })) }), onSuccess: value => { client.setQueryData(['public-dashboard-config'], value); markSaved(); void client.invalidateQueries({ queryKey: ['public-dashboard-config'] }) }, onError: async error => { if (isConflict(error)) await client.invalidateQueries({ queryKey: ['public-dashboard-config'] }) } })
   useEffect(() => {
     if (save.isSuccess || save.error) feedbackRef.current?.scrollIntoView?.({ block: 'nearest' })
   }, [save.isSuccess, save.error])
@@ -38,7 +38,7 @@ export function PublicDashboardAdmin({ publicSlug }: { publicSlug?: string } = {
   const pickerHosts = hosts.data?.hosts ?? []
   const activeHosts = pickerHosts.filter(host => !host.archived)
   const archivedHosts = pickerHosts.filter(host => host.archived)
-  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Administration</p><h1>Public status</h1><p className="muted">Publish a small, unauthenticated highlights page for explicitly selected hosts.</p></div><Globe2 className="muted-icon" size={24} /></div>{remoteChanged && <div className="notice warning" role="status"><span><strong>Another administrator saved the public view while you were editing.</strong> Your changes are kept. Saving them asks you to review the current settings first.</span><button type="button" className="text-button" onClick={discardDraft}>Discard my changes and load theirs</button></div>}<div className="legacy-banner"><LockKeyhole size={17} /><span><strong>Exposure warning.</strong> Published ports and ownership metadata are visible without a login. Private addresses never trigger an external registry lookup.</span></div><div className="panel"><div className="settings-form"><label className="checkbox-label" htmlFor="public-status-enabled"><input id="public-status-enabled" type="checkbox" checked={draft.enabled} onChange={event => setDraft(value => ({ ...value, enabled: event.target.checked }))} /><span>Enable public status page</span></label><label>Title<input value={draft.title} onChange={event => setDraft(value => ({ ...value, title: limitUnicode(event.target.value, PUBLIC_TITLE_MAX_LENGTH) }))} /></label><label>Introduction<textarea value={draft.introduction} onChange={event => setDraft(value => ({ ...value, introduction: limitUnicode(singleLine(event.target.value), PUBLIC_INTRODUCTION_MAX_LENGTH) }))} rows={3} /><small>Shown as one paragraph. Line breaks are not allowed and become spaces.</small></label></div></div><div className="panel"><div className="panel-heading"><div><h2>Published hosts</h2><p className="muted">Select individual effective IPs. New DNS or CIDR results are not published automatically.</p></div><ShieldCheck className="muted-icon" size={20} /></div>{hosts.isLoading ? <div className="loading"><span className="spinner" />Loading hosts…</div> : hosts.error ? <ErrorNotice message="Could not load scanned hosts." onRetry={() => hosts.refetch()} /> : <>{activeHosts.length ? <PublicHostPickerGroup title="Active jobs" description="Hosts from scheduled, paused, or newly configured jobs." hosts={activeHosts} draft={draft} onChange={setDraft} /> : <div className="inline-empty">No hosts from active jobs.</div>}{archivedHosts.length ? <PublicHostPickerGroup title="Archived jobs" description="Historical host results retained from archived jobs. Archived hosts are no longer published to the public page." hosts={archivedHosts} draft={draft} onChange={setDraft} /> : null}<Pagination page={hosts.data?.pagination} onChange={setHostOffset} /></>}</div><div className="public-save-controls"><div className="heading-actions"><button type="button" className="button primary" disabled={save.isPending} onClick={() => save.mutate()}>{save.isPending ? 'Saving…' : 'Save public view'}</button><a className="button secondary" href={publicSlug ? `/public/${encodeURIComponent(publicSlug)}` : '/public'} target="_blank" rel="noreferrer">Preview public page ↗</a></div>{save.isSuccess && <div ref={feedbackRef} className="success-banner save-feedback" role="status" tabIndex={-1}>Public view saved.</div>}{save.error && <div ref={feedbackRef} className="save-feedback" tabIndex={-1}><ErrorNotice message={isConflict(save.error) ? 'Another administrator changed the public view. The current settings were reloaded; review them and save again.' : save.error instanceof Error ? save.error.message : 'Could not save public view.'} retryLabel="Try again" onRetry={() => save.mutate()} /></div>}</div></section>
+  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Administration</p><h1>Public status</h1><p className="muted">Publish a small, unauthenticated highlights page for explicitly selected hosts.</p></div><Globe2 className="muted-icon" size={24} /></div>{remoteChanged && <div className="notice warning" role="status"><span><strong>Another administrator saved the public view while you were editing.</strong> Review the latest settings before choosing which version to save.</span><div className="heading-actions"><button type="button" className="button secondary" disabled={save.isPending} onClick={() => rebase()}>Keep my edits and use the latest revision</button><button type="button" className="text-button" disabled={save.isPending} onClick={adopt}>Load theirs</button></div></div>}{hasDraft && remoteChanged && isConflict(save.error) && <p className="notice" role="status">Your save was refused because the settings changed. Your edits are still here; choose whether to keep them or load the current version.</p>}<div className="legacy-banner"><LockKeyhole size={17} /><span><strong>Exposure warning.</strong> Published ports and ownership metadata are visible without a login. Private addresses never trigger an external registry lookup.</span></div><div className="panel"><div className="settings-form"><label className="checkbox-label" htmlFor="public-status-enabled"><input id="public-status-enabled" type="checkbox" checked={draft.enabled} onChange={event => setDraft(value => ({ ...value, enabled: event.target.checked }))} /><span>Enable public status page</span></label><label>Title<input value={draft.title} onChange={event => setDraft(value => ({ ...value, title: limitUnicode(event.target.value, PUBLIC_TITLE_MAX_LENGTH) }))} /></label><label>Introduction<textarea value={draft.introduction} onChange={event => setDraft(value => ({ ...value, introduction: limitUnicode(singleLine(event.target.value), PUBLIC_INTRODUCTION_MAX_LENGTH) }))} rows={3} /><small>Shown as one paragraph. Line breaks are not allowed and become spaces.</small></label></div></div><div className="panel"><div className="panel-heading"><div><h2>Published hosts</h2><p className="muted">Select individual effective IPs. New DNS or CIDR results are not published automatically.</p></div><ShieldCheck className="muted-icon" size={20} /></div>{hosts.isLoading ? <div className="loading"><span className="spinner" />Loading hosts…</div> : hosts.error ? <ErrorNotice message="Could not load scanned hosts." onRetry={() => hosts.refetch()} /> : <>{activeHosts.length ? <PublicHostPickerGroup title="Active jobs" description="Hosts from scheduled, paused, or newly configured jobs." hosts={activeHosts} draft={draft} onChange={setDraft} /> : <div className="inline-empty">No hosts from active jobs.</div>}{archivedHosts.length ? <PublicHostPickerGroup title="Archived jobs" description="Historical host results retained from archived jobs. Archived hosts are no longer published to the public page." hosts={archivedHosts} draft={draft} onChange={setDraft} /> : null}<Pagination page={hosts.data?.pagination} onChange={setHostOffset} /></>}</div><div className="public-save-controls"><div className="heading-actions"><button type="button" className="button primary" disabled={save.isPending || (remoteChanged && isConflict(save.error))} onClick={() => save.mutate()}>{save.isPending ? 'Saving…' : 'Save public view'}</button><a className="button secondary" href={publicSlug ? `/public/${encodeURIComponent(publicSlug)}` : '/public'} target="_blank" rel="noreferrer">Preview public page ↗</a></div>{save.isSuccess && <div ref={feedbackRef} className="success-banner save-feedback" role="status" tabIndex={-1}>Public view saved.</div>}{save.error && <div ref={feedbackRef} className="save-feedback" tabIndex={-1}><ErrorNotice message={isConflict(save.error) ? 'The current settings changed. Review them above, then keep your edits or load theirs.' : save.error instanceof Error ? save.error.message : 'Could not save public view.'} retryLabel="Try again" onRetry={() => save.mutate()} /></div>}</div></section>
 }
 
 function PublicHostPickerGroup({ title, description, hosts, draft, onChange }: { title: string; description: string; hosts: Awaited<ReturnType<typeof listHosts>>['hosts']; draft: PublicDraft; onChange: React.Dispatch<React.SetStateAction<PublicDraft>> }) {
@@ -49,55 +49,6 @@ type PublicDraft = { enabled: boolean; title: string; introduction: string; host
 
 function isConflict(error: unknown) {
   return error instanceof APIError && error.code === 'conflict'
-}
-
-/**
- * The administrator's draft of the public view. A clean draft follows the
- * server: any refetch, such as on window focus or a live-update reconnect,
- * replaces it. Once the administrator edits it, a refetch no longer does.
- * The draft keeps the updated_at it was loaded with, so saving it after
- * another administrator's save answers 409 instead of silently undoing
- * that save, and remoteChanged says that happened.
- */
-function usePublicDraft(value: Awaited<ReturnType<typeof getPublicDashboardConfig>> | undefined) {
-  // Keep the server snapshot stable between renders, so the effect below runs
-  // only when the server's answer changes, not after every local edit.
-  const snapshot = useMemo(() => value ? { enabled: value.enabled, title: value.title, introduction: value.introduction, hosts: value.hosts, updated_at: value.updated_at } : undefined, [value])
-  const [draft, setDraftState] = useState<PublicDraft>(snapshot ?? { enabled: false, title: 'EdgeWatch public status', introduction: '', hosts: [], updated_at: '' })
-  const [remoteChanged, setRemoteChanged] = useState(false)
-  const dirty = useRef(false)
-  const draftToken = useRef(draft.updated_at)
-  draftToken.current = draft.updated_at
-  const latest = useRef(snapshot)
-  latest.current = snapshot
-  useEffect(() => {
-    if (!snapshot) return
-    if (!dirty.current) {
-      setDraftState(snapshot)
-      setRemoteChanged(false)
-      return
-    }
-    setRemoteChanged(snapshot.updated_at !== draftToken.current)
-  }, [snapshot])
-  const setDraft = useCallback<React.Dispatch<React.SetStateAction<PublicDraft>>>(update => {
-    dirty.current = true
-    setDraftState(update)
-  }, [])
-  const replaceDraft = useCallback((next: PublicDraft) => {
-    dirty.current = false
-    setRemoteChanged(false)
-    setDraftState(next)
-  }, [])
-  // Drops the edits and follows the server again, adopting its current
-  // answer now and the refetch that follows.
-  const client = useQueryClient()
-  const discardDraft = useCallback(() => {
-    dirty.current = false
-    setRemoteChanged(false)
-    if (latest.current) setDraftState(latest.current)
-    void client.invalidateQueries({ queryKey: ['public-dashboard-config'] })
-  }, [client])
-  return { draft, setDraft, replaceDraft, remoteChanged, discardDraft }
 }
 
 /** `slug` selects a business unit's page (/public/<slug>); without it the default unit's page is shown. */

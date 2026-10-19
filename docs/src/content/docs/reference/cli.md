@@ -37,10 +37,10 @@ docker compose exec edgewatch edgewatch status \
 
 ## Commands and options
 
-Every documented host command except `version` and `help` takes `--config`
-(default `/etc/edgewatch/config.yaml`), and every command except `daemon`,
-`version`, and `help` takes `--output text|json`
-(default `text`). A command refuses an option that does not apply to it.
+Commands that read deployment settings accept `--config`
+(default `/etc/edgewatch/config.yaml`); commands that support structured
+output accept `--output text|json` (default `text`). The table lists each
+command's additional options. Commands refuse options that do not apply.
 `edgewatch help` and `edgewatch --help` list the commands, and
 `edgewatch COMMAND --help` lists the options of one command with their
 defaults.
@@ -60,6 +60,7 @@ defaults.
 | `verify` | `--from FILE` (check a backup file instead of the configured database), `--allow-key-mismatch` (with `--from` only) |
 | `health` | none |
 | `notify test` | `--tenant` |
+| `scanner-identities recover` | `--confirm-all-volume-users-stopped` (required; text output only, no `--config`) |
 | `admin setup-token` | `--force` (required, because it replaces the current token); `admin reissue-setup-token` is the same command |
 | `admin platform-setup-token` | `--force`, required only while an unused platform setup token exists |
 | `admin reset-password` | `--username` (default `admin`), `--password-file FILE`, `--tenant` |
@@ -158,14 +159,17 @@ produced. Text output prints nothing on stdout when health is unhealthy or the
 configuration/database cannot be read. A healthy or starting
 daemon prints its status, and `warnings` list actions that do not stop
 EdgeWatch, such as removing imported notification URLs from `config.yaml` or a
-scanner identity-pool or seccomp failure. In `auto` mode, such a scanner failure
+scanner identity-pool or seccomp failure. Scanner health reads the lease
+journal without leasing an identity and reports active, quarantined,
+in-use-by-other-processes, and free counts; it warns when free capacity falls
+below `max_concurrent_scans`. In `auto` mode, such a scanner failure
 prevents launches; it does not start scanners as UID 0. The scanner sandbox is
 unconfined only when `scanner.sandbox: off` is explicit. Notifications in
 `notifications.sandbox: auto` can fall back to the daemon's identity. Both
 documents include `scanner_sandbox`, which reports how scanner processes start
 in this container: `state` is `enforced`, `disabled`, or `unavailable`;
 `identity_pool` reports the per-invocation strategy, UID/GID range, maximum
-parallel leases, and any pool reason. Scanner status has no single
+parallel leases, live counts, and any pool reason. Scanner status has no single
 `process_uid`, because each invocation leases its own identity.
 `capabilities` lists what a sandboxed scanner keeps, and `reason` explains an
 unavailable sandbox. Its

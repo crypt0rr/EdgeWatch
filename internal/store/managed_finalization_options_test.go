@@ -29,12 +29,11 @@ func TestFinalizeManagedScanWithOptionsUsesDefaultBudgetsAndMissingLeaseFallback
 	}
 	scan := managedFinalizationScan(record, "managed-options-defaults-scan")
 
-	// An owner without a lease exercises the safe job-row write-lock fallback.
-	// A missing writer-wait budget defaults independently while the explicit
-	// work budget keeps the test bounded.
+	// A finalization without a lease owner uses the safe job-row write-lock
+	// fallback. A missing writer-wait budget defaults independently while the
+	// explicit work budget keeps the test bounded.
 	_, err = s.System().FinalizeManagedScanWithOptions(ctx, &scan, record.ID, scan.ConfigHash, nil, ManagedScanFinalizationOptions{
 		WorkTimeout: time.Second,
-		LeaseOwner:  "lease-not-created",
 	}, func(*model.JobState, *model.Scan, IncidentReminderSettings) ([]model.Event, error) {
 		return nil, nil
 	})

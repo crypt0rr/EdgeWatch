@@ -288,7 +288,7 @@ func boolMetric(value bool) float64 {
 var (
 	metricsHealthStates    = []string{healthReady, healthStarting, healthUnhealthy}
 	metricsMigrationStates = []string{"migrating", "ready", "failed", "unknown"}
-	metricsSandboxStates   = []string{model.SandboxStateSandboxed, model.SandboxStateIdentityOnly, model.SandboxStateLandlockOnly, model.SandboxStateUnconfined}
+	metricsSandboxStates   = []string{model.SandboxStateSandboxed, model.SandboxStateIdentityOnly, model.SandboxStateLandlockOnly, model.SandboxStateUnconfined, model.SandboxStateLaunchesRefused}
 	metricsUpdateStatuses  = []string{"up_to_date", "update_available", "ahead", "check_failed", "disabled", "development_build"}
 )
 

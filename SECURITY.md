@@ -887,7 +887,7 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 74 must not be opened by an older EdgeWatch
+database upgraded to schema 75 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
@@ -962,7 +962,13 @@ Schema 74 adds a scalar job-runtime projection for scheduled probe-budget
 skips and an index for rows awaiting the copy. The daemon backfills in
 restartable batches of 250 from validated legacy runtime JSON; malformed or
 oversized values become empty markers. It does not rewrite scan history,
-runtime snapshots, or baselines.
+runtime snapshots, or baselines. Schema 75 adds separate projections for scan
+unit results and compact coverage status. Coverage omits port inventories and
+service evidence; the immutable full snapshot remains unchanged. Startup
+backfills one scan per restartable transaction, leaving malformed legacy
+snapshots untouched and marking their projections empty. An older release must
+not open the upgraded database; rollback requires the complete pre-upgrade
+backup.
 Only the daemon migrates, and only one process at a time: from v0.36.0 the
 daemon holds an advisory lock on the database directory, which restores take
 too, from before it opens the database until migration and startup finish and

@@ -30,10 +30,11 @@ const (
 // The confinement states of a sandbox that a deployment-health alert
 // reports, from the best to the worst.
 const (
-	SandboxStateSandboxed    = "sandboxed"
-	SandboxStateIdentityOnly = "identity_only"
-	SandboxStateLandlockOnly = "landlock_only"
-	SandboxStateUnconfined   = "unconfined"
+	SandboxStateSandboxed       = "sandboxed"
+	SandboxStateIdentityOnly    = "identity_only"
+	SandboxStateLandlockOnly    = "landlock_only"
+	SandboxStateUnconfined      = "unconfined"
+	SandboxStateLaunchesRefused = "launches_refused"
 )
 
 // SecurityAlertWindowKind returns the kind whose alert window coalesces an

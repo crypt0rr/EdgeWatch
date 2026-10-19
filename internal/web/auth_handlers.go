@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
+	"github.com/crypt0rr/edgewatch/internal/sandbox"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/updatecheck"
 )
@@ -91,6 +92,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 	// How scanner and notification processes start is deployment-wide and
 	// names no unit's data.
 	scannerSandbox, notificationSandbox := s.App.ScannerSandbox(), s.App.NotificationSandbox()
+	scannerSandbox = refreshScannerIdentityPoolStatus(r.Context(), scannerSandbox)
 	status := adminStatusView{
 		Configured:          true,
 		Username:            user.Username,
@@ -167,6 +169,27 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 		status.Telemetry = &telemetry
 	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+func refreshScannerIdentityPoolStatus(ctx context.Context, status sandbox.Status) sandbox.Status {
+	if ctx == nil || status.Mode == sandbox.ModeOff || status.IdentityPool == nil {
+		return status
+	}
+	inspectCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	pool, err := sandbox.InspectScannerIdentityPool(inspectCtx)
+	cancel()
+	if err != nil {
+		return status
+	}
+	if pool == nil {
+		return status
+	}
+	if status.State == sandbox.StateUnavailable {
+		pool.State = sandbox.StateUnavailable
+		pool.Reason = status.Reason
+	}
+	status.IdentityPool = pool
+	return status
 }
 
 const deploymentTelemetryTTL = 30 * time.Second

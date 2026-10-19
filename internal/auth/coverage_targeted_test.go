@@ -343,13 +343,13 @@ func TestLimiterMapInitializationEvictionAndCleanup(t *testing.T) {
 	for i := len(fails); i < authLimiterMaxEntries; i++ {
 		fails["f"+string(rune(i))] = []time.Time{now}
 	}
-	// The oldest failure is evicted when the bounded map is full.
+	// Admission evicts one key from a bounded activity sample when the map is full.
 	if len(fails) != authLimiterMaxEntries {
 		t.Fatalf("test limiter size = %d", len(fails))
 	}
 	evictFailureBucketLocked(now, fails, blocked)
-	if _, ok := fails["old"]; ok {
-		t.Fatal("oldest failure bucket was not evicted")
+	if len(fails) != authLimiterMaxEntries-1 {
+		t.Fatalf("failure eviction size = %d", len(fails))
 	}
 
 	// A blocked-only key is also eligible for eviction, and empty failure
@@ -405,4 +405,29 @@ func TestLimiterMapInitializationEvictionAndCleanup(t *testing.T) {
 	if got := legacySourceScope("source:proxy:203.0.113.4"); got != "203.0.113.4" {
 		t.Fatalf("scoped legacy source scope = %q", got)
 	}
+}
+
+func TestLimiterSweepIsThrottledAndRunsWhenDue(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	m := &Manager{
+		fails:        map[string][]time.Time{"expired": {now.Add(-authFailureWindow - time.Second)}},
+		blocked:      map[string]time.Time{"expired": now.Add(-time.Second)},
+		accountFails: map[string][]time.Time{}, accountBlocked: map[string]time.Time{},
+		loginClientFails: map[string][]time.Time{}, loginClientBlocked: map[string]time.Time{},
+		secondFactor: map[string]*secondFactorState{}, accountSignInFailures: map[string]*accountSignInFailureState{},
+		lastLimiterSweep: now,
+	}
+	m.mu.Lock()
+	m.sweepLimiterIfDueLocked(now.Add(authLimiterSweepInterval - time.Nanosecond))
+	if len(m.fails) != 1 || len(m.blocked) != 1 {
+		m.mu.Unlock()
+		t.Fatal("limiter maps swept before the configured interval")
+	}
+	m.sweepLimiterIfDueLocked(now.Add(authLimiterSweepInterval))
+	if len(m.fails) != 0 || len(m.blocked) != 0 {
+		m.mu.Unlock()
+		t.Fatalf("limiter maps remain after due sweep: fails=%d blocked=%d", len(m.fails), len(m.blocked))
+	}
+	m.mu.Unlock()
 }

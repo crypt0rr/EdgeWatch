@@ -23,6 +23,55 @@ func cycleFixture(t *testing.T) (context.Context, *Store, JobRecord, scanner.Wor
 	return ctx, s, job, plan
 }
 
+func TestFinalizeManagedScanRejectsSecondPromotionOfCompletedCycle(t *testing.T) {
+	t.Parallel()
+	ctx, s, job, plan := cycleFixture(t)
+	defer s.Close()
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	cycle, err = s.System().CompleteScanCycle(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizerCalls := 0
+	finalize := func(id string) error {
+		now := time.Now().UTC()
+		_, err := s.System().FinalizeManagedScan(ctx, &model.Scan{ID: id, JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: cycle.StartedAt, FinishedAt: now, Status: "success", ConfigHash: job.Job.SecurityHash(), CycleID: cycle.ID, CycleAttempt: cycle.AttemptCount, CycleStatus: cycle.Status, Snapshot: model.Snapshot{}}, job.ID, job.Job.SecurityHash(), nil, func(*model.JobState, *model.Scan) ([]model.Event, error) {
+			finalizerCalls++
+			return nil, nil
+		})
+		return err
+	}
+	if err := finalize("cycle-promote-once"); err != nil {
+		t.Fatal(err)
+	}
+	if err := finalize("cycle-promote-twice"); !errors.Is(err, ErrCycleNotResumable) {
+		t.Fatalf("second promotion error = %v, want ErrCycleNotResumable", err)
+	}
+	if finalizerCalls != 1 {
+		t.Fatalf("finalizer calls = %d, want only the first promotion", finalizerCalls)
+	}
+	var promoted int
+	if err := s.DB.QueryRowContext(ctx, scanCycleHasScanQuery, cycle.ID, job.TenantID).Scan(&promoted); err != nil || promoted != 1 {
+		t.Fatalf("promoted rows = %d, %v; want one", promoted, err)
+	}
+}
+
 func TestListActiveScanCycleSummariesFiltersArchiveAndOmitsPlan(t *testing.T) {
 	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)

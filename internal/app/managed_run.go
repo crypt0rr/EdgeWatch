@@ -457,11 +457,32 @@ func (r *managedRun) finalize(ctx, scanCtx context.Context, snapshot model.Snaps
 		return *scan, nil, errors.Join(finalizeErr, scanErr)
 	}
 	if errors.Is(finalizeErr, store.ErrCycleNotResumable) {
-		// The store retained this result as immutable history but deliberately
-		// skipped runtime comparison because the cycle was discarded or expired.
+		// The store deliberately skipped runtime comparison because the cycle
+		// was discarded, expired, or already promoted by another finalizer.
 		r.leaseReleased = true
 		r.publishCompletion("Scan " + scan.Status)
 		return *scan, nil, finalizeErr
+	}
+	if errors.Is(finalizeErr, store.ErrJobLeaseLost) {
+		// A lost lease fences this result from runtime comparison. Record it as
+		// a failed history row while leaving completed cycle checkpoints
+		// available for recovery by the lease owner.
+		r.leaseReleased = true
+		failed := *scan
+		failed.Status = "failed"
+		failed.Error = "scan was not compared because the job lease was lost before finalization"
+		failed.Comparison = model.ScanComparisonNotCompared
+		failed.Changes = nil
+		saveCtx, saveCancel := context.WithTimeout(persistCtx, scanPersistenceWriterWaitTimeout+persistTimeout)
+		saveErr := r.system.SaveScan(saveCtx, failed)
+		saveCancel()
+		if saveErr == nil {
+			*scan = failed
+		} else if a.Logger != nil {
+			a.Logger.Error("scan with a lost job lease could not be recorded", "job", job.Name, "scan_id", scan.ID, "error", saveErr)
+		}
+		r.publishCompletion("Scan was not compared because the job lease was lost")
+		return *scan, nil, errors.Join(finalizeErr, saveErr)
 	}
 	if finalizeErr != nil {
 		if a.Logger != nil {

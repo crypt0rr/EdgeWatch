@@ -1,6 +1,9 @@
 package store
 
-import "database/sql"
+import (
+	"context"
+	"database/sql"
+)
 
 // The scans table stores snapshot_json, a scan's complete result, before the
 // columns that later schemas added, among them job_id, tenant_id,
@@ -59,9 +62,9 @@ ON CONFLICT(table_name) DO UPDATE SET complete=0,updated_at=excluded.updated_at`
 // is still copying its latest-host projection for schema 54 has no guard
 // triggers yet; the copy installs these when it completes, because rows
 // whose scan retention removed must pass it first.
-func migration66ConditionalStatements(tx *sql.Tx) ([]string, error) {
+func migration66ConditionalStatements(ctx context.Context, tx *sql.Tx) ([]string, error) {
 	var installed int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN (?,?)`, latestScanHostsTenantInsertTrigger, latestScanHostsTenantUpdateTrigger).Scan(&installed); err != nil || installed == 0 {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN (?,?)`, latestScanHostsTenantInsertTrigger, latestScanHostsTenantUpdateTrigger).Scan(&installed); err != nil || installed == 0 {
 		return nil, err
 	}
 	return append([]string{

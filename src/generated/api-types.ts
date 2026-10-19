@@ -89,6 +89,10 @@ export type ScannerIdentityPoolStatus = {
   uid_start: number
   uid_end: number
   max_parallel: number
+  active: number
+  quarantined: number
+  in_use_by_other_processes: number
+  free: number
   reason?: string
 }
 

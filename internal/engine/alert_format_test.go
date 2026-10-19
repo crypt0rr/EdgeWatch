@@ -123,6 +123,13 @@ func TestFormatHealthAlerts(t *testing.T) {
 				"Run edgewatch health and see the container hardening guide.",
 		},
 		{
+			name:  "scanner launches refused",
+			alert: &model.AlertDetail{Kind: model.HealthAlertSandboxDegraded, Subject: "scanner", Previous: model.SandboxStateSandboxed, Current: model.SandboxStateLaunchesRefused},
+			want: "⚠️ EdgeWatch deployment alert: the scanner processes lost confinement\n" +
+				"Now: scanner launches refused （fail closed）\nBefore: sandboxed with Landlock\n" +
+				"Run edgewatch health and see the container hardening guide.",
+		},
+		{
 			name:  "sandbox recovered",
 			alert: &model.AlertDetail{Kind: model.HealthAlertSandboxRecovered, Subject: "notification", Previous: model.SandboxStateLandlockOnly, Current: model.SandboxStateIdentityOnly},
 			want: "🟢 EdgeWatch deployment alert: the notification process regained confinement\n" +

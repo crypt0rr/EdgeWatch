@@ -495,6 +495,7 @@ func TestForeignKeysOffMigrationHandlesCancellation(t *testing.T) {
 		statements  []string
 		cancelFirst bool
 		wantError   string
+		alsoError   string
 	}{
 		{
 			name:        "before the run",
@@ -509,9 +510,12 @@ func TestForeignKeysOffMigrationHandlesCancellation(t *testing.T) {
 			wantError:  "schema migration 7: context canceled",
 		},
 		{
-			name:       "after the last statement",
+			// Cancellation may be observed by the statement itself or by the
+			// foreign-key check immediately after it, depending on scheduling.
+			name:       "during the final statement",
 			statements: append(slices.Clone(rebuild), "SELECT edgewatch_test_cancel_migration()"),
-			wantError:  "schema migration 7: check foreign keys after the rebuild: context canceled",
+			wantError:  "schema migration 7: context canceled",
+			alsoError:  "schema migration 7: check foreign keys after the rebuild: context canceled",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -526,7 +530,7 @@ func TestForeignKeysOffMigrationHandlesCancellation(t *testing.T) {
 			defer cancelMigrationForTest.Store(nil)
 
 			err := runMigration(ctx, db, 7, test.statements, true)
-			if !errors.Is(err, context.Canceled) || err.Error() != test.wantError {
+			if !errors.Is(err, context.Canceled) || (err.Error() != test.wantError && err.Error() != test.alsoError) {
 				t.Fatalf("error = %v, want %q wrapping context.Canceled", err, test.wantError)
 			}
 			assertParentsUnchanged(t, db, before)

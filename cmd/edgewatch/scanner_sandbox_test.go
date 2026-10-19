@@ -111,21 +111,21 @@ func TestNotifyCheckReadsTheCertificateAuthorities(t *testing.T) {
 func TestScannerSandboxWarningsFailClosedWhenThePoolIsUnavailable(t *testing.T) {
 	t.Parallel()
 	unavailable := sandbox.Status{Mode: sandbox.ModeAuto, State: sandbox.StateUnavailable, IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateUnavailable, Reason: "the container does not grant KILL"}, Reason: "the container does not grant KILL"}
-	if got := scannerSandboxWarnings(unavailable); len(got) != 1 || got[0] != "scanner launches are unavailable because the per-invocation identity pool could not be enforced: the container does not grant KILL" {
+	if got := scannerSandboxWarnings(unavailable, 1); len(got) != 1 || got[0] != "scanner launches are refused because the per-invocation identity pool could not be enforced: the container does not grant KILL" {
 		t.Fatalf("root warnings = %q", got)
 	}
 	restricted := unavailable
 	restricted.Landlock = sandbox.LandlockStatus{State: sandbox.StateEnforced, ABI: 6}
-	if got := scannerSandboxWarnings(restricted); len(got) != 1 || got[0] != "scanner launches are unavailable because the per-invocation identity pool could not be enforced: the container does not grant KILL" {
+	if got := scannerSandboxWarnings(restricted, 1); len(got) != 1 || got[0] != "scanner launches are refused because the per-invocation identity pool could not be enforced: the container does not grant KILL" {
 		t.Fatalf("root warnings with Landlock = %q", got)
 	}
 	fallback := sandbox.Status{
 		Mode: sandbox.ModeAuto, State: sandbox.StateEnforced,
-		IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced},
+		IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 1, Free: 1},
 		Landlock:     sandbox.LandlockStatus{Mode: sandbox.ModeAuto, State: sandbox.StateUnavailable, Reason: "nmap could not start with Landlock and seccomp"},
 		Seccomp:      sandbox.SeccompStatus{State: sandbox.StateEnforced},
 	}
-	if got := scannerSandboxWarnings(fallback); len(got) != 1 || got[0] != "scanner processes start with identity isolation and seccomp but without Landlock: nmap could not start with Landlock and seccomp" {
+	if got := scannerSandboxWarnings(fallback, 1); len(got) != 1 || got[0] != "scanner processes start with identity isolation and seccomp but without Landlock: nmap could not start with Landlock and seccomp" {
 		t.Fatalf("Landlock fallback warnings = %q", got)
 	}
 	controlFailure := sandbox.Status{
@@ -135,7 +135,7 @@ func TestScannerSandboxWarningsFailClosedWhenThePoolIsUnavailable(t *testing.T) 
 		Seccomp:      sandbox.SeccompStatus{State: sandbox.StateEnforced},
 		Reason:       "nmap could not start with the required identity and seccomp policy; scanner launches are unavailable",
 	}
-	if got := scannerSandboxWarnings(controlFailure); len(got) != 1 || got[0] != "scanner launches are unavailable: nmap could not start with the required identity and seccomp policy; scanner launches are unavailable" {
+	if got := scannerSandboxWarnings(controlFailure, 1); len(got) != 1 || got[0] != "scanner launches are refused: nmap could not start with the required identity and seccomp policy; scanner launches are unavailable" {
 		t.Fatalf("Nmap control failure warnings = %q", got)
 	}
 	rootNotification := sandbox.Status{Mode: sandbox.ModeAuto, State: sandbox.StateUnavailable, ProcessUID: sandboxUIDPointer(0), Reason: "the container does not grant KILL"}
@@ -147,12 +147,26 @@ func TestScannerSandboxWarningsFailClosedWhenThePoolIsUnavailable(t *testing.T) 
 		t.Fatalf("notification root warnings with Landlock = %q", got)
 	}
 	for name, status := range map[string]sandbox.Status{
-		"enforced": {State: sandbox.StateEnforced, IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced}},
+		"enforced": {State: sandbox.StateEnforced, IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 1, Free: 1}},
 		"disabled": {Mode: sandbox.ModeOff, State: sandbox.StateDisabled, ProcessUID: sandboxUIDPointer(0)},
 	} {
-		if got := scannerSandboxWarnings(status); len(got) != 0 {
+		if got := scannerSandboxWarnings(status, 1); len(got) != 0 {
 			t.Errorf("%s warnings = %q, want none", name, got)
 		}
+	}
+}
+
+func TestScannerSandboxWarningsWhenFreeCapacityIsBelowConcurrency(t *testing.T) {
+	status := sandbox.Status{
+		Mode: sandbox.ModeAuto, State: sandbox.StateEnforced,
+		IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, Active: 3, Quarantined: 2, InUseByOtherProcesses: 1, Free: 4, MaxParallel: 10},
+	}
+	warnings := scannerSandboxWarnings(status, 5)
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "4 free slots") || !strings.Contains(warnings[0], "max_concurrent_scans=5") || !strings.Contains(warnings[0], "reduce max_concurrent_scans") {
+		t.Fatalf("low-capacity warnings = %q", warnings)
+	}
+	if got := scannerSandboxWarnings(status, 4); len(got) != 0 {
+		t.Fatalf("capacity at configured concurrency warned: %q", got)
 	}
 }
 
@@ -186,12 +200,12 @@ func TestLogScannerSandboxNamesTheOutcome(t *testing.T) {
 		want   string
 	}{
 		"enforced":         {status: sandbox.NewEnforced().Status(), want: `"level":"INFO","msg":"scanner processes use per-invocation identities","strategy":"per_invocation","uid_start":60000,"uid_end":60063,"max_parallel":64`},
-		"unavailable root": {status: sandbox.Status{State: sandbox.StateUnavailable, IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateUnavailable, Reason: "no KILL"}, Reason: "no KILL"}, want: `"level":"WARN","msg":"scanner launches are unavailable; see the container hardening guide","reason":"no KILL"`},
-		"unavailable user": {status: sandbox.Status{State: sandbox.StateUnavailable, IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateUnavailable, Reason: "not root"}, Reason: "not root"}, want: `"level":"WARN","msg":"scanner launches are unavailable; see the container hardening guide","reason":"not root"`},
+		"unavailable root": {status: sandbox.Status{State: sandbox.StateUnavailable, IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateUnavailable, Reason: "no KILL"}, Reason: "no KILL"}, want: `"level":"WARN","msg":"scanner launches are refused; see the container hardening guide","reason":"no KILL"`},
+		"unavailable user": {status: sandbox.Status{State: sandbox.StateUnavailable, IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateUnavailable, Reason: "not root"}, Reason: "not root"}, want: `"level":"WARN","msg":"scanner launches are refused; see the container hardening guide","reason":"not root"`},
 		"off":              {status: sandbox.Status{State: sandbox.StateDisabled}, want: `"msg":"scanner sandbox is off; scanner processes run unconfined"`},
 		"Landlock only": {
 			status: sandbox.Status{State: sandbox.StateUnavailable, IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateUnavailable, Reason: "no KILL"}, Reason: "no KILL", Landlock: sandbox.LandlockStatus{State: sandbox.StateEnforced, ABI: 6}},
-			want:   `"level":"WARN","msg":"scanner launches are unavailable; see the container hardening guide","reason":"no KILL"`,
+			want:   `"level":"WARN","msg":"scanner launches are refused; see the container hardening guide","reason":"no KILL"`,
 		},
 		"Landlock": {status: sandbox.NewEnforced().WithLandlock("/usr/local/bin/edgewatch", 6).WithSeccomp().Status(), want: `"level":"INFO","msg":"scanner processes are restricted with Landlock","abi":6,"seccomp":"enforced"`},
 		"no Landlock": {

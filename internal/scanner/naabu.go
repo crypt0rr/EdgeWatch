@@ -953,10 +953,12 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 		scannerReservation = reservation.scannerReservation()
 	}
 	invocationPolicy := n.sandbox.WithScannerIdentityReservation(scannerReservation)
-	temporary, err = sandbox.PreparePrivateTemporaryDirectory(ctx, cmd, invocationPolicy)
+	temporaryPolicy := invocationPolicy.WithScannerNetworkCapabilities(false, false)
+	temporary, err = sandbox.PreparePrivateTemporaryDirectory(ctx, cmd, temporaryPolicy)
 	if err != nil {
 		return naabuDiscovery{}, "", ExecutableStartError(cmd.Path, err)
 	}
+	invocationPolicy = invocationPolicy.WithScannerNetworkCapabilities(options.ScanType == "syn", options.ScanType == "syn")
 	invocation, err = sandbox.PrepareScannerInvocation(ctx, cmd, invocationPolicy, false)
 	if err != nil {
 		return naabuDiscovery{}, "", err

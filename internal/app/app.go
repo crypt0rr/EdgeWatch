@@ -1241,10 +1241,13 @@ func (a *App) Daemon(ctx context.Context) error {
 			a.Logger.Info("shutdown notification claims released", "claims", released)
 		}
 	}()
-	a.wakeDelivery()
 	// Close expired planned change windows before the first normal heartbeat.
 	// The durable review remains due even if its optional summary delivery fails.
 	a.expireChangeWindows(ctx, system, true)
+	// Wake the drain only after expiry has atomically coalesced held alerts and
+	// queued the close summary. Otherwise a startup window can leak individual
+	// alerts before this pass records its durable review.
+	a.wakeDelivery()
 	// Compare the sandboxes with the states that the last deployment-health
 	// alerts reported, once at startup and then with each heartbeat.
 	a.checkDeploymentAlerts(ctx, a.nowUTC())

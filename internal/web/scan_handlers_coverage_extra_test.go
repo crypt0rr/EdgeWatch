@@ -514,7 +514,7 @@ func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
 	if err := db.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.DB.ExecContext(ctx, `UPDATE scans SET changes_json=?, snapshot_json=? WHERE id=?`, []byte(`{`), []byte(`{`), scan.ID); err != nil {
+	if _, err := db.DB.ExecContext(ctx, `UPDATE scans SET changes_json=?, snapshot_json=?, results_json=? WHERE id=?`, []byte(`{`), []byte(`{`), []byte(`{`), scan.ID); err != nil {
 		t.Fatal(err)
 	}
 	for name, invoke := range map[string]func(*httptest.ResponseRecorder){

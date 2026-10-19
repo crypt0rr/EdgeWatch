@@ -126,8 +126,8 @@ func profileFor(mask string) (capabilityProfile, error) {
 		return capabilityProfile{launch: mask, post: mask, ambient: []uintptr{13}, applyNaabuCapTransition: true}, nil
 	case "0000000000003000": // Explicit SYN scan: NET_ADMIN and NET_RAW.
 		return capabilityProfile{launch: mask, post: "0000000000002000", ambient: []uintptr{12, 13}, applyNaabuCapTransition: true}, nil
-	case "nmap-0000000000003000": // Nmap keeps the full explicit SYN capability profile.
-		return capabilityProfile{launch: "0000000000003000", post: "0000000000003000", ambient: []uintptr{12, 13}}, nil
+	case "nmap-0000000000003000": // Nmap retains only NET_RAW even when the daemon grants NET_ADMIN.
+		return capabilityProfile{launch: "0000000000002000", post: "0000000000002000", ambient: []uintptr{13}}, nil
 	default:
 		return capabilityProfile{}, fmt.Errorf("unsupported exact scanner capability profile %q", mask)
 	}
@@ -630,6 +630,19 @@ def create_job(base, state, name, tcp_ports, udp_ports, timing):
     return request(base, state, "POST", "/jobs", job)["id"]
 
 
+def scan_marker(base, state, name, expected):
+    job_id = create_job(base, state, name, "80", "", "fast")
+    request(base, state, "POST", f"/jobs/{job_id}/run")
+    scan = wait_for_scan(base, state, job_id, {"success", "incomplete", "failed", "timed_out", "canceled"})
+    if scan["status"] != "success":
+        raise SystemExit(f"marker scan {scan['id']} ended {scan['status']}: {scan.get('error', '')}")
+    results = request(base, state, "GET", f"/jobs/{job_id}/scans/{scan['id']}/results?limit=100")["results"]
+    services = [port.get("service", "") for unit in results for port in unit.get("ports") or []]
+    if not any(expected in service for service in services):
+        raise SystemExit(f"marker scan expected {expected!r} through the Nmap XML output, got {services!r}")
+    print(json.dumps({"service_markers": services}))
+
+
 def create_naabu_job(base, state, name, rate=10000):
     # A fast connect profile keeps the full-range discovery of one loopback
     # address to seconds. SYN discovery of loopback drops ports at any rate
@@ -690,6 +703,9 @@ def main():
             # services, which can change between runs. Report the listener.
             observed = [entry for entry in observed if entry[1] == int(wanted)]
         print(json.dumps(observed))
+    elif command == "scan-marker":
+        name, expected = args
+        scan_marker(base, state, name, expected)
     elif command in ("start", "start-naabu"):
         if command == "start":
             name, tcp_ports = args
@@ -1655,6 +1671,60 @@ fallback_warning=$(docker exec "$container" edgewatch health --config /etc/edgew
 stop_daemon
 daemon_mounts=()
 
+# Exercise the production Nmap scan branch, which combines Landlock with the
+# XML file-size limit. The stand-in reads a world-readable marker outside the
+# scanner allowlist and reports that result through its inherited XML output
+# descriptor. The identity-only control uses the same Nmap command and must
+# read the marker successfully.
+mkdir -m 0755 "$workdir/nmap-scan-landlock-probe"
+printf 'landlock scan-mode marker\n' >"$workdir/nmap-scan-landlock-probe/marker"
+chmod 0644 "$workdir/nmap-scan-landlock-probe/marker"
+cat >"$workdir/nmap-scan-landlock" <<'SH'
+#!/bin/sh
+if [ "$1" = --version ]; then
+  echo 'Nmap version 7.99 ( https://nmap.org )'
+  exit 0
+fi
+xml=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -oX ] && [ "$#" -gt 1 ]; then
+    xml=$2
+    shift 2
+  else
+    shift
+  fi
+done
+[ -n "$xml" ] || exit 2
+if /bin/cat /opt/edgewatch-nmap-scan-probe/marker >/dev/null 2>&1; then
+  marker=landlock-allowed
+else
+  marker=landlock-denied
+fi
+cat >"$xml" <<EOF
+<?xml version="1.0"?>
+<nmaprun><host><status state="up"/><address addr="127.0.0.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="80"><state state="open"/><service name="http" product="$marker" method="probed"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>
+EOF
+SH
+chmod 0755 "$workdir/nmap-scan-landlock"
+daemon_mounts=(--volume "$workdir/nmap-scan-landlock:/usr/bin/nmap:ro"
+  --volume "$workdir/nmap-scan-landlock-probe:/opt/edgewatch-nmap-scan-probe:ro")
+daemon_landlock=auto
+run_daemon nmap-scan-landlock auto "${bundled_caps[@]}"
+expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:1000,65536 pool:enforced,per_invocation,60000-60063,64"
+scan_marker_output=$(python3 "$workdir/driver.py" scan-marker "$base" "$state" nmap-landlock-scan landlock-denied) ||
+  fail "the file-size-limited Nmap scan did not report the Landlock denial through XML: $scan_marker_output"
+echo "verified file-size-limited Nmap scan under Landlock: $scan_marker_output"
+stop_daemon
+daemon_landlock=off
+run_daemon nmap-scan-identity-control auto "${bundled_caps[@]}"
+expect_health "enforced - NET_RAW landlock:disabled seccomp:enforced limits:1000,65536 pool:enforced,per_invocation,60000-60063,64"
+scan_marker_output=$(python3 "$workdir/driver.py" scan-marker "$base" "$state" nmap-identity-scan landlock-allowed) ||
+  fail "the identity-only Nmap control did not read the marker and report it through XML: $scan_marker_output"
+echo "verified file-size-limited identity-only Nmap control: $scan_marker_output"
+stop_daemon
+daemon_mounts=()
+daemon_landlock=auto
+
 # If the identity+seccomp control also fails, Auto must keep the scanner
 # unavailable. The private marker is unreadable to the leased scanner UID;
 # the /tmp marker proves the identity-only retry ran (Landlock denies that
@@ -1791,8 +1861,19 @@ deliver_notification() {
 tcp_ports="$tcp_open,$tcp_closed"
 udp_ports="$udp_open"
 
+# The exec probe is a mode-0755 file on a normal bind mount. Docker's /tmp
+# tmpfs is noexec, so this gives the Landlock check both a positive control
+# and an exec-capable path.
+mkdir -m 0755 "$workdir/landlock-exec"
+cat >"$workdir/landlock-exec/probe" <<'SH'
+#!/bin/sh
+echo landlock-exec-positive-control
+SH
+chmod 0755 "$workdir/landlock-exec/probe"
+
 # The bundled Compose deployment: the scanner keeps NET_RAW only and uses a
 # distinct leased UID/GID for each invocation.
+daemon_mounts=(--volume "$workdir/landlock-exec:/opt/edgewatch-landlock-exec:ro")
 run_daemon base auto "${bundled_caps[@]}"
 expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:1000,65536 pool:enforced,per_invocation,60000-60063,64"
 expect_legacy_tmp_grant_rejected
@@ -1821,6 +1902,12 @@ if output=$(landlocked /tmp/edgewatch-landlock-exec 2>&1); then
 fi
 printf '%s\n' "$output" | grep -qi 'permission denied' || fail "executing a file in /tmp failed for another reason than Landlock: $output"
 docker exec "$container" rm -f /tmp/edgewatch-landlock-exec
+exec_control=$(docker exec "$container" /opt/edgewatch-landlock-exec/probe) || fail "the exec-capable bind-mount positive control could not run"
+[ "$exec_control" = landlock-exec-positive-control ] || fail "the exec-capable bind-mount positive control returned '$exec_control'"
+if output=$(landlocked /opt/edgewatch-landlock-exec/probe 2>&1); then
+  fail "a Landlock-restricted process executed a file from the exec-capable bind mount"
+fi
+printf '%s\n' "$output" | grep -qi 'permission denied' || fail "executing the bind-mounted probe failed for another reason than Landlock: $output"
 for escape in "cat /var/lib/edgewatch/edgewatch.db" "ls /var/lib/edgewatch" "cat /etc/edgewatch/config.yaml" \
   "touch /var/lib/edgewatch/escape" "cp /bin/true /tmp/escape && /tmp/escape"; do
   if output=$(landlocked /bin/sh -c "$escape" 2>&1); then
@@ -1884,22 +1971,30 @@ if [ -n "$(scanner_pids nmap)" ]; then
   fail "Nmap kept running after the scan was cancelled"
 fi
 
-# A sandboxed Nmap that edgewatch scan started dies with it: the kernel keeps
-# the parent-death signal across the change to its leased UID and the executions
-# of sandbox-exec and Nmap.
+# A sandboxed Nmap and supervisor that edgewatch scan started die when that
+# scan command exits: the supervisor's parent-death signal and its child
+# supervision keep both processes tied to the command that owns the scan.
 python3 "$workdir/driver.py" create "$base" "$state" orphaned "1-20000" >/dev/null
 docker exec -d "$container" edgewatch scan --config /etc/edgewatch/config.yaml --job orphaned
 hold_scanner_process nmap --stats-every
 nmap_pid=$held_scanner_pid
 [ -n "$nmap_pid" ] || fail "edgewatch scan started no Nmap"
-scan_pid=$(docker exec "$container" awk '/^PPid:/{print $2}' "/proc/$nmap_pid/status")
+supervisor_pid=$(docker exec "$container" awk '/^PPid:/{print $2}' "/proc/$nmap_pid/status")
+scan_pid=$(docker exec "$container" awk '/^PPid:/{print $2}' "/proc/$supervisor_pid/status")
+scan_command=$(docker exec "$container" /bin/sh -c 'tr "\000" " " <"/proc/$1/cmdline"' sh "$scan_pid")
+[[ "$scan_command" == *"edgewatch scan"* ]] || fail "the scanner supervisor parent is not the edgewatch scan command: PID $scan_pid '$scan_command'"
 docker exec "$container" kill -9 "$scan_pid"
 resume_held_scanner
 for attempt in $(seq 1 20); do
-  docker exec "$container" test -d "/proc/$nmap_pid" || break
-  [ "$(docker exec "$container" awk '/^State:/{print $2}' "/proc/$nmap_pid/status" 2>/dev/null)" = Z ] && break
+  nmap_state=$(docker exec "$container" awk '/^State:/{print $2; exit}' "/proc/$nmap_pid/status" 2>/dev/null || true)
+  supervisor_state=$(docker exec "$container" awk '/^State:/{print $2; exit}' "/proc/$supervisor_pid/status" 2>/dev/null || true)
+  nmap_live=0
+  supervisor_live=0
+  case "$nmap_state" in ''|Z|X) ;; *) nmap_live=1 ;; esac
+  case "$supervisor_state" in ''|Z|X) ;; *) supervisor_live=1 ;; esac
+  [ "$nmap_live $supervisor_live" = "0 0" ] && break
   sleep 0.5
-  [ "$attempt" = 20 ] && fail "Nmap kept running after edgewatch scan was killed"
+  [ "$attempt" = 20 ] && fail "edgewatch scan exit left supervisor state '$supervisor_state' or Nmap state '$nmap_state' alive"
 done
 stop_daemon
 
@@ -1922,7 +2017,7 @@ hold_scanner_process nmap --stats-every
 nmap_pid=$held_scanner_pid
 nmap_starttime=$held_scanner_starttime
 nmap_uid=$(scanner_uid "$nmap_pid")
-expect_scanner_identity "$nmap_pid" "0000000000003000" "0000000000003000"
+expect_scanner_identity "$nmap_pid" "0000000000003000" "0000000000002000"
 expect_nmap_file_size_limit "Landlock Nmap" "$nmap_pid"
 expect_private_scan_file "Nmap XML" "$nmap_pid" 'edgewatch-nmap-*.xml'
 expect_private_nmap_xml "$nmap_pid" "nmap-0000000000003000" "$nmap_uid" "$nmap_starttime"
@@ -2045,7 +2140,11 @@ quarantined_pid=$naabu_pid
 quarantined_namespace=$naabu_namespace
 quarantined_leaf=$naabu_leaf
 quarantined_target=$naabu_source_input
+quarantined_input=$naabu_input
+quarantined_database=$naabu_database
 [ -n "$quarantined_target" ] || fail "the proof-timeout Naabu scan has no inherited target-list file"
+[ -n "$quarantined_input" ] || fail "the proof-timeout Naabu scan has no saved leaf input path"
+[ -n "$quarantined_database" ] || fail "the proof-timeout Naabu scan has no saved database path"
 supervisor_pid=$(scanner_supervisor_pid "$naabu_pid")
 docker exec "$container" kill -STOP "$supervisor_pid" || fail "could not stop the verified scanner supervisor $supervisor_pid"
 cancel_detail=$(python3 "$workdir/driver.py" cancel-detail "$base" "$state" "$job_id" "$scan_id")
@@ -2067,8 +2166,17 @@ quarantined_target_stat=$(docker exec "$container" stat -c '%a %u %g' "$quaranti
 [ "$quarantined_target_stat" = "604 0 0" ] || fail "proof failure changed the parent-owned target-list file to '$quarantined_target_stat'"
 quarantined_journal_state=$(docker exec "$container" cat /var/lib/edgewatch/scanner-identities/leases.json | python3 -c 'import json, sys; journal=json.load(sys.stdin); print(journal.get("leases", {}).get(sys.argv[1], {}).get("state", "missing"))' "$quarantined_uid")
 [ "$quarantined_journal_state" = quarantined ] || fail "proof failure left scanner UID $quarantined_uid in journal state '$quarantined_journal_state'"
-child_leaf_contents=$(docker exec --user "$quarantined_uid:$quarantined_uid" "$container" find "$quarantined_leaf" -mindepth 1 -maxdepth 1 -print 2>/dev/null || true)
-echo "verified failed-proof quarantine: UID=$quarantined_uid journal=$quarantined_journal_state namespace=$quarantined_namespace ($quarantined_namespace_stat), leaf=$quarantined_leaf ($quarantined_leaf_stat), parent-owned source=$quarantined_target ($quarantined_target_stat), child-owned leaf entries=${child_leaf_contents:-<empty>}"
+quarantined_health_count=$(docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml --output json |
+  python3 -c 'import json, sys; health=json.load(sys.stdin); print(health["scanner_sandbox"]["identity_pool"]["quarantined"])')
+[ "$quarantined_health_count" -ge 1 ] || fail "health JSON reports only $quarantined_health_count quarantined scanner identities after proof failure"
+docker exec --user "$quarantined_uid:$quarantined_uid" "$container" test -f "$quarantined_input" || fail "proof failure removed the saved leaf-local Naabu input"
+docker exec --user "$quarantined_uid:$quarantined_uid" "$container" test -d "$quarantined_database" || fail "proof failure removed the saved Naabu database directory"
+docker exec --user "$quarantined_uid:$quarantined_uid" "$container" test -f "$quarantined_database/CURRENT" || fail "proof failure removed the saved Naabu database CURRENT file"
+child_leaf_contents=$(docker exec --user "$quarantined_uid:$quarantined_uid" "$container" find "$quarantined_leaf" -mindepth 1 -maxdepth 1 -print 2>&1) ||
+  fail "proof failure quarantine leaf could not be listed: $child_leaf_contents"
+printf '%s\n' "$child_leaf_contents" | grep -Fxq "$quarantined_input" || fail "proof failure quarantine listing omitted saved input $quarantined_input: $child_leaf_contents"
+printf '%s\n' "$child_leaf_contents" | grep -Fxq "$quarantined_database" || fail "proof failure quarantine listing omitted saved database $quarantined_database: $child_leaf_contents"
+echo "verified failed-proof quarantine: UID=$quarantined_uid journal=$quarantined_journal_state health-count=$quarantined_health_count namespace=$quarantined_namespace ($quarantined_namespace_stat), leaf=$quarantined_leaf ($quarantined_leaf_stat), parent-owned source=$quarantined_target ($quarantined_target_stat), child-owned leaf entries=${child_leaf_contents:-<empty>}"
 
 started=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" after-proof-timeout-naabu)
 job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')

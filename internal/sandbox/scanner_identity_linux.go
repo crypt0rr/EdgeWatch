@@ -43,7 +43,7 @@ var (
 // scannerIdentityAllocator serializes scanner UID/GID leases across daemon
 // processes and records every lease before a scanner can start. A lease that
 // is not explicitly released after the supervisor proves the scanner subtree
-// is gone remains occupied until the kernel boot ID changes.
+// is gone remains occupied while any process still holds its liveness lock.
 //
 // Production uses scannerIdentityDirectory. Tests use a private directory and
 // controlled boot/PID-namespace identities; callers cannot configure the
@@ -229,7 +229,101 @@ func (allocator *scannerIdentityAllocator) acquire(ctx context.Context) (*scanne
 		}
 		return lease, nil
 	}
-	return nil, errScannerIdentityPoolExhausted
+	counts := scannerIdentityPoolCounts(allocator, journal, identitiesInUse)
+	return nil, fmt.Errorf("%w: active=%d quarantined=%d in_use_by_other_processes=%d free=%d of %d; restart the container with no other EdgeWatch process using the data volume to reset the pool",
+		errScannerIdentityPoolExhausted, counts.Active, counts.Quarantined, counts.InUseByOtherProcesses, counts.Free, counts.MaxParallel)
+}
+
+func scannerIdentityPoolCounts(allocator *scannerIdentityAllocator, journal scannerIdentityJournal, identitiesInUse map[uint32]struct{}) *ScannerIdentityPoolStatus {
+	status := scannerIdentityPoolStatus(StateEnforced, "")
+	status.UIDStart = int(allocator.uidStart)
+	status.UIDEnd = int(allocator.uidStart + allocator.count - 1)
+	status.MaxParallel = int(allocator.count)
+	for _, entry := range journal.Leases {
+		switch entry.State {
+		case "active":
+			status.Active++
+		case "quarantined":
+			status.Quarantined++
+		}
+	}
+	for uid := range identitiesInUse {
+		if _, leased := journal.Leases[uid]; !leased {
+			status.InUseByOtherProcesses++
+		}
+	}
+	status.Free = status.MaxParallel - status.Active - status.Quarantined - status.InUseByOtherProcesses
+	if status.Free < 0 {
+		status.Free = 0
+	}
+	return status
+}
+
+func inspectProductionScannerIdentityPool(ctx context.Context) (*ScannerIdentityPoolStatus, error) {
+	allocator := productionScannerIdentityAllocator()
+	status, err := allocator.inspect(ctx)
+	if err == nil {
+		return status, nil
+	}
+	reason := scannerIdentityProbeUnavailableReason(err)
+	return scannerIdentityPoolStatus(StateUnavailable, reason), err
+}
+
+func (allocator *scannerIdentityAllocator) inspect(ctx context.Context) (*ScannerIdentityPoolStatus, error) {
+	if ctx == nil || allocator == nil || allocator.directory == "" || allocator.markerDir == "" || allocator.uidStart == 0 || allocator.count == 0 ||
+		allocator.bootID == nil || allocator.pidNamespace == nil || allocator.privateRuntime == nil || allocator.validateMap == nil || allocator.inUse == nil {
+		return nil, errors.New("scanner identity allocator: inspection inputs are invalid")
+	}
+	bootID, err := allocator.bootID()
+	if err != nil || !validBootID(bootID) {
+		return nil, errors.New("scanner identity allocator: kernel boot identity is unavailable")
+	}
+	pidNamespace, err := allocator.pidNamespace()
+	if err != nil || pidNamespace == 0 {
+		return nil, errors.New("scanner identity allocator: PID namespace identity is unavailable")
+	}
+	privateRuntime, err := allocator.privateRuntime()
+	if err != nil {
+		return nil, errors.New("scanner identity allocator: private runtime scope is unavailable")
+	}
+	if err := allocator.validateMap(allocator.uidStart, allocator.count); err != nil {
+		return nil, err
+	}
+	identitiesInUse, err := allocator.inUse(allocator.uidStart, allocator.count)
+	if err != nil {
+		return nil, errors.New("scanner identity allocator: current identity use cannot be inspected")
+	}
+	directoryFD, markerFD, err := openScannerIdentityDirectoriesReadOnly(allocator.directory, allocator.markerDir)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(directoryFD)
+	defer unix.Close(markerFD)
+	lockFD, err := openExistingScannerIdentityLock(directoryFD)
+	if err != nil {
+		return nil, errors.New("scanner identity allocator: journal lock is unavailable for health inspection")
+	}
+	defer unix.Close(lockFD)
+	if err := lockScannerIdentityShared(ctx, lockFD); err != nil {
+		return nil, err
+	}
+	defer func() { _ = unix.Flock(lockFD, unix.LOCK_UN) }()
+	marker, err := readScannerIdentityMarker(markerFD)
+	if err != nil {
+		return nil, errors.New("scanner identity allocator: boot marker is unavailable")
+	}
+	journal, err := readScannerIdentityJournal(directoryFD)
+	if err != nil {
+		return nil, errors.New("scanner identity allocator: lease journal is unavailable")
+	}
+	if marker.BootID != bootID || marker.PIDNamespace != pidNamespace || marker.PrivateRuntime != privateRuntime ||
+		journal.Version != scannerIdentityVersion || journal.BootID != bootID || journal.PIDNamespace != pidNamespace || journal.PrivateRuntime != privateRuntime {
+		return nil, errors.New("scanner identity allocator: PID namespace changed without exclusive private-scope proof")
+	}
+	if err := allocator.validateJournal(journal); err != nil {
+		return nil, err
+	}
+	return scannerIdentityPoolCounts(allocator, journal, identitiesInUse), nil
 }
 
 func (lease *scannerIdentityLease) identity() (int, int, bool) {
@@ -251,8 +345,8 @@ func (lease *scannerIdentityLease) inheritedScannerLivenessFile() (*os.File, err
 }
 
 // quarantine keeps an invocation's identity unavailable after supervisor,
-// process-tree, or cleanup uncertainty. It is intentionally not reversible
-// during the same boot.
+// process-tree, or cleanup uncertainty. A clean container restart can archive
+// and reset it after all processes holding the previous liveness locks exit.
 func (lease *scannerIdentityLease) quarantine() error {
 	if lease == nil || lease.finished {
 		return errors.New("quarantine scanner identity: lease is unavailable")
@@ -604,38 +698,6 @@ func (allocator *scannerIdentityAllocator) privateRuntimeForLease(lease *scanner
 	return allocator.privateScope(pidNamespace)
 }
 
-// transitionEmptyPrivateScope permits a same-boot PID namespace change only
-// when both the durable previous scope and the current runtime have an
-// isolated /tmp, the previous journal contains no lease, and any interrupted
-// journal-first transition is exactly recognizable. Nonempty state always
-// fails closed because a prior scanner subtree may still exist.
-func (allocator *scannerIdentityAllocator) transitionEmptyPrivateScope(directoryFD, markerFD int, bootID string, pidNamespace uint64, privateRuntime bool, marker scannerIdentityScope, journal scannerIdentityJournal) (scannerIdentityJournal, error) {
-	if !privateRuntime || !marker.PrivateRuntime || journal.Version != scannerIdentityVersion || journal.BootID != bootID || !journal.PrivateRuntime || journal.Leases == nil || len(journal.Leases) != 0 {
-		return scannerIdentityJournal{}, errors.New("scanner identity allocator: PID namespace changed with unsafe or occupied scope")
-	}
-	if err := allocator.validateJournal(journal); err != nil {
-		return scannerIdentityJournal{}, err
-	}
-	switch journal.PIDNamespace {
-	case marker.PIDNamespace:
-		// Begin a new isolated container scope. Persist the empty journal first;
-		// if marker persistence fails, the next acquire recognizes and completes
-		// only this empty, private, same-boot transition.
-		journal.PIDNamespace = pidNamespace
-		if err := writeScannerIdentityJournal(directoryFD, journal); err != nil {
-			return scannerIdentityJournal{}, errors.New("scanner identity allocator: empty private scope transition journal failed")
-		}
-	case pidNamespace:
-		// The journal commit completed but the matching marker commit did not.
-	default:
-		return scannerIdentityJournal{}, errors.New("scanner identity allocator: PID namespace transition state is inconsistent")
-	}
-	if err := writeScannerIdentityMarker(markerFD, bootID, pidNamespace, true); err != nil {
-		return scannerIdentityJournal{}, errors.New("scanner identity allocator: empty private scope transition marker failed")
-	}
-	return journal, nil
-}
-
 func initializeScannerIdentityScope(directoryFD, markerFD int, bootID string, pidNamespace uint64, privateRuntime bool, operation string) (scannerIdentityJournal, error) {
 	journal := scannerIdentityJournal{Version: scannerIdentityVersion, BootID: bootID, PIDNamespace: pidNamespace, PrivateRuntime: privateRuntime, Leases: make(map[uint32]scannerIdentityJournalEntry)}
 	if err := writeScannerIdentityJournal(directoryFD, journal); err != nil {
@@ -943,6 +1005,67 @@ func openScannerIdentityDirectories(path, markerDir string) (int, int, error) {
 		return -1, -1, errors.New("scanner identity allocator directory is not private to the daemon")
 	}
 	return directoryFD, markerFD, nil
+}
+
+func openScannerIdentityDirectoriesReadOnly(path, markerDir string) (int, int, error) {
+	if filepath.Clean(filepath.Dir(path)) != filepath.Clean(markerDir) || filepath.Base(path) == "." || filepath.Base(path) == string(filepath.Separator) {
+		return -1, -1, errors.New("scanner identity allocator paths must be sibling directories")
+	}
+	markerFD, err := unix.Open(markerDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return -1, -1, errors.New("scanner identity allocator trusted parent is unavailable")
+	}
+	if err := validateScannerIdentityParent(markerFD); err != nil {
+		_ = unix.Close(markerFD)
+		return -1, -1, err
+	}
+	directoryFD, err := unix.Openat(markerFD, filepath.Base(path), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		_ = unix.Close(markerFD)
+		return -1, -1, errors.New("scanner identity allocator private directory is unavailable")
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(directoryFD, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0o7777 != 0o700 {
+		_ = unix.Close(directoryFD)
+		_ = unix.Close(markerFD)
+		return -1, -1, errors.New("scanner identity allocator directory is not private to the daemon")
+	}
+	return directoryFD, markerFD, nil
+}
+
+func openExistingScannerIdentityLock(directoryFD int) (int, error) {
+	fd, err := unix.Openat(directoryFD, scannerIdentityLock, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return -1, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Nlink != 1 || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0o7777 != 0o600 || stat.Size != 0 {
+		_ = unix.Close(fd)
+		return -1, errors.New("scanner identity allocator lock metadata is invalid")
+	}
+	return fd, nil
+}
+
+func lockScannerIdentityShared(ctx context.Context, fd int) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := unix.Flock(fd, unix.LOCK_SH|unix.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EINTR) {
+			return errors.New("scanner identity allocator lock failed")
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func validateScannerIdentityParent(fd int) error {

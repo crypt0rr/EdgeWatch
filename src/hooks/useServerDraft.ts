@@ -10,9 +10,10 @@ type ControlledDraft<TDraft, TRevision> = {
   onChange: (snapshot: ServerDraftSnapshot<TDraft, TRevision> | null) => void
 }
 
-type ServerDraftOptions<TServer, TDraft, TRevision> = {
+type ServerDraftOptions<TServer, TDraft, TRevision, TView> = {
   createDraft?: (server: TServer) => TDraft
-  mergeDraft?: (server: TServer, draft: TDraft) => TServer
+  mergeDraft?: (server: TServer, draft: TDraft) => TView
+  captureDraft?: (server: TServer, view: TView) => TDraft
   controlled?: ControlledDraft<TDraft, TRevision>
 }
 
@@ -22,22 +23,23 @@ type ServerDraftOptions<TServer, TDraft, TRevision> = {
  * adopted from the server, discarded, or marked saved. `mergeDraft` lets
  * partially edited forms keep following server updates for untouched fields.
  */
-export function useServerDraft<TServer, TDraft = TServer, TRevision = string>(
+export function useServerDraft<TServer, TDraft = TServer, TRevision = string, TView = TServer>(
   server: TServer,
   revision: TRevision,
-  options: ServerDraftOptions<TServer, TDraft, TRevision> = {},
+  options: ServerDraftOptions<TServer, TDraft, TRevision, TView> = {},
 ) {
   const [internalSnapshot, setInternalSnapshot] = useState<ServerDraftSnapshot<TDraft, TRevision> | null>(null)
   const controlled = options.controlled
   const snapshot = controlled ? controlled.snapshot ?? null : internalSnapshot
   const createDraft = options.createDraft ?? ((value: TServer) => value as unknown as TDraft)
-  const mergeDraft = options.mergeDraft ?? ((_server: TServer, draft: TDraft) => draft as unknown as TServer)
-  const draft = snapshot ? mergeDraft(server, snapshot.value) : server
+  const mergeDraft = options.mergeDraft ?? ((_server: TServer, draft: TDraft) => draft as unknown as TView)
+  const captureDraft = options.captureDraft ?? ((_server: TServer, view: TView) => view as unknown as TDraft)
+  const draft = mergeDraft(server, snapshot ? snapshot.value : createDraft(server))
   const baseRevision = snapshot?.baseRevision ?? revision
   const remoteChanged = snapshot !== null && !Object.is(snapshot.baseRevision, revision)
 
-  const latest = useRef({ server, revision, snapshot, controlled, createDraft })
-  latest.current = { server, revision, snapshot, controlled, createDraft }
+  const latest = useRef({ server, revision, snapshot, controlled, createDraft, mergeDraft, captureDraft })
+  latest.current = { server, revision, snapshot, controlled, createDraft, mergeDraft, captureDraft }
 
   const publish = (next: ServerDraftSnapshot<TDraft, TRevision> | null) => {
     latest.current.snapshot = next
@@ -45,13 +47,13 @@ export function useServerDraft<TServer, TDraft = TServer, TRevision = string>(
     else setInternalSnapshot(next)
   }
 
-  const setDraft: Dispatch<SetStateAction<TDraft>> = update => {
+  const setDraft: Dispatch<SetStateAction<TView>> = update => {
     const current = latest.current
-    const previous = current.snapshot?.value ?? current.createDraft(current.server)
-    const value = typeof update === 'function'
-      ? (update as (value: TDraft) => TDraft)(previous)
+    const previous = current.mergeDraft(current.server, current.snapshot ? current.snapshot.value : current.createDraft(current.server))
+    const view = typeof update === 'function'
+      ? (update as (value: TView) => TView)(previous)
       : update
-    publish({ value, baseRevision: current.snapshot?.baseRevision ?? current.revision })
+    publish({ value: current.captureDraft(current.server, view), baseRevision: current.snapshot?.baseRevision ?? current.revision })
   }
 
   const clear = () => publish(null)

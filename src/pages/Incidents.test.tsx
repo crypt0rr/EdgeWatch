@@ -218,6 +218,53 @@ describe('shared review workflow', () => {
     expect(note).toHaveFocus()
   })
 
+  it('keeps the evidence panel, review draft and focus after a background refetch fails', async () => {
+    vi.mocked(listIncidents).mockResolvedValueOnce(page() as never).mockRejectedValueOnce(new Error('temporary inbox failure'))
+    const { client } = renderInbox(['/incidents?view=all_active'])
+    await waitForInbox()
+    openFirstEvidence()
+    const panel = await screen.findByRole('complementary', { name: 'Evidence and review' })
+    const note = within(panel).getByRole('textbox', { name: 'Shared reviewer note' })
+    fireEvent.change(note, { target: { value: 'Unsaved reviewer context' } })
+    note.focus()
+
+    await act(async () => { await client.invalidateQueries({ queryKey: ['incidents'] }) })
+    await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(2))
+
+    expect(screen.getByRole('complementary', { name: 'Evidence and review' })).toBeInTheDocument()
+    expect(within(panel).getByRole('textbox', { name: 'Shared reviewer note' })).toHaveValue('Unsaved reviewer context')
+    expect(note).toHaveFocus()
+    expect(await screen.findByText(/Could not refresh the investigation inbox\. Showing the last loaded results\./)).toBeInTheDocument()
+  })
+
+  it('shows the saved review revision while the post-save refetch is pending and disables edits during save', async () => {
+    let finishSave!: (value: IncidentReview) => void
+    let finishRefetch!: (value: IncidentInboxPage & { incidents: IncidentInboxItem[] }) => void
+    const savedReview: IncidentReview = { ...review, status: 'investigating', reviewer_label: 'Riley Reviewer', reviewed_at: '2026-10-12T10:00:00Z', note: 'Saved note', revision: 1 }
+    vi.mocked(listIncidents).mockResolvedValueOnce(page() as never).mockReturnValueOnce(new Promise(resolve => { finishRefetch = resolve }) as never)
+    vi.mocked(updateIncidentReview).mockReturnValueOnce(new Promise(resolve => { finishSave = resolve }) as never)
+    renderInbox(['/incidents?view=all_active'])
+    await waitForInbox()
+    openFirstEvidence()
+    const panel = await screen.findByRole('complementary', { name: 'Evidence and review' })
+    const note = within(panel).getByRole('textbox', { name: 'Shared reviewer note' })
+    fireEvent.change(note, { target: { value: 'Saved note' } })
+    const save = within(panel).getByRole('button', { name: 'Save review' })
+    fireEvent.click(save)
+    expect(note).toBeDisabled()
+    expect(within(panel).getByRole('combobox', { name: 'Review status' })).toBeDisabled()
+
+    await act(async () => { finishSave(savedReview) })
+    expect(await within(panel).findByText(/Review saved/)).toBeInTheDocument()
+    expect(note).toHaveValue('Saved note')
+    expect(within(panel).getByText('Revision 1')).toBeInTheDocument()
+    expect(note).toBeDisabled()
+
+    await act(async () => { finishRefetch(page([{ ...item, review: savedReview, view_status: 'investigating' }]) as never) })
+    await waitFor(() => expect(note).not.toBeDisabled())
+    expect(note).toHaveValue('Saved note')
+  })
+
   it('keeps focus on Save after a successful save refreshes the selected row', async () => {
     const savedReview = { ...review, status: 'investigating', reviewer_label: 'Riley Reviewer', reviewed_at: '2026-10-12T10:00:00Z', note: 'My draft', revision: 1 }
     const refreshed = { ...item, review: savedReview, incident: { ...item.incident, last_seen_at: '2026-10-12T08:00:00Z' }, view_status: 'investigating' }
@@ -402,7 +449,8 @@ describe('follow-up due refresh', () => {
       await waitForInbox()
       await act(async () => { await vi.advanceTimersByTimeAsync(dueAt - start.getTime() + 250) })
       await waitFor(() => expect(listIncidents).toHaveBeenCalledTimes(2))
-      expect(screen.getByRole('alert')).toHaveTextContent('Could not load investigation inbox items.')
+      expect(await screen.findByText(/Could not refresh the investigation inbox\. Showing the last loaded results\./)).toBeInTheDocument()
+      expect(screen.getByRole('cell', { name: 'Follow-up due' })).toBeInTheDocument()
 
       Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
       await act(async () => { window.dispatchEvent(new Event('visibilitychange')) })

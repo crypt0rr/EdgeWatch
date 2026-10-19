@@ -446,9 +446,13 @@ func insertIncidentEvidenceScan(t *testing.T, ctx context.Context, s *Store, job
 	if err != nil {
 		t.Fatal(err)
 	}
+	results, coverage, err := marshalScanEvidenceProjections(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	stamp := sqliteTimestamp(finished)
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scans(id,job_id,job,started_at,finished_at,status,comparison,config_hash,snapshot_json,tenant_id)
-		VALUES(?,?,?,?,?,?,?,?,?,?)`, id, job.ID, job.Job.Name, stamp, stamp, status, comparison, job.Job.SecurityHash(), raw, job.TenantID); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scans(id,job_id,job,started_at,finished_at,status,comparison,config_hash,snapshot_json,results_json,results_unit_count,coverage_summary_json,tenant_id)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, job.ID, job.Job.Name, stamp, stamp, status, comparison, job.Job.SecurityHash(), raw, results, len(snapshot.Units), coverage, job.TenantID); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -499,7 +503,7 @@ func seedLargeIncidentInboxPage(t *testing.T, incidentCount, hostCount, paddingB
 	return s, ts, job, now, len(rawSnapshot)
 }
 
-func TestIncidentInboxFullPageReadsAndDecodesLargeComparedSnapshotOnce(t *testing.T) {
+func TestIncidentInboxFullPageReadsAndDecodesCompactCoverageProjectionOnce(t *testing.T) {
 	s, ts, _, now, snapshotBytes := seedLargeIncidentInboxPage(t, 400, 3000, 1400)
 	if snapshotBytes < 3<<20 {
 		t.Fatalf("large evidence snapshot is %d bytes; want a multi-megabyte fixture", snapshotBytes)
@@ -508,7 +512,7 @@ func TestIncidentInboxFullPageReadsAndDecodesLargeComparedSnapshotOnce(t *testin
 	connectionsInUseDuringDecode := -1
 	page, err := ts.listIncidentInboxWithSnapshotAccess(context.Background(), IncidentInboxFilter{View: "all_active", Limit: 400, Now: now.Add(time.Hour)}, func(ctx context.Context, key incidentInboxSnapshotKey) ([]byte, error) {
 		readCount++
-		return readIncidentInboxSnapshot(ctx, s.ReadDB, key)
+		return readIncidentInboxCoverageSummary(ctx, s.ReadDB, key)
 	}, func(raw []byte, snapshot *model.Snapshot) error {
 		decodeCount++
 		connectionsInUseDuringDecode = s.ReadDB.Stats().InUse
@@ -521,10 +525,25 @@ func TestIncidentInboxFullPageReadsAndDecodesLargeComparedSnapshotOnce(t *testin
 		t.Fatalf("full inbox page = limit %d, total %d, items %d; want 400 rows", page.Limit, page.Total, len(page.Items))
 	}
 	if readCount != 1 || decodeCount != 1 {
-		t.Fatalf("full-page shared scan accesses = %d reads and %d decodes; want one each", readCount, decodeCount)
+		t.Fatalf("full-page coverage accesses = %d reads and %d decodes; want one each", readCount, decodeCount)
 	}
 	if connectionsInUseDuringDecode != 0 {
-		t.Fatalf("read connections in use while decoding = %d; want the snapshot query connection released before decode", connectionsInUseDuringDecode)
+		t.Fatalf("read connections in use while decoding = %d; want the coverage query connection released before decode", connectionsInUseDuringDecode)
+	}
+}
+
+func TestIncidentInboxClassifiesFinalizedScanWithoutReadingSnapshot(t *testing.T) {
+	ctx := context.Background()
+	s, ts, _, now, _ := seedLargeIncidentInboxPage(t, 1, 2, 16)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scans SET snapshot_json='{' WHERE id='shared-newer-scan'`); err != nil {
+		t.Fatal(err)
+	}
+	page, err := ts.ListIncidentInbox(ctx, IncidentInboxFilter{View: "all_active", Limit: 10, Now: now.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ObservationUncertainty.Reason != IncidentReasonLatestScanDoesNotEstablishRecovery {
+		t.Fatalf("classification with corrupt full snapshot = %+v; want the valid compact coverage projection to decide the reason", page.Items)
 	}
 }
 
@@ -566,7 +585,7 @@ func TestIncidentInboxIncompleteNewerScanDoesNotReadItsSnapshot(t *testing.T) {
 	readCount, decodeCount := 0, 0
 	page, err := ts.listIncidentInboxWithSnapshotAccess(ctx, IncidentInboxFilter{View: "all_active", Limit: 10, Now: lastSeen.Add(time.Hour)}, func(ctx context.Context, key incidentInboxSnapshotKey) ([]byte, error) {
 		readCount++
-		return readIncidentInboxSnapshot(ctx, s.ReadDB, key)
+		return readIncidentInboxCoverageSummary(ctx, s.ReadDB, key)
 	}, func(raw []byte, snapshot *model.Snapshot) error {
 		decodeCount++
 		return json.Unmarshal(raw, snapshot)
@@ -608,7 +627,7 @@ func TestIncidentInboxSnapshotDeletedAfterMetadataReadIsUnclassifiable(t *testin
 		if _, err := s.DB.ExecContext(ctx, `DELETE FROM scans WHERE id=? AND tenant_id=? AND job_id=?`, key.scanID, key.tenantID, key.jobID); err != nil {
 			return nil, err
 		}
-		return readIncidentInboxSnapshot(ctx, s.ReadDB, key)
+		return readIncidentInboxCoverageSummary(ctx, s.ReadDB, key)
 	}, func(raw []byte, snapshot *model.Snapshot) error {
 		decodeCount++
 		return json.Unmarshal(raw, snapshot)
@@ -635,7 +654,7 @@ func TestIncidentInboxSnapshotReaderRequiresTenantAndJob(t *testing.T) {
 		{tenantID: job.TenantID, jobID: "another-job", scanID: "scoped-snapshot"},
 		{tenantID: secondTenantID, jobID: job.ID, scanID: "scoped-snapshot"},
 	} {
-		if _, err := readIncidentInboxSnapshot(ctx, s.ReadDB, key); !errors.Is(err, sql.ErrNoRows) {
+		if _, err := readIncidentInboxCoverageSummary(ctx, s.ReadDB, key); !errors.Is(err, sql.ErrNoRows) {
 			t.Errorf("snapshot read for tenant/job scope %+v = %v; want sql.ErrNoRows", key, err)
 		}
 	}

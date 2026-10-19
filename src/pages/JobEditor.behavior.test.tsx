@@ -590,8 +590,8 @@ describe('job editor workflow coverage', () => {
 
     vi.mocked(getJob).mockResolvedValue(remote as never)
     await client.invalidateQueries({ queryKey: ['job', 'job-1'] })
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Reload saved version' })).toBeInTheDocument())
-    fireEvent.click(screen.getByRole('button', { name: 'Reload saved version' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Load theirs' })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Load theirs' }))
 
     await waitFor(() => expect(replacement).toBeChecked())
     expect(original).not.toBeChecked()
@@ -600,17 +600,20 @@ describe('job editor workflow coverage', () => {
     expect(vi.mocked(updateJob).mock.calls.at(-1)?.[2]).toMatchObject({ notification_destinations: ['notify-2'] })
   })
 
-  it('blocks saving a dirty draft after a newer job revision arrives', async () => {
+  it('preserves a dirty job draft and allows saving only after an explicit rebase', async () => {
     vi.mocked(getJob).mockResolvedValue(approvedJob as never)
     const { client } = renderWithProviders(<Routes><Route path="/jobs/:id/edit" element={<JobEditor />} /></Routes>, { route: ['/jobs/job-1/edit'] })
     await waitFor(() => expect(screen.getByDisplayValue('Broad edge')).toBeInTheDocument())
     fireEvent.change(screen.getByLabelText('Job name'), { target: { value: 'Draft name' } })
     vi.mocked(getJob).mockResolvedValue({ ...approvedJob, revision: 5 } as never)
     await client.invalidateQueries({ queryKey: ['job', 'job-1'] })
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Reload saved version' })).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Keep my edits' })).toBeInTheDocument())
+    expect(screen.getByLabelText('Job name')).toHaveValue('Draft name')
+    expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Keep my edits' }))
+    expect(screen.getByLabelText('Job name')).toHaveValue('Draft name')
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
-    await waitFor(() => expect(screen.getAllByRole('alert').some(alert => alert.textContent?.includes('Reload the saved version before continuing.'))).toBe(true))
-    expect(updateJob).not.toHaveBeenCalled()
+    await waitFor(() => expect(updateJob).toHaveBeenCalledWith('job-1', 5, expect.objectContaining({ name: 'Draft name' }), false))
   })
 
   describe('with a saved destination that no longer exists', () => {

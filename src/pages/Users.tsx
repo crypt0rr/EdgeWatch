@@ -6,8 +6,11 @@ import type { UserSummary } from '../api'
 import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { OneTimeLink } from '../components/OneTimeLink'
+import { useServerDraft, type ServerDraftSnapshot } from '../hooks/useServerDraft'
 
 const USERNAME_MAX_BYTES = 80
+type UserEditFields = { displayName: string; role: Role }
+type UserEditTarget = { userID: string; username: string; pending: boolean }
 
 // Mirrors the server's username rule so an invalid name is explained before
 // the request. The limit counts UTF-8 bytes, so the input's maxLength (which
@@ -44,7 +47,20 @@ function userActions(user: UserSummary, sessionUserID: string | undefined) {
 
 export function Users() {
   type Prompt = { action: 'toggle' | 'renew' | 'revoke' | 'sessions' | 'edit'; userID: string; username: string; label: string; targetEnabled?: boolean; revision?: number; linkKind?: 'activation' | 'password-reset' }
-  const client = useQueryClient(); const users = useQuery({ queryKey: ['users'], queryFn: listUsers }); const session = useQuery({ queryKey: ['session'], queryFn: getSession }); const [username, setUsername] = useState(''); const [displayName, setDisplayName] = useState(''); const [role, setRole] = useState<Role>('viewer'); const [password, setPassword] = useState(''); const [message, setMessage] = useState(''); const [error, setError] = useState(''); const [issued, setIssued] = useState<{ path: string; username: string; userID: string; kind: 'activation' | 'password-reset' } | null>(null); const [prompt, setPrompt] = useState<Prompt | null>(null); const [editDraft, setEditDraft] = useState<{ userID: string; username: string; displayName: string; originalDisplayName: string; role: Role; originalRole: Role; pending: boolean; revision: number } | null>(null)
+  const client = useQueryClient(); const users = useQuery({ queryKey: ['users'], queryFn: listUsers }); const session = useQuery({ queryKey: ['session'], queryFn: getSession }); const [username, setUsername] = useState(''); const [displayName, setDisplayName] = useState(''); const [role, setRole] = useState<Role>('viewer'); const [password, setPassword] = useState(''); const [message, setMessage] = useState(''); const [error, setError] = useState(''); const [issued, setIssued] = useState<{ path: string; username: string; userID: string; kind: 'activation' | 'password-reset' } | null>(null); const [prompt, setPrompt] = useState<Prompt | null>(null); const [editTarget, setEditTarget] = useState<UserEditTarget | null>(null); const [editSnapshot, setEditSnapshot] = useState<ServerDraftSnapshot<UserEditFields, number> | null>(null)
+  const editingUser = editTarget ? users.data?.users.find(value => value.id === editTarget.userID) : undefined
+  const editServer: UserEditFields = { displayName: editingUser?.display_name ?? editSnapshot?.value.displayName ?? '', role: editingUser?.role ?? editSnapshot?.value.role ?? 'viewer' }
+  const editRevision = editingUser?.revision ?? editSnapshot?.baseRevision ?? 0
+  const editState = useServerDraft<UserEditFields, UserEditFields, number>(editServer, editRevision, {
+    controlled: { snapshot: editSnapshot, onChange: setEditSnapshot },
+  })
+  const editDraft = editTarget ? {
+    ...editTarget,
+    ...editState.draft,
+    originalDisplayName: editServer.displayName,
+    originalRole: editServer.role,
+    revision: editState.baseRevision,
+  } : null
   const create = useMutation({ mutationFn: () => createUser(username, displayName, role, password), onSuccess: value => { setUsername(''); setDisplayName(''); setPassword(''); setIssued({ path: value.activation_path, username: value.user.username, userID: value.user.id, kind: 'activation' }); setMessage(`Created ${value.user.username}. Share the one-time activation link before leaving this page.`); void client.invalidateQueries({ queryKey: ['users'] }) }, onError: err => setError(err instanceof Error ? err.message : 'Could not create user') })
   async function submit(event: FormEvent) { event.preventDefault(); setMessage(''); setError(''); const problem = usernameProblem(username); if (problem) { setError(problem); return } create.mutate() }
   type Account = Awaited<ReturnType<typeof listUsers>>['users'][number]
@@ -64,7 +80,8 @@ export function Users() {
   function edit(user: Account) {
     setError('')
     setMessage('')
-    setEditDraft({ userID: user.id, username: user.username, displayName: user.display_name, originalDisplayName: user.display_name, role: user.role, originalRole: user.role, pending: user.pending, revision: user.revision })
+    setEditTarget({ userID: user.id, username: user.username, pending: user.pending })
+    setEditSnapshot({ value: { displayName: user.display_name, role: user.role }, baseRevision: user.revision })
     openPrompt('edit', user, `Edit account for ${user.username}`)
   }
   // Revocation, disablement, and role changes invalidate outstanding
@@ -121,17 +138,28 @@ export function Users() {
             setMessage(`Updated ${draft.username}.`)
           }
         }
-        setEditDraft(null)
+        setEditTarget(null)
+        setEditSnapshot(null)
       }
       setPrompt(null)
       await client.invalidateQueries({ queryKey: ['users'] })
     } catch (err) {
       if (err instanceof APIError && err.code === 'conflict') {
         if (prompt.action === 'edit') {
-          await client.invalidateQueries({ queryKey: ['users'] })
-          setPrompt(null)
-          setEditDraft(null)
-          setError('This account changed in another session. The latest details are loaded; review them and reopen Edit account.')
+          try {
+            const refreshed = await listUsers()
+            client.setQueryData(['users'], refreshed)
+            if (!refreshed.users.some(value => value.id === prompt.userID)) {
+              setPrompt(null)
+              setEditTarget(null)
+              setEditSnapshot(null)
+              setError('This account was removed in another session.')
+            } else {
+              setError('This account changed in another session. Your edits are kept on their original revision; keep your edits or load the latest account.')
+            }
+          } catch {
+            setError('This account changed in another session, and the latest details could not be loaded. Refresh before saving again.')
+          }
         } else if (prompt.action === 'toggle') {
           try {
             const refreshed = await listUsers()
@@ -164,7 +192,7 @@ export function Users() {
       }
     }
   }
-  const roleChangeNeedsPassword = prompt?.action === 'edit' && editDraft?.role !== editDraft?.originalRole
+  const roleChangeNeedsPassword = prompt?.action === 'edit' && editDraft?.role !== editServer.role
   const promptDescription = prompt?.action === 'edit'
     ? `Review the display name and role for ${prompt.username}. Changing this account’s role requires your administrator password.${roleChangeNeedsPassword ? ` It also revokes any outstanding ${editDraft?.pending ? 'activation' : 'password reset'} link.` : ''}`
     : prompt?.action === 'toggle'
@@ -174,7 +202,7 @@ export function Users() {
         : prompt?.action === 'sessions'
           ? `${prompt.username} is signed out on every device. Its password, authenticator, and links do not change. Enter your administrator password to authorize it.`
           : `Revoke the outstanding activation or password reset link for ${prompt?.username ?? 'this account'}. Enter your administrator password to authorize the change.`
-  function cancelPrompt() { setPrompt(null); setEditDraft(null); setError('') }
+  function cancelPrompt() { setPrompt(null); setEditTarget(null); setEditSnapshot(null); setError('') }
   return <section className="page">
     <div className="page-heading"><div><p className="eyebrow">Administration</p><h1>Users</h1><p className="muted">Invite operators and viewers without sharing passwords.</p></div><UsersIcon className="muted-icon" size={24} /></div>
     {message && <div className="success-banner" role="status">{message}</div>}
@@ -211,6 +239,6 @@ export function Users() {
         })}</div> : <div className="inline-empty">No users have been configured yet.</div>}
       </div>
     </div>
-    {prompt && <ActionDialog title={prompt.label} description={promptDescription} confirmLabel={prompt.action === 'edit' ? 'Save changes' : prompt.action === 'sessions' ? 'Revoke sessions' : 'Confirm'} valueLabel={prompt.action === 'edit' ? roleChangeNeedsPassword ? 'Administrator password' : undefined : 'Administrator password'} valueType="password" valueRequired={prompt.action !== 'edit' || !!roleChangeNeedsPassword} autoComplete="current-password" destructive={prompt.action === 'revoke' || prompt.action === 'sessions' || prompt.label.startsWith('Disable ')} restoreFocus={prompt.action !== 'renew'} onConfirm={confirmAction} onCancel={cancelPrompt} error={error}>{prompt.action === 'edit' && editDraft && <><label>Display name<input value={editDraft.displayName} maxLength={80} onChange={event => setEditDraft(value => value ? { ...value, displayName: event.target.value } : value)} /></label><label>Role<select value={editDraft.role} onChange={event => setEditDraft(value => value ? { ...value, role: event.target.value as Role } : value)}><option value="viewer" disabled={editDraft.userID === session.data?.user_id}>Viewer · read only</option><option value="operator" disabled={editDraft.userID === session.data?.user_id}>Operator · manage scans</option><option value="administrator">Administrator · full access</option></select>{editDraft.userID === session.data?.user_id && <small>You cannot change your own administrator role.</small>}</label></>}</ActionDialog>}
+    {prompt && <ActionDialog title={prompt.label} description={promptDescription} confirmLabel={prompt.action === 'edit' ? 'Save changes' : prompt.action === 'sessions' ? 'Revoke sessions' : 'Confirm'} valueLabel={prompt.action === 'edit' ? roleChangeNeedsPassword ? 'Administrator password' : undefined : 'Administrator password'} valueType="password" valueRequired={prompt.action !== 'edit' || !!roleChangeNeedsPassword} autoComplete="current-password" destructive={prompt.action === 'revoke' || prompt.action === 'sessions' || prompt.label.startsWith('Disable ')} restoreFocus={prompt.action !== 'renew'} onConfirm={confirmAction} onCancel={cancelPrompt} error={error}>{prompt.action === 'edit' && editDraft && <><label>Display name<input value={editDraft.displayName} maxLength={80} onChange={event => editState.setDraft(value => ({ ...value, displayName: event.target.value }))} /></label><label>Role<select value={editDraft.role} onChange={event => editState.setDraft(value => ({ ...value, role: event.target.value as Role }))}><option value="viewer" disabled={editDraft.userID === session.data?.user_id}>Viewer · read only</option><option value="operator" disabled={editDraft.userID === session.data?.user_id}>Operator · manage scans</option><option value="administrator">Administrator · full access</option></select>{editDraft.userID === session.data?.user_id && <small>You cannot change your own administrator role.</small>}</label>{editState.remoteChanged && <div className="notice warning" role="status"><span>This account changed elsewhere. Your edits still use revision {editState.baseRevision}; the latest account is revision {editRevision}.</span><button type="button" className="text-button" onClick={() => { editState.rebase(editRevision); setError('Your account edits now use the latest revision. Review the values and save again.') }}>Keep my edits</button><button type="button" className="text-button" onClick={() => { editState.adopt(); setError('Latest account loaded.') }}>Load theirs</button></div>}</>}</ActionDialog>}
   </section>
 }

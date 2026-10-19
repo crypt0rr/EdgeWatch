@@ -233,7 +233,7 @@ describe('public dashboard pages', () => {
     expect(container.textContent).toContain('Public view saved.')
   })
 
-  it('reloads the current configuration when another administrator saved first', async () => {
+  it('keeps the draft after a 409 and lets the administrator rebase it', async () => {
     await renderPage(<PublicDashboardAdmin />)
     const enabled = container.querySelector('#public-status-enabled') as HTMLInputElement
     act(() => enabled.click())
@@ -249,18 +249,18 @@ describe('public dashboard pages', () => {
       await Promise.resolve()
     })
     expect(savePublicDashboardConfig).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: true, updated_at: publicConfig.updated_at }))
-    await vi.waitFor(() => expect(container.textContent).toContain('Another administrator changed the public view'), { timeout: 1000 })
-    await vi.waitFor(() => expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('Changed elsewhere'), { timeout: 1000 })
-    expect((container.querySelector('#public-status-enabled') as HTMLInputElement).checked).toBe(false)
-    expect(container.textContent).not.toContain('Public view saved.')
+    await vi.waitFor(() => expect(container.textContent).toContain('Another administrator saved the public view while you were editing.'), { timeout: 1000 })
+    expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe(publicConfig.introduction)
+    expect((container.querySelector('#public-status-enabled') as HTMLInputElement).checked).toBe(true)
+    const keep = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Keep my edits')) as HTMLButtonElement
+    act(() => keep.click())
 
-    // The next save is based on the reloaded revision.
-    vi.mocked(savePublicDashboardConfig).mockResolvedValueOnce({ ...current, updated_at: '2026-09-12T09:30:00Z' })
+    vi.mocked(savePublicDashboardConfig).mockResolvedValueOnce({ ...current, enabled: true, introduction: publicConfig.introduction, updated_at: '2026-09-12T09:30:00Z' })
     await act(async () => {
       saveButton().click()
       await Promise.resolve()
     })
-    expect(savePublicDashboardConfig).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: false, introduction: 'Changed elsewhere', updated_at: current.updated_at }))
+    expect(savePublicDashboardConfig).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: true, introduction: publicConfig.introduction, updated_at: current.updated_at }))
     await vi.waitFor(() => expect(container.textContent).toContain('Public view saved.'), { timeout: 1000 })
   })
   it('keeps an edited draft when a background refetch brings another administrator\'s save', async () => {
@@ -287,6 +287,11 @@ describe('public dashboard pages', () => {
       await Promise.resolve()
     })
     expect(savePublicDashboardConfig).toHaveBeenLastCalledWith(expect.objectContaining({ hosts: [{ job_id: 'job-1', address: '198.51.100.10' }], updated_at: publicConfig.updated_at }))
+    await vi.waitFor(() => expect(container.textContent).toContain('Your save was refused because the settings changed.'), { timeout: 1000 })
+    expect((container.querySelector('input:not([type])') as HTMLInputElement).value).toBe(publicConfig.title)
+    expect(host().checked).toBe(true)
+    const load = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Load theirs') as HTMLButtonElement
+    act(() => load.click())
     await vi.waitFor(() => expect((container.querySelector('input:not([type])') as HTMLInputElement).value).toBe('Changed elsewhere'), { timeout: 1000 })
     expect(host().checked).toBe(false)
   })
@@ -300,7 +305,7 @@ describe('public dashboard pages', () => {
       await queryClient.invalidateQueries({ queryKey: ['public-dashboard-config'] })
     })
     const discard = await vi.waitFor(() => {
-      const button = Array.from(container.querySelectorAll('button')).find(item => item.textContent === 'Discard my changes and load theirs')
+      const button = Array.from(container.querySelectorAll('button')).find(item => item.textContent === 'Load theirs')
       expect(button).toBeTruthy()
       return button as HTMLButtonElement
     }, { timeout: 1000 })

@@ -692,7 +692,7 @@ func TestChangeWindowCloseDedupeBoundsSummaryAndCoalescesAlerts(t *testing.T) {
 	}
 }
 
-func TestDelayedWindowExpiryExcludesAlertsDeliveredAfterWindowEnd(t *testing.T) {
+func TestDelayedWindowExpiryHoldsDuringWindowAlertAndExcludesPostEndAlert(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -713,30 +713,25 @@ func TestDelayedWindowExpiryExcludesAlertsDeliveredAfterWindowEnd(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(deliveries) != 2 {
-		t.Fatalf("before-expiry claim = %+v; want both pending alerts released at the window end", deliveries)
+	if len(deliveries) != 1 || deliveries[0].Event.ScanID != "scan-after" {
+		t.Fatalf("before-expiry claim = %+v; want only the alert queued after the window ended", deliveries)
 	}
-	seen := map[string]bool{}
 	for _, delivery := range deliveries {
-		seen[delivery.Event.ScanID] = true
 		if err := s.System().DeliveryResultClaim(ctx, delivery.ID, delivery.ClaimToken, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if !seen["scan-before"] || !seen["scan-after"] {
-		t.Fatalf("before-expiry claim scans = %v; want scan-before and scan-after", seen)
-	}
 	if _, changed, err := ts.ExpireChangeWindow(ctx, window.ID, func() time.Time { return time.Now().UTC() }, []string{"summary-destination"}); err != nil || !changed {
 		t.Fatalf("delayed expiry: changed %v, err %v", changed, err)
 	}
-	if countRows(t, s.DB, `SELECT COUNT(*) FROM outbox WHERE event_job_id=? AND event_type='changes-detected' AND change_window_id=? AND coalesced_at<>''`, job.ID, window.ID) != 0 {
-		t.Fatal("delivered post-end alerts were coalesced at delayed expiry")
+	if countRows(t, s.DB, `SELECT COUNT(*) FROM outbox WHERE event_job_id=? AND event_type='changes-detected' AND change_window_id=? AND coalesced_at<>''`, job.ID, window.ID) != 1 {
+		t.Fatal("alert held during the window was not coalesced at delayed expiry")
 	}
-	if countRows(t, s.DB, `SELECT COUNT(*) FROM outbox WHERE event_job_id=? AND event_type='changes-detected' AND sent_at IS NOT NULL`, job.ID) != 2 {
-		t.Fatal("both alerts were not individually delivered at delayed expiry")
+	if countRows(t, s.DB, `SELECT COUNT(*) FROM outbox WHERE event_job_id=? AND event_type='changes-detected' AND sent_at IS NOT NULL`, job.ID) != 1 {
+		t.Fatal("post-end alert was not individually delivered")
 	}
-	if countRows(t, s.DB, `SELECT COUNT(*) FROM change_window_refs WHERE window_id=? AND category='new'`, window.ID) != 0 {
-		t.Fatal("the closing summary included alerts already delivered after window end")
+	if countRows(t, s.DB, `SELECT COUNT(*) FROM change_window_refs WHERE window_id=? AND category='new'`, window.ID) != 1 {
+		t.Fatal("the closing summary did not list the held change exactly once")
 	}
 }
 

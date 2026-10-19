@@ -168,8 +168,8 @@ func TestMigration74BackfillFailureIsRecordedAndResumedOnStartup(t *testing.T) {
 	if err := migrateContext(ctx, s.DB); err == nil || !strings.Contains(err.Error(), "backfill probe-budget alert projection") {
 		t.Fatalf("migration with rejected projection write = %v, want a wrapped backfill error", err)
 	}
-	if got := countRows(t, s.DB, `PRAGMA user_version`); got != 74 {
-		t.Fatalf("schema after backfill failure = %d, want 74 DDL retained for restart", got)
+	if got := countRows(t, s.DB, `PRAGMA user_version`); got != schemaVersion {
+		t.Fatalf("schema after backfill failure = %d, want %d DDL retained for restart", got, schemaVersion)
 	}
 	var state, phase, lastError string
 	if err := s.DB.QueryRowContext(ctx, `SELECT state,phase,last_error FROM startup_state WHERE id=1`).Scan(&state, &phase, &lastError); err != nil {
@@ -189,7 +189,7 @@ func TestMigration74BackfillFailureIsRecordedAndResumedOnStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := migrateContext(ctx, s.DB); err != nil {
-		t.Fatalf("resume schema 74 startup after clearing the failed writer: %v", err)
+		t.Fatalf("resume schema %d startup after clearing the failed writer: %v", schemaVersion, err)
 	}
 	if err := s.DB.QueryRowContext(ctx, `SELECT state,phase,last_error FROM startup_state WHERE id=1`).Scan(&state, &phase, &lastError); err != nil {
 		t.Fatal(err)

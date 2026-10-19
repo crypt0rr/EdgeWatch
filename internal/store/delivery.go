@@ -224,8 +224,9 @@ const (
 const heldDeliverySQL = `(due.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants WHERE tenants.id=due.tenant_id AND tenants.state='` + TenantStateActive + `'))
 AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=due.tenant_id AND purge.job_id=CASE WHEN json_valid(CAST(due.payload_json AS TEXT)) THEN COALESCE(json_extract(CAST(due.payload_json AS TEXT),'$.job_id'),'') ELSE '' END)`
 
-// changeWindowDeliverySQL keeps a pending change alert out of a claim only
-// while its associated open window's interval contains the writer timestamp.
+// changeWindowDeliverySQL keeps a pending change alert out of a claim while
+// its associated open window is active and through the bounded summary grace.
+// The second timestamp is the claim time minus that grace.
 const changeWindowDeliverySQL = `(due.change_window_id='' OR NOT EXISTS (
  SELECT 1 FROM change_windows AS quiet
  WHERE quiet.id=due.change_window_id AND quiet.closed_at='' AND quiet.start_at<=? AND quiet.end_at>?
@@ -289,6 +290,7 @@ func (ss *SystemStore) AgeLockedDeliveries(ctx context.Context, destinations []s
 	now := time.Now().UTC()
 	nowText := sqliteTimestamp(now)
 	windowNowText := sqliteTimestamp(now)
+	windowGraceCutoffText := sqliteTimestamp(now.Add(-ChangeWindowSummaryDestinationGrace))
 	query := `SELECT id,destination,deferrals FROM outbox AS due
 WHERE sent_at IS NULL AND terminal_at='' AND next_at<=?
   AND attempts<? AND deferrals<?
@@ -299,7 +301,7 @@ WHERE sent_at IS NULL AND terminal_at='' AND next_at<=?
 ORDER BY id LIMIT ?`
 	// The first timestamp is the due cutoff and the last timestamp before the
 	// destination list is the claim-expiry cutoff.
-	args := []any{nowText, deliveryMaxAttempts, deliveryMaxDeferrals, nowText, windowNowText, windowNowText}
+	args := []any{nowText, deliveryMaxAttempts, deliveryMaxDeferrals, nowText, windowNowText, windowGraceCutoffText}
 	for _, destination := range unique {
 		args = append(args, destination)
 	}
@@ -424,8 +426,9 @@ func (ss *SystemStore) claimDueDeliveries(ctx context.Context, limit int, owner 
 	now := time.Now().UTC()
 	nowText := now.Format(time.RFC3339Nano)
 	windowNowText := sqliteTimestamp(now)
+	windowGraceCutoffText := sqliteTimestamp(now.Add(-ChangeWindowSummaryDestinationGrace))
 	where := `id IN (SELECT id FROM outbox AS due WHERE sent_at IS NULL AND terminal_at='' AND attempts < ? AND next_at <= ? AND (claim_token='' OR claim_until='' OR claim_until <= ?) AND ` + heldDeliverySQL + ` AND ` + changeWindowDeliverySQL
-	whereArgs := []any{deliveryMaxAttempts, nowText, nowText, windowNowText, windowNowText}
+	whereArgs := []any{deliveryMaxAttempts, nowText, nowText, windowNowText, windowGraceCutoffText}
 	if len(excluded) > 0 {
 		placeholders := make([]string, 0, len(excluded))
 		for _, destination := range excluded {

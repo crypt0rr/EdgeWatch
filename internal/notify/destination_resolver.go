@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"golang.org/x/net/dns/dnsmessage"
@@ -641,6 +642,8 @@ type destinationAddressDialer struct {
 	dial   func(context.Context, string, string) (net.Conn, error)
 }
 
+const destinationAddressDialAttemptFloor = 250 * time.Millisecond
+
 var destinationTargetDial = func(ctx context.Context, network, address string) (net.Conn, error) {
 	// destinationAddressDialer passes only IPs that were already resolved and
 	// checked against the tenant policy. Do not let this final dial consult the
@@ -662,16 +665,45 @@ func (d destinationAddressDialer) DialContext(ctx context.Context, network, addr
 	if dial == nil {
 		dial = destinationTargetDial
 	}
-	var lastErr error
+	candidates := make([]netip.Addr, 0, len(addresses))
 	for _, resolved := range addresses {
 		if strings.HasSuffix(network, "4") && !resolved.Is4() || strings.HasSuffix(network, "6") && !resolved.Is6() {
 			continue
 		}
-		conn, dialErr := dial(ctx, network, net.JoinHostPort(resolved.String(), port))
+		candidates = append(candidates, resolved)
+	}
+	if len(candidates) == 0 {
+		return nil, destinationDNSFailure()
+	}
+	var lastErr error
+	for index, resolved := range candidates {
+		available := notificationProviderTimeout
+		if deadline, ok := ctx.Deadline(); ok {
+			available = time.Until(deadline)
+		}
+		if available <= 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, context.DeadlineExceeded
+		}
+		attemptBudget := available / time.Duration(len(candidates)-index)
+		if attemptBudget < destinationAddressDialAttemptFloor {
+			attemptBudget = destinationAddressDialAttemptFloor
+		}
+		if attemptBudget > available {
+			attemptBudget = available
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptBudget)
+		conn, dialErr := dial(attemptCtx, network, net.JoinHostPort(resolved.String(), port))
+		cancel()
 		if dialErr == nil {
 			return conn, nil
 		}
 		lastErr = dialErr
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 	}
 	if lastErr != nil {
 		return nil, lastErr

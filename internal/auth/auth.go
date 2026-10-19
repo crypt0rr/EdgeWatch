@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -60,9 +61,15 @@ const (
 	// unavailable for five minutes or revealing whether a username exists.
 	authSharedLoopbackRetryDelay = 2 * time.Second
 	// The limiter is process-local by design, but it must remain bounded when
-	// an attacker rotates source addresses. Keys are evicted oldest-first once
-	// this ceiling is reached; expired entries are swept on every decision.
+	// an attacker rotates source addresses. Keys are evicted from a bounded
+	// activity sample once this ceiling is reached.
 	authLimiterMaxEntries = 4096
+	// authLimiterSweepInterval amortizes cleanup of attacker-controlled maps;
+	// each decision still checks its own timestamps before admitting a request.
+	authLimiterSweepInterval = time.Second
+	// authLimiterEvictionSample bounds the work performed when a failure bucket
+	// map is full. The oldest observed key is evicted from a small map sample.
+	authLimiterEvictionSample = 16
 	// Argon2id deliberately uses a meaningful memory cost. Keep the number of
 	// requests that may enter the work factor bounded so a burst of invalid
 	// credentials cannot exhaust the daemon's memory or CPU. A short queue
@@ -148,7 +155,9 @@ type Manager struct {
 	Store *store.Store
 	Now   func() time.Time
 
-	mu sync.Mutex
+	mu           sync.Mutex
+	forwardingMu sync.Mutex
+	forwarding   atomic.Pointer[forwardingConfig]
 	// fails and blocked are the source-address backstop. Scoped authentication
 	// paths use the account maps below so different operations and accounts
 	// do not share a lockout bucket. The login-client maps hold the sign-in
@@ -164,12 +173,11 @@ type Manager struct {
 	sourceInFlight        map[string]int
 	accountInFlight       map[string]int
 	loginClientInFlight   map[string]int
+	lastLimiterSweep      time.Time
 	rateAudit             map[string]time.Time
 	// secondFactor holds each account's wrong one-time and recovery codes,
 	// by account ID, whatever their source; see admitSecondFactor.
-	secondFactor    map[string]*secondFactorState
-	trustedProxies  []*net.IPNet
-	forwardedHeader string
+	secondFactor map[string]*secondFactorState
 	// ipv6Prefix is the prefix length by which the rate limits group IPv6
 	// client addresses; zero is defaultIPv6RateLimitPrefix.
 	ipv6Prefix int
@@ -187,6 +195,13 @@ type Manager struct {
 	untrustedProxy       UntrustedProxy
 	untrustedProxyLogged time.Time
 }
+
+type forwardingConfig struct {
+	trusted []*net.IPNet
+	header  string
+}
+
+var defaultForwardingConfig = &forwardingConfig{header: forwardedHeaderXForwardedFor}
 
 const (
 	// untrustedProxyLogInterval is how often NoteForwarding asks for the
@@ -231,9 +246,9 @@ func (m *Manager) NoteForwarding(request *http.Request) (UntrustedProxy, bool) {
 	if peer == nil {
 		return UntrustedProxy{}, false
 	}
-	trusted, forwardedHeader := m.forwardingPolicy()
+	policy := m.forwardingPolicy()
 	proxy, header := peer, ""
-	if !ipInNetworks(peer, trusted) {
+	if !ipInNetworks(peer, policy.trusted) {
 		switch {
 		case strings.TrimSpace(request.Header.Get("X-Forwarded-For")) != "":
 			header = "X-Forwarded-For"
@@ -243,12 +258,12 @@ func (m *Manager) NoteForwarding(request *http.Request) (UntrustedProxy, bool) {
 			return UntrustedProxy{}, false
 		}
 	} else {
-		client, forwarder := walkForwardedChain(peer, forwardedCandidatesFor(request, forwardedHeader), trusted)
+		client, forwarder := walkForwardedChain(peer, forwardedCandidatesFor(request, policy.header), policy.trusted)
 		if !forwarder {
 			return UntrustedProxy{}, false
 		}
 		proxy, header = client, "X-Forwarded-For"
-		if forwardedHeader == forwardedHeaderForwarded {
+		if policy.header == forwardedHeaderForwarded {
 			header = "Forwarded"
 		}
 	}
@@ -280,10 +295,9 @@ func (m *Manager) UntrustedProxy() (UntrustedProxy, bool) {
 
 func NewManager(s *store.Store) *Manager {
 	dummyPasswordHash()
-	return &Manager{
+	manager := &Manager{
 		Store: s, Now: time.Now,
-		forwardedHeader: forwardedHeaderXForwardedFor,
-		fails:           map[string][]time.Time{}, blocked: map[string]time.Time{},
+		fails: map[string][]time.Time{}, blocked: map[string]time.Time{},
 		accountFails: map[string][]time.Time{}, accountBlocked: map[string]time.Time{},
 		accountSignInFailures: map[string]*accountSignInFailureState{},
 		loginClientFails:      map[string][]time.Time{}, loginClientBlocked: map[string]time.Time{},
@@ -291,6 +305,8 @@ func NewManager(s *store.Store) *Manager {
 		rateAudit: map[string]time.Time{}, secondFactor: map[string]*secondFactorState{}, argon2Sem: make(chan struct{}, authArgon2MaxConcurrent),
 		rateRecordSlots: make(chan struct{}, rateLimitRecordsPending),
 	}
+	manager.forwarding.Store(&forwardingConfig{header: forwardedHeaderXForwardedFor})
+	return manager
 }
 
 // withArgon2 admits one password hash/verification operation to the bounded
@@ -344,9 +360,10 @@ func (m *Manager) SetTrustedProxies(values []string) error {
 		}
 		networks = append(networks, network)
 	}
-	m.mu.Lock()
-	m.trustedProxies = networks
-	m.mu.Unlock()
+	m.forwardingMu.Lock()
+	current := m.currentForwardingConfig()
+	m.forwarding.Store(&forwardingConfig{trusted: networks, header: current.header})
+	m.forwardingMu.Unlock()
 	return nil
 }
 
@@ -364,9 +381,10 @@ func (m *Manager) SetForwardedHeader(value string) error {
 	default:
 		return fmt.Errorf("forwarded header must be one of %q, %q, or %q", forwardedHeaderXForwardedFor, forwardedHeaderForwarded, forwardedHeaderNone)
 	}
-	m.mu.Lock()
-	m.forwardedHeader = value
-	m.mu.Unlock()
+	m.forwardingMu.Lock()
+	current := m.currentForwardingConfig()
+	m.forwarding.Store(&forwardingConfig{trusted: current.trusted, header: value})
+	m.forwardingMu.Unlock()
 	return nil
 }
 
@@ -423,10 +441,7 @@ func (m *Manager) IsTrustedProxy(request *http.Request) bool {
 	if peer == nil {
 		return false
 	}
-	m.mu.Lock()
-	trusted := append([]*net.IPNet(nil), m.trustedProxies...)
-	m.mu.Unlock()
-	return ipInNetworks(peer, trusted)
+	return ipInNetworks(peer, m.forwardingPolicy().trusted)
 }
 
 // ClientIP resolves the client address of the request for audit records;
@@ -441,24 +456,32 @@ func (m *Manager) ClientIP(request *http.Request) string {
 	if peer == nil {
 		return remote
 	}
-	trusted, forwardedHeader := m.forwardingPolicy()
-	if !ipInNetworks(peer, trusted) {
+	policy := m.forwardingPolicy()
+	if !ipInNetworks(peer, policy.trusted) {
 		return peer.String()
 	}
-	client, _ := walkForwardedChain(peer, forwardedCandidatesFor(request, forwardedHeader), trusted)
+	client, _ := walkForwardedChain(peer, forwardedCandidatesFor(request, policy.header), policy.trusted)
 	return client.String()
 }
 
-// forwardingPolicy returns the trusted proxy networks and the forwarding
-// header that they use.
-func (m *Manager) forwardingPolicy() ([]*net.IPNet, string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	forwardedHeader := m.forwardedHeader
-	if forwardedHeader == "" {
-		forwardedHeader = forwardedHeaderXForwardedFor
+// currentForwardingConfig is used only while forwardingMu is held. The
+// published config is immutable, so request lookups can read it atomically.
+func (m *Manager) currentForwardingConfig() *forwardingConfig {
+	if m != nil {
+		if current := m.forwarding.Load(); current != nil {
+			return current
+		}
 	}
-	return append([]*net.IPNet(nil), m.trustedProxies...), forwardedHeader
+	return defaultForwardingConfig
+}
+
+// forwardingPolicy returns the immutable trusted-proxy policy without taking
+// the authentication limiter mutex or copying its network list on requests.
+func (m *Manager) forwardingPolicy() *forwardingConfig {
+	if m == nil {
+		return defaultForwardingConfig
+	}
+	return m.currentForwardingConfig()
 }
 
 // walkForwardedChain resolves the client address of a request whose
@@ -1803,7 +1826,7 @@ func (m *Manager) allowScoped(source, account string) bool {
 	defer m.mu.Unlock()
 	now := m.now()
 	m.ensureScopedLimiterMapsLocked()
-	m.sweepLimiterLocked(now)
+	m.sweepLimiterIfDueLocked(now)
 	// A loopback peer is not a trustworthy client identity when EdgeWatch is
 	// behind an unconfigured tunnel or reverse proxy: every remote client can
 	// collapse to 127.0.0.1 or ::1. Do not turn that shared identity into a
@@ -1894,7 +1917,7 @@ func (m *Manager) allowLoginClient(client string) bool {
 	defer m.mu.Unlock()
 	now := m.now()
 	m.ensureScopedLimiterMapsLocked()
-	m.sweepLimiterLocked(now)
+	m.sweepLimiterIfDueLocked(now)
 	until, ok := m.loginClientBlocked[client]
 	if ok && now.Before(until) {
 		return false
@@ -2103,7 +2126,7 @@ func (m *Manager) failedScoped(source, account, loginClient string) {
 	defer m.mu.Unlock()
 	now := m.now()
 	m.ensureScopedLimiterMapsLocked()
-	m.sweepLimiterLocked(now)
+	m.sweepLimiterIfDueLocked(now)
 	if source != "" && !loopbackConfirmation(source, account) {
 		recordFailureLocked(now, source, authSourceFailureThreshold, m.fails, m.blocked)
 	}
@@ -2304,7 +2327,12 @@ func evictFailureBucketLocked(now time.Time, fails map[string][]time.Time, block
 	}
 	oldestKey := ""
 	oldestAt := now
+	visited := 0
 	for key, values := range fails {
+		if visited >= authLimiterEvictionSample {
+			break
+		}
+		visited++
 		if len(values) == 0 {
 			continue
 		}
@@ -2313,7 +2341,12 @@ func evictFailureBucketLocked(now time.Time, fails map[string][]time.Time, block
 			oldestKey, oldestAt = key, activity
 		}
 	}
+	visited = 0
 	for key, until := range blocked {
+		if visited >= authLimiterEvictionSample {
+			break
+		}
+		visited++
 		activity := until.Add(-authBlockDuration)
 		if oldestKey == "" || activity.Before(oldestAt) {
 			oldestKey, oldestAt = key, activity
@@ -2344,6 +2377,16 @@ func (m *Manager) sweepLimiterLocked(now time.Time) {
 			delete(m.accountSignInFailures, key)
 		}
 	}
+}
+
+// sweepLimiterIfDueLocked amortizes full-map expiry work across requests.
+// Callers hold m.mu, and their own keys still check timestamps on admission.
+func (m *Manager) sweepLimiterIfDueLocked(now time.Time) {
+	if !m.lastLimiterSweep.IsZero() && now.Sub(m.lastLimiterSweep) < authLimiterSweepInterval {
+		return
+	}
+	m.sweepLimiterLocked(now)
+	m.lastLimiterSweep = now
 }
 
 func sweepFailureBucketLocked(now time.Time, fails map[string][]time.Time, blocked map[string]time.Time, threshold int) {

@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -33,6 +34,32 @@ func TestCancelChangeWindowKeepsHeldAlertsWhenDestinationsCannotBeLoaded(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	closedWindow, err := ts.CreateChangeWindow(ctx, job.ID, time.Now().UTC().Add(time.Hour), time.Now().UTC().Add(2*time.Hour), false, "scheduled", admin.UserID, admin.Username)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, changed, err := ts.CancelScheduledChangeWindow(ctx, job.ID, closedWindow.ID, admin.UserID, admin.Username, store.AuditEntry{}); err != nil || !changed {
+		t.Fatalf("prepare closed window = changed %v, err %v", changed, err)
+	}
+	other, err := db.Platform().CreateTenant(ctx, "Other unit", "other-unit-window-cancel", store.AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherScope, err := db.TenantScopeByID(ctx, other.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherTS := db.Tenant(otherScope)
+	otherJob, err := otherTS.CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name: "other-unit-window-cancel", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.11"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherWindow, err := otherTS.CreateChangeWindow(ctx, otherJob.ID, time.Time{}, time.Now().UTC().Add(time.Hour), true, "other unit", admin.UserID, admin.Username)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := db.System().QueueEvent(ctx, "held-change-alert", model.Event{
 		Type: "changes-detected", JobID: job.ID, Job: job.Job.Name, ScanID: "cancel-window-read-failure",
 		Message: "change detected", CreatedAt: time.Now().UTC(),
@@ -50,6 +77,8 @@ func TestCancelChangeWindowKeepsHeldAlertsWhenDestinationsCannotBeLoaded(t *test
 		t.Fatal(err)
 	}
 	viewInstalled := false
+	var logs strings.Builder
+	server.Log = slog.New(slog.NewTextHandler(&logs, nil))
 	restoreMetadata := func() error {
 		if _, err := db.DB.ExecContext(ctx, `DROP VIEW IF EXISTS managed_notifications`); err != nil {
 			return err
@@ -76,21 +105,34 @@ func TestCancelChangeWindowKeepsHeldAlertsWhenDestinationsCannotBeLoaded(t *test
 		t.Fatal("destination lookup succeeded with a broken metadata source")
 	}
 
-	cancel := func() *httptest.ResponseRecorder {
+	cancel := func(windowID, requestID string) *httptest.ResponseRecorder {
 		t.Helper()
-		body, err := json.Marshal(map[string]string{"window_id": window.ID})
+		body, err := json.Marshal(map[string]string{"window_id": windowID})
 		if err != nil {
 			t.Fatal(err)
 		}
 		req := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+job.ID+"/change-windows", strings.NewReader(string(body)))
 		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(context.WithValue(req.Context(), requestIDContextKey{}, requestID))
 		response := httptest.NewRecorder()
 		server.cancelChangeWindow(response, req, admin, ts, job)
 		return response
 	}
-	failed := cancel()
+	missing := cancel("unknown-window", "missing-window-request")
+	foreign := cancel(otherWindow.ID, "foreign-window-request")
+	if missing.Code != http.StatusNotFound || foreign.Code != http.StatusNotFound || missing.Body.String() != foreign.Body.String() {
+		t.Fatalf("unknown window = %d %s; another unit's window = %d %s; want identical 404 answers", missing.Code, missing.Body.String(), foreign.Code, foreign.Body.String())
+	}
+	closedResponse := cancel(closedWindow.ID, "closed-window-request")
+	if closedResponse.Code != http.StatusConflict || !strings.Contains(closedResponse.Body.String(), `"code":"conflict"`) {
+		t.Fatalf("closed window = %d %s; want 409 conflict", closedResponse.Code, closedResponse.Body.String())
+	}
+	failed := cancel(window.ID, "active-window-request")
 	if failed.Code != http.StatusInternalServerError || !strings.Contains(failed.Body.String(), `"code":"notification"`) || strings.Contains(failed.Body.String(), brokenSource) {
 		t.Fatalf("cancel with unavailable destinations = %d %s; want a redacted 500 notification error", failed.Code, failed.Body.String())
+	}
+	if !strings.Contains(failed.Body.String(), "active-window-request") || !strings.Contains(logs.String(), brokenSource) || !strings.Contains(logs.String(), "request_id=active-window-request") {
+		t.Fatalf("started-window failure lost its request ID or destination cause: response=%q logs=%q", failed.Body.String(), logs.String())
 	}
 	open, err := ts.GetChangeWindow(ctx, job.ID, window.ID)
 	if err != nil || open.ClosedAt != nil || open.ReviewState != "none" {
@@ -106,8 +148,11 @@ func TestCancelChangeWindowKeepsHeldAlertsWhenDestinationsCannotBeLoaded(t *test
 	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE tenant_id=? AND action='change_window.cancelled'`, store.DefaultTenantID).Scan(&cancelAudits); err != nil {
 		t.Fatal(err)
 	}
-	if heldRows != 1 || coalescedRows != 0 || summaryRows != 0 || cancelAudits != 0 {
-		t.Fatalf("failed cancel side effects: held=%d coalesced=%d summaries=%d cancel audits=%d; want 1,0,0,0", heldRows, coalescedRows, summaryRows, cancelAudits)
+	// The one audit entry is the setup cancellation of closedWindow. Failed
+	// requests against missing, foreign, closed, and destination-blocked active
+	// windows must not add another audit record.
+	if heldRows != 1 || coalescedRows != 0 || summaryRows != 0 || cancelAudits != 1 {
+		t.Fatalf("failed cancel side effects: held=%d coalesced=%d summaries=%d cancel audits=%d; want 1,0,0,1", heldRows, coalescedRows, summaryRows, cancelAudits)
 	}
 
 	if err := restoreMetadata(); err != nil {
@@ -117,7 +162,7 @@ func TestCancelChangeWindowKeepsHeldAlertsWhenDestinationsCannotBeLoaded(t *test
 	if err != nil || len(wantDestinations) != 1 {
 		t.Fatalf("healthy destination lookup = %v, %v; want one configured destination", wantDestinations, err)
 	}
-	retried := cancel()
+	retried := cancel(window.ID, "healthy-retry-request")
 	if retried.Code != http.StatusOK {
 		t.Fatalf("healthy retry = %d: %s", retried.Code, retried.Body.String())
 	}
@@ -154,8 +199,8 @@ func TestCancelChangeWindowKeepsHeldAlertsWhenDestinationsCannotBeLoaded(t *test
 	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE tenant_id=? AND action='change_window.cancelled'`, store.DefaultTenantID).Scan(&cancelAudits); err != nil {
 		t.Fatal(err)
 	}
-	if cancelAudits != 1 {
-		t.Fatalf("cancel audit count after healthy retry = %d; want one", cancelAudits)
+	if cancelAudits != 2 {
+		t.Fatalf("cancel audit count after healthy retry = %d; want the setup and successful cancellation", cancelAudits)
 	}
 }
 

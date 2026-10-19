@@ -34,6 +34,11 @@ func replaceBaselineHostProjectionTx(ctx context.Context, tx *sql.Tx, jobID stri
 	if _, err := tx.ExecContext(ctx, `DELETE FROM baseline_hosts WHERE job_id=?`, jobID); err != nil {
 		return err
 	}
+	insertStmt, err := tx.PrepareContext(ctx, `INSERT INTO baseline_hosts(job_id,address,address_family,source_targets_json,dns_names_json,host_json,data_quality,search_text,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer insertStmt.Close()
 	snapshot.Normalize()
 	for _, host := range snapshot.Hosts {
 		address := normalizeCycleAddress(host.Address)
@@ -57,7 +62,7 @@ func replaceBaselineHostProjectionTx(ctx context.Context, tx *sql.Tx, jobID stri
 		// names searchable in the baseline projection.
 		searchText := hostSearchContent("", host)
 		open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered := scanHostStats(host)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO baseline_hosts(job_id,address,address_family,source_targets_json,dns_names_json,host_json,data_quality,search_text,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		if _, err := insertStmt.ExecContext(ctx,
 			jobID, address, host.AddressFamily, sourceTargets, dnsNames, raw, "detailed", searchText, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered); err != nil {
 			return err
 		}

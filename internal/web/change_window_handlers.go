@@ -99,10 +99,12 @@ func (s *Server) cancelChangeWindow(w http.ResponseWriter, r *http.Request, sess
 	}
 	destinations := []string{}
 	destinationsUnavailable := false
+	var destinationError error
 	if notifier := s.tenantNotifier(ts); notifier != nil {
 		selected, err := notifier.QueueDestinationsForJob(r.Context(), job.Job)
 		if err != nil {
 			destinationsUnavailable = true
+			destinationError = err
 		} else {
 			destinations = selected
 		}
@@ -116,8 +118,27 @@ func (s *Server) cancelChangeWindow(w http.ResponseWriter, r *http.Request, sess
 		// need destination metadata. This method rechecks the start time after
 		// acquiring the writer lock to prevent a preflight/start race.
 		window, changed, err = ts.CancelScheduledChangeWindow(r.Context(), job.ID, input.WindowID, session.UserID, session.Username, audit)
-		if err != nil || !changed {
-			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
+		if errors.Is(err, store.ErrChangeWindowStarted) {
+			// A started window needs its close summary and cannot be canceled
+			// without destination metadata. Preserve the familiar notification
+			// response while logging the lookup cause with this request's ID.
+			requestID := RequestID(r.Context())
+			if s.Log != nil {
+				s.Log.ErrorContext(r.Context(), "change-window destination lookup failed", "request_id", requestID, "error", destinationError)
+			}
+			var details any
+			if requestID != "" {
+				details = map[string]string{"request_id": requestID}
+			}
+			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", details)
+			return
+		}
+		if err != nil {
+			s.writeChangeWindowError(w, r, err)
+			return
+		}
+		if !changed {
+			writeError(w, http.StatusConflict, "conflict", "change window is already closed", nil)
 			return
 		}
 	} else {

@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,10 +23,11 @@ import (
 )
 
 const (
-	scannerSupervisorFlag      = "--supervise-scanner"
-	scannerSupervisorMagic     = "EWSUP001"
-	scannerSupervisorMaxConfig = 1 << 20
-	scannerSupervisorTimeout   = 5 * time.Second
+	scannerSupervisorFlag             = "--supervise-scanner"
+	scannerSupervisorMagic            = "EWSUP001"
+	scannerSupervisorMaxConfig        = 1 << 20
+	scannerSupervisorTimeout          = 5 * time.Second
+	scannerSupervisorWatchdogInterval = 20 * time.Millisecond
 )
 
 type scannerLaunchRequest struct {
@@ -43,18 +45,20 @@ type scannerLaunchRequest struct {
 }
 
 type scannerSupervisorInvocation struct {
-	lease         identityLease
-	request       scannerLaunchRequest
-	config        []byte
-	configRead    *os.File
-	configWrite   *os.File
-	resultRead    *os.File
-	resultWrite   *os.File
-	startedOK     bool
-	startFailedOK bool
-	proofChecked  bool
-	proofErr      error
-	finished      bool
+	stateMu               sync.Mutex
+	lease                 identityLease
+	request               scannerLaunchRequest
+	config                []byte
+	configRead            *os.File
+	configWrite           *os.File
+	resultRead            *os.File
+	resultWrite           *os.File
+	startedOK             bool
+	cancelledBeforeLaunch bool
+	startFailedOK         bool
+	proofChecked          bool
+	proofErr              error
+	finished              bool
 }
 
 type scannerSupervisorRequest struct {
@@ -67,6 +71,7 @@ func init() {
 	prepareScannerInvocation = prepareLinuxScannerInvocation
 	reserveScannerIdentity = reserveLinuxScannerIdentity
 	recoverScannerIdentityState = recoverScannerIdentityStateOfflineLinux
+	inspectScannerIdentityPool = inspectProductionScannerIdentityPool
 }
 
 func reserveLinuxScannerIdentity(ctx context.Context, policy *Policy) (*ScannerIdentityReservation, error) {
@@ -438,7 +443,12 @@ func appendScannerLivenessFile(cmd *exec.Cmd, file *os.File) (int, error) {
 }
 
 func (invocation *scannerSupervisorInvocation) started() error {
-	if invocation == nil || invocation.startedOK {
+	if invocation == nil {
+		return errors.New("start scanner supervisor: invocation is unavailable")
+	}
+	invocation.stateMu.Lock()
+	defer invocation.stateMu.Unlock()
+	if invocation.startedOK {
 		return errors.New("start scanner supervisor: invocation is unavailable")
 	}
 	invocation.startedOK = true
@@ -446,6 +456,13 @@ func (invocation *scannerSupervisorInvocation) started() error {
 	invocation.configRead = nil
 	_ = invocation.resultWrite.Close()
 	invocation.resultWrite = nil
+	if invocation.cancelledBeforeLaunch {
+		if invocation.configWrite != nil {
+			_ = invocation.configWrite.Close()
+			invocation.configWrite = nil
+		}
+		return context.Canceled
+	}
 	if err := writeAll(invocation.configWrite, invocation.config); err != nil {
 		_ = invocation.configWrite.Close()
 		invocation.configWrite = nil
@@ -474,7 +491,12 @@ func writeAll(writer io.Writer, data []byte) error {
 }
 
 func (invocation *scannerSupervisorInvocation) startFailed(cleanupSucceeded bool) error {
-	if invocation == nil || invocation.finished {
+	if invocation == nil {
+		return nil
+	}
+	invocation.stateMu.Lock()
+	defer invocation.stateMu.Unlock()
+	if invocation.finished {
 		return nil
 	}
 	if invocation.startedOK {
@@ -494,6 +516,32 @@ func (invocation *scannerSupervisorInvocation) startFailed(cleanupSucceeded bool
 }
 
 func (invocation *scannerSupervisorInvocation) cancel(cmd *exec.Cmd) error {
+	if invocation == nil {
+		return nil
+	}
+	invocation.stateMu.Lock()
+	if !invocation.startedOK {
+		invocation.cancelledBeforeLaunch = true
+		if invocation.configWrite != nil {
+			_ = invocation.configWrite.Close()
+			invocation.configWrite = nil
+		}
+		if invocation.configRead != nil {
+			_ = invocation.configRead.Close()
+			invocation.configRead = nil
+		}
+		if invocation.resultWrite != nil {
+			_ = invocation.resultWrite.Close()
+			invocation.resultWrite = nil
+		}
+		invocation.stateMu.Unlock()
+		return nil
+	}
+	if invocation.finished {
+		invocation.stateMu.Unlock()
+		return nil
+	}
+	invocation.stateMu.Unlock()
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
@@ -508,23 +556,36 @@ func (invocation *scannerSupervisorInvocation) verifyProcessTree() error {
 	if invocation == nil {
 		return errors.New("scanner supervisor result is unavailable")
 	}
+	invocation.stateMu.Lock()
 	if invocation.proofChecked {
-		return invocation.proofErr
+		err := invocation.proofErr
+		invocation.stateMu.Unlock()
+		return err
 	}
 	invocation.proofChecked = true
 	if !invocation.startedOK || invocation.resultRead == nil {
 		invocation.proofErr = errors.New("scanner supervisor result is unavailable")
-		return invocation.proofErr
+		err := invocation.proofErr
+		invocation.stateMu.Unlock()
+		return err
 	}
-	if err := waitScannerSupervisorResult(int(invocation.resultRead.Fd()), scannerSupervisorTimeout); err != nil {
+	resultFD := int(invocation.resultRead.Fd())
+	invocation.stateMu.Unlock()
+	if err := waitScannerSupervisorResult(resultFD, scannerSupervisorTimeout); err != nil {
+		invocation.stateMu.Lock()
 		invocation.proofErr = errors.New("scanner supervisor did not prove process-tree cleanup")
-		return invocation.proofErr
+		proofErr := invocation.proofErr
+		invocation.stateMu.Unlock()
+		return proofErr
 	}
 	message := make([]byte, 16)
-	n, _, flags, _, err := unix.Recvmsg(int(invocation.resultRead.Fd()), message, nil, 0)
+	n, _, flags, _, err := unix.Recvmsg(resultFD, message, nil, 0)
 	if err != nil || flags&unix.MSG_TRUNC != 0 || n != len(message) || validateScannerSupervisorResult(message) != nil {
+		invocation.stateMu.Lock()
 		invocation.proofErr = errors.New("scanner supervisor did not prove process-tree cleanup")
-		return invocation.proofErr
+		proofErr := invocation.proofErr
+		invocation.stateMu.Unlock()
+		return proofErr
 	}
 	return nil
 }
@@ -546,13 +607,21 @@ func validateScannerSupervisorResult(message []byte) error {
 }
 
 func (invocation *scannerSupervisorInvocation) finish(cleanupSucceeded bool) error {
-	if invocation == nil || invocation.finished {
+	if invocation == nil {
+		return nil
+	}
+	invocation.stateMu.Lock()
+	if invocation.finished {
+		invocation.stateMu.Unlock()
 		return nil
 	}
 	invocation.finished = true
+	started := invocation.startedOK
+	startFailed := invocation.startFailedOK
+	invocation.stateMu.Unlock()
 	defer invocation.closeParentFiles()
-	if !invocation.startedOK {
-		if invocation.startFailedOK && cleanupSucceeded {
+	if !started {
+		if startFailed && cleanupSucceeded {
 			return invocation.lease.release()
 		}
 		return invocation.lease.quarantine()
@@ -651,32 +720,44 @@ func execScannerSupervisorWithBrokerFactory(args []string, brokerFactory func(li
 	if err != nil {
 		return err
 	}
+	result := os.NewFile(uintptr(request.resultFD), "scanner supervisor result")
+	if result == nil {
+		return errors.New("scanner supervisor: result descriptor is unavailable")
+	}
+	defer result.Close()
+	unix.CloseOnExec(request.resultFD)
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	defer signal.Stop(signals)
 	runtime.LockOSThread()
 	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+		_ = sendScannerSupervisorResult(request.resultFD, true)
 		return fmt.Errorf("%s: establish child reaper: %w", ExecCommand, err)
 	}
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		_ = sendScannerSupervisorResult(request.resultFD, true)
 		return fmt.Errorf("%s: protect supervisor process: %w", ExecCommand, err)
 	}
 	configFile := os.NewFile(uintptr(request.requestFD), "scanner launch request")
 	if configFile == nil {
+		_ = sendScannerSupervisorResult(request.resultFD, true)
 		return errors.New("scanner supervisor: launch request descriptor is unavailable")
 	}
 	configuration, err := io.ReadAll(io.LimitReader(configFile, scannerSupervisorMaxConfig+1))
 	_ = configFile.Close()
 	if err != nil || len(configuration) == 0 || len(configuration) > scannerSupervisorMaxConfig {
+		_ = sendScannerSupervisorResult(request.resultFD, true)
 		return errors.New("scanner supervisor: launch request is unavailable or too large")
 	}
 	launch, err := decodeScannerLaunchRequest(configuration, request)
 	if err != nil {
+		_ = sendScannerSupervisorResult(request.resultFD, true)
 		return fmt.Errorf("scanner supervisor: %w", err)
 	}
 	if err := validateScannerLivenessDescriptor(launch.LivenessFD); err != nil {
+		_ = sendScannerSupervisorResult(request.resultFD, true)
 		return errors.New("scanner supervisor: inherited liveness descriptor is invalid")
 	}
-	result := os.NewFile(uintptr(request.resultFD), "scanner supervisor result")
-	defer result.Close()
-	unix.CloseOnExec(request.resultFD)
 
 	childFiles := make([]*os.File, launch.Files)
 	for index := range childFiles {
@@ -714,9 +795,16 @@ func execScannerSupervisorWithBrokerFactory(args []string, brokerFactory func(li
 	launch.Args = childArgs
 	child := buildScannerChildCommand(launch, childFiles)
 
-	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-	defer signal.Stop(signals)
+	select {
+	case <-signals:
+		_ = unix.Close(notificationRead)
+		for _, file := range childFiles {
+			_ = file.Close()
+		}
+		_ = sendScannerSupervisorResult(request.resultFD, true)
+		return errors.New("scanner supervisor: canceled before scanner child start")
+	default:
+	}
 	if err := child.Start(); err != nil {
 		_ = unix.Close(notificationRead)
 		for _, file := range childFiles {
@@ -747,7 +835,7 @@ func execScannerSupervisorWithBrokerFactory(args []string, brokerFactory func(li
 	if broker == nil || broker.listenerFD != listenerFD {
 		return terminateAndReapScannerChild(child, request.resultFD, errors.New("scanner supervisor: seccomp notification broker is invalid"))
 	}
-	watchdog := time.NewTicker(20 * time.Millisecond)
+	watchdog := time.NewTicker(scannerSupervisorWatchdogInterval)
 	defer watchdog.Stop()
 	interrupted, childErr, err := superviseScannerChild(child, request.resultFD, signals, watchdog.C, scannerSupervisorOps{
 		waitForExit: func(pid int) (bool, error) {
@@ -762,7 +850,7 @@ func execScannerSupervisorWithBrokerFactory(args []string, brokerFactory func(li
 		reapChildren:         reapScannerChildren,
 		sendResult:           sendScannerSupervisorResult,
 		now:                  time.Now,
-		serviceNotifications: broker.serveOne,
+		serviceNotifications: broker.waitAndServeOne,
 	})
 	if err != nil {
 		return err
@@ -893,7 +981,7 @@ type scannerSupervisorOps struct {
 	reapChildren         func(time.Duration) error
 	sendResult           func(fd int, clean bool) error
 	now                  func() time.Time
-	serviceNotifications func() error
+	serviceNotifications func() (bool, error)
 }
 
 // superviseScannerChild owns the process-tree proof ordering after Start:
@@ -921,12 +1009,15 @@ func superviseScannerChild(child *exec.Cmd, resultFD int, signals <-chan os.Sign
 			break
 		}
 		if notificationErr == nil && ops.serviceNotifications != nil {
-			if err := ops.serviceNotifications(); err != nil {
+			served, err := ops.serviceNotifications()
+			if err != nil {
 				notificationErr = err
 				_ = ops.killGroup(child.Process.Pid, syscall.SIGKILL)
 				if cancellationDeadline.IsZero() {
 					cancellationDeadline = ops.now().Add(scannerSupervisorTimeout)
 				}
+			} else if served {
+				continue
 			}
 		}
 		select {

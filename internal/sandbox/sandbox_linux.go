@@ -131,6 +131,20 @@ func inspectScannerWith(options Options, env environment, inspectPool func(conte
 		policy.status.Seccomp = SeccompStatus{State: StateDisabled, Reason: "scanner.sandbox is off"}
 		return policy
 	}
+	// Report kernel support independently from identity isolation. The health
+	// inspection can read these facts without starting a scanner probe, even
+	// when the daemon cannot lease scanner identities.
+	policy.status.Seccomp = SeccompStatus{State: StateEnforced}
+	if env.seccompErr != nil {
+		policy.status.Seccomp = SeccompStatus{State: StateUnavailable, Reason: seccompUnavailableReason(env.seccompErr)}
+	} else if env.executableErr != nil {
+		policy.status.Seccomp = SeccompStatus{State: StateUnavailable, Reason: "the EdgeWatch executable cannot install the required scanner seccomp filter"}
+	}
+	if landlockMode == ModeOff {
+		policy.status.Landlock = LandlockStatus{Mode: landlockMode, State: StateDisabled, Reason: "scanner.landlock is off"}
+	} else {
+		policy.status.Landlock = LandlockStatus{Mode: landlockMode, State: StateUnavailable, Reason: "scanner identity isolation is unavailable"}
+	}
 	unavailable := func(reason string) *Policy {
 		policy.status.State = StateUnavailable
 		policy.status.Reason = reason
@@ -180,11 +194,12 @@ func inspectScannerWith(options Options, env environment, inspectPool func(conte
 			policy.status.Capabilities = append(policy.status.Capabilities, capabilityName(capability))
 		}
 	}
-	if env.seccompErr != nil {
-		policy.status.Seccomp = SeccompStatus{State: StateUnavailable, Reason: seccompUnavailableReason(env.seccompErr)}
+	if policy.status.Seccomp.State != StateEnforced {
+		if landlockMode != ModeOff {
+			policy.status.Landlock = LandlockStatus{Mode: landlockMode, State: StateUnavailable, Reason: "scanner seccomp isolation is unavailable"}
+		}
 		return unavailable(policy.status.Seccomp.Reason)
 	}
-	policy.status.Seccomp = SeccompStatus{State: StateEnforced}
 	if landlockMode == ModeOff {
 		policy.status.Landlock = LandlockStatus{Mode: landlockMode, State: StateDisabled, Reason: "scanner.landlock is off"}
 	} else if !ValidMode(landlockMode) {

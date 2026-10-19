@@ -128,6 +128,30 @@ func TestInspectScannerReportsPoolWithoutRunningProbesOrRetainingRuntime(t *test
 	}
 }
 
+func TestInspectScannerReportsIndependentIsolationStatusWithoutIdentityCapabilities(t *testing.T) {
+	env, _ := containerEnvironment()
+	env.effective = capabilityMask(unix.CAP_NET_RAW, unix.CAP_NET_ADMIN)
+	env.permitted = env.effective
+	var poolInspections int
+	policy := inspectScannerWith(Options{Mode: ModeAuto, Landlock: ModeAuto}, env, func(context.Context) (*ScannerIdentityPoolStatus, error) {
+		poolInspections++
+		return nil, errors.New("identity pool should not be inspected without control capabilities")
+	})
+	status := policy.Status()
+	if status.State != StateUnavailable || status.IdentityPool == nil || status.IdentityPool.State != StateUnavailable {
+		t.Fatalf("scanner status = %+v, want unavailable identity isolation", status)
+	}
+	if status.Seccomp.State != StateEnforced {
+		t.Fatalf("seccomp = %+v, want its supported runtime state reported independently", status.Seccomp)
+	}
+	if status.Landlock.State != StateUnavailable || !strings.Contains(status.Landlock.Reason, "scanner identity isolation is unavailable") {
+		t.Fatalf("Landlock = %+v, want unavailable while scanner identity isolation is unavailable", status.Landlock)
+	}
+	if poolInspections != 0 {
+		t.Fatalf("identity pool inspection ran %d times without control capabilities", poolInspections)
+	}
+}
+
 func TestDetectMapsScannerRuntimeAllocatorErrors(t *testing.T) {
 	env, _ := containerEnvironment()
 	env.ensureScannerRuntime = func() error {

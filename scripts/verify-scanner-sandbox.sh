@@ -122,6 +122,8 @@ type capabilityProfile struct {
 
 func profileFor(mask string) (capabilityProfile, error) {
 	switch mask {
+	case "0000000000000000": // Connect scans need no packet capabilities.
+		return capabilityProfile{launch: mask, post: mask}, nil
 	case "0000000000002000": // NET_RAW-only daemon capability set.
 		return capabilityProfile{launch: mask, post: mask, ambient: []uintptr{13}, applyNaabuCapTransition: true}, nil
 	case "0000000000003000": // Explicit SYN scan: NET_ADMIN and NET_RAW.
@@ -643,14 +645,16 @@ def scan_marker(base, state, name, expected):
     print(json.dumps({"service_markers": services}))
 
 
-def create_naabu_job(base, state, name, rate=10000):
+def create_naabu_job(base, state, name, rate=10000, scan_type="connect"):
     # A fast connect profile keeps the full-range discovery of one loopback
     # address to seconds. SYN discovery of loopback drops ports at any rate
     # whether or not it is sandboxed, so it cannot give comparable results.
-    # A rate of 1 keeps the discovery running until it is cancelled.
+    # A rate of 1 keeps the discovery running until it is cancelled. Callers
+    # that exercise the SYN capability override pass scan_type="syn" so the
+    # live process matches the capabilities the verifier expects.
     profile = request(base, state, "POST", "/scanner-profiles", {
         "name": name + "-profile", "engine": "naabu_nmap", "password": PASSWORD,
-        "naabu": {"scan_type": "connect", "rate": rate, "workers": 100, "retries": 2, "timeout_ms": 1000,
+        "naabu": {"scan_type": scan_type, "rate": rate, "workers": 100, "retries": 2, "timeout_ms": 1000,
                   "warm_up_seconds": 1, "verify": False, "address_batch_size": 16},
     })
     job = {
@@ -711,8 +715,13 @@ def main():
             name, tcp_ports = args
             job_id = create_job(base, state, name, tcp_ports, "", "conservative")
         else:
-            name, = args
-            job_id = create_naabu_job(base, state, name, rate=1)
+            if len(args) not in (1, 2):
+                raise SystemExit("start-naabu expects a name and optional connect or syn scan type")
+            name = args[0]
+            scan_type = args[1] if len(args) == 2 else "connect"
+            if scan_type not in ("connect", "syn"):
+                raise SystemExit("start-naabu scan type must be connect or syn")
+            job_id = create_naabu_job(base, state, name, rate=1, scan_type=scan_type)
         request(base, state, "POST", f"/jobs/{job_id}/run")
         deadline = time.time() + 60
         while time.time() < deadline:
@@ -1079,7 +1088,7 @@ expect_private_naabu_tmp() {
   local pid=$1 expected_pe=$2 expected_ia=$3 profile=$2 pid_starttime uid gid namespaces namespace leaves leaf namespace_stat leaf_stat candidate owner leaf_candidate
   local inputs input input_stat databases database database_stat current_stat current_contents manifest manifest_stat descriptor_path descriptor_stat descriptor_contents leaf_input_contents probe_output
   case "$expected_pe/$expected_ia" in
-    0000000000002000/0000000000002000|0000000000003000/0000000000002000) ;;
+    0000000000000000/0000000000000000|0000000000002000/0000000000002000|0000000000003000/0000000000002000) ;;
     *) fail "unsupported exact Naabu probe profile: permitted/effective=$expected_pe inheritable/ambient=$expected_ia" ;;
   esac
   docker exec "$container" test -d "/proc/$pid" || fail "Naabu process $pid exited before its temporary files were inspected"
@@ -2049,7 +2058,7 @@ expect_scanner_identity "$nmap_pid" "0000000000002000" "0000000000002000"
 expect_nmap_file_size_limit "Landlock Nmap" "$nmap_pid"
 expect_private_scan_file "Nmap XML" "$nmap_pid" 'edgewatch-nmap-*.xml'
 expect_private_nmap_xml "$nmap_pid" "nmap-0000000000003000" "$nmap_uid" "$nmap_starttime"
-started=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" slow-naabu)
+started=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" slow-naabu syn)
 landlock_naabu_job=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
 landlock_naabu_scan=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
 naabu_pid=$(scanner_pid naabu)
@@ -2076,10 +2085,10 @@ daemon_scan_limit=1
 # Two live Naabu invocations must receive separate leased identities and
 # private leaves. A peer UID must not reach the other's LevelDB files or its
 # inherited target-list descriptor through /proc.
-started_one=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" concurrent-naabu-one)
+started_one=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" concurrent-naabu-one syn)
 job_one=$(printf '%s' "$started_one" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
 scan_one=$(printf '%s' "$started_one" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
-started_two=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" concurrent-naabu-two)
+started_two=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" concurrent-naabu-two syn)
 job_two=$(printf '%s' "$started_two" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
 scan_two=$(printf '%s' "$started_two" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
 concurrent_pids=$(wait_for_scanner_count naabu 2)
@@ -2161,7 +2170,7 @@ job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
 naabu_pid=$(scanner_pid naabu)
 [ -n "$naabu_pid" ] || fail "the proof-timeout Naabu scan started no Naabu"
-expect_private_naabu_tmp "$naabu_pid" "0000000000002000" "0000000000002000"
+expect_private_naabu_tmp "$naabu_pid" "0000000000000000" "0000000000000000"
 quarantined_uid=$naabu_uid
 quarantined_gid=$naabu_gid
 quarantined_pid=$naabu_pid
@@ -2210,10 +2219,10 @@ started=$(python3 "$workdir/driver.py" start-naabu "$base" "$state" after-proof-
 job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
 naabu_pid=$(wait_for_new_scanner_pid naabu "$quarantined_pid")
-expect_scanner_identity "$naabu_pid" "0000000000002000" "0000000000002000"
+expect_scanner_identity "$naabu_pid" "0000000000000000" "0000000000000000"
 followup_uid=$(scanner_uid "$naabu_pid")
 [ "$followup_uid" != "$quarantined_uid" ] || fail "post-timeout scanner reused quarantined UID $quarantined_uid"
-expect_private_naabu_tmp "$naabu_pid" "0000000000002000" "0000000000002000"
+expect_private_naabu_tmp "$naabu_pid" "0000000000000000" "0000000000000000"
 followup_leaf=$naabu_leaf
 cancelled=$(python3 "$workdir/driver.py" cancel "$base" "$state" "$job_id" "$scan_id")
 [ "$cancelled" = canceled ] || fail "the post-quarantine Naabu scan ended '$cancelled'"
@@ -2283,12 +2292,12 @@ naabu_job=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.lo
 naabu_scan=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
 naabu_pid=$(scanner_pid naabu)
 [ -n "$naabu_pid" ] || fail "the identity-only slow Naabu scan started no Naabu"
-expect_scanner_identity "$naabu_pid" "0000000000002000" "0000000000002000"
+expect_scanner_identity "$naabu_pid" "0000000000000000" "0000000000000000"
 expect_scanner_limits Naabu "$naabu_pid"
-expect_private_naabu_tmp "$naabu_pid" "0000000000002000" "0000000000002000"
-expect_peer_denied_between_scanners "$naabu_uid" "0000000000002000" "/proc/$nmap_pid/fd/3" "identity-only Nmap XML descriptor" \
+expect_private_naabu_tmp "$naabu_pid" "0000000000000000" "0000000000000000"
+expect_peer_denied_between_scanners "$naabu_uid" "0000000000000000" "/proc/$nmap_pid/fd/3" "identity-only Nmap XML descriptor" \
   "$nmap_pid" "$nmap_starttime" "$naabu_pid" "$naabu_starttime"
-expect_peer_denied_between_scanners "$naabu_uid" "0000000000002000" "/proc/$nmap_pid/fd/3" "identity-only Nmap XML descriptor write-open" \
+expect_peer_denied_between_scanners "$naabu_uid" "0000000000000000" "/proc/$nmap_pid/fd/3" "identity-only Nmap XML descriptor write-open" \
   "$nmap_pid" "$nmap_starttime" "$naabu_pid" "$naabu_starttime" open-write
 expect_peer_denied_between_scanners "$nmap_uid" "0000000000002000" "/proc/$naabu_pid/fd/3" "identity-only Naabu target descriptor" \
   "$naabu_pid" "$naabu_starttime" "$nmap_pid" "$nmap_starttime"

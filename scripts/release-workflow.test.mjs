@@ -1434,8 +1434,16 @@ test('scanner sandbox verification selects the live Nmap scan and pins it while 
   assert.ok(synSection, 'the verifier covers the explicit SYN capability override')
   assert.match(synSection, /expect_scanner_identity "\$nmap_pid" "0000000000002000" "0000000000002000"/,
     'Nmap drops NET_ADMIN even when the SYN override grants it to the daemon')
+  assert.match(synSection, /start-naabu "\$base" "\$state" slow-naabu syn/,
+    'the SYN capability assertion starts Naabu with an actual SYN profile')
   assert.match(synSection, /expect_private_naabu_tmp "\$naabu_pid" "0000000000003000" "0000000000002000"/,
     'Naabu retains NET_ADMIN for its SYN discovery')
+  assert.match(scannerSandboxVerifier,
+    /def create_naabu_job\(base, state, name, rate=10000, scan_type="connect"\):[\s\S]*?"scan_type": scan_type/,
+    'the sandbox driver can choose Naabu connect or SYN mode for held invocations')
+  assert.match(scannerSandboxVerifier,
+    /expect_private_naabu_tmp "\$naabu_pid" "0000000000000000" "0000000000000000"/,
+    'connect-mode Naabu receives no packet capabilities')
   const markerScan = /def scan_marker\([\s\S]*?\n\ndef create_naabu_job/.exec(scannerSandboxVerifier)?.[0]
   assert.ok(markerScan, 'the sandbox verifier has a dedicated XML marker scan')
   assert.match(markerScan, /create_job\([^)]*service_detection=True\)/,

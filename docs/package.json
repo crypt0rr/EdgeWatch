@@ -23,5 +23,9 @@
     "@astrojs/check": "^0.9.10",
     "parse5": "^8.0.0",
     "typescript": "~6.0.3"
+  },
+  "overrides": {
+    "postcss-nested": "7.0.2",
+    "postcss-selector-parser": "7.1.6"
   }
 }

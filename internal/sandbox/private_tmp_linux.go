@@ -1620,9 +1620,13 @@ func removePrivateDirectoryContents(fd int, device uint64, owner, group uint32, 
 				return err
 			}
 			child, err := unix.Openat(pinned, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-			_ = unix.Close(pinned)
+			closePinnedErr := unix.Close(pinned)
 			if err != nil {
 				return errors.New("open private temporary subdirectory failed")
+			}
+			if closePinnedErr != nil {
+				_ = unix.Close(child)
+				return errors.New("close pinned private temporary subdirectory failed")
 			}
 			var readable unix.Stat_t
 			if err := unix.Fstat(child, &readable); err != nil || !sameObject(&opened, &readable) || readable.Mode != unix.S_IFDIR|privateScannerTemporaryMode {
@@ -1633,10 +1637,6 @@ func removePrivateDirectoryContents(fd int, device uint64, owner, group uint32, 
 			if err := unix.Fstatat(int(current.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&readable, &named) || named.Mode != unix.S_IFDIR|privateScannerTemporaryMode || uint64(named.Dev) != device || named.Uid != owner || named.Gid != group {
 				_ = unix.Close(child)
 				return errors.New("private temporary subdirectory changed while opening")
-			}
-			if err := unix.Close(pinned); err != nil {
-				_ = unix.Close(child)
-				return errors.New("close pinned private temporary subdirectory failed")
 			}
 			childFile := os.NewFile(uintptr(child), "private temporary nested contents")
 			if childFile == nil {

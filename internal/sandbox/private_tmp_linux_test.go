@@ -2215,6 +2215,11 @@ func TestPrivateTemporaryCleanupBoundsEntryCountAndAllowsDeepTrees(t *testing.T)
 		if err := os.WriteFile(artifact, []byte("keep on rejected cleanup"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		allocator := newTestScannerIdentityAllocator(t, 1)
+		lease, err := allocator.acquire(context.Background())
+		if err != nil {
+			t.Fatalf("acquire scanner identity for cleanup overflow: %v", err)
+		}
 		fd, err := unix.Openat(int(temporary.leaf.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -2225,11 +2230,20 @@ func TestPrivateTemporaryCleanupBoundsEntryCountAndAllowsDeepTrees(t *testing.T)
 			t.Fatal(err)
 		}
 		budget := cleanupBudget{entries: privateTemporaryCleanupEntries}
-		if err := removePrivateDirectoryContents(fd, uint64(stat.Dev), stat.Uid, stat.Gid, &budget); err == nil {
+		cleanupErr := removePrivateDirectoryContents(fd, uint64(stat.Dev), stat.Uid, stat.Gid, &budget)
+		if cleanupErr == nil {
 			t.Fatal("cleaner accepted an entry beyond its total-entry limit")
 		}
 		if contents, err := os.ReadFile(artifact); err != nil || string(contents) != "keep on rejected cleanup" {
 			t.Fatalf("entry-limit rejection removed or changed the artifact: %q, %v", contents, err)
+		}
+		invocation := &scannerSupervisorInvocation{lease: lease, startedOK: true, proofChecked: true}
+		if err := invocation.finish(cleanupErr == nil); err == nil || !strings.Contains(err.Error(), "identity quarantined") {
+			t.Fatalf("finish after cleanup budget failure = %v, want quarantined identity", err)
+		}
+		pool, err := allocator.inspect(context.Background())
+		if err != nil || pool.Active != 0 || pool.Quarantined != 1 || pool.Free != 0 {
+			t.Fatalf("pool after cleanup budget failure = %+v, %v; want one health-visible quarantined identity", pool, err)
 		}
 	})
 }

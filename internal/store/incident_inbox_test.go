@@ -952,7 +952,6 @@ func TestIncidentInboxSnapshotDecodesAreSerializedAcrossRequests(t *testing.T) {
 }
 
 func TestIncidentInboxSnapshotDecodeYieldsBetweenKeys(t *testing.T) {
-	t.Parallel()
 	firstRequest := map[incidentInboxSnapshotKey][]int{
 		{tenantID: "tenant-a", jobID: "job-one", scanID: "scan-one"}: {0},
 		{tenantID: "tenant-a", jobID: "job-two", scanID: "scan-two"}: {1},

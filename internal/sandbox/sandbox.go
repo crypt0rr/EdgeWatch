@@ -231,7 +231,9 @@ func scannerIdentityPoolStatus(state, reason string) *ScannerIdentityPoolStatus 
 	}
 }
 
-var inspectScannerIdentityPool = func(context.Context) (*ScannerIdentityPoolStatus, error) {
+var inspectScannerIdentityPool = unavailableScannerIdentityPool
+
+func unavailableScannerIdentityPool(context.Context) (*ScannerIdentityPoolStatus, error) {
 	return scannerIdentityPoolStatus(StateUnavailable, "scanner identity pool inspection requires Linux"), errors.New("scanner identity pool inspection requires Linux")
 }
 
@@ -638,6 +640,10 @@ func InspectScanner(options Options) *Policy {
 	if inspectScannerSandbox != nil {
 		return inspectScannerSandbox(options)
 	}
+	return inspectScannerFallback(options)
+}
+
+func inspectScannerFallback(options Options) *Policy {
 	status := Status{Mode: options.Mode, State: StateUnavailable, Reason: "scanner sandbox inspection requires Linux", IdentityPool: scannerIdentityPoolStatus(StateUnavailable, "scanner identity leases require Linux"), Landlock: LandlockStatus{Mode: options.Landlock, State: StateUnavailable, Reason: "Landlock requires Linux"}, Seccomp: SeccompStatus{State: StateUnavailable, Reason: "scanner seccomp requires Linux"}}
 	if options.Mode == ModeOff {
 		status.State = StateDisabled

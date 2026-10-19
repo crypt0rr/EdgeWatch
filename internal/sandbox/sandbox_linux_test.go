@@ -91,6 +91,13 @@ func TestDetectEnforcesWithTheContainerNetworkCapabilities(t *testing.T) {
 }
 
 func TestScannerInvocationPoliciesDropUnusedNetworkCapabilities(t *testing.T) {
+	if (*Policy)(nil).WithScannerNetworkCapabilities(true, true) != nil {
+		t.Fatal("nil scanner policy produced a capability copy")
+	}
+	notifier := NewEnforcedFor(Notifier)
+	if notifier.WithScannerNetworkCapabilities(true, true) != notifier {
+		t.Fatal("non-scanner policy changed its network capabilities")
+	}
 	base := NewEnforced(unix.CAP_NET_RAW, unix.CAP_NET_ADMIN)
 	nmap := base.WithScannerNetworkCapabilities(true, false)
 	if !reflect.DeepEqual(nmap.ambient, []uintptr{unix.CAP_NET_RAW}) || !reflect.DeepEqual(nmap.Status().Capabilities, []string{"NET_RAW"}) {

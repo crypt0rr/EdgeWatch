@@ -953,7 +953,9 @@ restart_daemon_with_caps() {
 }
 
 # health_state prints the sandbox state, the scanner UID, the capabilities,
-# and the Landlock state that the health command reports.
+# and the Landlock state from the health command's read-only inspection. It
+# checks runtime capabilities and the identity pool without running scanner
+# compatibility probes; daemon-specific probe fallbacks are checked in logs.
 health_state() {
   docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml --output json |
     python3 -c 'import json, sys; sandbox = json.load(sys.stdin)["scanner_sandbox"]; limits = sandbox.get("limits"); pool = sandbox.get("identity_pool") or {}; print(sandbox["state"], sandbox.get("process_uid", "-"), ",".join(sandbox.get("capabilities") or []) or "-", "landlock:" + sandbox["landlock"]["state"], "seccomp:" + sandbox["seccomp"]["state"], "limits:" + ("%s,%s" % (limits["oom_score_adj"], limits["max_open_files"]) if limits else "-"), "pool:%s,%s,%s-%s,%s" % (pool.get("state", "-"), pool.get("strategy", "-"), pool.get("uid_start", "-"), pool.get("uid_end", "-"), pool.get("max_parallel", "-")))'
@@ -1673,10 +1675,16 @@ daemon_mounts=(--volume "$workdir/landlock-incompatible-nmap:/usr/bin/nmap:ro"
   --volume "$workdir/nmap-landlock-probe:/opt/edgewatch-nmap-probe:ro")
 daemon_landlock=auto
 run_daemon nmap-landlock-fallback auto "${bundled_caps[@]}"
-expect_health "enforced - NET_RAW landlock:unavailable seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
-fallback_warning=$(docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml --output json |
-  python3 -c 'import json, sys; warnings=json.load(sys.stdin).get("warnings") or []; print(any("scanner processes start with identity isolation and seccomp but without Landlock" in value for value in warnings))')
-[ "$fallback_warning" = True ] || fail "health did not warn that Landlock is unavailable after the identity-only Nmap control passed"
+# The read-only health command confirms that Landlock is available in this
+# container. The daemon has also tested this Nmap binary under its scanner
+# policy, so its startup log must report the per-binary fallback accurately.
+expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
+fallback_log="$workdir/nmap-landlock-fallback.log"
+docker logs "$container" >"$fallback_log" 2>&1
+grep -Fq 'scanner processes start with identity isolation and seccomp but without Landlock' "$fallback_log" ||
+  fail "the daemon did not warn that Nmap uses the identity-and-seccomp fallback"
+grep -Fq '"reason":"nmap could not start with Landlock and seccomp"' "$fallback_log" ||
+  fail "the daemon did not report the Nmap Landlock compatibility failure"
 stop_daemon
 daemon_mounts=()
 

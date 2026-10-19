@@ -1430,6 +1430,12 @@ test('scanner sandbox verification selects the live Nmap scan and pins it while 
   assert.match(scannerSandboxVerifier,
     /expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"[\s\S]*?control_sandbox=\$\(python3 "\$workdir\/driver.py" scanner-sandbox/,
     'read-only health checks runtime confinement while daemon status checks its Nmap probe result')
+  const synSection = /^# The SYN override:[\s\S]*?^resume_held_scanner$/m.exec(scannerSandboxVerifier)?.[0]
+  assert.ok(synSection, 'the verifier covers the explicit SYN capability override')
+  assert.match(synSection, /expect_scanner_identity "\$nmap_pid" "0000000000002000" "0000000000002000"/,
+    'Nmap drops NET_ADMIN even when the SYN override grants it to the daemon')
+  assert.match(synSection, /expect_private_naabu_tmp "\$naabu_pid" "0000000000003000" "0000000000002000"/,
+    'Naabu retains NET_ADMIN for its SYN discovery')
   const markerScan = /def scan_marker\([\s\S]*?\n\ndef create_naabu_job/.exec(scannerSandboxVerifier)?.[0]
   assert.ok(markerScan, 'the sandbox verifier has a dedicated XML marker scan')
   assert.match(markerScan, /create_job\([^)]*service_detection=True\)/,

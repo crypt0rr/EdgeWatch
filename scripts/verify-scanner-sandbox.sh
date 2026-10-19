@@ -2025,11 +2025,12 @@ for attempt in $(seq 1 20); do
 done
 stop_daemon
 
-# The SYN override: a sandboxed Naabu keeps NET_RAW and NET_ADMIN, and
-# discovers ports with the target list it reads through its descriptor. This
-# daemon runs without TMPDIR, as a deployment that does not copy compose.yaml
-# does: the files of running scans still lie in the scanner files directory,
-# where another sandboxed process can open none of them.
+# The SYN override: Naabu keeps NET_RAW and NET_ADMIN for SYN discovery, while
+# Nmap drops NET_ADMIN and keeps only NET_RAW. Both read their private files
+# through descriptors. This daemon runs without TMPDIR, as a deployment that
+# does not copy compose.yaml does: the files of running scans still lie in the
+# scanner files directory, where another sandboxed process can open none of
+# them.
 daemon_tmpdir=
 daemon_scan_limit=2
 daemon_mounts=(--volume "$workdir/proc-fd-probe:/usr/local/bin/edgewatch-proc-fd-probe:ro")
@@ -2044,7 +2045,7 @@ hold_scanner_process nmap --stats-every
 nmap_pid=$held_scanner_pid
 nmap_starttime=$held_scanner_starttime
 nmap_uid=$(scanner_uid "$nmap_pid")
-expect_scanner_identity "$nmap_pid" "0000000000003000" "0000000000002000"
+expect_scanner_identity "$nmap_pid" "0000000000002000" "0000000000002000"
 expect_nmap_file_size_limit "Landlock Nmap" "$nmap_pid"
 expect_private_scan_file "Nmap XML" "$nmap_pid" 'edgewatch-nmap-*.xml'
 expect_private_nmap_xml "$nmap_pid" "nmap-0000000000003000" "$nmap_uid" "$nmap_starttime"

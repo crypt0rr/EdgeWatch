@@ -1415,6 +1415,12 @@ test('scanner sandbox verification selects the live Nmap scan and pins it while 
     'the sandbox verifier waits for startup health to reach its expected state')
   assert.match(expectHealth, /sleep 0\.1/,
     'the startup health wait is bounded and polls without a long fixed sleep')
+  assert.doesNotMatch(scannerSandboxVerifier, /^\s*expect_health "[^"]*limits:1000,65536/m,
+    'read-only health inspection does not claim per-process resource limits')
+  assert.match(scannerSandboxVerifier, /^expect_scanner_limits Nmap /m,
+    'the verifier checks Nmap resource limits from its live process')
+  assert.match(scannerSandboxVerifier, /^expect_scanner_limits Naabu /m,
+    'the verifier checks Naabu resource limits from its live process')
 
   const directory = await mkdtemp(join(tmpdir(), 'edgewatch-scanner-pid-selector-'))
   t.after(() => rm(directory, { recursive: true, force: true }))

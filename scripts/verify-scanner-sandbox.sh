@@ -956,6 +956,8 @@ restart_daemon_with_caps() {
 # and the Landlock state from the health command's read-only inspection. It
 # checks runtime capabilities and the identity pool without running scanner
 # compatibility probes; daemon-specific probe fallbacks are checked in logs.
+# Read-only inspection does not report per-process resource limits; the checks
+# below inspect those limits from /proc after a scanner starts.
 health_state() {
   docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml --output json |
     python3 -c 'import json, sys; sandbox = json.load(sys.stdin)["scanner_sandbox"]; limits = sandbox.get("limits"); pool = sandbox.get("identity_pool") or {}; print(sandbox["state"], sandbox.get("process_uid", "-"), ",".join(sandbox.get("capabilities") or []) or "-", "landlock:" + sandbox["landlock"]["state"], "seccomp:" + sandbox["seccomp"]["state"], "limits:" + ("%s,%s" % (limits["oom_score_adj"], limits["max_open_files"]) if limits else "-"), "pool:%s,%s,%s-%s,%s" % (pool.get("state", "-"), pool.get("strategy", "-"), pool.get("uid_start", "-"), pool.get("uid_end", "-"), pool.get("max_parallel", "-")))'
@@ -1727,14 +1729,14 @@ daemon_mounts=(--volume "$workdir/nmap-scan-landlock:/usr/bin/nmap:ro"
   --volume "$workdir/nmap-scan-landlock-probe:/opt/edgewatch-nmap-scan-probe:ro")
 daemon_landlock=auto
 run_daemon nmap-scan-landlock auto "${bundled_caps[@]}"
-expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:1000,65536 pool:enforced,per_invocation,60000-60063,64"
+expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
 scan_marker_output=$(python3 "$workdir/driver.py" scan-marker "$base" "$state" nmap-landlock-scan landlock-denied) ||
   fail "the file-size-limited Nmap scan did not report the Landlock denial through XML: $scan_marker_output"
 echo "verified file-size-limited Nmap scan under Landlock: $scan_marker_output"
 stop_daemon
 daemon_landlock=off
 run_daemon nmap-scan-identity-control auto "${bundled_caps[@]}"
-expect_health "enforced - NET_RAW landlock:disabled seccomp:enforced limits:1000,65536 pool:enforced,per_invocation,60000-60063,64"
+expect_health "enforced - NET_RAW landlock:disabled seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
 scan_marker_output=$(python3 "$workdir/driver.py" scan-marker "$base" "$state" nmap-identity-scan landlock-allowed) ||
   fail "the identity-only Nmap control did not read the marker and report it through XML: $scan_marker_output"
 echo "verified file-size-limited identity-only Nmap control: $scan_marker_output"
@@ -1892,7 +1894,7 @@ chmod 0755 "$workdir/landlock-exec/probe"
 # distinct leased UID/GID for each invocation.
 daemon_mounts=(--volume "$workdir/landlock-exec:/opt/edgewatch-landlock-exec:ro")
 run_daemon base auto "${bundled_caps[@]}"
-expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:1000,65536 pool:enforced,per_invocation,60000-60063,64"
+expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
 expect_legacy_tmp_grant_rejected
 daemon_hardening=$(process_hardening 1)
 read -r daemon_filters daemon_core_soft daemon_core_hard daemon_filter <<< "$daemon_hardening"
@@ -2026,7 +2028,7 @@ daemon_mounts=(--volume "$workdir/proc-fd-probe:/usr/local/bin/edgewatch-proc-fd
 run_daemon syn auto "${bundled_caps[@]}" NET_ADMIN
 daemon_mounts=()
 daemon_tmpdir=/var/lib/edgewatch/tmp
-expect_health "enforced - NET_RAW,NET_ADMIN landlock:enforced seccomp:enforced limits:1000,65536 pool:enforced,per_invocation,60000-60063,64"
+expect_health "enforced - NET_RAW,NET_ADMIN landlock:enforced seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
 started=$(python3 "$workdir/driver.py" start "$base" "$state" slow-files "1-20000")
 landlock_nmap_job=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
 landlock_nmap_scan=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')
@@ -2140,7 +2142,7 @@ expect_no_scanner_processes "a scan refused without scanner identity capabilitie
 expect_no_naabu_temporary_namespaces
 expect_no_naabu_target_inputs
 restart_daemon_with_caps restored "${bundled_caps[@]}"
-expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:1000,65536 pool:enforced,per_invocation,60000-60063,64"
+expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
 
 # Stop the trusted supervisor while a scanner is alive. Cancellation must
 # fail closed when the result channel cannot prove subtree cleanup: its
@@ -2228,7 +2230,7 @@ chmod 0755 "$workdir/forking-nmap"
 daemon_mounts=(--volume "$workdir/forking-nmap:/usr/bin/nmap:ro")
 run_daemon forking auto "${bundled_caps[@]}"
 daemon_mounts=()
-expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:1000,65536 pool:enforced,per_invocation,60000-60063,64"
+expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
 started=$(python3 "$workdir/driver.py" start "$base" "$state" forking "1-20000")
 job_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["job_id"])')
 scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load(sys.stdin)["scan_id"])')

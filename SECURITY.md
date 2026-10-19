@@ -236,10 +236,11 @@ mapping and a configured piped core handler may still be invoked and receive
 core metadata; `RLIMIT_CORE` does not limit piped handlers.
 
 `scanner_sandbox.identity_pool` in `edgewatch health` reports the pool's
-`per_invocation` strategy, fixed UID range, 64-lease capacity, and availability
-reason when present. The capacity is not an active/free/quarantined count. The
-scanner status does not expose one `process_uid`, `uid`, or `gid` because
-concurrent invocations have different identities. Its `seccomp` and
+`per_invocation` strategy, fixed UID range and 64-lease capacity, active and
+quarantined leases, identities in use by unleased processes, and free slots.
+The capacity is fixed; the other counts describe current use. The scanner
+status does not expose one `process_uid`, `uid`, or `gid` because concurrent
+invocations have different identities. Its `seccomp` and
 `landlock` fields report those controls independently. The notification child
 process, which receives one destination URL, runs in a sandbox of its own with
 `notifications.sandbox: auto`: as UID and GID 65531 without capabilities,

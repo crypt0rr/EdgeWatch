@@ -78,10 +78,12 @@ Each business unit publishes its own page; see
 [Business units](/administration/business-units/).
 
 A public-status save applies only to the configuration the editor loaded. If
-another administrator saved in the meantime, EdgeWatch rejects the save with a
-conflict and the editor reloads the current settings, so an outdated editor
-cannot republish a withdrawn page. An editor with unsaved changes keeps them
-when the console refreshes in the background, and says when another
-administrator has saved; **Discard my changes and load theirs** reloads the
-current settings at once. API clients send the `updated_at` value from
+another administrator saved in the meantime, EdgeWatch rejects the stale save
+with a conflict and keeps your draft in the editor. Open **Review latest saved
+settings** to compare the currently published state, title, introduction, and
+host selections with your draft. Then choose **Keep my edits and use the latest
+revision** to save your draft against that revision, or **Load theirs** to
+discard your draft and use the latest settings. A background refresh also
+preserves unsaved edits and offers those choices when another administrator
+has saved. API clients send the `updated_at` value from
 `GET /api/v1/public-dashboard` with each `PUT`.

@@ -271,13 +271,25 @@ describe('public dashboard pages', () => {
     expect(host().checked).toBe(true)
 
     // Another administrator saves a title; a focus or reconnect refetch arrives.
-    vi.mocked(getPublicDashboardConfig).mockResolvedValue({ ...publicConfig, title: 'Changed elsewhere', updated_at: '2026-09-12T09:00:00Z' })
+    vi.mocked(getPublicDashboardConfig).mockResolvedValue({
+      ...publicConfig,
+      enabled: true,
+      title: 'Changed elsewhere',
+      hosts: [{ job_id: 'job-2', address: '198.51.100.11' }],
+      updated_at: '2026-09-12T09:00:00Z',
+    })
     await act(async () => {
       await queryClient.invalidateQueries({ queryKey: ['public-dashboard-config'] })
     })
     await vi.waitFor(() => expect(container.textContent).toContain('Another administrator saved the public view while you were editing.'), { timeout: 1000 })
     expect(host().checked).toBe(true)
     expect((container.querySelector('input:not([type])') as HTMLInputElement).value).toBe(publicConfig.title)
+    expect((container.querySelector('#public-status-enabled') as HTMLInputElement).checked).toBe(false)
+    const reviewLatest = container.querySelector('.public-status-current-settings summary') as HTMLElement
+    act(() => reviewLatest.click())
+    expect(container.querySelector('.public-status-current-settings')?.textContent).toContain('Enabled')
+    expect(container.querySelector('.public-status-current-settings')?.textContent).toContain('Changed elsewhere')
+    expect(container.querySelector('.public-status-current-settings')?.textContent).toContain('198.51.100.11 · job job-2')
 
     // Saving the draft still carries the token it was loaded with, so the
     // server can refuse it instead of silently undoing the other save.
@@ -293,7 +305,9 @@ describe('public dashboard pages', () => {
     const load = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Load theirs') as HTMLButtonElement
     act(() => load.click())
     await vi.waitFor(() => expect((container.querySelector('input:not([type])') as HTMLInputElement).value).toBe('Changed elsewhere'), { timeout: 1000 })
+    expect((container.querySelector('#public-status-enabled') as HTMLInputElement).checked).toBe(true)
     expect(host().checked).toBe(false)
+    expect((document.getElementById('public-host-job-2-198.51.100.11-0') as HTMLInputElement).checked).toBe(true)
   })
 
   it('discards an edited draft on request and follows the server again', async () => {

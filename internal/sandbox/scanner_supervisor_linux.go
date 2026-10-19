@@ -191,10 +191,12 @@ func prepareLinuxScannerInvocation(ctx context.Context, cmd *exec.Cmd, policy *P
 		return nil, err
 	}
 
-	var ambient []uintptr
-	if cmd.SysProcAttr != nil {
-		ambient = append(ambient, cmd.SysProcAttr.AmbientCaps...)
-	}
+	// The policy is the source of truth for the scanner's capabilities. Some
+	// invocation setup helpers (such as Naabu's private temporary directory)
+	// deliberately clear the command's process capabilities before wrapping
+	// it, but the supervised scanner still needs the capabilities allowed by
+	// its invocation policy.
+	ambient := append([]uintptr(nil), policy.ambient...)
 	request := scannerLaunchRequest{
 		Version: 1, Path: cmd.Path, Args: append([]string(nil), cmd.Args...), Env: append([]string(nil), cmd.Env...),
 		Dir: cmd.Dir, Files: len(cmd.ExtraFiles), LivenessFD: livenessFD, UID: uint32(uid), GID: uint32(gid),

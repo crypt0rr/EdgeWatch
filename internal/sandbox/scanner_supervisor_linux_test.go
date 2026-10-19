@@ -1478,8 +1478,10 @@ func TestPrepareLinuxScannerInvocationBuildsBoundLaunchRequestBeforeStart(t *tes
 	command := exec.Command("/bin/true", "--version")
 	command.Env = []string{"EDGEWATCH_TEST_VALUE=present"}
 	command.Dir = t.TempDir()
-	command.SysProcAttr = &syscall.SysProcAttr{AmbientCaps: []uintptr{unix.CAP_NET_RAW, unix.CAP_NET_ADMIN}}
-	wantAmbientCaps := append([]uintptr(nil), command.SysProcAttr.AmbientCaps...)
+	// Private-temp setup may leave only the confined identity on the command.
+	// The invocation policy must still carry the final scanner capabilities.
+	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: UID, Gid: GID, Groups: []uint32{}}}
+	wantAmbientCaps := append([]uintptr(nil), policy.ambient...)
 
 	invocation, err := prepareLinuxScannerInvocation(context.Background(), command, policy, true)
 	if err != nil {

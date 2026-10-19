@@ -366,8 +366,9 @@ func runScannerVersionProbe(ctx context.Context, path string, policy *sandbox.Po
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = append([]string(nil), scannerProbeEnv...)
-	policy.WithScannerNetworkCapabilities(false, false).Confine(cmd)
-	invocation, err := sandbox.PrepareScannerInvocation(ctx, cmd, policy, false)
+	probePolicy := policy.WithScannerNetworkCapabilities(false, false)
+	probePolicy.Confine(cmd)
+	invocation, err := sandbox.PrepareScannerInvocation(ctx, cmd, probePolicy, false)
 	if err != nil {
 		return nil, err
 	}

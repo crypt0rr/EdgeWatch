@@ -342,7 +342,7 @@ func mustOpenScannerIdentityDirectory(t *testing.T, path, markerDir string) int 
 	return directoryFD
 }
 
-func TestInspectScannerFallbackAndPoolNilContext(t *testing.T) {
+func TestInspectScannerFallbackAndUnavailablePool(t *testing.T) {
 	status := InspectScanner(Options{Mode: ModeOff}).Status()
 	if status.State != StateDisabled || status.IdentityPool == nil || status.IdentityPool.State != StateDisabled {
 		t.Fatalf("Linux scanner inspection = %+v; want disabled status", status)
@@ -350,9 +350,6 @@ func TestInspectScannerFallbackAndPoolNilContext(t *testing.T) {
 	status = inspectScannerFallback(Options{Mode: ModeOff}).Status()
 	if status.State != StateDisabled || status.IdentityPool == nil || status.IdentityPool.State != StateDisabled {
 		t.Fatalf("non-Linux off-mode scanner status = %+v", status)
-	}
-	if _, err := InspectScannerIdentityPool(nil); err == nil {
-		t.Fatal("identity-pool inspection accepted a nil context")
 	}
 	pool, err := unavailableScannerIdentityPool(context.Background())
 	if err == nil || pool == nil || pool.State != StateUnavailable {

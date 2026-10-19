@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, createNotificationDestination, deleteNotificationDestination, getSession, listNotificationDestinations, listPlatformNotifications, testNotificationDestination, updateNotificationDestination, updatePlatformNotification } from '../api'
@@ -179,50 +179,55 @@ describe('notification destination workflows', () => {
     expect(banner).toBe('Notification destination updated. Alerts queued for the previous credentials were discarded.')
   })
 
-  it('saves a unit destination against the revision opened and reloads after a conflict', async () => {
+  it('preserves the unit destination draft through a stale-save conflict and requires an explicit rebase', async () => {
     const latest = { ...destination, name: 'Paused elsewhere', enabled: false, revision: 5 }
     vi.mocked(listNotificationDestinations).mockResolvedValueOnce(response as never).mockResolvedValue({ ...response, destinations: [latest] } as never)
     vi.mocked(updateNotificationDestination).mockRejectedValueOnce(new APIError('stale revision', 'conflict'))
-    const { client } = renderWithProviders(<Notifications />)
+    renderWithProviders(<Notifications />)
     await waitFor(() => expect(screen.getByText('Mattermost')).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
     const editForm = screen.getByRole('button', { name: 'Save changes' }).closest('form')!
     fireEvent.change(editForm.querySelector('input')!, { target: { value: 'My rename' } })
-    await act(async () => { await client.invalidateQueries({ queryKey: ['notifications'] }) })
-    await waitFor(() => expect(screen.getByText('Paused elsewhere')).toBeInTheDocument())
-
+    const rotatedURL = 'generic://pager.example.test/new'
+    fireEvent.change(within(editForm).getByPlaceholderText('generic://host/path?disabletls=yes'), { target: { value: rotatedURL } })
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
     await confirmDialog()
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('The latest values are loaded; review them and save again.'))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Your draft still uses revision 4'))
 
-    expect(updateNotificationDestination).toHaveBeenCalledWith('destination-1', 4, 'My rename', 'administrator-password', { enabled: true })
-    expect(screen.getByRole('button', { name: 'Save changes' })).toBeInTheDocument()
+    expect(updateNotificationDestination).toHaveBeenCalledWith('destination-1', 4, 'My rename', 'administrator-password', { enabled: true, url: rotatedURL })
+    expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled()
     const refreshedForm = screen.getByRole('button', { name: 'Save changes' }).closest('form')!
-    expect(refreshedForm.querySelector('input')?.value).toBe('Paused elsewhere')
-    expect((refreshedForm.querySelector('input[type="checkbox"]') as HTMLInputElement).checked).toBe(false)
+    expect(refreshedForm.querySelector('input')?.value).toBe('My rename')
+    expect(within(refreshedForm).getByPlaceholderText('generic://host/path?disabletls=yes')).toHaveValue(rotatedURL)
+    expect(within(refreshedForm).getByRole('checkbox', { name: /Enabled/ })).toBeChecked()
+    fireEvent.click(screen.getByRole('button', { name: 'Keep my edits' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await confirmDialog()
+    await waitFor(() => expect(updateNotificationDestination).toHaveBeenLastCalledWith('destination-1', 5, 'My rename', 'administrator-password', { enabled: true, url: rotatedURL }))
   })
 
-  it('uses the edit-opening revision for platform destinations too', async () => {
+  it('preserves platform destination edits through a stale-save conflict and requires an explicit rebase', async () => {
     const latest = { ...destination, name: 'Platform changed elsewhere', enabled: false, revision: 8 }
     vi.mocked(listPlatformNotifications).mockResolvedValueOnce(response as never).mockResolvedValue({ ...response, destinations: [latest] } as never)
     vi.mocked(updatePlatformNotification).mockRejectedValueOnce(new APIError('stale revision', 'conflict'))
-    const { client } = renderWithProviders(<PlatformNotifications />)
+    renderWithProviders(<PlatformNotifications />)
     await waitFor(() => expect(screen.getByText('Mattermost')).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
     const editForm = screen.getByRole('button', { name: 'Save changes' }).closest('form')!
     fireEvent.change(editForm.querySelector('input')!, { target: { value: 'Platform rename' } })
-    await act(async () => { await client.invalidateQueries({ queryKey: ['platform-notifications'] }) })
-    await waitFor(() => expect(screen.getByText('Platform changed elsewhere')).toBeInTheDocument())
-
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
     await confirmDialog()
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('The latest values are loaded; review them and save again.'))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Your draft still uses revision 4'))
 
     expect(updatePlatformNotification).toHaveBeenCalledWith('destination-1', 4, 'Platform rename', 'administrator-password', { enabled: true })
-    expect(screen.getByRole('button', { name: 'Save changes' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled()
     const refreshedForm = screen.getByRole('button', { name: 'Save changes' }).closest('form')!
-    expect(refreshedForm.querySelector('input')?.value).toBe('Platform changed elsewhere')
-    expect((refreshedForm.querySelector('input[type="checkbox"]') as HTMLInputElement).checked).toBe(false)
+    expect(refreshedForm.querySelector('input')?.value).toBe('Platform rename')
+    expect((refreshedForm.querySelector('input[type="checkbox"]') as HTMLInputElement).checked).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Keep my edits' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await confirmDialog()
+    await waitFor(() => expect(updatePlatformNotification).toHaveBeenLastCalledWith('destination-1', 8, 'Platform rename', 'administrator-password', { enabled: true }))
   })
 
   it('keeps protected destination state unchanged when confirmation fails', async () => {

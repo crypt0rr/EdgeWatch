@@ -12,6 +12,8 @@ const workflowPath = resolve(repositoryRoot, '.github', 'workflows', 'release.ym
 const workflow = await readFile(workflowPath, 'utf8')
 const ciWorkflowPath = resolve(repositoryRoot, '.github', 'workflows', 'ci.yml')
 const ciWorkflow = await readFile(ciWorkflowPath, 'utf8')
+const titleWorkflowPath = resolve(repositoryRoot, '.github', 'workflows', 'pr-title.yml')
+const titleWorkflow = await readFile(titleWorkflowPath, 'utf8')
 const workflowsDirectory = resolve(repositoryRoot, '.github', 'workflows')
 const workflows = await Promise.all(
   (await readdir(workflowsDirectory))
@@ -241,6 +243,49 @@ function permissionsOf(text, indent) {
 function writeScopes(permissions) {
   if (typeof permissions === 'string') return permissions === 'read-all' || permissions === '{}' ? [] : [permissions]
   return Object.entries(permissions).filter(([, level]) => level === 'write').map(([scope]) => scope)
+}
+
+function workflowScriptPaths(block) {
+  return [...block.matchAll(/(?:^|\s)(?:bash\s+)?\.\/(scripts\/[A-Za-z0-9_./-]+\.sh)\b/gm)].map((match) => match[1])
+}
+
+async function calledScripts(initialPaths) {
+  const paths = new Set()
+  const pending = [...initialPaths]
+  while (pending.length > 0) {
+    const path = pending.pop()
+    if (paths.has(path)) continue
+    paths.add(path)
+    const source = await readRepositoryFile(path)
+    const directory = dirname(path)
+    for (const match of source.matchAll(/\$[A-Za-z_][A-Za-z0-9_]*\/([A-Za-z0-9_./-]+\.sh)\b/g)) {
+      const child = resolve(directory, match[1]).slice(repositoryRoot.length + 1)
+      if (child.startsWith('scripts/') && !paths.has(child)) pending.push(child)
+    }
+  }
+  return [...paths]
+}
+
+function literalImagesStartedByDocker(source) {
+  const collapsed = withoutComments(source).replace(/\\\r?\n[ \t]*/g, ' ')
+  const images = []
+  const valueOptions = new Set(['--add-host', '--cap-add', '--cap-drop', '--cpus', '--device', '--entrypoint', '--env', '-e', '--health-cmd', '--hostname', '--ipc', '--memory', '--mount', '--name', '--network', '--platform', '--pids-limit', '--publish', '-p', '--restart', '--runtime', '--security-opt', '--tmpfs', '--user', '-u', '--volume', '-v', '--workdir', '-w'])
+  for (const match of collapsed.matchAll(/\bdocker\s+(?:run|create|pull)\b/g)) {
+    const end = collapsed.slice(match.index).search(/[\n;|&]/)
+    const invocation = collapsed.slice(match.index, end < 0 ? undefined : match.index + end)
+    const words = invocation.match(/"[^"\n]*"|'[^'\n]*'|[^\s]+/g) ?? []
+    for (let index = 2; index < words.length; index++) {
+      const word = words[index].replace(/^['"]|['"]$/g, '')
+      if (word.startsWith('-')) {
+        if (!word.includes('=') && valueOptions.has(word)) index++
+        continue
+      }
+      if (word.startsWith('$') || word.includes('${{')) break
+      if (/^[A-Za-z0-9][A-Za-z0-9._/-]*:[A-Za-z0-9][A-Za-z0-9._-]*(?:@sha256:[0-9a-f]{64})?$/.test(word)) images.push(word)
+      break
+    }
+  }
+  return images
 }
 
 function withoutComments(text) {
@@ -618,7 +663,7 @@ const dockerAutomaticArgs = new Set([
   'BUILDPLATFORM', 'BUILDOS', 'BUILDARCH', 'BUILDVARIANT',
   'TARGETPLATFORM', 'TARGETOS', 'TARGETARCH', 'TARGETVARIANT',
 ])
-const reviewedDockerfileSyntax = '# syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b'
+const dockerfileSyntaxShape = /^# syntax=docker\/dockerfile:[0-9]+(?:\.[0-9]+)*@sha256:[0-9a-f]{64}$/
 
 function releaseShellBranch(command, args) {
   const guard = /\bif\s+\[\s*["']?\$([A-Za-z_][A-Za-z0-9_]*)["']?\s*(=|==|!=)\s*(["']?)([^"'\s\]]+)\3\s*\]\s*;\s*then\b([\s\S]*?)(?:;\s*else\b([\s\S]*?))?;\s*fi\b/g
@@ -644,6 +689,11 @@ function expandedRunCommand(command, args) {
       const name = braced ?? plain
       return args.has(name) && args.get(name) !== undefined ? String(args.get(name)) : whole
     })
+}
+
+function normalizeApkPinVersions(command) {
+  return command.replace(/\bapk add --no-cache\b([^\n]*?)(?=\s*&&|$)/, (_whole, packageArgs) =>
+    'apk add --no-cache' + packageArgs.replace(/\b([a-z0-9.+-]+)=[0-9][0-9A-Za-z.+~-]*/g, '$1=<version>'))
 }
 
 const reviewedReleaseRunForms = new Map([
@@ -741,9 +791,14 @@ function releaseDockerfileRunViolations(source, buildArgs, targetName) {
   const parserDirectives = source.replace(/\r\n/g, '\n').split('\n')
     .map((line) => line.trim())
     .filter((line) => /^#\s*(?:syntax|escape|check)\s*=/i.test(line))
-  if (firstLine !== reviewedDockerfileSyntax || parserDirectives.length !== 1 ||
-      parserDirectives[0] !== reviewedDockerfileSyntax) {
+  if (!dockerfileSyntaxShape.test(firstLine ?? '') || parserDirectives.length !== 1 ||
+      parserDirectives[0] !== firstLine) {
     violations.push({ stage: '#dockerfile', line: 1, command: 'unreviewed Dockerfile parser directive' })
+  }
+  try {
+    assertApkPinsManaged(source)
+  } catch (error) {
+    violations.push({ stage: '#apk-pins', line: 0, command: error instanceof Error ? error.message : String(error) })
   }
   for (const declaration of globalArgDeclarations) {
     violations.push({ stage: 'global', line: declaration.line, command: 'ARG ' + declaration.name })
@@ -770,7 +825,7 @@ function releaseDockerfileRunViolations(source, buildArgs, targetName) {
     for (let index = 0; index < Math.max(stage.runs.length, expectedRuns.length); index++) {
       const run = stage.runs[index]
       const expected = expectedRuns[index]
-      if (!run || run.command !== expected) {
+      if (!run || normalizeApkPinVersions(run.command) !== normalizeApkPinVersions(expected ?? '')) {
         violations.push({ stage: stage.name, line: run?.line ?? 0, command: run?.command.trim() ?? 'missing reviewed RUN' })
         continue
       }
@@ -992,10 +1047,21 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   }
   assert.ok(runViolations(sourceDockerfile, { ...buildArgs, TARGETOS: 'windows', TARGETARCH: 'amd64' }).length > 0,
     'unsupported automatic operating systems must fail closed')
-  assert.ok(runViolations(sourceDockerfile.replace(reviewedDockerfileSyntax + '\n', '')).length > 0,
+  assert.ok(runViolations(sourceDockerfile.replace(/^# syntax=.*\n/, '')).length > 0,
     'removing the reviewed Dockerfile syntax directive must fail closed')
-  assert.ok(runViolations(sourceDockerfile.replace(reviewedDockerfileSyntax, '# escape=`')).length > 0,
+  assert.ok(runViolations(sourceDockerfile.replace(/^# syntax=.*$/m, '# escape=`')).length > 0,
     'changing the Dockerfile escape directive must fail closed')
+  const syntaxDigestBump = sourceDockerfile.replace(/^(# syntax=docker\/dockerfile:[^@]+@sha256:)[0-9a-f]{64}$/m, (_whole, prefix) => prefix + 'a'.repeat(64))
+  assert.notEqual(syntaxDigestBump, sourceDockerfile, 'syntax digest fixture must update the current directive')
+  assert.deepEqual(runViolations(syntaxDigestBump), [], 'a valid Renovate syntax digest update must remain accepted')
+  const baseDigestBump = sourceDockerfile.replace(/^(FROM\s+(?:--platform=\S+\s+)?[^\s@]+@sha256:)[0-9a-f]{64}/gm, (_whole, prefix) => prefix + 'b'.repeat(64))
+  assert.notEqual(baseDigestBump, sourceDockerfile, 'base image digest fixture must update current FROM directives')
+  assert.deepEqual(runViolations(baseDigestBump), [], 'valid Renovate base image digest updates must remain accepted')
+  const apkVersionBump = sourceDockerfile.replace('tzdata=2026e-r0', 'tzdata=2026f-r0')
+  assert.notEqual(apkVersionBump, sourceDockerfile, 'apk pin fixture must update the current tzdata version')
+  assert.deepEqual(runViolations(apkVersionBump), [], 'a Renovate-managed apk package version update must remain accepted')
+  const unpinnedApk = sourceDockerfile.replace('tzdata=2026e-r0', 'tzdata')
+  assert.ok(runViolations(unpinnedApk).some((run) => run.stage === '#apk-pins'), 'an unpinned apk package must fail with a pin-specific finding')
   const defaultArgs = { ...buildArgs }
   delete defaultArgs.PREBUILT_FRONTEND
   assert.ok(
@@ -1020,7 +1086,8 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   )
   assert.ok(runViolations(m1).some((run) => run.stage === 'frontend'), 'M1 must be rejected in the reached frontend stage')
 
-  const buildStage = 'FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine3.24@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS build'
+  const buildStage = sourceDockerfile.split(/\r?\n/).find((line) => /^FROM\s+.*\sAS\s+build$/i.test(line))
+  assert.ok(buildStage, 'the build stage FROM line must exist')
   const auditStage = [
     `FROM --platform=$BUILDPLATFORM ${frontendImage} AS frontend-audit`,
     'WORKDIR /src',
@@ -1102,7 +1169,8 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   assert.ok(runViolations(duplicatedRun).length > 0,
     'an extra copy of an otherwise reviewed RUN must fail closed')
 
-  const finalStage = 'FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6'
+  const finalStage = sourceDockerfile.match(/^FROM\s+[^\n]+$/gm)?.at(-1)
+  assert.ok(finalStage, 'the final FROM line must exist')
   const unreachableNpmStage = [
     `FROM --platform=$BUILDPLATFORM ${frontendImage} AS unused-audit`,
     'RUN npm ci --no-audit',
@@ -1341,6 +1409,46 @@ test('release Node setup matches the frontend image base', () => {
 })
 
 test('scanner sandbox verification selects the live Nmap scan and pins it while inspecting proc', async (t) => {
+  const expectHealth = /expect_health\(\) \{([\s\S]*?)\n\}/.exec(scannerSandboxVerifier)?.[1]
+  assert.ok(expectHealth, 'the sandbox verifier checks its reported health state')
+  assert.match(expectHealth, /for attempt in \$\(seq 1 300\)/,
+    'the sandbox verifier waits for startup health to reach its expected state')
+  assert.match(expectHealth, /sleep 0\.1/,
+    'the startup health wait is bounded and polls without a long fixed sleep')
+  assert.doesNotMatch(scannerSandboxVerifier, /^\s*expect_health "[^"]*limits:1000,65536/m,
+    'read-only health inspection does not claim per-process resource limits')
+  assert.match(scannerSandboxVerifier, /^expect_scanner_limits Nmap /m,
+    'the verifier checks Nmap resource limits from its live process')
+  assert.match(scannerSandboxVerifier, /^expect_scanner_limits Naabu /m,
+    'the verifier checks Naabu resource limits from its live process')
+  assert.match(scannerSandboxVerifier,
+    /def create_job\(base, state, name, tcp_ports, udp_ports, timing, service_detection=False\):[\s\S]*?"service_detection": service_detection/,
+    'the sandbox driver can enable service evidence for marker scans')
+  assert.match(scannerSandboxVerifier,
+    /elif command == "scanner-sandbox":[\s\S]*?request\(base, state, "GET", "\/status"\)/,
+    'the sandbox verifier can read the daemon-reported scanner policy')
+  assert.match(scannerSandboxVerifier,
+    /expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"[\s\S]*?control_sandbox=\$\(python3 "\$workdir\/driver.py" scanner-sandbox/,
+    'read-only health checks runtime confinement while daemon status checks its Nmap probe result')
+  const synSection = /^# The SYN override:[\s\S]*?^resume_held_scanner$/m.exec(scannerSandboxVerifier)?.[0]
+  assert.ok(synSection, 'the verifier covers the explicit SYN capability override')
+  assert.match(synSection, /expect_scanner_identity "\$nmap_pid" "0000000000002000" "0000000000002000"/,
+    'Nmap drops NET_ADMIN even when the SYN override grants it to the daemon')
+  assert.match(synSection, /start-naabu "\$base" "\$state" slow-naabu syn/,
+    'the SYN capability assertion starts Naabu with an actual SYN profile')
+  assert.match(synSection, /expect_private_naabu_tmp "\$naabu_pid" "0000000000003000" "0000000000002000"/,
+    'Naabu retains NET_ADMIN for its SYN discovery')
+  assert.match(scannerSandboxVerifier,
+    /def create_naabu_job\(base, state, name, rate=10000, scan_type="connect"\):[\s\S]*?"scan_type": scan_type/,
+    'the sandbox driver can choose Naabu connect or SYN mode for held invocations')
+  assert.match(scannerSandboxVerifier,
+    /expect_private_naabu_tmp "\$naabu_pid" "0000000000000000" "0000000000000000"/,
+    'connect-mode Naabu receives no packet capabilities')
+  const markerScan = /def scan_marker\([\s\S]*?\n\ndef create_naabu_job/.exec(scannerSandboxVerifier)?.[0]
+  assert.ok(markerScan, 'the sandbox verifier has a dedicated XML marker scan')
+  assert.match(markerScan, /create_job\([^)]*service_detection=True\)/,
+    'the XML marker scan retains Nmap service evidence in its results')
+
   const directory = await mkdtemp(join(tmpdir(), 'edgewatch-scanner-pid-selector-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
   const proc = join(directory, 'proc')
@@ -1465,11 +1573,16 @@ test('CI requires and merges the privileged sandbox coverage profile', () => {
   assert.match(aggregate, /check-diff-coverage\.mjs --language go --coverage coverage\.out/)
 })
 
-test('pull request titles are checked on edit and gate the required CI check', () => {
-  assert.match(ciWorkflow, /^ {2}pull_request:\n {4}types: \[opened, synchronize, reopened, ready_for_review, edited\]$/m,
-    'title edits must rerun the workflow that produces the required CI check')
-
-  const titleJob = ciJobBlock('pr-title')
+test('pull request title edits run a small independent check', () => {
+  assert.match(ciWorkflow, /^ {2}pull_request:\n {4}types: \[opened, synchronize, reopened, ready_for_review\]$/m,
+    'the heavy CI workflow must not run for PR description edits')
+  assert.doesNotMatch(ciWorkflow, /\bedited\b/, 'CI must not subscribe to the edited pull request action')
+  assert.doesNotMatch(ciJobsSection, /^  pr-title:/m, 'the title check must be separate from the CI matrix')
+  assert.match(titleWorkflow, /^name: Pull request title$/m)
+  assert.match(titleWorkflow, /^ {2}pull_request:\n {4}types: \[opened, synchronize, reopened, ready_for_review, edited\]$/m,
+    'title edits must run the small title workflow')
+  const titleJob = jobsOf(titleWorkflow).find(({ name }) => name === 'pr-title')?.block
+  assert.ok(titleJob, 'the standalone title workflow must define its check job')
   assert.deepEqual(permissionsOf(titleJob, 4), { contents: 'read' },
     'the title job must have read-only repository access')
   assert.match(titleJob, /^ {4}if: github\.event_name == 'pull_request'$/m)
@@ -1489,32 +1602,23 @@ test('pull request titles are checked on edit and gate the required CI check', (
   assert.match(titleJob, /^ {10}package-manager-cache: false$/m)
 
   const aggregate = ciJobBlock('test')
-  assert.ok(needsOf(aggregate).includes('pr-title'), 'the branch-protection aggregate must wait for the title check')
-  assert.match(aggregate, /PR_TITLE_CHECK: \$\{\{ needs\.pr-title\.result \}\}/)
-  assert.match(aggregate, /\[ \"\$GITHUB_EVENT_NAME\" = pull_request \] && \[ \"\$PR_TITLE_CHECK\" != success \]/)
+  assert.ok(!needsOf(aggregate).includes('pr-title'), 'the heavy CI aggregate must not need the title workflow')
+  assert.doesNotMatch(aggregate, /PR_TITLE_CHECK|pull-request-title/)
 
   const gate = stepBlock(aggregate, 'Require Go checks and test shards')
   const shell = /^ {8}run: \|\n((?: {10}.*(?:\n|$))+)/m.exec(gate)
   assert.ok(shell, 'the required-check aggregate must have an executable gate step')
   const gateScript = shell[1].split('\n').map((line) => line.slice(10)).join('\n')
-  const runGate = (eventName, titleResult) => spawnSync('bash', ['-c', gateScript], {
+  const runGate = () => spawnSync('bash', ['-c', gateScript], {
     encoding: 'utf8',
     env: {
       ...process.env,
       CHECKS: 'success',
       TESTS: 'success',
       CONTAINER: 'success',
-      GITHUB_EVENT_NAME: eventName,
-      PR_TITLE_CHECK: titleResult,
     },
   })
-  assert.equal(runGate('pull_request', 'success').status, 0)
-  assert.equal(runGate('pull_request', 'failure').status, 1,
-    'the existing required check must fail when the title check fails')
-  assert.equal(runGate('pull_request', 'skipped').status, 1,
-    'the title check must not be skipped for a pull request')
-  assert.equal(runGate('push', 'skipped').status, 0,
-    'a skipped pull request-only title job must not fail a push check')
+  assert.equal(runGate().status, 0)
 })
 
 // A partial re-run ("Re-run failed jobs") does not repeat the image job, and
@@ -1620,7 +1724,7 @@ test('release reruns replace only an abandoned draft', () => {
 // the frontend build loads. In a job with a write scope that code could use
 // the job token, for example to push :latest or replace release assets
 // (#1296), so such jobs consume artifacts that read-only jobs built.
-test('no job that holds a write scope runs npm packages', () => {
+test('no job that holds a write scope runs npm packages directly or through its scripts', async () => {
   const thirdPartyBuild = /\bnpm (?:ci|install|i|run|exec|test|rebuild)\b|\bnpx\b|\bmake (?:build|frontend|check)\b|uses: actions\/setup-node@/
   let writers = 0
   for (const { file, text } of workflows) {
@@ -1633,10 +1737,59 @@ test('no job that holds a write scope runs npm packages', () => {
       if (writes.length === 0) continue
       writers++
       assert.doesNotMatch(withoutComments(block), thirdPartyBuild, `${file} job ${name} holds ${writes.join(', ')} write access and must not run npm packages`)
+      for (const script of await calledScripts(workflowScriptPaths(block))) {
+        const source = await readRepositoryFile(script)
+        assert.doesNotMatch(withoutComments(source), thirdPartyBuild,
+          `${file} job ${name} reaches ${script}, which must not run npm packages`)
+      }
     }
   }
   assert.ok(writers >= 6, `expected the six release jobs that publish to hold write scopes, found ${writers}`)
   assert.deepEqual(permissionsOf(jobBlock('verify'), 4), { contents: 'read' })
+})
+
+test('workflow actions use immutable commits and started container images use digests', async () => {
+  let actionCount = 0
+  for (const { file, text } of workflows) {
+    for (const { name, block } of jobsOf(text)) {
+      for (const step of stepsOf(block)) {
+        const action = /^ {8}uses: ([^\s]+)/m.exec(step)?.[1]
+        if (!action || action.startsWith('./')) continue
+        actionCount++
+        assert.match(action, /^[^@]+@[0-9a-f]{40}$/,
+          `${file} job ${name} uses ${action}; external actions must be pinned to a 40-character commit SHA`)
+      }
+      for (const image of literalImagesStartedByDocker(block)) {
+        assert.match(image, /@sha256:[0-9a-f]{64}$/,
+          `${file} job ${name} starts ${image}; literal container images must be pinned by digest`)
+      }
+      for (const script of await calledScripts(workflowScriptPaths(block))) {
+        for (const image of literalImagesStartedByDocker(await readRepositoryFile(script))) {
+          assert.match(image, /@sha256:[0-9a-f]{64}$/,
+            `${file} job ${name} reaches ${script}, which starts unpinned image ${image}`)
+        }
+      }
+    }
+  }
+  assert.ok(actionCount > 0, 'workflow action pins must be checked')
+  assert.deepEqual(literalImagesStartedByDocker('docker run --rm alpine:3.24 true'), ['alpine:3.24'],
+    'the verifier must recognize a literal image started by docker run')
+  assert.deepEqual(literalImagesStartedByDocker('docker run --rm alpine:3.24@sha256:' + 'a'.repeat(64) + ' true'),
+    ['alpine:3.24@sha256:' + 'a'.repeat(64)])
+})
+
+test('GoReleaser independently rebuilds candidate binaries without npm code', () => {
+  const rebuild = jobBlock('go-rebuild')
+  assert.deepEqual(needsOf(rebuild), ['verify'])
+  assert.deepEqual(permissionsOf(rebuild, 4), { contents: 'read' })
+  assert.doesNotMatch(withoutComments(rebuild), /\bnpm (?:ci|install|i|run|exec|test|rebuild)\b|\bnpx\b|setup-node/,
+    'the independent Go build job must not run npm or Node package setup')
+  assert.match(rebuild, /go mod download && go mod verify/)
+  assert.match(rebuild, /goreleaser-action@[0-9a-f]{40}/)
+  assert.match(rebuild, /release --clean --skip=publish/)
+  assert.match(rebuild, /cmp "candidate\/release-binaries\/linux_\$\{arch\}\/edgewatch" "rebuilt-release-binaries\/linux_\$\{arch\}\/edgewatch"/)
+  const binaries = jobBlock('binaries')
+  assert.ok(needsOf(binaries).includes('go-rebuild'), 'release publication must wait for the independent binary comparison')
 })
 
 test('every checkout leaves the job token out of the Git configuration', () => {

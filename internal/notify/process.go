@@ -17,6 +17,8 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"syscall"
+	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/sandbox"
 	"github.com/crypt0rr/edgewatch/internal/store"
@@ -158,10 +160,28 @@ func runNotificationProcess(ctx context.Context, rawURL, message string) error {
 	childCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	command := notificationCommandContext(childCtx, executable, "notify-send")
+	if command.SysProcAttr == nil {
+		command.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	command.SysProcAttr.Setpgid = true
+	command.SysProcAttr.Pdeathsig = syscall.SIGKILL
+	command.Cancel = func() error {
+		if command.Process == nil {
+			return nil
+		}
+		err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return err
+	}
+	command.WaitDelay = time.Second
 	command.Env = notificationChildEnvironment()
 	command.Stdin = bytes.NewReader(payload)
-	command.Stdout = io.Discard
-	command.Stderr = io.Discard
+	// Nil output streams make exec use /dev/null. The child owns no parent-side
+	// pipe that a descendant could keep open after the send bound expires.
+	command.Stdout = nil
+	command.Stderr = nil
 	childSandbox.Load().Confine(command)
 	if err := command.Run(); err != nil {
 		if childCtx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

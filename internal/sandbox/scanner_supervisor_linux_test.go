@@ -817,7 +817,7 @@ func TestScannerSupervisorCancelSignalsOnlyTheSupervisorProcess(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	invocation := &scannerSupervisorInvocation{}
+	invocation := &scannerSupervisorInvocation{startedOK: true}
 	if err := invocation.cancel(cmd); err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
@@ -1203,9 +1203,9 @@ func TestScannerSupervisorChildProofOrderingAndFailurePaths(t *testing.T) {
 			observations++
 			return observations > 1, nil
 		}
-		ops.serviceNotifications = func() error {
+		ops.serviceNotifications = func() (bool, error) {
 			events = append(events, "service-notification")
-			return errors.New("unexpected notification")
+			return false, errors.New("unexpected notification")
 		}
 		watchdog := make(chan time.Time, 1)
 		watchdog <- time.Now()
@@ -1216,6 +1216,30 @@ func TestScannerSupervisorChildProofOrderingAndFailurePaths(t *testing.T) {
 		want := []string{"observe-exit", "service-notification", "kill-group", "observe-exit", "kill-group", "wait-leader", "reap-descendants", "send-proof"}
 		if !equalStrings(events, want) {
 			t.Fatalf("notification failure cleanup = %v, want %v", events, want)
+		}
+	})
+
+	t.Run("sequential notifications are served without a watchdog tick", func(t *testing.T) {
+		var events []string
+		ops := baseOps(&events)
+		observations := 0
+		ops.waitForExit = func(int) (bool, error) {
+			observations++
+			return observations > 2, nil
+		}
+		served := 0
+		ops.serviceNotifications = func() (bool, error) {
+			served++
+			events = append(events, "service-notification")
+			return served <= 2, nil
+		}
+		interrupted, childErr, err := superviseScannerChild(child, 9, nil, never, ops)
+		if err != nil || interrupted || childErr != nil || served != 2 {
+			t.Fatalf("supervise sequential notifications = interrupted %t, child error %v, error %v, served %d", interrupted, childErr, err, served)
+		}
+		want := []string{"service-notification", "service-notification", "kill-group", "wait-leader", "reap-descendants", "send-proof"}
+		if !equalStrings(events, want) {
+			t.Fatalf("sequential notification ordering = %v, want %v", events, want)
 		}
 	})
 
@@ -1454,8 +1478,10 @@ func TestPrepareLinuxScannerInvocationBuildsBoundLaunchRequestBeforeStart(t *tes
 	command := exec.Command("/bin/true", "--version")
 	command.Env = []string{"EDGEWATCH_TEST_VALUE=present"}
 	command.Dir = t.TempDir()
-	command.SysProcAttr = &syscall.SysProcAttr{AmbientCaps: []uintptr{unix.CAP_NET_RAW, unix.CAP_NET_ADMIN}}
-	wantAmbientCaps := append([]uintptr(nil), command.SysProcAttr.AmbientCaps...)
+	// Private-temp setup may leave only the confined identity on the command.
+	// The invocation policy must still carry the final scanner capabilities.
+	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: UID, Gid: GID, Groups: []uint32{}}}
+	wantAmbientCaps := append([]uintptr(nil), policy.ambient...)
 
 	invocation, err := prepareLinuxScannerInvocation(context.Background(), command, policy, true)
 	if err != nil {

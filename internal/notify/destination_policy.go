@@ -196,6 +196,20 @@ var fixedHostProviders = map[string]bool{
 	"pushover": true, "slack": true, "telegram": true,
 }
 
+// fixedHostDestinations are the public API hosts that Shoutrrr's fixed-host
+// providers contact instead of the host in their credential URL. Check these
+// before provider initialization; some providers make requests while parsing
+// their URLs, and some suppress a later transport error.
+var fixedHostDestinations = map[string][]string{
+	"discord":    {"discord.com"},
+	"ifttt":      {"maker.ifttt.com"},
+	"join":       {"joinjoaomgcd.appspot.com"},
+	"pushbullet": {"api.pushbullet.com"},
+	"pushover":   {"api.pushover.net"},
+	"slack":      {"hooks.slack.com", "slack.com"},
+	"telegram":   {"api.telegram.org"},
+}
+
 const teamsDefaultHost = "outlook.office.com"
 
 // destinationHosts returns the hosts that the provider of a Shoutrrr URL
@@ -242,9 +256,12 @@ func destinationHosts(rawURL string) []string {
 	case strings.Contains(scheme, "+"):
 		hosts = append(hosts, parsed.Hostname())
 	case fixedHostProviders[scheme]:
-		return nil
+		hosts = append(hosts, fixedHostDestinations[scheme]...)
 	default:
 		hosts = append(hosts, parsed.Hostname())
+	}
+	if len(hosts) == 0 {
+		return nil
 	}
 	result := make([]string, 0, len(hosts))
 	seen := make(map[string]struct{}, len(hosts))

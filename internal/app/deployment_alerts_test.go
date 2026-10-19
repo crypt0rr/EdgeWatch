@@ -25,6 +25,7 @@ func TestSandboxHealthState(t *testing.T) {
 		{"leased scanner identities", sandbox.Status{State: sandbox.StateEnforced, IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced}}, model.SandboxStateIdentityOnly},
 		{"Landlock as UID 0", withLandlock(sandbox.Status{State: sandbox.StateUnavailable}), model.SandboxStateLandlockOnly},
 		{"unconfined as UID 0", sandbox.Status{State: sandbox.StateUnavailable}, model.SandboxStateUnconfined},
+		{"scanner launches refused", sandbox.Status{Mode: sandbox.ModeAuto, State: sandbox.StateUnavailable, IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateUnavailable}}, model.SandboxStateLaunchesRefused},
 		{"off as UID 0", sandbox.Status{State: sandbox.StateDisabled}, model.SandboxStateUnconfined},
 		{"daemon that is not root", sandbox.Status{State: sandbox.StateUnavailable, ProcessUID: testUIDPointer(1000)}, model.SandboxStateIdentityOnly},
 	} {

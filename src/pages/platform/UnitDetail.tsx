@@ -52,10 +52,18 @@ async function refreshUnit(client: ReturnType<typeof useQueryClient>, id: string
 
 function UnitOverview({ unit }: { unit: BusinessUnit }) {
   const client = useQueryClient()
-  const { draft, setDraft, baseRevision, remoteChanged, adopt, rebase, markSaved } = useServerDraft(
-    { name: unit.name, slug: unit.slug },
+  const serverDraft = { name: unit.name, slug: unit.slug }
+  const { draft, setDraft, baseRevision, remoteChanged, adopt, rebase, markSaved } = useServerDraft<typeof serverDraft, Partial<typeof serverDraft>, number, typeof serverDraft>(
+    serverDraft,
     unit.revision,
-    { createDraft: () => ({}), mergeDraft: (server, edits) => ({ ...server, ...edits }) },
+    {
+      createDraft: () => ({}),
+      mergeDraft: (server, edits) => ({ ...server, ...edits }),
+      captureDraft: (server, view) => ({
+        ...(view.name !== server.name ? { name: view.name } : {}),
+        ...(view.slug !== server.slug ? { slug: view.slug } : {}),
+      }),
+    },
   )
   const { name, slug } = draft
   const [message, setMessage] = useState('')
@@ -186,10 +194,6 @@ function capacityEdits(draft: CapacityDraft, saved: UnitCapacitySettings) {
   return edits
 }
 
-function sameCapacity(left: UnitCapacitySettings, right: UnitCapacitySettings) {
-  return capacityFields.every(({ key }) => left[key] === right[key])
-}
-
 /** Validate a unit's capacity against the deployment's limits, as the server does. */
 export function capacityProblems(draft: CapacityDraft, limits: DeploymentLimits) {
   const problems: Partial<Record<CapacityField, string>> = {}
@@ -213,28 +217,25 @@ function UnitCapacityTab({ unit }: { unit: BusinessUnit }) {
 function UnitCapacityForm({ unit, capacity }: { unit: BusinessUnit; capacity: UnitCapacity }) {
   const client = useQueryClient()
   const limits = capacity.limits
-  // The saved capacity that the draft was built from. A save sends only the
-  // settings the draft changed, so it never reverts a setting that another
-  // platform administrator saved meanwhile, and names the revision the
-  // capacity was read at, so the server refuses it once another change
-  // was saved.
-  const [base, setBase] = useState(capacity)
-  const [draft, setDraft] = useState(() => capacityDraft(capacity.capacity))
+  const { draft, setDraft, baseRevision, remoteChanged, rebase, adopt, markSaved } = useServerDraft<
+    UnitCapacitySettings, Partial<CapacityDraft>, number, CapacityDraft
+  >(capacity.capacity, capacity.revision, {
+    createDraft: () => ({}),
+    mergeDraft: (saved, overrides) => ({ ...capacityDraft(saved), ...overrides }),
+    captureDraft: (saved, view) => {
+      const original = capacityDraft(saved)
+      const overrides: Partial<CapacityDraft> = {}
+      for (const { key } of capacityFields) {
+        if (view[key].mode !== original[key].mode || view[key].value !== original[key].value) overrides[key] = view[key]
+      }
+      return overrides
+    },
+  })
   const [message, setMessage] = useState('')
-  const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const edits = capacityEdits(draft, base.capacity)
+  const edits = capacityEdits(draft, capacity.capacity)
   const edited = Object.keys(edits).length > 0
-  // When the capacity is read again, every 15 seconds and after a refused
-  // save, the form shows the saved values and keeps the edits on top.
-  if (capacity.revision !== base.revision || !sameCapacity(capacity.capacity, base.capacity)) {
-    const next = capacityDraft(capacity.capacity)
-    for (const key of Object.keys(edits) as CapacityField[]) next[key] = draft[key]
-    setBase(capacity)
-    setDraft(next)
-    if (edited && !sameCapacity(capacity.capacity, base.capacity)) setNotice('Another platform administrator changed this unit’s capacity. The form shows the saved values with your unsaved changes; review them before saving.')
-  }
   const problems = capacityProblems(draft, limits)
   const invalid = Object.keys(problems).length > 0
   function change(key: CapacityField, next: Partial<{ mode: CapacityMode; value: string }>) {
@@ -245,13 +246,11 @@ function UnitCapacityForm({ unit, capacity }: { unit: BusinessUnit; capacity: Un
     event.preventDefault()
     setMessage('')
     setError('')
-    if (invalid || !edited) return
+    if (invalid || !edited || remoteChanged) return
     setBusy(true)
     try {
-      const saved = await updateUnitCapacity(unit.id, base.revision, edits)
-      setBase(saved)
-      setDraft(capacityDraft(saved.capacity))
-      setNotice('')
+      const saved = await updateUnitCapacity(unit.id, baseRevision, edits)
+      markSaved()
       client.setQueryData(['platform-unit-capacity', unit.id], saved)
       // Saving the capacity moves the unit to a new revision, so the page
       // reloads the unit before its next rename, disable, or enable.
@@ -262,13 +261,11 @@ function UnitCapacityForm({ unit, capacity }: { unit: BusinessUnit; capacity: Un
         setError(errorMessage(err, 'The capacity could not be saved.'))
         return
       }
-      // The unit changed since the capacity was read: read it again, which
-      // keeps the edits over the saved values, and let the administrator
-      // review the result before saving again.
-      await client.invalidateQueries({ queryKey: ['platform-unit-capacity', unit.id] })
+      // Refresh the current values but retain the draft and its pinned
+      // revision until the administrator chooses to keep or load them.
+      await client.fetchQuery({ queryKey: ['platform-unit-capacity', unit.id], queryFn: () => getUnitCapacity(unit.id), staleTime: 0 }).catch(() => undefined)
       await refreshUnit(client, unit.id)
-      setNotice('')
-      setError('Another platform administrator changed this unit. The current values are loaded with your changes; review them and save again.')
+      setError('Another platform administrator changed this unit. Your edits are kept; review the latest values, then keep your edits or load theirs.')
     } finally {
       setBusy(false)
     }
@@ -276,8 +273,8 @@ function UnitCapacityForm({ unit, capacity }: { unit: BusinessUnit; capacity: Un
   return <div className="settings-grid">
     <div className="panel"><div className="panel-heading"><div><h2>Unit share</h2><p className="muted">Now {capacity.slots.in_use} in use and {capacity.slots.queued} queued, with at most {plural(capacity.slots.limit ?? limits.max_concurrent_scans, 'slot')}.</p></div><Gauge className="muted-icon" size={20} /></div>
       {message && <div className="success-banner" role="status">{message}</div>}
-      {notice && <div className="notice warning" role="status"><AlertTriangle size={14} /><span>{notice}</span></div>}
       {error && <div className="form-error" role="alert">{error}</div>}
+      {remoteChanged && <div className="notice warning"><AlertTriangle size={14} /><span role="status"><strong>Another platform administrator changed this unit’s capacity.</strong> Your edits still use revision {baseRevision}. The latest capacity is shown for fields you have not changed. Choose whether to keep your edits on revision {capacity.revision} or load the latest values.</span><button type="button" className="text-button" onClick={() => { rebase(capacity.revision); setError('Your edits now use the latest capacity revision. Review them, then save again.') }}>Keep my edits</button><button type="button" className="text-button" onClick={() => { adopt(); setError(''); setMessage('Latest capacity loaded.') }}>Load theirs</button></div>}
       <form className="settings-form" onSubmit={save} noValidate>
         {capacityFields.map(field => {
           const entry = draft[field.key]
@@ -306,7 +303,7 @@ function UnitCapacityForm({ unit, capacity }: { unit: BusinessUnit; capacity: Un
           </fieldset>
         })}
         <p className="notice">A cap is a limit, not a reservation. When units wait for slots, free slots go round-robin to the waiting units, up to each unit’s cap.</p>
-        <button className="button primary" type="submit" disabled={busy || invalid || !edited}>{busy ? 'Saving…' : 'Save capacity'}</button>
+        <button className="button primary" type="submit" disabled={busy || invalid || !edited || remoteChanged}>{busy ? 'Saving…' : 'Save capacity'}</button>
       </form>
     </div>
     <div className="panel"><div className="panel-heading"><div><h2>Deployment limits</h2><p className="muted">Set in config.yaml on the EdgeWatch host. Read-only here.</p></div></div>

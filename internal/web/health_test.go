@@ -379,6 +379,7 @@ func TestMetricsReportSandboxesAndMigrations(t *testing.T) {
 	for _, want := range []string{
 		`edgewatch_scanner_sandbox_state{state="identity_only"} 1`,
 		`edgewatch_scanner_sandbox_state{state="sandboxed"} 0`,
+		`edgewatch_scanner_sandbox_state{state="launches_refused"} 0`,
 		`edgewatch_notification_sandbox_state{state="sandboxed"} 1`,
 		`edgewatch_health_status{status="starting"} 1`,
 		`edgewatch_migration_state{state="migrating"} 1`,

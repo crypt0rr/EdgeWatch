@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -118,6 +121,9 @@ func TestRunSendChildOwnsDestinationGuardsUntilProcessExit(t *testing.T) {
 		if !errors.Is(err, ErrDestinationExcluded) {
 			t.Fatalf("blocked child send error = %v, want destination exclusion", err)
 		}
+		// Preflight rejects this literal address before installing process-wide
+		// guards or initializing the provider.
+		return
 	case "allowed":
 		if err != nil {
 			t.Fatalf("allowed child send error = %v", err)
@@ -164,8 +170,8 @@ func TestNotificationProcessFailureIsRedactedAndSendUsesIsolation(t *testing.T) 
 		notificationCommandContext = originalCommand
 	}()
 	notificationIsTestBinary = func() bool { return false }
-	notificationCommandContext = func(_ context.Context, _ string, _ ...string) *exec.Cmd {
-		return exec.Command("/bin/false")
+	notificationCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/false")
 	}
 	if err := runNotificationProcess(context.Background(), "generic://127.0.0.1/no-listener", "test"); !errors.Is(err, store.ErrDeliveryProvider) {
 		t.Fatalf("isolated process error = %v, want provider error", err)
@@ -187,11 +193,13 @@ func TestNotificationProcessUsesSafeExecutableAndCommand(t *testing.T) {
 		t.Fatalf("executable lookup error = %v, want provider error", err)
 	}
 	notificationExecutable = func() (string, error) { return "/usr/local/bin/edgewatch", nil }
-	notificationCommandContext = func(_ context.Context, _ string, _ ...string) *exec.Cmd {
-		return exec.Command("/bin/true")
+	var command *exec.Cmd
+	notificationCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		command = exec.CommandContext(ctx, "/bin/true")
+		return command
 	}
 	if err := runNotificationProcess(context.Background(), "generic://example.invalid", "test"); err != nil {
-		t.Fatalf("successful isolated process = %v", err)
+		t.Fatalf("successful isolated process = %v; state=%v commandErr=%v path=%q", err, command.ProcessState, command.Err, command.Path)
 	}
 }
 
@@ -258,20 +266,59 @@ func TestNotificationProcessTimeoutTerminatesAndReapsChild(t *testing.T) {
 		notificationCommandContext = originalCommand
 	}()
 	notificationExecutable = func() (string, error) { return "/usr/local/bin/edgewatch", nil }
+	pidFile := filepath.Join(t.TempDir(), "processes")
+	script := fmt.Sprintf("sleep 30 & printf '%%s %%s\\n' \"$$\" \"$!\" > '%s'; wait", pidFile)
 	notificationCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "exec sleep 30")
+		return exec.CommandContext(ctx, "/bin/sh", "-c", script)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	started := time.Now()
 	err := runNotificationProcess(ctx, "generic://example.invalid", "test")
 	if !errors.Is(err, ErrNotificationSendIndeterminate) {
 		t.Fatalf("timed-out process error = %v, want indeterminate", err)
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("timed-out process took %s; child was not reaped promptly", elapsed)
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("timed-out process took %s; process group outlived the send bound", elapsed)
 	}
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read controlled child PIDs: %v", err)
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) != 2 {
+		t.Fatalf("controlled child PIDs = %q; want shell and descendant PIDs", data)
+	}
+	for _, field := range fields {
+		pid, err := strconv.Atoi(field)
+		if err != nil {
+			t.Fatalf("parse controlled PID %q: %v", field, err)
+		}
+		deadline := time.Now().Add(time.Second)
+		for processIsRunning(pid) && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if processIsRunning(pid) {
+			t.Errorf("notification process %d remained alive after the send bound", pid)
+		}
+	}
+}
+
+func processIsRunning(pid int) bool {
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	separator := strings.LastIndexByte(string(data), ')')
+	if separator < 0 {
+		return true
+	}
+	fields := strings.Fields(string(data)[separator+1:])
+	return len(fields) == 0 || fields[0] != "Z"
 }
 
 func TestRunSendChildDeliversWithoutPuttingCredentialsInArguments(t *testing.T) {

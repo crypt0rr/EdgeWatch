@@ -125,6 +125,14 @@ var notAuditActions = map[string]bool{
 	"auth.key":                    true,
 	"notification.key":            true,
 	"edgewatch.db":                true,
+	"discord.com":                 true, // Fixed destination host, not an audit action.
+	"api.pushover.net":            true, // Fixed destination host, not an audit action.
+	"maker.ifttt.com":             true, // Fixed destination host, not an audit action.
+	"joinjoaomgcd.appspot.com":    true, // Fixed destination host, not an audit action.
+	"api.pushbullet.com":          true, // Fixed destination host, not an audit action.
+	"hooks.slack.com":             true, // Fixed destination host, not an audit action.
+	"slack.com":                   true, // Fixed destination host, not an audit action.
+	"api.telegram.org":            true, // Fixed destination host, not an audit action.
 	"outlook.office.com":          true, // Shoutrrr's fixed Microsoft Teams destination host.
 	"v0.35.0":                     true,
 	"github.com":                  true,

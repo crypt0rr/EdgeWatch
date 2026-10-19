@@ -416,7 +416,7 @@ describe('user administration', () => {
     expect(screen.getByRole('button', { name: 'Copy link' })).toBeInTheDocument()
   })
 
-  it('closes a stale role editor and requires review of the refreshed account', async () => {
+  it('preserves a stale role draft and requires an explicit rebase', async () => {
     vi.mocked(listUsers)
       .mockResolvedValueOnce({ users: [user, pending] })
       .mockResolvedValue({ users: [{ ...user, display_name: 'Operations Lead', revision: 5 }, pending] })
@@ -426,15 +426,50 @@ describe('user administration', () => {
 
     fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Edit account' }))
     const dialog = screen.getByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Display name'), { target: { value: 'My account name' } })
     fireEvent.change(within(dialog).getByLabelText('Role'), { target: { value: 'viewer' } })
     fireEvent.change(within(dialog).getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('latest details are loaded; review them and reopen Edit account')
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    await waitFor(() => expect(within(dialog).getByRole('alert')).toHaveTextContent('Your edits are kept on their original revision; keep your edits or load the latest account.'))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Display name')).toHaveValue('My account name')
+    expect(within(dialog).getByLabelText('Role')).toHaveValue('viewer')
     await waitFor(() => expect(screen.getByText('Operations Lead')).toBeInTheDocument())
-    fireEvent.click(within(row('Operations Lead')).getByRole('button', { name: 'Edit account' }))
-    expect(within(screen.getByRole('dialog')).getByLabelText('Display name')).toHaveValue('Operations Lead')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Keep my edits' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(updateUser).toHaveBeenLastCalledWith('user-2', { display_name: 'My account name', role: 'viewer', revision: 5, password: 'administrator-password' }))
+  })
+
+  it('keeps a removed account draft after conflict until the administrator discards it', async () => {
+    vi.mocked(listUsers)
+      .mockResolvedValueOnce({ users: [user, pending] })
+      .mockResolvedValueOnce({ users: [pending] })
+    vi.mocked(updateUser).mockRejectedValueOnce(new APIError('stale', 'conflict'))
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
+
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Edit account' }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Display name'), { target: { value: 'My unsaved account name' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(within(dialog).getByRole('alert')).toHaveTextContent('Your draft is still here, but it cannot be saved.'))
+    expect(within(dialog).getByLabelText('Display name')).toHaveValue('My unsaved account name')
+    expect(within(dialog).getByLabelText('Display name')).toBeDisabled()
+    expect(within(dialog).getByRole('button', { name: 'Discard draft' })).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Role')).toBeDisabled()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    const retainedDraft = screen.getByRole('status')
+    expect(retainedDraft).toHaveTextContent('Your draft is kept on this page')
+    fireEvent.click(within(retainedDraft).getByRole('button', { name: 'Review draft' }))
+    const reopenedDialog = screen.getByRole('dialog')
+    expect(within(reopenedDialog).getByLabelText('Display name')).toHaveValue('My unsaved account name')
+    fireEvent.click(within(reopenedDialog).getByRole('button', { name: 'Discard draft' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(screen.getByRole('status')).toHaveTextContent('Removed account draft discarded.')
   })
 
   it('clears an old action error when the dialog is cancelled and another account is opened', async () => {

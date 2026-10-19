@@ -68,7 +68,7 @@ func TestMigration67AddsEmptyAlertRouting(t *testing.T) {
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, statement := range migration67Statements() {
-		if err := execMigrationStatement(tx, statement); err != nil {
+		if err := execMigrationStatement(ctx, tx, statement); err != nil {
 			t.Fatalf("repeated %s: %v", statement, err)
 		}
 	}

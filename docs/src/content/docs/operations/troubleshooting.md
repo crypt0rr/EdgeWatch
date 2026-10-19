@@ -84,12 +84,6 @@ action it names:
   complete scanner range, 60000–60063. Configure the full subordinate UID and
   GID ranges for rootless Docker or user-namespace remapping, then recreate
   the container.
-- **The scanner identity allocator could not verify an empty prior scope
-  after a PID namespace change.** Stop other EdgeWatch processes using the
-  data volume and preserve the lease journal and boot marker. With pre-v3 lease
-  state, a host reboot may be needed before the allocator can prove that
-  previous-boot scanner processes are gone. Do not delete or edit the state
-  files.
 - **The scanner identity allocator could not prove the previous private scope
   safe after a PID namespace change.** When using the v3 allocator, ensure the
   supported private scanner runtime is active. Stop every other EdgeWatch
@@ -97,6 +91,10 @@ action it names:
   so inherited liveness references close, then retry. Once it has exclusive
   proof, the allocator can archive and reset the prior scope without a host
   reboot. Preserve the journal and boot marker; do not delete or edit them.
+
+  A nonempty v2 journal from v0.40.0 or earlier has no liveness references and
+  cannot be reclaimed automatically. Follow the [v2-to-v3 recovery steps](/deployment/container-hardening/#upgrading-an-existing-deployment),
+  including `scanner-identities recover --confirm-all-volume-users-stopped`.
 
 EdgeWatch does not run scanners as UID 0 when the pool is unavailable. Set
 `scanner.sandbox: required` if the daemon should also refuse startup until the
@@ -253,7 +251,9 @@ A daemon that exits with `another EdgeWatch process is migrating or restoring
 the database in this directory` found another daemon migrating the database
 on the same data volume, or a restore replacing it. Let the restore finish,
 or make sure that only one daemon uses the volume, and start the service
-again.
+again. Once the other daemon has completed startup and holds its lease, the
+second daemon instead exits with `another EdgeWatch daemon holds the database
+lease`; stop one daemon before starting another on the same database.
 
 An older binary refuses a database upgraded beyond its supported version.
 Rollback requires a matching pre-upgrade backup; do not replace a live database.

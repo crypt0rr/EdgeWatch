@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, archiveScannerProfile, createScannerProfile, getSession, listScannerProfiles, restoreScannerProfile, updateScannerProfile, validateScannerProfile } from '../api'
 import type { ScannerProfile } from '../api'
@@ -107,7 +107,7 @@ describe('scanner profiles', () => {
     expect(screen.getByText(/Scanner profile restored/)).toBeInTheDocument()
   })
 
-  it('adopts the current revision after a save conflict and keeps the typed draft', async () => {
+  it('keeps a conflicted draft pinned until the administrator rebases or loads the saved profile', async () => {
     renderWithProviders(<ScannerProfiles />)
     await waitFor(() => expect(screen.getByText('Managed connect')).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: 'Edit Managed connect' }))
@@ -116,11 +116,46 @@ describe('scanner profiles', () => {
     vi.mocked(updateScannerProfile).mockRejectedValueOnce(new APIError('scanner profile was modified; reload before saving', 'conflict', undefined, 409))
     vi.mocked(listScannerProfiles).mockResolvedValue({ profiles: [{ ...profile, revision: 4, description: 'saved elsewhere' }] })
     fireEvent.click(screen.getByRole('button', { name: 'Save revision' }))
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('saved elsewhere while you were editing (now revision 4)'))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Your draft still uses revision 3'))
     expect(screen.getByLabelText('Description')).toHaveValue('typed while another administrator saved')
+    expect(screen.getByRole('button', { name: 'Keep my edits' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Load theirs' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Keep my edits' }))
+    expect(screen.getByRole('alert')).toHaveTextContent('Your profile draft now uses revision 4')
 
     fireEvent.click(screen.getByRole('button', { name: 'Save revision' }))
     await waitFor(() => expect(updateScannerProfile).toHaveBeenLastCalledWith('profile-1', expect.objectContaining({ description: 'typed while another administrator saved' }), 4))
+  })
+
+  it('keeps a refetched editor draft and saves with its opening revision', async () => {
+    const { client } = renderWithProviders(<ScannerProfiles />)
+    await waitFor(() => expect(screen.getByText('Managed connect')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Managed connect' }))
+    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'typed locally' } })
+    vi.mocked(listScannerProfiles).mockResolvedValue({ profiles: [{ ...profile, revision: 4, description: 'saved remotely' }] })
+    await act(async () => { await client.fetchQuery({ queryKey: ['scanner-profiles', true], queryFn: () => listScannerProfiles(true), staleTime: 0 }) })
+    expect(client.getQueryData<{ profiles: ScannerProfile[] }>(['scanner-profiles', true])?.profiles[0].revision).toBe(4)
+
+    expect(screen.getByLabelText('Description')).toHaveValue('typed locally')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('saves still use revision 3'))
+    fireEvent.change(screen.getByLabelText('Password confirmation'), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save revision' }))
+    await waitFor(() => expect(updateScannerProfile).toHaveBeenCalledWith('profile-1', expect.objectContaining({ description: 'typed locally' }), 3))
+  })
+
+  it('loads the saved profile and discards the local draft only after that choice', async () => {
+    const { client } = renderWithProviders(<ScannerProfiles />)
+    await waitFor(() => expect(screen.getByText('Managed connect')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Managed connect' }))
+    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'typed locally' } })
+    vi.mocked(listScannerProfiles).mockResolvedValue({ profiles: [{ ...profile, revision: 4, description: 'saved remotely' }] })
+    await act(async () => { await client.fetchQuery({ queryKey: ['scanner-profiles', true], queryFn: () => listScannerProfiles(true), staleTime: 0 }) })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Load theirs' })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Load theirs' }))
+
+    expect(screen.getByLabelText('Description')).toHaveValue('saved remotely')
+    expect(screen.queryByRole('status')).toBeNull()
   })
 
   it('surfaces validation and save failures while retaining the editor', async () => {

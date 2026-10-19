@@ -417,6 +417,67 @@ func TestManagedNotificationRotationTreatsFutureWindowAttemptAsUnlinked(t *testi
 	}
 }
 
+func TestManagedNotificationKeepAfterDiscardPreservesStartedFutureWindowClaim(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job := createWindowTestJob(t, ts, "rotation-future-discard-then-keep", "UTC")
+	destination, err := ts.CreateManagedNotification(ctx, "rotation-future-discard-then-keep-destination", "Ops", "generic", []byte{1}, []byte{2}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	createTestChangeWindow(t, ts, job.ID, start, start.Add(time.Hour))
+	event := model.Event{Type: "changes-detected", JobID: job.ID, TenantID: DefaultTenantID, ScanID: "rotation-future-discard-then-keep-event", CreatedAt: time.Now().UTC(), Changes: []model.Change{{Key: "discard-then-keep-change", Kind: "port", Port: 443}}}
+	if err := s.System().QueueEvent(ctx, managedNotificationKey(destination.ID, destination.Revision), event); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := s.System().ClaimDueDeliveries(ctx, 1, "rotation-future-discard-then-keep")
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim future-window event = %d, %v", len(claimed), err)
+	}
+	item := claimed[0]
+	if err := s.System().BeginDeliveryAttempt(ctx, item.ID, item.ClaimToken); err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := ts.UpdateManagedNotificationWithAudit(ctx, destination.ID, destination.Revision, destination.Name, destination.Provider, []byte{3}, []byte{4}, true, AuditEntry{Action: "notifications.updated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkInFlight := func(stage string) {
+		t.Helper()
+		var selector, claim, marker string
+		var coalesceAfter int
+		if err := s.DB.QueryRowContext(ctx, `SELECT destination,claim_token,attempt_started_at,coalesce_after_attempt FROM outbox WHERE id=?`, item.ID).Scan(&selector, &claim, &marker, &coalesceAfter); err != nil {
+			t.Fatal(err)
+		}
+		if selector != item.Destination || claim != item.ClaimToken || marker == "" || coalesceAfter != 1 {
+			t.Fatalf("%s in-flight future-window alert = selector %q claim %q marker %q coalesce-after %d; want original claim and selector preserved", stage, selector, claim, marker, coalesceAfter)
+		}
+	}
+	checkInFlight("discard rotation")
+	kept, err := ts.UpdateManagedNotificationKeepingPendingWithAudit(ctx, destination.ID, rotated.Revision, rotated.Name, rotated.Provider, []byte{5}, []byte{6}, true, AuditEntry{Action: "notifications.updated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkInFlight("keep-pending rotation")
+	if err := s.System().DeliveryResultClaim(ctx, item.ID, item.ClaimToken, ErrDeliveryProvider); err != nil {
+		t.Fatalf("record result of original provider attempt after both rotations: %v", err)
+	}
+	var claim, marker, coalesced string
+	var coalesceAfter int
+	if err := s.DB.QueryRowContext(ctx, `SELECT claim_token,attempt_started_at,coalesce_after_attempt,coalesced_at FROM outbox WHERE id=?`, item.ID).Scan(&claim, &marker, &coalesceAfter, &coalesced); err != nil {
+		t.Fatal(err)
+	}
+	if claim != "" || marker != "" || coalesceAfter != 0 || coalesced == "" {
+		t.Fatalf("finished original attempt = claim %q marker %q coalesce-after %d coalesced %q; want safely coalesced", claim, marker, coalesceAfter, coalesced)
+	}
+	if kept.Revision != destination.Revision+2 {
+		t.Fatalf("credential rotation revision = %d; want both edits recorded", kept.Revision)
+	}
+}
+
 func containsAll(value string, parts ...string) bool {
 	for _, part := range parts {
 		if !strings.Contains(value, part) {

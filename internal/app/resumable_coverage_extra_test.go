@@ -642,7 +642,7 @@ func TestResumableAttemptHandlesUnitFailuresAndNoProgressStalls(t *testing.T) {
 	}
 }
 
-func TestManagedFinalizationContinuesWhenLeaseRenewalIsLost(t *testing.T) {
+func TestManagedFinalizationDoesNotCompareWhenJobLeaseIsLost(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
@@ -669,8 +669,12 @@ func TestManagedFinalizationContinuesWhenLeaseRenewalIsLost(t *testing.T) {
 		closeDB:     db,
 	}
 	scan, _, runErr := a.RunJobRecord(ctx, record)
-	if runErr != nil || scan.Status != "success" {
-		t.Fatalf("managed scan after lost lease = %#v, %v", scan, runErr)
+	if !errors.Is(runErr, store.ErrJobLeaseLost) || scan.Status != "failed" || scan.Comparison != model.ScanComparisonNotCompared {
+		t.Fatalf("managed scan after lost lease = %#v, %v; want a non-compared failure", scan, runErr)
+	}
+	state, err := defaultTenant(db).RuntimeState(ctx, record.ID)
+	if err != nil || state.Baseline != nil || len(state.FingerprintCandidates) != 0 || len(state.Pending) != 0 || len(state.Incidents) != 0 {
+		t.Fatalf("runtime after lost lease = %#v, %v; want no comparison state", state, err)
 	}
 }
 

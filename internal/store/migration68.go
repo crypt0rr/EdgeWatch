@@ -1,6 +1,9 @@
 package store
 
-import "database/sql"
+import (
+	"context"
+	"database/sql"
+)
 
 // migration68Statements adds durable, per-occurrence incident review state.
 // Reviews reference the managed job but not either the replaceable active
@@ -47,7 +50,7 @@ func migration68Statements() []string {
 // runtime incident projection. Conditional column checks keep migration
 // reconstruction and recovery fixtures safe if a newer template has already
 // installed one of them.
-func migration68ConditionalStatements(tx *sql.Tx) ([]string, error) {
+func migration68ConditionalStatements(ctx context.Context, tx *sql.Tx) ([]string, error) {
 	var statements []string
 	for _, column := range []struct {
 		name       string
@@ -59,7 +62,7 @@ func migration68ConditionalStatements(tx *sql.Tx) ([]string, error) {
 		{"opened_at_sort", `TEXT NOT NULL DEFAULT ''`},
 		{"last_seen_at_sort", `TEXT NOT NULL DEFAULT ''`},
 	} {
-		exists, err := migrationColumnExists(tx, "runtime_incidents", column.name)
+		exists, err := migrationColumnExists(ctx, tx, "runtime_incidents", column.name)
 		if err != nil {
 			return nil, err
 		}

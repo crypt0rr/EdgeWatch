@@ -37,7 +37,7 @@ const (
 	privateTemporaryCreateMagic      = "EWTMP002"
 	privateTemporaryMessageMax       = 256
 	privateTemporaryStartupTimeout   = 5 * time.Second
-	privateTemporaryCleanupTimeout   = 5 * time.Second
+	privateTemporaryCleanupTimeout   = 10 * time.Second
 	privateTemporaryCleanupEntries   = 100000
 )
 
@@ -1434,15 +1434,22 @@ type cleanupBudget struct {
 }
 
 func (budget *cleanupBudget) visit() error {
+	if err := budget.check(); err != nil {
+		return err
+	}
+	budget.entries++
+	if budget.entries > privateTemporaryCleanupEntries {
+		return errors.New("private temporary directory has too many entries")
+	}
+	return nil
+}
+
+func (budget *cleanupBudget) check() error {
 	if budget.deadline.IsZero() {
 		budget.deadline = time.Now().Add(privateTemporaryCleanupTimeout)
 	}
 	if time.Now().After(budget.deadline) {
 		return errors.New("private temporary cleanup exceeded its time budget")
-	}
-	budget.entries++
-	if budget.entries > privateTemporaryCleanupEntries {
-		return errors.New("private temporary directory has too many entries")
 	}
 	return nil
 }
@@ -1456,10 +1463,12 @@ func normalizePrivateTemporaryDirectory(fd int, expected *unix.Stat_t, device ui
 		uint64(current.Dev) != device || current.Uid != owner || current.Gid != group {
 		return errors.New("private temporary leaf identity changed")
 	}
-	if current.Mode != unix.S_IFDIR|privateScannerTemporaryMode {
-		if err := chmodPinnedPrivateDirectory(fd, privateScannerTemporaryMode); err != nil {
-			return errors.New("restore private temporary directory permissions failed")
-		}
+	if current.Mode == unix.S_IFDIR|privateScannerTemporaryMode {
+		*expected = current
+		return nil
+	}
+	if err := chmodPinnedPrivateDirectory(fd, privateScannerTemporaryMode); err != nil {
+		return errors.New("restore private temporary directory permissions failed")
 	}
 	if err := unix.Fstat(fd, &current); err != nil || !sameObject(expected, &current) || current.Mode != unix.S_IFDIR|privateScannerTemporaryMode ||
 		uint64(current.Dev) != device || current.Uid != owner || current.Gid != group {
@@ -1504,115 +1513,179 @@ func cleanPrivateDirectoryContents(leafFD int, expected *unix.Stat_t, owner, gro
 }
 
 type privateTemporaryCleanupFrame struct {
-	directory *os.File
-	name      string
-	stat      unix.Stat_t
-	pending   []os.DirEntry
-	eof       bool
+	name    string
+	stat    unix.Stat_t
+	entries []os.DirEntry
+	next    int
+	listed  bool
 }
 
 func removePrivateDirectoryContents(fd int, device uint64, owner, group uint32, budget *cleanupBudget) error {
 	if budget == nil {
 		budget = &cleanupBudget{}
 	}
-	root := os.NewFile(uintptr(fd), "private temporary contents")
-	stack := []privateTemporaryCleanupFrame{{directory: root}}
+	current := os.NewFile(uintptr(fd), "private temporary contents")
+	if current == nil {
+		return errors.New("open private temporary directory failed")
+	}
 	defer func() {
-		for _, frame := range stack {
-			if frame.directory != nil {
-				_ = frame.directory.Close()
-			}
+		if current != nil {
+			_ = current.Close()
 		}
 	}()
+	var rootStat unix.Stat_t
+	if err := unix.Fstat(fd, &rootStat); err != nil {
+		return errors.New("read private temporary directory failed")
+	}
+	stack := []privateTemporaryCleanupFrame{{stat: rootStat}}
 	for len(stack) > 0 {
-		frame := &stack[len(stack)-1]
-		if len(frame.pending) == 0 && !frame.eof {
-			entries, err := frame.directory.ReadDir(128)
-			if err != nil && !errors.Is(err, io.EOF) {
-				return errors.New("read private temporary directory failed")
-			}
-			frame.pending = entries
-			frame.eof = errors.Is(err, io.EOF)
-		}
-		if len(frame.pending) == 0 {
-			if !frame.eof {
-				continue
-			}
-			if err := frame.directory.Close(); err != nil {
-				return errors.New("close private temporary directory failed")
-			}
-			popped := *frame
-			stack[len(stack)-1] = privateTemporaryCleanupFrame{}
-			stack = stack[:len(stack)-1]
-			if popped.name != "" {
-				parent := stack[len(stack)-1].directory
-				var current unix.Stat_t
-				if err := unix.Fstatat(int(parent.Fd()), popped.name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&popped.stat, &current) || current.Mode != unix.S_IFDIR|privateScannerTemporaryMode {
-					return errors.New("private temporary subdirectory changed during cleanup")
-				}
-				if err := unix.Unlinkat(int(parent.Fd()), popped.name, unix.AT_REMOVEDIR); err != nil {
-					return errors.New("remove private temporary subdirectory failed")
-				}
-			}
-			continue
-		}
-		entry := frame.pending[0]
-		frame.pending = frame.pending[1:]
-		if err := budget.visit(); err != nil {
+		if err := budget.check(); err != nil {
 			return err
 		}
+		frame := &stack[len(stack)-1]
+		if !frame.listed {
+			entries, err := readPrivateTemporaryDirectoryEntries(current, budget)
+			if err != nil {
+				return err
+			}
+			frame.entries = entries
+			frame.listed = true
+		}
+		if frame.next == len(frame.entries) {
+			if len(stack) == 1 {
+				return nil
+			}
+			popped := *frame
+			parentExpected := stack[len(stack)-2].stat
+			parentFD, err := unix.Openat(int(current.Fd()), "..", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+			if err != nil {
+				return errors.New("open private temporary parent failed")
+			}
+			parent := os.NewFile(uintptr(parentFD), "private temporary parent")
+			if parent == nil {
+				_ = unix.Close(parentFD)
+				return errors.New("open private temporary parent failed")
+			}
+			closeParentOnError := func(message string) error {
+				_ = parent.Close()
+				return errors.New(message)
+			}
+			var parentCurrent unix.Stat_t
+			if err := unix.Fstat(parentFD, &parentCurrent); err != nil || !sameObject(&parentExpected, &parentCurrent) || parentCurrent.Mode != parentExpected.Mode || uint64(parentCurrent.Dev) != device || parentCurrent.Uid != owner || parentCurrent.Gid != group {
+				return closeParentOnError("private temporary parent changed during cleanup")
+			}
+			var namedChild unix.Stat_t
+			if err := unix.Fstatat(parentFD, popped.name, &namedChild, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&popped.stat, &namedChild) || namedChild.Mode != popped.stat.Mode || uint64(namedChild.Dev) != device || namedChild.Uid != owner || namedChild.Gid != group {
+				return closeParentOnError("private temporary subdirectory changed during cleanup")
+			}
+			if err := unix.Unlinkat(parentFD, popped.name, unix.AT_REMOVEDIR); err != nil {
+				return closeParentOnError("remove private temporary subdirectory failed")
+			}
+			if err := current.Close(); err != nil {
+				current = nil
+				_ = parent.Close()
+				return errors.New("close private temporary directory failed")
+			}
+			current = parent
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		entry := frame.entries[frame.next]
+		frame.next++
 		name := entry.Name()
 		if name == "." || name == ".." || strings.ContainsRune(name, '/') || strings.ContainsRune(name, '\x00') {
 			return errors.New("private temporary directory contains an invalid entry")
 		}
 		var item unix.Stat_t
-		if err := unix.Fstatat(int(frame.directory.Fd()), name, &item, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return errors.New("inspect private temporary entry failed")
+		entryType := entry.Type() & os.ModeType
+		isDirectory := entryType == os.ModeDir
+		if !isDirectory {
+			if err := unix.Fstatat(int(current.Fd()), name, &item, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+				return errors.New("inspect private temporary entry failed")
+			}
+			if uint64(item.Dev) != device || item.Uid != owner || item.Gid != group {
+				return errors.New("private temporary entry ownership changed")
+			}
+			isDirectory = item.Mode&unix.S_IFMT == unix.S_IFDIR
 		}
-		if uint64(item.Dev) != device || item.Uid != owner || item.Gid != group {
-			return errors.New("private temporary entry ownership changed")
-		}
-		if item.Mode&unix.S_IFMT == unix.S_IFDIR {
-			pinned, err := unix.Openat(int(frame.directory.Fd()), name, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if isDirectory {
+			pinned, err := unix.Openat(int(current.Fd()), name, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 			if err != nil {
 				return errors.New("pin private temporary subdirectory failed")
 			}
-			var opened unix.Stat_t
-			if err := unix.Fstat(pinned, &opened); err != nil || !sameObject(&item, &opened) || uint64(opened.Dev) != device || opened.Uid != owner || opened.Gid != group {
-				_ = unix.Close(pinned)
-				return errors.New("private temporary subdirectory identity changed")
-			}
-			if err := normalizePrivateTemporaryDirectory(pinned, &opened, device, owner, group); err != nil {
+			opened := item
+			if entryType == os.ModeDir {
+				if err := unix.Fstat(pinned, &opened); err != nil || uint64(opened.Dev) != device || opened.Uid != owner || opened.Gid != group || opened.Mode&unix.S_IFMT != unix.S_IFDIR {
+					_ = unix.Close(pinned)
+					return errors.New("private temporary subdirectory identity changed")
+				}
+				if opened.Mode != unix.S_IFDIR|privateScannerTemporaryMode {
+					if err := normalizePrivateTemporaryDirectory(pinned, &opened, device, owner, group); err != nil {
+						_ = unix.Close(pinned)
+						return err
+					}
+				}
+			} else if err := normalizePrivateTemporaryDirectory(pinned, &opened, device, owner, group); err != nil {
 				_ = unix.Close(pinned)
 				return err
 			}
 			child, err := unix.Openat(pinned, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-			_ = unix.Close(pinned)
+			closePinnedErr := unix.Close(pinned)
 			if err != nil {
 				return errors.New("open private temporary subdirectory failed")
 			}
-			var readable unix.Stat_t
-			if err := unix.Fstat(child, &readable); err != nil || !sameObject(&opened, &readable) || readable.Mode != unix.S_IFDIR|privateScannerTemporaryMode {
+			if closePinnedErr != nil {
+				_ = unix.Close(child)
+				return errors.New("close pinned private temporary subdirectory failed")
+			}
+			var named unix.Stat_t
+			if err := unix.Fstatat(int(current.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&opened, &named) || named.Mode != opened.Mode || opened.Mode != unix.S_IFDIR|privateScannerTemporaryMode || uint64(named.Dev) != device || named.Uid != owner || named.Gid != group {
 				_ = unix.Close(child)
 				return errors.New("private temporary subdirectory changed while opening")
 			}
-			stack = append(stack, privateTemporaryCleanupFrame{
-				directory: os.NewFile(uintptr(child), "private temporary nested contents"),
-				name:      name,
-				stat:      readable,
-			})
+			childFile := os.NewFile(uintptr(child), "private temporary nested contents")
+			if childFile == nil {
+				_ = unix.Close(child)
+				return errors.New("open private temporary subdirectory failed")
+			}
+			if err := current.Close(); err != nil {
+				current = nil
+				_ = childFile.Close()
+				return errors.New("close private temporary parent failed")
+			}
+			current = childFile
+			stack = append(stack, privateTemporaryCleanupFrame{name: name, stat: opened})
 			continue
 		}
-		var current unix.Stat_t
-		if err := unix.Fstatat(int(frame.directory.Fd()), name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&item, &current) ||
-			uint64(current.Dev) != device || current.Uid != owner || current.Gid != group {
+		var currentStat unix.Stat_t
+		if err := unix.Fstatat(int(current.Fd()), name, &currentStat, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&item, &currentStat) ||
+			uint64(currentStat.Dev) != device || currentStat.Uid != owner || currentStat.Gid != group {
 			return errors.New("private temporary entry changed during cleanup")
 		}
-		if err := unix.Unlinkat(int(frame.directory.Fd()), name, 0); err != nil {
+		if err := unix.Unlinkat(int(current.Fd()), name, 0); err != nil {
 			return errors.New("remove private temporary entry failed")
 		}
 	}
 	return nil
+}
+
+func readPrivateTemporaryDirectoryEntries(directory *os.File, budget *cleanupBudget) ([]os.DirEntry, error) {
+	var entries []os.DirEntry
+	for {
+		batch, err := directory.ReadDir(128)
+		for _, entry := range batch {
+			if visitErr := budget.visit(); visitErr != nil {
+				return nil, visitErr
+			}
+			entries = append(entries, entry)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return entries, nil
+			}
+			return nil, errors.New("read private temporary directory failed")
+		}
+	}
 }
 
 func helperSendPrivateTemporaryReady(controlFD int, name string, nonce [privateTemporaryNonceSize]byte, stat *unix.Stat_t) error {

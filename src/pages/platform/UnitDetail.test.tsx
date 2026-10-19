@@ -643,7 +643,7 @@ describe('business unit detail', () => {
       expect(server.stored).toEqual({ max_concurrent_scans: 3, max_probe_count: 250_000, max_naabu_probe_count: 1_000_000, high_cost_ceiling: 1_000_000 })
     })
 
-    it('keeps unsaved edits over a capacity changed elsewhere, says so, and saves them only at the current revision', async () => {
+    it('keeps unsaved capacity edits pinned until the administrator rebases them', async () => {
       const server = capacityServer()
       const { client } = renderUnit('capacity')
       const slots = await screen.findByLabelText('Scan slot cap', { selector: 'input[type="number"]' })
@@ -652,9 +652,12 @@ describe('business unit detail', () => {
       server.stored = { ...server.stored, max_probe_count: 250_000 }
       server.revision = 4
       await act(async () => { await client.refetchQueries({ queryKey: ['platform-unit-capacity', 'unit-retail'] }) })
-      expect(await screen.findByText('Another platform administrator changed this unit’s capacity. The form shows the saved values with your unsaved changes; review them before saving.')).toBeInTheDocument()
+      expect(await screen.findByRole('status')).toHaveTextContent('Your edits still use revision 3')
       expect(slots).toHaveValue(3)
       expect(screen.getByLabelText('Nmap probe budget per run', { selector: 'input[type="number"]' })).toHaveValue(250_000)
+      expect(screen.getByRole('button', { name: 'Save capacity' })).toBeDisabled()
+      fireEvent.click(screen.getByRole('button', { name: 'Keep my edits' }))
+      expect(screen.getByRole('button', { name: 'Save capacity' })).toBeEnabled()
 
       // A change saved after the last refresh makes the server refuse the
       // save; the form loads it and keeps the edit.
@@ -664,11 +667,13 @@ describe('business unit detail', () => {
         fireEvent.submit(slots.closest('form')!)
         await Promise.resolve()
       })
-      expect(await screen.findByText('Another platform administrator changed this unit. The current values are loaded with your changes; review them and save again.')).toBeInTheDocument()
+      expect(await screen.findByRole('alert')).toHaveTextContent('Your edits are kept; review the latest values, then keep your edits or load theirs.')
       expect(updateUnitCapacity).toHaveBeenLastCalledWith('unit-retail', 4, { max_concurrent_scans: 3 })
       await waitFor(() => expect(screen.getByLabelText('Naabu probe budget per run', { selector: 'input[type="number"]' })).toHaveValue(2_000_000))
       expect(slots).toHaveValue(3)
       expect(server.stored.max_concurrent_scans).toBe(2)
+      expect(screen.getByRole('button', { name: 'Save capacity' })).toBeDisabled()
+      fireEvent.click(screen.getByRole('button', { name: 'Keep my edits' }))
 
       await act(async () => {
         fireEvent.submit(slots.closest('form')!)
@@ -690,6 +695,7 @@ describe('business unit detail', () => {
       await act(async () => { await client.refetchQueries({ queryKey: ['platform-unit-capacity', 'unit-retail'] }) })
       expect(await screen.findByLabelText('Nmap probe budget per run', { selector: 'input[type="number"]' })).toHaveValue(250_000)
       expect(screen.getByLabelText('Grant a ceiling')).toBeChecked()
+      fireEvent.click(screen.getByRole('button', { name: 'Keep my edits' }))
       const ceiling = screen.getByLabelText('High-cost ceiling', { selector: 'input[type="number"]' })
       fireEvent.change(ceiling, { target: { value: '7000000' } })
       await act(async () => {

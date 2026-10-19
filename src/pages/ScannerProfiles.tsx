@@ -5,8 +5,14 @@ import { APIError, archiveScannerProfile, createScannerProfile, getSession, list
 import type { ScannerProfile, ScannerProfilePayload } from '../api'
 import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
+import { useServerDraft } from '../hooks/useServerDraft'
 
 type PreviewCommand = { executable: string; args: string[] }
+type ScannerEditorDraft = {
+  payload: ScannerProfilePayload
+  args: { nmap: string; naabu: string; enrichment: string }
+  nseArgs: string
+}
 
 const defaultBounds: Record<string, { min: number; max: number }> = {
   rate: { min: 1, max: 100000 }, workers: { min: 1, max: 1024 }, retries: { min: 0, max: 10 },
@@ -19,6 +25,24 @@ const empty: ScannerProfilePayload = {
   nmap_args: [], naabu_args: [], enrichment_args: [], operator_adjustable: [], operator_bounds: {},
 }
 
+function emptyScannerEditorDraft(): ScannerEditorDraft {
+  return { payload: { ...empty, naabu: { ...empty.naabu }, operator_adjustable: [], operator_bounds: {} }, args: { nmap: '', naabu: '', enrichment: '' }, nseArgs: '' }
+}
+
+function scannerEditorDraft(profile: ScannerProfile): ScannerEditorDraft {
+  const definition = profile.definition
+  return {
+    payload: {
+      name: profile.name, description: profile.description, engine: definition.engine, naabu: { ...definition.naabu },
+      nmap_args: [...(definition.nmap_args ?? [])], naabu_args: [...(definition.naabu_args ?? [])], enrichment_args: [...(definition.enrichment_args ?? [])],
+      nse_profile: definition.nse_profile, operator_adjustable: [...(definition.operator_adjustable ?? [])],
+      operator_bounds: { ...(definition.operator_bounds ?? {}) },
+    },
+    args: { nmap: (definition.nmap_args ?? []).join('\n'), naabu: (definition.naabu_args ?? []).join('\n'), enrichment: (definition.enrichment_args ?? []).join('\n') },
+    nseArgs: Object.entries(definition.nse_args ?? {}).map(([key, value]) => `${key}=${value}`).join('\n'),
+  }
+}
+
 function formatCommand(command: PreviewCommand) {
   return [command.executable, ...command.args].map(value => /^[A-Za-z0-9_./:=+,-]+$/.test(value) ? value : JSON.stringify(value)).join(' ')
 }
@@ -28,11 +52,15 @@ export function ScannerProfiles() {
   const session = useQuery({ queryKey: ['session'], queryFn: getSession })
   const canManage = session.data?.permissions.includes('scanner_profiles.manage') ?? false
   const profiles = useQuery({ queryKey: ['scanner-profiles', true], queryFn: () => listScannerProfiles(true) })
-  const [draft, setDraft] = useState<ScannerProfilePayload>(empty)
   const [editing, setEditing] = useState<ScannerProfile | null>(null)
+  const editingServer = editing ? profiles.data?.profiles.find(profile => profile.id === editing.id) ?? editing : null
+  const editorServer = editingServer ? scannerEditorDraft(editingServer) : emptyScannerEditorDraft()
+  const editorState = useServerDraft<ScannerEditorDraft, ScannerEditorDraft, number>(editorServer, editingServer?.revision ?? 0, {
+    mergeDraft: (_server, draft) => draft,
+  })
+  const { draft: editor, setDraft, baseRevision, rebase, adopt, markSaved } = editorState
+  const remoteChanged = !!editingServer && editorState.hasDraft && baseRevision !== editingServer.revision
   const [password, setPassword] = useState('')
-  const [args, setArgs] = useState({ nmap: '', naabu: '', enrichment: '' })
-  const [nseArgs, setNSEArgs] = useState('')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -45,10 +73,8 @@ export function ScannerProfiles() {
   }, [message, error])
 
   function reset() {
+    markSaved()
     setEditing(null)
-    setDraft({ ...empty, naabu: { ...empty.naabu }, operator_adjustable: [], operator_bounds: {} })
-    setArgs({ nmap: '', naabu: '', enrichment: '' })
-    setNSEArgs('')
     setPassword('')
     setError('')
     setMessage('')
@@ -57,16 +83,8 @@ export function ScannerProfiles() {
   }
 
   function select(profile: ScannerProfile) {
-    const definition = profile.definition
+    markSaved()
     setEditing(profile)
-    setDraft({
-      name: profile.name, description: profile.description, engine: definition.engine, naabu: definition.naabu,
-      nmap_args: definition.nmap_args, naabu_args: definition.naabu_args, enrichment_args: definition.enrichment_args,
-      nse_profile: definition.nse_profile, operator_adjustable: definition.operator_adjustable,
-      operator_bounds: definition.operator_bounds ?? {},
-    })
-    setArgs({ nmap: (definition.nmap_args ?? []).join('\n'), naabu: (definition.naabu_args ?? []).join('\n'), enrichment: (definition.enrichment_args ?? []).join('\n') })
-    setNSEArgs(Object.entries(definition.nse_args ?? {}).map(([key, value]) => `${key}=${value}`).join('\n'))
     setPassword('')
     setError('')
     setMessage('')
@@ -75,12 +93,12 @@ export function ScannerProfiles() {
 
   function payload(): ScannerProfilePayload {
     const lines = (value: string) => value.split('\n').map(item => item.trim()).filter(Boolean)
-    const structured = nseArgs.split('\n').map(item => item.trim()).filter(Boolean).reduce<Record<string, string>>((out, item) => {
+    const structured = editor.nseArgs.split('\n').map(item => item.trim()).filter(Boolean).reduce<Record<string, string>>((out, item) => {
       const separator = item.indexOf('=')
       if (separator > 0) out[item.slice(0, separator).trim()] = item.slice(separator + 1).trim()
       return out
     }, {})
-    return { ...draft, nmap_args: lines(args.nmap), naabu_args: lines(args.naabu), enrichment_args: lines(args.enrichment), nse_args: structured, password }
+    return { ...editor.payload, nmap_args: lines(editor.args.nmap), naabu_args: lines(editor.args.naabu), enrichment_args: lines(editor.args.enrichment), nse_args: structured, password }
   }
 
   async function save() {
@@ -89,7 +107,7 @@ export function ScannerProfiles() {
     setMessage('')
     try {
       const value = payload()
-      if (editing) await updateScannerProfile(editing.id, value, editing.revision)
+      if (editing) await updateScannerProfile(editing.id, value, baseRevision)
       else await createScannerProfile(value)
       await client.invalidateQueries({ queryKey: ['scanner-profiles'] })
       reset()
@@ -98,14 +116,12 @@ export function ScannerProfiles() {
       setMessage('Scanner profile saved. Jobs keep their pinned revision until explicitly upgraded.')
     } catch (err) {
       if (editing && err instanceof APIError && err.status === 409) {
-        // Another administrator saved this profile. Adopt its current
-        // revision, so the next save is checked against it, and keep the
-        // typed draft for the administrator to review before saving.
+        // Refresh the server snapshot, but leave both the typed draft and its
+        // pinned revision intact until the administrator chooses what to do.
         const refreshed = await client.fetchQuery({ queryKey: ['scanner-profiles', true], queryFn: () => listScannerProfiles(true), staleTime: 0 }).catch(() => undefined)
         const current = refreshed?.profiles.find(profile => profile.id === editing.id)
         if (current) {
-          setEditing(current)
-          setError(`This profile was saved elsewhere while you were editing (now revision ${current.revision}). Your changes are kept; review them and save again.`)
+          setError(`This profile changed elsewhere (now revision ${current.revision}). Your draft still uses revision ${baseRevision}; keep it or load the saved profile.`)
           return
         }
       }
@@ -147,14 +163,35 @@ export function ScannerProfiles() {
     }
   }
 
-  const updateNaabu = (field: string, value: number | string | boolean) => setDraft(current => ({ ...current, naabu: { ...current.naabu, [field]: value } }))
+  const updatePayload = (update: (current: ScannerProfilePayload) => ScannerProfilePayload) => setDraft(current => ({ ...current, payload: update(current.payload) }))
+  const updateNaabu = (field: string, value: number | string | boolean) => updatePayload(current => ({ ...current, naabu: { ...current.naabu, [field]: value } }))
   const toggleAdjustable = (field: string, checked: boolean) => {
-    const selected = draft.operator_adjustable ?? []
+    const selected = editor.payload.operator_adjustable ?? []
     const next = checked ? [...selected, field] : selected.filter(value => value !== field)
-    const bounds = { ...(draft.operator_bounds ?? {}) }
+    const bounds = { ...(editor.payload.operator_bounds ?? {}) }
     if (checked && defaultBounds[field] && !bounds[field]) bounds[field] = defaultBounds[field]
     if (!checked) delete bounds[field]
-    setDraft({ ...draft, operator_adjustable: next, operator_bounds: bounds })
+    updatePayload(current => ({ ...current, operator_adjustable: next, operator_bounds: bounds }))
+  }
+  const updateEditor = (update: (current: ScannerEditorDraft) => ScannerEditorDraft) => setDraft(update)
+
+  function keepMyEdits() {
+    if (!editingServer) return
+    rebase(editingServer.revision)
+    setError(`Your profile draft now uses revision ${editingServer.revision}. Review it and save again.`)
+  }
+
+  function loadTheirs() {
+    if (!editingServer) {
+      reset()
+      setError('This scanner profile was removed elsewhere.')
+      return
+    }
+    adopt()
+    setEditing(editingServer)
+    setPassword('')
+    setPreview([])
+    setError('The saved scanner profile is loaded.')
   }
 
   return <section className="page">
@@ -164,25 +201,26 @@ export function ScannerProfiles() {
         {profiles.isLoading ? <div className="loading"><span className="spinner" />Loading profiles…</div> : profiles.error ? <ErrorNotice message="Could not load scanner profiles." onRetry={() => profiles.refetch()} /> : <>{(profiles.data?.invalid_profiles?.length ?? 0) > 0 && <div className="notice warning" role="status"><AlertTriangle size={16} /><span><strong>{profiles.data?.invalid_profiles?.length} stored profile{profiles.data?.invalid_profiles?.length === 1 ? '' : 's'} need attention.</strong> Invalid definitions are hidden from selection until repaired or removed.</span></div>}{profiles.data?.profiles.length ? <div className="activity-list">{profiles.data.profiles.map(profile => <div className="activity-row" key={profile.id}><div><strong>{profile.name}</strong><span>{profile.definition.engine === 'naabu_nmap' ? 'Naabu full TCP → Nmap' : 'Nmap'} · revision {profile.revision}{profile.archived ? ' · archived' : ''}</span></div><span className={profile.built_in ? 'pill blue' : profile.archived ? 'pill gray' : 'pill green'}>{profile.built_in ? 'Built-in' : profile.archived ? 'Archived' : 'Managed'}</span>{canManage && !profile.built_in && <><button className="icon-button" aria-label={`Edit ${profile.name}`} onClick={() => select(profile)}><Save size={15} /></button>{profile.archived ? <button className="icon-button" aria-label={`Restore ${profile.name}`} onClick={() => requestLifecycle(profile, 'restore')}><RotateCcw size={15} /></button> : <button className="icon-button" aria-label={`Archive ${profile.name}`} onClick={() => requestLifecycle(profile, 'archive')}><Trash2 size={15} /></button>}</>}</div>)}</div> : <div className="inline-empty">No valid scanner profiles are configured.</div>}</>}
       </div>
       <div className="panel form-panel"><div className="panel-heading"><div><h2 title={editing ? `Edit ${editing.name}` : 'Create profile'}>{editing ? `Edit ${editing.name}` : 'Create profile'}</h2><p className="muted">{canManage ? 'Password confirmation is required for every mutation.' : 'Profiles are read-only for your account.'}</p></div><LockKeyhole className="muted-icon" size={18} /></div>{!canManage && <div className="notice notification-read-only" role="status"><LockKeyhole size={16} />Only administrators can create, validate, or revise scanner profiles.</div>}
-        <label>Name<input value={draft.name ?? ''} title={draft.name ?? ''} onChange={event => setDraft({ ...draft, name: event.target.value })} placeholder="Careful Naabu defaults" /></label>
-        <label>Description<textarea value={draft.description ?? ''} onChange={event => setDraft({ ...draft, description: event.target.value })} /></label>
-        <label>Engine<select value={draft.engine} onChange={event => setDraft({ ...draft, engine: event.target.value })}><option value="nmap">Nmap only</option><option value="naabu_nmap">Naabu discovery → Nmap</option></select></label>
-        {draft.engine === 'naabu_nmap' && <div className="two-fields">
-          <label>Discovery type<select value={draft.naabu?.scan_type ?? 'connect'} onChange={event => updateNaabu('scan_type', event.target.value)}><option value="connect">Connect</option><option value="syn">SYN (NET_ADMIN + NET_RAW)</option></select></label>
-          <label>Rate<input type="number" min={1} max={100000} value={draft.naabu?.rate ?? 1000} onChange={event => updateNaabu('rate', Number(event.target.value))} /></label>
-          <label>Workers<input type="number" min={1} max={1024} value={draft.naabu?.workers ?? 25} onChange={event => updateNaabu('workers', Number(event.target.value))} /></label>
-          <label>Retries<input type="number" min={0} max={10} value={draft.naabu?.retries ?? 3} onChange={event => updateNaabu('retries', Number(event.target.value))} /></label>
-          <label>Probe timeout (ms)<input type="number" min={100} max={60000} value={draft.naabu?.timeout_ms ?? 1000} onChange={event => updateNaabu('timeout_ms', Number(event.target.value))} /></label>
-          <label>Warm-up (seconds)<input type="number" min={0} max={60} value={draft.naabu?.warm_up_seconds ?? 2} onChange={event => updateNaabu('warm_up_seconds', Number(event.target.value))} /></label>
-          <label>Address batch size<input type="number" min={1} max={256} value={draft.naabu?.address_batch_size ?? 16} onChange={event => updateNaabu('address_batch_size', Number(event.target.value))} /></label>
-          <label className="switch-row"><input type="checkbox" checked={draft.naabu?.verify ?? true} onChange={event => updateNaabu('verify', event.target.checked)} /><span><strong>Verify discoveries</strong><small>Ask Naabu to re-check discovered ports.</small></span></label>
+        {remoteChanged && <div className="notice warning" role="status"><span>This profile changed elsewhere. Your edits are kept, and saves still use revision {baseRevision}.</span><button type="button" className="text-button" onClick={keepMyEdits}>Keep my edits</button><button type="button" className="text-button" onClick={loadTheirs}>Load theirs</button></div>}
+        <label>Name<input value={editor.payload.name ?? ''} title={editor.payload.name ?? ''} onChange={event => updatePayload(current => ({ ...current, name: event.target.value }))} placeholder="Careful Naabu defaults" /></label>
+        <label>Description<textarea value={editor.payload.description ?? ''} onChange={event => updatePayload(current => ({ ...current, description: event.target.value }))} /></label>
+        <label>Engine<select value={editor.payload.engine} onChange={event => updatePayload(current => ({ ...current, engine: event.target.value as ScannerProfilePayload['engine'] }))}><option value="nmap">Nmap only</option><option value="naabu_nmap">Naabu discovery → Nmap</option></select></label>
+        {editor.payload.engine === 'naabu_nmap' && <div className="two-fields">
+          <label>Discovery type<select value={editor.payload.naabu?.scan_type ?? 'connect'} onChange={event => updateNaabu('scan_type', event.target.value)}><option value="connect">Connect</option><option value="syn">SYN (NET_ADMIN + NET_RAW)</option></select></label>
+          <label>Rate<input type="number" min={1} max={100000} value={editor.payload.naabu?.rate ?? 1000} onChange={event => updateNaabu('rate', Number(event.target.value))} /></label>
+          <label>Workers<input type="number" min={1} max={1024} value={editor.payload.naabu?.workers ?? 25} onChange={event => updateNaabu('workers', Number(event.target.value))} /></label>
+          <label>Retries<input type="number" min={0} max={10} value={editor.payload.naabu?.retries ?? 3} onChange={event => updateNaabu('retries', Number(event.target.value))} /></label>
+          <label>Probe timeout (ms)<input type="number" min={100} max={60000} value={editor.payload.naabu?.timeout_ms ?? 1000} onChange={event => updateNaabu('timeout_ms', Number(event.target.value))} /></label>
+          <label>Warm-up (seconds)<input type="number" min={0} max={60} value={editor.payload.naabu?.warm_up_seconds ?? 2} onChange={event => updateNaabu('warm_up_seconds', Number(event.target.value))} /></label>
+          <label>Address batch size<input type="number" min={1} max={256} value={editor.payload.naabu?.address_batch_size ?? 16} onChange={event => updateNaabu('address_batch_size', Number(event.target.value))} /></label>
+          <label className="switch-row"><input type="checkbox" checked={editor.payload.naabu?.verify ?? true} onChange={event => updateNaabu('verify', event.target.checked)} /><span><strong>Verify discoveries</strong><small>Ask Naabu to re-check discovered ports.</small></span></label>
         </div>}
-        <label>NSE profile<select value={draft.nse_profile ?? ''} onChange={event => setDraft({ ...draft, nse_profile: event.target.value })}><option value="">No NSE scripts</option><option value="banner">banner</option><option value="http-title">http-title</option><option value="http-headers">http-headers</option><option value="ssl-cert">ssl-cert</option><option value="ssh-hostkey">ssh-hostkey</option><option value="dns-recursion">dns-recursion</option></select></label>
-        <label>NSE arguments<textarea value={nseArgs} onChange={event => setNSEArgs(event.target.value)} placeholder="One safe key=value per line (optional)" /><small>Values are scalar and validated; paths, wildcards, boolean expressions, and @files are rejected.</small></label>
-        <label>Nmap argument array<textarea rows={6} value={args.nmap} onChange={event => setArgs({ ...args, nmap: event.target.value })} placeholder="Required placeholders: {address(es)}, {ports}, {structured_output}" /></label>
-        {draft.engine === 'naabu_nmap' && <label>Naabu argument array<textarea rows={6} value={args.naabu} onChange={event => setArgs({ ...args, naabu: event.target.value })} placeholder="Required placeholders: {targets_file}, {ports}, {structured_output}" /></label>}
-        <label>Enrichment argument array<textarea rows={6} value={args.enrichment} onChange={event => setArgs({ ...args, enrichment: event.target.value })} placeholder="Required placeholders: {address(es)}, {ports}, {structured_output}" /></label>
-        <fieldset><legend>Operator-adjustable fields</legend><div className="two-fields">{adjustable.map(field => <label key={field} className="switch-row"><input type="checkbox" checked={(draft.operator_adjustable ?? []).includes(field)} onChange={event => toggleAdjustable(field, event.target.checked)} /><span><strong>{field}</strong><small>Permit job-level tuning within bounds</small></span></label>)}</div><p className="helper">Bounds use the product safety limits by default; the API validates any administrator changes.</p></fieldset>
+        <label>NSE profile<select value={editor.payload.nse_profile ?? ''} onChange={event => updatePayload(current => ({ ...current, nse_profile: event.target.value }))}><option value="">No NSE scripts</option><option value="banner">banner</option><option value="http-title">http-title</option><option value="http-headers">http-headers</option><option value="ssl-cert">ssl-cert</option><option value="ssh-hostkey">ssh-hostkey</option><option value="dns-recursion">dns-recursion</option></select></label>
+        <label>NSE arguments<textarea value={editor.nseArgs} onChange={event => updateEditor(current => ({ ...current, nseArgs: event.target.value }))} placeholder="One safe key=value per line (optional)" /><small>Values are scalar and validated; paths, wildcards, boolean expressions, and @files are rejected.</small></label>
+        <label>Nmap argument array<textarea rows={6} value={editor.args.nmap} onChange={event => updateEditor(current => ({ ...current, args: { ...current.args, nmap: event.target.value } }))} placeholder="Required placeholders: {address(es)}, {ports}, {structured_output}" /></label>
+        {editor.payload.engine === 'naabu_nmap' && <label>Naabu argument array<textarea rows={6} value={editor.args.naabu} onChange={event => updateEditor(current => ({ ...current, args: { ...current.args, naabu: event.target.value } }))} placeholder="Required placeholders: {targets_file}, {ports}, {structured_output}" /></label>}
+        <label>Enrichment argument array<textarea rows={6} value={editor.args.enrichment} onChange={event => updateEditor(current => ({ ...current, args: { ...current.args, enrichment: event.target.value } }))} placeholder="Required placeholders: {address(es)}, {ports}, {structured_output}" /></label>
+        <fieldset><legend>Operator-adjustable fields</legend><div className="two-fields">{adjustable.map(field => <label key={field} className="switch-row"><input type="checkbox" checked={(editor.payload.operator_adjustable ?? []).includes(field)} onChange={event => toggleAdjustable(field, event.target.checked)} /><span><strong>{field}</strong><small>Permit job-level tuning within bounds</small></span></label>)}</div><p className="helper">Bounds use the product safety limits by default; the API validates any administrator changes.</p></fieldset>
         {preview.length > 0 && <div className="scanner-preview" role="region" aria-label="Effective command preview"><h3>Effective command preview</h3><p className="helper">Documentation-only examples use fixed EdgeWatch executables and safe sample values. They are never executed.</p>{preview.map((command, index) => <pre key={`${command.executable}-${index}`}><code>{formatCommand(command)}</code></pre>)}</div>}
         {canManage && <><label>Password confirmation<input type="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete="current-password" /></label><div className="heading-actions"><button className="button secondary" type="button" onClick={validate}>Validate & preview</button><button className="button primary" type="button" disabled={saving} onClick={save}><Save size={16} />{saving ? 'Saving…' : editing ? 'Save revision' : 'Create profile'}</button></div></>}
         {(message || error) && <div ref={feedbackRef} className="profile-save-feedback save-feedback">{message && <div className="success-banner" role="status"><ShieldCheck size={16} />{message}</div>}{error && !pendingLifecycle && <div className="form-error" role="alert">{error}</div>}</div>}

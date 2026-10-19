@@ -332,6 +332,51 @@ func TestDestinationAddressDialerPreservesSafeDialErrorsAndAddressFamily(t *test
 	}
 }
 
+func TestDestinationAddressDialerSplitsTimeoutAcrossResolvedAddresses(t *testing.T) {
+	previousTimeout := notificationProviderTimeout
+	notificationProviderTimeout = 2 * time.Second
+	t.Cleanup(func() { notificationProviderTimeout = previousTimeout })
+	var dialed []netip.Addr
+	useDestinationSendHooks(t, func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("2001:4860:4860::8888"), netip.MustParseAddr("203.0.113.19")}, nil
+	}, func(ctx context.Context, network, address string) (net.Conn, error) {
+		_ = network
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			t.Fatalf("dial address %q: %v", address, err)
+		}
+		resolved, err := netip.ParseAddr(host)
+		if err != nil {
+			t.Fatalf("dial address host %q: %v", host, err)
+		}
+		dialed = append(dialed, resolved)
+		if resolved.Is6() {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		conn, peer := net.Pipe()
+		_ = peer.Close()
+		return conn, nil
+	})
+	dialer := destinationAddressDialer{policy: destinationTestPolicy(t)}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	started := time.Now()
+	conn, err := dialer.DialContext(ctx, "tcp", "hooks.example:443")
+	if err != nil {
+		t.Fatalf("dial after a blackholed IPv6 address: %v", err)
+	}
+	_ = conn.Close()
+	elapsed := time.Since(started)
+	if elapsed >= 1800*time.Millisecond {
+		t.Fatalf("fallback dial took %s; want success well before the 2 s provider deadline", elapsed)
+	}
+	want := []netip.Addr{netip.MustParseAddr("2001:4860:4860::8888"), netip.MustParseAddr("203.0.113.19")}
+	if !reflect.DeepEqual(dialed, want) {
+		t.Fatalf("resolved address order = %v, want %v", dialed, want)
+	}
+}
+
 func TestPolicyRedirectKeepsTheRedirectLimit(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "https://hooks.example/start", nil)
 	checkRedirect := policyRedirect(destinationTestPolicy(t), nil)
@@ -569,8 +614,8 @@ func TestDestinationProviderInventoryMatchesPinnedShoutrrr(t *testing.T) {
 		switch {
 		case fixedHostProviders[provider]:
 			rawURL := provider + "://token@target.example/path"
-			if got := destinationHosts(rawURL); len(got) != 0 {
-				t.Errorf("fixed-host provider %q was classified by its URL host: %v", provider, got)
+			if got, want := destinationHosts(rawURL), fixedHostDestinations[provider]; len(got) != len(want) || !reflect.DeepEqual(got, want) && len(want) != 0 {
+				t.Errorf("fixed-host provider %q destinations = %v, want fixed API hosts %v", provider, got, want)
 			}
 		case provider == "teams":
 			rawURL := "teams://group@tenant/alt/owner?host=target.example"
@@ -591,6 +636,170 @@ func TestDestinationProviderInventoryMatchesPinnedShoutrrr(t *testing.T) {
 		if _, ok := seenURLHostProviders[provider]; !ok {
 			t.Errorf("destination-policy inventory provider %q is absent from the pinned Shoutrrr router", provider)
 		}
+	}
+}
+
+func TestGuardedChildCoversEveryDestinationProviderAgainstLoopback(t *testing.T) {
+	providerURLs := map[string]string{
+		"bark":       "bark://:device-key@target.example",
+		"discord":    "discord://token@id",
+		"generic":    "generic+http://target.example/hook?template=json",
+		"googlechat": "googlechat://target.example/v1/spaces/FOO/messages?key=bar&token=baz",
+		"gotify":     "gotify://target.example/Aaa.bbb.ccc.ddd",
+		"hangouts":   "hangouts://target.example/v1/spaces/FOO/messages?key=bar&token=baz",
+		"ifttt":      "ifttt://key?events=event",
+		"join":       "join://:apikey@join/?devices=device",
+		"logger":     "logger://",
+		"matrix":     "matrix://user:pass@target.example:443?rooms=room1",
+		"mattermost": "mattermost://user@target.example/token",
+		"ntfy":       "ntfy://user:pass@target.example/topic",
+		"opsgenie":   "opsgenie://target.example/token?responders=user:dummy",
+		"pushbullet": "pushbullet://tokentokentokentokentokentokentoke",
+		"pushover":   "pushover://:token@user/?devices=device",
+		"rocketchat": "rocketchat://target.example/token/channel",
+		"slack":      "slack://AAAAAAAAA/BBBBBBBBB/123456789123456789123456",
+		"smtp":       "smtp://target.example:25/?fromAddress=from%40host.tld&toAddresses=to%40host.tld",
+		"teams":      "teams://11111111-4444-4444-8444-cccccccccccc@22222222-4444-4444-8444-cccccccccccc/33333333012222222222333333333344/44444444-4444-4444-8444-cccccccccccc",
+		"telegram":   "telegram://000000000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA@telegram?channels=channel",
+		"zulip":      "zulip://mail:key@target.example/?stream=foo&topic=bar",
+	}
+	services := (&router.ServiceRouter{}).ListServices()
+	sort.Strings(services)
+	if len(services) != len(providerURLs) {
+		t.Fatalf("guarded-send URL inventory has %d providers, Shoutrrr has %d: %v", len(providerURLs), len(services), services)
+	}
+
+	type target struct {
+		name    string
+		host    string
+		address netip.Addr
+	}
+	targets := []target{
+		{name: "localhost", host: "localhost", address: netip.MustParseAddr("127.0.0.1")},
+		{name: "hosts-file-alias", host: "edgewatch-loopback-alias.invalid", address: netip.MustParseAddr("127.0.0.1")},
+		{name: "ipv4-literal", host: "127.0.0.1", address: netip.MustParseAddr("127.0.0.1")},
+		{name: "ipv4-mapped-ipv6-literal", host: "::ffff:127.0.0.1", address: netip.MustParseAddr("::ffff:127.0.0.1")},
+	}
+
+	for _, provider := range services {
+		baseURL, ok := providerURLs[provider]
+		if !ok {
+			t.Fatalf("Shoutrrr provider %q has no guarded-send URL row", provider)
+		}
+		provider := provider
+		if provider == "logger" {
+			// Shoutrrr's logger service has no network transport. Exercise its
+			// child route once and assert that it cannot reach the listener.
+			t.Run(provider+"/no-network", func(t *testing.T) {
+				assertGuardedChildProviderResult(t, provider, baseURL, "", netip.MustParseAddr("127.0.0.1"), false)
+			})
+			continue
+		}
+		for _, target := range targets {
+			target := target
+			t.Run(provider+"/"+target.name, func(t *testing.T) {
+				assertGuardedChildProviderResult(t, provider, baseURL, target.host, target.address, true)
+			})
+		}
+	}
+}
+
+func providerURLForLoopbackTarget(t *testing.T, provider, rawURL, host string, port int) string {
+	t.Helper()
+	if fixedHostProviders[provider] {
+		// These providers use a public API hostname instead of the URL host;
+		// the resolver hook below maps that real API hostname to loopback.
+		return rawURL
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse %s fixture: %v", provider, err)
+	}
+	if provider == "teams" {
+		query := parsed.Query()
+		query.Set("host", net.JoinHostPort(host, strconv.Itoa(port)))
+		parsed.RawQuery = query.Encode()
+	} else {
+		parsed.Host = net.JoinHostPort(host, strconv.Itoa(port))
+	}
+	return parsed.String()
+}
+
+func assertGuardedChildProviderResult(t *testing.T, provider, baseURL, host string, answer netip.Addr, wantExcluded bool) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	var accepts atomic.Int32
+	accepted := make(chan struct{})
+	go func() {
+		defer close(accepted)
+		for {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			accepts.Add(1)
+			_ = connection.Close()
+		}
+	}()
+
+	globals := captureDestinationGuardProcessGlobals(t)
+	oldDefaultClientTransport := http.DefaultClient.Transport
+	oldDefaultTransport := http.DefaultTransport
+	listenerAddress := listener.Addr().String()
+	var dials atomic.Int32
+	testDial := func(ctx context.Context, network, _ string) (net.Conn, error) {
+		dials.Add(1)
+		return (&net.Dialer{}).DialContext(ctx, network, listenerAddress)
+	}
+	http.DefaultTransport = &http.Transport{Proxy: nil, DialContext: testDial}
+	http.DefaultClient.Transport = nil
+	useDestinationSendHooks(t,
+		func(context.Context, string) ([]netip.Addr, error) { return []netip.Addr{answer}, nil },
+		testDial,
+	)
+	t.Cleanup(func() {
+		http.DefaultClient.Transport = oldDefaultClientTransport
+		http.DefaultTransport = oldDefaultTransport
+		globals.assertRestored(t)
+	})
+
+	policy := destinationTestPolicy(t)
+	rawURL := baseURL
+	if provider != "logger" {
+		_, portText, splitErr := net.SplitHostPort(listenerAddress)
+		if splitErr != nil {
+			t.Fatal(splitErr)
+		}
+		port, parseErr := strconv.Atoi(portText)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		rawURL = providerURLForLoopbackTarget(t, provider, baseURL, host, port)
+	}
+	payload, err := json.Marshal(notificationProcessRequest{
+		URL: rawURL, Message: "provider guard test", TargetExclusions: policy.exclusionCIDRs(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := runSendChildInProcess(bytes.NewReader(payload))
+	if wantExcluded && !errors.Is(got, ErrDestinationExcluded) {
+		t.Fatalf("guarded child send = %v, want destination excluded (test dials=%d, accepts=%d)", got, dials.Load(), accepts.Load())
+	}
+	if !wantExcluded && got != nil {
+		t.Fatalf("networkless provider send = %v, want success", got)
+	}
+	_ = listener.Close()
+	<-accepted
+	if count := dials.Load(); count != 0 {
+		t.Fatalf("guarded child attempted %d connection(s) to the controlled loopback listener", count)
+	}
+	if count := accepts.Load(); count != 0 {
+		t.Fatalf("guarded child opened %d connection(s) to the controlled loopback listener", count)
 	}
 }
 
@@ -1082,6 +1291,7 @@ func TestRunSendChildSMTPRefusesReboundAddressBeforeDial(t *testing.T) {
 		return dialDestinationTestAddress(ctx, network, dns.address)
 	}
 	t.Cleanup(func() { destinationResolverUpstreamDial = previousUpstreamDial })
+	useDestinationResolver(t, dns.resolver(testDestinationPolicy(t)))
 
 	port := listener.Addr().(*net.TCPAddr).Port
 	rawURL := "smtp://user:password@smtp.example.:" + strconv.Itoa(port) + "/?from=a@example.com&to=b@example.com"

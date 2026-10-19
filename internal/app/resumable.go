@@ -125,21 +125,32 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, ts *store.Tenant
 					return true, model.Snapshot{}, scanErr
 				}
 				if !hasScan {
-					discarded, discardErr := ts.DiscardCompletedScanCycleAfterFinalizationFailures(stateCtx, latest.ID, baselineEpoch, scanCycleMaxFinalizationFailures)
-					if discardErr != nil {
-						scan.Status = "failed"
-						scan.Error = discardErr.Error()
-						return true, model.Snapshot{}, discardErr
-					}
-					if !discarded {
-						return a.recoverCompletedCycle(stateCtx, scan, run, latest)
-					}
-					if a.Logger != nil {
-						a.Logger.Warn("completed scan cycle discarded after repeated result finalization failures; planning a fresh scan",
-							"job", job.Name,
-							"cycle_id", latest.ID,
-							"finalization_failures", scanCycleMaxFinalizationFailures,
-						)
+					if cycleResumeWindowElapsed(latest, time.Now().UTC()) {
+						if discardErr := ts.DiscardScanCycle(stateCtx, latest.ID); discardErr != nil {
+							scan.Status = "failed"
+							scan.Error = discardErr.Error()
+							return true, model.Snapshot{}, discardErr
+						}
+						if a.Logger != nil {
+							a.Logger.Warn("expired completed scan cycle discarded; planning a fresh scan", "job", job.Name, "cycle_id", latest.ID, "expired_at", latest.ExpiresAt)
+						}
+					} else {
+						discarded, discardErr := ts.DiscardCompletedScanCycleAfterFinalizationFailures(stateCtx, latest.ID, baselineEpoch, scanCycleMaxFinalizationFailures)
+						if discardErr != nil {
+							scan.Status = "failed"
+							scan.Error = discardErr.Error()
+							return true, model.Snapshot{}, discardErr
+						}
+						if !discarded {
+							return a.recoverCompletedCycle(stateCtx, scan, run, latest)
+						}
+						if a.Logger != nil {
+							a.Logger.Warn("completed scan cycle discarded after repeated result finalization failures; planning a fresh scan",
+								"job", job.Name,
+								"cycle_id", latest.ID,
+								"finalization_failures", scanCycleMaxFinalizationFailures,
+							)
+						}
 					}
 				}
 			} else {
@@ -566,6 +577,12 @@ func (a *App) recoverCompletedCycle(ctx context.Context, scan *model.Scan, run *
 	// this recovered result as superseded without mutating the new baseline.
 	scan.ConfigHash = cycle.ConfigHash
 	scan.JobRevision = cycle.JobRevision
+	if !cycle.StartedAt.IsZero() {
+		scan.StartedAt = cycle.StartedAt
+	}
+	if !cycle.FinishedAt.IsZero() {
+		scan.FinishedAt = cycle.FinishedAt
+	}
 	scan.Status = "success"
 	scan.Resumable = true
 	scan.Snapshot = snapshot

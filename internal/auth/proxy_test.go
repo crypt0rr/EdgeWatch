@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +25,52 @@ func TestClientIPIgnoresUntrustedForwardingHeaders(t *testing.T) {
 	if got := m.ClientIP(request); got != "127.0.0.1" {
 		t.Fatalf("untrusted forwarded client = %q", got)
 	}
+}
+
+func TestForwardingPolicyUpdatesDoNotSerializeRequestReadsOnLimiterMutex(t *testing.T) {
+	t.Parallel()
+	m := &Manager{}
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "127.0.0.1:8080"
+	request.Header.Set("X-Forwarded-For", "198.51.100.10")
+	request.Header.Set("Forwarded", "for=198.51.100.11")
+	var workers sync.WaitGroup
+	workers.Add(4)
+	for i := 0; i < 2; i++ {
+		go func(i int) {
+			defer workers.Done()
+			for n := 0; n < 500; n++ {
+				if i == 0 {
+					if err := m.SetTrustedProxies([]string{"127.0.0.1/32", "10.0.0.0/8"}); err != nil {
+						t.Errorf("set trusted proxies: %v", err)
+						return
+					}
+				} else {
+					header := forwardedHeaderXForwardedFor
+					if n%2 == 0 {
+						header = forwardedHeaderForwarded
+					}
+					if err := m.SetForwardedHeader(header); err != nil {
+						t.Errorf("set forwarding header: %v", err)
+						return
+					}
+				}
+			}
+		}(i)
+	}
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer workers.Done()
+			for n := 0; n < 500; n++ {
+				if got := m.ClientIP(request); got == "" {
+					t.Error("ClientIP returned an empty address")
+					return
+				}
+				m.NoteForwarding(request)
+			}
+		}()
+	}
+	workers.Wait()
 }
 
 func TestIsTrustedProxyOnlyConsidersDirectPeer(t *testing.T) {

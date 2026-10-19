@@ -1,13 +1,16 @@
 package store
 
-import "database/sql"
+import (
+	"context"
+	"database/sql"
+)
 
 // migration61ConditionalStatements makes inherited per-scan reminder defaults
 // hourly. A prior reminder-setting audit record is treated conservatively as
 // an explicit preference because older releases did not record which field
 // changed; this preserves an administrator's possible every-scan selection.
-func migration61ConditionalStatements(tx *sql.Tx) ([]string, error) {
-	exists, err := migrationColumnExists(tx, "tenants", "incident_reminder_cadence_explicit")
+func migration61ConditionalStatements(ctx context.Context, tx *sql.Tx) ([]string, error) {
+	exists, err := migrationColumnExists(ctx, tx, "tenants", "incident_reminder_cadence_explicit")
 	if err != nil || exists {
 		return nil, err
 	}

@@ -51,7 +51,7 @@ const scan = {
   scanner_engine: 'nmap',
 } as ScanSummary
 
-const scannerIdentityPool = { state: 'enforced', strategy: 'per_invocation', uid_start: 60000, uid_end: 60063, max_parallel: 64 }
+const scannerIdentityPool = { state: 'enforced', strategy: 'per_invocation', uid_start: 60000, uid_end: 60063, max_parallel: 64, active: 0, quarantined: 0, in_use_by_other_processes: 0, free: 64 }
 const unavailableScannerSandbox = (reason: string): ScannerSandboxStatus => ({
   mode: 'auto',
   state: 'unavailable',
@@ -528,6 +528,20 @@ describe('dashboard', () => {
     await vi.waitFor(() => expect(isolationEntry(container, 'Scanners')).toEqual({ state: 'Enforced', tone: 'green', icon: true, layers: ['UID pool 60000–60063 (64 max parallel): enforced'], reasons: [], keeps: 'Keeps NET_RAW' }), { timeout: 1000 })
     expect(isolationEntry(container, 'Notifications')).toBeUndefined()
     expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
+  })
+
+  it('reports live scanner identity counts and warns below configured concurrency', async () => {
+    vi.mocked(adminStatus).mockResolvedValue({
+      ...status,
+      scanner_sandbox: sandboxWithoutLayers({
+        mode: 'auto', state: 'enforced',
+        identity_pool: { ...scannerIdentityPool, active: 2, quarantined: 1, in_use_by_other_processes: 0, free: 1 },
+      }),
+    })
+    await renderDashboard()
+    const entry = Array.from(container.querySelectorAll('.isolation-entry')).find(item => item.querySelector('.isolation-name')?.textContent === 'Scanners')
+    expect(entry?.querySelector('.isolation-pool-counts')?.textContent).toBe('Scanner identities: 2 active · 1 quarantined · 0 in use by unleased processes · 1 free of 64.')
+    expect(entry?.querySelector('.isolation-pool-warning')?.textContent).toContain('Free scanner slots (1) are below this unit’s concurrent scan limit (2).')
   })
 
   it('shows the notification sandbox in the deployment footprint', async () => {

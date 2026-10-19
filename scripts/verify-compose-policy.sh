@@ -77,8 +77,8 @@ caps = {str(cap) for cap in service.get("cap_add") or []}
 if "NET_RAW" not in caps:
     raise SystemExit("NET_RAW is required for Nmap and Naabu")
 # The daemon needs SETUID and SETGID to start Nmap and Naabu as the
-# unprivileged sandbox identity, and KILL to stop them; without them the
-# scanner processes would run unconfined as UID 0.
+# unprivileged sandbox identity, and KILL to stop them; without them scanner
+# launches fail closed.
 missing_sandbox_caps = sorted({"SETUID", "SETGID", "KILL"} - caps)
 if missing_sandbox_caps:
     raise SystemExit(f"the scanner sandbox requires cap_add: {', '.join(missing_sandbox_caps)}")

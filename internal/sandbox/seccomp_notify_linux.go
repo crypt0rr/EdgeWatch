@@ -83,8 +83,22 @@ func validateScannerSocketDescriptorsForRequest(request execRequest) error {
 }
 
 func execSeccompNotificationProbe(args []string) error {
-	if len(args) != 2 || args[0] != "--control-fd" || args[1] != strconv.Itoa(seccompNotificationControlFD) {
+	if len(args) != 2 && len(args) != 4 {
 		return errors.New("seccomp notification probe arguments are invalid")
+	}
+	if args[0] != "--control-fd" || args[1] != strconv.Itoa(seccompNotificationControlFD) {
+		return errors.New("seccomp notification probe arguments are invalid")
+	}
+	requestCount := 2
+	if len(args) == 4 {
+		if args[2] != "--requests" {
+			return errors.New("seccomp notification probe arguments are invalid")
+		}
+		parsed, err := strconv.Atoi(args[3])
+		if err != nil || parsed < 1 || parsed > seccompNotificationLimit {
+			return errors.New("seccomp notification probe request count is invalid")
+		}
+		requestCount = parsed
 	}
 	if os.Getenv("GODEBUG") != seccompNotificationProbeGODEBUG {
 		return errors.New("seccomp notification probe requires async preemption to be disabled")
@@ -96,7 +110,7 @@ func execSeccompNotificationProbe(args []string) error {
 	if err := installAndSendSeccompNotificationListener(-1, seccompNotificationControlFD); err != nil {
 		return err
 	}
-	for count := 0; count < 2; count++ {
+	for count := 0; count < requestCount; count++ {
 		fd, err := unix.Socket(unix.AF_UNIX, seccompNotificationSocketType, 0)
 		if err != nil {
 			return fmt.Errorf("seccomp notification probe socket was not mediated: %w", err)
@@ -412,50 +426,66 @@ func receiveSeccompNotificationListenerPacket(controlFD, helperPID int, uid, gid
 // and process-exit checks remain responsive under a malicious request flood.
 // It is called only by the trusted supervisor while it owns the listener.
 func (broker *seccompNotificationBroker) serveOne() error {
+	_, err := broker.serveOneWithTimeout(0)
+	return err
+}
+
+// waitAndServeOne waits for at most one watchdog interval for a notification.
+// The supervisor calls it again immediately after serving one, so serial
+// socket requests wake it as soon as the child issues the next request rather
+// than waiting for the next watchdog tick.
+func (broker *seccompNotificationBroker) waitAndServeOne() (bool, error) {
+	return broker.serveOneWithTimeout(scannerSupervisorWatchdogInterval)
+}
+
+func (broker *seccompNotificationBroker) serveOneWithTimeout(timeout time.Duration) (bool, error) {
 	if broker == nil || broker.listenerFD < 0 {
-		return errors.New("seccomp notification listener is unavailable")
+		return false, errors.New("seccomp notification listener is unavailable")
 	}
 	poll := []unix.PollFd{{Fd: int32(broker.listenerFD), Events: unix.POLLIN | unix.POLLHUP | unix.POLLERR}}
-	_, err := unix.Poll(poll, 0)
+	_, err := unix.Poll(poll, int(timeout/time.Millisecond))
 	if errors.Is(err, unix.EINTR) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return errors.New("poll seccomp notification listener failed")
+		return false, errors.New("poll seccomp notification listener failed")
 	}
 	if poll[0].Revents&unix.POLLIN == 0 {
 		if poll[0].Revents&(unix.POLLERR|unix.POLLNVAL) != 0 {
-			return errors.New("seccomp notification listener failed")
+			return false, errors.New("seccomp notification listener failed")
 		}
 		// POLLHUP without POLLIN means no task still uses this filter, so
 		// there can be no further notification to service. This is not process-
 		// tree cleanup proof: the supervisor still observes the leader, kills
 		// its process group, waits, and reaps descendants before proving cleanup.
-		return nil
+		return false, nil
 	}
 	var notification seccompNotificationRequest
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(broker.listenerFD), uintptr(unix.SECCOMP_IOCTL_NOTIF_RECV), uintptr(unsafe.Pointer(&notification)))
 	if errno != 0 {
 		if errors.Is(errno, unix.EINTR) || errors.Is(errno, unix.EAGAIN) {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("receive seccomp notification: %w", errno)
+		return false, fmt.Errorf("receive seccomp notification: %w", errno)
 	}
 	if broker.served >= seccompNotificationLimit {
-		return errors.New("seccomp notification request limit exceeded")
+		return false, errors.New("seccomp notification request limit exceeded")
 	}
 	arch, err := currentSeccompArchitecture()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if notification.Flags != 0 || notification.Data.Architecture != arch.audit ||
 		uint32(notification.Data.Number) != arch.numbers["socket"] ||
 		notification.Data.Arguments[0] != unix.AF_UNIX ||
 		notification.Data.Arguments[1] != seccompNotificationSocketType ||
 		notification.Data.Arguments[2] != 0 {
-		return errors.New("unexpected seccomp notification request")
+		return false, errors.New("unexpected seccomp notification request")
 	}
-	return broker.injectINETDatagram(notification.ID, notification.PID)
+	if err := broker.injectINETDatagram(notification.ID, notification.PID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (broker *seccompNotificationBroker) injectINETDatagram(notificationID uint64, traceePID uint32) (resultErr error) {

@@ -48,8 +48,8 @@ func TestCancelScheduledChangeWindowRechecksStartAfterWriterWait(t *testing.T) {
 
 	select {
 	case got := <-completed:
-		if got.changed || !errors.Is(got.err, ErrConflict) {
-			t.Fatalf("cancel after scheduled start = changed %v, err %v; want unchanged ErrConflict", got.changed, got.err)
+		if got.changed || !errors.Is(got.err, ErrChangeWindowStarted) {
+			t.Fatalf("cancel after scheduled start = changed %v, err %v; want unchanged ErrChangeWindowStarted", got.changed, got.err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("scheduled cancellation did not finish after writer lock release")

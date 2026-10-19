@@ -69,6 +69,10 @@ func saveScanExec(ctx context.Context, tx *sql.Tx, scan model.Scan) error {
 	if err != nil {
 		return err
 	}
+	results, coverage, err := marshalScanEvidenceProjections(scan.Snapshot)
+	if err != nil {
+		return err
+	}
 	changes := scan.Changes
 	if changes == nil {
 		changes = []model.Change{}
@@ -81,12 +85,57 @@ func saveScanExec(ctx context.Context, tx *sql.Tx, scan model.Scan) error {
 	// The insert returns it, so the host rows take it from here rather than
 	// from the scan row, which stores it after the snapshot.
 	var tenantID string
-	err = tx.QueryRowContext(ctx, `INSERT INTO scans(id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,comparison,changes_json,snapshot_json,tenant_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,`+jobTenantSQL+`) RETURNING tenant_id`,
-		scan.ID, nullString(scan.JobID), nullInt64(scan.JobRevision), scan.Job, sqliteTimestamp(scan.StartedAt), sqliteTimestamp(scan.FinishedAt), scan.Status, scan.Error, scan.NmapVersion, scan.ScannerEngine, scan.ScannerProfileID, scan.ScannerProfileRevision, scan.NaabuVersion, scan.DiscoveryPorts, scan.ConfirmedPorts, scan.DiscoveryDurationMS, scan.EnrichmentDurationMS, scan.ConfigHash, scan.CycleID, scan.CycleAttempt, scan.CycleStatus, boolInt(scan.Resumable), scan.CompletedProbes, scan.TotalProbes, scan.CompletedUnits, scan.TotalUnits, scan.NoProgressTries, scan.BaselineScanID, scan.BaselineConfigHash, scan.Comparison, changesJSON, snapshot, scan.JobID).Scan(&tenantID)
+	err = tx.QueryRowContext(ctx, `INSERT INTO scans(id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,comparison,changes_json,snapshot_json,results_json,results_unit_count,coverage_summary_json,tenant_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,`+jobTenantSQL+`) RETURNING tenant_id`,
+		scan.ID, nullString(scan.JobID), nullInt64(scan.JobRevision), scan.Job, sqliteTimestamp(scan.StartedAt), sqliteTimestamp(scan.FinishedAt), scan.Status, scan.Error, scan.NmapVersion, scan.ScannerEngine, scan.ScannerProfileID, scan.ScannerProfileRevision, scan.NaabuVersion, scan.DiscoveryPorts, scan.ConfirmedPorts, scan.DiscoveryDurationMS, scan.EnrichmentDurationMS, scan.ConfigHash, scan.CycleID, scan.CycleAttempt, scan.CycleStatus, boolInt(scan.Resumable), scan.CompletedProbes, scan.TotalProbes, scan.CompletedUnits, scan.TotalUnits, scan.NoProgressTries, scan.BaselineScanID, scan.BaselineConfigHash, scan.Comparison, changesJSON, snapshot, results, len(scan.Snapshot.Units), coverage, scan.JobID).Scan(&tenantID)
 	if err != nil {
 		return err
 	}
 	return saveScanHostsExec(ctx, tx, scan, tenantID)
+}
+
+// marshalScanEvidenceProjections keeps frequently requested projections
+// separate from the immutable full snapshot. Results pages need only units,
+// while Inbox recovery classification needs status and scope metadata without
+// service evidence or port inventories.
+func marshalScanEvidenceProjections(snapshot model.Snapshot) ([]byte, []byte, error) {
+	units := snapshot.Units
+	if units == nil {
+		units = []model.Unit{}
+	}
+	results, err := json.Marshal(units)
+	if err != nil {
+		return nil, nil, err
+	}
+	coverage := model.Snapshot{
+		Scopes:         append([]model.Scope(nil), snapshot.Scopes...),
+		TargetFailures: append([]model.TargetCoverageFailure(nil), snapshot.TargetFailures...),
+		HostStates:     append([]model.HostState(nil), snapshot.HostStates...),
+		Hosts:          make([]model.HostObservation, 0, len(snapshot.Hosts)),
+	}
+	for _, host := range snapshot.Hosts {
+		projected := model.HostObservation{
+			Address:       host.Address,
+			SourceTargets: append([]string(nil), host.SourceTargets...),
+			DNSNames:      append([]string(nil), host.DNSNames...),
+			Status:        host.Status,
+			StatusReason:  host.StatusReason,
+			Protocols:     make([]model.ProtocolObservation, 0, len(host.Protocols)),
+		}
+		for _, protocol := range host.Protocols {
+			projected.Protocols = append(projected.Protocols, model.ProtocolObservation{
+				Protocol:       protocol.Protocol,
+				Status:         protocol.Status,
+				StatusReason:   protocol.StatusReason,
+				DiscoveryState: protocol.DiscoveryState,
+			})
+		}
+		coverage.Hosts = append(coverage.Hosts, projected)
+	}
+	encodedCoverage, err := json.Marshal(coverage)
+	if err != nil {
+		return nil, nil, err
+	}
+	return results, encodedCoverage, nil
 }
 
 // saveScanHostsExec writes the host rows of a scan that the transaction has
@@ -114,9 +163,22 @@ func saveScanHostsExec(ctx context.Context, tx *sql.Tx, scan model.Scan, tenantI
 // writeScanHostsExec writes a host row for each host of the scan with a
 // valid address, and for a successful scan the tenant's latest observation
 // of that address, and returns how many host rows it wrote.
-func writeScanHostsExec(ctx context.Context, execer contextExecer, scan model.Scan, tenantID string) (int, error) {
+func writeScanHostsExec(ctx context.Context, tx *sql.Tx, scan model.Scan, tenantID string) (int, error) {
 	if len(scan.Snapshot.Hosts) == 0 {
 		return 0, nil
+	}
+	insertStmt, err := tx.PrepareContext(ctx, `INSERT INTO scan_hosts(scan_id,address,job,address_family,source_targets_json,dns_names_json,host_json,search_text,data_quality,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return 0, err
+	}
+	defer insertStmt.Close()
+	var latestStmt *sql.Stmt
+	if scan.Status == "success" {
+		latestStmt, err = tx.PrepareContext(ctx, upsertLatestScanHostSQL)
+		if err != nil {
+			return 0, err
+		}
+		defer latestStmt.Close()
 	}
 	// Normalize a copy so the indexed payload has stable ordering without
 	// mutating the immutable snapshot that the caller may still hold.
@@ -143,13 +205,13 @@ func writeScanHostsExec(ctx context.Context, execer contextExecer, scan model.Sc
 		}
 		searchText := hostSearchContent(scan.Job, host)
 		open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered := scanHostStats(host)
-		if _, err := execer.ExecContext(ctx, `INSERT INTO scan_hosts(scan_id,address,job,address_family,source_targets_json,dns_names_json,host_json,search_text,data_quality,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		if _, err := insertStmt.ExecContext(ctx,
 			scan.ID, address, scan.Job, host.AddressFamily, sourceTargets, dnsNames, hostJSON, searchText, "detailed", open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered); err != nil {
 			return written, err
 		}
 		written++
-		if scan.Status == "success" {
-			if err := upsertLatestScanHostExec(ctx, execer, scan, tenantID, address, host.AddressFamily, sourceTargets, dnsNames, hostJSON, searchText, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered); err != nil {
+		if latestStmt != nil {
+			if err := upsertLatestScanHostExec(ctx, latestStmt, scan, tenantID, address, host.AddressFamily, sourceTargets, dnsNames, hostJSON, searchText, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered); err != nil {
 				return written, err
 			}
 		}
@@ -261,9 +323,9 @@ WHERE excluded.finished_at > latest_scan_hosts.finished_at
 // scans with equal times. The caller passes the tenant of the scan row that
 // it has written in the same transaction, as upsertLatestScanHostSQL
 // explains. The guard trigger still refuses a tenant that is not the scan's.
-func upsertLatestScanHostExec(ctx context.Context, execer contextExecer, scan model.Scan, tenantID, address, addressFamily string, sourceTargets, dnsNames, hostJSON []byte, searchText string, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered int) error {
+func upsertLatestScanHostExec(ctx context.Context, stmt *sql.Stmt, scan model.Scan, tenantID, address, addressFamily string, sourceTargets, dnsNames, hostJSON []byte, searchText string, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered int) error {
 	finishedAt := sqliteTimestamp(scan.FinishedAt)
-	_, err := execer.ExecContext(ctx, upsertLatestScanHostSQL,
+	_, err := stmt.ExecContext(ctx,
 		tenantID, address, scan.ID, scan.JobID, scan.Job, finishedAt, "detailed", addressFamily, sourceTargets, dnsNames, hostJSON, searchText, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered)
 	return err
 }
@@ -840,6 +902,47 @@ func (ts *TenantStore) ListScanResultsPage(ctx context.Context, id string, limit
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Unit]
 	readDB := ts.store.reader()
+	var results []byte
+	var total sql.NullInt64
+	projectionErr := readDB.QueryRowContext(ctx, `SELECT scans.results_json,scans.results_unit_count FROM scans
+		WHERE scans.id=? AND scans.tenant_id=? AND NOT EXISTS (
+			SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id
+		)`, id, ts.scope.id).Scan(&results, &total)
+	if projectionErr != nil && !errors.Is(projectionErr, sql.ErrNoRows) {
+		return page, projectionErr
+	}
+	if errors.Is(projectionErr, sql.ErrNoRows) {
+		return page, nil
+	}
+	if results != nil && total.Valid {
+		page.Total = int(total.Int64)
+		if page.Total == 0 {
+			return page, nil
+		}
+		rows, err := readDB.QueryContext(ctx, `SELECT json_each.value FROM scans, json_each(scans.results_json)
+			WHERE scans.id=? AND scans.tenant_id=? AND scans.results_json IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=scans.tenant_id AND purge.job_id=scans.job_id
+			) ORDER BY json_each.key LIMIT ? OFFSET ?`, id, ts.scope.id, limit, offset)
+		if err != nil {
+			return page, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var raw []byte
+			if err := rows.Scan(&raw); err != nil {
+				return page, err
+			}
+			var unit model.Unit
+			if err := json.Unmarshal(raw, &unit); err != nil {
+				return page, err
+			}
+			page.Items = append(page.Items, unit)
+		}
+		return page, rows.Err()
+	}
+	// Rows written before schema 75 have no units-only projection. Keep their
+	// existing compatibility path until the restartable migration backfill
+	// fills them in.
 	// json_each emits a single SQL NULL row for a JSON null value. Treat a
 	// missing/null units member as an empty array so failed or legacy scans do
 	// not produce a row that cannot be decoded as model.Unit.

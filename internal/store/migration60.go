@@ -1,9 +1,12 @@
 package store
 
-import "database/sql"
+import (
+	"context"
+	"database/sql"
+)
 
-func migration60ConditionalStatements(tx *sql.Tx) ([]string, error) {
-	exists, err := migrationColumnExists(tx, "tenants", "incident_reminder_cadence")
+func migration60ConditionalStatements(ctx context.Context, tx *sql.Tx) ([]string, error) {
+	exists, err := migrationColumnExists(ctx, tx, "tenants", "incident_reminder_cadence")
 	if err != nil || exists {
 		return nil, err
 	}

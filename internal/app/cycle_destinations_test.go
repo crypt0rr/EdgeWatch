@@ -130,6 +130,46 @@ func TestCompletedCycleWaitsForNotificationDestinations(t *testing.T) {
 	}
 }
 
+func TestOldUnpromotedCompletedCycleIsDiscardedAndReplanned(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	probe := &completingCycleScanner{}
+	a, db := newLifecycleTestApp(t, probe, nil)
+	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("old-cycle-replan"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `ALTER TABLE managed_notifications RENAME TO managed_notifications_unavailable`); err != nil {
+		t.Fatal(err)
+	}
+	deferred, _, deferErr := a.runJobRecord(ctx, record, false)
+	if deferErr == nil || deferred.CycleID == "" || deferred.CycleStatus != "completed" {
+		t.Fatalf("run without destinations = %#v, err %v", deferred, deferErr)
+	}
+	oldFinished := deferred.FinishedAt
+	if _, err := db.DB.ExecContext(ctx, `UPDATE scan_cycles SET expires_at=?,finished_at=? WHERE id=?`, time.Now().UTC().Add(-30*24*time.Hour).Format(time.RFC3339Nano), time.Now().UTC().Add(-30*24*time.Hour).Format(time.RFC3339Nano), deferred.CycleID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `ALTER TABLE managed_notifications_unavailable RENAME TO managed_notifications`); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh, _, runErr := a.runJobRecord(ctx, record, false)
+	if runErr != nil || fresh.Status != "success" || fresh.CycleID == deferred.CycleID {
+		t.Fatalf("run after old cycle expiry = %#v, err %v; want a fresh cycle", fresh, runErr)
+	}
+	if !fresh.StartedAt.After(oldFinished) || !fresh.FinishedAt.After(oldFinished) {
+		t.Fatalf("fresh scan timestamps = %s..%s; old cycle ended %s", fresh.StartedAt, fresh.FinishedAt, oldFinished)
+	}
+	oldCycle, err := defaultTenant(db).GetScanCycle(ctx, deferred.CycleID)
+	if err != nil || oldCycle.Status != "discarded" || oldCycle.CompletedUnits != 0 {
+		t.Fatalf("old cycle after expiry = %#v, %v", oldCycle, err)
+	}
+	if plans, units := probe.counts(); plans != 2 || units != 4 {
+		t.Fatalf("scanner planned %d cycles and scanned %d units; want the old completed cycle discarded and a new plan", plans, units)
+	}
+}
+
 func TestRepeatedCompletedCycleFinalizationFailuresPlanFreshCycle(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

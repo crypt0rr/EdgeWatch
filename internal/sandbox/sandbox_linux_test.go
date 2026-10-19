@@ -90,6 +90,96 @@ func TestDetectEnforcesWithTheContainerNetworkCapabilities(t *testing.T) {
 	}
 }
 
+func TestScannerInvocationPoliciesDropUnusedNetworkCapabilities(t *testing.T) {
+	if (*Policy)(nil).WithScannerNetworkCapabilities(true, true) != nil {
+		t.Fatal("nil scanner policy produced a capability copy")
+	}
+	notifier := NewEnforcedFor(Notifier)
+	if notifier.WithScannerNetworkCapabilities(true, true) != notifier {
+		t.Fatal("non-scanner policy changed its network capabilities")
+	}
+	base := NewEnforced(unix.CAP_NET_RAW, unix.CAP_NET_ADMIN)
+	nmap := base.WithScannerNetworkCapabilities(true, false)
+	if !reflect.DeepEqual(nmap.ambient, []uintptr{unix.CAP_NET_RAW}) || !reflect.DeepEqual(nmap.Status().Capabilities, []string{"NET_RAW"}) {
+		t.Fatalf("Nmap policy ambient/status = %v/%v, want NET_RAW only", nmap.ambient, nmap.Status().Capabilities)
+	}
+	syn := base.WithScannerNetworkCapabilities(true, true)
+	if !reflect.DeepEqual(syn.ambient, []uintptr{unix.CAP_NET_RAW, unix.CAP_NET_ADMIN}) || !reflect.DeepEqual(syn.Status().Capabilities, []string{"NET_RAW", "NET_ADMIN"}) {
+		t.Fatalf("Naabu SYN policy ambient/status = %v/%v, want NET_RAW and NET_ADMIN", syn.ambient, syn.Status().Capabilities)
+	}
+	connect := base.WithScannerNetworkCapabilities(false, false)
+	if len(connect.ambient) != 0 || len(connect.Status().Capabilities) != 0 {
+		t.Fatalf("Naabu connect policy retains unnecessary capabilities: %v/%v", connect.ambient, connect.Status().Capabilities)
+	}
+	if !reflect.DeepEqual(base.ambient, []uintptr{unix.CAP_NET_RAW, unix.CAP_NET_ADMIN}) {
+		t.Fatalf("filter mutated the shared base policy: %v", base.ambient)
+	}
+}
+
+func TestInspectScannerReportsPoolWithoutRunningProbesOrRetainingRuntime(t *testing.T) {
+	env, _ := containerEnvironment()
+	var runtimeRetains, probes int
+	env.ensureScannerRuntime = func() error { runtimeRetains++; return nil }
+	env.run = func(*Policy, []string, []string) error { probes++; return nil }
+	pool := scannerIdentityPoolStatus(StateEnforced, "")
+	pool.Active, pool.Quarantined, pool.Free = 2, 1, ScannerIdentityPoolCapacity-3
+	policy := inspectScannerWith(Options{Mode: ModeAuto, Landlock: ModeAuto}, env, func(context.Context) (*ScannerIdentityPoolStatus, error) {
+		return pool, nil
+	})
+	status := policy.Status()
+	if status.State != StateEnforced || status.IdentityPool == nil || status.IdentityPool.Active != 2 || status.IdentityPool.Quarantined != 1 || status.IdentityPool.Free != ScannerIdentityPoolCapacity-3 {
+		t.Fatalf("read-only scanner status = %+v", status)
+	}
+	if runtimeRetains != 0 || probes != 0 {
+		t.Fatalf("inspection retained runtime %d times and ran %d probes", runtimeRetains, probes)
+	}
+}
+
+func TestInspectScannerReportsIndependentIsolationStatusWithoutIdentityCapabilities(t *testing.T) {
+	env, _ := containerEnvironment()
+	env.effective = capabilityMask(unix.CAP_NET_RAW, unix.CAP_NET_ADMIN)
+	env.permitted = env.effective
+	var poolInspections int
+	policy := inspectScannerWith(Options{Mode: ModeAuto, Landlock: ModeAuto}, env, func(context.Context) (*ScannerIdentityPoolStatus, error) {
+		poolInspections++
+		return nil, errors.New("identity pool should not be inspected without control capabilities")
+	})
+	status := policy.Status()
+	if status.State != StateUnavailable || status.IdentityPool == nil || status.IdentityPool.State != StateUnavailable {
+		t.Fatalf("scanner status = %+v, want unavailable identity isolation", status)
+	}
+	if status.Seccomp.State != StateEnforced {
+		t.Fatalf("seccomp = %+v, want its supported runtime state reported independently", status.Seccomp)
+	}
+	if status.Landlock.State != StateUnavailable || !strings.Contains(status.Landlock.Reason, "scanner identity isolation is unavailable") {
+		t.Fatalf("Landlock = %+v, want unavailable while scanner identity isolation is unavailable", status.Landlock)
+	}
+	if poolInspections != 0 {
+		t.Fatalf("identity pool inspection ran %d times without control capabilities", poolInspections)
+	}
+}
+
+func TestDetectMapsScannerRuntimeAllocatorErrors(t *testing.T) {
+	env, _ := containerEnvironment()
+	env.ensureScannerRuntime = func() error {
+		return errors.New("scanner identity allocator: PID namespace changed without exclusive private-scope proof")
+	}
+	status := detectIdentity(Scanner, ModeAuto, Status{Mode: ModeAuto, Landlock: enforcedLandlock, Seccomp: SeccompStatus{State: StateEnforced}}, scannerSandboxProbe(), env).Status()
+	if status.State != StateUnavailable || status.IdentityPool == nil || status.IdentityPool.State != StateUnavailable {
+		t.Fatalf("runtime refusal status = %+v, want unavailable", status)
+	}
+	for _, want := range []string{"stop all other EdgeWatch processes and containers using the data volume", "preserve the journal and boot marker"} {
+		if !strings.Contains(status.Reason, want) {
+			t.Errorf("runtime refusal reason %q does not contain %q", status.Reason, want)
+		}
+	}
+	for _, forbidden := range []string{"scanner identity allocator:", "/private", "secret-token"} {
+		if strings.Contains(status.Reason, forbidden) {
+			t.Errorf("runtime refusal reason %q leaks %q", status.Reason, forbidden)
+		}
+	}
+}
+
 func TestScannerStatusJSONReportsPoolWithoutAStableInvocationUID(t *testing.T) {
 	t.Parallel()
 	env, _ := containerEnvironment()
@@ -179,13 +269,6 @@ func TestDetectReportsActionableScannerIdentityPoolReasons(t *testing.T) {
 			wantSeccomp: StateEnforced,
 			forbid:      []string{"/private", "secret-token"},
 		},
-		"pre-v3 allocator refuses unsafe namespace transition": {
-			change: func(env *environment) {
-				env.run = failing(func(*Policy) bool { return true }, errors.New("scanner identity allocator: PID namespace changed with unsafe or occupied scope"))
-			},
-			want:        "PID namespace change",
-			wantSeccomp: StateUnavailable,
-		},
 		"v3 allocator waits for exclusive private-scope proof": {
 			change: func(env *environment) {
 				env.run = failing(func(*Policy) bool { return true }, errors.New("scanner identity allocator: PID namespace changed without exclusive private-scope proof"))
@@ -242,11 +325,6 @@ func TestDetectSanitizesKnownAllocatorFailuresFromRealProbePath(t *testing.T) {
 	for _, test := range []struct {
 		name, allocatorError, want string
 	}{
-		{
-			name:           "pre-v3 unsafe scope",
-			allocatorError: "scanner identity allocator: PID namespace changed with unsafe or occupied scope",
-			want:           "For pre-v3 lease state, a host reboot may be needed",
-		},
 		{
 			name:           "v3 missing exclusive proof",
 			allocatorError: "scanner identity allocator: PID namespace changed without exclusive private-scope proof",

@@ -29,13 +29,13 @@ func TestBeginDeliveryAttemptDoesNotHoldAlertsForExpiredUnclosedWindow(t *testin
 			}
 			later := createTestChangeWindowWithContext(ctx, t, ts, job.ID, firstEnd.Add(time.Minute), firstEnd.Add(2*time.Hour))
 			if mode == "queued-after-window-end" {
-				if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET end_at=? WHERE id=?`, sqliteTimestamp(now.Add(-time.Second)), first.ID); err != nil {
+				if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET end_at=? WHERE id=?`, sqliteTimestamp(now.Add(-ChangeWindowSummaryDestinationGrace-time.Second)), first.ID); err != nil {
 					t.Fatal(err)
 				}
 				queueWindowTestEvent(t, ctx, s, "expired-window-gate-"+mode, job.ID, "changes-detected", "expired-window-gate-scan", now, []model.Change{{Key: "expired-window-gate-change", Kind: "port", Target: "192.0.2.10", Port: 443}}, false, 0)
 			} else {
 				early = &first
-				if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET end_at=? WHERE id=?`, sqliteTimestamp(now.Add(-time.Second)), first.ID); err != nil {
+				if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET end_at=? WHERE id=?`, sqliteTimestamp(now.Add(-ChangeWindowSummaryDestinationGrace-time.Second)), first.ID); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -73,7 +73,7 @@ func TestBeginDeliveryAttemptDoesNotHoldAlertsForExpiredUnclosedWindow(t *testin
 	}
 }
 
-func TestChangeWindowDeliveryPredicateReleasesAtExactEnd(t *testing.T) {
+func TestChangeWindowDeliveryPredicateHoldsThroughDestinationGrace(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -99,18 +99,119 @@ func TestChangeWindowDeliveryPredicateReleasesAtExactEnd(t *testing.T) {
 		want bool
 	}{
 		{name: "one nanosecond before end remains held", now: endBoundary.Add(-time.Nanosecond), want: false},
-		{name: "exact end is released", now: endBoundary, want: true},
+		{name: "end remains held during summary grace", now: endBoundary, want: false},
+		{name: "exact grace bound releases", now: endBoundary.Add(ChangeWindowSummaryDestinationGrace), want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var sendable bool
 			nowText := sqliteTimestamp(test.now)
-			if err := s.DB.QueryRowContext(ctx, `SELECT `+changeWindowDeliverySQL+` FROM outbox AS due WHERE due.id=?`, nowText, nowText, id).Scan(&sendable); err != nil {
+			graceCutoff := sqliteTimestamp(test.now.Add(-ChangeWindowSummaryDestinationGrace))
+			if err := s.DB.QueryRowContext(ctx, `SELECT `+changeWindowDeliverySQL+` FROM outbox AS due WHERE due.id=?`, nowText, graceCutoff, id).Scan(&sendable); err != nil {
 				t.Fatal(err)
 			}
 			if sendable != test.want {
 				t.Fatalf("change-window sendable at %s = %v, want %v", nowText, sendable, test.want)
 			}
 		})
+	}
+}
+
+func TestBeginDeliveryAttemptKeepsEndedWindowAlertUntilClose(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job := createWindowTestJob(t, ts, "window-summary-grace-gate", "UTC")
+	now := time.Now().UTC().Truncate(time.Second)
+	window, err := ts.CreateChangeWindow(ctx, job.ID, time.Time{}, now.Add(time.Hour), true, "maintenance", "actor", "Operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := model.Event{Type: "changes-detected", JobID: job.ID, TenantID: DefaultTenantID, ScanID: "window-summary-grace-scan", CreatedAt: now, Changes: []model.Change{{Key: "window-summary-grace-change", Kind: "port", Target: "192.0.2.10", Port: 443}}}
+	if err := s.System().QueueEvent(ctx, "window-summary-grace-destination", event); err != nil {
+		t.Fatal(err)
+	}
+	endAt := now.Add(-time.Second)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET end_at=? WHERE id=?`, sqliteTimestamp(endAt), window.ID); err != nil {
+		t.Fatal(err)
+	}
+	var id int64
+	if err := s.DB.QueryRowContext(ctx, `SELECT id FROM outbox WHERE event_job_id=? AND event_type='changes-detected'`, job.ID).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	claim := "window-summary-grace-claim"
+	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET claim_token=?,claim_until=?,next_at=? WHERE id=?`, claim, sqliteTimestamp(now.Add(time.Minute)), sqliteTimestamp(now.Add(-time.Second)), id); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.System().BeginDeliveryAttempt(ctx, id, claim); !errors.Is(err, ErrDeliveryWindowHeld) {
+		t.Fatalf("begin after end during summary grace = %v; want ErrDeliveryWindowHeld", err)
+	}
+	var link, coalesced, sent, next string
+	if err := s.DB.QueryRowContext(ctx, `SELECT change_window_id,coalesced_at,COALESCE(sent_at,''),next_at FROM outbox WHERE id=?`, id).Scan(&link, &coalesced, &sent, &next); err != nil {
+		t.Fatal(err)
+	}
+	if link != window.ID || coalesced != "" || sent != "" || scanTime(next).Before(endAt.Add(ChangeWindowSummaryDestinationGrace)) {
+		t.Fatalf("alert state after end-boundary gate: link=%q coalesced=%q sent=%q next=%q", link, coalesced, sent, next)
+	}
+	var evidence int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM change_window_events WHERE window_id=?`, window.ID).Scan(&evidence); err != nil || evidence != 1 {
+		t.Fatalf("window evidence after gated attempt = %d, %v; want one event", evidence, err)
+	}
+
+	summary, changed, err := ts.ExpireChangeWindow(ctx, window.ID, func() time.Time { return endAt.Add(time.Second) }, nil)
+	if err != nil || !changed || summary.SuppressedEventCount != 1 {
+		t.Fatalf("close window after grace hold = %+v changed=%v err=%v", summary, changed, err)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT coalesced_at,COALESCE(sent_at,'') FROM outbox WHERE id=?`, id).Scan(&coalesced, &sent); err != nil || coalesced == "" || sent != "" {
+		t.Fatalf("close did not coalesce the held alert once: coalesced=%q sent=%q err=%v", coalesced, sent, err)
+	}
+}
+
+func TestBeginDeliveryAttemptRelinksEndedWindowAlertToAdjacentActiveWindow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job := createWindowTestJob(t, ts, "adjacent-window-delivery-relink", "UTC")
+	now := time.Now().UTC().Truncate(time.Second)
+	firstEnd := now.Add(time.Minute)
+	first, err := ts.CreateChangeWindow(ctx, job.ID, time.Time{}, firstEnd, true, "first", "actor", "Operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ts.CreateChangeWindow(ctx, job.ID, firstEnd, now.Add(2*time.Hour), false, "second", "actor", "Operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := model.Event{Type: "changes-detected", JobID: job.ID, TenantID: DefaultTenantID, ScanID: "adjacent-window-scan", CreatedAt: now, Changes: []model.Change{{Key: "adjacent-window-change", Kind: "port", Target: "192.0.2.11", Port: 8443}}}
+	if err := s.System().QueueEvent(ctx, "adjacent-window-destination", event); err != nil {
+		t.Fatal(err)
+	}
+	ended := now.Add(-time.Second)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET end_at=? WHERE id=?`, sqliteTimestamp(ended), first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET start_at=? WHERE id=?`, sqliteTimestamp(ended), second.ID); err != nil {
+		t.Fatal(err)
+	}
+	var id int64
+	if err := s.DB.QueryRowContext(ctx, `SELECT id FROM outbox WHERE event_job_id=? AND event_type='changes-detected'`, job.ID).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	claim := "adjacent-window-claim"
+	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET claim_token=?,claim_until=?,next_at=? WHERE id=?`, claim, sqliteTimestamp(now.Add(time.Minute)), sqliteTimestamp(now.Add(-time.Second)), id); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.System().BeginDeliveryAttempt(ctx, id, claim); !errors.Is(err, ErrDeliveryWindowHeld) {
+		t.Fatalf("begin attempt in adjacent active window = %v; want held", err)
+	}
+	var link string
+	if err := s.DB.QueryRowContext(ctx, `SELECT change_window_id FROM outbox WHERE id=?`, id).Scan(&link); err != nil || link != second.ID {
+		t.Fatalf("delivery linked to %q, %v; want adjacent window %q", link, err, second.ID)
+	}
+	var evidence int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM change_window_events WHERE window_id=?`, second.ID).Scan(&evidence); err != nil || evidence != 1 {
+		t.Fatalf("adjacent window evidence = %d, %v; want one event", evidence, err)
 	}
 }
 
@@ -231,5 +332,47 @@ func TestExpireChangeWindowWithoutSummaryNotificationPreservesInFlightFailureRet
 	}
 	if err := s.System().BeginDeliveryAttempt(ctx, id, retry[0].ClaimToken); err != nil {
 		t.Fatalf("failed alert was not retryable after destination fallback: %v", err)
+	}
+}
+
+func TestExpireChangeWindowWithoutSummaryCoalescesOrphanedStartedAttempt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	ts := defaultTenant(s)
+	job := createWindowTestJob(t, ts, "destination-failure-orphaned-attempt", "UTC")
+	now := time.Now().UTC().Truncate(time.Second)
+	window, err := ts.CreateChangeWindow(ctx, job.ID, now.Add(-time.Hour), now.Add(time.Hour), true, "maintenance", "actor", "Operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueWindowTestEvent(t, ctx, s, "destination-failure-orphaned-attempt", job.ID, "changes-detected", "destination-failure-orphaned-scan", now, []model.Change{{Key: "orphaned-attempt-change", Kind: "port", Target: "192.0.2.10", Port: 443}}, false, 0)
+	var id int64
+	if err := s.DB.QueryRowContext(ctx, `SELECT id FROM outbox WHERE event_job_id=? AND event_type='changes-detected'`, job.ID).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	startedAt := now.Add(-time.Second)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET attempt_started_at=?,claim_token='',claim_until='',coalesce_after_attempt=1 WHERE id=?`, sqliteTimestamp(startedAt), id); err != nil {
+		t.Fatal(err)
+	}
+	end := now.Add(-ChangeWindowSummaryDestinationGrace - time.Second)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE change_windows SET end_at=? WHERE id=?`, sqliteTimestamp(end), window.ID); err != nil {
+		t.Fatal(err)
+	}
+	closeAt := end.Add(ChangeWindowSummaryDestinationGrace + time.Second)
+	summary, changed, err := ts.ExpireChangeWindowWithoutSummaryNotification(ctx, window.ID, func() time.Time { return closeAt })
+	if err != nil || !changed || summary.SummaryNotificationStatus != "not_queued_destinations_unavailable" {
+		t.Fatalf("close without summary = %+v, changed %v, err %v", summary, changed, err)
+	}
+	var claim, marker, coalesced string
+	var coalesceAfter int
+	if err := s.DB.QueryRowContext(ctx, `SELECT claim_token,attempt_started_at,coalesce_after_attempt,coalesced_at FROM outbox WHERE id=?`, id).Scan(&claim, &marker, &coalesceAfter, &coalesced); err != nil {
+		t.Fatal(err)
+	}
+	if claim != "" || marker != "" || coalesceAfter != 0 || coalesced == "" {
+		t.Fatalf("orphan after no-summary close = claim %q marker %q coalesce-after %d coalesced %q; want coalesced and ownerless", claim, marker, coalesceAfter, coalesced)
+	}
+	if claimed, err := s.System().ClaimDueDeliveries(ctx, 1, "orphaned-window-attempt-retry"); err != nil || len(claimed) != 0 {
+		t.Fatalf("claim after no-summary close = %+v, %v; orphan was stranded or retried", claimed, err)
 	}
 }

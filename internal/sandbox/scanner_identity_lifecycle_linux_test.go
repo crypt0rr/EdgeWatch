@@ -264,77 +264,6 @@ func TestScannerIdentityLeaseLifecycleRejectsMissingDirectoryAndInvalidCalls(t *
 	}
 }
 
-func TestScannerIdentityPrivateScopeTransitionRejectsUnsafeJournalState(t *testing.T) {
-	tests := []struct {
-		name    string
-		prepare func(*testing.T, *scannerIdentityAllocator, *scannerIdentityScope, *scannerIdentityJournal)
-	}{
-		{name: "untrusted current runtime", prepare: func(_ *testing.T, _ *scannerIdentityAllocator, _ *scannerIdentityScope, _ *scannerIdentityJournal) {}},
-		{name: "previous runtime was not private", prepare: func(_ *testing.T, _ *scannerIdentityAllocator, marker *scannerIdentityScope, _ *scannerIdentityJournal) {
-			marker.PrivateRuntime = false
-		}},
-		{name: "unknown journal version", prepare: func(_ *testing.T, _ *scannerIdentityAllocator, _ *scannerIdentityScope, journal *scannerIdentityJournal) {
-			journal.Version++
-		}},
-		{name: "wrong journal boot", prepare: func(_ *testing.T, _ *scannerIdentityAllocator, _ *scannerIdentityScope, journal *scannerIdentityJournal) {
-			journal.BootID = testScannerBootID2
-		}},
-		{name: "journal not private", prepare: func(_ *testing.T, _ *scannerIdentityAllocator, _ *scannerIdentityScope, journal *scannerIdentityJournal) {
-			journal.PrivateRuntime = false
-		}},
-		{name: "nil lease map", prepare: func(_ *testing.T, _ *scannerIdentityAllocator, _ *scannerIdentityScope, journal *scannerIdentityJournal) {
-			journal.Leases = nil
-		}},
-		{name: "occupied journal", prepare: func(_ *testing.T, allocator *scannerIdentityAllocator, _ *scannerIdentityScope, journal *scannerIdentityJournal) {
-			journal.Leases[allocator.uidStart] = scannerIdentityJournalEntry{GID: allocator.uidStart, Token: "0123456789abcdef0123456789abcdef", State: "active"}
-		}},
-		{name: "inconsistent transition namespace", prepare: func(_ *testing.T, _ *scannerIdentityAllocator, _ *scannerIdentityScope, journal *scannerIdentityJournal) {
-			journal.PIDNamespace = 99
-		}},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			allocator, markerFD, directoryFD, marker, journal := emptyPrivateScannerScopeFixture(t)
-			privateRuntime := test.name != "untrusted current runtime"
-			test.prepare(t, allocator, &marker, &journal)
-			if _, err := allocator.transitionEmptyPrivateScope(directoryFD, markerFD, testScannerBootID, 18, privateRuntime, marker, journal); err == nil {
-				t.Fatal("unsafe scope transition succeeded")
-			}
-			persisted := readTestScannerIdentityJournalOrFatal(t, allocator)
-			if persisted.PIDNamespace != 17 || len(persisted.Leases) != 0 {
-				t.Fatalf("rejected transition changed persistent journal: %+v", persisted)
-			}
-		})
-	}
-}
-
-func TestScannerIdentityPrivateScopeTransitionPersistsJournalBeforeMarker(t *testing.T) {
-	allocator, _, directoryFD, marker, journal := emptyPrivateScannerScopeFixture(t)
-	procFD := openProcDirectoryOrFatal(t)
-	defer unix.Close(procFD)
-	if _, err := allocator.transitionEmptyPrivateScope(directoryFD, procFD, testScannerBootID, 18, true, marker, journal); err == nil || !strings.Contains(err.Error(), "transition marker failed") {
-		t.Fatalf("transition with unavailable marker directory = %v; want marker failure", err)
-	}
-	persisted := readTestScannerIdentityJournalOrFatal(t, allocator)
-	if persisted.PIDNamespace != 18 || len(persisted.Leases) != 0 {
-		t.Fatalf("journal-first transition was not persisted before marker failure: %+v", persisted)
-	}
-
-	restarted := usePrivateScannerRuntime(newScannerIdentityAllocatorForTest(allocator.directory, allocator.uidStart, allocator.count, testScannerBootID, 18))
-	lease, err := restarted.acquire(context.Background())
-	if err != nil {
-		t.Fatalf("finish exact empty journal-first transition: %v", err)
-	}
-	completedMarker, err := readScannerIdentityMarkerAtPath(allocator.markerDir)
-	if err != nil || completedMarker.PIDNamespace != 18 || !completedMarker.PrivateRuntime {
-		t.Fatalf("recovered transition marker = %+v, %v", completedMarker, err)
-	}
-	if err := lease.release(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestScannerIdentityPrivateScopeRecoveryArchivesPriorJournal(t *testing.T) {
 	allocator := usePrivateScannerRuntime(newTestScannerIdentityAllocator(t, 1))
 	oldLease, err := allocator.acquire(context.Background())
@@ -1236,35 +1165,6 @@ func writeTestScannerIdentityMarker(t *testing.T, allocator *scannerIdentityAllo
 	if err := writeScannerIdentityMarker(fd, bootID, namespace, private); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func emptyPrivateScannerScopeFixture(t *testing.T) (*scannerIdentityAllocator, int, int, scannerIdentityScope, scannerIdentityJournal) {
-	t.Helper()
-	allocator := usePrivateScannerRuntime(newTestScannerIdentityAllocator(t, 1))
-	lease, err := allocator.acquire(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := lease.release(); err != nil {
-		t.Fatal(err)
-	}
-	directoryFD, markerFD, err := openScannerIdentityDirectories(allocator.directory, allocator.markerDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = unix.Close(directoryFD)
-		_ = unix.Close(markerFD)
-	})
-	marker, err := readScannerIdentityMarker(markerFD)
-	if err != nil {
-		t.Fatal(err)
-	}
-	journal, err := readScannerIdentityJournal(directoryFD)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return allocator, markerFD, directoryFD, marker, journal
 }
 
 func openProcDirectoryOrFatal(t *testing.T) int {

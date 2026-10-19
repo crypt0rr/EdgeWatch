@@ -13,6 +13,7 @@ import { ErrorNotice } from '../components/ErrorNotice'
 import { editableDuration, formatDateTime, getDisplayTimeZone } from '../format'
 import { cloneJobCreationDraft, cloneProtocol, defaultTCP, jobFormSchema, newJobCreationDraft, optionalNumber, presetFor, toJobFormPayload, type JobFormFields } from '../job-form'
 import { useOptionalJobCreationDraft } from '../job-creation-draft'
+import { useServerDraft } from '../hooks/useServerDraft'
 
 export function JobEditor() {
   const { id } = useParams()
@@ -43,7 +44,6 @@ export function JobEditor() {
   const [draftDirty, setDraftDirty] = useState(false)
   const [suggestionInput, setSuggestionInput] = useState({ schedule: defaults.schedule, timezone: defaults.timezone })
   const [dismissedSuggestion, setDismissedSuggestion] = useState('')
-  const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
   const [rebaselinePrompt, setRebaselinePrompt] = useState<{ values: JobFormFields; changes: string[] } | null>(null)
   const [discardNavigation, setDiscardNavigation] = useState<{ destination: string; historyPop: boolean } | null>(null)
   const loadedRevision = useRef<{ id?: string; revision: number } | null>(null)
@@ -58,6 +58,9 @@ export function JobEditor() {
   const { register, handleSubmit, reset, watch, setValue, formState: { errors: formErrors, isDirty } } = useForm<JobFormFields>({
     defaultValues: defaults,
     resolver: zodResolver(jobFormSchema),
+  })
+  const serverDraft = useServerDraft<Job | null, Job | null, number>(existing.data ?? null, existing.data?.revision ?? 0, {
+    mergeDraft: (_server, draft) => draft,
   })
   const scheduleRegister = register('schedule')
   const schedule = watch('schedule')
@@ -213,7 +216,9 @@ export function JobEditor() {
     }
     setScheduleEnabled(data.enabled)
     loadedRevision.current = { id, revision: data.revision }
-    setRemoteRevision(null)
+    serverDraft.markSaved()
+    serverDraft.setDraft(data)
+    serverDraft.rebase(data.revision)
     setDraftDirty(false)
   }
 
@@ -224,10 +229,7 @@ export function JobEditor() {
       return
     }
     if (existing.data.revision === loadedRevision.current.revision) return
-    if (hasDraftChanges) {
-      setRemoteRevision(existing.data.revision)
-      return
-    }
+    if (hasDraftChanges) return
     applyServerJob(existing.data)
   }, [existing.data, id, hasDraftChanges, reset])
 
@@ -277,8 +279,8 @@ export function JobEditor() {
       setError('Enable TCP, UDP, or both scan types.')
       return
     }
-    if (edit && remoteRevision !== null) {
-      setError('This job changed in another tab. Reload the saved version before continuing.')
+    if (edit && serverDraft.remoteChanged) {
+      setError('This job changed in another tab. Keep your edits on the latest revision or load the saved version before continuing.')
       return
     }
     const payload = toJobFormPayload(values, {
@@ -296,13 +298,16 @@ export function JobEditor() {
     setError('')
     try {
       if (edit) {
-        const saved = await updateJob(id!, loadedRevision.current?.revision ?? existing.data!.revision, payload, confirm)
+        const saved = await updateJob(id!, serverDraft.baseRevision, payload, confirm)
         // Job detail reads this query. Without a live update it could keep the
         // pre-save revision for its stale time, and a lifecycle action would
         // then send that revision and be rejected. Store the saved job.
         if (saved?.id === id) {
           loadedRevision.current = { id, revision: saved.revision }
           client.setQueryData(['job', id], saved)
+          serverDraft.markSaved()
+          serverDraft.setDraft(saved)
+          serverDraft.rebase(saved.revision)
         } else {
           void client.invalidateQueries({ queryKey: ['job', id], refetchType: 'none' })
         }
@@ -343,6 +348,13 @@ export function JobEditor() {
       navigate(edit ? `/jobs/${id}` : '/jobs')
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not save job'
+      if (edit && err instanceof APIError && err.code === 'conflict') {
+        const latest = await client.fetchQuery({ queryKey: ['job', id], queryFn: () => getJob(id!), staleTime: 0 }).catch(() => undefined)
+        if (latest) {
+          setError(`This job changed elsewhere (now revision ${latest.revision}). Your draft still uses revision ${serverDraft.baseRevision}; keep your edits or load the saved version.`)
+          return
+        }
+      }
       if (err instanceof APIError && err.code === 'validation_failed') {
         const details = Object.entries(err.details ?? {}).reduce<Record<string, string>>((out, [key, value]) => {
           if (typeof value === 'string') out[key] = value
@@ -494,14 +506,14 @@ export function JobEditor() {
             <label>Timing profile<select {...register('timing')}><option value="conservative">Conservative (T2)</option><option value="balanced">Balanced (T3)</option><option value="fast">Fast (T4)</option></select>{(formErrors.timing?.message || fieldErrors.timing) && <small className="field-error">{formErrors.timing?.message || fieldErrors.timing}</small>}</label>
             <label>Scan timeout<input {...register('timeout')} placeholder="1h" />{(formErrors.timeout?.message || fieldErrors.timeout) && <small className="field-error">{formErrors.timeout?.message || fieldErrors.timeout}</small>}<small>Examples: 30m, 1h, 2d.</small></label>
             <label>Resume window<input {...register('resume_window')} placeholder="8d" />{(formErrors.resume_window?.message || fieldErrors.resume_window) && <small className="field-error">{formErrors.resume_window?.message || fieldErrors.resume_window}</small>}<small>How long paused broad-scan progress is kept (1h–30d).</small></label>
-            {remoteRevision !== null && <div className="notice warning" role="alert"><TriangleAlert size={16} /><span>This job was saved elsewhere while you were editing. Your draft is preserved. <button type="button" className="link-button" onClick={() => existing.data && applyServerJob(existing.data)}>Reload saved version</button></span></div>}
+            {serverDraft.remoteChanged && existing.data && <div className="notice warning" role="alert"><TriangleAlert size={16} /><span><strong>This job was saved elsewhere while you were editing.</strong> Your draft still uses revision {serverDraft.baseRevision}; the saved job is revision {existing.data.revision}. Choose whether to keep your edits or load the saved version.</span><button type="button" className="text-button" onClick={() => { serverDraft.rebase(existing.data!.revision); loadedRevision.current = { id, revision: existing.data!.revision }; setError('Your job edits now use the latest revision. Review them and save again.') }}>Keep my edits</button><button type="button" className="text-button" onClick={() => applyServerJob(existing.data!)}>Load theirs</button></div>}
             {timing === 'fast' && <div className="notice warning"><TriangleAlert size={16} /><span>Fast timing can miss responses on congested or filtered networks.</span></div>}
           </div>
         </aside>
         <div className="editor-actions">
           {error && <div className="form-error" role="alert">{error}</div>}
           {!edit && creation?.createOutcomeUnknown && <div className="form-error" role="alert">The create result is still unknown. <Link to="/jobs" target="_blank" rel="noreferrer">Open Jobs in another tab</Link> to check before starting a new monitor.</div>}
-          <button disabled={saving || (!edit && !!creation?.createOutcomeUnknown)} className="button primary" type="submit"><Save size={16} />{saving ? 'Saving…' : edit ? 'Save changes' : 'Create job'}</button>
+          <button disabled={saving || (edit && serverDraft.remoteChanged) || (!edit && !!creation?.createOutcomeUnknown)} className="button primary" type="submit"><Save size={16} />{saving ? 'Saving…' : edit ? 'Save changes' : 'Create job'}</button>
           <button type="button" className="button ghost" onClick={() => requestNavigation(edit ? `/jobs/${id}` : advancedCreation ? '/jobs/new' : '/jobs')}>Cancel</button>
         </div>
         </fieldset>

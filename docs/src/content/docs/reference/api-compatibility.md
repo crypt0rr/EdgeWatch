@@ -401,7 +401,7 @@ holds only `edgewatch_build_info`, `edgewatch_health_status`, and the
 | `edgewatch_notification_outbox_terminal` | | Alerts that failed for good and are kept in the outbox. |
 | `edgewatch_notification_destinations_locked` | | Enabled web-managed destinations, of every unit and the platform, that alerts cannot reach: the notification key cannot open them, or their URL is no longer valid. It follows a lost or replaced key from the next delivery pass, normally within 30 seconds. |
 | `edgewatch_telemetry_collected_timestamp_seconds` | | When the database and outbox counts were read; they are read at most every 30 seconds. |
-| `edgewatch_scanner_sandbox_state` | `state`: `sandboxed`, `identity_only`, `landlock_only`, `unconfined` | `1` for how scanner processes are confined. |
+| `edgewatch_scanner_sandbox_state` | `state`: `sandboxed`, `identity_only`, `landlock_only`, `unconfined`, `launches_refused` | `1` for how scanner processes are confined; `launches_refused` means the scanner identity or required sandbox could not be established and scans fail closed. |
 | `edgewatch_notification_sandbox_state` | `state`, as above | `1` for how the notification process is confined. |
 | `edgewatch_update_check_status` | `status`: `up_to_date`, `update_available`, `ahead`, `check_failed`, `disabled`, `development_build` | `1` for the release check's status. |
 | `edgewatch_update_available` | | `1` when a newer release is available. |

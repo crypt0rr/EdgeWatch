@@ -2002,6 +2002,18 @@ func mergeForScopeChange(old, candidate model.Snapshot) model.Snapshot {
 	result := cloneSnapshot(candidate)
 	oldUnits := unitMap(old)
 	candidateUnits := unitMap(candidate)
+	candidateScopes := newScopeIndex(candidate)
+	candidateTargets := make(map[string]struct{}, len(candidate.Scopes))
+	candidateProtocols := make(map[string]map[string]struct{})
+	for _, scope := range candidate.Scopes {
+		candidateTargets[scope.Target] = struct{}{}
+		protocols := candidateProtocols[scope.Target]
+		if protocols == nil {
+			protocols = make(map[string]struct{})
+			candidateProtocols[scope.Target] = protocols
+		}
+		protocols[strings.ToLower(scope.Protocol)] = struct{}{}
+	}
 	// Keep only ports that the new security scope actually covers. A malformed
 	// or stale candidate must not smuggle an out-of-scope positive port into the
 	// new baseline during a hash migration.
@@ -2011,8 +2023,8 @@ func mergeForScopeChange(old, candidate model.Snapshot) model.Snapshot {
 		ou, oldExists := oldUnits[key]
 		ports := map[int]model.PortState{}
 		for _, p := range cu.Ports {
-			if scopeAllows(candidate, target, protocol, p.Port, false) {
-				if !scopeAllows(candidate, target, protocol, p.Port, true) {
+			if candidateScopes.allows(target, protocol, p.Port, false) {
+				if !candidateScopes.allows(target, protocol, p.Port, true) {
 					p.Service = ""
 				}
 				ports[p.Port] = p
@@ -2020,8 +2032,8 @@ func mergeForScopeChange(old, candidate model.Snapshot) model.Snapshot {
 		}
 		if oldExists {
 			for _, p := range ou.Ports {
-				if scopeAllows(candidate, target, protocol, p.Port, false) {
-					if !scopeAllows(candidate, target, protocol, p.Port, true) {
+				if candidateScopes.allows(target, protocol, p.Port, false) {
+					if !candidateScopes.allows(target, protocol, p.Port, true) {
 						p.Service = ""
 					}
 					if current, exists := ports[p.Port]; exists {
@@ -2029,7 +2041,7 @@ func mergeForScopeChange(old, candidate model.Snapshot) model.Snapshot {
 						// did not return one or because a replacement fingerprint has
 						// not reached its sample threshold. Keep the last expected
 						// fingerprint until a stable replacement is available.
-						if current.Service == "" && p.Service != "" && scopeAllows(candidate, target, protocol, p.Port, true) {
+						if current.Service == "" && p.Service != "" && candidateScopes.allows(target, protocol, p.Port, true) {
 							current.Service = p.Service
 							ports[p.Port] = current
 						}
@@ -2054,16 +2066,19 @@ func mergeForScopeChange(old, candidate model.Snapshot) model.Snapshot {
 		}
 		parts := strings.Split(key, "\x00")
 		target, protocol := parts[0], parts[1]
-		if !hasTarget(candidate, target) || !scopeAllowsProtocol(candidate, target, protocol) {
+		if _, exists := candidateTargets[target]; !exists {
+			continue
+		}
+		if _, exists := candidateProtocols[target][strings.ToLower(protocol)]; !exists {
 			continue
 		}
 		clone := ou
 		clone.Ports = nil
 		for _, p := range ou.Ports {
-			if !scopeAllows(candidate, target, protocol, p.Port, false) {
+			if !candidateScopes.allows(target, protocol, p.Port, false) {
 				continue
 			}
-			if !scopeAllows(candidate, target, protocol, p.Port, true) {
+			if !candidateScopes.allows(target, protocol, p.Port, true) {
 				p.Service = ""
 			}
 			clone.Ports = append(clone.Ports, p)

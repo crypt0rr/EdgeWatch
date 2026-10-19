@@ -3,9 +3,9 @@
 # Smoke-test an image assembled from release-style prebuilt inputs. The checks
 # deliberately exercise the image on the requested architecture, including a
 # read-only daemon with only NET_RAW: the capabilities of a Compose file from
-# before v0.27.0, with which the scanner sandbox is unavailable and the
-# scanners run as UID 0. scripts/verify-compose-deployment.sh starts the
-# bundled compose.yaml, which enables the sandbox.
+# before v0.27.0. The daemon starts, but scanner launches fail closed while
+# the scanner identity pool is unavailable. scripts/verify-compose-deployment.sh
+# starts the bundled compose.yaml, which enables the sandbox.
 set -euo pipefail
 
 image="${1:?image reference is required}"

@@ -17,13 +17,13 @@ func migration74Statements() []string {
 // migration74ConditionalStatements also supports migration tests that lower
 // user_version on a database copied from the current schema. Those fixtures
 // can already contain either piece of the additive schema step.
-func migration74ConditionalStatements(tx *sql.Tx) ([]string, error) {
-	columnExists, err := migrationColumnExists(tx, "job_runtime_meta", "budget_skip_alert_key")
+func migration74ConditionalStatements(ctx context.Context, tx *sql.Tx) ([]string, error) {
+	columnExists, err := migrationColumnExists(ctx, tx, "job_runtime_meta", "budget_skip_alert_key")
 	if err != nil {
 		return nil, err
 	}
 	var indexExists bool
-	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?)`, budgetSkipAlertPendingIndex).Scan(&indexExists); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?)`, budgetSkipAlertPendingIndex).Scan(&indexExists); err != nil {
 		return nil, err
 	}
 	var statements []string

@@ -110,6 +110,9 @@ Before the release is published and the image is promoted, the workflow:
 
 - builds the image from scratch, without registry or Actions caches, with
   BuildKit, QEMU and the SBOM generator pinned by digest;
+- rebuilds the candidate's AMD64 and ARM64 Go binaries with GoReleaser in a
+  separate job that runs no npm code, then compares both binaries byte for byte
+  with the immutable candidate before packaging;
 - records each Linux archive's `edgewatch` member digest in schema 2 of
   `release-manifest.json`, compares the staged per-architecture executable to
   that archive member, and compares the executable copied from each candidate
@@ -121,10 +124,12 @@ Before the release is published and the image is promoted, the workflow:
 
 `scripts/release-workflow.test.mjs` enforces these gates and the supply-chain
 rules of both workflows: a job that holds a write scope runs no npm packages;
-no checkout keeps the job token; the release restores no cache; and every
-image that a workflow step or the scan script starts is pinned by digest, in
-a form that Renovate updates. CI runs it, and so does the release; run
-`node --test scripts/release-workflow.test.mjs` after changing a workflow.
+the scripts reachable from those jobs also run no npm packages; every action
+is pinned to a 40-character commit SHA; no checkout keeps the job token; the
+release restores no cache; and every image that a workflow step or the scan
+script starts is pinned by digest, in a form that Renovate updates. CI runs it,
+and so does the release; run `node --test scripts/release-workflow.test.mjs`
+after changing a workflow.
 
 The release npm guard roots its Dockerfile stage graph at the target configured
 on the exact image build action, or at the final stage when no target is set.

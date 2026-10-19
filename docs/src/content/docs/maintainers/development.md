@@ -164,7 +164,8 @@ The pinned Shoutrrr v0.8.0 provider inventory is split by destination:
   checked because Shoutrrr's map iteration can select either one.
 - Fixed public service hostname: Discord, IFTTT, Join, logger, Pushbullet,
   Pushover, Slack, and Telegram. These URLs carry tokens or IDs in their host
-  component. Their actual HTTP connections still use the guarded transport.
+  component, so the destination inventory records each provider's actual API
+  host instead. Their HTTP connections still use the guarded transport.
 
 The HTTP providers use `http.DefaultClient`, `http.Post`, or Shoutrrr's
 `jsonclient`. Telegram's package-level `jsonclient.DefaultClient` captures the
@@ -177,15 +178,17 @@ refused when it selects a proxy, and uninspectable custom proxy functions are
 refused; direct transports and environment `NO_PROXY` paths remain direct.
 
 `TestDestinationProviderInventoryMatchesPinnedShoutrrr` compares this host
-classification with `ServiceRouter.ListServices()`. It fails when an upgrade
-adds or removes a provider without an explicit inventory review. For every
-Shoutrrr dependency update, also inspect the pinned source for new or changed
-HTTP clients, transports, redirect handling, SMTP/raw dial paths, and provider
+classification with `ServiceRouter.ListServices()`. The table-driven
+`TestGuardedChildCoversEveryDestinationProviderAgainstLoopback` also sends
+every listed scheme through the notification child with localhost, a fake
+hosts-file alias, IPv4 loopback, and IPv4-mapped IPv6 loopback answers, and
+asserts that no controlled listener accepts a connection. The networkless
+logger provider has an explicit no-connection case. For every Shoutrrr
+dependency update, also inspect the pinned source for new or changed HTTP
+clients, transports, redirect handling, SMTP/raw dial paths, and provider
 target construction. Update the inventory and add a controlled listener or
 fake-resolver regression for any new path; preserve TLS SNI, provider URL
-options, proxy behavior, secret redaction, and notification sandboxing. The
-inventory test alone does not prove that a provider's transport path stayed
-guarded.
+options, proxy behavior, secret redaction, and notification sandboxing.
 
 ## Validate changes
 

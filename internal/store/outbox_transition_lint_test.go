@@ -17,12 +17,16 @@ const (
 	outboxSQLIdentifier    = `(?:[A-Za-z_][A-Za-z0-9_]*|"(?:""|[^"])*"|` + "`(?:``|[^`])*`" + `|\[(?:\]\]|[^\]])*\])`
 )
 
-var outboxUpdateStatement = regexp.MustCompile(
-	`(?is)\bUPDATE` + sqlSeparator +
-		`(?:OR` + sqlSeparator + `\w+` + sqlSeparator + `)?` +
-		`(?:` + outboxSQLIdentifier + sqlOptionalSeparator + `\.` + sqlOptionalSeparator + `)?` +
-		`(?:outbox|"outbox"|\[outbox\]|` + "`outbox`" + `)` + sqlSeparator + `SET\b` + sqlSeparator +
-		`(?:\(\s*` + outboxSQLIdentifier + `(?:\s*,\s*` + outboxSQLIdentifier + `)*\s*\)|` + outboxSQLIdentifier + `)` + sqlOptionalSeparator + `=`,
+var (
+	outboxTableName = `(?:outbox|"outbox"|\[outbox\]|` + "`outbox`" + `)`
+	outboxSchema    = `(?:` + outboxSQLIdentifier + sqlOptionalSeparator + `\.` + sqlOptionalSeparator + `)?`
+	outboxMutation  = regexp.MustCompile(
+		`(?is)^\s*UPDATE` + sqlSeparator +
+			`(?:OR` + sqlSeparator + `\w+` + sqlSeparator + `)?` + outboxSchema + outboxTableName +
+			`(?:` + sqlSeparator + `(?:AS` + sqlSeparator + `)?` + outboxSQLIdentifier + `)?` + sqlSeparator + `SET\b` +
+			`|^\s*REPLACE` + sqlSeparator + `INTO` + sqlSeparator + outboxSchema + outboxTableName + `(?:\s|\(|$)` +
+			`|^\s*INSERT(?:` + sqlSeparator + `OR` + sqlSeparator + `\w+)?` + sqlSeparator + `INTO` + sqlSeparator + outboxSchema + outboxTableName + `(?:\s|\(|$)[\s\S]*?\bON` + sqlSeparator + `CONFLICT\b[\s\S]*?\bDO` + sqlSeparator + `UPDATE\b`,
+	)
 )
 
 var migrationStatementFunction = regexp.MustCompile(`^migration[0-9]+(?:Conditional)?Statements$`)
@@ -40,8 +44,8 @@ func lintOutboxTransitionUpdates(fset *token.FileSet, files []*ast.File) []strin
 		if statement.function == "buildOutboxTransitionStatement" || migrationStatementFunction.MatchString(statement.function) {
 			continue
 		}
-		if outboxUpdateStatement.MatchString(statement.text) {
-			findings = append(findings, fmt.Sprintf("%s: runtime UPDATE outbox must use applyOutboxTransition with a named contract", statement.position))
+		if outboxMutation.MatchString(statement.text) {
+			findings = append(findings, fmt.Sprintf("%s: runtime outbox mutations must use applyOutboxTransition with a named contract", statement.position))
 		}
 	}
 	return findings
@@ -72,16 +76,22 @@ func TestOutboxTransitionUpdateLintFindsHandWrittenSQL(t *testing.T) {
 func unsafeRequeue(db DB) {
 	_, _ = db.Exec("update outbox set attempts=0")
 	_, _ = db.Exec("UP" + "DATE /* comment */ OR REPLACE main.`+"`outbox`"+` SET attempts=0, deferrals=0")
+	_, _ = db.Exec("UPDATE outbox AS o SET attempts=0")
+	_, _ = db.Exec("INSERT INTO outbox(id) VALUES(?) ON CONFLICT(id) DO UPDATE SET attempts=0")
+	_, _ = db.Exec("REPLACE INTO outbox(id) VALUES(?)")
+	column := "attempts"
+	_, _ = db.Exec("UPDATE outbox SET " + column + "=0")
+	_, _ = db.Exec(fmt.Sprintf("UPDATE outbox SET %s=0", column))
 	_, _ = db.Exec("UPDATE outbox_archive SET attempts=0")
 	_, _ = db.Exec("This message mentions UPDATE outbox SET but is not a statement")
 }
 `)
 	findings := lintOutboxTransitionUpdates(fset, []*ast.File{file})
-	if len(findings) != 2 {
-		t.Fatalf("lint findings = %v; want both hand-written outbox updates and no outbox_archive match", findings)
+	if len(findings) != 7 {
+		t.Fatalf("lint findings = %v; want all seven outbox mutation forms and no prose/archive match", findings)
 	}
 	for _, finding := range findings {
-		if !strings.Contains(finding, "runtime UPDATE outbox must use applyOutboxTransition") {
+		if !strings.Contains(finding, "runtime outbox mutations must use applyOutboxTransition") {
 			t.Errorf("finding lacks transition guidance: %q", finding)
 		}
 	}

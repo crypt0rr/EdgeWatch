@@ -5,7 +5,7 @@ description: Understand the current SQLite schema, the oldest schema that upgrad
 
 ## Current schema and rollback
 
-The current schema is version 74. Schema 31 records terminal notification
+The current schema is version 75. Schema 31 records terminal notification
 deliveries and marks rows that had already exhausted the original eight
 attempts. Schema 63 repairs databases that had already passed schema 31 by
 marking still-unsent rows with at least eight attempts and a scheduled retry
@@ -135,6 +135,19 @@ rewrite scan history, runtime snapshots, or baselines. Its duration and
 temporary WAL depend on the number of runtime metadata rows. An older release
 refuses the upgraded database; restore the matching pre-upgrade `./data`
 backup to roll back.
+
+## Schema 75
+
+Schema 75 adds three scan-history projections: the unit results and their
+count, plus a compact coverage summary with target scopes, failures, host
+states, and host/protocol status. The summary omits port inventories and
+service evidence; the immutable full snapshot remains available for detailed
+history. The daemon backfills one scan per restartable transaction. A malformed
+legacy snapshot stays unchanged and receives empty projections, so it cannot
+block startup or make inbox recovery classification parse the full document.
+The migration's duration and temporary WAL depend on retained scan history. An
+older release refuses the upgraded database; restore the matching pre-upgrade
+`./data` backup to roll back.
 
 ## Upgrade floor
 
@@ -329,10 +342,13 @@ until its migration and startup phases have finished and it has acquired its
 daemon lease. Restores of that directory use the same lock. The daemon runs
 only on Linux because this directory-lock implementation is Linux-only; an
 attempt to start it on a non-Linux system fails closed before migration, even
-on a filesystem that supports `flock`. On Linux, a second daemon on the same data volume exits
-with `another EdgeWatch process is migrating or restoring the database in
-this directory` while the current daemon lease is live, and a restore waits
-until startup has finished. Each migration step also checks, in its own
+on a filesystem that supports `flock`. On Linux, a second daemon on the same
+data volume exits with
+`another EdgeWatch process is migrating or restoring the database in this directory`
+while the first daemon is migrating or completing startup. Once its lease is
+live, a later daemon exits with
+`another EdgeWatch daemon holds the database lease`. A restore waits until
+startup has finished. Each migration step also checks, in its own
 transaction, that the schema version is still the one it upgrades from, so no
 step runs twice. The Linux database filesystem must support advisory
 directory locking; if the directory cannot be locked, startup exits with

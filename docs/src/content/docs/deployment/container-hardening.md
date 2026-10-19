@@ -173,8 +173,8 @@ A sandboxed scanner process:
 
 - runs with a distinct UID and matching GID leased from 60000–60063 for that
   invocation, with no supplementary groups;
-- keeps `NET_RAW`, and `NET_ADMIN` when the container grants it, as ambient
-  capabilities and no other capability;
+- gives Nmap only `NET_RAW`; gives Naabu SYN `NET_RAW` and `NET_ADMIN` when
+  the container grants it; and gives Naabu connect neither capability;
 - cannot read or list `./data`, which belongs to UID 0 with mode `0750`, or
   read `config.yaml`; it reads its target list and writes its results through
   file descriptors that EdgeWatch passes to it, to [files](#scanner-files)
@@ -221,10 +221,14 @@ docker compose exec edgewatch edgewatch health --config /etc/edgewatch/config.ya
 
 `scanner_sandbox.state` is `enforced`, `disabled` or `unavailable`, and
 `reason` explains a sandbox that is not enforced. `scanner_sandbox.identity_pool`
-reports the pool state, the `per_invocation` strategy, the UID range, and its
-maximum parallel capacity of 64. That capacity is not a count of currently
-active, free, or quarantined leases. Since concurrent scans can use different
-identities, the scanner status does not report one `uid`, `gid`, or
+reports the pool state, the `per_invocation` strategy, the UID range, its
+maximum parallel capacity of 64, active and quarantined leases, identities in
+use by unleased processes, and free identities. The health command inspects
+the journal without leasing an identity and warns when free slots fall below
+`max_concurrent_scans`. If the pool is exhausted, stop other EdgeWatch
+processes using the data volume and restart the container. Since concurrent
+scans can use different identities, the scanner status does not report one
+`uid`, `gid`, or
 `process_uid`. The independent `scanner_sandbox.landlock` and
 `scanner_sandbox.seccomp` fields report those layers separately.
 When required capabilities are missing, the reason lists their names; when a
@@ -390,7 +394,7 @@ In sandboxed mode the scanner controls the permissions and contents of its own
 leaf. After the supervisor proves the process tree exited and was reaped, the
 trusted cleanup helper verifies the pinned leaf's identity, restores its mode
 to `0700`, and removes nested entries without following symbolic links.
-Cleanup is iterative and bounded to 100,000 entries and five seconds. It then
+Cleanup is iterative and bounded to 100,000 entries and ten seconds. It then
 removes the empty leaf and namespace. If identity checks, traversal, or cleanup
 fail, the scan fails, its results do not become a successful observation or
 advance the baseline, artifacts remain, and the UID is quarantined rather than
@@ -420,9 +424,9 @@ When the scanner exits, its supervisor kills what remains in the group and
 reaps adopted descendants before returning a cleanup proof. EdgeWatch waits a
 bounded time for that proof and for the scanner's output pipes and Nmap's
 terminal to close. It fails the scan if the process tree cannot be proven gone,
-retains its temporary artifacts, and quarantines the leased identity for the
-rest of the kernel boot. It only removes scan files and releases the lease after
-the proof and cleanup succeed. The
+retains its temporary artifacts, and quarantines the leased identity while any
+process still holds its liveness reference. It only removes scan files and
+releases the lease after the proof and cleanup succeed. The
 [seccomp filter](#seccomp-filter) refuses the calls that leave a process
 group. On Linux the kernel also kills a scanner whose EdgeWatch process dies,
 and `edgewatch scan` cancels its scan when its terminal hangs up, as it does on
@@ -508,14 +512,14 @@ scanner identity pool:
 
 Then recreate the container with `docker compose up -d`. No database schema
 migration is needed; `./data` keeps its UID 0 ownership. Keep the allocator
-journal and boot marker with that data directory. A clean container restart
-with an empty journal can move to its new private PID namespace. If a scanner's
-process-tree cleanup could not be proven, its lease is quarantined for the rest
-of the kernel boot and reduces pool capacity. A container restart does not
-clear that quarantine. After a host reboot, the allocator can reset leases
-from the previous boot when the durable boot marker proves the kernel changed.
-If the marker or journal is unreadable or invalid, the pool remains fail-closed
-and needs storage recovery. Do not delete journal entries to recover capacity.
+journal and boot marker with that data directory. A quarantined identity stays
+unavailable while any process holds its liveness reference. A clean container
+restart can archive and reset the old scope after every EdgeWatch process using
+the volume has exited and the new private PID namespace is verified. Older v2
+lease state has no liveness references and may require a host reboot or the
+documented recovery command. If the marker or journal is unreadable or invalid,
+the pool remains fail-closed and needs storage recovery. Do not delete journal
+entries to recover capacity.
 
 ### What the sandbox does not cover
 
@@ -583,10 +587,13 @@ A sandboxed notification process:
   scanner process can neither signal it nor read its memory;
 - is restricted with [Landlock](#landlock), when the kernel provides it, to the
   same system files as a scanner process, without `/tmp`: it can write no file
-  at all. The [seccomp filter](#seccomp-filter) applies as it does to
-  scanners;
-- is non-dumpable for its whole run, so another process of its identity can
-  neither trace it nor read the destination URL from its memory;
+  at all. The notifier's [seccomp filter](#seccomp-filter) is installed through
+  this helper path too. Without Landlock, the notifier runs without that filter;
+  `edgewatch health` reports the Landlock and seccomp states separately;
+- calls `HardenProcess` before it reads the request from stdin, keeps the
+  destination URL out of argv and the environment, and remains non-dumpable
+  until it exits. Same-UID processes cannot trace it or read the URL from its
+  memory;
 - keeps its network access and the proxy, time zone, and certificate authority
   variables the daemon passes to it: `HTTP_PROXY`, `HTTPS_PROXY`,
   `ALL_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `TZ`, `LANG`, and

@@ -105,8 +105,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: Verify dependencies
-        run: go mod verify
       - name: Verify schema documentation
         run: ./scripts/check-schema-docs.sh
       - name: Verify pinned Naabu release
@@ -175,6 +173,8 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Browser acceptance tests
         run: npm run test:e2e
+      - name: Download and verify Go modules
+        run: go mod download && go mod verify
       - name: Check formatting
         run: test -z "$(gofmt -l cmd internal)"
       - name: Vet
@@ -239,6 +239,58 @@ jobs:
             dist/release-manifest.json
             internal/webui/dist
             release-binaries
+
+  go-rebuild:
+    name: Verify Go binaries on an npm-free runner
+    needs: [verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download the candidate and its frontend inputs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-candidate
+          path: candidate
+      - name: Install the candidate frontend assets
+        run: |
+          test -f candidate/internal/webui/dist/index.html
+          mkdir -p internal/webui/dist
+          cp -a candidate/internal/webui/dist/. internal/webui/dist/
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Download and verify Go modules
+        run: go mod download && go mod verify
+      - name: Check GoReleaser configuration
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7
+        with:
+          distribution: goreleaser
+          version: ${{ env.GORELEASER_VERSION }}
+          args: check
+      - name: Rebuild release archives without npm
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7
+        with:
+          distribution: goreleaser
+          version: ${{ env.GORELEASER_VERSION }}
+          args: release --clean --skip=publish
+        env:
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+      - name: Compare rebuilt Go binary digests
+        run: |
+          ./scripts/prepare-release-binaries.sh dist rebuilt-release-binaries
+          for arch in amd64 arm64; do
+            cmp "candidate/release-binaries/linux_${arch}/edgewatch" "rebuilt-release-binaries/linux_${arch}/edgewatch"
+            echo "linux/${arch} EdgeWatch binary matches the npm-built candidate"
+          done
 
   # Verification repeats most of CI but not all of it: the Compose policy,
   # the image smoke tests and vulnerability scans of the container job, and
@@ -318,7 +370,7 @@ jobs:
 
   binaries:
     name: Stage draft GitHub release
-    needs: [verify, ci-status]
+    needs: [verify, ci-status, go-rebuild]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

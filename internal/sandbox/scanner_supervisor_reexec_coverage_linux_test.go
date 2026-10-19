@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"os"
 	"os/exec"
@@ -175,6 +176,77 @@ func TestScannerSupervisorReexecCoverageAndFailClosedStart(t *testing.T) {
 	}
 }
 
+func TestScannerSupervisorCancellationBeforeStartedReleasesUnlaunchedIdentity(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	livenessFile := scannerLivenessTestFile(t)
+	configRead, configWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultFDs, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		_ = configRead.Close()
+		_ = configWrite.Close()
+		t.Fatal(err)
+	}
+	resultRead := os.NewFile(uintptr(resultFDs[0]), "scanner supervisor pre-launch result")
+	resultWrite := os.NewFile(uintptr(resultFDs[1]), "scanner supervisor pre-launch child result")
+	marker := filepath.Join(t.TempDir(), "scanner-started")
+	launch := scannerLaunchRequest{
+		Version: 1, Path: "/bin/sh", Args: []string{"/bin/sh", "-c", "printf started > \"$MARKER\""},
+		Env: []string{"PATH=/usr/bin:/bin", "MARKER=" + marker}, Files: 1, LivenessFD: 3,
+		UID: uint32(ScannerIdentityPoolUIDStart), GID: uint32(ScannerIdentityPoolUIDStart),
+	}
+	configuration, err := json.Marshal(launch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := &scannerSupervisorCoverageLease{}
+	implementation := &scannerSupervisorInvocation{
+		lease: lease, request: launch, config: configuration,
+		configRead: configRead, configWrite: configWrite,
+		resultRead: resultRead, resultWrite: resultWrite,
+	}
+	invocation := &ScannerInvocation{implementation: implementation}
+	args := []string{"-test.run=^TestScannerSupervisorCoverageChild$"}
+	if coverageDir := currentTestCoverageDirectory(); coverageDir != "" {
+		args = append(args, "-test.gocoverdir="+coverageDir)
+	}
+	args = append(args, "--", "--files", "1", "--request-fd", "4", "--result-fd", "5")
+	command := exec.Command(executable, args...)
+	command.Env = append(os.Environ(), scannerSupervisorCoverageChildEnv+"=1", scannerSupervisorCoverageExpectedErrorEnv+"=launch request is unavailable or too large")
+	command.ExtraFiles = []*os.File{livenessFile, configRead, resultWrite}
+	command.WaitDelay = time.Second
+	if err := command.Start(); err != nil {
+		_ = invocation.StartFailed(true)
+		t.Fatalf("start scanner supervisor: %v", err)
+	}
+	if err := invocation.Cancel(command); err != nil {
+		t.Fatal(err)
+	}
+	if err := invocation.Started(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("acknowledge canceled launch = %v, want context.Canceled", err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatalf("supervisor re-exec test process failed: %v", err)
+	}
+	if err := invocation.VerifyProcessTree(); err != nil {
+		t.Fatalf("prove no scanner child started: %v", err)
+	}
+	if err := invocation.Finish(true); err != nil {
+		t.Fatalf("release unlaunched scanner identity: %v", err)
+	}
+	if lease.releases != 1 || lease.quarantines != 0 {
+		t.Fatalf("pre-launch cancellation actions = release %d, quarantine %d; want release", lease.releases, lease.quarantines)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scanner child ran after pre-launch cancellation; marker stat error = %v", err)
+	}
+}
+
 func TestScannerSupervisorReexecRejectsMalformedControlInput(t *testing.T) {
 	validLaunch := scannerLaunchRequest{
 		Version:    1,
@@ -198,18 +270,19 @@ func TestScannerSupervisorReexecRejectsMalformedControlInput(t *testing.T) {
 	}
 
 	for _, test := range []struct {
-		name          string
-		args          []string
-		configuration []byte
-		wantError     string
+		name           string
+		args           []string
+		configuration  []byte
+		wantError      string
+		wantCleanProof bool
 	}{
 		{name: "invalid argument frame", args: []string{"--files", "0"}, wantError: "usage: sandbox-exec"},
-		{name: "empty configuration", args: []string{"--files", "1", "--request-fd", "4", "--result-fd", "5"}, wantError: "launch request is unavailable or too large"},
-		{name: "malformed JSON", args: []string{"--files", "1", "--request-fd", "4", "--result-fd", "5"}, configuration: []byte("{"), wantError: "launch request is malformed"},
-		{name: "invalid lease identity", args: []string{"--files", "1", "--request-fd", "4", "--result-fd", "5"}, configuration: wrongIdentityConfiguration, wantError: "launch request is invalid"},
+		{name: "empty configuration", args: []string{"--files", "1", "--request-fd", "4", "--result-fd", "5"}, wantError: "launch request is unavailable or too large", wantCleanProof: true},
+		{name: "malformed JSON", args: []string{"--files", "1", "--request-fd", "4", "--result-fd", "5"}, configuration: []byte("{"), wantError: "launch request is malformed", wantCleanProof: true},
+		{name: "invalid lease identity", args: []string{"--files", "1", "--request-fd", "4", "--result-fd", "5"}, configuration: wrongIdentityConfiguration, wantError: "launch request is invalid", wantCleanProof: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			runScannerSupervisorCoverageChild(t, test.args, test.configuration, test.wantError, false)
+			runScannerSupervisorCoverageChild(t, test.args, test.configuration, test.wantError, test.wantCleanProof)
 		})
 	}
 	// A valid request reaches child.Start. Rootless CI cannot change to the

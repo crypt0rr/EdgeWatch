@@ -1061,6 +1061,12 @@ func sendInProcessWithPolicyLifetime(ctx context.Context, rawURL, message string
 	if policy == nil {
 		return sendInProcess(rawURL, message)
 	}
+	// Some providers perform network work while their URL is being parsed.
+	// Check the destination first so their initialization cannot reach an
+	// excluded address before the provider transport is guarded.
+	if err := policy.check(ctx, rawURL); err != nil {
+		return err
+	}
 	service, err := (&router.ServiceRouter{}).Locate(rawURL)
 	if err != nil {
 		return err
@@ -1078,9 +1084,6 @@ func sendInProcessWithPolicyLifetime(ctx context.Context, rawURL, message string
 	}
 	if restore != nil {
 		defer restore()
-	}
-	if err := policy.check(ctx, rawURL); err != nil {
-		return err
 	}
 	// The child preflight ran through the same Resolver hook, but the SMTP
 	// classification below is about the provider's own lookup only.

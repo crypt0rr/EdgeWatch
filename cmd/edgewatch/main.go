@@ -485,9 +485,9 @@ func run(args []string) error {
 		health, err := s.System().HealthStatus(ctx)
 		// The sandbox is detected for this container, which grants the
 		// health command the daemon's capabilities and configuration.
-		scannerSandbox := sandbox.Detect(scannerSandboxOptions(cfg, *nmapPath)).Status()
+		scannerSandbox := sandbox.InspectScanner(scannerSandboxOptions(cfg, *nmapPath)).Status()
 		notificationSandbox := sandbox.Detect(notificationSandboxOptions(cfg)).Status()
-		health.Warnings = append(health.Warnings, scannerSandboxWarnings(scannerSandbox)...)
+		health.Warnings = append(health.Warnings, scannerSandboxWarnings(scannerSandbox, cfg.Scheduler.MaxConcurrent)...)
 		health.Warnings = append(health.Warnings, notificationSandboxWarnings(notificationSandbox)...)
 		// A database of an older schema cannot list its jobs by unit yet; the
 		// daemon checks the jobs once it has upgraded it.
@@ -1001,12 +1001,15 @@ func notificationSandboxOptions(cfg *config.Config) sandbox.Options {
 // while scanner processes run as UID 0. A daemon that runs as another user
 // starts scanner processes as that user, which the sandbox would not improve
 // on.
-func scannerSandboxWarnings(status sandbox.Status) []string {
+func scannerSandboxWarnings(status sandbox.Status, maxConcurrent int) []string {
 	if status.Mode != sandbox.ModeOff && status.IdentityPool != nil && status.IdentityPool.State == sandbox.StateUnavailable {
-		return []string{"scanner launches are unavailable because the per-invocation identity pool could not be enforced: " + status.IdentityPool.Reason}
+		return []string{"scanner launches are refused because the per-invocation identity pool could not be enforced: " + status.IdentityPool.Reason}
 	}
 	if status.Mode != sandbox.ModeOff && status.State == sandbox.StateUnavailable {
-		return []string{"scanner launches are unavailable: " + status.Reason}
+		return []string{"scanner launches are refused: " + status.Reason}
+	}
+	if pool := status.IdentityPool; pool != nil && pool.State == sandbox.StateEnforced && maxConcurrent > 0 && pool.Free < maxConcurrent {
+		return []string{fmt.Sprintf("scanner identity pool has %d free slots, below max_concurrent_scans=%d; stop other EdgeWatch processes using the data volume or reduce max_concurrent_scans", pool.Free, maxConcurrent)}
 	}
 	if status.Mode != sandbox.ModeOff && status.Landlock.Mode != sandbox.ModeOff && status.Landlock.State == sandbox.StateUnavailable {
 		return []string{"scanner processes start with identity isolation and seccomp but without Landlock: " + status.Landlock.Reason}
@@ -1043,12 +1046,12 @@ func logScannerSandbox(logger *slog.Logger, status sandbox.Status) {
 	switch {
 	case status.State == sandbox.StateEnforced:
 		if pool := status.IdentityPool; pool != nil {
-			logger.Info("scanner processes use per-invocation identities", "strategy", pool.Strategy, "uid_start", pool.UIDStart, "uid_end", pool.UIDEnd, "max_parallel", pool.MaxParallel, "capabilities", status.Capabilities, "no_new_privileges", status.NoNewPrivileges)
+			logger.Info("scanner processes use per-invocation identities", "strategy", pool.Strategy, "uid_start", pool.UIDStart, "uid_end", pool.UIDEnd, "max_parallel", pool.MaxParallel, "active", pool.Active, "quarantined", pool.Quarantined, "in_use_by_other_processes", pool.InUseByOtherProcesses, "free", pool.Free, "capabilities", status.Capabilities, "no_new_privileges", status.NoNewPrivileges)
 		} else {
 			logger.Info("scanner processes are sandboxed", "uid", status.UID, "gid", status.GID, "capabilities", status.Capabilities, "no_new_privileges", status.NoNewPrivileges)
 		}
 	case status.State == sandbox.StateUnavailable:
-		logger.Warn("scanner launches are unavailable; see the container hardening guide", "reason", status.Reason)
+		logger.Warn("scanner launches are refused; see the container hardening guide", "reason", status.Reason)
 	default:
 		uid, _ := processUID(status)
 		logger.Info("scanner sandbox is off; scanner processes run unconfined", "uid", uid)

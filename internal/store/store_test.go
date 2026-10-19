@@ -693,6 +693,31 @@ func TestScanResultsPagePaginatesSnapshotUnits(t *testing.T) {
 	}
 }
 
+func TestScanResultsPageUsesUnitsProjectionForLargeScan(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	units := make([]model.Unit, 65_536)
+	for i := range units {
+		units[i] = model.Unit{Target: fmt.Sprintf("192.0.%d.%d", i/256, i%256), Protocol: "tcp"}
+	}
+	results, err := json.Marshal(units)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := sqliteTimestamp(time.Now().UTC())
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scans(id,job,started_at,finished_at,status,config_hash,snapshot_json,results_json,results_unit_count,coverage_summary_json)
+		VALUES('large-results','large',?,?,'success','hash','{',?,?,'{}')`, stamp, stamp, results, len(units)); err != nil {
+		// Keep malformed legacy full evidence in the fixture: the projection
+		// endpoint must page without touching or decoding it.
+		t.Fatal(err)
+	}
+	page, err := defaultTenant(s).ListScanResultsPage(ctx, "large-results", 1, len(units)-1)
+	if err != nil || page.Total != len(units) || len(page.Items) != 1 || page.Items[0].Target != units[len(units)-1].Target {
+		t.Fatalf("large projected result page = total %d items %#v, err %v", page.Total, page.Items, err)
+	}
+}
+
 func TestScanResultsPageTreatsNullOrMissingUnitsAsEmpty(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -715,6 +740,14 @@ func TestScanResultsPageTreatsNullOrMissingUnitsAsEmpty(t *testing.T) {
 		if page.Total != 0 || len(page.Items) != 0 {
 			t.Fatalf("%s: page=%#v, want an empty result page", tc.id, page)
 		}
+	}
+	nowTime := time.Now().UTC()
+	if err := s.System().SaveScan(ctx, model.Scan{ID: "fresh-empty-projection", Job: "results", StartedAt: nowTime, FinishedAt: nowTime, Status: "failed", ConfigHash: "hash"}); err != nil {
+		t.Fatalf("save fresh scan with no units: %v", err)
+	}
+	page, err := defaultTenant(s).ListScanResultsPage(ctx, "fresh-empty-projection", 50, 0)
+	if err != nil || page.Total != 0 || len(page.Items) != 0 {
+		t.Fatalf("fresh empty results projection: page=%#v, err=%v", page, err)
 	}
 }
 

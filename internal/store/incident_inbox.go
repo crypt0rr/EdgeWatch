@@ -392,7 +392,7 @@ func (ts *TenantStore) listIncidentInboxWithSnapshotAccess(ctx context.Context, 
 	if readSnapshot == nil {
 		readDB := ts.store.reader()
 		readSnapshot = func(ctx context.Context, key incidentInboxSnapshotKey) ([]byte, error) {
-			return readIncidentInboxSnapshot(ctx, readDB, key)
+			return readIncidentInboxCoverageSummary(ctx, readDB, key)
 		}
 	}
 	if err := classifyIncidentInboxSnapshots(ctx, neededSnapshotItems, pending, readSnapshot, decodeSnapshot); err != nil {
@@ -416,12 +416,12 @@ func (ts *TenantStore) listIncidentInboxWithSnapshotAccess(ctx context.Context, 
 	return result, nil
 }
 
-// readIncidentInboxSnapshot scans one fixed identity through the shared
-// reader. QueryRow.Scan closes its rows before returning, releasing the pool
-// connection before the caller decodes the returned bytes.
-func readIncidentInboxSnapshot(ctx context.Context, db *sql.DB, key incidentInboxSnapshotKey) ([]byte, error) {
+// readIncidentInboxCoverageSummary reads only the compact immutable coverage
+// projection for one scan. QueryRow.Scan closes its rows before returning, so
+// classification never holds a shared reader while decoding evidence.
+func readIncidentInboxCoverageSummary(ctx context.Context, db *sql.DB, key incidentInboxSnapshotKey) ([]byte, error) {
 	var raw []byte
-	err := db.QueryRowContext(ctx, `SELECT snapshot_json FROM scans INDEXED BY scans_identity WHERE id=? AND tenant_id=? AND job_id=?`, key.scanID, key.tenantID, key.jobID).Scan(&raw)
+	err := db.QueryRowContext(ctx, `SELECT coverage_summary_json FROM scans INDEXED BY scans_identity WHERE id=? AND tenant_id=? AND job_id=?`, key.scanID, key.tenantID, key.jobID).Scan(&raw)
 	return raw, err
 }
 

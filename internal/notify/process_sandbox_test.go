@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/sandbox"
 )
@@ -42,14 +44,14 @@ func TestNotificationProcessStartsInTheSandbox(t *testing.T) {
 		t.Fatalf("notification process = %q, want %q", started.Args, want)
 	}
 	credential := started.SysProcAttr.Credential
-	if credential == nil || credential.Uid != sandbox.NotifierUID || credential.Gid != sandbox.NotifierGID || len(started.SysProcAttr.AmbientCaps) != 0 {
+	if credential == nil || credential.Uid != sandbox.NotifierUID || credential.Gid != sandbox.NotifierGID || len(started.SysProcAttr.AmbientCaps) != 0 || !started.SysProcAttr.Setpgid || started.SysProcAttr.Pdeathsig != syscall.SIGKILL {
 		t.Fatalf("notification process attributes = %+v", started.SysProcAttr)
 	}
 
 	// Without a policy, the process starts as before.
 	SetSandbox(nil)
 	_ = runNotificationProcess(context.Background(), "generic://127.0.0.1/hook", "test")
-	if !reflect.DeepEqual(started.Args, []string{child, "notify-send"}) || started.SysProcAttr != nil {
+	if !reflect.DeepEqual(started.Args, []string{child, "notify-send"}) || started.SysProcAttr == nil || !started.SysProcAttr.Setpgid || started.SysProcAttr.Pdeathsig != syscall.SIGKILL || started.Stdout != nil || started.Stderr != nil || started.WaitDelay != time.Second {
 		t.Fatalf("unconfined notification process = %q %+v", started.Args, started.SysProcAttr)
 	}
 }

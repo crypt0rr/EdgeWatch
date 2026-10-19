@@ -132,10 +132,15 @@ function openingTime(item: IncidentInboxItem) {
 function rowKey(item: IncidentInboxItem) {
   return item.occurrence_token
 }
-function reviewViewStatus(review: IncidentReview, now = Date.now()) {
+function reviewViewStatus(review: IncidentReview, now = Date.now()): IncidentInboxItem['view_status'] {
   if (review.status === 'needs_review') return 'needs_review'
   if (review.follow_up_at && Date.parse(review.follow_up_at) <= now) return 'follow_up_due'
   return 'investigating'
+}
+function withCurrentReviewStatus(item: IncidentInboxItem, now: number): IncidentInboxItem {
+  if (item.view_status === 'follow_up_due') return item
+  const viewStatus = reviewViewStatus(item.review, now)
+  return viewStatus === item.view_status ? item : { ...item, view_status: viewStatus }
 }
 const maxDueRefreshAttempts = 3
 const dueRefreshSafetyMarginMs = 250
@@ -264,7 +269,8 @@ export function Incidents() {
   const hasConflictRefresh = !!conflictRefresh
   const refreshedSnapshot = conflictRefresh?.status === 'found' && selectedSnapshot?.occurrence_token === selectedOccurrence ? selectedSnapshot : undefined
   const staleSelectedRow = !!refreshedSnapshot && !!selectedRow && refreshedSnapshot.review.revision !== selectedRow.review.revision
-  const evidenceItem = refreshedSnapshot ?? selectedRow ?? (selectedSnapshot?.occurrence_token === selectedOccurrence ? selectedSnapshot : undefined)
+  const savedSnapshotAhead = !!selectedSnapshot && selectedSnapshot.occurrence_token === selectedOccurrence && !!selectedRow && selectedSnapshot.review.revision > selectedRow.review.revision
+  const evidenceItem = refreshedSnapshot ?? (savedSnapshotAhead ? selectedSnapshot : selectedRow ?? (selectedSnapshot?.occurrence_token === selectedOccurrence ? selectedSnapshot : undefined))
   const selectionOutOfResults = !!selectedOccurrence && incidents.isSuccess && (!selectedRow || staleSelectedRow)
   const activeCount = incidents.data?.active_count ?? incidents.data?.pagination.total ?? 0
   const selectedJobUnavailable = !!jobID && !!jobs.data && !jobs.data.jobs.some(job => job.id === jobID)
@@ -444,7 +450,8 @@ export function Incidents() {
         </select></label>
       </div>
       {jobs.error && <ErrorNotice message="Could not load job filters. You can still filter by view, severity, and change kind." onRetry={() => jobs.refetch()} />}
-      {incidents.isLoading ? <div className="skeleton-list" aria-label="Loading incidents" /> : incidents.error ? <ErrorNotice message="Could not load investigation inbox items." onRetry={() => incidents.refetch()} /> : <>
+      {incidents.isLoading && !incidents.data ? <div className="skeleton-list" aria-label="Loading incidents" /> : incidents.error && !incidents.data ? <ErrorNotice message="Could not load investigation inbox items." onRetry={() => incidents.refetch()} /> : <>
+        {incidents.error && incidents.data && <div className="notice warning" role="status"><span>Could not refresh the investigation inbox. Showing the last loaded results.</span><button className="text-button" type="button" onClick={() => void incidents.refetch()}>Retry refresh</button></div>}
         {incidents.data?.truncated && <p className="notice" role="status">The server limited this result. Narrow the filters to review the matching incidents.</p>}
         <p className="incident-inbox-result-count">{incidents.data?.pagination.total ?? 0} matching incident{incidents.data?.pagination.total === 1 ? '' : 's'} · sorted by severity, opening time, then stable tie-breakers</p>
     {exactLookup && <p className="notice" role="status">Showing the exact refreshed occurrence for {selectedJobUnavailable ? 'the selected job' : jobs.data?.jobs.find(job => job.id === jobID)?.job.name ?? 'the selected job'}.</p>}
@@ -454,9 +461,9 @@ export function Incidents() {
               <div className="table-card inbox-table-card">
                 <div className="inbox-desktop-table"><table>
                   <thead><tr><th scope="col">Review state</th><th scope="col">Severity</th><th scope="col">Job</th><th scope="col">Target</th><th scope="col">Change</th><th scope="col">Opened</th><th scope="col">Evidence</th></tr></thead>
-                  <tbody>{rows.map(item => <IncidentTableRow key={rowKey(item)} item={item} selected={selectedOccurrence === item.occurrence_token} onOpen={selectOccurrence} />)}</tbody>
+                  <tbody>{rows.map(item => <IncidentTableRow key={rowKey(item)} item={withCurrentReviewStatus(item, estimatedServerNow)} selected={selectedOccurrence === item.occurrence_token} onOpen={selectOccurrence} />)}</tbody>
                 </table></div>
-                <div className="inbox-mobile-list" aria-label="Active incidents">{rows.map(item => <IncidentCard key={rowKey(item)} item={item} selected={selectedOccurrence === item.occurrence_token} onOpen={selectOccurrence} />)}</div>
+                <div className="inbox-mobile-list" aria-label="Active incidents">{rows.map(item => <IncidentCard key={rowKey(item)} item={withCurrentReviewStatus(item, estimatedServerNow)} selected={selectedOccurrence === item.occurrence_token} onOpen={selectOccurrence} />)}</div>
               </div>
               <Pagination page={incidents.data?.pagination} onChange={changePage} label="Investigation inbox pagination" />
             </> : incidents.data?.pagination.total ? <><div className="inline-empty">No incidents on this page.</div><Pagination page={incidents.data.pagination} onChange={changePage} label="Investigation inbox pagination" /></> : <Empty icon={<ClipboardList />} title="No matching incidents" body={view === 'needs_review' ? 'New confirmed changes will appear here for review.' : 'Change the view or filters to see other active incidents.'} />}
@@ -639,14 +646,14 @@ function ReviewEditor({ item, readOnly, draft: draftSnapshot, onDraftChange, con
     {readOnly && <p className="incident-context-notice">Review fields are read-only because this occurrence is outside the current results.</p>}
     {conflict && <div className="incident-review-conflict" role="status"><strong>Latest saved review</strong><p>Status: {item.review.status === 'investigating' ? 'Investigating' : 'Needs review'} · Revision {item.review.revision}{item.review.reviewer_label ? ` · ${item.review.reviewer_label}` : ''}{item.review.reviewed_at ? ` · ${safeTime(item.review.reviewed_at)}` : ''}</p><p>Shared note:</p>{item.review.note ? <blockquote>{item.review.note}</blockquote> : <p>No saved note.</p>}<p>Follow-up: {item.review.follow_up_at ? followUpTime(item.review.follow_up_at) : 'None'}</p><p>Your draft remains based on revision {draftBaseRevision}. Rebase keeps your edits and changes the revision used when you save.</p><button className="button secondary" type="button" disabled={readOnly || saving} onClick={rebaseDraft}>Rebase my draft to revision {item.review.revision}</button></div>}
     {draft.rebasedToRevision === item.review.revision && <p className="success-message" role="status">Your draft is based on revision {item.review.revision}. Save it to share your changes.</p>}
-    <label>Review status<select disabled={readOnly} value={status} onChange={event => { const value = event.target.value as IncidentReviewUpdate['status']; patchDraft(value === 'needs_review' ? { status: value, dueLocal: '', ambiguousChoice: '' } : { status: value }) }}>
+    <label>Review status<select disabled={readOnly || saving} value={status} onChange={event => { const value = event.target.value as IncidentReviewUpdate['status']; patchDraft(value === 'needs_review' ? { status: value, dueLocal: '', ambiguousChoice: '' } : { status: value }) }}>
       <option value="needs_review">Needs review</option><option value="investigating">Investigating</option>
     </select></label>
-    <label>Shared reviewer note<textarea disabled={readOnly} value={note} rows={4} onChange={event => patchDraft({ note: event.target.value })} aria-describedby="incident-note-help incident-note-count" /></label>
+    <label>Shared reviewer note<textarea disabled={readOnly || saving} value={note} rows={4} onChange={event => patchDraft({ note: event.target.value })} aria-describedby="incident-note-help incident-note-count" /></label>
     <div className="incident-note-meta"><small id="incident-note-help">Plain text shared with other reviewers. Maximum {maxNoteBytes} UTF-8 bytes.</small><small id="incident-note-count" aria-live="polite" className={bytes > maxNoteBytes ? 'over-limit' : ''}>{bytes} / {maxNoteBytes} bytes</small></div>
-    <label>Optional follow-up time <span className="incident-timezone-label">({timezone})</span><input type="datetime-local" value={dueLocal} disabled={readOnly || status === 'needs_review'} onChange={event => patchDraft({ dueLocal: event.target.value, ambiguousChoice: '' })} aria-describedby="incident-follow-up-help incident-follow-up-feedback" /></label>
+    <label>Optional follow-up time <span className="incident-timezone-label">({timezone})</span><input type="datetime-local" value={dueLocal} disabled={readOnly || saving || status === 'needs_review'} onChange={event => patchDraft({ dueLocal: event.target.value, ambiguousChoice: '' })} aria-describedby="incident-follow-up-help incident-follow-up-feedback" /></label>
     <small id="incident-follow-up-help">Enter local wall time in {timezone}. Past times are allowed; future times are limited to 30 days. Returning to Needs review clears the follow-up and keeps the note.</small>
-    {dueCandidates.length > 1 && <label>Choose the matching local-time occurrence<select disabled={readOnly} value={selectedDue} onChange={event => patchDraft({ ambiguousChoice: event.target.value })}>
+    {dueCandidates.length > 1 && <label>Choose the matching local-time occurrence<select disabled={readOnly || saving} value={selectedDue} onChange={event => patchDraft({ ambiguousChoice: event.target.value })}>
       <option value="">Choose UTC offset</option>{dueCandidates.map(candidate => <option key={candidate} value={candidate}>{formatDateTime(candidate, { dateStyle: 'medium', timeStyle: 'short' })} · {incidentTimeOffset(candidate, timezone)} ({candidate})</option>)}
     </select></label>}
     <div id="incident-follow-up-feedback" className="incident-follow-up-feedback" aria-live="polite">

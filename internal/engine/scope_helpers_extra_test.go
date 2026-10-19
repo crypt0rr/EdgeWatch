@@ -1,6 +1,10 @@
 package engine
 
 import (
+	"fmt"
+	"math/rand"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/model"
@@ -66,4 +70,128 @@ func TestScopeHelpersAndScopeChangeMerge(t *testing.T) {
 	if len(unitMap(merged)) != 1 {
 		t.Fatalf("unit map = %#v", unitMap(merged))
 	}
+}
+
+func TestScopeChangeIndexedMergeMatchesLinearReference(t *testing.T) {
+	rng := rand.New(rand.NewSource(81423))
+	for iteration := 0; iteration < 200; iteration++ {
+		old := randomScopeMergeSnapshot(rng)
+		candidate := randomScopeMergeSnapshot(rng)
+		got := mergeForScopeChange(old, candidate)
+		want := mergeForScopeChangeLinear(old, candidate)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("indexed merge differs from linear reference at iteration %d:\n got %#v\nwant %#v", iteration, got, want)
+		}
+	}
+}
+
+func randomScopeMergeSnapshot(rng *rand.Rand) model.Snapshot {
+	protocols := []string{"tcp", "udp"}
+	snapshot := model.Snapshot{DNS: map[string][]string{}}
+	for targetIndex := 0; targetIndex < 8; targetIndex++ {
+		target := fmt.Sprintf("edge-%d.example", targetIndex)
+		for protocolIndex, protocol := range protocols {
+			if rng.Intn(3) != 0 {
+				continue
+			}
+			start := rng.Intn(24) + 1
+			end := start + rng.Intn(8)
+			snapshot.Scopes = append(snapshot.Scopes, model.Scope{Target: target, Protocol: protocol, Ports: fmt.Sprintf("%d-%d", start, end), ServiceDetection: rng.Intn(2) == 0})
+			if rng.Intn(4) == 0 {
+				// Overlapping ranges exercise the scope groups and their OR
+				// semantics, including different service-detection flags.
+				snapshot.Scopes = append(snapshot.Scopes, model.Scope{Target: target, Protocol: protocol, Ports: fmt.Sprintf("%d-%d", max(1, start-2), min(32, end+2)), ServiceDetection: rng.Intn(2) == 0})
+			}
+			ports := make([]model.PortState, 0, 5)
+			for portIndex := 0; portIndex < 5; portIndex++ {
+				port := rng.Intn(32) + 1
+				service := ""
+				if rng.Intn(2) == 0 {
+					service = fmt.Sprintf("service-%d-%d", iterationPort(targetIndex, protocolIndex), port)
+				}
+				ports = append(ports, model.PortState{Port: port, State: []string{"open", "closed", "filtered"}[rng.Intn(3)], Service: service})
+			}
+			snapshot.Units = append(snapshot.Units, model.Unit{Target: target, Protocol: protocol, Ports: ports})
+		}
+		if rng.Intn(2) == 0 {
+			snapshot.DNS[target] = []string{fmt.Sprintf("192.0.2.%d", targetIndex+1)}
+		}
+	}
+	return snapshot
+}
+
+func iterationPort(targetIndex, protocolIndex int) int { return targetIndex*2 + protocolIndex }
+
+func mergeForScopeChangeLinear(old, candidate model.Snapshot) model.Snapshot {
+	result := cloneSnapshot(candidate)
+	oldUnits := unitMap(old)
+	candidateUnits := unitMap(candidate)
+	for key, cu := range candidateUnits {
+		parts := strings.Split(key, "\x00")
+		target, protocol := parts[0], parts[1]
+		ou, oldExists := oldUnits[key]
+		ports := map[int]model.PortState{}
+		for _, port := range cu.Ports {
+			if scopeAllows(candidate, target, protocol, port.Port, false) {
+				if !scopeAllows(candidate, target, protocol, port.Port, true) {
+					port.Service = ""
+				}
+				ports[port.Port] = port
+			}
+		}
+		if oldExists {
+			for _, port := range ou.Ports {
+				if !scopeAllows(candidate, target, protocol, port.Port, false) {
+					continue
+				}
+				if !scopeAllows(candidate, target, protocol, port.Port, true) {
+					port.Service = ""
+				}
+				if current, exists := ports[port.Port]; exists {
+					if current.Service == "" && port.Service != "" && scopeAllows(candidate, target, protocol, port.Port, true) {
+						current.Service = port.Service
+						ports[port.Port] = current
+					}
+				} else {
+					ports[port.Port] = port
+				}
+			}
+		}
+		cu.Ports = nil
+		for _, port := range ports {
+			cu.Ports = append(cu.Ports, port)
+		}
+		candidateUnits[key] = cu
+	}
+	for key, oldUnit := range oldUnits {
+		if _, exists := candidateUnits[key]; exists {
+			continue
+		}
+		parts := strings.Split(key, "\x00")
+		target, protocol := parts[0], parts[1]
+		if !hasTarget(candidate, target) || !scopeAllowsProtocol(candidate, target, protocol) {
+			continue
+		}
+		mergedUnit := oldUnit
+		mergedUnit.Ports = nil
+		for _, port := range oldUnit.Ports {
+			if !scopeAllows(candidate, target, protocol, port.Port, false) {
+				continue
+			}
+			if !scopeAllows(candidate, target, protocol, port.Port, true) {
+				port.Service = ""
+			}
+			mergedUnit.Ports = append(mergedUnit.Ports, port)
+		}
+		if addresses := result.DNS[target]; len(addresses) > 0 {
+			mergedUnit.Addresses = append([]string(nil), addresses...)
+		}
+		candidateUnits[key] = mergedUnit
+	}
+	result.Units = nil
+	for _, unit := range candidateUnits {
+		result.Units = append(result.Units, unit)
+	}
+	result.Normalize()
+	return result
 }

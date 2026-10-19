@@ -24,7 +24,7 @@ func TestMigrationDDLChecksExistingColumnsStructurally(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := execMigrationStatement(tx, "ALTER TABLE sample ADD COLUMN value TEXT NOT NULL"); err != nil {
+	if err := execMigrationStatement(context.Background(), tx, "ALTER TABLE sample ADD COLUMN value TEXT NOT NULL"); err != nil {
 		t.Fatalf("existing column should be skipped structurally: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -35,7 +35,7 @@ func TestMigrationDDLChecksExistingColumnsStructurally(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := execMigrationStatement(tx, "ALTER TABLE missing ADD COLUMN value TEXT"); err == nil {
+	if err := execMigrationStatement(context.Background(), tx, "ALTER TABLE missing ADD COLUMN value TEXT"); err == nil {
 		t.Fatal("missing-table migration error was suppressed")
 	}
 	_ = tx.Rollback()

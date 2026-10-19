@@ -104,10 +104,119 @@ func probeName(probe Probe) string {
 
 func init() {
 	detectPlatform = func(options Options) *Policy { return detect(options, systemEnvironment()) }
+	inspectScannerSandbox = inspectScanner
 	confineProcess = confineLinux
 	nameCapability = linuxCapabilityName
 	execRestricted = execLandlocked
 	hardenProcess = hardenLinux
+}
+
+func inspectScanner(options Options) *Policy {
+	return inspectScannerWith(options, systemEnvironment(), func(ctx context.Context) (*ScannerIdentityPoolStatus, error) {
+		return productionScannerIdentityAllocator().inspect(ctx)
+	})
+}
+
+func inspectScannerWith(options Options, env environment, inspectPool func(context.Context) (*ScannerIdentityPoolStatus, error)) *Policy {
+	mode := normalizedMode(options.Mode)
+	landlockMode := normalizedMode(options.Landlock)
+	status := Status{Mode: mode, IdentityPool: scannerIdentityPoolStatus(StateUnavailable, "scanner identity pool has not been inspected"), Landlock: LandlockStatus{Mode: landlockMode}, Seccomp: SeccompStatus{}}
+	policy := &Policy{profile: Scanner, status: status}
+	if mode == ModeOff {
+		policy.status.State = StateDisabled
+		policy.status.Reason = "scanner.sandbox is off"
+		policy.status.ProcessUID = uidPointer(os.Geteuid())
+		policy.status.IdentityPool = scannerIdentityPoolStatus(StateDisabled, "scanner.sandbox is off")
+		policy.status.Landlock = LandlockStatus{Mode: landlockMode, State: StateDisabled, Reason: "scanner.sandbox is off"}
+		policy.status.Seccomp = SeccompStatus{State: StateDisabled, Reason: "scanner.sandbox is off"}
+		return policy
+	}
+	// Report kernel support independently from identity isolation. The health
+	// inspection can read these facts without starting a scanner probe, even
+	// when the daemon cannot lease scanner identities.
+	policy.status.Seccomp = SeccompStatus{State: StateEnforced}
+	if env.seccompErr != nil {
+		policy.status.Seccomp = SeccompStatus{State: StateUnavailable, Reason: seccompUnavailableReason(env.seccompErr)}
+	} else if env.executableErr != nil {
+		policy.status.Seccomp = SeccompStatus{State: StateUnavailable, Reason: "the EdgeWatch executable cannot install the required scanner seccomp filter"}
+	}
+	if landlockMode == ModeOff {
+		policy.status.Landlock = LandlockStatus{Mode: landlockMode, State: StateDisabled, Reason: "scanner.landlock is off"}
+	} else {
+		policy.status.Landlock = LandlockStatus{Mode: landlockMode, State: StateUnavailable, Reason: "scanner identity isolation is unavailable"}
+	}
+	unavailable := func(reason string) *Policy {
+		policy.status.State = StateUnavailable
+		policy.status.Reason = reason
+		return policy
+	}
+	if !ValidMode(mode) {
+		return unavailable("scanner.sandbox must be auto, required, or off")
+	}
+	if env.euid != 0 {
+		policy.status.IdentityPool = scannerIdentityPoolStatus(StateUnavailable, scannerIdentityRootUnavailableReason(env.euid))
+		return unavailable(policy.status.IdentityPool.Reason)
+	}
+	if env.identityRangeErr != nil {
+		policy.status.IdentityPool = scannerIdentityPoolStatus(StateUnavailable, scannerIdentityRangeUnavailableReason(env.identityRangeErr))
+		return unavailable(policy.status.IdentityPool.Reason)
+	}
+	if env.capErr != nil {
+		policy.status.IdentityPool = scannerIdentityPoolStatus(StateUnavailable, "the daemon's capabilities could not be verified; check the container runtime's capability settings")
+		return unavailable(policy.status.IdentityPool.Reason)
+	}
+	var missing []string
+	for _, capability := range controlCapabilities {
+		if env.effective&(1<<capability) == 0 {
+			missing = append(missing, capabilityName(capability))
+		}
+	}
+	if len(missing) > 0 {
+		reason := fmt.Sprintf("the container does not grant %s, which EdgeWatch needs to start and stop scanner processes under leased identities; add them to cap_add", strings.Join(missing, ", "))
+		policy.status.IdentityPool = scannerIdentityPoolStatus(StateUnavailable, reason)
+		return unavailable(reason)
+	}
+	if inspectPool == nil {
+		return unavailable("the scanner identity pool could not be inspected")
+	}
+	inspectCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	pool, poolErr := inspectPool(inspectCtx)
+	cancel()
+	if poolErr != nil {
+		reason := scannerIdentityProbeUnavailableReason(poolErr)
+		policy.status.IdentityPool = scannerIdentityPoolStatus(StateUnavailable, reason)
+		return unavailable(reason)
+	}
+	policy.status.IdentityPool = pool
+	policy.status.NoNewPrivileges = env.noNewPrivs
+	for _, capability := range networkCapabilities {
+		if env.permitted&(1<<capability) != 0 {
+			policy.status.Capabilities = append(policy.status.Capabilities, capabilityName(capability))
+		}
+	}
+	if policy.status.Seccomp.State != StateEnforced {
+		if landlockMode != ModeOff {
+			policy.status.Landlock = LandlockStatus{Mode: landlockMode, State: StateUnavailable, Reason: "scanner seccomp isolation is unavailable"}
+		}
+		return unavailable(policy.status.Seccomp.Reason)
+	}
+	if landlockMode == ModeOff {
+		policy.status.Landlock = LandlockStatus{Mode: landlockMode, State: StateDisabled, Reason: "scanner.landlock is off"}
+	} else if !ValidMode(landlockMode) {
+		policy.status.Landlock = LandlockStatus{Mode: landlockMode, State: StateUnavailable, Reason: fmt.Sprintf("scanner.landlock %q is not auto, required, or off", landlockMode)}
+		if mode == ModeRequired || landlockMode == ModeRequired {
+			return unavailable(policy.status.Landlock.Reason)
+		}
+	} else if env.landlockErr != nil {
+		policy.status.Landlock = LandlockStatus{Mode: landlockMode, State: StateUnavailable, Reason: landlockUnavailableReason(env.landlockErr)}
+		if mode == ModeRequired || landlockMode == ModeRequired {
+			return unavailable(policy.status.Landlock.Reason)
+		}
+	} else {
+		policy.status.Landlock = LandlockStatus{Mode: landlockMode, State: StateEnforced, ABI: env.landlockABI}
+	}
+	policy.status.State = StateEnforced
+	return policy
 }
 
 // hardenLinux limits ordinary core-file output, excludes memory mappings from
@@ -290,14 +399,40 @@ func scannerIdentityRangeUnavailableReason(err error) string {
 }
 
 func scannerIdentityProbeUnavailableReason(err error) string {
-	// detectIdentity calls this only after the probe returns a non-nil error.
+	if err == nil {
+		return "the scanner identity probe could not start under a leased identity; check the allocator state, UID/GID mappings, and SETUID, SETGID, and KILL capabilities"
+	}
+	if errors.Is(err, errScannerIdentityPoolExhausted) {
+		return err.Error()
+	}
 	switch err.Error() {
-	case "scanner identity allocator: PID namespace changed with unsafe or occupied scope":
-		return "the scanner identity allocator could not verify an empty prior scope after a PID namespace change; stop other EdgeWatch processes using the data volume and preserve the lease journal and boot marker. For pre-v3 lease state, a host reboot may be needed before the allocator can prove prior-boot processes are gone; do not delete or edit state files"
 	case "scanner identity allocator: PID namespace changed without exclusive private-scope proof":
 		return "the scanner identity allocator could not prove the previous private scope safe after a PID namespace change; ensure the supported private scanner runtime is active, stop all other EdgeWatch processes and containers using the data volume so inherited liveness references close, then retry. The v3 allocator can archive and reset the prior scope once it proves exclusivity; preserve the journal and boot marker and do not delete or edit state files"
 	}
+	// Only the exact refusal above is actionable. A malformed lookalike can
+	// include paths or other untrusted text containing "journal"; keep that
+	// failure generic instead of classifying it as a durable-state problem.
+	if strings.Contains(err.Error(), "PID namespace changed without exclusive private-scope proof") {
+		return "the scanner identity probe could not start under a leased identity; check the allocator state, UID/GID mappings, and SETUID, SETGID, and KILL capabilities"
+	}
+	if strings.Contains(err.Error(), "UID/GID") || strings.Contains(err.Error(), "UID map") || strings.Contains(err.Error(), "GID map") {
+		return "the scanner identity allocator could not use its configured UID/GID range; check that the full scanner identity range is mapped in the container"
+	}
+	if strings.Contains(err.Error(), "journal") || strings.Contains(err.Error(), "boot marker") || strings.Contains(err.Error(), "allocator lock") {
+		return "the scanner identity allocator could not verify its durable lease state; preserve the journal and boot marker, stop other EdgeWatch processes using the data volume, and inspect the scanner identity state before retrying"
+	}
 	return "the scanner identity probe could not start under a leased identity; check the allocator state, UID/GID mappings, and SETUID, SETGID, and KILL capabilities"
+}
+
+func scannerIdentityRuntimeUnavailableReason(err error) string {
+	if err == nil {
+		return "the scanner identity runtime scope could not be retained"
+	}
+	reason := scannerIdentityProbeUnavailableReason(err)
+	if reason != "the scanner identity probe could not start under a leased identity; check the allocator state, UID/GID mappings, and SETUID, SETGID, and KILL capabilities" {
+		return reason
+	}
+	return "the scanner identity runtime scope could not be retained; check the configured UID/GID mapping, scanner identity state, and SETUID, SETGID, and KILL capabilities"
 }
 
 func scannerSeccompProbeUnavailableReason(err error) string {
@@ -354,7 +489,7 @@ func detectIdentity(profile Profile, mode string, status Status, probe Probe, en
 		// scanner lease that survives the probe; missing control capabilities
 		// still prevent scanner identity probes and scanner launches below.
 		if err := env.ensureScannerRuntime(); err != nil {
-			return unavailable(fmt.Sprintf("the scanner identity runtime scope could not be retained: %v", err))
+			return unavailable(scannerIdentityRuntimeUnavailableReason(err))
 		}
 	}
 	var missing []string

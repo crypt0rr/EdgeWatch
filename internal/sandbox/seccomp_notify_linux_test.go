@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -197,7 +198,15 @@ func TestSeccompNotificationListenerSendAndProbeRejectInvalidContracts(t *testin
 	if err := sendSeccompNotificationListener(1<<20, int(listener.Fd())); err == nil {
 		t.Fatal("closed listener channel was accepted")
 	}
-	for _, args := range [][]string{nil, {"--wrong", "3"}, {"--control-fd", "4"}, {"--control-fd", "3", "extra"}} {
+	for _, args := range [][]string{
+		nil,
+		{"--wrong", "3"},
+		{"--control-fd", "4"},
+		{"--control-fd", "3", "extra"},
+		{"--control-fd", "3", "--wrong", "4"},
+		{"--control-fd", "3", "--requests", "0"},
+		{"--control-fd", "3", "--requests", strconv.Itoa(seccompNotificationLimit + 1)},
+	} {
 		if err := execSeccompNotificationProbe(args); err == nil {
 			t.Fatalf("probe args %q were accepted", args)
 		}
@@ -213,6 +222,97 @@ func TestSeccompNotificationProbeRequiresAsyncPreemptionOff(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "async preemption to be disabled") {
 		t.Fatalf("probe without its required runtime setting = %v, want async-preemption refusal", err)
 	}
+}
+
+func TestSeccompNotificationBrokerServes128SequentialRequestsWithin100msOfUnfiltered(t *testing.T) {
+	if err := seccompNotificationSupport(); err != nil {
+		t.Skipf("kernel seccomp notification support is unavailable: %v", err)
+	}
+	const requestCount = 128
+	unfilteredStart := time.Now()
+	for count := 0; count < requestCount; count++ {
+		fd, err := unix.Socket(unix.AF_UNIX, seccompNotificationSocketType, 0)
+		if err != nil {
+			t.Fatalf("unfiltered socket request %d: %v", count+1, err)
+		}
+		if err := unix.Close(fd); err != nil {
+			t.Fatalf("close unfiltered socket request %d: %v", count+1, err)
+		}
+	}
+	unfilteredElapsed := time.Since(unfilteredStart)
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := os.NewFile(uintptr(pair[0]), "sequential notification test parent")
+	childSocket := os.NewFile(uintptr(pair[1]), "sequential notification test child")
+	if err := unix.SetsockoptInt(pair[0], unix.SOL_SOCKET, unix.SO_PASSCRED, 1); err != nil {
+		_ = parent.Close()
+		_ = childSocket.Close()
+		t.Fatal(err)
+	}
+	command := exec.Command(executable, ExecCommand, seccompNotificationProbeFlag,
+		"--control-fd", strconv.Itoa(seccompNotificationControlFD), "--requests", strconv.Itoa(requestCount))
+	command.Env = []string{"GODEBUG=" + seccompNotificationProbeGODEBUG}
+	command.Dir = "/"
+	command.ExtraFiles = []*os.File{childSocket}
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	if err := command.Start(); err != nil {
+		_ = parent.Close()
+		_ = childSocket.Close()
+		t.Fatalf("start sequential notification probe: %v", err)
+	}
+	_ = childSocket.Close()
+	waited := false
+	t.Cleanup(func() {
+		_ = parent.Close()
+		if !waited {
+			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+			_ = command.Wait()
+		}
+	})
+	listenerFD, err := receiveSeccompNotificationListener(pair[0], command.Process.Pid,
+		uint32(os.Geteuid()), uint32(os.Getegid()), scannerSupervisorTimeout)
+	if err != nil {
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		_ = command.Wait()
+		waited = true
+		t.Fatalf("receive sequential notification listener: %v", err)
+	}
+	defer unix.Close(listenerFD)
+	broker := &seccompNotificationBroker{listenerFD: listenerFD}
+	started := time.Now()
+	deadline := started.Add(scannerSupervisorTimeout)
+	for served := 0; served < requestCount; {
+		if time.Now().After(deadline) {
+			t.Fatalf("served %d of %d sequential notifications before timeout", served, requestCount)
+		}
+		ready, err := broker.waitAndServeOne()
+		if err != nil {
+			t.Fatalf("serve sequential notification %d: %v", served+1, err)
+		}
+		if ready {
+			served++
+		}
+	}
+	filteredElapsed := time.Since(started)
+	if delta := filteredElapsed - unfilteredElapsed; delta > 100*time.Millisecond {
+		t.Fatalf("128 sequential brokered socket requests took %s versus %s unfiltered (delta %s), want at most 100ms overhead",
+			filteredElapsed, unfilteredElapsed, delta)
+	}
+	if broker.served != requestCount {
+		t.Fatalf("broker served %d requests, want %d", broker.served, requestCount)
+	}
+	if err := command.Wait(); err != nil {
+		waited = true
+		t.Fatalf("sequential notification probe failed after %d requests: %v", requestCount, err)
+	}
+	waited = true
 }
 
 func TestSeccompNotificationProbeCleansUpInvalidBrokerFactory(t *testing.T) {

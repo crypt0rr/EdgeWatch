@@ -51,7 +51,8 @@ func TestBeginDeliveryAttemptRechecksActiveWindowAfterClaim(t *testing.T) {
 	if err := s.DB.QueryRowContext(ctx, `SELECT change_window_id,attempt_started_at,claim_token,next_at,attempts,deferrals FROM outbox WHERE id=?`, item.ID).Scan(&linked, &startedAt, &claim, &nextAt, &attempts, &deferrals); err != nil {
 		t.Fatal(err)
 	}
-	if linked != window.ID || startedAt != "" || claim != "" || nextAt != window.EndAt.Format(time.RFC3339Nano) || attempts != 0 || deferrals != 0 {
+	wantNextAt := window.EndAt.Add(ChangeWindowSummaryDestinationGrace).Format(time.RFC3339Nano)
+	if linked != window.ID || startedAt != "" || claim != "" || nextAt != wantNextAt || attempts != 0 || deferrals != 0 {
 		t.Fatalf("held row linked=%q started=%q claim=%q next=%q attempts=%d deferrals=%d", linked, startedAt, claim, nextAt, attempts, deferrals)
 	}
 	if countRows(t, s.DB, `SELECT COUNT(*) FROM change_window_events WHERE window_id=? AND event_type='changes-detected'`, window.ID) != 1 {
@@ -284,7 +285,7 @@ func TestProviderSuccessAfterWindowEndSurvivesDelayedExpiry(t *testing.T) {
 	}
 }
 
-func TestReleaseDeliveryClaimsUsesExactWindowIntervalForStartedAttempts(t *testing.T) {
+func TestReleaseDeliveryClaimsUsesWindowAndSummaryGraceForStartedAttempts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	for _, tc := range []struct {
@@ -293,7 +294,7 @@ func TestReleaseDeliveryClaimsUsesExactWindowIntervalForStartedAttempts(t *testi
 		wantMarker bool
 	}{
 		{name: "active window retains unknown outcome", endOffset: time.Hour, wantMarker: true},
-		{name: "expired unclosed window retries", endOffset: -time.Second},
+		{name: "expired unclosed window retries after summary grace", endOffset: -ChangeWindowSummaryDestinationGrace - time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := openTestStoreWithContext(ctx, t)

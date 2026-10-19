@@ -10,16 +10,17 @@
 // Scanner invocations instead use a UID/GID pair leased from a bounded pool,
 // with no supplementary groups. The pool gives concurrent scans separate
 // filesystem identities; the seccomp filter prevents descendants from
-// escaping their process group. Scanner processes hold only the container's
-// NET_RAW and, when granted, NET_ADMIN capabilities. Private scanner files
-// are passed as inherited descriptors.
+// escaping their process group. Nmap holds only NET_RAW, Naabu SYN holds
+// NET_RAW and, when granted, NET_ADMIN, and Naabu connect holds neither.
+// Private scanner files are passed as inherited descriptors.
 //
 // Failure to establish the leased identity or seccomp filter prevents a scan
 // from starting, including in auto mode. Landlock is independently optional
 // in auto mode. The explicit scanner.sandbox off mode disables all scanner
 // isolation. A trusted supervisor keeps the identity lease until it proves
 // the scanner process tree is gone and private artifact cleanup succeeds;
-// otherwise the lease is quarantined.
+// otherwise the lease is quarantined while its liveness reference remains
+// held. A clean container restart can recover it after every prior holder exits.
 package sandbox
 
 import (
@@ -48,6 +49,12 @@ const (
 	StateEnforced    = "enforced"
 	StateDisabled    = "disabled"
 	StateUnavailable = "unavailable"
+	StateUnknown     = "unknown"
+)
+
+const (
+	scannerCAPNetAdmin = uintptr(12)
+	scannerCAPNetRaw   = uintptr(13)
 )
 
 // UID and GID are the legacy scanner identity and the fixed notification
@@ -167,8 +174,8 @@ type Status struct {
 	// identity. It is omitted for scanner status because there is no single
 	// process UID across per-invocation leases.
 	ProcessUID *int `json:"process_uid,omitempty"`
-	// IdentityPool describes the scanner's fixed per-invocation identity
-	// strategy. It does not report current free or quarantined leases.
+	// IdentityPool describes the scanner's per-invocation identity strategy
+	// and current pool counts when the status came from read-only inspection.
 	IdentityPool *ScannerIdentityPoolStatus `json:"identity_pool,omitempty"`
 	// Capabilities are the capabilities a confined process keeps.
 	Capabilities []string `json:"capabilities,omitempty"`
@@ -193,7 +200,8 @@ type Status struct {
 }
 
 // ScannerIdentityPoolStatus describes the bounded scanner identity pool.
-// MaxParallel is the pool's fixed capacity; it is not a live free-slot count.
+// MaxParallel is the fixed capacity; the other counts are a live, read-only
+// inspection of the journal and current UID use.
 type ScannerIdentityPoolStatus struct {
 	// State is enforced, disabled, or unavailable.
 	State string `json:"state"`
@@ -204,6 +212,13 @@ type ScannerIdentityPoolStatus struct {
 	UIDEnd   int `json:"uid_end"`
 	// MaxParallel is the maximum number of simultaneous scanner leases.
 	MaxParallel int `json:"max_parallel"`
+	// Active and Quarantined are durable scanner leases in the journal.
+	Active      int `json:"active"`
+	Quarantined int `json:"quarantined"`
+	// InUseByOtherProcesses counts pool identities occupied by a process
+	// without a journal lease; Free counts identities available to acquire.
+	InUseByOtherProcesses int `json:"in_use_by_other_processes"`
+	Free                  int `json:"free"`
 	// Reason explains a disabled or unavailable pool.
 	Reason string `json:"reason,omitempty"`
 }
@@ -214,6 +229,22 @@ func scannerIdentityPoolStatus(state, reason string) *ScannerIdentityPoolStatus 
 		UIDStart: ScannerIdentityPoolUIDStart, UIDEnd: ScannerIdentityPoolUIDEnd,
 		MaxParallel: ScannerIdentityPoolCapacity, Reason: reason,
 	}
+}
+
+var inspectScannerIdentityPool = unavailableScannerIdentityPool
+
+func unavailableScannerIdentityPool(context.Context) (*ScannerIdentityPoolStatus, error) {
+	return scannerIdentityPoolStatus(StateUnavailable, "scanner identity pool inspection requires Linux"), errors.New("scanner identity pool inspection requires Linux")
+}
+
+// InspectScannerIdentityPool reads the durable pool journal and current UID
+// census under the allocator lock. It never leases an identity or changes
+// scanner scope state, so health checks cannot consume pool capacity.
+func InspectScannerIdentityPool(ctx context.Context) (*ScannerIdentityPoolStatus, error) {
+	if ctx == nil {
+		return scannerIdentityPoolStatus(StateUnavailable, "scanner identity pool inspection context is nil"), errors.New("scanner identity pool inspection context is nil")
+	}
+	return inspectScannerIdentityPool(ctx)
 }
 
 func uidPointer(uid int) *int { return &uid }
@@ -293,6 +324,7 @@ type Probe struct {
 // Exec fails.
 var (
 	detectPlatform              func(options Options) *Policy
+	inspectScannerSandbox       func(options Options) *Policy
 	confineProcess              func(cmd *exec.Cmd, uid, gid int, ambient []uintptr)
 	nameCapability              func(capability uintptr) string
 	execRestricted              func(args []string) error
@@ -389,6 +421,26 @@ func (policy *Policy) WithScannerIdentityReservation(reservation *ScannerIdentit
 		}
 	}
 	copied.identityReservation = reservation
+	return &copied
+}
+
+// WithScannerNetworkCapabilities returns a scanner policy copy limited to
+// the packet capabilities required by one invocation. Nmap needs NET_RAW;
+// Naabu SYN scans need both NET_RAW and NET_ADMIN, while connect scans need
+// neither. It does not change the policy used for other invocations.
+func (policy *Policy) WithScannerNetworkCapabilities(allowNetRaw, allowNetAdmin bool) *Policy {
+	if policy == nil || policy.profileName() != Scanner {
+		return policy
+	}
+	copied := *policy
+	copied.status.Capabilities = nil
+	copied.ambient = nil
+	for _, capability := range policy.ambient {
+		if (allowNetRaw && capability == scannerCAPNetRaw) || (allowNetAdmin && capability == scannerCAPNetAdmin) {
+			copied.ambient = append(copied.ambient, capability)
+			copied.status.Capabilities = append(copied.status.Capabilities, capabilityName(capability))
+		}
+	}
 	return &copied
 }
 
@@ -576,6 +628,31 @@ func Detect(options Options) *Policy {
 		status.Landlock.State, status.Landlock.Reason = StateDisabled, spec.landlockSetting+" is off"
 	}
 	return &Policy{profile: options.Profile, status: status}
+}
+
+// InspectScanner reports scanner confinement using read-only runtime checks.
+// Unlike Detect, it starts no scanner probe and takes no identity lease, so a
+// healthcheck cannot consume a pool slot if it is killed.
+func InspectScanner(options Options) *Policy {
+	options.Profile = Scanner
+	options.Mode = normalizedMode(options.Mode)
+	options.Landlock = normalizedMode(options.Landlock)
+	if inspectScannerSandbox != nil {
+		return inspectScannerSandbox(options)
+	}
+	return inspectScannerFallback(options)
+}
+
+func inspectScannerFallback(options Options) *Policy {
+	status := Status{Mode: options.Mode, State: StateUnavailable, Reason: "scanner sandbox inspection requires Linux", IdentityPool: scannerIdentityPoolStatus(StateUnavailable, "scanner identity leases require Linux"), Landlock: LandlockStatus{Mode: options.Landlock, State: StateUnavailable, Reason: "Landlock requires Linux"}, Seccomp: SeccompStatus{State: StateUnavailable, Reason: "scanner seccomp requires Linux"}}
+	if options.Mode == ModeOff {
+		status.State = StateDisabled
+		status.IdentityPool.State = StateDisabled
+		status.ProcessUID = uidPointer(os.Geteuid())
+		status.Landlock = LandlockStatus{Mode: options.Landlock, State: StateDisabled, Reason: "scanner.sandbox is off"}
+		status.Seccomp = SeccompStatus{State: StateDisabled, Reason: "scanner.sandbox is off"}
+	}
+	return &Policy{profile: Scanner, status: status}
 }
 
 // Exec runs the sandbox-exec command: it restricts its own process with

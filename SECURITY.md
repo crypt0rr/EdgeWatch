@@ -207,7 +207,7 @@ leased UID/GID. The scanner controls its leaf's permissions and contents;
 after the supervisor proves the process tree
 exited and was reaped, the trusted cleaner validates the pinned identity,
 restores mode `0700`, and iteratively removes entries without following
-symlinks, with limits of 100,000 entries and five seconds. A cleanup or proof
+symlinks, with limits of 100,000 entries and ten seconds. A cleanup or proof
 failure retains artifacts and quarantines the UID. A setup failure before any
 supervised scanner process starts releases its unused lease; after process
 start, a lease is released only after descendant reaping and cleanup are
@@ -236,10 +236,11 @@ mapping and a configured piped core handler may still be invoked and receive
 core metadata; `RLIMIT_CORE` does not limit piped handlers.
 
 `scanner_sandbox.identity_pool` in `edgewatch health` reports the pool's
-`per_invocation` strategy, fixed UID range, 64-lease capacity, and availability
-reason when present. The capacity is not an active/free/quarantined count. The
-scanner status does not expose one `process_uid`, `uid`, or `gid` because
-concurrent invocations have different identities. Its `seccomp` and
+`per_invocation` strategy, fixed UID range and 64-lease capacity, active and
+quarantined leases, identities in use by unleased processes, and free slots.
+The capacity is fixed; the other counts describe current use. The scanner
+status does not expose one `process_uid`, `uid`, or `gid` because concurrent
+invocations have different identities. Its `seccomp` and
 `landlock` fields report those controls independently. The notification child
 process, which receives one destination URL, runs in a sandbox of its own with
 `notifications.sandbox: auto`: as UID and GID 65531 without capabilities,
@@ -887,7 +888,7 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 74 must not be opened by an older EdgeWatch
+database upgraded to schema 75 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
@@ -962,7 +963,13 @@ Schema 74 adds a scalar job-runtime projection for scheduled probe-budget
 skips and an index for rows awaiting the copy. The daemon backfills in
 restartable batches of 250 from validated legacy runtime JSON; malformed or
 oversized values become empty markers. It does not rewrite scan history,
-runtime snapshots, or baselines.
+runtime snapshots, or baselines. Schema 75 adds separate projections for scan
+unit results and compact coverage status. Coverage omits port inventories and
+service evidence; the immutable full snapshot remains unchanged. Startup
+backfills one scan per restartable transaction, leaving malformed legacy
+snapshots untouched and marking their projections empty. An older release must
+not open the upgraded database; rollback requires the complete pre-upgrade
+backup.
 Only the daemon migrates, and only one process at a time: from v0.36.0 the
 daemon holds an advisory lock on the database directory, which restores take
 too, from before it opens the database until migration and startup finish and

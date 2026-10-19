@@ -731,6 +731,21 @@ func (ss *SystemStore) FinalizeManagedScanWithOptions(ctx context.Context, scan 
 		var cycleStatus string
 		cycleErr := tx.QueryRowContext(ctx, `SELECT baseline_epoch,status FROM scan_cycles WHERE id=?`, scan.CycleID).Scan(&cycleEpoch, &cycleStatus)
 		if cycleErr == nil {
+			if cycleStatus == "completed" && (scan.Status == "success" || scan.Status == "incomplete") {
+				var promoted int
+				if err := tx.QueryRowContext(ctx, scanCycleHasScanSystemQuery, scan.CycleID).Scan(&promoted); err != nil {
+					return nil, err
+				}
+				if promoted != 0 {
+					if err := releaseManagedScanLeaseTx(ctx, tx, jobID, options.LeaseOwner); err != nil {
+						return nil, err
+					}
+					if err := tx.Commit(); err != nil {
+						return nil, err
+					}
+					return nil, ErrCycleNotResumable
+				}
+			}
 			var currentEpoch int64
 			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(baseline_epoch,0) FROM job_runtime_meta WHERE job_id=?`, jobID).Scan(&currentEpoch); err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return nil, err
@@ -888,7 +903,11 @@ func (ss *SystemStore) beginManagedScanFinalization(ctx context.Context, jobID s
 				if changed, rowsErr := result.RowsAffected(); rowsErr != nil {
 					err = rowsErr
 				} else if changed == 0 {
-					_, err = tx.ExecContext(waitCtx, `UPDATE jobs SET id=id WHERE id=?`, jobID)
+					_ = tx.Rollback()
+					_ = conn.Close()
+					cancelWait()
+					cancelTxLifetime()
+					return nil, nil, nil, ErrJobLeaseLost
 				}
 			}
 		} else {

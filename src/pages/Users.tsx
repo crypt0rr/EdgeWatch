@@ -54,6 +54,7 @@ export function Users() {
   const editState = useServerDraft<UserEditFields, UserEditFields, number>(editServer, editRevision, {
     controlled: { snapshot: editSnapshot, onChange: setEditSnapshot },
   })
+  const editRemoved = !!editTarget && !!users.data && !users.data.users.some(value => value.id === editTarget.userID)
   const editDraft = editTarget ? {
     ...editTarget,
     ...editState.draft,
@@ -87,8 +88,24 @@ export function Users() {
   // Revocation, disablement, and role changes invalidate outstanding
   // one-time links, so the page stops offering the affected link for copying.
   function dropToken(userID: string) { setIssued(current => current?.userID === userID ? null : current) }
+  function discardRemovedEditDraft() {
+    setPrompt(null)
+    setEditTarget(null)
+    setEditSnapshot(null)
+    setError('')
+    setMessage('Removed account draft discarded.')
+  }
+  function reviewRemovedEditDraft() {
+    if (!editTarget) return
+    setError('')
+    setPrompt({ action: 'edit', userID: editTarget.userID, username: editTarget.username, label: `Edit account for ${editTarget.username}` })
+  }
   async function confirmAction(secret: string) {
     if (!prompt) return
+    if (prompt.action === 'edit' && editRemoved) {
+      discardRemovedEditDraft()
+      return
+    }
     setMessage('')
     setError('')
     try {
@@ -150,10 +167,7 @@ export function Users() {
             const refreshed = await listUsers()
             client.setQueryData(['users'], refreshed)
             if (!refreshed.users.some(value => value.id === prompt.userID)) {
-              setPrompt(null)
-              setEditTarget(null)
-              setEditSnapshot(null)
-              setError('This account was removed in another session.')
+              setError('This account was removed elsewhere. Your draft is still here, but it cannot be saved. Choose Discard draft to remove it.')
             } else {
               setError('This account changed in another session. Your edits are kept on their original revision; keep your edits or load the latest account.')
             }
@@ -194,7 +208,9 @@ export function Users() {
   }
   const roleChangeNeedsPassword = prompt?.action === 'edit' && editDraft?.role !== editServer.role
   const promptDescription = prompt?.action === 'edit'
-    ? `Review the display name and role for ${prompt.username}. Changing this account’s role requires your administrator password.${roleChangeNeedsPassword ? ` It also revokes any outstanding ${editDraft?.pending ? 'activation' : 'password reset'} link.` : ''}`
+    ? editRemoved
+      ? `This account was removed elsewhere. Your draft is retained here, but it can no longer be saved. Choose Discard draft to remove it.`
+      : `Review the display name and role for ${prompt.username}. Changing this account’s role requires your administrator password.${roleChangeNeedsPassword ? ` It also revokes any outstanding ${editDraft?.pending ? 'activation' : 'password reset'} link.` : ''}`
     : prompt?.action === 'toggle'
       ? `Confirm the account change for ${prompt.username}. Enter your administrator password to authorize it.`
       : prompt?.action === 'renew'
@@ -202,11 +218,20 @@ export function Users() {
         : prompt?.action === 'sessions'
           ? `${prompt.username} is signed out on every device. Its password, authenticator, and links do not change. Enter your administrator password to authorize it.`
           : `Revoke the outstanding activation or password reset link for ${prompt?.username ?? 'this account'}. Enter your administrator password to authorize the change.`
-  function cancelPrompt() { setPrompt(null); setEditTarget(null); setEditSnapshot(null); setError('') }
+  function cancelPrompt() {
+    const keepingRemovedDraft = editRemoved && prompt?.action === 'edit'
+    setPrompt(null)
+    setError('')
+    if (!keepingRemovedDraft) {
+      setEditTarget(null)
+      setEditSnapshot(null)
+    }
+  }
   return <section className="page">
     <div className="page-heading"><div><p className="eyebrow">Administration</p><h1>Users</h1><p className="muted">Invite operators and viewers without sharing passwords.</p></div><UsersIcon className="muted-icon" size={24} /></div>
     {message && <div className="success-banner" role="status">{message}</div>}
     {error && <div className="form-error banner" role="alert">{error}</div>}
+    {editRemoved && !prompt && <div className="notice warning" role="status"><span>This account was removed elsewhere. Your draft is kept on this page, but it cannot be saved. Review it or choose Discard draft to remove it.</span><button type="button" className="text-button" onClick={reviewRemovedEditDraft}>Review draft</button><button type="button" className="text-button" onClick={discardRemovedEditDraft}>Discard draft</button></div>}
     <div className="settings-grid">
       <div className="panel">
         <div className="panel-heading"><div><h2>Invite user</h2><p className="muted">The user chooses their own Argon2id password.</p></div><UserPlus className="muted-icon" size={20} /></div>
@@ -239,6 +264,6 @@ export function Users() {
         })}</div> : <div className="inline-empty">No users have been configured yet.</div>}
       </div>
     </div>
-    {prompt && <ActionDialog title={prompt.label} description={promptDescription} confirmLabel={prompt.action === 'edit' ? 'Save changes' : prompt.action === 'sessions' ? 'Revoke sessions' : 'Confirm'} valueLabel={prompt.action === 'edit' ? roleChangeNeedsPassword ? 'Administrator password' : undefined : 'Administrator password'} valueType="password" valueRequired={prompt.action !== 'edit' || !!roleChangeNeedsPassword} autoComplete="current-password" destructive={prompt.action === 'revoke' || prompt.action === 'sessions' || prompt.label.startsWith('Disable ')} restoreFocus={prompt.action !== 'renew'} onConfirm={confirmAction} onCancel={cancelPrompt} error={error}>{prompt.action === 'edit' && editDraft && <><label>Display name<input value={editDraft.displayName} maxLength={80} onChange={event => editState.setDraft(value => ({ ...value, displayName: event.target.value }))} /></label><label>Role<select value={editDraft.role} onChange={event => editState.setDraft(value => ({ ...value, role: event.target.value as Role }))}><option value="viewer" disabled={editDraft.userID === session.data?.user_id}>Viewer · read only</option><option value="operator" disabled={editDraft.userID === session.data?.user_id}>Operator · manage scans</option><option value="administrator">Administrator · full access</option></select>{editDraft.userID === session.data?.user_id && <small>You cannot change your own administrator role.</small>}</label>{editState.remoteChanged && <div className="notice warning" role="status"><span>This account changed elsewhere. Your edits still use revision {editState.baseRevision}; the latest account is revision {editRevision}.</span><button type="button" className="text-button" onClick={() => { editState.rebase(editRevision); setError('Your account edits now use the latest revision. Review the values and save again.') }}>Keep my edits</button><button type="button" className="text-button" onClick={() => { editState.adopt(); setError('Latest account loaded.') }}>Load theirs</button></div>}</>}</ActionDialog>}
+    {prompt && <ActionDialog title={prompt.label} description={promptDescription} confirmLabel={prompt.action === 'edit' ? editRemoved ? 'Discard draft' : 'Save changes' : prompt.action === 'sessions' ? 'Revoke sessions' : 'Confirm'} valueLabel={prompt.action === 'edit' ? !editRemoved && roleChangeNeedsPassword ? 'Administrator password' : undefined : 'Administrator password'} valueType="password" valueRequired={prompt.action !== 'edit' || (!editRemoved && !!roleChangeNeedsPassword)} autoComplete="current-password" destructive={editRemoved || prompt.action === 'revoke' || prompt.action === 'sessions' || prompt.label.startsWith('Disable ')} restoreFocus={prompt.action !== 'renew'} onConfirm={confirmAction} onCancel={cancelPrompt} error={error}>{prompt.action === 'edit' && editDraft && <><label>Display name<input value={editDraft.displayName} maxLength={80} disabled={editRemoved} onChange={event => editState.setDraft(value => ({ ...value, displayName: event.target.value }))} /></label><label>Role<select value={editDraft.role} disabled={editRemoved} onChange={event => editState.setDraft(value => ({ ...value, role: event.target.value as Role }))}><option value="viewer" disabled={editDraft.userID === session.data?.user_id}>Viewer · read only</option><option value="operator" disabled={editDraft.userID === session.data?.user_id}>Operator · manage scans</option><option value="administrator">Administrator · full access</option></select>{editDraft.userID === session.data?.user_id && <small>You cannot change your own administrator role.</small>}</label>{editState.remoteChanged && !editRemoved && <div className="notice warning" role="status"><span>This account changed elsewhere. Your edits still use revision {editState.baseRevision}; the latest account is revision {editRevision}.</span><button type="button" className="text-button" onClick={() => { editState.rebase(editRevision); setError('Your account edits now use the latest revision. Review the values and save again.') }}>Keep my edits</button><button type="button" className="text-button" onClick={() => { editState.adopt(); setError('Latest account loaded.') }}>Load theirs</button></div>}</>}</ActionDialog>}
   </section>
 }

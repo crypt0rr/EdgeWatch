@@ -441,6 +441,37 @@ describe('user administration', () => {
     await waitFor(() => expect(updateUser).toHaveBeenLastCalledWith('user-2', { display_name: 'My account name', role: 'viewer', revision: 5, password: 'administrator-password' }))
   })
 
+  it('keeps a removed account draft after conflict until the administrator discards it', async () => {
+    vi.mocked(listUsers)
+      .mockResolvedValueOnce({ users: [user, pending] })
+      .mockResolvedValueOnce({ users: [pending] })
+    vi.mocked(updateUser).mockRejectedValueOnce(new APIError('stale', 'conflict'))
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
+
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Edit account' }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Display name'), { target: { value: 'My unsaved account name' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(within(dialog).getByRole('alert')).toHaveTextContent('Your draft is still here, but it cannot be saved.'))
+    expect(within(dialog).getByLabelText('Display name')).toHaveValue('My unsaved account name')
+    expect(within(dialog).getByLabelText('Display name')).toBeDisabled()
+    expect(within(dialog).getByRole('button', { name: 'Discard draft' })).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Role')).toBeDisabled()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    const retainedDraft = screen.getByRole('status')
+    expect(retainedDraft).toHaveTextContent('Your draft is kept on this page')
+    fireEvent.click(within(retainedDraft).getByRole('button', { name: 'Review draft' }))
+    const reopenedDialog = screen.getByRole('dialog')
+    expect(within(reopenedDialog).getByLabelText('Display name')).toHaveValue('My unsaved account name')
+    fireEvent.click(within(reopenedDialog).getByRole('button', { name: 'Discard draft' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(screen.getByRole('status')).toHaveTextContent('Removed account draft discarded.')
+  })
+
   it('clears an old action error when the dialog is cancelled and another account is opened', async () => {
     vi.mocked(updateUser).mockRejectedValueOnce(new Error('Incorrect administrator password.'))
     renderWithProviders(<Users />)

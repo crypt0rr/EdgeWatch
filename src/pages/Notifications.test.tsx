@@ -5,10 +5,12 @@ import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  APIError,
   getSession,
   listNotificationDestinations,
   toggleNotificationSecurityAlert,
   toggleNotificationUpdateAlert,
+  updateNotificationDestination,
   updateIncidentReminders,
 } from '../api'
 import { Notifications } from './Notifications'
@@ -17,6 +19,11 @@ import { defaultUnitScope } from '../test/test-utils'
 vi.mock('../api', () => ({
   APIError: class APIError extends Error {
     details?: Record<string, unknown>
+    code?: string
+    constructor(message: string, code?: string) {
+      super(message)
+      this.code = code
+    }
   },
   createNotificationDestination: vi.fn(),
   deleteNotificationDestination: vi.fn(),
@@ -190,6 +197,41 @@ describe('notification update-alert routing', () => {
     await vi.waitFor(() => expect(container.textContent).toContain('Could not load notification destinations'), { timeout: 1000 })
     expect(container.querySelector('.notification-update-toggle')).toBeNull()
     expect(toggleNotificationUpdateAlert).not.toHaveBeenCalled()
+  })
+
+  it('keeps a removed destination draft after conflict until the administrator discards it', async () => {
+    const latest = { ...response(false, []), destinations: [destinations[1]] }
+    vi.mocked(listNotificationDestinations).mockResolvedValueOnce(response(false, [])).mockResolvedValueOnce(latest)
+    vi.mocked(updateNotificationDestination).mockRejectedValueOnce(new APIError('stale', 'conflict'))
+    await renderPage()
+
+    const operations = container.querySelector('.notification-row') as HTMLElement
+    const editButton = Array.from(operations.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Edit') as HTMLButtonElement
+    act(() => editButton.click())
+    const form = operations.querySelector('form.notification-edit') as HTMLFormElement
+    const nameInput = form.querySelector('label input') as HTMLInputElement
+    setInputValue(nameInput, 'Unsaved destination name')
+    await act(async () => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+      await Promise.resolve()
+    })
+
+    const dialog = document.body.querySelector('[role="dialog"]') as HTMLElement
+    setInputValue(dialog.querySelector('input[type="password"]') as HTMLInputElement, 'fixture-password')
+    await act(async () => {
+      ;(dialog.querySelector('button[type="submit"]') as HTMLButtonElement).click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    await vi.waitFor(() => expect(container.querySelector('.notification-panel-feedback[role="status"]')?.textContent).toContain('Your draft is still here, but it cannot be saved.'), { timeout: 1000 })
+    expect(updateNotificationDestination).toHaveBeenCalledWith('dest-1', 1, 'Unsaved destination name', 'fixture-password', { enabled: true })
+    expect(container.querySelectorAll('.notification-row')).toHaveLength(1)
+    expect(container.querySelector('.notification-panel-feedback')).not.toHaveTextContent('Unsaved destination name')
+    expect(container.querySelector('.notification-panel-feedback button')).toHaveTextContent('Discard draft')
+
+    act(() => (container.querySelector('.notification-panel-feedback button') as HTMLButtonElement).click())
+    expect(container.querySelector('.notification-panel-feedback[role="status"]')).toBeNull()
   })
 
   it('leaves the toggle unchanged when password confirmation is cancelled', async () => {

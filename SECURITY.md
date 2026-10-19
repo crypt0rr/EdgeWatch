@@ -207,7 +207,7 @@ leased UID/GID. The scanner controls its leaf's permissions and contents;
 after the supervisor proves the process tree
 exited and was reaped, the trusted cleaner validates the pinned identity,
 restores mode `0700`, and iteratively removes entries without following
-symlinks, with limits of 100,000 entries and five seconds. A cleanup or proof
+symlinks, with limits of 100,000 entries and ten seconds. A cleanup or proof
 failure retains artifacts and quarantines the UID. A setup failure before any
 supervised scanner process starts releases its unused lease; after process
 start, a lease is released only after descendant reaping and cleanup are

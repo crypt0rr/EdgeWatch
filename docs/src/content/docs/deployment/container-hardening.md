@@ -394,7 +394,7 @@ In sandboxed mode the scanner controls the permissions and contents of its own
 leaf. After the supervisor proves the process tree exited and was reaped, the
 trusted cleanup helper verifies the pinned leaf's identity, restores its mode
 to `0700`, and removes nested entries without following symbolic links.
-Cleanup is iterative and bounded to 100,000 entries and five seconds. It then
+Cleanup is iterative and bounded to 100,000 entries and ten seconds. It then
 removes the empty leaf and namespace. If identity checks, traversal, or cleanup
 fail, the scan fails, its results do not become a successful observation or
 advance the baseline, artifacts remain, and the UID is quarantined rather than

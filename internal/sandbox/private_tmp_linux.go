@@ -37,7 +37,7 @@ const (
 	privateTemporaryCreateMagic      = "EWTMP002"
 	privateTemporaryMessageMax       = 256
 	privateTemporaryStartupTimeout   = 5 * time.Second
-	privateTemporaryCleanupTimeout   = 5 * time.Second
+	privateTemporaryCleanupTimeout   = 10 * time.Second
 	privateTemporaryCleanupEntries   = 100000
 )
 
@@ -1557,10 +1557,6 @@ func removePrivateDirectoryContents(fd int, device uint64, owner, group uint32, 
 			}
 			popped := *frame
 			parentExpected := stack[len(stack)-2].stat
-			var childCurrent unix.Stat_t
-			if err := unix.Fstat(int(current.Fd()), &childCurrent); err != nil || !sameObject(&popped.stat, &childCurrent) || childCurrent.Mode != popped.stat.Mode || uint64(childCurrent.Dev) != device || childCurrent.Uid != owner || childCurrent.Gid != group {
-				return errors.New("private temporary subdirectory changed during cleanup")
-			}
 			parentFD, err := unix.Openat(int(current.Fd()), "..", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 			if err != nil {
 				return errors.New("open private temporary parent failed")
@@ -1601,19 +1597,35 @@ func removePrivateDirectoryContents(fd int, device uint64, owner, group uint32, 
 			return errors.New("private temporary directory contains an invalid entry")
 		}
 		var item unix.Stat_t
-		if err := unix.Fstatat(int(current.Fd()), name, &item, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return errors.New("inspect private temporary entry failed")
+		entryType := entry.Type() & os.ModeType
+		isDirectory := entryType == os.ModeDir
+		if !isDirectory {
+			if err := unix.Fstatat(int(current.Fd()), name, &item, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+				return errors.New("inspect private temporary entry failed")
+			}
+			if uint64(item.Dev) != device || item.Uid != owner || item.Gid != group {
+				return errors.New("private temporary entry ownership changed")
+			}
+			isDirectory = item.Mode&unix.S_IFMT == unix.S_IFDIR
 		}
-		if uint64(item.Dev) != device || item.Uid != owner || item.Gid != group {
-			return errors.New("private temporary entry ownership changed")
-		}
-		if item.Mode&unix.S_IFMT == unix.S_IFDIR {
+		if isDirectory {
 			pinned, err := unix.Openat(int(current.Fd()), name, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 			if err != nil {
 				return errors.New("pin private temporary subdirectory failed")
 			}
 			opened := item
-			if err := normalizePrivateTemporaryDirectory(pinned, &opened, device, owner, group); err != nil {
+			if entryType == os.ModeDir {
+				if err := unix.Fstat(pinned, &opened); err != nil || uint64(opened.Dev) != device || opened.Uid != owner || opened.Gid != group || opened.Mode&unix.S_IFMT != unix.S_IFDIR {
+					_ = unix.Close(pinned)
+					return errors.New("private temporary subdirectory identity changed")
+				}
+				if opened.Mode != unix.S_IFDIR|privateScannerTemporaryMode {
+					if err := normalizePrivateTemporaryDirectory(pinned, &opened, device, owner, group); err != nil {
+						_ = unix.Close(pinned)
+						return err
+					}
+				}
+			} else if err := normalizePrivateTemporaryDirectory(pinned, &opened, device, owner, group); err != nil {
 				_ = unix.Close(pinned)
 				return err
 			}
@@ -1626,13 +1638,8 @@ func removePrivateDirectoryContents(fd int, device uint64, owner, group uint32, 
 				_ = unix.Close(child)
 				return errors.New("close pinned private temporary subdirectory failed")
 			}
-			var readable unix.Stat_t
-			if err := unix.Fstat(child, &readable); err != nil || !sameObject(&opened, &readable) || readable.Mode != unix.S_IFDIR|privateScannerTemporaryMode {
-				_ = unix.Close(child)
-				return errors.New("private temporary subdirectory changed while opening")
-			}
 			var named unix.Stat_t
-			if err := unix.Fstatat(int(current.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&readable, &named) || named.Mode != unix.S_IFDIR|privateScannerTemporaryMode || uint64(named.Dev) != device || named.Uid != owner || named.Gid != group {
+			if err := unix.Fstatat(int(current.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameObject(&opened, &named) || named.Mode != opened.Mode || opened.Mode != unix.S_IFDIR|privateScannerTemporaryMode || uint64(named.Dev) != device || named.Uid != owner || named.Gid != group {
 				_ = unix.Close(child)
 				return errors.New("private temporary subdirectory changed while opening")
 			}
@@ -1647,7 +1654,7 @@ func removePrivateDirectoryContents(fd int, device uint64, owner, group uint32, 
 				return errors.New("close private temporary parent failed")
 			}
 			current = childFile
-			stack = append(stack, privateTemporaryCleanupFrame{name: name, stat: readable})
+			stack = append(stack, privateTemporaryCleanupFrame{name: name, stat: opened})
 			continue
 		}
 		var currentStat unix.Stat_t

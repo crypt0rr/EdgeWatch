@@ -793,6 +793,8 @@ def main():
         name, url = args
         request(base, state, "POST", "/notifications/destinations", {"name": name, "url": url, "enabled": True, "password": PASSWORD})
         print(json.dumps(request(base, state, "POST", "/notifications/test")))
+    elif command == "scanner-sandbox":
+        print(json.dumps(request(base, state, "GET", "/status").get("scanner_sandbox") or {}))
     elif command == "diagnose":
         status = request(base, state, "GET", "/status")
         sandbox = status.get("scanner_sandbox") or {}
@@ -1766,15 +1768,21 @@ daemon_mounts=(--volume "$workdir/identity-incompatible-nmap:/usr/bin/nmap:ro"
   --volume "$workdir/nmap-identity-control:/opt/edgewatch-nmap-control:ro")
 daemon_landlock=auto
 run_daemon nmap-identity-control-failure auto "${bundled_caps[@]}"
-expect_health "unavailable - - landlock:unavailable seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
+# The standalone health command inspects the container without running the
+# daemon's configured Nmap compatibility probe. Its result therefore remains
+# the runtime state even when the daemon refuses scanner launches.
+expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"
 docker exec "$container" test -f /tmp/edgewatch-nmap-identity-control-ran ||
   fail "the identity+seccomp Nmap control was not attempted"
-control_reason=$(docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml --output json |
-  python3 -c 'import json, sys; print(json.load(sys.stdin)["scanner_sandbox"].get("reason", ""))')
+control_sandbox=$(python3 "$workdir/driver.py" scanner-sandbox "$base" "$state")
+control_state=$(printf '%s' "$control_sandbox" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("state", ""))')
+control_reason=$(printf '%s' "$control_sandbox" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("reason", ""))')
+[[ "$control_state" == "unavailable" ]] ||
+  fail "the daemon status reports scanner state '$control_state', want unavailable"
 [[ "$control_reason" == *"nmap could not start with the required identity and seccomp policy"* ]] ||
-  fail "health did not report the sanitized Nmap identity+seccomp control failure"
+  fail "daemon status did not report the sanitized Nmap identity+seccomp control failure"
 [[ "$control_reason" != *"permission denied"* && "$control_reason" != *"private-marker"* ]] ||
-  fail "health exposed raw Nmap probe diagnostics: $control_reason"
+  fail "daemon status exposed raw Nmap probe diagnostics: $control_reason"
 stop_daemon
 daemon_mounts=()
 

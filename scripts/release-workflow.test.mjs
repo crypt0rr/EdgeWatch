@@ -1424,6 +1424,12 @@ test('scanner sandbox verification selects the live Nmap scan and pins it while 
   assert.match(scannerSandboxVerifier,
     /def create_job\(base, state, name, tcp_ports, udp_ports, timing, service_detection=False\):[\s\S]*?"service_detection": service_detection/,
     'the sandbox driver can enable service evidence for marker scans')
+  assert.match(scannerSandboxVerifier,
+    /elif command == "scanner-sandbox":[\s\S]*?request\(base, state, "GET", "\/status"\)/,
+    'the sandbox verifier can read the daemon-reported scanner policy')
+  assert.match(scannerSandboxVerifier,
+    /expect_health "enforced - NET_RAW landlock:enforced seccomp:enforced limits:- pool:enforced,per_invocation,60000-60063,64"[\s\S]*?control_sandbox=\$\(python3 "\$workdir\/driver.py" scanner-sandbox/,
+    'read-only health checks runtime confinement while daemon status checks its Nmap probe result')
   const markerScan = /def scan_marker\([\s\S]*?\n\ndef create_naabu_job/.exec(scannerSandboxVerifier)?.[0]
   assert.ok(markerScan, 'the sandbox verifier has a dedicated XML marker scan')
   assert.match(markerScan, /create_job\([^)]*service_detection=True\)/,

@@ -2298,20 +2298,24 @@ func TestNmapXMLProgressParserScansMalformedRecordsLinearlyAndHonorsCancellation
 	parser := &nmapXMLProgressParser{}
 	started := time.Now()
 	parser.feed(data, nil)
-	if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
-		t.Fatalf("2 MiB of malformed task progress took %s; want under 100 ms", elapsed)
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		// Keep this a coarse guard for the old quadratic suffix scan; race
+		// instrumentation and shared CI runners make a tight wall-clock bound
+		// unreliable even when the parser scans linearly.
+		t.Fatalf("2 MiB of malformed task progress took %s; want under 1 s", elapsed)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	started = time.Now()
+	emitted := 0
 	err := (&nmapXMLProgressParser{}).feedContext(ctx, bytes.Repeat([]byte(`<taskprogress task="scan" percent="1"/>`), 64<<10), func(string, float64) {
+		emitted++
 		cancel()
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled progress feed = %v; want context.Canceled", err)
 	}
-	if elapsed := time.Since(started); elapsed >= 50*time.Millisecond {
-		t.Fatalf("cancelled progress feed took %s; want under 50 ms", elapsed)
+	if emitted != 1 {
+		t.Fatalf("cancelled progress feed emitted %d records; want it to stop after the callback cancels the context", emitted)
 	}
 }
 

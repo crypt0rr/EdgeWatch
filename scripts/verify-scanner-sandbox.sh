@@ -618,10 +618,10 @@ def save(path, state):
         json.dump(state, handle)
 
 
-def create_job(base, state, name, tcp_ports, udp_ports, timing):
+def create_job(base, state, name, tcp_ports, udp_ports, timing, service_detection=False):
     job = {
         "name": name, "schedule": "0 0 1 1 *", "timezone": "UTC", "targets": ["127.0.0.1"],
-        "tcp": {"ports": tcp_ports, "mode": "syn", "service_detection": False, "engine": "nmap"},
+        "tcp": {"ports": tcp_ports, "mode": "syn", "service_detection": service_detection, "engine": "nmap"},
         "assume_alive": True, "timing": timing, "timeout": "10m", "baseline_samples": 1,
         "change_confirmations": 1, "enabled": True, "notification_destinations": [],
     }
@@ -631,7 +631,7 @@ def create_job(base, state, name, tcp_ports, udp_ports, timing):
 
 
 def scan_marker(base, state, name, expected):
-    job_id = create_job(base, state, name, "80", "", "fast")
+    job_id = create_job(base, state, name, "80", "", "fast", service_detection=True)
     request(base, state, "POST", f"/jobs/{job_id}/run")
     scan = wait_for_scan(base, state, job_id, {"success", "incomplete", "failed", "timed_out", "canceled"})
     if scan["status"] != "success":

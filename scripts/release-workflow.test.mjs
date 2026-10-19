@@ -1421,6 +1421,13 @@ test('scanner sandbox verification selects the live Nmap scan and pins it while 
     'the verifier checks Nmap resource limits from its live process')
   assert.match(scannerSandboxVerifier, /^expect_scanner_limits Naabu /m,
     'the verifier checks Naabu resource limits from its live process')
+  assert.match(scannerSandboxVerifier,
+    /def create_job\(base, state, name, tcp_ports, udp_ports, timing, service_detection=False\):[\s\S]*?"service_detection": service_detection/,
+    'the sandbox driver can enable service evidence for marker scans')
+  const markerScan = /def scan_marker\([\s\S]*?\n\ndef create_naabu_job/.exec(scannerSandboxVerifier)?.[0]
+  assert.ok(markerScan, 'the sandbox verifier has a dedicated XML marker scan')
+  assert.match(markerScan, /create_job\([^)]*service_detection=True\)/,
+    'the XML marker scan retains Nmap service evidence in its results')
 
   const directory = await mkdtemp(join(tmpdir(), 'edgewatch-scanner-pid-selector-'))
   t.after(() => rm(directory, { recursive: true, force: true }))

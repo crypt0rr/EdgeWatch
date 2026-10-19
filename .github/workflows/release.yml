@@ -257,12 +257,12 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-candidate
-          path: candidate
+          path: ${{ runner.temp }}/release-candidate
       - name: Install the candidate frontend assets
         run: |
-          test -f candidate/internal/webui/dist/index.html
+          test -f "$RUNNER_TEMP/release-candidate/internal/webui/dist/index.html"
           mkdir -p internal/webui/dist
-          cp -a candidate/internal/webui/dist/. internal/webui/dist/
+          cp -a "$RUNNER_TEMP/release-candidate/internal/webui/dist/." internal/webui/dist/
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -288,7 +288,7 @@ jobs:
         run: |
           ./scripts/prepare-release-binaries.sh dist rebuilt-release-binaries
           for arch in amd64 arm64; do
-            cmp "candidate/release-binaries/linux_${arch}/edgewatch" "rebuilt-release-binaries/linux_${arch}/edgewatch"
+            cmp "$RUNNER_TEMP/release-candidate/release-binaries/linux_${arch}/edgewatch" "rebuilt-release-binaries/linux_${arch}/edgewatch"
             echo "linux/${arch} EdgeWatch binary matches the npm-built candidate"
           done
 

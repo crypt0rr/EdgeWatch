@@ -2155,22 +2155,44 @@ func TestPrivateTemporaryCleanupBoundsEntryCountAndAllowsDeepTrees(t *testing.T)
 		}
 	})
 
-	t.Run("depth 40", func(t *testing.T) {
+	t.Run("depth 70,000", func(t *testing.T) {
 		temporary, _, _ := newPrivateTemporaryProtocolFixture(t)
-		leafPath := temporary.path()
-		if err := os.Chmod(leafPath, 0o755); err != nil {
+		currentFD, err := unix.Dup(int(temporary.leaf.Fd()))
+		if err != nil {
 			t.Fatal(err)
 		}
-		deep := leafPath
-		for i := 0; i < 40; i++ {
-			deep = filepath.Join(deep, fmt.Sprintf("level-%02d", i))
-			if err := os.Mkdir(deep, 0o700); err != nil {
-				t.Fatalf("create depth %d: %v", i+1, err)
+		defer func() {
+			if currentFD >= 0 {
+				_ = unix.Close(currentFD)
 			}
+		}()
+		const depth = 70_000
+		for level := 0; level < depth; level++ {
+			if err := unix.Mkdirat(currentFD, "d", 0o700); err != nil {
+				t.Fatalf("create depth %d: %v", level+1, err)
+			}
+			childFD, err := unix.Openat(currentFD, "d", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			if err != nil {
+				t.Fatalf("open depth %d: %v", level+1, err)
+			}
+			if err := unix.Close(currentFD); err != nil {
+				_ = unix.Close(childFD)
+				t.Fatalf("close parent at depth %d: %v", level+1, err)
+			}
+			currentFD = childFD
 		}
-		if err := os.WriteFile(filepath.Join(deep, "artifact"), []byte("keep inside only"), 0); err != nil {
-			t.Fatal(err)
+		artifactFD, err := unix.Openat(currentFD, "artifact", unix.O_CREAT|unix.O_EXCL|unix.O_WRONLY|unix.O_CLOEXEC, 0o600)
+		if err != nil {
+			t.Fatalf("create artifact at depth %d: %v", depth, err)
 		}
+		if err := unix.Close(artifactFD); err != nil {
+			t.Fatalf("close deepest artifact: %v", err)
+		}
+		if err := unix.Close(currentFD); err != nil {
+			t.Fatalf("close deepest directory: %v", err)
+		}
+		currentFD = -1
+
 		var stat unix.Stat_t
 		if err := unix.Fstat(int(temporary.leaf.Fd()), &stat); err != nil {
 			t.Fatal(err)
@@ -2180,9 +2202,9 @@ func TestPrivateTemporaryCleanupBoundsEntryCountAndAllowsDeepTrees(t *testing.T)
 			leafMode: privateScannerTemporaryMode, uid: uint32(os.Geteuid()), gid: uint32(os.Getegid()),
 		}
 		if err := cleanupPrivateTemporaryDirectoryFD(request, int(temporary.leaf.Fd())); err != nil {
-			t.Fatalf("clean 40-deep tree and repair leaf mode: %v", err)
+			t.Fatalf("clean %d-deep tree without exhausting file descriptors: %v", depth, err)
 		}
-		if entries, err := os.ReadDir(leafPath); err != nil || len(entries) != 0 {
+		if entries, err := os.ReadDir(temporary.path()); err != nil || len(entries) != 0 {
 			t.Fatalf("deep-tree cleanup left leaf contents: %v, %v", entries, err)
 		}
 	})

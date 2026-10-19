@@ -1299,7 +1299,10 @@ scanner_supervisor_pid() {
   parent=$(docker exec "$container" awk '/^PPid:/{print $2; exit}' "/proc/$supervisor/status")
   [ "$name" = edgewatch ] || fail "scanner parent PID $supervisor is '$name', not the EdgeWatch supervisor"
   [ "$parent" = 1 ] || fail "scanner supervisor PID $supervisor has parent $parent, want daemon PID 1"
-  children=$(docker exec "$container" cat "/proc/$supervisor/task/$supervisor/children")
+  # Go may start exec.Cmd from any runtime thread. Each task's children file
+  # lists only the children started by that thread, so inspect the whole
+  # supervisor process instead of assuming its main thread launched Naabu.
+  children=$(docker exec "$container" /bin/sh -c 'for task in /proc/"$1"/task/*; do cat "$task/children" 2>/dev/null || :; done' sh "$supervisor")
   case " $children " in
     *" $scanner_pid "*) ;;
     *) fail "scanner supervisor PID $supervisor does not list scanner PID $scanner_pid as its child: $children" ;;

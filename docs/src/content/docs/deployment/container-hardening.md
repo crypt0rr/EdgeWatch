@@ -587,10 +587,13 @@ A sandboxed notification process:
   scanner process can neither signal it nor read its memory;
 - is restricted with [Landlock](#landlock), when the kernel provides it, to the
   same system files as a scanner process, without `/tmp`: it can write no file
-  at all. The [seccomp filter](#seccomp-filter) applies as it does to
-  scanners;
-- is non-dumpable for its whole run, so another process of its identity can
-  neither trace it nor read the destination URL from its memory;
+  at all. The notifier's [seccomp filter](#seccomp-filter) is installed through
+  this helper path too. Without Landlock, the notifier runs without that filter;
+  `edgewatch health` reports the Landlock and seccomp states separately;
+- calls `HardenProcess` before it reads the request from stdin, keeps the
+  destination URL out of argv and the environment, and remains non-dumpable
+  until it exits. Same-UID processes cannot trace it or read the URL from its
+  memory;
 - keeps its network access and the proxy, time zone, and certificate authority
   variables the daemon passes to it: `HTTP_PROXY`, `HTTPS_PROXY`,
   `ALL_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `TZ`, `LANG`, and

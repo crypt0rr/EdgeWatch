@@ -38,6 +38,32 @@ type scanEvidenceProjectionRow struct {
 	snapshot []byte
 }
 
+func readScanEvidenceProjectionBatch(ctx context.Context, tx *sql.Tx) ([]scanEvidenceProjectionRow, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id,snapshot_json FROM scans
+		WHERE results_json IS NULL OR results_unit_count IS NULL OR coverage_summary_json IS NULL
+		ORDER BY id LIMIT ?`, scanEvidenceProjectionBatchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	batch := make([]scanEvidenceProjectionRow, 0, scanEvidenceProjectionBatchSize)
+	for rows.Next() {
+		var item scanEvidenceProjectionRow
+		if err := rows.Scan(&item.id, &item.snapshot); err != nil {
+			return nil, err
+		}
+		batch = append(batch, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return batch, nil
+}
+
 func backfillScanEvidenceProjections(ctx context.Context, db *sql.DB, progress func(int64)) error {
 	var processed int64
 	for {
@@ -45,29 +71,8 @@ func backfillScanEvidenceProjections(ctx context.Context, db *sql.DB, progress f
 		if err != nil {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT id,snapshot_json FROM scans
-			WHERE results_json IS NULL OR results_unit_count IS NULL OR coverage_summary_json IS NULL
-			ORDER BY id LIMIT ?`, scanEvidenceProjectionBatchSize)
+		batch, err := readScanEvidenceProjectionBatch(ctx, tx)
 		if err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		batch := make([]scanEvidenceProjectionRow, 0, scanEvidenceProjectionBatchSize)
-		for rows.Next() {
-			var item scanEvidenceProjectionRow
-			if err := rows.Scan(&item.id, &item.snapshot); err != nil {
-				_ = rows.Close()
-				_ = tx.Rollback()
-				return err
-			}
-			batch = append(batch, item)
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			_ = tx.Rollback()
-			return err
-		}
-		if err := rows.Close(); err != nil {
 			_ = tx.Rollback()
 			return err
 		}

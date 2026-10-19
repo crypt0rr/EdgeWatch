@@ -1409,6 +1409,13 @@ test('release Node setup matches the frontend image base', () => {
 })
 
 test('scanner sandbox verification selects the live Nmap scan and pins it while inspecting proc', async (t) => {
+  const expectHealth = /expect_health\(\) \{([\s\S]*?)\n\}/.exec(scannerSandboxVerifier)?.[1]
+  assert.ok(expectHealth, 'the sandbox verifier checks its reported health state')
+  assert.match(expectHealth, /for attempt in \$\(seq 1 300\)/,
+    'the sandbox verifier waits for startup health to reach its expected state')
+  assert.match(expectHealth, /sleep 0\.1/,
+    'the startup health wait is bounded and polls without a long fixed sleep')
+
   const directory = await mkdtemp(join(tmpdir(), 'edgewatch-scanner-pid-selector-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
   const proc = join(directory, 'proc')

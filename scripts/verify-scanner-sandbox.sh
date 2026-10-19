@@ -1622,7 +1622,16 @@ expect_filtered() {
 }
 
 expect_health() {
-  local want=$1 got
+  local want=$1 got attempt
+  # The web server answers health checks while daemon startup and migration
+  # continue. Wait for the sandbox report to reach the expected initialized
+  # state instead of treating that transient report as a sandbox failure.
+  for attempt in $(seq 1 300); do
+    if got=$(health_state 2>/dev/null) && [ "$got" = "$want" ]; then
+      return
+    fi
+    sleep 0.1
+  done
   got=$(health_state)
   [ "$got" = "$want" ] || fail "health reports the sandbox as '$got', want '$want'"
 }

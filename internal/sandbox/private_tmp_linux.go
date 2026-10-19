@@ -1463,10 +1463,12 @@ func normalizePrivateTemporaryDirectory(fd int, expected *unix.Stat_t, device ui
 		uint64(current.Dev) != device || current.Uid != owner || current.Gid != group {
 		return errors.New("private temporary leaf identity changed")
 	}
-	if current.Mode != unix.S_IFDIR|privateScannerTemporaryMode {
-		if err := chmodPinnedPrivateDirectory(fd, privateScannerTemporaryMode); err != nil {
-			return errors.New("restore private temporary directory permissions failed")
-		}
+	if current.Mode == unix.S_IFDIR|privateScannerTemporaryMode {
+		*expected = current
+		return nil
+	}
+	if err := chmodPinnedPrivateDirectory(fd, privateScannerTemporaryMode); err != nil {
+		return errors.New("restore private temporary directory permissions failed")
 	}
 	if err := unix.Fstat(fd, &current); err != nil || !sameObject(expected, &current) || current.Mode != unix.S_IFDIR|privateScannerTemporaryMode ||
 		uint64(current.Dev) != device || current.Uid != owner || current.Gid != group {
@@ -1610,11 +1612,7 @@ func removePrivateDirectoryContents(fd int, device uint64, owner, group uint32, 
 			if err != nil {
 				return errors.New("pin private temporary subdirectory failed")
 			}
-			var opened unix.Stat_t
-			if err := unix.Fstat(pinned, &opened); err != nil || !sameObject(&item, &opened) || uint64(opened.Dev) != device || opened.Uid != owner || opened.Gid != group {
-				_ = unix.Close(pinned)
-				return errors.New("private temporary subdirectory identity changed")
-			}
+			opened := item
 			if err := normalizePrivateTemporaryDirectory(pinned, &opened, device, owner, group); err != nil {
 				_ = unix.Close(pinned)
 				return err

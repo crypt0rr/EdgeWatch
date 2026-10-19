@@ -83,8 +83,22 @@ func validateScannerSocketDescriptorsForRequest(request execRequest) error {
 }
 
 func execSeccompNotificationProbe(args []string) error {
-	if len(args) != 2 || args[0] != "--control-fd" || args[1] != strconv.Itoa(seccompNotificationControlFD) {
+	if len(args) != 2 && len(args) != 4 {
 		return errors.New("seccomp notification probe arguments are invalid")
+	}
+	if args[0] != "--control-fd" || args[1] != strconv.Itoa(seccompNotificationControlFD) {
+		return errors.New("seccomp notification probe arguments are invalid")
+	}
+	requestCount := 2
+	if len(args) == 4 {
+		if args[2] != "--requests" {
+			return errors.New("seccomp notification probe arguments are invalid")
+		}
+		parsed, err := strconv.Atoi(args[3])
+		if err != nil || parsed < 1 || parsed > seccompNotificationLimit {
+			return errors.New("seccomp notification probe request count is invalid")
+		}
+		requestCount = parsed
 	}
 	if os.Getenv("GODEBUG") != seccompNotificationProbeGODEBUG {
 		return errors.New("seccomp notification probe requires async preemption to be disabled")
@@ -96,7 +110,7 @@ func execSeccompNotificationProbe(args []string) error {
 	if err := installAndSendSeccompNotificationListener(-1, seccompNotificationControlFD); err != nil {
 		return err
 	}
-	for count := 0; count < 2; count++ {
+	for count := 0; count < requestCount; count++ {
 		fd, err := unix.Socket(unix.AF_UNIX, seccompNotificationSocketType, 0)
 		if err != nil {
 			return fmt.Errorf("seccomp notification probe socket was not mediated: %w", err)

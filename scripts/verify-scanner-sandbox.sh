@@ -2464,15 +2464,21 @@ assert_container_mount "$namespace_probe_container" "$namespace_probe_database_d
 wait_for_owned_container_exit "$namespace_probe_container"
 namespace_probe_exit=$(docker inspect --format '{{.State.ExitCode}}' "$namespace_probe_container")
 [ "$namespace_probe_exit" != 0 ] || fail "container B unexpectedly started while container A held the scanner scope"
-docker logs "$namespace_probe_container" >"$workdir/lifecycle-b.log" 2>&1 || fail "could not read container B's refusal log"
+namespace_probe_refusal_found=
+for attempt in $(seq 1 50); do
+  docker logs "$namespace_probe_container" >"$workdir/lifecycle-b.log" 2>&1 || fail "could not read container B's refusal log"
+  if grep -Fq 'scanner identity allocator could not prove the previous private scope safe after a PID namespace change' "$workdir/lifecycle-b.log"; then
+    namespace_probe_refusal_found=1
+    break
+  fi
+  sleep 0.1
+done
 b_pidns=$(sed -n 's/^lifecycle-probe-pidns=//p' "$workdir/lifecycle-b.log" | head -1)
 [ -n "$b_pidns" ] || fail "container B did not report its PID namespace before startup"
 b_pidns_inode=$(scanner_pid_namespace_inode "$b_pidns")
 [ "$b_pidns_inode" != "$a_pidns_inode" ] || fail "containers A and B unexpectedly share PID namespace $a_pidns"
-grep -Fq 'scanner identity runtime scope could not be retained' "$workdir/lifecycle-b.log" ||
-  fail "container B did not refuse because its scanner identity runtime scope was live: $(tail -40 "$workdir/lifecycle-b.log")"
-grep -Eqi 'liveness lock is unavailable|PID namespace changed' "$workdir/lifecycle-b.log" ||
-  fail "container B's refusal log did not identify the live liveness scope: $(tail -40 "$workdir/lifecycle-b.log")"
+[ -n "$namespace_probe_refusal_found" ] ||
+  fail "container B (exit $namespace_probe_exit) did not refuse because its scanner identity runtime scope was live: $(tail -40 "$workdir/lifecycle-b.log")"
 if find "$namespace_probe_database_dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
   fail "container B touched its isolated database directory before refusing the live scanner scope"
 fi

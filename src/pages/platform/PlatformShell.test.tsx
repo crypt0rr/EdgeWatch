@@ -3,7 +3,7 @@
 import { act, fireEvent, screen, waitFor } from '@testing-library/react'
 import { useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { activeScans, adminStatus, getSession, getUnitCapacity, listIncidents, listJobs, listScans, listUnits, platformAudit, platformStatus, recordActivity } from '../../api'
+import { activeScans, adminStatus, getPerimeter, getPerimeterRange, getSession, getUnitCapacity, listIncidents, listJobs, listScans, listUnits, platformAudit, platformStatus, recordActivity } from '../../api'
 import type { PlatformStatus } from '../../generated/api-types'
 import { deploymentLimits as limits, platformPermissions, platformSession } from '../../test/platform-fixtures'
 import { developmentBuildUpdates } from '../../test/status-fixtures'
@@ -12,7 +12,7 @@ import { PlatformShell } from './PlatformShell'
 
 vi.mock('../../api', async () => {
   const actual = await vi.importActual<typeof import('../../api')>('../../api')
-  return { ...actual, activeScans: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), getUnitCapacity: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listScans: vi.fn(), listUnits: vi.fn(), platformAudit: vi.fn(), platformStatus: vi.fn(), recordActivity: vi.fn() }
+  return { ...actual, activeScans: vi.fn(), adminStatus: vi.fn(), getPerimeter: vi.fn(), getPerimeterRange: vi.fn(), getSession: vi.fn(), getUnitCapacity: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listScans: vi.fn(), listUnits: vi.fn(), platformAudit: vi.fn(), platformStatus: vi.fn(), recordActivity: vi.fn() }
 })
 
 const status: PlatformStatus = { version: 'v0.19.0', updates: developmentBuildUpdates, units: { total: 2, active: 2, disabled: 0, deleting: 0 }, accounts: 5, jobs: 3, stored_scans: 12, platform_admins: { total: 1, enabled: 1 }, capacity: { limits, slots: { capacity: 4, in_use: 1, queued: 0 } } }
@@ -48,7 +48,7 @@ describe('platform console shell', () => {
     const onLogout = vi.fn()
     renderShell('/platform/units', platformPermissions, onLogout)
     for (const label of ['Units', 'Platform admins', 'Notifications', 'Audit', 'Status', 'Security']) expect(screen.getByRole('link', { name: label })).toBeInTheDocument()
-    for (const label of ['Overview', 'Jobs', 'Hosts', 'Incidents', 'Users', 'Public status', 'Scanner profiles']) expect(screen.queryByRole('link', { name: label })).not.toBeInTheDocument()
+    for (const label of ['Overview', 'Jobs', 'Hosts', 'Perimeter', 'Incidents', 'Users', 'Public status', 'Scanner profiles']) expect(screen.queryByRole('link', { name: label })).not.toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Units' })).toHaveAttribute('aria-current', 'page')
     expect(screen.getByText('All business units')).toBeInTheDocument()
     expect(screen.getByText('Platform administrator')).toBeInTheDocument()
@@ -62,13 +62,13 @@ describe('platform console shell', () => {
   })
 
   it('never mounts a unit page: every unit route leads to the unit list without requesting unit data', async () => {
-    for (const path of ['/', '/highlights', '/jobs', '/jobs/new', '/jobs/job-1', '/jobs/job-1/baseline', '/hosts', '/scans/scan-1', '/incidents', '/notifications', '/users', '/audit', '/public-dashboard', '/scanner-profiles', '/platform', '/platform/unknown']) {
+    for (const path of ['/', '/highlights', '/jobs', '/jobs/new', '/jobs/job-1', '/jobs/job-1/baseline', '/hosts', '/perimeter', '/perimeter/ranges/range-1', '/scans/scan-1', '/incidents', '/notifications', '/users', '/audit', '/public-dashboard', '/scanner-profiles', '/platform', '/platform/unknown']) {
       const view = renderShell(path)
       await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/platform\/units$/))
       expect(await screen.findByRole('heading', { name: 'Business units' })).toBeInTheDocument()
       view.unmount()
     }
-    for (const unitRequest of [listJobs, listIncidents, listScans, activeScans, adminStatus]) expect(unitRequest).not.toHaveBeenCalled()
+    for (const unitRequest of [listJobs, listIncidents, listScans, activeScans, adminStatus, getPerimeter, getPerimeterRange]) expect(unitRequest).not.toHaveBeenCalled()
     expect(EventSourceStub.instances).toBe(0)
   })
 

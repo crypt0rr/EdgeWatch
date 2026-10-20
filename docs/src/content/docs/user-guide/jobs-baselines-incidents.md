@@ -183,6 +183,16 @@ editing the job, and **Resume schedule** starts them again; **Scan now** keeps
 working while a job is paused. Pausing and resuming are unavailable while the
 job's scan is running.
 
+## Find coverage gaps
+
+The **Perimeter** page compares the address ranges that the unit declares
+with what its monitors will scan per protocol. It lists the declared space
+that no monitor scans, the monitors that cannot scan or have not proven their
+coverage, such as paused, over-budget, or stale ones, and the monitored IP and
+CIDR targets outside the declared ranges. For uncovered IPv4 space it suggests
+monitors sized to the unit's probe budget. See
+[Perimeter coverage](/user-guide/perimeter/).
+
 ## First scan and baseline learning
 
 On the final review, choose **Create and start first scan** to save and open the

@@ -448,6 +448,8 @@ monitors will scan. A declared range states ownership or permission; it does
 not authorize a scan. No route scans, resolves a DNS name, opens an outbound
 connection, or creates, changes, or starts a job. Existing routes and
 responses are unchanged, apart from the two new entries in `permissions`.
+The console's **Perimeter** page uses these routes; see
+[Perimeter coverage](/user-guide/perimeter/).
 
 | Endpoint | Permission | Request and response |
 | --- | --- | --- |

@@ -1,14 +1,18 @@
 /** @vitest-environment jsdom */
 
 import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { StrictMode, useEffect, type ReactNode } from 'react'
 import { Link, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, BUILTIN_NAABU_PROFILE_ID, createJob, createNotificationDestination, getJob, getSession, listNotificationDestinations, listScannerProfiles, previewJob, scannerCapabilities, scheduleSuggestion, testNotificationDestination, updateJob } from '../api'
 import type { NotificationDestination } from '../api'
 import type { Job, JobForm, JobPreview } from '../types'
+import type { PerimeterProtocol, PerimeterSuggestion } from '../generated/api-types'
 import { setDisplayTimeZone } from '../format'
+import { defaultTCP, type JobCreationDraft } from '../job-form'
 import { JobCreationDraftProvider, useOptionalJobCreationDraft } from '../job-creation-draft'
 import { consumeFirstScanIntent } from '../firstScanIntent'
+import { buildPerimeterPrefill } from '../perimeter-prefill'
 import { renderWithProviders } from '../test/test-utils'
 import { JobEditor } from './JobEditor'
 import { MonitorSetup } from './MonitorSetup'
@@ -31,6 +35,27 @@ vi.mock('../api', async () => {
   }
 })
 
+// The markDirty argument of each draft update that the guided setup makes,
+// so a test can count them. The hook below passes every update through.
+const guidedDraftUpdates = vi.hoisted(() => [] as Array<boolean | undefined>)
+
+vi.mock('../job-creation-draft', async () => {
+  const actual = await vi.importActual<typeof import('../job-creation-draft')>('../job-creation-draft')
+  const { useCallback } = await vi.importActual<typeof import('react')>('react')
+  return {
+    ...actual,
+    useJobCreationDraft: () => {
+      const value = actual.useJobCreationDraft()
+      const { updateDraft } = value
+      const recordedUpdateDraft = useCallback<typeof updateDraft>((updater, markDirty) => {
+        guidedDraftUpdates.push(markDirty)
+        updateDraft(updater, markDirty)
+      }, [updateDraft])
+      return { ...value, updateDraft: recordedUpdateDraft }
+    },
+  }
+})
+
 const destination: NotificationDestination = { id: 'destination-1', name: 'Operations', provider: 'smtp', source: 'web', enabled: true, locked: false, read_only: false, revision: 1 }
 const session = { role: 'administrator' as const, user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'jobs.read', 'users.manage', 'notifications.manage'], high_cost_override: true, csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, scope: 'unit' as const, unit: { id: 'unit-1', name: 'Unit', slug: 'unit' }, multi_unit: false }
 const profile = { id: 'profile-advanced', name: 'Tuned discovery', description: '', built_in: false, archived: false, revision: 7, definition: { engine: 'naabu_nmap', naabu: { scan_type: 'connect', rate: 1800, workers: 20, retries: 2, timeout_ms: 1200, warm_up_seconds: 2, verify: true, address_batch_size: 16 }, nmap_args: ['-sV'], naabu_args: [], enrichment_args: [] } }
@@ -49,12 +74,23 @@ function returnedJob(value: JobForm): Job {
   return { id: 'job-created', revision: 1, enabled: value.enabled ?? true, archived: false, security_hash: 'scope', created_at: '2026-10-09T08:00:00Z', updated_at: '2026-10-09T08:00:00Z', job: value, baseline: { status: 'pending', samples: 0, attempts: 0 } }
 }
 
-function CreationRoutes() {
-  return <JobCreationDraftProvider><DraftProbe /><Routes>
+function CreationRoutes({ editedDraft = false }: { editedDraft?: boolean }) {
+  const routes = <Routes>
     <Route index element={<MonitorSetup />} />
     <Route path="advanced" element={<JobEditor />} />
     <Route path="*" element={<div>Unknown creation path</div>} />
-  </Routes></JobCreationDraftProvider>
+  </Routes>
+  return <JobCreationDraftProvider><DraftProbe />{editedDraft ? <EditBeforeSetup>{routes}</EditBeforeSetup> : routes}</JobCreationDraftProvider>
+}
+
+// Edits the creation draft, as a person would have, before the guided setup
+// mounts.
+function EditBeforeSetup({ children }: { children: ReactNode }) {
+  const { dirty, updateDraft } = useOptionalJobCreationDraft()!
+  useEffect(() => {
+    updateDraft(draft => ({ ...draft, fields: { ...draft.fields, name: 'Hand-edited monitor' }, targets: ['198.51.100.7'] }))
+  }, [updateDraft])
+  return dirty ? children : null
 }
 
 function DraftProbe() {
@@ -70,11 +106,11 @@ function PathProbe() {
   return <output data-testid="route-location">{JSON.stringify({ path: location.pathname, state: location.state ?? null })}</output>
 }
 
-function TestJourney() {
+function TestJourney({ editedDraft = false }: { editedDraft?: boolean }) {
   return <>
     <PathProbe />
     <Routes>
-      <Route path="/jobs/new/*" element={<CreationRoutes />} />
+      <Route path="/jobs/new/*" element={<CreationRoutes editedDraft={editedDraft} />} />
       <Route path="/jobs/:id" element={<div data-testid="created-job">Created job</div>} />
       <Route path="/jobs" element={<div>Jobs list <Link to="/jobs/new">New monitor</Link></div>} />
     </Routes>
@@ -83,6 +119,34 @@ function TestJourney() {
 
 function renderJourney(route = '/jobs/new') {
   return renderWithProviders(<TestJourney />, { route: [route] })
+}
+
+function creationDraft(): JobCreationDraft {
+  return JSON.parse(screen.getByTestId('creation-draft').textContent ?? '{}')
+}
+
+function routeLocation(): { path: string; state: unknown } {
+  return JSON.parse(screen.getByTestId('route-location').textContent ?? '{}')
+}
+
+// The job protocol settings of a Perimeter protocol: all but its protocol key.
+function jobSettings(value: PerimeterProtocol) {
+  const { protocol: _kind, ...settings } = value
+  return settings
+}
+
+// Protocol settings that differ from the console's own defaults, so a test
+// can tell the returned settings from a preset.
+const perimeterFullTCP: PerimeterProtocol = { protocol: 'tcp', engine: 'naabu_nmap', ports: '1-65535', mode: 'connect', service_detection: false, profile_id: 'perimeter-naabu-profile' }
+const perimeterSelectedTCP: PerimeterProtocol = { protocol: 'tcp', engine: 'nmap', ports: '22,80,443', mode: 'connect', service_detection: true }
+const perimeterUDP: PerimeterProtocol = { protocol: 'udp', engine: 'nmap', ports: '53,123,161,500,1194,4500', service_detection: true }
+
+function perimeterSuggestion(overrides: Partial<PerimeterSuggestion> = {}): PerimeterSuggestion {
+  return { mode: 'full_tcp', targets: ['203.0.112.0/24', '203.0.113.64/27'], addresses: 288, estimated_probes: 18_874_080, protocol: perimeterFullTCP, ...overrides }
+}
+
+function perimeterRoute(state: unknown) {
+  return [{ pathname: '/jobs/new', state }]
 }
 
 async function goToSchedule() {
@@ -123,6 +187,7 @@ describe('guided monitor creation', () => {
     vi.clearAllMocks()
     setDisplayTimeZone(undefined)
     window.history.replaceState(null, '', '/')
+    guidedDraftUpdates.length = 0
   })
 
   it('labels browser-zone fallback times with the zone used in both schedule notices', async () => {
@@ -589,5 +654,158 @@ describe('guided monitor creation', () => {
     expect(screen.getByRole('button', { name: 'Create without starting' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Create and start first scan' })).toBeDisabled()
     expect(screen.getByText(/Scanner availability is unverified/)).toBeInTheDocument()
+  })
+
+  describe('Perimeter prefill', () => {
+    it('applies a suggestion once under StrictMode, clears the router state, and marks the draft dirty', async () => {
+      const perimeterPrefill = buildPerimeterPrefill(perimeterSuggestion(), '203.0.112.0/23', 0, 1)
+      renderWithProviders(<StrictMode><TestJourney /></StrictMode>, { route: perimeterRoute({ perimeterPrefill }) })
+      await screen.findByRole('heading', { name: 'Choose targets' })
+
+      expect(await screen.findByText('Prefilled from Perimeter (203.0.112.0/23). A declared range is not an authorization: confirm you may scan these addresses.')).toBeInTheDocument()
+      expect(screen.getByText(/Only add targets that you are authorized to scan/)).toBeInTheDocument()
+      expect(screen.queryByText(/was not applied/)).not.toBeInTheDocument()
+      expect(screen.getByLabelText(/^Monitor name/)).toHaveValue('Perimeter 203.0.112.0/24 +1 more · full TCP')
+      expect(screen.getByLabelText('Target 1')).toHaveValue('203.0.112.0/24')
+      expect(screen.getByLabelText('Target 2')).toHaveValue('203.0.113.64/27')
+      expect(screen.getByLabelText(/^Maximum expanded hosts/)).toHaveValue(288)
+
+      // One update, which marks the draft dirty, and the handoff is gone from
+      // the history entry.
+      await waitFor(() => expect(routeLocation()).toEqual({ path: '/jobs/new', state: null }))
+      expect(guidedDraftUpdates).toEqual([undefined])
+      const draft = creationDraft()
+      expect(draft.fields.allow_high_cost).toBe(false)
+      expect(draft.tcp).toStrictEqual(jobSettings(perimeterFullTCP))
+      expect(draft.tcpFullSnapshot).toStrictEqual(jobSettings(perimeterFullTCP))
+      expect(draft.tcpSelectedSnapshot).toBeUndefined()
+      expect(draft.lastTCP).toBeUndefined()
+      expect(draft.udp).toBeUndefined()
+      expect(draft.lastUDP).toBeUndefined()
+
+      // The leave guard protects the prefilled monitor, and an edit survives
+      // the guided setup mounting again.
+      fireEvent.click(screen.getByRole('link', { name: /Back to jobs/ }))
+      expect(await screen.findByRole('dialog')).toHaveTextContent('Discard monitor changes?')
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+      fireEvent.change(screen.getByLabelText(/^Monitor name/), { target: { value: 'Edited perimeter monitor' } })
+      fireEvent.click(screen.getByRole('link', { name: /Open full editor/ }))
+      await screen.findByRole('heading', { name: 'Create a monitoring job' })
+      // The full editor keeps the authorization warning of the prefill.
+      expect(screen.getByText(/^Prefilled from Perimeter \(203\.0\.112\.0\/23\)/).closest('[role="status"]')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('link', { name: /Back to guided setup/ }))
+      await screen.findByRole('heading', { name: 'Choose targets' })
+      expect(screen.getByLabelText(/^Monitor name/)).toHaveValue('Edited perimeter monitor')
+      // The outcome lives with the draft, so the targets step still shows it.
+      expect(screen.getByText(/^Prefilled from Perimeter \(203\.0\.112\.0\/23\)/)).toBeInTheDocument()
+      expect(screen.queryByText(/was not applied/)).not.toBeInTheDocument()
+    })
+
+    it.each([
+      {
+        mode: 'full_tcp' as const,
+        source: '203.0.112.0/23',
+        suggestion: perimeterSuggestion(),
+        maxExpandedHosts: 288,
+        draft: { tcp: jobSettings(perimeterFullTCP), tcpFullSnapshot: jobSettings(perimeterFullTCP), tcpSelectedSnapshot: undefined, lastTCP: undefined, udp: undefined, lastUDP: undefined },
+      },
+      {
+        mode: 'selected_tcp' as const,
+        source: '198.18.0.0/15',
+        suggestion: perimeterSuggestion({ mode: 'selected_tcp', targets: ['198.18.0.0/20'], addresses: 4096, estimated_probes: 24_576, protocol: perimeterSelectedTCP }),
+        maxExpandedHosts: 4096,
+        draft: { tcp: jobSettings(perimeterSelectedTCP), tcpFullSnapshot: defaultTCP(), tcpSelectedSnapshot: jobSettings(perimeterSelectedTCP), lastTCP: undefined, udp: undefined, lastUDP: undefined },
+      },
+      {
+        // A suggestion smaller than the default expansion limit keeps it.
+        mode: 'udp' as const,
+        source: '192.0.2.0/24',
+        suggestion: perimeterSuggestion({ mode: 'udp', targets: ['192.0.2.64/26'], addresses: 64, estimated_probes: 768, protocol: perimeterUDP }),
+        maxExpandedHosts: 256,
+        draft: { tcp: undefined, tcpFullSnapshot: defaultTCP(), tcpSelectedSnapshot: undefined, lastTCP: defaultTCP(), udp: jobSettings(perimeterUDP), lastUDP: undefined },
+      },
+    ])('applies the returned $mode protocol verbatim and previews it unchanged', async ({ mode, source, suggestion, maxExpandedHosts, draft: expected }) => {
+      const perimeterPrefill = buildPerimeterPrefill(suggestion, source, 0, 1)
+      renderWithProviders(<TestJourney />, { route: perimeterRoute({ perimeterPrefill }) })
+      await screen.findByText(`Prefilled from Perimeter (${source}). A declared range is not an authorization: confirm you may scan these addresses.`)
+      await waitFor(() => expect(routeLocation().state).toBeNull())
+
+      const draft = creationDraft()
+      expect(draft.fields.name).toBe(perimeterPrefill.name)
+      expect(draft.targets).toEqual(suggestion.targets)
+      expect(draft.fields.max_expanded_hosts).toBe(maxExpandedHosts)
+      expect(draft.fields.allow_high_cost).toBe(false)
+      for (const field of ['tcp', 'tcpFullSnapshot', 'tcpSelectedSnapshot', 'lastTCP', 'udp', 'lastUDP'] as const) {
+        expect(draft[field], field).toStrictEqual(expected[field])
+      }
+
+      fireEvent.click(screen.getByRole('button', { name: /Continue to coverage/ }))
+      await screen.findByRole('heading', { name: 'Set scan coverage' })
+      if (mode === 'udp') {
+        expect(screen.getByRole('checkbox', { name: /Include TCP/ })).not.toBeChecked()
+        expect(screen.getByLabelText(/^UDP ports/)).toHaveValue(perimeterUDP.ports)
+        // TCP comes back as a new draft's full range, and leaves again.
+        fireEvent.click(screen.getByRole('checkbox', { name: /Include TCP/ }))
+        expect(screen.getByRole('radio', { name: /Full TCP range/ })).toBeChecked()
+        fireEvent.click(screen.getByRole('checkbox', { name: /Include TCP/ }))
+      } else {
+        expect(screen.getByRole('checkbox', { name: /Include UDP/ })).not.toBeChecked()
+        if (mode === 'selected_tcp') {
+          expect(screen.getByLabelText(/^TCP ports/)).toHaveValue(perimeterSelectedTCP.ports)
+          fireEvent.click(screen.getByRole('radio', { name: /Full TCP range/ }))
+          expect(creationDraft().tcp).toStrictEqual(defaultTCP())
+          fireEvent.click(screen.getByRole('radio', { name: /Selected TCP ports/ }))
+          expect(screen.getByLabelText(/^TCP ports/)).toHaveValue(perimeterSelectedTCP.ports)
+        } else {
+          expect(screen.getByRole('radio', { name: /Full TCP range/ })).toBeChecked()
+        }
+      }
+      fireEvent.click(screen.getByRole('button', { name: /Continue to schedule/ }))
+      await screen.findByRole('heading', { name: 'Set schedule and alerts' })
+      fireEvent.click(screen.getByRole('button', { name: 'Continue without alerts' }))
+      fireEvent.click(screen.getByRole('button', { name: /Review monitor/ }))
+      await screen.findByRole('heading', { name: 'Review and create' })
+      await waitFor(() => expect(previewJob).toHaveBeenCalled())
+
+      const payload = vi.mocked(previewJob).mock.calls.at(-1)![0]
+      expect(payload).toMatchObject({ name: perimeterPrefill.name, targets: suggestion.targets, max_expanded_hosts: maxExpandedHosts, allow_high_cost: false })
+      expect(payload.tcp).toEqual(expected.tcp)
+      expect(payload.udp).toEqual(expected.udp)
+      expect(createJob).not.toHaveBeenCalled()
+    })
+
+    it('never overwrites a draft that already has changes, and says why', async () => {
+      const perimeterPrefill = buildPerimeterPrefill(perimeterSuggestion(), '203.0.112.0/23', 0, 1)
+      renderWithProviders(<TestJourney editedDraft />, { route: perimeterRoute({ perimeterPrefill }) })
+      await screen.findByRole('heading', { name: 'Choose targets' })
+
+      expect(await screen.findByText('The Perimeter suggestion for 203.0.112.0/23 was not applied, because this monitor draft already has changes. Finish or discard this draft, then choose Create monitor again.')).toBeInTheDocument()
+      expect(screen.queryByText(/Prefilled from Perimeter/)).not.toBeInTheDocument()
+      expect(screen.getByLabelText(/^Monitor name/)).toHaveValue('Hand-edited monitor')
+      expect(screen.getByLabelText('Target 1')).toHaveValue('198.51.100.7')
+      expect(screen.getByLabelText(/^Maximum expanded hosts/)).toHaveValue(256)
+      await waitFor(() => expect(routeLocation()).toEqual({ path: '/jobs/new', state: null }))
+      expect(guidedDraftUpdates).toEqual([])
+      expect(creationDraft().tcp).toStrictEqual(defaultTCP())
+    })
+
+    it.each([
+      { label: 'a protocol of the wrong kind for its mode', state: { perimeterPrefill: { ...buildPerimeterPrefill(perimeterSuggestion(), '203.0.112.0/23', 0, 1), protocol: perimeterUDP } } },
+      { label: 'no targets', state: { perimeterPrefill: { ...buildPerimeterPrefill(perimeterSuggestion(), '203.0.112.0/23', 0, 1), targets: [] } } },
+      { label: 'a name that is not a job name', state: { perimeterPrefill: { ...buildPerimeterPrefill(perimeterSuggestion(), '203.0.112.0/23', 0, 1), name: 'Perimeter\tedge' } } },
+      { label: 'unrelated state', state: { from: '/perimeter' } },
+    ])('ignores router state with $label', async ({ state }) => {
+      renderWithProviders(<TestJourney />, { route: perimeterRoute(state) })
+      await screen.findByRole('heading', { name: 'Choose targets' })
+
+      expect(screen.getByLabelText(/^Monitor name/)).toHaveValue('')
+      expect(screen.getByLabelText('Target 1')).toHaveValue('')
+      expect(screen.queryByText(/Prefilled from Perimeter|was not applied/)).not.toBeInTheDocument()
+      expect(guidedDraftUpdates).toEqual([])
+      expect(routeLocation()).toEqual({ path: '/jobs/new', state })
+      // The draft is still clean, so leaving needs no confirmation.
+      fireEvent.click(screen.getByRole('link', { name: /Back to jobs/ }))
+      await screen.findByText('Jobs list')
+    })
   })
 })

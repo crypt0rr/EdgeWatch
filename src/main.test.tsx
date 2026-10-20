@@ -5,14 +5,15 @@ import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQuery } from '@tanstack/react-query'
 import { useLocation } from 'react-router-dom'
-import { APIError, adminStatus, getSession, incidentInboxSummary, listEvents, listIncidents, listJobs, login, logout, recordActivity, setupStatus } from './api'
+import { APIError, adminStatus, getPerimeter, getPerimeterRange, getSession, incidentInboxSummary, listEvents, listIncidents, listJobs, login, logout, recordActivity, setupStatus } from './api'
 import { formatDateTimeInTimeZone, setDisplayTimeZone } from './format'
 import { AppContent, AuthRoutes, createQueryClient, Jobs, ProtectedApp, retryQuery, retryQueryDelay, Shell, unitBreadcrumb } from './main'
+import { perimeterOverview, perimeterRangeDetail } from './test/perimeter-fixtures'
 import { renderWithProviders } from './test/test-utils'
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api')
-  return { ...actual, acceptIncident: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), incidentInboxSummary: vi.fn(), listEvents: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), login: vi.fn(), logout: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), suppressIncident: vi.fn() }
+  return { ...actual, acceptIncident: vi.fn(), adminStatus: vi.fn(), getPerimeter: vi.fn(), getPerimeterRange: vi.fn(), getSession: vi.fn(), incidentInboxSummary: vi.fn(), listEvents: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), login: vi.fn(), logout: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), suppressIncident: vi.fn() }
 })
 
 class EventSourceStub {
@@ -50,6 +51,8 @@ describe('application shell', () => {
     vi.mocked(logout).mockResolvedValue(undefined)
     vi.mocked(recordActivity).mockResolvedValue(undefined)
     vi.mocked(setupStatus).mockResolvedValue({ configured: true } as never)
+    vi.mocked(getPerimeter).mockResolvedValue(perimeterOverview())
+    vi.mocked(getPerimeterRange).mockResolvedValue(perimeterRangeDetail())
     EventSourceStub.instances = []
     vi.stubGlobal('EventSource', EventSourceStub)
   })
@@ -101,6 +104,42 @@ describe('application shell', () => {
     expect(unitBreadcrumb('/jobs/job-123/scans/scan-456', links)).toBe('Jobs / Scan')
     expect(unitBreadcrumb('/jobs/job-123/baseline/hosts/2001%3Adb8%3A%3A1', links)).toBe('Jobs / Baseline host')
     expect(unitBreadcrumb('/scans/scan-456/hosts/2001%3Adb8%3A%3A1', links)).toBe('Hosts / Scan host')
+    expect(unitBreadcrumb('/perimeter', [{ to: '/perimeter', label: 'Perimeter' }])).toBe('Perimeter')
+    expect(unitBreadcrumb('/perimeter/ranges/range-123', [{ to: '/perimeter', label: 'Perimeter' }])).toBe('Perimeter / Range')
+  })
+
+  it('offers the Perimeter page and its range detail only with perimeter.read, and keeps Perimeter current on a range', async () => {
+    const operator = ['jobs.read', 'jobs.write', 'perimeter.read']
+    vi.mocked(getSession).mockResolvedValue({ role: 'operator', user_id: 'operator', username: 'operator', permissions: operator, csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    const page = renderWithProviders(<><Shell displayName="Operator" role="operator" permissions={operator} onLogout={vi.fn()} /><CurrentPath /></>, { route: ['/perimeter'] })
+    const link = screen.getByRole('link', { name: 'Perimeter' })
+    expect(link).toHaveAttribute('href', '/perimeter')
+    expect(link).toHaveAttribute('aria-current', 'page')
+    expect(await screen.findByRole('heading', { level: 1, name: 'Perimeter' })).toBeInTheDocument()
+    expect(document.title).toBe('Perimeter · EdgeWatch')
+    fireEvent.click(await screen.findByRole('link', { name: '203.0.113.0/24' }))
+    expect(await screen.findByRole('heading', { level: 1, name: '203.0.113.0/24' })).toBeInTheDocument()
+    expect(screen.getByTestId('current-path')).toHaveTextContent('/perimeter/ranges/range-1')
+    expect(screen.getByRole('link', { name: 'Perimeter' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: 'Jobs' })).not.toHaveAttribute('aria-current')
+    expect(screen.getByLabelText('Breadcrumb: Perimeter / Range')).toBeInTheDocument()
+    page.unmount()
+    vi.mocked(getPerimeter).mockClear()
+    vi.mocked(getPerimeterRange).mockClear()
+
+    // A viewer holds no perimeter.read: no navigation item, and both routes
+    // lead to the jobs, the console's fallback, without reading the report.
+    for (const path of ['/perimeter', '/perimeter/ranges/range-1']) {
+      const view = renderWithProviders(<><Shell displayName="Viewer" role="viewer" permissions={['jobs.read']} onLogout={vi.fn()} /><CurrentPath /></>, { route: [path] })
+      await waitFor(() => expect(screen.getByTestId('current-path')).toHaveTextContent(/^\/jobs$/))
+      expect(screen.queryByRole('link', { name: 'Perimeter' })).not.toBeInTheDocument()
+      view.unmount()
+    }
+    const security = renderWithProviders(<><Shell displayName="Nobody" role="viewer" permissions={[]} onLogout={vi.fn()} /><CurrentPath /></>, { route: ['/perimeter'] })
+    await waitFor(() => expect(screen.getByTestId('current-path')).toHaveTextContent(/^\/security$/))
+    security.unmount()
+    expect(getPerimeter).not.toHaveBeenCalled()
+    expect(getPerimeterRange).not.toHaveBeenCalled()
   })
 
   it('provides a skip link, marks the current page, names the document, and focuses main after navigation', async () => {
@@ -175,6 +214,29 @@ describe('application shell', () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['active-scans'] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['jobs'] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['job', 'job-9'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['perimeter'] })
+    invalidate.mockClear()
+    // The perimeter report follows its declarations, every scan outcome, every
+    // job lifecycle change, the silence watchdog, and a discarded cycle,
+    // without a full refresh.
+    for (const type of [
+      'perimeter.updated',
+      'scan.started', 'scan.completed', 'scan-paused', 'scan-recovered', 'scan-failure', 'scan-incomplete', 'scan-canceled', 'scan-interrupted', 'scan-anomaly', 'scan-budget-exceeded',
+      'job.created', 'job.updated', 'job.archived', 'job.restored', 'job.deleted', 'job.paused', 'job.resumed',
+      'job-silent',
+      'scan.cycle_discarded',
+    ]) {
+      invalidate.mockClear()
+      act(() => stream.emit(type, 'job-9'))
+      expect(invalidate, type).toHaveBeenCalledWith({ queryKey: ['perimeter'] })
+      expect(invalidate, type).not.toHaveBeenCalledWith()
+    }
+    invalidate.mockClear()
+    act(() => stream.emit('perimeter.updated'))
+    expect(invalidate.mock.calls).toEqual([[{ queryKey: ['perimeter'] }]])
+    invalidate.mockClear()
+    act(() => stream.emit('changes-detected', 'job-9'))
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['perimeter'] })
     invalidate.mockClear()
     act(() => stream.emit('scan-interrupted', 'job-9'))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['activity-events'] })

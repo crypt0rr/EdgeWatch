@@ -5,7 +5,8 @@ description: Manage platform administrators, unit accounts, capacity, and unit l
 
 Business units let several internal teams share one deployment and its
 database. Each unit has its own accounts, jobs, scans, baselines, incidents,
-notification destinations, custom scanner profiles, and public status page.
+notification destinations, custom scanner profiles, perimeter, and public
+status page.
 EdgeWatch enforces the separation in the application, not in the host or the
 database; see [Limits](/administration/business-units/#limits).
 
@@ -39,10 +40,10 @@ creates, renames, disables, and deletes units, sets their capacity, invites
 and resets their administrators, can sign out any of their accounts, manages
 the other platform administrators and the platform's own notification
 destinations, and reads the platform audit and status. It never sees a
-unit's jobs, scans, hosts, baselines, incidents, destinations, or public
-status settings: the platform console shows each unit with its name, slug,
-state, and counts of accounts, administrators, jobs, stored scans, and scan
-slots in use, and lists the unit's accounts without credentials. The
+unit's jobs, scans, hosts, baselines, incidents, destinations, perimeter, or
+public status settings: the platform console shows each unit with its name,
+slug, state, and counts of accounts, administrators, jobs, stored scans, and
+scan slots in use, and lists the unit's accounts without credentials. The
 **Stored scans** count includes every scan in the unit's history, including scans for archived
 jobs. Retention reduces this count. While a unit is being deleted, the count
 shows the scans that remain to be erased.
@@ -135,6 +136,14 @@ account then enrolls again.
   list of units, it records no copy, and a later check records every copy.
 - **Scanner profiles:** the built-in profiles are shared and read-only. Custom
   profiles belong to the unit that created them.
+- **Perimeter:** the address ranges that a unit declares on
+  [Perimeter](/user-guide/perimeter/) are unit data. Only the unit's
+  administrators and operators see them and the coverage report computed
+  from them, and only its administrators declare and remove them. Another
+  unit, the platform console, and public status never show them; two units
+  can declare the same range, and each sees only its own declaration and the
+  coverage of its own monitors. Deleting the unit erases them with its other
+  data.
 - **YAML jobs:** the inactive jobs in `config.yaml` belong to the default unit.
   Only its administrators and operators see them listed on **Overview**, and
   `edgewatch status` lists them for the default unit only.
@@ -158,7 +167,10 @@ account then enrolls again.
   own limit, the cap where it has one and the deployment's setting
   otherwise, as "N scans at a time", and
   the API's status reports the unit's own slots and probe budgets the same
-  way. The high-cost ceiling is the most probes that a job approved
+  way. The unit's **Perimeter** page sizes its suggested monitors to the
+  unit's probe budgets, so a lower cap gives smaller suggested monitors; the
+  page shows a capacity change the next time it loads its data. The
+  high-cost ceiling is the most probes that a job approved
   for high-cost work may send. A new unit has none: its **Capacity** tab
   shows the ceiling as **Not granted**, and such an approval raises neither
   probe budget, whatever `config.yaml` sets now or later, until a platform

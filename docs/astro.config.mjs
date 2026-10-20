@@ -53,6 +53,7 @@ export default defineConfig({
           items: [
             { label: 'Scanning and profiles', slug: 'user-guide/scanning' },
             { label: 'Jobs, baselines, and incidents', slug: 'user-guide/jobs-baselines-incidents' },
+            { label: 'Perimeter coverage', slug: 'user-guide/perimeter' },
             { label: 'Notifications', slug: 'user-guide/notifications' },
           ],
         },

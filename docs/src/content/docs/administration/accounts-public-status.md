@@ -63,12 +63,14 @@ its sessions. To end your own sessions, use **Log out all sessions** on
 | Role | Access |
 | --- | --- |
 | Administrator | Full administration, users, destinations, profiles, jobs, baselines, incidents, perimeter, and public status. |
-| Operator | Configure and run jobs; approve or reset baselines; accept or suppress incidents; review evidence; view the perimeter and its coverage; and select existing destinations for jobs. Cannot manage destinations, users, scanner profiles, or the perimeter's declared ranges, permanently delete archived jobs, or approve high-cost scans; an operator's scope change clears an existing high-cost approval. |
-| Viewer | Read-only jobs and baseline information. Cannot view the perimeter. |
+| Operator | Configure and run jobs; approve or reset baselines; accept or suppress incidents; review evidence; view **Perimeter** and create monitors from its suggestions; and select existing destinations for jobs. Cannot manage destinations, users, scanner profiles, or the perimeter's declared ranges, permanently delete archived jobs, or approve high-cost scans; an operator's scope change clears an existing high-cost approval. |
+| Viewer | Read-only jobs and baseline information. Cannot open **Perimeter**. |
 
-In the API, viewing the perimeter needs the `perimeter.read` permission and
-declaring or removing its ranges needs `perimeter.manage`; platform
-administrators hold neither. See
+Administrators and operators see **Perimeter** in the navigation; only
+administrators declare and remove its ranges. See
+[Perimeter coverage](/user-guide/perimeter/). In the API, viewing the
+perimeter needs the `perimeter.read` permission and declaring or removing its
+ranges needs `perimeter.manage`; platform administrators hold neither. See
 [API compatibility](/reference/api-compatibility/#perimeter-coverage).
 
 ## Public status

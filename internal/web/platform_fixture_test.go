@@ -39,9 +39,12 @@ var platformActors = []string{actorAdminA, actorOperatorA, actorViewerA, actorAd
 // administrator and a viewer. Both units have a job named "shared-job" that
 // scans 192.0.2.10; unit B also has "bravo-job", which scans 198.51.100.77
 // and has a scan, and a scanner profile, a notification destination, and
-// audit records. Everything that names unit B contains "bravo", so a
-// response can be searched for it. Every account is signed in, and the
-// administrators have enrolled TOTP, as more than one unit requires.
+// audit records. Each unit declares one perimeter range: unit A
+// 192.0.2.0/24, which holds its job's target, and unit B 198.51.100.0/24,
+// which holds only bravo-job's. Everything that names unit B contains
+// "bravo", so a response can be searched for it. Every account is signed
+// in, and the administrators have enrolled TOTP, as more than one unit
+// requires.
 type platformFixture struct {
 	server   *Server
 	db       *store.Store
@@ -51,9 +54,9 @@ type platformFixture struct {
 	users    map[string]store.User
 	sessions map[string]routeMatrixSession
 	// Unit B's resources, by kind.
-	jobB, sharedJobB, scanB, profileB, destinationB, viewerB, windowB string
+	jobB, sharedJobB, scanB, profileB, destinationB, viewerB, windowB, seedB string
 	// Unit A's resources, by kind.
-	jobA, scanA, profileA, destinationA, windowA string
+	jobA, scanA, profileA, destinationA, windowA, seedA string
 	// The platform administrator's second account and the platform's
 	// destination.
 	secondPlatformAdmin string
@@ -155,6 +158,20 @@ func newPlatformFixture(t *testing.T) *platformFixture {
 	}
 	f.destinationA = newDestination(f.a, "alpha-destination")
 	f.destinationB = newDestination(f.b, "bravo-destination")
+	newSeed := func(ts *store.TenantStore, actor, value, label string) string {
+		t.Helper()
+		audit := store.AuditEntry{ActorUserID: f.users[actor].ID, ActorUsername: f.users[actor].Username}
+		if _, err := ts.DeclarePerimeterSeeds(ctx, []store.PerimeterEntry{{Kind: store.PerimeterKindPrefix, Value: value, Label: label}}, audit); err != nil {
+			t.Fatal(err)
+		}
+		seeds, err := ts.ListPerimeterSeeds(ctx)
+		if err != nil || len(seeds) != 1 {
+			t.Fatalf("perimeter of %s = %+v, %v", actor, seeds, err)
+		}
+		return seeds[0].ID
+	}
+	f.seedA = newSeed(f.a, actorAdminA, "192.0.2.0/24", "alpha-perimeter")
+	f.seedB = newSeed(f.b, actorAdminB, "198.51.100.0/24", "bravo-perimeter")
 	for _, entry := range []store.AuditEntry{
 		{Action: "job.created", Detail: "bravo-data-audit", ActorUserID: f.users[actorAdminB].ID, ActorUsername: "bravo-admin", SourceIP: "203.0.113.20"},
 		{Action: "user.created", Detail: "bravo-account-audit", ActorUserID: f.users[actorAdminB].ID, ActorUsername: "bravo-admin", SourceIP: "203.0.113.20"},

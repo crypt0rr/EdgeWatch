@@ -22,8 +22,8 @@ import (
 // isolationIDs are the values that the isolation matrix puts in a route's
 // placeholders.
 type isolationIDs struct {
-	job, scan, cycle, address, profile, user, destination, window string
-	unit, account, admin, platformDestination                     string
+	job, scan, cycle, address, profile, user, destination, window, seed string
+	unit, account, admin, platformDestination                           string
 }
 
 // unknownIsolationIDs name nothing in the fixture.
@@ -32,16 +32,16 @@ var unknownIsolationIDs = isolationIDs{
 	address: "203.0.113.254", profile: "00000000-0000-0000-0000-00000000dead", user: "00000000-0000-0000-0000-00000000dead",
 	destination: "00000000-0000-0000-0000-00000000dead", unit: "00000000-0000-0000-0000-00000000dead", account: "00000000-0000-0000-0000-00000000dead",
 	admin: "00000000-0000-0000-0000-00000000dead", platformDestination: "00000000-0000-0000-0000-00000000dead",
-	window: "00000000-0000-0000-0000-00000000dead",
+	window: "00000000-0000-0000-0000-00000000dead", seed: "00000000-0000-0000-0000-00000000dead",
 }
 
 // unitIDs returns the IDs of a unit's resources in the fixture.
 func (f *platformFixture) unitIDs(unit string) isolationIDs {
 	if unit == "A" {
-		return isolationIDs{job: f.jobA, scan: f.scanA, cycle: unknownIsolationIDs.cycle, address: "192.0.2.10", profile: f.profileA, user: f.users[actorViewerA].ID, destination: f.destinationA, window: f.windowA,
+		return isolationIDs{job: f.jobA, scan: f.scanA, cycle: unknownIsolationIDs.cycle, address: "192.0.2.10", profile: f.profileA, user: f.users[actorViewerA].ID, destination: f.destinationA, window: f.windowA, seed: f.seedA,
 			unit: store.DefaultTenantID, account: f.users[actorAdminA].ID, admin: f.secondPlatformAdmin, platformDestination: unknownIsolationIDs.platformDestination}
 	}
-	return isolationIDs{job: f.jobB, scan: f.scanB, cycle: unknownIsolationIDs.cycle, address: platformFixtureAddress, profile: f.profileB, user: f.viewerB, destination: f.destinationB, window: f.windowB,
+	return isolationIDs{job: f.jobB, scan: f.scanB, cycle: unknownIsolationIDs.cycle, address: platformFixtureAddress, profile: f.profileB, user: f.viewerB, destination: f.destinationB, window: f.windowB, seed: f.seedB,
 		unit: f.unitB, account: f.users[actorAdminB].ID, admin: f.secondPlatformAdmin, platformDestination: unknownIsolationIDs.platformDestination}
 }
 
@@ -103,6 +103,8 @@ func (ids isolationIDs) path(t *testing.T, template string) string {
 				value = ids.admin
 			case "notifications":
 				value = ids.platformDestination
+			case "seeds":
+				value = ids.seed
 			}
 		}
 		if value == "" {
@@ -164,14 +166,14 @@ var isolationNotFoundExceptions = map[string]string{
 // fixture, for a search of a response that must not contain them.
 func (f *platformFixture) markersOf(unit string) []string {
 	if unit == "A" {
-		return []string{"alpha", store.DefaultTenantID, f.jobA, f.scanA, f.profileA, f.destinationA, f.users[actorAdminA].ID, f.users[actorOperatorA].ID, f.users[actorViewerA].ID}
+		return []string{"alpha", store.DefaultTenantID, f.jobA, f.scanA, f.profileA, f.destinationA, f.seedA, f.users[actorAdminA].ID, f.users[actorOperatorA].ID, f.users[actorViewerA].ID}
 	}
-	return []string{"bravo", platformFixtureAddress, f.unitB, f.jobB, f.sharedJobB, f.scanB, f.profileB, f.destinationB, f.viewerB, f.users[actorAdminB].ID}
+	return []string{"bravo", platformFixtureAddress, f.unitB, f.jobB, f.sharedJobB, f.scanB, f.profileB, f.destinationB, f.seedB, f.viewerB, f.users[actorAdminB].ID}
 }
 
 // dataMarkers name the units' data, which even the platform never sees.
 func (f *platformFixture) dataMarkers() []string {
-	return []string{"shared-job", "bravo-job", "bravo-profile", "bravo-destination", "bravo-data-audit", "alpha-profile", "alpha-destination", "alpha-data-audit", platformFixtureAddress, "192.0.2.10", f.jobA, f.jobB, f.sharedJobB, f.scanA, f.scanB, f.profileA, f.profileB, f.destinationA, f.destinationB}
+	return []string{"shared-job", "bravo-job", "bravo-profile", "bravo-destination", "bravo-data-audit", "alpha-profile", "alpha-destination", "alpha-data-audit", "alpha-perimeter", "bravo-perimeter", "192.0.2.0/24", "198.51.100.0/24", platformFixtureAddress, "192.0.2.10", f.jobA, f.jobB, f.sharedJobB, f.scanA, f.scanB, f.profileA, f.profileB, f.destinationA, f.destinationB, f.seedA, f.seedB}
 }
 
 // isolationRequest sends a request of the matrix as the actor.
@@ -313,18 +315,20 @@ func TestIsolationMatrix(t *testing.T) {
 }
 
 // unitBSnapshot reads what a foreign request could change in unit B: its
-// jobs, users, sessions, invites, destinations, profiles and scans.
+// jobs, users, sessions, invites, destinations, profiles, scans and
+// perimeter ranges.
 func (f *platformFixture) unitBSnapshot(t *testing.T) map[string]string {
 	t.Helper()
 	snapshot := map[string]string{}
 	for name, query := range map[string]string{
-		"jobs":         `SELECT group_concat(id||':'||revision||':'||archived||':'||enabled,',') FROM (SELECT * FROM jobs WHERE tenant_id=? ORDER BY id)`,
-		"users":        `SELECT group_concat(id||':'||revision||':'||enabled||':'||display_name,',') FROM (SELECT * FROM users WHERE tenant_id=? ORDER BY id)`,
-		"sessions":     `SELECT COUNT(*) FROM sessions WHERE user_id IN (SELECT id FROM users WHERE tenant_id=?)`,
-		"invites":      `SELECT COUNT(*) FROM user_invites WHERE user_id IN (SELECT id FROM users WHERE tenant_id=?)`,
-		"destinations": `SELECT group_concat(id||':'||revision,',') FROM (SELECT * FROM managed_notifications WHERE tenant_id=? ORDER BY id)`,
-		"profiles":     `SELECT group_concat(id||':'||revision||':'||archived,',') FROM (SELECT * FROM scanner_profiles WHERE tenant_id=? ORDER BY id)`,
-		"scans":        `SELECT group_concat(id||':'||status,',') FROM (SELECT * FROM scans WHERE tenant_id=? ORDER BY id)`,
+		"jobs":            `SELECT group_concat(id||':'||revision||':'||archived||':'||enabled,',') FROM (SELECT * FROM jobs WHERE tenant_id=? ORDER BY id)`,
+		"users":           `SELECT group_concat(id||':'||revision||':'||enabled||':'||display_name,',') FROM (SELECT * FROM users WHERE tenant_id=? ORDER BY id)`,
+		"sessions":        `SELECT COUNT(*) FROM sessions WHERE user_id IN (SELECT id FROM users WHERE tenant_id=?)`,
+		"invites":         `SELECT COUNT(*) FROM user_invites WHERE user_id IN (SELECT id FROM users WHERE tenant_id=?)`,
+		"destinations":    `SELECT group_concat(id||':'||revision,',') FROM (SELECT * FROM managed_notifications WHERE tenant_id=? ORDER BY id)`,
+		"profiles":        `SELECT group_concat(id||':'||revision||':'||archived,',') FROM (SELECT * FROM scanner_profiles WHERE tenant_id=? ORDER BY id)`,
+		"scans":           `SELECT group_concat(id||':'||status,',') FROM (SELECT * FROM scans WHERE tenant_id=? ORDER BY id)`,
+		"perimeter_seeds": `SELECT group_concat(id||':'||kind||':'||value,',') FROM (SELECT * FROM perimeter_seeds WHERE tenant_id=? ORDER BY id)`,
 	} {
 		var value sql.NullString
 		if err := f.db.DB.QueryRow(query, f.unitB).Scan(&value); err != nil {
@@ -342,7 +346,7 @@ func TestPositiveMatrix(t *testing.T) {
 	t.Parallel()
 	f := newPlatformFixture(t)
 	createIsolationWindows(t, f)
-	owned := []string{"/jobs/{id}", "/jobs/{id}/scans", "/jobs/{id}/scans/{scan}", "/scans/{id}", "/scans/{id}/summary", "/scans/{id}/hosts", "/scans/{id}/hosts/{address}", "/users/{id}", "/notifications/destinations/{id}", "/scanner-profiles/{id}", "/scanner/profiles/{id}", "/jobs/{id}/baseline", "/audit"}
+	owned := []string{"/jobs/{id}", "/jobs/{id}/scans", "/jobs/{id}/scans/{scan}", "/scans/{id}", "/scans/{id}/summary", "/scans/{id}/hosts", "/scans/{id}/hosts/{address}", "/users/{id}", "/notifications/destinations/{id}", "/scanner-profiles/{id}", "/scanner/profiles/{id}", "/jobs/{id}/baseline", "/audit", "/perimeter", "/perimeter/seeds/{id}"}
 	platformOwned := []string{"/platform/units", "/platform/units/{id}", "/platform/units/{id}/capacity", "/platform/units/{id}/accounts", "/platform/admins", "/platform/audit", "/platform/notifications", "/platform/status"}
 	reached := map[string][]string{}
 	for _, route := range apiRoutes {
@@ -370,7 +374,7 @@ func TestPositiveMatrix(t *testing.T) {
 			}
 		}
 	}
-	want := map[string]int{actorAdminA: 13, actorOperatorA: 11, actorViewerA: 2, actorAdminB: 13, actorPlatform: 8}
+	want := map[string]int{actorAdminA: 15, actorOperatorA: 13, actorViewerA: 2, actorAdminB: 15, actorPlatform: 8}
 	for actor, count := range want {
 		if len(reached[actor]) != count {
 			sort.Strings(reached[actor])

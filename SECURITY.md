@@ -37,7 +37,23 @@ trigger keeps fixed, and a unit's requests read and write them only through
 its tenant-scoped store; apart from that, only the daemon's purge of a
 deleted unit and whole-database backup and restore touch them. They are
 never shared with another unit and never appear on the public status surface
-or in the platform console. Each addition and removal
+or in the platform console. The unit's administrators and operators read the
+declarations and the coverage report computed from them (`perimeter.read`);
+only its administrators declare and remove ranges (`perimeter.manage`), and
+viewers and platform administrators can do neither. The report is computed on
+each request from the declarations, the configuration and scan status of the
+unit's own unarchived jobs, its probe budgets, and the deployment's
+`scanner.max_job_hosts` and `scanner.target_exclusions`. It returns job
+names, states, and IP and CIDR targets, never scan evidence, a profile's
+contents, or another unit's data, and computing it sends no packet and opens
+no connection. It counts the addresses of each range that
+`scanner.target_exclusions` holds and leaves them out of the gaps it reports,
+so the same roles that may save jobs can read which addresses of their
+declared ranges are excluded, as refusing such a job's target already tells
+them. Its suggested monitors create nothing: a monitor is created only through
+the job API, which applies the exclusions, probe budgets, and high-cost
+approval as for any other job. A change to the declarations sends the unit's
+own live-update streams a notice that names no range. Each addition and removal
 is recorded in the unit's audit as a data record, which the platform audit
 does not show. Deleting the business unit erases its declarations through
 the resumable purge. A declared range states ownership or permission for
@@ -488,24 +504,24 @@ its handler, and a request that matches no route is refused before any
 handler runs: `401` without a session, and `403` otherwise. The handler
 reads and writes through a store bound to the session's unit; the platform
 console's handlers use the platform's store and never a unit's. An ID of
-another unit's job, scan, host, account, scanner profile, or notification
-destination gets a response byte-identical to an unknown ID's. That is a
-404, except where both get another answer: cancelling a scan answers any
-scan that is not running in the unit with 409 `scan_not_active`, and
-validating or previewing a scanner profile checks only the submitted
+another unit's job, scan, host, account, scanner profile, notification
+destination, or perimeter range gets a response byte-identical to an unknown
+ID's. That is a 404, except where both get another answer: cancelling a scan
+answers any scan that is not running in the unit with 409 `scan_not_active`,
+and validating or previewing a scanner profile checks only the submitted
 definition.
 
 ### The platform administrator
 
 A platform administrator is a separate account without a unit. It manages
 the units and their administrators and holds no permission on any unit's
-jobs, scans, baselines, incidents, notifications, or public status: every
-route of a unit's console refuses it except its own account's password,
-TOTP, session, and sign-out routes. Only a platform administrator reaches
-the platform console's API, under `/api/v1/platform/`, and it never returns
-a unit's data: a unit appears with its name, slug, state, and counts of its
-accounts, administrators, jobs, stored scans, and scan slots in use; its
-accounts as summaries without credentials; and its
+jobs, scans, baselines, incidents, notifications, perimeter, or public
+status: every route of a unit's console refuses it except its own account's
+password, TOTP, session, and sign-out routes. Only a platform administrator
+reaches the platform console's API, under `/api/v1/platform/`, and it never
+returns a unit's data: a unit appears with its name, slug, state, and counts
+of its accounts, administrators, jobs, stored scans, and scan slots in use;
+its accounts as summaries without credentials; and its
 capacity as numbers. The stored scan count is a number of rows, never a
 scan's content. The platform's own notification destinations are
 write-only like a unit's, and the platform cannot read, select, or change a
@@ -758,15 +774,16 @@ replacement for revoking a compromised account or session.
 
 Each live update has one audience, and replay after a reconnect is filtered
 the same way. A business unit's streams receive only that unit's updates: its
-jobs, scans, incidents, baselines, scan cycles, scanner profiles and
-notification destinations, and the unit's own copy of an update alert. The
-notice that the application update status changed carries no unit's data and
-reaches every stream. Platform administrators hold no stream permission and
-receive no live updates; the platform's copy of an update alert is addressed
-to platform streams only, and a platform stream would never receive a unit's
-update. Disabling or deleting a unit through the running daemon ends the
-unit's open streams at once; the change also ends the unit's sessions, so a
-disable from another process takes effect through the revalidation fallback.
+jobs, scans, incidents, baselines, scan cycles, scanner profiles,
+notification destinations and perimeter, and the unit's own copy of an update
+alert. The notice that the application update status changed carries no
+unit's data and reaches every stream. Platform administrators hold no stream
+permission and receive no live updates; the platform's copy of an update
+alert is addressed to platform streams only, and a platform stream would
+never receive a unit's update. Disabling or deleting a unit through the
+running daemon ends the unit's open streams at once; the change also ends the
+unit's sessions, so a disable from another process takes effect through the
+revalidation fallback.
 The deployment keeps at most 256 streams open (`web.max_live_streams`), and
 one account at most four. Once more than one unit is active, each unit (and
 the platform) may hold an equal share of the deployment's streams: the limit

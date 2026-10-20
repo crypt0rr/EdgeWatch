@@ -37,6 +37,11 @@ const (
 	PermissionStreamRead            = "stream.read"
 	PermissionScannerProfilesRead   = "scanner_profiles.read"
 	PermissionScannerProfilesManage = "scanner_profiles.manage"
+	// PermissionPerimeterRead reads the unit's declared perimeter and its
+	// coverage report; PermissionPerimeterManage declares and removes its
+	// ranges. Administrators hold both and operators only the read.
+	PermissionPerimeterRead   = "perimeter.read"
+	PermissionPerimeterManage = "perimeter.manage"
 	// PermissionAccountSelf covers authenticated self-service operations such
 	// as password, display-name, TOTP, session revocation, and logout. Keeping
 	// it explicit prevents a newly added /auth/* mutation from becoming an
@@ -65,6 +70,7 @@ var rolePermissions = map[string]map[string]bool{
 		PermissionNotificationsManage: true, PermissionUsersManage: true,
 		PermissionPublicManage: true, PermissionStreamRead: true,
 		PermissionScannerProfilesRead: true, PermissionScannerProfilesManage: true,
+		PermissionPerimeterRead: true, PermissionPerimeterManage: true,
 		PermissionAuditRead:   true,
 		PermissionAccountSelf: true,
 	},
@@ -74,8 +80,8 @@ var rolePermissions = map[string]map[string]bool{
 		PermissionBaselinesRead: true, PermissionBaselinesManage: true,
 		PermissionIncidentsRead: true, PermissionIncidentsManage: true,
 		PermissionNotificationOptions: true, PermissionStreamRead: true,
-		PermissionScannerProfilesRead: true,
-		PermissionAccountSelf:         true,
+		PermissionScannerProfilesRead: true, PermissionPerimeterRead: true,
+		PermissionAccountSelf: true,
 	},
 	store.RoleViewer: {
 		// Viewers get the deliberately narrow read-only console: configured

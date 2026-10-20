@@ -19,7 +19,7 @@ import (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 75
+const schemaVersion = 76
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -374,6 +374,9 @@ func schemaMigrationStatements() map[int][]string {
 		// Results pages and Inbox recovery classification use compact scan
 		// projections instead of parsing the full immutable snapshot.
 		75: migration75Statements(),
+		// Each business unit declares the address space it owns or may
+		// scan, its perimeter. See migration76.go.
+		76: migration76Statements(),
 	}
 }
 

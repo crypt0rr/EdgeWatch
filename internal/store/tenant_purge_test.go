@@ -25,6 +25,7 @@ var tenantPurgeOracle = map[string]string{
 	"latest_scan_hosts":                `SELECT rowid FROM latest_scan_hosts WHERE tenant_id=?1`,
 	"managed_notifications":            `SELECT rowid FROM managed_notifications WHERE tenant_id=?1`,
 	"outbox":                           `SELECT rowid FROM outbox WHERE tenant_id=?1`,
+	"perimeter_seeds":                  `SELECT rowid FROM perimeter_seeds WHERE tenant_id=?1`,
 	"public_dashboards":                `SELECT rowid FROM public_dashboards WHERE tenant_id=?1`,
 	"restore_quarantined_deliveries":   `SELECT rowid FROM restore_quarantined_deliveries WHERE tenant_id=?1`,
 	"scanner_profiles":                 `SELECT rowid FROM scanner_profiles WHERE tenant_id=?1`,
@@ -132,8 +133,8 @@ func TestTenantPurgeCoversTheRegistry(t *testing.T) {
 // that the fixture leaves empty, so the purge has something to erase, and to
 // keep, in every table: a public status page with a host, a legacy host
 // backfill marker, a quarantined delivery, a discovery checkpoint, delivery
-// health, a TOTP step, and audit records of a tenant action and of a
-// platform administrator's action.
+// health, a TOTP step, a declared perimeter range, and audit records of a
+// tenant action and of a platform administrator's action.
 func addTenantPurgeRows(t *testing.T, f tenantFixture) {
 	t.Helper()
 	ctx := context.Background()
@@ -165,6 +166,7 @@ func addTenantPurgeRows(t *testing.T, f tenantFixture) {
 			{`INSERT INTO security_alert_windows(tenant_id,kind,started_at,suppressed) VALUES(?,'rate_limited',?,2)`, []any{tenant, stamp}},
 			{`INSERT INTO incident_reviews(job_id,occurrence_token,incident_key,opening_scan_id,opened_at,status,reviewer_user_id,reviewer_label,reviewed_at,note,follow_up_at,revision,closed_at) VALUES(?,?,?,'',?,'investigating',?,'Purge reviewer',?,'purge fixture','',1,?)`, []any{owner.job, "purge:" + tenant, "purge:" + tenant, stamp, owner.account, stamp, stamp}},
 			{`INSERT INTO incident_review_history(job_id,occurrence_token,revision,status,reviewer_user_id,reviewer_label,reviewed_at,note,follow_up_at) VALUES(?,?,1,'investigating',?,'Purge reviewer',?,'purge fixture','')`, []any{owner.job, "purge:" + tenant, owner.account, stamp}},
+			{`INSERT INTO perimeter_seeds(id,tenant_id,kind,value,label,created_at,created_by) VALUES(?,?,'prefix','192.0.2.0/24','purge fixture',?,'Purge reviewer')`, []any{"purge-seed-" + tenant, tenant, stamp}},
 		} {
 			if _, err := f.store.DB.ExecContext(ctx, statement.query, statement.args...); err != nil {
 				t.Fatalf("%s: %v", statement.query, err)

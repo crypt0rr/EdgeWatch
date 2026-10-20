@@ -5,7 +5,7 @@ description: Understand the current SQLite schema, the oldest schema that upgrad
 
 ## Current schema and rollback
 
-The current schema is version 75. Schema 31 records terminal notification
+The current schema is version 76. Schema 31 records terminal notification
 deliveries and marks rows that had already exhausted the original eight
 attempts. Schema 63 repairs databases that had already passed schema 31 by
 marking still-unsent rows with at least eight attempts and a scheduled retry
@@ -148,6 +148,29 @@ block startup or make inbox recovery classification parse the full document.
 The migration's duration and temporary WAL depend on retained scan history. An
 older release refuses the upgraded database; restore the matching pre-upgrade
 `./data` backup to roll back.
+
+## Schema 76
+
+Schema 76 adds the `perimeter_seeds` table, which holds the address ranges a
+business unit declares: space it owns, of kind `prefix`, and third-party space
+it may scan, of kind `authorized`. Each row stores its unit, its kind, its
+canonical IPv4 or IPv6 CIDR value of 1 to 64 characters, an optional label,
+its source, its creation time, and the username that declared it. A unit holds
+a value at most once per kind, and a trigger refuses any change of a row's
+`tenant_id`. The kind check also accepts `asn`, and the source check accepts
+`declared` and `adopted` with an `adopted_from` column, so a later release can
+watch an ASN's announced space without rebuilding the table; this release
+writes only `prefix` and `authorized` ranges with the source `declared`. The
+index of the unique constraint serves the lookups by unit and kind, so the
+table has no other index. The table backs the forthcoming Perimeter coverage
+view.
+
+The ranges are unit data: deleting the unit erases them through the resumable
+purge, and public status never shows them. A declared range records ownership
+or permission and does not authorize scanning it. The migration creates an
+empty table and changes no existing row, so its duration does not depend on
+the database size. An older release refuses the upgraded database; restore
+the matching pre-upgrade `./data` backup to roll back.
 
 ## Upgrade floor
 

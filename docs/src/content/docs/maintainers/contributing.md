@@ -17,6 +17,7 @@ contains the detailed change rules and validation matrix.
 | `internal/config/` | Configuration validation and scanner profiles |
 | `internal/scanner/` | Nmap and Naabu execution, parsing, and scan plans |
 | `internal/engine/` | Baseline comparison and change detection |
+| `internal/addrspace/` | Address-range arithmetic (merge, subtract, cover, pack) for perimeter coverage |
 | `internal/model/` | Shared domain types |
 | `internal/store/` | SQLite queries, migrations, history, backup, and restore |
 | `internal/auth/` | Authentication and permissions |

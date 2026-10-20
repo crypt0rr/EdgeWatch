@@ -388,12 +388,18 @@ five-second busy timeout, instead of failing the daemon's start. Daemon and
 scheduled-job lease acquisition also reserves the write lock before reading
 lease ownership or job revision, so a concurrent writer delays the claim
 through SQLite's busy timeout instead of causing a failed read-to-write
-upgrade. During service, a heartbeat that receives `SQLITE_BUSY` retries on
-the next heartbeat tick without counting it as a missed heartbeat; lease loss,
-`SQLITE_LOCKED`, and other database errors keep their existing failure
-behavior. A host process holding SQLite's writer lock for more than two
-minutes can still prevent a successful heartbeat long enough for the daemon
-lease to become stale. If a second daemon acquires the database after that
+upgrade. A host command's write that reads the current state first takes the
+write lock first too: `admin setup-token`, `admin reissue-setup-token`,
+`admin platform-setup-token`, `admin reset-password`, `admin disable-totp`,
+`baseline approve`, `baseline reset`, and the scan cycle progress of `scan`
+wait for the running daemon's write, up to the same busy timeout, instead of
+failing with `database is locked`. During service, a heartbeat that
+receives `SQLITE_BUSY` retries on the next heartbeat tick without counting it
+as a missed heartbeat; lease loss, `SQLITE_LOCKED`, and other database errors
+keep their existing failure behavior. A host process holding SQLite's writer
+lock for more than two minutes can still prevent a successful heartbeat long
+enough for the daemon lease to become stale. If a second daemon acquires the
+database after that
 writer releases the lock, it can take over and reclaim the first daemon's job
 leases while the first process is still alive. The first daemon detects lease
 loss at its next heartbeat and stops its scans. Avoid suspending or otherwise

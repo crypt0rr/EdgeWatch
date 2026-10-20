@@ -1539,7 +1539,7 @@ func (ts *TenantStore) resetRuntimeWithAudits(ctx context.Context, jobID, name s
 	if err := ts.ready(); err != nil {
 		return nil, err
 	}
-	tx, err := ts.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ts.store.DB)
 	if err != nil {
 		return nil, err
 	}
@@ -1629,7 +1629,7 @@ func (ts *TenantStore) approveRuntimeWithAudits(ctx context.Context, jobID, name
 	if scan.ID == "" {
 		return nil, errors.New("scan ID is required")
 	}
-	tx, err := ts.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ts.store.DB)
 	if err != nil {
 		return nil, err
 	}

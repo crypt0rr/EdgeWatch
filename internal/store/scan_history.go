@@ -24,7 +24,7 @@ func (ss *SystemStore) SaveScan(ctx context.Context, scan model.Scan) error {
 	// host index is consumed as an authoritative projection by the web API, so
 	// exposing a scan with only a prefix of its hosts would be worse than
 	// rejecting the write and retrying it later.
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return err
 	}

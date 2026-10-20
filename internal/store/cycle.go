@@ -238,7 +238,7 @@ func (ss *SystemStore) ReconcileScanCycleEnrichment(ctx context.Context, cycleID
 // committed and lets the caller drain additional batches without making the
 // writer transaction itself unbounded.
 func (ss *SystemStore) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID string, plan scanner.WorkPlan) (bool, error) {
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return false, err
 	}
@@ -1227,7 +1227,7 @@ func (ts *TenantStore) ListScanCycleUnitSummariesPage(ctx context.Context, cycle
 // atomically marks the cycle running for this attempt.
 func (ss *SystemStore) StartScanCycleAttempt(ctx context.Context, id string) (ScanCycleRecord, error) {
 	now := time.Now().UTC()
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return ScanCycleRecord{}, err
 	}
@@ -1385,7 +1385,7 @@ func (ss *SystemStore) CompleteScanCycleUnit(ctx context.Context, cycleID string
 		return err
 	}
 	now := time.Now().UTC()
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return err
 	}
@@ -1475,7 +1475,7 @@ func (ss *SystemStore) SplitScanCycleUnit(ctx context.Context, cycleID string, s
 	if err != nil {
 		return err
 	}
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return err
 	}
@@ -1556,7 +1556,7 @@ func (ss *SystemStore) MarkScanCycleStalled(ctx context.Context, cycleID, lastEr
 // completed, then returns the cycle.
 func (ss *SystemStore) CompleteScanCycle(ctx context.Context, cycleID string) (ScanCycleRecord, error) {
 	now := sqliteTimestamp(time.Now())
-	tx, err := ss.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ss.store.DB)
 	if err != nil {
 		return ScanCycleRecord{}, err
 	}
@@ -1606,7 +1606,7 @@ func (ts *TenantStore) DiscardScanCycle(ctx context.Context, cycleID string) err
 	if err := ts.ready(); err != nil {
 		return err
 	}
-	tx, err := ts.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ts.store.DB)
 	if err != nil {
 		return err
 	}
@@ -1669,7 +1669,7 @@ func (ss *SystemStore) ExpireScanCycles(ctx context.Context, now time.Time) (int
 		if err := ctx.Err(); err != nil {
 			return total, err
 		}
-		tx, err := ss.store.DB.BeginTx(ctx, nil)
+		tx, err := beginWriteTx(ctx, ss.store.DB)
 		if err != nil {
 			return total, err
 		}

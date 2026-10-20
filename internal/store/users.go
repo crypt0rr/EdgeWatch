@@ -550,7 +550,7 @@ func (ts *TenantStore) SaveUserSecurityPreservingSession(ctx context.Context, u 
 	if err != nil {
 		return err
 	}
-	tx, err := ts.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ts.store.DB)
 	if err != nil {
 		return err
 	}

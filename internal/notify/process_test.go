@@ -296,11 +296,14 @@ func TestNotificationProcessTimeoutTerminatesAndReapsChild(t *testing.T) {
 			t.Fatalf("parse controlled PID %q: %v", field, err)
 		}
 		deadline := time.Now().Add(time.Second)
-		for processIsRunning(pid) && time.Now().Before(deadline) {
+		// Check the PID only in the loop condition: Linux may recycle its
+		// number after /proc reports it gone.
+		for processIsRunning(pid) {
+			if !time.Now().Before(deadline) {
+				t.Errorf("notification process %d remained alive after the send bound", pid)
+				break
+			}
 			time.Sleep(10 * time.Millisecond)
-		}
-		if processIsRunning(pid) {
-			t.Errorf("notification process %d remained alive after the send bound", pid)
 		}
 	}
 }

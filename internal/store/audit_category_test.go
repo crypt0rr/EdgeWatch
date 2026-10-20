@@ -119,6 +119,7 @@ var notAuditActions = map[string]bool{
 	"application.update_status":   true,
 	"security.alert":              true, // A security alert's event type; the audit holds the record it reports.
 	"notification.changed":        true,
+	"perimeter.updated":           true, // A live-update message type; the declaration's audit record is perimeter.seeds_added or perimeter.seed_removed.
 	"scan.cancellation_requested": true,
 	"scan.completed":              true,
 	"scan.skipped":                true,

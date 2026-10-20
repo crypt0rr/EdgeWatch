@@ -162,8 +162,9 @@ a value at most once per kind, and a trigger refuses any change of a row's
 watch an ASN's announced space without rebuilding the table; this release
 writes only `prefix` and `authorized` ranges with the source `declared`. The
 index of the unique constraint serves the lookups by unit and kind, so the
-table has no other index. The table backs the forthcoming Perimeter coverage
-view.
+table has no other index. The table backs the
+[perimeter coverage API](/reference/api-compatibility/#perimeter-coverage)
+and the forthcoming Perimeter console page.
 
 The ranges are unit data: deleting the unit erases them through the resumable
 purge, and public status never shows them. A declared range records ownership

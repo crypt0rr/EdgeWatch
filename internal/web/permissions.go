@@ -233,6 +233,12 @@ var apiRoutes = withPathAlias("/scanner-profiles", "/scanner/profiles", []apiRou
 	{Method: http.MethodPost, Template: "/jobs/{id}/incidents/suppress", Permission: auth.PermissionIncidentsManage, Mutates: true, Example: "/jobs/job-1/incidents/suppress", TrailingSlash: true, Handle: (*Server).suppressIncidentRoute},
 	{Method: http.MethodGet, Template: "/jobs/{id}/events", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/events", TrailingSlash: true, Handle: jobHandler(jobMissingOnAnyError, (*Server).jobEvents)},
 
+	// Perimeter: declared address space and its coverage report.
+	{Method: http.MethodGet, Template: "/perimeter", Permission: auth.PermissionPerimeterRead, Example: "/perimeter", Handle: tenantHandler((*Server).perimeterOverview)},
+	{Method: http.MethodPost, Template: "/perimeter/seeds", Permission: auth.PermissionPerimeterManage, Mutates: true, Example: "/perimeter/seeds", Handle: sessionTenantHandler((*Server).declarePerimeterSeeds)},
+	{Method: http.MethodGet, Template: "/perimeter/seeds/{id}", Permission: auth.PermissionPerimeterRead, Example: "/perimeter/seeds/seed-1", Handle: tenantIDHandler((*Server).perimeterRangeDetail)},
+	{Method: http.MethodDelete, Template: "/perimeter/seeds/{id}", Permission: auth.PermissionPerimeterManage, Mutates: true, Example: "/perimeter/seeds/seed-1", Handle: sessionTenantIDHandler((*Server).deletePerimeterSeed)},
+
 	// The unit's security audit, for its administrators.
 	{Method: http.MethodGet, Template: "/audit", Permission: auth.PermissionAuditRead, Example: "/audit", Handle: tenantHandler((*Server).unitAudit)},
 

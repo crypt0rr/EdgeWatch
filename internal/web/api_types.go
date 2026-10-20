@@ -70,5 +70,25 @@ func ResponseTypes() []apitypes.Type {
 		{Name: "ServiceObservation", Value: model.ServiceObservation{}},
 		{Name: "StateSummary", Value: model.StateSummary{}},
 		{Name: "StateReason", Value: model.StateReason{}},
+
+		// The perimeter: GET /api/v1/perimeter, the range detail of GET
+		// /api/v1/perimeter/seeds/{id}, the result of a declaration, and the
+		// refused entries that a declaration lists in details.entries.
+		{Name: "PerimeterOverview", Value: app.PerimeterReport{}},
+		{Name: "PerimeterRange", Value: app.PerimeterRange{}},
+		{Name: "PerimeterCoverage", Value: app.PerimeterCoverage{}},
+		{Name: "PerimeterTotals", Value: app.PerimeterTotals{}},
+		{Name: "PerimeterLimits", Value: app.PerimeterLimits{}},
+		{Name: "PerimeterMonitorRef", Value: app.PerimeterMonitorRef{}},
+		{Name: "PerimeterOutsideTarget", Value: app.PerimeterOutsideTarget{}},
+		{Name: "PerimeterRangeDetail", Value: app.PerimeterRangeDetail{}},
+		{Name: "PerimeterUncovered", Value: app.PerimeterUncovered{}},
+		{Name: "PerimeterBlocks", Value: app.PerimeterBlocks{}},
+		{Name: "PerimeterModeCounts", Value: app.PerimeterModeCounts{}},
+		{Name: "PerimeterModeFlags", Value: app.PerimeterModeFlags{}},
+		{Name: "PerimeterSuggestion", Value: app.PerimeterSuggestion{}},
+		{Name: "PerimeterProtocol", Value: app.PerimeterProtocol{}},
+		{Name: "PerimeterDeclareResult", Value: store.PerimeterDeclareResult{}},
+		{Name: "PerimeterLineError", Value: store.PerimeterLineError{}},
 	}
 }

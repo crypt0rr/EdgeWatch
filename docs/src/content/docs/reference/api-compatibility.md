@@ -438,6 +438,205 @@ The alerts are delivered as events of the types `security.alert` and
 `application.health_alert`, which a destination's failed alerts can list;
 they do not appear in the activity history.
 
+## Perimeter coverage
+
+Four new routes serve a business unit's perimeter: the address ranges that
+its administrators declare, either as space the unit owns
+(`kind: "prefix"`) or as third-party space it may scan
+(`kind: "authorized"`), and a report that compares them with what the unit's
+monitors will scan. A declared range states ownership or permission; it does
+not authorize a scan. No route scans, resolves a DNS name, opens an outbound
+connection, or creates, changes, or starts a job. Existing routes and
+responses are unchanged, apart from the two new entries in `permissions`.
+
+| Endpoint | Permission | Request and response |
+| --- | --- | --- |
+| `GET /api/v1/perimeter` | `perimeter.read` | `200` with a `PerimeterOverview`. |
+| `POST /api/v1/perimeter/seeds` | `perimeter.manage` | `{entries: [{kind, value, label}]}`, with 1 to 256 entries. `200` with a `PerimeterDeclareResult`, `{created, skipped}`. |
+| `GET /api/v1/perimeter/seeds/{id}` | `perimeter.read` | `200` with a `PerimeterRangeDetail`. |
+| `DELETE /api/v1/perimeter/seeds/{id}` | `perimeter.manage` | No body and no password. `204`. |
+
+A unit's administrators hold both permissions and its operators hold
+`perimeter.read`, so `permissions` in the login, session, and status responses
+lists them for those roles. Viewers, platform administrators, and anonymous
+callers reach none of the routes and get the route gate's answers. The `POST`
+and `DELETE` need the session's CSRF token, like every state-changing route.
+None of the routes accepts a trailing slash.
+
+### Declaring ranges
+
+```json
+{
+  "entries": [
+    { "kind": "prefix", "value": "203.0.113.0/24", "label": "DC1 edge" },
+    { "kind": "authorized", "value": "198.51.100.7" }
+  ]
+}
+```
+
+`value` is an IPv4 or IPv6 address or CIDR prefix. The server masks the host
+bits and stores a bare address as a `/32` or `/128`; every range in a
+response carries that canonical value, while a refused entry echoes the value
+as submitted (see the table below). `label` is optional, at most 200
+characters, and holds no control characters. Ranges may overlap. An entry
+whose value the unit already holds under the same kind, or that repeats an
+earlier entry of the same kind, is not refused: the range is created once and
+each repeat counts as `skipped`. The server is authoritative for these rules
+and refuses an entry, with its own reason, when:
+
+- `kind` is not `prefix` or `authorized`; `asn` is refused as well;
+- the value is not an address or CIDR prefix, such as a DNS name, a range such
+  as `10.0.0.1-10`, or an ASN, or it carries an IPv6 zone;
+- the value overlaps IPv4-mapped IPv6 space (`::ffff:0:0/96`), which takes
+  the IPv4 form instead, or unspecified, loopback, multicast, or link-local
+  space;
+- an IPv4 prefix is shorter than `/8`, or an IPv6 prefix shorter than `/16`;
+- the value is already declared under the other kind, stored or earlier in the
+  same request.
+
+A declaration is all or nothing: when any entry is refused, or the unit would
+hold more than 1,024 ranges, nothing is written. Each accepted declaration,
+including one whose entries were all skipped, and each removal is recorded in
+the unit's audit, as `perimeter.seeds_added` with the counts by kind and as
+`perimeter.seed_removed` with the kind and value. The platform audit does not
+show them.
+
+| Case | Response |
+| --- | --- |
+| A `POST` body with another content type | `415 unsupported_media_type` |
+| A `POST` body that is not JSON, has an unknown field or trailing data, or is over 1 MiB | `400 invalid_json` |
+| No entries, or more than 256 | `400 validation_failed`, "Declare between 1 and 256 entries.", with `details: {"limit": 256}` |
+| A refused entry | `400 validation_failed` with `details.entries`: every refused entry as a `PerimeterLineError`, `{index, value, reason}`, in request order. `index` is the entry's position in `entries`, `value` is the submitted value cut to 64 bytes, and `reason` is a fixed text. |
+| More than 1,024 ranges after the declaration | `400 perimeter_limit` with `details: {"limit": 1024, "held": …, "new": …}`: the ranges the unit held before the request and those the request would have created. |
+| `GET` or `DELETE /api/v1/perimeter/seeds/{id}` with an unknown ID or another unit's | `404 not_found`, byte-identical for both and without the ID. |
+| A declaration or removal whose audit record cannot be written | `503 audit_unavailable`, like the job routes; nothing is stored or removed, and no live update is sent. |
+| A report whose data or unit probe budget cannot be read | `500`; never a partial report. |
+
+### The coverage report
+
+`GET /api/v1/perimeter` computes the report on each request from the unit's
+ranges, the configuration of its unarchived jobs, the status of their scans,
+the unit's probe budgets, and the deployment's `scanner.max_job_hosts` and
+`scanner.target_exclusions`. Coverage comes from job configuration only,
+never from observed hosts or DNS answers.
+
+Each monitor in the report is a `PerimeterMonitorRef`. Its `state` is the
+first check that fails, in the order a scheduled run meets them, or
+`covering`; `reasons` lists every failing check. Only `covering` monitors
+count as coverage.
+
+| `state` | Meaning |
+| --- | --- |
+| `paused` | The job is disabled. |
+| `invalid_config` | The stored job no longer passes the work estimator. |
+| `over_budget` | The scheduler's preflight refuses the job's estimate: it exceeds the unit's probe budget, or, for a job with `allow_high_cost`, the high-cost ceiling. |
+| `over_expansion` | The targets expand past the lower of the job's `max_expanded_hosts` and `scanner.max_job_hosts`, counted as the scanner counts them: every IP and CIDR target in full, overlaps included, and each DNS name as one address. |
+| `excluded_target` | An IP or CIDR target contains an address in `scanner.target_exclusions`. |
+| `covering` | No check fails. |
+
+Only a `covering` monitor carries the flags that leave it counted but
+unproven: `stale`, with the `stale_reason` `overdue` once the `job-silent`
+watchdog's deadline has passed or `schedule never fires` when its schedule
+gives that rule no deadline; and `stalled_cycle` when its active scan cycle
+is stalled. Unlike the `job-silent` alert, which waits while a scan holds the
+job's lease, the flag does not wait for a scan that is still running. Every monitor has
+`last_attempt_status`, the status of its latest scan attempt or an empty
+string, and `last_success_at`, when its latest successful scan finished or
+`null`. `host_discovery` is true for a job with `assume_alive: false`, which
+scans only hosts that answer host discovery. `dns_targets` counts the
+DNS-name targets, which never count as coverage. `protocols` names the
+buckets that the job's protocol settings fill, whatever its state:
+
+- `full_tcp`: TCP with the engine `naabu_nmap`, or `nmap` with ports that
+  cover 1–65535;
+- `any_tcp`: TCP with any engine and ports, so it includes `full_tcp`;
+- `udp`: UDP with any ports.
+
+`PerimeterOverview` has these keys:
+
+| Key | Content |
+| --- | --- |
+| `ranges` | One `PerimeterRange` per declared range: `id`, `kind`, `value`, `label`, `family` (`4` or `6`), `created_at`, `created_by`, and the `monitor_ids` of the monitors whose targets touch it. An IPv4 range has its `addresses`, the `excluded` addresses that `scanner.target_exclusions` holds, and `coverage`, a `PerimeterCoverage` of `full_tcp`, `any_tcp`, and `udp` with the addresses that `covering` monitors of each bucket scan, excluded addresses left out. A percentage uses `addresses` minus `excluded` as its denominator, and when that is 0 every address is excluded. An IPv6 range has these at 0 and its covered counts in `ipv6_monitored` instead, which saturate like every address count. It has no percentage: one job scans at most `limits.max_job_hosts` addresses, so no monitor sweeps an IPv6 prefix. |
+| `monitors` | Once the unit declares a range, the monitors with an IP or CIDR target that overlaps a declared range or lies at least partly outside them, in name order; empty while the unit declares none. |
+| `outside` | Once the unit declares a range, each IP or CIDR target of a monitor in any state that lies fully or partly outside the union of the declared ranges, as a `PerimeterOutsideTarget`: `job_id`, `job_name`, `state`, `target`, `partial` when only part of it is outside, and `outside_addresses`, the count of its addresses outside them, which saturates. At most 200; DNS names are not listed. |
+| `outside_truncated` | `true` when `outside` was cut at 200. |
+| `totals` | A `PerimeterTotals`: `declared_ipv4`, `excluded_ipv4`, and `covered_full_tcp`, `covered_any_tcp`, and `covered_udp` over the union of the IPv4 ranges, so overlapping ranges count once; `ranges`, every declared range, and `ipv6_ranges`, the IPv6 ones among them; `cannot_scan_monitors`, the monitors that touch the perimeter and are not `covering`; `unproven_monitors`, the `covering` ones that touch it and are stale, have a stalled cycle, or whose latest attempt failed, timed out, or was incomplete; and `outside_targets`. Each count is taken before any list is cut. |
+| `limits` | A `PerimeterLimits`: `max_job_hosts`; `max_probe_count` and `max_naabu_probe_count`, the unit's normal probe budgets that the states and suggestions use, not its high-cost ceiling; `max_ranges` (1,024); and `max_entries_per_request` (256). |
+| `generated_at` | When the report was computed. |
+
+Every address count in the perimeter responses saturates at
+9,007,199,254,740,991, JavaScript's `Number.MAX_SAFE_INTEGER`, so a client
+that parses the JSON into JavaScript numbers reads each one exactly. The
+limit applies to `addresses`, `excluded`, `coverage`, `ipv6_monitored`, the
+address counts of `totals`, and `outside_addresses`; a suggestion's
+`addresses` and `addresses_per_monitor` never exceed
+`limits.max_job_hosts`. Only an IPv6 count reaches it, such as that of a
+`/64` target outside the declared ranges, and a count at the limit means at
+least that many.
+
+### Range detail and suggested monitors
+
+`GET /api/v1/perimeter/seeds/{id}` returns a `PerimeterRangeDetail` with the
+`range`, the `monitors` that touch it, and:
+
+| Key | Content |
+| --- | --- |
+| `uncovered` | A `PerimeterUncovered` with a `PerimeterBlocks` for each of `full_tcp`, `any_tcp`, and `udp`: the range's addresses outside `scanner.target_exclusions` that no `covering` monitor of the bucket scans, as `cidrs`, the fewest aligned CIDR blocks, at most 256; `truncated`; and `total`, the number of blocks before the cap. An IPv6 range lists its blocks too. |
+| `addresses_per_monitor`, `monitors_needed` | `PerimeterModeCounts` with a count for each suggestion mode: `full_tcp`, `selected_tcp`, and `udp`. |
+| `suggestions` | Up to 64 `PerimeterSuggestion` objects per mode: `mode`, `targets`, `addresses`, `estimated_probes`, and `protocol`. |
+| `suggestions_truncated`, `budget_too_low` | `PerimeterModeFlags` with a flag for each mode. |
+
+Suggestions fill uncovered IPv4 space, of owned and authorized ranges alike.
+An IPv6 range gets none, and its `monitors_needed` are 0, while its
+`addresses_per_monitor` and `budget_too_low` still describe the unit's modes.
+Each mode fills one bucket's gaps with a fixed preset, which `protocol`, a
+`PerimeterProtocol`, returns with `protocol` (`tcp` or `udp`), `engine`,
+`ports`, `service_detection`, `mode` for the TCP modes only, and
+`profile_id` for `full_tcp` only:
+
+| Mode | Fills the gaps of | Preset |
+| --- | --- | --- |
+| `full_tcp` | `full_tcp` | TCP, engine `naabu_nmap`, ports `1-65535`, mode `connect`, no service detection, the built-in Naabu profile |
+| `selected_tcp` | `any_tcp` | TCP, engine `nmap`, ports `22,443`, mode `connect`, no service detection |
+| `udp` | `udp` | UDP, engine `nmap`, ports `53,123,161,500,1194,4500`, service detection |
+
+`addresses_per_monitor` is the number of addresses one monitor of the mode
+fits: the lowest of `scanner.max_job_hosts`, each of the unit's Naabu and
+Nmap probe budgets divided by the probes that one address needs, rounded
+down, and a cap of 4,096 addresses for `selected_tcp` and 1,024 for `udp`.
+At the default budgets that is 305, 4,096, and 1,024. When one address does
+not fit the budget, it is 0, `budget_too_low` is `true`, and the mode has no
+suggestions.
+
+Packing is deterministic. Each uncovered block at least as large as the
+largest power of two that fits one monitor is split into monitors of that
+size, and the smaller blocks, in address order, join the first monitor with
+room. `monitors_needed` counts every monitor; `suggestions_truncated` is
+`true` when more than 64 were needed. No suggestion contains an excluded
+address, and none states a scan duration. A suggestion creates nothing: a
+client that wants the monitor sends it to `POST /api/v1/jobs`, which checks it
+like any other new job.
+
+### Live updates and generated types
+
+A declaration that created at least one range, and each removal, sends
+`{"type": "perimeter.updated"}` to the unit's own live-update streams, and to
+no other audience. A declaration whose entries were all skipped sends none.
+The report also changes when the unit's jobs and scans change, which send
+their own updates, and when the unit's capacity or the deployment's scanner
+settings change, which send the unit none.
+
+The TypeScript types of these responses, and of the refused entries in
+`details.entries`, are generated in
+[`src/generated/api-types.ts`](https://github.com/crypt0rr/EdgeWatch/blob/main/src/generated/api-types.ts):
+`PerimeterOverview`, `PerimeterRange`, `PerimeterCoverage`, `PerimeterTotals`,
+`PerimeterLimits`, `PerimeterMonitorRef`, `PerimeterOutsideTarget`,
+`PerimeterRangeDetail`, `PerimeterUncovered`, `PerimeterBlocks`,
+`PerimeterModeCounts`, `PerimeterModeFlags`, `PerimeterSuggestion`,
+`PerimeterProtocol`, `PerimeterDeclareResult`, and `PerimeterLineError`.
+The generated types declare each list as `T[] | null`, but these responses
+always send an array, which is empty when there is nothing to list.
+
 ## Business units
 
 v0.20.0 adds business units to every installation. The routes and response

@@ -588,3 +588,158 @@ export type StateReason = {
   reason: string
   count: number
 }
+
+// PerimeterOverview is app.PerimeterReport.
+export type PerimeterOverview = {
+  ranges: PerimeterRange[] | null
+  monitors: PerimeterMonitorRef[] | null
+  outside: PerimeterOutsideTarget[] | null
+  outside_truncated: boolean
+  totals: PerimeterTotals
+  limits: PerimeterLimits
+  generated_at: string
+}
+
+// PerimeterRange is app.PerimeterRange.
+export type PerimeterRange = {
+  id: string
+  kind: string
+  value: string
+  label: string
+  family: number
+  created_at: string
+  created_by: string
+  addresses: number
+  excluded: number
+  coverage: PerimeterCoverage
+  ipv6_monitored: PerimeterCoverage
+  monitor_ids: string[] | null
+}
+
+// PerimeterCoverage is app.PerimeterCoverage.
+export type PerimeterCoverage = {
+  full_tcp: number
+  any_tcp: number
+  udp: number
+}
+
+// PerimeterTotals is app.PerimeterTotals.
+export type PerimeterTotals = {
+  declared_ipv4: number
+  excluded_ipv4: number
+  covered_full_tcp: number
+  covered_any_tcp: number
+  covered_udp: number
+  ranges: number
+  ipv6_ranges: number
+  cannot_scan_monitors: number
+  unproven_monitors: number
+  outside_targets: number
+}
+
+// PerimeterLimits is app.PerimeterLimits.
+export type PerimeterLimits = {
+  max_job_hosts: number
+  max_probe_count: number
+  max_naabu_probe_count: number
+  max_ranges: number
+  max_entries_per_request: number
+}
+
+// PerimeterMonitorRef is app.PerimeterMonitorRef.
+export type PerimeterMonitorRef = {
+  job_id: string
+  name: string
+  state: string
+  reasons: string[] | null
+  stale: boolean
+  stale_reason: string
+  stalled_cycle: boolean
+  last_attempt_status: string
+  last_success_at: string | null
+  host_discovery: boolean
+  protocols: string[] | null
+  dns_targets: number
+}
+
+// PerimeterOutsideTarget is app.PerimeterOutsideTarget.
+export type PerimeterOutsideTarget = {
+  job_id: string
+  job_name: string
+  state: string
+  target: string
+  partial: boolean
+  outside_addresses: number
+}
+
+// PerimeterRangeDetail is app.PerimeterRangeDetail.
+export type PerimeterRangeDetail = {
+  range: PerimeterRange
+  monitors: PerimeterMonitorRef[] | null
+  uncovered: PerimeterUncovered
+  addresses_per_monitor: PerimeterModeCounts
+  monitors_needed: PerimeterModeCounts
+  suggestions: PerimeterSuggestion[] | null
+  suggestions_truncated: PerimeterModeFlags
+  budget_too_low: PerimeterModeFlags
+}
+
+// PerimeterUncovered is app.PerimeterUncovered.
+export type PerimeterUncovered = {
+  full_tcp: PerimeterBlocks
+  any_tcp: PerimeterBlocks
+  udp: PerimeterBlocks
+}
+
+// PerimeterBlocks is app.PerimeterBlocks.
+export type PerimeterBlocks = {
+  cidrs: string[] | null
+  truncated: boolean
+  total: number
+}
+
+// PerimeterModeCounts is app.PerimeterModeCounts.
+export type PerimeterModeCounts = {
+  full_tcp: number
+  selected_tcp: number
+  udp: number
+}
+
+// PerimeterModeFlags is app.PerimeterModeFlags.
+export type PerimeterModeFlags = {
+  full_tcp: boolean
+  selected_tcp: boolean
+  udp: boolean
+}
+
+// PerimeterSuggestion is app.PerimeterSuggestion.
+export type PerimeterSuggestion = {
+  mode: string
+  targets: string[] | null
+  addresses: number
+  estimated_probes: number
+  protocol: PerimeterProtocol
+}
+
+// PerimeterProtocol is app.PerimeterProtocol.
+export type PerimeterProtocol = {
+  protocol: string
+  engine: string
+  ports: string
+  mode?: string
+  service_detection: boolean
+  profile_id?: string
+}
+
+// PerimeterDeclareResult is store.PerimeterDeclareResult.
+export type PerimeterDeclareResult = {
+  created: number
+  skipped: number
+}
+
+// PerimeterLineError is store.PerimeterLineError.
+export type PerimeterLineError = {
+  index: number
+  value: string
+  reason: string
+}

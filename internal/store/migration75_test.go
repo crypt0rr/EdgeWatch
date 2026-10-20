@@ -40,8 +40,10 @@ func TestMigration75BackfillsCompactScanEvidenceAndResumes(t *testing.T) {
 	if err := migrateContext(ctx, s.DB); err == nil || !strings.Contains(err.Error(), "injected projection failure") {
 		t.Fatalf("migration with rejected projection update = %v", err)
 	}
-	if got := countRows(t, s.DB, `PRAGMA user_version`); got != 75 {
-		t.Fatalf("schema after projection backfill failure = %d, want 75", got)
+	// The backfill runs after every schema step, so the marker has reached
+	// the current schema when it fails.
+	if got := countRows(t, s.DB, `PRAGMA user_version`); got != schemaVersion {
+		t.Fatalf("schema after projection backfill failure = %d, want %d", got, schemaVersion)
 	}
 	if _, err := s.DB.ExecContext(ctx, `DROP TRIGGER reject_scan_projection`); err != nil {
 		t.Fatal(err)

@@ -21,6 +21,7 @@ It uses a Go backend, SQLite storage, and a React/TypeScript web console.
 | `internal/scanner/` | Nmap and Naabu execution, parsing, and scan plans |
 | `internal/sandbox/` | The unprivileged identities, capabilities, and Landlock restrictions scanner and notification processes start with |
 | `internal/engine/` | Baseline comparison and change detection |
+| `internal/addrspace/` | Address-range arithmetic (merge, subtract, cover, pack) for perimeter coverage |
 | `internal/model/` | Shared domain types |
 | `internal/store/` | SQLite queries, migrations, history, backup, and restore |
 | `internal/auth/` | Authentication and permissions |

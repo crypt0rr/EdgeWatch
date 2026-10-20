@@ -142,6 +142,8 @@ var tenantPurgeSteps = []tenantPurgeStep{
 	{table: "job_history_purges", rowids: `SELECT rowid FROM job_history_purges WHERE tenant_id=?1`},
 	{table: "jobs", rowids: `SELECT rowid FROM jobs WHERE tenant_id=?1`},
 	{table: "public_dashboards", rowids: `SELECT rowid FROM public_dashboards WHERE tenant_id=?1`},
+	// The address space the tenant declared as its perimeter.
+	{table: "perimeter_seeds", rowids: `SELECT rowid FROM perimeter_seeds WHERE tenant_id=?1`},
 	// Notification destinations and scanner profiles. The delivery health of
 	// a destination deleted before deletes removed its health names no
 	// destination, so its owner cannot be told apart; no tenant counts it,

@@ -28,6 +28,23 @@ a pending review and their evidence expire under configured history retention.
 Review-due summaries remain until reviewed, and permanent job or tenant
 deletion erases them through the resumable purge.
 
+Perimeter declarations store the address ranges that a business unit says it
+owns or may scan, each with an optional label and the username that declared
+it, in the SQLite database and its backups. They map the unit's address space
+and the third parties it works with, so treat them as operationally
+sensitive. Declarations are unit data: each row carries its unit, which a
+trigger keeps fixed, and a unit's requests read and write them only through
+its tenant-scoped store; apart from that, only the daemon's purge of a
+deleted unit and whole-database backup and restore touch them. They are
+never shared with another unit and never appear on the public status surface
+or in the platform console. Each addition and removal
+is recorded in the unit's audit as a data record, which the platform audit
+does not show. Deleting the business unit erases its declarations through
+the resumable purge. A declared range states ownership or permission for
+coverage reporting; it does not authorize scanning that range, and EdgeWatch
+never starts a scan or creates, changes, pauses, or deletes a job because of a
+declaration.
+
 TCP jobs may use the optional Naabu discovery-to-Nmap pipeline. Both scanners
 are fixed, image-bundled executables (`/usr/local/bin/naabu` and
 `/usr/bin/nmap`); administrators can edit only validated argument arrays and
@@ -888,7 +905,7 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 75 must not be opened by an older EdgeWatch
+database upgraded to schema 76 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
@@ -970,6 +987,10 @@ backfills one scan per restartable transaction, leaving malformed legacy
 snapshots untouched and marking their projections empty. An older release must
 not open the upgraded database; rollback requires the complete pre-upgrade
 backup.
+Schema 76 adds `perimeter_seeds`, the address ranges that each unit declares
+as owned or authorized space, with a trigger that keeps each row in its unit.
+The migration creates an empty table and changes no existing row; an older
+release must not open the upgraded database either.
 Only the daemon migrates, and only one process at a time: from v0.36.0 the
 daemon holds an advisory lock on the database directory, which restores take
 too, from before it opens the database until migration and startup finish and

@@ -84,6 +84,7 @@ var tenancyTables = map[string]tableTenancy{
 	"latest_scan_hosts":              directTable,
 	"managed_notifications":          directTable,
 	"outbox":                         directTable,
+	"perimeter_seeds":                directTable,
 	"public_dashboards":              directTable,
 	"restore_quarantined_deliveries": directTable,
 	"scanner_profiles":               directTable,

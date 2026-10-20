@@ -134,6 +134,8 @@ var auditActionCategories = map[string]string{
 	auditSecurityRouting:                       auditCategoryData,
 	"notifications.incident_reminders_changed": auditCategoryData,
 	"notifications.updated":                    auditCategoryData,
+	auditPerimeterSeedsAdded:                   auditCategoryData,
+	auditPerimeterSeedRemoved:                  auditCategoryData,
 	"public_dashboard.updated":                 auditCategoryData,
 	"scan.cancel_requested":                    auditCategoryData,
 	"scan.queued_run_canceled":                 auditCategoryData,

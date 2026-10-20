@@ -416,6 +416,7 @@ export function JobEditor() {
         <fieldset className="editor-fields" disabled={!edit && saving} aria-busy={!edit && saving}>
         <legend className="sr-only">Job configuration</legend>
         <div className="editor-main">
+          {advancedCreation && creation?.perimeterPrefill?.applied && <div className="notice warning" role="status"><TriangleAlert size={16} /><span>Prefilled from Perimeter ({creation.perimeterPrefill.source}). A declared range is not an authorization: confirm you may scan these addresses.</span></div>}
           <div className="panel form-panel">
             <div className="panel-heading"><div><h2>Basics</h2><p className="muted">A name and the systems this job should watch.</p></div></div>
             <label>Job name<input {...register('name')} placeholder="Production edge" />{(formErrors.name?.message || fieldErrors.name) && <small className="field-error">{formErrors.name?.message || fieldErrors.name}</small>}</label>

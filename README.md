@@ -74,7 +74,7 @@ The full user, operator, and maintainer documentation is available at
 
 - [Installation](https://edgewatch.offsec.nl/getting-started/installation/) and [first scan](https://edgewatch.offsec.nl/getting-started/first-scan/)
 - [Updates](https://edgewatch.offsec.nl/deployment/updates/), [reverse proxies](https://edgewatch.offsec.nl/deployment/reverse-proxies/), and [container hardening](https://edgewatch.offsec.nl/deployment/container-hardening/)
-- [Jobs and incidents](https://edgewatch.offsec.nl/user-guide/jobs-baselines-incidents/), [scanning](https://edgewatch.offsec.nl/user-guide/scanning/), and [notifications](https://edgewatch.offsec.nl/user-guide/notifications/)
+- [Jobs and incidents](https://edgewatch.offsec.nl/user-guide/jobs-baselines-incidents/), [perimeter coverage](https://edgewatch.offsec.nl/user-guide/perimeter/), [scanning](https://edgewatch.offsec.nl/user-guide/scanning/), and [notifications](https://edgewatch.offsec.nl/user-guide/notifications/)
 - [Accounts and public status](https://edgewatch.offsec.nl/administration/accounts-public-status/) and [business units](https://edgewatch.offsec.nl/administration/business-units/)
 - [Configuration](https://edgewatch.offsec.nl/reference/configuration/), [CLI](https://edgewatch.offsec.nl/reference/cli/), [database compatibility](https://edgewatch.offsec.nl/reference/database-compatibility/), and [API compatibility](https://edgewatch.offsec.nl/reference/api-compatibility/)
 - [Backup and recovery](https://edgewatch.offsec.nl/operations/backup-recovery/) and [local development](https://edgewatch.offsec.nl/maintainers/development/)

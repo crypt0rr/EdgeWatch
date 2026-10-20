@@ -3146,3 +3146,154 @@ label small,
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Perimeter: the declared address space compared with what monitors scan.
+   The page stacks its sections in one grid, so the generic page spacing rules
+   above do not apply inside it. */
+.perimeter-stack { display: grid; gap: 16px; min-width: 0; }
+.perimeter-stack > * { min-width: 0; margin: 0; }
+.perimeter-stack > .back-link { justify-self: start; }
+
+/* Four columns keep the coverage cards on one row and the monitor counts on
+   the next, instead of leaving one card alone on a row. */
+.perimeter-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.perimeter-summary .summary-card { display: grid; align-content: start; min-width: 0; padding: 14px; }
+.perimeter-summary .summary-card .muted { white-space: normal; overflow-wrap: anywhere; }
+
+.perimeter-coverage { display: grid; gap: 5px; min-width: 0; }
+.perimeter-coverage-label { color: #9fb5ce; font-size: 11px; font-weight: 600; }
+.perimeter-coverage-value { color: #e7eef8; font-size: 13px; }
+.summary-card .perimeter-coverage-value { font-size: 16px; margin-bottom: 0; }
+.perimeter-coverage-count { color: var(--muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.perimeter-meter { display: block; width: 100%; min-width: 64px; height: 6px; border: 0; border-radius: 99px; background: #1a2e46; }
+.perimeter-meter::-webkit-meter-bar { height: 6px; border: 0; border-radius: 99px; background: #1a2e46; }
+.perimeter-meter::-webkit-meter-optimum-value,
+.perimeter-meter::-webkit-meter-suboptimum-value,
+.perimeter-meter::-webkit-meter-even-less-good-value { border-radius: 99px; background: var(--blue); }
+.perimeter-meter::-moz-meter-bar { border-radius: 99px; background: var(--blue); }
+
+.perimeter-generated { font-size: 11px; }
+/* What fills each coverage bucket, as visible text under the panel heading. */
+.perimeter-bucket-legend { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 16px; margin: -6px 0 14px; font-size: 12px; line-height: 1.5; }
+.perimeter-bucket-legend > div { min-width: 0; }
+.perimeter-bucket-legend dt { color: #dcecff; font-weight: 650; }
+.perimeter-bucket-legend dd { margin: 2px 0 0; color: #9fb5ce; overflow-wrap: anywhere; }
+.perimeter-truncation { margin-bottom: 12px; }
+.perimeter-docs-link { display: inline-flex; align-items: center; gap: 4px; color: #83b9ef; text-decoration: underline; text-underline-offset: 2px; }
+.perimeter-intro > p:not(.muted) { max-width: 78ch; margin: 0 0 12px; color: #c4d5e8; font-size: 13px; line-height: 1.6; }
+.perimeter-host-discovery,
+.perimeter-ipv6-note,
+.perimeter-authorization-banner { font-size: 12px; }
+
+/* Positioned, so the visually hidden header text scrolls with the table
+   instead of widening the page. */
+.perimeter-table-wrap { position: relative; }
+.perimeter-table-wrap:focus-visible { outline: 2px solid #5499dc; outline-offset: 2px; }
+.perimeter-table th,
+.perimeter-table td { padding: 12px 14px; vertical-align: top; white-space: normal; }
+.perimeter-table thead th { white-space: nowrap; }
+.perimeter-table tbody th { min-width: 190px; background: transparent; color: #dce8f7; font-size: 12px; font-weight: 500; letter-spacing: normal; text-transform: none; }
+.perimeter-table td { min-width: 120px; }
+.perimeter-range-row,
+.perimeter-range-card { cursor: pointer; }
+.perimeter-range-row:hover > * { background: #10243a; }
+.perimeter-table tr:last-child th { border-bottom: 0; }
+.perimeter-range-name { display: grid; justify-items: start; gap: 5px; min-width: 0; }
+.perimeter-range-name a { color: #83b9ef; text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
+.perimeter-range-name code { font-size: 12px; }
+.perimeter-range-name small { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.perimeter-state-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.perimeter-state-list li { display: inline-flex; align-items: center; gap: 4px; color: #c4d5e8; font-size: 11px; }
+.perimeter-remove { padding: 7px 10px; color: #ffb7bc; font-size: 12px; }
+
+.perimeter-range-cards { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.perimeter-range-card { display: grid; gap: 12px; min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: #0d1b2d; }
+.perimeter-range-card-coverage { display: grid; gap: 10px; }
+.perimeter-range-card-monitors .summary-label { margin-bottom: 6px; }
+.perimeter-range-card .perimeter-remove { justify-self: start; }
+
+.perimeter-monitor-list,
+.perimeter-outside-list,
+.perimeter-suggestion-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.perimeter-monitor-list > li,
+.perimeter-outside-list > li,
+.perimeter-suggestion-list > li { min-width: 0; padding: 12px 0; border-top: 1px solid #1c3047; }
+.perimeter-monitor-list > li:first-child,
+.perimeter-outside-list > li:first-child,
+.perimeter-suggestion-list > li:first-child { padding-top: 2px; border-top: 0; }
+.perimeter-monitor-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.perimeter-monitor-name { color: #dce8f7; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+a.perimeter-monitor-name { color: #83b9ef; text-decoration: underline; text-underline-offset: 2px; }
+.perimeter-monitor-reasons { display: grid; gap: 2px; margin: 6px 0 0; padding-left: 18px; color: #c4d5e8; font-size: 12px; line-height: 1.55; }
+.perimeter-monitor-protocols { margin-top: 6px; font-size: 11px; }
+
+.perimeter-outside-list > li { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, .8fr) minmax(0, 1fr); align-items: center; gap: 6px 14px; }
+.perimeter-outside-target { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.perimeter-outside-target code { color: #b7dcff; font-size: 12px; overflow-wrap: anywhere; }
+.perimeter-outside-count,
+.perimeter-outside-monitor { min-width: 0; color: #c4d5e8; font-size: 12px; overflow-wrap: anywhere; }
+
+.perimeter-declare-form { display: grid; gap: 12px; min-width: 0; }
+.perimeter-kind-choice { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.perimeter-kind-choice legend { margin-bottom: 8px; padding: 0; color: #bfd0e3; font-size: 12px; font-weight: 600; }
+.perimeter-kind-choice label { display: flex; align-items: flex-start; gap: 10px; padding: 10px; border: 1px solid #203b59; border-radius: 8px; cursor: pointer; }
+.perimeter-kind-choice label:has(input:checked) { border-color: #3987e7; background: #102744; }
+.perimeter-kind-choice input { flex: 0 0 15px; width: 15px; height: 15px; margin: 2px 0 0; accent-color: #3987e7; }
+.perimeter-kind-choice span { display: grid; gap: 4px; }
+.perimeter-kind-choice strong { color: #dcecff; font-size: 12px; }
+.perimeter-kind-choice small { color: #8fa6bf; font-size: 11px; font-weight: 400; }
+.perimeter-declare-form textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.perimeter-declare-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 14px; color: #8fa6bf; font-size: 11px; line-height: 1.5; }
+.perimeter-declare-meta small { font-size: 11px; }
+.perimeter-declare-meta .over-limit { color: #ff9298; font-weight: 750; }
+.perimeter-line-errors { display: grid; gap: 4px; margin: 0; padding: 10px 12px 10px 28px; border: 1px solid #71353f; border-radius: 8px; background: #2c1820; color: #ffb7bc; font-size: 12px; line-height: 1.5; }
+.perimeter-line-errors code { color: #ffd3d6; overflow-wrap: anywhere; }
+.perimeter-declare-form .form-error,
+.perimeter-declare-form .success-message { margin: 0; }
+.perimeter-authorization { font-size: 11px; }
+.perimeter-declare-actions { display: flex; justify-content: flex-end; }
+
+.perimeter-range-title code { font-size: inherit; overflow-wrap: anywhere; }
+.perimeter-range-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: 0; color: #c4d5e8; font-size: 13px; overflow-wrap: anywhere; }
+.perimeter-range-meta .muted { font-size: 12px; }
+.perimeter-blocks-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; gap: 14px; }
+.perimeter-blocks,
+.perimeter-mode { display: grid; align-content: start; gap: 8px; min-width: 0; padding: 14px; border: 1px solid #203b59; border-radius: 9px; background: #0a1929; }
+.perimeter-blocks h3,
+.perimeter-mode h3 { margin: 0; color: #dcecff; font-size: 13px; }
+.perimeter-blocks .muted,
+.perimeter-mode .muted { font-size: 11px; }
+.perimeter-blocks .text-button { justify-self: start; }
+.perimeter-cidr-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.perimeter-cidr-list code { display: inline-block; padding: 3px 7px; border: 1px solid #203c59; border-radius: 6px; background: #091727; color: #b5d7fb; font-size: 11px; overflow-wrap: anywhere; }
+.perimeter-modes { display: grid; gap: 14px; margin-top: 14px; }
+.perimeter-mode-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; }
+.perimeter-needs { display: grid; gap: 4px; margin: 0; color: #dcecff; font-size: 12px; }
+.perimeter-suggestion-list > li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; }
+.perimeter-suggestion-copy { display: grid; flex: 1 1 240px; gap: 6px; min-width: 0; }
+.perimeter-suggestion-copy strong { color: #dcecff; font-size: 12px; }
+.perimeter-suggestion-locked { font-size: 11px; }
+
+@media (max-width: 1000px) {
+  .perimeter-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 900px) {
+  .perimeter-blocks-grid,
+  .perimeter-bucket-legend,
+  .perimeter-outside-list > li { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 520px) {
+  .perimeter-kind-choice { grid-template-columns: minmax(0, 1fr); }
+  .perimeter-declare-actions .button,
+  .perimeter-suggestion-list .button { width: 100%; }
+}
+
+@media (pointer: coarse) {
+  .perimeter-remove,
+  .perimeter-declare-form .button,
+  .perimeter-suggestion-list .button,
+  .perimeter-kind-choice label,
+  .perimeter-blocks .text-button { min-height: 44px; }
+}

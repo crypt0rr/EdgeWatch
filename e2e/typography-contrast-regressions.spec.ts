@@ -10,6 +10,8 @@ const operatorPages = [
   '/activity',
   '/notifications',
   '/hosts',
+  '/perimeter',
+  '/perimeter/ranges/range-1',
   '/scans/scan-1/hosts/192.0.2.10',
   '/security',
 ]

@@ -2,13 +2,13 @@ import { expect, test } from '@playwright/test'
 import { mockConsole, rolePermissions, type UnitConsoleRole } from './mock-console'
 
 const navigationLabels = [
-  'Overview', 'Jobs', 'Hosts', 'Incidents', 'Notifications', 'Users',
+  'Overview', 'Jobs', 'Hosts', 'Perimeter', 'Incidents', 'Notifications', 'Users',
   'Public status', 'Scanner profiles', 'Audit', 'Security',
 ]
 
 const expectedNavigation: Record<UnitConsoleRole, string[]> = {
   administrator: navigationLabels,
-  operator: ['Overview', 'Jobs', 'Hosts', 'Incidents', 'Scanner profiles', 'Security'],
+  operator: ['Overview', 'Jobs', 'Hosts', 'Perimeter', 'Incidents', 'Scanner profiles', 'Security'],
   viewer: ['Jobs', 'Security'],
 }
 
@@ -25,6 +25,8 @@ const routePermissions: Array<{ path: string; permission?: string; refusedToHome
   { path: '/jobs/job-1/scans/scan-1', permission: 'scans.read' },
   { path: '/jobs/job-1/scans/scan-1/hosts/192.0.2.10', permission: 'scans.read' },
   { path: '/hosts', permission: 'hosts.read' },
+  { path: '/perimeter', permission: 'perimeter.read' },
+  { path: '/perimeter/ranges/range-1', permission: 'perimeter.read' },
   { path: '/scans/scan-1', permission: 'scans.read' },
   { path: '/incidents', permission: 'incidents.read' },
   { path: '/notifications', permission: 'notifications.manage' },
@@ -35,10 +37,12 @@ const routePermissions: Array<{ path: string; permission?: string; refusedToHome
   { path: '/security', permission: 'account.self' },
 ]
 
-test('role route and navigation matrix matches the authorization contract', async ({ browser, baseURL }, testInfo) => {
-  test.skip(testInfo.project.name !== 'desktop', 'The permission matrix runs once on desktop; mobile navigation is covered separately.')
+// One test per role, so that the roles run in parallel and each stays well
+// inside the test timeout as the route table grows.
+for (const role of Object.keys(expectedNavigation) as UnitConsoleRole[]) {
+  test(`role route and navigation matrix matches the authorization contract for ${role}`, async ({ browser, baseURL }, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop', 'The permission matrix runs once on desktop; mobile navigation is covered separately.')
 
-  for (const role of Object.keys(expectedNavigation) as UnitConsoleRole[]) {
     // Use the configured preview origin so PLAYWRIGHT_PORT is honored.
     const context = await browser.newContext({ baseURL })
     const page = await context.newPage()
@@ -68,6 +72,9 @@ test('role route and navigation matrix matches the authorization contract', asyn
         await page.goto('/scanner-profiles')
         await expect(page.getByRole('button', { name: 'New profile' })).toBeVisible()
         await expect(page.getByRole('button', { name: 'Validate & preview' })).toBeVisible()
+        await page.goto('/perimeter')
+        await expect(page.getByRole('heading', { name: 'Declare ranges', exact: true })).toBeVisible()
+        await expect(page.getByRole('button', { name: 'Remove 203.0.113.0/24' })).toBeVisible()
       } else if (role === 'operator') {
         await page.goto('/scanner-profiles')
         await expect(page.getByRole('heading', { name: 'Scanner profiles', exact: true })).toBeVisible()
@@ -75,6 +82,12 @@ test('role route and navigation matrix matches the authorization contract', asyn
         await expect(page.getByRole('button', { name: 'New profile' })).toHaveCount(0)
         await expect(page.getByRole('button', { name: 'Validate & preview' })).toHaveCount(0)
         await expect(page.getByRole('button', { name: 'Create profile' })).toHaveCount(0)
+        // Operators read the perimeter but neither declare nor remove ranges.
+        await page.goto('/perimeter')
+        await expect(page.getByRole('heading', { name: 'Declared ranges', exact: true })).toBeVisible()
+        await expect(page.getByRole('heading', { name: 'Declare ranges', exact: true })).toHaveCount(0)
+        await expect(page.getByRole('textbox', { name: 'Ranges, one per line' })).toHaveCount(0)
+        await expect(page.getByRole('button', { name: /^Remove / })).toHaveCount(0)
       } else {
         await expect(page.getByRole('button', { name: 'New job' })).toHaveCount(0)
       }
@@ -89,8 +102,8 @@ test('role route and navigation matrix matches the authorization contract', asyn
     } finally {
       await context.close()
     }
-  }
-})
+  })
+}
 
 // The platform administrator's console: its own navigation, never a unit's,
 // and every unit route leads to the platform's home without a request for a

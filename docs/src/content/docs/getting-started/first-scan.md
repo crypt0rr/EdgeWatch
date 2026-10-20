@@ -106,3 +106,12 @@ Use **Incidents** to review confirmed changes.
 Administrators and operators can take these incident actions. The
 [jobs, baselines, and incidents guide](/user-guide/jobs-baselines-incidents/)
 also explains rebaselining, DNS aggregation, archival, and deletion.
+
+## Find coverage gaps
+
+When your team is responsible for whole IP ranges, an administrator can
+declare the ranges your unit owns or may scan on **Perimeter**. The page
+shows which parts of them no monitor scans, per protocol, and which monitors
+cannot scan, and suggests monitors sized to the unit's probe budget. A
+declared range is not an authorization to scan it. See
+[Perimeter coverage](/user-guide/perimeter/).

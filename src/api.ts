@@ -1,5 +1,5 @@
 import type { ActiveScan, ActivityEvent, BaselineHostsResponse, GlobalHostsResponse, HostDetailResponse, Job, JobForm, JobPreview, Pagination, PendingChange, QueuedRun, RdapResult, ScanComparison, NaabuOptions } from './types'
-import type { AdminStatus, Change, ChangeWindow, DeploymentLimits, IncidentInboxItem, IncidentInboxPage, IncidentInboxSummary, IncidentReview, NotificationStatus, PlatformStatus, Scan, ScanSummary, Scope, Unit } from './generated/api-types'
+import type { AdminStatus, Change, ChangeWindow, DeploymentLimits, IncidentInboxItem, IncidentInboxPage, IncidentInboxSummary, IncidentReview, NotificationStatus, PerimeterDeclareResult, PerimeterLineError, PerimeterOverview, PerimeterRangeDetail, PlatformStatus, Scan, ScanSummary, Scope, Unit } from './generated/api-types'
 import { setDisplayTimeZone } from './format'
 
 export type NotificationDestination = {
@@ -282,6 +282,30 @@ export const acceptIncident = (jobId: string, key: string, expectedChange: Chang
 export const suppressIncident = (jobId: string, key: string, expectedChange: Change) => api<void>(`/jobs/${encodeURIComponent(jobId)}/incidents/suppress`, { method: 'POST', body: JSON.stringify({ key, expected_change: expectedChange }) })
 export const listEvents = (offset = 0, limit = 20, jobId?: string) => api<{ events: ActivityEvent[]; pagination: Pagination }>(`/events?limit=${limit}&offset=${offset}${jobId ? `&job_id=${encodeURIComponent(jobId)}` : ''}`)
 export const jobPendingChanges = (jobId: string, offset = 0, limit = 10) => api<{ job_id: string; job: string; pending_changes: PendingChange[]; pagination: Pagination }>(`/jobs/${encodeURIComponent(jobId)}/pending-changes?limit=${limit}&offset=${offset}`)
+// Perimeter: the address space a unit declares and the report that compares
+// it with what the unit's monitors scan. None of these routes scans, or
+// creates or changes a job.
+/** The kind of a declared range: space the unit owns, or third-party space it may scan. */
+export type PerimeterKind = 'prefix' | 'authorized'
+/** One range of a declaration: an IP address or CIDR prefix, with an optional label. */
+export type PerimeterEntry = { kind: PerimeterKind; value: string; label?: string }
+export const getPerimeter = () => api<PerimeterOverview>('/perimeter')
+/** Declares ranges, all or nothing: a refused entry fails the request with validation_failed and details.entries. */
+export const declarePerimeterSeeds = (entries: PerimeterEntry[]) => api<PerimeterDeclareResult>('/perimeter/seeds', { method: 'POST', body: JSON.stringify({ entries }) })
+export const getPerimeterRange = (id: string) => api<PerimeterRangeDetail>(`/perimeter/seeds/${encodeURIComponent(id)}`)
+/** Removes a declared range. It sends no body and needs no password; the console confirms it first. */
+export const deletePerimeterSeed = (id: string) => api<void>(`/perimeter/seeds/${encodeURIComponent(id)}`, { method: 'DELETE' })
+/**
+ * The refused entries of a declaration that failed with validation_failed,
+ * from details.entries, or an empty list for any other error. Each names the
+ * entry's position in the request, so a form can map it back to its input.
+ */
+export function perimeterLineErrors(error: unknown): PerimeterLineError[] {
+  if (!(error instanceof APIError) || error.code !== 'validation_failed') return []
+  const entries = error.details?.entries
+  if (!Array.isArray(entries)) return []
+  return entries.filter((entry): entry is PerimeterLineError => typeof entry === 'object' && entry !== null && Number.isSafeInteger(entry.index) && entry.index >= 0 && typeof entry.value === 'string' && typeof entry.reason === 'string')
+}
 export const notificationTest = () => api<{ sent: number }>('/notifications/test', { method: 'POST' })
 export const listNotificationDestinations = () => api<NotificationDestinationsResponse>('/notifications/destinations')
 export const updateNotificationRouting = (destinations: string[], password: string) => api<NotificationUpdateRouting>('/notifications/update-routing', { method: 'PUT', body: JSON.stringify({ destinations, password }) })

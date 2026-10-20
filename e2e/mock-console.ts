@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test'
+import type { PerimeterBlocks, PerimeterDeclareResult, PerimeterLineError, PerimeterMonitorRef, PerimeterOutsideTarget, PerimeterOverview, PerimeterProtocol, PerimeterRange, PerimeterRangeDetail, PerimeterSuggestion } from '../src/generated/api-types'
 
 export type UnitConsoleRole = 'administrator' | 'operator' | 'viewer'
 /** platform_admin is the business units' platform administrator. */
@@ -11,13 +12,13 @@ export const rolePermissions: Record<ConsoleRole, string[]> = {
     'incidents.read', 'incidents.manage', 'notification_options.read',
     'notifications.manage', 'users.manage', 'public_dashboard.manage',
     'stream.read', 'scanner_profiles.read', 'scanner_profiles.manage',
-    'audit.read', 'account.self',
+    'perimeter.read', 'perimeter.manage', 'audit.read', 'account.self',
   ],
   operator: [
     'overview.read', 'jobs.read', 'jobs.write', 'jobs.run',
     'hosts.read', 'scans.read', 'baselines.read', 'baselines.manage',
     'incidents.read', 'incidents.manage', 'notification_options.read',
-    'stream.read', 'scanner_profiles.read', 'account.self',
+    'stream.read', 'scanner_profiles.read', 'perimeter.read', 'account.self',
   ],
   viewer: ['jobs.read', 'baselines.read', 'account.self'],
   platform_admin: [
@@ -30,6 +31,8 @@ export type ConsoleMockControls = {
   failNext: (operation: string) => void
   setPreviewResponse: (response: unknown) => void
   deferNextPreview: () => { started: Promise<void>; resolve: (response: unknown) => void }
+  /** Rewrites every perimeter overview the mock serves from now on, such as to truncate its outside list. */
+  transformPerimeterOverview: (transform: (overview: PerimeterOverview) => PerimeterOverview) => void
   calls: Record<string, number>
   payloads: Record<string, unknown[]>
 }
@@ -130,6 +133,328 @@ function platformAccount(overrides: Record<string, unknown>) {
   return { enabled: true, pending: false, totp_enabled: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', revision: 1, ...overrides }
 }
 
+// The default unit's perimeter, shaped like the generated PerimeterOverview
+// and PerimeterRangeDetail types. The four ranges show an owned IPv4 range
+// with suggestions, an authorized range that needs more monitors than the
+// page lists, an IPv6 range, and a range that the deployment excludes
+// entirely. The monitors show every list of the page: covering, paused, over
+// budget and expansion, stale with host discovery, stalled with a failed
+// attempt, and a stale monitor that touches no range and so is listed only
+// for its target outside the perimeter.
+
+/** The report time of every perimeter fixture. */
+const perimeterGeneratedAt = '2026-10-20T10:00:00Z'
+
+type PerimeterBucket = 'full_tcp' | 'any_tcp' | 'udp'
+type PerimeterMode = 'full_tcp' | 'selected_tcp' | 'udp'
+
+function perimeterMonitor(overrides: Partial<PerimeterMonitorRef> & Pick<PerimeterMonitorRef, 'job_id' | 'name'>): PerimeterMonitorRef {
+  return { state: 'covering', reasons: [], stale: false, stale_reason: '', stalled_cycle: false, last_attempt_status: 'success', last_success_at: '2026-10-20T06:00:00Z', host_discovery: false, protocols: ['any_tcp'], dns_targets: 0, ...overrides }
+}
+
+// Only a covering monitor carries stale and stalled_cycle; the report lists
+// monitors in the byte order of their names, as the job list does.
+const perimeterMonitors: PerimeterMonitorRef[] = [
+  perimeterMonitor({ job_id: 'job-dns', name: 'Edge DNS UDP', state: 'paused', reasons: ['paused'], protocols: ['udp'], last_success_at: '2026-09-01T06:00:00Z' }),
+  perimeterMonitor({ job_id: 'job-edge', name: 'Edge full TCP', protocols: ['full_tcp', 'any_tcp'] }),
+  perimeterMonitor({ job_id: 'job-edge-web', name: 'Edge web ports', stale: true, stale_reason: 'overdue', last_success_at: '2026-10-01T06:00:00Z', host_discovery: true, dns_targets: 1 }),
+  perimeterMonitor({ job_id: 'job-partner', name: 'Partner TCP', stalled_cycle: true, last_attempt_status: 'failed', last_success_at: null }),
+  perimeterMonitor({ job_id: 'job-wide', name: 'Partner sweep', state: 'over_budget', reasons: ['over_budget', 'over_expansion'], protocols: ['full_tcp', 'any_tcp'], last_attempt_status: '', last_success_at: null }),
+  perimeterMonitor({ job_id: 'job-1', name: 'fixture-job', stale: true, stale_reason: 'overdue', last_success_at: '2026-01-01T00:00:01Z' }),
+]
+
+/**
+ * The monitored targets outside the declared ranges, in the order of their
+ * monitors. This is a static fixture: it is served whenever any range is
+ * declared and does not follow the declarations or removals a test makes.
+ */
+const perimeterOutside: PerimeterOutsideTarget[] = [
+  { job_id: 'job-wide', job_name: 'Partner sweep', state: 'over_budget', target: '198.18.0.0/15', partial: true, outside_addresses: 65_536 },
+  { job_id: 'job-1', job_name: 'fixture-job', state: 'covering', target: '192.0.2.10', partial: false, outside_addresses: 1 },
+]
+
+function perimeterRange(overrides: Partial<PerimeterRange> & Pick<PerimeterRange, 'id' | 'value'>): PerimeterRange {
+  return { kind: 'prefix', label: '', family: 4, created_at: '2026-10-18T09:30:00Z', created_by: 'admin', addresses: 0, excluded: 0, coverage: { full_tcp: 0, any_tcp: 0, udp: 0 }, ipv6_monitored: { full_tcp: 0, any_tcp: 0, udp: 0 }, monitor_ids: [], ...overrides }
+}
+
+const perimeterFixtureRanges = (): PerimeterRange[] => [
+  perimeterRange({ id: 'range-1', value: '203.0.113.0/24', label: 'DC1 edge', addresses: 256, coverage: { full_tcp: 128, any_tcp: 256, udp: 0 }, monitor_ids: ['job-dns', 'job-edge', 'job-edge-web'] }),
+  perimeterRange({ id: 'range-2', kind: 'authorized', value: '198.18.0.0/16', label: 'Partner cloud', addresses: 65_536, coverage: { full_tcp: 0, any_tcp: 128, udp: 0 }, monitor_ids: ['job-partner', 'job-wide'] }),
+  perimeterRange({ id: 'range-3', value: '2001:db8:100::/48', label: 'IPv6 edge', family: 6, ipv6_monitored: { full_tcp: 0, any_tcp: 256, udp: 0 }, monitor_ids: ['job-edge-web'] }),
+  perimeterRange({ id: 'range-4', value: '192.0.2.128/30', label: 'Lab', addresses: 4, excluded: 4 }),
+]
+
+// The uncovered blocks of each fixture range per bucket. A range declared
+// in a test has no monitor, so every address of it is uncovered.
+const perimeterGaps: Record<string, () => Record<PerimeterBucket, string[]>> = {
+  'range-1': () => ({ full_tcp: ['203.0.113.128/25'], any_tcp: [], udp: ['203.0.113.0/24'] }),
+  'range-2': () => ({ full_tcp: ['198.18.0.0/16'], any_tcp: perimeterRemainder('198.18.0.0/16', '198.18.0.0/25'), udp: ['198.18.0.0/16'] }),
+  'range-3': () => ({ full_tcp: ['2001:db8:100::/48'], any_tcp: perimeterRemainder('2001:db8:100::/48', '2001:db8:100::/120'), udp: ['2001:db8:100::/48'] }),
+  'range-4': () => ({ full_tcp: [], any_tcp: [], udp: [] }),
+}
+
+// The suggestion presets as the report returns them, with the addresses per
+// monitor at the default probe budgets and the probes each address costs, as
+// config.EstimateJobWork counts them: Naabu probes all 65,535 TCP ports, and
+// Nmap probes each port twice with service detection, so the UDP preset's 6
+// ports cost 12.
+const perimeterPresets: Record<PerimeterMode, { bucket: PerimeterBucket; perMonitor: number; probesPerAddress: number; protocol: PerimeterProtocol }> = {
+  full_tcp: { bucket: 'full_tcp', perMonitor: 305, probesPerAddress: 65_535, protocol: { protocol: 'tcp', engine: 'naabu_nmap', ports: '1-65535', mode: 'connect', service_detection: false, profile_id: '00000000-0000-0000-0000-000000000014' } },
+  selected_tcp: { bucket: 'any_tcp', perMonitor: 4_096, probesPerAddress: 2, protocol: { protocol: 'tcp', engine: 'nmap', ports: '22,443', mode: 'connect', service_detection: false } },
+  udp: { bucket: 'udp', perMonitor: 1_024, probesPerAddress: 12, protocol: { protocol: 'udp', engine: 'nmap', ports: '53,123,161,500,1194,4500', service_detection: true } },
+}
+const perimeterModes = Object.keys(perimeterPresets) as PerimeterMode[]
+
+type PerimeterBlock = { family: 4 | 6; start: bigint; bits: number }
+
+const familyWidth = (family: 4 | 6) => family === 4 ? 32 : 128
+const blockSize = (block: PerimeterBlock) => 1n << BigInt(familyWidth(block.family) - block.bits)
+
+/** Parses an IP address or CIDR prefix with its host bits masked, as the server canonicalizes it, or returns null. */
+function parsePerimeterValue(value: string): PerimeterBlock | null {
+  const [address, length, ...rest] = value.split('/')
+  if (rest.length || !address) return null
+  const family = address.includes(':') ? 6 : 4
+  const width = familyWidth(family)
+  const bits = length === undefined ? width : /^\d{1,3}$/.test(length) ? Number(length) : Number.NaN
+  if (!Number.isInteger(bits) || bits > width) return null
+  let start = 0n
+  if (family === 4) {
+    const octets = address.split('.')
+    if (octets.length !== 4 || !octets.every(octet => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)) return null
+    for (const octet of octets) start = (start << 8n) | BigInt(octet)
+  } else {
+    const halves = address.split('::')
+    if (halves.length > 2) return null
+    const groups = (part: string) => part === '' ? [] : part.split(':')
+    const head = groups(halves[0])
+    const tail = halves.length === 2 ? groups(halves[1]) : []
+    const missing = 8 - head.length - tail.length
+    if (halves.length === 2 ? missing < 1 : missing !== 0) return null
+    const all = [...head, ...Array<string>(halves.length === 2 ? missing : 0).fill('0'), ...tail]
+    if (!all.every(group => /^[0-9a-f]{1,4}$/i.test(group))) return null
+    for (const group of all) start = (start << 16n) | BigInt(`0x${group}`)
+  }
+  const block = { family, start, bits } as PerimeterBlock
+  return { ...block, start: start - (start % blockSize(block)) }
+}
+
+/** Formats a block as the server does: dotted IPv4, or IPv6 with its longest run of zero groups compressed. */
+function formatPerimeterBlock(block: PerimeterBlock): string {
+  if (block.family === 4) return `${[24n, 16n, 8n, 0n].map(shift => String((block.start >> shift) & 255n)).join('.')}/${block.bits}`
+  const groups = Array.from({ length: 8 }, (_, index) => Number((block.start >> BigInt(112 - index * 16)) & 0xffffn))
+  let longest = { at: -1, length: 1 }
+  for (let index = 0; index < groups.length;) {
+    let end = index
+    while (end < groups.length && groups[end] === 0) end++
+    if (end - index > longest.length) longest = { at: index, length: end - index }
+    index = Math.max(end, index + 1)
+  }
+  const hex = groups.map(group => group.toString(16))
+  const text = longest.at < 0 ? hex.join(':') : `${hex.slice(0, longest.at).join(':')}::${hex.slice(longest.at + longest.length).join(':')}`
+  return `${text}/${block.bits}`
+}
+
+/** The fewest aligned blocks of range that remain when covered, a block at its start, is taken out, in address order. */
+function perimeterRemainder(range: string, covered: string): string[] {
+  const whole = parsePerimeterValue(range)!
+  const first = parsePerimeterValue(covered)!
+  const blocks: string[] = []
+  for (let bits = first.bits; bits > whole.bits; bits--) blocks.push(formatPerimeterBlock({ family: whole.family, start: whole.start + (1n << BigInt(familyWidth(whole.family) - bits)), bits }))
+  return blocks
+}
+
+/**
+ * Packs uncovered blocks into monitors as addrspace.Pack does. P is the
+ * largest power of two that fits a monitor. First, every block of at least P
+ * addresses, in address order, is split into blocks of P with a monitor each.
+ * Then every smaller block, in address order, joins the first monitor, in the
+ * order the monitors opened, with room for it, or opens a new monitor at the
+ * end. Each monitor lists its blocks in address order.
+ */
+function packPerimeterBlocks(cidrs: string[], perMonitor: number): string[][] {
+  const capacity = BigInt(perMonitor)
+  let unit = 1n
+  while (unit * 2n <= capacity) unit *= 2n
+  const monitors: { blocks: PerimeterBlock[]; room: bigint }[] = []
+  const blocks = cidrs.map(cidr => parsePerimeterValue(cidr)!).sort(byStart)
+  const small: PerimeterBlock[] = []
+  for (const block of blocks) {
+    const size = blockSize(block)
+    if (size < unit) {
+      small.push(block)
+      continue
+    }
+    const bits = familyWidth(block.family) - (unit.toString(2).length - 1)
+    for (let start = block.start; start < block.start + size; start += unit) monitors.push({ blocks: [{ family: block.family, start, bits }], room: capacity - unit })
+  }
+  for (const block of small) {
+    const size = blockSize(block)
+    const open = monitors.find(monitor => monitor.room >= size)
+    if (open) {
+      open.blocks.push(block)
+      open.room -= size
+    } else {
+      monitors.push({ blocks: [block], room: capacity - size })
+    }
+  }
+  return monitors.map(monitor => [...monitor.blocks].sort(byStart).map(formatPerimeterBlock))
+}
+
+function byStart(left: PerimeterBlock, right: PerimeterBlock): number {
+  return left.start < right.start ? -1 : left.start > right.start ? 1 : 0
+}
+
+function perimeterBlocks(cidrs: string[]): PerimeterBlocks {
+  return { cidrs: cidrs.slice(0, 256), truncated: cidrs.length > 256, total: cidrs.length }
+}
+
+/** The detail of a declared range: its monitors, its uncovered blocks, and at most 64 suggestions per mode for IPv4. */
+function perimeterRangeDetail(range: PerimeterRange): PerimeterRangeDetail {
+  const gaps = perimeterGaps[range.id]?.() ?? { full_tcp: [range.value], any_tcp: [range.value], udp: [range.value] }
+  const ids = new Set(range.monitor_ids ?? [])
+  const suggestions: PerimeterSuggestion[] = []
+  const needed = { full_tcp: 0, selected_tcp: 0, udp: 0 }
+  const truncated = { full_tcp: false, selected_tcp: false, udp: false }
+  for (const mode of perimeterModes) {
+    if (range.family !== 4) continue
+    const preset = perimeterPresets[mode]
+    const sets = packPerimeterBlocks(gaps[preset.bucket], preset.perMonitor)
+    needed[mode] = sets.length
+    truncated[mode] = sets.length > 64
+    for (const targets of sets.slice(0, 64)) {
+      const addresses = targets.reduce((sum, target) => sum + Number(blockSize(parsePerimeterValue(target)!)), 0)
+      suggestions.push({ mode, targets, addresses, estimated_probes: addresses * preset.probesPerAddress, protocol: { ...preset.protocol } })
+    }
+  }
+  return {
+    range,
+    monitors: perimeterMonitors.filter(monitor => ids.has(monitor.job_id)),
+    uncovered: { full_tcp: perimeterBlocks(gaps.full_tcp), any_tcp: perimeterBlocks(gaps.any_tcp), udp: perimeterBlocks(gaps.udp) },
+    addresses_per_monitor: { full_tcp: perimeterPresets.full_tcp.perMonitor, selected_tcp: perimeterPresets.selected_tcp.perMonitor, udp: perimeterPresets.udp.perMonitor },
+    monitors_needed: needed,
+    suggestions,
+    suggestions_truncated: truncated,
+    budget_too_low: { full_tcp: false, selected_tcp: false, udp: false },
+  }
+}
+
+const unprovenAttempts = new Set(['failed', 'timed_out', 'incomplete'])
+
+/** Orders declared ranges as the store does: IPv4 before IPv6, then by address and prefix length. */
+function comparePerimeterRanges(left: PerimeterRange, right: PerimeterRange): number {
+  const a = parsePerimeterValue(left.value)!
+  const b = parsePerimeterValue(right.value)!
+  return a.family - b.family || byStart(a, b) || a.bits - b.bits || left.kind.localeCompare(right.kind) || left.id.localeCompare(right.id)
+}
+
+/** The overview of the declared ranges, with totals counted over the fixture ranges, which do not overlap. */
+function perimeterOverview(declaredRanges: PerimeterRange[]): PerimeterOverview {
+  const ranges = [...declaredRanges].sort(comparePerimeterRanges)
+  const declared = ranges.length > 0
+  const touching = new Set(ranges.flatMap(range => range.monitor_ids ?? []))
+  const outside = declared ? perimeterOutside : []
+  const listed = declared ? perimeterMonitors.filter(monitor => touching.has(monitor.job_id) || outside.some(target => target.job_id === monitor.job_id)) : []
+  const ipv4 = ranges.filter(range => range.family === 4)
+  const sum = (count: (range: PerimeterRange) => number) => ipv4.reduce((total, range) => total + count(range), 0)
+  const touchingMonitors = listed.filter(monitor => touching.has(monitor.job_id))
+  return {
+    ranges,
+    monitors: listed,
+    outside,
+    outside_truncated: false,
+    totals: {
+      declared_ipv4: sum(range => range.addresses),
+      excluded_ipv4: sum(range => range.excluded),
+      covered_full_tcp: sum(range => range.coverage.full_tcp),
+      covered_any_tcp: sum(range => range.coverage.any_tcp),
+      covered_udp: sum(range => range.coverage.udp),
+      ranges: ranges.length,
+      ipv6_ranges: ranges.length - ipv4.length,
+      cannot_scan_monitors: touchingMonitors.filter(monitor => monitor.state !== 'covering').length,
+      unproven_monitors: touchingMonitors.filter(monitor => monitor.state === 'covering' && (monitor.stale || monitor.stalled_cycle || unprovenAttempts.has(monitor.last_attempt_status))).length,
+      outside_targets: outside.length,
+    },
+    limits: { max_job_hosts: 65_536, max_probe_count: deploymentLimits.max_probe_count, max_naabu_probe_count: deploymentLimits.max_naabu_probe_count, max_ranges: 1_024, max_entries_per_request: 256 },
+    generated_at: perimeterGeneratedAt,
+  }
+}
+
+/**
+ * The address spaces that no declared range may overlap, in the order the
+ * store checks them, before the prefix length rules.
+ */
+const perimeterSpecialRanges = [
+  ['0.0.0.0/32', 'unspecified address space is not allowed'],
+  ['127.0.0.0/8', 'loopback address space is not allowed'],
+  ['224.0.0.0/4', 'multicast address space is not allowed'],
+  ['169.254.0.0/16', 'link-local address space is not allowed'],
+  ['::/128', 'unspecified address space is not allowed'],
+  ['::1/128', 'loopback address space is not allowed'],
+  ['ff00::/8', 'multicast address space is not allowed'],
+  ['fe80::/10', 'link-local address space is not allowed'],
+].map(([value, reason]) => ({ block: parsePerimeterValue(value)!, reason }))
+const perimeterMappedBlock = parsePerimeterValue('::ffff:0:0/96')!
+
+function perimeterBlocksOverlap(left: PerimeterBlock, right: PerimeterBlock): boolean {
+  return left.family === right.family && left.start < right.start + blockSize(right) && right.start < left.start + blockSize(left)
+}
+
+/** Why the store refuses a declared value, in its order, or '' for an allowed one. */
+function perimeterValueReason(value: string, block: PerimeterBlock | null): string {
+  const [address] = value.split('/', 1)
+  const zone = address.indexOf('%')
+  if (zone > 0 && zone < address.length - 1 && address.includes(':') && parsePerimeterValue(address.slice(0, zone))) return 'zones are not allowed'
+  if (!block) return 'not an IP address or CIDR prefix'
+  const special = perimeterSpecialRanges.find(range => perimeterBlocksOverlap(block, range.block))
+  if (special) return special.reason
+  if (block.family === 4 && block.bits < 8) return 'IPv4 prefixes must be /8 or longer'
+  if (block.family === 6 && block.bits < 16) return 'IPv6 prefixes must be /16 or longer'
+  if (perimeterBlocksOverlap(block, perimeterMappedBlock)) return 'write the IPv4 form'
+  return ''
+}
+
+/** Why the store refuses a label, or ''. */
+function perimeterLabelReason(label: string): string {
+  if (Array.from(label).length > 200) return 'label must be at most 200 characters'
+  if (/\p{Cc}/u.test(label)) return 'label must not contain control characters'
+  return ''
+}
+
+/**
+ * Declares entries as the server does, all or nothing: every refused entry
+ * is listed with its index and reason, a value already declared under the
+ * other kind is refused, and a repeat under the same kind is skipped. Values
+ * and labels are refused for the store's reasons, in its order.
+ */
+function declarePerimeter(ranges: PerimeterRange[], entries: Array<{ kind?: unknown; value?: unknown; label?: unknown }>, nextID: () => string): { refused: PerimeterLineError[]; result: PerimeterDeclareResult; created: PerimeterRange[] } {
+  const refused: PerimeterLineError[] = []
+  const created: PerimeterRange[] = []
+  const declared = new Map(ranges.map(range => [range.value, range.kind]))
+  let skipped = 0
+  entries.forEach((entry, index) => {
+    const value = typeof entry.value === 'string' ? entry.value.trim() : ''
+    const refuse = (reason: string) => refused.push({ index, value: value.slice(0, 64), reason })
+    if (entry.kind === 'asn') { refuse('ASN declarations are not supported; declare the prefixes the ASN announces'); return }
+    if (entry.kind !== 'prefix' && entry.kind !== 'authorized') { refuse('kind must be prefix or authorized'); return }
+    const block = parsePerimeterValue(value)
+    const reason = perimeterValueReason(value, block)
+    if (reason || !block) { refuse(reason); return }
+    const canonical = formatPerimeterBlock(block)
+    const kind = declared.get(canonical)
+    // As in the store, the first entry with a value sets its kind even when
+    // its label is refused.
+    if (!kind) declared.set(canonical, entry.kind)
+    const label = typeof entry.label === 'string' ? entry.label.trim() : ''
+    const labelReason = perimeterLabelReason(label)
+    if (labelReason) { refuse(labelReason); return }
+    if (kind && kind !== entry.kind) { refuse(kind === 'prefix' ? 'already declared as owned' : 'already declared as authorized'); return }
+    if (kind) { skipped++; return }
+    created.push(perimeterRange({ id: nextID(), kind: entry.kind, value: canonical, label, family: block.family, created_at: perimeterGeneratedAt, addresses: block.family === 4 ? Number(blockSize(block)) : 0 }))
+  })
+  return { refused, result: { created: refused.length ? 0 : created.length, skipped: refused.length ? 0 : skipped }, created: refused.length ? [] : created }
+}
+
 /**
  * Install a deterministic API surface for browser acceptance tests. The
  * fixture intentionally models the same role/permission contract as the Go
@@ -140,9 +465,10 @@ function platformAccount(overrides: Record<string, unknown>) {
  * deployment starts
  * with the default unit only; once a second unit exists, its session must
  * enrol TOTP and holds only account.self, and the platform routes are
- * refused, as the server's permission gate does.
+ * refused, as the server's permission gate does. With emptyPerimeter, the
+ * unit starts without declared ranges.
  */
-export async function mockConsole(page: Page, role: ConsoleRole = 'administrator', { platformTOTP = true }: { platformTOTP?: boolean } = {}): Promise<ConsoleMockControls> {
+export async function mockConsole(page: Page, role: ConsoleRole = 'administrator', { platformTOTP = true, emptyPerimeter = false }: { platformTOTP?: boolean; emptyPerimeter?: boolean } = {}): Promise<ConsoleMockControls> {
   let incidents: any[] = [{
     job_id: 'job-1',
     job: 'fixture-job',
@@ -189,6 +515,9 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
   let createdJob: any = null
   let createdDestination: any = null
   let previewResponse: unknown = null
+  let perimeterRanges = emptyPerimeter ? [] : perimeterFixtureRanges()
+  let perimeterTransform = (overview: PerimeterOverview) => overview
+  let declaredRanges = 0
   const previewGates: Array<{ started: () => void; response: Promise<unknown> }> = []
   let platformRouting = { configured: false, destinations: [] as string[] }
   const failures = new Set<string>()
@@ -205,6 +534,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
       previewGates.push({ started: markStarted, response })
       return { started, resolve: release }
     },
+    transformPerimeterOverview: (transform) => { perimeterTransform = transform },
     calls,
     payloads,
   }
@@ -413,6 +743,33 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/scanner/capabilities' && method === 'GET') { await json({ engines: ['nmap', 'naabu_nmap'], nmap: { path: '/usr/bin/nmap', version: '7.99', available: true }, naabu: { path: '/usr/local/bin/naabu', version: '2.6.1', available: true, syn_supported: false } }); return }
     if (path === '/scanner-profiles' && method === 'GET') { await json({ profiles: [profile] }); return }
     if (path === '/scanner-profiles/profile-1' && method === 'GET') { await json(profile); return }
+    if (path === '/perimeter' && method === 'GET') { await json(perimeterTransform(perimeterOverview(perimeterRanges))); return }
+    if (path === '/perimeter/seeds' && method === 'POST') {
+      const value = body() as { entries?: unknown }
+      record('perimeter-declare', value)
+      // The audit record cannot be written, so nothing is stored.
+      if (failures.delete('perimeter-declare')) { await json({ error: { code: 'audit_unavailable', message: 'the action was not committed because the security audit could not be recorded' } }, 503); return }
+      const entries = Array.isArray(value.entries) ? value.entries as Array<Record<string, unknown>> : []
+      if (entries.length < 1 || entries.length > 256) { await json({ error: { code: 'validation_failed', message: 'Declare between 1 and 256 entries.', details: { limit: 256 } } }, 400); return }
+      const declaration = declarePerimeter(perimeterRanges, entries, () => `range-new-${++declaredRanges}`)
+      if (declaration.refused.length) { await json({ error: { code: 'validation_failed', message: 'Some entries were refused; nothing was saved.', details: { entries: declaration.refused } } }, 400); return }
+      perimeterRanges = [...perimeterRanges, ...declaration.created]
+      await json(declaration.result); return
+    }
+    const perimeterSeed = /^\/perimeter\/seeds\/([^/]+)$/.exec(path)
+    if (perimeterSeed) {
+      const id = decodeURIComponent(perimeterSeed[1])
+      const range = perimeterRanges.find(item => item.id === id)
+      if (method === 'DELETE') {
+        record('perimeter-remove', id)
+        if (failures.delete('perimeter-remove')) { await json({ error: { code: 'audit_unavailable', message: 'the action was not committed because the security audit could not be recorded' } }, 503); return }
+        if (range) perimeterRanges = perimeterRanges.filter(item => item !== range)
+      }
+      // An unknown range and another unit's answer alike, without the ID.
+      if (!range) { await json({ error: { code: 'not_found', message: 'perimeter range not found' } }, 404); return }
+      if (method === 'DELETE') { await route.fulfill({ status: 204 }); return }
+      if (method === 'GET') { await json(perimeterRangeDetail(range)); return }
+    }
 
     if (path === '/jobs/preview' && method === 'POST') {
       const value = body() as Record<string, any>

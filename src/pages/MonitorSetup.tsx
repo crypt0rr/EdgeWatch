@@ -5,14 +5,16 @@ import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { APIError, createJob, createNotificationDestination, getSession, listNotificationDestinations, listScannerProfiles, previewJob, scannerCapabilities, scheduleSuggestion, testNotificationDestination } from '../api'
 import type { NotificationDestination, NotificationDestinationsResponse } from '../api'
 import type { Job, JobForm, JobPreview, Protocol } from '../types'
+import type { PerimeterProtocol } from '../generated/api-types'
 import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { NotificationDestinationCreateForm } from '../components/NotificationDestinationCreateForm'
 import { cidrWarning, duplicateTarget, hostCeilingWarning, targetKind } from '../target'
 import { formatDateTime, getDisplayTimeZone } from '../format'
-import { cloneProtocol, defaultTCP, defaultUDP, payloadFromCreationDraft, presetFor } from '../job-form'
+import { cloneProtocol, defaultTCP, defaultUDP, payloadFromCreationDraft, presetFor, type JobCreationDraft } from '../job-form'
 import { useJobCreationDraft } from '../job-creation-draft'
 import { issueFirstScanIntent } from '../firstScanIntent'
+import { readPerimeterPrefill, type PerimeterPrefill } from '../perimeter-prefill'
 
 type SetupStep = 'targets' | 'coverage' | 'schedule' | 'review'
 const steps: { id: SetupStep; label: string }[] = [
@@ -25,7 +27,7 @@ const steps: { id: SetupStep; label: string }[] = [
 type PreviewState = { signature: string; status: 'loading' | 'ready' | 'error'; data?: JobPreview; message?: string }
 
 export function MonitorSetup() {
-  const { draft, dirty, updateDraft, clearDraft, createOutcomeUnknown, markCreateOutcomeUnknown } = useJobCreationDraft()
+  const { draft, dirty, updateDraft, clearDraft, createOutcomeUnknown, markCreateOutcomeUnknown, perimeterPrefill: perimeterPrefillOutcome, setPerimeterPrefillOutcome } = useJobCreationDraft()
   const navigate = useNavigate()
   const location = useLocation()
   const client = useQueryClient()
@@ -48,6 +50,7 @@ export function MonitorSetup() {
   const currentHistoryEntry = useRef<{ path: string; state: unknown } | null>(null)
   const allowHistoryPop = useRef(false)
   const headingRef = useRef<HTMLHeadingElement>(null)
+  const perimeterPrefillHandled = useRef<string | null>(null)
 
   const activeStepIndex = steps.findIndex(item => item.id === step)
   const suggestionReady = scheduleInput.schedule.trim().split(/\s+/).length === 5 && !!scheduleInput.timezone.trim()
@@ -83,6 +86,27 @@ export function MonitorSetup() {
     if (!defaults.length) return
     updateDraft(current => ({ ...current, notificationIDs: defaults }), false)
   }, [destinations.data, draft.notificationIDs.length, draft.notificationSelectionTouched, updateDraft])
+
+  // Create monitor on a Perimeter range hands its suggestion over in the
+  // router state. Like the first-scan handoff of JobDetail, it is handled once
+  // per history entry: StrictMode replays this effect, and a render can see
+  // the prefilled, dirty draft before the cleared state. A draft that already
+  // has changes is never overwritten. Clearing the state keeps Back and reload
+  // from applying it again, and updateDraft marks the draft dirty, so the
+  // leave guard protects the prefilled monitor. The outcome is kept with the
+  // draft, so the targets step still shows it after the full editor.
+  useEffect(() => {
+    const prefill = readPerimeterPrefill(location.state)
+    if (!prefill || perimeterPrefillHandled.current === location.key) return
+    perimeterPrefillHandled.current = location.key
+    if (dirty) {
+      setPerimeterPrefillOutcome({ source: prefill.source, applied: false })
+    } else {
+      updateDraft(current => applyPerimeterPrefill(current, prefill))
+      setPerimeterPrefillOutcome({ source: prefill.source, applied: true })
+    }
+    navigate(`${location.pathname}${location.search}${location.hash}`, { replace: true, state: null })
+  }, [dirty, location.hash, location.key, location.pathname, location.search, location.state, navigate, setPerimeterPrefillOutcome, updateDraft])
 
   useEffect(() => {
     if (step !== 'review') {
@@ -398,6 +422,9 @@ export function MonitorSetup() {
     <fieldset className="monitor-step-fields" disabled={saving} aria-busy={saving}>
     <legend className="sr-only">Current monitor setup fields</legend>
     {step === 'targets' && <div className="monitor-step-content">
+      {perimeterPrefillOutcome && (perimeterPrefillOutcome.applied
+        ? <div className="notice warning" role="status"><TriangleAlert size={16} /><span>Prefilled from Perimeter ({perimeterPrefillOutcome.source}). A declared range is not an authorization: confirm you may scan these addresses.</span></div>
+        : <div className="notice warning" role="status"><TriangleAlert size={16} /><span>The Perimeter suggestion for {perimeterPrefillOutcome.source} was not applied, because this monitor draft already has changes. Finish or discard this draft, then choose Create monitor again.</span></div>)}
       <div className="panel form-panel">
         <div className="panel-heading"><div><h2>Name and authorized targets</h2><p className="muted">Use systems you own or have permission to monitor.</p></div><Network className="muted-icon" size={19} /></div>
         <label>Monitor name<input value={draft.fields.name} autoComplete="off" placeholder="Production edge" onChange={event => updateFields({ name: event.currentTarget.value })} aria-describedby="monitor-name-help" />{fieldError && !draft.fields.name.trim() && <small className="field-error">{fieldError}</small>}<small id="monitor-name-help">A clear name helps operators recognize this scope.</small></label>
@@ -587,6 +614,35 @@ function coverageSummary(tcp?: Protocol, udp?: Protocol) {
     udp && `UDP ports ${udp.ports} through Nmap`,
   ].filter(Boolean)
   return parts.join(' · ')
+}
+
+// The draft that a Perimeter suggestion prefills: its name and targets, an
+// expansion limit that holds its addresses, and its protocol settings exactly
+// as the server returned them. Every protocol field of the draft is set, so
+// the Coverage step's toggles behave as they do for a new draft. High-cost
+// approval is never set.
+function applyPerimeterPrefill(draft: JobCreationDraft, prefill: PerimeterPrefill): JobCreationDraft {
+  const protocol = perimeterJobProtocol(prefill.protocol)
+  const prefilled: JobCreationDraft = {
+    ...draft,
+    fields: { ...draft.fields, name: prefill.name, max_expanded_hosts: Math.max(draft.fields.max_expanded_hosts, prefill.addresses) },
+    targets: [...prefill.targets],
+  }
+  switch (prefill.mode) {
+    case 'full_tcp':
+      return { ...prefilled, tcp: protocol, tcpFullSnapshot: cloneProtocol(protocol), tcpSelectedSnapshot: undefined, udp: undefined, lastUDP: undefined }
+    case 'selected_tcp':
+      return { ...prefilled, tcp: protocol, tcpFullSnapshot: defaultTCP(), tcpSelectedSnapshot: cloneProtocol(protocol), udp: undefined, lastUDP: undefined }
+    case 'udp':
+      return { ...prefilled, tcp: undefined, lastTCP: defaultTCP(), udp: protocol }
+  }
+}
+
+// The job protocol settings of a Perimeter suggestion. Its protocol key only
+// says whether they are TCP or UDP settings; the others are copied unchanged.
+function perimeterJobProtocol(value: PerimeterProtocol): Protocol {
+  const { protocol: _kind, ...settings } = value
+  return settings
 }
 
 function defaultSelectedTCP(): Protocol {

@@ -94,7 +94,7 @@ func (ps *PlatformStore) IssuePlatformSetupToken(ctx context.Context, hash strin
 	if !expires.After(now) {
 		return errors.New("setup token expiry must be after its issue")
 	}
-	tx, err := ps.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ps.store.DB)
 	if err != nil {
 		return err
 	}
@@ -430,7 +430,7 @@ func (pa *PlatformAccountStore) save(ctx context.Context, u User, recoveryCodes 
 	if err != nil {
 		return err
 	}
-	tx, err := pa.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, pa.store.DB)
 	if err != nil {
 		return err
 	}

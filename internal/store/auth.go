@@ -280,7 +280,7 @@ func (s *Store) SaveAdminSecurityWithAuditPreservingSession(ctx context.Context,
 	if err != nil {
 		return err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, s.DB)
 	if err != nil {
 		return err
 	}
@@ -393,7 +393,7 @@ var ErrSetupTokenRateLimited = errors.New("setup token was issued too recently; 
 // recovery path; the token itself is returned only to that caller and never
 // enters an API response or audit detail.
 func (ps *PlatformStore) ReissueSetupToken(ctx context.Context, hash string, expires, now time.Time) error {
-	tx, err := ps.store.DB.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, ps.store.DB)
 	if err != nil {
 		return err
 	}

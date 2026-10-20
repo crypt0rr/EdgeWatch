@@ -1026,13 +1026,18 @@ and the next start resumes the remaining work. Startup phases that read
 before they write take the write lock first, so a concurrent host command
 delays them instead of failing the start. Daemon and scheduled-job lease
 acquisition likewise reserve the write lock before reading ownership or job
-revision. A heartbeat that receives `SQLITE_BUSY` retries at the next tick
-without counting as missed; lease loss, `SQLITE_LOCKED`, and other database
-errors keep their existing failure behavior. A host process that holds
-SQLite's writer lock for more than two minutes can still prevent a successful
-heartbeat long enough for the daemon lease to become stale. After that writer
-releases the lock, a second daemon can take over and reclaim the first
-daemon's job leases. The first daemon may remain alive until its next
+revision. The host commands' writes that read the current state first, such
+as a setup token, an account recovery, a baseline approval or reset, and the
+scan cycle progress of `scan`, also take the write lock first, so a running
+daemon delays them up to the five-second busy timeout instead of failing
+them with `database is locked`. A heartbeat that receives `SQLITE_BUSY`
+retries at the next tick without counting as missed; lease loss,
+`SQLITE_LOCKED`, and other database errors keep their existing failure
+behavior. A host process that holds SQLite's writer lock for more than two
+minutes can still prevent a successful heartbeat long enough for the daemon
+lease to become stale. After that writer releases the lock, a second daemon
+can take over and reclaim the first daemon's job leases. The first daemon
+may remain alive until its next
 heartbeat detects lease loss; it then stops its scans. Taking over a stale
 lease means a second daemon is not always refused merely because
 the first process is still running. The host commands that act on

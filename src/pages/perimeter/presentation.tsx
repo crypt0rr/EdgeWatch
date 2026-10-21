@@ -129,20 +129,21 @@ export function formatMinimumScanDuration(seconds: number): string {
 
 /**
  * Why a covering monitor has not proven its coverage, as the report counts it
- * in totals.unproven_monitors: it is stale, its security scope changed, its
- * cycle is stalled, or its latest attempt failed, timed out, or was incomplete
- * without progressing resumable work. Only a covering
- * monitor carries these flags, so any other monitor gets none.
+ * in totals.unproven_monitors: no successful scan exists, it is stale, its
+ * security scope changed, its cycle is stalled, or its latest attempt failed,
+ * timed out, or was incomplete without progressing resumable work. Only a
+ * covering monitor carries these flags, so any other monitor gets none.
  */
 export function unprovenReasons(monitor: PerimeterMonitorRef): string[] {
   if (monitor.state !== 'covering') return []
   const reasons: string[] = []
+  if (!monitor.last_success_at) reasons.push('Not scanned yet')
   if (monitor.stale) {
     if (monitor.stale_reason === 'schedule never fires') {
       reasons.push('Schedule never fires')
-      reasons.push(monitor.last_success_at ? `Last successful scan ${formatDateTime(monitor.last_success_at)}` : 'Not scanned yet')
-    } else {
-      reasons.push(monitor.last_success_at ? `No successful scan since ${formatDateTime(monitor.last_success_at)}` : 'Not scanned yet')
+      if (monitor.last_success_at) reasons.push(`Last successful scan ${formatDateTime(monitor.last_success_at)}`)
+    } else if (monitor.last_success_at) {
+      reasons.push(`No successful scan since ${formatDateTime(monitor.last_success_at)}`)
     }
   }
   if (monitor.stalled_cycle) reasons.push('Scan cycle stalled')

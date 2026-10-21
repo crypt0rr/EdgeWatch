@@ -425,6 +425,15 @@ func (s *Server) listJobsWithSession(w http.ResponseWriter, r *http.Request, ses
 		}
 		logger.ErrorContext(r.Context(), "active scan cycle list lookup failed", "request_id", RequestID(r.Context()), "error", cycleErr)
 	}
+	silenceReferences, silenceReferenceErr := ts.ListJobSilenceReferences(r.Context())
+	if silenceReferenceErr != nil {
+		logger := s.Log
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.ErrorContext(r.Context(), "job silence reference lookup failed", "request_id", RequestID(r.Context()), "error", silenceReferenceErr)
+		silenceReferences = nil
+	}
 	profileRevisions, profileErr := ts.CurrentScannerProfileRevisions(r.Context())
 	if profileErr != nil {
 		logger := s.Log
@@ -493,11 +502,19 @@ func (s *Server) listJobsWithSession(w http.ResponseWriter, r *http.Request, ses
 		} else {
 			value["scan_cycle"] = nil
 		}
-		cycleStatus := ""
+		var activeCycle *store.ScanCycleSummary
 		if cycle, ok := cycles[j.ID]; cycleErr == nil && ok {
-			cycleStatus = cycle.Status
+			copy := cycle
+			activeCycle = &copy
 		}
 		_, historyExists := executions[j.ID]
+		silenceReference := j.CreatedAt
+		if eligible := silenceReferences[j.ID]; eligible.After(silenceReference) {
+			silenceReference = eligible
+		}
+		if successful := executions[j.ID].LatestSuccessfulScan; successful != nil && successful.FinishedAt.After(silenceReference) {
+			silenceReference = successful.FinishedAt
+		}
 		monitoring := jobMonitoringSummary(
 			j,
 			executions[j.ID],
@@ -505,8 +522,9 @@ func (s *Server) listJobsWithSession(w http.ResponseWriter, r *http.Request, ses
 			executionErr == nil && historyExists,
 			activityByJob[j.ID],
 			activityAvailable,
-			cycleStatus,
+			activeCycle,
 			cycleErr == nil,
+			silenceReference,
 			canReadScans,
 			now,
 		)

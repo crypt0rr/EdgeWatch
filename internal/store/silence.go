@@ -202,6 +202,22 @@ func jobSilenceDecisionQuery(ctx context.Context, queryer rowQueryer, jobID stri
 	if active > 0 {
 		return jobSilenceDecision{}, nil
 	}
+	// A resumable cycle can make durable progress over several scheduled
+	// attempts without producing a successful scan yet. Count a recently
+	// updated, in-window cycle with completed work as activity; a cycle that
+	// stalls, expires, or stops progressing past the silence threshold no
+	// longer suppresses the watchdog.
+	progressCutoff := sqliteTimestamp(now.Add(-threshold))
+	var progressing int
+	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycles
+ WHERE job_id=? AND status IN ('running','paused') AND expires_at>?
+ AND updated_at>? AND (completed_units>0 OR completed_probes>0)
+ AND completed_units<total_units`, jobID, sqliteTimestamp(now), progressCutoff).Scan(&progressing); err != nil {
+		return jobSilenceDecision{}, err
+	}
+	if progressing > 0 {
+		return jobSilenceDecision{}, nil
+	}
 
 	if stateErr == nil {
 		return jobSilenceDecision{due: true, lastReference: lastReference, backoffLevel: backoff}, nil

@@ -33,7 +33,12 @@ func monitoringAttempt(status string) *store.JobScanStatusSummary {
 }
 
 func monitoringView(record store.JobRecord, attempt *store.JobScanStatusSummary, historyAvailable bool, appActivity string, appActivityAvailable bool, cycleStatus string, cycleAvailable bool) jobMonitoringSummaryView {
-	return jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: attempt}, "", historyAvailable, appActivity, appActivityAvailable, cycleStatus, cycleAvailable, false, time.Date(2026, 10, 11, 8, 0, 0, 0, time.UTC))
+	now := time.Date(2026, 10, 11, 8, 0, 0, 0, time.UTC)
+	var cycle *store.ScanCycleSummary
+	if cycleAvailable && cycleStatus != "" {
+		cycle = &store.ScanCycleSummary{ID: "cycle-id", Status: cycleStatus, TotalUnits: 2, ExpiresAt: time.Date(2026, 10, 20, 8, 0, 0, 0, time.UTC)}
+	}
+	return jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: attempt}, "", historyAvailable, appActivity, appActivityAvailable, cycle, cycleAvailable, now.Add(-time.Hour), false, now)
 }
 
 func TestJobMonitoringSummaryStatusPrecedenceAndAvailability(t *testing.T) {
@@ -59,7 +64,7 @@ func TestJobMonitoringSummaryStatusPrecedenceAndAvailability(t *testing.T) {
 		{name: "failed attempt", record: record, attempt: failed, historyAvailable: true, appAvailable: true, cycleAvailable: true, availability: "available", activity: stringPointer("none"), scheduleState: "scheduled", attention: "failed"},
 		{name: "queued work supersedes failed attempt", record: record, attempt: failed, historyAvailable: true, appActivity: "queued", appAvailable: true, cycleAvailable: true, availability: "available", activity: stringPointer("queued"), scheduleState: "scheduled", attention: "none"},
 		{name: "running work supersedes failed attempt", record: record, attempt: failed, historyAvailable: true, appActivity: "running", appAvailable: true, cycleAvailable: true, availability: "available", activity: stringPointer("running"), scheduleState: "scheduled", attention: "none"},
-		{name: "paused resumable cycle retains failure", record: record, attempt: failed, historyAvailable: true, appAvailable: true, cycleStatus: "paused", cycleAvailable: true, availability: "available", activity: stringPointer("resumable"), scheduleState: "scheduled", attention: "failed"},
+		{name: "paused resumable cycle retains failure without progress", record: record, attempt: failed, historyAvailable: true, appAvailable: true, cycleStatus: "paused", cycleAvailable: true, availability: "available", activity: stringPointer("resumable"), scheduleState: "scheduled", attention: "failed"},
 		{name: "stalled cycle remains actionable", record: record, attempt: failed, historyAvailable: true, appAvailable: true, cycleStatus: "stalled", cycleAvailable: true, availability: "available", activity: stringPointer("stalled"), scheduleState: "scheduled", attention: "stalled_cycle"},
 		{name: "queued manual retry preserves stalled attention", record: record, attempt: failed, historyAvailable: true, appActivity: "queued", appAvailable: true, cycleStatus: "stalled", cycleAvailable: true, availability: "available", activity: stringPointer("queued"), scheduleState: "scheduled", attention: "stalled_cycle"},
 		{name: "running manual retry preserves stalled attention", record: record, attempt: failed, historyAvailable: true, appActivity: "running", appAvailable: true, cycleStatus: "stalled", cycleAvailable: true, availability: "available", activity: stringPointer("running"), scheduleState: "scheduled", attention: "stalled_cycle"},
@@ -94,6 +99,41 @@ func TestJobMonitoringSummaryStatusPrecedenceAndAvailability(t *testing.T) {
 	}
 }
 
+func TestJobMonitoringReportsProgressingResumableCycleWithoutFailureAttention(t *testing.T) {
+	t.Parallel()
+	record := monitoringTestJob()
+	attempt := monitoringAttempt("timed_out")
+	attempt.Resumable = true
+	attempt.CycleID = "cycle-id"
+	attempt.CycleStatus = "paused"
+	cycle := &store.ScanCycleSummary{
+		ID: "cycle-id", Status: "paused", CompletedUnits: 1, TotalUnits: 2,
+		UpdatedAt: time.Date(2026, 10, 11, 7, 59, 0, 0, time.UTC), ExpiresAt: time.Date(2026, 10, 20, 8, 0, 0, 0, time.UTC),
+	}
+	now := time.Date(2026, 10, 11, 8, 0, 0, 0, time.UTC)
+	reference := now.Add(-time.Hour)
+	view := jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: attempt}, "", true, "", true, cycle, true, reference, false, now)
+	if view.Activity == nil || *view.Activity != "in_progress" || !view.CycleInProgress || view.CycleCompletedUnits != 1 || view.CycleTotalUnits != 2 || view.AttentionReason != "none" {
+		t.Fatalf("monitoring summary = %+v; want visible progress without failure attention", view)
+	}
+	view = jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: attempt}, "", true, "", false, cycle, true, reference, false, now)
+	if view.Activity == nil || *view.Activity != "in_progress" || view.Availability != "unavailable" || view.AttentionReason != "none" {
+		t.Fatalf("monitoring summary without live activity = %+v; want durable progress without failure attention", view)
+	}
+
+	cycle.CompletedUnits = 0
+	view = jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: attempt}, "", true, "", true, cycle, true, reference, false, now)
+	if view.CycleInProgress || view.AttentionReason != "failed" {
+		t.Fatalf("no-progress resumable cycle summary = %+v; want failure attention", view)
+	}
+	cycle.CompletedUnits = 1
+	cycle.UpdatedAt = now.Add(-72 * time.Hour)
+	view = jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: attempt}, "", true, "", true, cycle, true, reference, false, now)
+	if view.CycleInProgress || view.AttentionReason != "failed" {
+		t.Fatalf("stale resumable cycle summary = %+v; want failure attention", view)
+	}
+}
+
 func TestJobMonitoringScheduledBudgetSkipPrecedence(t *testing.T) {
 	t.Parallel()
 	record := monitoringTestJob()
@@ -114,7 +154,11 @@ func TestJobMonitoringScheduledBudgetSkipPrecedence(t *testing.T) {
 		{name: "known budget skip survives unavailable activity", want: "probe_budget_skipped"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			view := jobMonitoringSummary(record, failed, "scope-hash|65536", true, test.activity, test.activityLoaded, test.cycle, test.cycleLoaded, false, now)
+			var cycle *store.ScanCycleSummary
+			if test.cycleLoaded && test.cycle != "" {
+				cycle = &store.ScanCycleSummary{ID: "cycle-id", Status: test.cycle}
+			}
+			view := jobMonitoringSummary(record, failed, "scope-hash|65536", true, test.activity, test.activityLoaded, cycle, test.cycleLoaded, now.Add(-time.Hour), false, now)
 			if view.AttentionReason != test.want {
 				t.Fatalf("attention reason = %q, want %q", view.AttentionReason, test.want)
 			}
@@ -137,7 +181,7 @@ func TestJobMonitoringSummaryNextRunUsesCronTimezoneDSTSemantics(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			record := monitoringTestJob()
 			record.Job.Schedule = test.schedule
-			view := jobMonitoringSummary(record, store.JobExecutionSummary{}, "", true, "", true, "", true, false, test.now)
+			view := jobMonitoringSummary(record, store.JobExecutionSummary{}, "", true, "", true, nil, true, test.now.Add(-time.Hour), false, test.now)
 			if view.ScheduleState != "scheduled" || view.NextRunAt == nil || !view.NextRunAt.Equal(test.want) {
 				t.Fatalf("next run = %+v, state %q; want %s", view.NextRunAt, view.ScheduleState, test.want)
 			}
@@ -157,7 +201,8 @@ func TestJobMonitoringSummaryScanIDsAndNullTimesRespectPermission(t *testing.T) 
 	t.Parallel()
 	record := monitoringTestJob()
 	scan := &store.JobScanStatusSummary{ID: "scan-private-id", Status: "failed"}
-	view := jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: scan}, "", true, "", true, "", true, false, time.Now().UTC())
+	now := time.Now().UTC()
+	view := jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: scan}, "", true, "", true, nil, true, now.Add(-time.Hour), false, now)
 	encoded, err := json.Marshal(view)
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +210,7 @@ func TestJobMonitoringSummaryScanIDsAndNullTimesRespectPermission(t *testing.T) 
 	if strings.Contains(string(encoded), "scan-private-id") || !strings.Contains(string(encoded), `"started_at":null`) || !strings.Contains(string(encoded), `"finished_at":null`) {
 		t.Fatalf("jobs.read monitoring data = %s; scan ID must be omitted and missing times explicit", encoded)
 	}
-	allowed := jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: scan}, "", true, "", true, "", true, true, time.Now().UTC())
+	allowed := jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: scan}, "", true, "", true, nil, true, now.Add(-time.Hour), true, now)
 	if allowed.LatestAttempt == nil || allowed.LatestAttempt.ScanID != scan.ID {
 		t.Fatalf("scans.read latest attempt = %+v", allowed.LatestAttempt)
 	}

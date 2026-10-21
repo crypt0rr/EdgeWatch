@@ -140,8 +140,12 @@ the affected window.
 
 The **Jobs** list shows each job's latest scan attempt separately from its
 latest successful scan, along with its next scheduled run and current queued,
-running, or resumable work. A paused cycle is shown as resumable; a stalled
-cycle stays marked for a manual retry. A job with no scan history is distinct
+running, resumable, or progressing work. A paused cycle with recent completed
+work inside its resume window is shown as **Scan cycle in progress** with its
+completed and total units; its timed-out attempt is not listed under **Needs
+attention** while the cycle is progressing. A resumable cycle without progress
+remains resumable, and a stalled cycle stays marked for a manual retry. A job
+with no scan history is distinct
 from one whose monitoring summary could not be read. Missing schedule, paused,
 manual-only, and archived states do not create attention by themselves.
 The list shows an active change window first, then an expired but unclosed
@@ -153,14 +157,17 @@ in the job's scheduler timezone displayed beside it. Job details list up to
 reviewed-history rows each, in that order.
 
 Choose **Needs attention** to filter the full tenant job list to jobs whose
-latest attempt failed or was incomplete, whose saved scan cycle stalled, or
-whose last scheduled run was skipped because it exceeded the probe budget.
+latest attempt failed, timed out, or was incomplete without current progressing
+resumable work, whose saved scan cycle stalled, or whose last scheduled run was
+skipped because it exceeded the probe budget.
 That saved marker reports the last skip rather than predicting the next run:
 DNS answers, job settings, or the unit's budget can change. The job keeps its
 next scheduled time, and a later scan clears the marker when its result is
 finalized. Queued or running work supersedes an older failed or incomplete
 attempt or budget-skip marker; a later successful attempt clears that older
-failure. A stalled cycle remains actionable while a retry waits or runs. The
+failure. A progressing resumable cycle is also current work and does not add
+failure attention for its latest timed-out attempt. A stalled cycle remains
+actionable while a retry waits or runs. The
 filter does not infer problems from elapsed time or the absence of a schedule.
 Unavailable summaries remain visible in **All jobs** and are reported as
 unavailable rather than treated as healthy or as having no scan history. When

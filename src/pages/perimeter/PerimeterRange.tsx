@@ -6,7 +6,7 @@ import type { PerimeterBlocks, PerimeterMonitorRef, PerimeterRangeDetail, Perime
 import { ErrorNotice } from '../../components/ErrorNotice'
 import { formatDateTime } from '../../format'
 import { buildPerimeterPrefill, isPerimeterMode, perimeterModes, type PerimeterMode } from '../../perimeter-prefill'
-import { countLabel, CoverageLegend, CoverageShare, coverageBuckets, formatCount, ipv6Explanation, isNotFound, KindBadge, MonitoredCount, MonitorSummary, perimeterQueryKey, perimeterRangeQueryKey, reasonDescription, unprovenReasons } from './presentation'
+import { countLabel, CoverageLegend, CoverageShare, coverageBuckets, formatCount, formatMinimumScanDuration, ipv6Explanation, isNotFound, KindBadge, MonitoredCount, MonitorSummary, perimeterQueryKey, perimeterRangeQueryKey, reasonDescription, unprovenReasons } from './presentation'
 
 /** Above this many monitors, a mode states how many it needs instead of listing a Create monitor button for each. */
 export const maxListedSuggestions = 16
@@ -148,7 +148,7 @@ function SuggestionsPanel({ detail, scannable, canWriteJobs }: { detail: Perimet
   return <section className="panel" aria-labelledby="perimeter-suggestions-title">
     <div className="panel-heading"><div>
       <h2 id="perimeter-suggestions-title">Suggested monitors</h2>
-      <p className="muted">Monitors sized to this business unit’s probe budget that would fill this range’s gaps. Estimates count probes; EdgeWatch does not predict scan durations.</p>
+      <p className="muted">Monitors sized to this business unit’s probe budget that would fill this range’s gaps. Full TCP shows a lower-bound duration at the built-in Naabu rate; host response time, retries, and Nmap confirmation can make a scan take longer.</p>
     </div></div>
     <p className="notice warning perimeter-authorization-banner" role="note"><span>A declared range is not an authorization: confirm you may scan these addresses before you create a monitor. Create monitor opens the guided setup prefilled; you review and save each monitor there, and nothing is created in bulk.</span></p>
     {scannable === 0 ? <p className="inline-empty">All addresses excluded: there is nothing to suggest.</p>
@@ -173,7 +173,7 @@ function ModeSuggestions({ mode, detail, suggestions, canWriteJobs }: { mode: Pe
       <div id={descriptionID} className="perimeter-suggestion-copy">
         <strong>Monitor {index + 1} of {suggestions.length}</strong>
         <ul className="perimeter-cidr-list">{targets.map(target => <li key={target}><code>{target}</code></li>)}</ul>
-        <small className="muted">{countLabel(suggestion.addresses, 'address', 'addresses')} · {countLabel(suggestion.estimated_probes, 'estimated probe')} · {suggestion.protocol.protocol.toUpperCase()} ports {suggestion.protocol.ports}</small>
+        <small className="muted">{countLabel(suggestion.addresses, 'address', 'addresses')} · {countLabel(suggestion.estimated_probes, 'estimated probe')} · {suggestion.protocol.protocol.toUpperCase()} ports {suggestion.protocol.ports}{suggestion.minimum_duration_seconds ? ` · at least ${formatMinimumScanDuration(suggestion.minimum_duration_seconds)} at the built-in Naabu rate` : ''}</small>
       </div>
       {!canWriteJobs
         ? <small className="muted perimeter-suggestion-locked">Creating a monitor needs permission to write jobs.</small>

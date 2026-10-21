@@ -78,10 +78,10 @@ describe('Perimeter range detail', () => {
 
     const suggestions = screen.getByRole('region', { name: 'Suggested monitors' })
     expect(within(suggestions).getByRole('note')).toHaveTextContent('A declared range is not an authorization: confirm you may scan these addresses')
-    expect(within(suggestions).queryByText(/minute|hour|duration of/i)).not.toBeInTheDocument()
+    expect(within(suggestions).getByText(/Full TCP shows a lower-bound duration at the built-in Naabu rate/)).toBeInTheDocument()
     const full = modeSection('Full TCP')
     expect(full).toHaveTextContent('Up to 305 addresses per monitor')
-    expect(full).toHaveTextContent('Monitor 1 of 1203.0.113.128/25128 addresses · 8,388,480 estimated probes · TCP ports 1-65535')
+    expect(full).toHaveTextContent('Monitor 1 of 1203.0.113.128/25128 addresses · 8,388,480 estimated probes · TCP ports 1-65535 · at least 2h 19m 49s at the built-in Naabu rate')
     expect(within(full).getByRole('button', { name: 'Create monitor' })).toBeInTheDocument()
     expect(modeSection('Selected TCP ports')).toHaveTextContent('No gaps to fill in this mode.')
     expect(within(modeSection('Selected TCP ports')).queryByRole('button')).not.toBeInTheDocument()

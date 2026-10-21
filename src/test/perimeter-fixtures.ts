@@ -91,7 +91,7 @@ export function perimeterRangeDetail(overrides: Partial<PerimeterRangeDetail> = 
     addresses_per_monitor: { full_tcp: 305, selected_tcp: 4096, udp: 1024 },
     monitors_needed: { full_tcp: 1, selected_tcp: 0, udp: 1 },
     suggestions: [
-      perimeterSuggestion({ targets: ['203.0.113.128/25'] }),
+      perimeterSuggestion({ targets: ['203.0.113.128/25'], minimum_duration_seconds: 8_389 }),
       perimeterSuggestion({ mode: 'udp', targets: ['203.0.113.0/24'], addresses: 256, estimated_probes: 3072, protocol: udpProtocol }),
     ],
     suggestions_truncated: { full_tcp: false, selected_tcp: false, udp: false },

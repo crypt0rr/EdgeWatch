@@ -128,6 +128,7 @@ function PerimeterReport({ overview, canManage, canReadJobs, onRemove }: { overv
   const touching = new Set(ranges.flatMap(range => range.monitor_ids ?? []))
   const touchingMonitors = monitors.filter(monitor => touching.has(monitor.job_id))
   const cannotScan = touchingMonitors.filter(monitor => monitor.state !== 'covering')
+  const inProgress = touchingMonitors.filter(monitor => monitor.cycle_in_progress)
   const unproven = touchingMonitors.filter(monitor => unprovenReasons(monitor).length > 0)
   const hostDiscovery = touchingMonitors.filter(monitor => monitor.state === 'covering' && monitor.host_discovery)
   const hasIPv6 = ranges.some(range => range.family === 6)
@@ -145,6 +146,13 @@ function PerimeterReport({ overview, canManage, canReadJobs, onRemove }: { overv
       {cannotScan.length ? <ul className="perimeter-monitor-list">{cannotScan.map(monitor => <li key={monitor.job_id}><MonitorSummary monitor={monitor} canReadJobs={canReadJobs} details={(monitor.reasons ?? []).map(reasonDescription)} /></li>)}</ul>
         : <p className="inline-empty">Every monitor that touches the perimeter can scan.</p>}
     </section>
+    {inProgress.length > 0 && <section className="panel" aria-labelledby="perimeter-progress-title">
+      <div className="panel-heading"><div>
+        <h2 id="perimeter-progress-title">Scan cycles in progress</h2>
+        <p className="muted">Their latest interrupted attempts left resumable work inside the resume window. Coverage is proven only after a successful scan of the current targets and protocols.</p>
+      </div></div>
+      <ul className="perimeter-monitor-list">{inProgress.map(monitor => <li key={monitor.job_id}><MonitorSummary monitor={monitor} canReadJobs={canReadJobs} details={[]} /></li>)}</ul>
+    </section>}
     <section className="panel" aria-labelledby="perimeter-unproven-title">
       <div className="panel-heading"><div>
         <h2 id="perimeter-unproven-title">Coverage not proven</h2>

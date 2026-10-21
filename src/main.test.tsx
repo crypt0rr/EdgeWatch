@@ -637,6 +637,30 @@ describe('application shell', () => {
     expect(card).not.toHaveTextContent(formatDateTimeInTimeZone('2026-10-13T07:00:00Z', 'Europe/Amsterdam'))
   })
 
+  it('shows progressing resumable work without latest-scan failure attention', async () => {
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [{
+      id: 'progressing-job', revision: 1, enabled: true, archived: false,
+      job: { name: 'Full TCP monitor', targets: ['198.51.100.0/24'], schedule: '0 */6 * * *' },
+      baseline: { status: 'learning', samples: 1 },
+      monitoring: {
+        availability: 'available', history_available: true, activity: 'in_progress', schedule_state: 'scheduled',
+        next_run_at: '2026-10-12T00:00:00Z', timezone: 'UTC',
+        latest_attempt: { status: 'timed_out', started_at: '2026-10-11T12:00:00Z', finished_at: '2026-10-11T12:01:00Z' },
+        latest_successful_scan: { status: 'success', started_at: '2026-10-11T06:00:00Z', finished_at: '2026-10-11T06:01:00Z' },
+        cycle_in_progress: true, cycle_completed_units: 1, cycle_total_units: 16, attention_reason: 'none',
+      },
+    }] } as never)
+    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: ['jobs.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    renderWithProviders(<Jobs />)
+
+    await screen.findByRole('heading', { name: 'Full TCP monitor' })
+    expect(screen.getByText('Scan cycle in progress (1 of 16 units)')).toBeInTheDocument()
+    expect(screen.getByText('timed out · saved progress')).toBeInTheDocument()
+    expect(screen.queryByText(/Needs attention · Latest scan failed/)).not.toBeInTheDocument()
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter jobs' }), { target: { value: 'attention' } })
+    expect(screen.getByText('No available jobs need attention')).toBeInTheDocument()
+  })
+
   it('shows explicit unknown and no-scan states and gates scan links by permission', async () => {
     const monitoredJob = {
       id: 'monitoring-job', revision: 1, enabled: true, archived: false,

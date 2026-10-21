@@ -54,7 +54,7 @@ func (s *completingCycleScanner) counts() (plans, units int) {
 // its notification destinations cannot be read, the cycle must stay
 // unpromoted, so the next trigger promotes and compares the same cycle
 // instead of discarding its result and planning a new one.
-func TestCompletedCycleWaitsForNotificationDestinations(t *testing.T) {
+func TestRecoveredCycleWaitsForNotificationDestinationsAndPreservesOriginalFinishTime(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	probe := &completingCycleScanner{}
@@ -101,6 +101,11 @@ func TestCompletedCycleWaitsForNotificationDestinations(t *testing.T) {
 	if err != nil || cycle.Status != "completed" {
 		t.Fatalf("cycle after the destination failure = %#v, %v", cycle, err)
 	}
+	originalFinishedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	originalStartedAt := originalFinishedAt.Add(-2 * time.Hour)
+	if _, err := db.DB.ExecContext(ctx, `UPDATE scan_cycles SET started_at=?,finished_at=? WHERE id=?`, originalStartedAt.Format(time.RFC3339Nano), originalFinishedAt.Format(time.RFC3339Nano), deferred.CycleID); err != nil {
+		t.Fatal(err)
+	}
 	if state, err := defaultTenant(db).RuntimeState(ctx, record.ID); err != nil || len(state.Incidents) != 0 {
 		t.Fatalf("runtime after the destination failure = %#v, %v", state, err)
 	}
@@ -111,6 +116,21 @@ func TestCompletedCycleWaitsForNotificationDestinations(t *testing.T) {
 	promoted, events, promoteErr := a.runJobRecord(ctx, record, false)
 	if promoteErr != nil || promoted.CycleID != deferred.CycleID || promoted.Status != "success" || promoted.Comparison != model.ScanComparisonCompared {
 		t.Fatalf("next run = %#v, err %v; want the completed cycle promoted and compared", promoted, promoteErr)
+	}
+	if !promoted.FinishedAt.Equal(originalFinishedAt) {
+		t.Fatalf("recovered scan finished at %s, want original cycle completion %s", promoted.FinishedAt, originalFinishedAt)
+	}
+	var scanFinishedAt, lastSuccessAt string
+	if err := db.DB.QueryRowContext(ctx, `SELECT finished_at FROM scans WHERE cycle_id=? AND status='success'`, deferred.CycleID).Scan(&scanFinishedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.QueryRowContext(ctx, `SELECT last_success_at FROM job_silence_state WHERE job_id=?`, record.ID).Scan(&lastSuccessAt); err != nil {
+		t.Fatal(err)
+	}
+	parsedScanFinishedAt, scanErr := time.Parse(time.RFC3339Nano, scanFinishedAt)
+	parsedLastSuccessAt, successErr := time.Parse(time.RFC3339Nano, lastSuccessAt)
+	if scanErr != nil || successErr != nil || !parsedScanFinishedAt.Equal(originalFinishedAt) || !parsedLastSuccessAt.Equal(originalFinishedAt) {
+		t.Fatalf("recovered finish markers = scans %q (%v), silence %q (%v); want %s", scanFinishedAt, scanErr, lastSuccessAt, successErr, originalFinishedAt.Format(time.RFC3339Nano))
 	}
 	if !hasEventType(events, "changes-detected") {
 		t.Fatalf("promoted cycle was not compared with the baseline: %#v", events)

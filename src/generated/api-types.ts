@@ -321,6 +321,9 @@ export type JobMonitoringSummary = {
   timezone: string
   latest_attempt: JobScanStatus | null
   latest_successful_scan: JobScanStatus | null
+  cycle_in_progress: boolean
+  cycle_completed_units: number
+  cycle_total_units: number
   attention_reason: string
 }
 
@@ -668,6 +671,10 @@ export type PerimeterMonitorRef = {
   stale: boolean
   stale_reason: string
   stalled_cycle: boolean
+  scope_changed?: boolean
+  cycle_in_progress?: boolean
+  cycle_completed_units?: number
+  cycle_total_units?: number
   last_attempt_status: string
   last_success_at: string | null
   host_discovery: boolean
@@ -731,6 +738,7 @@ export type PerimeterSuggestion = {
   targets: string[] | null
   addresses: number
   estimated_probes: number
+  minimum_duration_seconds?: number
   protocol: PerimeterProtocol
 }
 

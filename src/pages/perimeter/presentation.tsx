@@ -118,10 +118,20 @@ const attemptLabels: Record<string, string> = {
   incomplete: 'Last attempt incomplete',
 }
 
+/** A readable lower bound for a Full TCP scan at the built-in Naabu rate. */
+export function formatMinimumScanDuration(seconds: number): string {
+  const value = Math.max(0, Math.floor(seconds))
+  const hours = Math.floor(value / 3600)
+  const minutes = Math.floor((value % 3600) / 60)
+  const remainder = value % 60
+  return [hours ? `${hours}h` : '', minutes ? `${minutes}m` : '', remainder ? `${remainder}s` : ''].filter(Boolean).join(' ') || '0s'
+}
+
 /**
  * Why a covering monitor has not proven its coverage, as the report counts it
- * in totals.unproven_monitors: it is stale, its cycle is stalled, or its
- * latest attempt failed, timed out, or was incomplete. Only a covering
+ * in totals.unproven_monitors: it is stale, its security scope changed, its
+ * cycle is stalled, or its latest attempt failed, timed out, or was incomplete
+ * without progressing resumable work. Only a covering
  * monitor carries these flags, so any other monitor gets none.
  */
 export function unprovenReasons(monitor: PerimeterMonitorRef): string[] {
@@ -136,8 +146,9 @@ export function unprovenReasons(monitor: PerimeterMonitorRef): string[] {
     }
   }
   if (monitor.stalled_cycle) reasons.push('Scan cycle stalled')
+  if (monitor.scope_changed) reasons.push('Not scanned since its targets or protocols changed')
   const attempt = attemptLabels[monitor.last_attempt_status]
-  if (attempt) reasons.push(attempt)
+  if (attempt && !monitor.cycle_in_progress) reasons.push(attempt)
   return reasons
 }
 
@@ -193,7 +204,9 @@ export function MonitorName({ jobID, name, canReadJobs }: { jobID: string; name:
 
 /** A monitor with its state and the lines that explain it. */
 export function MonitorSummary({ monitor, canReadJobs, details, children }: { monitor: PerimeterMonitorRef; canReadJobs: boolean; details: string[]; children?: ReactNode }) {
-  const lines = monitor.host_discovery ? [...details, hostDiscoveryText] : details
+  const lines = [...details]
+  if (monitor.cycle_in_progress) lines.push(`Scan cycle in progress (${monitor.cycle_completed_units} of ${monitor.cycle_total_units} units)`)
+  if (monitor.host_discovery) lines.push(hostDiscoveryText)
   return <>
     <div className="perimeter-monitor-heading"><MonitorName jobID={monitor.job_id} name={monitor.name} canReadJobs={canReadJobs} /><MonitorStatePill state={monitor.state} /></div>
     {lines.length > 0 && <ul className="perimeter-monitor-reasons">{lines.map(line => <li key={line}>{line}</li>)}</ul>}

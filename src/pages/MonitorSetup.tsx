@@ -623,9 +623,10 @@ function coverageSummary(tcp?: Protocol, udp?: Protocol) {
 // approval is never set.
 function applyPerimeterPrefill(draft: JobCreationDraft, prefill: PerimeterPrefill): JobCreationDraft {
   const protocol = perimeterJobProtocol(prefill.protocol)
+  const timeout = suggestedTimeout(draft.fields.timeout, draft.fields.resume_window, prefill.mode === 'full_tcp' ? prefill.minimumDurationSeconds : undefined)
   const prefilled: JobCreationDraft = {
     ...draft,
-    fields: { ...draft.fields, name: prefill.name, max_expanded_hosts: Math.max(draft.fields.max_expanded_hosts, prefill.addresses) },
+    fields: { ...draft.fields, name: prefill.name, max_expanded_hosts: Math.max(draft.fields.max_expanded_hosts, prefill.addresses), timeout },
     targets: [...prefill.targets],
   }
   switch (prefill.mode) {
@@ -636,6 +637,29 @@ function applyPerimeterPrefill(draft: JobCreationDraft, prefill: PerimeterPrefil
     case 'udp':
       return { ...prefilled, tcp: undefined, lastTCP: defaultTCP(), udp: protocol }
   }
+}
+
+// Full TCP's probe-rate lower bound can inform a new draft's per-attempt
+// timeout. Keep it only when it fits the draft's existing resume window; the
+// estimate never changes the resume window or runtime timeout behavior.
+function suggestedTimeout(current: string, resumeWindow: string, minimumSeconds?: number): string {
+  if (!minimumSeconds || !Number.isSafeInteger(minimumSeconds) || minimumSeconds <= 0) return current
+  const minimum = Math.ceil(minimumSeconds / 60) * 60
+  const currentSeconds = durationFieldSeconds(current)
+  const resumeSeconds = durationFieldSeconds(resumeWindow)
+  if (currentSeconds === undefined || resumeSeconds === undefined || minimum <= currentSeconds || minimum > resumeSeconds) return current
+  const minutes = minimum / 60
+  const hours = Math.floor(minutes / 60)
+  const remainingMinutes = minutes % 60
+  return `${hours ? `${hours}h` : ''}${remainingMinutes ? `${remainingMinutes}m` : ''}`
+}
+
+function durationFieldSeconds(value: string): number | undefined {
+  const trimmed = value.trim()
+  const match = trimmed.match(/^(?:(\d+(?:\.\d+)?)d)?(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m)?(?:(\d+(?:\.\d+)?)s)?$/)
+  if (!match || !trimmed) return undefined
+  const seconds = Number(match[1] ?? 0) * 86400 + Number(match[2] ?? 0) * 3600 + Number(match[3] ?? 0) * 60 + Number(match[4] ?? 0)
+  return Number.isFinite(seconds) ? seconds : undefined
 }
 
 // The job protocol settings of a Perimeter suggestion. Its protocol key only

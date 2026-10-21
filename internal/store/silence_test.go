@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
+	"github.com/crypt0rr/edgewatch/internal/scanner"
 )
 
 func TestRecordJobSilenceAlertPersistsEventAndOutboxAtomically(t *testing.T) {
@@ -83,6 +84,67 @@ func TestRecordJobSilenceAlertSkipsRecentSuccess(t *testing.T) {
 		t.Fatal(err)
 	} else if created {
 		t.Fatal("recent successful scan generated silence alert")
+	}
+}
+
+func TestJobSilenceWatchdogCountsRecentResumableProgressAsActivity(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	job, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name: "resumable-progress", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"192.0.2.14"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference := job.CreatedAt.UTC()
+	now := reference.Add(3 * time.Hour)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE job_silence_state SET eligible_at=? WHERE job_id=?`, reference.Format(time.RFC3339Nano), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	plan := scanner.WorkPlan{Units: []scanner.WorkUnit{
+		{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.14"}, Ports: "22", PortCount: 1, Probes: 1},
+		{Sequence: 1, Protocol: "tcp", Addresses: []string{"192.0.2.14"}, Ports: "443", PortCount: 1, Probes: 1},
+	}}
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
+		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(),
+		ExecutionHash: job.Job.ExecutionHash(), Plan: plan, StartedAt: reference, UpdatedAt: now.Add(-time.Minute),
+		ExpiresAt: now.Add(24 * time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET completed_units=1,completed_probes=1,updated_at=? WHERE id=?`, now.Add(-time.Minute).Format(time.RFC3339Nano), cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	threshold := 2 * time.Hour
+	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || due {
+		t.Fatalf("recent progress silence decision = due %v, err %v; want not due", due, err)
+	}
+	if _, created, err := s.System().RecordJobSilenceAlert(ctx, job.ID, job.Job.Name, reference, now, threshold, nil); err != nil || created {
+		t.Fatalf("recent progress alert = created %v, err %v; want no alert", created, err)
+	}
+
+	// A stalled cycle and an in-window cycle whose last update is old enough
+	// to exceed the existing watchdog window no longer suppress silence.
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='stalled' WHERE id=?`, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || !due {
+		t.Fatalf("stalled cycle silence decision = due %v, err %v; want due", due, err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='paused',updated_at=? WHERE id=?`, now.Add(-threshold-time.Minute).Format(time.RFC3339Nano), cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || !due {
+		t.Fatalf("stale progress silence decision = due %v, err %v; want due", due, err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET updated_at=?,expires_at=? WHERE id=?`, now.Add(-time.Minute).Format(time.RFC3339Nano), now.Add(-time.Minute).Format(time.RFC3339Nano), cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || !due {
+		t.Fatalf("expired progress silence decision = due %v, err %v; want due", due, err)
 	}
 }
 

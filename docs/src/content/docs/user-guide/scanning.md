@@ -106,7 +106,15 @@ once from its saved work. After a second persisted finalization failure,
 the next trigger discards that cycle and plans a fresh scan. The server log
 records a WARN with the discarded cycle ID. A destination lookup failure is
 not counted as a finalization failure, and a restart between cycle completion
-and scan-history insertion still recovers the completed result.
+and scan-history insertion still recovers the completed result. Recovery keeps
+the cycle's original completion time in scan history and the job silence
+watchdog, rather than treating the recovery attempt as a new successful scan.
+A paused resumable cycle with recent completed work inside its resume window is
+reported as in progress; the watchdog treats that progress as activity, and
+the latest timed-out attempt does not count as a failure while the saved work
+remains current. Perimeter coverage can still be unproven when the last
+successful scan is overdue or the monitored scope changed. Cycles that stall,
+expire, or stop progressing keep their existing retry and watchdog behavior.
 A resumed cycle keeps the scanner-profile arguments it started with, and its
 scans record that job and profile revision; a profile change applies from the
 next cycle. Accepting an incident, approving or resetting the baseline, or

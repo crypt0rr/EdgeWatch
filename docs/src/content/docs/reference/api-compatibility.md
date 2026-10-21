@@ -641,7 +641,7 @@ least that many.
 | --- | --- |
 | `uncovered` | A `PerimeterUncovered` with a `PerimeterBlocks` for each of `full_tcp`, `any_tcp`, and `udp`: the range's addresses outside `scanner.target_exclusions` that no `covering` monitor of the bucket scans, as `cidrs`, the fewest aligned CIDR blocks, at most 256; `truncated`; and `total`, the number of blocks before the cap. An IPv6 range lists its blocks too. |
 | `addresses_per_monitor`, `monitors_needed` | `PerimeterModeCounts` with a count for each suggestion mode: `full_tcp`, `selected_tcp`, and `udp`. |
-| `suggestions` | Up to 64 `PerimeterSuggestion` objects per mode: `mode`, `targets`, `addresses`, `estimated_probes`, and `protocol`. |
+| `suggestions` | Up to 64 `PerimeterSuggestion` objects per mode: `mode`, `targets`, `addresses`, `estimated_probes`, and `protocol`. Full TCP suggestions may also include `minimum_duration_seconds`. |
 | `suggestions_truncated`, `budget_too_low` | `PerimeterModeFlags` with a flag for each mode. |
 
 Suggestions fill uncovered IPv4 space, of owned and authorized ranges alike.
@@ -671,9 +671,12 @@ largest power of two that fits one monitor is split into monitors of that
 size, and the smaller blocks, in address order, join the first monitor with
 room. `monitors_needed` counts every monitor; `suggestions_truncated` is
 `true` when more than 64 were needed. No suggestion contains an excluded
-address, and none states a scan duration. A suggestion creates nothing: a
-client that wants the monitor sends it to `POST /api/v1/jobs`, which checks it
-like any other new job.
+address. A Full TCP suggestion may include `minimum_duration_seconds`, a
+lower-bound estimate based on the built-in Naabu probe rate; it excludes host
+response time, retries, and Nmap confirmation. Other suggestion modes omit
+this field, and the estimate is not a scan-duration promise. A suggestion
+creates nothing: a client that wants the monitor sends it to
+`POST /api/v1/jobs`, which checks it like any other new job.
 
 ### Live updates and generated types
 

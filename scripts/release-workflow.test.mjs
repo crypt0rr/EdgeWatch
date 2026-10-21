@@ -24,6 +24,9 @@ const workflows = await Promise.all(
 const readRepositoryFile = (path) => readFile(resolve(repositoryRoot, path), 'utf8')
 const dockerfile = await readRepositoryFile('Dockerfile')
 const makefile = await readRepositoryFile('Makefile')
+const goMod = await readRepositoryFile('go.mod')
+const developmentGuidePath = 'docs/src/content/docs/maintainers/development.md'
+const developmentGuide = await readRepositoryFile(developmentGuidePath)
 const golangciLintVersion = await readRepositoryFile('.golangci-lint-version')
 const renovate = JSON.parse(await readRepositoryFile('renovate.json'))
 const thirdPartyLicenses = await readRepositoryFile('THIRD_PARTY_LICENSES.md')
@@ -1407,6 +1410,47 @@ test('release Node setup matches the frontend image base', () => {
   assert.ok(releaseNodeVersion, 'release workflow must declare its Node version')
   assert.equal(releaseNodeVersion, frontendNodeVersion,
     'release verification and builds must use the same Node version as the frontend image')
+})
+
+// CI's Go jobs and the release binaries use the Go that go.mod names, the
+// golang images build Naabu and, in CI's image builds, EdgeWatch, and the
+// guide tells contributors which Go to use. Renovate proposes each Go release
+// for all of them in one pull request.
+test('go.mod, the golang images, and the development guide name one Go release that Renovate updates together', () => {
+  const goVersion = /^go ([0-9]+\.[0-9]+\.[0-9]+)$/m.exec(goMod)?.[1]
+  assert.ok(goVersion, 'go.mod must name an exact Go release for setup-go to install')
+  const toolchain = /^toolchain (\S+)$/m.exec(goMod)?.[1]
+  assert.ok(toolchain === undefined || toolchain === `go${goVersion}`, 'setup-go would install the toolchain directive instead')
+  let setups = 0
+  for (const { file, text } of workflows) {
+    for (const step of stepsOf(text).filter((candidate) => /uses: actions\/setup-go@/.test(candidate))) {
+      setups++
+      assert.match(step, /^ {10}go-version-file: go\.mod$/m, `${file} must set up the Go version in go.mod`)
+      assert.doesNotMatch(step, /^ {10}go-version:/m, `${file} must not choose another Go version`)
+    }
+  }
+  assert.ok(setups >= 9, `expected the CI and release Go setups, found ${setups}`)
+
+  const images = [...dockerfile.matchAll(/^FROM (?:--platform=\S+ )?golang:([0-9]+\.[0-9]+\.[0-9]+)-alpine\S*@sha256:[0-9a-f]{64} AS (\S+)$/gm)]
+  assert.deepEqual(images.map((match) => match[2]), ['naabu', 'build'])
+  assert.equal(dockerfile.match(/^FROM\b.*\bgolang:/gm).length, images.length, 'every golang stage must name an exact Go release')
+  for (const [, version, stage] of images) {
+    assert.equal(version, goVersion, `the ${stage} stage must build with the Go release in go.mod`)
+  }
+  assert.deepEqual([...developmentGuide.matchAll(/\bGo ([0-9]+\.[0-9]+\.[0-9]+)\b/g)].map((match) => match[1]), [goVersion],
+    'the development guide must name the Go release in go.mod')
+
+  assert.deepEqual(renovateDependencies(developmentGuidePath, developmentGuide), [
+    { datasource: 'golang-version', depName: 'go', currentValue: goVersion, currentDigest: undefined },
+  ])
+  const bump = renovate.packageRules.filter((rule) => rule.matchDepTypes?.includes('golang'))
+  assert.deepEqual(bump.map(({ description, ...rule }) => rule), [
+    { matchManagers: ['gomod'], matchDepNames: ['go'], matchDepTypes: ['golang'], rangeStrategy: 'bump' },
+  ], 'Renovate must bump the go directive, which it leaves alone by default')
+  const groups = renovate.packageRules.filter((rule) => rule.groupName && rule.matchDepNames?.some((name) => name === 'go' || name === 'golang'))
+  assert.deepEqual(groups.map(({ description, ...rule }) => rule), [
+    { matchDepNames: ['go', 'golang'], groupName: 'Go toolchain' },
+  ], 'the go directive, the guide, and the golang images must update in one pull request')
 })
 
 test('scanner sandbox verification selects the live Nmap scan and pins it while inspecting proc', async (t) => {

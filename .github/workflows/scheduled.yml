@@ -1,0 +1,74 @@
+name: Scheduled checks
+
+# Daily checks of what changes outside the repository, so they fail without a
+# commit. Alpine removes a pinned package build when it publishes an update,
+# which breaks the next image build without a cache, such as the release. New
+# vulnerabilities are published for the packages and the Naabu build of the
+# image that users already run. Start a run before tagging a release with
+# `gh workflow run scheduled.yml`. GitHub reports a failed scheduled run to
+# whoever last changed the schedule.
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: scheduled-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PUBLISHED_IMAGE: ghcr.io/crypt0rr/edgewatch:latest
+
+jobs:
+  apk-pins:
+    name: Alpine package pins
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare the Dockerfile apk pins with the Alpine indexes
+        run: ./scripts/check-apk-pins.sh
+
+  published-image:
+    name: Scan the published image for known vulnerabilities
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source for the scan policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go for govulncheck
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Scan both platforms of the latest release
+        run: |
+          set -euo pipefail
+          # Both scans share one copy of Grype's vulnerability database.
+          export GRYPE_DB_CACHE_DIR="$RUNNER_TEMP/grype-db"
+          index="$(docker buildx imagetools inspect --raw "$PUBLISHED_IMAGE")"
+          status=0
+          for platform in linux/amd64 linux/arm64; do
+            # Scan each platform by its own manifest digest, as the release
+            # does: Docker keeps one local image per digest reference.
+            platform_digest="$(jq -r --arg os "${platform%/*}" --arg arch "${platform#*/}" \
+              '[.manifests[] | select(.platform.os == $os and .platform.architecture == $arch)] | if length == 1 then .[0].digest else empty end' <<<"$index")"
+            if [[ ! "$platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "$PUBLISHED_IMAGE has no single $platform manifest" >&2
+              exit 1
+            fi
+            platform_image="${PUBLISHED_IMAGE%:*}@$platform_digest"
+            docker pull "$platform_image"
+            echo "$PUBLISHED_IMAGE is $(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$platform_image") for $platform"
+            ./scripts/scan-image-vulnerabilities.sh "$platform_image" "$platform" || status=1
+          done
+          exit "$status"

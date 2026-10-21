@@ -180,8 +180,8 @@ the verified candidate.
 ### Vulnerability scan failures
 
 `scripts/scan-image-vulnerabilities.sh IMAGE PLATFORM` runs in CI's
-`container` job and in the release. It exports the image's filesystem without
-starting the image and fails when:
+`container` job, in the release, and every day on the published image. It
+exports the image's filesystem without starting the image and fails when:
 
 - govulncheck finds a vulnerable symbol in the bundled Naabu that
   `scripts/naabu-vulncheck-allowlist.txt` does not accept. Renovate proposes
@@ -197,6 +197,33 @@ starting the image and fails when:
   `.grype.yaml`.
 
 Grype ignores Go modules because govulncheck checks the Go binaries more
-precisely. `make vulncheck` checks EdgeWatch's own module.
+precisely. `make vulncheck` checks EdgeWatch's own module and the standard
+library of the Go version that runs it.
+
+### Scheduled checks
+
+The `Scheduled checks` workflow runs every day and on demand. It checks what
+changes outside the repository, so it can fail without a new commit:
+
+- `./scripts/check-apk-pins.sh` compares every `apk add` pin in the Dockerfile
+  with the current Alpine package index for x86_64 and aarch64. A stable
+  Alpine branch keeps only the newest build of each package and removes the
+  pinned build when it publishes an update. CI keeps passing because its image
+  builds reuse a cached layer, but the release builds without a cache and
+  fails. When the check fails, update each stale pin to the version it lists;
+  Renovate proposes the same update once Repology lists it;
+- the vulnerability scan runs on both platforms of the published `latest`
+  image, so a finding in the bundled Naabu or the Alpine packages that is
+  published after a release fails the run. Fix or triage the finding as
+  described above, then publish a patch release;
+- `make vulncheck` runs on the source of the latest published release, with
+  the Go version in that release's `go.mod`, which built its binaries. A new
+  advisory for a module EdgeWatch calls or for that Go release fails the run.
+  Update the module, or move `go.mod`, the Dockerfile's `golang` images, and
+  the development guide to the fixed Go release, then publish a patch release.
+
+Before you tag a release, run `./scripts/check-apk-pins.sh` or start the
+workflow with `gh workflow run scheduled.yml`. GitHub reports a failed
+scheduled run to whoever last changed its schedule.
 
 For documentation changes, follow [Documentation and hosting](/maintainers/documentation/).

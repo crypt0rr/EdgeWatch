@@ -843,7 +843,8 @@ function releaseDockerfileRunViolations(source, buildArgs, targetName) {
 }
 
 function apkPackagePins(source) {
-  const logicalLines = source.replace(/\\\r?\n[ \t]*/g, ' ')
+  // Docker continues a line whose backslash only blanks follow.
+  const logicalLines = source.replace(/\\[ \t]*\r?\n[ \t]*/g, ' ')
   return [...logicalLines.matchAll(/^RUN[ \t]+apk add --no-cache[ \t]+([^\n]*)/gm)].flatMap((match) => {
     const packageArguments = match[1].split(/[ \t]+&&[ \t]+/, 1)[0]
     return packageArguments.trim().split(/[ \t]+/).filter(Boolean)
@@ -1916,6 +1917,284 @@ test('the apk pin check sees unpinned packages on Dockerfile continuation lines'
     '    && echo done',
   ].join('\n') + '\n'
   assert.throws(() => assertApkPinsManaged(wrappedInstall), /apk package new-package must be pinned to a version/)
+  assert.deepEqual(apkPackagePins('FROM alpine:3.24.2\nRUN \\ \t\n    apk add --no-cache zlib=1.3.2-r1\n'), ['zlib=1.3.2-r1'])
+})
+
+const apkPinCheck = resolve(repositoryRoot, 'scripts', 'check-apk-pins.sh')
+const alpineBranch = `3.${/^alpine_3_(\d+)\//.exec(renovate.customManagers.find((manager) => manager.datasourceTemplate === 'repology')?.packageNameTemplate ?? '')?.[1]}`
+
+// An Alpine mirror on disk that serves an APKINDEX.tar.gz for each
+// architecture and repository of one branch, listing the given NAME=VERSION
+// packages.
+async function createAlpineMirror(t, branch, indexes) {
+  const mirror = await mkdtemp(join(tmpdir(), 'edgewatch-alpine-mirror-'))
+  t.after(() => rm(mirror, { recursive: true, force: true }))
+  for (const [architecture, repositories] of Object.entries(indexes)) {
+    for (const [repository, packages] of Object.entries(repositories)) {
+      const directory = join(mirror, `v${branch}`, repository, architecture)
+      await mkdir(directory, { recursive: true })
+      const records = packages.map((pin) => {
+        const [name, version] = pin.split('=')
+        return `C:Q1fixture=\nP:${name}\nV:${version}\nA:${architecture}\n`
+      })
+      await writeFile(join(directory, 'APKINDEX'), records.join('\n') + '\n')
+      execFileSync('tar', ['-czf', 'APKINDEX.tar.gz', 'APKINDEX'], { cwd: directory })
+    }
+  }
+  return mirror
+}
+
+function runApkPinCheck(mirror, dockerfilePath) {
+  return spawnSync(apkPinCheck, [dockerfilePath], {
+    encoding: 'utf8',
+    env: { ...process.env, ALPINE_MIRROR: `file://${mirror}` },
+  })
+}
+
+// Alpine removes a pinned build when it publishes an update, and only an
+// image build without a cache notices (#1620).
+test('the apk pin check accepts current pins and names each stale one with the published version', async (t) => {
+  assert.match(alpineBranch, /^3\.\d+$/)
+  const pins = [...new Set(apkPackagePins(dockerfile))].sort()
+  assert.ok(pins.length >= 3, 'the image pins several apk packages')
+  const half = Math.ceil(pins.length / 2)
+  const index = (main, community = pins.slice(half)) => ({ main: ['busybox=1.0-r0', ...main], community })
+  const current = await createAlpineMirror(t, alpineBranch, {
+    x86_64: index(pins.slice(0, half)),
+    aarch64: index(pins.slice(0, half)),
+  })
+  const passed = runApkPinCheck(current, resolve(repositoryRoot, 'Dockerfile'))
+  assert.equal(passed.status, 0, passed.stderr)
+  assert.deepEqual([...passed.stdout.matchAll(/^current: (\S+) \(Alpine v(\S+)\)$/gm)].map(([, pin, branch]) => `${branch} ${pin}`).sort(),
+    pins.map((pin) => `${alpineBranch} ${pin}`), 'the script must check every pin that the workflow test reads')
+  assert.match(passed.stdout, new RegExp(`^all ${pins.length} apk pins in .*Dockerfile are current for x86_64 aarch64$`, 'm'))
+
+  const [updated, removed] = pins
+  const updatedName = updated.split('=')[0]
+  const removedName = removed.split('=')[0]
+  const stale = await createAlpineMirror(t, alpineBranch, {
+    x86_64: index([`${updatedName}=99.0-r0`, ...pins.slice(1, half)]),
+    aarch64: index(pins.slice(0, half).filter((pin) => pin !== removed)),
+  })
+  const failed = runApkPinCheck(stale, resolve(repositoryRoot, 'Dockerfile'))
+  assert.equal(failed.status, 1, failed.stderr)
+  assert.ok(failed.stderr.includes(`stale: ${updated} is no longer in the Alpine v${alpineBranch} index; it lists\n  x86_64: ${updatedName}=99.0-r0\n`), failed.stderr)
+  assert.ok(failed.stderr.includes(`stale: ${removed} is no longer in the Alpine v${alpineBranch} index; it lists\n  aarch64: no ${removedName} package\n`), failed.stderr)
+  assert.match(failed.stderr, new RegExp(`^2 of ${pins.length} apk pins in .*Dockerfile are stale; update them to the listed versions$`, 'm'))
+  assert.equal([...failed.stdout.matchAll(/^current: /gm)].length, pins.length - 2)
+})
+
+test('the apk pin check reads Dockerfiles as Docker does and fails closed on what it cannot read', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'edgewatch-apk-pins-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const mirror = await createAlpineMirror(t, '3.24', {
+    x86_64: { main: ['zlib=1.0-r0'], community: [] },
+    aarch64: { main: ['zlib=1.0-r0'], community: [] },
+  })
+  const check = async (name, lines, expectedStatus, expected, source = mirror) => {
+    const path = join(directory, name)
+    await writeFile(path, lines.join('\n') + '\n')
+    const result = runApkPinCheck(source, path)
+    assert.equal(result.status, expectedStatus, `${name}: ${result.stdout}${result.stderr}`)
+    assert.match(result.stdout + result.stderr, expected, name)
+  }
+
+  // A stage inherits the branch of the stage it builds on. Docker drops
+  // comment and blank lines inside a continued RUN and continues a line whose
+  // backslash only blanks follow.
+  await check('inherited', [
+    'FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24@sha256:' + 'a'.repeat(64) + ' AS build',
+    'FROM build AS second',
+    'RUN apk add --no-cache \\',
+    '# a comment',
+    '    zlib=1.0-r0 && echo done',
+  ], 0, /^current: zlib=1\.0-r0 \(Alpine v3\.24\)$/m)
+  await check('blank-after-backslash', [
+    'FROM alpine:3.24.2',
+    'RUN \\ ',
+    '',
+    '    apk add --no-cache zlib=0.9-r0 \\\t',
+    '    && echo done',
+  ], 1, /^stale: zlib=0\.9-r0 is no longer in the Alpine v3\.24 index/m)
+  await check('unpinned', [
+    'FROM alpine:3.24.2',
+    'RUN apk add --no-cache zlib=1.0-r0 \\',
+    '    new-package \\',
+    '    && echo done',
+  ], 2, /unpinned:2: apk package new-package must be pinned to a version/)
+  await check('repository-option', [
+    'FROM alpine:3.24.2',
+    'RUN apk add --no-cache --repository https://example.invalid zlib=1.0-r0',
+  ], 2, /apk add option --repository is not supported/)
+  await check('other-base', ['FROM debian:13', 'RUN apk add --no-cache zlib=1.0-r0'], 2,
+    /cannot tell the Alpine branch of the stage that runs apk add/)
+  await check('no-packages', ['FROM alpine:3.24.2', 'RUN echo nothing'], 2, /has no apk add package/)
+  await check('other-branch', ['FROM alpine:3.23.4', 'RUN apk add --no-cache zlib=1.0-r0'], 2,
+    /could not download file:\/\/.*\/v3\.23\/main\/x86_64\/APKINDEX\.tar\.gz/)
+  await rm(join(mirror, 'v3.24', 'community', 'aarch64'), { recursive: true })
+  await check('missing-index', ['FROM alpine:3.24.2', 'RUN apk add --no-cache zlib=1.0-r0'], 2,
+    /could not download file:\/\/.*\/v3\.24\/community\/aarch64\/APKINDEX\.tar\.gz/)
+  const http = spawnSync(apkPinCheck, [resolve(repositoryRoot, 'Dockerfile')], {
+    encoding: 'utf8',
+    env: { ...process.env, ALPINE_MIRROR: 'http://127.0.0.1:9' },
+  })
+  assert.equal(http.status, 2, 'the indexes must be read over HTTPS')
+  assert.match(http.stderr, /Protocol "http" (?:not supported or )?disabled/, 'curl must refuse plain HTTP before it connects')
+})
+
+test('a daily workflow checks the apk pins and scans the published image', async (t) => {
+  const scheduled = workflows.find(({ file }) => file === '.github/workflows/scheduled.yml')?.text
+  assert.ok(scheduled, 'the scheduled checks workflow must exist')
+  assert.match(scheduled, /^on:\n {2}schedule:\n {4}- cron: "\d+ \d+ \* \* \*"\n {2}workflow_dispatch:\n\n/m,
+    'the checks must run daily and on demand, and never for untrusted pull request code')
+  assert.deepEqual(permissionsOf(scheduled.slice(0, scheduled.indexOf('\njobs:\n')), 0), { contents: 'read' })
+  const jobs = Object.fromEntries(jobsOf(scheduled).map(({ name, block }) => [name, block]))
+  assert.deepEqual(Object.keys(jobs), ['apk-pins', 'published-image', 'release-source'])
+  for (const [name, block] of Object.entries(jobs)) {
+    assert.equal(permissionsOf(block, 4), null, `scheduled job ${name} must keep the read-only default`)
+  }
+  assert.match(jobs['apk-pins'], /^ {8}run: \.\/scripts\/check-apk-pins\.sh$/m)
+  assert.match(scheduled, /^ {2}PUBLISHED_IMAGE: ghcr\.io\/crypt0rr\/edgewatch:latest$/m)
+
+  // Run the scan step with a stand-in docker and scan script, as GitHub runs
+  // it, so a broken step fails here rather than in the next scheduled run.
+  const step = stepBlock(jobs['published-image'], 'Scan both platforms of the latest release')
+  const shell = /^ {8}run: \|\n((?: {10}.*(?:\n|$))+)/m.exec(step)
+  assert.ok(shell, 'the published image job must have a scan step')
+  const scanStep = shell[1].split('\n').map((line) => line.slice(10)).join('\n')
+  const directory = await mkdtemp(join(tmpdir(), 'edgewatch-scheduled-scan-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const fakeBin = join(directory, 'bin')
+  await mkdir(fakeBin)
+  await mkdir(join(directory, 'scripts'))
+  await writeFile(join(fakeBin, 'docker'), [
+    '#!/bin/sh',
+    'case "$1 $2" in',
+    '  "buildx imagetools") cat "$FAKE_INDEX" ;;',
+    '  "pull "*) echo "pull $2" >> "$FAKE_LOG" ;;',
+    '  "image inspect") echo v9.9.9 ;;',
+    '  *) echo "unexpected docker $*" >&2; exit 1 ;;',
+    'esac',
+  ].join('\n') + '\n')
+  await chmod(join(fakeBin, 'docker'), 0o755)
+  await writeFile(join(directory, 'scripts', 'scan-image-vulnerabilities.sh'),
+    '#!/bin/sh\necho "scan $1 $2 $GRYPE_DB_CACHE_DIR" >> "$FAKE_LOG"\n[ "$2" != "$FAKE_FAIL_PLATFORM" ]\n')
+  await chmod(join(directory, 'scripts', 'scan-image-vulnerabilities.sh'), 0o755)
+  const amd64 = `sha256:${'1'.repeat(64)}`
+  const arm64 = `sha256:${'2'.repeat(64)}`
+  const runScan = async (manifests, failPlatform = '') => {
+    await writeFile(join(directory, 'index.json'), JSON.stringify({ manifests }))
+    await rm(join(directory, 'log'), { force: true })
+    const result = spawnSync('bash', ['-c', scanStep], {
+      cwd: directory,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        PUBLISHED_IMAGE: 'ghcr.io/crypt0rr/edgewatch:latest',
+        RUNNER_TEMP: directory,
+        FAKE_INDEX: join(directory, 'index.json'),
+        FAKE_LOG: join(directory, 'log'),
+        FAKE_FAIL_PLATFORM: failPlatform,
+      },
+    })
+    const log = await readFile(join(directory, 'log'), 'utf8').catch(() => '')
+    return { ...result, log }
+  }
+  const attestation = { digest: `sha256:${'3'.repeat(64)}`, platform: { os: 'unknown', architecture: 'unknown' } }
+  const manifests = [
+    { digest: amd64, platform: { os: 'linux', architecture: 'amd64' } },
+    { digest: arm64, platform: { os: 'linux', architecture: 'arm64' } },
+    attestation,
+  ]
+  const both = await runScan(manifests)
+  assert.equal(both.status, 0, both.stderr)
+  assert.equal(both.log, [
+    `pull ghcr.io/crypt0rr/edgewatch@${amd64}`,
+    `scan ghcr.io/crypt0rr/edgewatch@${amd64} linux/amd64 ${directory}/grype-db`,
+    `pull ghcr.io/crypt0rr/edgewatch@${arm64}`,
+    `scan ghcr.io/crypt0rr/edgewatch@${arm64} linux/arm64 ${directory}/grype-db`,
+  ].join('\n') + '\n')
+  assert.match(both.stdout, /^ghcr\.io\/crypt0rr\/edgewatch:latest is v9\.9\.9 for linux\/arm64$/m)
+
+  const vulnerable = await runScan(manifests, 'linux/amd64')
+  assert.equal(vulnerable.status, 1, 'a failed scan must fail the scheduled run')
+  assert.match(vulnerable.log, /^scan \S+ linux\/arm64 /m, 'a failed amd64 scan must not skip the arm64 scan')
+
+  const amd64Only = await runScan([{ digest: amd64, platform: { os: 'linux', architecture: 'amd64' } }, attestation])
+  assert.equal(amd64Only.status, 1)
+  assert.match(amd64Only.stderr, /ghcr\.io\/crypt0rr\/edgewatch:latest has no single linux\/arm64 manifest/)
+})
+
+test('the daily workflow runs govulncheck on the latest release with the Go it was built with', async (t) => {
+  const scheduled = workflows.find(({ file }) => file === '.github/workflows/scheduled.yml')?.text
+  assert.ok(scheduled, 'the scheduled checks workflow must exist')
+  const job = jobsOf(scheduled).find(({ name }) => name === 'release-source')?.block
+  assert.ok(job, 'the scheduled workflow must check the latest release')
+  assert.deepEqual(stepsOf(job).map((step) => /^ {6}- name: (.*)$/m.exec(step)?.[1]), [
+    'Find the latest release',
+    'Check out the release',
+    'Set up the Go version the release was built with',
+    'Run govulncheck on the release',
+  ])
+  assert.match(stepBlock(job, 'Check out the release'), /^ {10}ref: refs\/tags\/\$\{\{ steps\.release\.outputs\.tag \}\}$/m)
+  const setupGo = stepBlock(job, 'Set up the Go version the release was built with')
+  assert.match(setupGo, /^ {10}go-version-file: go\.mod$/m)
+  assert.match(setupGo, /^ {10}cache: false$/m)
+  assert.match(stepBlock(job, 'Run govulncheck on the release'), /^ {8}run: make vulncheck$/m)
+  // The job reports the release's toolchain only while the release builds
+  // with the Go in go.mod and govulncheck keeps the Go it was started with.
+  const releaseSetups = stepsOf(workflow).filter((step) => /uses: actions\/setup-go@/.test(step))
+  assert.ok(releaseSetups.length > 0, 'the release must set up Go')
+  for (const step of releaseSetups) {
+    assert.match(step, /^ {10}go-version-file: go\.mod$/m)
+    assert.doesNotMatch(step, /^ {10}go-version:/m)
+  }
+  assert.match(makefile, /^vulncheck:\n\tGOTOOLCHAIN="\$\$\(go env GOVERSION\)" go run golang\.org\/x\/vuln\/cmd\/govulncheck@/m)
+
+  // Run the lookup step with a stand-in gh, as GitHub runs it.
+  const find = stepBlock(job, 'Find the latest release')
+  assert.match(find, /^ {8}id: release$/m)
+  assert.match(find, /^ {10}GH_TOKEN: \$\{\{ github\.token \}\}$/m)
+  const shell = /^ {8}run: \|\n((?: {10}.*(?:\n|$))+)/m.exec(find)
+  assert.ok(shell, 'the lookup step must run a script')
+  const findStep = shell[1].split('\n').map((line) => line.slice(10)).join('\n')
+  const directory = await mkdtemp(join(tmpdir(), 'edgewatch-scheduled-release-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const fakeBin = join(directory, 'bin')
+  await mkdir(fakeBin)
+  await writeFile(join(fakeBin, 'gh'), '#!/bin/sh\necho "$*" > "$FAKE_ARGS"\n[ -z "$FAKE_FAIL" ] || exit 1\nprintf "%s\\n" "$FAKE_TAG"\n')
+  await chmod(join(fakeBin, 'gh'), 0o755)
+  const runFind = async (tag, fail = '') => {
+    const output = join(directory, 'output')
+    await writeFile(output, '')
+    const result = spawnSync('bash', ['-c', findStep], {
+      cwd: directory,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        GITHUB_REPOSITORY: 'crypt0rr/EdgeWatch',
+        GITHUB_OUTPUT: output,
+        FAKE_ARGS: join(directory, 'args'),
+        FAKE_TAG: tag,
+        FAKE_FAIL: fail,
+      },
+    })
+    return { ...result, output: await readFile(output, 'utf8') }
+  }
+  const latest = await runFind('v0.42.1')
+  assert.equal(latest.status, 0, latest.stderr)
+  assert.equal(latest.output, 'tag=v0.42.1\n')
+  assert.equal(await readFile(join(directory, 'args'), 'utf8'), 'api repos/crypt0rr/EdgeWatch/releases/latest --jq .tag_name\n')
+  for (const tag of ['', 'main', 'v1.2.3-rc.1', 'v1.2.3\nother=1', '../v1.2.3']) {
+    const unexpected = await runFind(tag)
+    assert.equal(unexpected.status, 1, `tag ${JSON.stringify(tag)} must fail the lookup`)
+    assert.equal(unexpected.output, '', `tag ${JSON.stringify(tag)} must not reach the checkout`)
+  }
+  const failed = await runFind('v0.42.1', '1')
+  assert.notEqual(failed.status, 0, 'a failed lookup must fail the job')
+  assert.equal(failed.output, '')
 })
 
 test('the Naabu license notice matches the Dockerfile release and immutable commit', () => {

@@ -245,19 +245,15 @@ func readPreMigrationState(t *testing.T, path string) preMigrationState {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer rows.Close()
 	for rows.Next() {
 		var object string
 		if err := rows.Scan(&object); err != nil {
-			_ = rows.Close()
 			t.Fatal(err)
 		}
 		state.schemaObjects = append(state.schemaObjects, object)
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		t.Fatal(err)
-	}
-	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.DB.QueryRow(`SELECT state,owner,phase,started_at,updated_at,progress,total,last_error FROM startup_state WHERE id=1`).Scan(&state.startup.state, &state.startup.owner, &state.startup.phase, &state.startup.startedAt, &state.startup.updatedAt, &state.startup.progress, &state.startup.total, &state.startup.lastError); err != nil {

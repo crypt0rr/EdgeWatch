@@ -112,9 +112,10 @@ watchdog, rather than treating the recovery attempt as a new successful scan.
 A paused resumable cycle with recent completed work inside its resume window is
 reported as in progress; the watchdog treats that progress as activity, and
 the latest timed-out attempt does not count as a failure while the saved work
-remains current. Perimeter coverage can still be unproven when the last
-successful scan is overdue or the monitored scope changed. Cycles that stall,
-expire, or stop progressing keep their existing retry and watchdog behavior.
+remains current. Perimeter coverage stays unproven until a successful scan
+establishes the current scope, including when no successful scan exists yet or
+the monitored scope changed. Cycles that stall, expire, or stop progressing
+keep their existing retry and watchdog behavior.
 A resumed cycle keeps the scanner-profile arguments it started with, and its
 scans record that job and profile revision; a profile change applies from the
 next cycle. Accepting an incident, approving or resetting the baseline, or

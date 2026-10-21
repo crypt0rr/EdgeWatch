@@ -583,12 +583,21 @@ count as coverage.
 | `excluded_target` | An IP or CIDR target contains an address in `scanner.target_exclusions`. |
 | `covering` | No check fails. |
 
-Only a `covering` monitor carries the flags that leave it counted but
-unproven: `stale`, with the `stale_reason` `overdue` once the `job-silent`
-watchdog's deadline has passed or `schedule never fires` when its schedule
-gives that rule no deadline; and `stalled_cycle` when its active scan cycle
-is stalled. Unlike the `job-silent` alert, which waits while a scan holds the
-job's lease, the flag does not wait for a scan that is still running. Every monitor has
+A `covering` monitor's coverage stays unproven until a successful scan
+establishes its current targets and protocols, including before the first
+successful scan when recent resumable progress is shown. A latest failed,
+timed-out, or incomplete attempt also leaves coverage unproven unless recent
+resumable progress exists. Such progress preserves an existing same-scope
+success, while a success from an older scope does not prove the current one.
+Other flags that leave coverage unproven are `stale`, with the `stale_reason`
+`overdue` once the `job-silent` watchdog's deadline has passed or
+`schedule never fires` when its schedule gives that rule no deadline;
+`stalled_cycle` when its active scan cycle is stalled; and `scope_changed`
+when the latest successful scan has different targets or protocols. Unlike
+the `job-silent` alert, which waits while a scan holds the job's lease,
+staleness does not wait for a scan that is still running. `cycle_in_progress`
+reports a resumable cycle with recent completed work; `cycle_completed_units`
+and `cycle_total_units` report that cycle's progress. Every monitor has
 `last_attempt_status`, the status of its latest scan attempt or an empty
 string, and `last_success_at`, when its latest successful scan finished or
 `null`. `host_discovery` is true for a job with `assume_alive: false`, which
@@ -609,7 +618,7 @@ buckets that the job's protocol settings fill, whatever its state:
 | `monitors` | Once the unit declares a range, the monitors with an IP or CIDR target that overlaps a declared range or lies at least partly outside them, in name order; empty while the unit declares none. |
 | `outside` | Once the unit declares a range, each IP or CIDR target of a monitor in any state that lies fully or partly outside the union of the declared ranges, as a `PerimeterOutsideTarget`: `job_id`, `job_name`, `state`, `target`, `partial` when only part of it is outside, and `outside_addresses`, the count of its addresses outside them, which saturates. At most 200; DNS names are not listed. |
 | `outside_truncated` | `true` when `outside` was cut at 200. |
-| `totals` | A `PerimeterTotals`: `declared_ipv4`, `excluded_ipv4`, and `covered_full_tcp`, `covered_any_tcp`, and `covered_udp` over the union of the IPv4 ranges, so overlapping ranges count once; `ranges`, every declared range, and `ipv6_ranges`, the IPv6 ones among them; `cannot_scan_monitors`, the monitors that touch the perimeter and are not `covering`; `unproven_monitors`, the `covering` ones that touch it and are stale, have a stalled cycle, or whose latest attempt failed, timed out, or was incomplete; and `outside_targets`. Each count is taken before any list is cut. |
+| `totals` | A `PerimeterTotals`: `declared_ipv4`, `excluded_ipv4`, and `covered_full_tcp`, `covered_any_tcp`, and `covered_udp` over the union of the IPv4 ranges, so overlapping ranges count once; `ranges`, every declared range, and `ipv6_ranges`, the IPv6 ones among them; `cannot_scan_monitors`, the monitors that touch the perimeter and are not `covering`; `unproven_monitors`, the `covering` ones that touch it without a successful scan for the current scope, that are stale, have a stalled cycle or changed scope, or whose latest attempt failed, timed out, or was incomplete without recent resumable progress; and `outside_targets`. Each count is taken before any list is cut. |
 | `limits` | A `PerimeterLimits`: `max_job_hosts`; `max_probe_count` and `max_naabu_probe_count`, the unit's normal probe budgets that the states and suggestions use, not its high-cost ceiling; `max_ranges` (1,024); and `max_entries_per_request` (256). |
 | `generated_at` | When the report was computed. |
 

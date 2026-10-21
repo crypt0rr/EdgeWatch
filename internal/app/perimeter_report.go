@@ -163,8 +163,8 @@ type PerimeterTotals struct {
 	// CannotScanMonitors counts the monitors that touch the perimeter and
 	// are not covering. UnprovenMonitors counts the covering monitors that
 	// touch it and are stale, have a stalled cycle, changed security scope, or
-	// whose latest attempt failed or was incomplete without recent resumable
-	// progress.
+	// have no successful scan for their current scope, or whose latest attempt
+	// failed or was incomplete without recent resumable progress.
 	CannotScanMonitors int `json:"cannot_scan_monitors"`
 	UnprovenMonitors   int `json:"unproven_monitors"`
 	OutsideTargets     int `json:"outside_targets"`
@@ -620,15 +620,15 @@ func (a *App) classifyPerimeterMonitor(state *perimeterState, record store.JobRe
 }
 
 // unproven reports a covering monitor that has not proven its current scope:
-// it is stale, its cycle is stalled, its scope changed, or its latest attempt
-// failed, timed out or was incomplete without recent resumable progress. The
-// latest attempt is the newest scan, so such an attempt is newer than the last
-// success.
+// it has no successful scan for that scope, is stale, its cycle is stalled,
+// or its latest attempt failed, timed out or was incomplete without recent
+// resumable progress. Progress only preserves existing coverage proof; it
+// cannot establish coverage before the first successful scan.
 func (m perimeterMonitor) unproven() bool {
 	if m.ref.State != perimeterCovering {
 		return false
 	}
-	if m.ref.ScopeChanged {
+	if m.ref.ScopeChanged || m.ref.LastSuccessAt == nil {
 		return true
 	}
 	if !m.ref.CycleInProgress {

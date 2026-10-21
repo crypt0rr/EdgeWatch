@@ -317,8 +317,8 @@ func TestPerimeterReportClassifiesEveryMonitorState(t *testing.T) {
 			t.Errorf("%s = %s %v (%s), want %s %v", test.job.Name, monitor.State, monitor.Reasons, monitor.JobID, wantState, wantReasons)
 		}
 	}
-	if report.Totals.CannotScanMonitors != 9 || report.Totals.UnprovenMonitors != 0 {
-		t.Fatalf("totals = %+v, want 9 monitors that cannot scan", report.Totals)
+	if report.Totals.CannotScanMonitors != 9 || report.Totals.UnprovenMonitors != 2 {
+		t.Fatalf("totals = %+v, want 9 monitors that cannot scan and 2 without successful coverage", report.Totals)
 	}
 	// Only the two covering monitors cover: 198.51.100.0/25 at full TCP.
 	edge := perimeterRangeValued(t, report.Ranges, "198.51.100.0/24")
@@ -441,13 +441,25 @@ func TestPerimeterReportFlagsStaleMonitorsByTheSilenceRule(t *testing.T) {
 				got[monitor.Name] = monitor.StaleReason
 			}
 		}
-		// Every stale monitor's coverage is unproven.
-		if report.Totals.UnprovenMonitors != len(got) {
-			t.Fatalf("unproven monitors = %d, want %d", report.Totals.UnprovenMonitors, len(got))
+		// Stale monitors are unproven, and monitors without a successful scan
+		// can also be unproven before their silence threshold makes them stale.
+		unproven := 0
+		for _, monitor := range report.Monitors {
+			unprovenState := (perimeterMonitor{ref: monitor}).unproven()
+			if unprovenState {
+				unproven++
+			}
+			if monitor.Stale && !unprovenState {
+				t.Errorf("stale monitor %s has proven coverage", monitor.Name)
+			}
+		}
+		if report.Totals.UnprovenMonitors != unproven {
+			t.Fatalf("unproven monitors = %d, want %d", report.Totals.UnprovenMonitors, unproven)
 		}
 		return got
 	}
-	// A new monitor is not stale before its first scheduled run is overdue.
+	// A new monitor is unproven before its first successful scan, but is not
+	// stale before its first scheduled run is overdue.
 	if got := stale(10 * time.Minute); !reflect.DeepEqual(got, map[string]string{"never": "schedule never fires"}) {
 		t.Fatalf("stale monitors after 10 minutes = %v", got)
 	}
@@ -521,28 +533,29 @@ func TestPerimeterReportFlagsCoverageThatIsNotProven(t *testing.T) {
 		discovery      bool
 		attempt        string
 		hasLastSuccess bool
+		unproven       bool
 	}
 	want := map[string]flags{
-		"healthy":    {"covering", false, false, "", false},
-		"stalled":    {"covering", true, false, "", false},
-		"discovery":  {"covering", false, true, "", false},
-		"failed":     {"covering", false, false, "failed", false},
-		"incomplete": {"covering", false, false, "incomplete", true},
-		"recovered":  {"covering", false, false, "success", true},
-		"timed-out":  {"covering", false, false, "timed_out", false},
+		"healthy":    {"covering", false, false, "", false, true},
+		"stalled":    {"covering", true, false, "", false, true},
+		"discovery":  {"covering", false, true, "", false, true},
+		"failed":     {"covering", false, false, "failed", false, true},
+		"incomplete": {"covering", false, false, "incomplete", true, true},
+		"recovered":  {"covering", false, false, "success", true, false},
+		"timed-out":  {"covering", false, false, "timed_out", false, true},
 		// The flags belong to covering monitors only.
-		"paused-stalled": {"paused", false, false, "", false},
+		"paused-stalled": {"paused", false, false, "", false, false},
 	}
 	for name, wanted := range want {
 		monitor := perimeterMonitorNamed(t, report.Monitors, name)
-		got := flags{monitor.State, monitor.StalledCycle, monitor.HostDiscovery, monitor.LastAttemptStatus, monitor.LastSuccessAt != nil}
+		got := flags{monitor.State, monitor.StalledCycle, monitor.HostDiscovery, monitor.LastAttemptStatus, monitor.LastSuccessAt != nil, (perimeterMonitor{ref: monitor}).unproven()}
 		if got != wanted || monitor.Stale {
 			t.Errorf("%s = %+v (stale %v), want %+v", name, got, monitor.Stale, wanted)
 		}
 	}
-	// A stalled cycle, a failed, an incomplete and a timed-out attempt leave
-	// coverage unproven; host discovery and a success after a failure do not.
-	if report.Totals.UnprovenMonitors != 4 || report.Totals.CannotScanMonitors != 1 {
+	// Covering monitors stay unproven until a successful scan establishes the
+	// current scope, and later stalled/failed attempts keep that proof invalid.
+	if report.Totals.UnprovenMonitors != 6 || report.Totals.CannotScanMonitors != 1 {
 		t.Fatalf("totals = %+v", report.Totals)
 	}
 	if got := perimeterRangeValued(t, report.Ranges, "198.51.100.0/24").Coverage; got != (PerimeterCoverage{AnyTCP: 7}) {
@@ -556,11 +569,10 @@ func TestPerimeterReportOnlyShowsRecentCheckpointAsInProgress(t *testing.T) {
 	f := newPerimeterFixture(t)
 	declarePerimeter(t, f.ts, store.PerimeterKindPrefix, "198.51.100.0/24")
 	record := createPerimeterJob(t, f.ts, perimeterJob("progressing", "198.51.100.10"), true)
-	now := time.Now().UTC()
-	successAt := now.Add(-time.Hour)
+	successAt := record.CreatedAt
 	if err := f.db.System().SaveScan(ctx, model.Scan{
 		ID: "progressing-success", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name,
-		StartedAt: successAt.Add(-time.Minute), FinishedAt: successAt, Status: "success", ConfigHash: record.Job.SecurityHash(),
+		StartedAt: successAt, FinishedAt: successAt, Status: "success", ConfigHash: record.Job.SecurityHash(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -568,10 +580,11 @@ func TestPerimeterReportOnlyShowsRecentCheckpointAsInProgress(t *testing.T) {
 		{Sequence: 0, Protocol: "tcp", Addresses: []string{"198.51.100.10"}, Ports: "22", PortCount: 1, Probes: 1},
 		{Sequence: 1, Protocol: "tcp", Addresses: []string{"198.51.100.10"}, Ports: "443", PortCount: 1, Probes: 1},
 	}}
+	cycleStartedAt := time.Now().UTC()
 	cycle, err := f.db.System().CreateScanCycle(ctx, store.ScanCycleRecord{
 		JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision,
 		ConfigHash: record.Job.SecurityHash(), ExecutionHash: record.Job.ExecutionHash(), Plan: plan,
-		StartedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-time.Minute), ExpiresAt: now.Add(24 * time.Hour),
+		StartedAt: cycleStartedAt, UpdatedAt: cycleStartedAt, ExpiresAt: cycleStartedAt.Add(24 * time.Hour),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -592,17 +605,18 @@ func TestPerimeterReportOnlyShowsRecentCheckpointAsInProgress(t *testing.T) {
 	if _, err := f.db.System().PauseScanCycle(ctx, cycle.ID, false, "first unit completed"); err != nil {
 		t.Fatal(err)
 	}
+	timeoutAt := time.Now().UTC()
 	if err := f.db.System().SaveScan(ctx, model.Scan{
 		ID: "progressing-timeout", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name,
-		StartedAt: now.Add(-2 * time.Hour), FinishedAt: now.Add(-time.Minute), Status: "timed_out", ConfigHash: record.Job.SecurityHash(),
+		StartedAt: cycleStartedAt, FinishedAt: timeoutAt, Status: "timed_out", ConfigHash: record.Job.SecurityHash(),
 		CycleID: cycle.ID, CycleStatus: "paused", Resumable: true, CompletedUnits: 1, TotalUnits: 2,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	f.setClock(now)
+	f.setClock(time.Now().UTC())
 	report := f.report(t, f.ts)
 	monitor := perimeterMonitorNamed(t, report.Monitors, "progressing")
-	if monitor.LastAttemptStatus != "timed_out" || !monitor.CycleInProgress || monitor.CycleCompletedUnits != 1 || monitor.CycleTotalUnits != 2 || report.Totals.UnprovenMonitors != 0 {
+	if monitor.LastAttemptStatus != "timed_out" || monitor.LastSuccessAt == nil || monitor.ScopeChanged || !monitor.CycleInProgress || monitor.CycleCompletedUnits != 1 || monitor.CycleTotalUnits != 2 || report.Totals.UnprovenMonitors != 0 {
 		t.Fatalf("progressing monitor = %+v; want in-progress cycle and proven recent coverage", monitor)
 	}
 	if report.Totals.UnprovenMonitors != 0 || perimeterRangeValued(t, report.Ranges, "198.51.100.0/24").Coverage.AnyTCP != 1 {
@@ -611,7 +625,7 @@ func TestPerimeterReportOnlyShowsRecentCheckpointAsInProgress(t *testing.T) {
 
 	// A later timed-out attempt that completes no new unit must not make the
 	// old checkpoint look recent just because the cycle is started and paused.
-	checkpointAt := now.Add(-72 * time.Hour)
+	checkpointAt := timeoutAt.Add(-72 * time.Hour)
 	if _, err := f.db.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET finished_at=? WHERE cycle_id=? AND status='completed'`, checkpointAt.Format(time.RFC3339Nano), cycle.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -638,6 +652,66 @@ func TestPerimeterReportOnlyShowsRecentCheckpointAsInProgress(t *testing.T) {
 	monitor = perimeterMonitorNamed(t, report.Monitors, "progressing")
 	if monitor.LastAttemptStatus != "timed_out" || monitor.CycleInProgress || report.Totals.UnprovenMonitors != 1 {
 		t.Fatalf("no-progress timeout monitor = %+v; want no in-progress status and unproven coverage", monitor)
+	}
+}
+
+func createRecentPerimeterProgress(t *testing.T, f perimeterFixture, record store.JobRecord, id string) {
+	t.Helper()
+	ctx := context.Background()
+	startedAt := time.Now().UTC()
+	plan := scanner.WorkPlan{Units: []scanner.WorkUnit{
+		{Sequence: 0, Protocol: "tcp", Addresses: []string{record.Job.Targets[0]}, Ports: "22", PortCount: 1, Probes: 1},
+		{Sequence: 1, Protocol: "tcp", Addresses: []string{record.Job.Targets[0]}, Ports: "443", PortCount: 1, Probes: 1},
+	}}
+	cycle, err := f.db.System().CreateScanCycle(ctx, store.ScanCycleRecord{
+		JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision,
+		ConfigHash: record.Job.SecurityHash(), ExecutionHash: record.Job.ExecutionHash(), Plan: plan,
+		StartedAt: startedAt, UpdatedAt: startedAt, ExpiresAt: startedAt.Add(24 * time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := f.db.System().NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.System().PauseScanCycle(ctx, cycle.ID, false, "first unit completed"); err != nil {
+		t.Fatal(err)
+	}
+	finishedAt := time.Now().UTC()
+	if err := f.db.System().SaveScan(ctx, model.Scan{
+		ID: id + "-timeout", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name,
+		StartedAt: startedAt, FinishedAt: finishedAt, Status: "timed_out", ConfigHash: record.Job.SecurityHash(),
+		CycleID: cycle.ID, CycleStatus: "paused", Resumable: true, CompletedUnits: 1, TotalUnits: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPerimeterFirstProgressDoesNotProveCoverage(t *testing.T) {
+	t.Parallel()
+	f := newPerimeterFixture(t)
+	declarePerimeter(t, f.ts, store.PerimeterKindPrefix, "198.51.100.0/24")
+	record := createPerimeterJob(t, f.ts, perimeterJob("first-progress", "198.51.100.10"), true)
+	createRecentPerimeterProgress(t, f, record, "first-progress")
+	f.setClock(time.Now().UTC())
+
+	report := f.report(t, f.ts)
+	monitor := perimeterMonitorNamed(t, report.Monitors, "first-progress")
+	if monitor.LastSuccessAt != nil || monitor.Stale || monitor.ScopeChanged || !monitor.CycleInProgress || monitor.CycleCompletedUnits != 1 || monitor.CycleTotalUnits != 2 {
+		t.Fatalf("first-ever partial cycle = %+v; want recent progress, no success and no stale/scope flag", monitor)
+	}
+	if report.Totals.UnprovenMonitors != 1 {
+		t.Fatalf("first-ever partial cycle has %d unproven monitors, want 1", report.Totals.UnprovenMonitors)
 	}
 }
 
@@ -721,6 +795,36 @@ func TestPerimeterCoverageProofTracksSecurityScopeHash(t *testing.T) {
 	monitor = perimeterMonitorNamed(t, report.Monitors, protocolRecord.Job.Name)
 	if monitor.ScopeChanged || report.Totals.UnprovenMonitors != 0 {
 		t.Fatalf("successful current-protocol scan did not restore proof: %+v", monitor)
+	}
+}
+
+func TestPerimeterProgressDoesNotProveChangedScope(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newPerimeterFixture(t)
+	declarePerimeter(t, f.ts, store.PerimeterKindPrefix, "198.51.100.0/24")
+	record := createPerimeterJob(t, f.ts, perimeterJob("changed-scope-progress", "198.51.100.10"), true)
+	successAt := record.CreatedAt
+	if err := f.db.System().SaveScan(ctx, model.Scan{
+		ID: "changed-scope-success", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name,
+		StartedAt: successAt, FinishedAt: successAt, Status: "success", ConfigHash: record.Job.SecurityHash(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	changedScope := record.Job
+	changedScope.Targets = []string{"198.51.100.11"}
+	updated, _, err := f.ts.UpdateJob(ctx, record.ID, record.Revision, changedScope, true, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createRecentPerimeterProgress(t, f, updated, "changed-scope-progress")
+	f.setClock(time.Now().UTC())
+
+	report := f.report(t, f.ts)
+	monitor := perimeterMonitorNamed(t, report.Monitors, "changed-scope-progress")
+	if monitor.LastSuccessAt == nil || !monitor.ScopeChanged || !monitor.CycleInProgress || monitor.CycleCompletedUnits != 1 || monitor.CycleTotalUnits != 2 || report.Totals.UnprovenMonitors != 1 {
+		t.Fatalf("changed-scope progress = %+v; unproven monitors = %d, want progress visible but coverage unproven", monitor, report.Totals.UnprovenMonitors)
 	}
 }
 

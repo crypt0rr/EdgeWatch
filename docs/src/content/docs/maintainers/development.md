@@ -11,8 +11,10 @@ and builds, but is not included in the production image.
 
 The project uses Go 1.27.3 or newer and Node.js 24.16.0 or newer within the
 Node 24 release line. CI, the release workflow, and the container build are
-pinned to 24.22.0; local version managers can use
-[.node-version](https://github.com/crypt0rr/EdgeWatch/blob/main/.node-version).
+pinned to 24.22.0 along with this guide. The documentation workflow and local
+version managers read
+[.node-version](https://github.com/crypt0rr/EdgeWatch/blob/main/.node-version),
+and the pull-request title check uses the same runtime pin.
 The daemon and real-stack browser tests run on Linux. The migration and
 restore directory lock required for safe daemon startup is implemented only
 on Linux; attempting to start the daemon on macOS, BSD, or another non-Linux
@@ -196,7 +198,7 @@ options, proxy behavior, secret redaction, and notification sandboxing.
 | --- | --- |
 | Go code | `gofmt` on changed files, `go vet ./...`, `go test -race -timeout=25m ./...` |
 | A struct that `ResponseTypes` lists | `go run ./scripts/gen-api-types`, commit `src/generated/`, then the console checks |
-| Console code | `npm run lint`, `npm run build`, `npm run test:coverage` |
+| Console code | `npm run lint` (type-checks `src/`, `e2e/`, `playwright.config.ts`, and `vitest.config.ts`), `npm run build`, `npm run test:coverage` |
 | Browser behavior | `npm run test:e2e` |
 | Database schema | Migration tests and `./scripts/check-schema-docs.sh` |
 | Container image or `compose.yaml` | `./scripts/verify-compose-deployment.sh IMAGE` and `./scripts/scan-image-vulnerabilities.sh IMAGE PLATFORM` on a built image |

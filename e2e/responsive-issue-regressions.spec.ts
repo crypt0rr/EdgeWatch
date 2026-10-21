@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import type { PlatformStatus } from '../src/generated/api-types'
 import { mockConsole } from './mock-console'
 
 const timestamp = '2026-09-29T10:00:00Z'
@@ -132,14 +133,15 @@ test.describe('responsive issue regressions', () => {
   test('platform update indicator and status notice are visible on a phone (#989, #990)', async ({ page }) => {
     await page.setViewportSize({ width: 320, height: 760 })
     await mockConsole(page, 'platform_admin')
+    const platformStatus: PlatformStatus = {
+      version: 'v0.20.13', version_release_url: 'https://example.test/releases/v0.20.13',
+      updates: { enabled: true, status: 'update_available', available: true, current_version: 'v0.20.13', latest_version: 'v0.21.0', release_url: 'https://example.test/releases/v0.21.0', stale: false },
+      units: { total: 2, active: 2, disabled: 0, deleting: 0 }, accounts: 5, jobs: 3, stored_scans: 12,
+      platform_admins: { total: 1, enabled: 1 }, capacity: { limits: { max_concurrent_scans: 4, max_probe_count: 5000000, max_naabu_probe_count: 20000000, max_probe_count_limit: 100000000 }, slots: { capacity: 4, in_use: 1, queued: 0 } },
+    }
     await page.route('**/api/v1/platform/status', async route => {
       if (route.request().method() !== 'GET') return route.fallback()
-      await route.fulfill({ json: {
-        version: 'v0.20.13', version_release_url: 'https://example.test/releases/v0.20.13',
-        updates: { enabled: true, status: 'update_available', available: true, current_version: 'v0.20.13', latest_version: 'v0.21.0', release_url: 'https://example.test/releases/v0.21.0' },
-        units: { total: 2, active: 2, disabled: 0, deleting: 0 }, accounts: 5, jobs: 3, stored_scans: 12,
-        platform_admins: { total: 1, enabled: 1 }, capacity: { limits: { max_concurrent_scans: 4, max_probe_count: 5000000, max_naabu_probe_count: 20000000, max_probe_count_limit: 100000000 }, slots: { capacity: 4, in_use: 1, queued: 0 } },
-      } })
+      await route.fulfill({ json: platformStatus })
     })
     await page.goto('/platform/status')
     await expect(page).toHaveTitle('Status · EdgeWatch')
@@ -155,7 +157,8 @@ test.describe('responsive issue regressions', () => {
     await page.getByRole('dialog', { name: 'Primary navigation' }).getByRole('button', { name: 'Close navigation' }).click()
     await expect(page.getByRole('status')).toContainText('Version v0.21.0 is available.')
     await expect(page.getByRole('link', { name: 'Release notes' })).toBeVisible()
-    expect(await page.locator('.breadcrumb').evaluate(element => element.innerText)).toBe('Status')
+    await expect(page.getByRole('navigation', { name: 'Breadcrumb: Platform / Status', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Status', exact: true })).toBeVisible()
     await expectNoHorizontalScroll(page)
   })
 

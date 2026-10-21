@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test'
-import type { PerimeterBlocks, PerimeterDeclareResult, PerimeterLineError, PerimeterMonitorRef, PerimeterOutsideTarget, PerimeterOverview, PerimeterProtocol, PerimeterRange, PerimeterRangeDetail, PerimeterSuggestion } from '../src/generated/api-types'
+import type { AdminStatus, HostObservation, IncidentInboxItem, IncidentInboxPage, IncidentInboxSummary, PerimeterBlocks, PerimeterDeclareResult, PerimeterLineError, PerimeterMonitorRef, PerimeterOutsideTarget, PerimeterOverview, PerimeterProtocol, PerimeterRange, PerimeterRangeDetail, PerimeterSuggestion, PlatformStatus, Scan } from '../src/generated/api-types'
+import type { Job, JobForm } from '../src/types'
 
 export type UnitConsoleRole = 'administrator' | 'operator' | 'viewer'
 /** platform_admin is the business units' platform administrator. */
@@ -37,7 +38,7 @@ export type ConsoleMockControls = {
   payloads: Record<string, unknown[]>
 }
 
-const job = {
+const job: Job = {
   id: 'job-1',
   revision: 1,
   enabled: true,
@@ -64,7 +65,7 @@ const job = {
   baseline: { status: 'complete', samples: 1, attempts: 1, host_count: 1, scan_id: 'scan-1' },
 }
 
-const scan = {
+const scan: Scan = {
   id: 'scan-1',
   job_id: 'job-1',
   job: 'fixture-job',
@@ -76,7 +77,7 @@ const scan = {
   snapshot: { units: [], scopes: [] },
 }
 
-const host = {
+const host: HostObservation = {
   address: '192.0.2.10',
   address_family: 'IPv4',
   source_targets: ['router.example.com'],
@@ -469,7 +470,7 @@ function declarePerimeter(ranges: PerimeterRange[], entries: Array<{ kind?: unkn
  * unit starts without declared ranges.
  */
 export async function mockConsole(page: Page, role: ConsoleRole = 'administrator', { platformTOTP = true, emptyPerimeter = false }: { platformTOTP?: boolean; emptyPerimeter?: boolean } = {}): Promise<ConsoleMockControls> {
-  let incidents: any[] = [{
+  let incidents: IncidentInboxItem[] = [{
     job_id: 'job-1',
     job: 'fixture-job',
     occurrence_token: 'fixture-occurrence-1',
@@ -512,7 +513,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
   }
   const platformAdmins: any[] = [platformAccount({ id: 'user-platform_admin', username: 'platform', display_name: 'platform_admin', role: 'platform_admin', totp_enabled: true })]
   let createdUnitUser: Record<string, unknown> | null = null
-  let createdJob: any = null
+  let createdJob: Job | null = null
   let createdDestination: any = null
   let previewResponse: unknown = null
   let perimeterRanges = emptyPerimeter ? [] : perimeterFixtureRanges()
@@ -550,7 +551,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     const url = new URL(request.url())
     const path = url.pathname.replace('/api/v1', '')
     const method = request.method()
-    const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
+    const json = <T,>(body: T, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
     const body = () => {
       try { return JSON.parse(request.postData() ?? '{}') as unknown } catch { return {} }
     }
@@ -683,12 +684,12 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
         await json(platformRouting); return
       }
       if (parts.length === 1 && parts[0] === 'status' && method === 'GET') {
-        await json({ version: 'v0.18.65', units: { total: units.length, active: units.filter(item => item.status === 'active').length, disabled: units.filter(item => item.status === 'disabled').length, deleting: units.filter(item => item.status === 'deleting').length }, accounts: 6, jobs: 3, stored_scans: 1492, platform_admins: { total: platformAdmins.length, enabled: 1 }, capacity: { limits: deploymentLimits, slots: { capacity: 4, in_use: 1, queued: 0 } }, updates: { enabled: true, status: 'up_to_date', current_version: 'v0.18.65' } }); return
+        await json<PlatformStatus>({ version: 'v0.18.65', units: { total: units.length, active: units.filter(item => item.status === 'active').length, disabled: units.filter(item => item.status === 'disabled').length, deleting: units.filter(item => item.status === 'deleting').length }, accounts: 6, jobs: 3, stored_scans: 1492, platform_admins: { total: platformAdmins.length, enabled: 1 }, capacity: { limits: deploymentLimits, slots: { capacity: 4, in_use: 1, queued: 0 } }, updates: { enabled: true, status: 'up_to_date', current_version: 'v0.18.65', available: false, stale: false } }); return
       }
       await json({ error: { code: 'not_found', message: `${method} ${path}` } }, 404); return
     }
     if (path === '/status') {
-      await json({ configured: true, username: role, display_name: role, role, version: 'v0.18.65', notification_destinations: 1, notifications: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' }, retention: '90d', max_concurrent_scans: 1, updates: { enabled: true, status: 'up_to_date', current_version: 'v0.18.65' } })
+      await json<AdminStatus>({ configured: true, username: role, display_name: role, role, version: 'v0.18.65', notification_destinations: 1, notifications: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' }, retention: '90d', max_concurrent_scans: 1, updates: { enabled: true, status: 'up_to_date', current_version: 'v0.18.65', available: false, stale: false } })
       return
     }
     if (path === '/audit' && method === 'GET') {
@@ -699,9 +700,9 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
       const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0)
       const matching = incidents
       const hasMore = offset + limit < matching.length
-      await json({ incidents: matching.slice(offset, offset + limit), truncated: false, active_count: incidents.length, server_now: new Date().toISOString(), next_follow_up_at: null, pagination: { limit, offset, total: matching.length, has_more: hasMore, next_offset: hasMore ? offset + limit : null } }); return
+      await json<IncidentInboxPage>({ incidents: matching.slice(offset, offset + limit), truncated: false, active_count: incidents.length, server_now: new Date().toISOString(), next_follow_up_at: null, pagination: { limit, offset, total: matching.length, has_more: hasMore, next_offset: hasMore ? offset + limit : null } }); return
     }
-    if (path === '/incidents/summary' && method === 'GET') { await json({ active_count: incidents.length }); return }
+    if (path === '/incidents/summary' && method === 'GET') { await json<IncidentInboxSummary>({ active_count: incidents.length }); return }
     if (path === '/hosts' && method === 'GET') {
       const hosts = [{ ...host, job_id: 'job-1', job: 'fixture-job', scan_id: 'scan-1', scanned_at: scan.finished_at, open_ports: 1, open_filtered_ports: 0, has_open_ports: true, data_quality: 'detailed' }]
       await json({ hosts, pagination: pagination(hosts.length) }); return
@@ -709,10 +710,10 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/jobs' && method === 'GET') { await json({ jobs: createdJob ? [job, createdJob] : [job] }); return }
     if (path === '/jobs/schedule-suggestion' && method === 'GET') { await json({ suggested: false, draft_next_run: '2026-01-01T06:00:00Z', gap_minutes: 45 }); return }
     if (/^\/jobs\/[^/]+\/change-windows$/.test(path) && method === 'GET') { await json({ windows: [] }); return }
-    if (path === '/jobs/job-1' && method === 'GET') { await json(job); return }
+    if (path === '/jobs/job-1' && method === 'GET') { await json<Job>(job); return }
     // Like the API, a known job with no successful scan or no saved cycle
     // answers 200 with null rather than 404.
-    if (/^\/jobs\/job-(1|created)\/scans\/latest-successful$/.test(path) && method === 'GET') { await json({ scan: path.startsWith('/jobs/job-1/') ? scan : null }); return }
+    if (/^\/jobs\/job-(1|created)\/scans\/latest-successful$/.test(path) && method === 'GET') { await json<{ scan: Scan | null }>({ scan: path.startsWith('/jobs/job-1/') ? scan : null }); return }
     if (/^\/jobs\/job-(1|created)\/scan-cycle$/.test(path) && method === 'GET') { await json({ cycle: null }); return }
     if (path === '/jobs/job-created' && method === 'GET') { createdJob ? await json(createdJob) : await json({ error: { code: 'not_found', message: 'job not found' } }, 404); return }
     if (path === '/jobs/job-created/scans' && method === 'GET') { await json({ scans: [], pagination: pagination(0, 20) }); return }
@@ -743,7 +744,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/scanner/capabilities' && method === 'GET') { await json({ engines: ['nmap', 'naabu_nmap'], nmap: { path: '/usr/bin/nmap', version: '7.99', available: true }, naabu: { path: '/usr/local/bin/naabu', version: '2.6.1', available: true, syn_supported: false } }); return }
     if (path === '/scanner-profiles' && method === 'GET') { await json({ profiles: [profile] }); return }
     if (path === '/scanner-profiles/profile-1' && method === 'GET') { await json(profile); return }
-    if (path === '/perimeter' && method === 'GET') { await json(perimeterTransform(perimeterOverview(perimeterRanges))); return }
+    if (path === '/perimeter' && method === 'GET') { await json<PerimeterOverview>(perimeterTransform(perimeterOverview(perimeterRanges))); return }
     if (path === '/perimeter/seeds' && method === 'POST') {
       const value = body() as { entries?: unknown }
       record('perimeter-declare', value)
@@ -768,7 +769,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
       // An unknown range and another unit's answer alike, without the ID.
       if (!range) { await json({ error: { code: 'not_found', message: 'perimeter range not found' } }, 404); return }
       if (method === 'DELETE') { await route.fulfill({ status: 204 }); return }
-      if (method === 'GET') { await json(perimeterRangeDetail(range)); return }
+      if (method === 'GET') { await json<PerimeterRangeDetail>(perimeterRangeDetail(range)); return }
     }
 
     if (path === '/jobs/preview' && method === 'POST') {
@@ -791,11 +792,11 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
       return
     }
     if (path === '/jobs' && method === 'POST') {
-      const value = body()
+      const value = body() as JobForm
       record('job-create', value)
       if (failures.delete('job-create')) { await json(jsonError('job-create'), 422); return }
       createdJob = { ...job, id: 'job-created', revision: 1, job: value, baseline: { status: 'learning', samples: 0, attempts: 0 }, scan_budget: { exceeded: false }, scan_cycle: null }
-      await json(createdJob, 201)
+      await json<Job>(createdJob, 201)
       return
     }
     if (path === '/jobs/job-created/run' && method === 'POST') {

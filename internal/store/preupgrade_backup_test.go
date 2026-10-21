@@ -123,6 +123,33 @@ func TestPreMigrationWithoutBackupDirectoryWarnsAndContinues(t *testing.T) {
 	}
 }
 
+func TestPrunePreUpgradeBackupsPreservesMalformedAndNonOwnerFiles(t *testing.T) {
+	directory := t.TempDir()
+	invalidTimestamp := "edgewatch-preupgrade-s74-s76-20261301T000000.000000000Z.db"
+	nonOwnerOnly := "edgewatch-preupgrade-s74-s76-20250101T000000.000000000Z.db"
+	for _, name := range []string{invalidTimestamp, nonOwnerOnly} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte("operator backup"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(filepath.Join(directory, nonOwnerOnly), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := prunePreUpgradeBackups(directory, preUpgradeBackupRetention)
+	if err != nil {
+		t.Fatalf("prune automatic pre-migration backups: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("removed backups = %v, want malformed and non-owner files preserved", removed)
+	}
+	for _, name := range []string{invalidTimestamp, nonOwnerOnly} {
+		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
+			t.Errorf("operator backup %q was removed: %v", name, err)
+		}
+	}
+}
+
 func TestPreMigrationBackupsRetainExactlyLatestThreeAndPreserveManualFiles(t *testing.T) {
 	requireLinuxDaemonStartup(t)
 	path := newSchema75TestDatabase(t, false)

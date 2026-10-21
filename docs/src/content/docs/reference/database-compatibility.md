@@ -35,6 +35,13 @@ file, notification URL, or metrics token file is unusable (see
 keys with the database or encrypted web-managed destinations and never
 commit them.
 
+When `backup.directory` is configured, the daemon creates and verifies a
+pre-migration backup before it starts schema writes and keeps the latest three
+automatic copies separately from scheduled backups. A failure to create or
+verify that backup stops the migration. If no directory is configured, the
+daemon warns and continues without an automatic pre-migration copy. Keep a
+separate off-host backup and the matching keys for recovery from storage loss.
+
 ## Schema 69
 
 Schema 69 adds tenant-scoped `change_windows`, compact per-window event and

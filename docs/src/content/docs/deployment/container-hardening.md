@@ -47,13 +47,17 @@ The image and Compose deployment still apply the following controls:
 - Compose grants a seven-minute stop grace period so the daemon can cancel
   scanner processes and persist large snapshots within its six-minute
   graceful-shutdown deadline;
+- container logs use the `json-file` driver with rotation bounded to 10 MB per
+  file and three files, limiting log storage to about 30 MB per container;
 - scanner executables and their argument surface are fixed by EdgeWatch, and
   the web listener remains loopback-only.
 
 CI renders `compose.yaml`, and `compose.yaml` with `compose.syn.yaml`, and
 `scripts/verify-compose-policy.sh` checks the capability, privilege,
-namespace, device, filesystem and mount controls above on each render. A
-change to either file that drops one of them fails CI. CI and the release
+namespace, device, filesystem, mount, shutdown grace-period and log-rotation
+controls above on each render. It requires at least seven minutes of stop
+grace and bounded `json-file` logs. A change to either file that drops one of
+these controls fails CI. CI and the release
 also start the image with `compose.yaml` itself, replacing only the image and
 the container name, in `scripts/verify-compose-deployment.sh`: the container
 must become healthy with the capabilities, `TMPDIR` and memory limit of the

@@ -1431,6 +1431,103 @@ func TestPerimeterRangeDetailWithholdsOversizedCoalescedPlans(t *testing.T) {
 	}
 }
 
+func TestPerimeterRangeDetailSkipsBroadUncoveredCoalescedWalk(t *testing.T) {
+	t.Parallel()
+	f := newPerimeterFixture(t)
+	f.setClock(time.Now().UTC().Add(time.Minute))
+	f.app.Config.Scanner.MaxJobHosts = ptrTo(1)
+	const rangeValue = "10.0.0.0/8"
+	id := declarePerimeter(t, f.ts, store.PerimeterKindPrefix, rangeValue)[rangeValue]
+
+	detail := f.detail(t, f.ts, id)
+	if detail.AddressesPerMonitor != (PerimeterModeCounts{FullTCP: 1, SelectedTCP: 1, UDP: 1}) {
+		t.Fatalf("addresses per monitor = %+v, want one per mode", detail.AddressesPerMonitor)
+	}
+	if detail.SuggestionsTruncated != (PerimeterModeFlags{FullTCP: true, SelectedTCP: true, UDP: true}) || len(detail.Suggestions) != 3*perimeterMaxSuggestions {
+		t.Fatalf("ordinary suggestions = %d, truncated %+v, want the existing 64-suggestion cap per mode", len(detail.Suggestions), detail.SuggestionsTruncated)
+	}
+	if len(detail.CoalescedSuggestions) != 0 || detail.CoalescedMonitorsNeeded != (PerimeterModeCounts{}) || detail.CoalescedSuggestionsTruncated != (PerimeterModeFlags{}) {
+		t.Fatalf("uncovered range has coalesced alternatives: suggestions %+v, needed %+v, truncated %+v", detail.CoalescedSuggestions, detail.CoalescedMonitorsNeeded, detail.CoalescedSuggestionsTruncated)
+	}
+}
+
+func TestPerimeterRangeDetailStopsAtCoalescedCapBeforeBroadRangeEnd(t *testing.T) {
+	t.Parallel()
+	f := newPerimeterFixture(t)
+	f.setClock(time.Now().UTC().Add(time.Minute))
+	f.app.Config.Scanner.MaxJobHosts = ptrTo(2)
+	const rangeValue = "10.0.0.0/8"
+	id := declarePerimeter(t, f.ts, store.PerimeterKindPrefix, rangeValue)[rangeValue]
+	// This covered address is at the last address of the range. The selected
+	// TCP plan can coalesce with its preceding /32, but only after the first
+	// sixteen suggestions have already been exceeded.
+	createPerimeterJob(t, f.ts, perimeterJob("last-host", "10.255.255.255"), true)
+
+	detail := f.detail(t, f.ts, id)
+	wantNeeded := PerimeterModeCounts{SelectedTCP: perimeterMaxCoalescedSuggestions + 1}
+	wantTruncated := PerimeterModeFlags{SelectedTCP: true}
+	if detail.CoalescedMonitorsNeeded != wantNeeded || detail.CoalescedSuggestionsTruncated != wantTruncated || len(coalescedSuggestionsOf(detail, "selected_tcp")) != 0 {
+		t.Fatalf("coalesced cap result = needed %+v, truncated %+v, suggestions %+v; want %+v and %+v with no partial plan", detail.CoalescedMonitorsNeeded, detail.CoalescedSuggestionsTruncated, detail.CoalescedSuggestions, wantNeeded, wantTruncated)
+	}
+}
+
+func TestPerimeterCoalescingPreflightRespectsBudgetAndScannableBoundaries(t *testing.T) {
+	t.Parallel()
+	rangeOf := func(value string) addrspace.Range {
+		return addrspace.FromPrefix(netip.MustParsePrefix(value))
+	}
+	tests := []struct {
+		name           string
+		base, gaps     []addrspace.Range
+		minPrefixBits  int
+		wantCoalescing bool
+	}{
+		{
+			name:           "no covered addresses",
+			base:           []addrspace.Range{rangeOf("10.1.0.0/8")},
+			gaps:           []addrspace.Range{rangeOf("10.1.0.0/8")},
+			minPrefixBits:  24,
+			wantCoalescing: false,
+		},
+		{
+			name:           "one host budget cannot bridge coverage",
+			base:           []addrspace.Range{rangeOf("10.1.0.0/31")},
+			gaps:           []addrspace.Range{rangeOf("10.1.0.0/32")},
+			minPrefixBits:  32,
+			wantCoalescing: false,
+		},
+		{
+			name:           "neighboring coverage fits budget",
+			base:           []addrspace.Range{rangeOf("10.1.0.0/31")},
+			gaps:           []addrspace.Range{rangeOf("10.1.0.0/32")},
+			minPrefixBits:  31,
+			wantCoalescing: true,
+		},
+		{
+			name:           "exclusion boundary prevents a bridge",
+			base:           []addrspace.Range{rangeOf("10.1.0.0/32"), rangeOf("10.1.0.2/32")},
+			gaps:           []addrspace.Range{rangeOf("10.1.0.0/32")},
+			minPrefixBits:  31,
+			wantCoalescing: false,
+		},
+		{
+			name:           "IPv6 does not produce IPv4 suggestions",
+			base:           []addrspace.Range{rangeOf("2001:db8::/126")},
+			gaps:           []addrspace.Range{rangeOf("2001:db8::/127")},
+			minPrefixBits:  24,
+			wantCoalescing: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := perimeterCoalescingCanIncludeCovered(test.base, test.gaps, test.minPrefixBits); got != test.wantCoalescing {
+				t.Fatalf("coalescing preflight = %v, want %v", got, test.wantCoalescing)
+			}
+		})
+	}
+}
+
 // The uncovered blocks of a bucket stop at 256 CIDRs, with their total.
 func TestPerimeterRangeDetailCapsUncoveredBlocks(t *testing.T) {
 	t.Parallel()

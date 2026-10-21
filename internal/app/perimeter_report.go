@@ -300,11 +300,11 @@ type PerimeterModeFlags struct {
 // they hold, the probes a run of them is estimated to send, and the exact
 // protocol settings the console applies to the new monitor.
 type PerimeterSuggestion struct {
-	Mode                    string            `json:"mode"`
-	Targets                 []string          `json:"targets"`
-	Addresses               int               `json:"addresses"`
-	AlreadyCoveredAddresses int               `json:"already_covered_addresses"`
-	EstimatedProbes         int64             `json:"estimated_probes"`
+	Mode                    string   `json:"mode"`
+	Targets                 []string `json:"targets"`
+	Addresses               int      `json:"addresses"`
+	AlreadyCoveredAddresses int      `json:"already_covered_addresses"`
+	EstimatedProbes         int64    `json:"estimated_probes"`
 	// MinimumDurationSeconds is Full TCP's probe-rate lower bound. It excludes
 	// response time, retries, and Nmap confirmation.
 	MinimumDurationSeconds int64             `json:"minimum_duration_seconds,omitempty"`
@@ -842,10 +842,16 @@ func perimeterCoalescedSuggestionSets(base, gaps []addrspace.Range, perMonitor u
 	}
 	maxAddresses := min(perMonitor, uint64(1<<(32-perimeterMaxCoalescedPrefixBits)))
 	minPrefixBits := max(perimeterMaxCoalescedPrefixBits, 32-(bits.Len64(maxAddresses)-1))
+	// A coalesced plan is useful only if one of its targets can include a
+	// covered address. Check that from range boundaries before splitting broad
+	// gaps into individual prefixes; with a one-host budget, for example, no
+	// target can include both uncovered and covered space.
+	if !perimeterCoalescingCanIncludeCovered(base, gaps, minPrefixBits) {
+		return nil, 0, false
+	}
 	seen := make(map[netip.Prefix]struct{})
 	var current perimeterCoalescedSet
 	var currentAddresses uint64
-	hasOverlap := false
 	tooMany := false
 
 	flush := func() {
@@ -874,17 +880,14 @@ func perimeterCoalescedSuggestionSets(base, gaps []addrspace.Range, perMonitor u
 		addresses := uint64(1) << uint(32-candidate.Bits())
 		gapAddresses, _ := addrspace.CountCapped(addrspace.Intersect([]addrspace.Range{candidateRange}, gaps), addresses)
 		alreadyCovered := int(addresses - gapAddresses)
-		hasOverlap = hasOverlap || alreadyCovered > 0
-		if tooMany {
-			// Keep scanning only until an overlap proves this is a coalesced
-			// alternative. A covered block can come after the output limit.
-			return !hasOverlap
-		}
 		if len(current.targets) > 0 && (currentAddresses+addresses > perMonitor || len(current.targets) >= perimeterMaxCoalescedTargets) {
 			flush()
 			if len(sets) >= perimeterMaxCoalescedSuggestions {
 				tooMany = true
-				return !hasOverlap
+				// The range-boundary preflight proved that the complete plan
+				// contains a coalesced target, so the output cap lets us stop
+				// without searching the rest of a potentially broad range.
+				return false
 			}
 		}
 		seen[candidate] = struct{}{}
@@ -910,18 +913,82 @@ func perimeterCoalescedSuggestionSets(base, gaps []addrspace.Range, perMonitor u
 				break
 			}
 		}
-		if tooMany && hasOverlap {
+		if tooMany {
 			break
 		}
-	}
-	if !hasOverlap {
-		return nil, 0, false
 	}
 	if tooMany {
 		return nil, perimeterMaxCoalescedSuggestions + 1, true
 	}
 	flush()
 	return sets, len(sets), false
+}
+
+// perimeterCoalescingCanIncludeCovered reports whether an aligned prefix no
+// larger than the selected budget can contain both a gap and covered
+// scannable space. The closest endpoints at each gap/coverage boundary are
+// enough: any prefix containing addresses from both sides also contains the
+// endpoints at one of their intervening boundaries. The prefix must remain
+// wholly inside base, so exclusions and declared-range edges stay enforced.
+func perimeterCoalescingCanIncludeCovered(base, gaps []addrspace.Range, minPrefixBits int) bool {
+	if len(base) == 0 || len(gaps) == 0 || minPrefixBits >= 32 {
+		return false
+	}
+	gaps = addrspace.Intersect(base, gaps)
+	covered := addrspace.Subtract(base, gaps)
+	if len(gaps) == 0 || len(covered) == 0 {
+		return false
+	}
+
+	gapIndex, coveredIndex := 0, 0
+	for gapIndex < len(gaps) && coveredIndex < len(covered) {
+		gap, cover := gaps[gapIndex], covered[coveredIndex]
+		switch {
+		case gap.To.Less(cover.From):
+			if perimeterCoalescedPrefixFitsBase(gap.To, cover.From, minPrefixBits, base) {
+				return true
+			}
+			gapIndex++
+		case cover.To.Less(gap.From):
+			if perimeterCoalescedPrefixFitsBase(cover.To, gap.From, minPrefixBits, base) {
+				return true
+			}
+			coveredIndex++
+		default:
+			// gaps and covered are complements within base. If malformed
+			// input ever makes them overlap, advance the shorter interval.
+			if gap.To.Less(cover.To) {
+				gapIndex++
+			} else {
+				coveredIndex++
+			}
+		}
+	}
+	return false
+}
+
+// perimeterCoalescedPrefixFitsBase reports whether the narrowest IPv4 prefix
+// containing both endpoints satisfies the budget and stays inside base.
+func perimeterCoalescedPrefixFitsBase(a, b netip.Addr, minPrefixBits int, base []addrspace.Range) bool {
+	if !a.Is4() || !b.Is4() {
+		return false
+	}
+	aBytes, bBytes := a.As4(), b.As4()
+	commonBits := 32
+	for index := range aBytes {
+		difference := aBytes[index] ^ bBytes[index]
+		if difference != 0 {
+			commonBits = index*8 + bits.LeadingZeros8(difference)
+			break
+		}
+	}
+	if commonBits < minPrefixBits {
+		return false
+	}
+	prefix := netip.PrefixFrom(a, commonBits).Masked()
+	candidate := addrspace.FromPrefix(prefix)
+	index := sort.Search(len(base), func(index int) bool { return base[index].To.Compare(candidate.From) >= 0 })
+	return index < len(base) && base[index].From.Compare(candidate.From) <= 0 && base[index].To.Compare(candidate.To) >= 0
 }
 
 // perimeterBlocks returns the fewest aligned CIDRs that hold gaps, which is

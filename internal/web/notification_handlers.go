@@ -618,7 +618,7 @@ func (s *Server) writeNotificationError(w http.ResponseWriter, err error) {
 // in-memory map without bound.
 func (s *Server) allowNotificationTest(r *http.Request) bool {
 	key := s.clientIP(r)
-	if cookie, err := r.Cookie(auth.SessionCookie); err == nil && cookie.Value != "" {
+	if cookie, ok := auth.SessionCookieFromRequest(r, s.sessionCookieSecure(r)); ok {
 		key = digest(cookie.Value)
 	}
 	now := time.Now().UTC()

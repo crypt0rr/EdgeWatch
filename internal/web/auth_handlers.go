@@ -699,8 +699,8 @@ func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store
 		writeError(w, http.StatusInternalServerError, "totp_failed", "TOTP setup could not be initialized", nil)
 		return
 	}
-	cookie, cookieErr := r.Cookie(auth.SessionCookie)
-	if cookieErr != nil || cookie.Value == "" {
+	cookie, ok := auth.SessionCookieFromRequest(r, s.sessionCookieSecure(r))
+	if !ok {
 		writeError(w, http.StatusBadRequest, "totp_failed", "an authenticated session cookie is required for TOTP setup", nil)
 		return
 	}
@@ -716,8 +716,8 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	cookie, cookieErr := r.Cookie(auth.SessionCookie)
-	if cookieErr != nil || cookie.Value == "" {
+	cookie, ok := auth.SessionCookieFromRequest(r, s.sessionCookieSecure(r))
+	if !ok {
 		writeError(w, http.StatusBadRequest, "totp_failed", "an authenticated session cookie is required for TOTP setup", nil)
 		return
 	}
@@ -889,9 +889,9 @@ func (s *Server) totpRecoveryCodes(w http.ResponseWriter, r *http.Request, sessi
 		writeError(w, http.StatusInternalServerError, "totp_failed", "recovery codes could not be generated", nil)
 		return
 	}
-	cookie, cookieErr := r.Cookie(auth.SessionCookie)
+	cookie, hasCookie := auth.SessionCookieFromRequest(r, s.sessionCookieSecure(r))
 	preserve := ""
-	if cookieErr == nil && cookie.Value != "" {
+	if hasCookie {
 		preserve = digest(cookie.Value)
 	}
 	user.UpdatedAt = s.currentTime()

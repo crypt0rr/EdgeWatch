@@ -22,16 +22,22 @@ Replace `edgewatch.example.ts.net` with your tailnet or proxy hostname. Use the
 bare hostname only; do not include `https://`, a path, or a port. EdgeWatch
 checks the forwarded `Host` value before authentication, so an unlisted proxy
 hostname is rejected with `421 Misdirected Request` even when the loopback
-listener is healthy. Approved non-loopback hostnames receive Secure session
-cookies; direct loopback HTTP remains available for local administration and
-SSH tunnels. The example trusts a local proxy and its sanitized
+listener is healthy. HTTPS requests receive the host-only
+`__Host-edgewatch_session` cookie with `Secure`, `HttpOnly`, `SameSite=Strict`,
+and `Path=/`; it has no `Domain` attribute. HTTPS requests accept only this
+cookie name. A stale cookie with the other transport's name is ignored, so it
+cannot select or shadow a session; repeated cookies with the active name are
+ambiguous and unauthenticated. Direct loopback HTTP continues to use
+`edgewatch_session` for local administration and SSH tunnels. Existing HTTPS
+sessions signed in before this cookie-name change must sign in again. Logout
+expires both cookie names. The example trusts a local proxy and its sanitized
 `X-Forwarded-For` client address; replace these networks with the addresses that
 actually connect to EdgeWatch when the proxy runs elsewhere. If a
 TLS-terminating proxy rewrites the upstream `Host` to a loopback address, list
 the proxy address or network in `web.trusted_proxies` so EdgeWatch can trust its
 `X-Forwarded-Proto: https` (or RFC 7239 `Forwarded: ...;proto=https`) signal
-and keep the session cookie Secure. Trust only proxies you control, and configure them to sanitize forwarding
-headers.
+and use the prefixed session cookie. Trust only proxies you control, and
+configure them to sanitize forwarding headers.
 
 After changing the bind-mounted configuration, recreate the container:
 

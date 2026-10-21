@@ -208,7 +208,7 @@ func publicUnitAdministrators(t *testing.T, f publicTenantFixture) func(account,
 	enrollAdministratorsInTOTP(t, f.db)
 	return func(account, method, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, "/api/v1/public-dashboard", strings.NewReader(body))
-		req.AddCookie(&http.Cookie{Name: "edgewatch_session", Value: "unit-public-" + account})
+		addTestSessionCookie(req, "unit-public-"+account)
 		req.Header.Set("X-CSRF-Token", "csrf-"+account)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()

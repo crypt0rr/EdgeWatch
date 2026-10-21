@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
@@ -70,7 +69,7 @@ func TestChangeWindowEvidenceIsPermissionScopedForReadAndMutationResponses(t *te
 	requestDetail := func(token, windowID string) *httptest.ResponseRecorder {
 		t.Helper()
 		request := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+job.ID+"/change-windows/"+windowID, nil)
-		request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: token})
+		addTestSessionCookie(request, token)
 		response := httptest.NewRecorder()
 		server.api(response, request)
 		return response

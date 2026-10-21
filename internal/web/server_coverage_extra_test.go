@@ -222,7 +222,7 @@ func TestNotificationDestinationRouteGuardsAndTestDelivery(t *testing.T) {
 	server.testLast["expired"] = time.Now().UTC().Add(-11 * time.Minute)
 	identity := httptest.NewRequest(http.MethodPost, "/", nil)
 	identity.RemoteAddr = "127.0.0.1:4003"
-	identity.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "session-cookie"})
+	addTestSessionCookie(identity, "session-cookie")
 	if !server.allowNotificationTest(identity) {
 		t.Fatal("expired notification test identity was unexpectedly limited")
 	}
@@ -249,19 +249,19 @@ func TestNotificationTestRateLimitIsScopedPerSession(t *testing.T) {
 	server, _, _ := newUsersTestServer(t)
 	first := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/one/test", nil)
 	first.RemoteAddr = "127.0.0.8:4008"
-	first.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "shared-session"})
+	addTestSessionCookie(first, "shared-session")
 	if !server.allowNotificationTest(first) {
 		t.Fatal("first session notification test was unexpectedly limited")
 	}
 	second := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/two/test", nil)
 	second.RemoteAddr = "127.0.0.8:4010"
-	second.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "shared-session"})
+	addTestSessionCookie(second, "shared-session")
 	if server.allowNotificationTest(second) {
 		t.Fatal("different destination test bypassed the session limit")
 	}
 	differentSession := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/two/test", nil)
 	differentSession.RemoteAddr = second.RemoteAddr
-	differentSession.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "different-session"})
+	addTestSessionCookie(differentSession, "different-session")
 	if !server.allowNotificationTest(differentSession) {
 		t.Fatal("a different session was unexpectedly limited")
 	}
@@ -341,7 +341,7 @@ func TestServerAuthenticationAndAuditFailureResponses(t *testing.T) {
 	}
 	logout := httptest.NewRecorder()
 	logoutRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
-	logoutRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "logout-failure"})
+	addTestSessionCookie(logoutRequest, "logout-failure")
 	server.logout(logout, logoutRequest, admin)
 	if logout.Code != http.StatusServiceUnavailable {
 		t.Fatalf("audit logout status = %d %s", logout.Code, logout.Body.String())

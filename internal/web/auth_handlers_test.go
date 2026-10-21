@@ -26,8 +26,8 @@ func TestLogoutHandlerClearsCookieAndRevokesSession(t *testing.T) {
 	if err := storetest.CreateSession(ctx, db, admin.UserID, digest("logout-session"), "csrf", now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
-	req.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "logout-session"})
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/v1/auth/logout", nil)
+	addTestSessionCookie(req, "logout-session")
 	rec := httptest.NewRecorder()
 	server.logout(rec, req, admin)
 	if rec.Code != http.StatusNoContent {
@@ -37,7 +37,7 @@ func TestLogoutHandlerClearsCookieAndRevokesSession(t *testing.T) {
 		t.Fatalf("session after logout = %v", err)
 	}
 	cleared := rec.Result().Cookies()
-	if len(cleared) != 1 || cleared[0].Name != auth.SessionCookie || cleared[0].MaxAge != -1 || !cleared[0].HttpOnly {
+	if len(cleared) != 2 || cleared[0].Name != auth.SessionCookie || cleared[0].MaxAge != -1 || !cleared[0].HttpOnly || cleared[1].Name != auth.SecureSessionCookie || !cleared[1].Secure || cleared[1].MaxAge != -1 {
 		t.Fatalf("logout cookie = %#v", cleared)
 	}
 }
@@ -46,9 +46,8 @@ func TestAuthenticationCookiesAreSecureForProxyHosts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	server, db, _ := newUsersTestServer(t)
-	loginRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"username":"admin","password":"administrator password"}`))
+	loginRequest := httptest.NewRequest(http.MethodPost, "https://console.example.test:8443/api/v1/auth/login", strings.NewReader(`{"username":"admin","password":"administrator password"}`))
 	loginRequest.Header.Set("Content-Type", "application/json")
-	loginRequest.Host = "console.example.test:8443"
 	loginRequest.RemoteAddr = "198.51.100.10:4010"
 	loginRecorder := httptest.NewRecorder()
 	server.login(loginRecorder, loginRequest)
@@ -56,15 +55,14 @@ func TestAuthenticationCookiesAreSecureForProxyHosts(t *testing.T) {
 		t.Fatalf("proxy login status = %d: %s", loginRecorder.Code, loginRecorder.Body.String())
 	}
 	cookies := loginRecorder.Result().Cookies()
-	if len(cookies) != 1 || !cookies[0].Secure {
-		t.Fatalf("proxy login cookie = %#v, want Secure", cookies)
+	if len(cookies) != 1 || cookies[0].Name != auth.SecureSessionCookie || !cookies[0].Secure || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode || cookies[0].Path != "/" || cookies[0].Domain != "" {
+		t.Fatalf("proxy login cookie = %#v, want secure __Host cookie with Path=/ and no Domain", cookies)
 	}
 	session, err := db.GetSession(ctx, digest(cookies[0].Value))
 	if err != nil {
 		t.Fatal(err)
 	}
-	logoutRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
-	logoutRequest.Host = "console.example.test:8443"
+	logoutRequest := httptest.NewRequest(http.MethodPost, "https://console.example.test:8443/api/v1/auth/logout", nil)
 	logoutRequest.AddCookie(cookies[0])
 	logoutRecorder := httptest.NewRecorder()
 	server.logout(logoutRecorder, logoutRequest, session)
@@ -72,8 +70,84 @@ func TestAuthenticationCookiesAreSecureForProxyHosts(t *testing.T) {
 		t.Fatalf("proxy logout status = %d: %s", logoutRecorder.Code, logoutRecorder.Body.String())
 	}
 	cleared := logoutRecorder.Result().Cookies()
-	if len(cleared) != 1 || !cleared[0].Secure || cleared[0].MaxAge != -1 {
+	if len(cleared) != 2 || cleared[0].Name != auth.SessionCookie || !cleared[0].Secure || cleared[0].MaxAge != -1 || cleared[1].Name != auth.SecureSessionCookie || !cleared[1].Secure || cleared[1].MaxAge != -1 {
 		t.Fatalf("proxy logout cookie = %#v, want Secure deletion", cleared)
+	}
+}
+
+func TestLoopbackHTTPLoginKeepsPlainSessionCookie(t *testing.T) {
+	t.Parallel()
+	server, _, _ := newUsersTestServer(t)
+	loginRequest := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/v1/auth/login", strings.NewReader(`{"username":"admin","password":"administrator password"}`))
+	loginRequest.Header.Set("Content-Type", "application/json")
+	loginRequest.RemoteAddr = "127.0.0.1:9000"
+	loginRecorder := httptest.NewRecorder()
+	server.login(loginRecorder, loginRequest)
+	if loginRecorder.Code != http.StatusOK {
+		t.Fatalf("loopback login status = %d: %s", loginRecorder.Code, loginRecorder.Body.String())
+	}
+	cookies := loginRecorder.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != auth.SessionCookie || cookies[0].Secure {
+		t.Fatalf("loopback login cookie = %#v, want the plain loopback HTTP cookie", cookies)
+	}
+	sessionRequest := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/v1/auth/session", nil)
+	sessionRequest.RemoteAddr = "127.0.0.1:9000"
+	sessionRequest.AddCookie(cookies[0])
+	sessionRecorder := httptest.NewRecorder()
+	server.api(sessionRecorder, sessionRequest)
+	if sessionRecorder.Code != http.StatusOK {
+		t.Fatalf("loopback session status = %d: %s", sessionRecorder.Code, sessionRecorder.Body.String())
+	}
+}
+
+func TestDuplicateSessionCookiesAreUnauthenticated(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	if err := server.Auth.SetTrustedProxies([]string{"127.0.0.1/32"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, session := range []string{"first-cookie-session", "second-cookie-session"} {
+		if err := storetest.CreateSession(ctx, db, admin.UserID, digest(session), "csrf", now, now.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		name       string
+		url        string
+		cookieName string
+		secure     bool
+	}{
+		{name: "loopback HTTP", url: "http://127.0.0.1:8080/api/v1/auth/session", cookieName: auth.SessionCookie},
+		{name: "HTTPS through trusted proxy", url: "http://127.0.0.1:8080/api/v1/auth/session", cookieName: auth.SecureSessionCookie, secure: true},
+	}
+	orders := []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{name: "attacker first", first: "first-cookie-session", second: "second-cookie-session"},
+		{name: "attacker second", first: "second-cookie-session", second: "first-cookie-session"},
+	}
+	for _, test := range tests {
+		for _, order := range orders {
+			t.Run(test.name+"/"+order.name, func(t *testing.T) {
+				request := httptest.NewRequest(http.MethodGet, test.url, nil)
+				request.RemoteAddr = "127.0.0.1:9000"
+				if test.secure {
+					request.Header.Set("X-Forwarded-Proto", "https")
+				}
+				// Both values are valid sessions. The request must reject the
+				// ambiguity instead of authenticating whichever cookie appears first.
+				request.Header.Set("Cookie", test.cookieName+"="+order.first+"; "+test.cookieName+"="+order.second)
+				recorder := httptest.NewRecorder()
+				server.api(recorder, request)
+				if recorder.Code != http.StatusUnauthorized {
+					t.Fatalf("duplicate-cookie session status = %d, want 401: %s", recorder.Code, recorder.Body.String())
+				}
+			})
+		}
 	}
 }
 
@@ -147,7 +221,7 @@ func TestAuthenticationCookiesAreSecureWhenTrustedProxyRewritesLoopbackHost(t *t
 		t.Fatalf("proxy loopback logout status = %d: %s", logoutRecorder.Code, logoutRecorder.Body.String())
 	}
 	cleared := logoutRecorder.Result().Cookies()
-	if len(cleared) != 1 || !cleared[0].Secure || cleared[0].MaxAge != -1 {
+	if len(cleared) != 2 || cleared[0].Name != auth.SessionCookie || !cleared[0].Secure || cleared[0].MaxAge != -1 || cleared[1].Name != auth.SecureSessionCookie || !cleared[1].Secure || cleared[1].MaxAge != -1 {
 		t.Fatalf("proxy loopback logout cookie = %#v, want Secure deletion", cleared)
 	}
 }
@@ -197,7 +271,7 @@ func TestPasswordAndTOTPHandlersValidateCredentialsAndSessionCookie(t *testing.T
 	}
 	setup := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/setup", strings.NewReader(`{"password":"new administrator password"}`))
 	setup.Header.Set("Content-Type", "application/json")
-	setup.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "totp-session"})
+	addTestSessionCookie(setup, "totp-session")
 	setupRecorder := httptest.NewRecorder()
 	server.totpSetup(setupRecorder, setup, admin, defaultTenantStore(server))
 	if setupRecorder.Code != http.StatusOK || !strings.Contains(setupRecorder.Body.String(), "otpauth://totp") {
@@ -212,7 +286,7 @@ func TestPasswordAndTOTPHandlersValidateCredentialsAndSessionCookie(t *testing.T
 	}
 	invalidEnable := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/enable", strings.NewReader(`{"code":"000000"}`))
 	invalidEnable.Header.Set("Content-Type", "application/json")
-	invalidEnable.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "totp-session"})
+	addTestSessionCookie(invalidEnable, "totp-session")
 	invalidEnableRecorder := httptest.NewRecorder()
 	server.totpEnable(invalidEnableRecorder, invalidEnable, admin, defaultTenantStore(server))
 	if invalidEnableRecorder.Code != http.StatusBadRequest {
@@ -243,7 +317,7 @@ func TestTOTPEnablePreservesActingSessionForRecoveryCodes(t *testing.T) {
 
 	setupRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/setup", strings.NewReader(`{"password":"administrator password"}`))
 	setupRequest.Header.Set("Content-Type", "application/json")
-	setupRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: actingCookie})
+	addTestSessionCookie(setupRequest, actingCookie)
 	setupResponse := httptest.NewRecorder()
 	server.totpSetup(setupResponse, setupRequest, admin, defaultTenantStore(server))
 	if setupResponse.Code != http.StatusOK {
@@ -258,7 +332,7 @@ func TestTOTPEnablePreservesActingSessionForRecoveryCodes(t *testing.T) {
 
 	enableRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/enable", strings.NewReader(`{"code":"`+coverageTOTPCode(setupPayload.Secret, time.Now().Unix()/30)+`"}`))
 	enableRequest.Header.Set("Content-Type", "application/json")
-	enableRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: actingCookie})
+	addTestSessionCookie(enableRequest, actingCookie)
 	enableResponse := httptest.NewRecorder()
 	server.totpEnable(enableResponse, enableRequest, admin, defaultTenantStore(server))
 	if enableResponse.Code != http.StatusOK || !strings.Contains(enableResponse.Body.String(), "recovery_codes") {
@@ -293,7 +367,7 @@ func TestTOTPRecoveryCodeRotationRequiresCurrentFactorAndPreservesSession(t *tes
 	code := coverageTOTPCode(admin.TOTPSecret, now.Unix()/30)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/recovery-codes", strings.NewReader(`{"password":"administrator password","code":"`+code+`"}`))
 	request.Header.Set("Content-Type", "application/json")
-	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookieValue})
+	addTestSessionCookie(request, cookieValue)
 	response := httptest.NewRecorder()
 	server.totpRecoveryCodes(response, request, session, defaultTenantStore(server))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "recovery_codes") {
@@ -305,7 +379,7 @@ func TestTOTPRecoveryCodeRotationRequiresCurrentFactorAndPreservesSession(t *tes
 
 	wrong := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/recovery-codes", strings.NewReader(`{"password":"administrator password","code":"000000"}`))
 	wrong.Header.Set("Content-Type", "application/json")
-	wrong.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookieValue})
+	addTestSessionCookie(wrong, cookieValue)
 	wrongResponse := httptest.NewRecorder()
 	server.totpRecoveryCodes(wrongResponse, wrong, session, defaultTenantStore(server))
 	if wrongResponse.Code != http.StatusUnauthorized || !strings.Contains(wrongResponse.Body.String(), "totp_required") {
@@ -368,7 +442,7 @@ func TestPendingTOTPEnrolmentsExpireAndRemainBounded(t *testing.T) {
 	server.storePendingTOTP(digest("expired-session"), "expired-secret", base.Add(-11*time.Minute))
 	enable := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/enable", strings.NewReader(`{"code":"000000"}`))
 	enable.Header.Set("Content-Type", "application/json")
-	enable.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "expired-session"})
+	addTestSessionCookie(enable, "expired-session")
 	enableResponse := httptest.NewRecorder()
 	server.totpEnable(enableResponse, enable, admin, defaultTenantStore(server))
 	if enableResponse.Code != http.StatusBadRequest {
@@ -390,7 +464,7 @@ func TestPendingTOTPEnrolmentsExpireAndRemainBounded(t *testing.T) {
 	// enrolments continue to arrive.
 	setup := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/setup", strings.NewReader(`{"password":"administrator password"}`))
 	setup.Header.Set("Content-Type", "application/json")
-	setup.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "handler-totp-session"})
+	addTestSessionCookie(setup, "handler-totp-session")
 	response := httptest.NewRecorder()
 	server.totpSetup(response, setup, admin, defaultTenantStore(server))
 	if response.Code != http.StatusOK {
@@ -416,7 +490,7 @@ func startTOTPEnrolment(t *testing.T, server *Server, db *store.Store, session s
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/setup", strings.NewReader(`{"password":"administrator password"}`))
 	request.Header.Set("Content-Type", "application/json")
-	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookieValue})
+	addTestSessionCookie(request, cookieValue)
 	response := httptest.NewRecorder()
 	server.totpSetup(response, request, session, defaultTenantStore(server))
 	var payload struct {
@@ -431,7 +505,7 @@ func startTOTPEnrolment(t *testing.T, server *Server, db *store.Store, session s
 func submitTOTPEnable(server *Server, session store.Session, cookieValue, code string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/enable", strings.NewReader(`{"code":"`+code+`"}`))
 	request.Header.Set("Content-Type", "application/json")
-	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookieValue})
+	addTestSessionCookie(request, cookieValue)
 	response := httptest.NewRecorder()
 	server.totpEnable(response, request, session, defaultTenantStore(server))
 	return response

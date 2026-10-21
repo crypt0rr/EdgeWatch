@@ -29,7 +29,7 @@ func TestCookieHelpersLogoutAndPasswordRequirements(t *testing.T) {
 	if err := m.Setup(ctx, token, "correct horse battery staple"); err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/v1/auth/login", nil)
 	request.RemoteAddr = "127.0.0.1:7000"
 	raw, _, err := m.LoginAs(ctx, request, "admin", "correct horse battery staple", "", "")
 	if err != nil {
@@ -39,7 +39,7 @@ func TestCookieHelpersLogoutAndPasswordRequirements(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.AddCookie(&http.Cookie{Name: SessionCookie, Value: raw})
+	addAuthTestSessionCookie(request, raw)
 	if err := m.LogoutSession(ctx, request, session); err != nil {
 		t.Fatal(err)
 	}
@@ -59,20 +59,30 @@ func TestCookieHelpersLogoutAndPasswordRequirements(t *testing.T) {
 	secureRecorder := httptest.NewRecorder()
 	SetSessionCookie(secureRecorder, "secure-token", true)
 	secureCookie := secureRecorder.Result().Cookies()[0]
-	if !secureCookie.Secure || !secureCookie.HttpOnly || secureCookie.SameSite != http.SameSiteStrictMode || secureCookie.Path != "/" || secureCookie.MaxAge != int(SessionTTL/time.Second) {
+	if secureCookie.Name != SecureSessionCookie || !secureCookie.Secure || !secureCookie.HttpOnly || secureCookie.SameSite != http.SameSiteStrictMode || secureCookie.Path != "/" || secureCookie.Domain != "" || secureCookie.MaxAge != int(SessionTTL/time.Second) {
 		t.Fatalf("secure session cookie = %#v", secureCookie)
 	}
 	clearRecorder := httptest.NewRecorder()
 	ClearSessionCookie(clearRecorder, false)
-	clearCookie := clearRecorder.Result().Cookies()[0]
-	if !clearCookie.HttpOnly || clearCookie.Secure || clearCookie.SameSite != http.SameSiteStrictMode || clearCookie.MaxAge != -1 || clearCookie.Value != "" {
-		t.Fatalf("clear cookie = %#v", clearCookie)
+	clearedCookies := clearRecorder.Result().Cookies()
+	if len(clearedCookies) != 2 || clearedCookies[0].Name != SessionCookie || clearedCookies[0].Secure || clearedCookies[1].Name != SecureSessionCookie || !clearedCookies[1].Secure {
+		t.Fatalf("clear cookies = %#v", clearedCookies)
+	}
+	for _, clearedCookie := range clearedCookies {
+		if !clearedCookie.HttpOnly || clearedCookie.SameSite != http.SameSiteStrictMode || clearedCookie.Path != "/" || clearedCookie.Domain != "" || clearedCookie.MaxAge != -1 || clearedCookie.Value != "" {
+			t.Fatalf("clear cookie = %#v", clearedCookie)
+		}
 	}
 	secureClearRecorder := httptest.NewRecorder()
 	ClearSessionCookie(secureClearRecorder, true)
-	secureClearCookie := secureClearRecorder.Result().Cookies()[0]
-	if !secureClearCookie.Secure || !secureClearCookie.HttpOnly || secureClearCookie.SameSite != http.SameSiteStrictMode || secureClearCookie.MaxAge != -1 || secureClearCookie.Value != "" {
-		t.Fatalf("secure clear cookie = %#v", secureClearCookie)
+	secureClearedCookies := secureClearRecorder.Result().Cookies()
+	if len(secureClearedCookies) != 2 || secureClearedCookies[0].Name != SessionCookie || !secureClearedCookies[0].Secure || secureClearedCookies[1].Name != SecureSessionCookie || !secureClearedCookies[1].Secure {
+		t.Fatalf("secure clear cookies = %#v", secureClearedCookies)
+	}
+	for _, clearedCookie := range secureClearedCookies {
+		if !clearedCookie.HttpOnly || clearedCookie.SameSite != http.SameSiteStrictMode || clearedCookie.Path != "/" || clearedCookie.Domain != "" || clearedCookie.MaxAge != -1 || clearedCookie.Value != "" {
+			t.Fatalf("secure clear cookie = %#v", clearedCookie)
+		}
 	}
 	requirements := PasswordRequirements()
 	if requirements["minimum_length"] != PasswordMin || requirements["algorithm"] != "argon2id" {
@@ -80,6 +90,40 @@ func TestCookieHelpersLogoutAndPasswordRequirements(t *testing.T) {
 	}
 	if VerifyTOTPAt("not-base32", "123456", time.Now()) || VerifyTOTPAt("JBSWY3DPEHPK3PXP", "１２３４５６", time.Now()) || VerifyTOTPAt("JBSWY3DPEHPK3PXP", "12345", time.Now()) {
 		t.Fatal("invalid TOTP input was accepted")
+	}
+}
+
+func TestSessionCookieFromRequestRejectsDuplicatesAndWrongTransportName(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		url       string
+		cookie    string
+		secure    bool
+		want      bool
+		wantValue string
+	}{
+		{name: "loopback plain cookie", url: "http://127.0.0.1/", cookie: SessionCookie + "=local", want: true, wantValue: "local"},
+		{name: "secure prefixed cookie", url: "https://console.example.test/", cookie: SecureSessionCookie + "=secure", secure: true, want: true, wantValue: "secure"},
+		{name: "duplicate plain cookies", url: "http://127.0.0.1/", cookie: SessionCookie + "=attacker; " + SessionCookie + "=victim", want: false},
+		{name: "duplicate secure cookies", url: "https://console.example.test/", cookie: SecureSessionCookie + "=attacker; " + SecureSessionCookie + "=victim", secure: true, want: false},
+		{name: "secure cookie alongside ignored legacy name", url: "https://console.example.test/", cookie: SessionCookie + "=legacy; " + SecureSessionCookie + "=new", secure: true, want: true, wantValue: "new"},
+		{name: "loopback cookie alongside ignored secure name", url: "http://127.0.0.1/", cookie: SecureSessionCookie + "=stale; " + SessionCookie + "=local", want: true, wantValue: "local"},
+		{name: "plain cookie on secure request", url: "https://console.example.test/", cookie: SessionCookie + "=old", secure: true, want: false},
+		{name: "prefixed cookie on loopback http", url: "http://127.0.0.1/", cookie: SecureSessionCookie + "=secure", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, test.url, nil)
+			request.Header.Set("Cookie", test.cookie)
+			cookie, ok := SessionCookieFromRequest(request, test.secure)
+			if ok != test.want {
+				t.Fatalf("SessionCookieFromRequest() = (%#v, %t), want valid=%t", cookie, ok, test.want)
+			}
+			if ok && cookie.Value != test.wantValue {
+				t.Fatalf("session cookie value = %q, want %q", cookie.Value, test.wantValue)
+			}
+		})
 	}
 }
 

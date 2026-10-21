@@ -167,18 +167,18 @@ func TestLoginAfterAdminsRetirementAndAuthenticationFailureModes(t *testing.T) {
 		t.Fatal("missing authentication cookie was accepted")
 	}
 	emptyCookie := httptest.NewRequest(http.MethodGet, "/", nil)
-	emptyCookie.AddCookie(&http.Cookie{Name: SessionCookie, Value: ""})
+	addAuthTestSessionCookie(emptyCookie, "")
 	if _, ok := m.Authenticate(ctx, emptyCookie); ok {
 		t.Fatal("empty authentication cookie was accepted")
 	}
 	unknownCookie := httptest.NewRequest(http.MethodGet, "/", nil)
-	unknownCookie.AddCookie(&http.Cookie{Name: SessionCookie, Value: "unknown"})
+	addAuthTestSessionCookie(unknownCookie, "unknown")
 	if _, ok := m.Authenticate(ctx, unknownCookie); ok {
 		t.Fatal("unknown authentication cookie was accepted")
 	}
 
 	valid := httptest.NewRequest(http.MethodGet, "/", nil)
-	valid.AddCookie(&http.Cookie{Name: SessionCookie, Value: raw})
+	addAuthTestSessionCookie(valid, raw)
 	if _, ok := m.Authenticate(ctx, valid); !ok {
 		t.Fatal("administrator session did not authenticate")
 	}
@@ -188,7 +188,7 @@ func TestLoginAfterAdminsRetirementAndAuthenticationFailureModes(t *testing.T) {
 		t.Fatal(err)
 	}
 	expired := httptest.NewRequest(http.MethodGet, "/", nil)
-	expired.AddCookie(&http.Cookie{Name: SessionCookie, Value: "expired-auth"})
+	addAuthTestSessionCookie(expired, "expired-auth")
 	m.Now = func() time.Time { return now }
 	if _, ok := m.Authenticate(ctx, expired); ok {
 		t.Fatal("expired session was accepted")
@@ -197,7 +197,7 @@ func TestLoginAfterAdminsRetirementAndAuthenticationFailureModes(t *testing.T) {
 		t.Fatal(err)
 	}
 	idle := httptest.NewRequest(http.MethodGet, "/", nil)
-	idle.AddCookie(&http.Cookie{Name: SessionCookie, Value: "idle-auth"})
+	addAuthTestSessionCookie(idle, "idle-auth")
 	if _, ok := m.Authenticate(ctx, idle); ok {
 		t.Fatal("idle session was accepted")
 	}
@@ -265,7 +265,7 @@ func TestLogoutSessionEmptyCookieNoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	empty := httptest.NewRequest(http.MethodPost, "/", nil)
-	empty.AddCookie(&http.Cookie{Name: SessionCookie, Value: ""})
+	addAuthTestSessionCookie(empty, "")
 	if err := m.LogoutSession(ctx, empty, store.Session{}); err != nil {
 		t.Fatal(err)
 	}

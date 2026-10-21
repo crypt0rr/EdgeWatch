@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/app"
-	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
@@ -223,7 +222,7 @@ func (f *platformFixture) signIn(t *testing.T, actor string) routeMatrixSession 
 		t.Fatal(err)
 	}
 	probe := httptest.NewRequest(http.MethodGet, consoleAPIBase+"/auth/session", nil)
-	probe.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(probe, raw)
 	session, ok := f.server.Auth.AuthenticateReadOnly(ctx, probe)
 	if !ok || session.TOTPEnrollmentRequired {
 		t.Fatalf("session of %s = %+v, authenticated %t", actor, session, ok)

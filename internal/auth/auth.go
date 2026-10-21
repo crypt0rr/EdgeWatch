@@ -31,10 +31,11 @@ import (
 )
 
 const (
-	SessionCookie = "edgewatch_session"
-	PasswordMin   = 12
-	SessionTTL    = 30 * 24 * time.Hour
-	IdleTTL       = store.SessionIdleTimeout
+	SessionCookie       = "edgewatch_session"
+	SecureSessionCookie = "__Host-edgewatch_session"
+	PasswordMin         = 12
+	SessionTTL          = 30 * 24 * time.Hour
+	IdleTTL             = store.SessionIdleTimeout
 	// Session activity writes are coalesced across tabs so a user can keep a
 	// session alive without turning every keypress or click into a SQLite write.
 	sessionActivityTouchInterval = 5 * time.Minute
@@ -442,6 +443,109 @@ func (m *Manager) IsTrustedProxy(request *http.Request) bool {
 		return false
 	}
 	return ipInNetworks(peer, m.forwardingPolicy().trusted)
+}
+
+// SessionCookieSecure reports whether a request should use the Secure session
+// cookie name. Forwarded protocol headers affect this decision only when the
+// request came directly from a configured proxy.
+func (m *Manager) SessionCookieSecure(request *http.Request) bool {
+	trustedForwardedTLS := m != nil && m.IsTrustedProxy(request) && forwardedRequestIsHTTPS(request)
+	return SessionCookieSecure(request, trustedForwardedTLS)
+}
+
+// SessionCookieSecure reports whether a request is secure based on its TLS
+// state, URL scheme, or host. trustedForwardedTLS must only be true after the
+// direct peer has been verified as a trusted proxy.
+func SessionCookieSecure(request *http.Request, trustedForwardedTLS bool) bool {
+	if request == nil {
+		return true
+	}
+	if trustedForwardedTLS || request.TLS != nil || (request.URL != nil && strings.EqualFold(strings.TrimSpace(request.URL.Scheme), "https")) {
+		return true
+	}
+	host := strings.TrimSpace(request.Host)
+	if host == "" && request.URL != nil {
+		host = strings.TrimSpace(request.URL.Host)
+	}
+	host = sessionCookieHostName(host)
+	if host == "" {
+		return true
+	}
+	if strings.EqualFold(host, "localhost") {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return false
+	}
+	return true
+}
+
+// SessionCookieFromRequest accepts exactly one cookie using the name
+// appropriate for the request's transport. Duplicate cookies of that active
+// name are ambiguous and rejected; the other transport's name is ignored.
+func SessionCookieFromRequest(request *http.Request, secure bool) (*http.Cookie, bool) {
+	if request == nil {
+		return nil, false
+	}
+	want := SessionCookie
+	if secure {
+		want = SecureSessionCookie
+	}
+	var found *http.Cookie
+	for _, cookie := range request.Cookies() {
+		if cookie.Name != want {
+			continue
+		}
+		if found != nil || cookie.Value == "" {
+			return nil, false
+		}
+		found = cookie
+	}
+	return found, found != nil
+}
+
+func sessionCookieHostName(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	}
+	if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
+		raw = raw[1 : len(raw)-1]
+	}
+	return strings.TrimSuffix(strings.ToLower(raw), ".")
+}
+
+// forwardedRequestIsHTTPS recognizes the two common proxy protocol headers.
+// The caller must first prove that the direct peer is trusted; parsing these
+// headers alone would let a client manufacture a Secure cookie decision.
+func forwardedRequestIsHTTPS(request *http.Request) bool {
+	if request == nil {
+		return false
+	}
+	for _, value := range request.Header.Values("X-Forwarded-Proto") {
+		for _, protocol := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(protocol), "https") {
+				return true
+			}
+		}
+	}
+	for _, value := range request.Header.Values("Forwarded") {
+		for _, element := range strings.Split(value, ",") {
+			for _, parameter := range strings.Split(element, ";") {
+				key, raw, ok := strings.Cut(strings.TrimSpace(parameter), "=")
+				if !ok || !strings.EqualFold(key, "proto") {
+					continue
+				}
+				if strings.EqualFold(strings.Trim(strings.TrimSpace(raw), `"`), "https") {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // ClientIP resolves the client address of the request for audit records;
@@ -2450,8 +2554,8 @@ func (m *Manager) RecordActivity(ctx context.Context, session store.Session) err
 }
 
 func (m *Manager) authenticate(ctx context.Context, r *http.Request, touch bool) (store.Session, bool) {
-	cookie, err := r.Cookie(SessionCookie)
-	if err != nil || cookie.Value == "" {
+	cookie, ok := SessionCookieFromRequest(r, m.SessionCookieSecure(r))
+	if !ok {
 		return store.Session{}, false
 	}
 	session, err := m.Store.GetSession(ctx, digest(cookie.Value))
@@ -2489,7 +2593,7 @@ func (m *Manager) authenticate(ctx context.Context, r *http.Request, touch bool)
 }
 
 func (m *Manager) Logout(ctx context.Context, r *http.Request) error {
-	if cookie, err := r.Cookie(SessionCookie); err == nil {
+	if cookie, ok := SessionCookieFromRequest(r, m.SessionCookieSecure(r)); ok {
 		return m.Store.DeleteSessionWithAudit(ctx, digest(cookie.Value), "admin.logout", "session ended")
 	}
 	return nil
@@ -2499,8 +2603,8 @@ func (m *Manager) Logout(ctx context.Context, r *http.Request) error {
 // legacy Logout method above for CLI/tests while attributing new sign-outs to
 // the actual account and avoiding a second session lookup.
 func (m *Manager) LogoutSession(ctx context.Context, r *http.Request, session store.Session) error {
-	cookie, err := r.Cookie(SessionCookie)
-	if err != nil || cookie.Value == "" {
+	cookie, ok := SessionCookieFromRequest(r, m.SessionCookieSecure(r))
+	if !ok {
 		return nil
 	}
 	action := "user.logout"
@@ -2530,23 +2634,37 @@ func SetSessionCookie(w http.ResponseWriter, raw string, secure bool) {
 }
 
 func ClearSessionCookie(w http.ResponseWriter, secure bool) {
-	if secure {
-		http.SetCookie(w, newSessionCookie("", -1, true))
-		return
-	}
-	setLoopbackSessionCookie(w, "", -1)
+	// Clear both the old cookie and the prefixed HTTPS cookie so an upgrade
+	// signs the browser out even when the logout request comes through a
+	// different supported transport.
+	// The plain cookie has an empty value and expires immediately; it only removes
+	// the loopback HTTP name and carries no session credential.
+	// codeql[go/cookie-secure-not-set]
+
+	http.SetCookie(w, newSessionCookieForName(SessionCookie, "", -1, secure))
+	http.SetCookie(w, newSessionCookieForName(SecureSessionCookie, "", -1, true))
 }
 
 func newSessionCookie(raw string, maxAge int, secure bool) *http.Cookie {
-	return &http.Cookie{Name: SessionCookie, Value: raw, Path: "/", HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode, MaxAge: maxAge}
+	name := SessionCookie
+	if secure {
+		name = SecureSessionCookie
+	}
+	return newSessionCookieForName(name, raw, maxAge, secure)
+}
+
+func newSessionCookieForName(name, raw string, maxAge int, secure bool) *http.Cookie {
+	return &http.Cookie{Name: name, Value: raw, Path: "/", HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode, MaxAge: maxAge}
 }
 
 func setLoopbackSessionCookie(w http.ResponseWriter, raw string, maxAge int) {
 	// This is the only intentionally insecure-cookie branch: it is selected
 	// exclusively for direct loopback HTTP access when no trusted proxy has
-	// supplied HTTPS evidence; all externally served requests use Secure.
+	// supplied HTTPS evidence. Non-loopback listeners are rejected, and all
+	// externally served requests use Secure.
 	// codeql[go/cookie-secure-not-set]
-	http.SetCookie(w, newSessionCookie(raw, maxAge, false))
+
+	http.SetCookie(w, newSessionCookieForName(SessionCookie, raw, maxAge, false))
 }
 
 func NewTOTPSecret() (string, error) {

@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
@@ -65,7 +64,7 @@ func previewAPICall(t *testing.T, server *Server, account *routeMatrixSession, b
 	request.RemoteAddr = "127.0.0.1:9000"
 	request.Header.Set("Content-Type", "application/json")
 	if account != nil {
-		request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: account.raw})
+		addTestSessionCookie(request, account.raw)
 		if csrf {
 			request.Header.Set("X-CSRF-Token", account.session.CSRFToken)
 		}

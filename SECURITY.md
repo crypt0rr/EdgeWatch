@@ -304,6 +304,19 @@ size, sandbox states, and release check, without a label that names a unit,
 an account, a job, a target, or a destination. Keep `/metrics` off a public
 proxy.
 
+HTTPS sessions use the host-only `__Host-edgewatch_session` cookie with
+`Secure`, `HttpOnly`, `SameSite=Strict`, and `Path=/`, with no `Domain`
+attribute. Secure requests reject the legacy `edgewatch_session` name and
+reject duplicate `__Host-edgewatch_session` cookies. A cookie with the other
+transport's name is ignored, so a stale cookie cannot select or shadow the
+active session; repeated copies of the active name are ambiguous and
+unauthenticated. Direct loopback HTTP uses the unprefixed name so local
+administration and SSH tunnels continue to work, and rejects duplicate
+`edgewatch_session` cookies. Upgrading signs HTTPS sessions out once; logout
+expires both cookie names. Keep the HTTPS hostname scoped to the intended
+EdgeWatch host and trust only proxies that sanitize the forwarded scheme and
+host headers.
+
 The daemon also reports the deployment's own health to the platform
 destinations that platform administrators select for deployment alerts: a
 scanner or notification sandbox that lost confinement since the last alert,

@@ -218,7 +218,7 @@ func TestUserSecurityHandlersCoverOperatorAndTOTPSuccess(t *testing.T) {
 	cookieValue := "operator-totp-session"
 	setupRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/setup", strings.NewReader(`{"password":"replacement operator password"}`))
 	setupRequest.Header.Set("Content-Type", "application/json")
-	setupRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookieValue})
+	addTestSessionCookie(setupRequest, cookieValue)
 	setup := httptest.NewRecorder()
 	server.totpSetup(setup, setupRequest, session, defaultTenantStore(server))
 	if setup.Code != http.StatusOK {
@@ -234,7 +234,7 @@ func TestUserSecurityHandlersCoverOperatorAndTOTPSuccess(t *testing.T) {
 	enrolmentStep := time.Now().Unix() / 30
 	enableRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/enable", strings.NewReader(`{"code":"`+coverageTOTPCode(setupValue.Secret, enrolmentStep)+`"}`))
 	enableRequest.Header.Set("Content-Type", "application/json")
-	enableRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookieValue})
+	addTestSessionCookie(enableRequest, cookieValue)
 	enable := httptest.NewRecorder()
 	server.totpEnable(enable, enableRequest, session, defaultTenantStore(server))
 	if enable.Code != http.StatusOK || !strings.Contains(enable.Body.String(), "recovery_codes") {

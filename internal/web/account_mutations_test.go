@@ -75,7 +75,7 @@ func TestPasswordResetActivationClosesTheAccountsStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	authRequest := httptest.NewRequest(http.MethodGet, "/", nil)
-	authRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(authRequest, raw)
 	session, ok := server.Auth.AuthenticateReadOnly(ctx, authRequest)
 	if !ok || session.UserID != operator.ID {
 		t.Fatalf("operator session = %#v, ok=%v", session, ok)

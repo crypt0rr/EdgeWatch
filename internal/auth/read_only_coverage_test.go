@@ -42,7 +42,7 @@ func TestAuthenticateReadOnlyDoesNotTouchIdleTimestamp(t *testing.T) {
 	now = now.Add(time.Hour)
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil)
 	request.RemoteAddr = "192.0.2.10:8080"
-	request.AddCookie(&http.Cookie{Name: SessionCookie, Value: raw})
+	addAuthTestSessionCookie(request, raw)
 	authenticated, ok := m.AuthenticateReadOnly(ctx, request)
 	if !ok || authenticated.Username != "admin" || authenticated.Role != store.RoleAdministrator {
 		t.Fatalf("read-only authentication = %#v, %t", authenticated, ok)
@@ -88,7 +88,7 @@ func TestAuthenticateReadOnlyRejectsDisabledAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	request = httptest.NewRequest(http.MethodGet, "/", nil)
-	request.AddCookie(&http.Cookie{Name: SessionCookie, Value: raw})
+	addAuthTestSessionCookie(request, raw)
 	if _, ok := m.AuthenticateReadOnly(ctx, request); ok {
 		t.Fatal("disabled account authenticated through read-only path")
 	}

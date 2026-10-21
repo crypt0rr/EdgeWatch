@@ -8,8 +8,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/crypt0rr/edgewatch/internal/auth"
 )
 
 // routeTableOf returns the table that serves a route of apiRoutes.
@@ -320,7 +318,7 @@ func TestConsoleAPIFailsClosedOutsideTheRouteTable(t *testing.T) {
 			request := httptest.NewRequest(test.method, target, nil)
 			request.RemoteAddr = "127.0.0.1:9000"
 			if check.account != nil {
-				request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: check.account.raw})
+				addTestSessionCookie(request, check.account.raw)
 				if check.csrf {
 					request.Header.Set("X-CSRF-Token", check.account.session.CSRFToken)
 				}
@@ -371,7 +369,7 @@ func TestHandlerFailsClosedOutsideTheRouteTable(t *testing.T) {
 		request := httptest.NewRequest(test.method, test.target, nil)
 		request.Host = "127.0.0.1:8080"
 		request.RemoteAddr = "127.0.0.1:9000"
-		request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: admin.raw})
+		addTestSessionCookie(request, admin.raw)
 		request.Header.Set("X-CSRF-Token", admin.session.CSRFToken)
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, request)
@@ -415,7 +413,7 @@ func TestHandlerFailsClosedBeforeOuterAPICanonicalization(t *testing.T) {
 			request.Host = "127.0.0.1:8080"
 			request.RemoteAddr = "127.0.0.1:9000"
 			if check.account != nil {
-				request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: check.account.raw})
+				addTestSessionCookie(request, check.account.raw)
 				if check.csrf {
 					request.Header.Set("X-CSRF-Token", check.account.session.CSRFToken)
 				}

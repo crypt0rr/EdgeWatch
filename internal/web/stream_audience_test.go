@@ -11,8 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/crypt0rr/edgewatch/internal/auth"
 )
 
 // broadcast sends a live update to every stream. The package's stream tests
@@ -141,7 +139,7 @@ func TestSSEStreamReplaysAndDeliversOnlyItsAudience(t *testing.T) {
 		t.Fatal(err)
 	}
 	authRequest := httptest.NewRequest(http.MethodGet, "/", nil)
-	authRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(authRequest, raw)
 	session, ok := server.Auth.AuthenticateReadOnly(ctx, authRequest)
 	if !ok {
 		t.Fatal("login session was not authenticated")
@@ -161,7 +159,7 @@ func TestSSEStreamReplaysAndDeliversOnlyItsAudience(t *testing.T) {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(streamCtx)
-	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(request, raw)
 	request.Header.Set("Last-Event-ID", strconv.FormatUint(lastSeen, 10))
 	writer := &deadlineTrackingWriter{header: make(http.Header)}
 	done := make(chan struct{})

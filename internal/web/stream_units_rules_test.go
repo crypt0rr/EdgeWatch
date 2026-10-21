@@ -346,7 +346,7 @@ func TestASingleUnitsStreamReceivesEveryLiveUpdate(t *testing.T) {
 	stream := f.openLiveStream(t, "admin", 0)
 	account := routeMatrixSession{raw: raw}
 	probe := httptest.NewRequest(http.MethodGet, "/", nil)
-	probe.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(probe, raw)
 	if account.session, _ = server.Auth.AuthenticateReadOnly(ctx, probe); account.session.CSRFToken == "" {
 		t.Fatal("session was not authenticated")
 	}

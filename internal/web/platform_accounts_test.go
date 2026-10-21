@@ -41,7 +41,7 @@ func signIn(t *testing.T, server *Server, role, username, password, otp string) 
 		t.Fatalf("sign-in of %s: %v", username, err)
 	}
 	probe := httptest.NewRequest(http.MethodGet, consoleAPIBase+"/auth/session", nil)
-	probe.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(probe, raw)
 	session, ok := server.Auth.AuthenticateReadOnly(ctx, probe)
 	if !ok {
 		t.Fatalf("session of %s did not authenticate", username)
@@ -56,7 +56,7 @@ func callAPI(t *testing.T, server *Server, account routeMatrixSession, method, p
 	request := httptest.NewRequest(method, consoleAPIBase+path, strings.NewReader(body))
 	request.RemoteAddr = "127.0.0.1:9000"
 	request.Header.Set("Content-Type", "application/json")
-	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: account.raw})
+	addTestSessionCookie(request, account.raw)
 	request.Header.Set("X-CSRF-Token", account.session.CSRFToken)
 	recorder := httptest.NewRecorder()
 	server.api(recorder, request)

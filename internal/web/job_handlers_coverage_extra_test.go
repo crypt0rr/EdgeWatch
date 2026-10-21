@@ -176,7 +176,7 @@ func TestJobListAndAPIDispatchCoverage(t *testing.T) {
 	}
 	callAPI := func(method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
-		req.AddCookie(&http.Cookie{Name: "edgewatch_session", Value: raw})
+		addTestSessionCookie(req, raw)
 		if body != "" {
 			req.Header.Set("Content-Type", "application/json")
 		}

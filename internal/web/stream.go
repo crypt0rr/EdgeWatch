@@ -177,7 +177,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	// so perform one fresh read-only authorization before sending any bytes.
 	// Direct stream fixtures without a cookie retain their existing behavior;
 	// network requests always carry the cookie validated by api.
-	if _, err := r.Cookie(auth.SessionCookie); err == nil && !s.streamAuthorizedFresh(streamCtx, r, authKey) {
+	if _, hasCookie := auth.SessionCookieFromRequest(r, s.sessionCookieSecure(r)); hasCookie && !s.streamAuthorizedFresh(streamCtx, r, authKey) {
 		return
 	}
 	if !s.writeSSE(streamCtx, w, []byte(": connected\nretry: 5000\n\n")) {

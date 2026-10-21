@@ -26,7 +26,7 @@ func perimeterCall(t *testing.T, f *platformFixture, actor, method, path, conten
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}
-	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: account.raw})
+	addTestSessionCookie(request, account.raw)
 	request.Header.Set("X-CSRF-Token", account.session.CSRFToken)
 	recorder := httptest.NewRecorder()
 	f.server.api(recorder, request)

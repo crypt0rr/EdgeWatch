@@ -259,7 +259,7 @@ func TestUsersAPIEnforcesAuthenticationCSRFAndRolePermissions(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		req.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+		addTestSessionCookie(req, raw)
 		if body != "" {
 			req.Header.Set("Content-Type", "application/json")
 		}

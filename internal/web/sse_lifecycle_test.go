@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -20,7 +19,7 @@ import (
 func startCookieSSEStream(server *Server, raw string, session store.Session) (*deadlineTrackingWriter, context.CancelFunc, <-chan struct{}) {
 	ctx, cancel := context.WithCancel(context.Background())
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(ctx)
-	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(request, raw)
 	writer := &deadlineTrackingWriter{header: make(http.Header)}
 	done := make(chan struct{})
 	go func() {
@@ -75,7 +74,7 @@ func TestSSEAuthorizationCacheLifecycleThroughStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	authRequest := httptest.NewRequest(http.MethodGet, "/", nil)
-	authRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(authRequest, raw)
 	session, ok := server.Auth.AuthenticateReadOnly(ctx, authRequest)
 	if !ok {
 		t.Fatal("login session was not authenticated")

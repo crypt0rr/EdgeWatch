@@ -587,66 +587,14 @@ func (s *Server) validateRequestHost(r *http.Request) bool {
 // Server method below so a trusted TLS-terminating proxy can describe the
 // browser's HTTPS scheme even when it forwards a loopback Host header.
 func sessionCookieSecure(r *http.Request) bool {
-	return sessionCookieSecureWithForwardedTLS(r, false)
+	return auth.SessionCookieSecure(r, false)
 }
 
 func (s *Server) sessionCookieSecure(r *http.Request) bool {
-	trustedHTTPS := s != nil && s.Auth != nil && s.Auth.IsTrustedProxy(r) && forwardedRequestIsHTTPS(r)
-	return sessionCookieSecureWithForwardedTLS(r, trustedHTTPS)
-}
-
-func sessionCookieSecureWithForwardedTLS(r *http.Request, trustedForwardedTLS bool) bool {
-	if r == nil {
-		return true
+	if s != nil && s.Auth != nil {
+		return s.Auth.SessionCookieSecure(r)
 	}
-	if trustedForwardedTLS || r.TLS != nil || (r.URL != nil && strings.EqualFold(strings.TrimSpace(r.URL.Scheme), "https")) {
-		return true
-	}
-	host := strings.TrimSpace(r.Host)
-	if host == "" && r.URL != nil {
-		host = strings.TrimSpace(r.URL.Host)
-	}
-	host = requestHostName(host)
-	if host == "" {
-		return true
-	}
-	if strings.EqualFold(host, "localhost") {
-		return false
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		return false
-	}
-	return true
-}
-
-// forwardedRequestIsHTTPS recognizes the two common proxy protocol headers.
-// The caller must first prove that the direct peer is trusted; parsing these
-// headers alone would let a client manufacture a Secure cookie decision.
-func forwardedRequestIsHTTPS(r *http.Request) bool {
-	if r == nil {
-		return false
-	}
-	for _, value := range r.Header.Values("X-Forwarded-Proto") {
-		for _, protocol := range strings.Split(value, ",") {
-			if strings.EqualFold(strings.TrimSpace(protocol), "https") {
-				return true
-			}
-		}
-	}
-	for _, value := range r.Header.Values("Forwarded") {
-		for _, element := range strings.Split(value, ",") {
-			for _, parameter := range strings.Split(element, ";") {
-				key, raw, ok := strings.Cut(strings.TrimSpace(parameter), "=")
-				if !ok || !strings.EqualFold(key, "proto") {
-					continue
-				}
-				if strings.EqualFold(strings.Trim(strings.TrimSpace(raw), `"`), "https") {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	return auth.SessionCookieSecure(r, false)
 }
 
 // requestHostName strips an optional port while preserving bracketed IPv6

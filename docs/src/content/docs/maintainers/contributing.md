@@ -219,8 +219,8 @@ changes outside the repository, so it can fail without a new commit:
 - `make vulncheck` runs on the source of the latest published release, with
   the Go version in that release's `go.mod`, which built its binaries. A new
   advisory for a module EdgeWatch calls or for that Go release fails the run.
-  Update the module or the `go` line in `go.mod`, then publish a patch
-  release.
+  Update the module, or move `go.mod`, the Dockerfile's `golang` images, and
+  the development guide to the fixed Go release, then publish a patch release.
 
 Before you tag a release, run `./scripts/check-apk-pins.sh` or start the
 workflow with `gh workflow run scheduled.yml`. GitHub reports a failed

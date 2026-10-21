@@ -102,7 +102,7 @@ func TestIncidentReminderSettingAPIIsRouted(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodPut, "/api/v1/notifications/incident-reminders", strings.NewReader(`{"enabled":false,"password":"administrator password"}`))
 	request.RemoteAddr = "127.0.0.1:9100"
-	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(request, raw)
 	request.Header.Set("X-CSRF-Token", csrf)
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()

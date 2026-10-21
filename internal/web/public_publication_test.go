@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
@@ -253,7 +252,7 @@ func TestPublicDashboardSaveStaysAdministratorOnly(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+		addTestSessionCookie(request, raw)
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("X-CSRF-Token", "csrf-"+role)
 		response, err := http.DefaultClient.Do(request)

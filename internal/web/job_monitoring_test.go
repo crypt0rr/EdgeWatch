@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
@@ -216,7 +215,7 @@ func TestJobListMonitoringFieldsArePermissionScopedAndDoNotExposeScanErrors(t *t
 	responseFor := func(session store.Session, token string) (map[string]any, string) {
 		t.Helper()
 		request := httptest.NewRequest(http.MethodGet, "/api/v1/jobs?include_archived=true", nil)
-		request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: token})
+		addTestSessionCookie(request, token)
 		response := httptest.NewRecorder()
 		server.api(response, request)
 		if response.Code != http.StatusOK {

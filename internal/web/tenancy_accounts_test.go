@@ -110,7 +110,7 @@ func newTenantAccountsFixture(t *testing.T) tenantAccountsFixture {
 func (f tenantAccountsFixture) call(account, method, path, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:9000"
-	req.AddCookie(&http.Cookie{Name: "edgewatch_session", Value: f.cookies[account]})
+	addTestSessionCookie(req, f.cookies[account])
 	req.Header.Set("X-CSRF-Token", "csrf-"+account)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()

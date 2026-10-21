@@ -441,7 +441,7 @@ func TestSetupStatusDoesNotExposeOperationalDetails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: sessionToken})
+	addTestSessionCookie(req, sessionToken)
 	resp, err = (&http.Client{}).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -545,7 +545,7 @@ func TestSSEStopsDeliveringAfterSessionRevocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(request, raw)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -599,7 +599,7 @@ func TestSSEConnectionsAndLimitResponsesDoNotRefreshIdleSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	authRequest := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil)
-	authRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(authRequest, raw)
 	session, ok := server.Auth.AuthenticateReadOnly(ctx, authRequest)
 	if !ok {
 		t.Fatal("login session was not authenticated")
@@ -617,7 +617,7 @@ func TestSSEConnectionsAndLimitResponsesDoNotRefreshIdleSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(request, raw)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -642,7 +642,7 @@ func TestSSEConnectionsAndLimitResponsesDoNotRefreshIdleSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	limitedRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(limitedRequest, raw)
 	limitedResponse, err := http.DefaultClient.Do(limitedRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -662,7 +662,7 @@ func TestSSEConnectionsAndLimitResponsesDoNotRefreshIdleSession(t *testing.T) {
 
 	now = now.Add(time.Hour)
 	ordinaryRequest := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil)
-	ordinaryRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(ordinaryRequest, raw)
 	if _, ok := server.Auth.Authenticate(ctx, ordinaryRequest); !ok {
 		t.Fatal("ordinary authenticated request was rejected")
 	}
@@ -686,7 +686,7 @@ func TestBackgroundStatusPollingDoesNotRefreshIdleSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	authRequest := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
-	authRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(authRequest, raw)
 	session, ok := server.Auth.AuthenticateReadOnly(ctx, authRequest)
 	if !ok {
 		t.Fatal("login session was not authenticated")
@@ -703,7 +703,7 @@ func TestBackgroundStatusPollingDoesNotRefreshIdleSession(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+		addTestSessionCookie(request, raw)
 		response, err := http.DefaultClient.Do(request)
 		if err != nil {
 			t.Fatal(err)
@@ -725,7 +725,7 @@ func TestBackgroundStatusPollingDoesNotRefreshIdleSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	invalidActivity.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(invalidActivity, raw)
 	invalidResponse, err := http.DefaultClient.Do(invalidActivity)
 	if err != nil {
 		t.Fatal(err)
@@ -745,7 +745,7 @@ func TestBackgroundStatusPollingDoesNotRefreshIdleSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	activityRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(activityRequest, raw)
 	activityRequest.Header.Set("X-CSRF-Token", session.CSRFToken)
 	activityResponse, err := http.DefaultClient.Do(activityRequest)
 	if err != nil {
@@ -767,7 +767,7 @@ func TestBackgroundStatusPollingDoesNotRefreshIdleSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	activityRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(activityRequest, raw)
 	activityRequest.Header.Set("X-CSRF-Token", session.CSRFToken)
 	activityResponse, err = http.DefaultClient.Do(activityRequest)
 	if err != nil {
@@ -789,7 +789,7 @@ func TestBackgroundStatusPollingDoesNotRefreshIdleSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(request, raw)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -803,7 +803,7 @@ func TestBackgroundStatusPollingDoesNotRefreshIdleSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(request, raw)
 	response, err = http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -825,7 +825,7 @@ func TestIdleActivityWriteDoesNotBlockAuthenticatedReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	authRequest := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
-	authRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(authRequest, raw)
 	session, ok := server.Auth.AuthenticateReadOnly(ctx, authRequest)
 	if !ok {
 		t.Fatal("login session was not authenticated")
@@ -848,7 +848,7 @@ func TestIdleActivityWriteDoesNotBlockAuthenticatedReads(t *testing.T) {
 		_ = tx.Rollback()
 		t.Fatal(err)
 	}
-	readRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(readRequest, raw)
 	readResponse, err := http.DefaultClient.Do(readRequest)
 	if err != nil {
 		_ = tx.Rollback()
@@ -864,7 +864,7 @@ func TestIdleActivityWriteDoesNotBlockAuthenticatedReads(t *testing.T) {
 		_ = tx.Rollback()
 		t.Fatal(err)
 	}
-	activityRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(activityRequest, raw)
 	activityRequest.Header.Set("X-CSRF-Token", session.CSRFToken)
 	started := time.Now()
 	activityResponse, err := http.DefaultClient.Do(activityRequest)
@@ -901,7 +901,7 @@ func TestSSESessionRevocationIsIsolatedBetweenBrowserSessions(t *testing.T) {
 			cancel()
 			t.Fatal(err)
 		}
-		request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+		addTestSessionCookie(request, raw)
 		return request, cancel
 	}
 
@@ -915,13 +915,13 @@ func TestSSESessionRevocationIsIsolatedBetweenBrowserSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	requestA := httptest.NewRequest(http.MethodGet, "/", nil)
-	requestA.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: rawA})
+	addTestSessionCookie(requestA, rawA)
 	sessionA, ok := server.Auth.AuthenticateReadOnly(ctx, requestA)
 	if !ok {
 		t.Fatal("first login session was not authenticated")
 	}
 	requestB := httptest.NewRequest(http.MethodGet, "/", nil)
-	requestB.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: rawB})
+	addTestSessionCookie(requestB, rawB)
 	sessionB, ok := server.Auth.AuthenticateReadOnly(ctx, requestB)
 	if !ok || sessionA.UserID != sessionB.UserID || sessionA.IDHash == sessionB.IDHash {
 		t.Fatalf("login sessions are not distinct sessions for one account: A=%#v B=%#v", sessionA, sessionB)
@@ -1023,7 +1023,7 @@ func TestSSEAuthorizationCacheDoesNotCrossSessionsOrMissingCookie(t *testing.T) 
 			t.Fatal(err)
 		}
 		request := httptest.NewRequest(http.MethodGet, "/", nil)
-		request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+		addTestSessionCookie(request, raw)
 		session, ok := server.Auth.AuthenticateReadOnly(ctx, request)
 		if !ok {
 			t.Fatal("login session was not authenticated")
@@ -1036,7 +1036,7 @@ func TestSSEAuthorizationCacheDoesNotCrossSessionsOrMissingCookie(t *testing.T) 
 		t.Fatalf("login sessions are not distinct sessions for one account: A=%#v B=%#v", sessionA, sessionB)
 	}
 	requestB := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil)
-	requestB.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: rawB})
+	addTestSessionCookie(requestB, rawB)
 	if !server.streamAuthorized(ctx, requestB, sseAuthorizationCacheKey(sessionB)) {
 		t.Fatal("valid second session was not authorized")
 	}
@@ -1044,7 +1044,7 @@ func TestSSEAuthorizationCacheDoesNotCrossSessionsOrMissingCookie(t *testing.T) 
 		t.Fatal(err)
 	}
 	requestA := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil)
-	requestA.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: rawA})
+	addTestSessionCookie(requestA, rawA)
 	if server.streamAuthorized(ctx, requestA, sseAuthorizationCacheKey(sessionA)) {
 		t.Fatal("revoked session reused another session's authorization cache entry")
 	}
@@ -1174,7 +1174,7 @@ func TestSensitiveJobMutationFailsClosedWhenAuditUnavailable(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-CSRF-Token", session.CSRFToken)
-	req.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(req, raw)
 	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
 		t.Fatal(err)

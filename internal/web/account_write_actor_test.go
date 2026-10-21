@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
@@ -44,7 +43,7 @@ func (f *platformFixture) startGated(t *testing.T, actor, method, path, body str
 	request := httptest.NewRequest(method, consoleAPIBase+path, gate)
 	request.RemoteAddr = "127.0.0.1:9000"
 	request.Header.Set("Content-Type", "application/json")
-	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: account.raw})
+	addTestSessionCookie(request, account.raw)
 	request.Header.Set("X-CSRF-Token", account.session.CSRFToken)
 	recorder := httptest.NewRecorder()
 	done := make(chan struct{})

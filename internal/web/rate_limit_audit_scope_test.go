@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
@@ -127,7 +126,7 @@ func TestRateLimitRecordsFollowTheAccount(t *testing.T) {
 		request.RemoteAddr = remote
 		request.Header.Set("Content-Type", "application/json")
 		if account != nil {
-			request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: account.raw})
+			addTestSessionCookie(request, account.raw)
 			request.Header.Set("X-CSRF-Token", account.session.CSRFToken)
 		}
 		recorder := httptest.NewRecorder()

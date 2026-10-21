@@ -76,7 +76,7 @@ func TestSignInCarriesTheAccountTenant(t *testing.T) {
 		t.Fatal(err)
 	}
 	authenticated := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil)
-	authenticated.AddCookie(&http.Cookie{Name: SessionCookie, Value: "other-session"})
+	addAuthTestSessionCookie(authenticated, "other-session")
 	session, ok := m.AuthenticateReadOnly(ctx, authenticated)
 	if !ok || session.TenantID != otherTenantID || session.Username != "other-operator" {
 		t.Fatalf("session = %+v, %v", session, ok)

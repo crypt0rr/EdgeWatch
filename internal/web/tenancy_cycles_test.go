@@ -80,7 +80,7 @@ func TestScanCycleRoutesUseTheSessionTenant(t *testing.T) {
 	enrollAdministratorsInTOTP(t, db)
 	call := func(account, method, path string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, nil)
-		req.AddCookie(&http.Cookie{Name: "edgewatch_session", Value: cookies[account]})
+		addTestSessionCookie(req, cookies[account])
 		req.Header.Set("X-CSRF-Token", "csrf-"+account)
 		rec := httptest.NewRecorder()
 		server.api(rec, req)

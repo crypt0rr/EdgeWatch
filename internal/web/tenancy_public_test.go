@@ -236,7 +236,7 @@ func TestPublicDashboardRouteUsesTheSessionTenant(t *testing.T) {
 	enrollAdministratorsInTOTP(t, f.db)
 	call := func(account, method, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, "/api/v1/public-dashboard", strings.NewReader(body))
-		req.AddCookie(&http.Cookie{Name: "edgewatch_session", Value: cookies[account]})
+		addTestSessionCookie(req, cookies[account])
 		req.Header.Set("X-CSRF-Token", "csrf-"+account)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()

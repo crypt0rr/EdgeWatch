@@ -85,7 +85,7 @@ func authenticateAs(t *testing.T, m *Manager, user store.User, raw string) store
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
-	request.AddCookie(&http.Cookie{Name: SessionCookie, Value: raw})
+	addAuthTestSessionCookie(request, raw)
 	session, ok := m.AuthenticateReadOnly(ctx, request)
 	if !ok {
 		t.Fatalf("session of %s did not authenticate", user.Username)

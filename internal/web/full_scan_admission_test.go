@@ -342,7 +342,7 @@ func TestFullScanAdmissionWaitIsClampedToRealListenerWriteTimeout(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.AddCookie(&http.Cookie{Name: "edgewatch_session", Value: "full-scan-budget-session"})
+	addTestSessionCookie(request, "full-scan-budget-session")
 	started := time.Now()
 	response, err := httpServer.Client().Do(request)
 	if err != nil {
@@ -398,7 +398,7 @@ func TestFullScanLateListenerRequestNeverReturnsSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.AddCookie(&http.Cookie{Name: "edgewatch_session", Value: "late-full-scan-session"})
+	addTestSessionCookie(request, "late-full-scan-session")
 	client := &http.Client{Timeout: 3 * time.Second}
 	requestStarted := time.Now()
 	response, requestErr := client.Do(request)

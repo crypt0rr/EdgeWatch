@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -19,7 +18,7 @@ func loginSSETestSession(t *testing.T, server *Server) (string, store.Session) {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
-	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(request, raw)
 	session, ok := server.Auth.AuthenticateReadOnly(ctx, request)
 	if !ok {
 		t.Fatal("login session was not authenticated")
@@ -102,7 +101,7 @@ func TestLogoutCancelsOriginatingSSEStream(t *testing.T) {
 	waitForSSESubscribers(t, server, 1)
 
 	logout := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
-	logout.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	addTestSessionCookie(logout, raw)
 	response := httptest.NewRecorder()
 	server.logout(response, logout, session)
 	if response.Code != http.StatusNoContent {

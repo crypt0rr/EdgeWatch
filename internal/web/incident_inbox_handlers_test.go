@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
@@ -51,7 +50,7 @@ func TestIncidentInboxRoutesExposeReviewAndConflictContract(t *testing.T) {
 		t.Helper()
 		request := httptest.NewRequest(method, path, strings.NewReader(body))
 		request.RemoteAddr = "127.0.0.1:9000"
-		request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: rawCookie})
+		addTestSessionCookie(request, rawCookie)
 		if body != "" {
 			request.Header.Set("Content-Type", "application/json")
 		}

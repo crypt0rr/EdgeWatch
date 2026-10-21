@@ -13,7 +13,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -424,7 +423,7 @@ func TestPlatformNotificationRoutingTogglePreservesConcurrentDestinations(t *tes
 			request := httptest.NewRequest(http.MethodPatch, consoleAPIBase+"/platform/notifications/update-routing", strings.NewReader(body))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-CSRF-Token", account.session.CSRFToken)
-			request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: account.raw})
+			addTestSessionCookie(request, account.raw)
 			results[index] = httptest.NewRecorder()
 			f.server.api(results[index], request)
 		}(index, id)

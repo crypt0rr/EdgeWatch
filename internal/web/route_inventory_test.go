@@ -154,7 +154,7 @@ func newRouteMatrixSessions(t *testing.T) (*Server, []routeMatrixSession) {
 			t.Fatal(err)
 		}
 		probe := httptest.NewRequest(http.MethodGet, consoleAPIBase+"/status", nil)
-		probe.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+		addTestSessionCookie(probe, raw)
 		session, ok := server.Auth.AuthenticateReadOnly(ctx, probe)
 		if !ok || session.Role != account.role || session.CSRFToken == "" {
 			t.Fatalf("%s session = %#v, authenticated %t", account.role, session, ok)
@@ -201,7 +201,7 @@ func serveRouteMatrixRequest(t *testing.T, handler http.HandlerFunc, method, tar
 	request := httptest.NewRequest(method, target, nil).WithContext(ctx)
 	request.RemoteAddr = "127.0.0.1:9000"
 	if account != nil {
-		request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: account.raw})
+		addTestSessionCookie(request, account.raw)
 		if csrf {
 			request.Header.Set("X-CSRF-Token", account.session.CSRFToken)
 		}

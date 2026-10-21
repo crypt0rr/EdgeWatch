@@ -176,7 +176,7 @@ func TestSessionAuthenticationAndCSRF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.AddCookie(&http.Cookie{Name: SessionCookie, Value: raw})
+	addAuthTestSessionCookie(r, raw)
 	session, ok := m.Authenticate(context.Background(), r)
 	if !ok || session.CSRFToken == "" {
 		t.Fatal("session did not authenticate")
@@ -460,7 +460,7 @@ func TestSessionLifetimeRemainsAbsoluteWhenTouched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.AddCookie(&http.Cookie{Name: SessionCookie, Value: raw})
+	addAuthTestSessionCookie(request, raw)
 	original, err := s.GetSession(context.Background(), digest(raw))
 	if err != nil {
 		t.Fatal(err)
@@ -668,7 +668,7 @@ func TestLoginAsUserAndPasswordConfirmationAreScoped(t *testing.T) {
 	if err := s.Tenant(store.DefaultTenantScope()).UpdateUser(ctx, operator, false, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
-	request.AddCookie(&http.Cookie{Name: SessionCookie, Value: raw})
+	addAuthTestSessionCookie(request, raw)
 	if _, ok := m.Authenticate(ctx, request); ok {
 		t.Fatal("disabled user session remained valid")
 	}

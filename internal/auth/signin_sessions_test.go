@@ -479,7 +479,7 @@ func TestSignInEndsTheLeastRecentlyUsedSessionOverTheCap(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil)
 		r.RemoteAddr = "192.0.2.80:4000"
 		if raw != "" {
-			r.AddCookie(&http.Cookie{Name: SessionCookie, Value: raw})
+			addAuthTestSessionCookie(r, raw)
 		}
 		return r
 	}

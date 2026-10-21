@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
@@ -31,7 +30,7 @@ func (f tenantAccountsFixture) startLiveStream(t *testing.T, account string, las
 	ctx, cancel := context.WithCancel(context.Background())
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(ctx)
 	request.RemoteAddr = "127.0.0.1:9000"
-	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: f.cookies[account]})
+	addTestSessionCookie(request, f.cookies[account])
 	if lastEventID > 0 {
 		request.Header.Set("Last-Event-ID", strconv.FormatUint(lastEventID, 10))
 	}

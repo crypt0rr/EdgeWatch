@@ -81,7 +81,7 @@ func TestRBACSeparatesViewerReadsAndOperatorNotificationManagement(t *testing.T)
 		if requestErr != nil {
 			t.Fatal(requestErr)
 		}
-		req.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+		addTestSessionCookie(req, raw)
 		if body != "" {
 			req.Header.Set("Content-Type", "application/json")
 		}

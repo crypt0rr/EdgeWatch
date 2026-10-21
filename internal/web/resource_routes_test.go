@@ -282,7 +282,7 @@ func (f *resourceRouteFixture) serve(user, method, target, body string) *httptes
 		request = httptest.NewRequest(method, "/api/v1"+target, nil)
 	}
 	request.RemoteAddr = "127.0.0.1:9000"
-	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: f.cookies[user]})
+	addTestSessionCookie(request, f.cookies[user])
 	if method != http.MethodGet {
 		request.Header.Set("X-CSRF-Token", f.csrf[user])
 	}

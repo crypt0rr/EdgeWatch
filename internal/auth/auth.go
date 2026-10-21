@@ -2637,6 +2637,10 @@ func ClearSessionCookie(w http.ResponseWriter, secure bool) {
 	// Clear both the old cookie and the prefixed HTTPS cookie so an upgrade
 	// signs the browser out even when the logout request comes through a
 	// different supported transport.
+	// The plain cookie has an empty value and expires immediately; it only removes
+	// the loopback HTTP name and carries no session credential.
+	// codeql[go/cookie-secure-not-set]
+
 	http.SetCookie(w, newSessionCookieForName(SessionCookie, "", -1, secure))
 	http.SetCookie(w, newSessionCookieForName(SecureSessionCookie, "", -1, true))
 }
@@ -2656,8 +2660,10 @@ func newSessionCookieForName(name, raw string, maxAge int, secure bool) *http.Co
 func setLoopbackSessionCookie(w http.ResponseWriter, raw string, maxAge int) {
 	// This is the only intentionally insecure-cookie branch: it is selected
 	// exclusively for direct loopback HTTP access when no trusted proxy has
-	// supplied HTTPS evidence; all externally served requests use Secure.
+	// supplied HTTPS evidence. Non-loopback listeners are rejected, and all
+	// externally served requests use Secure.
 	// codeql[go/cookie-secure-not-set]
+
 	http.SetCookie(w, newSessionCookieForName(SessionCookie, raw, maxAge, false))
 }
 

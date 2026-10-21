@@ -191,6 +191,12 @@ func TestSessionCookieSecureKeepsOnlyLoopbackHTTPUnsecured(t *testing.T) {
 
 func TestServerSessionCookieSecureHonorsTrustedProxyProtocol(t *testing.T) {
 	t.Parallel()
+	fallbackServer := &Server{}
+	fallbackRequest := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/v1/auth/login", nil)
+	if fallbackServer.sessionCookieSecure(fallbackRequest) {
+		t.Fatal("server without an auth manager must retain loopback HTTP behavior")
+	}
+
 	server := &Server{Auth: auth.NewManager(nil)}
 	if err := server.Auth.SetTrustedProxies([]string{"127.0.0.1/32"}); err != nil {
 		t.Fatal(err)

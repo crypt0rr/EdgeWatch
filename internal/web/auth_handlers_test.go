@@ -122,22 +122,32 @@ func TestDuplicateSessionCookiesAreUnauthenticated(t *testing.T) {
 		{name: "loopback HTTP", url: "http://127.0.0.1:8080/api/v1/auth/session", cookieName: auth.SessionCookie},
 		{name: "HTTPS through trusted proxy", url: "http://127.0.0.1:8080/api/v1/auth/session", cookieName: auth.SecureSessionCookie, secure: true},
 	}
+	orders := []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{name: "attacker first", first: "first-cookie-session", second: "second-cookie-session"},
+		{name: "attacker second", first: "second-cookie-session", second: "first-cookie-session"},
+	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodGet, test.url, nil)
-			request.RemoteAddr = "127.0.0.1:9000"
-			if test.secure {
-				request.Header.Set("X-Forwarded-Proto", "https")
-			}
-			// Both values are valid sessions. The request must reject the
-			// ambiguity instead of authenticating whichever cookie appears first.
-			request.Header.Set("Cookie", test.cookieName+"=first-cookie-session; "+test.cookieName+"=second-cookie-session")
-			recorder := httptest.NewRecorder()
-			server.api(recorder, request)
-			if recorder.Code != http.StatusUnauthorized {
-				t.Fatalf("duplicate-cookie session status = %d, want 401: %s", recorder.Code, recorder.Body.String())
-			}
-		})
+		for _, order := range orders {
+			t.Run(test.name+"/"+order.name, func(t *testing.T) {
+				request := httptest.NewRequest(http.MethodGet, test.url, nil)
+				request.RemoteAddr = "127.0.0.1:9000"
+				if test.secure {
+					request.Header.Set("X-Forwarded-Proto", "https")
+				}
+				// Both values are valid sessions. The request must reject the
+				// ambiguity instead of authenticating whichever cookie appears first.
+				request.Header.Set("Cookie", test.cookieName+"="+order.first+"; "+test.cookieName+"="+order.second)
+				recorder := httptest.NewRecorder()
+				server.api(recorder, request)
+				if recorder.Code != http.StatusUnauthorized {
+					t.Fatalf("duplicate-cookie session status = %d, want 401: %s", recorder.Code, recorder.Body.String())
+				}
+			})
+		}
 	}
 }
 

@@ -2049,7 +2049,7 @@ test('a daily workflow checks the apk pins and scans the published image', async
     'the checks must run daily and on demand, and never for untrusted pull request code')
   assert.deepEqual(permissionsOf(scheduled.slice(0, scheduled.indexOf('\njobs:\n')), 0), { contents: 'read' })
   const jobs = Object.fromEntries(jobsOf(scheduled).map(({ name, block }) => [name, block]))
-  assert.deepEqual(Object.keys(jobs), ['apk-pins', 'published-image'])
+  assert.deepEqual(Object.keys(jobs), ['apk-pins', 'published-image', 'release-source'])
   for (const [name, block] of Object.entries(jobs)) {
     assert.equal(permissionsOf(block, 4), null, `scheduled job ${name} must keep the read-only default`)
   }
@@ -2124,6 +2124,77 @@ test('a daily workflow checks the apk pins and scans the published image', async
   const amd64Only = await runScan([{ digest: amd64, platform: { os: 'linux', architecture: 'amd64' } }, attestation])
   assert.equal(amd64Only.status, 1)
   assert.match(amd64Only.stderr, /ghcr\.io\/crypt0rr\/edgewatch:latest has no single linux\/arm64 manifest/)
+})
+
+test('the daily workflow runs govulncheck on the latest release with the Go it was built with', async (t) => {
+  const scheduled = workflows.find(({ file }) => file === '.github/workflows/scheduled.yml')?.text
+  assert.ok(scheduled, 'the scheduled checks workflow must exist')
+  const job = jobsOf(scheduled).find(({ name }) => name === 'release-source')?.block
+  assert.ok(job, 'the scheduled workflow must check the latest release')
+  assert.deepEqual(stepsOf(job).map((step) => /^ {6}- name: (.*)$/m.exec(step)?.[1]), [
+    'Find the latest release',
+    'Check out the release',
+    'Set up the Go version the release was built with',
+    'Run govulncheck on the release',
+  ])
+  assert.match(stepBlock(job, 'Check out the release'), /^ {10}ref: refs\/tags\/\$\{\{ steps\.release\.outputs\.tag \}\}$/m)
+  const setupGo = stepBlock(job, 'Set up the Go version the release was built with')
+  assert.match(setupGo, /^ {10}go-version-file: go\.mod$/m)
+  assert.match(setupGo, /^ {10}cache: false$/m)
+  assert.match(stepBlock(job, 'Run govulncheck on the release'), /^ {8}run: make vulncheck$/m)
+  // The job reports the release's toolchain only while the release builds
+  // with the Go in go.mod and govulncheck keeps the Go it was started with.
+  const releaseSetups = stepsOf(workflow).filter((step) => /uses: actions\/setup-go@/.test(step))
+  assert.ok(releaseSetups.length > 0, 'the release must set up Go')
+  for (const step of releaseSetups) {
+    assert.match(step, /^ {10}go-version-file: go\.mod$/m)
+    assert.doesNotMatch(step, /^ {10}go-version:/m)
+  }
+  assert.match(makefile, /^vulncheck:\n\tGOTOOLCHAIN="\$\$\(go env GOVERSION\)" go run golang\.org\/x\/vuln\/cmd\/govulncheck@/m)
+
+  // Run the lookup step with a stand-in gh, as GitHub runs it.
+  const find = stepBlock(job, 'Find the latest release')
+  assert.match(find, /^ {8}id: release$/m)
+  assert.match(find, /^ {10}GH_TOKEN: \$\{\{ github\.token \}\}$/m)
+  const shell = /^ {8}run: \|\n((?: {10}.*(?:\n|$))+)/m.exec(find)
+  assert.ok(shell, 'the lookup step must run a script')
+  const findStep = shell[1].split('\n').map((line) => line.slice(10)).join('\n')
+  const directory = await mkdtemp(join(tmpdir(), 'edgewatch-scheduled-release-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const fakeBin = join(directory, 'bin')
+  await mkdir(fakeBin)
+  await writeFile(join(fakeBin, 'gh'), '#!/bin/sh\necho "$*" > "$FAKE_ARGS"\n[ -z "$FAKE_FAIL" ] || exit 1\nprintf "%s\\n" "$FAKE_TAG"\n')
+  await chmod(join(fakeBin, 'gh'), 0o755)
+  const runFind = async (tag, fail = '') => {
+    const output = join(directory, 'output')
+    await writeFile(output, '')
+    const result = spawnSync('bash', ['-c', findStep], {
+      cwd: directory,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        GITHUB_REPOSITORY: 'crypt0rr/EdgeWatch',
+        GITHUB_OUTPUT: output,
+        FAKE_ARGS: join(directory, 'args'),
+        FAKE_TAG: tag,
+        FAKE_FAIL: fail,
+      },
+    })
+    return { ...result, output: await readFile(output, 'utf8') }
+  }
+  const latest = await runFind('v0.42.1')
+  assert.equal(latest.status, 0, latest.stderr)
+  assert.equal(latest.output, 'tag=v0.42.1\n')
+  assert.equal(await readFile(join(directory, 'args'), 'utf8'), 'api repos/crypt0rr/EdgeWatch/releases/latest --jq .tag_name\n')
+  for (const tag of ['', 'main', 'v1.2.3-rc.1', 'v1.2.3\nother=1', '../v1.2.3']) {
+    const unexpected = await runFind(tag)
+    assert.equal(unexpected.status, 1, `tag ${JSON.stringify(tag)} must fail the lookup`)
+    assert.equal(unexpected.output, '', `tag ${JSON.stringify(tag)} must not reach the checkout`)
+  }
+  const failed = await runFind('v0.42.1', '1')
+  assert.notEqual(failed.status, 0, 'a failed lookup must fail the job')
+  assert.equal(failed.output, '')
 })
 
 test('the Naabu license notice matches the Dockerfile release and immutable commit', () => {

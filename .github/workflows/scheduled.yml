@@ -4,7 +4,8 @@ name: Scheduled checks
 # commit. Alpine removes a pinned package build when it publishes an update,
 # which breaks the next image build without a cache, such as the release. New
 # vulnerabilities are published for the packages and the Naabu build of the
-# image that users already run. Start a run before tagging a release with
+# image that users already run, and for the Go code and toolchain of the
+# latest release. Start a run before tagging a release with
 # `gh workflow run scheduled.yml`. GitHub reports a failed scheduled run to
 # whoever last changed the schedule.
 
@@ -72,3 +73,37 @@ jobs:
             ./scripts/scan-image-vulnerabilities.sh "$platform_image" "$platform" || status=1
           done
           exit "$status"
+
+  release-source:
+    name: Check the latest release's Go code for known vulnerabilities
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Find the latest release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Ask for the published release, not the newest tag: the tag of a
+          # failed release stays, but its release was never published.
+          tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "the latest release has an unexpected tag: $tag" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Check out the release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.release.outputs.tag }}
+          persist-credentials: false
+      # The release builds its binaries with the Go version in its go.mod,
+      # and govulncheck reports the standard library of the Go it runs with.
+      - name: Set up the Go version the release was built with
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Run govulncheck on the release
+        run: make vulncheck

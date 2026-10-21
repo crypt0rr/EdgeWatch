@@ -197,7 +197,8 @@ exports the image's filesystem without starting the image and fails when:
   `.grype.yaml`.
 
 Grype ignores Go modules because govulncheck checks the Go binaries more
-precisely. `make vulncheck` checks EdgeWatch's own module.
+precisely. `make vulncheck` checks EdgeWatch's own module and the standard
+library of the Go version that runs it.
 
 ### Scheduled checks
 
@@ -214,7 +215,12 @@ changes outside the repository, so it can fail without a new commit:
 - the vulnerability scan runs on both platforms of the published `latest`
   image, so a finding in the bundled Naabu or the Alpine packages that is
   published after a release fails the run. Fix or triage the finding as
-  described above, then publish a patch release.
+  described above, then publish a patch release;
+- `make vulncheck` runs on the source of the latest published release, with
+  the Go version in that release's `go.mod`, which built its binaries. A new
+  advisory for a module EdgeWatch calls or for that Go release fails the run.
+  Update the module or the `go` line in `go.mod`, then publish a patch
+  release.
 
 Before you tag a release, run `./scripts/check-apk-pins.sh` or start the
 workflow with `gh workflow run scheduled.yml`. GitHub reports a failed

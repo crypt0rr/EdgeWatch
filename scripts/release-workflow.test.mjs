@@ -1452,8 +1452,10 @@ test('every Node runtime pin matches the frontend image and Renovate groups them
   assert.ok(directNodePins > 0, 'at least one workflow must carry a direct Node pin')
   assert.equal(nodeVersionFileSteps, 1, 'the docs workflow must consume .node-version exactly once')
 
+  assert.ok(!renovate.enabledManagers || renovate.enabledManagers.includes('nodenv'), 'Renovate must not disable the built-in nodenv manager')
+  assert.deepEqual(renovateDependencies('.node-version', nodeVersionFile), [],
+    'the built-in nodenv manager must own .node-version without a duplicate custom regex extraction')
   const nodeDependency = { datasource: 'node-version', depName: 'node', currentValue: nodeVersion, currentDigest: undefined }
-  assert.deepEqual(renovateDependencies('.node-version', nodeVersionFile), [nodeDependency], 'Renovate must update .node-version')
   assert.deepEqual(renovateDependencies(developmentGuidePath, developmentGuide).filter((dependency) => dependency.depName === 'node'), [nodeDependency], 'Renovate must update the development guide pin')
   const nodeRule = renovate.packageRules.find((rule) => rule.matchPackageNames?.includes('node'))
   assert.ok(nodeRule, 'Renovate must group Node runtime updates')

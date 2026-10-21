@@ -66,10 +66,9 @@
     },
     {
       "customType": "regex",
-      "description": "Update the exact Node runtime pin in workflows, .node-version, and the maintainer guide.",
+      "description": "Update the exact Node runtime pin in workflows and the maintainer guide.",
       "managerFilePatterns": [
         "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/",
-        "/(^|/)\\.node-version$/",
         "/(^|/)docs/src/content/docs/maintainers/development\\.md$/"
       ],
       "matchStrings": [

@@ -496,14 +496,29 @@ func TestNormalizeStoredJobRetainsLegacyPortScopeHash(t *testing.T) {
 	if stored.TCP.Ports != "22,443" {
 		t.Fatalf("stored ports = %q, want canonical 22,443", stored.TCP.Ports)
 	}
+	legacyScope := NormalizeJob(legacy)
+	legacyScope.TCP.Ports = legacy.TCP.Ports
+	if want := legacyScope.securityHashNormalized(); oldHash != want {
+		t.Fatalf("legacy hash = %q, want previous raw-port hash %q", oldHash, want)
+	}
 	if stored.LegacySecurityHash() != oldHash {
 		t.Fatalf("legacy hash = %q, want %q", stored.LegacySecurityHash(), oldHash)
 	}
 	if stored.SecurityHash() == oldHash {
 		t.Fatal("canonical scope hash unexpectedly equals legacy raw-expression hash")
 	}
+	if got := NormalizeStoredJob(NormalizeJob(legacy)).LegacySecurityHash(); got != "" {
+		t.Fatalf("canonical stored job retained a legacy hash %q", got)
+	}
 	if got := NormalizeStoredJob(stored).LegacySecurityHash(); got != "" {
 		t.Fatalf("already-normalized stored job retained a stale legacy hash %q", got)
+	}
+	legacyUDP := Job{Targets: []string{"192.0.2.1"}, UDP: &Protocol{Ports: "443, 22"}}
+	storedUDP := NormalizeStoredJob(legacyUDP)
+	legacyUDPScope := NormalizeJob(legacyUDP)
+	legacyUDPScope.UDP.Ports = legacyUDP.UDP.Ports
+	if storedUDP.UDP.Ports != "22,443" || storedUDP.LegacySecurityHash() != legacyUDPScope.securityHashNormalized() {
+		t.Fatalf("legacy UDP job = ports %q, hash %q; want canonical 22,443 and previous raw-port hash %q", storedUDP.UDP.Ports, storedUDP.LegacySecurityHash(), legacyUDPScope.securityHashNormalized())
 	}
 	legacyNaabu := NormalizeStoredJob(Job{TCP: &Protocol{Engine: EngineNaabuNmap, Ports: "443"}})
 	if legacyNaabu.TCP.Ports != NaabuFullPortExpression || legacyNaabu.LegacySecurityHash() != "" {

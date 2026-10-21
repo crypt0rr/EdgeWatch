@@ -149,7 +149,7 @@ function PerimeterReport({ overview, canManage, canReadJobs, onRemove }: { overv
     {inProgress.length > 0 && <section className="panel" aria-labelledby="perimeter-progress-title">
       <div className="panel-heading"><div>
         <h2 id="perimeter-progress-title">Scan cycles in progress</h2>
-        <p className="muted">Their latest interrupted attempts left resumable work inside the resume window. Coverage is proven only after a successful scan of the current targets and protocols.</p>
+        <p className="muted">Their latest interrupted attempts left resumable work inside the resume window. Coverage is proven only after a successful scan matches the current security scope.</p>
       </div></div>
       <ul className="perimeter-monitor-list">{inProgress.map(monitor => <li key={monitor.job_id}><MonitorSummary monitor={monitor} canReadJobs={canReadJobs} details={[]} /></li>)}</ul>
     </section>}

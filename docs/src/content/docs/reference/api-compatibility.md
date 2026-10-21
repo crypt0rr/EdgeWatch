@@ -584,7 +584,7 @@ count as coverage.
 | `covering` | No check fails. |
 
 A `covering` monitor's coverage stays unproven until a successful scan
-establishes its current targets and protocols, including before the first
+establishes its current security scope, including before the first
 successful scan when recent resumable progress is shown. A latest failed,
 timed-out, or incomplete attempt also leaves coverage unproven unless recent
 resumable progress exists. Such progress preserves an existing same-scope
@@ -593,7 +593,9 @@ Other flags that leave coverage unproven are `stale`, with the `stale_reason`
 `overdue` once the `job-silent` watchdog's deadline has passed or
 `schedule never fires` when its schedule gives that rule no deadline;
 `stalled_cycle` when its active scan cycle is stalled; and `scope_changed`
-when the latest successful scan has different targets or protocols. Unlike
+when the latest successful scan's security hash does not match the current job
+scope. The hash covers settings such as targets, protocol settings,
+`max_expanded_hosts`, and `assume_alive`. Unlike
 the `job-silent` alert, which waits while a scan holds the job's lease,
 staleness does not wait for a scan that is still running. `cycle_in_progress`
 reports a resumable cycle with recent completed work; `cycle_completed_units`

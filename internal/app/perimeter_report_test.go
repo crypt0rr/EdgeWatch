@@ -769,11 +769,37 @@ func TestPerimeterCoverageProofTracksSecurityScopeHash(t *testing.T) {
 		t.Fatalf("successful current-scope scan did not restore proof: %+v", monitor)
 	}
 
-	changedProtocol := changed.Job
+	changedExpansionLimit := changed.Job
+	changedExpansionLimit.MaxExpandedHosts = 128
+	expansionRecord, _, err := f.ts.UpdateJob(ctx, changed.ID, changed.Revision, changedExpansionLimit, true, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report = f.report(t, f.ts)
+	monitor = perimeterMonitorNamed(t, report.Monitors, changedExpansionLimit.Name)
+	if !monitor.ScopeChanged || report.Totals.UnprovenMonitors != 1 {
+		t.Fatalf("max-expanded-hosts-only change remained proven: %+v", monitor)
+	}
+
+	expansionSuccessAt := successAt.Add(2 * time.Minute)
+	if err := f.db.System().SaveScan(ctx, model.Scan{
+		ID: "scope-proof-expansion-after", JobID: expansionRecord.ID, JobRevision: expansionRecord.Revision, Job: expansionRecord.Job.Name,
+		StartedAt: expansionSuccessAt.Add(-time.Minute), FinishedAt: expansionSuccessAt, Status: "success", ConfigHash: expansionRecord.Job.SecurityHash(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.setClock(expansionSuccessAt.Add(time.Minute))
+	report = f.report(t, f.ts)
+	monitor = perimeterMonitorNamed(t, report.Monitors, expansionRecord.Job.Name)
+	if monitor.ScopeChanged || report.Totals.UnprovenMonitors != 0 {
+		t.Fatalf("successful scan after host-expansion change did not restore proof: %+v", monitor)
+	}
+
+	changedProtocol := expansionRecord.Job
 	updatedProtocol := *changedProtocol.TCP
 	updatedProtocol.Ports = "80,443"
 	changedProtocol.TCP = &updatedProtocol
-	protocolRecord, _, err := f.ts.UpdateJob(ctx, changed.ID, changed.Revision, changedProtocol, true, false, true)
+	protocolRecord, _, err := f.ts.UpdateJob(ctx, expansionRecord.ID, expansionRecord.Revision, changedProtocol, true, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -783,7 +809,7 @@ func TestPerimeterCoverageProofTracksSecurityScopeHash(t *testing.T) {
 		t.Fatalf("protocol change remained proven: %+v", monitor)
 	}
 
-	protocolSuccessAt := successAt.Add(2 * time.Minute)
+	protocolSuccessAt := expansionSuccessAt.Add(2 * time.Minute)
 	if err := f.db.System().SaveScan(ctx, model.Scan{
 		ID: "scope-proof-protocol-after", JobID: protocolRecord.ID, JobRevision: protocolRecord.Revision, Job: protocolRecord.Job.Name,
 		StartedAt: protocolSuccessAt.Add(-time.Minute), FinishedAt: protocolSuccessAt, Status: "success", ConfigHash: protocolRecord.Job.SecurityHash(),

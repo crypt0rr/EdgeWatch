@@ -58,10 +58,10 @@ describe('perimeter presentation', () => {
     expect(unprovenReasons(perimeterMonitor({ stale: true, stale_reason: 'overdue', last_success_at: null }))).toEqual(['Not scanned yet'])
     expect(unprovenReasons(perimeterMonitor({ last_success_at: null }))).toEqual(['Not scanned yet'])
     expect(unprovenReasons(perimeterMonitor({ stale: true, stale_reason: 'schedule never fires', last_success_at: '2026-10-19T08:00:00Z' }))).toEqual(['Schedule never fires', expect.stringMatching(/^Last successful scan .*2026/)])
-    expect(unprovenReasons(perimeterMonitor({ scope_changed: true }))).toEqual(['Not scanned since its targets or protocols changed'])
+    expect(unprovenReasons(perimeterMonitor({ scope_changed: true }))).toEqual(['Not scanned since its security scope changed'])
     expect(unprovenReasons(perimeterMonitor({ cycle_in_progress: true, last_attempt_status: 'timed_out' }))).toEqual([])
     expect(unprovenReasons(perimeterMonitor({ cycle_in_progress: true, last_attempt_status: 'timed_out', last_success_at: null }))).toEqual(['Not scanned yet'])
-    expect(unprovenReasons(perimeterMonitor({ scope_changed: true, cycle_in_progress: true, last_attempt_status: 'timed_out' }))).toEqual(['Not scanned since its targets or protocols changed'])
+    expect(unprovenReasons(perimeterMonitor({ scope_changed: true, cycle_in_progress: true, last_attempt_status: 'timed_out' }))).toEqual(['Not scanned since its security scope changed'])
     expect(unprovenReasons(perimeterMonitor({ last_attempt_status: 'canceled' }))).toEqual([])
   })
 

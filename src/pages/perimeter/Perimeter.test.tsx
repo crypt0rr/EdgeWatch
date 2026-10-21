@@ -99,7 +99,7 @@ describe('Perimeter page', () => {
     const progress = await screen.findByRole('region', { name: 'Scan cycles in progress' })
     expect(progress).toHaveTextContent('Edge TCP')
     expect(progress).toHaveTextContent('Scan cycle in progress (1 of 16 units)')
-    expect(progress).toHaveTextContent('Coverage is proven only after a successful scan of the current targets and protocols.')
+    expect(progress).toHaveTextContent('Coverage is proven only after a successful scan matches the current security scope.')
     expect(progress).not.toHaveTextContent('Last attempt timed out')
     expect(screen.getByRole('region', { name: 'Coverage not proven' })).toHaveTextContent('Every covering monitor that touches the perimeter has proven its coverage.')
   })

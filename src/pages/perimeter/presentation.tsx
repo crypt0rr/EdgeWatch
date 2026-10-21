@@ -147,7 +147,7 @@ export function unprovenReasons(monitor: PerimeterMonitorRef): string[] {
     }
   }
   if (monitor.stalled_cycle) reasons.push('Scan cycle stalled')
-  if (monitor.scope_changed) reasons.push('Not scanned since its targets or protocols changed')
+  if (monitor.scope_changed) reasons.push('Not scanned since its security scope changed')
   const attempt = attemptLabels[monitor.last_attempt_status]
   if (attempt && !monitor.cycle_in_progress) reasons.push(attempt)
   return reasons

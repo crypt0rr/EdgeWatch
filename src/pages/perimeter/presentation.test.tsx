@@ -86,13 +86,19 @@ describe('perimeter presentation', () => {
 })
 
 describe('perimeter declare parsing', () => {
-  it('splits each non-blank line into its value and its trimmed label, keeping line numbers', () => {
+  it('splits each non-blank line into its value and normalized label, keeping line numbers', () => {
     expect(parsePerimeterLines('')).toEqual([])
-    expect(parsePerimeterLines('203.0.113.0/24\r\n\r\n  198.51.100.7   Mail relay  \rfe80::1   Lab\n2001:db8::/48\tDC2\tcore')).toEqual([
+    expect(parsePerimeterLines('203.0.113.0/24\r\n\r\n  198.51.100.7   Mail relay  \rfe80::1   Lab\u2003network\n2001:db8::/48\tDC2\tcore')).toEqual([
       { line: 1, value: '203.0.113.0/24', label: '' },
       { line: 3, value: '198.51.100.7', label: 'Mail relay' },
-      { line: 4, value: 'fe80::1', label: 'Lab' },
-      { line: 5, value: '2001:db8::/48', label: 'DC2\tcore' },
+      { line: 4, value: 'fe80::1', label: 'Lab network' },
+      { line: 5, value: '2001:db8::/48', label: 'DC2 core' },
+    ])
+  })
+
+  it('keeps non-whitespace control characters for server validation', () => {
+    expect(parsePerimeterLines('203.0.113.0/24 edge\u0007router')).toEqual([
+      { line: 1, value: '203.0.113.0/24', label: 'edge\u0007router' },
     ])
   })
 

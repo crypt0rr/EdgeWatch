@@ -13,8 +13,9 @@ export type PerimeterLine = { line: number; value: string; label: string }
 /**
  * Parses the bulk paste, one `<cidr-or-ip> [label]` per line. The value is
  * the text before the first run of whitespace and the label is the rest of
- * the line, trimmed; blank lines are skipped but keep their numbers, so a
- * refused entry is reported on the line it came from. The server validates
+ * the line, trimmed with runs of spaces, tabs, and Unicode spacing separators
+ * collapsed to one space; blank lines are skipped but keep their numbers, so
+ * a refused entry is reported on the line it came from. The server validates
  * every value and label.
  */
 export function parsePerimeterLines(text: string): PerimeterLine[] {
@@ -23,7 +24,8 @@ export function parsePerimeterLines(text: string): PerimeterLine[] {
     const line = raw.trim()
     if (!line) return
     const [value] = line.split(/\s/, 1)
-    parsed.push({ line: index + 1, value, label: line.slice(value.length).trim() })
+    const label = line.slice(value.length).trim().replace(/[\t\p{Zs}\u2028\u2029]+/gu, ' ')
+    parsed.push({ line: index + 1, value, label })
   })
   return parsed
 }

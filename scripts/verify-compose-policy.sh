@@ -16,6 +16,7 @@ import os
 import posixpath
 import re
 import sys
+from decimal import Decimal
 
 mode = sys.argv[1]
 value = json.loads(os.environ["COMPOSE_JSON"])
@@ -28,6 +29,39 @@ if not str(service.get("image", "")).startswith("ghcr.io/crypt0rr/edgewatch:"):
     raise SystemExit("Compose must use the published GHCR image")
 if service.get("read_only") is not True:
     raise SystemExit("runtime root filesystem must be read-only")
+stop_grace_period = service.get("stop_grace_period")
+duration_text = str(stop_grace_period or "")
+duration_parts = re.finditer(r"([0-9]+(?:\.[0-9]+)?)(ns|us|µs|ms|s|m|h)", duration_text)
+duration_units = {
+    "ns": Decimal("0.000000001"),
+    "us": Decimal("0.000001"),
+    "µs": Decimal("0.000001"),
+    "ms": Decimal("0.001"),
+    "s": Decimal(1),
+    "m": Decimal(60),
+    "h": Decimal(3600),
+}
+duration_seconds = Decimal(0)
+duration_end = 0
+for part in duration_parts:
+    if part.start() != duration_end:
+        break
+    duration_seconds += Decimal(part.group(1)) * duration_units[part.group(2)]
+    duration_end = part.end()
+if duration_end != len(duration_text) or duration_seconds < Decimal(420):
+    raise SystemExit("stop_grace_period must be at least 420 seconds")
+logging = service.get("logging")
+if not isinstance(logging, dict) or logging.get("driver") != "json-file":
+    raise SystemExit("container logs must use the json-file driver")
+log_options = logging.get("options")
+if not isinstance(log_options, dict):
+    raise SystemExit("json-file logs must set positive max-size and max-file bounds")
+max_size = re.fullmatch(r"([0-9]+)([kmg]?)", str(log_options.get("max-size", "")), re.IGNORECASE)
+if max_size is None or int(max_size.group(1)) == 0:
+    raise SystemExit("json-file max-size must be a positive byte size")
+max_file = log_options.get("max-file")
+if not re.fullmatch(r"[0-9]+", str(max_file or "")) or int(max_file) == 0:
+    raise SystemExit("json-file max-file must be a positive integer")
 if "ALL" not in service.get("cap_drop", []):
     raise SystemExit("all Linux capabilities must be dropped by default")
 # Privileged mode grants every capability and host device, which silently

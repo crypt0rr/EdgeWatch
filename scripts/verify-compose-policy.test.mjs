@@ -25,6 +25,11 @@ const service = ({ syn = false } = {}) => ({
   cap_add: ['NET_RAW', 'SETUID', 'SETGID', 'KILL', ...(syn ? ['NET_ADMIN'] : [])],
   security_opt: ['no-new-privileges:true'],
   read_only: true,
+  stop_grace_period: '7m0s',
+  logging: {
+    driver: 'json-file',
+    options: { 'max-size': '10m', 'max-file': '3' },
+  },
   tmpfs: ['/tmp:size=128m,mode=1777'],
   volumes: [
     bind('/opt/edgewatch/config.yaml', '/etc/edgewatch/config.yaml', true),
@@ -85,6 +90,7 @@ test('the unmodified base and SYN policies pass', async () => {
 // so the stricter mount and tmpfs checks cannot reject a valid deployment.
 for (const mode of ['base', 'syn']) {
   for (const [label, mutate] of [
+    ['a stop grace period of exactly 420 seconds', (value) => { value.stop_grace_period = '420s' }],
     ['a read-only notification key under /run/secrets', (value) => {
       value.volumes.push(bind('/opt/edgewatch/notification-encryption.key', '/run/secrets/edgewatch-notification-key', true))
     }],
@@ -107,6 +113,14 @@ for (const mode of ['base', 'syn']) {
 // Each case names the render it mutates and the guard that must reject it, so
 // a case cannot pass because an unrelated check happened to fail first.
 for (const [mode, label, mutate, expected] of [
+  ['base', 'missing stop_grace_period', (value) => { delete value.stop_grace_period }, /stop_grace_period must be at least 420 seconds/],
+  ['base', 'stop_grace_period below seven minutes', (value) => { value.stop_grace_period = '419s' }, /stop_grace_period must be at least 420 seconds/],
+  ['base', 'missing log rotation', (value) => { delete value.logging }, /container logs must use the json-file driver/],
+  ['base', 'a non-json-file log driver', (value) => { value.logging.driver = 'local' }, /container logs must use the json-file driver/],
+  ['base', 'missing log size bound', (value) => { delete value.logging.options['max-size'] }, /json-file max-size must be a positive byte size/],
+  ['base', 'zero log size bound', (value) => { value.logging.options['max-size'] = '0' }, /json-file max-size must be a positive byte size/],
+  ['base', 'missing log file bound', (value) => { delete value.logging.options['max-file'] }, /json-file max-file must be a positive integer/],
+  ['base', 'zero log file bound', (value) => { value.logging.options['max-file'] = '0' }, /json-file max-file must be a positive integer/],
   ['base', 'missing no-new-privileges', (value) => { delete value.security_opt }, /no-new-privileges must be enabled/],
   ['base', 'missing /tmp tmpfs', (value) => { delete value.tmpfs }, /\/tmp must be backed by a bounded tmpfs/],
   ['base', 'missing host networking', (value) => { value.network_mode = 'bridge' }, /host networking is required/],
@@ -124,6 +138,14 @@ for (const [mode, label, mutate, expected] of [
   ['base', 'ipc: host', (value) => { value.ipc = 'host' }, /ipc: host is not allowed/],
   ['base', 'userns_mode: host', (value) => { value.userns_mode = 'host' }, /userns_mode: host is not allowed/],
   ['syn', 'missing NET_ADMIN', (value) => { value.cap_add = ['NET_RAW', 'SETUID', 'SETGID', 'KILL'] }, /SYN override must grant NET_ADMIN/],
+  ['syn', 'missing stop_grace_period', (value) => { delete value.stop_grace_period }, /stop_grace_period must be at least 420 seconds/],
+  ['syn', 'stop_grace_period below seven minutes', (value) => { value.stop_grace_period = '419s' }, /stop_grace_period must be at least 420 seconds/],
+  ['syn', 'missing log rotation', (value) => { delete value.logging }, /container logs must use the json-file driver/],
+  ['syn', 'a non-json-file log driver', (value) => { value.logging.driver = 'local' }, /container logs must use the json-file driver/],
+  ['syn', 'missing log size bound', (value) => { delete value.logging.options['max-size'] }, /json-file max-size must be a positive byte size/],
+  ['syn', 'zero log size bound', (value) => { value.logging.options['max-size'] = '0' }, /json-file max-size must be a positive byte size/],
+  ['syn', 'missing log file bound', (value) => { delete value.logging.options['max-file'] }, /json-file max-file must be a positive integer/],
+  ['syn', 'zero log file bound', (value) => { value.logging.options['max-file'] = '0' }, /json-file max-file must be a positive integer/],
   ['syn', 'cap_add SYS_ADMIN', (value) => { value.cap_add = ['NET_RAW', 'SETUID', 'SETGID', 'KILL', 'NET_ADMIN', 'SYS_ADMIN'] }, /syn Compose must add only KILL, NET_ADMIN, NET_RAW, SETGID, SETUID; unexpected cap_add: SYS_ADMIN/],
   ['syn', 'cap_add ALL', (value) => { value.cap_add = ['NET_RAW', 'SETUID', 'SETGID', 'KILL', 'NET_ADMIN', 'ALL'] }, /unexpected cap_add: ALL/],
   ['syn', 'privileged mode', (value) => { value.privileged = true }, /privileged mode is not allowed/],

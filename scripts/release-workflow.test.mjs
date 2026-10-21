@@ -23,6 +23,8 @@ const workflows = await Promise.all(
 )
 const readRepositoryFile = (path) => readFile(resolve(repositoryRoot, path), 'utf8')
 const dockerfile = await readRepositoryFile('Dockerfile')
+const packageJson = JSON.parse(await readRepositoryFile('package.json'))
+const nodeVersionFile = await readRepositoryFile('.node-version')
 const makefile = await readRepositoryFile('Makefile')
 const goMod = await readRepositoryFile('go.mod')
 const developmentGuidePath = 'docs/src/content/docs/maintainers/development.md'
@@ -1403,13 +1405,62 @@ test('release verification keeps schema, scanner, build, and race gates current'
   assert.match(stepBlock(verify, 'Test'), /go test -race -timeout=25m -coverprofile=coverage\.out \.\/\.\.\./)
 })
 
-test('release Node setup matches the frontend image base', () => {
-  const frontendNodeVersion = /^FROM --platform=\$BUILDPLATFORM node:([0-9]+\.[0-9]+\.[0-9]+)-alpine/m.exec(dockerfile)?.[1]
+test('every Node runtime pin matches the frontend image and Renovate groups them together', () => {
+  const nodeVersion = /^FROM --platform=\$BUILDPLATFORM node:([0-9]+\.[0-9]+\.[0-9]+)-alpine/m.exec(dockerfile)?.[1]
   const releaseNodeVersion = /^  NODE_VERSION: ([0-9]+\.[0-9]+\.[0-9]+)$/m.exec(workflow)?.[1]
-  assert.ok(frontendNodeVersion, 'Dockerfile must declare the frontend Node version')
+  assert.ok(nodeVersion, 'Dockerfile must declare the frontend Node version')
   assert.ok(releaseNodeVersion, 'release workflow must declare its Node version')
-  assert.equal(releaseNodeVersion, frontendNodeVersion,
-    'release verification and builds must use the same Node version as the frontend image')
+  assert.equal(releaseNodeVersion, nodeVersion, 'release builds must use the Node version in the frontend image')
+
+  assert.match(nodeVersionFile, /^[0-9]+\.[0-9]+\.[0-9]+\r?\n?$/, '.node-version must contain one exact Node release')
+  assert.equal(nodeVersionFile.trim(), nodeVersion, '.node-version must match the frontend image')
+  assert.equal(packageJson.engines.node, '>=24.16.0 <25', 'the supported Node compatibility floor must remain Node 24.16.0')
+  assert.deepEqual([...developmentGuide.matchAll(/\bpinned to ([0-9]+\.[0-9]+\.[0-9]+)/g)].map((match) => match[1]), [nodeVersion],
+    'the development guide must name the exact runtime patch')
+
+  let setupNodeSteps = 0
+  let directNodePins = 0
+  let nodeVersionFileSteps = 0
+  const nodeVersionPattern = /^[0-9]+\.[0-9]+\.[0-9]+$/
+  for (const { file, text } of workflows) {
+    for (const step of stepsOf(text).filter((candidate) => /uses: actions\/setup-node@/.test(candidate))) {
+      setupNodeSteps++
+      const directVersion = /^ {10}node-version: (.+)$/m.exec(step)?.[1]
+      const versionFile = /^ {10}node-version-file: (\S+)$/m.exec(step)?.[1]
+      assert.equal(Number(Boolean(directVersion)) + Number(Boolean(versionFile)), 1,
+        `${file} setup-node steps must select exactly one version source`)
+      if (versionFile) {
+        nodeVersionFileSteps++
+        assert.equal(file, '.github/workflows/docs.yml', 'only the docs workflow should use a version file')
+        assert.equal(versionFile, '.node-version', 'the docs workflow must use the shared Node version file')
+      } else if (directVersion === '${{ env.NODE_VERSION }}') {
+        assert.equal(file, '.github/workflows/release.yml', 'only the release workflow may use its Node version variable')
+        assert.equal(releaseNodeVersion, nodeVersion)
+      } else {
+        directNodePins++
+        assert.match(directVersion, nodeVersionPattern, `${file} setup-node must name an exact Node patch`)
+        assert.equal(directVersion, nodeVersion, `${file} setup-node pin must match the frontend image`)
+      }
+    }
+    const nodeDependencies = renovateDependencies(file, text).filter((dependency) => dependency.depName === 'node')
+    const expectedNodeDependencies = [...text.matchAll(/^ {10}node-version: [0-9]+\.[0-9]+\.[0-9]+$/gm)].length
+      + [...text.matchAll(/^  NODE_VERSION: [0-9]+\.[0-9]+\.[0-9]+$/gm)].length
+    assert.equal(nodeDependencies.length, expectedNodeDependencies, `Renovate must track every Node pin in ${file}`)
+    assert.ok(nodeDependencies.every((dependency) => dependency.currentValue === nodeVersion), `${file} Node pins must resolve to one runtime version`)
+  }
+  assert.ok(setupNodeSteps > 0, 'workflows must set up Node')
+  assert.ok(directNodePins > 0, 'at least one workflow must carry a direct Node pin')
+  assert.equal(nodeVersionFileSteps, 1, 'the docs workflow must consume .node-version exactly once')
+
+  assert.ok(!renovate.enabledManagers || renovate.enabledManagers.includes('nodenv'), 'Renovate must not disable the built-in nodenv manager')
+  assert.deepEqual(renovateDependencies('.node-version', nodeVersionFile), [],
+    'the built-in nodenv manager must own .node-version without a duplicate custom regex extraction')
+  const nodeDependency = { datasource: 'node-version', depName: 'node', currentValue: nodeVersion, currentDigest: undefined }
+  assert.deepEqual(renovateDependencies(developmentGuidePath, developmentGuide).filter((dependency) => dependency.depName === 'node'), [nodeDependency], 'Renovate must update the development guide pin')
+  const nodeRule = renovate.packageRules.find((rule) => rule.matchPackageNames?.includes('node'))
+  assert.ok(nodeRule, 'Renovate must group Node runtime updates')
+  assert.equal(nodeRule.allowedVersions, '/^24\\./', 'Renovate must keep the Node 24 release line')
+  assert.equal(nodeRule.groupName, 'Node.js runtime', 'all Node pins must update in one pull request')
 })
 
 // CI's Go jobs and the release binaries use the Go that go.mod names, the
@@ -1440,7 +1491,7 @@ test('go.mod, the golang images, and the development guide name one Go release t
   assert.deepEqual([...developmentGuide.matchAll(/\bGo ([0-9]+\.[0-9]+\.[0-9]+)\b/g)].map((match) => match[1]), [goVersion],
     'the development guide must name the Go release in go.mod')
 
-  assert.deepEqual(renovateDependencies(developmentGuidePath, developmentGuide), [
+  assert.deepEqual(renovateDependencies(developmentGuidePath, developmentGuide).filter((dependency) => dependency.depName === 'go'), [
     { datasource: 'golang-version', depName: 'go', currentValue: goVersion, currentDigest: undefined },
   ])
   const bump = renovate.packageRules.filter((rule) => rule.matchDepTypes?.includes('golang'))

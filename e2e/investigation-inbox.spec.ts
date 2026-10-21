@@ -1,10 +1,12 @@
 import { expect, test, type Page } from '@playwright/test'
+import type { IncidentInboxItem, IncidentInboxPage, IncidentReview } from '../src/generated/api-types'
 import { mockConsole } from './mock-console'
 
-const review0 = { status: 'needs_review', reviewer_label: null, reviewed_at: null, note: '', follow_up_at: null, revision: 0 }
+const review0: IncidentReview = { status: 'needs_review', reviewer_label: null, reviewed_at: null, note: '', follow_up_at: null, revision: 0 }
+type IncidentReviewUpdateRequest = { occurrence_token: string; expected_revision: number; status: string; note: string; follow_up_at: string | null }
 const pagination = (offset: number, total: number, count: number) => ({ limit: 20, offset, total, has_more: offset + count < total, next_offset: offset + count < total ? offset + 20 : null })
 
-function incident(index: number, review = review0, occurrenceToken = `occurrence-${index}`, lastSeenAt?: string) {
+function incident(index: number, review: IncidentReview = review0, occurrenceToken = `occurrence-${index}`, lastSeenAt?: string): IncidentInboxItem {
   const opened = new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString()
   return {
     job_id: 'job-1', job: 'Production perimeter monitoring', occurrence_token: occurrenceToken,
@@ -20,13 +22,13 @@ function incident(index: number, review = review0, occurrenceToken = `occurrence
 }
 
 async function installInboxAPI(page: Page, conflict: 'revision-move' | 'occurrence-closed' | 'lookup-error' = 'revision-move', total = 21) {
-  let currentReview = review0
+  let currentReview: IncidentReview = review0
   let reviewWrites = 0
   let occurrenceChanged = false
   let replacedOccurrence = ''
   let lastSeenAt = ''
   let serverNow = new Date().toISOString()
-  const writes: Record<string, unknown>[] = []
+  const writes: IncidentReviewUpdateRequest[] = []
   const lookups: string[] = []
   await page.route(url => new URL(url).pathname === '/api/v1/incidents', async route => {
     const url = new URL(route.request().url())
@@ -56,7 +58,8 @@ async function installInboxAPI(page: Page, conflict: 'revision-move' | 'occurren
         return
       }
       const selected = all.filter(row => row.occurrence_token === token).slice(0, limit)
-      await route.fulfill({ json: { incidents: selected, pagination: pagination(0, selected.length, selected.length), truncated: false, active_count: total, server_now: serverNow, next_follow_up_at: nextFollowUpAt } })
+      const response: IncidentInboxPage = { incidents: selected, pagination: pagination(0, selected.length, selected.length), truncated: false, active_count: total, server_now: serverNow, next_follow_up_at: nextFollowUpAt }
+      await route.fulfill({ json: response })
       return
     }
     const view = url.searchParams.get('view') ?? 'all_active'
@@ -65,11 +68,12 @@ async function installInboxAPI(page: Page, conflict: 'revision-move' | 'occurren
         : view === 'follow_up_due' ? all.filter(row => row.review.status === 'investigating' && !!row.review.follow_up_at && Date.parse(row.review.follow_up_at) <= Date.parse(serverNow))
         : all
     const selected = byView.slice(offset, offset + limit)
-    await route.fulfill({ json: { incidents: selected, pagination: pagination(offset, byView.length, selected.length), truncated: false, active_count: total, server_now: serverNow, next_follow_up_at: nextFollowUpAt } })
+    const response: IncidentInboxPage = { incidents: selected, pagination: pagination(offset, byView.length, selected.length), truncated: false, active_count: total, server_now: serverNow, next_follow_up_at: nextFollowUpAt }
+    await route.fulfill({ json: response })
   })
   await page.route('**/api/v1/jobs/job-1/incidents/review', async route => {
     if (route.request().method() !== 'PUT') return route.fallback()
-    const payload = route.request().postDataJSON() as Record<string, unknown>
+    const payload = route.request().postDataJSON() as IncidentReviewUpdateRequest
     writes.push(payload)
     if (reviewWrites++ === 0) {
       if (conflict === 'revision-move') {

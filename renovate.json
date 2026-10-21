@@ -66,8 +66,17 @@
     },
     {
       "customType": "regex",
-      "managerFilePatterns": ["/(^|/)\\.github/workflows/release\\.yml$/"],
-      "matchStrings": ["NODE_VERSION:\\s*(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"],
+      "description": "Update the exact Node runtime pin in workflows and the maintainer guide.",
+      "managerFilePatterns": [
+        "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/",
+        "/(^|/)docs/src/content/docs/maintainers/development\\.md$/"
+      ],
+      "matchStrings": [
+        "NODE_VERSION:\\s*(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)",
+        "node-version:\\s*(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)",
+        "^(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)(?:\\r?\\n|$)",
+        "pinned to (?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
       "depNameTemplate": "node",
       "packageNameTemplate": "node",
       "datasourceTemplate": "node-version",
@@ -96,8 +105,10 @@
       "groupName": "Go toolchain"
     },
     {
+      "description": "Keep the container, workflow, version-file, and guide Node pins together on one supported Node 24 release.",
       "matchPackageNames": ["node"],
-      "allowedVersions": "/^24\\./"
+      "allowedVersions": "/^24\\./",
+      "groupName": "Node.js runtime"
     },
     {
       "description": "Wait three days before proposing an npm release: the registry lets its author unpublish it within 72 hours, and most malicious releases are found and removed in that time. Security updates are not delayed.",

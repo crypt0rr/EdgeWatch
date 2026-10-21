@@ -1,4 +1,6 @@
 import { expect, test } from '@playwright/test'
+import type { AdminStatus, IncidentInboxPage, IncidentInboxSummary, Scan } from '../src/generated/api-types'
+import type { GlobalHostSummary, Job, JobForm } from '../src/types'
 
 const adminPermissions = [
   'overview.read', 'jobs.read', 'jobs.write', 'jobs.run', 'jobs.delete',
@@ -24,14 +26,14 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   let loggedIn = false
   let csrf = ''
   let displayName = 'admin'
-  let createdJob: Record<string, unknown> | null = null
-  const existingJob = {
+  const createdJob: { current: Job | null } = { current: null }
+  const existingJob: Job = {
     id: 'job-existing', revision: 1, enabled: true, archived: false, security_hash: 'existing-hash',
     created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
     job: { name: 'nightly', schedule: '0 */6 * * *', timezone: 'Europe/Amsterdam', targets: ['192.0.2.2'], max_expanded_hosts: 256, tcp: { ports: '22', mode: 'connect', service_detection: false }, timing: 'balanced', timeout: '1h', baseline_samples: 1, change_confirmations: 1 },
     baseline: { status: 'collecting', samples: 0, attempts: 0 },
   }
-  const scan = {
+  const scan: Scan = {
     id: 'scan-1', job_id: 'job-1', job: 'edge-router', job_revision: 1,
     started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:00:01Z',
     status: 'success', config_hash: 'hash', snapshot: { units: [], scopes: [] },
@@ -44,7 +46,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
       { protocol: 'udp', scan_type: 'udp', scanned_ports: '53', scanned_port_count: 1, service_detection: false, ports: [{ port: 53, state: 'open|filtered', reason: 'udp-response', reason_ttl: 64 }], state_summaries: [{ state: 'open|filtered', count: 1 }] },
     ],
   }
-  const globalHosts = [
+  const globalHosts: GlobalHostSummary[] = [
     { address: '192.0.2.1', address_family: 'IPv4', source_targets: ['router.example.com'], protocols: [{ protocol: 'tcp', scanned_ports: '22', scanned_port_count: 1, service_detection: false, open_ports: 1, open_filtered_ports: 0 }], open_ports: 1, open_filtered_ports: 0, has_open_ports: true, job_id: 'job-1', job: 'edge-router', scan_id: 'scan-1', scanned_at: '2026-01-01T00:00:01Z', data_quality: 'detailed' },
     { address: '192.0.2.222', address_family: 'IPv4', source_targets: ['switch-222.example.com'], protocols: [{ protocol: 'tcp', scanned_ports: '443', scanned_port_count: 1, service_detection: false, open_ports: 0, open_filtered_ports: 0 }], open_ports: 0, open_filtered_ports: 0, has_open_ports: false, job_id: 'job-2', job: 'switches', scan_id: 'scan-2', scanned_at: '2026-01-01T00:00:01Z', data_quality: 'detailed' },
   ]
@@ -53,7 +55,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
     const request = route.request()
     const path = new URL(request.url()).pathname.replace('/api/v1', '')
     const method = request.method()
-    const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
+    const json = <T,>(body: T, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 
     if (path === '/stream') {
       await route.abort()
@@ -69,7 +71,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
       return
     }
     if (path === '/status' && method === 'GET') {
-      await json({ configured: true, username: 'admin', display_name: displayName, version: 'v0.7.0', notification_destinations: 0, notifications: { deployment: 0, managed: 0, active: 0, locked: 0, key_state: 'not_required' }, retention: '90d', max_concurrent_scans: 1 })
+      await json<AdminStatus>({ configured: true, username: 'admin', display_name: displayName, version: 'v0.7.0', notification_destinations: 0, notifications: { deployment: 0, managed: 0, active: 0, locked: 0, key_state: 'not_required' }, retention: '90d', max_concurrent_scans: 1, updates: { enabled: true, status: 'up_to_date', current_version: 'v0.7.0', available: false, stale: false } })
       return
     }
     if (path === '/scans/active' && method === 'GET') {
@@ -77,11 +79,11 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
       return
     }
     if (path === '/incidents' && method === 'GET') {
-      await json({ incidents: [{ job_id: 'job-existing', job: 'nightly', occurrence_token: 'occurrence-existing', opening_time_known: true, opening_scan_available: true, view_status: 'needs_review', incident: { change: { key: 'port|192.0.2.2|tcp|443', kind: 'port', target: '192.0.2.2', protocol: 'tcp', port: 443, severity: 'critical' }, scan_id: 'scan-1', opened_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:00:00Z', recovery_count: 0 }, review: { status: 'needs_review', reviewer_label: null, reviewed_at: null, note: '', follow_up_at: null, revision: 0 }, observation_uncertainty: { status: 'unknown', reason: 'no_newer_observation' } }], pagination: { limit: 20, offset: 0, total: 1, has_more: false, next_offset: null }, truncated: false, active_count: 1, server_now: new Date().toISOString(), next_follow_up_at: null })
+      await json<IncidentInboxPage>({ incidents: [{ job_id: 'job-existing', job: 'nightly', occurrence_token: 'occurrence-existing', opening_time_known: true, opening_scan_available: true, view_status: 'needs_review', incident: { change: { key: 'port|192.0.2.2|tcp|443', kind: 'port', target: '192.0.2.2', protocol: 'tcp', port: 443, severity: 'critical' }, scan_id: 'scan-1', opened_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:00:00Z', recovery_count: 0 }, review: { status: 'needs_review', reviewer_label: null, reviewed_at: null, note: '', follow_up_at: null, revision: 0 }, observation_uncertainty: { status: 'unknown', reason: 'no_newer_observation' } }], pagination: { limit: 20, offset: 0, total: 1, has_more: false, next_offset: null }, truncated: false, active_count: 1, server_now: new Date().toISOString(), next_follow_up_at: null })
       return
     }
     if (path === '/incidents/summary' && method === 'GET') {
-      await json({ active_count: 1 })
+      await json<IncidentInboxSummary>({ active_count: 1 })
       return
     }
     if (path === '/hosts' && method === 'GET') {
@@ -137,7 +139,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
       return
     }
     if (path === '/jobs' && method === 'GET') {
-      await json({ jobs: [existingJob, ...(createdJob ? [createdJob] : [])] })
+      await json({ jobs: [existingJob, ...(createdJob.current ? [createdJob.current] : [])] })
       return
     }
     if (path === '/jobs/schedule-suggestion' && method === 'GET') {
@@ -146,20 +148,20 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
       return
     }
     if (path === '/jobs' && method === 'POST') {
-      const payload = JSON.parse(request.postData() ?? '{}') as Record<string, unknown>
-      createdJob = {
+      const payload = JSON.parse(request.postData() ?? '{}') as JobForm
+      createdJob.current = {
         id: 'job-1', revision: 1, enabled: true, archived: false, security_hash: 'hash',
         created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
         job: payload, baseline: { status: 'complete', samples: 1, attempts: 1, host_count: 1, scan_id: 'scan-1' },
       }
-      await json(createdJob, 201)
+      await json(createdJob.current, 201)
       return
     }
     if (path === '/notifications/destinations' && method === 'GET') {
       await json({ destinations: [{ id: 'dest-1', name: 'Operations', provider: 'generic', source: 'web', enabled: true, locked: false, read_only: false, revision: 1 }], status: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' } })
       return
     }
-    if (path === '/jobs/job-1' && method === 'GET') { await json(createdJob); return }
+    if (path === '/jobs/job-1' && method === 'GET') { await json(createdJob.current); return }
     if (path === '/jobs/job-1/change-windows' && method === 'GET') { await json({ windows: [] }); return }
     if (path === '/jobs/job-1/scans' && method === 'GET') {
       await json({ scans: [scan], pagination: { limit: 20, offset: 0, total: 1, has_more: false, next_offset: null } })
@@ -239,12 +241,12 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
 
   await expect(page).toHaveURL(/\/jobs$/)
   await expect(page.getByRole('heading', { name: 'edge-router' })).toBeVisible()
-  expect(createdJob?.job && (createdJob.job as Record<string, unknown>).targets).toEqual(['router.example.com', '192.0.2.1/32'])
-  expect(createdJob?.job && (createdJob.job as Record<string, unknown>).udp).toMatchObject({ ports: '53,123' })
-  expect(createdJob?.job && (createdJob.job as Record<string, unknown>).assume_alive).toBe(false)
-  expect(createdJob?.job && (createdJob.job as Record<string, unknown>).run_on_start).toBe(false)
-  expect(createdJob?.job && (createdJob.job as Record<string, unknown>).schedule).toBe('*/15 * * * *')
-  expect(createdJob?.job && (createdJob.job as Record<string, unknown>).notification_destinations).toEqual(['dest-1'])
+  expect(createdJob.current?.job.targets).toEqual(['router.example.com', '192.0.2.1/32'])
+  expect(createdJob.current?.job.udp).toMatchObject({ ports: '53,123' })
+  expect(createdJob.current?.job.assume_alive).toBe(false)
+  expect(createdJob.current?.job.run_on_start).toBe(false)
+  expect(createdJob.current?.job.schedule).toBe('*/15 * * * *')
+  expect(createdJob.current?.job.notification_destinations).toEqual(['dest-1'])
   await page.getByRole('link', { name: /edge-router/ }).click()
   await expect(page.getByRole('heading', { name: 'edge-router' })).toBeVisible()
   await expect(page.getByRole('link', { name: /Explore baseline/ })).toContainText('1')

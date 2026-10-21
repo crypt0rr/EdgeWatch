@@ -6,6 +6,7 @@ const fullTCP: PerimeterSuggestion = {
   mode: 'full_tcp',
   targets: ['203.0.113.0/24'],
   addresses: 256,
+  already_covered_addresses: 0,
   estimated_probes: 16_776_960,
   protocol: { protocol: 'tcp', engine: 'naabu_nmap', ports: '1-65535', mode: 'connect', service_detection: false, profile_id: '00000000-0000-0000-0000-000000000014' },
 }
@@ -14,6 +15,7 @@ const udp: PerimeterSuggestion = {
   mode: 'udp',
   targets: ['198.51.100.0/24', '198.51.100.0/27', '192.0.2.7'],
   addresses: 289,
+  already_covered_addresses: 0,
   estimated_probes: 3468,
   protocol: { protocol: 'udp', engine: 'nmap', ports: '53,123,161,500,1194,4500', service_detection: true },
 }

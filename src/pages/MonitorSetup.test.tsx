@@ -142,7 +142,7 @@ const perimeterSelectedTCP: PerimeterProtocol = { protocol: 'tcp', engine: 'nmap
 const perimeterUDP: PerimeterProtocol = { protocol: 'udp', engine: 'nmap', ports: '53,123,161,500,1194,4500', service_detection: true }
 
 function perimeterSuggestion(overrides: Partial<PerimeterSuggestion> = {}): PerimeterSuggestion {
-  return { mode: 'full_tcp', targets: ['203.0.112.0/24', '203.0.113.64/27'], addresses: 288, estimated_probes: 18_874_080, protocol: perimeterFullTCP, ...overrides }
+  return { mode: 'full_tcp', targets: ['203.0.112.0/24', '203.0.113.64/27'], addresses: 288, already_covered_addresses: 0, estimated_probes: 18_874_080, protocol: perimeterFullTCP, ...overrides }
 }
 
 function perimeterRoute(state: unknown) {

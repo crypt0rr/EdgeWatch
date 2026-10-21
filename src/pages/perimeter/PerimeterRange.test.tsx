@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, getPerimeter, getPerimeterRange, getSession } from '../../api'
 import type { PerimeterSuggestion } from '../../generated/api-types'
 import { readPerimeterPrefill } from '../../perimeter-prefill'
-import { blocks, perimeterMonitor, perimeterOverview, perimeterRange, perimeterRangeDetail, perimeterSuggestion, selectedTCPProtocol, udpProtocol } from '../../test/perimeter-fixtures'
+import { blocks, fullTCPProtocol, perimeterMonitor, perimeterOverview, perimeterRange, perimeterRangeDetail, perimeterSuggestion, selectedTCPProtocol, udpProtocol } from '../../test/perimeter-fixtures'
 import { renderWithProviders } from '../../test/test-utils'
 import { PerimeterRangeView } from './PerimeterRange'
 
@@ -101,6 +101,41 @@ describe('Perimeter range detail', () => {
       source: '203.0.113.0/24',
     } })
     expect(readPerimeterPrefill(state)).toEqual(state.perimeterPrefill)
+  })
+
+  it('shows a bounded coalesced alternative and opens its targets in guided setup', async () => {
+    const coalesced = perimeterSuggestion({
+      targets: ['203.0.113.0/24'],
+      addresses: 256,
+      already_covered_addresses: 10,
+      estimated_probes: 16_776_960,
+    })
+    vi.mocked(getPerimeterRange).mockResolvedValue(perimeterRangeDetail({
+      coalesced_monitors_needed: { full_tcp: 1, selected_tcp: 0, udp: 0 },
+      coalesced_suggestions: [coalesced],
+    }))
+    renderDetail()
+
+    const full = await screen.findByRole('region', { name: 'Full TCP' })
+    expect(within(full).getByRole('heading', { level: 4, name: 'Gaps-only option' })).toBeInTheDocument()
+    const coalescedHeading = screen.getByRole('heading', { level: 4, name: 'Coalesced alternative' })
+    const coalescedPlan = coalescedHeading.parentElement
+    const coalescedAlternative = coalescedPlan?.parentElement
+    expect(coalescedPlan).not.toBeNull()
+    expect(coalescedAlternative).not.toBeNull()
+    expect(within(coalescedAlternative!).getByText(/Targets may include already-covered addresses/)).toBeInTheDocument()
+    expect(within(coalescedPlan!).getByText(/Includes 10 already-covered addresses/)).toBeInTheDocument()
+    fireEvent.click(within(coalescedPlan!).getByRole('button', { name: 'Create monitor' }))
+
+    const state = JSON.parse((await screen.findByTestId('jobs-new')).textContent ?? 'null')
+    expect(state.perimeterPrefill).toEqual({
+      name: 'Perimeter 203.0.113.0/24 · full TCP',
+      targets: ['203.0.113.0/24'],
+      mode: 'full_tcp',
+      protocol: fullTCPProtocol,
+      addresses: 256,
+      source: '203.0.113.0/24',
+    })
   })
 
   it('shows suggestions as text without jobs.write', async () => {

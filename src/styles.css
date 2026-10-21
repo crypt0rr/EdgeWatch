@@ -3268,6 +3268,9 @@ a.perimeter-monitor-name { color: #83b9ef; text-decoration: underline; text-unde
 .perimeter-cidr-list code { display: inline-block; padding: 3px 7px; border: 1px solid #203c59; border-radius: 6px; background: #091727; color: #b5d7fb; font-size: 11px; overflow-wrap: anywhere; }
 .perimeter-modes { display: grid; gap: 14px; margin-top: 14px; }
 .perimeter-mode-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; }
+.perimeter-suggestion-plan { display: grid; gap: 8px; }
+.perimeter-suggestion-plan h4 { margin: 0; color: #cfe1f5; font-size: 12px; }
+.perimeter-suggestion-alternative { display: grid; gap: 8px; margin-top: 4px; padding-top: 12px; border-top: 1px solid #1c3047; }
 .perimeter-needs { display: grid; gap: 4px; margin: 0; color: #dcecff; font-size: 12px; }
 .perimeter-suggestion-list > li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; }
 .perimeter-suggestion-copy { display: grid; flex: 1 1 240px; gap: 6px; min-width: 0; }

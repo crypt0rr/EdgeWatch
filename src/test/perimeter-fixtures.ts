@@ -76,7 +76,7 @@ export const selectedTCPProtocol = { protocol: 'tcp', engine: 'nmap', ports: '22
 export const udpProtocol = { protocol: 'udp', engine: 'nmap', ports: '53,123,161,500,1194,4500', service_detection: true }
 
 export function perimeterSuggestion(overrides: Partial<PerimeterSuggestion> = {}): PerimeterSuggestion {
-  return { mode: 'full_tcp', targets: ['203.0.113.0/25'], addresses: 128, estimated_probes: 8_388_480, protocol: fullTCPProtocol, ...overrides }
+  return { mode: 'full_tcp', targets: ['203.0.113.0/25'], addresses: 128, already_covered_addresses: 0, estimated_probes: 8_388_480, protocol: fullTCPProtocol, ...overrides }
 }
 
 export function blocks(cidrs: string[], total = cidrs.length): PerimeterBlocks {
@@ -95,6 +95,9 @@ export function perimeterRangeDetail(overrides: Partial<PerimeterRangeDetail> = 
       perimeterSuggestion({ mode: 'udp', targets: ['203.0.113.0/24'], addresses: 256, estimated_probes: 3072, protocol: udpProtocol }),
     ],
     suggestions_truncated: { full_tcp: false, selected_tcp: false, udp: false },
+    coalesced_monitors_needed: { full_tcp: 0, selected_tcp: 0, udp: 0 },
+    coalesced_suggestions: [],
+    coalesced_suggestions_truncated: { full_tcp: false, selected_tcp: false, udp: false },
     budget_too_low: { full_tcp: false, selected_tcp: false, udp: false },
     ...overrides,
   }

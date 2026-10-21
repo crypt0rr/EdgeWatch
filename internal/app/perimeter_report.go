@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math/bits"
 	"net/netip"
 	"sort"
 	"time"
@@ -62,6 +63,15 @@ const (
 	perimeterMaxUncovered = 256
 	// perimeterMaxSuggestions bounds the suggestions of one range and mode.
 	perimeterMaxSuggestions = 64
+	// perimeterMaxCoalescedPrefixBits limits one coalesced target to a /24,
+	// or 256 addresses. A smaller monitor budget tightens this further.
+	perimeterMaxCoalescedPrefixBits = 24
+	// perimeterMaxCoalescedSuggestions bounds the alternative plan per range
+	// and mode. An over-limit plan is withheld rather than returned partially.
+	perimeterMaxCoalescedSuggestions = 16
+	// perimeterMaxCoalescedTargets bounds the target list of one coalesced
+	// suggestion, keeping the alternative easy to review in the console.
+	perimeterMaxCoalescedTargets = 16
 )
 
 // perimeterCountLimit is where every address count of the API saturates:
@@ -246,7 +256,14 @@ type PerimeterRangeDetail struct {
 	MonitorsNeeded       PerimeterModeCounts   `json:"monitors_needed"`
 	Suggestions          []PerimeterSuggestion `json:"suggestions"`
 	SuggestionsTruncated PerimeterModeFlags    `json:"suggestions_truncated"`
-	BudgetTooLow         PerimeterModeFlags    `json:"budget_too_low"`
+	// CoalescedSuggestions is a complete alternative that may include already
+	// covered, but never excluded, addresses. It is withheld when more than
+	// 16 monitors would be needed; then CoalescedSuggestionsTruncated is true
+	// and CoalescedMonitorsNeeded is 17 (meaning 17 or more).
+	CoalescedMonitorsNeeded       PerimeterModeCounts   `json:"coalesced_monitors_needed"`
+	CoalescedSuggestions          []PerimeterSuggestion `json:"coalesced_suggestions"`
+	CoalescedSuggestionsTruncated PerimeterModeFlags    `json:"coalesced_suggestions_truncated"`
+	BudgetTooLow                  PerimeterModeFlags    `json:"budget_too_low"`
 }
 
 // PerimeterUncovered holds the uncovered blocks of a range per bucket.
@@ -283,10 +300,11 @@ type PerimeterModeFlags struct {
 // they hold, the probes a run of them is estimated to send, and the exact
 // protocol settings the console applies to the new monitor.
 type PerimeterSuggestion struct {
-	Mode            string   `json:"mode"`
-	Targets         []string `json:"targets"`
-	Addresses       int      `json:"addresses"`
-	EstimatedProbes int64    `json:"estimated_probes"`
+	Mode                    string            `json:"mode"`
+	Targets                 []string          `json:"targets"`
+	Addresses               int               `json:"addresses"`
+	AlreadyCoveredAddresses int               `json:"already_covered_addresses"`
+	EstimatedProbes         int64             `json:"estimated_probes"`
 	// MinimumDurationSeconds is Full TCP's probe-rate lower bound. It excludes
 	// response time, retries, and Nmap confirmation.
 	MinimumDurationSeconds int64             `json:"minimum_duration_seconds,omitempty"`
@@ -435,7 +453,10 @@ func (a *App) PerimeterRangeDetail(ctx context.Context, ts *store.TenantStore, i
 		return PerimeterRangeDetail{}, err
 	}
 	whole := addrspace.FromPrefix(prefix)
-	detail := PerimeterRangeDetail{Range: state.rangeView(seed, prefix), Monitors: []PerimeterMonitorRef{}, Suggestions: []PerimeterSuggestion{}}
+	detail := PerimeterRangeDetail{
+		Range: state.rangeView(seed, prefix), Monitors: []PerimeterMonitorRef{},
+		Suggestions: []PerimeterSuggestion{}, CoalescedSuggestions: []PerimeterSuggestion{},
+	}
 	for _, monitor := range state.monitors {
 		if perimeterOverlaps(monitor.ranges, []addrspace.Range{whole}) {
 			detail.Monitors = append(detail.Monitors, monitor.ref)
@@ -450,8 +471,8 @@ func (a *App) PerimeterRangeDetail(ctx context.Context, ts *store.TenantStore, i
 	}
 	detail.Uncovered = PerimeterUncovered{FullTCP: blocks[perimeterFullTCP], AnyTCP: blocks[perimeterAnyTCP], UDP: blocks[perimeterUDP]}
 
-	var perMonitor, needed [len(perimeterPresets)]int
-	var truncated, tooLow [len(perimeterPresets)]bool
+	var perMonitor, needed, coalescedNeeded [len(perimeterPresets)]int
+	var truncated, coalescedTruncated, tooLow [len(perimeterPresets)]bool
 	for index, preset := range perimeterPresets {
 		size, err := state.addressesPerMonitor(preset)
 		if err != nil {
@@ -471,10 +492,22 @@ func (a *App) PerimeterRangeDetail(ctx context.Context, ts *store.TenantStore, i
 			}
 			detail.Suggestions = append(detail.Suggestions, suggestion)
 		}
+		coalescedSets, coalescedCount, coalescedCut := perimeterCoalescedSuggestionSets(base, gaps[preset.bucket], size)
+		coalescedNeeded[index], coalescedTruncated[index] = coalescedCount, coalescedCut
+		for _, set := range coalescedSets {
+			suggestion, err := perimeterSuggestion(preset, set.targets)
+			if err != nil {
+				return PerimeterRangeDetail{}, err
+			}
+			suggestion.AlreadyCoveredAddresses = set.alreadyCovered
+			detail.CoalescedSuggestions = append(detail.CoalescedSuggestions, suggestion)
+		}
 	}
 	detail.AddressesPerMonitor = PerimeterModeCounts{FullTCP: perMonitor[0], SelectedTCP: perMonitor[1], UDP: perMonitor[2]}
 	detail.MonitorsNeeded = PerimeterModeCounts{FullTCP: needed[0], SelectedTCP: needed[1], UDP: needed[2]}
 	detail.SuggestionsTruncated = PerimeterModeFlags{FullTCP: truncated[0], SelectedTCP: truncated[1], UDP: truncated[2]}
+	detail.CoalescedMonitorsNeeded = PerimeterModeCounts{FullTCP: coalescedNeeded[0], SelectedTCP: coalescedNeeded[1], UDP: coalescedNeeded[2]}
+	detail.CoalescedSuggestionsTruncated = PerimeterModeFlags{FullTCP: coalescedTruncated[0], SelectedTCP: coalescedTruncated[1], UDP: coalescedTruncated[2]}
 	detail.BudgetTooLow = PerimeterModeFlags{FullTCP: tooLow[0], SelectedTCP: tooLow[1], UDP: tooLow[2]}
 	return detail, nil
 }
@@ -790,6 +823,105 @@ func perimeterSuggestion(preset perimeterPreset, set []netip.Prefix) (PerimeterS
 		}
 	}
 	return suggestion, nil
+}
+
+type perimeterCoalescedSet struct {
+	targets        []netip.Prefix
+	alreadyCovered int
+}
+
+// perimeterCoalescedSuggestionSets returns a complete alternative plan for
+// gaps. It may expand a gap prefix to include already-covered addresses, but
+// only while the larger prefix stays inside the scannable space. Targets are
+// no larger than a /24 (and no larger than the mode's budget), suggestions
+// hold at most 16 targets, and a plan needing more than 16 suggestions is
+// withheld. A returned count of 17 means at least 17 suggestions were needed.
+func perimeterCoalescedSuggestionSets(base, gaps []addrspace.Range, perMonitor uint64) (sets []perimeterCoalescedSet, total int, truncated bool) {
+	if len(gaps) == 0 || perMonitor == 0 {
+		return nil, 0, false
+	}
+	maxAddresses := min(perMonitor, uint64(1<<(32-perimeterMaxCoalescedPrefixBits)))
+	minPrefixBits := max(perimeterMaxCoalescedPrefixBits, 32-(bits.Len64(maxAddresses)-1))
+	seen := make(map[netip.Prefix]struct{})
+	var current perimeterCoalescedSet
+	var currentAddresses uint64
+	hasOverlap := false
+	tooMany := false
+
+	flush := func() {
+		if len(current.targets) == 0 {
+			return
+		}
+		sets = append(sets, current)
+		current = perimeterCoalescedSet{}
+		currentAddresses = 0
+	}
+	add := func(piece netip.Prefix) bool {
+		candidate := piece
+		for candidate.Bits() > minPrefixBits {
+			parent := netip.PrefixFrom(candidate.Addr(), candidate.Bits()-1).Masked()
+			parentRange := addrspace.FromPrefix(parent)
+			if len(addrspace.Subtract([]addrspace.Range{parentRange}, base)) != 0 {
+				break
+			}
+			candidate = parent
+		}
+		if _, exists := seen[candidate]; exists {
+			return true
+		}
+
+		candidateRange := addrspace.FromPrefix(candidate)
+		addresses := uint64(1) << uint(32-candidate.Bits())
+		gapAddresses, _ := addrspace.CountCapped(addrspace.Intersect([]addrspace.Range{candidateRange}, gaps), addresses)
+		alreadyCovered := int(addresses - gapAddresses)
+		hasOverlap = hasOverlap || alreadyCovered > 0
+		if tooMany {
+			// Keep scanning only until an overlap proves this is a coalesced
+			// alternative. A covered block can come after the output limit.
+			return !hasOverlap
+		}
+		if len(current.targets) > 0 && (currentAddresses+addresses > perMonitor || len(current.targets) >= perimeterMaxCoalescedTargets) {
+			flush()
+			if len(sets) >= perimeterMaxCoalescedSuggestions {
+				tooMany = true
+				return !hasOverlap
+			}
+		}
+		seen[candidate] = struct{}{}
+		current.targets = append(current.targets, candidate)
+		currentAddresses += addresses
+		current.alreadyCovered += alreadyCovered
+		return true
+	}
+
+	var walkPrefix func(netip.Prefix, func(netip.Prefix) bool) bool
+	walkPrefix = func(prefix netip.Prefix, visit func(netip.Prefix) bool) bool {
+		if prefix.Bits() >= minPrefixBits {
+			return visit(prefix)
+		}
+		childBits := prefix.Bits() + 1
+		left := netip.PrefixFrom(prefix.Addr(), childBits).Masked()
+		right := netip.PrefixFrom(addrspace.FromPrefix(left).To.Next(), childBits).Masked()
+		return walkPrefix(left, visit) && walkPrefix(right, visit)
+	}
+	for _, gap := range gaps {
+		for _, prefix := range addrspace.Cover(gap) {
+			if !walkPrefix(prefix, add) {
+				break
+			}
+		}
+		if tooMany && hasOverlap {
+			break
+		}
+	}
+	if !hasOverlap {
+		return nil, 0, false
+	}
+	if tooMany {
+		return nil, perimeterMaxCoalescedSuggestions + 1, true
+	}
+	flush()
+	return sets, len(sets), false
 }
 
 // perimeterBlocks returns the fewest aligned CIDRs that hold gaps, which is

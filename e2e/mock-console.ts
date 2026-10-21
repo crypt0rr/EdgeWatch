@@ -358,7 +358,7 @@ function perimeterRangeDetail(range: PerimeterRange): PerimeterRangeDetail {
     truncated[mode] = sets.length > 64
     for (const targets of sets.slice(0, 64)) {
       const addresses = targets.reduce((sum, target) => sum + Number(blockSize(parsePerimeterValue(target)!)), 0)
-      suggestions.push({ mode, targets, addresses, estimated_probes: addresses * preset.probesPerAddress, protocol: { ...preset.protocol } })
+      suggestions.push({ mode, targets, addresses, already_covered_addresses: 0, estimated_probes: addresses * preset.probesPerAddress, protocol: { ...preset.protocol } })
     }
   }
   return {
@@ -369,6 +369,9 @@ function perimeterRangeDetail(range: PerimeterRange): PerimeterRangeDetail {
     monitors_needed: needed,
     suggestions,
     suggestions_truncated: truncated,
+    coalesced_monitors_needed: { full_tcp: 0, selected_tcp: 0, udp: 0 },
+    coalesced_suggestions: [],
+    coalesced_suggestions_truncated: { full_tcp: false, selected_tcp: false, udp: false },
     budget_too_low: { full_tcp: false, selected_tcp: false, udp: false },
   }
 }

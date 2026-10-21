@@ -106,6 +106,7 @@ func TestJobMonitoringReportsProgressingResumableCycleWithoutFailureAttention(t 
 	attempt.Resumable = true
 	attempt.CycleID = "cycle-id"
 	attempt.CycleStatus = "paused"
+	attempt.ConfigHash = record.Job.SecurityHash()
 	cycle := &store.ScanCycleSummary{
 		ID: "cycle-id", Status: "paused", CompletedUnits: 1, TotalUnits: 2,
 		UpdatedAt:      time.Date(2026, 10, 11, 7, 59, 0, 0, time.UTC),
@@ -135,6 +136,37 @@ func TestJobMonitoringReportsProgressingResumableCycleWithoutFailureAttention(t 
 	view = jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: attempt}, "", true, "", true, cycle, true, reference, false, now)
 	if view.CycleInProgress || view.AttentionReason != "failed" {
 		t.Fatalf("no-progress pause after a stale checkpoint = %+v; want failure attention", view)
+	}
+}
+
+func TestJobMonitoringDoesNotReportProgressForPausedCycleFromOldScope(t *testing.T) {
+	t.Parallel()
+	record := monitoringTestJob()
+	record.Job.Targets = []string{"192.0.2.0/24"}
+	oldScopeHash := record.Job.SecurityHash()
+	record.Job.Targets = append(record.Job.Targets, "198.51.100.0/24")
+	if record.Job.SecurityHash() == oldScopeHash {
+		t.Fatal("test setup did not change the job security scope")
+	}
+
+	attempt := monitoringAttempt("timed_out")
+	attempt.ConfigHash = oldScopeHash
+	attempt.Resumable = true
+	attempt.CycleID = "cycle-id"
+	attempt.CycleStatus = "paused"
+	cycle := &store.ScanCycleSummary{
+		ID: "cycle-id", Status: "paused", CompletedUnits: 1, TotalUnits: 2,
+		UpdatedAt:      time.Date(2026, 10, 11, 7, 59, 0, 0, time.UTC),
+		LastProgressAt: time.Date(2026, 10, 11, 7, 59, 0, 0, time.UTC),
+		ExpiresAt:      time.Date(2026, 10, 20, 8, 0, 0, 0, time.UTC),
+	}
+	now := time.Date(2026, 10, 11, 8, 0, 0, 0, time.UTC)
+	view := jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: attempt}, "", true, "", true, cycle, true, now.Add(-time.Hour), false, now)
+	if view.CycleInProgress || view.CycleCompletedUnits != 0 || view.CycleTotalUnits != 0 {
+		t.Fatalf("stale-scope cycle progress = %+v; want no resumable progress", view)
+	}
+	if view.Activity == nil || *view.Activity != "none" || view.AttentionReason != "failed" {
+		t.Fatalf("stale-scope cycle summary = %+v; want no resumable activity and failure attention", view)
 	}
 }
 

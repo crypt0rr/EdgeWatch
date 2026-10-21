@@ -43,12 +43,25 @@ func resumableCycleInProgress(
 	reference time.Time,
 	now time.Time,
 ) bool {
-	if cycle == nil || execution.LatestAttempt == nil ||
-		!execution.LatestAttempt.Resumable || execution.LatestAttempt.CycleID != cycle.ID || execution.LatestAttempt.CycleStatus != "paused" {
+	if !latestAttemptResumesPausedCycle(execution, cycle) || !latestAttemptMatchesJobScope(record, execution.LatestAttempt) {
 		return false
 	}
 	threshold, err := app.JobSilenceThreshold(cron.NewParser(cron.Minute|cron.Hour|cron.Dom|cron.Month|cron.Dow), record.Job, reference)
 	return err == nil && app.ScanCycleHasRecentProgress(*cycle, now, threshold)
+}
+
+func latestAttemptResumesPausedCycle(execution store.JobExecutionSummary, cycle *store.ScanCycleSummary) bool {
+	return cycle != nil && execution.LatestAttempt != nil &&
+		execution.LatestAttempt.Resumable && execution.LatestAttempt.CycleID == cycle.ID && execution.LatestAttempt.CycleStatus == "paused"
+}
+
+func latestAttemptMatchesJobScope(record store.JobRecord, attempt *store.JobScanStatusSummary) bool {
+	if attempt == nil {
+		return false
+	}
+	currentHash := record.Job.SecurityHash()
+	legacyHash := record.Job.LegacySecurityHash()
+	return attempt.ConfigHash == currentHash || legacyHash != "" && attempt.ConfigHash == legacyHash
 }
 
 func jobMonitoringSummary(
@@ -95,8 +108,13 @@ func jobMonitoringSummary(
 		activity = "in_progress"
 	case appActivityAvailable && cycleAvailable && cycle != nil && (cycle.Status == "paused" || cycle.Status == "running"):
 		// A durable running cycle without a live queued/running process is
-		// recoverable work. Keep that distinct from a live running scan.
-		activity = "resumable"
+		// recoverable work. Keep that distinct from a live running scan. A
+		// paused cycle from an older scope cannot be resumed by this job.
+		if latestAttemptResumesPausedCycle(execution, cycle) && !latestAttemptMatchesJobScope(record, execution.LatestAttempt) {
+			activity = "none"
+		} else {
+			activity = "resumable"
+		}
 	case appActivityAvailable && cycleAvailable:
 		activity = "none"
 	}

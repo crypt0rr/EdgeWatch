@@ -171,6 +171,18 @@ Dockerfile arguments. The release manifest takes its GoReleaser version from
 the release workflow's canonical pin; an explicit `GORELEASER_VERSION` must
 match that pin or manifest generation fails.
 
+CI's Go jobs and GoReleaser, which builds the release binaries, use the Go
+release that the `go` line in `go.mod` names. The Dockerfile's `golang` images
+build Naabu, and build EdgeWatch in every image build without
+`PREBUILT_EDGEWATCH=1`, such as CI's multi-platform and native ARM64 images;
+the release image ships the GoReleaser binaries instead. The workflow test
+requires `go.mod`, both `golang` images, and the minimum Go version in
+[Local development](/maintainers/development/) to name the same release.
+Renovate bumps the `go` line, which it leaves alone by default, and proposes
+all of them in one `Go toolchain` pull request. That pull request fails the
+test until it contains every part, for example while the `golang` image for a
+new Go release is not yet published.
+
 For release helper scripts, run `./scripts/test-release-artifacts.sh`; it uses
 fixture binaries and does not build a release candidate. Follow the workflow's
 exact GoReleaser and candidate gates when changing release configuration.

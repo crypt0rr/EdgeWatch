@@ -72,9 +72,29 @@
       "packageNameTemplate": "node",
       "datasourceTemplate": "node-version",
       "versioningTemplate": "node"
+    },
+    {
+      "customType": "regex",
+      "description": "Update the minimum Go version in the development guide together with go.mod.",
+      "managerFilePatterns": ["/(^|/)docs/src/content/docs/maintainers/development\\.md$/"],
+      "matchStrings": ["The project uses Go (?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+) or newer"],
+      "depNameTemplate": "go",
+      "datasourceTemplate": "golang-version"
     }
   ],
   "packageRules": [
+    {
+      "description": "Renovate leaves the go directive alone by default. Bump it with each Go release: CI and the release build with the Go version that go.mod names.",
+      "matchManagers": ["gomod"],
+      "matchDepNames": ["go"],
+      "matchDepTypes": ["golang"],
+      "rangeStrategy": "bump"
+    },
+    {
+      "description": "Update the go directive, the development guide's minimum Go version, and the golang images that build the image in one pull request. The workflow test requires them to name the same Go release.",
+      "matchDepNames": ["go", "golang"],
+      "groupName": "Go toolchain"
+    },
     {
       "matchPackageNames": ["node"],
       "allowedVersions": "/^24\\./"

@@ -550,7 +550,7 @@ func TestPerimeterReportFlagsCoverageThatIsNotProven(t *testing.T) {
 	}
 }
 
-func TestPerimeterReportShowsProgressingResumableCoverageAsInProgress(t *testing.T) {
+func TestPerimeterReportOnlyShowsRecentCheckpointAsInProgress(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	f := newPerimeterFixture(t)
@@ -576,7 +576,20 @@ func TestPerimeterReportShowsProgressingResumableCoverageAsInProgress(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.db.DB.ExecContext(ctx, `UPDATE scan_cycles SET completed_units=1,completed_probes=1,updated_at=? WHERE id=?`, now.Add(-time.Minute).Format(time.RFC3339Nano), cycle.ID); err != nil {
+	if _, err := f.db.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := f.db.System().NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.System().PauseScanCycle(ctx, cycle.ID, false, "first unit completed"); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.db.System().SaveScan(ctx, model.Scan{
@@ -594,6 +607,37 @@ func TestPerimeterReportShowsProgressingResumableCoverageAsInProgress(t *testing
 	}
 	if report.Totals.UnprovenMonitors != 0 || perimeterRangeValued(t, report.Ranges, "198.51.100.0/24").Coverage.AnyTCP != 1 {
 		t.Fatalf("progressing cycle coverage report = %+v; coverage should remain proven", report.Totals)
+	}
+
+	// A later timed-out attempt that completes no new unit must not make the
+	// old checkpoint look recent just because the cycle is started and paused.
+	checkpointAt := now.Add(-72 * time.Hour)
+	if _, err := f.db.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET finished_at=? WHERE cycle_id=? AND status='completed'`, checkpointAt.Format(time.RFC3339Nano), cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	paused, err := f.db.System().PauseScanCycle(ctx, cycle.ID, true, "timed out before the next checkpoint")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paused.NoProgressAttempts != 1 {
+		t.Fatalf("no-progress attempts = %d, want 1", paused.NoProgressAttempts)
+	}
+	noProgressAt := time.Now().UTC()
+	if err := f.db.System().SaveScan(ctx, model.Scan{
+		ID: "progressing-no-progress-timeout", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name,
+		StartedAt: noProgressAt.Add(-time.Minute), FinishedAt: noProgressAt, Status: "timed_out", ConfigHash: record.Job.SecurityHash(),
+		CycleID: cycle.ID, CycleStatus: "paused", Resumable: true, CompletedUnits: 1, TotalUnits: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.setClock(noProgressAt)
+	report = f.report(t, f.ts)
+	monitor = perimeterMonitorNamed(t, report.Monitors, "progressing")
+	if monitor.LastAttemptStatus != "timed_out" || monitor.CycleInProgress || report.Totals.UnprovenMonitors != 1 {
+		t.Fatalf("no-progress timeout monitor = %+v; want no in-progress status and unproven coverage", monitor)
 	}
 }
 

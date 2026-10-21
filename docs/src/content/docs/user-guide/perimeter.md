@@ -144,13 +144,17 @@ The list says **Not scanned yet**, **No successful scan since** a date,
 **Last attempt timed out**, or **Last attempt incomplete**, plus
 **Not scanned since its targets or protocols changed** when the last success
 belongs to an older security scope. A current resumable cycle with completed
-work inside its resume window is shown separately as **Scan cycles in
-progress** and does not turn its recent timed-out attempt into a failed result.
-The report marks the monitor's coverage unproven until a successful scan
-matches its current targets and protocols. Stalled or expired cycles and saved
-work that has stopped progressing do not get this in-progress status. Unlike
-the job silence alert, which waits while a scan holds the job, a scan that is
-still running does not stop a monitor from being stale.
+work inside its resume window and a recent completed-work checkpoint is shown
+separately as **Scan cycles in progress** and does not turn its recent timed-out
+attempt into a failed result. The cycle's last completed-work checkpoint, not
+its lifecycle update time, controls progress freshness, so starting or pausing
+an attempt without completing another work unit does not refresh it. The report
+marks the monitor's coverage unproven until a successful scan matches its
+current targets and protocols. Stalled or expired cycles and saved work whose
+last checkpoint is no longer recent do not get this in-progress status. Three
+consecutive timed-out attempts without a completed unit still stall the cycle.
+Unlike the job silence alert, which waits while a scan holds the job, a scan
+that is still running does not stop a monitor from being stale.
 
 ### Coverage buckets
 

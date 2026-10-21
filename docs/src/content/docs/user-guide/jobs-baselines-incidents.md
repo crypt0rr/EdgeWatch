@@ -140,11 +140,15 @@ the affected window.
 
 The **Jobs** list shows each job's latest scan attempt separately from its
 latest successful scan, along with its next scheduled run and current queued,
-running, resumable, or progressing work. A paused cycle with recent completed
-work inside its resume window is shown as **Scan cycle in progress** with its
-completed and total units; its timed-out attempt is not listed under **Needs
-attention** while the cycle is progressing. A resumable cycle without progress
-remains resumable, and a stalled cycle stays marked for a manual retry. A job
+running, resumable, or progressing work. A paused cycle with a recent completed
+work-unit checkpoint inside its resume window is shown as **Scan cycle in
+progress** with its completed and total units; its timed-out attempt is not
+listed under **Needs attention** while that checkpoint remains recent. The
+cycle's last completed-work checkpoint, not its lifecycle update time, controls
+freshness, so starting or pausing an attempt without completing another unit
+does not refresh it. A cycle with no recent progress remains resumable until
+three consecutive timed-out attempts without a completed unit stall it, after
+which it stays marked for a manual retry. A job
 with no scan history is distinct
 from one whose monitoring summary could not be read. Missing schedule, paused,
 manual-only, and archived states do not create attention by themselves.

@@ -108,7 +108,9 @@ func TestJobMonitoringReportsProgressingResumableCycleWithoutFailureAttention(t 
 	attempt.CycleStatus = "paused"
 	cycle := &store.ScanCycleSummary{
 		ID: "cycle-id", Status: "paused", CompletedUnits: 1, TotalUnits: 2,
-		UpdatedAt: time.Date(2026, 10, 11, 7, 59, 0, 0, time.UTC), ExpiresAt: time.Date(2026, 10, 20, 8, 0, 0, 0, time.UTC),
+		UpdatedAt:      time.Date(2026, 10, 11, 7, 59, 0, 0, time.UTC),
+		LastProgressAt: time.Date(2026, 10, 11, 7, 59, 0, 0, time.UTC),
+		ExpiresAt:      time.Date(2026, 10, 20, 8, 0, 0, 0, time.UTC),
 	}
 	now := time.Date(2026, 10, 11, 8, 0, 0, 0, time.UTC)
 	reference := now.Add(-time.Hour)
@@ -127,10 +129,12 @@ func TestJobMonitoringReportsProgressingResumableCycleWithoutFailureAttention(t 
 		t.Fatalf("no-progress resumable cycle summary = %+v; want failure attention", view)
 	}
 	cycle.CompletedUnits = 1
-	cycle.UpdatedAt = now.Add(-72 * time.Hour)
+	cycle.NoProgressAttempts = 1
+	cycle.UpdatedAt = now
+	cycle.LastProgressAt = now.Add(-72 * time.Hour)
 	view = jobMonitoringSummary(record, store.JobExecutionSummary{LatestAttempt: attempt}, "", true, "", true, cycle, true, reference, false, now)
 	if view.CycleInProgress || view.AttentionReason != "failed" {
-		t.Fatalf("stale resumable cycle summary = %+v; want failure attention", view)
+		t.Fatalf("no-progress pause after a stale checkpoint = %+v; want failure attention", view)
 	}
 }
 

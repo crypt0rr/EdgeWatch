@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
+	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 )
 
@@ -115,7 +116,20 @@ func TestJobSilenceWatchdogCountsRecentResumableProgressAsActivity(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET completed_units=1,completed_probes=1,updated_at=? WHERE id=?`, now.Add(-time.Minute).Format(time.RFC3339Nano), cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET finished_at=? WHERE cycle_id=? AND status='completed'`, now.Add(-time.Minute).Format(time.RFC3339Nano), cycle.ID); err != nil {
 		t.Fatal(err)
 	}
 	threshold := 2 * time.Hour
@@ -126,15 +140,18 @@ func TestJobSilenceWatchdogCountsRecentResumableProgressAsActivity(t *testing.T)
 		t.Fatalf("recent progress alert = created %v, err %v; want no alert", created, err)
 	}
 
-	// A stalled cycle and an in-window cycle whose last update is old enough
-	// to exceed the existing watchdog window no longer suppress silence.
+	// A stalled cycle and an in-window cycle whose last completed checkpoint
+	// is old enough to exceed the watchdog window no longer suppress silence.
 	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='stalled' WHERE id=?`, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
 	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || !due {
 		t.Fatalf("stalled cycle silence decision = due %v, err %v; want due", due, err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='paused',updated_at=? WHERE id=?`, now.Add(-threshold-time.Minute).Format(time.RFC3339Nano), cycle.ID); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='paused' WHERE id=?`, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET finished_at=? WHERE cycle_id=? AND status='completed'`, now.Add(-threshold-time.Minute).Format(time.RFC3339Nano), cycle.ID); err != nil {
 		t.Fatal(err)
 	}
 	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || !due {
@@ -145,6 +162,82 @@ func TestJobSilenceWatchdogCountsRecentResumableProgressAsActivity(t *testing.T)
 	}
 	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || !due {
 		t.Fatalf("expired progress silence decision = due %v, err %v; want due", due, err)
+	}
+}
+
+func TestJobSilenceWatchdogDoesNotCountNoProgressPauseAsRecentProgress(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	job, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name: "stale-resumable-progress", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"192.0.2.15"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	reference := now.Add(-3 * time.Hour)
+	threshold := 2 * time.Hour
+	if _, err := s.DB.ExecContext(ctx, `UPDATE jobs SET created_at=? WHERE id=?`, sqliteTimestamp(reference), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE job_silence_state SET eligible_at=? WHERE job_id=?`, sqliteTimestamp(reference), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	plan := scanner.WorkPlan{Units: []scanner.WorkUnit{
+		{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.15"}, Ports: "22", PortCount: 1, Probes: 1},
+		{Sequence: 1, Protocol: "tcp", Addresses: []string{"192.0.2.15"}, Ports: "443", PortCount: 1, Probes: 1},
+	}}
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
+		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(),
+		ExecutionHash: job.Job.ExecutionHash(), Plan: plan, StartedAt: reference, ExpiresAt: now.Add(24 * time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.System().PauseScanCycle(ctx, cycle.ID, false, "first unit completed"); err != nil {
+		t.Fatal(err)
+	}
+	checkpointAt := now.Add(-threshold - time.Minute)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET finished_at=? WHERE cycle_id=? AND status='completed'`, sqliteTimestamp(checkpointAt), cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	paused, err := s.System().PauseScanCycle(ctx, cycle.ID, true, "timed out before the next checkpoint")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paused.Status != "paused" || paused.NoProgressAttempts != 1 {
+		t.Fatalf("no-progress pause = status %q, attempts %d; want paused with one no-progress attempt", paused.Status, paused.NoProgressAttempts)
+	}
+	if !paused.UpdatedAt.After(checkpointAt) {
+		t.Fatalf("no-progress pause updated_at = %s; want a fresh lifecycle timestamp after %s", paused.UpdatedAt, checkpointAt)
+	}
+	summaries, err := defaultTenant(s).ListActiveScanCycleSummaries(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := summaries[job.ID].LastProgressAt; !got.Equal(checkpointAt) {
+		t.Fatalf("last progress time = %s; want checkpoint time %s despite fresh updated_at %s", got, checkpointAt, paused.UpdatedAt)
+	}
+	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || !due {
+		t.Fatalf("silence after a stale checkpoint and no-progress pause = due %v, err %v; want due", due, err)
 	}
 }
 

@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { mockConsole, rolePermissions, type UnitConsoleRole } from './mock-console'
+import { allConsoleRoutes, expectedConsolePath } from './console-routes'
 
 const navigationLabels = [
   'Overview', 'Jobs', 'Hosts', 'Perimeter', 'Incidents', 'Notifications', 'Users',
@@ -11,31 +12,6 @@ const expectedNavigation: Record<UnitConsoleRole, string[]> = {
   operator: ['Overview', 'Jobs', 'Hosts', 'Perimeter', 'Incidents', 'Scanner profiles', 'Security'],
   viewer: ['Jobs', 'Security'],
 }
-
-// A refused page leads to /jobs, except the audit, which leads to the
-// role's home: the overview where the role has it.
-const routePermissions: Array<{ path: string; permission?: string; refusedToHome?: boolean }> = [
-  { path: '/', permission: 'overview.read' },
-  { path: '/jobs', permission: 'jobs.read' },
-  { path: '/jobs/new', permission: 'jobs.write' },
-  { path: '/jobs/new/advanced', permission: 'jobs.write' },
-  { path: '/jobs/job-1', permission: 'jobs.read' },
-  { path: '/jobs/job-1/edit', permission: 'jobs.write' },
-  { path: '/jobs/job-1/baseline', permission: 'baselines.read' },
-  { path: '/jobs/job-1/scans/scan-1', permission: 'scans.read' },
-  { path: '/jobs/job-1/scans/scan-1/hosts/192.0.2.10', permission: 'scans.read' },
-  { path: '/hosts', permission: 'hosts.read' },
-  { path: '/perimeter', permission: 'perimeter.read' },
-  { path: '/perimeter/ranges/range-1', permission: 'perimeter.read' },
-  { path: '/scans/scan-1', permission: 'scans.read' },
-  { path: '/incidents', permission: 'incidents.read' },
-  { path: '/notifications', permission: 'notifications.manage' },
-  { path: '/users', permission: 'users.manage' },
-  { path: '/public-dashboard', permission: 'public_dashboard.manage' },
-  { path: '/scanner-profiles', permission: 'scanner_profiles.read' },
-  { path: '/audit', permission: 'audit.read', refusedToHome: true },
-  { path: '/security', permission: 'account.self' },
-]
 
 // One test per role, so that the roles run in parallel and each stays well
 // inside the test timeout as the route table grows.
@@ -92,11 +68,9 @@ for (const role of Object.keys(expectedNavigation) as UnitConsoleRole[]) {
         await expect(page.getByRole('button', { name: 'New job' })).toHaveCount(0)
       }
 
-      for (const route of routePermissions) {
+      for (const route of allConsoleRoutes) {
         await page.goto(route.path)
-        const allowed = route.permission === undefined || rolePermissions[role].includes(route.permission)
-        const home = route.refusedToHome && rolePermissions[role].includes('overview.read') ? '/' : '/jobs'
-        const expectedPath = allowed ? new URL(route.path, baseURL).pathname : home
+        const expectedPath = expectedConsolePath(role, route)
         await expect.poll(() => new URL(page.url()).pathname).toBe(expectedPath)
       }
     } finally {
@@ -109,16 +83,6 @@ for (const role of Object.keys(expectedNavigation) as UnitConsoleRole[]) {
 // and every unit route leads to the platform's home without a request for a
 // unit's data.
 const platformNavigation = ['Units', 'Platform admins', 'Notifications', 'Audit', 'Status', 'Security']
-
-const platformRoutes: Array<{ path: string; permission: string }> = [
-  { path: '/platform/units', permission: 'units.manage' },
-  { path: '/platform/units/unit-retail/accounts', permission: 'units.manage' },
-  { path: '/platform/admins', permission: 'unit_accounts.manage' },
-  { path: '/platform/notifications', permission: 'platform_notifications.manage' },
-  { path: '/platform/audit', permission: 'platform_audit.read' },
-  { path: '/platform/status', permission: 'platform_status.read' },
-  { path: '/security', permission: 'account.self' },
-]
 
 test('platform administrator route and navigation matrix keeps unit pages out of the platform console', async ({ browser, baseURL }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'The permission matrix runs once on desktop; mobile navigation is covered separately.')
@@ -136,18 +100,10 @@ test('platform administrator route and navigation matrix keeps unit pages out of
     }
     await expect(page.getByText('All business units')).toBeVisible()
 
-    for (const route of platformRoutes) {
-      expect(rolePermissions.platform_admin).toContain(route.permission)
+    for (const route of allConsoleRoutes) {
+      if (route.scope === 'platform' && route.permission) expect(rolePermissions.platform_admin).toContain(route.permission)
       await page.goto(route.path)
-      await expect.poll(() => new URL(page.url()).pathname).toBe(route.path)
-    }
-    for (const route of routePermissions.filter(route => route.path !== '/security')) {
-      await page.goto(route.path)
-      await expect.poll(() => new URL(page.url()).pathname).toBe('/platform/units')
-    }
-    for (const path of ['/audit', '/highlights', '/platform/unknown']) {
-      await page.goto(path)
-      await expect.poll(() => new URL(page.url()).pathname).toBe('/platform/units')
+      await expect.poll(() => new URL(page.url()).pathname).toBe(expectedConsolePath('platform_admin', route))
     }
     expect(controls.calls['unit-data'] ?? 0).toBe(0)
   } finally {

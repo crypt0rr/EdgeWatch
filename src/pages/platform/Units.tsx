@@ -75,7 +75,8 @@ function UnitRow({ unit }: { unit: BusinessUnit }) {
   const capacity = useQuery({ queryKey: ['platform-unit-capacity', unit.id], queryFn: () => getUnitCapacity(unit.id), staleTime: 30_000, enabled: unit.status !== 'deleting' })
   const limit = capacity.data?.slots.limit
   const cap = limit !== undefined ? `cap ${limit}` : capacity.isError ? 'cap unavailable' : ''
-  return <Link className="unit-row" to={`/platform/units/${encodeURIComponent(unit.id)}`} aria-label={`Open ${unit.name}`}>
+  return <Link className="unit-row" to={`/platform/units/${encodeURIComponent(unit.id)}`}>
+    <span className="sr-only">Open unit details: </span>
     <span className="unit-row-name"><strong>{unit.name}</strong><small>/public/{unit.slug}</small></span>
     <span className="unit-row-badges"><UnitStatusPill status={unit.status} />{unit.is_default && <span className="pill blue">Default</span>}</span>
     <dl className="unit-facts">

@@ -12,7 +12,7 @@ test('a platform administrator creates a unit, invites its administrator, recove
   await page.goto('/platform/units')
 
   // The unit list shows counts only.
-  const retail = page.getByRole('link', { name: 'Open Retail' })
+  const retail = page.getByRole('link', { name: /Retail/ })
   await expect(retail).toContainText('3 accounts · 1 admin')
   await expect(retail).toContainText('2 jobs')
   await expect(retail).toContainText('1,480 scans')

@@ -3,6 +3,7 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { within } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { activeScans, adminStatus, cancelQueuedRun, cancelScan, getSession, listIncidents, listJobs, listScans, notificationTest, runJob } from '../api'
@@ -294,6 +295,16 @@ describe('dashboard', () => {
     expect(dots[0]).not.toHaveClass('fail')
     expect(dots[0]).not.toHaveClass('success')
     expect(dots[1]).toHaveClass('fail')
+  })
+
+  it('includes a failed scan error in the activity link name', async () => {
+    const error = 'The target did not answer within 10 seconds.'
+    vi.mocked(listScans).mockResolvedValue({ scans: [{ ...scan, id: 'failed-scan', status: 'failed', error }], pagination: { ...pagination, total: 1 } })
+    await renderDashboard()
+
+    const failedRow = within(container).getByRole('link', { name: new RegExp(error) })
+    expect(failedRow).toHaveAccessibleName(/The target did not answer within 10 seconds\./)
+    expect(failedRow.querySelector('.activity-error')).toHaveTextContent(error)
   })
 
   it('shows the total retained scan count and a date for older activity', async () => {

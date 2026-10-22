@@ -18,7 +18,10 @@ async function openMobileNavigation(page: import('@playwright/test').Page) {
 
 async function navigateFromShell(page: import('@playwright/test').Page, label: string) {
   await openMobileNavigation(page)
-  await page.getByRole('link', { name: label, exact: true }).click()
+  const link = label === 'Incidents'
+    ? page.getByRole('link', { name: /^Incidents(?:\s|$)/ })
+    : page.getByRole('link', { name: label, exact: true })
+  await link.click()
 }
 
 test('setup, login, and build a TCP/UDP job in the console', async ({ page }) => {
@@ -197,7 +200,9 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   await navigateFromShell(page, 'Overview')
   await expect(page.getByRole('heading', { name: 'Good day, Edge operator' })).toBeVisible()
   await openMobileNavigation(page)
-  await expect(page.getByRole('link', { name: 'Incidents' })).toHaveClass(/nav-link-alert/)
+  const incidentLink = page.getByRole('link', { name: /^Incidents\s+1 active incident$/ })
+  await expect(incidentLink).toHaveClass(/nav-link-alert/)
+  await expect(incidentLink).toBeVisible()
   await expect(page.locator('#active-incident-count')).toHaveText('1')
   const closeNavigation = page.getByRole('button', { name: 'Close navigation' }).first()
   if (await closeNavigation.isVisible()) await closeNavigation.click()

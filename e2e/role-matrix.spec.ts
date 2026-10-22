@@ -36,7 +36,9 @@ for (const role of Object.keys(expectedNavigation) as UnitConsoleRole[]) {
 
       const navigation = page.locator('#primary-navigation nav')
       for (const label of navigationLabels) {
-        const link = navigation.getByRole('link', { name: label, exact: true })
+        const link = label === 'Incidents'
+          ? navigation.getByRole('link', { name: /^Incidents(?:\s|$)/ })
+          : navigation.getByRole('link', { name: label, exact: true })
         if (expectedNavigation[role].includes(label)) await expect(link).toHaveCount(1)
         else await expect(link).toHaveCount(0)
       }
@@ -113,7 +115,9 @@ test('platform administrator navigation keeps unit pages out of the platform con
     await expect(page.getByRole('heading', { name: 'Business units', exact: true })).toBeVisible()
     const navigation = page.locator('#primary-navigation nav')
     for (const label of [...navigationLabels, ...platformNavigation]) {
-      const link = navigation.getByRole('link', { name: label, exact: true })
+      const link = label === 'Incidents'
+        ? navigation.getByRole('link', { name: /^Incidents(?:\s|$)/ })
+        : navigation.getByRole('link', { name: label, exact: true })
       if (platformNavigation.includes(label)) await expect(link).toHaveCount(1)
       else await expect(link).toHaveCount(0)
     }

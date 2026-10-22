@@ -5,6 +5,7 @@ import { mockConsole, rolePermissions, type ConsoleRole } from './mock-console'
 
 const roles: ConsoleRole[] = ['administrator', 'operator', 'viewer', 'platform_admin']
 const auditedProjects = new Set(['desktop', 'mobile-narrow', 'iphone-13'])
+const labelNameMismatchRule = 'label-content-name-mismatch'
 const routeBatchSize = 6
 const routeBatches = Array.from(
   { length: Math.ceil(allConsoleRoutes.length / routeBatchSize) },
@@ -26,6 +27,23 @@ async function expectProjectDevice(page: Page, testInfo: TestInfo) {
   expect(device).toEqual({ screen, deviceScaleFactor, hasTouch, userAgent })
 }
 
+function consoleAxe(page: Page) {
+  // Axe 4.13 tags this rule experimental and excludes it from the default run.
+  return new AxeBuilder({ page }).options({
+    rules: { [labelNameMismatchRule]: { enabled: true } },
+  })
+}
+
+async function expectRouteDataReady(page: Page, routePath: string) {
+  if (routePath === '/activity') {
+    await expect(page.locator('.activity-event')).toContainText('Fixture activity event confirms a baseline change.')
+  }
+  if (routePath === '/jobs' || routePath === '/perimeter') {
+    const demand = page.getByRole('region', { name: 'Scan-slot demand' })
+    await expect(demand).toContainText('Estimated scheduled demand is 1 slot-hours/day (50% of 2 available slot-hours/day across 2 scan slots).')
+  }
+}
+
 function routeIsRenderedForRole(role: ConsoleRole, routePath: string) {
   const route = allConsoleRoutes.find(item => item.path === routePath)
   // The route matrix still checks these requested paths and their actual
@@ -44,7 +62,7 @@ for (const role of roles) {
       test.skip(!auditedProjects.has(testInfo.project.name), 'The complete route matrix runs at desktop, narrow-mobile, and iPhone 13 widths; Pixel 7 covers additional phone regressions.')
 
       await expectProjectDevice(page, testInfo)
-      await mockConsole(page, role)
+      await mockConsole(page, role, { routeAuditFixtures: true })
 
       for (const route of routes) {
         await page.goto(route.path)
@@ -60,9 +78,10 @@ for (const role of roles) {
         await expect(content.locator('.page').last()).toBeVisible()
         await page.waitForLoadState('networkidle')
         await expect(content.locator('.loading, .skeleton-list')).toHaveCount(0)
+        await expectRouteDataReady(page, route.path)
 
-        const results = await new AxeBuilder({ page }).analyze()
-        const labelMismatches = results.violations.filter(violation => violation.id === 'label-content-name-mismatch')
+        const results = await consoleAxe(page).analyze()
+        const labelMismatches = results.violations.filter(violation => violation.id === labelNameMismatchRule)
         const blocking = results.violations.filter(violation => violation.impact === 'serious' || violation.impact === 'critical')
         expect(labelMismatches, `${role} on ${route.path} has visible link or button text missing from its accessible name`).toEqual([])
         expect(blocking, `${role} on ${route.path}: ${blocking.map(violation => `${violation.id} (${violation.impact})`).join(', ')}`).toEqual([])
@@ -70,6 +89,14 @@ for (const role of roles) {
     })
   }
 }
+
+test('the configured axe 4.13 rule detects visible labels missing from accessible names', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'The explicit rule-activation regression runs once; route audits cover each configured device project.')
+
+  await page.setContent('<!doctype html><html lang="en"><head><title>Rule activation fixture</title></head><body><button aria-label="Action">Delete deployment</button></body></html>')
+  const results = await consoleAxe(page).analyze()
+  expect(results.violations.filter(violation => violation.id === labelNameMismatchRule)).toHaveLength(1)
+})
 
 test('activity error text remains in visible row link names (#1629)', async ({ page }, testInfo) => {
   test.skip(!auditedProjects.has(testInfo.project.name), 'The focused accessible-name regression runs at desktop, narrow-mobile, and iPhone 13 widths.')
@@ -82,8 +109,8 @@ test('activity error text remains in visible row link names (#1629)', async ({ p
   await page.waitForLoadState('networkidle')
   await expect(page.locator('#main-content .content .loading, #main-content .content .skeleton-list')).toHaveCount(0)
   await expect(failedScan).toHaveAccessibleName(/Target timed out after 10 seconds/)
-  const activityAxe = await new AxeBuilder({ page }).analyze()
-  expect(activityAxe.violations.filter(violation => violation.id === 'label-content-name-mismatch')).toEqual([])
+  const activityAxe = await consoleAxe(page).analyze()
+  expect(activityAxe.violations.filter(violation => violation.id === labelNameMismatchRule)).toEqual([])
 })
 
 test('disabled unit lifecycle status remains in the visible row link name (#1629)', async ({ page }, testInfo) => {
@@ -92,11 +119,11 @@ test('disabled unit lifecycle status remains in the visible row link name (#1629
   await expectProjectDevice(page, testInfo)
   await mockConsole(page, 'platform_admin', { accessibilityFixtures: true })
   await page.goto('/platform/units')
-  const disabledUnit = page.getByRole('link', { name: /Disabled Retail/ })
+  const disabledUnit = page.getByRole('link', { name: /Retail.*Disabled/ })
   await expect(disabledUnit).toBeVisible()
   await page.waitForLoadState('networkidle')
   await expect(page.locator('#main-content .content .loading, #main-content .content .skeleton-list')).toHaveCount(0)
-  await expect(disabledUnit).toHaveAccessibleName(/Disabled/)
-  const platformAxe = await new AxeBuilder({ page }).analyze()
-  expect(platformAxe.violations.filter(violation => violation.id === 'label-content-name-mismatch')).toEqual([])
+  await expect(disabledUnit).toHaveAccessibleName(/Retail.*Disabled/)
+  const platformAxe = await consoleAxe(page).analyze()
+  expect(platformAxe.violations.filter(violation => violation.id === labelNameMismatchRule)).toEqual([])
 })

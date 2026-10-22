@@ -96,6 +96,18 @@ describe('perimeter declare parsing', () => {
     ])
   })
 
+  it('collapses U+2028 line separators inside labels', () => {
+    expect(parsePerimeterLines('203.0.113.0/24 Lab\u2028network')).toEqual([
+      { line: 1, value: '203.0.113.0/24', label: 'Lab network' },
+    ])
+  })
+
+  it('collapses U+2029 paragraph separators inside labels', () => {
+    expect(parsePerimeterLines('203.0.113.0/24 Lab\u2029network')).toEqual([
+      { line: 1, value: '203.0.113.0/24', label: 'Lab network' },
+    ])
+  })
+
   it('keeps non-whitespace control characters for server validation', () => {
     expect(parsePerimeterLines('203.0.113.0/24 edge\u0007router')).toEqual([
       { line: 1, value: '203.0.113.0/24', label: 'edge\u0007router' },

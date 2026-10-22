@@ -202,6 +202,188 @@ func TestScannerIdentityProcessCensusStopsAtDeadlineCheck(t *testing.T) {
 	}
 }
 
+func TestScannerIdentityCensusRejectsOversizedLiveSources(t *testing.T) {
+	root := t.TempDir()
+	procRoot := filepath.Join(root, "proc")
+	accountRoot := filepath.Join(root, "accounts")
+	for _, path := range []string{procRoot, accountRoot} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	passwdPath := filepath.Join(accountRoot, "passwd")
+	groupPath := filepath.Join(accountRoot, "group")
+	for _, path := range []string{passwdPath, groupPath} {
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("oversized live process status fails the census closed", func(t *testing.T) {
+		processPath := filepath.Join(procRoot, "404")
+		if err := os.Mkdir(processPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		statusPath := filepath.Join(processPath, "status")
+		if err := os.WriteFile(statusPath, []byte(strings.Repeat("x", scannerIdentityProcessStatusMaxBytes+1)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := scannerIdentitiesInUseAt(procRoot, passwdPath, groupPath, 61000, 4)
+		if err == nil || !strings.Contains(err.Error(), "live process status is unreadable") {
+			t.Fatalf("oversized live process status error = %v; want fail-closed census refusal", err)
+		}
+	})
+
+	t.Run("oversized local account database fails the census", func(t *testing.T) {
+		if err := os.WriteFile(passwdPath, []byte(strings.Repeat("x", scannerIdentityAccountsMaxBytes+1)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := scannerIdentitiesInUseAt(procRoot, passwdPath, groupPath, 61000, 4)
+		if err == nil || !strings.Contains(err.Error(), "local account database exceeds the size limit") {
+			t.Fatalf("oversized account database error = %v; want bounded-read refusal", err)
+		}
+	})
+}
+
+func TestScannerIdentityCensusRejectsNilAndCanceledContexts(t *testing.T) {
+	root := t.TempDir()
+	procRoot := filepath.Join(root, "proc")
+	accountRoot := filepath.Join(root, "accounts")
+	for _, path := range []string{procRoot, accountRoot} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	passwdPath := filepath.Join(accountRoot, "passwd")
+	groupPath := filepath.Join(accountRoot, "group")
+	for _, path := range []string{passwdPath, groupPath} {
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := scannerIdentitiesInUseAtContext(nil, procRoot, passwdPath, groupPath, 61000, 4); err == nil || !strings.Contains(err.Error(), "context is nil") {
+		t.Fatalf("nil census context error = %v; want explicit refusal", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := scannerIdentitiesInUseAtContext(ctx, procRoot, passwdPath, groupPath, 61000, 4); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled census context error = %v; want context.Canceled", err)
+	}
+}
+
+func TestScannerIdentityCurrentInUseChecksContextAndCensus(t *testing.T) {
+	t.Run("missing allocator or context fails closed", func(t *testing.T) {
+		var allocator *scannerIdentityAllocator
+		if _, err := allocator.currentInUse(context.Background()); err == nil {
+			t.Fatal("nil allocator supplied a process census")
+		}
+		allocator = newTestScannerIdentityAllocator(t, 2)
+		if _, err := allocator.currentInUse(nil); err == nil {
+			t.Fatal("nil context supplied a process census")
+		}
+		allocator.inUse = nil
+		if _, err := allocator.currentInUse(context.Background()); err == nil {
+			t.Fatal("missing census callback was accepted")
+		}
+	})
+
+	t.Run("canceled context does not start census", func(t *testing.T) {
+		allocator := newTestScannerIdentityAllocator(t, 2)
+		called := false
+		allocator.inUse = func(uint32, uint32) (map[uint32]struct{}, error) {
+			called = true
+			return nil, nil
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := allocator.currentInUse(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled census error = %v; want context.Canceled", err)
+		}
+		if called {
+			t.Fatal("census ran after its context was canceled")
+		}
+	})
+
+	t.Run("context-aware census receives configured pool and returns its error", func(t *testing.T) {
+		allocator := newTestScannerIdentityAllocator(t, 2)
+		want := map[uint32]struct{}{61001: {}}
+		called := false
+		allocator.inUseContext = func(ctx context.Context, start, count uint32) (map[uint32]struct{}, error) {
+			called = true
+			if ctx == nil || start != 61000 || count != 2 {
+				t.Fatalf("context-aware census args = %v, %d, %d", ctx, start, count)
+			}
+			return want, nil
+		}
+		got, err := allocator.currentInUse(context.Background())
+		if err != nil || !called || len(got) != 1 {
+			t.Fatalf("context-aware census = %v, %v, called=%t; want configured result", got, err, called)
+		}
+		if _, ok := got[61001]; !ok {
+			t.Fatalf("context-aware census identities = %v; want reserved UID 61001", got)
+		}
+
+		wantErr := errors.New("process census unavailable")
+		allocator.inUseContext = func(context.Context, uint32, uint32) (map[uint32]struct{}, error) { return nil, wantErr }
+		if _, err := allocator.currentInUse(context.Background()); !errors.Is(err, wantErr) {
+			t.Fatalf("context-aware census error = %v; want %v", err, wantErr)
+		}
+	})
+
+	t.Run("legacy census propagates failure and rejects post-census cancellation", func(t *testing.T) {
+		allocator := newTestScannerIdentityAllocator(t, 2)
+		wantErr := errors.New("legacy census unavailable")
+		allocator.inUse = func(uint32, uint32) (map[uint32]struct{}, error) { return nil, wantErr }
+		if _, err := allocator.currentInUse(context.Background()); !errors.Is(err, wantErr) {
+			t.Fatalf("legacy census error = %v; want %v", err, wantErr)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		allocator.inUse = func(uint32, uint32) (map[uint32]struct{}, error) {
+			cancel()
+			return map[uint32]struct{}{61000: {}}, nil
+		}
+		if _, err := allocator.currentInUse(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("post-census cancellation error = %v; want context.Canceled", err)
+		}
+	})
+}
+
+func TestScannerIdentityInspectionReturnsCensusCancellation(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		cancelErr bool
+	}{
+		{name: "census cancellation"},
+		{name: "context canceled after census", cancelErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			allocator := newTestScannerIdentityAllocator(t, 1)
+			lease, err := allocator.acquire(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := lease.release(); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			allocator.inUseContext = func(ctx context.Context, _, _ uint32) (map[uint32]struct{}, error) {
+				cancel()
+				if test.cancelErr {
+					return map[uint32]struct{}{}, nil
+				}
+				return nil, context.Canceled
+			}
+			if _, err := allocator.inspect(ctx); !errors.Is(err, context.Canceled) {
+				t.Fatalf("canceled identity inspection error = %v; want context.Canceled", err)
+			}
+		})
+	}
+}
+
 func TestWriteScannerIdentityFileDoesNotReplaceUnexpectedDirectory(t *testing.T) {
 	root := t.TempDir()
 	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)

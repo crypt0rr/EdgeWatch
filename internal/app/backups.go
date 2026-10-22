@@ -95,6 +95,10 @@ func (s BackupStatus) reported(now time.Time) *BackupStatus {
 	return &s
 }
 
+func (s BackupStatus) hasSuccessfulBackup() bool {
+	return !s.LastSuccessAt.IsZero() && s.LastBackup != ""
+}
+
 // BackupStatusPath returns the status file of the scheduled backups of the
 // database: backup-status.json beside the database file. An in-memory
 // database has none.

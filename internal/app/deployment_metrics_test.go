@@ -69,6 +69,7 @@ func TestMissingBackupStatusPreservesFailureUntilRecordedRecovery(t *testing.T) 
 	a := f.app
 	now := time.Now().UTC()
 	a.Config.Backup.Directory = t.TempDir()
+	a.Config.Backup.Schedule = "0 3 * * *"
 	statusPath := BackupStatusPath(f.db.Path)
 	if err := writeBackupStatusFile(statusPath, BackupStatus{Directory: a.Config.Backup.Directory, ConsecutiveFailures: 2}); err != nil {
 		t.Fatal(err)
@@ -89,17 +90,169 @@ func TestMissingBackupStatusPreservesFailureUntilRecordedRecovery(t *testing.T) 
 	}
 	assertScheduledBackupAlertState(t, f.db, 1)
 
+	// The worker can persist the configured directory before its first run.
+	// That status says nothing about whether a backup has succeeded, so it
+	// must not clear the durable failure alert.
 	if err := writeBackupStatusFile(statusPath, BackupStatus{Directory: a.Config.Backup.Directory}); err != nil {
 		t.Fatal(err)
 	}
-	metrics := a.DeploymentMetrics(ctx, now.Add(2*time.Minute))
+	a.backupWait = func(context.Context, time.Time) bool { return false }
+	<-a.startBackupWorker(ctx)
+	if metrics := a.DeploymentMetrics(ctx, now.Add(2*time.Minute)); metrics.Backups != nil {
+		t.Fatalf("pre-run backup status was exported as a known zero: %+v", metrics.Backups)
+	}
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(2*time.Minute)); err != nil || recorded != 0 {
+		t.Fatalf("pre-run backup status = %d, %v; want no transition", recorded, err)
+	}
+	assertScheduledBackupAlertState(t, f.db, 1)
+
+	if err := writeBackupStatusFile(statusPath, BackupStatus{
+		Directory:     a.Config.Backup.Directory,
+		LastSuccessAt: now.Add(3 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if metrics := a.DeploymentMetrics(ctx, now.Add(3*time.Minute)); metrics.Backups != nil {
+		t.Fatalf("success timestamp without a backup name was exported as known: %+v", metrics.Backups)
+	}
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(3*time.Minute)); err != nil || recorded != 0 {
+		t.Fatalf("incomplete backup success = %d, %v; want no transition", recorded, err)
+	}
+	assertScheduledBackupAlertState(t, f.db, 1)
+
+	if err := writeBackupStatusFile(statusPath, BackupStatus{
+		Directory:     a.Config.Backup.Directory,
+		LastSuccessAt: now.Add(4 * time.Minute),
+		LastBackup:    scheduledBackupPrefix + now.Add(4*time.Minute).Format(scheduledBackupTimeLayout) + ".db",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	metrics := a.DeploymentMetrics(ctx, now.Add(4*time.Minute))
 	if metrics.Backups == nil || metrics.Backups.ConsecutiveFailures != 0 {
 		t.Fatalf("recorded recovery metrics = %+v; want known zero failures", metrics.Backups)
 	}
-	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(2*time.Minute)); err != nil || recorded != 0 {
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(4*time.Minute)); err != nil || recorded != 0 {
 		t.Fatalf("recorded backup recovery = %d, %v; want a silent recovery", recorded, err)
 	}
 	assertScheduledBackupAlertState(t, f.db, 0)
+}
+
+func TestDeploymentMetricsTreatsUnreadableBackupStatusAsUnknown(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
+	a := f.app
+	now := time.Now().UTC()
+	a.Config.Backup.Directory = t.TempDir()
+	statusPath := BackupStatusPath(f.db.Path)
+	if err := writeBackupStatusFile(statusPath, BackupStatus{Directory: a.Config.Backup.Directory, ConsecutiveFailures: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now); err != nil || recorded != 1 {
+		t.Fatalf("initial failed backup = %d, %v; want one transition", recorded, err)
+	}
+	if err := os.WriteFile(statusPath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if metrics := a.DeploymentMetrics(ctx, now.Add(time.Minute)); metrics.Backups != nil {
+		t.Fatalf("unreadable backup status was exported as known: %+v", metrics.Backups)
+	}
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(time.Minute)); err != nil || recorded != 0 {
+		t.Fatalf("unreadable backup status = %d, %v; want no transition", recorded, err)
+	}
+	assertScheduledBackupAlertState(t, f.db, 1)
+}
+
+func TestNilApplicationOperationalMetricsAreEmpty(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var nilApp *App
+	if got := nilApp.deploymentHealthObservation(ctx, time.Now()); got != (deploymentHealthObservation{}) {
+		t.Fatalf("nil-app observation = %+v; want empty", got)
+	}
+	if got := nilApp.DeploymentMetrics(ctx, time.Now()); got != (DeploymentMetrics{}) {
+		t.Fatalf("nil-app metrics = %+v; want empty", got)
+	}
+	if active, stalled := nilApp.ScheduledRunSkips(); active != 0 || stalled != 0 {
+		t.Fatalf("nil-app scheduled skips = %d, %d; want zero", active, stalled)
+	}
+	if count, err := nilApp.CountOverdueJobs(ctx, time.Now()); count != 0 || err != nil {
+		t.Fatalf("nil-app overdue jobs = %d, %v; want zero, nil", count, err)
+	}
+	if count, err := nilApp.RecordDeploymentOperationalHealth(ctx, time.Now()); count != 0 || err != nil {
+		t.Fatalf("nil-app health transitions = %d, %v; want zero, nil", count, err)
+	}
+
+	empty := &App{}
+	if got := empty.deploymentHealthObservation(ctx, time.Now()); got != (deploymentHealthObservation{}) {
+		t.Fatalf("uninitialized observation = %+v; want empty", got)
+	}
+	if got := empty.DeploymentMetrics(ctx, time.Now()); got != (DeploymentMetrics{}) {
+		t.Fatalf("uninitialized metrics = %+v; want empty", got)
+	}
+	if count, err := empty.CountOverdueJobs(ctx, time.Now()); count != 0 || err != nil {
+		t.Fatalf("uninitialized overdue jobs = %d, %v; want zero, nil", count, err)
+	}
+	if count, err := empty.RecordDeploymentOperationalHealth(ctx, time.Now()); count != 0 || err != nil {
+		t.Fatalf("uninitialized health transitions = %d, %v; want zero, nil", count, err)
+	}
+}
+
+func TestOffScannerSandboxClearsCapacityAlert(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
+	a := f.app
+	a.Config.Scheduler.MaxConcurrent = 1
+	a.sandbox = sandbox.NewEnforced()
+	a.inspectScannerIdentities = func(context.Context) (*sandbox.ScannerIdentityPoolStatus, error) {
+		return &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, Free: 0}, nil
+	}
+	now := time.Now().UTC()
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now); err != nil || recorded != 1 {
+		t.Fatalf("low identity capacity = %d, %v; want one alert transition", recorded, err)
+	}
+
+	a.sandbox = sandbox.InspectScanner(sandbox.Options{Mode: sandbox.ModeOff})
+	if metrics := a.DeploymentMetrics(ctx, now.Add(time.Minute)); metrics.ScannerIdentities != nil {
+		t.Fatalf("disabled identity pool was exported as a capacity metric: %+v", metrics.ScannerIdentities)
+	}
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(time.Minute)); err != nil || recorded != 0 {
+		t.Fatalf("disabled identity pool recovery = %d, %v; want a silent recovery", recorded, err)
+	}
+	var low int
+	if err := f.db.DB.QueryRowContext(ctx, `SELECT scanner_identity_pool_low FROM platform_alert_state WHERE id=1`).Scan(&low); err != nil || low != 0 {
+		t.Fatalf("scanner identity low-capacity state = %d, %v; want recovery", low, err)
+	}
+}
+
+func TestDeploymentMetricsKeepDatabaseErrorsUnknown(t *testing.T) {
+	t.Parallel()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
+	a := f.app
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	metrics := a.DeploymentMetrics(canceled, time.Now().UTC())
+	if metrics.JobsOverdueKnown || metrics.StalledCyclesKnown {
+		t.Fatalf("metrics from a canceled database inspection were known: %+v", metrics)
+	}
+	if _, err := a.CountOverdueJobs(canceled, time.Now().UTC()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled overdue-job count error = %v; want context.Canceled", err)
+	}
+
+	a.Config.Backup.Directory = t.TempDir()
+	if err := writeBackupStatusFile(BackupStatusPath(f.db.Path), BackupStatus{Directory: a.Config.Backup.Directory, ConsecutiveFailures: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.RecordDeploymentOperationalHealth(canceled, time.Now().UTC()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled backup-health write error = %v; want context.Canceled", err)
+	}
+
+	a.Config.Backup = config.Backup{}
+	a.sandbox = sandbox.InspectScanner(sandbox.Options{Mode: sandbox.ModeOff})
+	if _, err := a.RecordDeploymentOperationalHealth(canceled, time.Now().UTC()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled identity-health write error = %v; want context.Canceled", err)
+	}
 }
 
 func TestChangedBackupDirectoryPreservesFailureUntilRecordedRecovery(t *testing.T) {

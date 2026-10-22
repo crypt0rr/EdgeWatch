@@ -938,7 +938,7 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 77 must not be opened by an older EdgeWatch
+database upgraded to schema 78 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
@@ -1024,6 +1024,9 @@ Schema 76 adds `perimeter_seeds`, the address ranges that each unit declares
 as owned or authorized space, with a trigger that keeps each row in its unit.
 The migration creates an empty table and changes no existing row; an older
 release must not open the upgraded database either.
+Schema 78 records the latest scan-cycle attempt start for recovery and capacity
+history; it does not alter existing scan or baseline rows. An older release
+must not open the upgraded database.
 Only the daemon migrates, and only one process at a time: from v0.36.0 the
 daemon holds an advisory lock on the database directory, which restores take
 too, from before it opens the database until migration and startup finish and

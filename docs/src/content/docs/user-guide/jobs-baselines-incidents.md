@@ -53,6 +53,25 @@ timezone when it is omitted. New jobs receive an optional 30-minute
 schedule-offset suggestion when another active job is nearby; the administrator
 can keep concurrent times.
 
+The **Jobs** and **Perimeter** pages show the business unit's scheduled
+scan-slot demand against its effective slot capacity. Jobs with completed scan
+history from the current job revision use the median duration of their 11 most
+recent samples, multiplied by their scheduled runs per day. Each completed
+resumable cycle sums the recorded durations of its scan attempts, excluding
+idle time between scheduled attempts. A successful or incomplete scan without
+a cycle is one sample. Samples from earlier revisions remain in scan history
+but do not determine the current estimate; after any job revision change,
+EdgeWatch uses the known-work lower bound until a scan of the current revision
+completes. That lower bound divides only known probe work by a configured
+maximum scanner rate, and is counted only when the configured scope is known to
+fit both the job's **Maximum expanded hosts** and the deployment's
+`scanner.max_job_hosts`. An over-limit or unresolved DNS scope adds no lower
+bound because the scanner may reject it before sending probes. DNS, target
+responses, retries, and data-dependent Nmap confirmation can make a scan take
+longer, and work without a configured rate ceiling is called out as
+unestimated. A warning appears at 80% utilization and when estimated demand
+exceeds capacity.
+
 ## Planned change windows
 
 On a job page, an operator or administrator can schedule one finite change

@@ -61,6 +61,7 @@ type ScanCycleRecord struct {
 	TotalProbes        int64
 	CompletedProbes    int64
 	StartedAt          time.Time
+	AttemptStartedAt   time.Time
 	UpdatedAt          time.Time
 	ExpiresAt          time.Time
 	FinishedAt         time.Time
@@ -173,8 +174,8 @@ func (ss *SystemStore) CreateScanCycle(ctx context.Context, cycle ScanCycleRecor
 		return ScanCycleRecord{}, err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,baseline_epoch,plan_json,status,attempt_count,no_progress_attempts,total_units,completed_units,total_probes,completed_probes,started_at,updated_at,expires_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		cycle.ID, cycle.JobID, cycle.Job, cycle.JobRevision, cycle.ConfigHash, cycle.ExecutionHash, cycle.BaselineEpoch, planJSON, cycle.Status, cycle.AttemptCount, cycle.NoProgressAttempts, cycle.TotalUnits, cycle.CompletedUnits, cycle.TotalProbes, cycle.CompletedProbes, sqliteTimestamp(cycle.StartedAt), sqliteTimestamp(cycle.UpdatedAt), sqliteTimestamp(cycle.ExpiresAt), "", cycle.LastError)
+	_, err = tx.ExecContext(ctx, `INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,baseline_epoch,plan_json,status,attempt_count,no_progress_attempts,total_units,completed_units,total_probes,completed_probes,started_at,attempt_started_at,updated_at,expires_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		cycle.ID, cycle.JobID, cycle.Job, cycle.JobRevision, cycle.ConfigHash, cycle.ExecutionHash, cycle.BaselineEpoch, planJSON, cycle.Status, cycle.AttemptCount, cycle.NoProgressAttempts, cycle.TotalUnits, cycle.CompletedUnits, cycle.TotalProbes, cycle.CompletedProbes, sqliteTimestamp(cycle.StartedAt), "", sqliteTimestamp(cycle.UpdatedAt), sqliteTimestamp(cycle.ExpiresAt), "", cycle.LastError)
 	if err != nil {
 		return ScanCycleRecord{}, err
 	}
@@ -794,7 +795,7 @@ const cyclePlanPrefix = 256 << 10
 
 // scanCycleColumns are the columns of a scan_cycles row aliased c that
 // scanScanCycle reads: of plan_json only its first cyclePlanPrefix bytes.
-var scanCycleColumns = `c.id,c.job_id,c.job,c.job_revision,c.config_hash,c.execution_hash,c.baseline_epoch,substr(c.plan_json,1,` + strconv.Itoa(cyclePlanPrefix) + `),c.status,c.attempt_count,c.no_progress_attempts,c.total_units,c.completed_units,c.total_probes,c.completed_probes,c.started_at,c.updated_at,c.expires_at,c.finished_at,c.last_error`
+var scanCycleColumns = `c.id,c.job_id,c.job,c.job_revision,c.config_hash,c.execution_hash,c.baseline_epoch,substr(c.plan_json,1,` + strconv.Itoa(cyclePlanPrefix) + `),c.status,c.attempt_count,c.no_progress_attempts,c.total_units,c.completed_units,c.total_probes,c.completed_probes,c.started_at,c.attempt_started_at,c.updated_at,c.expires_at,c.finished_at,c.last_error`
 
 // scanScanCycle reads the scanCycleColumns of the cycle with the given ID
 // from row. A missing row is ErrNoScanCycle. When the plan's job does not fit
@@ -802,8 +803,8 @@ var scanCycleColumns = `c.id,c.job_id,c.job,c.job_revision,c.config_hash,c.execu
 func scanScanCycle(row *sql.Row, id string, fullPlan func() ([]byte, error)) (ScanCycleRecord, error) {
 	var cycle ScanCycleRecord
 	var planJSON []byte
-	var started, updated, expires, finished string
-	err := row.Scan(&cycle.ID, &cycle.JobID, &cycle.Job, &cycle.JobRevision, &cycle.ConfigHash, &cycle.ExecutionHash, &cycle.BaselineEpoch, &planJSON, &cycle.Status, &cycle.AttemptCount, &cycle.NoProgressAttempts, &cycle.TotalUnits, &cycle.CompletedUnits, &cycle.TotalProbes, &cycle.CompletedProbes, &started, &updated, &expires, &finished, &cycle.LastError)
+	var started, attemptStarted, updated, expires, finished string
+	err := row.Scan(&cycle.ID, &cycle.JobID, &cycle.Job, &cycle.JobRevision, &cycle.ConfigHash, &cycle.ExecutionHash, &cycle.BaselineEpoch, &planJSON, &cycle.Status, &cycle.AttemptCount, &cycle.NoProgressAttempts, &cycle.TotalUnits, &cycle.CompletedUnits, &cycle.TotalProbes, &cycle.CompletedProbes, &started, &attemptStarted, &updated, &expires, &finished, &cycle.LastError)
 	if errors.Is(err, sql.ErrNoRows) {
 		return cycle, fmt.Errorf("%w: %s", ErrNoScanCycle, id)
 	}
@@ -825,6 +826,7 @@ func scanScanCycle(row *sql.Row, id string, fullPlan func() ([]byte, error)) (Sc
 	cycle.Plan.TotalUnits = cycle.TotalUnits
 	cycle.Plan.TotalProbes = cycle.TotalProbes
 	cycle.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
+	cycle.AttemptStartedAt, _ = time.Parse(time.RFC3339Nano, attemptStarted)
 	cycle.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
 	cycle.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expires)
 	cycle.FinishedAt, _ = time.Parse(time.RFC3339Nano, finished)
@@ -978,6 +980,98 @@ func (ts *TenantStore) ListActiveScanCycleSummaries(ctx context.Context, include
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+// ListCompletedScanCycleDurations returns the most recent completed scan
+// duration samples for each active job's current revision in the tenant. A
+// completed cycle's sample is the sum of its recorded earlier attempts and its final
+// attempt's durable start and completion timestamps, so time between attempts
+// is excluded and the final duration survives a crash before scan finalization.
+// Recovery invocations that start after cycle completion are excluded because
+// their duration is not scan work. A completed scan without a cycle is its own
+// sample. Older revisions remain in scan history but cannot describe the
+// current revision's demand.
+// The pinned plan and per-unit checkpoints are deliberately not loaded, and
+// the tenant predicate is part of every query branch.
+func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, perJobLimit int) (map[string][]time.Duration, error) {
+	if err := ts.ready(); err != nil {
+		return nil, err
+	}
+	if perJobLimit < 1 {
+		return map[string][]time.Duration{}, nil
+	}
+	rows, err := ts.store.reader().QueryContext(ctx, `
+		WITH attempt_records AS (
+			SELECT s.job_id,'cycle:'||c.id AS sample_id,s.id,s.started_at,s.finished_at
+			FROM scans AS s
+			JOIN scan_cycles AS c ON c.id=s.cycle_id AND c.job_id=s.job_id
+			JOIN jobs AS j ON j.id=c.job_id AND j.tenant_id=?
+			WHERE s.tenant_id=? AND j.archived=0 AND c.status='completed' AND c.job_revision=j.revision
+				AND (c.attempt_count=0 OR (s.cycle_attempt>0 AND s.cycle_attempt<c.attempt_count))
+				AND s.started_at<>'' AND s.finished_at<>''
+				AND julianday(s.started_at)<julianday(c.finished_at)
+				AND julianday(s.finished_at)>julianday(s.started_at)
+			UNION ALL
+			SELECT c.job_id,'cycle:'||c.id AS sample_id,'cycle:'||c.id AS id,
+				CASE WHEN c.attempt_started_at<>'' THEN c.attempt_started_at ELSE c.started_at END,c.finished_at
+			FROM scan_cycles AS c
+			JOIN jobs AS j ON j.id=c.job_id AND j.tenant_id=?
+			WHERE j.archived=0 AND c.status='completed' AND c.job_revision=j.revision
+				AND (c.attempt_started_at<>'' OR c.attempt_count=1)
+				AND c.finished_at<>''
+				AND julianday(c.finished_at)>julianday(CASE WHEN c.attempt_started_at<>'' THEN c.attempt_started_at ELSE c.started_at END)
+			UNION ALL
+			SELECT s.job_id,'scan:'||s.id AS sample_id,s.id,s.started_at,s.finished_at
+			FROM scans AS s
+			JOIN jobs AS j ON j.id=s.job_id AND j.tenant_id=?
+			WHERE s.tenant_id=? AND j.archived=0 AND COALESCE(s.cycle_id,'')=''
+				AND s.status IN ('success','incomplete')
+				AND s.job_revision=j.revision
+				AND s.started_at<>'' AND s.finished_at<>''
+				AND julianday(s.finished_at)>julianday(s.started_at)
+		), sample_candidates AS (
+			SELECT job_id,sample_id,MAX(finished_at) AS latest_finished
+			FROM attempt_records
+			GROUP BY job_id,sample_id
+		), ranked_samples AS (
+			SELECT job_id,sample_id,
+				ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY latest_finished DESC,sample_id DESC) AS sample_rank
+			FROM sample_candidates
+		)
+		SELECT a.job_id,a.sample_id,a.started_at,a.finished_at
+		FROM attempt_records AS a
+		JOIN ranked_samples AS r ON r.job_id=a.job_id AND r.sample_id=a.sample_id
+		WHERE r.sample_rank<=?
+		ORDER BY a.job_id,r.sample_rank,a.finished_at,a.id`,
+		ts.scope.id, ts.scope.id, ts.scope.id, ts.scope.id, ts.scope.id, perJobLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	bySample := make(map[string]map[string]time.Duration)
+	for rows.Next() {
+		var jobID, sampleID, started, finished string
+		if err := rows.Scan(&jobID, &sampleID, &started, &finished); err != nil {
+			return nil, err
+		}
+		duration := scanTime(finished).Sub(scanTime(started))
+		if duration > 0 {
+			if bySample[jobID] == nil {
+				bySample[jobID] = make(map[string]time.Duration)
+			}
+			bySample[jobID][sampleID] += duration
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make(map[string][]time.Duration, len(bySample))
+	for jobID, samples := range bySample {
+		for _, duration := range samples {
+			out[jobID] = append(out[jobID], duration)
+		}
 	}
 	return out, nil
 }
@@ -1271,7 +1365,7 @@ func (ss *SystemStore) StartScanCycleAttempt(ctx context.Context, id string) (Sc
 	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycle_units SET status='pending',started_at='',last_error=last_error WHERE cycle_id=? AND status='running'`, id); err != nil {
 		return ScanCycleRecord{}, err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycles SET status='running',attempt_count=attempt_count+1,updated_at=? WHERE id=? AND status IN ('paused','stalled','running')`, sqliteTimestamp(now), id); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycles SET status='running',attempt_count=attempt_count+1,attempt_started_at=?,updated_at=? WHERE id=? AND status IN ('paused','stalled','running')`, sqliteTimestamp(now), sqliteTimestamp(now), id); err != nil {
 		return ScanCycleRecord{}, err
 	}
 	if err = tx.Commit(); err != nil {

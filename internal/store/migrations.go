@@ -19,7 +19,7 @@ import (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 77
+const schemaVersion = 78
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -54,6 +54,9 @@ var conditionalMigrationStatements = map[int]func(context.Context, *sql.Tx) ([]s
 	74: migration74ConditionalStatements,
 	75: migration75ConditionalStatements,
 	77: migration77ConditionalStatements,
+	// Schema 78 records the start of the latest scan-cycle attempt so a
+	// completed cycle remains a duration sample after a finalization crash.
+	78: migration78ConditionalStatements,
 }
 
 // newerSchemaError is the refusal for a database that a newer release has
@@ -380,6 +383,8 @@ func schemaMigrationStatements() map[int][]string {
 		76: migration76Statements(),
 		// Deployment backup and scanner-identity alert windows. See migration77.go.
 		77: migration77Statements(),
+		// The attempt start is a recovery boundary on scan_cycles. See migration78.go.
+		78: migration78Statements(),
 	}
 }
 

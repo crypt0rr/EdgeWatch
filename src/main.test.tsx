@@ -5,7 +5,7 @@ import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQuery } from '@tanstack/react-query'
 import { useLocation } from 'react-router-dom'
-import { APIError, adminStatus, getPerimeter, getPerimeterRange, getSession, incidentInboxSummary, listEvents, listIncidents, listJobs, login, logout, recordActivity, setupStatus } from './api'
+import { APIError, adminStatus, getPerimeter, getPerimeterRange, getSession, incidentInboxSummary, listEvents, listIncidents, listJobs, login, logout, recordActivity, scanSlotDemand, setupStatus } from './api'
 import { formatDateTimeInTimeZone, setDisplayTimeZone } from './format'
 import { AppContent, AuthRoutes, createQueryClient, Jobs, ProtectedApp, retryQuery, retryQueryDelay, Shell, unitBreadcrumb } from './main'
 import { perimeterOverview, perimeterRangeDetail } from './test/perimeter-fixtures'
@@ -13,7 +13,7 @@ import { renderWithProviders } from './test/test-utils'
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api')
-  return { ...actual, acceptIncident: vi.fn(), adminStatus: vi.fn(), getPerimeter: vi.fn(), getPerimeterRange: vi.fn(), getSession: vi.fn(), incidentInboxSummary: vi.fn(), listEvents: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), login: vi.fn(), logout: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), suppressIncident: vi.fn() }
+  return { ...actual, acceptIncident: vi.fn(), adminStatus: vi.fn(), getPerimeter: vi.fn(), getPerimeterRange: vi.fn(), getSession: vi.fn(), incidentInboxSummary: vi.fn(), listEvents: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), login: vi.fn(), logout: vi.fn(), recordActivity: vi.fn(), scanSlotDemand: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), suppressIncident: vi.fn() }
 })
 
 class EventSourceStub {
@@ -46,6 +46,7 @@ describe('application shell', () => {
     vi.mocked(incidentInboxSummary).mockResolvedValue({ active_count: 0 })
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 0, server_now: new Date().toISOString(), next_follow_up_at: null, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] } as never)
+    vi.mocked(scanSlotDemand).mockResolvedValue({ enabled_jobs: 0, history_jobs: 0, lower_bound_jobs: 0, unestimated_jobs: 0, slots: 1, estimated_slot_seconds_per_day: 0, capacity_slot_seconds_per_day: 86_400, utilization_percent: 0, over_capacity: false })
     vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'incidents.read', 'incidents.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
     vi.mocked(login).mockResolvedValue({ role: 'administrator', username: 'admin', permissions: ['jobs.write'], csrf_token: '', totp_required: false } as never)
     vi.mocked(logout).mockResolvedValue(undefined)

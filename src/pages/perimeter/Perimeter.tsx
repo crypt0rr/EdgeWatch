@@ -6,6 +6,7 @@ import { APIError, deletePerimeterSeed, getPerimeter, getSession } from '../../a
 import type { PerimeterMonitorRef, PerimeterOutsideTarget, PerimeterOverview, PerimeterRange, PerimeterTotals } from '../../generated/api-types'
 import { ActionDialog } from '../../components/ActionDialog'
 import { ErrorNotice } from '../../components/ErrorNotice'
+import { ScanSlotDemandNotice } from '../../components/ScanSlotDemand'
 import { useIsMobile } from '../../components/navigation'
 import { formatDateTime } from '../../format'
 import { DeclareRanges, defaultMaxEntries } from './DeclareRanges'
@@ -79,6 +80,7 @@ export function Perimeter() {
       <Fence className="muted-icon" size={24} aria-hidden="true" />
     </div>
     <div className="perimeter-stack">
+      <ScanSlotDemandNotice />
       {/* Always mounted, so the live region exists before its text changes. */}
       <p ref={noticeRef} className="success-message perimeter-notice" role="status" tabIndex={-1} hidden={!notice}>{notice}</p>
       {!data && overview.isError ? <ErrorNotice message="Could not load the perimeter." onRetry={() => overview.refetch()} />

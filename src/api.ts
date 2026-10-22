@@ -1,5 +1,5 @@
 import type { ActiveScan, ActivityEvent, BaselineHostsResponse, GlobalHostsResponse, HostDetailResponse, Job, JobForm, JobPreview, Pagination, PendingChange, QueuedRun, RdapResult, ScanComparison, NaabuOptions } from './types'
-import type { AdminStatus, Change, ChangeWindow, DeploymentLimits, IncidentInboxItem, IncidentInboxPage, IncidentInboxSummary, IncidentReview, NotificationStatus, PerimeterDeclareResult, PerimeterLineError, PerimeterOverview, PerimeterRangeDetail, PlatformStatus, Scan, ScanSummary, Scope, Unit } from './generated/api-types'
+import type { AdminStatus, Change, ChangeWindow, DeploymentLimits, IncidentInboxItem, IncidentInboxPage, IncidentInboxSummary, IncidentReview, NotificationStatus, PerimeterDeclareResult, PerimeterLineError, PerimeterOverview, PerimeterRangeDetail, PlatformStatus, Scan, ScanSlotDemand, ScanSummary, Scope, Unit } from './generated/api-types'
 import { setDisplayTimeZone } from './format'
 
 export type NotificationDestination = {
@@ -161,6 +161,7 @@ export const logout = () => api('/auth/logout', { method: 'POST' })
 export const logoutAllSessions = () => api('/auth/sessions', { method: 'DELETE' })
 export const updateDisplayName = (displayName: string) => api<{ display_name: string }>('/auth/display-name', { method: 'PUT', body: JSON.stringify({ display_name: displayName }) })
 export const listJobs = (archived = false) => api<{ jobs: Job[] }>(`/jobs?include_archived=${archived}`)
+export const scanSlotDemand = () => api<ScanSlotDemand>('/jobs/slot-demand')
 export type ScheduleSuggestion = {
   suggested: boolean
   suggested_schedule?: string

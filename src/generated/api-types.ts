@@ -290,6 +290,19 @@ export type ScanSummary = {
   comparison?: string
 }
 
+// ScanSlotDemand is app.ScanSlotDemand.
+export type ScanSlotDemand = {
+  enabled_jobs: number
+  history_jobs: number
+  lower_bound_jobs: number
+  unestimated_jobs: number
+  slots: number
+  estimated_slot_seconds_per_day: number
+  capacity_slot_seconds_per_day: number
+  utilization_percent: number
+  over_capacity: boolean
+}
+
 // JobScanStatus is web.jobScanStatusView.
 export type JobScanStatus = {
   scan_id?: string

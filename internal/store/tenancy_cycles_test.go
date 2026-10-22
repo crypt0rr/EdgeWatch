@@ -272,6 +272,47 @@ func tenantCycleRows(t *testing.T, s *Store, scope TenantScope) string {
 // cycleTenantLeakCases hold the leak cases of the scan cycle reads and the
 // cycle discard. Each case opens its own copy of the cycle fixture.
 var cycleTenantLeakCases = map[string]tenantLeakCase{
+	"ListCompletedScanCycleDurations": {run: func(t *testing.T, _ tenantFixture) {
+		ctx := context.Background()
+		f := newCycleTenantFixture(t)
+		for _, owner := range []struct {
+			scope         TenantScope
+			job, archived string
+		}{{f.a, f.jobA, f.archivedA}, {f.b, f.jobB, f.archivedB}} {
+			finished := time.Now().UTC()
+			record, err := f.store.Tenant(owner.scope).GetJob(ctx, owner.job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.System().SaveScan(ctx, model.Scan{
+				ID: "scan-demand-standalone-" + owner.scope.ID(), JobID: owner.job, Job: "edge", JobRevision: record.Revision,
+				StartedAt: finished.Add(-30 * time.Second), FinishedAt: finished, Status: "success",
+				ConfigHash: "tenant-cycle-demand",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			durations, err := f.store.Tenant(owner.scope).ListCompletedScanCycleDurations(ctx, 11)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(durations[owner.job]) != 2 || len(durations[owner.archived]) != 0 {
+				t.Errorf("tenant %s: current-revision scan samples = %#v; want two for its job and none for its archived job without saved attempts", owner.scope.ID(), durations)
+			}
+			if len(durations) != 1 {
+				t.Errorf("tenant %s: completed cycle samples include another tenant's jobs: %#v", owner.scope.ID(), durations)
+			}
+			for jobID, samples := range durations {
+				if jobID != owner.job && jobID != owner.archived {
+					t.Errorf("tenant %s received samples for unexpected job %s", owner.scope.ID(), jobID)
+				}
+				for _, sample := range samples {
+					if sample <= 0 {
+						t.Errorf("tenant %s: non-positive cycle duration %s", owner.scope.ID(), sample)
+					}
+				}
+			}
+		}
+	}},
 	"GetScanCycle": {run: func(t *testing.T, _ tenantFixture) {
 		ctx := context.Background()
 		f := newCycleTenantFixture(t)

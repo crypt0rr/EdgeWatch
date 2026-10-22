@@ -577,10 +577,17 @@ func (a *App) recoverCompletedCycle(ctx context.Context, scan *model.Scan, run *
 	// this recovered result as superseded without mutating the new baseline.
 	scan.ConfigHash = cycle.ConfigHash
 	scan.JobRevision = cycle.JobRevision
-	if !cycle.StartedAt.IsZero() {
-		scan.StartedAt = cycle.StartedAt
+	// A newly recorded attempt start and the cycle completion timestamp bound
+	// scanner work independently of the recovery invocation. Preserve that
+	// interval in scan history when it is available so recovery-only time is
+	// never attributed to the scan. Older resumed cycles have no exact final
+	// attempt start, so retain their invocation timestamp.
+	attemptStarted := cycle.AttemptStartedAt
+	if attemptStarted.IsZero() && cycle.AttemptCount == 1 {
+		attemptStarted = cycle.StartedAt
 	}
-	if !cycle.FinishedAt.IsZero() {
+	if !attemptStarted.IsZero() {
+		scan.StartedAt = attemptStarted
 		scan.FinishedAt = cycle.FinishedAt
 	}
 	scan.Status = "success"

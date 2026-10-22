@@ -33,6 +33,15 @@ docker compose exec edgewatch edgewatch notify test \
 # Act on one business unit by its slug
 docker compose exec edgewatch edgewatch status \
   --config /etc/edgewatch/config.yaml --tenant UNIT_SLUG --output json
+
+# List a unit's declared perimeter ranges
+docker compose exec edgewatch edgewatch perimeter list \
+  --config /etc/edgewatch/config.yaml --tenant UNIT_SLUG --output json
+
+# Declare reviewed ranges from a host file through standard input
+docker compose exec -T edgewatch edgewatch perimeter declare \
+  --config /etc/edgewatch/config.yaml --tenant UNIT_SLUG \
+  --kind prefix --from - < ./perimeter-ranges.txt
 ```
 
 ## Commands and options
@@ -55,6 +64,8 @@ defaults.
 | `baseline approve` | `--job NAME`, `--scan-id ID` (required: a scan of the job's current configuration whose result becomes the baseline), `--tenant` |
 | `baseline reset` | `--job NAME`, `--tenant` |
 | `baseline export` | `--job NAME`, `--out FILE`, `--tenant` |
+| `perimeter list` | `--tenant SLUG` (required) |
+| `perimeter declare` | `--tenant SLUG` (required), `--kind prefix\|authorized` (required), `--from FILE\|-` (required) |
 | `backup` | `--out FILE` (must not exist yet), `--full-check` (SQLite's `integrity_check` instead of `quick_check`) |
 | `restore` | `--from FILE`, `--dry-run`, `--pending-deliveries quarantine\|discard\|preserve` (default `quarantine`), and the [emergency overrides](/operations/backup-recovery/#emergency-restore-overrides), including `--allow-key-mismatch` |
 | `verify` | `--from FILE` (check a backup file instead of the configured database), `--allow-key-mismatch` (with `--from` only) |
@@ -220,6 +231,25 @@ in the deployment is locked because the notification key is missing,
 replaced, or unreadable, whichever unit `--tenant` selects, so it can confirm
 a restored key for the whole deployment. Paused destinations are neither
 tested nor counted.
+
+## Perimeter commands
+
+`perimeter list` prints a unit's declared ranges; use `--output json` for a
+JSON array. `perimeter declare` reads one IP address or CIDR prefix per
+non-blank line, with an optional label after whitespace. `--from FILE` reads
+a file in the container, and `--from -` reads standard input. Runs of spaces,
+tabs, and Unicode space, line, and paragraph separators within a label are
+joined as one space, matching the Perimeter form; other control characters in
+labels are rejected. The unit slug is required for both commands so a host
+script cannot accidentally use the default unit. A declaration accepts 1 to
+256 entries and uses the same
+validation and canonicalization as the Perimeter page. Repeated entries in
+the same kind are skipped, including ranges already declared, while any
+invalid entry refuses the whole declaration. A successful declaration writes
+one `perimeter.seeds_added` audit record attributed to `host-cli`; listing is
+read-only. Host command changes do not send a live update to an open Perimeter
+page, so reload the page to see them. Neither command starts scans or changes
+monitors. See [Perimeter coverage](/user-guide/perimeter/#host-commands).
 
 ## Status and structured output
 

@@ -100,7 +100,7 @@ func run(args []string) error {
 	cmd := args[0]
 	action := ""
 	rest := args[1:]
-	if cmd == "config" || cmd == "baseline" || cmd == "notify" || cmd == "admin" || cmd == "scanner-identities" {
+	if cmd == "config" || cmd == "baseline" || cmd == "notify" || cmd == "admin" || cmd == "scanner-identities" || cmd == "perimeter" {
 		if len(rest) == 0 {
 			return usage()
 		}
@@ -126,6 +126,7 @@ func run(args []string) error {
 	username := fs.String("username", "admin", "username for administrator recovery actions")
 	force := fs.Bool("force", false, "confirm replacement of the current setup token")
 	tenantFlag := fs.String("tenant", "", "slug of the business unit a host command acts on")
+	kind := fs.String("kind", "", "perimeter range kind: prefix or authorized")
 	confirmAllVolumeUsersStopped := fs.Bool("confirm-all-volume-users-stopped", false, "confirm every process using the scanner state volume has stopped")
 	fs.SetOutput(io.Discard)
 	if err := fs.Parse(rest); err != nil {
@@ -147,6 +148,22 @@ func run(args []string) error {
 	}
 	if err := validateOutputFormat(cmd, action, *output); err != nil {
 		return err
+	}
+	if cmd == "perimeter" {
+		if action != "list" && action != "declare" {
+			return errors.New("expected: perimeter list or perimeter declare")
+		}
+		if tenantSlug == "" {
+			return errors.New("perimeter commands require --tenant SLUG")
+		}
+		if action == "declare" {
+			if *kind != store.PerimeterKindPrefix && *kind != store.PerimeterKindAuthorized {
+				return errors.New("--kind must be prefix or authorized")
+			}
+			if *fromPath == "" {
+				return errors.New("--from is required (use - to read standard input)")
+			}
+		}
 	}
 	if cmd == "scanner-identities" {
 		if action != "recover" {
@@ -181,7 +198,7 @@ func run(args []string) error {
 		return validateConfig(*configPath, *output)
 	}
 	loadConfig := config.Load
-	if cmd == "admin" || cmd == "backup" || cmd == "verify" || cmd == "health" || cmd == "status" || cmd == "history" || cmd == "restore" || (cmd == "baseline" && action == "export") {
+	if cmd == "admin" || cmd == "backup" || cmd == "verify" || cmd == "health" || cmd == "status" || cmd == "history" || cmd == "restore" || (cmd == "baseline" && action == "export") || cmd == "perimeter" {
 		// Host recovery must not depend on monitor-only configuration such as
 		// Shoutrrr destinations, encryption keys, listener settings, or legacy
 		// YAML job semantics.
@@ -271,7 +288,7 @@ func run(args []string) error {
 	// diagnostic commands must never create a database or mutate schema state,
 	// while backup needs a writable connection for VACUUM INTO without running
 	// migrations in parallel with the daemon.
-	readOnlyCommand := cmd == "health" || cmd == "status" || cmd == "history" || cmd == "verify" || (cmd == "baseline" && action == "export")
+	readOnlyCommand := cmd == "health" || cmd == "status" || cmd == "history" || cmd == "verify" || (cmd == "baseline" && action == "export") || (cmd == "perimeter" && action == "list")
 	// Initialize the configured logger before opening the writable store so
 	// migration and resumable-backfill progress uses the same structured output
 	// as the rest of the daemon.
@@ -369,8 +386,8 @@ func run(args []string) error {
 		}
 		return adminRecovery(context.Background(), action, s, *passwordFile, *username, options)
 	}
-	// scan, status, history, baseline, and notify test act on the jobs,
-	// scans, baselines, and destinations of the business unit that --tenant
+	// scan, status, history, baseline, perimeter, and notify test act on the jobs,
+	// scans, baselines, declarations, and destinations of the business unit that --tenant
 	// names, or of the default unit without it, and the unit's state limits
 	// them alike either way. The daemon, backup, verify, and health work on
 	// the whole database, and admin recovery above works in the unit of the
@@ -454,6 +471,11 @@ func run(args []string) error {
 			return exportBaseline(ctx, tenant, *jobName, *outPath, *output)
 		}
 		return baseline(ctx, action, tenant, application, *jobName, *scanID, *output)
+	case "perimeter":
+		if action == "list" {
+			return listPerimeter(ctx, tenant, *output)
+		}
+		return declarePerimeter(ctx, tenant, *kind, *fromPath, os.Stdin, *output)
 	case "notify":
 		if action != "test" {
 			return errors.New("expected: notify test")
@@ -520,10 +542,10 @@ func run(args []string) error {
 }
 
 const usageText = `Usage: edgewatch <command> [options]
-Commands: daemon, config validate, scan, status, history, baseline approve|reset|export, backup, restore, verify, notify test, scanner-identities recover, admin setup-token|reissue-setup-token|platform-setup-token|reset-password|disable-totp, health, version, help
+Commands: daemon, config validate, scan, status, history, baseline approve|reset|export, perimeter list|declare, backup, restore, verify, notify test, scanner-identities recover, admin setup-token|reissue-setup-token|platform-setup-token|reset-password|disable-totp, health, version, help
 Run edgewatch <command> --help for the options of one command.
 Admin recovery actions accept --username (default admin) and require host access.
-scan, status, history, baseline, and notify test accept --tenant SLUG to act on that business unit instead of the default one, and admin reset-password and disable-totp accept it to stop unless the account belongs to that unit.`
+scan, status, history, baseline, and notify test accept --tenant SLUG to act on that business unit instead of the default one; perimeter list and declare require it. Admin reset-password and disable-totp accept it to stop unless the account belongs to that unit.`
 
 // usage reports a missing or unknown command on stderr.
 func usage() error {
@@ -550,7 +572,11 @@ func printCommandHelp(w io.Writer, fs *flag.FlagSet, cmd, action string) {
 		if _, ok := allowed[f.Name]; !ok {
 			return
 		}
-		line := fmt.Sprintf("  --%s\t%s", f.Name, f.Usage)
+		usage := f.Usage
+		if f.Name == "from" && cmd == "perimeter" && action == "declare" {
+			usage = "input file, or - to read standard input"
+		}
+		line := fmt.Sprintf("  --%s\t%s", f.Name, usage)
 		if f.DefValue != "" && f.DefValue != "false" {
 			line += fmt.Sprintf(" (default %s)", f.DefValue)
 		}

@@ -33,9 +33,9 @@ owns or may scan, each with an optional label and the username that declared
 it, in the SQLite database and its backups. They map the unit's address space
 and the third parties it works with, so treat them as operationally
 sensitive. Declarations are unit data: each row carries its unit, which a
-trigger keeps fixed, and a unit's requests read and write them only through
-its tenant-scoped store; apart from that, only the daemon's purge of a
-deleted unit and whole-database backup and restore touch them. They are
+trigger keeps fixed, and requests and host commands read and write them only
+through the unit's tenant-scoped store; the daemon's purge of a deleted unit
+and whole-database backup and restore also touch them. They are
 never shared with another unit and never appear on the public status surface
 or in the platform console. The unit's administrators and operators read the
 declarations and the coverage report computed from them (`perimeter.read`);
@@ -53,9 +53,16 @@ declared ranges are excluded, as refusing such a job's target already tells
 them. Its suggested monitors create nothing: a monitor is created only through
 the job API, which applies the exclusions, probe budgets, and high-cost
 approval as for any other job. A change to the declarations sends the unit's
-own live-update streams a notice that names no range. Each addition and removal
-is recorded in the unit's audit as a data record, which the platform audit
-does not show. Deleting the business unit erases its declarations through
+own live-update streams a notice that names no range when changed in the
+console; the host CLI sends no live update. The host CLI lists and declares
+ranges only with an explicit unit slug. Its list command is read-only, and its
+declare command reads a file or standard input, accepts at most 256 entries,
+and uses the same validation and all-or-nothing transaction as the console.
+Every successful host declaration is attributed to `host-cli`; its audit
+record omits range values, labels, and input paths, and refusal messages do
+not echo submitted values. Each addition and removal is recorded in the
+unit's audit as a data record, which the platform audit does not show.
+Deleting the business unit erases its declarations through
 the resumable purge. A declared range states ownership or permission for
 coverage reporting; it does not authorize scanning that range, and EdgeWatch
 never starts a scan or creates, changes, pauses, or deletes a job because of a

@@ -1320,13 +1320,8 @@ func NormalizeStoredJob(j Job) Job {
 	// path can return after normalization without building either YAML hash.
 	// Only a pre-canonicalization spelling needs a legacy hash for baselines and
 	// resumable cycles created by older versions.
-	legacyPortsChanged := false
-	if j.TCP != nil && j.TCP.Engine != EngineNaabuNmap && tcpPorts != j.TCP.Ports {
-		legacyPortsChanged = true
-	}
-	if j.UDP != nil && udpPorts != j.UDP.Ports {
-		legacyPortsChanged = true
-	}
+	legacyPortsChanged := (j.TCP != nil && j.TCP.Engine != EngineNaabuNmap && tcpPorts != j.TCP.Ports) ||
+		(j.UDP != nil && udpPorts != j.UDP.Ports)
 	if !legacyPortsChanged {
 		return j
 	}

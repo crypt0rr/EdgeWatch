@@ -577,12 +577,9 @@ func (a *App) recoverCompletedCycle(ctx context.Context, scan *model.Scan, run *
 	// this recovered result as superseded without mutating the new baseline.
 	scan.ConfigHash = cycle.ConfigHash
 	scan.JobRevision = cycle.JobRevision
-	if !cycle.StartedAt.IsZero() {
-		scan.StartedAt = cycle.StartedAt
-	}
-	if !cycle.FinishedAt.IsZero() {
-		scan.FinishedAt = cycle.FinishedAt
-	}
+	// This scan row represents the recovery invocation holding the slot. Keep
+	// its invocation start and let finalize record its finish; cycle timestamps
+	// span any idle time between scheduled attempts.
 	scan.Status = "success"
 	scan.Resumable = true
 	scan.Snapshot = snapshot

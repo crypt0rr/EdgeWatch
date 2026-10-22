@@ -495,6 +495,61 @@ func TestResumableRecoveryAndFinishPersistenceFailures(t *testing.T) {
 	}
 }
 
+func TestRecoverCompletedCycleKeepsRecoveryAttemptTimestamps(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	tenant := defaultTenant(db)
+	job := config.NormalizeJob(config.Job{
+		Name: "recovery-timing", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"},
+	})
+	record, err := tenant.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := scanner.WorkPlan{
+		Job: job, Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "443"}},
+		Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Family: 4, Addresses: []string{"192.0.2.1"}, Ports: "443", PortCount: 1, Probes: 1}},
+	}
+	cycle, err := db.System().CreateScanCycle(ctx, store.ScanCycleRecord{
+		JobID: record.ID, Job: job.Name, JobRevision: record.Revision,
+		ConfigHash: job.SecurityHash(), ExecutionHash: job.ExecutionHash(), Plan: plan,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := db.System().NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	cycle, err = db.System().CompleteScanCycle(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cycle.StartedAt = time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	cycle.FinishedAt = cycle.StartedAt.Add(48 * time.Hour)
+	started := time.Now().UTC()
+	scan := model.Scan{StartedAt: started}
+
+	handled, _, err := (&App{Store: db}).recoverCompletedCycle(ctx, &scan, nil, cycle)
+	if err != nil || !handled {
+		t.Fatalf("recover completed cycle = handled %t, error %v", handled, err)
+	}
+	if !scan.StartedAt.Equal(started) || !scan.FinishedAt.IsZero() {
+		t.Fatalf("recovery scan timestamps = %s to %s; want invocation start %s and finish left for finalize", scan.StartedAt, scan.FinishedAt, started)
+	}
+}
+
 func TestFinishResumableCycleStallsWhenCheckpointRowsAreMissing(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {

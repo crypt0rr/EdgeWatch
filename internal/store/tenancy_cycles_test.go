@@ -279,14 +279,22 @@ var cycleTenantLeakCases = map[string]tenantLeakCase{
 			scope         TenantScope
 			job, archived string
 		}{{f.a, f.jobA, f.archivedA}, {f.b, f.jobB, f.archivedB}} {
+			finished := time.Now().UTC()
+			if err := f.store.System().SaveScan(ctx, model.Scan{
+				ID: "scan-demand-standalone-" + owner.scope.ID(), JobID: owner.job, Job: "edge",
+				StartedAt: finished.Add(-30 * time.Second), FinishedAt: finished, Status: "success",
+				ConfigHash: "tenant-cycle-demand",
+			}); err != nil {
+				t.Fatal(err)
+			}
 			durations, err := f.store.Tenant(owner.scope).ListCompletedScanCycleDurations(ctx, 11)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(durations[owner.job]) != 1 || len(durations[owner.archived]) != 1 {
-				t.Errorf("tenant %s: completed cycle samples = %#v; want one sample for each owned job", owner.scope.ID(), durations)
+			if len(durations[owner.job]) != 3 || len(durations[owner.archived]) != 0 {
+				t.Errorf("tenant %s: completed scan samples = %#v; want three for its job and none for its archived job without saved attempts", owner.scope.ID(), durations)
 			}
-			if len(durations) != 2 {
+			if len(durations) != 1 {
 				t.Errorf("tenant %s: completed cycle samples include another tenant's jobs: %#v", owner.scope.ID(), durations)
 			}
 			for jobID, samples := range durations {

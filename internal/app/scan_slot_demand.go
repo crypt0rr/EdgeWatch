@@ -31,7 +31,7 @@ type ScanSlotDemand struct {
 
 // ScanSlotDemand estimates the unit's scheduled demand from enabled jobs and
 // compares it with the unit's effective slot capacity. The most recent
-// completed cycle durations are the expected duration; jobs without that
+// completed scan-history samples are the expected duration; jobs without that
 // history use only work bounded by an explicitly configured scanner rate.
 func (a *App) ScanSlotDemand(ctx context.Context, ts *store.TenantStore) (ScanSlotDemand, error) {
 	var result ScanSlotDemand

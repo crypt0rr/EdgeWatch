@@ -44,6 +44,48 @@ func TestListCompletedScanCycleDurationsHandlesScopeLimitAndQueryErrors(t *testi
 	}
 }
 
+func TestListCompletedScanCycleDurationsSumsAttemptsAndExcludesPause(t *testing.T) {
+	t.Parallel()
+	ctx, s, job, _ := cycleFixture(t)
+	defer s.Close()
+	firstStart := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	firstFinish := firstStart.Add(2 * time.Minute)
+	secondStart := firstStart.Add(48 * time.Hour)
+	secondFinish := secondStart.Add(3 * time.Minute)
+	stamp := func(value time.Time) string { return value.Format(time.RFC3339Nano) }
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,attempt_count,total_units,total_probes,started_at,updated_at,expires_at,finished_at)
+		VALUES(?,?,?,?,?,?,?,'completed',2,1,2,?,?,?,?)`,
+		"paused-demand-cycle", job.ID, job.Job.Name, job.Revision, job.Job.SecurityHash(), "execution", []byte(`{}`),
+		stamp(firstStart), stamp(secondFinish), stamp(secondFinish), stamp(secondFinish)); err != nil {
+		t.Fatal(err)
+	}
+	for _, attempt := range []struct {
+		id       string
+		started  time.Time
+		finished time.Time
+		status   string
+	}{
+		{id: "paused-demand-attempt-1", started: firstStart, finished: firstFinish, status: "timed_out"},
+		{id: "paused-demand-attempt-2", started: secondStart, finished: secondFinish, status: "success"},
+	} {
+		if err := s.System().SaveScan(ctx, model.Scan{
+			ID: attempt.id, JobID: job.ID, Job: job.Job.Name, StartedAt: attempt.started,
+			FinishedAt: attempt.finished, Status: attempt.status, ConfigHash: job.Job.SecurityHash(),
+			CycleID: "paused-demand-cycle", CycleAttempt: 1, CycleStatus: "paused", Resumable: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	durations, err := defaultTenant(s).ListCompletedScanCycleDurations(ctx, 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := durations[job.ID]; len(got) != 1 || got[0] != 5*time.Minute {
+		t.Fatalf("completed cycle duration samples = %v, want the 2m and 3m held attempts summed to 5m without the 48h pause", got)
+	}
+}
+
 func TestFinalizeManagedScanRejectsSecondPromotionOfCompletedCycle(t *testing.T) {
 	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)

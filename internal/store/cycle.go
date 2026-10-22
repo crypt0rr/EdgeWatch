@@ -982,10 +982,12 @@ func (ts *TenantStore) ListActiveScanCycleSummaries(ctx context.Context, include
 	return out, nil
 }
 
-// ListCompletedScanCycleDurations returns the most recent completed-cycle
-// durations for each job in the tenant. The pinned plan and per-unit
-// checkpoints are deliberately not loaded. A cycle belongs to the tenant of
-// its job, so the tenant predicate is part of this query.
+// ListCompletedScanCycleDurations returns the most recent completed scan
+// duration samples for each job in the tenant. A completed cycle's sample is
+// the sum of its recorded scan attempts, so time between attempts is excluded.
+// A completed scan without a cycle is its own sample. The pinned plan and
+// per-unit checkpoints are deliberately not loaded, and the tenant predicate
+// is part of every query branch.
 func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, perJobLimit int) (map[string][]time.Duration, error) {
 	if err := ts.ready(); err != nil {
 		return nil, err
@@ -994,34 +996,63 @@ func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, perJ
 		return map[string][]time.Duration{}, nil
 	}
 	rows, err := ts.store.reader().QueryContext(ctx, `
-		WITH ranked AS (
-			SELECT c.job_id,c.started_at,c.finished_at,
-				ROW_NUMBER() OVER (PARTITION BY c.job_id ORDER BY c.finished_at DESC,c.id DESC) AS sample_rank
-			FROM scan_cycles AS c
-			JOIN jobs AS j ON j.id=c.job_id
-			WHERE j.tenant_id=? AND c.status='completed'
-				AND c.started_at<>'' AND c.finished_at<>''
-				AND julianday(c.finished_at)>julianday(c.started_at)
+		WITH attempt_records AS (
+			SELECT s.job_id,'cycle:'||c.id AS sample_id,s.id,s.started_at,s.finished_at
+			FROM scans AS s
+			JOIN scan_cycles AS c ON c.id=s.cycle_id AND c.job_id=s.job_id
+			JOIN jobs AS j ON j.id=c.job_id AND j.tenant_id=?
+			WHERE s.tenant_id=? AND c.status='completed'
+				AND s.started_at<>'' AND s.finished_at<>''
+				AND julianday(s.finished_at)>julianday(s.started_at)
+			UNION ALL
+			SELECT s.job_id,'scan:'||s.id AS sample_id,s.id,s.started_at,s.finished_at
+			FROM scans AS s
+			JOIN jobs AS j ON j.id=s.job_id AND j.tenant_id=?
+			WHERE s.tenant_id=? AND COALESCE(s.cycle_id,'')=''
+				AND s.status IN ('success','incomplete')
+				AND s.started_at<>'' AND s.finished_at<>''
+				AND julianday(s.finished_at)>julianday(s.started_at)
+		), sample_candidates AS (
+			SELECT job_id,sample_id,MAX(finished_at) AS latest_finished
+			FROM attempt_records
+			GROUP BY job_id,sample_id
+		), ranked_samples AS (
+			SELECT job_id,sample_id,
+				ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY latest_finished DESC,sample_id DESC) AS sample_rank
+			FROM sample_candidates
 		)
-		SELECT job_id,started_at,finished_at FROM ranked
-		WHERE sample_rank<=? ORDER BY job_id,finished_at DESC`, ts.scope.id, perJobLimit)
+		SELECT a.job_id,a.sample_id,a.started_at,a.finished_at
+		FROM attempt_records AS a
+		JOIN ranked_samples AS r ON r.job_id=a.job_id AND r.sample_id=a.sample_id
+		WHERE r.sample_rank<=?
+		ORDER BY a.job_id,r.sample_rank,a.finished_at,a.id`,
+		ts.scope.id, ts.scope.id, ts.scope.id, ts.scope.id, perJobLimit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := make(map[string][]time.Duration)
+	bySample := make(map[string]map[string]time.Duration)
 	for rows.Next() {
-		var jobID, started, finished string
-		if err := rows.Scan(&jobID, &started, &finished); err != nil {
+		var jobID, sampleID, started, finished string
+		if err := rows.Scan(&jobID, &sampleID, &started, &finished); err != nil {
 			return nil, err
 		}
 		duration := scanTime(finished).Sub(scanTime(started))
 		if duration > 0 {
-			out[jobID] = append(out[jobID], duration)
+			if bySample[jobID] == nil {
+				bySample[jobID] = make(map[string]time.Duration)
+			}
+			bySample[jobID][sampleID] += duration
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	out := make(map[string][]time.Duration, len(bySample))
+	for jobID, samples := range bySample {
+		for _, duration := range samples {
+			out[jobID] = append(out[jobID], duration)
+		}
 	}
 	return out, nil
 }

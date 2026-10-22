@@ -27,7 +27,7 @@ export function ScanSlotDemandNotice() {
     <div>
       <strong>{heading}</strong>
       <p>Estimated scheduled demand is {estimatedHours} slot-hours/day ({utilization}% of {capacityHours} available slot-hours/day across {value.slots} scan slot{value.slots === 1 ? '' : 's'}).</p>
-      <p>Expected durations use the median of each job’s 11 most recent completed cycles. Without history, the estimate uses only known work divided by configured maximum scanner rates, as a lower bound.</p>
+      <p>Expected durations use the median of each job’s 11 most recent completed scan samples. A completed cycle sums its recorded attempt durations, excluding idle time between attempts; a completed scan without a cycle is one sample. Without history, the estimate uses only known work divided by configured maximum scanner rates, as a lower bound.</p>
       {value.unestimated_jobs > 0 && <p>{value.unestimated_jobs} enabled job{value.unestimated_jobs === 1 ? ' has' : 's have'} work or a schedule frequency the estimate cannot fully bound, so actual demand may be higher.</p>}
       {value.enabled_jobs === 0 && <p>No enabled jobs contribute scheduled demand.</p>}
     </div>

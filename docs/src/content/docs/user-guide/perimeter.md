@@ -190,9 +190,11 @@ Administrators and operators open **Perimeter** from the navigation. A unit
 without declared ranges sees an explanation and, for administrators, the
 declare form. The page also shows the business unit's scheduled scan-slot
 demand and effective capacity. The estimate uses the median duration of recent
-completed cycles; without history, known work at configured maximum scanner
-rates is shown as a lower bound. The warning starts at 80% utilization. When
-the unit has declared ranges, the page also shows:
+completed scan samples. A completed cycle sums the recorded durations of its
+attempts, excluding idle time between scheduled attempts, and a successful or
+incomplete scan without a cycle is one sample. Without history, known work at
+configured maximum scanner rates is shown as a lower bound. The warning starts
+at 80% utilization. When the unit has declared ranges, the page also shows:
 
 - **Summary:** the declared IPv4 addresses; the covered percentage for full
   TCP, any TCP, and UDP; and the numbers of monitors that cannot scan, of

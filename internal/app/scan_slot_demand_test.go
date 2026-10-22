@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
+	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
@@ -45,6 +46,54 @@ func TestScanSlotDemandUsesMedianCompletedCycleDuration(t *testing.T) {
 	}
 	if demand.OverCapacity || math.Abs(demand.UtilizationPercent-100.0/3.0) > 0.01 {
 		t.Fatalf("capacity comparison = %+v, want 33.33%% and within one slot", demand)
+	}
+}
+
+func TestScanSlotDemandUsesCompletedSingleUnitNmapScanWithoutCycle(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	ts := defaultTenant(db)
+	job := config.NormalizeJob(config.Job{
+		Name:     "single-unit-nmap",
+		Schedule: "*/30 * * * *",
+		Timezone: "UTC",
+		Targets:  []string{"192.0.2.1"},
+		TCP:      &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+	})
+	record, err := ts.CreateJobWithEnabled(ctx, job, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	finished := started.Add(25 * time.Minute)
+	if err := db.System().SaveScan(ctx, model.Scan{
+		ID: "single-unit-nmap-scan", JobID: record.ID, Job: record.Job.Name,
+		StartedAt: started, FinishedAt: finished, Status: "success", ScannerEngine: config.EngineNmap,
+		ConfigHash: record.Job.SecurityHash(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var cycles int
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycles WHERE job_id=?`, record.ID).Scan(&cycles); err != nil {
+		t.Fatal(err)
+	}
+	if cycles != 0 {
+		t.Fatalf("single-unit Nmap scan created %d cycle rows, want none", cycles)
+	}
+
+	demand, err := (&App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}).ScanSlotDemand(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demand.HistoryJobs != 1 || demand.LowerBoundJobs != 0 {
+		t.Fatalf("history source counts = history %d, lower bound %d; want 1 and 0", demand.HistoryJobs, demand.LowerBoundJobs)
+	}
+	if got, want := demand.EstimatedSlotSecondsPerDay, float64(20*time.Hour/time.Second); math.Abs(got-want) > 0.01 {
+		t.Fatalf("slot demand = %.2f seconds/day, want 25m × 48 runs = %.2f", got, want)
+	}
+	if demand.UtilizationPercent < 80 || demand.OverCapacity {
+		t.Fatalf("capacity comparison = %+v; want an 80%% warning without exceeding one slot", demand)
 	}
 }
 
@@ -216,6 +265,13 @@ func insertCompletedCycle(t *testing.T, db *store.Store, jobID, name string, rev
 		id, jobID, name, revision, "hash", "execution-hash", []byte("{}"),
 		started.Format(time.RFC3339Nano), finished.Format(time.RFC3339Nano), finished.Format(time.RFC3339Nano), finished.Format(time.RFC3339Nano))
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.System().SaveScan(context.Background(), model.Scan{
+		ID: "scan-" + id, JobID: jobID, Job: name, JobRevision: revision,
+		StartedAt: started, FinishedAt: finished, Status: "success", ConfigHash: "hash",
+		CycleID: id, CycleAttempt: 1, CycleStatus: "completed", Resumable: true,
+	}); err != nil {
 		t.Fatal(err)
 	}
 }

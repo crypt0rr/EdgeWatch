@@ -139,6 +139,21 @@ another file in the directory, such as a backup taken with the backup command
 under another name; do not give your own files that name. A failed backup
 removes nothing, so the older good backups stay.
 
+When an existing database needs a schema upgrade, the daemon also writes a
+verified backup immediately before migration starts. It is named
+`edgewatch-preupgrade-s<from>-s<to>-<UTC timestamp>.db` and contains the
+pre-upgrade schema. The daemon keeps the latest three automatic pre-migration
+backups separately from the scheduled `keep` count. It removes only regular
+owner-only files with the reserved automatic name; manual backups and
+scheduled backups are left alone. If the configured directory is missing or
+the backup cannot be created and verified, the daemon stops before the schema
+migration writes anything. Without `backup.directory`, startup logs a warning
+and continues the migration without an automatic pre-migration backup.
+
+Use `edgewatch verify --from` to check an automatic backup before restoring
+it, and keep the backup directory private with the same keys as `./data`.
+Automatic backups are a local recovery copy; keep off-host backups as well.
+
 The daemon records the outcome in `backup-status.json` next to the database,
 outside the backup directory, so a directory that cannot be written is still
 reported. `edgewatch health` prints it in `backups`: the `directory`,

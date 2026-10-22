@@ -131,6 +131,14 @@ func OpenWithLogger(path string, logger *slog.Logger) (*Store, error) {
 // commits its own lease or closes the store. Host commands and generic opens
 // retain their existing guard lifetime.
 func OpenDaemonWithLoggerContext(ctx context.Context, path string, logger *slog.Logger) (*Store, error) {
+	return OpenDaemonWithLoggerContextAndBackupDirectory(ctx, path, logger, "")
+}
+
+// OpenDaemonWithLoggerContextAndBackupDirectory opens and migrates the daemon
+// database with its configured backup directory. When the database needs a
+// schema upgrade, the migration backup is verified and retained before any
+// migration write begins. An empty directory logs a warning and continues.
+func OpenDaemonWithLoggerContextAndBackupDirectory(ctx context.Context, path string, logger *slog.Logger, backupDirectory string) (*Store, error) {
 	if ctx == nil {
 		return nil, errors.New("daemon database open context is nil")
 	}
@@ -141,12 +149,13 @@ func OpenDaemonWithLoggerContext(ctx context.Context, path string, logger *slog.
 		return nil, errDaemonRequiresFileDatabase
 	}
 	return openWithOptionsContext(ctx, path, openOptions{
-		create:               true,
-		migrate:              true,
-		configureWAL:         true,
-		logger:               logger,
-		daemonStartup:        true,
-		retainMigrationGuard: true,
+		create:                   true,
+		migrate:                  true,
+		configureWAL:             true,
+		logger:                   logger,
+		migrationBackupDirectory: backupDirectory,
+		daemonStartup:            true,
+		retainMigrationGuard:     true,
 	})
 }
 
@@ -223,6 +232,9 @@ type openOptions struct {
 	// do not migrate.
 	refuseOlderSchema bool
 	logger            *slog.Logger
+	// migrationBackupDirectory is the configured destination for a verified
+	// backup made before an existing database's schema is upgraded.
+	migrationBackupDirectory string
 	// daemonStartup repeats the lease check while the migration guard is held.
 	daemonStartup bool
 	// retainMigrationGuard transfers the guard to the returned Store so the
@@ -401,7 +413,12 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 		// or older than minimumUpgradeSchema, before the journal mode below
 		// can rewrite the file header of a rollback-journal database, such
 		// as a restored backup, or create its WAL and shared-memory files.
-		if _, err := checkUpgradableSchemaContext(ctx, db); err != nil {
+		version, err := checkUpgradableSchemaContext(ctx, db)
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		if err := preparePreMigrationBackup(ctx, db, dsn, version, options.migrationBackupDirectory, options.logger); err != nil {
 			db.Close()
 			return nil, err
 		}

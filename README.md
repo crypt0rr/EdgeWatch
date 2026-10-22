@@ -66,6 +66,11 @@ creating the monitor. Runtime state and generated encryption keys live in
 `./data`; back them up together. See the [first-scan guide](https://edgewatch.offsec.nl/getting-started/first-scan/)
 for the initial scan and baseline workflow.
 
+Set `backup.directory` to keep verified scheduled backups and the latest three
+automatic pre-migration backups. An upgrade stops before schema writes if its
+configured pre-migration backup cannot be created or verified; without a
+configured directory, startup warns and continues.
+
 ## Documentation
 
 The full user, operator, and maintainer documentation is available at

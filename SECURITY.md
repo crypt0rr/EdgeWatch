@@ -949,6 +949,11 @@ unchanged, with the advice to upgrade through v0.35.0 first; `health`,
 `verify`, and a restore of such a backup report the same refusal. A new
 database starts from a frozen copy of schema 54 that a test keeps identical
 to what the retired migrations created.
+When `backup.directory` is configured, a schema upgrade first writes and
+verifies a pre-migration backup there and retains the latest three automatic
+copies separately from scheduled backups. If it cannot create or verify that
+copy, migration stops before schema writes; without the directory, startup
+warns and continues. Retain the backup with the database's encryption keys.
 Schema 63 also marks legacy unsent deliveries with at least eight attempts
 and a retry scheduled before v0.22.1 as terminal; deliveries still retrying
 under the newer fifteen-attempt policy remain eligible. Schema 64 adds an
@@ -1156,6 +1161,15 @@ error reason, without any secret. `edgewatch health` and the platform status
 report it, and so does the status of a single unit's administrators; with more
 than one unit, a unit's status leaves it out. Scheduled backups are logged,
 not recorded in the security audit.
+
+Before an existing database's schema upgrade, a configured backup directory
+also receives a verified `edgewatch-preupgrade-*.db` copy of the old schema.
+The daemon keeps the latest three automatic copies separately from scheduled
+retention and leaves manual backups alone. If the configured pre-migration
+copy cannot be created or verified, schema migration stops before it writes;
+without `backup.directory`, startup warns and continues. These copies hold all
+units' data and encrypted secrets, so protect them and retain their keys like
+other database backups.
 
 Restore and dry-run commands cancel staging on `SIGINT` or `SIGTERM` and
 remove the temporary copy. The next restore or dry run removes abandoned

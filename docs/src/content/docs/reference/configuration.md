@@ -29,7 +29,7 @@ validated schema.
 | `notifications.encryption_key_file` | YAML/secrets | Optional separate key for the encrypted notification destinations. |
 | `notifications.sandbox` | YAML | Whether the notification process runs as an unprivileged identity, restricted with Landlock; see [the notification sandbox](/deployment/container-hardening/#notification-sandbox). |
 | `notifications.urls`, `urls_file` | YAML/secrets | Deprecated. Imported once as web-managed destinations; see [Notifications](/user-guide/notifications/). |
-| `backup.directory`, `backup.schedule`, `backup.keep` | YAML | Optional verified, rotated backups that the daemon takes on a schedule; see [Scheduled backups](/operations/backup-recovery/#scheduled-backups). |
+| `backup.directory`, `backup.schedule`, `backup.keep` | YAML | Optional verified scheduled backups and pre-migration backups; see [Scheduled backups](/operations/backup-recovery/#scheduled-backups). |
 | Jobs, users, profiles, notification destinations | Web console | Runtime administration stored in SQLite. |
 
 The YAML jobs section from older deployments is not imported into the scheduler.
@@ -58,7 +58,7 @@ recreated and reviewed explicitly in the console.
 | `web.max_live_streams_per_unit` | `64`, or `web.max_live_streams` when that is lower | 1 to `web.max_live_streams`; `0` is rejected. |
 | `web.metrics.enabled` | `false` | `true` or `false`; `true` requires `web.metrics.token_file`. |
 | `web.metrics.token_file` | Not set | The absolute path of a regular file, without group or other permissions, that holds one token of 32 to 1024 printable ASCII characters without spaces. Requires `web.metrics.enabled: true`. |
-| `backup.directory` | Not set: no scheduled backups | The absolute path of an existing directory, other than `/`. |
+| `backup.directory` | Not set: no automatic backups | The absolute path of an existing directory, other than `/`. |
 | `backup.schedule` | `0 3 * * *` (daily at 03:00) | A five-field cron expression that fires, in `timezone` when it is set and UTC otherwise, without a `TZ=` or `CRON_TZ=` prefix. Requires `backup.directory`. |
 | `backup.keep` | `7` | 1 to 1000 scheduled backups. Requires `backup.directory`. |
 
@@ -268,10 +268,15 @@ Jobs are configured in the console, which enforces these limits:
 - Scheduled backups are off by default. Setting `backup.directory` turns them
   on: the daemon writes a backup there on `backup.schedule`, checks it as the
   `backup` command does before it publishes it, and keeps the newest
-  `backup.keep` of them. It removes only its own files, named
-  `edgewatch-scheduled-YYYYMMDDTHHMMSSZ.db`, and never another file in the
-  directory. `edgewatch health` and the console report the newest good backup
-  and any failure.
+  `backup.keep` of them. When an existing database needs a schema upgrade, the
+  daemon also creates and verifies a backup in that directory before migration
+  writes begin and keeps the latest three separately from `backup.keep`. A
+  failure to create or verify this pre-migration backup stops the migration;
+  without `backup.directory`, startup warns and continues. Scheduled rotation
+  removes only its own files, named
+  `edgewatch-scheduled-YYYYMMDDTHHMMSSZ.db`; pre-migration rotation removes
+  only its reserved automatic files, so manual backups are left alone.
+  `edgewatch health` and the console report scheduled backup status.
 - Update checks are enabled by default, run at startup and every three hours,
   and consider stable GitHub releases only. Set `updates.enabled: false` for
   offline deployments. Checks reveal the host's public IP and EdgeWatch user

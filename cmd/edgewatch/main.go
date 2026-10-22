@@ -326,7 +326,7 @@ func run(args []string) error {
 			} else {
 				startup = listener
 			}
-			return store.OpenDaemonWithLoggerContext(ctx, path, logger)
+			return store.OpenDaemonWithLoggerContextAndBackupDirectory(ctx, path, logger, cfg.Backup.Directory)
 		}
 	default:
 		openStore = store.OpenExistingUpgraded

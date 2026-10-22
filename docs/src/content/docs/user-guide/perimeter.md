@@ -97,6 +97,33 @@ Every declaration and removal is recorded in the unit's audit, as
 `perimeter.seed_removed` with the kind and value. The platform audit does not
 show them.
 
+### Host commands
+
+Host scripts can list or declare ranges for a specific unit. Both commands
+require its slug:
+
+```sh
+docker compose exec edgewatch edgewatch perimeter list \
+  --tenant UNIT_SLUG --output json
+
+docker compose exec -T edgewatch edgewatch perimeter declare \
+  --tenant UNIT_SLUG --kind prefix --from - < ./perimeter-ranges.txt
+```
+
+`perimeter list` reads only that unit's declarations. `--output json` prints
+the ranges as a JSON array; text output prints one range per line.
+`perimeter declare` reads an IP address or CIDR prefix and an optional label
+per line from standard input with `--from -`, or from a file inside the
+container with `--from FILE`. Blank lines are ignored, and at most 256
+entries can be declared at once. It applies the same validation as the page,
+skips ranges already declared under the selected kind, and saves nothing if
+any entry is refused. Each successful declaration writes one
+`perimeter.seeds_added` audit record with actor `host-cli`; range values,
+labels, and input paths are not included in that audit record or refusal
+messages. Host command changes send no live update, so reload an open
+Perimeter page to see them. These commands do not scan ranges or change
+monitors.
+
 ## How coverage is computed
 
 Coverage comes from the configuration of the unit's unarchived jobs, not from
@@ -390,10 +417,10 @@ In the API, reading needs `perimeter.read` and declaring or removing needs
 
 ## Live updates
 
-An open Perimeter page updates when a range is declared or removed, when the
-unit's monitors are created, edited, paused, resumed, archived, restored, or
-deleted, when their scans start or end, including failed, canceled, and
-skipped runs, and when a job silence alert is raised. A platform
+An open Perimeter page updates when a range is declared or removed in the
+console, when the unit's monitors are created, edited, paused, resumed,
+archived, restored, or deleted, when their scans start or end, including
+failed, canceled, and skipped runs, and when a job silence alert is raised. A platform
 administrator's change to the unit's probe budgets, and a change to
 `scanner.max_job_hosts` or `scanner.target_exclusions` in `config.yaml`, send
 no update: they appear the next time the page loads its data, for example
@@ -421,13 +448,20 @@ an ASN announces, look up its prefixes yourself and paste them:
    announce or that another ASN announces. Keep the prefixes that your unit
    owns, declare third-party space as authorized only when you may scan it,
    and add unannounced space by hand.
-3. On **Perimeter**, choose the kind, and paste one prefix per line. Add the
-   ASN as a label to recognize the ranges later, such as
-   `203.0.113.0/24 AS64496`. A declaration takes up to 256 lines, so paste a
-   longer list in parts, and a unit holds at most 1,024 ranges.
-4. Declare the ranges. An announced prefix that is more specific than another
-   one is accepted, and the totals count its addresses once. IPv6 prefixes
-   show their monitored counts but get no suggestions.
+3. Keep a prefix only when your unit owns it or is authorized to scan it. If
+   you want to recognize the ranges later, append the ASN as a label, such as
+   `203.0.113.0/24 AS64496`. Save the resulting prefixes one per line.
+4. Declare the ranges on **Perimeter**, or import the reviewed host file:
+
+   ```sh
+   docker compose exec -T edgewatch edgewatch perimeter declare \
+     --tenant UNIT_SLUG --kind prefix --from - < ./as64496-prefixes.txt
+   ```
+
+   A declaration takes up to 256 lines, so split a longer list into parts; a
+   unit holds at most 1,024 ranges. An announced prefix that is more specific
+   than another one is accepted, and the totals count its addresses once.
+   IPv6 prefixes show their monitored counts but get no suggestions.
 
 Announcements change, and the declared ranges do not follow them. Repeat the
 lookup from time to time: pasting the current list again creates only the new

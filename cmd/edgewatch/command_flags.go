@@ -24,6 +24,8 @@ var commandFlagAllowlist = map[string]map[string]struct{}{
 	"baseline approve":           allowedFlags("config", "output", "job", "scan-id", "tenant"),
 	"baseline reset":             allowedFlags("config", "output", "job", "tenant"),
 	"baseline export":            allowedFlags("config", "output", "job", "out", "tenant"),
+	"perimeter list":             allowedFlags("config", "output", "tenant"),
+	"perimeter declare":          allowedFlags("config", "output", "tenant", "kind", "from"),
 	"backup":                     allowedFlags("config", "output", "out", "full-check"),
 	"restore":                    allowedFlags("config", "output", "from", "dry-run", "allow-sidecar-replay", "allow-active-daemon", "allow-unreadable-destination", "allow-key-mismatch", "pending-deliveries"),
 	"verify":                     allowedFlags("config", "output", "from", "allow-key-mismatch"),

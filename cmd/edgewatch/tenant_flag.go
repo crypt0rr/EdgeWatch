@@ -12,7 +12,7 @@ import (
 )
 
 // The --tenant flag names a business unit by its slug. The host commands that
-// act on one unit's data (scan, status, history, baseline and notify test)
+// act on one unit's data (scan, status, history, baseline, perimeter, and notify test)
 // then act on that unit instead of the default one. The admin recovery
 // commands, which find their account by a username that is unique across
 // every unit, take it as a safety check: they stop unless the account belongs
@@ -34,6 +34,8 @@ func acceptsTenant(cmd, action string) bool {
 	switch cmd {
 	case "scan", "status", "history", "baseline", "notify":
 		return true
+	case "perimeter":
+		return action == "list" || action == "declare"
 	case "admin":
 		return action == "reset-password" || action == "disable-totp"
 	}
@@ -48,7 +50,7 @@ func checkTenantFlag(fs *flag.FlagSet, cmd, action, slug string) (string, error)
 	}
 	if !acceptsTenant(cmd, action) {
 		name := strings.TrimSpace(cmd + " " + action)
-		return "", fmt.Errorf("--tenant does not apply to %s; it is accepted by scan, status, history, baseline, notify test, admin reset-password and admin disable-totp", name)
+		return "", fmt.Errorf("--tenant does not apply to %s; it is accepted by scan, status, history, baseline, perimeter list, perimeter declare, notify test, admin reset-password and admin disable-totp", name)
 	}
 	slug = strings.TrimSpace(slug)
 	if slug == "" {
@@ -92,7 +94,7 @@ func findHostUnit(ctx context.Context, s *store.Store, match func(store.Tenant) 
 // tenantCommandReads reports whether a host command that takes --tenant
 // only reads the unit's data.
 func tenantCommandReads(cmd, action string) bool {
-	return cmd == "status" || cmd == "history" || (cmd == "baseline" && action == "export")
+	return cmd == "status" || cmd == "history" || (cmd == "baseline" && action == "export") || (cmd == "perimeter" && action == "list")
 }
 
 // hostUnitStore returns the business unit that a host command acts on, the

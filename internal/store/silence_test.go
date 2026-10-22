@@ -146,7 +146,16 @@ func TestJobSilenceWatchdogCountsRecentResumableProgressAsActivity(t *testing.T)
 	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || due {
 		t.Fatalf("recent legacy progress without expiry = due %v, err %v; want not due", due, err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='paused',config_hash='stale-scope' WHERE id=?`, cycle.ID); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='paused' WHERE id=?`, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || due {
+		t.Fatalf("recent paused progress without expiry silence decision = due %v, err %v; want not due", due, err)
+	}
+	if _, created, err := s.System().RecordJobSilenceAlert(ctx, job.ID, job.Job.Name, reference, now, threshold, nil); err != nil || created {
+		t.Fatalf("recent paused progress without expiry alert = created %v, err %v; want no alert", created, err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET config_hash='stale-scope' WHERE id=?`, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
 	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || !due {

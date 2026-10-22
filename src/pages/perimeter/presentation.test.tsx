@@ -86,13 +86,40 @@ describe('perimeter presentation', () => {
 })
 
 describe('perimeter declare parsing', () => {
-  it('splits each non-blank line into its value and its trimmed label, keeping line numbers', () => {
+  it('splits each non-blank line into its value and normalized label, keeping line numbers', () => {
     expect(parsePerimeterLines('')).toEqual([])
-    expect(parsePerimeterLines('203.0.113.0/24\r\n\r\n  198.51.100.7   Mail relay  \rfe80::1   Lab\n2001:db8::/48\tDC2\tcore')).toEqual([
+    expect(parsePerimeterLines('203.0.113.0/24\r\n\r\n  198.51.100.7   Mail relay  \rfe80::1   Lab\u2003network\n2001:db8::/48\tDC2\tcore')).toEqual([
       { line: 1, value: '203.0.113.0/24', label: '' },
       { line: 3, value: '198.51.100.7', label: 'Mail relay' },
-      { line: 4, value: 'fe80::1', label: 'Lab' },
-      { line: 5, value: '2001:db8::/48', label: 'DC2\tcore' },
+      { line: 4, value: 'fe80::1', label: 'Lab network' },
+      { line: 5, value: '2001:db8::/48', label: 'DC2 core' },
+    ])
+  })
+
+  it('collapses U+2028 line separators inside labels', () => {
+    expect(parsePerimeterLines('203.0.113.0/24 Lab\u2028network')).toEqual([
+      { line: 1, value: '203.0.113.0/24', label: 'Lab network' },
+    ])
+  })
+
+  it('collapses U+2029 paragraph separators inside labels', () => {
+    expect(parsePerimeterLines('203.0.113.0/24 Lab\u2029network')).toEqual([
+      { line: 1, value: '203.0.113.0/24', label: 'Lab network' },
+    ])
+  })
+
+  it('keeps non-whitespace control characters for server validation', () => {
+    expect(parsePerimeterLines('203.0.113.0/24 edge\u0007router')).toEqual([
+      { line: 1, value: '203.0.113.0/24', label: 'edge\u0007router' },
+    ])
+  })
+
+  it('preserves vertical tabs and form feeds at label boundaries for server validation', () => {
+    expect(parsePerimeterLines('203.0.113.0/24 \u000bstart\n203.0.113.0/24 end\u000b\n203.0.113.0/24 \u000cstart\n203.0.113.0/24 end\u000c')).toEqual([
+      { line: 1, value: '203.0.113.0/24', label: '\u000bstart' },
+      { line: 2, value: '203.0.113.0/24', label: 'end\u000b' },
+      { line: 3, value: '203.0.113.0/24', label: '\u000cstart' },
+      { line: 4, value: '203.0.113.0/24', label: 'end\u000c' },
     ])
   })
 

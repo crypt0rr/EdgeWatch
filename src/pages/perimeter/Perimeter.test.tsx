@@ -398,10 +398,21 @@ describe('Perimeter declare form', () => {
     expect(declarePerimeterSeeds).toHaveBeenCalledWith([
       { kind: 'authorized', value: '203.0.113.0/24', label: 'DC1 edge' },
       { kind: 'authorized', value: '198.51.100.7' },
-      { kind: 'authorized', value: '2001:db8::/48', label: 'Lab  network' },
+      { kind: 'authorized', value: '2001:db8::/48', label: 'Lab network' },
     ])
     expect(textarea()).toHaveValue('')
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['perimeter'] })
+  })
+
+  it('normalizes tab-separated label columns from a paste before declaring', async () => {
+    vi.mocked(declarePerimeterSeeds).mockResolvedValue({ created: 1, skipped: 0 })
+    renderPage()
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Ranges, one per line' }), { target: { value: '203.0.113.0/24\tDC1\tedge' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Declare owned ranges' }))
+    expect(await screen.findByText('Declared 1 new range.')).toBeInTheDocument()
+    expect(declarePerimeterSeeds).toHaveBeenCalledWith([
+      { kind: 'prefix', value: '203.0.113.0/24', label: 'DC1 edge' },
+    ])
   })
 
   it('keeps the result of the first declaration when the page turns into the report', async () => {

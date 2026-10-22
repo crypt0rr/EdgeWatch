@@ -74,12 +74,19 @@ kind, then paste one entry per line:
 2001:db8:10::/48 Amsterdam office
 ```
 
-The value is the text before the first space or tab, and the rest of the line
-is its label. Blank lines are ignored, and a declaration has at most 256
+The value is the text before the first whitespace character, and the rest of
+the line is its label. Ordinary leading and trailing whitespace is trimmed.
+Runs of spaces, tabs, and Unicode space, line, and paragraph separators in the
+label are collapsed to one space, so tab-separated label columns such as
+`DC1<TAB>edge` become `DC1 edge`. Vertical tabs (`U+000B`), form feeds
+(`U+000C`), U+0085 NEXT LINE, and other control characters that are not
+normalized as whitespace stay in the label for server validation, which
+refuses them. Blank lines are ignored, and a declaration has at most 256
 entries. A declaration is all or nothing: when any line is refused, EdgeWatch
 saves nothing and the form lists each refused line by its line number, with
-its value and the reason. Correct or remove those lines and declare again. After a declaration, the form
-reports how many ranges were created and how many entries were skipped.
+its value and the reason. Correct or remove those lines and declare again.
+After a declaration, the form reports how many ranges were created and how
+many entries were skipped.
 
 Administrators remove a range from the page after a confirmation. Removing
 a range changes no monitor: its monitors keep scanning, and their targets may

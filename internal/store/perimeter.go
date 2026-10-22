@@ -382,7 +382,7 @@ func validatePerimeterEntries(entries []PerimeterEntry) (perimeterDeclaration, [
 		if !seen {
 			kinds[canonical] = entry.Kind
 		}
-		label := strings.TrimSpace(entry.Label)
+		label := trimPerimeterLabelWhitespace(entry.Label)
 		if reason := perimeterLabelReason(label); reason != "" {
 			refuse(reason)
 			continue
@@ -437,6 +437,15 @@ func parsePerimeterPrefix(value string) (netip.Prefix, string) {
 		return netip.Prefix{}, perimeterReasonMapped
 	}
 	return prefix, ""
+}
+
+// trimPerimeterLabelWhitespace preserves control characters the label
+// validator must reject while trimming other leading and trailing Unicode
+// whitespace.
+func trimPerimeterLabelWhitespace(label string) string {
+	return strings.TrimFunc(label, func(r rune) bool {
+		return unicode.IsSpace(r) && !unicode.IsControl(r)
+	})
 }
 
 // perimeterLabelReason returns the reason a label is refused, or "".

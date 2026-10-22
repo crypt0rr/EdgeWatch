@@ -6,7 +6,9 @@ import { mockConsole, rolePermissions, type ConsoleRole } from './mock-console'
 const roles: ConsoleRole[] = ['administrator', 'operator', 'viewer', 'platform_admin']
 const auditedProjects = new Set(['desktop', 'mobile-narrow', 'iphone-13'])
 const labelNameMismatchRule = 'label-content-name-mismatch'
-const routeBatchSize = 6
+// Each route starts a fresh document and then runs axe. Keep each test under
+// Playwright's default 30-second limit even when an early route is complex.
+const routeBatchSize = 3
 const routeBatches = Array.from(
   { length: Math.ceil(allConsoleRoutes.length / routeBatchSize) },
   (_, index) => allConsoleRoutes.slice(index * routeBatchSize, (index + 1) * routeBatchSize),

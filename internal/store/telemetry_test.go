@@ -44,3 +44,24 @@ func TestDeploymentTelemetryReportsBoundedCounts(t *testing.T) {
 		t.Fatalf("database size/timestamp missing: %#v", telemetry)
 	}
 }
+
+func TestStalledScanCycleCountIsDeploymentAggregate(t *testing.T) {
+	t.Parallel()
+	ctx, s, job, plan := cycleFixture(t)
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.System().MarkScanCycleStalled(ctx, cycle.ID, "retry budget exhausted"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.System().StalledScanCycleCount(ctx); err != nil || got != 1 {
+		t.Fatalf("stalled cycles = %d, %v; want one", got, err)
+	}
+	if err := s.Tenant(DefaultTenantScope()).SetJobArchived(ctx, job.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.System().StalledScanCycleCount(ctx); err != nil || got != 0 {
+		t.Fatalf("stalled cycles after archiving the job = %d, %v; want zero", got, err)
+	}
+}

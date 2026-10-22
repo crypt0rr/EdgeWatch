@@ -378,9 +378,10 @@ true. Then it needs `Authorization: Bearer <token>` with the token of
 `401` with `WWW-Authenticate: Bearer realm="edgewatch-metrics"`, and a token
 file that cannot be read keeps the endpoint at `503 metrics_unavailable`.
 Each client may send 120 requests a minute (`429 rate_limited`). The answer
-is `text/plain; version=0.0.4` and holds only these gauges; their names and
-labels are stable, and a label never names a business unit, an account, a
-job, a target, or a destination. Until the daemon serves the console, it
+is `text/plain; version=0.0.4` and holds gauges plus the scheduled-run skip
+counter; their names and labels are stable, and a label never names a
+business unit, an account, a job, a target, or a destination. The database
+and operational metrics are each cached for up to 30 seconds. Until the daemon serves the console, it
 holds only `edgewatch_build_info`, `edgewatch_health_status`, and the
 `edgewatch_migration_*` gauges:
 
@@ -396,6 +397,13 @@ holds only `edgewatch_build_info`, `edgewatch_health_status`, and the
 | `edgewatch_scan_slots_in_use` | | Slots that running scans hold. |
 | `edgewatch_scans_queued` | | Accepted scans that wait for a slot. |
 | `edgewatch_database_bytes` | | The size SQLite has allocated for the database. |
+| `edgewatch_backup_status_known` | | `1` when the enabled backup status has a recorded outcome for the configured directory, `0` when it is missing, unreadable, for another directory, or has no outcome. Once the daemon opens its database, present whenever scheduled backups are enabled. |
+| `edgewatch_backup_last_success_timestamp_seconds` | | When a scheduled backup last succeeded, as a Unix time; zero means none has succeeded. Present when backup status is known. |
+| `edgewatch_backup_consecutive_failures` | | Consecutive scheduled backup failures since the last success. Present when backup status is known. |
+| `edgewatch_scanner_identities` | `state`: `active`, `quarantined`, `in_use_by_other_processes`, `free` | Number of scanner identities in each allocation state. Present when the bounded pool inspection succeeds. |
+| `edgewatch_scheduled_runs_skipped_total` | `reason`: `job_active`, `cycle_stalled` | Counter since this daemon started for scheduled runs skipped because their job was already active or their resumable cycle was stalled. |
+| `edgewatch_jobs_overdue` | | Enabled schedules currently due for the job-silence watchdog; live scans and alert retry windows are excluded. |
+| `edgewatch_scan_cycles_stalled` | | Stalled cycles for visible jobs in active business units. |
 | `edgewatch_notification_outbox_pending` | | Alerts still to be delivered, including those retrying. |
 | `edgewatch_notification_outbox_retrying` | | Alerts whose delivery failed at least once and is retried. |
 | `edgewatch_notification_outbox_terminal` | | Alerts that failed for good and are kept in the outbox. |

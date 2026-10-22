@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -147,6 +148,116 @@ func TestScannerIdentityAllocatorInspectionReportsQuarantineWithoutWriting(t *te
 	}
 	if !bytes.Equal(beforeJournal, afterJournal) || !bytes.Equal(beforeMarker, afterMarker) {
 		t.Fatal("read-only pool inspection changed the lease journal or boot marker")
+	}
+}
+
+func TestScannerIdentityInspectionSerializesProcessCensusWithLeaseRelease(t *testing.T) {
+	allocator := newTestScannerIdentityAllocator(t, 2)
+	lease, err := allocator.acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid, _, ok := lease.identity()
+	if !ok {
+		t.Fatal("acquired lease has no identity")
+	}
+	var releaseBlockedByCensus bool
+	var censusCount int
+	releaseDone := make(chan error, 1)
+	allocator.inUse = func(uint32, uint32) (map[uint32]struct{}, error) {
+		censusCount++
+		if censusCount > 1 {
+			return map[uint32]struct{}{}, nil
+		}
+		directoryFD, err := unix.Open(allocator.directory, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if err != nil {
+			return nil, err
+		}
+		lockFD, err := openExistingScannerIdentityLock(directoryFD)
+		_ = unix.Close(directoryFD)
+		if err != nil {
+			return nil, err
+		}
+		err = unix.Flock(lockFD, unix.LOCK_EX|unix.LOCK_NB)
+		switch {
+		case err == nil:
+			_ = unix.Flock(lockFD, unix.LOCK_UN)
+			_ = unix.Close(lockFD)
+			// This is the old ordering: no inspection lock protects the
+			// census yet, so release can commit before the journal is read.
+			if releaseErr := lease.release(); releaseErr != nil {
+				return nil, releaseErr
+			}
+		case errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN):
+			_ = unix.Close(lockFD)
+			releaseBlockedByCensus = true
+			go func() { releaseDone <- lease.release() }()
+		default:
+			_ = unix.Close(lockFD)
+			return nil, err
+		}
+		return map[uint32]struct{}{uint32(uid): {}}, nil
+	}
+
+	status, err := allocator.inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !releaseBlockedByCensus {
+		t.Fatal("lease release was not serialized behind the process census")
+	}
+	if status.Active != 1 || status.InUseByOtherProcesses != 0 || status.Free != 1 {
+		t.Fatalf("identity status during concurrent release = %+v; want the journal lease counted once", status)
+	}
+	if err := <-releaseDone; err != nil {
+		t.Fatalf("release after the inspection snapshot: %v", err)
+	}
+	status, err = allocator.inspect(context.Background())
+	if err != nil || status.Active != 0 || status.InUseByOtherProcesses != 0 || status.Free != 2 {
+		t.Fatalf("identity status after release = %+v, %v; want both identities free", status, err)
+	}
+}
+
+func TestScannerIdentityAcquireUsesCancelableProcessCensus(t *testing.T) {
+	allocator := newTestScannerIdentityAllocator(t, 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	allocator.inUseContext = func(ctx context.Context, _, _ uint32) (map[uint32]struct{}, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	type acquireResult struct {
+		lease *scannerIdentityLease
+		err   error
+	}
+	done := make(chan acquireResult, 1)
+	go func() {
+		lease, err := allocator.acquire(ctx)
+		done <- acquireResult{lease: lease, err: err}
+	}()
+	select {
+	case result := <-done:
+		if result.lease != nil {
+			_ = result.lease.release()
+		}
+		t.Fatalf("acquire completed without entering the context-aware census: lease=%v err=%v", result.lease, result.err)
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("acquire did not start its process census")
+	}
+	cancel()
+	select {
+	case result := <-done:
+		if result.lease != nil || !errors.Is(result.err, context.Canceled) {
+			t.Fatalf("canceled acquire = lease %v, error %v; want context.Canceled", result.lease, result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled process census did not release the allocator promptly")
+	}
+	if _, err := os.Stat(filepath.Join(allocator.directory, scannerIdentityJournalName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canceled census left a lease journal: %v", err)
 	}
 }
 

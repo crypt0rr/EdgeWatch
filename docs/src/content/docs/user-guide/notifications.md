@@ -181,18 +181,20 @@ Each deployment alert is also recorded in the platform audit as
 | A scanner sandbox lost confinement | The scanner's reported identity or Landlock confinement degraded. If the identity pool is unavailable in `scanner.sandbox: auto`, the daemon stays running but scanner launches fail closed; a seccomp failure also prevents launches. Scanners never fall back to UID 0. See [the container hardening guide](/deployment/container-hardening/). |
 | A notification sandbox lost confinement | The notification process lost its sandbox. In `notifications.sandbox: auto`, delivery continues as the daemon's user, which is UID 0 in the bundled container and may retain Landlock when available. See [the container hardening guide](/deployment/container-hardening/). |
 | A sandbox regained confinement | The scanner or notification sandbox regained a layer it had lost, and lost none. |
+| A scheduled backup failed | Scheduled backups changed from healthy to failing. The alert includes the consecutive failure count, never the backup directory or file name. |
+| Scanner identity capacity is low | Fewer scanner identities are free than `scheduler.max_concurrent_scans`. The alert includes the free and required counts, never a unit or job. |
 | A version rollback | The daemon starts a version older than the installed one. |
 | Alerts failed for good | Alerts of any unit or the platform dropped after their retries ran out since the previous report. The alert gives their number and how many of them were the platform's, never a destination, a URL, or a provider's answer. |
 
 The daemon compares the sandboxes when it starts and with each heartbeat,
 against the state that the last alert reported, so a restart with the same
-state sends nothing. The first start of v0.36.0 records the current state;
-when it is already degraded, it is reported once. A sandbox alert and a
-rollback alert are sent at most once an hour each, so a daemon that restarts
-in a loop, or whose sandbox comes and goes, cannot flood a destination; a
-change within the hour is reported when the hour ends, if it still holds. A
-rollback within the hour is recorded in the platform audit without being sent
-again. Failed alerts are reported at most once every six hours, and the
+state sends nothing. The first start of v0.36.0 records the current sandbox
+state; when it is already degraded, it is reported once. Sandbox, rollback,
+backup-failure, and low-identity transitions are sent at most once an hour
+per condition, so restarts and repeated failures cannot flood a destination;
+a transition held by the window is reported when the hour ends if the
+condition still holds. A rollback within the hour is recorded in the platform
+audit without being sent again. Failed alerts are reported at most once every six hours, and the
 failure of a deployment alert itself is not counted, so it cannot start a
 loop. A lost or replaced `notification.key` locks every destination, the
 platform's too, so it cannot be reported this way, and `/healthz` stays

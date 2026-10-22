@@ -180,11 +180,11 @@ func TestScannerIdentityAcquireDurableWriteFailuresPreserveReservationContract(t
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		controlled := &scannerIdentityModeChangeContext{
-			Context: ctx, directory: allocator.directory, changeOnCall: 6,
+			Context: ctx, directory: allocator.directory, changeOnCall: 8,
 		}
 		lease, err := allocator.acquire(controlled)
-		if controlled.calls != controlled.changeOnCall || controlled.changeErr != nil {
-			t.Fatalf("make allocator state directory read-only: calls=%d, err=%v", controlled.calls, controlled.changeErr)
+		if controlled.changeErr != nil {
+			t.Fatalf("make allocator state directory read-only: %v", controlled.changeErr)
 		}
 		if !controlled.writeBlocked {
 			if err == nil && lease != nil {
@@ -197,6 +197,9 @@ func TestScannerIdentityAcquireDurableWriteFailuresPreserveReservationContract(t
 				t.Skip("filesystem permissions do not block writes to a 0500 directory in this test environment")
 			}
 			t.Fatalf("read-only mode did not block writes, but acquire returned %v, %v", lease, err)
+		}
+		if controlled.calls != controlled.changeOnCall {
+			t.Fatalf("allocator acquisition continued after the read-only lease write failed: calls=%d", controlled.calls)
 		}
 		if lease != nil || err == nil || !strings.Contains(err.Error(), "durable lease write failed") {
 			t.Fatalf("acquire after durable lease write failure = %v, %v; want no lease and write refusal", lease, err)
@@ -223,7 +226,7 @@ func TestScannerIdentityAcquireDurableWriteFailuresPreserveReservationContract(t
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		controlled := &scannerIdentityModeChangeContext{
-			Context: ctx, cancel: cancel, directory: allocator.directory, changeOnCall: 7, cancelOnChange: true,
+			Context: ctx, cancel: cancel, directory: allocator.directory, changeOnCall: 9, cancelOnChange: true,
 		}
 		lease, err := allocator.acquire(controlled)
 		if controlled.calls != controlled.changeOnCall || controlled.changeErr != nil {

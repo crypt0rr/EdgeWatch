@@ -5,7 +5,7 @@ description: Understand the current SQLite schema, the oldest schema that upgrad
 
 ## Current schema and rollback
 
-The current schema is version 76. Schema 31 records terminal notification
+The current schema is version 77. Schema 31 records terminal notification
 deliveries and marks rows that had already exhausted the original eight
 attempts. Schema 63 repairs databases that had already passed schema 31 by
 marking still-unsent rows with at least eight attempts and a scheduled retry
@@ -172,6 +172,18 @@ or permission and does not authorize scanning it. The migration creates an
 empty table and changes no existing row, so its duration does not depend on
 the database size. An older release refuses the upgraded database; restore
 the matching pre-upgrade `./data` backup to roll back.
+
+## Schema 77
+
+Schema 77 adds four columns to the platform's existing deployment-alert
+state: the last reported scheduled-backup failure condition and its alert
+time, plus the last reported scanner identity-capacity condition and its alert
+time. The daemon uses them to report a new failure transition at most once an
+hour, even across restarts. A successful backup or a pool that regains enough
+free identities clears the condition without sending a recovery alert. The
+columns default to healthy and empty; the migration changes no existing alert
+or delivery. An older release refuses the upgraded database; restore the
+matching pre-upgrade `./data` backup to roll back.
 
 ## Upgrade floor
 

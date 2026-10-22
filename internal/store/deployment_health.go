@@ -29,6 +29,10 @@ const DeploymentHealthAlertWindow = time.Hour
 // previous one.
 const DeliveryFailureAlertWindow = 6 * time.Hour
 
+// OperationalHealthAlertWindow rate-limits transitions into a scheduled
+// backup failure or a scanner identity pool below scan capacity.
+const OperationalHealthAlertWindow = time.Hour
+
 // SandboxHealth is how the scanner and the notification processes start in
 // the running daemon, as the confinement states of model.SandboxState*. An
 // empty state is not known, such as for a library caller without a sandbox
@@ -152,6 +156,87 @@ func sandboxChangeDue(observed, recorded, alerted string, now time.Time) bool {
 	}
 	alertedAt, err := time.Parse(time.RFC3339Nano, alerted)
 	return err != nil || !now.Before(alertedAt.Add(DeploymentHealthAlertWindow))
+}
+
+// RecordScheduledBackupHealth reports when the scheduled backup worker moves
+// from healthy to failing. Recovery clears the stored condition without
+// sending an alert; a later failure is reported after the alert window.
+func (ps *PlatformStore) RecordScheduledBackupHealth(ctx context.Context, consecutiveFailures int, now time.Time) (bool, error) {
+	return ps.recordOperationalHealthTransition(
+		ctx,
+		"scheduled_backup_failing",
+		"scheduled_backup_alerted_at",
+		consecutiveFailures > 0,
+		model.AlertDetail{Kind: model.HealthAlertScheduledBackupFailed, Subject: "scheduled_backup", Count: consecutiveFailures},
+		fmt.Sprintf("scheduled backups failed %d consecutive time(s)", max(consecutiveFailures, 1)),
+		now,
+	)
+}
+
+// RecordScannerIdentityHealth reports when fewer scanner identities are free
+// than the deployment allows scans to run at once. A recovered pool clears
+// the condition without sending an alert.
+func (ps *PlatformStore) RecordScannerIdentityHealth(ctx context.Context, free, required int, now time.Time) (bool, error) {
+	return ps.recordOperationalHealthTransition(
+		ctx,
+		"scanner_identity_pool_low",
+		"scanner_identity_pool_alerted_at",
+		free < required && required > 0,
+		model.AlertDetail{Kind: model.HealthAlertScannerIdentitiesLow, Subject: "scanner identity pool", Current: fmt.Sprintf("%d free, %d required", max(free, 0), max(required, 0))},
+		fmt.Sprintf("scanner identity pool has %d free slots, below max_concurrent_scans=%d", max(free, 0), max(required, 0)),
+		now,
+	)
+}
+
+// recordOperationalHealthTransition compares one fixed deployment condition
+// with the state the previous alert reported. A transition into the condition
+// waits for the end of its window when necessary; a recovery is persisted at
+// once so a later regression can be reported independently.
+func (ps *PlatformStore) recordOperationalHealthTransition(ctx context.Context, stateColumn, alertedColumn string, failing bool, detail model.AlertDetail, text string, now time.Time) (bool, error) {
+	read := func(queryer rowQueryer) (recorded bool, alerted string, err error) {
+		err = queryer.QueryRowContext(ctx, `SELECT `+stateColumn+`,`+alertedColumn+` FROM platform_alert_state WHERE id=1`).Scan(&recorded, &alerted)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, "", nil
+		}
+		return recorded, alerted, err
+	}
+	current, _, err := read(ps.store.reader())
+	if err != nil {
+		return false, err
+	}
+	if current == failing {
+		return false, nil
+	}
+
+	tx, err := ps.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, ensurePlatformAlertStateRow); err != nil {
+		return false, err
+	}
+	current, alerted, err := read(tx)
+	if err != nil {
+		return false, err
+	}
+	if current == failing {
+		return false, nil
+	}
+	if failing {
+		if alertedAt, parseErr := time.Parse(time.RFC3339Nano, alerted); parseErr == nil && now.Before(alertedAt.Add(OperationalHealthAlertWindow)) {
+			return false, nil
+		}
+		if err := recordHealthAlertTx(ctx, tx, detail, text, true, now); err != nil {
+			return false, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE platform_alert_state SET `+stateColumn+`=1,`+alertedColumn+`=? WHERE id=1`, sqliteTimestamp(now)); err != nil {
+			return false, err
+		}
+	} else if _, err := tx.ExecContext(ctx, `UPDATE platform_alert_state SET `+stateColumn+`=0 WHERE id=1`); err != nil {
+		return false, err
+	}
+	return failing, tx.Commit()
 }
 
 // recordedState names a recorded sandbox state for an audit record.

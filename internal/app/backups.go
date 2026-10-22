@@ -95,6 +95,10 @@ func (s BackupStatus) reported(now time.Time) *BackupStatus {
 	return &s
 }
 
+func (s BackupStatus) hasSuccessfulBackup() bool {
+	return !s.LastSuccessAt.IsZero() && s.LastBackup != ""
+}
+
 // BackupStatusPath returns the status file of the scheduled backups of the
 // database: backup-status.json beside the database file. An in-memory
 // database has none.
@@ -142,37 +146,46 @@ func withBackupSettings(status BackupStatus, settings config.Backup) BackupStatu
 // readBackupStatusFile reads a recorded status. A missing file is an empty
 // status.
 func readBackupStatusFile(path string) (BackupStatus, error) {
+	status, _, err := readBackupStatusFileWithPresence(path)
+	return status, err
+}
+
+// readBackupStatusFileWithPresence also reports whether a valid status was
+// recorded. A missing file remains an empty status for user-facing health
+// reads, but deployment alert reconciliation must keep it distinct from an
+// explicit healthy result.
+func readBackupStatusFileWithPresence(path string) (BackupStatus, bool, error) {
 	var status BackupStatus
 	if path == "" {
-		return status, nil
+		return status, false, nil
 	}
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return status, nil
+		return status, false, nil
 	}
 	if err != nil {
-		return status, fmt.Errorf("read scheduled backup status: %w", err)
+		return status, false, fmt.Errorf("read scheduled backup status: %w", err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return status, fmt.Errorf("read scheduled backup status: %w", err)
+		return status, false, fmt.Errorf("read scheduled backup status: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return status, errors.New("read scheduled backup status: not a regular file")
+		return status, false, errors.New("read scheduled backup status: not a regular file")
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, backupStatusMaxBytes+1))
 	if err != nil {
-		return status, fmt.Errorf("read scheduled backup status: %w", err)
+		return status, false, fmt.Errorf("read scheduled backup status: %w", err)
 	}
 	if len(raw) > backupStatusMaxBytes {
-		return status, errors.New("read scheduled backup status: the file is too large")
+		return status, false, errors.New("read scheduled backup status: the file is too large")
 	}
 	if err := json.Unmarshal(raw, &status); err != nil {
-		return BackupStatus{}, fmt.Errorf("read scheduled backup status: %w", err)
+		return BackupStatus{}, false, fmt.Errorf("read scheduled backup status: %w", err)
 	}
 	status.LastSuccessAgeSeconds = nil
-	return status, nil
+	return status, true, nil
 }
 
 // writeBackupStatusFile replaces the status file atomically with a private
@@ -281,13 +294,21 @@ func (a *App) startBackupWorker(ctx context.Context) <-chan struct{} {
 	if configured, err := a.Config.Location(); err == nil && configured != nil {
 		location = configured
 	}
-	recorded, err := readBackupStatusFile(BackupStatusPath(a.Store.Path))
+	recorded, exists, err := readBackupStatusFileWithPresence(BackupStatusPath(a.Store.Path))
 	if err != nil {
 		logger.Warn("the recorded scheduled backup status is ignored", "error", err)
 	}
 	// The worker owns the status; the status file is how health and the
-	// console read it.
-	status := withBackupSettings(recorded, settings)
+	// console read it. Preserve a mismatched directory as the unknown-state
+	// marker until a backup actually runs with the current settings.
+	status := BackupStatus{}
+	if exists {
+		if recorded.Directory == settings.Directory {
+			status = withBackupSettings(recorded, settings)
+		} else {
+			status.Directory = recorded.Directory
+		}
+	}
 	if info, err := os.Stat(settings.Directory); err != nil || !info.IsDir() {
 		logger.Warn("the backup directory is not an existing directory; scheduled backups fail until it is created", "directory", settings.Directory)
 	}
@@ -308,7 +329,9 @@ func (a *App) startBackupWorker(ctx context.Context) <-chan struct{} {
 				return
 			}
 			status.NextRunAt = next.UTC()
-			a.recordBackupStatus(status)
+			if status.Directory == settings.Directory {
+				a.recordBackupStatus(status)
+			}
 			if !wait(ctx, status.NextRunAt) {
 				return
 			}
@@ -344,11 +367,13 @@ func (a *App) runScheduledBackup(ctx context.Context, settings config.Backup, st
 		if ctx.Err() != nil {
 			return status
 		}
+		status.Directory, status.Schedule, status.Keep = settings.Directory, settings.Schedule, settings.Keep
 		status.LastFailureAt, status.LastError = a.nowUTC(), boundedBackupError(err)
 		status.ConsecutiveFailures++
 		logger.Error("scheduled backup failed", "backup", name, "error", status.LastError, "consecutive_failures", status.ConsecutiveFailures)
 		return status
 	}
+	status.Directory, status.Schedule, status.Keep = settings.Directory, settings.Schedule, settings.Keep
 	removed, pruneErr := pruneScheduledBackups(settings.Directory, settings.Keep)
 	if pruneErr != nil {
 		logger.Warn("old scheduled backups could not be removed", "error", pruneErr)

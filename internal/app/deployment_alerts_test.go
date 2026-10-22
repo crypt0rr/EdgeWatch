@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,6 +134,120 @@ func TestCheckDeploymentAlertsReportsASandboxLoss(t *testing.T) {
 		t.Errorf("nil application's sandbox health = %+v", got)
 	}
 	(&App{}).checkDeploymentAlerts(ctx, now)
+}
+
+func TestCheckDeploymentAlertsReportsBackupAndIdentityCapacity(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
+	a := f.app
+	routeDeploymentAlerts(t, f.db)
+	a.Config.Scheduler.MaxConcurrent = 4
+	a.Config.Backup.Directory = t.TempDir()
+	a.sandbox = sandbox.NewEnforced().WithLandlock("/usr/local/bin/edgewatch", 3)
+	a.inspectScannerIdentities = func(context.Context) (*sandbox.ScannerIdentityPoolStatus, error) {
+		return &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Active: 60, Free: 3}, nil
+	}
+	if err := writeBackupStatusFile(BackupStatusPath(f.db.Path), BackupStatus{Directory: a.Config.Backup.Directory, ConsecutiveFailures: 2}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	drainWake(a)
+	a.checkDeploymentAlerts(ctx, now)
+	want := []model.AlertDetail{
+		{Kind: model.HealthAlertScheduledBackupFailed, Subject: "scheduled_backup", Count: 2},
+		{Kind: model.HealthAlertScannerIdentitiesLow, Subject: "scanner identity pool", Current: "3 free, 4 required"},
+	}
+	if alerts := healthAlerts(t, f.db); !reflect.DeepEqual(alerts, want) || !drainWake(a) {
+		t.Fatalf("operational deployment alerts = %+v, want %+v and a delivery wake", alerts, want)
+	}
+	a.checkDeploymentAlerts(ctx, now.Add(time.Minute))
+	if alerts := healthAlerts(t, f.db); !reflect.DeepEqual(alerts, want) || drainWake(a) {
+		t.Fatalf("repeated operational alerts = %+v, want no repeat", alerts)
+	}
+}
+
+func TestCheckDeploymentAlertsWakesAfterPartialOperationalQueue(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
+	a := f.app
+	routeDeploymentAlerts(t, f.db)
+	a.Config.Scheduler.MaxConcurrent = 4
+	a.Config.Backup.Directory = t.TempDir()
+	a.sandbox = sandbox.NewEnforced().WithLandlock("/usr/local/bin/edgewatch", 3)
+	var logs strings.Builder
+	a.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	a.inspectScannerIdentities = func(context.Context) (*sandbox.ScannerIdentityPoolStatus, error) {
+		return &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, Free: 3}, nil
+	}
+	if err := writeBackupStatusFile(BackupStatusPath(f.db.Path), BackupStatus{Directory: a.Config.Backup.Directory, ConsecutiveFailures: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.DB.Exec(`CREATE TRIGGER fail_scanner_identity_health BEFORE UPDATE OF scanner_identity_pool_low ON platform_alert_state BEGIN SELECT RAISE(ABORT, 'injected scanner identity transition failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	drainWake(a)
+	a.checkDeploymentAlerts(ctx, now)
+	want := []model.AlertDetail{{Kind: model.HealthAlertScheduledBackupFailed, Subject: "scheduled_backup", Count: 2}}
+	if alerts := healthAlerts(t, f.db); !reflect.DeepEqual(alerts, want) {
+		t.Fatalf("partially queued operational alerts = %+v, want %+v", alerts, want)
+	}
+	if !strings.Contains(logs.String(), "injected scanner identity transition failure") {
+		t.Fatalf("scanner identity transition did not fail as injected: %s", logs.String())
+	}
+	if !drainWake(a) {
+		t.Fatal("backup alert queued before identity transition failed, but delivery worker was not woken")
+	}
+}
+
+// A scanner identity inspection without an enforced pool cannot report a
+// low-capacity alert or clear a previously observed low-capacity condition.
+func TestScannerIdentityCapacityRequiresEnforcedInspection(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
+	a := f.app
+	routeDeploymentAlerts(t, f.db)
+	a.Config.Scheduler.MaxConcurrent = 4
+	a.sandbox = sandbox.NewEnforced()
+	pool := &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateUnavailable, Free: 0}
+	a.inspectScannerIdentities = func(context.Context) (*sandbox.ScannerIdentityPoolStatus, error) {
+		return pool, nil
+	}
+	now := time.Now().UTC()
+
+	if metrics := a.DeploymentMetrics(ctx, now); metrics.ScannerIdentities != nil {
+		t.Fatalf("unavailable scanner identity pool was exported: %+v", metrics.ScannerIdentities)
+	}
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now); err != nil || recorded != 0 {
+		t.Fatalf("unavailable scanner identity observation = %d, %v; want no alert", recorded, err)
+	}
+	if alerts := healthAlerts(t, f.db); len(alerts) != 0 {
+		t.Fatalf("unavailable scanner identity inspection alerted: %+v", alerts)
+	}
+
+	pool = &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, Free: 3}
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(time.Minute)); err != nil || recorded != 1 {
+		t.Fatalf("low enforced capacity = %d, %v; want one alert", recorded, err)
+	}
+	pool = &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateUnavailable, Free: 0}
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(2*time.Minute)); err != nil || recorded != 0 {
+		t.Fatalf("unavailable inspection after low capacity = %d, %v; want no transition", recorded, err)
+	}
+	var failing int
+	if err := f.db.DB.QueryRowContext(ctx, `SELECT scanner_identity_pool_low FROM platform_alert_state WHERE id=1`).Scan(&failing); err != nil || failing != 1 {
+		t.Fatalf("low-capacity state after unavailable inspection = %d, %v; want it preserved", failing, err)
+	}
+
+	pool = &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, Free: 4}
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(3*time.Minute)); err != nil || recorded != 0 {
+		t.Fatalf("healthy enforced capacity = %d, %v; want silent recovery", recorded, err)
+	}
+	if alerts := healthAlerts(t, f.db); len(alerts) != 1 || alerts[0].Kind != model.HealthAlertScannerIdentitiesLow {
+		t.Fatalf("scanner identity alerts after recovery = %+v; want only the low-capacity alert", alerts)
+	}
 }
 
 // The heartbeat's check also reports the security alerts that an ended

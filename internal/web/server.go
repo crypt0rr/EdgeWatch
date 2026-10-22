@@ -85,6 +85,10 @@ type Server struct {
 	// deploymentTelemetry caches the deployment's telemetry for the platform
 	// status and the metrics endpoint.
 	deploymentTelemetry singleFlight[store.DeploymentTelemetry]
+	// deploymentMetrics caches backup, scanner identity, and scheduled-work
+	// metrics so a scrape does not repeatedly inspect the identity allocator
+	// or walk every active job.
+	deploymentMetrics singleFlight[app.DeploymentMetrics]
 	// healthMu guards health, the cached answer of GET /healthz.
 	healthMu sync.Mutex
 	health   healthAnswer

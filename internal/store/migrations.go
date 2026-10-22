@@ -19,7 +19,7 @@ import (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 76
+const schemaVersion = 77
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -53,6 +53,7 @@ var conditionalMigrationStatements = map[int]func(context.Context, *sql.Tx) ([]s
 	68: migration68ConditionalStatements,
 	74: migration74ConditionalStatements,
 	75: migration75ConditionalStatements,
+	77: migration77ConditionalStatements,
 }
 
 // newerSchemaError is the refusal for a database that a newer release has
@@ -377,6 +378,8 @@ func schemaMigrationStatements() map[int][]string {
 		// Each business unit declares the address space it owns or may
 		// scan, its perimeter. See migration76.go.
 		76: migration76Statements(),
+		// Deployment backup and scanner-identity alert windows. See migration77.go.
+		77: migration77Statements(),
 	}
 }
 
@@ -387,6 +390,10 @@ func schemaMigrationStatements() map[int][]string {
 // avoids accumulating deferred rollbacks while a database is upgraded
 // through many versions.
 func applyMigration(ctx context.Context, db *sql.DB, version int, statements []string) error {
+	return applyMigrationWithConditional(ctx, db, version, statements, conditionalMigrationStatements[version])
+}
+
+func applyMigrationWithConditional(ctx context.Context, db *sql.DB, version int, statements []string, conditional func(context.Context, *sql.Tx) ([]string, error)) error {
 	tx, err := beginSchemaStep(ctx, db, version-1, version)
 	if err != nil {
 		return fmt.Errorf("schema migration %d: %w", version, err)
@@ -406,7 +413,7 @@ func applyMigration(ctx context.Context, db *sql.DB, version int, statements []s
 	if err := run(statements); err != nil {
 		return err
 	}
-	if conditional := conditionalMigrationStatements[version]; conditional != nil {
+	if conditional != nil {
 		extra, err := conditional(ctx, tx)
 		if err != nil {
 			return err

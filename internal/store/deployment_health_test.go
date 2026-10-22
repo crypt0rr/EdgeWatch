@@ -135,6 +135,70 @@ func TestDegradedFirstSandboxObservationAlerts(t *testing.T) {
 	}
 }
 
+// Scheduled-backup and scanner-identity regressions are alerted on entry,
+// share the one-hour deployment health window, and clear their state after
+// recovery without sending a recovery notice.
+func TestOperationalHealthAlertsAreRateLimitedPerCondition(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newDeploymentAlertFixture(t)
+	platform := f.store.Platform()
+	start := time.Now().UTC()
+
+	if recorded, err := platform.RecordScheduledBackupHealth(ctx, 0, start); err != nil || recorded {
+		t.Fatalf("healthy backup observation = %v, %v", recorded, err)
+	}
+	if recorded, err := platform.RecordScheduledBackupHealth(ctx, 2, start.Add(time.Minute)); err != nil || !recorded {
+		t.Fatalf("first backup failure = %v, %v; want alert", recorded, err)
+	}
+	if recorded, err := platform.RecordScheduledBackupHealth(ctx, 3, start.Add(2*time.Minute)); err != nil || recorded {
+		t.Fatalf("continued backup failure = %v, %v; want no repeat", recorded, err)
+	}
+	if recorded, err := platform.RecordScheduledBackupHealth(ctx, 0, start.Add(3*time.Minute)); err != nil || recorded {
+		t.Fatalf("backup recovery = %v, %v; want no recovery alert", recorded, err)
+	}
+	if recorded, err := platform.RecordScheduledBackupHealth(ctx, 1, start.Add(30*time.Minute)); err != nil || recorded {
+		t.Fatalf("backup failure inside window = %v, %v; want pending", recorded, err)
+	}
+	if recorded, err := platform.RecordScheduledBackupHealth(ctx, 1, start.Add(OperationalHealthAlertWindow+time.Minute)); err != nil || !recorded {
+		t.Fatalf("backup failure after window = %v, %v; want one alert", recorded, err)
+	}
+
+	if recorded, err := platform.RecordScannerIdentityHealth(ctx, 3, 4, start); err != nil || !recorded {
+		t.Fatalf("low identity capacity = %v, %v; want alert", recorded, err)
+	}
+	if recorded, err := platform.RecordScannerIdentityHealth(ctx, 2, 4, start.Add(time.Minute)); err != nil || recorded {
+		t.Fatalf("continued low capacity = %v, %v; want no repeat", recorded, err)
+	}
+	if recorded, err := platform.RecordScannerIdentityHealth(ctx, 4, 4, start.Add(2*time.Minute)); err != nil || recorded {
+		t.Fatalf("identity recovery = %v, %v; want no recovery alert", recorded, err)
+	}
+	if recorded, err := platform.RecordScannerIdentityHealth(ctx, 1, 4, start.Add(30*time.Minute)); err != nil || recorded {
+		t.Fatalf("low capacity inside window = %v, %v; want pending", recorded, err)
+	}
+	if recorded, err := platform.RecordScannerIdentityHealth(ctx, 1, 4, start.Add(OperationalHealthAlertWindow+time.Minute)); err != nil || !recorded {
+		t.Fatalf("low capacity after window = %v, %v; want one alert", recorded, err)
+	}
+
+	alerts := assertHealthAlerts(t, f.store, 8)
+	if got := alerts[0].event.Alert; got.Kind != model.HealthAlertScheduledBackupFailed || got.Count != 2 {
+		t.Errorf("scheduled-backup alert = %+v", got)
+	}
+	var scannerIdentityAlert *model.AlertDetail
+	for _, alert := range alerts {
+		if alert.event.Alert != nil && alert.event.Alert.Kind == model.HealthAlertScannerIdentitiesLow {
+			scannerIdentityAlert = alert.event.Alert
+			break
+		}
+	}
+	if scannerIdentityAlert == nil || scannerIdentityAlert.Current != "3 free, 4 required" {
+		t.Errorf("scanner identity alert = %+v", scannerIdentityAlert)
+	}
+	if count := countHealthAudit(t, f.store); count != 4 {
+		t.Errorf("deployment health audit entries = %d, want four transitions", count)
+	}
+}
+
 // Without deployment alert routing the alert is still recorded in the
 // platform audit, and nothing is queued.
 func TestDeploymentAlertWithoutRoutingIsAudited(t *testing.T) {

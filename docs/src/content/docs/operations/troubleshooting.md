@@ -43,10 +43,43 @@ with `429` beyond that. The answer is reused for one second.
 For Prometheus, turn on the opt-in `GET /metrics` with `web.metrics.enabled`
 and a bearer token in `web.metrics.token_file`; see
 [the configuration reference](/reference/configuration/#metrics). It reports
-deployment aggregates only, such as the heartbeat age, the migration state,
-the scan slots, the notification backlog, the locked notification
-destinations, the database size, and the sandbox states, never a unit's
-name, job, or target. The metric names are listed in
+deployment aggregates only, such as heartbeat age, migration state, scan
+slots, notification backlog, locked destinations, database size, sandbox
+states, scheduled-backup outcomes, scanner identity counts, skipped scheduled
+runs, overdue jobs, and stalled cycles. It never includes a unit name, job, or
+target, and caches operational values for up to 30 seconds. Alert on
+`edgewatch_backup_status_known` equal to zero as well as on consecutive backup
+failures. Once the daemon has opened its database, the status-known metric is
+present whenever scheduled backups are enabled; it is zero when the status
+file is missing, unreadable, belongs to another configured directory, or has
+no recorded outcome. This keeps an unavailable status visible while the
+failure and last-success metrics are omitted. For example:
+
+```yaml
+groups:
+  - name: edgewatch
+    rules:
+      - alert: EdgeWatchBackupStatusUnknown
+        expr: edgewatch_backup_status_known == 0
+        annotations:
+          summary: EdgeWatch scheduled backup status is unknown
+          description: The configured backup status has no readable recorded outcome.
+      - alert: EdgeWatchBackupFailures
+        expr: edgewatch_backup_status_known == 1 and edgewatch_backup_consecutive_failures > 0
+        annotations:
+          summary: EdgeWatch scheduled backups are failing
+          description: The scheduled backup failure count is {{ $value }}.
+```
+
+The unknown-status alert clears when status becomes readable with a recorded
+outcome. A failure alert remains active when that outcome still reports
+failures. Both clear after a successful backup is recorded for the configured
+directory; a directory change, a timestamp without a backup filename, or a
+missing status file does not count as recovery. The daemon's durable
+deployment alert follows the same recovery rule. Also alert on
+`edgewatch_scanner_identities{state="free"}` below your
+`scheduler.max_concurrent_scans`; deployment alerts also report a new failure
+transition to platform destinations. The metric names are listed in
 [the API reference](/reference/api-compatibility/#health-and-metrics). Keep
 `/metrics` off a public reverse proxy; see
 [Reverse proxies](/deployment/reverse-proxies/).

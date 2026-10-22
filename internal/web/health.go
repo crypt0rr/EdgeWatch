@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/app"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
@@ -231,6 +232,11 @@ func (m metricsWriter) family(name, help string) {
 	fmt.Fprintf(m.b, "# HELP %s %s\n# TYPE %s gauge\n", name, help, name)
 }
 
+// counterFamily writes the help and type of a counter.
+func (m metricsWriter) counterFamily(name, help string) {
+	fmt.Fprintf(m.b, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+}
+
 // sample writes one sample of a gauge, with its labels in the order given.
 func (m metricsWriter) sample(name string, value float64, labels ...string) {
 	m.b.WriteString(name)
@@ -370,12 +376,69 @@ func (s *Server) writeMetrics(ctx context.Context, b *bytes.Buffer) {
 		// migration until the daemon has opened the database.
 		return
 	}
+	if s.App != nil {
+		operational, err := s.cachedDeploymentMetrics(ctx)
+		if err != nil {
+			if s.Log != nil {
+				s.Log.Warn("deployment metrics refresh failed", "error", err)
+			}
+		} else {
+			if operational.BackupsEnabled {
+				m.gauge("edgewatch_backup_status_known", "Whether scheduled backup status is known for the configured directory; zero means the status is missing, unreadable, mismatched, or has no recorded outcome.", boolMetric(operational.BackupStatusKnown))
+			}
+			if backups := operational.Backups; backups != nil {
+				lastSuccess := 0.0
+				if !backups.LastSuccessAt.IsZero() {
+					lastSuccess = float64(backups.LastSuccessAt.Unix())
+				}
+				m.gauge("edgewatch_backup_last_success_timestamp_seconds", "When a scheduled backup last succeeded, as a Unix time; zero means none has succeeded yet.", lastSuccess)
+				m.gauge("edgewatch_backup_consecutive_failures", "Consecutive scheduled backup failures since the last success.", float64(backups.ConsecutiveFailures))
+			}
+			if pool := operational.ScannerIdentities; pool != nil {
+				m.family("edgewatch_scanner_identities", "The scanner identity pool counts by allocation state.")
+				for _, state := range []struct {
+					name  string
+					count int
+				}{
+					{"active", pool.Active},
+					{"quarantined", pool.Quarantined},
+					{"in_use_by_other_processes", pool.InUseByOtherProcesses},
+					{"free", pool.Free},
+				} {
+					m.sample("edgewatch_scanner_identities", float64(state.count), "state", state.name)
+				}
+			}
+			m.counterFamily("edgewatch_scheduled_runs_skipped_total", "Scheduled runs skipped because a job was active or its resumable cycle was stalled, since this daemon started.")
+			m.sample("edgewatch_scheduled_runs_skipped_total", float64(operational.JobActiveSkips), "reason", "job_active")
+			m.sample("edgewatch_scheduled_runs_skipped_total", float64(operational.CycleStalledSkips), "reason", "cycle_stalled")
+			if operational.JobsOverdueKnown {
+				m.gauge("edgewatch_jobs_overdue", "Enabled scheduled jobs currently due for the silence watchdog, excluding active scans and alert retry windows.", float64(operational.JobsOverdue))
+			}
+			if operational.StalledCyclesKnown {
+				m.gauge("edgewatch_scan_cycles_stalled", "Stalled scan cycles for visible jobs in active business units.", float64(operational.StalledCycles))
+			}
+		}
+	}
 	updates := s.applicationUpdateStatus(ctx)
 	m.stateSet("edgewatch_update_check_status", "The release check, 1 for the current status.", "status", updates.Status, metricsUpdateStatuses)
 	m.gauge("edgewatch_update_available", "Whether a newer release is available.", boolMetric(updates.Available))
 	if !updates.LastSuccessfulCheckAt.IsZero() {
 		m.gauge("edgewatch_update_last_successful_check_timestamp_seconds", "When the release check last succeeded, as a Unix time.", float64(updates.LastSuccessfulCheckAt.Unix()))
 	}
+}
+
+// cachedDeploymentMetrics caches app-level operational metrics for the same
+// bounded interval as the database telemetry. A scrape therefore does not
+// repeatedly inspect scanner identities or traverse every active job.
+func (s *Server) cachedDeploymentMetrics(ctx context.Context) (app.DeploymentMetrics, error) {
+	if s.App == nil {
+		return app.DeploymentMetrics{}, nil
+	}
+	return s.deploymentMetrics.get(ctx, deploymentTelemetryTTL, func(ctx context.Context) (app.DeploymentMetrics, error) {
+		metricsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		return s.App.DeploymentMetrics(metricsCtx, s.currentTime()), nil
+	})
 }
 
 // singleFlight caches one value for a TTL and lets one caller refresh it

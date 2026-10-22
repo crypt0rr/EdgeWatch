@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -139,6 +140,21 @@ func TestJobSilenceWatchdogCountsRecentResumableProgressAsActivity(t *testing.T)
 	if _, created, err := s.System().RecordJobSilenceAlert(ctx, job.ID, job.Job.Name, reference, now, threshold, nil); err != nil || created {
 		t.Fatalf("recent progress alert = created %v, err %v; want no alert", created, err)
 	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET expires_at='' WHERE id=?`, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || due {
+		t.Fatalf("recent legacy progress without expiry = due %v, err %v; want not due", due, err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='paused',config_hash='stale-scope' WHERE id=?`, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || !due {
+		t.Fatalf("recent stale-scope progress silence decision = due %v, err %v; want due", due, err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='running',config_hash=?,expires_at=? WHERE id=?`, job.Job.SecurityHash(), sqliteTimestamp(now.Add(24*time.Hour)), cycle.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	// A stalled cycle and an in-window cycle whose last completed checkpoint
 	// is old enough to exceed the watchdog window no longer suppress silence.
@@ -162,6 +178,76 @@ func TestJobSilenceWatchdogCountsRecentResumableProgressAsActivity(t *testing.T)
 	}
 	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || !due {
 		t.Fatalf("expired progress silence decision = due %v, err %v; want due", due, err)
+	}
+}
+
+func TestJobSilenceWatchdogCountsCompatibleLegacyScopeProgressAsActivity(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	tenant := defaultTenant(s)
+	job := config.NormalizeJob(config.Job{
+		Name: "legacy-scope-progress", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"192.0.2.16"}, TCP: &config.Protocol{Ports: "443,22", Mode: "connect"},
+	})
+	record, err := tenant.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyDefinition := record.Job
+	legacyTCP := *legacyDefinition.TCP
+	legacyTCP.Ports = "443,22"
+	legacyDefinition.TCP = &legacyTCP
+	definition, err := json.Marshal(legacyDefinition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE jobs SET definition_json=? WHERE id=?`, definition, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	record, err = tenant.GetJob(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyHash := record.Job.LegacySecurityHash()
+	if legacyHash == "" || legacyHash == record.Job.SecurityHash() {
+		t.Fatalf("stored job hashes = current %q, legacy %q; want distinct compatibility hashes", record.Job.SecurityHash(), legacyHash)
+	}
+
+	reference := record.CreatedAt.UTC()
+	now := reference.Add(3 * time.Hour)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE job_silence_state SET eligible_at=? WHERE job_id=?`, sqliteTimestamp(reference), record.ID); err != nil {
+		t.Fatal(err)
+	}
+	plan := scanner.WorkPlan{Job: record.Job, Units: []scanner.WorkUnit{
+		{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.16"}, Ports: "22", PortCount: 1, Probes: 1},
+		{Sequence: 1, Protocol: "tcp", Addresses: []string{"192.0.2.16"}, Ports: "443", PortCount: 1, Probes: 1},
+	}}
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
+		JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision, ConfigHash: legacyHash,
+		ExecutionHash: record.Job.ExecutionHash(), Plan: plan, StartedAt: reference, ExpiresAt: now.Add(24 * time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET finished_at=? WHERE cycle_id=? AND status='completed'`, sqliteTimestamp(now.Add(-time.Minute)), cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := s.System().JobSilenceDue(ctx, record.ID, reference, now, 2*time.Hour); err != nil || due {
+		t.Fatalf("compatible legacy-scope progress silence decision = due %v, err %v; want not due", due, err)
 	}
 }
 

@@ -117,29 +117,31 @@ func TestRecoveredLegacyResumedCyclePreservesOriginalFinishTime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	recoveryStartedAt := time.Now().UTC()
 	promoted, events, promoteErr := a.runJobRecord(ctx, record, false)
-	recoveryReturnedAt := time.Now().UTC()
 	if promoteErr != nil || promoted.CycleID != deferred.CycleID || promoted.Status != "success" || promoted.Comparison != model.ScanComparisonCompared {
 		t.Fatalf("next run = %#v, err %v; want the completed cycle promoted and compared", promoted, promoteErr)
 	}
-	if promoted.StartedAt.Before(recoveryStartedAt) || promoted.StartedAt.After(recoveryReturnedAt) {
-		t.Fatalf("recovered scan started at %s; want the recovery invocation interval %s to %s because the legacy attempt start is unknown", promoted.StartedAt, recoveryStartedAt, recoveryReturnedAt)
+	if !promoted.StartedAt.Equal(originalStartedAt) {
+		t.Fatalf("recovered scan started at %s, want original cycle start %s because the legacy attempt start is unknown", promoted.StartedAt, originalStartedAt)
 	}
 	if !promoted.FinishedAt.Equal(originalFinishedAt) {
 		t.Fatalf("recovered scan finished at %s, want original cycle completion %s", promoted.FinishedAt, originalFinishedAt)
 	}
-	var scanFinishedAt, lastSuccessAt string
-	if err := db.DB.QueryRowContext(ctx, `SELECT finished_at FROM scans WHERE cycle_id=? AND status='success'`, deferred.CycleID).Scan(&scanFinishedAt); err != nil {
+	if promoted.StartedAt.After(promoted.FinishedAt) {
+		t.Fatalf("recovered scan interval is inverted: %s to %s", promoted.StartedAt, promoted.FinishedAt)
+	}
+	var scanStartedAt, scanFinishedAt, lastSuccessAt string
+	if err := db.DB.QueryRowContext(ctx, `SELECT started_at,finished_at FROM scans WHERE cycle_id=? AND status='success'`, deferred.CycleID).Scan(&scanStartedAt, &scanFinishedAt); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.DB.QueryRowContext(ctx, `SELECT last_success_at FROM job_silence_state WHERE job_id=?`, record.ID).Scan(&lastSuccessAt); err != nil {
 		t.Fatal(err)
 	}
+	parsedScanStartedAt, startErr := time.Parse(time.RFC3339Nano, scanStartedAt)
 	parsedScanFinishedAt, scanErr := time.Parse(time.RFC3339Nano, scanFinishedAt)
 	parsedLastSuccessAt, successErr := time.Parse(time.RFC3339Nano, lastSuccessAt)
-	if scanErr != nil || successErr != nil || !parsedScanFinishedAt.Equal(originalFinishedAt) || !parsedLastSuccessAt.Equal(originalFinishedAt) {
-		t.Fatalf("recovered finish markers = scans %q (%v), silence %q (%v); want %s", scanFinishedAt, scanErr, lastSuccessAt, successErr, originalFinishedAt.Format(time.RFC3339Nano))
+	if startErr != nil || scanErr != nil || successErr != nil || parsedScanStartedAt.After(parsedScanFinishedAt) || !parsedScanStartedAt.Equal(originalStartedAt) || !parsedScanFinishedAt.Equal(originalFinishedAt) || !parsedLastSuccessAt.Equal(originalFinishedAt) {
+		t.Fatalf("recovered persisted interval/finish markers = scans %q..%q (%v, %v), silence %q (%v); want %s..%s and preserved finish", scanStartedAt, scanFinishedAt, startErr, scanErr, lastSuccessAt, successErr, originalStartedAt.Format(time.RFC3339Nano), originalFinishedAt.Format(time.RFC3339Nano))
 	}
 	if !hasEventType(events, "changes-detected") {
 		t.Fatalf("promoted cycle was not compared with the baseline: %#v", events)

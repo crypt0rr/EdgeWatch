@@ -142,37 +142,46 @@ func withBackupSettings(status BackupStatus, settings config.Backup) BackupStatu
 // readBackupStatusFile reads a recorded status. A missing file is an empty
 // status.
 func readBackupStatusFile(path string) (BackupStatus, error) {
+	status, _, err := readBackupStatusFileWithPresence(path)
+	return status, err
+}
+
+// readBackupStatusFileWithPresence also reports whether a valid status was
+// recorded. A missing file remains an empty status for user-facing health
+// reads, but deployment alert reconciliation must keep it distinct from an
+// explicit healthy result.
+func readBackupStatusFileWithPresence(path string) (BackupStatus, bool, error) {
 	var status BackupStatus
 	if path == "" {
-		return status, nil
+		return status, false, nil
 	}
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return status, nil
+		return status, false, nil
 	}
 	if err != nil {
-		return status, fmt.Errorf("read scheduled backup status: %w", err)
+		return status, false, fmt.Errorf("read scheduled backup status: %w", err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return status, fmt.Errorf("read scheduled backup status: %w", err)
+		return status, false, fmt.Errorf("read scheduled backup status: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return status, errors.New("read scheduled backup status: not a regular file")
+		return status, false, errors.New("read scheduled backup status: not a regular file")
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, backupStatusMaxBytes+1))
 	if err != nil {
-		return status, fmt.Errorf("read scheduled backup status: %w", err)
+		return status, false, fmt.Errorf("read scheduled backup status: %w", err)
 	}
 	if len(raw) > backupStatusMaxBytes {
-		return status, errors.New("read scheduled backup status: the file is too large")
+		return status, false, errors.New("read scheduled backup status: the file is too large")
 	}
 	if err := json.Unmarshal(raw, &status); err != nil {
-		return BackupStatus{}, fmt.Errorf("read scheduled backup status: %w", err)
+		return BackupStatus{}, false, fmt.Errorf("read scheduled backup status: %w", err)
 	}
 	status.LastSuccessAgeSeconds = nil
-	return status, nil
+	return status, true, nil
 }
 
 // writeBackupStatusFile replaces the status file atomically with a private

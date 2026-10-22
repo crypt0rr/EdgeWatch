@@ -59,6 +59,7 @@ type scannerIdentityAllocator struct {
 	privateScope             func(uint64) (bool, error)
 	validateMap              func(uint32, uint32) error
 	inUse                    func(uint32, uint32) (map[uint32]struct{}, error)
+	inUseContext             func(context.Context, uint32, uint32) (map[uint32]struct{}, error)
 	persistRuntimeLiveness   bool
 	runtimeLivenessMu        sync.Mutex
 	runtimeLivenessReference *os.File
@@ -103,6 +104,7 @@ func productionScannerIdentityAllocator() *scannerIdentityAllocator {
 			privateScope:           currentPrivateScannerNamespace,
 			validateMap:            validateScannerIdentityRangeMapping,
 			inUse:                  scannerIdentitiesInUse,
+			inUseContext:           scannerIdentitiesInUseContext,
 			persistRuntimeLiveness: true,
 		}
 	})
@@ -285,10 +287,6 @@ func (allocator *scannerIdentityAllocator) inspect(ctx context.Context) (*Scanne
 	if err := allocator.validateMap(allocator.uidStart, allocator.count); err != nil {
 		return nil, err
 	}
-	identitiesInUse, err := allocator.inUse(allocator.uidStart, allocator.count)
-	if err != nil {
-		return nil, errors.New("scanner identity allocator: current identity use cannot be inspected")
-	}
 	directoryFD, markerFD, err := openScannerIdentityDirectoriesReadOnly(allocator.directory, allocator.markerDir)
 	if err != nil {
 		return nil, err
@@ -304,6 +302,19 @@ func (allocator *scannerIdentityAllocator) inspect(ctx context.Context) (*Scanne
 		return nil, err
 	}
 	defer func() { _ = unix.Flock(lockFD, unix.LOCK_UN) }()
+	// Keep the census and durable lease journal in one allocator-lock
+	// snapshot. In particular, a release cannot remove a lease after the
+	// process census observed its UID but before this read counts the journal.
+	identitiesInUse, err := allocator.currentInUse(ctx)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, errors.New("scanner identity allocator: current identity use cannot be inspected")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	marker, err := readScannerIdentityMarker(markerFD)
 	if err != nil {
 		return nil, errors.New("scanner identity allocator: boot marker is unavailable")
@@ -332,6 +343,26 @@ func (allocator *scannerIdentityAllocator) inspect(ctx context.Context) (*Scanne
 		return nil, errors.New("scanner identity allocator: PID namespace changed without exclusive private-scope proof")
 	}
 	return scannerIdentityPoolCounts(allocator, journal, identitiesInUse), nil
+}
+
+func (allocator *scannerIdentityAllocator) currentInUse(ctx context.Context) (map[uint32]struct{}, error) {
+	if ctx == nil || allocator == nil || allocator.inUse == nil {
+		return nil, errors.New("scanner identity allocator: process census is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if allocator.inUseContext != nil {
+		return allocator.inUseContext(ctx, allocator.uidStart, allocator.count)
+	}
+	identitiesInUse, err := allocator.inUse(allocator.uidStart, allocator.count)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return identitiesInUse, nil
 }
 
 func (lease *scannerIdentityLease) identity() (int, int, bool) {
@@ -1227,7 +1258,11 @@ func idMapped(ranges []idMapRange, id uint32) bool {
 }
 
 func scannerIdentitiesInUse(uidStart, count uint32) (map[uint32]struct{}, error) {
-	return scannerIdentitiesInUseAt("/proc", "/etc/passwd", "/etc/group", uidStart, count)
+	return scannerIdentitiesInUseContext(context.Background(), uidStart, count)
+}
+
+func scannerIdentitiesInUseContext(ctx context.Context, uidStart, count uint32) (map[uint32]struct{}, error) {
+	return scannerIdentitiesInUseAtContext(ctx, "/proc", "/etc/passwd", "/etc/group", uidStart, count)
 }
 
 // scannerIdentitiesInUseAt reads one process/account snapshot. Production
@@ -1235,51 +1270,136 @@ func scannerIdentitiesInUse(uidStart, count uint32) (map[uint32]struct{}, error)
 // reader explicit also lets tests exercise the live-process fail-closed rule
 // against a controlled proc-like tree.
 func scannerIdentitiesInUseAt(procRoot, passwdPath, groupPath string, uidStart, count uint32) (map[uint32]struct{}, error) {
+	return scannerIdentitiesInUseAtContext(context.Background(), procRoot, passwdPath, groupPath, uidStart, count)
+}
+
+func scannerIdentitiesInUseAtContext(ctx context.Context, procRoot, passwdPath, groupPath string, uidStart, count uint32) (map[uint32]struct{}, error) {
+	if ctx == nil {
+		return nil, errors.New("scanner identity census context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Do not take an identity already present in the current namespace. The
 	// install documentation must reserve the fixed pool against services that
 	// may be launched later by the host's account manager.
-	entries, err := os.ReadDir(procRoot)
+	procDirectory, err := os.Open(procRoot)
 	if err != nil {
 		return nil, err
 	}
+	defer procDirectory.Close()
 	used := make(map[uint32]struct{})
-	if err := addScannerLocalAccountsInUse(passwdPath, groupPath, uidStart, count, used); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+	if err := addScannerLocalAccountsInUseContext(ctx, passwdPath, groupPath, uidStart, count, used); err != nil {
+		return nil, err
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		if _, err := strconv.ParseUint(entry.Name(), 10, 32); err != nil {
-			continue
+		entries, readErr := procDirectory.ReadDir(128)
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		processPath := filepath.Join(procRoot, entry.Name())
-		data, err := os.ReadFile(filepath.Join(processPath, "status"))
-		if err != nil {
-			if _, statErr := os.Stat(processPath); statErr == nil {
-				return nil, errors.New("a live process status is unreadable")
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return nil, readErr
+		}
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
-			continue
-		}
-		for _, line := range strings.Split(string(data), "\n") {
-			if !strings.HasPrefix(line, "Uid:") && !strings.HasPrefix(line, "Gid:") {
+			if !entry.IsDir() {
 				continue
 			}
-			for _, field := range strings.Fields(strings.TrimPrefix(strings.TrimPrefix(line, "Uid:"), "Gid:")) {
-				id, err := strconv.ParseUint(field, 10, 32)
-				if err == nil && id >= uint64(uidStart) && id < uint64(uidStart)+uint64(count) {
-					used[uint32(id)] = struct{}{}
+			if _, err := strconv.ParseUint(entry.Name(), 10, 32); err != nil {
+				continue
+			}
+			processPath := filepath.Join(procRoot, entry.Name())
+			data, err := readScannerIdentityProcessStatus(ctx, filepath.Join(processPath, "status"))
+			if err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, ctxErr
+				}
+				_, statErr := os.Stat(processPath)
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, ctxErr
+				}
+				if statErr == nil {
+					return nil, errors.New("a live process status is unreadable")
+				}
+				continue
+			}
+			for _, line := range strings.Split(string(data), "\n") {
+				if !strings.HasPrefix(line, "Uid:") && !strings.HasPrefix(line, "Gid:") {
+					continue
+				}
+				for _, field := range strings.Fields(strings.TrimPrefix(strings.TrimPrefix(line, "Uid:"), "Gid:")) {
+					id, err := strconv.ParseUint(field, 10, 32)
+					if err == nil && id >= uint64(uidStart) && id < uint64(uidStart)+uint64(count) {
+						used[uint32(id)] = struct{}{}
+					}
 				}
 			}
 		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return used, nil
 }
 
+const scannerIdentityProcessStatusMaxBytes = 64 << 10
+const scannerIdentityAccountsMaxBytes = 1 << 20
+
+func readScannerIdentityProcessStatus(ctx context.Context, path string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, scannerIdentityProcessStatusMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(data) > scannerIdentityProcessStatusMaxBytes {
+		return nil, errors.New("process status exceeds the size limit")
+	}
+	return data, nil
+}
+
 func addScannerAccountsInUse(path string, idField, uidStart, count uint32, used map[uint32]struct{}) error {
-	data, err := os.ReadFile(path)
+	return addScannerAccountsInUseContext(context.Background(), path, idField, uidStart, count, used)
+}
+
+func addScannerAccountsInUseContext(ctx context.Context, path string, idField, uidStart, count uint32, used map[uint32]struct{}) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	file, err := os.Open(path)
 	if err != nil {
 		return err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, scannerIdentityAccountsMaxBytes+1))
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(data) > scannerIdentityAccountsMaxBytes {
+		return errors.New("local account database exceeds the size limit")
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -1302,11 +1422,15 @@ func addScannerAccountsInUse(path string, idField, uidStart, count uint32, used 
 }
 
 func addScannerLocalAccountsInUse(passwdPath, groupPath string, uidStart, count uint32, used map[uint32]struct{}) error {
+	return addScannerLocalAccountsInUseContext(context.Background(), passwdPath, groupPath, uidStart, count, used)
+}
+
+func addScannerLocalAccountsInUseContext(ctx context.Context, passwdPath, groupPath string, uidStart, count uint32, used map[uint32]struct{}) error {
 	// Both passwd and group records put their numeric UID/GID in field three.
-	if err := addScannerAccountsInUse(passwdPath, 3, uidStart, count, used); err != nil {
+	if err := addScannerAccountsInUseContext(ctx, passwdPath, 3, uidStart, count, used); err != nil {
 		return err
 	}
-	return addScannerAccountsInUse(groupPath, 3, uidStart, count, used)
+	return addScannerAccountsInUseContext(ctx, groupPath, 3, uidStart, count, used)
 }
 
 func currentBootID() (string, error) {

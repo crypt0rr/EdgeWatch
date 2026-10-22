@@ -390,6 +390,10 @@ func schemaMigrationStatements() map[int][]string {
 // avoids accumulating deferred rollbacks while a database is upgraded
 // through many versions.
 func applyMigration(ctx context.Context, db *sql.DB, version int, statements []string) error {
+	return applyMigrationWithConditional(ctx, db, version, statements, conditionalMigrationStatements[version])
+}
+
+func applyMigrationWithConditional(ctx context.Context, db *sql.DB, version int, statements []string, conditional func(context.Context, *sql.Tx) ([]string, error)) error {
 	tx, err := beginSchemaStep(ctx, db, version-1, version)
 	if err != nil {
 		return fmt.Errorf("schema migration %d: %w", version, err)
@@ -409,7 +413,7 @@ func applyMigration(ctx context.Context, db *sql.DB, version int, statements []s
 	if err := run(statements); err != nil {
 		return err
 	}
-	if conditional := conditionalMigrationStatements[version]; conditional != nil {
+	if conditional != nil {
 		extra, err := conditional(ctx, tx)
 		if err != nil {
 			return err

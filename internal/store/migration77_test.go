@@ -26,8 +26,8 @@ func reconstructSchema76For77(t *testing.T, db *sql.DB) {
 }
 
 // Schema 77 adds durable state for two operational deployment alerts. A
-// later static-statement failure rolls back earlier static DDL. Successful
-// apply and reapply run the registered schema-77 conditional migration.
+// failure after its conditional DDL rolls back all four columns and the schema
+// marker. Successful apply and reapply run the registered conditional migration.
 func TestMigration77AddsOperationalAlertState(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -37,16 +37,20 @@ func TestMigration77AddsOperationalAlertState(t *testing.T) {
 		t.Fatal("schema 77 conditional migration is not registered")
 	}
 
-	if err := applyMigration(ctx, s.DB, 77, []string{
-		`ALTER TABLE platform_alert_state ADD COLUMN migration77_test_probe INTEGER NOT NULL DEFAULT 0`,
-		`CREATE INDEX migration77_broken ON platform_alert_state(missing_column)`,
-	}); err == nil {
-		t.Fatal("schema 77 migration with an invalid index succeeded")
+	conditionalWithFailure := func(ctx context.Context, tx *sql.Tx) ([]string, error) {
+		statements, err := migration77ConditionalStatements(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+		return append(statements, `CREATE INDEX migration77_broken ON platform_alert_state(missing_column)`), nil
+	}
+	if err := applyMigrationWithConditional(ctx, s.DB, 77, migration77Statements(), conditionalWithFailure); err == nil {
+		t.Fatal("schema 77 migration with a post-DDL failure succeeded")
 	}
 	if got := countRows(t, s.DB, `PRAGMA user_version`); got != 76 {
 		t.Fatalf("failed schema 77 migration advanced to schema %d", got)
 	}
-	for _, column := range []string{"migration77_test_probe", "scheduled_backup_failing", "scheduled_backup_alerted_at", "scanner_identity_pool_low", "scanner_identity_pool_alerted_at"} {
+	for _, column := range []string{"scheduled_backup_failing", "scheduled_backup_alerted_at", "scanner_identity_pool_low", "scanner_identity_pool_alerted_at"} {
 		var count int
 		if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('platform_alert_state') WHERE name=?`, column).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("failed migration left column %s count=%d, err=%v", column, count, err)

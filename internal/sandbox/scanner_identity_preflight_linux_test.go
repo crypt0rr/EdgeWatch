@@ -14,6 +14,23 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// scannerCensusDeadlineContext expires at a chosen context check so a test
+// can prove that a large process census stops between process reads without
+// relying on scheduler timing.
+type scannerCensusDeadlineContext struct {
+	context.Context
+	deadlineCheck int
+	checks        int
+}
+
+func (ctx *scannerCensusDeadlineContext) Err() error {
+	ctx.checks++
+	if ctx.checks >= ctx.deadlineCheck {
+		return context.DeadlineExceeded
+	}
+	return ctx.Context.Err()
+}
+
 func TestValidateScannerIdentityRangeMappingFromPaths(t *testing.T) {
 	root := t.TempDir()
 	uidPath := filepath.Join(root, "uid_map")
@@ -142,6 +159,47 @@ func TestScannerIdentityCensusFailsClosedWhenSourcesAreUnavailable(t *testing.T)
 			t.Fatal("unavailable passwd source was accepted")
 		}
 	})
+}
+
+func TestScannerIdentityProcessCensusStopsAtDeadlineCheck(t *testing.T) {
+	root := t.TempDir()
+	procRoot := filepath.Join(root, "proc")
+	accountRoot := filepath.Join(root, "accounts")
+	for _, path := range []string{procRoot, accountRoot} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"passwd", "group"} {
+		if err := os.WriteFile(filepath.Join(accountRoot, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, pid := range []string{"101", "102", "103"} {
+		processPath := filepath.Join(procRoot, pid)
+		if err := os.Mkdir(processPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if pid == "102" {
+			if err := os.Mkdir(filepath.Join(processPath, "status"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(processPath, "status"), []byte("Uid:\t61000\t61000\t61000\t61000\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ctx := &scannerCensusDeadlineContext{Context: base, deadlineCheck: 12}
+	_, err := scannerIdentitiesInUseAtContext(ctx, procRoot, filepath.Join(accountRoot, "passwd"), filepath.Join(accountRoot, "group"), 61000, 4)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("process census error = %v; want deadline exceeded before PID 102 is read", err)
+	}
+	if ctx.checks != ctx.deadlineCheck {
+		t.Fatalf("process census made %d context checks; want it to stop at %d", ctx.checks, ctx.deadlineCheck)
+	}
 }
 
 func TestWriteScannerIdentityFileDoesNotReplaceUnexpectedDirectory(t *testing.T) {

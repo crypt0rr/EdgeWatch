@@ -42,10 +42,19 @@ func (a *App) deploymentHealthObservation(ctx context.Context, now time.Time) de
 	if a == nil || a.Store == nil || a.Config == nil {
 		return observed
 	}
-	backup, backupErr := readBackupStatus(a.Store.Path, a.Config.Backup, now)
-	if backupErr != nil {
-		a.silenceLogger().Warn("scheduled backup health could not be read", "error", backupErr)
-	} else {
+	var backup *BackupStatus
+	backupRecorded := false
+	if a.Config.Backup.Enabled() {
+		status, recorded, backupErr := readBackupStatusFileWithPresence(BackupStatusPath(a.Store.Path))
+		if backupErr != nil {
+			a.silenceLogger().Warn("scheduled backup health could not be read", "error", backupErr)
+		} else if recorded {
+			status = withBackupSettings(status, a.Config.Backup)
+			backup = status.reported(now)
+			backupRecorded = true
+		}
+	}
+	if backupRecorded {
 		observed.backupKnown = true
 		observed.backups = backup
 	}

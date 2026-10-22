@@ -262,6 +262,7 @@ func TestScannerIdentityCensusRejectsNilAndCanceledContexts(t *testing.T) {
 		}
 	}
 
+	//nolint:staticcheck // This deliberately verifies that a nil context is rejected.
 	if _, err := scannerIdentitiesInUseAtContext(nil, procRoot, passwdPath, groupPath, 61000, 4); err == nil || !strings.Contains(err.Error(), "context is nil") {
 		t.Fatalf("nil census context error = %v; want explicit refusal", err)
 	}
@@ -279,6 +280,7 @@ func TestScannerIdentityCurrentInUseChecksContextAndCensus(t *testing.T) {
 			t.Fatal("nil allocator supplied a process census")
 		}
 		allocator = newTestScannerIdentityAllocator(t, 2)
+		//nolint:staticcheck // This deliberately verifies that a nil context is rejected.
 		if _, err := allocator.currentInUse(nil); err == nil {
 			t.Fatal("nil context supplied a process census")
 		}

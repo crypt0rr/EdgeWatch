@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -97,6 +98,64 @@ func TestMissingBackupStatusPreservesFailureUntilRecordedRecovery(t *testing.T) 
 	}
 	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(2*time.Minute)); err != nil || recorded != 0 {
 		t.Fatalf("recorded backup recovery = %d, %v; want a silent recovery", recorded, err)
+	}
+	assertScheduledBackupAlertState(t, f.db, 0)
+}
+
+func TestChangedBackupDirectoryPreservesFailureUntilRecordedRecovery(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
+	a := f.app
+	now := time.Now().UTC()
+	oldDirectory := t.TempDir()
+	newDirectory := t.TempDir()
+	statusPath := BackupStatusPath(f.db.Path)
+	a.Config.Backup = config.Backup{Directory: oldDirectory, Schedule: "0 3 * * *", Keep: 1}
+	if err := writeBackupStatusFile(statusPath, BackupStatus{Directory: oldDirectory, ConsecutiveFailures: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now); err != nil || recorded != 1 {
+		t.Fatalf("initial failed backup = %d, %v; want one transition", recorded, err)
+	}
+	assertScheduledBackupAlertState(t, f.db, 1)
+
+	// A status for the previous directory is unknown under the new settings;
+	// the reset status written before the first scheduled run must stay unknown
+	// too, because no backup has produced an outcome for the new directory.
+	a.Config.Backup.Directory = newDirectory
+	if metrics := a.DeploymentMetrics(ctx, now.Add(time.Minute)); metrics.Backups != nil {
+		t.Fatalf("status from another directory was exported as known: %+v", metrics.Backups)
+	}
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(time.Minute)); err != nil || recorded != 0 {
+		t.Fatalf("mismatched backup status = %d, %v; want no transition", recorded, err)
+	}
+	assertScheduledBackupAlertState(t, f.db, 1)
+
+	a.backupWait = func(context.Context, time.Time) bool { return false }
+	<-a.startBackupWorker(ctx)
+	if metrics := a.DeploymentMetrics(ctx, now.Add(2*time.Minute)); metrics.Backups != nil {
+		t.Fatalf("worker's pre-run status was exported as known: %+v", metrics.Backups)
+	}
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(2*time.Minute)); err != nil || recorded != 0 {
+		t.Fatalf("pre-run backup status = %d, %v; want no transition", recorded, err)
+	}
+	assertScheduledBackupAlertState(t, f.db, 1)
+
+	recovered := a.runScheduledBackup(ctx, a.Config.Backup, BackupStatus{Directory: oldDirectory, ConsecutiveFailures: 2})
+	if recovered.Directory != newDirectory || recovered.ConsecutiveFailures != 0 || recovered.LastSuccessAt.IsZero() || recovered.LastBackup == "" {
+		t.Fatalf("successful backup did not record matching-directory recovery: %+v", recovered)
+	}
+	if _, err := os.Stat(filepath.Join(newDirectory, recovered.LastBackup)); err != nil {
+		t.Fatalf("matching-directory backup was not created: %v", err)
+	}
+	a.recordBackupStatus(recovered)
+	metrics := a.DeploymentMetrics(ctx, now.Add(3*time.Minute))
+	if metrics.Backups == nil || metrics.Backups.ConsecutiveFailures != 0 || metrics.Backups.LastSuccessAt.IsZero() {
+		t.Fatalf("recorded matching-directory recovery metrics = %+v", metrics.Backups)
+	}
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(3*time.Minute)); err != nil || recorded != 0 {
+		t.Fatalf("recorded matching-directory recovery = %d, %v; want a silent recovery", recorded, err)
 	}
 	assertScheduledBackupAlertState(t, f.db, 0)
 }

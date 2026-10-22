@@ -48,7 +48,10 @@ func (a *App) deploymentHealthObservation(ctx context.Context, now time.Time) de
 		status, recorded, backupErr := readBackupStatusFileWithPresence(BackupStatusPath(a.Store.Path))
 		if backupErr != nil {
 			a.silenceLogger().Warn("scheduled backup health could not be read", "error", backupErr)
-		} else if recorded {
+		} else if recorded && status.Directory == a.Config.Backup.Directory {
+			// A status for another directory describes backups that are not
+			// available under the current settings. Keep it unknown until the
+			// backup worker records an outcome for this directory.
 			status = withBackupSettings(status, a.Config.Backup)
 			backup = status.reported(now)
 			backupRecorded = true

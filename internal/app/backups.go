@@ -290,13 +290,21 @@ func (a *App) startBackupWorker(ctx context.Context) <-chan struct{} {
 	if configured, err := a.Config.Location(); err == nil && configured != nil {
 		location = configured
 	}
-	recorded, err := readBackupStatusFile(BackupStatusPath(a.Store.Path))
+	recorded, exists, err := readBackupStatusFileWithPresence(BackupStatusPath(a.Store.Path))
 	if err != nil {
 		logger.Warn("the recorded scheduled backup status is ignored", "error", err)
 	}
 	// The worker owns the status; the status file is how health and the
-	// console read it.
-	status := withBackupSettings(recorded, settings)
+	// console read it. Preserve a mismatched directory as the unknown-state
+	// marker until a backup actually runs with the current settings.
+	status := BackupStatus{}
+	if exists {
+		if recorded.Directory == settings.Directory {
+			status = withBackupSettings(recorded, settings)
+		} else {
+			status.Directory = recorded.Directory
+		}
+	}
 	if info, err := os.Stat(settings.Directory); err != nil || !info.IsDir() {
 		logger.Warn("the backup directory is not an existing directory; scheduled backups fail until it is created", "directory", settings.Directory)
 	}
@@ -317,7 +325,9 @@ func (a *App) startBackupWorker(ctx context.Context) <-chan struct{} {
 				return
 			}
 			status.NextRunAt = next.UTC()
-			a.recordBackupStatus(status)
+			if status.Directory == settings.Directory {
+				a.recordBackupStatus(status)
+			}
 			if !wait(ctx, status.NextRunAt) {
 				return
 			}
@@ -353,11 +363,13 @@ func (a *App) runScheduledBackup(ctx context.Context, settings config.Backup, st
 		if ctx.Err() != nil {
 			return status
 		}
+		status.Directory, status.Schedule, status.Keep = settings.Directory, settings.Schedule, settings.Keep
 		status.LastFailureAt, status.LastError = a.nowUTC(), boundedBackupError(err)
 		status.ConsecutiveFailures++
 		logger.Error("scheduled backup failed", "backup", name, "error", status.LastError, "consecutive_failures", status.ConsecutiveFailures)
 		return status
 	}
+	status.Directory, status.Schedule, status.Keep = settings.Directory, settings.Schedule, settings.Keep
 	removed, pruneErr := pruneScheduledBackups(settings.Directory, settings.Keep)
 	if pruneErr != nil {
 		logger.Warn("old scheduled backups could not be removed", "error", pruneErr)

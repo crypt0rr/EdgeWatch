@@ -319,7 +319,10 @@ func TestPerimeterDeclareRejectsTenantStateChangeDuringInput(t *testing.T) {
 				cancel()
 				if !finished {
 					select {
-					case <-done:
+					case err := <-done:
+						if err != nil && !errors.Is(err, context.Canceled) {
+							t.Errorf("declaration cleanup: %v", err)
+						}
 					case <-time.After(time.Second):
 						t.Error("perimeter declaration did not stop during cleanup")
 					}

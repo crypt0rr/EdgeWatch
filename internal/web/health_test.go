@@ -283,10 +283,19 @@ func TestMetricsReportDeploymentAggregatesOnly(t *testing.T) {
 	f := newPlatformFixture(t)
 	server := f.server
 	server.configureMetrics(config.WebMetrics{Enabled: true, TokenFile: writeMetricsToken(t, metricsTestToken, 0o400)})
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := f.db.DB.Exec(`INSERT OR REPLACE INTO daemon_lease(id,owner,heartbeat) VALUES(1,'daemon',?)`, now); err != nil {
+	now := time.Now().UTC()
+	if _, err := f.db.DB.Exec(`INSERT OR REPLACE INTO daemon_lease(id,owner,heartbeat) VALUES(1,'daemon',?)`, now.Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
+	server.deploymentMetrics.value = app.DeploymentMetrics{
+		Backups:           &app.BackupStatus{LastSuccessAt: now.Add(-time.Hour), ConsecutiveFailures: 2},
+		ScannerIdentities: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, Active: 2, Quarantined: 1, InUseByOtherProcesses: 1, Free: 60},
+		JobActiveSkips:    3, CycleStalledSkips: 4,
+		JobsOverdue: 2, JobsOverdueKnown: true,
+		StalledCycles: 1, StalledCyclesKnown: true,
+	}
+	server.deploymentMetrics.at = now
+	server.deploymentMetrics.valid = true
 	response := getMetrics(server, "Bearer "+metricsTestToken, "192.0.2.80")
 	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "text/plain; version=0.0.4; charset=utf-8" {
 		t.Fatalf("/metrics = %d %q: %s", response.Code, response.Header().Get("Content-Type"), response.Body.String())
@@ -304,6 +313,14 @@ func TestMetricsReportDeploymentAggregatesOnly(t *testing.T) {
 		"edgewatch_notification_outbox_retrying 0",
 		"edgewatch_notification_outbox_terminal 0",
 		"edgewatch_notification_destinations_locked 0",
+		"edgewatch_backup_last_success_timestamp_seconds ",
+		"edgewatch_backup_consecutive_failures 2",
+		`edgewatch_scanner_identities{state="free"} 60`,
+		"# TYPE edgewatch_scheduled_runs_skipped_total counter",
+		`edgewatch_scheduled_runs_skipped_total{reason="job_active"} 3`,
+		`edgewatch_scheduled_runs_skipped_total{reason="cycle_stalled"} 4`,
+		"edgewatch_jobs_overdue 2",
+		"edgewatch_scan_cycles_stalled 1",
 		`edgewatch_update_check_status{status="development_build"} 1`,
 		"edgewatch_update_available 0",
 		`edgewatch_build_info{version="dev"} 1`,

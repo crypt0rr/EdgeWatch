@@ -164,6 +164,16 @@ func formatHealthAlert(e model.Event) string {
 		b.WriteString("\nBusiness units' destinations: ")
 		b.WriteString(strconv.Itoa(max(alert.Count-alert.PlatformCount, 0)))
 		b.WriteString("\nReview delivery health on the Notifications pages.")
+	case model.HealthAlertScheduledBackupFailed:
+		b.WriteString("⚠️ EdgeWatch deployment alert: scheduled backups are failing")
+		if alert.Count > 0 {
+			writeAlertLine(&b, "Consecutive failures", strconv.Itoa(alert.Count))
+		}
+		b.WriteString("\nCheck the backup destination and permissions; see the backup and recovery guide.")
+	case model.HealthAlertScannerIdentitiesLow:
+		b.WriteString("⚠️ EdgeWatch deployment alert: scanner identity capacity is below max_concurrent_scans")
+		writeAlertLine(&b, "Pool", alert.Current)
+		b.WriteString("\nStop other EdgeWatch processes using the data volume or reduce max_concurrent_scans; see the container hardening guide.")
 	default:
 		b.WriteString("⚠️ EdgeWatch deployment alert")
 	}

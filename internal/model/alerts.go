@@ -21,10 +21,12 @@ const (
 
 // The kinds of a deployment-health alert.
 const (
-	HealthAlertSandboxDegraded  = "sandbox_degraded"
-	HealthAlertSandboxRecovered = "sandbox_recovered"
-	HealthAlertVersionRollback  = "version_rollback"
-	HealthAlertDeliveryFailures = "delivery_failures"
+	HealthAlertSandboxDegraded       = "sandbox_degraded"
+	HealthAlertSandboxRecovered      = "sandbox_recovered"
+	HealthAlertVersionRollback       = "version_rollback"
+	HealthAlertDeliveryFailures      = "delivery_failures"
+	HealthAlertScheduledBackupFailed = "scheduled_backup_failed"
+	HealthAlertScannerIdentitiesLow  = "scanner_identities_low"
 )
 
 // The confinement states of a sandbox that a deployment-health alert

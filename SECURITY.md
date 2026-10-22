@@ -298,11 +298,12 @@ true, and then needs the bearer token of `web.metrics.token_file`, a file
 without group or other permissions that the daemon checks before it opens
 the database; the token is compared by its SHA-256 digest in constant time,
 never logged, and limited to 120 requests a minute per client. The metrics
-are deployment aggregates, the health, heartbeat age, migration state, scan
+are deployment aggregates: health, heartbeat age, migration state, scan
 slots, notification backlog, locked notification destinations, database
-size, sandbox states, and release check, without a label that names a unit,
-an account, a job, a target, or a destination. Keep `/metrics` off a public
-proxy.
+size, sandbox states, release status, scheduled-backup outcomes, scanner
+identity counts, skipped runs, overdue jobs, and stalled cycles. They do not
+label a unit, account, job, target, or destination. Keep `/metrics` off a
+public proxy.
 
 HTTPS sessions use the host-only `__Host-edgewatch_session` cookie with
 `Secure`, `HttpOnly`, `SameSite=Strict`, and `Path=/`, with no `Domain`
@@ -320,13 +321,15 @@ host headers.
 The daemon also reports the deployment's own health to the platform
 destinations that platform administrators select for deployment alerts: a
 scanner or notification sandbox that lost confinement since the last alert,
-or regained it, a version rollback, and the number of alerts that failed for
-good, counts only, without a destination, a URL, or a provider's answer. Each
-is recorded in the platform audit as `application.health_alert`, and none
-reaches a unit's destinations. A restart with the same state records nothing;
-a sandbox or rollback alert is sent at most once an hour, and failed
-deliveries are reported at most every six hours, without counting a failed
-deployment alert. A missing or replaced notification key locks the
+or regained it, scheduled backups that fail, scanner identity capacity below
+`max_concurrent_scans`, a version rollback, and the number of alerts that
+failed for good. Backup and identity alerts contain counts only, without a
+backup path, destination, URL, or provider's answer. Each is recorded in the
+platform audit as `application.health_alert`, and none reaches a unit's
+destinations. A restart with the same state records nothing; sandbox,
+rollback, backup, and identity-condition alerts are sent at most once an
+hour, and failed deliveries are reported at most every six hours, without
+counting a failed deployment alert. A missing or replaced notification key locks the
 platform's destinations too, so it cannot be reported this way, and
 `/healthz`, which reads only the migration and daemon state, still answers
 `ready`; the `edgewatch_notification_destinations_locked` metric, the locked
@@ -935,7 +938,7 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 76 must not be opened by an older EdgeWatch
+database upgraded to schema 77 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,

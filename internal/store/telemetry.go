@@ -59,6 +59,19 @@ func (ss *SystemStore) DeploymentTelemetry(ctx context.Context) (DeploymentTelem
 	return telemetry, nil
 }
 
+// StalledScanCycleCount returns the number of stalled cycles that still
+// belong to a visible job in an active tenant. It returns an aggregate only;
+// no unit, job, or cycle identity leaves the SystemStore.
+func (ss *SystemStore) StalledScanCycleCount(ctx context.Context) (int64, error) {
+	var count int64
+	err := ss.store.reader().QueryRowContext(ctx, `SELECT COUNT(*)
+FROM scan_cycles AS c
+JOIN jobs AS j ON j.id=c.job_id
+JOIN tenants AS t ON t.id=j.tenant_id
+WHERE c.status='stalled' AND j.archived=0 AND t.state=?`, TenantStateActive).Scan(&count)
+	return count, err
+}
+
 // DeploymentTelemetry is SystemStore.DeploymentTelemetry for the platform
 // console and the metrics endpoint: the deployment's aggregate counters,
 // numbers only, which name no tenant.

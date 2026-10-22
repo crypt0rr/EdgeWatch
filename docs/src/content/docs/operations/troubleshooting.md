@@ -43,10 +43,15 @@ with `429` beyond that. The answer is reused for one second.
 For Prometheus, turn on the opt-in `GET /metrics` with `web.metrics.enabled`
 and a bearer token in `web.metrics.token_file`; see
 [the configuration reference](/reference/configuration/#metrics). It reports
-deployment aggregates only, such as the heartbeat age, the migration state,
-the scan slots, the notification backlog, the locked notification
-destinations, the database size, and the sandbox states, never a unit's
-name, job, or target. The metric names are listed in
+deployment aggregates only, such as heartbeat age, migration state, scan
+slots, notification backlog, locked destinations, database size, sandbox
+states, scheduled-backup outcomes, scanner identity counts, skipped scheduled
+runs, overdue jobs, and stalled cycles. It never includes a unit name, job, or
+target, and caches operational values for up to 30 seconds. Alert on
+`edgewatch_backup_consecutive_failures` above zero and on
+`edgewatch_scanner_identities{state="free"}` below your
+`scheduler.max_concurrent_scans`; deployment alerts also report a new failure
+transition to platform destinations. The metric names are listed in
 [the API reference](/reference/api-compatibility/#health-and-metrics). Keep
 `/metrics` off a public reverse proxy; see
 [Reverse proxies](/deployment/reverse-proxies/).

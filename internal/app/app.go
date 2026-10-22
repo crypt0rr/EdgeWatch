@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
@@ -84,6 +85,11 @@ type App struct {
 	// backupWait overrides the wait for the next scheduled backup in
 	// deterministic tests; see backups.go.
 	backupWait func(context.Context, time.Time) bool
+	// inspectScannerIdentities is replaceable in tests; production uses the
+	// bounded read-only inspection of the scanner identity allocator.
+	inspectScannerIdentities   func(context.Context) (*sandbox.ScannerIdentityPoolStatus, error)
+	scheduledJobActiveSkips    atomic.Uint64
+	scheduledCycleStalledSkips atomic.Uint64
 }
 
 type activeRun struct {
@@ -1549,10 +1555,12 @@ func (a *App) startManagedScheduled(ctx context.Context, scope store.TenantScope
 		}
 		scan, events, runErr := a.runJobRecord(ctx, record, false)
 		if errors.Is(runErr, scanner.ErrBusy) {
+			a.scheduledJobActiveSkips.Add(1)
 			a.Logger.Warn("scheduled run skipped because job is active", "job", record.Job.Name)
 			return
 		}
 		if errors.Is(runErr, ErrScanCycleStalled) {
+			a.scheduledCycleStalledSkips.Add(1)
 			a.Logger.Warn("scheduled run skipped because resumable cycle is stalled; manual retry required", "job", record.Job.Name)
 			return
 		}

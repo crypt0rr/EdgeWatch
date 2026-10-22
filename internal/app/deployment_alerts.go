@@ -80,6 +80,11 @@ func (a *App) checkDeploymentAlerts(ctx context.Context, now time.Time) {
 	} else if recorded {
 		queued = true
 	}
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now); err != nil {
+		logger.Warn("deployment operational health alerts could not be recorded", "error", err)
+	} else if recorded > 0 {
+		queued = true
+	}
 	if summaries, err := a.Store.System().FlushSecurityAlertWindows(ctx, now); err != nil {
 		logger.Warn("security alert summaries could not be queued", "error", err)
 	} else if summaries > 0 {

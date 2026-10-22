@@ -160,6 +160,18 @@ func TestFormatHealthAlerts(t *testing.T) {
 				"Platform destinations: 0\nBusiness units' destinations: 1\nReview delivery health on the Notifications pages.",
 		},
 		{
+			name:  "scheduled backup failure",
+			alert: &model.AlertDetail{Kind: model.HealthAlertScheduledBackupFailed, Count: 3},
+			want: "⚠️ EdgeWatch deployment alert: scheduled backups are failing\n" +
+				"Consecutive failures: 3\nCheck the backup destination and permissions; see the backup and recovery guide.",
+		},
+		{
+			name:  "low scanner identity capacity",
+			alert: &model.AlertDetail{Kind: model.HealthAlertScannerIdentitiesLow, Current: "2 free, 4 required"},
+			want: "⚠️ EdgeWatch deployment alert: scanner identity capacity is below max_concurrent_scans\n" +
+				"Pool: 2 free, 4 required\nStop other EdgeWatch processes using the data volume or reduce max_concurrent_scans; see the container hardening guide.",
+		},
+		{
 			name:  "unknown",
 			alert: nil,
 			want:  "⚠️ EdgeWatch deployment alert",

@@ -567,9 +567,12 @@ the current state and reports it once when it is already degraded. A daemon
 that does not run as root counts as confined by identity, and a sandbox set
 to `off` as unconfined when the daemon runs as UID 0. See
 [Notifications](/user-guide/notifications/#deployment-alerts), which also
-describes the rollback and failed-delivery alerts. `scanner.sandbox: required`
-and `notifications.sandbox: required` remain the way to refuse to run
-degraded.
+describes the scheduled-backup, low-identity-capacity, rollback, and
+failed-delivery alerts. A low-identity alert means the free pool is below
+`scheduler.max_concurrent_scans`; stop other EdgeWatch processes using the
+data volume or lower that limit until capacity recovers.
+`scanner.sandbox: required` and `notifications.sandbox: required` remain the
+way to refuse to run degraded.
 
 ## Notification sandbox
 

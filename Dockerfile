@@ -6,6 +6,7 @@ COPY package.json package-lock.json ./
 RUN if [ "$PREBUILT_FRONTEND" != "1" ]; then npm ci; fi
 COPY index.html tsconfig.json tsconfig.node.json vite.config.ts ./
 COPY src ./src
+COPY public ./public
 COPY scripts/build-frontend.mjs ./scripts/build-frontend.mjs
 COPY scripts/check-node-runtime.mjs ./scripts/check-node-runtime.mjs
 COPY internal/webui/dist ./prebuilt-dist
@@ -56,6 +57,7 @@ RUN apk add --no-cache ca-certificates=20261020-r0 git=2.54.0-r0
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+RUN rm -rf ./internal/webui/dist
 COPY --from=frontend /src/internal/webui/dist ./internal/webui/dist
 ARG VERSION=dev
 ARG PREBUILT_EDGEWATCH=0

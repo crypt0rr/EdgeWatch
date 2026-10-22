@@ -11,6 +11,35 @@ defensible duration estimate is available. Clients should treat this field as
 optional and must not infer that a scan will finish within any fixed time from
 the probe count alone.
 
+## Scheduled scan-slot demand
+
+`GET /api/v1/jobs/slot-demand` requires `jobs.read` and returns the current
+business unit's scheduled scan demand compared with its effective scan-slot
+capacity. The response is tenant-scoped; it contains no job names or IDs.
+
+```json
+{
+  "enabled_jobs": 2,
+  "history_jobs": 1,
+  "lower_bound_jobs": 1,
+  "unestimated_jobs": 1,
+  "slots": 1,
+  "estimated_slot_seconds_per_day": 21600,
+  "capacity_slot_seconds_per_day": 86400,
+  "utilization_percent": 25,
+  "over_capacity": false
+}
+```
+
+`history_jobs` use the median duration from each job's 11 most recent
+completed scan cycles, multiplied by the average number of scheduled runs per
+day. For a job without completed history, `lower_bound_jobs` count estimates
+that include only known probe work divided by configured maximum scanner rates.
+These values are lower bounds, because DNS, target responses, retries, and
+data-dependent Nmap confirmation can add time. `unestimated_jobs` counts jobs
+with additional work that has no configured rate ceiling, or whose schedule
+cannot be estimated. The console shows a warning at 80% utilization and above.
+
 ## Job creation preview
 
 v0.32.0 adds `POST /api/v1/jobs/preview`. Send the same new-job JSON payload

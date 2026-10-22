@@ -7,6 +7,7 @@ import { adminStatus, APIError, getSession, incidentInboxSummary, listIncidents,
 import type { SessionUser, UnitRef } from './api'
 import { useActivityHeartbeat, useNavigationDrawer } from './components/navigation'
 import { ErrorNotice } from './components/ErrorNotice'
+import { ScanSlotDemandNotice } from './components/ScanSlotDemand'
 import { PageErrorBoundary } from './components/PageErrorBoundary'
 import { Audit } from './pages/Audit'
 import { PlatformShell } from './pages/platform/PlatformShell'
@@ -412,6 +413,7 @@ export function Jobs() {
         </div>
         {canWrite && <button className="button primary" onClick={() => navigate('/jobs/new')}>＋ New job</button>}
       </div>
+      <ScanSlotDemandNotice />
       {jobs.isLoading ? <Loading /> : jobs.error ? <ErrorNotice message="Could not load jobs." onRetry={() => jobs.refetch()} /> : (
         <>
           <div className="job-list-controls">

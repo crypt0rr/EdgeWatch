@@ -62,6 +62,12 @@ recreated and reviewed explicitly in the console.
 | `backup.schedule` | `0 3 * * *` (daily at 03:00) | A five-field cron expression that fires, in `timezone` when it is set and UTC otherwise, without a `TZ=` or `CRON_TZ=` prefix. Requires `backup.directory`. |
 | `backup.keep` | `7` | 1 to 1000 scheduled backups. Requires `backup.directory`. |
 
+The **Jobs** and **Perimeter** pages compare each business unit's scheduled
+scan demand with its effective scan-slot capacity, which is the lower of this
+deployment limit and the unit's own limit. See [Jobs, baselines, and
+incidents](/user-guide/jobs-baselines-incidents/) for how demand is estimated
+and when the warning appears.
+
 Jobs are configured in the console, which enforces these limits:
 
 | Job setting | Default | Allowed values |

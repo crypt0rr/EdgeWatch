@@ -43,6 +43,7 @@ func ResponseTypes() []apitypes.Type {
 		// A scan with its snapshot, and the summary that scan lists hold.
 		{Name: "Scan", Value: model.Scan{}},
 		{Name: "ScanSummary", Value: model.ScanSummary{}},
+		{Name: "ScanSlotDemand", Value: app.ScanSlotDemand{}},
 		{Name: "JobScanStatus", Value: jobScanStatusView{}},
 		{Name: "JobMonitoringSummary", Value: jobMonitoringSummaryView{}},
 		{Name: "Change", Value: model.Change{}},

@@ -3,7 +3,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes, useParams } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { APIError, declarePerimeterSeeds, deletePerimeterSeed, getPerimeter, getSession } from '../../api'
+import { APIError, declarePerimeterSeeds, deletePerimeterSeed, getPerimeter, getSession, scanSlotDemand } from '../../api'
 import { emptyPerimeterOverview, perimeterMonitor, perimeterOverview, perimeterRange } from '../../test/perimeter-fixtures'
 import { renderWithProviders } from '../../test/test-utils'
 import { Perimeter } from './Perimeter'
@@ -11,7 +11,7 @@ import { coverageBuckets, perimeterCoverageDocsURL, perimeterDocsURL } from './p
 
 vi.mock('../../api', async () => {
   const actual = await vi.importActual<typeof import('../../api')>('../../api')
-  return { ...actual, declarePerimeterSeeds: vi.fn(), deletePerimeterSeed: vi.fn(), getPerimeter: vi.fn(), getSession: vi.fn() }
+  return { ...actual, declarePerimeterSeeds: vi.fn(), deletePerimeterSeed: vi.fn(), getPerimeter: vi.fn(), getSession: vi.fn(), scanSlotDemand: vi.fn() }
 })
 
 const administrator = ['jobs.read', 'jobs.write', 'perimeter.read', 'perimeter.manage']
@@ -37,6 +37,7 @@ function textarea() {
 describe('Perimeter page', () => {
   beforeEach(() => {
     vi.mocked(getPerimeter).mockResolvedValue(perimeterOverview())
+    vi.mocked(scanSlotDemand).mockResolvedValue({ enabled_jobs: 0, history_jobs: 0, lower_bound_jobs: 0, unestimated_jobs: 0, slots: 1, estimated_slot_seconds_per_day: 0, capacity_slot_seconds_per_day: 86400, utilization_percent: 0, over_capacity: false })
   })
   afterEach(() => {
     vi.clearAllMocks()

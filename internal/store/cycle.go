@@ -982,6 +982,50 @@ func (ts *TenantStore) ListActiveScanCycleSummaries(ctx context.Context, include
 	return out, nil
 }
 
+// ListCompletedScanCycleDurations returns the most recent completed-cycle
+// durations for each job in the tenant. The pinned plan and per-unit
+// checkpoints are deliberately not loaded. A cycle belongs to the tenant of
+// its job, so the tenant predicate is part of this query.
+func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, perJobLimit int) (map[string][]time.Duration, error) {
+	if err := ts.ready(); err != nil {
+		return nil, err
+	}
+	if perJobLimit < 1 {
+		return map[string][]time.Duration{}, nil
+	}
+	rows, err := ts.store.reader().QueryContext(ctx, `
+		WITH ranked AS (
+			SELECT c.job_id,c.started_at,c.finished_at,
+				ROW_NUMBER() OVER (PARTITION BY c.job_id ORDER BY c.finished_at DESC,c.id DESC) AS sample_rank
+			FROM scan_cycles AS c
+			JOIN jobs AS j ON j.id=c.job_id
+			WHERE j.tenant_id=? AND c.status='completed'
+				AND c.started_at<>'' AND c.finished_at<>''
+				AND julianday(c.finished_at)>julianday(c.started_at)
+		)
+		SELECT job_id,started_at,finished_at FROM ranked
+		WHERE sample_rank<=? ORDER BY job_id,finished_at DESC`, ts.scope.id, perJobLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string][]time.Duration)
+	for rows.Next() {
+		var jobID, started, finished string
+		if err := rows.Scan(&jobID, &started, &finished); err != nil {
+			return nil, err
+		}
+		duration := scanTime(finished).Sub(scanTime(started))
+		if duration > 0 {
+			out[jobID] = append(out[jobID], duration)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GetLatestScanCycle returns the newest cycle for one of the tenant's jobs
 // regardless of its terminal state; a job of another tenant has none. It is
 // intentionally separate from GetActiveScanCycle: a completed, discarded, or

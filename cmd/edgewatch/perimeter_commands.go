@@ -53,7 +53,7 @@ func declarePerimeter(ctx context.Context, tenant *store.TenantStore, kind, from
 		defer file.Close()
 		input = file
 	}
-	entries, lineNumbers, err := parsePerimeterDeclaration(input, kind)
+	entries, lineNumbers, err := parsePerimeterDeclarationContext(ctx, input, kind)
 	if err != nil {
 		return err
 	}
@@ -68,6 +68,28 @@ func declarePerimeter(ctx context.Context, tenant *store.TenantStore, kind, from
 		return printValue(output, result)
 	}
 	return printValue(output, perimeterDeclareSummary(result))
+}
+
+// parsePerimeterDeclarationContext closes a closeable input when ctx is
+// canceled, interrupting a Scanner blocked in Read. In particular, this
+// lets command cancellation stop a read from stdin without waiting for its
+// writer to close.
+func parsePerimeterDeclarationContext(ctx context.Context, input io.Reader, kind string) ([]store.PerimeterEntry, []int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	var stopClosingInput func() bool
+	if closer, ok := input.(io.Closer); ok {
+		stopClosingInput = context.AfterFunc(ctx, func() { _ = closer.Close() })
+	}
+	entries, lineNumbers, err := parsePerimeterDeclaration(input, kind)
+	if stopClosingInput != nil {
+		stopClosingInput()
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, nil, ctxErr
+	}
+	return entries, lineNumbers, err
 }
 
 // parsePerimeterDeclaration matches the Perimeter form's line format: one IP

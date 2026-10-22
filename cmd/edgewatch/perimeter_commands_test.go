@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -345,6 +346,70 @@ func TestPerimeterDeclareInputErrorsAndTextSummary(t *testing.T) {
 	if err != nil || !strings.Contains(stdout, "Declared 1 new range.") {
 		t.Fatalf("text declaration summary = %q, err=%v", stdout, err)
 	}
+}
+
+func TestPerimeterDeclareCancellationInterruptsOpenInput(t *testing.T) {
+	database, _ := newPerimeterCLIStore(t)
+	s, err := store.OpenExisting(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	tenant := s.Tenant(store.DefaultTenantScope())
+
+	pipeReader, pipeWriter := io.Pipe()
+	input := &perimeterBlockingPipeReader{PipeReader: pipeReader, readStarted: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- declarePerimeter(ctx, tenant, store.PerimeterKindPrefix, "-", input, "json")
+	}()
+
+	completed := false
+	defer func() {
+		cancel()
+		_ = pipeWriter.Close()
+		_ = input.Close()
+		if !completed {
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Error("perimeter declaration reader did not stop after test cleanup")
+			}
+		}
+	}()
+
+	select {
+	case <-input.readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("perimeter declaration did not start reading the open input")
+	}
+
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		completed = true
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled declaration error = %v, want context.Canceled", err)
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("canceled declaration returned after %s, want within one second", elapsed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled declaration kept waiting on open input")
+	}
+}
+
+type perimeterBlockingPipeReader struct {
+	*io.PipeReader
+	readStarted chan struct{}
+	once        sync.Once
+}
+
+func (r *perimeterBlockingPipeReader) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.readStarted) })
+	return r.PipeReader.Read(p)
 }
 
 type perimeterChunkReader struct {

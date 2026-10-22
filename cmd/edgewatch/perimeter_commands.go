@@ -112,11 +112,7 @@ func splitPerimeterLines(data []byte, atEOF bool) (advance int, token []byte, er
 	for index, value := range data {
 		switch value {
 		case '\n':
-			end := index
-			if end > 0 && data[end-1] == '\r' {
-				end--
-			}
-			return index + 1, data[:end], nil
+			return index + 1, data[:index], nil
 		case '\r':
 			if index+1 == len(data) && !atEOF {
 				return 0, nil, nil

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -275,7 +277,126 @@ func TestPerimeterCommandContract(t *testing.T) {
 			t.Errorf("%v error = %v, want %q", test.args, err, test.want)
 		}
 	}
+	if err := run([]string{"perimeter", "unknown"}); err == nil || !strings.Contains(err.Error(), "expected: perimeter list or perimeter declare") {
+		t.Errorf("unknown perimeter action error = %v, want a usage error", err)
+	}
 
+}
+
+func TestPerimeterListTextEmptyAndReadError(t *testing.T) {
+	database, _ := newPerimeterCLIStore(t)
+	s, err := store.OpenExisting(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	tenant := s.Tenant(store.DefaultTenantScope())
+
+	stdout, _, err := captureCLIOutput(t, func() error {
+		return listPerimeter(context.Background(), tenant, "text")
+	})
+	if err != nil || !strings.Contains(stdout, "No declared perimeter ranges.") {
+		t.Fatalf("empty text list = %q, err=%v", stdout, err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := listPerimeter(ctx, tenant, "text"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled list error = %v, want context.Canceled", err)
+	}
+}
+
+func TestPerimeterDeclareInputErrorsAndTextSummary(t *testing.T) {
+	database, _ := newPerimeterCLIStore(t)
+	s, err := store.OpenExisting(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	tenant := s.Tenant(store.DefaultTenantScope())
+
+	missingPath := filepath.Join(t.TempDir(), "private-path-secret", "ranges.txt")
+	err = declarePerimeter(context.Background(), tenant, store.PerimeterKindPrefix, missingPath, strings.NewReader(""), "text")
+	if err == nil || err.Error() != "could not open perimeter declaration input" || strings.Contains(err.Error(), missingPath) {
+		t.Fatalf("missing input error = %v, want a generic path-free error", err)
+	}
+
+	oversized := strings.Repeat("PRIVATE-CONTENT", maxPerimeterInputLineBytes/len("PRIVATE-CONTENT")+2)
+	err = declarePerimeter(context.Background(), tenant, store.PerimeterKindPrefix, "-", strings.NewReader(oversized), "text")
+	if err == nil || err.Error() != "could not read perimeter declaration input" || strings.Contains(err.Error(), "PRIVATE-CONTENT") {
+		t.Fatalf("oversized input error = %v, want a generic value-free error", err)
+	}
+
+	err = declarePerimeter(context.Background(), tenant, store.PerimeterKindPrefix, "-", strings.NewReader("\r\n  \n"), "json")
+	if err == nil || !strings.Contains(err.Error(), "declare between 1 and 256 entries") {
+		t.Fatalf("empty declaration error = %v, want the bounded entry-count refusal", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = declarePerimeter(ctx, tenant, store.PerimeterKindPrefix, "-", strings.NewReader("192.0.2.0/24 private-label\n"), "json")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled declaration error = %v, want context.Canceled", err)
+	}
+
+	stdout, _, err := captureCLIOutput(t, func() error {
+		return declarePerimeter(context.Background(), tenant, store.PerimeterKindPrefix, "-", strings.NewReader("192.0.2.0/24\n"), "text")
+	})
+	if err != nil || !strings.Contains(stdout, "Declared 1 new range.") {
+		t.Fatalf("text declaration summary = %q, err=%v", stdout, err)
+	}
+}
+
+type perimeterChunkReader struct {
+	chunks []string
+}
+
+func (r *perimeterChunkReader) Read(p []byte) (int, error) {
+	if len(r.chunks) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.chunks[0])
+	r.chunks[0] = r.chunks[0][n:]
+	if r.chunks[0] == "" {
+		r.chunks = r.chunks[1:]
+	}
+	return n, nil
+}
+
+func TestParsePerimeterDeclarationHandlesSplitLineEndings(t *testing.T) {
+	input := &perimeterChunkReader{chunks: []string{
+		"192.0.2.0/24\r",
+		"\n198.51.100.0/24\r",
+		"\n2001:db8::/32",
+	}}
+	entries, lineNumbers, err := parsePerimeterDeclaration(input, store.PerimeterKindPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 || len(lineNumbers) != 3 {
+		t.Fatalf("parsed %d entries on %d lines, want three", len(entries), len(lineNumbers))
+	}
+	for i, want := range []string{"192.0.2.0/24", "198.51.100.0/24", "2001:db8::/32"} {
+		if entries[i].Value != want || lineNumbers[i] != i+1 {
+			t.Errorf("entry %d = %+v on line %d, want %q on line %d", i, entries[i], lineNumbers[i], want, i+1)
+		}
+	}
+}
+
+func TestPerimeterDeclareSummary(t *testing.T) {
+	for _, test := range []struct {
+		result store.PerimeterDeclareResult
+		want   string
+	}{
+		{result: store.PerimeterDeclareResult{Skipped: 2}, want: "No new ranges were declared; 2 already-declared entries were skipped."},
+		{result: store.PerimeterDeclareResult{Created: 1}, want: "Declared 1 new range."},
+		{result: store.PerimeterDeclareResult{Created: 2}, want: "Declared 2 new ranges."},
+		{result: store.PerimeterDeclareResult{Created: 1, Skipped: 1}, want: "Declared 1 new range; 1 already-declared entry was skipped."},
+	} {
+		if got := perimeterDeclareSummary(test.result); got != test.want {
+			t.Errorf("perimeterDeclareSummary(%+v) = %q, want %q", test.result, got, test.want)
+		}
+	}
 }
 
 func TestParsePerimeterDeclarationEnforcesBatchLimit(t *testing.T) {

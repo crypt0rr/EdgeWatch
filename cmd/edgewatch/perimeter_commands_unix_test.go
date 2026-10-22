@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -93,9 +94,15 @@ func TestPerimeterDeclareCancellationInterruptsInheritedStdin(t *testing.T) {
 		}
 		// The only helper goroutine is Cmd.Wait; killing and joining the child
 		// bounds its lifetime on every failing path.
-		_ = cmd.Process.Kill()
+		killErr := cmd.Process.Kill()
+		if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+			t.Errorf("kill inherited-stdin helper during cleanup: %v", killErr)
+		}
 		select {
-		case <-wait:
+		case waitErr := <-wait:
+			if waitErr != nil && (killErr != nil || !perimeterHelperWasKilled(waitErr)) {
+				t.Errorf("wait for inherited-stdin helper during cleanup: %v", waitErr)
+			}
 		case <-time.After(time.Second):
 			t.Error("killed inherited-stdin helper did not exit within one second")
 		}
@@ -114,13 +121,28 @@ func TestPerimeterDeclareCancellationInterruptsInheritedStdin(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("canceled inherited-stdin parser returned after %s, want within one second", elapsed)
 	}
-	_ = cmd.Process.Kill()
+	killErr := cmd.Process.Kill()
+	if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+		t.Fatalf("stop inherited-stdin helper after parser return: %v", killErr)
+	}
 	select {
-	case <-wait:
+	case waitErr := <-wait:
 		finished = true
+		if waitErr != nil && (killErr != nil || !perimeterHelperWasKilled(waitErr)) {
+			t.Fatalf("wait for inherited-stdin helper after parser return: %v", waitErr)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("inherited-stdin helper did not exit after cleanup")
 	}
+}
+
+func perimeterHelperWasKilled(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled() && status.Signal() == syscall.SIGKILL
 }
 
 // perimeterReadWaitContext signals after the parser's initial context check

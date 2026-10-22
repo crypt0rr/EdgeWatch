@@ -23,7 +23,7 @@ export function ScanSlotDemandNotice() {
   const estimatedHours = formatHours(value.estimated_slot_seconds_per_day)
   const capacityHours = formatHours(value.capacity_slot_seconds_per_day)
   const utilization = formatPercent(value.utilization_percent)
-  return <section className={`notice scan-slot-demand${nearCapacity ? ' warning' : ''}`} role="status" aria-label="Scan-slot demand">
+  return <section className={`notice scan-slot-demand${nearCapacity ? ' warning' : ''}`} aria-label="Scan-slot demand">
     <div>
       <strong>{heading}</strong>
       <p>Estimated scheduled demand is {estimatedHours} slot-hours/day ({utilization}% of {capacityHours} available slot-hours/day across {value.slots} scan slot{value.slots === 1 ? '' : 's'}).</p>

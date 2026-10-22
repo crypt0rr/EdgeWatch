@@ -48,7 +48,7 @@ describe('Perimeter page', () => {
     let resolve!: (value: ReturnType<typeof perimeterOverview>) => void
     vi.mocked(getPerimeter).mockReturnValueOnce(new Promise(done => { resolve = done }))
     renderPage()
-    expect(screen.getByRole('status')).toHaveTextContent('Loading perimeter…')
+    expect(screen.getByText('Loading perimeter…').parentElement).toHaveAttribute('role', 'status')
     resolve(perimeterOverview())
 
     const summary = await screen.findByRole('region', { name: 'Perimeter summary' })

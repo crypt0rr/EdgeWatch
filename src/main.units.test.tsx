@@ -4,7 +4,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { act } from 'react'
 import { useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { activeScans, adminStatus, api, APIError, createUnit, getPublicDashboard, getPublicDashboardConfig, getSession, getUnit, getUnitCapacity, incidentInboxSummary, listHosts, listIncidents, listJobs, listScans, listUnits, login, platformStatus, recordActivity, setupStatus, unitAudit } from './api'
+import { activeScans, adminStatus, api, APIError, createUnit, getPublicDashboard, getPublicDashboardConfig, getSession, getUnit, getUnitCapacity, incidentInboxSummary, listHosts, listIncidents, listJobs, listScans, listUnits, login, platformStatus, recordActivity, scanSlotDemand, setupStatus, unitAudit } from './api'
 import type { SessionUser } from './api'
 import { AppContent, createQueryClient, ProtectedApp } from './main'
 import type { Job } from './types'
@@ -14,7 +14,7 @@ import { developmentBuildUpdates } from './test/status-fixtures'
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api')
-  return { ...actual, activeScans: vi.fn(), adminStatus: vi.fn(), createUnit: vi.fn(), getPublicDashboard: vi.fn(), getPublicDashboardConfig: vi.fn(), getSession: vi.fn(), getUnit: vi.fn(), getUnitCapacity: vi.fn(), incidentInboxSummary: vi.fn(), listHosts: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listScans: vi.fn(), listUnits: vi.fn(), login: vi.fn(), platformStatus: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), unitAudit: vi.fn() }
+  return { ...actual, activeScans: vi.fn(), adminStatus: vi.fn(), createUnit: vi.fn(), getPublicDashboard: vi.fn(), getPublicDashboardConfig: vi.fn(), getSession: vi.fn(), getUnit: vi.fn(), getUnitCapacity: vi.fn(), incidentInboxSummary: vi.fn(), listHosts: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listScans: vi.fn(), listUnits: vi.fn(), login: vi.fn(), platformStatus: vi.fn(), recordActivity: vi.fn(), scanSlotDemand: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), unitAudit: vi.fn() }
 })
 
 class EventSourceStub {
@@ -53,6 +53,7 @@ describe('business units in the console', () => {
     vi.mocked(incidentInboxSummary).mockResolvedValue({ active_count: 0 })
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 0, server_now: new Date().toISOString(), next_follow_up_at: null, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] })
+    vi.mocked(scanSlotDemand).mockResolvedValue({ enabled_jobs: 0, history_jobs: 0, lower_bound_jobs: 0, unestimated_jobs: 0, slots: 1, estimated_slot_seconds_per_day: 0, capacity_slot_seconds_per_day: 86_400, utilization_percent: 0, over_capacity: false })
     vi.mocked(listUnits).mockResolvedValue({ limits: deploymentLimits, units: [] })
     vi.mocked(platformStatus).mockRejectedValue(new Error('not needed'))
     vi.mocked(recordActivity).mockResolvedValue(undefined)

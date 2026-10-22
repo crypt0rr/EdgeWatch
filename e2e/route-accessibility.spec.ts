@@ -38,6 +38,12 @@ async function expectRouteDataReady(page: Page, routePath: string) {
   if (routePath === '/activity') {
     await expect(page.locator('.activity-event')).toContainText('Fixture activity event confirms a baseline change.')
   }
+  if (routePath === '/scans/scan-1') {
+    await expect(page.getByRole('heading', { name: 'fixture-job', exact: true })).toBeVisible()
+    await expect(page.getByText('Scan scan-1', { exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Effective hosts', exact: true })).toBeVisible()
+    await expect(page.getByRole('link', { name: /192\.0\.2\.10/ })).toBeVisible()
+  }
   if (routePath === '/jobs' || routePath === '/perimeter') {
     const demand = page.getByRole('region', { name: 'Scan-slot demand' })
     await expect(demand).toContainText('Estimated scheduled demand is 1 slot-hours/day (50% of 2 available slot-hours/day across 2 scan slots).')
@@ -96,6 +102,26 @@ test('the configured axe 4.13 rule detects visible labels missing from accessibl
   await page.setContent('<!doctype html><html lang="en"><head><title>Rule activation fixture</title></head><body><button aria-label="Action">Delete deployment</button></body></html>')
   const results = await consoleAxe(page).analyze()
   expect(results.violations.filter(violation => violation.id === labelNameMismatchRule)).toHaveLength(1)
+})
+
+test('legacy scan detail route audit checks successful scan content before axe', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'The focused scan detail regression runs once; the route matrix covers every role and configured device.')
+
+  await expectProjectDevice(page, testInfo)
+  await mockConsole(page, 'administrator', { routeAuditFixtures: true })
+  await page.goto('/scans/scan-1')
+
+  const content = page.locator('#main-content .content')
+  await expect(content.locator('.page').last()).toBeVisible()
+  await page.waitForLoadState('networkidle')
+  await expect(content.locator('.loading, .skeleton-list')).toHaveCount(0)
+  await expectRouteDataReady(page, '/scans/scan-1')
+
+  const results = await consoleAxe(page).analyze()
+  const labelMismatches = results.violations.filter(violation => violation.id === labelNameMismatchRule)
+  const blocking = results.violations.filter(violation => violation.impact === 'serious' || violation.impact === 'critical')
+  expect(labelMismatches, 'administrator on /scans/scan-1 has visible link or button text missing from its accessible name').toEqual([])
+  expect(blocking, `administrator on /scans/scan-1: ${blocking.map(violation => `${violation.id} (${violation.impact})`).join(', ')}`).toEqual([])
 })
 
 test('activity error text remains in visible row link names (#1629)', async ({ page }, testInfo) => {

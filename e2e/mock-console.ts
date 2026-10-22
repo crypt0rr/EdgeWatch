@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test'
-import type { AdminStatus, HostObservation, IncidentInboxItem, IncidentInboxPage, IncidentInboxSummary, PerimeterBlocks, PerimeterDeclareResult, PerimeterLineError, PerimeterMonitorRef, PerimeterOutsideTarget, PerimeterOverview, PerimeterProtocol, PerimeterRange, PerimeterRangeDetail, PerimeterSuggestion, PlatformStatus, Scan, ScanSlotDemand } from '../src/generated/api-types'
+import type { AdminStatus, HostObservation, IncidentInboxItem, IncidentInboxPage, IncidentInboxSummary, PerimeterBlocks, PerimeterDeclareResult, PerimeterLineError, PerimeterMonitorRef, PerimeterOutsideTarget, PerimeterOverview, PerimeterProtocol, PerimeterRange, PerimeterRangeDetail, PerimeterSuggestion, PlatformStatus, Scan, ScanSlotDemand, ScanSummary } from '../src/generated/api-types'
 import type { ActivityEvent, Job, JobForm } from '../src/types'
 
 export type UnitConsoleRole = 'administrator' | 'operator' | 'viewer'
@@ -75,6 +75,17 @@ const scan: Scan = {
   status: 'success',
   config_hash: 'fixture-security-hash',
   snapshot: { units: [], scopes: [] },
+}
+
+const scanSummary: ScanSummary = {
+  id: scan.id,
+  job: scan.job,
+  started_at: scan.started_at,
+  finished_at: scan.finished_at,
+  status: scan.status,
+  nmap_version: '7.99',
+  scanner_engine: 'nmap',
+  config_hash: scan.config_hash,
 }
 
 const activityEvent: ActivityEvent = {
@@ -755,6 +766,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/jobs/job-1/baseline/hosts' && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, source_scan: scan, data_quality: 'detailed', hosts: [host], pagination: pagination(1) }); return }
     if (path.startsWith('/jobs/job-1/baseline/hosts/') && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, source_scan: scan, data_quality: 'detailed', host, expected: host }); return }
     if (path === '/scans' && method === 'GET') { await json({ scans: activityScans, pagination: pagination(activityScans.length, 20) }); return }
+    if (path === '/scans/scan-1/summary' && method === 'GET') { await json({ scan: scanSummary }); return }
     if (path === '/scans/scan-1' && method === 'GET') { await json({ scan }); return }
     if (path === '/scans/scan-1/hosts/192.0.2.10/rdap' && method === 'GET') { await json({ rdap: { status: 'private', address: host.address } }); return }
     if (path === '/scans/scan-1/hosts/192.0.2.10' && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, scan, data_quality: 'detailed', host }); return }

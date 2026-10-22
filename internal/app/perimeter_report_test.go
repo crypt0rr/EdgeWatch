@@ -854,6 +854,55 @@ func TestPerimeterProgressDoesNotProveChangedScope(t *testing.T) {
 	}
 }
 
+func TestPerimeterScopeEditsDiscardPriorScopeProgress(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newPerimeterFixture(t)
+	declarePerimeter(t, f.ts, store.PerimeterKindPrefix, "198.51.100.0/24")
+	record := createPerimeterJob(t, f.ts, perimeterJob("discard-old-scope-progress", "198.51.100.10"), true)
+	successAt := record.CreatedAt
+	if err := f.db.System().SaveScan(ctx, model.Scan{
+		ID: "discard-old-scope-success", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name,
+		StartedAt: successAt, FinishedAt: successAt, Status: "success", ConfigHash: record.Job.SecurityHash(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	createRecentPerimeterProgress(t, f, record, "discard-before-target-edit")
+	f.setClock(time.Now().UTC())
+	if report := f.report(t, f.ts); !perimeterMonitorNamed(t, report.Monitors, record.Job.Name).CycleInProgress {
+		t.Fatal("the prior-scope fixture did not start with visible progress")
+	}
+
+	changedTargets := record.Job
+	changedTargets.Targets = []string{"198.51.100.11"}
+	updated, _, err := f.ts.UpdateJob(ctx, record.ID, record.Revision, changedTargets, true, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := f.report(t, f.ts)
+	monitor := perimeterMonitorNamed(t, report.Monitors, updated.Job.Name)
+	if monitor.CycleInProgress || !monitor.ScopeChanged || report.Totals.UnprovenMonitors != 1 {
+		t.Fatalf("target edit retained prior-scope progress: %+v; totals %+v", monitor, report.Totals)
+	}
+
+	// A new cycle in the changed target scope may report progress, but a later
+	// protocol edit must discard that cycle in the same revision transaction.
+	createRecentPerimeterProgress(t, f, updated, "discard-before-protocol-edit")
+	changedProtocol := updated.Job
+	protocol := *changedProtocol.TCP
+	protocol.Ports = "80,443"
+	changedProtocol.TCP = &protocol
+	protocolUpdated, _, err := f.ts.UpdateJob(ctx, updated.ID, updated.Revision, changedProtocol, true, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report = f.report(t, f.ts)
+	monitor = perimeterMonitorNamed(t, report.Monitors, protocolUpdated.Job.Name)
+	if monitor.CycleInProgress || !monitor.ScopeChanged || report.Totals.UnprovenMonitors != 1 {
+		t.Fatalf("protocol edit retained prior-scope progress: %+v; totals %+v", monitor, report.Totals)
+	}
+}
+
 // Each covering monitor fills the buckets of its protocols: Naabu and Nmap
 // over every port fill full TCP, every TCP scan fills any TCP, and a UDP
 // scan fills UDP.

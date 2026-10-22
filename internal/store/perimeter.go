@@ -440,11 +440,11 @@ func parsePerimeterPrefix(value string) (netip.Prefix, string) {
 }
 
 // trimPerimeterLabelWhitespace preserves control characters the label
-// validator must reject while keeping strings.TrimSpace's behavior for other
-// leading and trailing whitespace.
+// validator must reject while trimming other leading and trailing Unicode
+// whitespace.
 func trimPerimeterLabelWhitespace(label string) string {
 	return strings.TrimFunc(label, func(r rune) bool {
-		return r != '\v' && r != '\f' && unicode.IsSpace(r)
+		return unicode.IsSpace(r) && !unicode.IsControl(r)
 	})
 }
 

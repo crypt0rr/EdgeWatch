@@ -312,6 +312,8 @@ func TestDeclarePerimeterSeedsRefusesEveryInvalidEntry(t *testing.T) {
 		{prefixEntry("203.0.113.0/24", "end\v"), perimeterReasonLabelControl},
 		{prefixEntry("203.0.113.0/24", "\fstart"), perimeterReasonLabelControl},
 		{prefixEntry("203.0.113.0/24", "end\f"), perimeterReasonLabelControl},
+		{prefixEntry("203.0.113.0/24", "\u0085start"), perimeterReasonLabelControl},
+		{prefixEntry("203.0.113.0/24", "end\u0085"), perimeterReasonLabelControl},
 		{prefixEntry("203.0.113.0/24", "edge\x7f"), perimeterReasonLabelControl},
 		{prefixEntry("203.0.113.0/24", "edge\u0085router"), perimeterReasonLabelControl},
 		{prefixEntry("203.0.113.0/24", "edge\xff"), perimeterReasonLabelEncoding},

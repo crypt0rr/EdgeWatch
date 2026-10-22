@@ -41,6 +41,7 @@ const frontendReport = (overrides = {}) => {
     'src/components/Pagination.tsx',
     'src/components/PortScopeDetails.tsx',
     'src/components/ScheduledBackupBanner.tsx',
+    'src/components/ScanSlotDemand.tsx',
     'src/components/SurfaceUnitList.tsx',
     'src/components/UntrustedProxyBanner.tsx',
     'src/format.ts',
@@ -150,6 +151,7 @@ test('frontend coverage gates reject low aggregate and missing critical entries'
     for (const source of [
       'src/components/MonitorNextActions.tsx',
       'src/components/NotificationDestinationCreateForm.tsx',
+      'src/components/ScanSlotDemand.tsx',
       'src/firstScanIntent.ts',
       'src/job-creation-draft.tsx',
       'src/job-form.ts',

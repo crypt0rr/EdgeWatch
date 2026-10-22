@@ -86,6 +86,48 @@ func TestListCompletedScanCycleDurationsSumsAttemptsAndExcludesPause(t *testing.
 	}
 }
 
+func TestListCompletedScanCycleDurationsExcludesRecoveryInvocation(t *testing.T) {
+	t.Parallel()
+	ctx, s, job, _ := cycleFixture(t)
+	defer s.Close()
+	started := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	firstAttemptFinished := started.Add(2 * time.Minute)
+	cycleFinished := started.Add(48 * time.Hour)
+	recoveryStarted := cycleFinished.Add(time.Minute)
+	stamp := func(value time.Time) string { return value.Format(time.RFC3339Nano) }
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,attempt_count,total_units,total_probes,started_at,updated_at,expires_at,finished_at)
+		VALUES(?,?,?,?,?,?,?,'completed',2,1,2,?,?,?,?)`,
+		"recovery-duration-cycle", job.ID, job.Job.Name, job.Revision, job.Job.SecurityHash(), "execution", []byte(`{}`),
+		stamp(started), stamp(cycleFinished), stamp(cycleFinished), stamp(cycleFinished)); err != nil {
+		t.Fatal(err)
+	}
+	for _, attempt := range []struct {
+		id       string
+		started  time.Time
+		finished time.Time
+		cycleTry int
+	}{
+		{id: "recovery-duration-attempt-before-crash", started: started, finished: firstAttemptFinished, cycleTry: 1},
+		{id: "recovery-duration-invocation", started: recoveryStarted, finished: recoveryStarted.Add(time.Second), cycleTry: 2},
+	} {
+		if err := s.System().SaveScan(ctx, model.Scan{
+			ID: attempt.id, JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
+			StartedAt: attempt.started, FinishedAt: attempt.finished, Status: "success", ConfigHash: job.Job.SecurityHash(),
+			CycleID: "recovery-duration-cycle", CycleAttempt: attempt.cycleTry, CycleStatus: "completed", Resumable: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	durations, err := defaultTenant(s).ListCompletedScanCycleDurations(ctx, 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := durations[job.ID]; len(got) != 1 || got[0] != 2*time.Minute {
+		t.Fatalf("completed cycle duration samples = %v; want only the two minutes of recorded scan work, excluding recovery invocation", got)
+	}
+}
+
 func TestListCompletedScanCycleDurationsUsesOnlyCurrentJobRevision(t *testing.T) {
 	t.Parallel()
 	ctx, s, job, _ := cycleFixture(t)

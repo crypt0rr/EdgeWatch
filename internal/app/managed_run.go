@@ -345,7 +345,7 @@ func (r *managedRun) finalize(ctx, scanCtx context.Context, snapshot model.Snaps
 		scan.DiscoveryDurationMS = current.DiscoveryDurationMS
 		scan.EnrichmentDurationMS = current.EnrichmentDurationMS
 	}
-	scan.FinishedAt = time.Now().UTC()
+	setScanFinishedAt(scan, time.Now().UTC())
 	scan.Snapshot = snapshot
 	if scan.ScannerEngine == config.EngineNaabuNmap {
 		scan.DiscoveryPorts, scan.ConfirmedPorts = scannerDiscoveryStats(snapshot)
@@ -523,6 +523,16 @@ func (r *managedRun) finalize(ctx, scanCtx context.Context, snapshot model.Snaps
 		return *scan, events, scanErr
 	}
 	return *scan, events, nil
+}
+
+// setScanFinishedAt preserves the scanner's durable completion time when a
+// completed cycle is being recovered. Other runs finish when finalization
+// records their immutable scan row.
+func setScanFinishedAt(scan *model.Scan, finishedAt time.Time) {
+	if scan.CycleStatus == "completed" && !scan.FinishedAt.IsZero() {
+		return
+	}
+	scan.FinishedAt = finishedAt.UTC()
 }
 
 // completedCycleResult reports whether scan carries the merged result of a

@@ -10,6 +10,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
@@ -144,7 +145,7 @@ func TestScanSlotDemandIgnoresOlderRevisionSamplesAfterScopeAndRateEdit(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	lowerBound, hasBound, _ := scanRateLowerBound(updated.Job)
+	lowerBound, hasBound, _ := scanRateLowerBound(updated.Job, config.DefaultMaxJobHosts)
 	runsPerDay, ok := scanJobRunsPerDay(updated.Job, app.Config.Timezone)
 	if !hasBound || !ok {
 		t.Fatalf("updated job lower bound/schedule = %.2f seconds, known %v, schedule valid %v", lowerBound, hasBound, ok)
@@ -187,6 +188,142 @@ func TestScanSlotDemandSumsRateLowerBoundsAgainstCapacity(t *testing.T) {
 	}
 	if demand.UnestimatedJobs != 16 {
 		t.Fatalf("lower-bound jobs with unbounded Nmap enrichment = %d, want 16", demand.UnestimatedJobs)
+	}
+}
+
+func TestScanSlotDemandDoesNotWarnForScopesRejectedByHostLimits(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name                string
+		jobMaxExpandedHosts int
+		deploymentMaxHosts  int
+	}{
+		{name: "default job limit", deploymentMaxHosts: config.DefaultMaxJobHosts},
+		{name: "deployment limit", jobMaxExpandedHosts: 65_536, deploymentMaxHosts: 256},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			db := storetest.OpenFresh(t)
+			ts := defaultTenant(db)
+			job := config.NormalizeJob(config.Job{
+				Name:             "over-limit",
+				Schedule:         "0 0 * * *",
+				Timezone:         "UTC",
+				Targets:          []string{"10.0.0.0/16"},
+				MaxExpandedHosts: test.jobMaxExpandedHosts,
+				TCP:              &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{Rate: 1000}},
+			})
+			if test.name == "default job limit" && job.MaxExpandedHosts != 256 {
+				t.Fatalf("default max_expanded_hosts = %d, want 256", job.MaxExpandedHosts)
+			}
+			if _, err := ts.CreateJobWithEnabled(ctx, job, true); err != nil {
+				t.Fatal(err)
+			}
+			deploymentMaxHosts := test.deploymentMaxHosts
+			app := &App{Store: db, Config: &config.Config{
+				Scheduler: config.Scheduler{MaxConcurrent: 1},
+				Scanner:   config.ScannerConfig{MaxJobHosts: &deploymentMaxHosts},
+			}}
+
+			demand, err := app.ScanSlotDemand(ctx, ts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if demand.EstimatedSlotSecondsPerDay != 0 || demand.LowerBoundJobs != 0 || demand.OverCapacity {
+				t.Fatalf("over-limit scope produced slot demand %+v; scanner rejects it before sending probes", demand)
+			}
+		})
+	}
+}
+
+func TestScanSlotDemandUsesCompletedCycleTimeAfterRecoveryBeforeFinalization(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	ts := defaultTenant(db)
+	job := config.NormalizeJob(config.Job{
+		Name: "recovered-first-cycle", Schedule: "*/30 * * * *", Timezone: "UTC",
+		Targets: []string{"192.0.2.1"},
+		TCP:     &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{Rate: 1000}},
+	})
+	record, err := ts.CreateJobWithEnabled(ctx, job, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedJob := record.Job
+	changedJob.TCP = &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{Rate: 500}}
+	current, _, err := ts.UpdateJob(ctx, record.ID, record.Revision, changedJob, true, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plan := scanner.WorkPlan{
+		Job:   current.Job,
+		Units: []scanner.WorkUnit{{Sequence: 0, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Family: 4, Addresses: []string{"192.0.2.1"}, Ports: "1-65535", PortCount: 65535, Probes: 65535}},
+	}
+	cycle, err := db.System().CreateScanCycle(ctx, store.ScanCycleRecord{
+		JobID: current.ID, Job: current.Job.Name, JobRevision: current.Revision,
+		ConfigHash: current.Job.SecurityHash(), ExecutionHash: current.Job.ExecutionHash(), Plan: plan,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := db.System().NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	// Model a long-running first attempt, then the crash window after the
+	// completed-cycle commit and before finalization persists a scan row.
+	attemptStarted := time.Now().UTC().Add(-2 * time.Hour)
+	stamp := func(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
+	if _, err := db.DB.ExecContext(ctx, `UPDATE scan_cycles SET attempt_started_at=? WHERE id=?`, stamp(attemptStarted), cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	cycle, err = db.System().CompleteScanCycle(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryStarted := cycle.FinishedAt.Add(time.Minute)
+	scan := model.Scan{
+		ID: "recovered-cycle-scan", JobID: current.ID, Job: current.Job.Name,
+		JobRevision: current.Revision, ConfigHash: current.Job.SecurityHash(), StartedAt: recoveryStarted,
+	}
+	handled, _, err := (&App{Store: db}).recoverCompletedCycle(ctx, &scan, nil, cycle)
+	if err != nil || !handled {
+		t.Fatalf("recover completed cycle = handled %t, error %v", handled, err)
+	}
+	if !scan.StartedAt.Equal(attemptStarted) || !scan.FinishedAt.Equal(cycle.FinishedAt) {
+		t.Fatalf("recovered scan interval = %s to %s; want scanner attempt %s to cycle finish %s", scan.StartedAt, scan.FinishedAt, attemptStarted, cycle.FinishedAt)
+	}
+	setScanFinishedAt(&scan, recoveryStarted.Add(time.Second))
+	if !scan.FinishedAt.Equal(cycle.FinishedAt) {
+		t.Fatalf("finalization replaced completed-cycle finish with recovery time %s", scan.FinishedAt)
+	}
+	if err := db.System().SaveScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}
+	demand, err := app.ScanSlotDemand(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := cycle.FinishedAt.Sub(attemptStarted).Seconds() * 48
+	if demand.HistoryJobs != 1 || demand.LowerBoundJobs != 0 || math.Abs(demand.EstimatedSlotSecondsPerDay-want) > 0.01 {
+		t.Fatalf("recovered cycle demand = %+v; want the completed attempt duration %s × 48 runs = %.2f seconds/day", demand, cycle.FinishedAt.Sub(attemptStarted), want)
+	}
+	if !demand.OverCapacity {
+		t.Fatalf("recovered cycle demand = %+v; want a capacity warning from the completed attempt", demand)
 	}
 }
 
@@ -285,7 +422,7 @@ func TestScanRateLowerBoundUsesOnlyGuaranteedNmapProbeWork(t *testing.T) {
 			NmapArgs:         []string{"--max-rate", "100"},
 		},
 	}
-	seconds, hasBound, incomplete := scanRateLowerBound(job)
+	seconds, hasBound, incomplete := scanRateLowerBound(job, config.DefaultMaxJobHosts)
 	if !hasBound || !incomplete || math.Abs(seconds-0.01) > 0.000001 {
 		t.Fatalf("Nmap lower bound = %.6fs, known %v, incomplete %v; want 0.01s for one guaranteed probe at 100/s and service detection marked unestimated", seconds, hasBound, incomplete)
 	}
@@ -293,17 +430,17 @@ func TestScanRateLowerBoundUsesOnlyGuaranteedNmapProbeWork(t *testing.T) {
 
 func TestScanRateLowerBoundHandlesMissingAndUDPScannerRates(t *testing.T) {
 	t.Parallel()
-	if seconds, hasBound, incomplete := scanRateLowerBound(config.Job{}); seconds != 0 || hasBound || incomplete {
+	if seconds, hasBound, incomplete := scanRateLowerBound(config.Job{}, config.DefaultMaxJobHosts); seconds != 0 || hasBound || incomplete {
 		t.Fatalf("empty scan lower bound = %.2f, known %v, incomplete %v; want no bound and complete", seconds, hasBound, incomplete)
 	}
 	withoutRate := config.Job{Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Engine: config.EngineNmap, Ports: "443"}}
-	if seconds, hasBound, incomplete := scanRateLowerBound(withoutRate); seconds != 0 || hasBound || !incomplete {
+	if seconds, hasBound, incomplete := scanRateLowerBound(withoutRate, config.DefaultMaxJobHosts); seconds != 0 || hasBound || !incomplete {
 		t.Fatalf("unlimited Nmap lower bound = %.2f, known %v, incomplete %v; want no bound and incomplete", seconds, hasBound, incomplete)
 	}
 	udp := config.Job{Targets: []string{"192.0.2.1"}, UDP: &config.Protocol{
 		Ports: "53", ServiceDetection: true, NmapArgs: []string{"--max-rate=50"},
 	}}
-	if seconds, hasBound, incomplete := scanRateLowerBound(udp); !hasBound || !incomplete || math.Abs(seconds-0.02) > 0.000001 {
+	if seconds, hasBound, incomplete := scanRateLowerBound(udp, config.DefaultMaxJobHosts); !hasBound || !incomplete || math.Abs(seconds-0.02) > 0.000001 {
 		t.Fatalf("UDP Nmap lower bound = %.6f, known %v, incomplete %v; want 0.02s with service-detection work unestimated", seconds, hasBound, incomplete)
 	}
 }

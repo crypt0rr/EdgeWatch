@@ -537,6 +537,7 @@ func TestRecoverCompletedCycleKeepsRecoveryAttemptTimestamps(t *testing.T) {
 		t.Fatal(err)
 	}
 	cycle.StartedAt = time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	cycle.AttemptStartedAt = cycle.StartedAt.Add(time.Hour)
 	cycle.FinishedAt = cycle.StartedAt.Add(48 * time.Hour)
 	started := time.Now().UTC()
 	scan := model.Scan{StartedAt: started}
@@ -545,8 +546,8 @@ func TestRecoverCompletedCycleKeepsRecoveryAttemptTimestamps(t *testing.T) {
 	if err != nil || !handled {
 		t.Fatalf("recover completed cycle = handled %t, error %v", handled, err)
 	}
-	if !scan.StartedAt.Equal(started) || !scan.FinishedAt.IsZero() {
-		t.Fatalf("recovery scan timestamps = %s to %s; want invocation start %s and finish left for finalize", scan.StartedAt, scan.FinishedAt, started)
+	if !scan.StartedAt.Equal(cycle.AttemptStartedAt) || !scan.FinishedAt.Equal(cycle.FinishedAt) {
+		t.Fatalf("recovery scan timestamps = %s to %s; want completed attempt %s to cycle finish %s", scan.StartedAt, scan.FinishedAt, cycle.AttemptStartedAt, cycle.FinishedAt)
 	}
 }
 

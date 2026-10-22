@@ -76,7 +76,7 @@ func (a *App) ScanSlotDemand(ctx context.Context, ts *store.TenantStore) (ScanSl
 			continue
 		}
 
-		lowerBound, hasBound, incomplete := scanRateLowerBound(record.Job)
+		lowerBound, hasBound, incomplete := scanRateLowerBound(record.Job, a.Config.Scanner.MaxJobHostsValue())
 		if hasBound {
 			result.EstimatedSlotSecondsPerDay += lowerBound * runsPerDay
 			result.LowerBoundJobs++
@@ -151,11 +151,21 @@ func scanJobRunsPerDay(job config.Job, defaultTimezone string) (float64, bool) {
 }
 
 // scanRateLowerBound returns seconds per run that are provably bounded by
-// configured maximum rates. It deliberately excludes response-dependent
-// waits, retries, Naabu-discovered Nmap enrichment, and Nmap work without an
-// explicit --max-rate ceiling.
-func scanRateLowerBound(job config.Job) (seconds float64, hasBound, incomplete bool) {
+// configured maximum rates. A scope over either host ceiling cannot run: the
+// scanner rejects the whole job before sending probes. DNS targets also have
+// no provable expansion here, so they cannot establish that a scope fits.
+// The estimate deliberately excludes response-dependent waits, retries,
+// Naabu-discovered Nmap enrichment, and Nmap work without an explicit
+// --max-rate ceiling.
+func scanRateLowerBound(job config.Job, deploymentMaxHosts int) (seconds float64, hasBound, incomplete bool) {
 	job = config.NormalizeJob(job)
+	if deploymentMaxHosts < 1 {
+		deploymentMaxHosts = config.DefaultMaxJobHosts
+	}
+	hosts, err := config.EstimateJobWork(config.Job{Targets: job.Targets})
+	if err != nil || hosts.UnknownDNS > 0 || hosts.Hosts > int64(min(job.MaxExpandedHosts, deploymentMaxHosts)) {
+		return 0, false, false
+	}
 	if job.TCP != nil && job.TCP.Engine == config.EngineNaabuNmap {
 		estimate, err := config.EstimateJobWork(job)
 		if err == nil && estimate.NaabuProbes > 0 && job.TCP.Naabu != nil && job.TCP.Naabu.Rate > 0 {

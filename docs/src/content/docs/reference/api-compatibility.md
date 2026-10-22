@@ -40,11 +40,15 @@ from older job revisions remains available in history but is excluded from
 this estimate; after any revision change, a job uses its known-work lower
 bound until a scan of the current revision completes. For a job without
 current-revision history, `lower_bound_jobs` count estimates that include only
-known probe work divided by configured maximum scanner rates. These values are
-lower bounds, because DNS, target responses, retries, and data-dependent Nmap
-confirmation can add time. `unestimated_jobs` counts jobs with additional
-work that has no configured rate ceiling, or whose schedule cannot be
-estimated. The console shows a warning at 80% utilization and above.
+known probe work divided by configured maximum scanner rates. A configured
+scope contributes only when it is known to fit both the job's
+`max_expanded_hosts` and deployment's `scanner.max_job_hosts`; over-limit or
+unresolved DNS scopes add no lower bound because the scanner may reject them
+before sending probes. These values are lower bounds, because DNS, target
+responses, retries, and data-dependent Nmap confirmation can add time.
+`unestimated_jobs` counts jobs with additional work that has no configured rate
+ceiling, or whose schedule cannot be estimated. The console shows a warning at
+80% utilization and above.
 
 ## Job creation preview
 

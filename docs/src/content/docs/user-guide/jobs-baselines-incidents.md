@@ -63,10 +63,14 @@ a cycle is one sample. Samples from earlier revisions remain in scan history
 but do not determine the current estimate; after any job revision change,
 EdgeWatch uses the known-work lower bound until a scan of the current revision
 completes. That lower bound divides only known probe work by a configured
-maximum scanner rate. DNS, target responses, retries, and data-dependent Nmap
-confirmation can make a scan take longer, and work without a configured rate
-ceiling is called out as unestimated. A warning appears at 80% utilization and
-when estimated demand exceeds capacity.
+maximum scanner rate, and is counted only when the configured scope is known to
+fit both the job's **Maximum expanded hosts** and the deployment's
+`scanner.max_job_hosts`. An over-limit or unresolved DNS scope adds no lower
+bound because the scanner may reject it before sending probes. DNS, target
+responses, retries, and data-dependent Nmap confirmation can make a scan take
+longer, and work without a configured rate ceiling is called out as
+unestimated. A warning appears at 80% utilization and when estimated demand
+exceeds capacity.
 
 ## Planned change windows
 

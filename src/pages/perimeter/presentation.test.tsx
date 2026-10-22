@@ -102,6 +102,15 @@ describe('perimeter declare parsing', () => {
     ])
   })
 
+  it('preserves vertical tabs and form feeds at label boundaries for server validation', () => {
+    expect(parsePerimeterLines('203.0.113.0/24 \u000bstart\n203.0.113.0/24 end\u000b\n203.0.113.0/24 \u000cstart\n203.0.113.0/24 end\u000c')).toEqual([
+      { line: 1, value: '203.0.113.0/24', label: '\u000bstart' },
+      { line: 2, value: '203.0.113.0/24', label: 'end\u000b' },
+      { line: 3, value: '203.0.113.0/24', label: '\u000cstart' },
+      { line: 4, value: '203.0.113.0/24', label: 'end\u000c' },
+    ])
+  })
+
   it('describes the outcome of an accepted declaration', () => {
     expect(declareResultMessage({ created: 1, skipped: 0 })).toBe('Declared 1 new range.')
     expect(declareResultMessage({ created: 3, skipped: 2 })).toBe('Declared 3 new ranges. 2 already declared entries were skipped.')

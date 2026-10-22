@@ -10,21 +10,32 @@ export const defaultMaxEntries = 256
 /** One non-blank line of the bulk paste: its 1-based line number, value, and label. */
 export type PerimeterLine = { line: number; value: string; label: string }
 
+function trimPerimeterWhitespace(value: string): string {
+  let start = 0
+  let end = value.length
+  const isEdgeWhitespace = (character: string) => character !== '\u000b' && character !== '\u000c' && /\s/u.test(character)
+  while (start < end && isEdgeWhitespace(value[start])) start++
+  while (end > start && isEdgeWhitespace(value[end - 1])) end--
+  return value.slice(start, end)
+}
+
 /**
  * Parses the bulk paste, one `<cidr-or-ip> [label]` per line. The value is
- * the text before the first run of whitespace and the label is the rest of
- * the line, trimmed with runs of spaces, tabs, and Unicode spacing separators
- * collapsed to one space; blank lines are skipped but keep their numbers, so
- * a refused entry is reported on the line it came from. The server validates
- * every value and label.
+ * the text before the first whitespace character and the label is the rest
+ * of the line, with ordinary edge whitespace trimmed and runs of spaces,
+ * tabs, and Unicode space, line, and paragraph separators collapsed to one
+ * space. Vertical tabs and form feeds are preserved for server validation;
+ * blank lines are skipped but keep their numbers, so a refused entry is
+ * reported on the line it came from. The server validates every value and
+ * label.
  */
 export function parsePerimeterLines(text: string): PerimeterLine[] {
   const parsed: PerimeterLine[] = []
   text.split(/\r\n|\r|\n/).forEach((raw, index) => {
-    const line = raw.trim()
+    const line = trimPerimeterWhitespace(raw)
     if (!line) return
     const [value] = line.split(/\s/, 1)
-    const label = line.slice(value.length).trim().replace(/[\t\p{Zs}\u2028\u2029]+/gu, ' ')
+    const label = trimPerimeterWhitespace(line.slice(value.length)).replace(/[\t\p{Zs}\u2028\u2029]+/gu, ' ')
     parsed.push({ line: index + 1, value, label })
   })
   return parsed

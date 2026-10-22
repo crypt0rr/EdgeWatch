@@ -1307,9 +1307,42 @@ func NormalizeJob(j Job) Job {
 // versions. The alias is process-local and is never serialized.
 func NormalizeStoredJob(j Job) Job {
 	j.legacySecurityHash = ""
-	legacyHash := j.securityHashBeforePortCanonicalization()
+	var tcpPorts, udpPorts string
+	if j.TCP != nil {
+		tcpPorts = j.TCP.Ports
+	}
+	if j.UDP != nil {
+		udpPorts = j.UDP.Ports
+	}
 	j = NormalizeJob(j)
-	if legacyHash != j.securityHashNormalized() {
+
+	// Stored jobs are written with canonical port expressions. The common read
+	// path can return after normalization without building either YAML hash.
+	// Only a pre-canonicalization spelling needs a legacy hash for baselines and
+	// resumable cycles created by older versions.
+	legacyPortsChanged := (j.TCP != nil && j.TCP.Engine != EngineNaabuNmap && tcpPorts != j.TCP.Ports) ||
+		(j.UDP != nil && udpPorts != j.UDP.Ports)
+	if !legacyPortsChanged {
+		return j
+	}
+
+	canonicalHash := j.securityHashNormalized()
+	// Naabu's TCP discovery has always covered the full range; its historical
+	// hash did not include a stored custom spelling. Keep that rule while
+	// restoring raw spellings for Nmap TCP and UDP compatibility hashes.
+	legacyJob := j
+	if j.TCP != nil && j.TCP.Engine != EngineNaabuNmap {
+		tcp := *j.TCP
+		tcp.Ports = tcpPorts
+		legacyJob.TCP = &tcp
+	}
+	if j.UDP != nil {
+		udp := *j.UDP
+		udp.Ports = udpPorts
+		legacyJob.UDP = &udp
+	}
+	legacyHash := legacyJob.securityHashNormalized()
+	if legacyHash != canonicalHash {
 		j.legacySecurityHash = legacyHash
 	}
 	return j
@@ -1911,27 +1944,6 @@ func (j Job) SecurityHash() string {
 	// tooling and scheduler fixtures may construct a value directly. Treat an
 	// omitted engine/default as the same scope as its explicit default.
 	j = NormalizeJob(j)
-	return j.securityHashNormalized()
-}
-
-func (j Job) securityHashBeforePortCanonicalization() string {
-	var tcpPorts, udpPorts string
-	if j.TCP != nil {
-		tcpPorts = j.TCP.Ports
-	}
-	if j.UDP != nil {
-		udpPorts = j.UDP.Ports
-	}
-	j = NormalizeJob(j)
-	// Naabu jobs have always normalized their TCP discovery scope to the full
-	// range before hashing. Preserve that historical behavior when deriving a
-	// compatibility alias from legacy persisted input.
-	if j.TCP != nil && j.TCP.Engine != EngineNaabuNmap {
-		j.TCP.Ports = tcpPorts
-	}
-	if j.UDP != nil {
-		j.UDP.Ports = udpPorts
-	}
 	return j.securityHashNormalized()
 }
 

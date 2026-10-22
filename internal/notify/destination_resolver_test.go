@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -79,15 +80,27 @@ func (*destinationPacketTestConn) SetWriteDeadline(time.Time) error { return nil
 
 func startDestinationDNSTestServer(t *testing.T, handler destinationDNSTestHandler) *destinationDNSTestServer {
 	t.Helper()
-	packet, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	udpAddress := packet.LocalAddr().(*net.UDPAddr)
-	tcp, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(udpAddress.Port)))
-	if err != nil {
+	var packet net.PacketConn
+	var tcp net.Listener
+	var err error
+	for attempt := 0; attempt < 10; attempt++ {
+		packet, err = net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		udpAddress := packet.LocalAddr().(*net.UDPAddr)
+		tcp, err = net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(udpAddress.Port)))
+		if err == nil {
+			break
+		}
 		_ = packet.Close()
-		t.Fatal(err)
+		packet = nil
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			t.Fatal(err)
+		}
+	}
+	if tcp == nil {
+		t.Fatalf("could not reserve a shared UDP/TCP DNS test port after 10 attempts: %v", err)
 	}
 	server := &destinationDNSTestServer{
 		packet:  packet,

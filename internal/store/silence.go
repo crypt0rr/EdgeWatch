@@ -167,12 +167,21 @@ func jobSilenceDecisionQuery(ctx context.Context, queryer rowQueryer, jobID stri
 	}
 	// A paused tenant's jobs are not expected to scan, so their silence is
 	// not an alert. The watchdog judges them again once the tenant is active.
-	var paused int
-	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs JOIN tenants ON tenants.id=jobs.tenant_id WHERE jobs.id=? AND tenants.state<>?`, jobID, TenantStateActive).Scan(&paused); err != nil {
+	var tenantState string
+	var definition []byte
+	err := queryer.QueryRowContext(ctx, `SELECT tenants.state,jobs.definition_json FROM jobs JOIN tenants ON tenants.id=jobs.tenant_id WHERE jobs.id=?`, jobID).Scan(&tenantState, &definition)
+	if errors.Is(err, sql.ErrNoRows) {
+		return jobSilenceDecision{}, nil
+	}
+	if err != nil {
 		return jobSilenceDecision{}, err
 	}
-	if paused > 0 {
+	if tenantState != TenantStateActive {
 		return jobSilenceDecision{}, nil
+	}
+	currentScopeHash, legacyScopeHash, err := jobSilenceScopeHashes(definition)
+	if err != nil {
+		return jobSilenceDecision{}, err
 	}
 	now = now.UTC()
 	createdAt = createdAt.UTC()
@@ -202,6 +211,23 @@ func jobSilenceDecisionQuery(ctx context.Context, queryer rowQueryer, jobID stri
 	if active > 0 {
 		return jobSilenceDecision{}, nil
 	}
+	// A resumable cycle can make durable progress over several scheduled
+	// attempts without producing a successful scan yet. Count an in-window
+	// cycle with a recently completed work-unit checkpoint as activity.
+	progressCutoff := sqliteTimestamp(now.Add(-threshold))
+	var progressing int
+	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycles
+ WHERE job_id=? AND status IN ('running','paused') AND (expires_at>? OR (status='paused' AND expires_at=''))
+   AND (config_hash=? OR (?<>'' AND config_hash=?))
+	 AND (completed_units>0 OR completed_probes>0)
+	 AND EXISTS (SELECT 1 FROM scan_cycle_units checkpoint
+	   WHERE checkpoint.cycle_id=scan_cycles.id AND checkpoint.status='completed' AND checkpoint.finished_at>?)
+	 AND completed_units<total_units`, jobID, sqliteTimestamp(now), currentScopeHash, legacyScopeHash, legacyScopeHash, progressCutoff).Scan(&progressing); err != nil {
+		return jobSilenceDecision{}, err
+	}
+	if progressing > 0 {
+		return jobSilenceDecision{}, nil
+	}
 
 	if stateErr == nil {
 		return jobSilenceDecision{due: true, lastReference: lastReference, backoffLevel: backoff}, nil
@@ -218,6 +244,18 @@ func jobSilenceDecisionQuery(ctx context.Context, queryer rowQueryer, jobID stri
 		return jobSilenceDecision{}, err
 	}
 	return jobSilenceDecision{due: true, lastReference: lastReference, backoffLevel: backoff}, nil
+}
+
+// jobSilenceScopeHashes loads the current persisted job definition so the
+// watchdog counts checkpoints only when their pinned security scope can still
+// resume. NormalizeStoredJob also supplies the one-time legacy hash for
+// definitions whose port spelling changed during canonicalization.
+func jobSilenceScopeHashes(definition []byte) (string, string, error) {
+	job, err := unmarshalJob(definition)
+	if err != nil {
+		return "", "", fmt.Errorf("decode job scope for silence watchdog: %w", err)
+	}
+	return job.SecurityHash(), job.LegacySecurityHash(), nil
 }
 
 const maxSilenceBackoffLevel = 8

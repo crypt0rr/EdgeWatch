@@ -25,6 +25,8 @@ export type PerimeterPrefill = {
   addresses: number
   /** The declared range the suggestion fills, as the server returns its value. */
   source: string
+  /** Full TCP's lower-bound duration at the built-in Naabu rate, in seconds. */
+  minimumDurationSeconds?: number
 }
 
 /** The most runes in a job name, as config.MaxJobNameRunes allows. */
@@ -78,6 +80,7 @@ export function buildPerimeterPrefill(suggestion: PerimeterSuggestion, rangeValu
     protocol: { ...suggestion.protocol },
     addresses: suggestion.addresses,
     source: rangeValue,
+    ...(suggestion.minimum_duration_seconds !== undefined ? { minimumDurationSeconds: suggestion.minimum_duration_seconds } : {}),
   }
 }
 
@@ -125,11 +128,12 @@ function readProtocol(value: unknown, mode: PerimeterMode): PerimeterProtocol | 
 export function readPerimeterPrefill(state: unknown): PerimeterPrefill | null {
   const candidate = isRecord(state) && 'perimeterPrefill' in state ? state.perimeterPrefill : state
   if (!isRecord(candidate)) return null
-  const { name, targets, mode, protocol, addresses, source } = candidate
+  const { name, targets, mode, protocol, addresses, source, minimumDurationSeconds } = candidate
   if (!validName(name) || !isPerimeterMode(mode) || !nonEmptyString(source)) return null
   if (!Array.isArray(targets) || targets.length === 0 || !targets.every(nonEmptyString)) return null
   if (typeof addresses !== 'number' || !Number.isSafeInteger(addresses) || addresses < 1) return null
+  if (minimumDurationSeconds !== undefined && (typeof minimumDurationSeconds !== 'number' || !Number.isSafeInteger(minimumDurationSeconds) || minimumDurationSeconds < 0)) return null
   const parsedProtocol = readProtocol(protocol, mode)
   if (!parsedProtocol) return null
-  return { name, targets: [...targets], mode, protocol: parsedProtocol, addresses, source }
+  return { name, targets: [...targets], mode, protocol: parsedProtocol, addresses, source, ...(minimumDurationSeconds !== undefined ? { minimumDurationSeconds } : {}) }
 }

@@ -54,7 +54,7 @@ func (s *completingCycleScanner) counts() (plans, units int) {
 // its notification destinations cannot be read, the cycle must stay
 // unpromoted, so the next trigger promotes and compares the same cycle
 // instead of discarding its result and planning a new one.
-func TestCompletedCycleWaitsForNotificationDestinations(t *testing.T) {
+func TestRecoveredLegacyResumedCyclePreservesOriginalFinishTime(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	probe := &completingCycleScanner{}
@@ -101,6 +101,15 @@ func TestCompletedCycleWaitsForNotificationDestinations(t *testing.T) {
 	if err != nil || cycle.Status != "completed" {
 		t.Fatalf("cycle after the destination failure = %#v, %v", cycle, err)
 	}
+	originalFinishedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	originalStartedAt := originalFinishedAt.Add(-2 * time.Hour)
+	if _, err := db.DB.ExecContext(ctx, `UPDATE scan_cycles SET started_at=?,attempt_started_at='',attempt_count=2,finished_at=? WHERE id=?`, originalStartedAt.Format(time.RFC3339Nano), originalFinishedAt.Format(time.RFC3339Nano), deferred.CycleID); err != nil {
+		t.Fatal(err)
+	}
+	legacyCycle, err := defaultTenant(db).GetScanCycle(ctx, deferred.CycleID)
+	if err != nil || legacyCycle.AttemptCount != 2 || !legacyCycle.AttemptStartedAt.IsZero() || !legacyCycle.FinishedAt.Equal(originalFinishedAt) {
+		t.Fatalf("legacy completed cycle = %#v, %v; want two attempts, no recorded attempt start, and finish %s", legacyCycle, err, originalFinishedAt)
+	}
 	if state, err := defaultTenant(db).RuntimeState(ctx, record.ID); err != nil || len(state.Incidents) != 0 {
 		t.Fatalf("runtime after the destination failure = %#v, %v", state, err)
 	}
@@ -111,6 +120,28 @@ func TestCompletedCycleWaitsForNotificationDestinations(t *testing.T) {
 	promoted, events, promoteErr := a.runJobRecord(ctx, record, false)
 	if promoteErr != nil || promoted.CycleID != deferred.CycleID || promoted.Status != "success" || promoted.Comparison != model.ScanComparisonCompared {
 		t.Fatalf("next run = %#v, err %v; want the completed cycle promoted and compared", promoted, promoteErr)
+	}
+	if !promoted.StartedAt.Equal(originalStartedAt) {
+		t.Fatalf("recovered scan started at %s, want original cycle start %s because the legacy attempt start is unknown", promoted.StartedAt, originalStartedAt)
+	}
+	if !promoted.FinishedAt.Equal(originalFinishedAt) {
+		t.Fatalf("recovered scan finished at %s, want original cycle completion %s", promoted.FinishedAt, originalFinishedAt)
+	}
+	if promoted.StartedAt.After(promoted.FinishedAt) {
+		t.Fatalf("recovered scan interval is inverted: %s to %s", promoted.StartedAt, promoted.FinishedAt)
+	}
+	var scanStartedAt, scanFinishedAt, lastSuccessAt string
+	if err := db.DB.QueryRowContext(ctx, `SELECT started_at,finished_at FROM scans WHERE cycle_id=? AND status='success'`, deferred.CycleID).Scan(&scanStartedAt, &scanFinishedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.QueryRowContext(ctx, `SELECT last_success_at FROM job_silence_state WHERE job_id=?`, record.ID).Scan(&lastSuccessAt); err != nil {
+		t.Fatal(err)
+	}
+	parsedScanStartedAt, startErr := time.Parse(time.RFC3339Nano, scanStartedAt)
+	parsedScanFinishedAt, scanErr := time.Parse(time.RFC3339Nano, scanFinishedAt)
+	parsedLastSuccessAt, successErr := time.Parse(time.RFC3339Nano, lastSuccessAt)
+	if startErr != nil || scanErr != nil || successErr != nil || parsedScanStartedAt.After(parsedScanFinishedAt) || !parsedScanStartedAt.Equal(originalStartedAt) || !parsedScanFinishedAt.Equal(originalFinishedAt) || !parsedLastSuccessAt.Equal(originalFinishedAt) {
+		t.Fatalf("recovered persisted interval/finish markers = scans %q..%q (%v, %v), silence %q (%v); want %s..%s and preserved finish", scanStartedAt, scanFinishedAt, startErr, scanErr, lastSuccessAt, successErr, originalStartedAt.Format(time.RFC3339Nano), originalFinishedAt.Format(time.RFC3339Nano))
 	}
 	if !hasEventType(events, "changes-detected") {
 		t.Fatalf("promoted cycle was not compared with the baseline: %#v", events)

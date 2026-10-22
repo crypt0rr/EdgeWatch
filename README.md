@@ -62,9 +62,13 @@ Then open **Jobs → New job** and follow the guided monitor setup to choose aut
 coverage, a schedule, and alerts. You can also add and test a notification
 destination during setup; operators can select existing destinations, and
 choosing no alerts is supported. Review the scan estimate and budget before
-creating the monitor. Runtime state and generated encryption keys live in
-`./data`; back them up together. See the [first-scan guide](https://edgewatch.offsec.nl/getting-started/first-scan/)
-for the initial scan and baseline workflow.
+creating the monitor. Full TCP suggestions also show a lower-bound duration at
+the built-in Naabu rate; guided setup may suggest a matching timeout when that
+estimate fits the existing resume window. Actual scans can take longer
+because of host response time, retries, and Nmap confirmation. Runtime state
+and generated encryption keys live in `./data`; back them up together. See the
+[first-scan guide](https://edgewatch.offsec.nl/getting-started/first-scan/) for
+the initial scan and baseline workflow.
 
 Set `backup.directory` to keep verified scheduled backups and the latest three
 automatic pre-migration backups. An upgrade stops before schema writes if its

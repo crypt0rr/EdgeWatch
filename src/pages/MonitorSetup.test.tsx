@@ -774,6 +774,36 @@ describe('guided monitor creation', () => {
       expect(createJob).not.toHaveBeenCalled()
     })
 
+    it('raises the Full TCP setup timeout to its probe-rate lower bound when it fits the resume window', async () => {
+      const suggestion = perimeterSuggestion({
+        targets: ['198.51.100.0/24'],
+        addresses: 256,
+        estimated_probes: 16_776_960,
+        minimum_duration_seconds: 16_777,
+      })
+      const perimeterPrefill = buildPerimeterPrefill(suggestion, '198.51.100.0/24', 0, 1)
+      renderWithProviders(<TestJourney />, { route: perimeterRoute({ perimeterPrefill }) })
+      await screen.findByRole('heading', { name: 'Choose targets' })
+
+      expect(creationDraft().fields.timeout).toBe('4h40m')
+      expect(creationDraft().fields.resume_window).toBe('8d')
+    })
+
+    it('keeps the current timeout when the Full TCP lower bound exceeds the configured resume window', async () => {
+      const suggestion = perimeterSuggestion({
+        targets: ['198.51.100.0/24'],
+        addresses: 256,
+        estimated_probes: 256 * 65_535,
+        minimum_duration_seconds: 700_000,
+      })
+      const perimeterPrefill = buildPerimeterPrefill(suggestion, '198.51.100.0/24', 0, 1)
+      renderWithProviders(<TestJourney />, { route: perimeterRoute({ perimeterPrefill }) })
+      await screen.findByRole('heading', { name: 'Choose targets' })
+
+      expect(creationDraft().fields.timeout).toBe('1h')
+      expect(creationDraft().fields.resume_window).toBe('8d')
+    })
+
     it('never overwrites a draft that already has changes, and says why', async () => {
       const perimeterPrefill = buildPerimeterPrefill(perimeterSuggestion(), '203.0.112.0/23', 0, 1)
       renderWithProviders(<TestJourney editedDraft />, { route: perimeterRoute({ perimeterPrefill }) })

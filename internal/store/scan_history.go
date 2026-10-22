@@ -735,10 +735,14 @@ func (ts *TenantStore) GetLatestSuccessfulJobScanSummary(ctx context.Context, jo
 // JobScanStatusSummary is the bounded execution metadata shown in the Jobs
 // list. It deliberately omits scan errors, comparison payloads, and snapshots.
 type JobScanStatusSummary struct {
-	ID         string
-	Status     string
-	StartedAt  time.Time
-	FinishedAt time.Time
+	ID          string
+	Status      string
+	StartedAt   time.Time
+	FinishedAt  time.Time
+	ConfigHash  string
+	CycleID     string
+	CycleStatus string
+	Resumable   bool
 }
 
 // JobExecutionSummary keeps the latest attempt separate from the latest
@@ -749,8 +753,8 @@ type JobExecutionSummary struct {
 }
 
 const jobExecutionSummariesSQL = `SELECT j.id,
- attempt.id,attempt.status,attempt.started_at,attempt.finished_at,
- successful.id,successful.status,successful.started_at,successful.finished_at
+ attempt.id,attempt.status,attempt.started_at,attempt.finished_at,attempt.config_hash,attempt.cycle_id,attempt.cycle_status,attempt.resumable,
+ successful.id,successful.status,successful.started_at,successful.finished_at,successful.config_hash
 FROM jobs AS j
 LEFT JOIN scans AS attempt ON attempt.id=(
  SELECT candidate.id FROM scans AS candidate
@@ -782,24 +786,27 @@ func (ts *TenantStore) ListJobExecutionSummaries(ctx context.Context, includeArc
 	result := make(map[string]JobExecutionSummary)
 	for rows.Next() {
 		var jobID string
-		var attemptID, attemptStatus, attemptStarted, attemptFinished sql.NullString
-		var successID, successStatus, successStarted, successFinished sql.NullString
+		var attemptID, attemptStatus, attemptStarted, attemptFinished, attemptConfigHash sql.NullString
+		var attemptCycleID, attemptCycleStatus sql.NullString
+		var attemptResumable sql.NullInt64
+		var successID, successStatus, successStarted, successFinished, successConfigHash sql.NullString
 		if err := rows.Scan(&jobID,
-			&attemptID, &attemptStatus, &attemptStarted, &attemptFinished,
-			&successID, &successStatus, &successStarted, &successFinished,
+			&attemptID, &attemptStatus, &attemptStarted, &attemptFinished, &attemptConfigHash, &attemptCycleID, &attemptCycleStatus, &attemptResumable,
+			&successID, &successStatus, &successStarted, &successFinished, &successConfigHash,
 		); err != nil {
 			return nil, err
 		}
 		summary := JobExecutionSummary{}
 		if attemptID.Valid {
 			summary.LatestAttempt = &JobScanStatusSummary{
-				ID: attemptID.String, Status: attemptStatus.String,
+				ID: attemptID.String, Status: attemptStatus.String, ConfigHash: attemptConfigHash.String,
+				CycleID: attemptCycleID.String, CycleStatus: attemptCycleStatus.String, Resumable: attemptResumable.Int64 != 0,
 				StartedAt: scanTime(attemptStarted.String), FinishedAt: scanTime(attemptFinished.String),
 			}
 		}
 		if successID.Valid {
 			summary.LatestSuccessfulScan = &JobScanStatusSummary{
-				ID: successID.String, Status: successStatus.String,
+				ID: successID.String, Status: successStatus.String, ConfigHash: successConfigHash.String,
 				StartedAt: scanTime(successStarted.String), FinishedAt: scanTime(successFinished.String),
 			}
 		}

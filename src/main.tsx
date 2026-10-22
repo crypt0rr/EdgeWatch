@@ -470,6 +470,7 @@ function JobMonitoringStatus({ job, canReadScans }: { job: Job; canReadScans: bo
   const successTime = successful?.finished_at || successful?.started_at
   const activityLabel = monitoring.activity === 'queued' ? 'Queued'
     : monitoring.activity === 'running' ? 'Running'
+      : monitoring.activity === 'in_progress' ? `Scan cycle in progress (${monitoring.cycle_completed_units} of ${monitoring.cycle_total_units} units)`
       : monitoring.activity === 'resumable' ? 'Saved work can be resumed'
         : monitoring.activity === 'stalled' ? 'Stalled cycle needs a manual retry'
           : monitoring.activity === 'none' ? 'No current scan or resumable cycle'
@@ -493,7 +494,7 @@ function JobMonitoringStatus({ job, canReadScans }: { job: Job; canReadScans: bo
       <dl className="job-monitoring-grid">
         <div>
           <dt>Latest attempt</dt>
-          <dd>{!monitoring.history_available ? 'Unavailable' : attempt ? attempt.status.replaceAll('_', ' ') : 'No scan recorded yet'}</dd>
+          <dd>{!monitoring.history_available ? 'Unavailable' : attempt ? `${attempt.status.replaceAll('_', ' ')}${monitoring.cycle_in_progress ? ' · saved progress' : ''}` : 'No scan recorded yet'}</dd>
           {monitoring.history_available && attempt && <small>{attemptTime ? formatDateTime(attemptTime) : 'Unknown time'}</small>}
           {canReadScans && attempt?.scan_id && <Link className="job-scan-link" to={`/jobs/${job.id}/scans/${attempt.scan_id}`}>View attempt</Link>}
         </div>
@@ -506,6 +507,7 @@ function JobMonitoringStatus({ job, canReadScans }: { job: Job; canReadScans: bo
           <dt>Current work</dt>
           <dd>{activityLabel}</dd>
           {monitoring.activity === 'resumable' && <small>Resume saved progress from job details.</small>}
+          {monitoring.activity === 'in_progress' && <small>Resume saved progress from job details.</small>}
           {monitoring.attention_reason === 'stalled_cycle' && <small>Review the saved cycle from job details.</small>}
         </div>
         <div>

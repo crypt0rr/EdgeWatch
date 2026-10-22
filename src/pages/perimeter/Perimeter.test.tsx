@@ -83,6 +83,27 @@ describe('Perimeter page', () => {
     expect(screen.getByText('Every monitored IP and CIDR target lies inside the declared ranges.')).toBeInTheDocument()
   })
 
+  it('shows progressing resumable work separately from proven and unproven coverage', async () => {
+    const monitor = perimeterMonitor({
+      last_attempt_status: 'timed_out',
+      cycle_in_progress: true,
+      cycle_completed_units: 1,
+      cycle_total_units: 16,
+    })
+    vi.mocked(getPerimeter).mockResolvedValue(perimeterOverview({
+      monitors: [monitor],
+      totals: { ...perimeterOverview().totals, unproven_monitors: 0 },
+    }))
+    renderPage()
+
+    const progress = await screen.findByRole('region', { name: 'Scan cycles in progress' })
+    expect(progress).toHaveTextContent('Edge TCP')
+    expect(progress).toHaveTextContent('Scan cycle in progress (1 of 16 units)')
+    expect(progress).toHaveTextContent('Coverage is proven only after a successful scan matches the current security scope.')
+    expect(progress).not.toHaveTextContent('Last attempt timed out')
+    expect(screen.getByRole('region', { name: 'Coverage not proven' })).toHaveTextContent('Every covering monitor that touches the perimeter has proven its coverage.')
+  })
+
   it('offers a retry when the report cannot be loaded, and keeps a loaded report when a refresh fails', async () => {
     vi.mocked(getPerimeter).mockRejectedValueOnce(new APIError('boom', 'internal_error', undefined, 500))
     const { client } = renderPage()

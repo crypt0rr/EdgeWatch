@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/app"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/robfig/cron/v3"
 )
@@ -29,7 +30,38 @@ type jobMonitoringSummaryView struct {
 	Timezone             string             `json:"timezone"`
 	LatestAttempt        *jobScanStatusView `json:"latest_attempt"`
 	LatestSuccessfulScan *jobScanStatusView `json:"latest_successful_scan"`
+	CycleInProgress      bool               `json:"cycle_in_progress"`
+	CycleCompletedUnits  int                `json:"cycle_completed_units"`
+	CycleTotalUnits      int                `json:"cycle_total_units"`
 	AttentionReason      string             `json:"attention_reason"`
+}
+
+func resumableCycleInProgress(
+	record store.JobRecord,
+	execution store.JobExecutionSummary,
+	cycle *store.ScanCycleSummary,
+	reference time.Time,
+	now time.Time,
+) bool {
+	if !latestAttemptResumesPausedCycle(execution, cycle) || !latestAttemptMatchesJobScope(record, execution.LatestAttempt) {
+		return false
+	}
+	threshold, err := app.JobSilenceThreshold(cron.NewParser(cron.Minute|cron.Hour|cron.Dom|cron.Month|cron.Dow), record.Job, reference)
+	return err == nil && app.ScanCycleHasRecentProgress(*cycle, now, threshold)
+}
+
+func latestAttemptResumesPausedCycle(execution store.JobExecutionSummary, cycle *store.ScanCycleSummary) bool {
+	return cycle != nil && execution.LatestAttempt != nil &&
+		execution.LatestAttempt.Resumable && execution.LatestAttempt.CycleID == cycle.ID && execution.LatestAttempt.CycleStatus == "paused"
+}
+
+func latestAttemptMatchesJobScope(record store.JobRecord, attempt *store.JobScanStatusSummary) bool {
+	if attempt == nil {
+		return false
+	}
+	currentHash := record.Job.SecurityHash()
+	legacyHash := record.Job.LegacySecurityHash()
+	return attempt.ConfigHash == currentHash || legacyHash != "" && attempt.ConfigHash == legacyHash
 }
 
 func jobMonitoringSummary(
@@ -39,8 +71,9 @@ func jobMonitoringSummary(
 	historyAvailable bool,
 	appActivity string,
 	appActivityAvailable bool,
-	cycleStatus string,
+	cycle *store.ScanCycleSummary,
 	cycleAvailable bool,
+	silenceReference time.Time,
 	canReadScans bool,
 	now time.Time,
 ) jobMonitoringSummaryView {
@@ -58,18 +91,30 @@ func jobMonitoringSummary(
 		view.LatestAttempt = jobScanStatus(execution.LatestAttempt, canReadScans)
 		view.LatestSuccessfulScan = jobScanStatus(execution.LatestSuccessfulScan, canReadScans)
 	}
+	if historyAvailable && cycleAvailable && resumableCycleInProgress(record, execution, cycle, silenceReference, now) {
+		view.CycleInProgress = true
+		view.CycleCompletedUnits = cycle.CompletedUnits
+		view.CycleTotalUnits = cycle.TotalUnits
+	}
 
 	switch {
 	case appActivityAvailable && appActivity == "queued":
 		activity = "queued"
 	case appActivityAvailable && appActivity == "running":
 		activity = "running"
-	case appActivityAvailable && cycleAvailable && cycleStatus == "stalled":
+	case appActivityAvailable && cycleAvailable && cycle != nil && cycle.Status == "stalled":
 		activity = "stalled"
-	case appActivityAvailable && cycleAvailable && (cycleStatus == "paused" || cycleStatus == "running"):
+	case view.CycleInProgress:
+		activity = "in_progress"
+	case appActivityAvailable && cycleAvailable && cycle != nil && (cycle.Status == "paused" || cycle.Status == "running"):
 		// A durable running cycle without a live queued/running process is
-		// recoverable work. Keep that distinct from a live running scan.
-		activity = "resumable"
+		// recoverable work. Keep that distinct from a live running scan. A
+		// paused cycle from an older scope cannot be resumed by this job.
+		if latestAttemptResumesPausedCycle(execution, cycle) && !latestAttemptMatchesJobScope(record, execution.LatestAttempt) {
+			activity = "none"
+		} else {
+			activity = "resumable"
+		}
 	case appActivityAvailable && cycleAvailable:
 		activity = "none"
 	}
@@ -102,16 +147,19 @@ func jobMonitoringSummary(
 	}
 
 	switch {
-	case cycleAvailable && cycleStatus == "stalled":
+	case cycleAvailable && cycle != nil && cycle.Status == "stalled":
 		view.AttentionReason = "stalled_cycle"
-	case view.Activity != nil && (*view.Activity == "queued" || *view.Activity == "running"):
+	case view.CycleInProgress:
+		// Durable work still in its resume window is the current outcome even
+		// when a live application status lookup is unavailable.
+	case view.Activity != nil && (*view.Activity == "queued" || *view.Activity == "running" || *view.Activity == "in_progress"):
 		// Only current queued/running work supersedes an older result. An
 		// unavailable activity lookup cannot erase a known outcome.
 	case budgetSkipAlertKey != "":
 		// This persisted marker records the last scheduled budget skip; it does
 		// not predict whether changed DNS answers or budgets block the next run.
 		view.AttentionReason = "probe_budget_skipped"
-	case historyAvailable && execution.LatestAttempt != nil:
+	case historyAvailable && execution.LatestAttempt != nil && !view.CycleInProgress:
 		switch execution.LatestAttempt.Status {
 		case "failed", "timed_out":
 			view.AttentionReason = "failed"

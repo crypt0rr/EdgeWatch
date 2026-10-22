@@ -84,9 +84,11 @@ type ScanCycleSummary struct {
 	CompletedProbes    int64
 	StartedAt          time.Time
 	UpdatedAt          time.Time
-	ExpiresAt          time.Time
-	FinishedAt         time.Time
-	LastError          string
+	// LastProgressAt comes from the newest completed work-unit checkpoint.
+	LastProgressAt time.Time
+	ExpiresAt      time.Time
+	FinishedAt     time.Time
+	LastError      string
 }
 
 // ScanCycleUnit is one independently persisted Nmap invocation.
@@ -961,9 +963,14 @@ func (ts *TenantStore) ListActiveScanCycleSummaries(ctx context.Context, include
 	if err := ts.ready(); err != nil {
 		return nil, err
 	}
-	rows, err := ts.store.reader().QueryContext(ctx, `SELECT c.id,c.job_id,c.job_revision,c.status,c.attempt_count,c.no_progress_attempts,c.total_units,c.completed_units,c.total_probes,c.completed_probes,c.started_at,c.updated_at,c.expires_at,c.finished_at,c.last_error
+	rows, err := ts.store.reader().QueryContext(ctx, `SELECT c.id,c.job_id,c.job_revision,c.status,c.attempt_count,c.no_progress_attempts,c.total_units,c.completed_units,c.total_probes,c.completed_probes,c.started_at,c.updated_at,
+ COALESCE((SELECT MAX(u.finished_at) FROM scan_cycle_units u
+ JOIN scan_cycles pc ON pc.id=u.cycle_id
+ JOIN jobs pj ON pj.id=pc.job_id AND pj.tenant_id=?
+ WHERE u.cycle_id=c.id AND u.status='completed'),'') AS last_progress_at,
+ c.expires_at,c.finished_at,c.last_error
  FROM scan_cycles c JOIN jobs j ON j.id=c.job_id AND j.tenant_id=?
- WHERE c.status IN ('running','paused','stalled') AND (?=1 OR j.archived=0)`, ts.scope.id, boolInt(includeArchived))
+ WHERE c.status IN ('running','paused','stalled') AND (?=1 OR j.archived=0)`, ts.scope.id, ts.scope.id, boolInt(includeArchived))
 	if err != nil {
 		return nil, err
 	}
@@ -971,11 +978,11 @@ func (ts *TenantStore) ListActiveScanCycleSummaries(ctx context.Context, include
 	out := make(map[string]ScanCycleSummary)
 	for rows.Next() {
 		var cycle ScanCycleSummary
-		var started, updated, expires, finished string
-		if err := rows.Scan(&cycle.ID, &cycle.JobID, &cycle.JobRevision, &cycle.Status, &cycle.AttemptCount, &cycle.NoProgressAttempts, &cycle.TotalUnits, &cycle.CompletedUnits, &cycle.TotalProbes, &cycle.CompletedProbes, &started, &updated, &expires, &finished, &cycle.LastError); err != nil {
+		var started, updated, lastProgress, expires, finished string
+		if err := rows.Scan(&cycle.ID, &cycle.JobID, &cycle.JobRevision, &cycle.Status, &cycle.AttemptCount, &cycle.NoProgressAttempts, &cycle.TotalUnits, &cycle.CompletedUnits, &cycle.TotalProbes, &cycle.CompletedProbes, &started, &updated, &lastProgress, &expires, &finished, &cycle.LastError); err != nil {
 			return nil, err
 		}
-		cycle.StartedAt, cycle.UpdatedAt, cycle.ExpiresAt, cycle.FinishedAt = scanTime(started), scanTime(updated), scanTime(expires), scanTime(finished)
+		cycle.StartedAt, cycle.UpdatedAt, cycle.LastProgressAt, cycle.ExpiresAt, cycle.FinishedAt = scanTime(started), scanTime(updated), scanTime(lastProgress), scanTime(expires), scanTime(finished)
 		out[cycle.JobID] = cycle
 	}
 	if err := rows.Err(); err != nil {

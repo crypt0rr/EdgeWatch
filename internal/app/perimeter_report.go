@@ -162,8 +162,9 @@ type PerimeterTotals struct {
 	IPv6Ranges int `json:"ipv6_ranges"`
 	// CannotScanMonitors counts the monitors that touch the perimeter and
 	// are not covering. UnprovenMonitors counts the covering monitors that
-	// touch it and are stale, have a stalled cycle, or whose latest attempt
-	// failed or was incomplete.
+	// touch it and are stale, have a stalled cycle, changed security scope, or
+	// have no successful scan for their current scope, or whose latest attempt
+	// failed or was incomplete without recent resumable progress.
 	CannotScanMonitors int `json:"cannot_scan_monitors"`
 	UnprovenMonitors   int `json:"unproven_monitors"`
 	OutsideTargets     int `json:"outside_targets"`
@@ -195,6 +196,13 @@ type PerimeterMonitorRef struct {
 	Stale        bool   `json:"stale"`
 	StaleReason  string `json:"stale_reason"`
 	StalledCycle bool   `json:"stalled_cycle"`
+	// ScopeChanged means the latest successful scan does not match this
+	// monitor's current security scope. Name and schedule edits do not set it.
+	ScopeChanged bool `json:"scope_changed,omitempty"`
+	// Cycle progress is shown separately from failed or unproven coverage.
+	CycleInProgress     bool `json:"cycle_in_progress,omitempty"`
+	CycleCompletedUnits int  `json:"cycle_completed_units,omitempty"`
+	CycleTotalUnits     int  `json:"cycle_total_units,omitempty"`
 	// LastAttemptStatus is the status of the latest scan, or empty.
 	LastAttemptStatus string     `json:"last_attempt_status"`
 	LastSuccessAt     *time.Time `json:"last_success_at"`
@@ -275,11 +283,14 @@ type PerimeterModeFlags struct {
 // they hold, the probes a run of them is estimated to send, and the exact
 // protocol settings the console applies to the new monitor.
 type PerimeterSuggestion struct {
-	Mode            string            `json:"mode"`
-	Targets         []string          `json:"targets"`
-	Addresses       int               `json:"addresses"`
-	EstimatedProbes int64             `json:"estimated_probes"`
-	Protocol        PerimeterProtocol `json:"protocol"`
+	Mode            string   `json:"mode"`
+	Targets         []string `json:"targets"`
+	Addresses       int      `json:"addresses"`
+	EstimatedProbes int64    `json:"estimated_probes"`
+	// MinimumDurationSeconds is Full TCP's probe-rate lower bound. It excludes
+	// response time, retries, and Nmap confirmation.
+	MinimumDurationSeconds int64             `json:"minimum_duration_seconds,omitempty"`
+	Protocol               PerimeterProtocol `json:"protocol"`
 }
 
 // PerimeterProtocol is the protocol setting of a suggestion mode. Protocol is
@@ -510,6 +521,11 @@ func (a *App) readPerimeterState(ctx context.Context, ts *store.TenantStore) (pe
 		if attempt := execution.LatestAttempt; attempt != nil {
 			monitor.ref.LastAttemptStatus = attempt.Status
 		}
+		if success := execution.LatestSuccessfulScan; success != nil {
+			currentHash := record.Job.SecurityHash()
+			legacyHash := record.Job.LegacySecurityHash()
+			monitor.ref.ScopeChanged = success.ConfigHash != currentHash && (legacyHash == "" || success.ConfigHash != legacyHash)
+		}
 		// The watchdog measures silence from the latest of the job's
 		// creation, its eligibility and its latest successful scan.
 		reference := record.CreatedAt
@@ -524,9 +540,18 @@ func (a *App) readPerimeterState(ctx context.Context, ts *store.TenantStore) (pe
 			}
 		}
 		if monitor.ref.State == perimeterCovering {
-			monitor.ref.Stale, monitor.ref.StaleReason = perimeterStale(parser, record.Job, reference, state.now)
+			var silenceThreshold time.Duration
+			monitor.ref.Stale, monitor.ref.StaleReason, silenceThreshold = perimeterStale(parser, record.Job, reference, state.now)
 			cycle, active := cycles[record.ID]
 			monitor.ref.StalledCycle = active && cycle.Status == "stalled"
+			if active && ScanCycleHasRecentProgress(cycle, state.now, silenceThreshold) {
+				attempt := execution.LatestAttempt
+				if attempt != nil && attempt.Resumable && attempt.CycleID == cycle.ID && attempt.CycleStatus == "paused" {
+					monitor.ref.CycleInProgress = true
+					monitor.ref.CycleCompletedUnits = cycle.CompletedUnits
+					monitor.ref.CycleTotalUnits = cycle.TotalUnits
+				}
+			}
 			for _, bucket := range perimeterJobBuckets(record.Job) {
 				covered[bucket] = append(covered[bucket], monitor.ranges...)
 			}
@@ -594,17 +619,23 @@ func (a *App) classifyPerimeterMonitor(state *perimeterState, record store.JobRe
 	return monitor, nil
 }
 
-// unproven reports a covering monitor that has not proven its coverage: it
-// is stale, its cycle is stalled, or its latest attempt failed, timed out or
-// was incomplete. The latest attempt is the newest scan, so such an attempt
-// is newer than the last success.
+// unproven reports a covering monitor that has not proven its current scope:
+// it has no successful scan for that scope, is stale, its cycle is stalled,
+// or its latest attempt failed, timed out or was incomplete without recent
+// resumable progress. Progress only preserves existing coverage proof; it
+// cannot establish coverage before the first successful scan.
 func (m perimeterMonitor) unproven() bool {
 	if m.ref.State != perimeterCovering {
 		return false
 	}
-	switch m.ref.LastAttemptStatus {
-	case "failed", "timed_out", "incomplete":
+	if m.ref.ScopeChanged || m.ref.LastSuccessAt == nil {
 		return true
+	}
+	if !m.ref.CycleInProgress {
+		switch m.ref.LastAttemptStatus {
+		case "failed", "timed_out", "incomplete":
+			return true
+		}
 	}
 	return m.ref.Stale || m.ref.StalledCycle
 }
@@ -615,19 +646,19 @@ func (m perimeterMonitor) unproven() bool {
 // for a running scan: the coverage is unproven until that scan succeeds. A
 // schedule that gives the watchdog no threshold, such as one that never
 // fires, is stale too, because nothing ever scans it on schedule.
-func perimeterStale(parser cron.Parser, job config.Job, reference, now time.Time) (bool, string) {
+func perimeterStale(parser cron.Parser, job config.Job, reference, now time.Time) (bool, string, time.Duration) {
 	if reference.IsZero() {
 		// The watchdog skips a job without a reference.
-		return false, ""
+		return false, "", 0
 	}
 	threshold, err := jobSilenceThreshold(parser, job, reference)
 	if err != nil {
-		return true, perimeterStaleNeverFires
+		return true, perimeterStaleNeverFires, 0
 	}
 	if now.Sub(reference) >= threshold {
-		return true, perimeterStaleOverdue
+		return true, perimeterStaleOverdue, threshold
 	}
-	return false, ""
+	return false, "", threshold
 }
 
 // perimeterJobBuckets returns the buckets a job's protocols fill: full TCP
@@ -747,6 +778,17 @@ func perimeterSuggestion(preset perimeterPreset, set []netip.Prefix) (PerimeterS
 		return PerimeterSuggestion{}, err
 	}
 	suggestion.EstimatedProbes = estimate.Probes
+	if preset.mode == "full_tcp" {
+		// The built-in Naabu profile rate gives only a lower bound: host
+		// response time, retries and Nmap enrichment can extend a real run.
+		rate := int64(config.BuiltinNaabuProfile().Naabu.Rate)
+		if rate > 0 && estimate.NaabuProbes > 0 {
+			suggestion.MinimumDurationSeconds = estimate.NaabuProbes / rate
+			if estimate.NaabuProbes%rate != 0 {
+				suggestion.MinimumDurationSeconds++
+			}
+		}
+	}
 	return suggestion, nil
 }
 

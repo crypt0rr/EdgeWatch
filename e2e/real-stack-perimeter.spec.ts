@@ -88,17 +88,19 @@ test('a monitor created from a perimeter suggestion covers the range until it is
     expect(saved.body.job).toMatchObject({ name: monitorName, schedule: '0 3 1 1 *', targets: [range], max_expanded_hosts: 256, allow_high_cost: false, tcp: { engine: 'nmap', ports: '22,443', mode: 'connect', service_detection: false } })
     expect(saved.body.job.udp ?? null).toBeNull()
 
-    // Its configuration covers every address on any TCP port, and a new
-    // monitor is not stale before its first scheduled run is due.
+    // Its configuration covers every address on any TCP port. A new monitor
+    // is unproven until its first successful scan, but not stale before its
+    // first scheduled run is due.
     await navigateFromShell(page, 'Perimeter')
     await expectSummary(page, { full: 0, any: 256, udp: 0 })
     await expect(rangeRow(page).locator('.perimeter-coverage-value')).toHaveText(['0%', '100%', '0%'])
-    await expect(rangeRow(page).getByRole('list', { name: `Monitors of ${range}` }).getByRole('listitem')).toHaveText(['Covering 1'])
+    await expect(rangeRow(page).getByRole('list', { name: `Monitors of ${range}` }).getByRole('listitem')).toHaveText(['Covering 1', 'Not proven 1'])
     await expect(page.getByRole('region', { name: 'Monitors that cannot scan' })).toContainText('Every monitor that touches the perimeter can scan.')
-    await expect(page.getByRole('region', { name: 'Coverage not proven' })).toContainText('Every covering monitor that touches the perimeter has proven its coverage.')
     const covering = await callAPI(page, '/perimeter', 'GET', csrf)
     expect(covering.body.monitors).toEqual([expect.objectContaining({ job_id: jobID, name: monitorName, state: 'covering', reasons: [], stale: false, stalled_cycle: false, last_attempt_status: '', last_success_at: null, protocols: ['any_tcp'] })])
-    expect(covering.body.totals).toMatchObject({ covered_full_tcp: 0, covered_any_tcp: 256, covered_udp: 0, cannot_scan_monitors: 0, unproven_monitors: 0, outside_targets: 0 })
+    expect(covering.body.totals).toMatchObject({ covered_full_tcp: 0, covered_any_tcp: 256, covered_udp: 0, cannot_scan_monitors: 0, unproven_monitors: 1, outside_targets: 0 })
+    await expect(page.getByRole('region', { name: 'Coverage not proven' })).toContainText(monitorName)
+    await expect(summaryCard(page, 'Coverage not proven').locator('strong')).toHaveText('1')
 
     // Pause the monitor from its job page.
     await page.getByRole('link', { name: range, exact: true }).click()

@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { APIError } from '../../api'
 import { perimeterMonitor } from '../../test/perimeter-fixtures'
 import { declareResultMessage, parsePerimeterLines } from './DeclareRanges'
-import { countLabel, CoverageShare, formatCount, formatShare, ipv6Explanation, isNotFound, kindLabel, monitorStateLabel, monitorStateTone, reasonDescription, unprovenReasons } from './presentation'
+import { countLabel, CoverageShare, formatCount, formatMinimumScanDuration, formatShare, ipv6Explanation, isNotFound, kindLabel, monitorStateLabel, monitorStateTone, reasonDescription, unprovenReasons } from './presentation'
 
 describe('perimeter presentation', () => {
   it('formats shares rounded down, so partial coverage never reads 100% and some coverage never reads 0%', () => {
@@ -26,6 +26,11 @@ describe('perimeter presentation', () => {
     expect(formatCount(Number.MAX_SAFE_INTEGER)).toBe('at least 9,007,199,254,740,991')
     expect(countLabel(1, 'address', 'addresses')).toBe('1 address')
     expect(countLabel(0, 'monitor')).toBe('0 monitors')
+  })
+
+  it('formats the Full TCP lower-bound duration for display', () => {
+    expect(formatMinimumScanDuration(16_777)).toBe('4h 39m 37s')
+    expect(formatMinimumScanDuration(60)).toBe('1m')
   })
 
   it('derives the IPv6 block that one monitor can scan from scanner.max_job_hosts', () => {
@@ -51,7 +56,12 @@ describe('perimeter presentation', () => {
     expect(unprovenReasons(perimeterMonitor())).toEqual([])
     expect(unprovenReasons(perimeterMonitor({ state: 'paused', stale: true, stalled_cycle: true, last_attempt_status: 'failed' }))).toEqual([])
     expect(unprovenReasons(perimeterMonitor({ stale: true, stale_reason: 'overdue', last_success_at: null }))).toEqual(['Not scanned yet'])
+    expect(unprovenReasons(perimeterMonitor({ last_success_at: null }))).toEqual(['Not scanned yet'])
     expect(unprovenReasons(perimeterMonitor({ stale: true, stale_reason: 'schedule never fires', last_success_at: '2026-10-19T08:00:00Z' }))).toEqual(['Schedule never fires', expect.stringMatching(/^Last successful scan .*2026/)])
+    expect(unprovenReasons(perimeterMonitor({ scope_changed: true }))).toEqual(['Not scanned since its security scope changed'])
+    expect(unprovenReasons(perimeterMonitor({ cycle_in_progress: true, last_attempt_status: 'timed_out' }))).toEqual([])
+    expect(unprovenReasons(perimeterMonitor({ cycle_in_progress: true, last_attempt_status: 'timed_out', last_success_at: null }))).toEqual(['Not scanned yet'])
+    expect(unprovenReasons(perimeterMonitor({ scope_changed: true, cycle_in_progress: true, last_attempt_status: 'timed_out' }))).toEqual(['Not scanned since its security scope changed'])
     expect(unprovenReasons(perimeterMonitor({ last_attempt_status: 'canceled' }))).toEqual([])
   })
 

@@ -134,13 +134,29 @@ lists it when it:
   schedule never fires is stale;
 - has a stalled scan cycle, which scheduled runs skip until someone retries it
   or its resume window ends;
+- has a successful scan whose security hash does not match its current scan
+  security scope. That scope includes settings such as its targets, protocol
+  settings, `max_expanded_hosts`, and `assume_alive`. Renaming a monitor or
+  changing its schedule does not invalidate this proof; a successful scan
+  with the current scope does;
 - has a latest attempt that failed, timed out, or was incomplete.
 
 The list says **Not scanned yet**, **No successful scan since** a date,
 **Schedule never fires**, **Scan cycle stalled**, **Last attempt failed**,
-**Last attempt timed out**, or **Last attempt incomplete**. Unlike the job
-silence alert, which waits while a scan holds the job, a scan that is still
-running does not stop a monitor from being stale.
+**Last attempt timed out**, or **Last attempt incomplete**, plus
+**Not scanned since its security scope changed** when the last success belongs
+to an older security scope. A current resumable cycle with completed
+work inside its resume window and a recent completed-work checkpoint is shown
+separately as **Scan cycles in progress** and does not turn its recent timed-out
+attempt into a failed result. The cycle's last completed-work checkpoint, not
+its lifecycle update time, controls progress freshness, so starting or pausing
+an attempt without completing another work unit does not refresh it. The report
+marks the monitor's coverage unproven until a successful scan matches its
+current security scope. Stalled or expired cycles and saved work whose
+last checkpoint is no longer recent do not get this in-progress status. Three
+consecutive timed-out attempts without a completed unit still stall the cycle.
+Unlike the job silence alert, which waits while a scan holds the job, a scan
+that is still running does not stop a monitor from being stale.
 
 ### Coverage buckets
 
@@ -272,8 +288,14 @@ its high-cost ceiling. When one address does not fit the budget, the mode
 has no suggestions and the page says that the unit's probe budget is too
 small for one address in that mode.
 
-Each suggestion shows its estimated probe count. It shows no scan duration,
-because the estimate does not predict time.
+Each suggestion shows its estimated probe count. Full TCP also shows a
+lower-bound duration at the built-in Naabu rate of 1,000 probes per second.
+This estimate excludes host response time, retries, and Nmap confirmation, so
+an actual scan can take longer. It does not impose a scan timeout or change
+runtime timeout semantics. When the lower bound exceeds the guided setup's
+current timeout but fits its existing resume window, setup raises the timeout
+draft to that lower bound rounded up to a whole minute. It does not extend the
+resume window; if the estimate does not fit, the timeout draft is left as is.
 
 ### Packing
 

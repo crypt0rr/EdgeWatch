@@ -188,6 +188,29 @@ func jobSilenceThreshold(parser cron.Parser, job config.Job, reference time.Time
 	return threshold, nil
 }
 
+// JobSilenceThreshold exposes the same schedule-aware watchdog window to
+// status projections that need to distinguish current scan-cycle progress
+// from old resumable work.
+func JobSilenceThreshold(parser cron.Parser, job config.Job, reference time.Time) (time.Duration, error) {
+	return jobSilenceThreshold(parser, job, reference)
+}
+
+// ScanCycleHasRecentProgress reports whether a durable cycle has completed
+// work, remains inside its resume window, and has a completed work-unit
+// checkpoint within the existing schedule-aware job-silence window.
+func ScanCycleHasRecentProgress(cycle store.ScanCycleSummary, now time.Time, threshold time.Duration) bool {
+	if threshold <= 0 || cycle.LastProgressAt.IsZero() || (cycle.Status != "paused" && cycle.Status != "running") {
+		return false
+	}
+	if (cycle.CompletedUnits <= 0 && cycle.CompletedProbes <= 0) || cycle.TotalUnits <= cycle.CompletedUnits {
+		return false
+	}
+	if !cycle.ExpiresAt.IsZero() && !now.Before(cycle.ExpiresAt) {
+		return false
+	}
+	return cycle.LastProgressAt.After(now.Add(-threshold))
+}
+
 // cronInterval derives the interval between the two most recent occurrences
 // without scanning every minute in a long schedule. An exponentially widening
 // lookback finds a window containing an occurrence, then cron.Next walks only

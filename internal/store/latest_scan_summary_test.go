@@ -77,9 +77,9 @@ func TestListJobExecutionSummariesSeparatesLatestAttemptAndSuccess(t *testing.T)
 		t.Fatal(err)
 	}
 	for _, scan := range []model.Scan{
-		{ID: "history-success-a", JobID: withHistory.ID, Job: withHistory.Job.Name, StartedAt: stamp, FinishedAt: stamp, Status: "success"},
-		{ID: "history-success-z", JobID: withHistory.ID, Job: withHistory.Job.Name, StartedAt: stamp, FinishedAt: stamp, Status: "success"},
-		{ID: "history-incomplete", JobID: withHistory.ID, Job: withHistory.Job.Name, StartedAt: stamp.Add(time.Minute), FinishedAt: stamp.Add(time.Minute), Status: "incomplete"},
+		{ID: "history-success-a", JobID: withHistory.ID, Job: withHistory.Job.Name, StartedAt: stamp, FinishedAt: stamp, Status: "success", ConfigHash: "old-scope"},
+		{ID: "history-success-z", JobID: withHistory.ID, Job: withHistory.Job.Name, StartedAt: stamp, FinishedAt: stamp, Status: "success", ConfigHash: "successful-scope"},
+		{ID: "history-incomplete", JobID: withHistory.ID, Job: withHistory.Job.Name, StartedAt: stamp.Add(time.Minute), FinishedAt: stamp.Add(time.Minute), Status: "incomplete", ConfigHash: "attempt-scope", CycleID: "resumable-cycle", CycleStatus: "paused", Resumable: true},
 		{ID: "no-success-failed", JobID: noSuccess.ID, Job: noSuccess.Job.Name, StartedAt: stamp, FinishedAt: stamp, Status: "failed", Error: "must not be returned"},
 		{ID: "later-success-failed", JobID: laterSuccess.ID, Job: laterSuccess.Job.Name, StartedAt: stamp, FinishedAt: stamp, Status: "failed"},
 		{ID: "later-success-won", JobID: laterSuccess.ID, Job: laterSuccess.Job.Name, StartedAt: stamp.Add(time.Minute), FinishedAt: stamp.Add(time.Minute), Status: "success"},
@@ -99,6 +99,12 @@ func TestListJobExecutionSummariesSeparatesLatestAttemptAndSuccess(t *testing.T)
 	}
 	if summary := got[withHistory.ID]; summary.LatestAttempt == nil || summary.LatestAttempt.ID != "history-incomplete" || summary.LatestSuccessfulScan == nil || summary.LatestSuccessfulScan.ID != "history-success-z" {
 		t.Fatalf("latest attempt/success = %#v; want incomplete and deterministic latest success", summary)
+	}
+	if attempt := got[withHistory.ID].LatestAttempt; attempt.ConfigHash != "attempt-scope" || attempt.CycleID != "resumable-cycle" || attempt.CycleStatus != "paused" || !attempt.Resumable {
+		t.Fatalf("latest attempt cycle metadata = %+v; want matching resumable attempt details", attempt)
+	}
+	if success := got[withHistory.ID].LatestSuccessfulScan; success.ConfigHash != "successful-scope" {
+		t.Fatalf("latest successful config hash = %q, want successful-scope", success.ConfigHash)
 	}
 	if summary := got[noSuccess.ID]; summary.LatestAttempt == nil || summary.LatestAttempt.ID != "no-success-failed" || summary.LatestSuccessfulScan != nil {
 		t.Fatalf("failed-only job summary = %#v; want latest attempt and no success", summary)

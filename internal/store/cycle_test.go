@@ -86,6 +86,56 @@ func TestListCompletedScanCycleDurationsSumsAttemptsAndExcludesPause(t *testing.
 	}
 }
 
+func TestListCompletedScanCycleDurationsUsesOnlyCurrentJobRevision(t *testing.T) {
+	t.Parallel()
+	ctx, s, job, _ := cycleFixture(t)
+	defer s.Close()
+	stamp := func(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
+	started := time.Now().UTC().Add(-2 * time.Hour)
+	finished := started.Add(time.Minute)
+	cycleID := "old-revision-demand-cycle"
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,total_units,total_probes,started_at,updated_at,expires_at,finished_at)
+		VALUES(?,?,?,?,?,?,?,'completed',0,0,?,?,?,?)`, cycleID, job.ID, job.Job.Name, job.Revision, job.Job.SecurityHash(), job.Job.ExecutionHash(), []byte(`{}`), stamp(started), stamp(finished), stamp(finished), stamp(finished)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.System().SaveScan(ctx, model.Scan{
+		ID: "old-revision-cycle-scan", JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
+		StartedAt: started, FinishedAt: finished, Status: "success", ConfigHash: job.Job.SecurityHash(),
+		CycleID: cycleID, CycleAttempt: 1, CycleStatus: "completed", Resumable: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	standaloneStarted := started.Add(time.Minute)
+	if err := s.System().SaveScan(ctx, model.Scan{
+		ID: "old-revision-standalone-scan", JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
+		StartedAt: standaloneStarted, FinishedAt: standaloneStarted.Add(30 * time.Second), Status: "success", ConfigHash: job.Job.SecurityHash(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	changedJob := job.Job
+	changedJob.Name = "cycle-revision-demand-renamed"
+	updated, _, err := defaultTenant(s).UpdateJob(ctx, job.ID, job.Revision, changedJob, job.Enabled, job.Archived, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentStarted := started.Add(2 * time.Minute)
+	if err := s.System().SaveScan(ctx, model.Scan{
+		ID: "current-revision-standalone-scan", JobID: updated.ID, Job: updated.Job.Name, JobRevision: updated.Revision,
+		StartedAt: currentStarted, FinishedAt: currentStarted.Add(2 * time.Minute), Status: "success", ConfigHash: updated.Job.SecurityHash(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	durations, err := defaultTenant(s).ListCompletedScanCycleDurations(ctx, 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := durations[job.ID]; len(got) != 1 || got[0] != 2*time.Minute {
+		t.Fatalf("completed samples after job revision %d = %v; want only its 2m sample, excluding the earlier cycle and standalone scan", updated.Revision, got)
+	}
+}
+
 func TestFinalizeManagedScanRejectsSecondPromotionOfCompletedCycle(t *testing.T) {
 	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)

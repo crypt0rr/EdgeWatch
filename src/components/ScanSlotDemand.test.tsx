@@ -35,6 +35,7 @@ describe('ScanSlotDemandNotice', () => {
     expect(screen.getByText(/298\.3 slot-hours\/day/)).toBeInTheDocument()
     expect(screen.getByText(/estimate cannot fully bound, so actual demand may be higher/)).toBeInTheDocument()
     expect(screen.getByText(/configured maximum scanner rates, as a lower bound/)).toBeInTheDocument()
+    expect(screen.getByText(/samples from its current revision/)).toBeInTheDocument()
   })
 
   it('shows an estimate without a warning below the 80 percent threshold', async () => {

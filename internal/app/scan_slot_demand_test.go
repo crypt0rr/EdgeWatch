@@ -68,7 +68,7 @@ func TestScanSlotDemandUsesCompletedSingleUnitNmapScanWithoutCycle(t *testing.T)
 	started := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	finished := started.Add(25 * time.Minute)
 	if err := db.System().SaveScan(ctx, model.Scan{
-		ID: "single-unit-nmap-scan", JobID: record.ID, Job: record.Job.Name,
+		ID: "single-unit-nmap-scan", JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision,
 		StartedAt: started, FinishedAt: finished, Status: "success", ScannerEngine: config.EngineNmap,
 		ConfigHash: record.Job.SecurityHash(),
 	}); err != nil {
@@ -94,6 +94,67 @@ func TestScanSlotDemandUsesCompletedSingleUnitNmapScanWithoutCycle(t *testing.T)
 	}
 	if demand.UtilizationPercent < 80 || demand.OverCapacity {
 		t.Fatalf("capacity comparison = %+v; want an 80%% warning without exceeding one slot", demand)
+	}
+}
+
+func TestScanSlotDemandIgnoresOlderRevisionSamplesAfterScopeAndRateEdit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	ts := defaultTenant(db)
+	job := config.NormalizeJob(config.Job{
+		Name:     "revision-demand",
+		Schedule: "*/30 * * * *",
+		Timezone: "UTC",
+		Targets:  []string{"192.0.2.1"},
+		TCP:      &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{Rate: 1000}},
+	})
+	record, err := ts.CreateJobWithEnabled(ctx, job, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < scanSlotDemandHistoryLimit; i++ {
+		insertCompletedCycle(t, db, record.ID, record.Job.Name, record.Revision, fmt.Sprintf("old-revision-demand-%02d", i), time.Second)
+	}
+	app := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}
+	before, err := app.ScanSlotDemand(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.HistoryJobs != 1 || before.LowerBoundJobs != 0 || before.OverCapacity {
+		t.Fatalf("demand before revision edit = %+v; want short history to be used", before)
+	}
+
+	changedJob := record.Job
+	changedJob.Targets = []string{"192.0.2.0/24"}
+	changedJob.TCP = &config.Protocol{
+		Engine: config.EngineNaabuNmap,
+		Ports:  "1-65535",
+		Naabu:  &config.NaabuOptions{Rate: 100},
+	}
+	updated, _, err := ts.UpdateJob(ctx, record.ID, record.Revision, changedJob, true, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Revision == record.Revision {
+		t.Fatalf("material scope/rate edit kept revision %d", record.Revision)
+	}
+
+	after, err := app.ScanSlotDemand(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lowerBound, hasBound, _ := scanRateLowerBound(updated.Job)
+	runsPerDay, ok := scanJobRunsPerDay(updated.Job, app.Config.Timezone)
+	if !hasBound || !ok {
+		t.Fatalf("updated job lower bound/schedule = %.2f seconds, known %v, schedule valid %v", lowerBound, hasBound, ok)
+	}
+	want := lowerBound * runsPerDay
+	if after.HistoryJobs != 0 || after.LowerBoundJobs != 1 || math.Abs(after.EstimatedSlotSecondsPerDay-want) > 0.01 {
+		t.Fatalf("demand after scope/rate edit = %+v; want current-revision lower bound %.2f seconds/day", after, want)
+	}
+	if after.UtilizationPercent < 80 || !after.OverCapacity {
+		t.Fatalf("capacity warning after scope/rate edit = %+v; want the larger current-revision demand to exceed capacity", after)
 	}
 }
 

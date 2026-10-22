@@ -983,11 +983,12 @@ func (ts *TenantStore) ListActiveScanCycleSummaries(ctx context.Context, include
 }
 
 // ListCompletedScanCycleDurations returns the most recent completed scan
-// duration samples for each job in the tenant. A completed cycle's sample is
-// the sum of its recorded scan attempts, so time between attempts is excluded.
-// A completed scan without a cycle is its own sample. The pinned plan and
-// per-unit checkpoints are deliberately not loaded, and the tenant predicate
-// is part of every query branch.
+// duration samples for each job's current revision in the tenant. A completed
+// cycle's sample is the sum of its recorded scan attempts, so time between
+// attempts is excluded. A completed scan without a cycle is its own sample.
+// Older revisions remain in scan history but cannot describe the current
+// revision's demand. The pinned plan and per-unit checkpoints are deliberately
+// not loaded, and the tenant predicate is part of every query branch.
 func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, perJobLimit int) (map[string][]time.Duration, error) {
 	if err := ts.ready(); err != nil {
 		return nil, err
@@ -1001,7 +1002,7 @@ func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, perJ
 			FROM scans AS s
 			JOIN scan_cycles AS c ON c.id=s.cycle_id AND c.job_id=s.job_id
 			JOIN jobs AS j ON j.id=c.job_id AND j.tenant_id=?
-			WHERE s.tenant_id=? AND c.status='completed'
+			WHERE s.tenant_id=? AND c.status='completed' AND c.job_revision=j.revision
 				AND s.started_at<>'' AND s.finished_at<>''
 				AND julianday(s.finished_at)>julianday(s.started_at)
 			UNION ALL
@@ -1010,6 +1011,7 @@ func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, perJ
 			JOIN jobs AS j ON j.id=s.job_id AND j.tenant_id=?
 			WHERE s.tenant_id=? AND COALESCE(s.cycle_id,'')=''
 				AND s.status IN ('success','incomplete')
+				AND s.job_revision=j.revision
 				AND s.started_at<>'' AND s.finished_at<>''
 				AND julianday(s.finished_at)>julianday(s.started_at)
 		), sample_candidates AS (

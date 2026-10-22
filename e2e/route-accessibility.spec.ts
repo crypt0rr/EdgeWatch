@@ -5,6 +5,11 @@ import { mockConsole, rolePermissions, type ConsoleRole } from './mock-console'
 
 const roles: ConsoleRole[] = ['administrator', 'operator', 'viewer', 'platform_admin']
 const auditedProjects = new Set(['desktop', 'mobile-narrow', 'iphone-13'])
+const routeBatchSize = 6
+const routeBatches = Array.from(
+  { length: Math.ceil(allConsoleRoutes.length / routeBatchSize) },
+  (_, index) => allConsoleRoutes.slice(index * routeBatchSize, (index + 1) * routeBatchSize),
+)
 
 async function expectProjectDevice(page: Page, testInfo: TestInfo) {
   const { viewport } = testInfo.project.use
@@ -34,35 +39,36 @@ function routeIsRenderedForRole(role: ConsoleRole, routePath: string) {
 }
 
 for (const role of roles) {
-  test(`axe audits every rendered console route for ${role}`, async ({ page }, testInfo) => {
-    test.skip(!auditedProjects.has(testInfo.project.name), 'The complete route matrix runs at desktop, narrow-mobile, and iPhone 13 widths; Pixel 7 covers additional phone regressions.')
-    test.setTimeout(180_000)
+  for (const [batchIndex, routes] of routeBatches.entries()) {
+    test(`axe route batch ${batchIndex + 1}/${routeBatches.length} checks every rendered console route for ${role}`, async ({ page }, testInfo) => {
+      test.skip(!auditedProjects.has(testInfo.project.name), 'The complete route matrix runs at desktop, narrow-mobile, and iPhone 13 widths; Pixel 7 covers additional phone regressions.')
 
-    await expectProjectDevice(page, testInfo)
-    await mockConsole(page, role)
+      await expectProjectDevice(page, testInfo)
+      await mockConsole(page, role)
 
-    for (const route of allConsoleRoutes) {
-      await page.goto(route.path)
-      const expectedPath = expectedConsolePath(role, route)
-      await expect.poll(() => new URL(page.url()).pathname).toBe(expectedPath)
+      for (const route of routes) {
+        await page.goto(route.path)
+        const expectedPath = expectedConsolePath(role, route)
+        await expect.poll(() => new URL(page.url()).pathname).toBe(expectedPath)
 
-      // A role that cannot open a page is sent to its permitted home or
-      // fallback. The route matrix checks every requested path and final
-      // destination; axe runs on pages the role can actually see.
-      if (!routeIsRenderedForRole(role, route.path) || expectedPath !== route.path) continue
+        // A role that cannot open a page is sent to its permitted home or
+        // fallback. The route matrix checks every requested path and final
+        // destination; axe runs on pages the role can actually see.
+        if (!routeIsRenderedForRole(role, route.path) || expectedPath !== route.path) continue
 
-      const content = page.locator('#main-content .content')
-      await expect(content.locator('.page').last()).toBeVisible()
-      await page.waitForLoadState('networkidle')
-      await expect(content.locator('.loading, .skeleton-list')).toHaveCount(0)
+        const content = page.locator('#main-content .content')
+        await expect(content.locator('.page').last()).toBeVisible()
+        await page.waitForLoadState('networkidle')
+        await expect(content.locator('.loading, .skeleton-list')).toHaveCount(0)
 
-      const results = await new AxeBuilder({ page }).analyze()
-      const labelMismatches = results.violations.filter(violation => violation.id === 'label-content-name-mismatch')
-      const blocking = results.violations.filter(violation => violation.impact === 'serious' || violation.impact === 'critical')
-      expect(labelMismatches, `${role} on ${route.path} has visible link or button text missing from its accessible name`).toEqual([])
-      expect(blocking, `${role} on ${route.path}: ${blocking.map(violation => `${violation.id} (${violation.impact})`).join(', ')}`).toEqual([])
-    }
-  })
+        const results = await new AxeBuilder({ page }).analyze()
+        const labelMismatches = results.violations.filter(violation => violation.id === 'label-content-name-mismatch')
+        const blocking = results.violations.filter(violation => violation.impact === 'serious' || violation.impact === 'critical')
+        expect(labelMismatches, `${role} on ${route.path} has visible link or button text missing from its accessible name`).toEqual([])
+        expect(blocking, `${role} on ${route.path}: ${blocking.map(violation => `${violation.id} (${violation.impact})`).join(', ')}`).toEqual([])
+      }
+    })
+  }
 }
 
 test('activity error text remains in visible row link names (#1629)', async ({ page }, testInfo) => {

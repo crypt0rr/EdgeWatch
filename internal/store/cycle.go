@@ -985,8 +985,8 @@ func (ts *TenantStore) ListActiveScanCycleSummaries(ctx context.Context, include
 }
 
 // ListCompletedScanCycleDurations returns the most recent completed scan
-// duration samples for each job's current revision in the tenant. A completed
-// cycle's sample is the sum of its recorded earlier attempts and its final
+// duration samples for each active job's current revision in the tenant. A
+// completed cycle's sample is the sum of its recorded earlier attempts and its final
 // attempt's durable start and completion timestamps, so time between attempts
 // is excluded and the final duration survives a crash before scan finalization.
 // Recovery invocations that start after cycle completion are excluded because
@@ -1008,7 +1008,7 @@ func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, perJ
 			FROM scans AS s
 			JOIN scan_cycles AS c ON c.id=s.cycle_id AND c.job_id=s.job_id
 			JOIN jobs AS j ON j.id=c.job_id AND j.tenant_id=?
-			WHERE s.tenant_id=? AND c.status='completed' AND c.job_revision=j.revision
+			WHERE s.tenant_id=? AND j.archived=0 AND c.status='completed' AND c.job_revision=j.revision
 				AND (c.attempt_count=0 OR (s.cycle_attempt>0 AND s.cycle_attempt<c.attempt_count))
 				AND s.started_at<>'' AND s.finished_at<>''
 				AND julianday(s.started_at)<julianday(c.finished_at)
@@ -1018,7 +1018,7 @@ func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, perJ
 				CASE WHEN c.attempt_started_at<>'' THEN c.attempt_started_at ELSE c.started_at END,c.finished_at
 			FROM scan_cycles AS c
 			JOIN jobs AS j ON j.id=c.job_id AND j.tenant_id=?
-			WHERE c.status='completed' AND c.job_revision=j.revision
+			WHERE j.archived=0 AND c.status='completed' AND c.job_revision=j.revision
 				AND (c.attempt_started_at<>'' OR c.attempt_count=1)
 				AND c.finished_at<>''
 				AND julianday(c.finished_at)>julianday(CASE WHEN c.attempt_started_at<>'' THEN c.attempt_started_at ELSE c.started_at END)
@@ -1026,7 +1026,7 @@ func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, perJ
 			SELECT s.job_id,'scan:'||s.id AS sample_id,s.id,s.started_at,s.finished_at
 			FROM scans AS s
 			JOIN jobs AS j ON j.id=s.job_id AND j.tenant_id=?
-			WHERE s.tenant_id=? AND COALESCE(s.cycle_id,'')=''
+			WHERE s.tenant_id=? AND j.archived=0 AND COALESCE(s.cycle_id,'')=''
 				AND s.status IN ('success','incomplete')
 				AND s.job_revision=j.revision
 				AND s.started_at<>'' AND s.finished_at<>''

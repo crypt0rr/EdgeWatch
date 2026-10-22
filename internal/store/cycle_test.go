@@ -23,6 +23,27 @@ func cycleFixture(t *testing.T) (context.Context, *Store, JobRecord, scanner.Wor
 	return ctx, s, job, plan
 }
 
+func TestListCompletedScanCycleDurationsHandlesScopeLimitAndQueryErrors(t *testing.T) {
+	t.Parallel()
+	var missingScope *TenantStore
+	if _, err := missingScope.ListCompletedScanCycleDurations(context.Background(), 11); !errors.Is(err, ErrNoTenantScope) {
+		t.Fatalf("missing tenant scope error = %v, want ErrNoTenantScope", err)
+	}
+
+	s := openTestStore(t)
+	tenant := defaultTenant(s)
+	durations, err := tenant.ListCompletedScanCycleDurations(context.Background(), 0)
+	if err != nil || len(durations) != 0 {
+		t.Fatalf("zero-limit durations = %#v, %v; want an empty result", durations, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tenant.ListCompletedScanCycleDurations(context.Background(), 11); err == nil {
+		t.Fatal("closed-database query succeeded; want the database closed error")
+	}
+}
+
 func TestFinalizeManagedScanRejectsSecondPromotionOfCompletedCycle(t *testing.T) {
 	t.Parallel()
 	ctx, s, job, plan := cycleFixture(t)

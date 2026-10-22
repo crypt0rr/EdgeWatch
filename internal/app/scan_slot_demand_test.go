@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"testing"
@@ -87,6 +88,58 @@ func TestScanJobRunsPerDayUsesSixHourlySchedule(t *testing.T) {
 	}
 }
 
+func TestScanSlotDemandReturnsTenantAndStorageErrors(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	if _, err := (*App)(nil).ScanSlotDemand(ctx, nil); !errors.Is(err, store.ErrNoTenantScope) {
+		t.Fatalf("nil app error = %v, want ErrNoTenantScope", err)
+	}
+	if _, err := (&App{}).ScanSlotDemand(ctx, nil); !errors.Is(err, store.ErrNoTenantScope) {
+		t.Fatalf("nil tenant store error = %v, want ErrNoTenantScope", err)
+	}
+	db := storetest.OpenFresh(t)
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	_, err := (&App{Store: db}).ScanSlotDemand(canceled, defaultTenant(db))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled list-jobs error = %v, want context.Canceled", err)
+	}
+}
+
+func TestMedianCycleDurationAveragesEvenSamples(t *testing.T) {
+	got := medianCycleDuration([]time.Duration{5 * time.Second, time.Second, 3 * time.Second, 9 * time.Second})
+	if want := 4 * time.Second; got != want {
+		t.Fatalf("even-sample median = %s, want %s", got, want)
+	}
+}
+
+func TestScanJobRunsPerDayHandlesFallbackInvalidAndDenseSchedules(t *testing.T) {
+	t.Parallel()
+	t.Run("timezone fallbacks", func(t *testing.T) {
+		job := config.Job{Schedule: "0 */6 * * *", Timezone: "  "}
+		if got, ok := scanJobRunsPerDay(job, " "); !ok || math.Abs(got-4) > 0.001 {
+			t.Fatalf("UTC fallback schedule = %.4f runs/day, valid %v; want 4", got, ok)
+		}
+		if got, ok := scanJobRunsPerDay(config.Job{Schedule: job.Schedule}, "America/New_York"); !ok || math.Abs(got-4) > 0.001 {
+			t.Fatalf("default timezone schedule = %.4f runs/day, valid %v; want 4", got, ok)
+		}
+	})
+	t.Run("invalid timezone and cron", func(t *testing.T) {
+		if _, ok := scanJobRunsPerDay(config.Job{Schedule: "0 * * * *", Timezone: "Mars/Olympus"}, "UTC"); ok {
+			t.Fatal("invalid job timezone was accepted")
+		}
+		if _, ok := scanJobRunsPerDay(config.Job{Schedule: "not cron", Timezone: "UTC"}, ""); ok {
+			t.Fatal("invalid cron schedule was accepted")
+		}
+	})
+	t.Run("dense schedule observation limit", func(t *testing.T) {
+		got, ok := scanJobRunsPerDay(config.Job{Schedule: "* * * * *"}, "")
+		if !ok || got < 1440 || got > 1441 {
+			t.Fatalf("dense schedule = %.4f runs/day, valid %v; want about 1440", got, ok)
+		}
+	})
+}
+
 func TestScanSlotDemandDoesNotCountManualOnlyJobsAsUnestimated(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -125,6 +178,32 @@ func TestScanRateLowerBoundUsesOnlyGuaranteedNmapProbeWork(t *testing.T) {
 	seconds, hasBound, incomplete := scanRateLowerBound(job)
 	if !hasBound || !incomplete || math.Abs(seconds-0.01) > 0.000001 {
 		t.Fatalf("Nmap lower bound = %.6fs, known %v, incomplete %v; want 0.01s for one guaranteed probe at 100/s and service detection marked unestimated", seconds, hasBound, incomplete)
+	}
+}
+
+func TestScanRateLowerBoundHandlesMissingAndUDPScannerRates(t *testing.T) {
+	t.Parallel()
+	if seconds, hasBound, incomplete := scanRateLowerBound(config.Job{}); seconds != 0 || hasBound || incomplete {
+		t.Fatalf("empty scan lower bound = %.2f, known %v, incomplete %v; want no bound and complete", seconds, hasBound, incomplete)
+	}
+	withoutRate := config.Job{Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Engine: config.EngineNmap, Ports: "443"}}
+	if seconds, hasBound, incomplete := scanRateLowerBound(withoutRate); seconds != 0 || hasBound || !incomplete {
+		t.Fatalf("unlimited Nmap lower bound = %.2f, known %v, incomplete %v; want no bound and incomplete", seconds, hasBound, incomplete)
+	}
+	udp := config.Job{Targets: []string{"192.0.2.1"}, UDP: &config.Protocol{
+		Ports: "53", ServiceDetection: true, NmapArgs: []string{"--max-rate=50"},
+	}}
+	if seconds, hasBound, incomplete := scanRateLowerBound(udp); !hasBound || !incomplete || math.Abs(seconds-0.02) > 0.000001 {
+		t.Fatalf("UDP Nmap lower bound = %.6f, known %v, incomplete %v; want 0.02s with service-detection work unestimated", seconds, hasBound, incomplete)
+	}
+}
+
+func TestNmapMaxRateAcceptsBothFormsAndIgnoresInvalidValues(t *testing.T) {
+	if got := nmapMaxRate([]string{"--max-rate=100", "--max-rate", "50", "--max-rate=0", "--max-rate", "bad"}); got != 50 {
+		t.Fatalf("last valid max-rate = %d, want 50", got)
+	}
+	if got := nmapMaxRate([]string{"--max-rate"}); got != 0 {
+		t.Fatalf("missing max-rate value = %d, want 0", got)
 	}
 }
 

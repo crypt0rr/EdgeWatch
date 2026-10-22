@@ -714,6 +714,7 @@ const reviewedReleaseRunForms = new Map([
   ['build', [
     'apk add --no-cache ca-certificates=20260909-r0 git=2.54.0-r0',
     'go mod download',
+    'rm -rf ./internal/webui/dist',
     'if [ "$PREBUILT_EDGEWATCH" = "1" ]; then test -f "/src/release-binaries/linux_${TARGETARCH}/edgewatch" && mkdir -p /out && install -m 0755 "/src/release-binaries/linux_${TARGETARCH}/edgewatch" /out/edgewatch; else CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/edgewatch ./cmd/edgewatch; fi',
   ]],
   ['final', [

@@ -43,7 +43,7 @@ func listPerimeter(ctx context.Context, tenant *store.TenantStore, output string
 // calls the store's transaction. The store commits ranges and the host audit
 // record together, and rejects a declaration with any refused entry.
 func declarePerimeter(ctx context.Context, tenant *store.TenantStore, kind, from string, stdin io.Reader, output string) error {
-	var input io.Reader = stdin
+	input := stdin
 	if from != "-" {
 		file, err := os.Open(from)
 		if err != nil {

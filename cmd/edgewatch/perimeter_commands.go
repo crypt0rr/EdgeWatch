@@ -70,21 +70,16 @@ func declarePerimeter(ctx context.Context, tenant *store.TenantStore, kind, from
 	return printValue(output, perimeterDeclareSummary(result))
 }
 
-// parsePerimeterDeclarationContext closes a closeable input when ctx is
-// canceled, interrupting a Scanner blocked in Read. In particular, this
-// lets command cancellation stop a read from stdin without waiting for its
-// writer to close.
+// parsePerimeterDeclarationContext makes file-backed input cancellation-aware
+// without relying on Close to interrupt a blocked operating-system read.
 func parsePerimeterDeclarationContext(ctx context.Context, input io.Reader, kind string) ([]store.PerimeterEntry, []int, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	var stopClosingInput func() bool
-	if closer, ok := input.(io.Closer); ok {
-		stopClosingInput = context.AfterFunc(ctx, func() { _ = closer.Close() })
-	}
-	entries, lineNumbers, err := parsePerimeterDeclaration(input, kind)
-	if stopClosingInput != nil {
-		stopClosingInput()
+	reader, stop := perimeterInputWithCancellation(ctx, input)
+	entries, lineNumbers, err := parsePerimeterDeclaration(reader, kind)
+	if stop != nil {
+		stop()
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, nil, ctxErr

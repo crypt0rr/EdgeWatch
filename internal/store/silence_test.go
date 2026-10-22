@@ -133,18 +133,25 @@ func TestJobSilenceWatchdogCountsRecentResumableProgressAsActivity(t *testing.T)
 	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET finished_at=? WHERE cycle_id=? AND status='completed'`, now.Add(-time.Minute).Format(time.RFC3339Nano), cycle.ID); err != nil {
 		t.Fatal(err)
 	}
+	var liveLeases int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_leases WHERE job=? AND expires_at>?`, job.ID, sqliteTimestamp(now)).Scan(&liveLeases); err != nil {
+		t.Fatal(err)
+	}
+	if liveLeases != 0 {
+		t.Fatalf("test setup has %d live job leases; want none", liveLeases)
+	}
 	threshold := 2 * time.Hour
 	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || due {
-		t.Fatalf("recent progress silence decision = due %v, err %v; want not due", due, err)
+		t.Fatalf("recent running progress with future expiry silence decision = due %v, err %v; want not due", due, err)
 	}
 	if _, created, err := s.System().RecordJobSilenceAlert(ctx, job.ID, job.Job.Name, reference, now, threshold, nil); err != nil || created {
-		t.Fatalf("recent progress alert = created %v, err %v; want no alert", created, err)
+		t.Fatalf("recent running progress with future expiry alert = created %v, err %v; want no alert", created, err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET expires_at='' WHERE id=?`, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || due {
-		t.Fatalf("recent legacy progress without expiry = due %v, err %v; want not due", due, err)
+	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || !due {
+		t.Fatalf("recent running progress without expiry silence decision = due %v, err %v; want due", due, err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='paused' WHERE id=?`, cycle.ID); err != nil {
 		t.Fatal(err)
@@ -187,6 +194,18 @@ func TestJobSilenceWatchdogCountsRecentResumableProgressAsActivity(t *testing.T)
 	}
 	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || !due {
 		t.Fatalf("expired progress silence decision = due %v, err %v; want due", due, err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='running',config_hash=?,expires_at='',updated_at=? WHERE id=?`, job.Job.SecurityHash(), sqliteTimestamp(now), cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET finished_at=? WHERE cycle_id=? AND status='completed'`, now.Add(-time.Minute).Format(time.RFC3339Nano), cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := s.System().JobSilenceDue(ctx, job.ID, reference, now, threshold); err != nil || !due {
+		t.Fatalf("recent running progress without expiry silence decision = due %v, err %v; want due", due, err)
+	}
+	if _, created, err := s.System().RecordJobSilenceAlert(ctx, job.ID, job.Job.Name, reference, now, threshold, nil); err != nil || !created {
+		t.Fatalf("recent running progress without expiry alert = created %v, err %v; want alert", created, err)
 	}
 }
 

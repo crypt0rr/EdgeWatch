@@ -217,7 +217,7 @@ func jobSilenceDecisionQuery(ctx context.Context, queryer rowQueryer, jobID stri
 	progressCutoff := sqliteTimestamp(now.Add(-threshold))
 	var progressing int
 	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycles
- WHERE job_id=? AND status IN ('running','paused') AND (expires_at='' OR expires_at>?)
+ WHERE job_id=? AND status IN ('running','paused') AND (expires_at>? OR (status='paused' AND expires_at=''))
    AND (config_hash=? OR (?<>'' AND config_hash=?))
 	 AND (completed_units>0 OR completed_probes>0)
 	 AND EXISTS (SELECT 1 FROM scan_cycle_units checkpoint

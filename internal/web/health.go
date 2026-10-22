@@ -383,6 +383,9 @@ func (s *Server) writeMetrics(ctx context.Context, b *bytes.Buffer) {
 				s.Log.Warn("deployment metrics refresh failed", "error", err)
 			}
 		} else {
+			if operational.BackupsEnabled {
+				m.gauge("edgewatch_backup_status_known", "Whether scheduled backup status is known for the configured directory; zero means the status is missing, unreadable, mismatched, or has no recorded outcome.", boolMetric(operational.BackupStatusKnown))
+			}
 			if backups := operational.Backups; backups != nil {
 				lastSuccess := 0.0
 				if !backups.LastSuccessAt.IsZero() {

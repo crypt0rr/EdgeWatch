@@ -45,7 +45,7 @@ func TestDeploymentMetricsInspectIdentityPoolAndAggregateOverdueJobs(t *testing.
 	}
 
 	metrics := a.DeploymentMetrics(ctx, now)
-	if metrics.Backups == nil || metrics.Backups.ConsecutiveFailures != 2 || metrics.Backups.LastSuccessAt.IsZero() {
+	if !metrics.BackupsEnabled || !metrics.BackupStatusKnown || metrics.Backups == nil || metrics.Backups.ConsecutiveFailures != 2 || metrics.Backups.LastSuccessAt.IsZero() {
 		t.Fatalf("backup metrics = %+v", metrics.Backups)
 	}
 	if metrics.ScannerIdentities == nil || metrics.ScannerIdentities.Free != 58 || metrics.ScannerIdentities.Active != 2 {
@@ -82,8 +82,8 @@ func TestMissingBackupStatusPreservesFailureUntilRecordedRecovery(t *testing.T) 
 	if err := os.Remove(statusPath); err != nil {
 		t.Fatal(err)
 	}
-	if metrics := a.DeploymentMetrics(ctx, now.Add(time.Minute)); metrics.Backups != nil {
-		t.Fatalf("missing backup status was exported as a known zero: %+v", metrics.Backups)
+	if metrics := a.DeploymentMetrics(ctx, now.Add(time.Minute)); !metrics.BackupsEnabled || metrics.BackupStatusKnown || metrics.Backups != nil {
+		t.Fatalf("missing backup status metrics = %+v; want enabled and unknown", metrics)
 	}
 	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(time.Minute)); err != nil || recorded != 0 {
 		t.Fatalf("missing backup status = %d, %v; want no transition", recorded, err)
@@ -98,8 +98,8 @@ func TestMissingBackupStatusPreservesFailureUntilRecordedRecovery(t *testing.T) 
 	}
 	a.backupWait = func(context.Context, time.Time) bool { return false }
 	<-a.startBackupWorker(ctx)
-	if metrics := a.DeploymentMetrics(ctx, now.Add(2*time.Minute)); metrics.Backups != nil {
-		t.Fatalf("pre-run backup status was exported as a known zero: %+v", metrics.Backups)
+	if metrics := a.DeploymentMetrics(ctx, now.Add(2*time.Minute)); !metrics.BackupsEnabled || metrics.BackupStatusKnown || metrics.Backups != nil {
+		t.Fatalf("pre-run backup status metrics = %+v; want enabled and unknown", metrics)
 	}
 	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(2*time.Minute)); err != nil || recorded != 0 {
 		t.Fatalf("pre-run backup status = %d, %v; want no transition", recorded, err)
@@ -112,8 +112,8 @@ func TestMissingBackupStatusPreservesFailureUntilRecordedRecovery(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if metrics := a.DeploymentMetrics(ctx, now.Add(3*time.Minute)); metrics.Backups != nil {
-		t.Fatalf("success timestamp without a backup name was exported as known: %+v", metrics.Backups)
+	if metrics := a.DeploymentMetrics(ctx, now.Add(3*time.Minute)); !metrics.BackupsEnabled || metrics.BackupStatusKnown || metrics.Backups != nil {
+		t.Fatalf("incomplete backup success metrics = %+v; want enabled and unknown", metrics)
 	}
 	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(3*time.Minute)); err != nil || recorded != 0 {
 		t.Fatalf("incomplete backup success = %d, %v; want no transition", recorded, err)
@@ -128,7 +128,7 @@ func TestMissingBackupStatusPreservesFailureUntilRecordedRecovery(t *testing.T) 
 		t.Fatal(err)
 	}
 	metrics := a.DeploymentMetrics(ctx, now.Add(4*time.Minute))
-	if metrics.Backups == nil || metrics.Backups.ConsecutiveFailures != 0 {
+	if !metrics.BackupsEnabled || !metrics.BackupStatusKnown || metrics.Backups == nil || metrics.Backups.ConsecutiveFailures != 0 {
 		t.Fatalf("recorded recovery metrics = %+v; want known zero failures", metrics.Backups)
 	}
 	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(4*time.Minute)); err != nil || recorded != 0 {
@@ -154,8 +154,8 @@ func TestDeploymentMetricsTreatsUnreadableBackupStatusAsUnknown(t *testing.T) {
 	if err := os.WriteFile(statusPath, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if metrics := a.DeploymentMetrics(ctx, now.Add(time.Minute)); metrics.Backups != nil {
-		t.Fatalf("unreadable backup status was exported as known: %+v", metrics.Backups)
+	if metrics := a.DeploymentMetrics(ctx, now.Add(time.Minute)); !metrics.BackupsEnabled || metrics.BackupStatusKnown || metrics.Backups != nil {
+		t.Fatalf("unreadable backup status metrics = %+v; want enabled and unknown", metrics)
 	}
 	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(time.Minute)); err != nil || recorded != 0 {
 		t.Fatalf("unreadable backup status = %d, %v; want no transition", recorded, err)
@@ -277,8 +277,8 @@ func TestChangedBackupDirectoryPreservesFailureUntilRecordedRecovery(t *testing.
 	// the reset status written before the first scheduled run must stay unknown
 	// too, because no backup has produced an outcome for the new directory.
 	a.Config.Backup.Directory = newDirectory
-	if metrics := a.DeploymentMetrics(ctx, now.Add(time.Minute)); metrics.Backups != nil {
-		t.Fatalf("status from another directory was exported as known: %+v", metrics.Backups)
+	if metrics := a.DeploymentMetrics(ctx, now.Add(time.Minute)); !metrics.BackupsEnabled || metrics.BackupStatusKnown || metrics.Backups != nil {
+		t.Fatalf("status from another directory metrics = %+v; want enabled and unknown", metrics)
 	}
 	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(time.Minute)); err != nil || recorded != 0 {
 		t.Fatalf("mismatched backup status = %d, %v; want no transition", recorded, err)
@@ -287,8 +287,8 @@ func TestChangedBackupDirectoryPreservesFailureUntilRecordedRecovery(t *testing.
 
 	a.backupWait = func(context.Context, time.Time) bool { return false }
 	<-a.startBackupWorker(ctx)
-	if metrics := a.DeploymentMetrics(ctx, now.Add(2*time.Minute)); metrics.Backups != nil {
-		t.Fatalf("worker's pre-run status was exported as known: %+v", metrics.Backups)
+	if metrics := a.DeploymentMetrics(ctx, now.Add(2*time.Minute)); !metrics.BackupsEnabled || metrics.BackupStatusKnown || metrics.Backups != nil {
+		t.Fatalf("worker's pre-run status metrics = %+v; want enabled and unknown", metrics)
 	}
 	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(2*time.Minute)); err != nil || recorded != 0 {
 		t.Fatalf("pre-run backup status = %d, %v; want no transition", recorded, err)
@@ -304,7 +304,7 @@ func TestChangedBackupDirectoryPreservesFailureUntilRecordedRecovery(t *testing.
 	}
 	a.recordBackupStatus(recovered)
 	metrics := a.DeploymentMetrics(ctx, now.Add(3*time.Minute))
-	if metrics.Backups == nil || metrics.Backups.ConsecutiveFailures != 0 || metrics.Backups.LastSuccessAt.IsZero() {
+	if !metrics.BackupsEnabled || !metrics.BackupStatusKnown || metrics.Backups == nil || metrics.Backups.ConsecutiveFailures != 0 || metrics.Backups.LastSuccessAt.IsZero() {
 		t.Fatalf("recorded matching-directory recovery metrics = %+v", metrics.Backups)
 	}
 	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(3*time.Minute)); err != nil || recorded != 0 {

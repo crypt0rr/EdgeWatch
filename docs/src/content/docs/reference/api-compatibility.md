@@ -397,8 +397,9 @@ holds only `edgewatch_build_info`, `edgewatch_health_status`, and the
 | `edgewatch_scan_slots_in_use` | | Slots that running scans hold. |
 | `edgewatch_scans_queued` | | Accepted scans that wait for a slot. |
 | `edgewatch_database_bytes` | | The size SQLite has allocated for the database. |
-| `edgewatch_backup_last_success_timestamp_seconds` | | When a scheduled backup last succeeded, as a Unix time; zero means none has succeeded. Present when scheduled backups are enabled. |
-| `edgewatch_backup_consecutive_failures` | | Consecutive scheduled backup failures since the last success. Present when scheduled backups are enabled. |
+| `edgewatch_backup_status_known` | | `1` when the enabled backup status has a recorded outcome for the configured directory, `0` when it is missing, unreadable, for another directory, or has no outcome. Once the daemon opens its database, present whenever scheduled backups are enabled. |
+| `edgewatch_backup_last_success_timestamp_seconds` | | When a scheduled backup last succeeded, as a Unix time; zero means none has succeeded. Present when backup status is known. |
+| `edgewatch_backup_consecutive_failures` | | Consecutive scheduled backup failures since the last success. Present when backup status is known. |
 | `edgewatch_scanner_identities` | `state`: `active`, `quarantined`, `in_use_by_other_processes`, `free` | Number of scanner identities in each allocation state. Present when the bounded pool inspection succeeds. |
 | `edgewatch_scheduled_runs_skipped_total` | `reason`: `job_active`, `cycle_stalled` | Counter since this daemon started for scheduled runs skipped because their job was already active or their resumable cycle was stalled. |
 | `edgewatch_jobs_overdue` | | Enabled schedules currently due for the job-silence watchdog; live scans and alert retry windows are excluded. |

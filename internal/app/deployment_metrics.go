@@ -15,6 +15,8 @@ const scannerIdentityHealthInspectionTimeout = 250 * time.Millisecond
 // deployment. Its job and cycle values contain no tenant, job, or target
 // identifiers.
 type DeploymentMetrics struct {
+	BackupsEnabled     bool
+	BackupStatusKnown  bool
 	Backups            *BackupStatus
 	ScannerIdentities  *sandbox.ScannerIdentityPoolStatus
 	JobActiveSkips     uint64
@@ -26,6 +28,7 @@ type DeploymentMetrics struct {
 }
 
 type deploymentHealthObservation struct {
+	backupsEnabled   bool
 	backupKnown      bool
 	backups          *BackupStatus
 	identitiesKnown  bool
@@ -45,6 +48,7 @@ func (a *App) deploymentHealthObservation(ctx context.Context, now time.Time) de
 	var backup *BackupStatus
 	backupRecorded := false
 	if a.Config.Backup.Enabled() {
+		observed.backupsEnabled = true
 		status, recorded, backupErr := readBackupStatusFileWithPresence(BackupStatusPath(a.Store.Path))
 		if backupErr != nil {
 			a.silenceLogger().Warn("scheduled backup health could not be read", "error", backupErr)
@@ -104,6 +108,8 @@ func (a *App) DeploymentMetrics(ctx context.Context, now time.Time) DeploymentMe
 	}
 	now = now.UTC()
 	observed := a.deploymentHealthObservation(ctx, now)
+	metrics.BackupsEnabled = observed.backupsEnabled
+	metrics.BackupStatusKnown = observed.backupKnown
 	if observed.backupKnown && observed.backups != nil {
 		metrics.Backups = observed.backups
 	}

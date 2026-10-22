@@ -171,8 +171,11 @@ func (allocator *scannerIdentityAllocator) acquire(ctx context.Context) (*scanne
 	// Do not create or rewrite durable scope state until the current identity
 	// census succeeds. The transition gate and allocator lock already serialize
 	// joins and mutations while the read-only process preflight runs.
-	identitiesInUse, err := allocator.inUse(allocator.uidStart, allocator.count)
+	identitiesInUse, err := allocator.currentInUse(ctx)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, errors.New("acquire scanner identity: current identity use cannot be inspected")
 	}
 	if err := ctx.Err(); err != nil {

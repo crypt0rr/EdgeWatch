@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,6 +164,41 @@ func TestCheckDeploymentAlertsReportsBackupAndIdentityCapacity(t *testing.T) {
 	a.checkDeploymentAlerts(ctx, now.Add(time.Minute))
 	if alerts := healthAlerts(t, f.db); !reflect.DeepEqual(alerts, want) || drainWake(a) {
 		t.Fatalf("repeated operational alerts = %+v, want no repeat", alerts)
+	}
+}
+
+func TestCheckDeploymentAlertsWakesAfterPartialOperationalQueue(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
+	a := f.app
+	routeDeploymentAlerts(t, f.db)
+	a.Config.Scheduler.MaxConcurrent = 4
+	a.Config.Backup.Directory = t.TempDir()
+	a.sandbox = sandbox.NewEnforced().WithLandlock("/usr/local/bin/edgewatch", 3)
+	var logs strings.Builder
+	a.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	a.inspectScannerIdentities = func(context.Context) (*sandbox.ScannerIdentityPoolStatus, error) {
+		return &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, Free: 3}, nil
+	}
+	if err := writeBackupStatusFile(BackupStatusPath(f.db.Path), BackupStatus{Directory: a.Config.Backup.Directory, ConsecutiveFailures: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.DB.Exec(`CREATE TRIGGER fail_scanner_identity_health BEFORE UPDATE OF scanner_identity_pool_low ON platform_alert_state BEGIN SELECT RAISE(ABORT, 'injected scanner identity transition failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	drainWake(a)
+	a.checkDeploymentAlerts(ctx, now)
+	want := []model.AlertDetail{{Kind: model.HealthAlertScheduledBackupFailed, Subject: "scheduled_backup", Count: 2}}
+	if alerts := healthAlerts(t, f.db); !reflect.DeepEqual(alerts, want) {
+		t.Fatalf("partially queued operational alerts = %+v, want %+v", alerts, want)
+	}
+	if !strings.Contains(logs.String(), "injected scanner identity transition failure") {
+		t.Fatalf("scanner identity transition did not fail as injected: %s", logs.String())
+	}
+	if !drainWake(a) {
+		t.Fatal("backup alert queued before identity transition failed, but delivery worker was not woken")
 	}
 }
 

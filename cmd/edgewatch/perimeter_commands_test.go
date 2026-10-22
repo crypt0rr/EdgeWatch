@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -237,6 +238,166 @@ func TestPerimeterDeclareRefusalIsAtomicAndDoesNotEchoInput(t *testing.T) {
 	if seeds != 0 || audits != 0 {
 		t.Fatalf("refused declaration wrote seeds=%d audits=%d; want no writes", seeds, audits)
 	}
+}
+
+func TestPerimeterDeclareNormalizesTabColumnsAndRejectsOtherControls(t *testing.T) {
+	database, configPath := newPerimeterCLIStore(t)
+	declareFile := func(name, contents string) error {
+		t.Helper()
+		inputPath := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(inputPath, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := captureCLIOutput(t, func() error {
+			return run([]string{"perimeter", "declare", "--tenant", "other", "--kind", "prefix", "--from", inputPath, "--config", configPath})
+		})
+		return err
+	}
+
+	if err := declareFile("tabs.txt", "192.0.2.0/24\tDC2\t\u2003core\n"); err != nil {
+		t.Fatalf("declare tab-separated label columns: %v", err)
+	}
+	if err := declareFile("controls.txt", "198.51.100.0/24\tValid\tcolumns\n203.0.113.0/24\t\vbadlabel\n"); err == nil || !strings.Contains(err.Error(), "line 2") || !strings.Contains(err.Error(), "control characters") {
+		t.Fatalf("declare label with a disallowed control: %v, want line-specific control-character refusal", err)
+	}
+
+	s, err := store.OpenReadOnlyExisting(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var seeds, audits int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM perimeter_seeds WHERE tenant_id=?`, otherTenantID).Scan(&seeds); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM security_audit WHERE tenant_id=? AND action='perimeter.seeds_added'`, otherTenantID).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	var label string
+	if err := s.DB.QueryRow(`SELECT label FROM perimeter_seeds WHERE tenant_id=? AND value='192.0.2.0/24'`, otherTenantID).Scan(&label); err != nil {
+		t.Fatal(err)
+	}
+	if label != "DC2 core" || seeds != 1 || audits != 1 {
+		t.Fatalf("stored label=%q seeds=%d audits=%d; want normalized label and only the successful declaration", label, seeds, audits)
+	}
+}
+
+func TestPerimeterDeclareRejectsTenantStateChangeDuringInput(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		state     string
+		wantError error
+	}{
+		{name: "disabled", state: store.TenantStateDisabled, wantError: store.ErrTenantNotActive},
+		{name: "deleted", state: store.TenantStateDeleted, wantError: store.ErrNoTenantScope},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database, _ := newPerimeterCLIStore(t)
+			s, err := store.OpenExisting(database)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+
+			unit, tenant, err := hostUnitStore(context.Background(), s, "other", "perimeter", "declare")
+			if err != nil || unit.State != store.TenantStateActive {
+				t.Fatalf("select active tenant before reading input = %+v, %v", unit, err)
+			}
+
+			reader, writer := io.Pipe()
+			started := make(chan struct{})
+			input := &perimeterStartedPipeReader{PipeReader: reader, started: started}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			finished := false
+			go func() {
+				done <- declarePerimeter(ctx, tenant, store.PerimeterKindPrefix, "-", input, "json")
+			}()
+			defer func() {
+				_ = writer.Close()
+				cancel()
+				if !finished {
+					select {
+					case <-done:
+					case <-time.After(time.Second):
+						t.Error("perimeter declaration did not stop during cleanup")
+					}
+				}
+			}()
+
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("declaration did not begin reading the open input")
+			}
+			if _, err := s.DB.ExecContext(context.Background(), `UPDATE tenants SET state=? WHERE id=?`, test.state, unit.ID); err != nil {
+				t.Fatalf("change tenant state while input remains open: %v", err)
+			}
+			if _, err := writer.Write([]byte("203.0.113.0/24 delayed input\n")); err != nil {
+				t.Fatalf("write delayed declaration input: %v", err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatalf("finish declaration input: %v", err)
+			}
+
+			select {
+			case err := <-done:
+				finished = true
+				if !errors.Is(err, test.wantError) {
+					t.Errorf("declaration after tenant became %s = %v, want %v", test.state, err, test.wantError)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("declaration did not finish after input closed")
+			}
+
+			var seeds, audits int
+			if err := s.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM perimeter_seeds WHERE tenant_id=?`, unit.ID).Scan(&seeds); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM security_audit WHERE tenant_id=? AND action='perimeter.seeds_added'`, unit.ID).Scan(&audits); err != nil {
+				t.Fatal(err)
+			}
+			if seeds != 0 || audits != 0 {
+				t.Errorf("declaration after tenant became %s left seeds=%d audit records=%d; want no residue", test.state, seeds, audits)
+			}
+		})
+	}
+}
+
+type perimeterStartedPipeReader struct {
+	*io.PipeReader
+	started chan struct{}
+	once    sync.Once
+}
+
+func (r *perimeterStartedPipeReader) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.started) })
+	return r.PipeReader.Read(p)
+}
+
+func TestPerimeterDefaultFileInputClosesOnCancellation(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "perimeter-input-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	input, stop := perimeterDefaultFileInputWithCancellation(ctx, file)
+	if input != file || stop == nil {
+		t.Fatalf("default file input = %T, stop=%v; want original file and cancellation callback", input, stop != nil)
+	}
+	cancel()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := file.Stat(); errors.Is(err, os.ErrClosed) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("default file input was not closed after cancellation")
 }
 
 func TestPerimeterCommandContract(t *testing.T) {

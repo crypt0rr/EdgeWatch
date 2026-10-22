@@ -237,9 +237,12 @@ tested nor counted.
 `perimeter list` prints a unit's declared ranges; use `--output json` for a
 JSON array. `perimeter declare` reads one IP address or CIDR prefix per
 non-blank line, with an optional label after whitespace. `--from FILE` reads
-a file in the container, and `--from -` reads standard input. The unit slug
-is required for both commands so a host script cannot accidentally use the
-default unit. A declaration accepts 1 to 256 entries and uses the same
+a file in the container, and `--from -` reads standard input. Runs of spaces,
+tabs, and Unicode space, line, and paragraph separators within a label are
+joined as one space, matching the Perimeter form; other control characters in
+labels are rejected. The unit slug is required for both commands so a host
+script cannot accidentally use the default unit. A declaration accepts 1 to
+256 entries and uses the same
 validation and canonicalization as the Perimeter page. Repeated entries in
 the same kind are skipped, including ranges already declared, while any
 invalid entry refuses the whole declaration. A successful declaration writes

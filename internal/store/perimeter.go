@@ -532,6 +532,9 @@ func (ts *TenantStore) DeclarePerimeterSeeds(ctx context.Context, entries []Peri
 		return PerimeterDeclareResult{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := requireActiveTenantTx(ctx, tx, ts.scope.id); err != nil {
+		return PerimeterDeclareResult{}, err
+	}
 	refused, err = ts.storedPerimeterConflicts(ctx, tx, declaration)
 	if err != nil {
 		return PerimeterDeclareResult{}, err

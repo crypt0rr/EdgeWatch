@@ -115,7 +115,10 @@ the ranges as a JSON array; text output prints one range per line.
 `perimeter declare` reads an IP address or CIDR prefix and an optional label
 per line from standard input with `--from -`, or from a file inside the
 container with `--from FILE`. Blank lines are ignored, and at most 256
-entries can be declared at once. It applies the same validation as the page,
+entries can be declared at once. Runs of spaces, tabs, and Unicode space,
+line, and paragraph separators in labels become one space, matching the
+Perimeter form; other control characters in labels are rejected. It applies
+the same validation as the page,
 skips ranges already declared under the selected kind, and saves nothing if
 any entry is refused. Each successful declaration writes one
 `perimeter.seeds_added` audit record with actor `host-cli`; range values,

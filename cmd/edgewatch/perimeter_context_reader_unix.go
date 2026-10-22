@@ -13,17 +13,15 @@ import (
 
 const perimeterInputPollTimeoutMillis = 100
 
-// perimeterInputWithCancellation uses poll for OS files so cancellation does
-// not depend on closing a descriptor interrupting a read already in progress.
-// Other reader types retain the close-on-cancel behavior used by the parser.
-func perimeterInputWithCancellation(ctx context.Context, input io.Reader) (io.Reader, func() bool) {
-	if file, ok := input.(*os.File); ok {
-		return perimeterPollFileReader{ctx: ctx, file: file}, nil
-	}
-	if closer, ok := input.(io.Closer); ok {
-		return input, context.AfterFunc(ctx, func() { _ = closer.Close() })
-	}
-	return input, nil
+func init() {
+	perimeterFileInputWithCancellation = perimeterPollFileInputWithCancellation
+}
+
+// perimeterPollFileInputWithCancellation uses poll for OS files so
+// cancellation does not depend on closing a descriptor interrupting a read
+// already in progress.
+func perimeterPollFileInputWithCancellation(ctx context.Context, file *os.File) (io.Reader, func() bool) {
+	return perimeterPollFileReader{ctx: ctx, file: file}, nil
 }
 
 // perimeterPollFileReader waits for descriptor readability in bounded poll

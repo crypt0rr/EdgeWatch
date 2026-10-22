@@ -88,8 +88,10 @@ func parsePerimeterDeclarationContext(ctx context.Context, input io.Reader, kind
 }
 
 // parsePerimeterDeclaration matches the Perimeter form's line format: one IP
-// address or CIDR prefix, then an optional label. Blank lines are ignored.
-// It retains source line numbers for bounded, value-free refusal messages.
+// address or CIDR prefix, then an optional label. Runs of tabs, Unicode space
+// separators, and line or paragraph separators in labels become one space;
+// other control characters are left for validation. Blank lines are ignored.
+// It retains source line numbers for bounded refusal messages.
 func parsePerimeterDeclaration(input io.Reader, kind string) ([]store.PerimeterEntry, []int, error) {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), maxPerimeterInputLineBytes)
@@ -99,7 +101,7 @@ func parsePerimeterDeclaration(input io.Reader, kind string) ([]store.PerimeterE
 	lineNumber := 0
 	for scanner.Scan() {
 		lineNumber++
-		line := strings.TrimSpace(scanner.Text())
+		line := strings.TrimFunc(scanner.Text(), perimeterInputTrimSpace)
 		if line == "" {
 			continue
 		}
@@ -108,9 +110,10 @@ func parsePerimeterDeclaration(input io.Reader, kind string) ([]store.PerimeterE
 		}
 		value := line
 		label := ""
-		if split := strings.IndexFunc(line, unicode.IsSpace); split >= 0 {
+		if split := strings.IndexFunc(line, perimeterInputSpace); split >= 0 {
 			value = line[:split]
-			label = strings.TrimSpace(line[split:])
+			label = strings.TrimFunc(line[split:], perimeterInputTrimSpace)
+			label = strings.Join(strings.FieldsFunc(label, perimeterLabelColumnSpace), " ")
 		}
 		entries = append(entries, store.PerimeterEntry{Kind: kind, Value: value, Label: label})
 		lineNumbers = append(lineNumbers, lineNumber)
@@ -121,6 +124,24 @@ func parsePerimeterDeclaration(input io.Reader, kind string) ([]store.PerimeterE
 		return nil, nil, errors.New("could not read perimeter declaration input")
 	}
 	return entries, lineNumbers, nil
+}
+
+func perimeterInputTrimSpace(r rune) bool {
+	return perimeterInputSpace(r) && r != '\v' && r != '\f'
+}
+
+// perimeterInputSpace matches JavaScript's \s used by the Perimeter form.
+// Unicode's White_Space property also includes NEL, which that form leaves in
+// the value or label for validation; JavaScript additionally treats BOM as
+// whitespace.
+func perimeterInputSpace(r rune) bool {
+	return r == '\ufeff' || r != '\u0085' && unicode.IsSpace(r)
+}
+
+// perimeterLabelColumnSpace matches the web form's separator class for label
+// columns while preserving other controls for the shared store validator.
+func perimeterLabelColumnSpace(r rune) bool {
+	return r == '\t' || unicode.Is(unicode.Zs, r) || r == '\u2028' || r == '\u2029'
 }
 
 // splitPerimeterLines recognizes Unix, Windows, and legacy Mac line endings,

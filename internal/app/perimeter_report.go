@@ -474,6 +474,11 @@ func (a *App) PerimeterRangeDetail(ctx context.Context, ts *store.TenantStore, i
 	var perMonitor, needed, coalescedNeeded [len(perimeterPresets)]int
 	var truncated, coalescedTruncated, tooLow [len(perimeterPresets)]bool
 	for index, preset := range perimeterPresets {
+		// The plans need no database, so a request that is gone stops here
+		// instead of computing the remaining modes.
+		if err := ctx.Err(); err != nil {
+			return PerimeterRangeDetail{}, err
+		}
 		size, err := state.addressesPerMonitor(preset)
 		if err != nil {
 			return PerimeterRangeDetail{}, err
@@ -836,6 +841,11 @@ type perimeterCoalescedSet struct {
 // no larger than a /24 (and no larger than the mode's budget), suggestions
 // hold at most 16 targets, and a plan needing more than 16 suggestions is
 // withheld. A returned count of 17 means at least 17 suggestions were needed.
+// base and gaps are merged, as Subtract returns them, and gaps lie in base.
+//
+// Each gap piece costs a binary search of base per expansion step, and each
+// new candidate a binary search of gaps for the gaps it holds, so the work
+// grows with the gap fragments and not with candidates times fragments.
 func perimeterCoalescedSuggestionSets(base, gaps []addrspace.Range, perMonitor uint64) (sets []perimeterCoalescedSet, total int, truncated bool) {
 	if len(gaps) == 0 || perMonitor == 0 {
 		return nil, 0, false
@@ -866,8 +876,7 @@ func perimeterCoalescedSuggestionSets(base, gaps []addrspace.Range, perMonitor u
 		candidate := piece
 		for candidate.Bits() > minPrefixBits {
 			parent := netip.PrefixFrom(candidate.Addr(), candidate.Bits()-1).Masked()
-			parentRange := addrspace.FromPrefix(parent)
-			if len(addrspace.Subtract([]addrspace.Range{parentRange}, base)) != 0 {
+			if !perimeterContains(base, addrspace.FromPrefix(parent)) {
 				break
 			}
 			candidate = parent
@@ -878,7 +887,9 @@ func perimeterCoalescedSuggestionSets(base, gaps []addrspace.Range, perMonitor u
 
 		candidateRange := addrspace.FromPrefix(candidate)
 		addresses := uint64(1) << uint(32-candidate.Bits())
-		gapAddresses, _ := addrspace.CountCapped(addrspace.Intersect([]addrspace.Range{candidateRange}, gaps), addresses)
+		// Only the gaps that share an address with the candidate count, so
+		// clip them first instead of merging the whole list again.
+		gapAddresses, _ := addrspace.CountCapped(addrspace.Intersect([]addrspace.Range{candidateRange}, perimeterClip(gaps, candidateRange)), addresses)
 		alreadyCovered := int(addresses - gapAddresses)
 		if len(current.targets) > 0 && (currentAddresses+addresses > perMonitor || len(current.targets) >= perimeterMaxCoalescedTargets) {
 			flush()
@@ -985,10 +996,15 @@ func perimeterCoalescedPrefixFitsBase(a, b netip.Addr, minPrefixBits int, base [
 	if commonBits < minPrefixBits {
 		return false
 	}
-	prefix := netip.PrefixFrom(a, commonBits).Masked()
-	candidate := addrspace.FromPrefix(prefix)
-	index := sort.Search(len(base), func(index int) bool { return base[index].To.Compare(candidate.From) >= 0 })
-	return index < len(base) && base[index].From.Compare(candidate.From) <= 0 && base[index].To.Compare(candidate.To) >= 0
+	return perimeterContains(base, addrspace.FromPrefix(netip.PrefixFrom(a, commonBits).Masked()))
+}
+
+// perimeterContains reports whether merged, which Merge returned, holds every
+// address of r. Merged ranges neither overlap nor touch, so r must lie inside
+// the one range that could hold its first address.
+func perimeterContains(merged []addrspace.Range, r addrspace.Range) bool {
+	index := sort.Search(len(merged), func(index int) bool { return merged[index].To.Compare(r.From) >= 0 })
+	return index < len(merged) && merged[index].From.Compare(r.From) <= 0 && merged[index].To.Compare(r.To) >= 0
 }
 
 // perimeterBlocks returns the fewest aligned CIDRs that hold gaps, which is

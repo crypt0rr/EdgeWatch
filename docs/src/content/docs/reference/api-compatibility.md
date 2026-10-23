@@ -100,8 +100,11 @@ values. `slots` is the deployment's `scheduler.max_concurrent_scans`, whatever
 the units' own caps are, and `capacity_slot_seconds_per_day` is `slots` ×
 86,400. `utilization_percent` and `over_capacity` compare the two as a unit's
 own estimate does. The object holds sums and counts only: no unit or job ID or
-name, and no per-unit figure. The daemon computes it at most once a minute
-and leaves it out when the estimate fails or takes longer than 10 seconds.
+name, and no per-unit figure. The daemon starts at most one estimate a
+minute, however often the status is requested, and reuses its outcome for that
+minute: when an estimate fails or takes longer than 10 seconds, the status
+leaves `scan_demand` out until the next estimate, and the daemon logs one
+warning for it.
 The platform console's **Status** page shows it with a warning at 80%
 utilization and above.
 

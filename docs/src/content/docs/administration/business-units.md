@@ -60,8 +60,11 @@ shows; disabled units and units being deleted schedule no scans and are left
 out. A warning appears at 80% and when the demand exceeds the slots, because
 scans then wait for a free slot and start late, and the panel counts the jobs
 that run longer than their schedules allow. The estimate is at most a minute
-old. It holds sums and counts only and names no unit or job: a unit's
-administrators see their own unit's demand and jobs on its **Jobs** page.
+old. When an estimate fails or takes longer than 10 seconds, the panel is
+missing for that minute and the daemon logs one warning,
+`deployment scan demand estimate failed`. The panel holds sums and counts only
+and names no unit or job: a unit's administrators see their own unit's demand
+and jobs on its **Jobs** page.
 
 The host creates the first platform administrator, after the first
 administrator exists. Print a one-time platform setup token:

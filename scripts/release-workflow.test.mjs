@@ -1516,8 +1516,11 @@ test('every Node runtime pin matches the frontend image and Renovate groups them
   assert.ok(directNodePins > 0, 'at least one workflow must carry a direct Node pin')
   assert.equal(nodeVersionFileSteps, 1, 'the docs workflow must consume .node-version exactly once')
 
-  for (const manager of ['dockerfile', 'github-actions', 'nodenv']) {
+  assert.notEqual(renovate.enabled, false, 'Renovate must stay enabled')
+  assert.ok(!(renovate.ignoreDeps ?? []).includes('node'), 'Renovate must not ignore the node dependency')
+  for (const manager of ['dockerfile', 'github-actions', 'nodenv', 'custom.regex']) {
     assert.ok(!renovate.enabledManagers || renovate.enabledManagers.includes(manager), `Renovate must not disable the built-in ${manager} manager`)
+    assert.notEqual(renovate[manager]?.enabled, false, `Renovate must not disable the ${manager} manager in its configuration`)
   }
   const frontendImageTag = /^FROM --platform=\$BUILDPLATFORM node:(\S+)@sha256:[0-9a-f]{64} AS frontend$/m.exec(dockerfile)?.[1]
   assert.ok(frontendImageTag, 'the frontend Node image must be digest-pinned for the dockerfile manager')
@@ -1549,6 +1552,7 @@ test('every Node runtime pin matches the frontend image and Renovate groups them
   for (const pin of nodePins) {
     assert.equal(pin.currentValue.replace(/-.*$/, ''), nodeVersion, `${pin.file}: the ${pin.manager} Node pin must name the frontend image's release`)
     const settings = renovateRuleSettings(pin)
+    assert.notEqual(settings.enabled, false, `${pin.file}: no package rule may disable the ${pin.manager} Node pin`)
     assert.equal(settings.groupName, 'Node.js runtime', `${pin.file}: the ${pin.manager} Node pin must update in the one Node pull request`)
     assert.equal(settings.allowedVersions, nodeRule.allowedVersions, `${pin.file}: the ${pin.manager} Node pin must stay on Node 24`)
     const releaseForm = releaseForms[pin.datasource]

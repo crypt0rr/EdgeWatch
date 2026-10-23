@@ -189,7 +189,10 @@ requires every `setup-node` pin, the release workflow's `NODE_VERSION`,
 to name the same release. Renovate proposes each Node 24 release for all of
 them in one `Node.js runtime` pull request. Its group matches the dependency
 name `node`, because Renovate looks `setup-node` versions up as the package
-`actions/node-versions`.
+`actions/node-versions`. Those versions, the `node` image, and the nodejs.org
+releases behind `.node-version` publish separately, so that pull request can
+first change only some of the pins and fail the test until the last of them
+is published.
 
 For release helper scripts, run `./scripts/test-release-artifacts.sh`; it uses
 fixture binaries and does not build a release candidate. Follow the workflow's

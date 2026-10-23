@@ -140,6 +140,40 @@ The few paths served outside the two APIs, such as `/healthz` and
 `/metrics`, are registered in `Server.Handler` and listed in
 `handlerPatterns` in `internal/web/route_drift_test.go`.
 
+## Console routes
+
+`e2e/console-routes.ts` lists a concrete path for every page the console
+renders: the unit console's routes in `Shell` in `src/main.tsx`, including the
+guided job-creation steps of `JobCreationJourney`, the platform console's in
+`PlatformShell`, each `UnitDetail` tab, and the pages outside either shell:
+sign-in, first-run setup, activation, the forced TOTP enrolment, and the
+public status pages. The axe audit in `e2e/route-accessibility.spec.ts`
+visits every entry; the role matrix in `e2e/role-matrix.spec.ts` visits the
+console routes, but not the pages outside both shells (`entrySurfaces`).
+
+`src/console-route-inventory.test.ts`, which `npm run test:coverage` runs
+before the browser tests, parses every `<Route>` in `src/` and the `UnitDetail`
+tabs, and resolves each inventory path with React Router, so a `:id`
+parameter matches any value. It fails when a route or tab has no entry, and
+when an entry no longer reaches the route it stands for. A route that renders
+no page of its own, such as a catch-all redirect outside the console shells,
+goes in `routesWithoutInventoryEntry` with its reason instead.
+
+To add a console page, add its `<Route>` with a string-literal `path`, then an
+entry with its scope and permission to `unitConsoleRoutes` or
+`platformConsoleRoutes`, or to `entrySurfaces` for a page outside both
+shells.
+
+The axe audit fails on serious and critical violations, on visible link or
+button text missing from the accessible name, and on the moderate
+`heading-order`, `page-has-heading-one`, and `landmark-*` rules. Besides each
+route in its default fixture state, it audits an open dialog, a failed
+confirmation, failed page reads, an empty investigation inbox, a job without a
+baseline, pending baseline changes, a near-capacity scan-slot demand notice,
+and every step of a monitor setup that Perimeter prefilled. Accept a violation only with an `axeAllowances` entry in the spec
+that names the rule, the audited surface, the node, and the reason; an entry
+that no longer matches a violation fails the audit.
+
 ## Notification destination policy
 
 The notification child applies the unit destination policy at the provider's

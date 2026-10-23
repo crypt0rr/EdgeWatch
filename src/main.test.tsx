@@ -511,7 +511,11 @@ describe('application shell', () => {
   it('renders job lists, archived states, and creation controls across loading, error, and empty paths', async () => {
     vi.mocked(listJobs).mockResolvedValue({ jobs: [{ id: 'job-1', revision: 2, enabled: true, archived: false, job: { name: 'TCP monitor', targets: ['198.51.100.10'], tcp: { ports: '22-23' }, baseline: { status: 'complete' }, schedule: '* * * * *' }, baseline: { status: 'complete', baseline_samples: 1 } }, { id: 'job-2', revision: 1, enabled: false, archived: true, job: { name: 'Old monitor', targets: ['198.51.100.11'], udp: { ports: '53' }, schedule: '0 * * * *' }, baseline: { status: 'learning', samples: 0 } }, { id: 'job-3', revision: 1, enabled: true, archived: false, job: { name: 'Stalled monitor', targets: ['198.51.100.12'], tcp: { ports: '443' }, schedule: '30 * * * *' }, baseline: { status: 'stalled', incomplete_attempts: 2 } }] } as never)
     renderWithProviders(<Jobs />)
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'TCP monitor' })).toBeInTheDocument())
+    // Each job card's title follows the page's level-one heading at level
+    // two, so the list never skips a heading level (#1680).
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'TCP monitor', level: 2 })).toBeInTheDocument())
+    expect(screen.getByRole('heading', { name: 'Jobs', level: 1 })).toBeInTheDocument()
+    expect(screen.queryAllByRole('heading', { level: 3 })).toEqual([])
     expect(screen.getByText('Archived')).toBeInTheDocument()
     expect(screen.getByText('⚠ Baseline stalled')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /New job/ }))
@@ -522,12 +526,12 @@ describe('application shell', () => {
     await waitFor(() => expect(screen.getByText('Could not load jobs.')).toBeInTheDocument())
     vi.mocked(listJobs).mockResolvedValueOnce({ jobs: [] } as never)
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
-    await waitFor(() => expect(screen.getByText('No jobs yet')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'No jobs yet', level: 2 })).toBeInTheDocument())
     cleanup()
     vi.mocked(listJobs).mockResolvedValueOnce({ jobs: [] } as never)
     vi.mocked(getSession).mockResolvedValueOnce({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: [], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
     renderWithProviders(<Jobs />)
-    await waitFor(() => expect(screen.getByText('No jobs configured')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'No jobs configured', level: 2 })).toBeInTheDocument())
   })
 
   it('shows each job’s latest change window, reason, end time, counts, and review state', async () => {
@@ -621,7 +625,7 @@ describe('application shell', () => {
     expect(listJobs).toHaveBeenCalledTimes(1)
     expect(screen.getByText(formatDateTimeInTimeZone('2026-10-12T00:00:00Z', 'UTC'))).toBeInTheDocument()
     fireEvent.change(screen.getByRole('combobox', { name: 'Filter jobs' }), { target: { value: 'attention' } })
-    expect(screen.getByText('No available jobs need attention')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'No available jobs need attention', level: 2 })).toBeInTheDocument()
     expect(EventSourceStub.instances).toHaveLength(0)
 
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })

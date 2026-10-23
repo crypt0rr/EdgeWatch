@@ -156,7 +156,7 @@ function isAddress(value: string) {
 }
 
 function Empty({ icon, title, body }: { icon: ReactNode; title: string; body: string }) {
-  return <div className="empty"><div className="empty-icon">{icon}</div><h3>{title}</h3><p>{body}</p></div>
+  return <div className="empty"><div className="empty-icon">{icon}</div><h2>{title}</h2><p>{body}</p></div>
 }
 
 export function Incidents() {

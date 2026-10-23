@@ -41,8 +41,14 @@ export function PerimeterRangeView() {
   if (!detail.data || notFound) {
     if (detail.isError) {
       return <section className="page perimeter-range-page">
+        <div className="page-heading">
+          <div>
+            <Link className="back-link" to="/perimeter">← Perimeter</Link>
+            <p className="eyebrow">Declared range</p>
+            <h1>Range unavailable</h1>
+          </div>
+        </div>
         <div className="perimeter-stack">
-          <Link className="back-link" to="/perimeter">← Perimeter</Link>
           <ErrorNotice message={notFound ? 'This range could not be found. It may have been removed.' : 'This range could not be loaded.'} onRetry={notFound ? undefined : () => detail.refetch()} />
         </div>
       </section>

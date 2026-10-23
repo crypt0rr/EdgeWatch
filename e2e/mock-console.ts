@@ -1,6 +1,7 @@
 import type { Page } from '@playwright/test'
 import type { AdminStatus, HostObservation, IncidentInboxItem, IncidentInboxPage, IncidentInboxSummary, PerimeterBlocks, PerimeterDeclareResult, PerimeterLineError, PerimeterMonitorRef, PerimeterOutsideTarget, PerimeterOverview, PerimeterProtocol, PerimeterRange, PerimeterRangeDetail, PerimeterSuggestion, PlatformStatus, Scan, ScanSlotDemand, ScanSummary } from '../src/generated/api-types'
-import type { ActivityEvent, Job, JobForm } from '../src/types'
+import type { PublicDashboard } from '../src/api'
+import type { ActivityEvent, Job, JobForm, PendingChange } from '../src/types'
 
 export type UnitConsoleRole = 'administrator' | 'operator' | 'viewer'
 /** platform_admin is the business units' platform administrator. */
@@ -36,6 +37,27 @@ export type ConsoleMockControls = {
   transformPerimeterOverview: (transform: (overview: PerimeterOverview) => PerimeterOverview) => void
   calls: Record<string, number>
   payloads: Record<string, unknown[]>
+}
+
+export type ConsoleMockOptions = {
+  platformTOTP?: boolean
+  emptyPerimeter?: boolean
+  accessibilityFixtures?: boolean
+  routeAuditFixtures?: boolean
+  /** A browser without a session on a configured installation: every request but the setup status answers 401. */
+  signedOut?: boolean
+  /** A fresh installation that offers first-run setup; no session exists yet. */
+  unconfigured?: boolean
+  /** A platform administrator without TOTP while two units exist, whose session may only enrol. */
+  enrolmentRequired?: boolean
+  /** job-1 confirms a change after two scans and has one seen once, so its page lists pending confirmations. */
+  pendingBaselineChanges?: boolean
+  /** Serves this scheduled scan-slot demand, over the route audit's fixture, to every role that reads jobs. */
+  scanSlotDemand?: Partial<ScanSlotDemand>
+  /** The unit has no active incident, so the investigation inbox shows its empty state. */
+  emptyInbox?: boolean
+  /** job-1's baseline explorer answers as the server does before a baseline completes: no data quality and no hosts. */
+  withoutBaseline?: boolean
 }
 
 const job: Job = {
@@ -110,6 +132,14 @@ const scanSlotDemand: ScanSlotDemand = {
   utilization_percent: 50,
   over_capacity: false,
 }
+
+// The change that pendingBaselineChanges makes job-1 wait on: a newly open
+// port seen in one of the two scans that confirm a change.
+const pendingChanges: PendingChange[] = [{
+  key: 'port|192.0.2.10|tcp|8443',
+  change: { key: 'port|192.0.2.10|tcp|8443', kind: 'port', severity: 'warning', target: '192.0.2.10', protocol: 'tcp', port: 8443, new: 'open' },
+  count: 1,
+}]
 
 const host: HostObservation = {
   address: '192.0.2.10',
@@ -506,7 +536,12 @@ function declarePerimeter(ranges: PerimeterRange[], entries: Array<{ kind?: unkn
  * refused, as the server's permission gate does. With emptyPerimeter, the
  * unit starts without declared ranges.
  */
-export async function mockConsole(page: Page, role: ConsoleRole = 'administrator', { platformTOTP = true, emptyPerimeter = false, accessibilityFixtures = false, routeAuditFixtures = false }: { platformTOTP?: boolean; emptyPerimeter?: boolean; accessibilityFixtures?: boolean; routeAuditFixtures?: boolean } = {}): Promise<ConsoleMockControls> {
+export async function mockConsole(page: Page, role: ConsoleRole = 'administrator', options: ConsoleMockOptions = {}): Promise<ConsoleMockControls> {
+  const { platformTOTP = true, emptyPerimeter = false, accessibilityFixtures = false, routeAuditFixtures = false, signedOut = false, unconfigured = false, enrolmentRequired = false, pendingBaselineChanges = false, emptyInbox = false, withoutBaseline = false } = options
+  // A platform administrator who must enrol has no TOTP while two units exist.
+  const platformHasTOTP = platformTOTP && !enrolmentRequired
+  const unitJob: Job = pendingBaselineChanges ? { ...job, job: { ...job.job, change_confirmations: 2 }, baseline: { ...job.baseline, pending: pendingChanges.length } } : job
+  const slotDemand: ScanSlotDemand | null = options.scanSlotDemand ? { ...scanSlotDemand, ...options.scanSlotDemand } : routeAuditFixtures ? scanSlotDemand : null
   const activityScans = accessibilityFixtures
     ? [{ ...scan, id: 'scan-failed', status: 'failed', error: 'Target timed out after 10 seconds.' }]
     : [scan]
@@ -526,6 +561,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     review: { status: 'needs_review', reviewer_label: null, reviewed_at: null, note: '', follow_up_at: null, revision: 0 },
     observation_uncertainty: { status: 'unknown', reason: 'no_newer_observation' },
   }]
+  if (emptyInbox) incidents = []
   let publicDashboard: any = {
     enabled: false,
     title: 'Fixture public status',
@@ -540,10 +576,10 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
   const units: any[] = [
     platformUnit({ id: 'unit-default', name: 'Default', slug: 'default', is_default: true, accounts: 3, administrators: 1, jobs: 1, stored_scans: 12 }),
     platformUnit({ id: 'unit-retail', name: 'Retail', slug: 'retail', accounts: 3, administrators: 1, jobs: 2, stored_scans: 1480, slots: { in_use: 1, queued: 0 } }),
-  ].slice(0, platformTOTP ? 2 : 1)
+  ].slice(0, platformHasTOTP || enrolmentRequired ? 2 : 1)
   if (accessibilityFixtures) units.push(platformUnit({ id: 'unit-disabled', name: 'Retail', slug: 'retail-lifecycle', status: 'disabled' }))
   const multipleUnits = () => units.filter(unit => unit.status !== 'deleted').length > 1
-  const mustEnrol = () => role === 'platform_admin' && !platformTOTP && multipleUnits()
+  const mustEnrol = () => role === 'platform_admin' && !platformHasTOTP && multipleUnits()
   const unitAccounts: Record<string, any[]> = {
     'unit-default': [platformAccount({ id: 'acct-admin', username: 'admin', display_name: 'Administrator', role: 'administrator', totp_enabled: true })],
     'unit-retail': [
@@ -607,7 +643,13 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     }
 
     if (path === '/stream') { await route.abort(); return }
-    if (path === '/setup/status') { await json({ configured: true, setup_available: false, password_requirements: { minimum_length: 12 }, platform_setup_available: false }); return }
+    if (path === '/setup/status') { await json({ configured: !unconfigured, setup_available: unconfigured, password_requirements: { minimum_length: 12 }, platform_setup_available: false }); return }
+    if (signedOut || unconfigured) {
+      // A browser without a session: the server refuses every other request.
+      record('signed-out', `${method} ${path}`)
+      await json({ error: { code: 'unauthorized', message: 'authentication required' } }, 401)
+      return
+    }
     if (path === '/auth/session') {
       // A platform administrator's session names the platform console, and
       // a unit role's names the default unit.
@@ -616,7 +658,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
       const enrolment = mustEnrol() ? { totp_enrollment_required: true } : {}
       // Only a unit administrator may approve high-cost scans.
       const highCost = role === 'administrator' && !mustEnrol() ? { high_cost_override: true } : {}
-      await json({ user_id: `user-${role}`, username: role === 'administrator' ? 'admin' : role === 'platform_admin' ? 'platform' : role, display_name: role, role, permissions, csrf_token: 'fixture-csrf', totp_enabled: role === 'platform_admin' && platformTOTP, password_requirements: { minimum_length: 12 }, ...scope, ...enrolment, ...highCost })
+      await json({ user_id: `user-${role}`, username: role === 'administrator' ? 'admin' : role === 'platform_admin' ? 'platform' : role, display_name: role, role, permissions, csrf_token: 'fixture-csrf', totp_enabled: role === 'platform_admin' && platformHasTOTP, password_requirements: { minimum_length: 12 }, ...scope, ...enrolment, ...highCost })
       return
     }
     if (mustEnrol() && path.startsWith('/platform/')) {
@@ -749,11 +791,12 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
       const hosts = [{ ...host, job_id: 'job-1', job: 'fixture-job', scan_id: 'scan-1', scanned_at: scan.finished_at, open_ports: 1, open_filtered_ports: 0, has_open_ports: true, data_quality: 'detailed' }]
       await json({ hosts, pagination: pagination(hosts.length) }); return
     }
-    if (path === '/jobs' && method === 'GET') { await json({ jobs: createdJob ? [job, createdJob] : [job] }); return }
-    if (routeAuditFixtures && path === '/jobs/slot-demand' && method === 'GET') { await json<ScanSlotDemand>(scanSlotDemand); return }
+    if (path === '/jobs' && method === 'GET') { await json({ jobs: createdJob ? [unitJob, createdJob] : [unitJob] }); return }
+    if (slotDemand && path === '/jobs/slot-demand' && method === 'GET') { await json<ScanSlotDemand>(slotDemand); return }
     if (path === '/jobs/schedule-suggestion' && method === 'GET') { await json({ suggested: false, draft_next_run: '2026-01-01T06:00:00Z', gap_minutes: 45 }); return }
     if (/^\/jobs\/[^/]+\/change-windows$/.test(path) && method === 'GET') { await json({ windows: [] }); return }
-    if (path === '/jobs/job-1' && method === 'GET') { await json<Job>(job); return }
+    if (path === '/jobs/job-1' && method === 'GET') { await json<Job>(unitJob); return }
+    if (pendingBaselineChanges && path === '/jobs/job-1/pending-changes' && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, pending_changes: pendingChanges, pagination: pagination(pendingChanges.length, 10) }); return }
     // Like the API, a known job with no successful scan or no saved cycle
     // answers 200 with null rather than 404.
     if (/^\/jobs\/job-(1|created)\/scans\/latest-successful$/.test(path) && method === 'GET') { await json<{ scan: Scan | null }>({ scan: path.startsWith('/jobs/job-1/') ? scan : null }); return }
@@ -767,7 +810,12 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/jobs/job-1/scans/scan-1/hosts/192.0.2.10/rdap' && method === 'GET') { await json({ rdap: { status: 'private', address: host.address } }); return }
     if (path === '/jobs/job-1/scans/scan-1/hosts/192.0.2.10' && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, scan, data_quality: 'detailed', host, expected: host }); return }
     if (path === '/jobs/job-1/baseline' && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, revision: 1, security_hash: job.security_hash, baseline: job.baseline, snapshot: { units: [], scopes: [] }, pagination: pagination(0) }); return }
-    if (path === '/jobs/job-1/baseline/hosts' && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, source_scan: scan, data_quality: 'detailed', hosts: [host], pagination: pagination(1) }); return }
+    if (path === '/jobs/job-1/baseline/hosts' && method === 'GET') {
+      await json(withoutBaseline
+        ? { job_id: 'job-1', job: job.job.name, source_scan: null, data_quality: 'none', hosts: [], pagination: pagination(0) }
+        : { job_id: 'job-1', job: job.job.name, source_scan: scan, data_quality: 'detailed', hosts: [host], pagination: pagination(1) })
+      return
+    }
     if (path.startsWith('/jobs/job-1/baseline/hosts/') && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, source_scan: scan, data_quality: 'detailed', host, expected: host }); return }
     if (path === '/scans' && method === 'GET') { await json({ scans: activityScans, pagination: pagination(activityScans.length, 20) }); return }
     if (path === '/scans/scan-1/summary' && method === 'GET') { await json({ scan: scanSummary }); return }
@@ -916,4 +964,32 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
   })
 
   return controls
+}
+
+/**
+ * Serves the public status pages: the default unit's at /public, the Retail
+ * unit's at /public/retail, and an unpublished page for any other slug. The
+ * public API is separate from the console's and needs no session.
+ */
+export async function mockPublicStatus(page: Page) {
+  const pages: Record<string, PublicDashboard> = {
+    '': {
+      title: 'Fixture public status',
+      introduction: 'Selected hosts of the default unit.',
+      updated_at: '2026-01-01T00:00:00Z',
+      hosts: [{ job: 'fixture-job', address: '192.0.2.10', public: false, private: true, last_successful_scan: '2026-01-01T00:00:01Z', open_ports: [{ protocol: 'tcp', port: 443, service: 'https' }], open_filtered_ports: [] }],
+    },
+    retail: {
+      title: 'Retail status',
+      updated_at: '2026-01-01T00:00:00Z',
+      hosts: [{ job: 'retail-edge', address: '198.51.100.10', public: true, private: false, open_ports: [], open_filtered_ports: [{ protocol: 'udp', port: 53, service: 'domain' }], rdap: { status: 'ok', network_name: 'RETAIL-NET', country: 'NL' } }],
+    },
+  }
+  await page.route('**/api/public/v1/**', async route => {
+    const slug = new URL(route.request().url()).pathname.replace(/^\/api\/public\/v1\/dashboard\/?/, '')
+    const value = pages[decodeURIComponent(slug)]
+    await route.fulfill(value
+      ? { status: 200, contentType: 'application/json', body: JSON.stringify(value) }
+      : { status: 404, contentType: 'application/json', body: JSON.stringify({ error: { code: 'public_disabled', message: 'public status is not enabled' } }) })
+  })
 }

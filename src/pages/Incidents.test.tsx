@@ -407,7 +407,8 @@ describe('follow-up due refresh', () => {
     vi.mocked(listIncidents).mockResolvedValueOnce(page([], 0, 0, 0, { serverNow: start.toISOString(), nextFollowUpAt: dueAtISO }) as never)
       .mockResolvedValue(page([due], 1, 0, 1, { serverNow: new Date(dueAt + 250).toISOString() }) as never)
     renderInbox(['/incidents?view=follow_up_due'])
-    await screen.findByRole('heading', { name: 'No matching incidents' })
+    // The empty state sits under the page's level-one heading (#1680).
+    await screen.findByRole('heading', { level: 2, name: 'No matching incidents' })
     expect(listIncidents).toHaveBeenCalledTimes(1)
 
     await act(async () => { await vi.advanceTimersByTimeAsync(59_000) })

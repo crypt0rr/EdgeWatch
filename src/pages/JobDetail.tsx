@@ -352,7 +352,7 @@ export function JobDetail() {
     // A deleted job, or another unit's, answers 404: say so instead of
     // offering a retry that fails the same way.
     const jobNotFound = isNotFound(job.error)
-    return <section className="page"><Link className="back-link" to="/jobs">← Jobs</Link><ErrorNotice message={job.error && !jobNotFound ? 'This job could not be loaded.' : 'This job could not be found.'} onRetry={job.error && !jobNotFound ? () => job.refetch() : undefined} /></section>
+    return <section className="page"><div className="page-heading"><div><Link className="back-link" to="/jobs">← Jobs</Link><h1>Job unavailable</h1></div></div><ErrorNotice message={job.error && !jobNotFound ? 'This job could not be loaded.' : 'This job could not be found.'} onRetry={job.error && !jobNotFound ? () => job.refetch() : undefined} /></section>
   }
 
   const value = job.data

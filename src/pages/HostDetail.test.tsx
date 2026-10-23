@@ -110,7 +110,8 @@ describe('host detail', () => {
 
   it('renders identity, RDAP, scanner provenance, service evidence, and sortable ports', async () => {
     await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address')
-    expect(container.textContent).toContain('198.51.100.10')
+    // The address is the page's level-one heading (#1680).
+    expect(Array.from(container.querySelectorAll('h1'), heading => heading.textContent)).toEqual(['198.51.100.10'])
     expect(container.textContent).toContain('syn-ack · TTL 64')
     expect(container.textContent).toContain('router.example')
     expect(container.textContent).toContain('Example Vendor')
@@ -184,6 +185,11 @@ describe('host detail', () => {
 
     const panel = container.querySelector('[aria-label="TCP Nmap script results"]')
     expect(panel).toBeTruthy()
+    // Below the host's h1, the protocol, its evidence, and each script result
+    // never skip a heading level (#1680).
+    const levels = Array.from(container.querySelectorAll('h1, h2, h3, h4, h5, h6'), heading => Number(heading.tagName[1]))
+    expect(levels.slice(0, 4)).toEqual([1, 2, 3, 4])
+    expect(levels.filter((level, index) => index > 0 && level - levels[index - 1] > 1)).toEqual([])
     expect(panel?.querySelectorAll('.nse-output-item')).toHaveLength(34)
     expect(panel?.textContent).toContain('http-title')
     expect(panel?.querySelector('img')).toBeNull()
@@ -303,6 +309,9 @@ describe('host detail', () => {
     vi.mocked(baselineHost).mockRejectedValue(Object.assign(new Error('missing'), { code: 'not_found' }))
     await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address')
     expect(container.querySelector('.error-card')?.textContent).toContain('could not be found')
+    // The page keeps its level-one heading while the host is unavailable (#1680).
+    expect(container.querySelector('h1')?.textContent).toBe('Host unavailable')
+    expect(container.querySelector('.eyebrow')?.textContent).toBe('Baseline host')
   })
 
   it('offers retry for transient host evidence failures', async () => {

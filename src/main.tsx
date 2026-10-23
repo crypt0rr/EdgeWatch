@@ -444,7 +444,7 @@ export function Jobs() {
             <p className="muted" role="status" aria-live="polite">Showing {visibleJobs.length} of {allJobs.length} jobs</p>
           </div>
           {filter === 'attention' && unavailableMonitoringCount > 0 ? <p className="job-monitoring-unavailable" role="status">Monitoring data is incomplete for {unavailableMonitoringCount} job{unavailableMonitoringCount === 1 ? '' : 's'}; known attention reasons remain visible in this filter.</p> : null}
-          {filter === 'attention' && allJobs.length > 0 && visibleJobs.length === 0 ? <div className="empty"><h3>No available jobs need attention</h3><p>No available job shows a latest failed or incomplete attempt, a stalled cycle, or a saved probe-budget skip.</p></div> : null}
+          {filter === 'attention' && allJobs.length > 0 && visibleJobs.length === 0 ? <div className="empty"><h2>No available jobs need attention</h2><p>No available job shows a latest failed or incomplete attempt, a stalled cycle, or a saved probe-budget skip.</p></div> : null}
           <div className="job-grid">
           {visibleJobs.map(job => {
             const baseline = baselinePresentation(job.baseline)
@@ -455,7 +455,7 @@ export function Jobs() {
                   <span className={`pill ${state.tone}`}>{state.label}</span>
                   <span className="revision">r{job.revision}</span>
                 </div>
-                <h3 id={`job-title-${job.id}`}><Link to={`/jobs/${job.id}`}>{job.job.name}</Link></h3>
+                <h2 id={`job-title-${job.id}`}><Link to={`/jobs/${job.id}`}>{job.job.name}</Link></h2>
                 <p className="muted">{job.job.targets.length} target{job.job.targets.length === 1 ? '' : 's'} · {protocolSummary(job)}</p>
                 <div className="job-card-bottom">
                   <span className={`baseline${baseline.status === 'complete' ? ' complete' : baseline.status === 'stalled' ? ' stalled' : ''}`}>
@@ -728,7 +728,7 @@ function decodePathSegment(value: string) {
 }
 
 function Loading() { return <div className="loading"><span className="spinner" />Loading EdgeWatch…</div> }
-function Empty({ icon, title, body, action }: { icon?: React.ReactNode; title: string; body: string; action?: React.ReactNode }) { return <div className="empty"><div className="empty-icon">{icon ?? <Boxes size={23} />}</div><h3>{title}</h3><p>{body}</p>{action}</div> }
+function Empty({ icon, title, body, action }: { icon?: React.ReactNode; title: string; body: string; action?: React.ReactNode }) { return <div className="empty"><div className="empty-icon">{icon ?? <Boxes size={23} />}</div><h2>{title}</h2><p>{body}</p>{action}</div> }
 
 const rootElement = document.getElementById('root')
 if (rootElement) createRoot(rootElement).render(<StrictMode><QueryClientProvider client={queryClient}><App /></QueryClientProvider></StrictMode>)

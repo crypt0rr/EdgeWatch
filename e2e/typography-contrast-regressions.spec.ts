@@ -102,7 +102,7 @@ test('operational text stays at least 11px on narrow screens', async ({ page }, 
 
   for (const path of operatorPages) {
     await page.goto(path)
-    const pageTitle = path.startsWith('/scans/') ? page.locator('.host-identity h2') : page.locator('h1').first()
+    const pageTitle = page.locator('h1').first()
     await expect(pageTitle).toBeVisible()
     if (path === '/activity') await expect(page.locator('.activity-event-heading time').first()).toBeVisible()
     if (path === '/jobs/job-1') await expect(page.locator('.pending-detail-heading')).toBeVisible()
@@ -137,7 +137,7 @@ test('Activity, pending confirmations, and host evidence stay readable on deskto
 
   for (const path of ['/activity', '/jobs/job-1', '/scans/scan-1/hosts/192.0.2.10']) {
     await page.goto(path)
-    const pageTitle = path.startsWith('/scans/') ? page.locator('.host-identity h2') : page.locator('h1').first()
+    const pageTitle = page.locator('h1').first()
     await expect(pageTitle).toBeVisible()
     if (path === '/activity') await expect(page.locator('.activity-event-heading time').first()).toBeVisible()
     if (path === '/jobs/job-1') await expect(page.locator('.pending-detail-heading')).toBeVisible()

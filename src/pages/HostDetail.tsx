@@ -16,7 +16,7 @@ function displayStatusReason(reason?: string) {
 }
 
 function HostIdentity({ host }: { host: HostObservation }) {
-  return <div className="host-identity"><div className="host-identity-icon"><Server size={25} /></div><div><h2>{host.address}</h2><div className="host-badges"><span className="pill blue">{host.address_family ?? (host.address.includes(':') ? 'IPv6' : 'IPv4')}</span><span className={host.status === 'up' ? 'pill green' : 'pill gray'}>{host.status ? hostStatusLabel(host.status) : 'Status not recorded'}</span>{host.status_reason && <span className="muted">{displayStatusReason(host.status_reason)}{host.reason_ttl ? ` · TTL ${host.reason_ttl}` : ''}</span>}</div></div></div>
+  return <div className="host-identity"><div className="host-identity-icon"><Server size={25} /></div><div><h1>{host.address}</h1><div className="host-badges"><span className="pill blue">{host.address_family ?? (host.address.includes(':') ? 'IPv6' : 'IPv4')}</span><span className={host.status === 'up' ? 'pill green' : 'pill gray'}>{host.status ? hostStatusLabel(host.status) : 'Status not recorded'}</span>{host.status_reason && <span className="muted">{displayStatusReason(host.status_reason)}{host.reason_ttl ? ` · TTL ${host.reason_ttl}` : ''}</span>}</div></div></div>
 }
 
 function ServiceText({ port }: { port: PortObservation }) {
@@ -36,7 +36,7 @@ function serviceSortValue(port: PortObservation) {
 
 function EvidencePorts({ title, description, ports, tone = 'muted' }: { title: string; description: string; ports: PortObservation[]; tone?: 'muted' | 'warning' }) {
   if (!ports.length) return null
-  return <section className={`evidence-section ${tone === 'warning' ? 'warning' : ''}`} aria-label={title}><div className="evidence-heading"><div><h4>{title}</h4><p className="muted">{description}</p></div><span className="pill gray">{ports.length} {ports.length === 1 ? 'port' : 'ports'}</span></div><div className="evidence-port-list">{ports.map(port => <div className="evidence-port-row" key={`${port.port}-${port.state}-${port.verification ?? ''}`}><code>{port.port}</code><span className={port.state === 'open' ? 'pill green' : 'pill amber'}>{port.state}</span><span className="muted">{port.reason || 'No reason reported'}{port.reason_ttl ? ` · TTL ${port.reason_ttl}` : ''}</span><ServiceText port={port} /></div>)}</div></section>
+  return <section className={`evidence-section ${tone === 'warning' ? 'warning' : ''}`} aria-label={title}><div className="evidence-heading"><div><h3>{title}</h3><p className="muted">{description}</p></div><span className="pill gray">{ports.length} {ports.length === 1 ? 'port' : 'ports'}</span></div><div className="evidence-port-list">{ports.map(port => <div className="evidence-port-row" key={`${port.port}-${port.state}-${port.verification ?? ''}`}><code>{port.port}</code><span className={port.state === 'open' ? 'pill green' : 'pill amber'}>{port.state}</span><span className="muted">{port.reason || 'No reason reported'}{port.reason_ttl ? ` · TTL ${port.reason_ttl}` : ''}</span><ServiceText port={port} /></div>)}</div></section>
 }
 
 function parseNSESummary(summary: string) {
@@ -53,7 +53,7 @@ function NSEOutputPanel({ protocol, outputs }: { protocol: string; outputs?: str
   return <section className="nse-output-panel" aria-label={label}>
     <div className="evidence-heading">
       <div>
-        <h4>Nmap script results</h4>
+        <h3>Nmap script results</h3>
         <p className="muted">Script names and captured output for this {protocol.toUpperCase()} scan.</p>
       </div>
       <span className="pill gray">{allEntries.length}</span>
@@ -63,7 +63,7 @@ function NSEOutputPanel({ protocol, outputs }: { protocol: string; outputs?: str
         const parsed = parseNSESummary(summary)
         const captureWasShortened = parsed.output.endsWith('…')
         return <article className="nse-output-item" key={`${protocol}-${index}`}>
-          <h5><code>{parsed.script}</code></h5>
+          <h4><code>{parsed.script}</code></h4>
           <pre className="nse-output-text">{parsed.output || 'No output reported'}</pre>
           {captureWasShortened && <small role="note">Nmap shortened this output when it was captured.</small>}
         </article>
@@ -108,7 +108,7 @@ function ProtocolCard({ protocol }: { protocol: ProtocolObservation }) {
   return <div className="protocol-card">
     <div className="protocol-heading">
       <div>
-        <h3>{protocol.protocol.toUpperCase()}</h3>
+        <h2>{protocol.protocol.toUpperCase()}</h2>
         <p className="muted">{protocol.scan_type || protocol.protocol} · {protocol.scanned_port_count.toLocaleString()} ports</p>
       </div>
       <span className="pill blue">{protocol.service_detection ? 'Service detection' : 'Port scan'}</span>
@@ -208,7 +208,7 @@ export function HostDetail() {
   const rdap = useQuery({ queryKey: ['host-rdap', id, scanID, address], queryFn: () => scanID ? historical ? historicalScanHostRDAP(scanID, address) : scanHostRDAP(id, scanID, address) : baselineHostRDAP(id, address), enabled: !!address && (historical || !!id), retry: false })
   if (detail.isLoading) return <div className="loading"><span className="spinner" />Loading host evidence…</div>
   const notFound = (detail.error as { code?: string } | null)?.code === 'not_found'
-  if (detail.error || !detail.data) return <section className="page"><Link className="back-link" to={back}>← {backLabel}</Link><ErrorNotice message={detail.error ? (notFound ? `This host could not be found in the selected ${scanID ? 'scan' : 'baseline'}.` : 'Host evidence could not be loaded.') : `This host could not be found in the selected ${scanID ? 'scan' : 'baseline'}.`} onRetry={detail.error && !notFound ? () => detail.refetch() : undefined} /></section>
+  if (detail.error || !detail.data) return <section className="page"><div className="page-heading"><div><Link className="back-link" to={back}>← {backLabel}</Link><p className="eyebrow">{scanID ? 'Historical scan host' : 'Baseline host'}</p><h1>Host unavailable</h1></div></div><ErrorNotice message={detail.error ? (notFound ? `This host could not be found in the selected ${scanID ? 'scan' : 'baseline'}.` : 'Host evidence could not be loaded.') : `This host could not be found in the selected ${scanID ? 'scan' : 'baseline'}.`} onRetry={detail.error && !notFound ? () => detail.refetch() : undefined} /></section>
   const value = detail.data
   const host = value.host
   const sourceScan = value.source_scan ?? value.scan

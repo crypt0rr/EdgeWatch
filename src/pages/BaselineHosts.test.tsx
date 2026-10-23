@@ -143,6 +143,8 @@ describe('baseline host explorer', () => {
       root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={['/jobs/job-1/baseline']}><Routes><Route path="/jobs/:id/baseline" element={<BaselineHosts />} /></Routes></MemoryRouter></QueryClientProvider>)
     })
     await vi.waitFor(() => expect(container.textContent).toContain('No active baseline'), { timeout: 1000 })
+    // The empty state sits under the page's level-one heading (#1680).
+    expect(container.querySelector('h2')?.textContent).toBe('No active baseline')
     expect(container.textContent).toContain('Complete the configured baseline samples')
     expect(container.querySelector('input[placeholder*="Search IP"]')).toBeNull()
   })

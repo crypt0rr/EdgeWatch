@@ -87,9 +87,12 @@ type App struct {
 	backupWait func(context.Context, time.Time) bool
 	// inspectScannerIdentities is replaceable in tests; production uses the
 	// bounded read-only inspection of the scanner identity allocator.
-	inspectScannerIdentities   func(context.Context) (*sandbox.ScannerIdentityPoolStatus, error)
-	scheduledJobActiveSkips    atomic.Uint64
-	scheduledCycleStalledSkips atomic.Uint64
+	inspectScannerIdentities func(context.Context) (*sandbox.ScannerIdentityPoolStatus, error)
+	// scannerIdentityInspectionFailing records that the last inspection of
+	// the scanner identity pool failed, so a lasting failure is logged once.
+	scannerIdentityInspectionFailing atomic.Bool
+	scheduledJobActiveSkips          atomic.Uint64
+	scheduledCycleStalledSkips       atomic.Uint64
 }
 
 type activeRun struct {

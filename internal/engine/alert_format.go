@@ -173,7 +173,7 @@ func formatHealthAlert(e model.Event) string {
 	case model.HealthAlertScannerIdentitiesLow:
 		b.WriteString("⚠️ EdgeWatch deployment alert: scanner identity capacity is below max_concurrent_scans")
 		writeAlertLine(&b, "Pool", alert.Current)
-		b.WriteString("\nStop other EdgeWatch processes using the data volume or reduce max_concurrent_scans; see the container hardening guide.")
+		b.WriteString("\nQuarantined identities or processes without a lease hold the rest of the pool; the daemon's own running scans do not count. Restart the container once no other EdgeWatch process uses the data volume, or reduce max_concurrent_scans; see the container hardening guide.")
 	default:
 		b.WriteString("⚠️ EdgeWatch deployment alert")
 	}

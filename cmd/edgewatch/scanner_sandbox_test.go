@@ -156,17 +156,27 @@ func TestScannerSandboxWarningsFailClosedWhenThePoolIsUnavailable(t *testing.T) 
 	}
 }
 
-func TestScannerSandboxWarningsWhenFreeCapacityIsBelowConcurrency(t *testing.T) {
-	status := sandbox.Status{
-		Mode: sandbox.ModeAuto, State: sandbox.StateEnforced,
-		IdentityPool: &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, Active: 3, Quarantined: 2, InUseByOtherProcesses: 1, Free: 4, MaxParallel: 10},
-	}
-	warnings := scannerSandboxWarnings(status, 5)
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "4 free slots") || !strings.Contains(warnings[0], "max_concurrent_scans=5") || !strings.Contains(warnings[0], "reduce max_concurrent_scans") {
-		t.Fatalf("low-capacity warnings = %q", warnings)
-	}
-	if got := scannerSandboxWarnings(status, 4); len(got) != 0 {
-		t.Fatalf("capacity at configured concurrency warned: %q", got)
+// The health command warns when quarantined identities and identities in use
+// without a lease leave fewer than max_concurrent_scans for the daemon's
+// scans. Active leases, which the daemon's running scans hold, stay
+// reachable, so an idle pool warns as it did when free identities were
+// compared, and a busy one does not warn.
+func TestScannerSandboxWarningsWhenReachableCapacityIsBelowConcurrency(t *testing.T) {
+	t.Parallel()
+	for name, pool := range map[string]sandbox.ScannerIdentityPoolStatus{
+		"idle":  {State: sandbox.StateEnforced, Quarantined: 2, InUseByOtherProcesses: 1, Free: 7, MaxParallel: 10},
+		"busy":  {State: sandbox.StateEnforced, Active: 3, Quarantined: 2, InUseByOtherProcesses: 1, Free: 4, MaxParallel: 10},
+		"empty": {State: sandbox.StateEnforced, Active: 7, Quarantined: 2, InUseByOtherProcesses: 1, MaxParallel: 10},
+	} {
+		status := sandbox.Status{Mode: sandbox.ModeAuto, State: sandbox.StateEnforced, IdentityPool: &pool}
+		warnings := scannerSandboxWarnings(status, 8)
+		if len(warnings) != 1 || !strings.Contains(warnings[0], "7 reachable identities") || !strings.Contains(warnings[0], "max_concurrent_scans=8") ||
+			!strings.Contains(warnings[0], "2 quarantined, 1 in use by processes without a lease") || !strings.Contains(warnings[0], "reduce max_concurrent_scans") {
+			t.Errorf("%s: low-capacity warnings = %q", name, warnings)
+		}
+		if got := scannerSandboxWarnings(status, 7); len(got) != 0 {
+			t.Errorf("%s: capacity at configured concurrency warned: %q", name, got)
+		}
 	}
 }
 

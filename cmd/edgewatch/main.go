@@ -1026,7 +1026,8 @@ func notificationSandboxOptions(cfg *config.Config) sandbox.Options {
 // scannerSandboxWarnings reports a sandbox that auto mode could not enforce
 // while scanner processes run as UID 0. A daemon that runs as another user
 // starts scanner processes as that user, which the sandbox would not improve
-// on.
+// on. It also reports a pool whose reachable identities, which include the
+// ones the daemon's running scans hold, are fewer than maxConcurrent.
 func scannerSandboxWarnings(status sandbox.Status, maxConcurrent int) []string {
 	if status.Mode != sandbox.ModeOff && status.IdentityPool != nil && status.IdentityPool.State == sandbox.StateUnavailable {
 		return []string{"scanner launches are refused because the per-invocation identity pool could not be enforced: " + status.IdentityPool.Reason}
@@ -1034,8 +1035,8 @@ func scannerSandboxWarnings(status sandbox.Status, maxConcurrent int) []string {
 	if status.Mode != sandbox.ModeOff && status.State == sandbox.StateUnavailable {
 		return []string{"scanner launches are refused: " + status.Reason}
 	}
-	if pool := status.IdentityPool; pool != nil && pool.State == sandbox.StateEnforced && maxConcurrent > 0 && pool.Free < maxConcurrent {
-		return []string{fmt.Sprintf("scanner identity pool has %d free slots, below max_concurrent_scans=%d; stop other EdgeWatch processes using the data volume or reduce max_concurrent_scans", pool.Free, maxConcurrent)}
+	if pool := status.IdentityPool; pool != nil && pool.State == sandbox.StateEnforced && maxConcurrent > 0 && pool.Reachable() < maxConcurrent {
+		return []string{fmt.Sprintf("scanner identity pool has %d reachable identities, below max_concurrent_scans=%d (%d quarantined, %d in use by processes without a lease); restart the container once no other EdgeWatch process uses the data volume to release them, or reduce max_concurrent_scans", pool.Reachable(), maxConcurrent, pool.Quarantined, pool.InUseByOtherProcesses)}
 	}
 	if status.Mode != sandbox.ModeOff && status.Landlock.Mode != sandbox.ModeOff && status.Landlock.State == sandbox.StateUnavailable {
 		return []string{"scanner processes start with identity isolation and seccomp but without Landlock: " + status.Landlock.Reason}

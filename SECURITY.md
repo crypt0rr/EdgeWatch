@@ -333,14 +333,14 @@ host headers.
 The daemon also reports the deployment's own health to the platform
 destinations that platform administrators select for deployment alerts: a
 scanner or notification sandbox that lost confinement since the last alert,
-or regained it, scheduled backups that fail, scanner identity capacity below
-`max_concurrent_scans`, a version rollback, and the number of alerts that
-failed for good. Backup and identity alerts contain counts only, without a
-backup path, destination, URL, or provider's answer. Each is recorded in the
-platform audit as `application.health_alert`, and none reaches a unit's
-destinations. A restart with the same state records nothing; sandbox,
-rollback, backup, and identity-condition alerts are sent at most once an
-hour, and failed deliveries are reported at most every six hours, without
+or regained it, scheduled backups that fail, fewer scanner identities that the
+daemon's scans can reach than `max_concurrent_scans`, a version rollback, and
+the number of alerts that failed for good. Backup and identity alerts contain
+counts only, without a backup path, destination, URL, or provider's answer.
+Each is recorded in the platform audit as `application.health_alert`, and none
+reaches a unit's destinations. A restart with the same state records nothing;
+sandbox, rollback, backup, and identity-condition alerts are sent at most once
+an hour, and failed deliveries are reported at most every six hours, without
 counting a failed deployment alert. A missing or replaced notification key locks the
 platform's destinations too, so it cannot be reported this way, and
 `/healthz`, which reads only the migration and daemon state, still answers

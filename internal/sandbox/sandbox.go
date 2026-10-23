@@ -223,6 +223,20 @@ type ScannerIdentityPoolStatus struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// Reachable returns how many identities the daemon's scans can hold at once:
+// the pool's capacity less quarantined leases and the identities that
+// processes without a lease occupy. Active leases stay reachable, because the
+// daemon's own running scans hold them and release them when they end. The
+// journal cannot tell those leases from the ones of an `edgewatch scan` that
+// shares the data volume, so they count as reachable too. A nil status has
+// none.
+func (status *ScannerIdentityPoolStatus) Reachable() int {
+	if status == nil {
+		return 0
+	}
+	return max(status.MaxParallel-status.Quarantined-status.InUseByOtherProcesses, 0)
+}
+
 func scannerIdentityPoolStatus(state, reason string) *ScannerIdentityPoolStatus {
 	return &ScannerIdentityPoolStatus{
 		State: state, Strategy: "per_invocation",
@@ -895,6 +909,19 @@ func NewEnforcedFor(profile Profile, ambient ...uintptr) *Policy {
 		enforce: true,
 		ambient: append([]uintptr(nil), ambient...),
 	}
+}
+
+// NewUnavailable returns a scanner policy in auto mode whose identity pool
+// could not be enforced for reason, as Detect reports for a daemon that does
+// not run as root, without checking the runtime. It confines nothing, so it
+// refuses every scanner launch. Detect is the entry point that checks.
+func NewUnavailable(reason string) *Policy {
+	return &Policy{profile: Scanner, status: Status{
+		Mode: ModeAuto, State: StateUnavailable, Reason: reason,
+		IdentityPool: scannerIdentityPoolStatus(StateUnavailable, reason),
+		Landlock:     LandlockStatus{Mode: ModeAuto, State: StateUnavailable, Reason: "scanner identity isolation is unavailable"},
+		Seccomp:      SeccompStatus{State: StateEnforced},
+	}}
 }
 
 // WithLandlock returns a copy of p that also starts its processes through the

@@ -173,17 +173,19 @@ func (ps *PlatformStore) RecordScheduledBackupHealth(ctx context.Context, consec
 	)
 }
 
-// RecordScannerIdentityHealth reports when fewer scanner identities are free
-// than the deployment allows scans to run at once. A recovered pool clears
-// the condition without sending an alert.
-func (ps *PlatformStore) RecordScannerIdentityHealth(ctx context.Context, free, required int, now time.Time) (bool, error) {
+// RecordScannerIdentityHealth reports when the daemon's scans can reach fewer
+// scanner identities than the deployment allows scans to run at once. The
+// caller counts the identities that its own running scans hold as reachable,
+// so a busy daemon does not raise the condition. A recovered pool clears the
+// condition without sending an alert.
+func (ps *PlatformStore) RecordScannerIdentityHealth(ctx context.Context, reachable, required int, now time.Time) (bool, error) {
 	return ps.recordOperationalHealthTransition(
 		ctx,
 		"scanner_identity_pool_low",
 		"scanner_identity_pool_alerted_at",
-		free < required && required > 0,
-		model.AlertDetail{Kind: model.HealthAlertScannerIdentitiesLow, Subject: "scanner identity pool", Current: fmt.Sprintf("%d free, %d required", max(free, 0), max(required, 0))},
-		fmt.Sprintf("scanner identity pool has %d free slots, below max_concurrent_scans=%d", max(free, 0), max(required, 0)),
+		reachable < required && required > 0,
+		model.AlertDetail{Kind: model.HealthAlertScannerIdentitiesLow, Subject: "scanner identity pool", Current: fmt.Sprintf("%d reachable, %d required", max(reachable, 0), max(required, 0))},
+		fmt.Sprintf("scanner identity pool has %d reachable identities, below max_concurrent_scans=%d", max(reachable, 0), max(required, 0)),
 		now,
 	)
 }

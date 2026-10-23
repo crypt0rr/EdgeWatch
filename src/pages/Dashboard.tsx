@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useId, useState } from 'react'
 import { Activity, AlertTriangle, Bell, Check, CheckCircle2, Clock3, Database, Minus, Play, Radar, ShieldAlert, ShieldCheck, ShieldHalf, ShieldOff, ShieldX, X } from 'lucide-react'
 import { activeScans, adminStatus, cancelQueuedRun, cancelScan, getSession, listIncidents, listJobs, listScans, notificationTest, runJob } from '../api'
-import type { DeploymentTelemetry, ScannerSandboxStatus } from '../generated/api-types'
+import type { DeploymentTelemetry, ScannerIdentityPoolStatus, ScannerSandboxStatus } from '../generated/api-types'
 import { Link, useNavigate } from 'react-router-dom'
 import { formatBytes, formatDate, formatDateTime, formatRetention, formatTime } from '../format'
 import { baselinePresentation, type BaselineStatusInfo } from '../baseline'
@@ -202,7 +202,8 @@ function SandboxEntry({ name, status, maxConcurrentScans }: { name: string; stat
   const reasons = layerReasons(layers, !status.identity_pool)
   const pool = status.identity_pool
   const hasPoolCounts = pool && typeof pool.active === 'number' && typeof pool.quarantined === 'number' && typeof pool.in_use_by_other_processes === 'number' && typeof pool.free === 'number'
-  const capacityLow = hasPoolCounts && maxConcurrentScans !== undefined && pool.free < maxConcurrentScans
+  const reachable = hasPoolCounts ? reachableScannerIdentities(pool) : 0
+  const capacityLow = hasPoolCounts && pool.state === 'enforced' && maxConcurrentScans !== undefined && reachable < maxConcurrentScans
   return <li className="isolation-entry">
     <span className="isolation-name">{name}</span>
     <span className={`pill ${tone} isolation-state`}><Icon size={12} aria-hidden="true" />{label}</span>
@@ -212,10 +213,20 @@ function SandboxEntry({ name, status, maxConcurrentScans }: { name: string; stat
         return <li key={layer.name} className={`isolation-layer ${layer.state === 'enforced' ? 'holds' : layer.state === 'disabled' ? 'off' : 'fails'}`}><LayerIcon size={12} strokeWidth={2.5} aria-hidden="true" />{layer.label}<span className="sr-only">: {layerStateText[layer.state] ?? layer.state}</span></li>
       })}</ul>{status.state === 'enforced' && status.capabilities?.length ? <span className="isolation-capabilities">Keeps {status.capabilities.join(', ')}</span> : null}</div>
       {hasPoolCounts && <p className="isolation-pool-counts">Scanner identities: {pool.active} active · {pool.quarantined} quarantined · {pool.in_use_by_other_processes} in use by unleased processes · {pool.free} free of {pool.max_parallel}.</p>}
-      {capacityLow && <p className="notice warning isolation-pool-warning" role="status">Free scanner slots ({pool.free}) are below this unit’s concurrent scan limit ({maxConcurrentScans}). The pool is shared across units; stop other EdgeWatch processes using the data volume or reduce scan concurrency.</p>}
+      {capacityLow && <p className="notice warning isolation-pool-warning" role="status">Scanner identities that scans can reach ({reachable}) are below this unit’s concurrent scan limit ({maxConcurrentScans}). Quarantined identities and processes without a lease hold the rest of the shared pool; the identities that running scans hold still count as reachable. Restart the container once no other EdgeWatch process uses the data volume, or reduce scan concurrency.</p>}
       {reasons.length > 0 && <ul className="isolation-reasons" role="list">{reasons.map(({ names, reason }) => <li key={names.join()}><span className="isolation-reason-layers">{names.join(', ')}:</span> <SandboxReason text={reason} /></li>)}</ul>}
     </div>
   </li>
+}
+
+// The identities the daemon's scans can reach: the pool's capacity less the
+// quarantined identities and those that processes without a lease occupy.
+// Active leases stay reachable, because running scans hold them and release
+// them when they end, so a busy daemon does not lower the count. The daemon's
+// low-identity alert and the health command count them the same way, with
+// ScannerIdentityPoolStatus.Reachable.
+function reachableScannerIdentities(pool: ScannerIdentityPoolStatus) {
+  return Math.max(pool.max_parallel - pool.quarantined - pool.in_use_by_other_processes, 0)
 }
 
 // A sandbox confines its processes in up to three layers: the sandbox

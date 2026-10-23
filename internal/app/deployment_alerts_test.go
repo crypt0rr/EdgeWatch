@@ -3,9 +3,12 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -145,8 +148,10 @@ func TestCheckDeploymentAlertsReportsBackupAndIdentityCapacity(t *testing.T) {
 	a.Config.Scheduler.MaxConcurrent = 4
 	a.Config.Backup.Directory = t.TempDir()
 	a.sandbox = sandbox.NewEnforced().WithLandlock("/usr/local/bin/edgewatch", 3)
+	// The daemon's own running scan holds one lease, which stays reachable;
+	// 61 quarantined identities leave it three of the four it needs.
 	a.inspectScannerIdentities = func(context.Context) (*sandbox.ScannerIdentityPoolStatus, error) {
-		return &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Active: 60, Free: 3}, nil
+		return &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Active: 1, Quarantined: 61, Free: 2}, nil
 	}
 	if err := writeBackupStatusFile(BackupStatusPath(f.db.Path), BackupStatus{Directory: a.Config.Backup.Directory, ConsecutiveFailures: 2}); err != nil {
 		t.Fatal(err)
@@ -156,7 +161,7 @@ func TestCheckDeploymentAlertsReportsBackupAndIdentityCapacity(t *testing.T) {
 	a.checkDeploymentAlerts(ctx, now)
 	want := []model.AlertDetail{
 		{Kind: model.HealthAlertScheduledBackupFailed, Subject: "scheduled_backup", Count: 2},
-		{Kind: model.HealthAlertScannerIdentitiesLow, Subject: "scanner identity pool", Current: "3 free, 4 required"},
+		{Kind: model.HealthAlertScannerIdentitiesLow, Subject: "scanner identity pool", Current: "3 reachable, 4 required"},
 	}
 	if alerts := healthAlerts(t, f.db); !reflect.DeepEqual(alerts, want) || !drainWake(a) {
 		t.Fatalf("operational deployment alerts = %+v, want %+v and a delivery wake", alerts, want)
@@ -179,7 +184,7 @@ func TestCheckDeploymentAlertsWakesAfterPartialOperationalQueue(t *testing.T) {
 	var logs strings.Builder
 	a.Logger = slog.New(slog.NewTextHandler(&logs, nil))
 	a.inspectScannerIdentities = func(context.Context) (*sandbox.ScannerIdentityPoolStatus, error) {
-		return &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, Free: 3}, nil
+		return &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Quarantined: 61, Free: 3}, nil
 	}
 	if err := writeBackupStatusFile(BackupStatusPath(f.db.Path), BackupStatus{Directory: a.Config.Backup.Directory, ConsecutiveFailures: 2}); err != nil {
 		t.Fatal(err)
@@ -228,7 +233,7 @@ func TestScannerIdentityCapacityRequiresEnforcedInspection(t *testing.T) {
 		t.Fatalf("unavailable scanner identity inspection alerted: %+v", alerts)
 	}
 
-	pool = &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, Free: 3}
+	pool = &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Quarantined: 61, Free: 3}
 	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(time.Minute)); err != nil || recorded != 1 {
 		t.Fatalf("low enforced capacity = %d, %v; want one alert", recorded, err)
 	}
@@ -241,12 +246,155 @@ func TestScannerIdentityCapacityRequiresEnforcedInspection(t *testing.T) {
 		t.Fatalf("low-capacity state after unavailable inspection = %d, %v; want it preserved", failing, err)
 	}
 
-	pool = &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, Free: 4}
+	pool = &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Quarantined: 60, Free: 4}
 	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(3*time.Minute)); err != nil || recorded != 0 {
 		t.Fatalf("healthy enforced capacity = %d, %v; want silent recovery", recorded, err)
 	}
+	if err := f.db.DB.QueryRowContext(ctx, `SELECT scanner_identity_pool_low FROM platform_alert_state WHERE id=1`).Scan(&failing); err != nil || failing != 0 {
+		t.Fatalf("low-capacity state after recovery = %d, %v; want it cleared", failing, err)
+	}
 	if alerts := healthAlerts(t, f.db); len(alerts) != 1 || alerts[0].Kind != model.HealthAlertScannerIdentitiesLow {
 		t.Fatalf("scanner identity alerts after recovery = %+v; want only the low-capacity alert", alerts)
+	}
+}
+
+// The low-identity condition measures the identities the daemon cannot
+// reach. The leases its own running scans hold stay reachable, so a busy
+// daemon raises nothing, while quarantined identities that leave fewer than
+// max_concurrent_scans do.
+func TestScannerIdentityCapacityCountsOwnScansAsReachable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
+	a := f.app
+	routeDeploymentAlerts(t, f.db)
+	a.sandbox = sandbox.NewEnforced()
+	var pool *sandbox.ScannerIdentityPoolStatus
+	a.inspectScannerIdentities = func(context.Context) (*sandbox.ScannerIdentityPoolStatus, error) {
+		copied := *pool
+		return &copied, nil
+	}
+	now := time.Now().UTC()
+	for i, test := range []struct {
+		name          string
+		maxConcurrent int
+		pool          sandbox.ScannerIdentityPoolStatus
+		want          int
+	}{
+		// 25 of 40 slots run scans, which hold 25 leases; 39 identities are free.
+		{"busy daemon", 40, sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Active: 25, Free: 39}, 0},
+		// max_concurrent_scans equals the pool's 64 identities; one scan runs.
+		{"one scan at the pool's capacity", 64, sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Active: 1, Free: 63}, 0},
+		// The same 25 scans with 25 quarantined identities leave 39 of 40.
+		{"quarantined identities", 40, sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Active: 25, Quarantined: 25, Free: 14}, 1},
+	} {
+		a.Config.Scheduler.MaxConcurrent = test.maxConcurrent
+		pool = &test.pool
+		if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(time.Duration(i)*time.Minute)); err != nil || recorded != test.want {
+			t.Fatalf("%s: recorded = %d, %v; want %d", test.name, recorded, err, test.want)
+		}
+	}
+	want := []model.AlertDetail{{Kind: model.HealthAlertScannerIdentitiesLow, Subject: "scanner identity pool", Current: "39 reachable, 40 required"}}
+	if alerts := healthAlerts(t, f.db); !reflect.DeepEqual(alerts, want) {
+		t.Fatalf("scanner identity alerts = %+v, want %+v", alerts, want)
+	}
+}
+
+// A daemon whose identity pool was unavailable at startup, as for one that
+// does not run as root, refuses every scanner launch. Its health passes do not
+// inspect the pool, so they neither warn nor alert.
+func TestUnavailableStartupIdentityPoolIsNotInspected(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
+	a := f.app
+	routeDeploymentAlerts(t, f.db)
+	a.Config.Scheduler.MaxConcurrent = 4
+	a.sandbox = sandbox.NewUnavailable("EdgeWatch runs as UID 1000 rather than UID 0, so it cannot start scanner processes under leased identities")
+	var logs strings.Builder
+	a.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	inspections := 0
+	a.inspectScannerIdentities = func(context.Context) (*sandbox.ScannerIdentityPoolStatus, error) {
+		inspections++
+		return nil, errors.New("scanner identity allocator: journal lock is unavailable for health inspection")
+	}
+	now := time.Now().UTC()
+	for i := range 3 {
+		if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now.Add(time.Duration(i)*time.Minute)); err != nil || recorded != 0 {
+			t.Fatalf("health pass %d = %d, %v; want nothing recorded", i, recorded, err)
+		}
+		if metrics := a.DeploymentMetrics(ctx, now.Add(time.Duration(i)*time.Minute)); metrics.ScannerIdentities != nil {
+			t.Fatalf("metrics pass %d exported the pool: %+v", i, metrics.ScannerIdentities)
+		}
+	}
+	if inspections != 0 {
+		t.Fatalf("scanner identity inspections = %d, want none", inspections)
+	}
+	if strings.Contains(logs.String(), "scanner identity pool") {
+		t.Fatalf("health passes logged about the pool: %s", logs.String())
+	}
+	if alerts := healthAlerts(t, f.db); len(alerts) != 0 {
+		t.Fatalf("health passes alerted: %+v", alerts)
+	}
+}
+
+// A pool that startup enforced is inspected with each heartbeat and /metrics
+// refresh. A failing inspection is logged when it starts to fail and when it
+// recovers, not with each of them, even when they overlap.
+func TestFailingScannerIdentityInspectionWarnsOncePerStateChange(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
+	a := f.app
+	a.sandbox = sandbox.NewEnforced()
+	var logs strings.Builder
+	a.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	var failing atomic.Bool
+	var inspections atomic.Int64
+	a.inspectScannerIdentities = func(context.Context) (*sandbox.ScannerIdentityPoolStatus, error) {
+		inspections.Add(1)
+		if failing.Load() {
+			return nil, errors.New("scanner identity allocator: journal lock is unavailable for health inspection")
+		}
+		return &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Free: 64}, nil
+	}
+	const warning = "scanner identity pool health could not be inspected"
+	const recovery = "scanner identity pool health can be inspected again"
+	pass := func(n int) {
+		t.Helper()
+		var wg sync.WaitGroup
+		for range n {
+			wg.Go(func() { a.deploymentHealthObservation(ctx, time.Now().UTC()) })
+		}
+		wg.Wait()
+	}
+	check := func(stage string, warnings, recoveries int) {
+		t.Helper()
+		if got := strings.Count(logs.String(), warning); got != warnings {
+			t.Fatalf("%s: %d inspection warnings, want %d: %s", stage, got, warnings, logs.String())
+		}
+		if got := strings.Count(logs.String(), recovery); got != recoveries {
+			t.Fatalf("%s: %d recovery notes, want %d: %s", stage, got, recoveries, logs.String())
+		}
+	}
+
+	pass(2)
+	check("healthy", 0, 0)
+	failing.Store(true)
+	pass(8)
+	if _, err := a.RecordDeploymentOperationalHealth(ctx, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	a.DeploymentMetrics(ctx, time.Now().UTC())
+	check("failing", 1, 0)
+	failing.Store(false)
+	pass(4)
+	check("recovered", 1, 1)
+	failing.Store(true)
+	pass(4)
+	check("failing again", 2, 1)
+	if got := inspections.Load(); got != 2+8+2+4+4 {
+		t.Fatalf("scanner identity inspections = %d, want one for each pass", got)
 	}
 }
 

@@ -206,7 +206,7 @@ func TestOffScannerSandboxClearsCapacityAlert(t *testing.T) {
 	a.Config.Scheduler.MaxConcurrent = 1
 	a.sandbox = sandbox.NewEnforced()
 	a.inspectScannerIdentities = func(context.Context) (*sandbox.ScannerIdentityPoolStatus, error) {
-		return &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, Free: 0}, nil
+		return &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Quarantined: 64}, nil
 	}
 	now := time.Now().UTC()
 	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, now); err != nil || recorded != 1 {

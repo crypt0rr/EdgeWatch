@@ -251,7 +251,10 @@ footprint's **Process isolation** section. Each sandbox has a status:
 
 The section marks each layer (the scanner identity pool, Landlock, and the
 [seccomp filter](#seccomp-filter)) as holding, unavailable, or off, and gives
-the reason for each layer that does not hold.
+the reason for each layer that does not hold. For an enforced pool it also
+shows the identity counts, and it warns when the identities that scans can
+reach, counted as `edgewatch health` counts them, fall below the unit's
+concurrent scan limit. Running scans do not lower that count.
 
 The scanner pool needs the container's user namespace to map every UID and GID
 from 60000 through 60063. Standard rootful Docker, rootless Docker, and

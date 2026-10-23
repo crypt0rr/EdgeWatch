@@ -541,18 +541,47 @@ describe('dashboard', () => {
     expect(container.querySelector('.scanner-sandbox-warning')).toBeNull()
   })
 
-  it('reports live scanner identity counts and warns below configured concurrency', async () => {
+  it('reports live scanner identity counts and warns when unreachable identities leave fewer than the concurrency limit', async () => {
     vi.mocked(adminStatus).mockResolvedValue({
       ...status,
       scanner_sandbox: sandboxWithoutLayers({
         mode: 'auto', state: 'enforced',
-        identity_pool: { ...scannerIdentityPool, active: 2, quarantined: 1, in_use_by_other_processes: 0, free: 1 },
+        identity_pool: { ...scannerIdentityPool, active: 0, quarantined: 40, in_use_by_other_processes: 23, free: 1 },
       }),
     })
     await renderDashboard()
     const entry = Array.from(container.querySelectorAll('.isolation-entry')).find(item => item.querySelector('.isolation-name')?.textContent === 'Scanners')
-    expect(entry?.querySelector('.isolation-pool-counts')?.textContent).toBe('Scanner identities: 2 active · 1 quarantined · 0 in use by unleased processes · 1 free of 64.')
-    expect(entry?.querySelector('.isolation-pool-warning')?.textContent).toContain('Free scanner slots (1) are below this unit’s concurrent scan limit (2).')
+    expect(entry?.querySelector('.isolation-pool-counts')?.textContent).toBe('Scanner identities: 0 active · 40 quarantined · 23 in use by unleased processes · 1 free of 64.')
+    const warning = entry?.querySelector('.isolation-pool-warning')?.textContent
+    expect(warning).toContain('Scanner identities that scans can reach (1) are below this unit’s concurrent scan limit (2).')
+    expect(warning).toContain('the identities that running scans hold still count as reachable')
+  })
+
+  // Running scans hold active leases and release them when they end, so a
+  // busy daemon with few free identities is not short of capacity (#1671).
+  it('does not warn when running scans hold the identities that are not free', async () => {
+    vi.mocked(adminStatus).mockResolvedValue({
+      ...status,
+      scanner_sandbox: sandboxWithoutLayers({
+        mode: 'auto', state: 'enforced',
+        identity_pool: { ...scannerIdentityPool, active: 62, quarantined: 1, in_use_by_other_processes: 0, free: 1 },
+      }),
+    })
+    await renderDashboard()
+    const entry = Array.from(container.querySelectorAll('.isolation-entry')).find(item => item.querySelector('.isolation-name')?.textContent === 'Scanners')
+    expect(entry?.querySelector('.isolation-pool-counts')?.textContent).toBe('Scanner identities: 62 active · 1 quarantined · 0 in use by unleased processes · 1 free of 64.')
+    expect(entry?.querySelector('.isolation-pool-warning')).toBeNull()
+  })
+
+  // An unavailable pool refuses every scanner launch, which the sandbox
+  // warning reports, so its counts raise no capacity warning.
+  it('does not warn about the capacity of an unavailable identity pool', async () => {
+    const reason = 'EdgeWatch runs as UID 1000 rather than UID 0, so it cannot start scanner processes under leased identities'
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, scanner_sandbox: { ...unavailableScannerSandbox(reason), identity_pool: { ...scannerIdentityPool, state: 'unavailable', reason, quarantined: 64, free: 0 } } })
+    await renderDashboard()
+    await vi.waitFor(() => expect(container.querySelector('.scanner-sandbox-warning')?.textContent).toContain(reason), { timeout: 1000 })
+    expect(container.querySelector('.isolation-pool-counts')?.textContent).toBe('Scanner identities: 0 active · 64 quarantined · 0 in use by unleased processes · 0 free of 64.')
+    expect(container.querySelector('.isolation-pool-warning')).toBeNull()
   })
 
   it('shows the notification sandbox in the deployment footprint', async () => {

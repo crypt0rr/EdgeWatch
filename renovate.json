@@ -66,15 +66,13 @@
     },
     {
       "customType": "regex",
-      "description": "Update the exact Node runtime pin in workflows and the maintainer guide.",
+      "description": "Update the workflow NODE_VERSION variables and the maintainer guide's Node pin. The built-in github-actions manager owns the setup-node node-version inputs, and the nodenv manager owns .node-version.",
       "managerFilePatterns": [
         "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/",
         "/(^|/)docs/src/content/docs/maintainers/development\\.md$/"
       ],
       "matchStrings": [
         "NODE_VERSION:\\s*(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)",
-        "node-version:\\s*(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)",
-        "^(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)(?:\\r?\\n|$)",
         "pinned to (?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
       ],
       "depNameTemplate": "node",
@@ -105,9 +103,9 @@
       "groupName": "Go toolchain"
     },
     {
-      "description": "Keep the container, workflow, version-file, and guide Node pins together on one supported Node 24 release.",
-      "matchPackageNames": ["node"],
-      "allowedVersions": "/^24\\./",
+      "description": "Keep the container, workflow, version-file, and guide Node pins together on one supported Node 24 release. Match the dependency name, because the github-actions manager looks setup-node versions up as the package actions/node-versions. Accept a leading v, because the node-version datasource lists releases as v24.x.y.",
+      "matchDepNames": ["node"],
+      "allowedVersions": "/^v?24\\./",
       "groupName": "Node.js runtime"
     },
     {

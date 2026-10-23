@@ -24,6 +24,7 @@ const workflows = await Promise.all(
 const readRepositoryFile = (path) => readFile(resolve(repositoryRoot, path), 'utf8')
 const dockerfile = await readRepositoryFile('Dockerfile')
 const packageJson = JSON.parse(await readRepositoryFile('package.json'))
+const docsPackageJson = JSON.parse(await readRepositoryFile('docs/package.json'))
 const nodeVersionFile = await readRepositoryFile('.node-version')
 const makefile = await readRepositoryFile('Makefile')
 const goMod = await readRepositoryFile('go.mod')
@@ -297,8 +298,9 @@ function withoutComments(text) {
   return text.replace(/^\s*#.*$/gm, '')
 }
 
-// The dependencies that Renovate's custom managers extract from a file.
-function renovateDependencies(file, text, config = renovate) {
+// The dependencies that Renovate's custom managers extract from a file, with
+// the manager and package names that packageRules match.
+function renovateCustomDependencies(file, text, config = renovate) {
   const dependencies = []
   for (const manager of config.customManagers) {
     const patterns = manager.managerFilePatterns.map((pattern) => {
@@ -309,9 +311,12 @@ function renovateDependencies(file, text, config = renovate) {
     if (!patterns.some((pattern) => pattern.test(file))) continue
     for (const matchString of manager.matchStrings) {
       for (const { groups } of text.matchAll(new RegExp(matchString, 'g'))) {
+        const depName = groups.depName ?? manager.depNameTemplate
         dependencies.push({
+          manager: `custom.${manager.customType}`,
           datasource: manager.datasourceTemplate,
-          depName: groups.depName ?? manager.depNameTemplate,
+          depName,
+          packageName: manager.packageNameTemplate?.replaceAll('{{{depName}}}', depName) ?? depName,
           currentValue: groups.currentValue,
           currentDigest: groups.currentDigest,
         })
@@ -319,6 +324,51 @@ function renovateDependencies(file, text, config = renovate) {
     }
   }
   return dependencies
+}
+
+// The dependencies that Renovate's custom managers extract from a file.
+function renovateDependencies(file, text, config = renovate) {
+  return renovateCustomDependencies(file, text, config)
+    .map(({ datasource, depName, currentValue, currentDigest }) => ({ datasource, depName, currentValue, currentDigest }))
+}
+
+// The dependency field that each packageRules matcher in renovate.json
+// compares. matchPackageNames compares the package that Renovate looks up,
+// which a built-in manager may name differently from the dependency.
+const renovateRuleSubjects = {
+  matchManagers: 'manager',
+  matchDatasources: 'datasource',
+  matchDepNames: 'depName',
+  matchPackageNames: 'packageName',
+  matchDepTypes: 'depType',
+}
+
+// Whether a packageRule applies to a dependency: Renovate requires every
+// matcher in the rule to accept it. This models exact names and /regex/
+// patterns, and fails on a matcher or pattern form it does not model.
+function renovateRuleApplies(rule, dependency) {
+  return Object.keys(rule).filter((key) => key.startsWith('match')).every((key) => {
+    assert.ok(Object.hasOwn(renovateRuleSubjects, key), `the workflow test does not model the Renovate matcher ${key}`)
+    const value = dependency[renovateRuleSubjects[key]]
+    return value !== undefined && rule[key].some((pattern) => {
+      const regex = /^\/(.*)\/([a-z]*)$/.exec(pattern)
+      if (regex) return new RegExp(regex[1], regex[2]).test(value)
+      assert.doesNotMatch(pattern, /^!|[*?{}[\]]/, `the workflow test does not model the Renovate pattern ${pattern}`)
+      return pattern === value
+    })
+  })
+}
+
+// The settings that the packageRules in renovate.json give a dependency.
+// Rules apply in order, so a later rule overrides an earlier one.
+function renovateRuleSettings(dependency, config = renovate) {
+  const settings = {}
+  for (const rule of config.packageRules.filter((candidate) => renovateRuleApplies(candidate, dependency))) {
+    for (const [key, value] of Object.entries(rule)) {
+      if (!key.startsWith('match') && key !== 'description') settings[key] = value
+    }
+  }
+  return settings
 }
 
 function dockerfileArgFrom(source, name) {
@@ -1419,17 +1469,26 @@ test('every Node runtime pin matches the frontend image and Renovate groups them
   assert.deepEqual([...developmentGuide.matchAll(/\bpinned to ([0-9]+\.[0-9]+\.[0-9]+)/g)].map((match) => match[1]), [nodeVersion],
     'the development guide must name the exact runtime patch')
 
+  // Every Node pin that Renovate extracts, named as its manager names it.
+  // Renovate's built-in github-actions manager owns each literal setup-node
+  // node-version input and looks it up as the GitHub releases of
+  // actions/node-versions under the dependency name node; it skips
+  // ${{ env.NODE_VERSION }}, whose value the custom regex manager tracks.
+  const nodePins = []
   let setupNodeSteps = 0
   let directNodePins = 0
   let nodeVersionFileSteps = 0
   const nodeVersionPattern = /^[0-9]+\.[0-9]+\.[0-9]+$/
   for (const { file, text } of workflows) {
+    let fileSetupNodePins = 0
     for (const step of stepsOf(text).filter((candidate) => /uses: actions\/setup-node@/.test(candidate))) {
       setupNodeSteps++
       const directVersion = /^ {10}node-version: (.+)$/m.exec(step)?.[1]
       const versionFile = /^ {10}node-version-file: (\S+)$/m.exec(step)?.[1]
       assert.equal(Number(Boolean(directVersion)) + Number(Boolean(versionFile)), 1,
         `${file} setup-node steps must select exactly one version source`)
+      assert.deepEqual(renovateDependencies(file, step).filter((dependency) => dependency.depName === 'node'), [],
+        `${file}: the built-in github-actions manager must own the setup-node version without a duplicate custom regex extraction`)
       if (versionFile) {
         nodeVersionFileSteps++
         assert.equal(file, '.github/workflows/docs.yml', 'only the docs workflow should use a version file')
@@ -1439,29 +1498,80 @@ test('every Node runtime pin matches the frontend image and Renovate groups them
         assert.equal(releaseNodeVersion, nodeVersion)
       } else {
         directNodePins++
+        fileSetupNodePins++
         assert.match(directVersion, nodeVersionPattern, `${file} setup-node must name an exact Node patch`)
         assert.equal(directVersion, nodeVersion, `${file} setup-node pin must match the frontend image`)
+        nodePins.push({ file, manager: 'github-actions', datasource: 'github-releases', depName: 'node', packageName: 'actions/node-versions', currentValue: directVersion })
       }
     }
-    const nodeDependencies = renovateDependencies(file, text).filter((dependency) => dependency.depName === 'node')
-    const expectedNodeDependencies = [...text.matchAll(/^ {10}node-version: [0-9]+\.[0-9]+\.[0-9]+$/gm)].length
-      + [...text.matchAll(/^  NODE_VERSION: [0-9]+\.[0-9]+\.[0-9]+$/gm)].length
-    assert.equal(nodeDependencies.length, expectedNodeDependencies, `Renovate must track every Node pin in ${file}`)
-    assert.ok(nodeDependencies.every((dependency) => dependency.currentValue === nodeVersion), `${file} Node pins must resolve to one runtime version`)
+    assert.equal(fileSetupNodePins, [...text.matchAll(/^ {10}node-version: [0-9]+\.[0-9]+\.[0-9]+$/gm)].length,
+      `Renovate must track every Node pin in ${file}: the github-actions manager extracts node-version only from setup-node steps`)
+    const customNodePins = renovateCustomDependencies(file, text).filter((dependency) => dependency.depName === 'node')
+    assert.deepEqual(customNodePins.map((dependency) => dependency.currentValue),
+      [...text.matchAll(/^  NODE_VERSION: ([0-9]+\.[0-9]+\.[0-9]+)$/gm)].map((match) => match[1]),
+      `Renovate's custom regex manager must track every NODE_VERSION in ${file} and no setup-node input`)
+    nodePins.push(...customNodePins.map((dependency) => ({ file, ...dependency })))
   }
   assert.ok(setupNodeSteps > 0, 'workflows must set up Node')
   assert.ok(directNodePins > 0, 'at least one workflow must carry a direct Node pin')
   assert.equal(nodeVersionFileSteps, 1, 'the docs workflow must consume .node-version exactly once')
 
-  assert.ok(!renovate.enabledManagers || renovate.enabledManagers.includes('nodenv'), 'Renovate must not disable the built-in nodenv manager')
+  assert.notEqual(renovate.enabled, false, 'Renovate must stay enabled')
+  assert.ok(!(renovate.ignoreDeps ?? []).includes('node'), 'Renovate must not ignore the node dependency')
+  for (const manager of ['dockerfile', 'github-actions', 'nodenv', 'custom.regex']) {
+    assert.ok(!renovate.enabledManagers || renovate.enabledManagers.includes(manager), `Renovate must not disable the built-in ${manager} manager`)
+    assert.notEqual(renovate[manager]?.enabled, false, `Renovate must not disable the ${manager} manager in its configuration`)
+  }
+  const frontendImageTag = /^FROM --platform=\$BUILDPLATFORM node:(\S+)@sha256:[0-9a-f]{64} AS frontend$/m.exec(dockerfile)?.[1]
+  assert.ok(frontendImageTag, 'the frontend Node image must be digest-pinned for the dockerfile manager')
+  nodePins.push({ file: 'Dockerfile', manager: 'dockerfile', datasource: 'docker', depName: 'node', packageName: 'node', currentValue: frontendImageTag })
   assert.deepEqual(renovateDependencies('.node-version', nodeVersionFile), [],
     'the built-in nodenv manager must own .node-version without a duplicate custom regex extraction')
-  const nodeDependency = { datasource: 'node-version', depName: 'node', currentValue: nodeVersion, currentDigest: undefined }
-  assert.deepEqual(renovateDependencies(developmentGuidePath, developmentGuide).filter((dependency) => dependency.depName === 'node'), [nodeDependency], 'Renovate must update the development guide pin')
-  const nodeRule = renovate.packageRules.find((rule) => rule.matchPackageNames?.includes('node'))
-  assert.ok(nodeRule, 'Renovate must group Node runtime updates')
-  assert.equal(nodeRule.allowedVersions, '/^24\\./', 'Renovate must keep the Node 24 release line')
-  assert.equal(nodeRule.groupName, 'Node.js runtime', 'all Node pins must update in one pull request')
+  nodePins.push({ file: '.node-version', manager: 'nodenv', datasource: 'node-version', depName: 'node', packageName: 'node', currentValue: nodeVersionFile.trim() })
+  const guidePins = renovateCustomDependencies(developmentGuidePath, developmentGuide).filter((dependency) => dependency.depName === 'node')
+  assert.deepEqual(guidePins.map(({ datasource, currentValue }) => ({ datasource, currentValue })), [{ datasource: 'node-version', currentValue: nodeVersion }],
+    'Renovate must update the development guide pin')
+  nodePins.push(...guidePins.map((dependency) => ({ file: developmentGuidePath, ...dependency })))
+
+  // The group must match on the dependency name: matchPackageNames compares
+  // the looked-up package, which is actions/node-versions for setup-node.
+  const nodeRules = renovate.packageRules.filter((rule) => rule.groupName === 'Node.js runtime')
+  assert.equal(nodeRules.length, 1, 'one Renovate rule must group Node runtime updates')
+  const [nodeRule] = nodeRules
+  assert.ok(nodeRule.matchDepNames?.includes('node'), 'the Node group must match the dependency name node, not only package names')
+  // allowedVersions sees each release as its datasource reports it, after the
+  // github-actions manager's extractVersion and the node image's
+  // versionCompatibility. nodejs.org, which the node-version datasource
+  // reads, lists each release with a leading v, such as v24.22.1.
+  const allowedVersions = /^\/(.*)\/([a-z]*)$/.exec(nodeRule.allowedVersions)
+  assert.ok(allowedVersions, 'the Node group must restrict updates with an allowedVersions /regex/')
+  const allowedVersion = new RegExp(allowedVersions[1], allowedVersions[2])
+  const releaseForms = { 'github-releases': (version) => version, docker: (version) => version, 'node-version': (version) => `v${version}` }
+  const [major, minor, patch] = nodeVersion.split('.').map(Number)
+  assert.equal(major, 24, 'the frontend image must stay on the Node 24 release line')
+  for (const pin of nodePins) {
+    assert.equal(pin.currentValue.replace(/-.*$/, ''), nodeVersion, `${pin.file}: the ${pin.manager} Node pin must name the frontend image's release`)
+    const settings = renovateRuleSettings(pin)
+    assert.notEqual(settings.enabled, false, `${pin.file}: no package rule may disable the ${pin.manager} Node pin`)
+    assert.equal(settings.groupName, 'Node.js runtime', `${pin.file}: the ${pin.manager} Node pin must update in the one Node pull request`)
+    assert.equal(settings.allowedVersions, nodeRule.allowedVersions, `${pin.file}: the ${pin.manager} Node pin must stay on Node 24`)
+    const releaseForm = releaseForms[pin.datasource]
+    assert.ok(releaseForm, `${pin.file}: the workflow test does not model the ${pin.datasource} datasource`)
+    for (const version of [nodeVersion, `${major}.${minor}.${patch + 1}`, `${major}.${minor + 1}.0`]) {
+      assert.match(releaseForm(version), allowedVersion, `${pin.file}: Renovate must accept Node ${version} from ${pin.datasource}`)
+    }
+    assert.doesNotMatch(releaseForm(`${major + 1}.0.0`), allowedVersion, `${pin.file}: Renovate must not propose Node ${major + 1} from ${pin.datasource}`)
+  }
+
+  // The group takes no npm package, such as @types/node.
+  const npmNames = new Set(['@types/node'])
+  for (const manifest of [packageJson, docsPackageJson]) {
+    for (const name of Object.keys({ ...manifest.dependencies, ...manifest.devDependencies })) npmNames.add(name)
+  }
+  for (const name of npmNames) {
+    assert.notEqual(renovateRuleSettings({ manager: 'npm', datasource: 'npm', depName: name, packageName: name }).groupName, 'Node.js runtime',
+      `the Node group must not take the npm package ${name}`)
+  }
 })
 
 // CI's Go jobs and the release binaries use the Go that go.mod names, the

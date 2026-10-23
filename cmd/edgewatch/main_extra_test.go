@@ -522,6 +522,35 @@ func TestStatusReportsARecoveredCycleAsTheLastScan(t *testing.T) {
 	}
 }
 
+// status reads the latest attempts of all managed jobs in one query, and a
+// failure of that query fails the command instead of printing jobs without
+// their last scan.
+func TestStatusReportsAnUnreadableScanHistory(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ts := s.Tenant(store.DefaultTenantScope())
+	job := config.NormalizeJob(config.Job{
+		Name: "unreadable", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"},
+		TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced",
+	})
+	if _, err := ts.CreateJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE scans RENAME TO scans_unreadable`); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, err := captureCLIOutput(t, func() error {
+		return status(ctx, ts, store.TenantStateActive, &config.Config{}, "", "json")
+	})
+	if err == nil || !strings.Contains(err.Error(), "scans") {
+		t.Fatalf("status error = %v, output %q; want the scan history query error", err, stdout)
+	}
+}
+
 func TestRunStatusHistoryAndBaselineForManagedJob(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

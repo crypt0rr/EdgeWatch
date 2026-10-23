@@ -1389,6 +1389,56 @@ func TestPerimeterRangeDetailCoalescesFragmentedGapsWithinBounds(t *testing.T) {
 	}
 }
 
+// A coalesced alternative appears only when it needs fewer targets or fewer
+// monitors than the gaps-only plan. One /24 instead of one /25 or one address
+// only rescans covered addresses, so the mode then has none and a count of 0.
+func TestPerimeterRangeDetailOffersCoalescedPlanOnlyWhenItReducesTargets(t *testing.T) {
+	t.Parallel()
+	f := newPerimeterFixture(t)
+	f.setClock(time.Now().UTC().Add(time.Minute))
+	ids := declarePerimeter(t, f.ts, store.PerimeterKindPrefix, "10.80.0.0/24", "10.81.0.0/24", "10.82.0.0/24")
+	createPerimeterJob(t, f.ts, perimeterJob("lower-half", "10.80.0.0/25"), true)
+	// Every address of 10.81.0.0/24 but the last one.
+	createPerimeterJob(t, f.ts, perimeterJob("all-but-one", "10.81.0.0/25", "10.81.0.128/26", "10.81.0.192/27", "10.81.0.224/28", "10.81.0.240/29", "10.81.0.248/30", "10.81.0.252/31", "10.81.0.254"), true)
+	createPerimeterJob(t, f.ts, perimeterJob("lowest-quarter", "10.82.0.0/26"), true)
+
+	tests := []struct {
+		value          string
+		gapsOnly       []string
+		coalesced      []string
+		alreadyCovered int
+	}{
+		{value: "10.80.0.0/24", gapsOnly: []string{"10.80.0.128/25"}},
+		{value: "10.81.0.0/24", gapsOnly: []string{"10.81.0.255"}},
+		// Two gaps-only targets become one: a real reduction.
+		{value: "10.82.0.0/24", gapsOnly: []string{"10.82.0.64/26", "10.82.0.128/25"}, coalesced: []string{"10.82.0.0/24"}, alreadyCovered: 64},
+	}
+	for _, test := range tests {
+		t.Run(test.value, func(t *testing.T) {
+			detail := f.detail(t, f.ts, ids[test.value])
+			gaps := suggestionsOf(detail, "selected_tcp")
+			if len(gaps) != 1 || !reflect.DeepEqual(gaps[0].Targets, test.gapsOnly) || detail.MonitorsNeeded.SelectedTCP != 1 {
+				t.Fatalf("gaps-only suggestions = %+v, want one monitor on %v", gaps, test.gapsOnly)
+			}
+			// The job covers no full-TCP or UDP address, so only selected TCP
+			// could have an alternative.
+			if test.coalesced == nil {
+				if len(detail.CoalescedSuggestions) != 0 || detail.CoalescedMonitorsNeeded != (PerimeterModeCounts{}) || detail.CoalescedSuggestionsTruncated != (PerimeterModeFlags{}) {
+					t.Fatalf("coalesced alternative that reduces nothing = %+v, needed %+v, truncated %+v", detail.CoalescedSuggestions, detail.CoalescedMonitorsNeeded, detail.CoalescedSuggestionsTruncated)
+				}
+				return
+			}
+			coalesced := coalescedSuggestionsOf(detail, "selected_tcp")
+			if len(coalesced) != 1 || len(detail.CoalescedSuggestions) != 1 || detail.CoalescedMonitorsNeeded != (PerimeterModeCounts{SelectedTCP: 1}) || detail.CoalescedSuggestionsTruncated != (PerimeterModeFlags{}) {
+				t.Fatalf("coalesced suggestions = %+v, needed %+v, truncated %+v", detail.CoalescedSuggestions, detail.CoalescedMonitorsNeeded, detail.CoalescedSuggestionsTruncated)
+			}
+			if !reflect.DeepEqual(coalesced[0].Targets, test.coalesced) || coalesced[0].AlreadyCoveredAddresses != test.alreadyCovered {
+				t.Fatalf("coalesced suggestion = %+v, want %v repeating %d covered addresses", coalesced[0], test.coalesced, test.alreadyCovered)
+			}
+		})
+	}
+}
+
 func TestPerimeterRangeDetailCoalescedSuggestionsRespectExclusionsAndBudget(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

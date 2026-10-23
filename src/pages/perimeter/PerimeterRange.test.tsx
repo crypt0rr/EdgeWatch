@@ -104,13 +104,19 @@ describe('Perimeter range detail', () => {
   })
 
   it('shows a bounded coalesced alternative and opens its targets in guided setup', async () => {
+    // The report offers the alternative only when it needs fewer targets or
+    // monitors: here one /24 instead of two gaps-only blocks.
+    const gapsOnly = perimeterSuggestion({ targets: ['203.0.113.64/26', '203.0.113.128/25'], addresses: 192, estimated_probes: 12_582_720 })
     const coalesced = perimeterSuggestion({
       targets: ['203.0.113.0/24'],
       addresses: 256,
-      already_covered_addresses: 10,
+      already_covered_addresses: 64,
       estimated_probes: 16_776_960,
     })
     vi.mocked(getPerimeterRange).mockResolvedValue(perimeterRangeDetail({
+      uncovered: { full_tcp: blocks(['203.0.113.64/26', '203.0.113.128/25']), any_tcp: blocks([]), udp: blocks([]) },
+      monitors_needed: { full_tcp: 1, selected_tcp: 0, udp: 0 },
+      suggestions: [gapsOnly],
       coalesced_monitors_needed: { full_tcp: 1, selected_tcp: 0, udp: 0 },
       coalesced_suggestions: [coalesced],
     }))
@@ -123,8 +129,8 @@ describe('Perimeter range detail', () => {
     const coalescedAlternative = coalescedPlan?.parentElement
     expect(coalescedPlan).not.toBeNull()
     expect(coalescedAlternative).not.toBeNull()
-    expect(within(coalescedAlternative!).getByText(/Targets may include already-covered addresses/)).toBeInTheDocument()
-    expect(within(coalescedPlan!).getByText(/Includes 10 already-covered addresses/)).toBeInTheDocument()
+    expect(within(coalescedAlternative!).getByText(/^Offered because it needs fewer targets in total, or fewer monitors, than the gaps-only option\. Targets may include already-covered addresses\./)).toBeInTheDocument()
+    expect(within(coalescedPlan!).getByText(/Includes 64 already-covered addresses/)).toBeInTheDocument()
     fireEvent.click(within(coalescedPlan!).getByRole('button', { name: 'Create monitor' }))
 
     const state = JSON.parse((await screen.findByTestId('jobs-new')).textContent ?? 'null')
@@ -136,6 +142,23 @@ describe('Perimeter range detail', () => {
       addresses: 256,
       source: '203.0.113.0/24',
     })
+  })
+
+  it('withholds a coalesced alternative above 16 monitors without claiming it improves anything', async () => {
+    vi.mocked(getPerimeterRange).mockResolvedValue(perimeterRangeDetail({
+      coalesced_monitors_needed: { full_tcp: 17, selected_tcp: 0, udp: 0 },
+      coalesced_suggestions_truncated: { full_tcp: true, selected_tcp: false, udp: false },
+    }))
+    renderDetail()
+
+    const full = await screen.findByRole('region', { name: 'Full TCP' })
+    const coalescedPlan = within(full).getByRole('heading', { level: 4, name: 'Coalesced alternative' }).parentElement!
+    const coalescedAlternative = coalescedPlan.parentElement!
+    expect(coalescedPlan).toHaveTextContent('Needs more than 16 monitors The complete coalesced option is too large to list or to compare with the gaps-only option.')
+    expect(within(coalescedPlan).queryByRole('button')).not.toBeInTheDocument()
+    expect(within(coalescedAlternative).getByText(/^Targets may include already-covered addresses\./)).toBeInTheDocument()
+    expect(coalescedAlternative).not.toHaveTextContent('Offered because')
+    expect(within(full).getAllByRole('button', { name: 'Create monitor' })).toHaveLength(1)
   })
 
   it('shows suggestions as text without jobs.write', async () => {

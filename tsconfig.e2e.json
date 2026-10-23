@@ -1,5 +1,6 @@
 {
   "extends": "./tsconfig.json",
+  "files": ["src/console-route-inventory.test.ts"],
   "include": [
     "e2e/**/*.ts",
     "e2e/**/*.tsx",

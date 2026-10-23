@@ -17,5 +17,8 @@
     "noEmit": true,
     "jsx": "react-jsx"
   },
-  "include": ["src"]
+  "include": ["src"],
+  // The route inventory check reads e2e/console-routes.ts, which the image
+  // build context leaves out; tsconfig.e2e.json type-checks it instead.
+  "exclude": ["src/console-route-inventory.test.ts"]
 }

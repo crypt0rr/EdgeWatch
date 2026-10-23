@@ -169,9 +169,12 @@ DNS answers, job settings, or the unit's budget can change. The job keeps its
 next scheduled time, and a later scan clears the marker when its result is
 finalized. Queued or running work supersedes an older failed or incomplete
 attempt or budget-skip marker; a later successful attempt clears that older
-failure. A progressing resumable cycle is also current work and does not add
-failure attention for its latest timed-out attempt. A stalled cycle remains
-actionable while a retry waits or runs. The
+failure. When a run recovers a completed scan cycle whose result an earlier
+attempt could not finalize, the recovered scan clears that attempt's failure
+too, although it keeps the cycle's earlier completion time; the failed attempt
+stays in scan history. A progressing resumable cycle is also current work and
+does not add failure attention for its latest timed-out attempt. A stalled
+cycle remains actionable while a retry waits or runs. The
 filter does not infer problems from elapsed time or the absence of a schedule.
 Unavailable summaries remain visible in **All jobs** and are reported as
 unavailable rather than treated as healthy or as having no scan history. When

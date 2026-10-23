@@ -13,6 +13,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/scanner"
+	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
 // completingCycleScanner plans a two-unit resumable cycle and completes it
@@ -260,6 +261,81 @@ func TestRepeatedCompletedCycleFinalizationFailuresPlanFreshCycle(t *testing.T) 
 	}
 	if plans, units := probe.counts(); plans != 2 || units != 4 {
 		t.Fatalf("scanner planned %d cycles and scanned %d units; want one retry then one fresh plan", plans, units)
+	}
+}
+
+// A completed cycle whose finalization fails leaves a failed fallback row
+// that finishes after the cycle did, and the run that recovers the cycle
+// records its scan at the cycle's own finish time, which is earlier. The
+// recovered scan, not the fallback row it superseded, is the job's latest
+// attempt, so neither the Jobs list nor the Perimeter report keeps showing
+// the job as failed until its next run.
+func TestRecoveredCycleAfterFinalizationFailureIsTheLatestAttempt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	probe := &completingCycleScanner{}
+	a, db := newLifecycleTestApp(t, probe, nil)
+	ts := defaultTenant(db)
+	declarePerimeter(t, ts, store.PerimeterKindPrefix, "192.0.2.0/24")
+	record, err := ts.CreateJob(ctx, lifecycleJob("cycle-finalization-recovery"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	budgetCalls := 0
+	a.persistenceBudget = func(int) time.Duration {
+		budgetCalls++
+		if budgetCalls == 1 {
+			return time.Nanosecond
+		}
+		return scanPersistenceTimeout(0)
+	}
+
+	failed, _, failErr := a.runJobRecord(ctx, record, false)
+	if failErr == nil || failed.Status != "failed" || failed.Error != model.ScanFinalizationFailureMessage || failed.CycleStatus != "completed" || !failed.Resumable {
+		t.Fatalf("first run = %#v, %v; want a finalization failure of the completed cycle", failed, failErr)
+	}
+	executions, err := ts.ListJobExecutionSummaries(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt := executions[record.ID].LatestAttempt; attempt == nil || attempt.ID != failed.ID || attempt.Status != "failed" {
+		t.Fatalf("latest attempt before recovery = %+v; want the unrecovered failure %s", attempt, failed.ID)
+	}
+
+	recovered, _, recoverErr := a.runJobRecord(ctx, record, false)
+	if recoverErr != nil || recovered.Status != "success" || recovered.CycleID != failed.CycleID || recovered.CycleStatus != "completed" || recovered.Comparison != model.ScanComparisonBaselineEstablished {
+		t.Fatalf("recovery run = %#v, %v; want the failed cycle promoted as the first baseline sample", recovered, recoverErr)
+	}
+	if !recovered.FinishedAt.Before(failed.FinishedAt) {
+		t.Fatalf("recovered scan finished at %s, fallback row at %s; want the recovery to keep the cycle's earlier finish time", recovered.FinishedAt, failed.FinishedAt)
+	}
+	if plans, units := probe.counts(); plans != 1 || units != 2 {
+		t.Fatalf("scanner planned %d cycles and scanned %d units; want the failed cycle recovered", plans, units)
+	}
+
+	executions, err = ts.ListJobExecutionSummaries(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution := executions[record.ID]
+	if attempt := execution.LatestAttempt; attempt == nil || attempt.ID != recovered.ID || attempt.Status != "success" || attempt.CycleID != recovered.CycleID {
+		t.Fatalf("latest attempt after recovery = %+v; want the recovered scan %s", attempt, recovered.ID)
+	}
+	if success := execution.LatestSuccessfulScan; success == nil || success.ID != recovered.ID {
+		t.Fatalf("latest successful scan after recovery = %+v; want %s", success, recovered.ID)
+	}
+	// The fallback row stays in the job's history, newest first.
+	if scans, err := ts.ListJobScans(ctx, record.ID, 10); err != nil || len(scans) != 2 || scans[0].ID != failed.ID || scans[1].ID != recovered.ID {
+		t.Fatalf("job history after recovery = %#v, %v; want the fallback row kept before the recovered scan", scans, err)
+	}
+
+	report, err := a.PerimeterReport(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor := perimeterMonitorNamed(t, report.Monitors, record.Job.Name)
+	if monitor.State != perimeterCovering || monitor.LastAttemptStatus != "success" || monitor.LastSuccessAt == nil || monitor.Stale || (perimeterMonitor{ref: monitor}).unproven() || report.Totals.UnprovenMonitors != 0 {
+		t.Fatalf("perimeter monitor after recovery = %+v, unproven monitors %d; want a proven monitor whose last attempt succeeded", monitor, report.Totals.UnprovenMonitors)
 	}
 }
 

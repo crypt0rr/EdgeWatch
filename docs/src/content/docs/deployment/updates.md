@@ -144,7 +144,10 @@ the schema in either of these ways:
 
 - the `from_schema` of the first `pre-migration backup started` record that
   `docker compose logs edgewatch` shows after the update, which also names the
-  file it wrote under `backup`;
+  file it wrote under `backup`. Container logs last only as long as the
+  container: once it has been recreated, for example to start another release,
+  the first record left can show a partly upgraded schema, so prefer the
+  scheduled backup then;
 - the `schema_version` that `edgewatch verify --from` reports for the newest
   `edgewatch-scheduled-YYYYMMDDTHHMMSSZ.db` backup written before the update.
 

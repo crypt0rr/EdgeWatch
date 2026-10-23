@@ -130,7 +130,8 @@ func TestPrunePreUpgradeBackupsPreservesMalformedAndNonOwnerFiles(t *testing.T) 
 	invalidTimestamp := "edgewatch-preupgrade-s74-s76-20261301T000000.000000000Z.db"
 	nonOwnerOnly := "edgewatch-preupgrade-s74-s76-20250101T000000.000000000Z.db"
 	invalidSchema := "edgewatch-preupgrade-s99999999999999999999-s76-20240101T000000.000000000Z.db"
-	operatorFiles := []string{invalidTimestamp, nonOwnerOnly, invalidSchema}
+	invalidTarget := "edgewatch-preupgrade-s76-s99999999999999999999-20240101T000000.000000000Z.db"
+	operatorFiles := []string{invalidTimestamp, nonOwnerOnly, invalidSchema, invalidTarget}
 	for _, name := range operatorFiles {
 		if err := os.WriteFile(filepath.Join(directory, name), []byte("operator backup"), 0o600); err != nil {
 			t.Fatal(err)
@@ -139,6 +140,17 @@ func TestPrunePreUpgradeBackupsPreservesMalformedAndNonOwnerFiles(t *testing.T) 
 	if err := os.Chmod(filepath.Join(directory, nonOwnerOnly), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A symlink and a directory that carry the reserved name are not
+	// automatic backups either.
+	symlink := "edgewatch-preupgrade-s74-s76-20230101T000000.000000000Z.db"
+	if err := os.Symlink(invalidTimestamp, filepath.Join(directory, symlink)); err != nil {
+		t.Fatal(err)
+	}
+	subdirectory := "edgewatch-preupgrade-s74-s76-20220101T000000.000000000Z.db"
+	if err := os.Mkdir(filepath.Join(directory, subdirectory), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	operatorFiles = append(operatorFiles, symlink, subdirectory)
 
 	removed, err := prunePreUpgradeBackups(directory, schemaVersion-1, 0, "")
 	if err != nil {
@@ -148,7 +160,7 @@ func TestPrunePreUpgradeBackupsPreservesMalformedAndNonOwnerFiles(t *testing.T) 
 		t.Fatalf("removed backups = %v, want malformed and non-owner files preserved", removed)
 	}
 	for _, name := range operatorFiles {
-		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
+		if _, err := os.Lstat(filepath.Join(directory, name)); err != nil {
 			t.Errorf("operator backup %q was removed: %v", name, err)
 		}
 	}
@@ -174,7 +186,7 @@ func TestPrunePreUpgradeBackupsKeepEachUnfinishedUpgradeCopy(t *testing.T) {
 			keep:    preUpgradeBackupRetention,
 			written: "edgewatch-preupgrade-s77-s78-20220601T000000.000000000Z.db",
 			files: []string{
-				"edgewatch-preupgrade-s74-s76-20210101T000000.000000000Z.db",
+				"edgewatch-preupgrade-s73-s75-20210101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s75-s78-20220101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s75-s78-20220201T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20220301T000000.000000000Z.db",
@@ -225,7 +237,7 @@ func TestPrunePreUpgradeBackupsKeepEachUnfinishedUpgradeCopy(t *testing.T) {
 			keep:    preUpgradeBackupRetention,
 			written: "edgewatch-preupgrade-s77-s78-20260106T000000.000000000Z.db",
 			files: []string{
-				"edgewatch-preupgrade-s74-s76-20250101T000000.000000000Z.db",
+				"edgewatch-preupgrade-s73-s75-20250101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s75-s78-20260101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s76-s78-20260102T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20260103T000000.000000000Z.db",
@@ -271,6 +283,35 @@ func TestPrunePreUpgradeBackupsKeepEachUnfinishedUpgradeCopy(t *testing.T) {
 		{
 			// After a rollback, a new attempt starts at the schema the
 			// previous release used. Its new copy supersedes the old one.
+			// v0.43.0 (target 78) started at 76, committed 77 and failed, and
+			// three restarts followed. v0.43.1 (target 79) then took over at
+			// 77, committed 78 and failed at 79, and this start retries it at
+			// 78. The copy at 76 is the one the previous release opens: its
+			// upgrade has passed 78, but it reaches beyond 77, the schema that
+			// the kept copy of the takeover started from.
+			name:    "a takeover release passes the first release's target",
+			current: 78,
+			keep:    preUpgradeBackupRetention,
+			written: "edgewatch-preupgrade-s78-s79-20260107T000000.000000000Z.db",
+			files: []string{
+				"edgewatch-preupgrade-s76-s78-20260101T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260102T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260103T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260104T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s79-20260105T000000.000000000Z.db",
+				"edgewatch-preupgrade-s78-s79-20260106T000000.000000000Z.db",
+				"edgewatch-preupgrade-s78-s79-20260107T000000.000000000Z.db",
+			},
+			kept: []string{
+				"edgewatch-preupgrade-s76-s78-20260101T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260103T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260104T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s79-20260105T000000.000000000Z.db",
+				"edgewatch-preupgrade-s78-s79-20260106T000000.000000000Z.db",
+				"edgewatch-preupgrade-s78-s79-20260107T000000.000000000Z.db",
+			},
+		},
+		{
 			name:    "a new attempt from the previous release's schema",
 			current: 75,
 			keep:    preUpgradeBackupRetention,
@@ -319,7 +360,7 @@ func TestPrunePreUpgradeBackupsKeepEachUnfinishedUpgradeCopy(t *testing.T) {
 			keep:    preUpgradeBackupRetention,
 			written: "edgewatch-preupgrade-s78-s79-20230101T000000.000000000Z.db",
 			files: []string{
-				"edgewatch-preupgrade-s74-s76-20210101T000000.000000000Z.db",
+				"edgewatch-preupgrade-s73-s75-20210101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s75-s78-20220101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20220301T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20220401T000000.000000000Z.db",
@@ -341,7 +382,7 @@ func TestPrunePreUpgradeBackupsKeepEachUnfinishedUpgradeCopy(t *testing.T) {
 			keep:    0,
 			written: "edgewatch-preupgrade-s77-s79-20260105T000000.000000000Z.db",
 			files: []string{
-				"edgewatch-preupgrade-s74-s76-20250101T000000.000000000Z.db",
+				"edgewatch-preupgrade-s73-s75-20250101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s75-s78-20260101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s75-s78-20260102T000000.000000000Z.db",
 				"edgewatch-preupgrade-s76-s79-20260103T000000.000000000Z.db",
@@ -387,7 +428,7 @@ func TestPrunePreUpgradeBackupsKeepEachUnfinishedUpgradeCopy(t *testing.T) {
 			keep:    1,
 			written: "edgewatch-preupgrade-s77-s79-20260105T000000.000000000Z.db",
 			files: []string{
-				"edgewatch-preupgrade-s74-s76-20260101T000000.000000000Z.db",
+				"edgewatch-preupgrade-s73-s75-20260101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s75-s76-20260101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s79-20260105T000000.000000000Z.db",
 			},

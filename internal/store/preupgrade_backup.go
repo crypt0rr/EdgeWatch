@@ -83,8 +83,11 @@ type preUpgradeBackupFile struct {
 // from a schema below current to a schema above it belongs to an upgrade that
 // has not yet passed the database's schema: this upgrade, whichever release
 // started it, or an attempt that was rolled back. For each source schema
-// below current, the newest such copy is therefore kept, and the copy at the
-// schema the previous release used is among them. The running release's
+// below current, the newest such copy is therefore kept, and so, in turn, is
+// the newest copy from each schema below a kept copy's schema to one above
+// it, so the copy at the schema the previous release used stays among them
+// even after a release with a later target took over and passed the first
+// release's target. The running release's
 // target does not decide, because a release with another target can take over
 // a failing upgrade, and neither the timestamps nor the lowest source schema
 // single that copy out, because a rolled-back attempt can leave a copy at a
@@ -141,17 +144,28 @@ func prunePreUpgradeBackups(directory string, current, keep int, written string)
 		}
 		return files[i].time.After(files[j].time)
 	})
-	// Newest first, so the first copy beyond current from each earlier schema
-	// is the newest of them.
+	// Newest first, so the first match from each earlier schema is the newest
+	// of them. A protected copy's own schema becomes a further limit: when a
+	// release with a later target took over the upgrade and passed the first
+	// release's target before it failed too, the copy the takeover started
+	// from is beyond current, and the copy that the first release took is
+	// beyond that copy's schema.
+	protected := make(map[string]bool)
 	earlier := make(map[int]bool)
+	for limits := []int{current}; len(limits) > 0; limits = limits[1:] {
+		limit := limits[0]
+		for _, file := range files {
+			if file.from < limit && file.to > limit && !earlier[file.from] {
+				earlier[file.from] = true
+				protected[file.name] = true
+				limits = append(limits, file.from)
+			}
+		}
+	}
 	var removed []string
 	kept := 0
 	for _, file := range files {
-		if file.name == written {
-			continue
-		}
-		if file.from < current && file.to > current && !earlier[file.from] {
-			earlier[file.from] = true
+		if file.name == written || protected[file.name] {
 			continue
 		}
 		if kept < keep {

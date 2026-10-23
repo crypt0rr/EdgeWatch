@@ -164,9 +164,12 @@ where the current schema is the one the database has at this start:
   upgrade that has not passed the database's schema yet. These are the copies
   taken at the earlier schemas of this upgrade, one from each start that
   committed a step before it failed, and at those of any attempt that was
-  rolled back. The copy at the schema the previous release used is among them,
-  also when a release with another schema is started to retry the failed
-  upgrade;
+  rolled back. The same applies in turn below each kept copy: from each schema
+  below a kept copy's `<from>`, the newest copy whose `<to>` is above that
+  `<from>` is kept too. The copy at the schema the previous release used is
+  therefore among them, also when a release with another schema is started to
+  retry the failed upgrade and passes the first release's schema before it
+  fails;
 - the latest three other automatic pre-migration backups by the timestamp in
   their names, whatever their schemas, including earlier copies of the current
   schema and copies for upgrades that finished. Of two equal timestamps, the

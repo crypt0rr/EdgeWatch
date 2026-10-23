@@ -37,13 +37,13 @@ commit them.
 
 When `backup.directory` is configured, the daemon creates and verifies a
 pre-migration backup before it starts schema writes. Separately from scheduled
-backups, it keeps the starting copy of the current upgrade, at the schema the
-database had before the upgrade began, and the latest three other automatic
-copies, so restarts after a failed upgrade never remove the starting copy. A
-failure to create or verify that backup stops the migration. If no directory
-is configured, the daemon warns and continues without an automatic
-pre-migration copy. Keep a separate off-host backup and the matching keys for
-recovery from storage loss.
+backups, it keeps, for the release being upgraded to, the newest copy taken at
+each earlier schema of an interrupted upgrade, so retrying a failed upgrade
+never removes the copy the previous release can open, and the latest three
+other automatic copies. A failure to create or verify that backup stops the
+migration. If no directory is configured, the daemon warns and continues
+without an automatic pre-migration copy. Keep a separate off-host backup and
+the matching keys for recovery from storage loss.
 
 ## Schema 69
 

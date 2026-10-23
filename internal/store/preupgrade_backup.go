@@ -15,9 +15,9 @@ import (
 )
 
 // preUpgradeBackupRetention is the number of automatic pre-migration backups
-// kept by the timestamp in their names. prunePreUpgradeBackups keeps the
-// starting copy of the current upgrade in addition to them, so the directory
-// holds at most one more automatic backup than this.
+// kept by the timestamp in their names. prunePreUpgradeBackups also keeps, in
+// addition to them, the newest copy taken at each earlier schema of the
+// upgrade in progress, so retries at one schema never grow the directory.
 const preUpgradeBackupRetention = 3
 
 var preUpgradeBackupName = regexp.MustCompile(`^edgewatch-preupgrade-s([0-9]+)-s([0-9]+)-([0-9]{8}T[0-9]{6}\.[0-9]{9}Z)\.db$`)
@@ -46,9 +46,9 @@ func preparePreMigrationBackup(ctx context.Context, db *sql.DB, dsn string, vers
 	name := fmt.Sprintf("edgewatch-preupgrade-s%d-s%d-%s.db", version, schemaVersion, stamp)
 	path := filepath.Join(directory, name)
 	// Copying and verifying a large database can take a while, and the
-	// migration waits for it. Log the file name only; the completion record
-	// below reports the full path.
-	logger.Info("pre-migration backup started", "backup", name, "from_schema", version, "to_schema", schemaVersion)
+	// migration waits for it, so the start is logged too. Both records give
+	// the backup's full path under the same key.
+	logger.Info("pre-migration backup started", "backup", path, "from_schema", version, "to_schema", schemaVersion)
 	snapshot := &Store{DB: db, Path: dsn}
 	result, err := snapshot.BackupWithOptions(ctx, path, BackupOptions{})
 	if err != nil {
@@ -57,7 +57,7 @@ func preparePreMigrationBackup(ctx context.Context, db *sql.DB, dsn string, vers
 	if result.SchemaVersion != version {
 		return fmt.Errorf("automatic pre-migration backup has schema version %d, expected %d", result.SchemaVersion, version)
 	}
-	removed, err := prunePreUpgradeBackups(directory, schemaVersion, preUpgradeBackupRetention)
+	removed, err := prunePreUpgradeBackups(directory, version, schemaVersion, preUpgradeBackupRetention)
 	if err != nil {
 		return fmt.Errorf("retain automatic pre-migration backups: %w", err)
 	}
@@ -73,18 +73,24 @@ type preUpgradeBackupFile struct {
 
 // prunePreUpgradeBackups removes only regular owner-only files with the
 // reserved automatic-backup name whose schemas and timestamp parse. Manual and
-// scheduled backups are untouched.
+// scheduled backups are untouched. current is the stored schema of the
+// database that is being upgraded to target.
 //
-// It always keeps the starting copy of the upgrade to target: of the copies
-// whose target schema is target, the newest of those with the lowest source
-// schema. Each schema step commits on its own, so an upgrade that fails part
-// way leaves the database at an intermediate schema, and every retry writes a
-// copy of that schema, which the previous release refuses to open; the
-// starting copy is the one it can open. Beside it, the newest keep other
-// copies by the UTC timestamp in their names are kept, whatever their
-// schemas, so at most keep+1 remain. Copies for other target schemas fall
-// under this count only.
-func prunePreUpgradeBackups(directory string, target, keep int) ([]string, error) {
+// Each schema step commits on its own, so an upgrade that fails part way
+// leaves the database at an intermediate schema, and every retry writes a
+// copy of that schema, which the previous release refuses to open. For each
+// source schema below current, the newest copy from that schema to target is
+// therefore kept: these are the copies taken at the earlier schemas of this
+// upgrade, one from each start that committed a step before it failed, and
+// the copy at the schema the previous release used is among them. Neither the
+// timestamps nor the lowest source schema single that copy out, because an
+// earlier attempt that was rolled back can leave a copy at a lower schema
+// than the one this upgrade started from. Every other copy, including those
+// at current and those for other targets, falls under keep: the newest keep
+// of them by the UTC timestamp in their names remain. The directory thus
+// holds at most keep automatic copies plus one per earlier schema of the
+// upgrade, and retries at one schema never grow it.
+func prunePreUpgradeBackups(directory string, current, target, keep int) ([]string, error) {
 	if keep < 0 {
 		return nil, errors.New("pre-migration backup retention cannot be negative")
 	}
@@ -128,18 +134,14 @@ func prunePreUpgradeBackups(directory string, target, keep int) ([]string, error
 		}
 		return files[i].time.After(files[j].time)
 	})
-	// Newest first, so the first copy with the lowest source schema for the
-	// target is the newest of them.
-	start := -1
-	for i, file := range files {
-		if file.to == target && (start < 0 || file.from < files[start].from) {
-			start = i
-		}
-	}
+	// Newest first, so the first copy to target from each earlier schema is
+	// the newest of them.
+	earlier := make(map[int]bool)
 	var removed []string
 	kept := 0
-	for i, file := range files {
-		if i == start {
+	for _, file := range files {
+		if file.to == target && file.from < current && !earlier[file.from] {
+			earlier[file.from] = true
 			continue
 		}
 		if kept < keep {

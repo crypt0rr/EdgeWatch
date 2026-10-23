@@ -71,11 +71,12 @@ and generated encryption keys live in `./data`; back them up together. See the
 the initial scan and baseline workflow.
 
 Set `backup.directory` to keep verified scheduled backups and automatic
-pre-migration backups: the copy taken where the current upgrade started, which
-retries of a failed upgrade never remove, and the latest three others. An
-upgrade stops before schema writes if its configured pre-migration backup
-cannot be created or verified; without a configured directory, startup warns
-and continues.
+pre-migration backups. For the release being upgraded to, the daemon keeps the
+newest copy taken at each earlier schema of an interrupted upgrade, so retrying
+a failed upgrade never removes the copy the previous release can open, and it
+keeps the latest three other automatic copies. An upgrade stops before schema
+writes if its configured pre-migration backup cannot be created or verified;
+without a configured directory, startup warns and continues.
 
 ## Documentation
 

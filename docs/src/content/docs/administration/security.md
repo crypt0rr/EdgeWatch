@@ -70,8 +70,8 @@ Scheduled backups, backups taken with the backup command, and the automatic
 `edgewatch-preupgrade-*` copies that the daemon writes to `backup.directory`
 before a schema upgrade hold every unit's data: keep them, and the keys, as
 private as `./data`. The daemon removes a pre-upgrade copy only when newer
-pre-upgrade copies replace it, never by age, and always keeps the starting
-copy of the current upgrade, as
+pre-upgrade copies replace it, never by age, and keeps the newest copy taken
+at each earlier schema of an interrupted upgrade, as
 [Backup and recovery](/operations/backup-recovery/#scheduled-backups)
 describes; delete the copies you no longer need for a rollback. Check
 [database compatibility](/reference/database-compatibility/) before upgrading

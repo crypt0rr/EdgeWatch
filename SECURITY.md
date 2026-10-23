@@ -551,10 +551,16 @@ returns a unit's data: a unit appears with its name, slug, state, and counts
 of its accounts, administrators, jobs, stored scans, and scan slots in use;
 its accounts as summaries without credentials; and its
 capacity as numbers. The stored scan count is a number of rows, never a
-scan's content. The platform's own notification destinations are
-write-only like a unit's, and the platform cannot read, select, or change a
-unit's destinations. Usernames stay unique across every unit and the
-platform.
+scan's content. The platform status adds deployment totals, and the
+scheduled scan demand of all active units together against the deployment's
+scan slots: the daemon sums each unit's own estimate, which it derives from
+the schedules, timeouts, scopes, scanner rates, and recent scan durations of
+the unit's enabled jobs, and returns only the sums and counts of jobs, never
+a unit or job ID or name, a target, or any unit's own figure. With a single
+active unit, that total is the unit's own estimate. The platform's own
+notification destinations are write-only like a unit's, and the platform
+cannot read, select, or change a unit's destinations. Usernames stay unique
+across every unit and the platform.
 
 Only the host creates the first platform administrator: `edgewatch admin
 platform-setup-token` prints a one-time token, valid for 15 minutes, once the

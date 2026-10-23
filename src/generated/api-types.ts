@@ -161,6 +161,7 @@ export type PlatformStatus = {
   capacity: PlatformCapacityStatus
   jobs: number
   platform_admins: PlatformAdminCounts
+  scan_demand?: PlatformScanDemand
   stored_scans: number
   telemetry?: PlatformTelemetry
   units: PlatformUnitCounts
@@ -203,6 +204,21 @@ export type DeploymentSlots = {
   capacity: number
   in_use: number
   queued: number
+}
+
+// PlatformScanDemand is app.DeploymentScanDemand.
+export type PlatformScanDemand = {
+  units: number
+  enabled_jobs: number
+  history_jobs: number
+  lower_bound_jobs: number
+  unestimated_jobs: number
+  cadence_unattainable_jobs: number
+  slots: number
+  estimated_slot_seconds_per_day: number
+  capacity_slot_seconds_per_day: number
+  utilization_percent: number
+  over_capacity: boolean
 }
 
 // PlatformTelemetry is store.DeploymentTelemetry.

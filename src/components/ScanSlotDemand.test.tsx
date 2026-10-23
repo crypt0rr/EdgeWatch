@@ -34,6 +34,7 @@ describe('ScanSlotDemandNotice', () => {
     expect(await screen.findByText('Scheduled scan demand exceeds capacity')).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Scan-slot demand' })).toHaveClass('warning')
     expect(screen.getByText(/298\.3 slot-hours\/day/)).toBeInTheDocument()
+    expect(screen.getByText(/The scan slots are shared by all business units and not reserved for this one\./)).toBeInTheDocument()
     expect(screen.getByText(/estimate cannot fully bound, so actual demand may be higher/)).toBeInTheDocument()
     expect(screen.getByText(/configured maximum scanner rates, as a lower bound/)).toBeInTheDocument()
     expect(screen.getByText(/samples with its current scan settings/)).toBeInTheDocument()

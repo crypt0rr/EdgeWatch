@@ -4,6 +4,7 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, createPlatformNotification, deletePendingPlatformAdmin, deletePlatformNotification, getSession, invitePlatformAdmin, listPlatformAdmins, listPlatformNotifications, listUnits, platformAudit, platformStatus, renewPlatformAdminInvitation, revokePlatformAdminInvitation, setPlatformAdminEnabled, togglePlatformDeploymentAlert, togglePlatformNotificationUpdateAlert, togglePlatformSecurityAlert, updatePlatformNotification } from '../../api'
 import type { AuditEntry, NotificationDestination, UserSummary } from '../../api'
+import type { PlatformScanDemand, PlatformStatus } from '../../generated/api-types'
 import { formatDateTime, setDisplayTimeZone } from '../../format'
 import { businessUnit, deploymentLimits as limits, platformSession } from '../../test/platform-fixtures'
 import { developmentBuildUpdates, updateStatus } from '../../test/status-fixtures'
@@ -17,6 +18,16 @@ vi.mock('../../api', async () => {
   const actual = await vi.importActual<typeof import('../../api')>('../../api')
   return { ...actual, createPlatformNotification: vi.fn(), deletePendingPlatformAdmin: vi.fn(), deletePlatformNotification: vi.fn(), getSession: vi.fn(), invitePlatformAdmin: vi.fn(), listPlatformAdmins: vi.fn(), listPlatformNotifications: vi.fn(), listUnits: vi.fn(), platformAudit: vi.fn(), platformStatus: vi.fn(), renewPlatformAdminInvitation: vi.fn(), revokePlatformAdminInvitation: vi.fn(), setPlatformAdminEnabled: vi.fn(), togglePlatformDeploymentAlert: vi.fn(), togglePlatformNotificationUpdateAlert: vi.fn(), togglePlatformSecurityAlert: vi.fn(), updatePlatformNotification: vi.fn() }
 })
+
+/** A platform status of two active units, with the scan demand given. */
+function statusWithDemand(scanDemand?: PlatformScanDemand): PlatformStatus {
+  return { version: 'v0.19.0', updates: developmentBuildUpdates, units: { total: 4, active: 3, disabled: 1, deleting: 0 }, accounts: 9, jobs: 4, stored_scans: 12, platform_admins: { total: 1, enabled: 1 }, capacity: { limits, slots: { capacity: 1, in_use: 1, queued: 2 } }, scan_demand: scanDemand }
+}
+
+/** Scheduled scan demand of three active units against one shared slot. */
+function scanDemand(overrides: Partial<PlatformScanDemand> = {}): PlatformScanDemand {
+  return { units: 3, enabled_jobs: 3, history_jobs: 3, lower_bound_jobs: 0, unestimated_jobs: 0, cadence_unattainable_jobs: 0, slots: 1, estimated_slot_seconds_per_day: 0.6 * 3 * 86_400, capacity_slot_seconds_per_day: 86_400, utilization_percent: 180, over_capacity: true, ...overrides }
+}
 
 function admin(overrides: Partial<UserSummary> & Pick<UserSummary, 'id' | 'username'>): UserSummary {
   return { display_name: overrides.username, role: 'platform_admin', enabled: true, pending: false, totp_enabled: true, created_at: '2026-08-01T00:00:00Z', updated_at: '2026-08-01T00:00:00Z', revision: 1, ...overrides }
@@ -594,6 +605,51 @@ describe('platform status', () => {
     renderWithProviders(<PlatformStatusPage />)
     expect(await screen.findByText('Scheduled backups are failing.')).toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent('The newest good backup, edgewatch-scheduled-20261001T030000Z.db, is from')
+  })
+
+  it('warns when the active units’ scheduled scan demand exceeds the shared slots, in words', async () => {
+    vi.mocked(platformStatus).mockResolvedValue(statusWithDemand(scanDemand({ unestimated_jobs: 2, cadence_unattainable_jobs: 2 })))
+    renderWithProviders(<PlatformStatusPage />)
+    const panel = (await screen.findByRole('heading', { name: 'Scheduled scan demand' })).closest('.panel') as HTMLElement
+    expect(within(panel).getByText('Scheduled scan demand: 43.2 of 24 slot-hours/day (180%)')).toBeInTheDocument()
+    expect(within(panel).getByText(/The enabled jobs of 3 active units together, against the 1 scan slot that all units share\. A unit’s slot cap limits its share and reserves no slot\./)).toBeInTheDocument()
+    const warning = within(panel).getByRole('status')
+    expect(warning).toHaveClass('notice', 'warning')
+    expect(warning).toHaveTextContent('Scheduled scan demand exceeds the shared capacity.')
+    expect(warning).toHaveTextContent('Raise scheduler.max_concurrent_scans in config.yaml')
+    expect(within(panel).getByText('Not fully estimated').nextSibling).toHaveTextContent('2')
+    expect(within(panel).getByText(/2 jobs run longer than their schedules allow, so some of their scheduled runs are skipped\. Each unit’s Jobs page counts its own\./).closest('.notice')).toHaveClass('warning')
+    expect(within(panel).getByText('2 enabled jobs have work or a schedule frequency the estimate cannot fully bound, so actual demand may be higher.')).toBeInTheDocument()
+    expect(within(panel).getByText('Enabled jobs').nextSibling).toHaveTextContent('3')
+    expect(within(panel).getByText('Estimated from scan history').nextSibling).toHaveTextContent('3')
+    expect(within(panel).getByText('Lower bound from scanner rates').nextSibling).toHaveTextContent('0')
+  })
+
+  it('warns from 80% of the shared slots, and not below', async () => {
+    vi.mocked(platformStatus).mockResolvedValue(statusWithDemand(scanDemand({ slots: 2, estimated_slot_seconds_per_day: 1.6 * 86_400, capacity_slot_seconds_per_day: 2 * 86_400, utilization_percent: 80, over_capacity: false, cadence_unattainable_jobs: 1 })))
+    const near = renderWithProviders(<PlatformStatusPage />)
+    let panel = (await screen.findByRole('heading', { name: 'Scheduled scan demand' })).closest('.panel') as HTMLElement
+    expect(within(panel).getByText('Scheduled scan demand: 38.4 of 48 slot-hours/day (80%)')).toBeInTheDocument()
+    expect(within(panel).getByRole('status')).toHaveTextContent('Scheduled scan demand is near the shared capacity.')
+    expect(within(panel).getByText(/^1 job runs longer than its schedule allows, so some of its scheduled runs are skipped\./)).toBeInTheDocument()
+    expect(within(panel).queryByText(/estimate cannot fully bound/)).not.toBeInTheDocument()
+    near.unmount()
+
+    vi.mocked(platformStatus).mockResolvedValue(statusWithDemand(scanDemand({ units: 1, enabled_jobs: 1, history_jobs: 0, lower_bound_jobs: 1, slots: 2, estimated_slot_seconds_per_day: 0.25 * 86_400, capacity_slot_seconds_per_day: 2 * 86_400, utilization_percent: 12.5, over_capacity: false })))
+    renderWithProviders(<PlatformStatusPage />)
+    panel = (await screen.findByRole('heading', { name: 'Scheduled scan demand' })).closest('.panel') as HTMLElement
+    expect(within(panel).getByText('Scheduled scan demand: 6 of 48 slot-hours/day (12.5%)')).toBeInTheDocument()
+    expect(within(panel).getByText(/The enabled jobs of 1 active unit together, against the 2 scan slots/)).toBeInTheDocument()
+    expect(within(panel).queryByRole('status')).not.toBeInTheDocument()
+    expect(within(panel).queryByText(/near the shared capacity|exceeds the shared capacity|longer than (its|their) schedules? allows?/)).not.toBeInTheDocument()
+  })
+
+  it('leaves the scan demand out when the server could not estimate it', async () => {
+    vi.mocked(platformStatus).mockResolvedValue(statusWithDemand(undefined))
+    renderWithProviders(<PlatformStatusPage />)
+    expect(await screen.findByRole('heading', { name: 'Deployment limits' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Scheduled scan demand' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/slot-hours\/day/)).not.toBeInTheDocument()
   })
 
   it('reports a status that cannot be loaded and describes each release state', async () => {

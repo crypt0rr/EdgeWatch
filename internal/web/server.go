@@ -89,6 +89,10 @@ type Server struct {
 	// metrics so a scrape does not repeatedly inspect the identity allocator
 	// or walk every active job.
 	deploymentMetrics singleFlight[app.DeploymentMetrics]
+	// deploymentScanDemand caches the scheduled scan demand of every active
+	// unit together for the platform status; see
+	// cachedDeploymentScanDemand.
+	deploymentScanDemand singleFlight[app.DeploymentScanDemand]
 	// healthMu guards health, the cached answer of GET /healthz.
 	healthMu sync.Mutex
 	health   healthAnswer

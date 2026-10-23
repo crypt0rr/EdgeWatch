@@ -77,16 +77,19 @@ type applicationUpdateStatusView struct {
 
 // platformStatusView reports the deployment to the platform administrators
 // as numbers: the units by state, their accounts, jobs, and stored scans,
-// the platform administrators, the scan capacity and its use, the version
-// and update status, the untrusted proxy once one was seen, the outcome of
-// the scheduled backups when they are on, and the deployment's telemetry
-// unless it cannot be read.
+// the platform administrators, the scan capacity and its use, the scheduled
+// scan demand of the active units together against the shared slots, the
+// version and update status, the untrusted proxy once one was seen, the
+// outcome of the scheduled backups when they are on, and the deployment's
+// telemetry. The scan demand and the telemetry are left out when they cannot
+// be read.
 type platformStatusView struct {
 	Accounts          int                         `json:"accounts"`
 	Backups           *app.BackupStatus           `json:"backups,omitempty"`
 	Capacity          platformCapacityStatusView  `json:"capacity"`
 	Jobs              int                         `json:"jobs"`
 	PlatformAdmins    platformAdminCountsView     `json:"platform_admins"`
+	ScanDemand        *app.DeploymentScanDemand   `json:"scan_demand,omitempty"`
 	StoredScans       int64                       `json:"stored_scans"`
 	Telemetry         *store.DeploymentTelemetry  `json:"telemetry,omitempty"`
 	Units             platformUnitCountsView      `json:"units"`

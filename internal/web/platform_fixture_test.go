@@ -66,6 +66,13 @@ const platformFixtureAddress = "198.51.100.77"
 
 func newPlatformFixture(t *testing.T) *platformFixture {
 	t.Helper()
+	return newPlatformFixtureWith(t, nil)
+}
+
+// newPlatformFixtureWith is newPlatformFixture with a configuration that
+// configure, when it is not nil, changes before the application starts.
+func newPlatformFixtureWith(t *testing.T, configure func(*config.Config)) *platformFixture {
+	t.Helper()
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -75,6 +82,9 @@ func newPlatformFixture(t *testing.T) *platformFixture {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	rdap := false
 	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 2}, Web: config.Web{Listen: "127.0.0.1:8080"}, Enrichment: config.Enrichment{RDAP: config.RDAP{Enabled: &rdap}}}
+	if configure != nil {
+		configure(cfg)
+	}
 	application, err := app.New(cfg, db, "missing-nmap", logger)
 	if err != nil {
 		t.Fatal(err)

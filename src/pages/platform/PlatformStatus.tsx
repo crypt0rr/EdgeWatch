@@ -1,10 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
-import { Activity, ArrowUp } from 'lucide-react'
+import { Activity, AlertTriangle, ArrowUp } from 'lucide-react'
 import { platformStatus } from '../../api'
-import type { ApplicationUpdateStatus } from '../../generated/api-types'
+import type { ApplicationUpdateStatus, PlatformScanDemand } from '../../generated/api-types'
 import { UntrustedProxyBanner } from '../../components/UntrustedProxyBanner'
 import { ScheduledBackupBanner } from '../../components/ScheduledBackupBanner'
 import { ErrorNotice } from '../../components/ErrorNotice'
+import { formatSlotHours, formatSlotPercent } from '../../components/ScanSlotDemand'
 import { formatBytes, formatTime } from '../../format'
 import { formatCount, Loading, plural } from './common'
 
@@ -19,12 +20,40 @@ export function updateSummary(updates?: ApplicationUpdateStatus) {
   return 'Release status unknown.'
 }
 
+/** The utilization at which the scheduled scan demand is near capacity, as on a unit's own notice. */
+const scanDemandWarningPercent = 80
+
+/**
+ * The scheduled scan demand of every active unit together against the scan
+ * slots that all units share. The server sends sums and counts only, so the
+ * panel names no unit and no job.
+ */
+export function PlatformScanDemandPanel({ demand }: { demand: PlatformScanDemand }) {
+  const overCapacity = demand.over_capacity
+  const nearCapacity = overCapacity || demand.utilization_percent >= scanDemandWarningPercent
+  return <div className="panel platform-scan-demand"><div className="panel-heading"><div><h2>Scheduled scan demand</h2><p className="muted">The enabled jobs of {plural(demand.units, 'active unit')} together, against the {plural(demand.slots, 'scan slot')} that all units share. A unit’s slot cap limits its share and reserves no slot. Estimated at most every minute.</p></div></div>
+    {nearCapacity && <div className="notice warning platform-scan-demand-warning" role="status"><AlertTriangle size={15} aria-hidden="true" /><span><strong>{overCapacity ? 'Scheduled scan demand exceeds the shared capacity.' : 'Scheduled scan demand is near the shared capacity.'}</strong> {overCapacity ? 'Scans wait for free slots, so they start late and some scheduled runs are skipped.' : 'Scans may wait for free slots at busy times.'} Raise scheduler.max_concurrent_scans in config.yaml, or ask the units to space out or shorten their scans.</span></div>}
+    <p className="platform-scan-demand-summary">Scheduled scan demand: {formatSlotHours(demand.estimated_slot_seconds_per_day)} of {formatSlotHours(demand.capacity_slot_seconds_per_day)} slot-hours/day ({formatSlotPercent(demand.utilization_percent)}%)</p>
+    <dl className="fact-grid">
+      <div><dt>Enabled jobs</dt><dd>{formatCount(demand.enabled_jobs)}</dd></div>
+      <div><dt>Estimated from scan history</dt><dd>{formatCount(demand.history_jobs)}</dd></div>
+      <div><dt>Lower bound from scanner rates</dt><dd>{formatCount(demand.lower_bound_jobs)}</dd></div>
+      <div><dt>Not fully estimated</dt><dd>{formatCount(demand.unestimated_jobs)}</dd></div>
+    </dl>
+    {demand.cadence_unattainable_jobs > 0 && <div className="notice warning platform-scan-demand-cadence"><AlertTriangle size={15} aria-hidden="true" /><span>{demand.cadence_unattainable_jobs === 1
+      ? '1 job runs longer than its schedule allows, so some of its scheduled runs are skipped.'
+      : `${formatCount(demand.cadence_unattainable_jobs)} jobs run longer than their schedules allow, so some of their scheduled runs are skipped.`} Each unit’s Jobs page counts its own.</span></div>}
+    {demand.unestimated_jobs > 0 && <p className="muted">{plural(demand.unestimated_jobs, 'enabled job')} {demand.unestimated_jobs === 1 ? 'has' : 'have'} work or a schedule frequency the estimate cannot fully bound, so actual demand may be higher.</p>}
+  </div>
+}
+
 /**
  * The deployment as numbers: its business units by state, their accounts and
- * jobs, the platform administrators, the scan capacity and its use, and the
- * database size and notification backlog of the whole deployment, with
- * warnings about an untrusted proxy and failing scheduled backups. It names
- * no unit and no unit's data.
+ * jobs, the platform administrators, the scan capacity and its use, the
+ * active units' scheduled scan demand together, and the database size and
+ * notification backlog of the whole deployment, with warnings about an
+ * untrusted proxy, failing scheduled backups, and scan demand near or over
+ * the shared capacity. It names no unit and no unit's data.
  */
 export function PlatformStatusPage() {
   const status = useQuery({ queryKey: ['platform-status'], queryFn: platformStatus, refetchInterval: 15_000 })
@@ -53,6 +82,7 @@ export function PlatformStatusPage() {
           <div><dt>Absolute probe ceiling</dt><dd>{formatCount(limits.max_probe_count_limit)}</dd></div>
         </dl>
       </div>
+      {value.scan_demand && <PlatformScanDemandPanel demand={value.scan_demand} />}
       {value.telemetry && <div className="panel platform-telemetry"><div className="panel-heading"><div><h2>Storage and delivery</h2><p className="muted">Every unit’s data together, counted at most every 30 seconds; collected <time dateTime={value.telemetry.collected_at}>{formatTime(value.telemetry.collected_at, { hour: '2-digit', minute: '2-digit' })}</time>.</p></div></div>
         <dl className="fact-grid">
           <div><dt>Database</dt><dd>{formatBytes(value.telemetry.database_bytes)}</dd></div>

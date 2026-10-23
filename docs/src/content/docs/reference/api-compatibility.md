@@ -67,6 +67,44 @@ the scheduler skips some of them. The console shows a warning at 80%
 utilization and above, and names the count of jobs that cannot keep their
 cadence.
 
+A unit's capacity is a limit, not a reservation: every unit's scans share the
+deployment's `scheduler.max_concurrent_scans` slots, so units that each stay
+within their own capacity can still oversubscribe those slots together. From
+v0.44.0, `GET /api/v1/platform/status`, which requires
+`platform_status.read`, adds `scan_demand`: the scheduled demand of every
+active unit together, compared with the slots of the whole deployment.
+
+```json
+{
+  "scan_demand": {
+    "units": 3,
+    "enabled_jobs": 3,
+    "history_jobs": 3,
+    "lower_bound_jobs": 0,
+    "unestimated_jobs": 0,
+    "cadence_unattainable_jobs": 0,
+    "slots": 1,
+    "estimated_slot_seconds_per_day": 155520,
+    "capacity_slot_seconds_per_day": 86400,
+    "utilization_percent": 180,
+    "over_capacity": true
+  }
+}
+```
+
+`units` counts the active units included; disabled units and units being
+deleted schedule no scans and are left out. Each unit contributes the same
+estimate that its own `GET /api/v1/jobs/slot-demand` reports, and the job
+counts and `estimated_slot_seconds_per_day` are the sums of the units'
+values. `slots` is the deployment's `scheduler.max_concurrent_scans`, whatever
+the units' own caps are, and `capacity_slot_seconds_per_day` is `slots` ×
+86,400. `utilization_percent` and `over_capacity` compare the two as a unit's
+own estimate does. The object holds sums and counts only: no unit or job ID or
+name, and no per-unit figure. The daemon computes it at most once a minute
+and leaves it out when the estimate fails or takes longer than 10 seconds.
+The platform console's **Status** page shows it with a warning at 80%
+utilization and above.
+
 ## Job creation preview
 
 v0.32.0 adds `POST /api/v1/jobs/preview`. Send the same new-job JSON payload
@@ -819,4 +857,4 @@ of `200`. `POST /api/v1/platform/admins/{id}/activation` and
 | `PATCH /api/v1/platform/notifications/{id}` | `platform_notifications.manage` | `{revision, name, url, enabled, password}`; an absent `url` or `enabled`, or an empty `name`, keeps its value. |
 | `DELETE /api/v1/platform/notifications/{id}` | `platform_notifications.manage` | `{revision, password}`. `204`. |
 | `PUT /api/v1/platform/notifications/update-routing` | `platform_notifications.manage` | `{destinations, password}`; platform destination IDs only, and an empty array selects none. |
-| `GET /api/v1/platform/status` | `platform_status.read` | Units by state, account, job, and stored scan totals (`accounts`, `jobs`, `stored_scans`), platform administrator counts, the deployment's scan limits and slot use, the version and update status, and, from v0.36.0, the deployment's `telemetry`. |
+| `GET /api/v1/platform/status` | `platform_status.read` | Units by state, account, job, and stored scan totals (`accounts`, `jobs`, `stored_scans`), platform administrator counts, the deployment's scan limits and slot use, the version and update status, from v0.36.0 the deployment's `telemetry`, and from v0.44.0 the active units' scheduled `scan_demand` together; see [Scheduled scan-slot demand](#scheduled-scan-slot-demand). |

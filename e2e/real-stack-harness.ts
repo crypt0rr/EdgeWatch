@@ -19,7 +19,10 @@ export const password = 'correct horse battery staple'
 export async function navigateFromShell(page: Page, label: string) {
   const trigger = page.getByRole('button', { name: 'Open navigation' })
   if (await trigger.isVisible()) await trigger.click()
-  await page.getByRole('link', { name: label, exact: true }).click()
+  const link = label === 'Incidents'
+    ? page.getByRole('link', { name: /^Incidents(?:\s|$)/ })
+    : page.getByRole('link', { name: label, exact: true })
+  await link.click()
 }
 
 export type Harness = {

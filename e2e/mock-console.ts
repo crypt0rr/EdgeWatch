@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test'
-import type { AdminStatus, HostObservation, IncidentInboxItem, IncidentInboxPage, IncidentInboxSummary, PerimeterBlocks, PerimeterDeclareResult, PerimeterLineError, PerimeterMonitorRef, PerimeterOutsideTarget, PerimeterOverview, PerimeterProtocol, PerimeterRange, PerimeterRangeDetail, PerimeterSuggestion, PlatformStatus, Scan } from '../src/generated/api-types'
-import type { Job, JobForm } from '../src/types'
+import type { AdminStatus, HostObservation, IncidentInboxItem, IncidentInboxPage, IncidentInboxSummary, PerimeterBlocks, PerimeterDeclareResult, PerimeterLineError, PerimeterMonitorRef, PerimeterOutsideTarget, PerimeterOverview, PerimeterProtocol, PerimeterRange, PerimeterRangeDetail, PerimeterSuggestion, PlatformStatus, Scan, ScanSlotDemand, ScanSummary } from '../src/generated/api-types'
+import type { ActivityEvent, Job, JobForm } from '../src/types'
 
 export type UnitConsoleRole = 'administrator' | 'operator' | 'viewer'
 /** platform_admin is the business units' platform administrator. */
@@ -75,6 +75,39 @@ const scan: Scan = {
   status: 'success',
   config_hash: 'fixture-security-hash',
   snapshot: { units: [], scopes: [] },
+}
+
+const scanSummary: ScanSummary = {
+  id: scan.id,
+  job: scan.job,
+  started_at: scan.started_at,
+  finished_at: scan.finished_at,
+  status: scan.status,
+  nmap_version: '7.99',
+  scanner_engine: 'nmap',
+  config_hash: scan.config_hash,
+}
+
+const activityEvent: ActivityEvent = {
+  type: 'changes-detected',
+  job_id: 'job-1',
+  job: 'fixture-job',
+  scan_id: 'scan-1',
+  message: 'Fixture activity event confirms a baseline change.',
+  created_at: '2026-01-01T00:00:00Z',
+  changes: [],
+}
+
+const scanSlotDemand: ScanSlotDemand = {
+  enabled_jobs: 1,
+  history_jobs: 1,
+  lower_bound_jobs: 0,
+  unestimated_jobs: 0,
+  slots: 2,
+  estimated_slot_seconds_per_day: 3_600,
+  capacity_slot_seconds_per_day: 7_200,
+  utilization_percent: 50,
+  over_capacity: false,
 }
 
 const host: HostObservation = {
@@ -469,7 +502,10 @@ function declarePerimeter(ranges: PerimeterRange[], entries: Array<{ kind?: unkn
  * refused, as the server's permission gate does. With emptyPerimeter, the
  * unit starts without declared ranges.
  */
-export async function mockConsole(page: Page, role: ConsoleRole = 'administrator', { platformTOTP = true, emptyPerimeter = false }: { platformTOTP?: boolean; emptyPerimeter?: boolean } = {}): Promise<ConsoleMockControls> {
+export async function mockConsole(page: Page, role: ConsoleRole = 'administrator', { platformTOTP = true, emptyPerimeter = false, accessibilityFixtures = false, routeAuditFixtures = false }: { platformTOTP?: boolean; emptyPerimeter?: boolean; accessibilityFixtures?: boolean; routeAuditFixtures?: boolean } = {}): Promise<ConsoleMockControls> {
+  const activityScans = accessibilityFixtures
+    ? [{ ...scan, id: 'scan-failed', status: 'failed', error: 'Target timed out after 10 seconds.' }]
+    : [scan]
   let incidents: IncidentInboxItem[] = [{
     job_id: 'job-1',
     job: 'fixture-job',
@@ -501,6 +537,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     platformUnit({ id: 'unit-default', name: 'Default', slug: 'default', is_default: true, accounts: 3, administrators: 1, jobs: 1, stored_scans: 12 }),
     platformUnit({ id: 'unit-retail', name: 'Retail', slug: 'retail', accounts: 3, administrators: 1, jobs: 2, stored_scans: 1480, slots: { in_use: 1, queued: 0 } }),
   ].slice(0, platformTOTP ? 2 : 1)
+  if (accessibilityFixtures) units.push(platformUnit({ id: 'unit-disabled', name: 'Retail', slug: 'retail-lifecycle', status: 'disabled' }))
   const multipleUnits = () => units.filter(unit => unit.status !== 'deleted').length > 1
   const mustEnrol = () => role === 'platform_admin' && !platformTOTP && multipleUnits()
   const unitAccounts: Record<string, any[]> = {
@@ -703,11 +740,13 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
       await json<IncidentInboxPage>({ incidents: matching.slice(offset, offset + limit), truncated: false, active_count: incidents.length, server_now: new Date().toISOString(), next_follow_up_at: null, pagination: { limit, offset, total: matching.length, has_more: hasMore, next_offset: hasMore ? offset + limit : null } }); return
     }
     if (path === '/incidents/summary' && method === 'GET') { await json<IncidentInboxSummary>({ active_count: incidents.length }); return }
+    if (routeAuditFixtures && path === '/events' && method === 'GET') { await json({ events: [activityEvent], pagination: pagination(1, 20) }); return }
     if (path === '/hosts' && method === 'GET') {
       const hosts = [{ ...host, job_id: 'job-1', job: 'fixture-job', scan_id: 'scan-1', scanned_at: scan.finished_at, open_ports: 1, open_filtered_ports: 0, has_open_ports: true, data_quality: 'detailed' }]
       await json({ hosts, pagination: pagination(hosts.length) }); return
     }
     if (path === '/jobs' && method === 'GET') { await json({ jobs: createdJob ? [job, createdJob] : [job] }); return }
+    if (routeAuditFixtures && path === '/jobs/slot-demand' && method === 'GET') { await json<ScanSlotDemand>(scanSlotDemand); return }
     if (path === '/jobs/schedule-suggestion' && method === 'GET') { await json({ suggested: false, draft_next_run: '2026-01-01T06:00:00Z', gap_minutes: 45 }); return }
     if (/^\/jobs\/[^/]+\/change-windows$/.test(path) && method === 'GET') { await json({ windows: [] }); return }
     if (path === '/jobs/job-1' && method === 'GET') { await json<Job>(job); return }
@@ -721,12 +760,17 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/jobs/job-1/scans/scan-1' && method === 'GET') { await json({ scan, changes: [], changes_pagination: pagination(0), current_security_hash: job.security_hash }); return }
     if (path === '/jobs/job-1/scans/scan-1/results' && method === 'GET') { await json({ results: [], pagination: pagination(0) }); return }
     if (path === '/jobs/job-1/scans/scan-1/changes' && method === 'GET') { await json({ changes: [], pagination: pagination(0) }); return }
+    if (path === '/jobs/job-1/scans/scan-1/hosts/192.0.2.10/rdap' && method === 'GET') { await json({ rdap: { status: 'private', address: host.address } }); return }
+    if (path === '/jobs/job-1/scans/scan-1/hosts/192.0.2.10' && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, scan, data_quality: 'detailed', host, expected: host }); return }
     if (path === '/jobs/job-1/baseline' && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, revision: 1, security_hash: job.security_hash, baseline: job.baseline, snapshot: { units: [], scopes: [] }, pagination: pagination(0) }); return }
     if (path === '/jobs/job-1/baseline/hosts' && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, source_scan: scan, data_quality: 'detailed', hosts: [host], pagination: pagination(1) }); return }
     if (path.startsWith('/jobs/job-1/baseline/hosts/') && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, source_scan: scan, data_quality: 'detailed', host, expected: host }); return }
-    if (path === '/scans' && method === 'GET') { await json({ scans: [scan], pagination: pagination(1, 20) }); return }
+    if (path === '/scans' && method === 'GET') { await json({ scans: activityScans, pagination: pagination(activityScans.length, 20) }); return }
+    if (path === '/scans/scan-1/summary' && method === 'GET') { await json({ scan: scanSummary }); return }
     if (path === '/scans/scan-1' && method === 'GET') { await json({ scan }); return }
-    if (path.startsWith('/scans/scan-1/hosts') && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, scan, data_quality: 'detailed', hosts: [host], pagination: pagination(1) }); return }
+    if (path === '/scans/scan-1/hosts/192.0.2.10/rdap' && method === 'GET') { await json({ rdap: { status: 'private', address: host.address } }); return }
+    if (path === '/scans/scan-1/hosts/192.0.2.10' && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, scan, data_quality: 'detailed', host }); return }
+    if (path === '/scans/scan-1/hosts' && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, scan, data_quality: 'detailed', hosts: [host], pagination: pagination(1) }); return }
     if (path === '/scans/active' && method === 'GET') { await json({ scans: [] }); return }
     if (path === '/notifications/destinations' && method === 'GET') { await json({ destinations: createdDestination ? [destination, createdDestination] : [destination], status: { deployment: 0, managed: createdDestination ? 2 : 1, active: createdDestination ? 2 : 1, locked: 0, key_state: 'ready' }, update_routing: updateRouting, incident_reminders_enabled: incidentRemindersEnabled, incident_reminder_cadence: incidentReminderCadence }); return }
     if (path === '/users' && method === 'GET') {

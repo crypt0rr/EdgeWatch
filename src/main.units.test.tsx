@@ -193,7 +193,7 @@ describe('business units in the console', () => {
       return businessUnit({ id: 'unit-logistics', name: 'Logistics', slug: 'logistics' })
     })
     renderApp('/platform/units')
-    expect(await screen.findByRole('link', { name: 'Open Default' })).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: /Default/ })).toBeInTheDocument()
     const unitListReads = vi.mocked(listUnits).mock.calls.length
 
     fireEvent.click(screen.getByRole('button', { name: /New unit/ }))

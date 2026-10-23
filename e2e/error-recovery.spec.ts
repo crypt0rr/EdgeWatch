@@ -118,6 +118,20 @@ test.describe('load and save error recovery (#982)', () => {
 
   test('a page render failure leaves navigation available and offers recovery', async ({ page }) => {
     await mockConsole(page)
+    // Keep the malformed list response local to this boundary regression. The
+    // shared mock returns a proper single-host detail for every valid host URL.
+    await page.route('**/api/v1/scans/scan-1/hosts/192.0.2.10', async route => {
+      await route.fulfill({
+        json: {
+          job_id: 'job-1',
+          job: 'fixture-job',
+          scan: { id: 'scan-1', job_id: 'job-1', job: 'fixture-job', status: 'success' },
+          data_quality: 'detailed',
+          hosts: [{ address: '192.0.2.10', protocols: [] }],
+          pagination: { limit: 50, offset: 0, total: 1, has_more: false, next_offset: null },
+        },
+      })
+    })
     await page.goto('/scans/scan-1/hosts/192.0.2.10')
 
     // This route intentionally returns the host-list envelope where the

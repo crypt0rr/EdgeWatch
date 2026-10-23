@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { mockConsole, rolePermissions, type UnitConsoleRole } from './mock-console'
+import { allConsoleRoutes, expectedConsolePath } from './console-routes'
 
 const navigationLabels = [
   'Overview', 'Jobs', 'Hosts', 'Perimeter', 'Incidents', 'Notifications', 'Users',
@@ -12,35 +13,17 @@ const expectedNavigation: Record<UnitConsoleRole, string[]> = {
   viewer: ['Jobs', 'Security'],
 }
 
-// A refused page leads to /jobs, except the audit, which leads to the
-// role's home: the overview where the role has it.
-const routePermissions: Array<{ path: string; permission?: string; refusedToHome?: boolean }> = [
-  { path: '/', permission: 'overview.read' },
-  { path: '/jobs', permission: 'jobs.read' },
-  { path: '/jobs/new', permission: 'jobs.write' },
-  { path: '/jobs/new/advanced', permission: 'jobs.write' },
-  { path: '/jobs/job-1', permission: 'jobs.read' },
-  { path: '/jobs/job-1/edit', permission: 'jobs.write' },
-  { path: '/jobs/job-1/baseline', permission: 'baselines.read' },
-  { path: '/jobs/job-1/scans/scan-1', permission: 'scans.read' },
-  { path: '/jobs/job-1/scans/scan-1/hosts/192.0.2.10', permission: 'scans.read' },
-  { path: '/hosts', permission: 'hosts.read' },
-  { path: '/perimeter', permission: 'perimeter.read' },
-  { path: '/perimeter/ranges/range-1', permission: 'perimeter.read' },
-  { path: '/scans/scan-1', permission: 'scans.read' },
-  { path: '/incidents', permission: 'incidents.read' },
-  { path: '/notifications', permission: 'notifications.manage' },
-  { path: '/users', permission: 'users.manage' },
-  { path: '/public-dashboard', permission: 'public_dashboard.manage' },
-  { path: '/scanner-profiles', permission: 'scanner_profiles.read' },
-  { path: '/audit', permission: 'audit.read', refusedToHome: true },
-  { path: '/security', permission: 'account.self' },
-]
+const routeBatchSize = 8
+const routeBatches = Array.from(
+  { length: Math.ceil(allConsoleRoutes.length / routeBatchSize) },
+  (_, index) => allConsoleRoutes.slice(index * routeBatchSize, (index + 1) * routeBatchSize),
+)
 
-// One test per role, so that the roles run in parallel and each stays well
-// inside the test timeout as the route table grows.
+// Keep the role-level navigation contract separate from route navigation.
+// The route inventory runs in fixed-size batches so every role still checks
+// every path without one long test approaching Playwright's 30-second limit.
 for (const role of Object.keys(expectedNavigation) as UnitConsoleRole[]) {
-  test(`role route and navigation matrix matches the authorization contract for ${role}`, async ({ browser, baseURL }, testInfo) => {
+  test(`role navigation matrix matches the authorization contract for ${role}`, async ({ browser, baseURL }, testInfo) => {
     test.skip(testInfo.project.name !== 'desktop', 'The permission matrix runs once on desktop; mobile navigation is covered separately.')
 
     // Use the configured preview origin so PLAYWRIGHT_PORT is honored.
@@ -53,7 +36,9 @@ for (const role of Object.keys(expectedNavigation) as UnitConsoleRole[]) {
 
       const navigation = page.locator('#primary-navigation nav')
       for (const label of navigationLabels) {
-        const link = navigation.getByRole('link', { name: label, exact: true })
+        const link = label === 'Incidents'
+          ? navigation.getByRole('link', { name: /^Incidents(?:\s|$)/ })
+          : navigation.getByRole('link', { name: label, exact: true })
         if (expectedNavigation[role].includes(label)) await expect(link).toHaveCount(1)
         else await expect(link).toHaveCount(0)
       }
@@ -91,18 +76,28 @@ for (const role of Object.keys(expectedNavigation) as UnitConsoleRole[]) {
       } else {
         await expect(page.getByRole('button', { name: 'New job' })).toHaveCount(0)
       }
-
-      for (const route of routePermissions) {
-        await page.goto(route.path)
-        const allowed = route.permission === undefined || rolePermissions[role].includes(route.permission)
-        const home = route.refusedToHome && rolePermissions[role].includes('overview.read') ? '/' : '/jobs'
-        const expectedPath = allowed ? new URL(route.path, baseURL).pathname : home
-        await expect.poll(() => new URL(page.url()).pathname).toBe(expectedPath)
-      }
     } finally {
       await context.close()
     }
   })
+
+  for (const [batchIndex, routes] of routeBatches.entries()) {
+    test(`role route matrix batch ${batchIndex + 1}/${routeBatches.length} matches the authorization contract for ${role}`, async ({ browser, baseURL }, testInfo) => {
+      test.skip(testInfo.project.name !== 'desktop', 'The permission matrix runs once on desktop; mobile navigation is covered separately.')
+      const context = await browser.newContext({ baseURL })
+      const page = await context.newPage()
+      try {
+        await mockConsole(page, role)
+        for (const route of routes) {
+          await page.goto(route.path)
+          const expectedPath = expectedConsolePath(role, route)
+          await expect.poll(() => new URL(page.url()).pathname).toBe(expectedPath)
+        }
+      } finally {
+        await context.close()
+      }
+    })
+  }
 }
 
 // The platform administrator's console: its own navigation, never a unit's,
@@ -110,17 +105,7 @@ for (const role of Object.keys(expectedNavigation) as UnitConsoleRole[]) {
 // unit's data.
 const platformNavigation = ['Units', 'Platform admins', 'Notifications', 'Audit', 'Status', 'Security']
 
-const platformRoutes: Array<{ path: string; permission: string }> = [
-  { path: '/platform/units', permission: 'units.manage' },
-  { path: '/platform/units/unit-retail/accounts', permission: 'units.manage' },
-  { path: '/platform/admins', permission: 'unit_accounts.manage' },
-  { path: '/platform/notifications', permission: 'platform_notifications.manage' },
-  { path: '/platform/audit', permission: 'platform_audit.read' },
-  { path: '/platform/status', permission: 'platform_status.read' },
-  { path: '/security', permission: 'account.self' },
-]
-
-test('platform administrator route and navigation matrix keeps unit pages out of the platform console', async ({ browser, baseURL }, testInfo) => {
+test('platform administrator navigation keeps unit pages out of the platform console', async ({ browser, baseURL }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'The permission matrix runs once on desktop; mobile navigation is covered separately.')
   const context = await browser.newContext({ baseURL })
   const page = await context.newPage()
@@ -130,27 +115,35 @@ test('platform administrator route and navigation matrix keeps unit pages out of
     await expect(page.getByRole('heading', { name: 'Business units', exact: true })).toBeVisible()
     const navigation = page.locator('#primary-navigation nav')
     for (const label of [...navigationLabels, ...platformNavigation]) {
-      const link = navigation.getByRole('link', { name: label, exact: true })
+      const link = label === 'Incidents'
+        ? navigation.getByRole('link', { name: /^Incidents(?:\s|$)/ })
+        : navigation.getByRole('link', { name: label, exact: true })
       if (platformNavigation.includes(label)) await expect(link).toHaveCount(1)
       else await expect(link).toHaveCount(0)
     }
     await expect(page.getByText('All business units')).toBeVisible()
 
-    for (const route of platformRoutes) {
-      expect(rolePermissions.platform_admin).toContain(route.permission)
-      await page.goto(route.path)
-      await expect.poll(() => new URL(page.url()).pathname).toBe(route.path)
-    }
-    for (const route of routePermissions.filter(route => route.path !== '/security')) {
-      await page.goto(route.path)
-      await expect.poll(() => new URL(page.url()).pathname).toBe('/platform/units')
-    }
-    for (const path of ['/audit', '/highlights', '/platform/unknown']) {
-      await page.goto(path)
-      await expect.poll(() => new URL(page.url()).pathname).toBe('/platform/units')
-    }
     expect(controls.calls['unit-data'] ?? 0).toBe(0)
   } finally {
     await context.close()
   }
 })
+
+for (const [batchIndex, routes] of routeBatches.entries()) {
+  test(`platform administrator route matrix batch ${batchIndex + 1}/${routeBatches.length} keeps unit pages out of the platform console`, async ({ browser, baseURL }, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop', 'The permission matrix runs once on desktop; mobile navigation is covered separately.')
+    const context = await browser.newContext({ baseURL })
+    const page = await context.newPage()
+    try {
+      const controls = await mockConsole(page, 'platform_admin')
+      for (const route of routes) {
+        if (route.scope === 'platform' && route.permission) expect(rolePermissions.platform_admin).toContain(route.permission)
+        await page.goto(route.path)
+        await expect.poll(() => new URL(page.url()).pathname).toBe(expectedConsolePath('platform_admin', route))
+      }
+      expect(controls.calls['unit-data'] ?? 0).toBe(0)
+    } finally {
+      await context.close()
+    }
+  })
+}

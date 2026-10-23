@@ -27,6 +27,7 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@playwright/test": "^1.62.1",
     "@tailwindcss/vite": "^4.1.17",
     "@testing-library/jest-dom": "^7.0.0",

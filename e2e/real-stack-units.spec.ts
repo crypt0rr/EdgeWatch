@@ -231,8 +231,8 @@ test('two business units stay apart through the real console, TOTP enrolment, pu
     // The platform console shows the default unit as counts, never its job.
     await expect(platform.getByRole('heading', { name: 'Business units' })).toBeVisible()
     await expect(platform.getByRole('heading', { name: '1 unit', exact: true })).toBeVisible()
-    await expect(platform.getByRole('link', { name: 'Open Default' })).toContainText('1 job')
-    await expect(storedScans(platform.getByRole('link', { name: 'Open Default' }))).toHaveText('1 scan')
+    await expect(platform.getByRole('link', { name: /Default/ })).toContainText('1 job')
+    await expect(storedScans(platform.getByRole('link', { name: /Default/ }))).toHaveText('1 scan')
     expect(await platform.locator('main').innerText()).not.toContain(jobName)
     expect((await callAPI(platform, '/jobs', 'GET')).status).toBe(403)
 
@@ -360,12 +360,12 @@ test('two business units stay apart through the real console, TOTP enrolment, pu
     // The platform console counts both units' jobs, stored scans and
     // accounts, and neither the console nor its API names a job.
     await navigateFromShell(platform, 'Units')
-    const unitBRow = platform.getByRole('link', { name: 'Open Unit B' })
+    const unitBRow = platform.getByRole('link', { name: /Unit B/ })
     await expect(unitBRow).toContainText('1 account · 1 admin')
     await expect(unitBRow).toContainText('1 job')
     await expect(storedScans(unitBRow)).toHaveText('1 scan')
-    await expect(platform.getByRole('link', { name: 'Open Default' })).toContainText('1 job')
-    await expect(storedScans(platform.getByRole('link', { name: 'Open Default' }))).toHaveText('1 scan')
+    await expect(platform.getByRole('link', { name: /Default/ })).toContainText('1 job')
+    await expect(storedScans(platform.getByRole('link', { name: /Default/ }))).toHaveText('1 scan')
     expect(await platform.locator('main').innerText()).not.toContain(jobName)
     for (const path of ['/platform/units', `/platform/units/${unitBID}`, `/platform/units/${unitBID}/accounts`, '/platform/status']) {
       const response = await rawAPI(platform, path)

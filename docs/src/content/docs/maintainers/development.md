@@ -147,8 +147,9 @@ renders: the unit console's routes in `Shell` in `src/main.tsx`, including the
 guided job-creation steps of `JobCreationJourney`, the platform console's in
 `PlatformShell`, each `UnitDetail` tab, and the pages outside either shell:
 sign-in, first-run setup, activation, the forced TOTP enrolment, and the
-public status pages. The axe audit in `e2e/route-accessibility.spec.ts` and
-the role matrix in `e2e/role-matrix.spec.ts` visit every entry.
+public status pages. The axe audit in `e2e/route-accessibility.spec.ts`
+visits every entry; the role matrix in `e2e/role-matrix.spec.ts` visits the
+console routes, but not the pages outside both shells (`entrySurfaces`).
 
 `src/console-route-inventory.test.ts`, which `npm run test:coverage` runs
 before the browser tests, parses every `<Route>` in `src/` and the `UnitDetail`

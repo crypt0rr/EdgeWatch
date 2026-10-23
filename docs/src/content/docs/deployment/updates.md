@@ -27,11 +27,15 @@ prepare the rollback before you pull.
 
 When `backup.directory` is configured, the daemon also creates and verifies a
 pre-migration backup immediately before an existing database's schema is
-upgraded. It retains the latest three automatic pre-migration backups
-separately from scheduled backup retention. If creation or verification fails,
-the migration stops before its schema writes; without a configured directory,
-the daemon warns and continues. Keep the configuration enabled and retain an
-off-host backup for recovery from host or storage loss.
+upgraded. It always keeps the starting copy of the current upgrade, which
+holds the schema the database had before the upgrade began, so restarts after
+a failed upgrade never remove it. Beside it, the daemon keeps the latest three
+other automatic pre-migration backups, separately from scheduled backup
+retention; [Backup and recovery](/operations/backup-recovery/#scheduled-backups)
+gives the exact rule. If creation or verification fails, the migration stops
+before its schema writes; without a configured directory, the daemon warns and
+continues. Keep the configuration enabled and retain an off-host backup for
+recovery from host or storage loss.
 
 Then pull and start the new image:
 
@@ -132,7 +136,11 @@ If automatic pre-migration backups are configured, the matching
 `edgewatch-preupgrade-s<from>-s<to>-<UTC timestamp>.db` file in
 `backup.directory` is also a pre-update recovery point. Check it with
 `edgewatch verify --from` and restore it with the same procedure as another
-backup. The daemon keeps the latest three such files and does not include them
+backup. After a failed update, use the newest file with the lowest `s<from>`
+among those whose `s<to>` is the new release's schema: it holds the schema of
+the version you noted. Copies that restarts wrote after the failure hold a
+partly upgraded schema, which the older version refuses. The daemon keeps that
+starting copy and the latest three other such files, and does not include them
 in scheduled backup rotation.
 
 Replace `0.25.23` with the noted version, without the leading `v`, and add

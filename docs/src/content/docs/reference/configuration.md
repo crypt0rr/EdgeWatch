@@ -270,10 +270,13 @@ Jobs are configured in the console, which enforces these limits:
   `backup` command does before it publishes it, and keeps the newest
   `backup.keep` of them. When an existing database needs a schema upgrade, the
   daemon also creates and verifies a backup in that directory before migration
-  writes begin and keeps the latest three separately from `backup.keep`. A
-  failure to create or verify this pre-migration backup stops the migration;
-  without `backup.directory`, startup warns and continues. Scheduled rotation
-  removes only its own files, named
+  writes begin. Separately from `backup.keep`, it keeps the starting copy of
+  the current upgrade, which restarts after a failed upgrade never remove, and
+  the latest three other pre-migration backups, as
+  [Scheduled backups](/operations/backup-recovery/#scheduled-backups)
+  describes. A failure to create or verify this pre-migration backup stops the
+  migration; without `backup.directory`, startup warns and continues.
+  Scheduled rotation removes only its own files, named
   `edgewatch-scheduled-YYYYMMDDTHHMMSSZ.db`; pre-migration rotation removes
   only its reserved automatic files, so manual backups are left alone.
   `edgewatch health` and the console report scheduled backup status.

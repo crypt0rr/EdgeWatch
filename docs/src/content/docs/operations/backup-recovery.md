@@ -141,14 +141,38 @@ removes nothing, so the older good backups stay.
 
 When an existing database needs a schema upgrade, the daemon also writes a
 verified backup immediately before migration starts. It is named
-`edgewatch-preupgrade-s<from>-s<to>-<UTC timestamp>.db` and contains the
-pre-upgrade schema. The daemon keeps the latest three automatic pre-migration
-backups separately from the scheduled `keep` count. It removes only regular
-owner-only files with the reserved automatic name; manual backups and
-scheduled backups are left alone. If the configured directory is missing or
-the backup cannot be created and verified, the daemon stops before the schema
-migration writes anything. Without `backup.directory`, startup logs a warning
-and continues the migration without an automatic pre-migration backup.
+`edgewatch-preupgrade-s<from>-s<to>-<UTC timestamp>.db`, where `<from>` is the
+schema the copy contains and `<to>` the schema of the release that wrote it.
+Startup logs `pre-migration backup started` before the copy and
+`verified pre-migration backup written` after it, with both schemas, because
+copying a large database delays the migration. If the configured directory is
+missing or the backup cannot be created and verified, the daemon stops before
+the schema migration writes anything. Without `backup.directory`, startup logs
+a warning and continues the migration without an automatic pre-migration
+backup.
+
+Each schema step commits on its own, so an upgrade that fails part way leaves
+the database at an intermediate schema, and every restart until it succeeds
+writes another copy, of that intermediate schema. The previous release refuses
+those copies. After writing a copy, the daemon therefore keeps:
+
+- the starting copy of the current upgrade: of the copies whose `<to>` is the
+  running release's schema, the newest of those with the lowest `<from>`,
+  which is the schema the database had before the upgrade began;
+- the latest three other automatic pre-migration backups by the timestamp in
+  their names, whatever their schemas.
+
+It removes the rest, so the directory holds at most four automatic copies,
+however often a failed upgrade is retried, separately from the scheduled
+`keep` count. Copies written for an earlier release's upgrade count only
+toward the latest three. A new copy is written on every start that needs a
+migration, because a database restored and run on the previous release in
+between holds newer data. The daemon removes only regular owner-only files
+with the reserved automatic name; manual backups and scheduled backups are
+left alone. Automatic copies have no age limit: like other backups they hold
+every unit's data, including that of a unit deleted after the copy was taken,
+until newer copies replace them, so delete the ones you no longer need for a
+rollback.
 
 Use `edgewatch verify --from` to check an automatic backup before restoring
 it, and keep the backup directory private with the same keys as `./data`.

@@ -962,10 +962,13 @@ unchanged, with the advice to upgrade through v0.35.0 first; `health`,
 database starts from a frozen copy of schema 54 that a test keeps identical
 to what the retired migrations created.
 When `backup.directory` is configured, a schema upgrade first writes and
-verifies a pre-migration backup there and retains the latest three automatic
-copies separately from scheduled backups. If it cannot create or verify that
-copy, migration stops before schema writes; without the directory, startup
-warns and continues. Retain the backup with the database's encryption keys.
+verifies a pre-migration backup there. It retains the starting copy of the
+current upgrade, which holds the schema the database had before the upgrade
+began, and the latest three other automatic copies, separately from scheduled
+backups, so restarts after a failed upgrade never remove the starting copy. If
+it cannot create or verify that copy, migration stops before schema writes;
+without the directory, startup warns and continues. Retain the backup with the
+database's encryption keys.
 Schema 63 also marks legacy unsent deliveries with at least eight attempts
 and a retry scheduled before v0.22.1 as terminal; deliveries still retrying
 under the newer fifteen-attempt policy remain eligible. Schema 64 adds an
@@ -1175,13 +1178,21 @@ than one unit, a unit's status leaves it out. Scheduled backups are logged,
 not recorded in the security audit.
 
 Before an existing database's schema upgrade, a configured backup directory
-also receives a verified `edgewatch-preupgrade-*.db` copy of the old schema.
-The daemon keeps the latest three automatic copies separately from scheduled
-retention and leaves manual backups alone. If the configured pre-migration
-copy cannot be created or verified, schema migration stops before it writes;
-without `backup.directory`, startup warns and continues. These copies hold all
-units' data and encrypted secrets, so protect them and retain their keys like
-other database backups.
+also receives a verified `edgewatch-preupgrade-s<from>-s<to>-*.db` copy of the
+old schema, on every start that needs a migration. Each schema step commits on
+its own, so restarts after a failed upgrade write copies of an intermediate
+schema that the previous release refuses. After each copy, the daemon keeps
+the starting copy of the current upgrade (of the copies for the running
+release's schema, the newest with the lowest source schema) and the latest
+three other automatic copies by timestamp, at most four in all, separately
+from scheduled retention, and leaves manual backups alone. If the configured
+pre-migration copy cannot be created or verified, schema migration stops
+before it writes; without `backup.directory`, startup warns and continues.
+These copies hold all units' data and encrypted secrets, so protect them and
+retain their keys like other database backups. They have no age limit: only a
+later pre-migration copy removes one, so on a deployment that upgrades rarely
+a copy can hold a deleted unit's data long after the deletion; delete it by
+hand once it is no longer needed for a rollback.
 
 Restore and dry-run commands cancel staging on `SIGINT` or `SIGTERM` and
 remove the temporary copy. The next restore or dry run removes abandoned

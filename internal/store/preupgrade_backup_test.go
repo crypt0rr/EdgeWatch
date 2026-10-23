@@ -3,12 +3,14 @@ package store
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -127,7 +129,9 @@ func TestPrunePreUpgradeBackupsPreservesMalformedAndNonOwnerFiles(t *testing.T) 
 	directory := t.TempDir()
 	invalidTimestamp := "edgewatch-preupgrade-s74-s76-20261301T000000.000000000Z.db"
 	nonOwnerOnly := "edgewatch-preupgrade-s74-s76-20250101T000000.000000000Z.db"
-	for _, name := range []string{invalidTimestamp, nonOwnerOnly} {
+	invalidSchema := "edgewatch-preupgrade-s99999999999999999999-s76-20240101T000000.000000000Z.db"
+	operatorFiles := []string{invalidTimestamp, nonOwnerOnly, invalidSchema}
+	for _, name := range operatorFiles {
 		if err := os.WriteFile(filepath.Join(directory, name), []byte("operator backup"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -136,21 +140,207 @@ func TestPrunePreUpgradeBackupsPreservesMalformedAndNonOwnerFiles(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	removed, err := prunePreUpgradeBackups(directory, preUpgradeBackupRetention)
+	removed, err := prunePreUpgradeBackups(directory, schemaVersion, 0)
 	if err != nil {
 		t.Fatalf("prune automatic pre-migration backups: %v", err)
 	}
 	if len(removed) != 0 {
 		t.Fatalf("removed backups = %v, want malformed and non-owner files preserved", removed)
 	}
-	for _, name := range []string{invalidTimestamp, nonOwnerOnly} {
+	for _, name := range operatorFiles {
 		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
 			t.Errorf("operator backup %q was removed: %v", name, err)
 		}
 	}
 }
 
-func TestPreMigrationBackupsRetainExactlyLatestThreeAndPreserveManualFiles(t *testing.T) {
+// Retention always keeps the starting copy of the upgrade to the running
+// schema: the newest copy for that target whose source schema is the lowest
+// among them. The newest three other copies are kept by timestamp; copies
+// for another target, and older or later-source copies for this one, fall
+// under that count only.
+func TestPrunePreUpgradeBackupsKeepsTheStartingCopyOfTheTargetSchema(t *testing.T) {
+	files := []string{
+		"edgewatch-preupgrade-s70-s76-20200101T000000.000000000Z.db",
+		"edgewatch-preupgrade-s74-s76-20210101T000000.000000000Z.db",
+		"edgewatch-preupgrade-s76-s78-20210601T000000.000000000Z.db",
+		"edgewatch-preupgrade-s75-s78-20220101T000000.000000000Z.db",
+		"edgewatch-preupgrade-s75-s78-20220201T000000.000000000Z.db",
+		"edgewatch-preupgrade-s77-s78-20230101T000000.000000000Z.db",
+		"edgewatch-preupgrade-s77-s78-20230201T000000.000000000Z.db",
+		"edgewatch-preupgrade-s77-s78-20230301T000000.000000000Z.db",
+		"edgewatch-preupgrade-s77-s78-20230401T000000.000000000Z.db",
+	}
+	for _, test := range []struct {
+		name   string
+		target int
+		kept   []string
+	}{
+		{
+			name:   "retries of an upgrade to 78",
+			target: 78,
+			kept: []string{
+				"edgewatch-preupgrade-s75-s78-20220201T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20230201T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20230301T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20230401T000000.000000000Z.db",
+			},
+		},
+		{
+			// The starting copy is kept even when it is the oldest file.
+			name:   "an upgrade to 76",
+			target: 76,
+			kept: []string{
+				"edgewatch-preupgrade-s70-s76-20200101T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20230201T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20230301T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20230401T000000.000000000Z.db",
+			},
+		},
+		{
+			name:   "no copy for the target",
+			target: 79,
+			kept: []string{
+				"edgewatch-preupgrade-s77-s78-20230201T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20230301T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20230401T000000.000000000Z.db",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			for _, name := range files {
+				if err := os.WriteFile(filepath.Join(directory, name), []byte("automatic backup fixture"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var wantRemoved []string
+			for _, name := range files {
+				if !slices.Contains(test.kept, name) {
+					wantRemoved = append(wantRemoved, name)
+				}
+			}
+			slices.Sort(wantRemoved)
+
+			removed, err := prunePreUpgradeBackups(directory, test.target, preUpgradeBackupRetention)
+			if err != nil {
+				t.Fatalf("prune automatic pre-migration backups: %v", err)
+			}
+			slices.Sort(removed)
+			if !reflect.DeepEqual(removed, wantRemoved) {
+				t.Errorf("removed = %q, want %q", removed, wantRemoved)
+			}
+			if got := automaticPreUpgradeBackups(t, directory); !reflect.DeepEqual(got, test.kept) {
+				t.Errorf("kept = %q, want %q", got, test.kept)
+			}
+
+			// Retention is stable: a second pass removes nothing more.
+			removed, err = prunePreUpgradeBackups(directory, test.target, preUpgradeBackupRetention)
+			if err != nil || len(removed) != 0 {
+				t.Errorf("second prune removed %q (error %v), want nothing", removed, err)
+			}
+		})
+	}
+}
+
+// Each schema step commits on its own, so an upgrade that fails at a later
+// step leaves the database at an intermediate schema, and Compose restarts
+// the daemon at once. Every retry writes a copy of that intermediate schema,
+// which the previous release refuses to open; none of them may evict the copy
+// of the schema the upgrade started from, and repeated retries do not grow
+// the directory past the retention bound.
+func TestPreMigrationBackupRetriesKeepTheStartingSchemaCopy(t *testing.T) {
+	ctx := context.Background()
+	path := newSchema75TestDatabase(t, false)
+	backupDirectory := t.TempDir()
+	s, err := OpenExisting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+
+	if err := preparePreMigrationBackup(ctx, s.DB, s.Path, 75, backupDirectory, logger); err != nil {
+		t.Fatalf("back up schema 75 before the first start migrates it: %v", err)
+	}
+	automatic := automaticPreUpgradeBackups(t, backupDirectory)
+	if len(automatic) != 1 || !strings.HasPrefix(automatic[0], fmt.Sprintf("edgewatch-preupgrade-s75-s%d-", schemaVersion)) {
+		t.Fatalf("automatic backups after the first start = %q, want one schema 75 copy", automatic)
+	}
+	starting := automatic[0]
+
+	// The first start commits the steps to schema 77 and fails after them.
+	migrations := schemaMigrationStatements()
+	for _, version := range []int{76, 77} {
+		if err := runMigration(ctx, s.DB, version, migrations[version], foreignKeysOffMigrations[version]); err != nil {
+			t.Fatalf("commit schema %d: %v", version, err)
+		}
+	}
+	if got := countRows(t, s.DB, `PRAGMA user_version`); got != 77 {
+		t.Fatalf("schema after the failed start = %d, want 77", got)
+	}
+
+	retries := 2 * preUpgradeBackupRetention
+	for retry := 1; retry <= retries; retry++ {
+		if err := preparePreMigrationBackup(ctx, s.DB, s.Path, 77, backupDirectory, logger); err != nil {
+			t.Fatalf("back up schema 77 on retry %d: %v", retry, err)
+		}
+		automatic := automaticPreUpgradeBackups(t, backupDirectory)
+		if !slices.Contains(automatic, starting) {
+			t.Fatalf("retry %d removed the starting copy %q; automatic backups = %q", retry, starting, automatic)
+		}
+		if want := min(retry+1, preUpgradeBackupRetention+1); len(automatic) != want {
+			t.Fatalf("automatic backups after retry %d = %q, want %d", retry, automatic, want)
+		}
+	}
+	entries, err := os.ReadDir(backupDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != preUpgradeBackupRetention+1 {
+		t.Errorf("backup directory holds %d entries after %d retries, want only the %d automatic copies", len(entries), retries, preUpgradeBackupRetention+1)
+	}
+
+	// Each start logs the backup step before it copies the database, with the
+	// file name and the schemas but not the directory.
+	var started []map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+		var record map[string]any
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("decode log line %q: %v", line, err)
+		}
+		if record["msg"] == "pre-migration backup started" {
+			started = append(started, record)
+		}
+	}
+	if len(started) != retries+1 {
+		t.Fatalf("pre-migration backup start logs = %d, want one per start (%d)", len(started), retries+1)
+	}
+	for i, record := range started {
+		from := 77.0
+		if i == 0 {
+			from = 75
+		}
+		name, _ := record["backup"].(string)
+		if record["from_schema"] != from || record["to_schema"] != float64(schemaVersion) || !preUpgradeBackupName.MatchString(name) {
+			t.Errorf("start log %d = %v, want the file name of a schema %v to %d copy", i, record, from, schemaVersion)
+		}
+	}
+
+	report, err := VerifyBackupFile(ctx, filepath.Join(backupDirectory, starting), BackupFileOptions{LiveDatabase: path})
+	if err != nil {
+		t.Fatalf("verify the starting copy: %v (%+v)", err, report)
+	}
+	if !report.Valid || report.SchemaVersion != 75 || !report.EdgeWatchSchema {
+		t.Fatalf("starting copy verification = %+v, want a valid schema 75 backup", report)
+	}
+}
+
+// The new copy is the starting copy of the upgrade to the running schema.
+// Copies for an earlier upgrade fall under the count, so the newest three of
+// them stay beside it.
+func TestPreMigrationBackupsRetainTheStartingCopyAndLatestThreeAndPreserveManualFiles(t *testing.T) {
 	requireLinuxDaemonStartup(t)
 	path := newSchema75TestDatabase(t, false)
 	backupDirectory := t.TempDir()
@@ -179,7 +369,34 @@ func TestPreMigrationBackupsRetainExactlyLatestThreeAndPreserveManualFiles(t *te
 		t.Fatal(err)
 	}
 
-	entries, err := os.ReadDir(backupDirectory)
+	automatic := automaticPreUpgradeBackups(t, backupDirectory)
+	if len(automatic) != preUpgradeBackupRetention+1 {
+		t.Fatalf("automatic pre-migration backups = %v, want exactly %d", automatic, preUpgradeBackupRetention+1)
+	}
+	// The names sort by source schema first, so the new schema 75 copy sorts
+	// after the seeded schema 74 copies.
+	starting := automatic[len(automatic)-1]
+	if !strings.HasPrefix(starting, fmt.Sprintf("edgewatch-preupgrade-s75-s%d-", schemaVersion)) {
+		t.Fatalf("newest automatic backup = %q, want the schema 75 copy", starting)
+	}
+	if want := append(slices.Clone(old[1:]), starting); !reflect.DeepEqual(automatic, want) {
+		t.Errorf("retained automatic backups = %q, want %q", automatic, want)
+	}
+	if _, err := os.Stat(filepath.Join(backupDirectory, old[0])); !os.IsNotExist(err) {
+		t.Errorf("oldest automatic backup %q remains: %v", old[0], err)
+	}
+	for _, name := range []string{manual, scheduled, malformedAutomatic} {
+		if _, err := os.Stat(filepath.Join(backupDirectory, name)); err != nil {
+			t.Errorf("operator-owned file %q was removed: %v", name, err)
+		}
+	}
+}
+
+// automaticPreUpgradeBackups lists the names in directory that have the
+// reserved automatic-backup form, sorted by name.
+func automaticPreUpgradeBackups(t *testing.T, directory string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,25 +406,7 @@ func TestPreMigrationBackupsRetainExactlyLatestThreeAndPreserveManualFiles(t *te
 			automatic = append(automatic, entry.Name())
 		}
 	}
-	if len(automatic) != preUpgradeBackupRetention {
-		t.Fatalf("automatic pre-migration backups = %v, want exactly %d", automatic, preUpgradeBackupRetention)
-	}
-	for _, want := range []string{old[2], old[3], automatic[len(automatic)-1]} {
-		// ReadDir sorts by name; the new timestamp sorts after the seeded files.
-		if _, err := os.Stat(filepath.Join(backupDirectory, want)); err != nil {
-			t.Errorf("expected retained automatic backup %q: %v", want, err)
-		}
-	}
-	for _, removed := range old[:2] {
-		if _, err := os.Stat(filepath.Join(backupDirectory, removed)); !os.IsNotExist(err) {
-			t.Errorf("older automatic backup %q remains: %v", removed, err)
-		}
-	}
-	for _, name := range []string{manual, scheduled, malformedAutomatic} {
-		if _, err := os.Stat(filepath.Join(backupDirectory, name)); err != nil {
-			t.Errorf("operator-owned file %q was removed: %v", name, err)
-		}
-	}
+	return automatic
 }
 
 func newSchema75TestDatabase(t *testing.T, invalidForeignKey bool) string {

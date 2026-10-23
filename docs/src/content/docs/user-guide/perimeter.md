@@ -12,8 +12,10 @@ answers three questions:
    their coverage?
 3. Which monitored IP and CIDR targets lie outside the declared space?
 
-For uncovered IPv4 space, the page suggests monitors sized to the unit's
-probe budget, and **Create monitor** opens the guided monitor setup with the
+For uncovered IPv4 space, the page suggests gaps-only monitors sized to the
+unit's probe budget. When combining gaps can reduce fragmentation, it also
+offers a bounded coalesced alternative that may rescan already-covered
+addresses. **Create monitor** opens the guided monitor setup with the chosen
 suggestion filled in. You still review and save every monitor yourself.
 
 Apart from declaring and removing ranges, the page only reads: it sends no
@@ -289,7 +291,8 @@ A range's detail shows:
   addresses that no `covering` monitor of the bucket scans, excluded
   addresses left out: at most 256 blocks per bucket, with their total;
 - how many addresses one suggested monitor of each mode holds, and the
-  suggested monitors for the range's uncovered IPv4 space.
+  gaps-only suggestions for the range's uncovered IPv4 space, plus a bounded
+  coalesced alternative when it can bridge already-covered space.
 
 ## Suggested monitors
 
@@ -303,6 +306,23 @@ Each suggestion mode fills the gaps of one bucket with fixed settings:
 
 Suggestions apply to owned and authorized ranges alike, and never include an
 excluded address.
+
+The **Gaps-only option** targets only uncovered addresses. The **Coalesced
+alternative** may include addresses already covered by a `covering` monitor,
+which can replace many small targets with fewer larger blocks. The report
+counts those repeated addresses and includes them in the estimated probes.
+The job API still validates every created monitor against the current
+exclusions and probe budgets.
+
+The coalesced alternative is deliberately bounded: each target is at most a
+`/24` (256 addresses), or a smaller power-of-two block when the mode's probe
+budget is lower; each suggested monitor has at most 16 CIDR targets; and the
+report returns a complete plan only when it needs at most 16 monitors per
+mode. If a complete plan needs more, the page says **Needs more than 16
+monitors** and withholds it. The normal gaps-only option remains available.
+These limits keep each repeated block small and each plan reviewable, while
+the probe budget can make blocks narrower still. A `/24` can repeat up to
+255 already-covered addresses when only one address in it is uncovered.
 
 ### Addresses per monitor
 
@@ -401,6 +421,9 @@ count as coverage until you resume its schedule.
 | Uncovered blocks per bucket in a range's detail | 256, with the total |
 | Suggestions per range and mode | 64, with the number of monitors needed |
 | **Create monitor** buttons per range and mode | Up to 16 monitors |
+| Addresses in one coalesced target | 256 (`/24`) maximum; reduced by a smaller probe budget |
+| Targets in one coalesced monitor | 16 |
+| Coalesced monitors per range and mode | 16; larger complete plans are withheld |
 
 A declaration that would leave the unit with more than 1,024 ranges is
 refused, and nothing is saved.

@@ -145,6 +145,7 @@ function UncoveredPanel({ detail }: { detail: PerimeterRangeDetail }) {
 
 function SuggestionsPanel({ detail, scannable, canWriteJobs }: { detail: PerimeterRangeDetail; scannable: number; canWriteJobs: boolean }) {
   const suggestions = detail.suggestions ?? []
+  const coalescedSuggestions = detail.coalesced_suggestions ?? []
   return <section className="panel" aria-labelledby="perimeter-suggestions-title">
     <div className="panel-heading"><div>
       <h2 id="perimeter-suggestions-title">Suggested monitors</h2>
@@ -152,40 +153,58 @@ function SuggestionsPanel({ detail, scannable, canWriteJobs }: { detail: Perimet
     </div></div>
     <p className="notice warning perimeter-authorization-banner" role="note"><span>A declared range is not an authorization: confirm you may scan these addresses before you create a monitor. Create monitor opens the guided setup prefilled; you review and save each monitor there, and nothing is created in bulk.</span></p>
     {scannable === 0 ? <p className="inline-empty">All addresses excluded: there is nothing to suggest.</p>
-      : <div className="perimeter-modes">{perimeterModes.map(mode => <ModeSuggestions key={mode} mode={mode} detail={detail} suggestions={suggestions.filter(suggestion => suggestion.mode === mode)} canWriteJobs={canWriteJobs} />)}</div>}
+      : <div className="perimeter-modes">{perimeterModes.map(mode => <ModeSuggestions key={mode} mode={mode} detail={detail} suggestions={suggestions.filter(suggestion => suggestion.mode === mode)} coalescedSuggestions={coalescedSuggestions.filter(suggestion => suggestion.mode === mode)} canWriteJobs={canWriteJobs} />)}</div>}
   </section>
 }
 
-function ModeSuggestions({ mode, detail, suggestions, canWriteJobs }: { mode: PerimeterMode; detail: PerimeterRangeDetail; suggestions: PerimeterSuggestion[]; canWriteJobs: boolean }) {
-  const navigate = useNavigate()
+function ModeSuggestions({ mode, detail, suggestions, coalescedSuggestions, canWriteJobs }: { mode: PerimeterMode; detail: PerimeterRangeDetail; suggestions: PerimeterSuggestion[]; coalescedSuggestions: PerimeterSuggestion[]; canWriteJobs: boolean }) {
   const heading = modeHeadings[mode]
   const perMonitor = detail.addresses_per_monitor[mode]
   const needed = detail.monitors_needed[mode]
+  const coalescedNeeded = detail.coalesced_monitors_needed[mode]
   const headingID = `perimeter-mode-${mode}`
-  let body
-  if (detail.budget_too_low[mode]) body = <p className="notice warning" role="status"><span>The unit’s probe budget is too small for one address in this mode.</span></p>
-  else if (needed === 0) body = <p className="muted">No gaps to fill in this mode.</p>
-  else if (needed > maxListedSuggestions) body = <p className="perimeter-needs"><strong>Needs {needed.toLocaleString()} monitors</strong> <span className="muted">of up to {countLabel(perMonitor, 'address', 'addresses')} each. That is too many to list here: declare smaller ranges to work through this one in parts, or ask a platform administrator about the unit’s probe budget.</span></p>
-  else body = <ol className="perimeter-suggestion-list">{suggestions.map((suggestion, index) => {
-    const descriptionID = `${headingID}-${index}`
-    const targets = suggestion.targets ?? []
-    return <li key={targets.join(',') || index}>
-      <div id={descriptionID} className="perimeter-suggestion-copy">
-        <strong>Monitor {index + 1} of {suggestions.length}</strong>
-        <ul className="perimeter-cidr-list">{targets.map(target => <li key={target}><code>{target}</code></li>)}</ul>
-        <small className="muted">{countLabel(suggestion.addresses, 'address', 'addresses')} · {countLabel(suggestion.estimated_probes, 'estimated probe')} · {suggestion.protocol.protocol.toUpperCase()} ports {suggestion.protocol.ports}{suggestion.minimum_duration_seconds ? ` · at least ${formatMinimumScanDuration(suggestion.minimum_duration_seconds)} at the built-in Naabu rate` : ''}</small>
-      </div>
-      {!canWriteJobs
-        ? <small className="muted perimeter-suggestion-locked">Creating a monitor needs permission to write jobs.</small>
-        : isPerimeterMode(suggestion.mode) && targets.length > 0 && <button className="button secondary" type="button" aria-describedby={`${headingID}-title ${descriptionID}`} onClick={() => navigate('/jobs/new', { state: { perimeterPrefill: buildPerimeterPrefill(suggestion, detail.range.value, index, suggestions.length) } })}>Create monitor</button>}
-    </li>
-  })}</ol>
   return <section className="perimeter-mode" aria-labelledby={`${headingID}-title`}>
     <div className="perimeter-mode-heading">
       <h3 id={`${headingID}-title`}>{heading.title}</h3>
       {!detail.budget_too_low[mode] && <span className="muted">Up to {countLabel(perMonitor, 'address', 'addresses')} per monitor</span>}
     </div>
     <p className="muted">{heading.fills}</p>
-    {body}
+    {detail.budget_too_low[mode]
+      ? <p className="notice warning" role="status"><span>The unit’s probe budget is too small for one address in this mode.</span></p>
+      : needed === 0
+        ? <p className="muted">No gaps to fill in this mode.</p>
+        : <>
+          <SuggestionPlan title="Gaps-only option" id={`${headingID}-gaps`} mode={mode} detail={detail} needed={needed} truncated={detail.suggestions_truncated[mode]} suggestions={suggestions} canWriteJobs={canWriteJobs} />
+          {coalescedNeeded > 0 && <div className="perimeter-suggestion-alternative">
+            <p className="muted">Targets may include already-covered addresses to reduce fragmentation. Each target is at most a /24 (256 addresses), each monitor has at most 16 targets, and the probe budget still applies. The probe estimate includes repeated addresses.</p>
+            <SuggestionPlan title="Coalesced alternative" id={`${headingID}-coalesced`} mode={mode} detail={detail} needed={coalescedNeeded} truncated={detail.coalesced_suggestions_truncated[mode]} suggestions={coalescedSuggestions} canWriteJobs={canWriteJobs} coalesced />
+          </div>}
+        </>}
   </section>
+}
+
+function SuggestionPlan({ title, id, mode, detail, needed, truncated, suggestions, canWriteJobs, coalesced = false }: { title?: string; id: string; mode: PerimeterMode; detail: PerimeterRangeDetail; needed: number; truncated: boolean; suggestions: PerimeterSuggestion[]; canWriteJobs: boolean; coalesced?: boolean }) {
+  const navigate = useNavigate()
+  const perMonitor = detail.addresses_per_monitor[mode]
+  let body
+  if (truncated && coalesced) body = <p className="perimeter-needs"><strong>Needs more than {maxListedSuggestions} monitors</strong> <span className="muted">The complete coalesced option is too large to list. Use the gaps-only option or declare smaller ranges.</span></p>
+  else if (needed > maxListedSuggestions) body = <p className="perimeter-needs"><strong>Needs {needed.toLocaleString()} monitors</strong> <span className="muted">of up to {countLabel(perMonitor, 'address', 'addresses')} each. That is too many to list here: declare smaller ranges to work through this one in parts, or ask a platform administrator about the unit’s probe budget.</span></p>
+  else body = <ol className="perimeter-suggestion-list">{suggestions.map((suggestion, index) => {
+    const descriptionID = `${id}-${index}`
+    const targets = suggestion.targets ?? []
+    return <li key={targets.join(',') || index}>
+      <div id={descriptionID} className="perimeter-suggestion-copy">
+        <strong>Monitor {index + 1} of {suggestions.length}</strong>
+        <ul className="perimeter-cidr-list">{targets.map(target => <li key={target}><code>{target}</code></li>)}</ul>
+        <small className="muted">{countLabel(suggestion.addresses, 'address', 'addresses')} · {countLabel(suggestion.estimated_probes, 'estimated probe')} · {suggestion.protocol.protocol.toUpperCase()} ports {suggestion.protocol.ports}{suggestion.minimum_duration_seconds ? ` · at least ${formatMinimumScanDuration(suggestion.minimum_duration_seconds)} at the built-in Naabu rate` : ''}{suggestion.already_covered_addresses > 0 && <> · Includes {countLabel(suggestion.already_covered_addresses, 'already-covered address', 'already-covered addresses')}</>}</small>
+      </div>
+      {!canWriteJobs
+        ? <small className="muted perimeter-suggestion-locked">Creating a monitor needs permission to write jobs.</small>
+        : isPerimeterMode(suggestion.mode) && targets.length > 0 && <button className="button secondary" type="button" aria-describedby={`${id}-title ${descriptionID}`} onClick={() => navigate('/jobs/new', { state: { perimeterPrefill: buildPerimeterPrefill(suggestion, detail.range.value, index, suggestions.length) } })}>Create monitor</button>}
+    </li>
+  })}</ol>
+  return <div className="perimeter-suggestion-plan">
+    {title && <h4 id={`${id}-title`}>{title}</h4>}
+    {body}
+  </div>
 }

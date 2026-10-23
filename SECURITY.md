@@ -50,10 +50,15 @@ no connection. It counts the addresses of each range that
 `scanner.target_exclusions` holds and leaves them out of the gaps it reports,
 so the same roles that may save jobs can read which addresses of their
 declared ranges are excluded, as refusing such a job's target already tells
-them. Its suggested monitors create nothing: a monitor is created only through
+them. Suggested monitors create nothing: a monitor is created only through
 the job API, which applies the exclusions, probe budgets, and high-cost
-approval as for any other job. A change to the declarations sends the unit's
-own live-update streams a notice that names no range when changed in the
+approval as for any other job. Alongside gaps-only suggestions, the report
+may offer a bounded coalesced plan that includes already-covered addresses:
+each repeated target is at most a `/24`, and each monitor and complete plan
+are limited to 16 targets and 16 monitors respectively. Excluded addresses
+remain outside both plans, and repeated addresses count toward probe
+estimates and budgets. A change to the declarations sends the unit's own
+live-update streams a notice that names no range when changed in the
 console; the host CLI sends no live update. The host CLI lists and declares
 ranges only with an explicit unit slug. Its list command is read-only, and its
 declare command reads a file or standard input, accepts at most 256 entries,

@@ -701,6 +701,9 @@ export type PerimeterRangeDetail = {
   monitors_needed: PerimeterModeCounts
   suggestions: PerimeterSuggestion[] | null
   suggestions_truncated: PerimeterModeFlags
+  coalesced_monitors_needed: PerimeterModeCounts
+  coalesced_suggestions: PerimeterSuggestion[] | null
+  coalesced_suggestions_truncated: PerimeterModeFlags
   budget_too_low: PerimeterModeFlags
 }
 
@@ -737,6 +740,7 @@ export type PerimeterSuggestion = {
   mode: string
   targets: string[] | null
   addresses: number
+  already_covered_addresses: number
   estimated_probes: number
   minimum_duration_seconds?: number
   protocol: PerimeterProtocol

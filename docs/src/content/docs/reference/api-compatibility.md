@@ -643,8 +643,11 @@ least that many.
 | --- | --- |
 | `uncovered` | A `PerimeterUncovered` with a `PerimeterBlocks` for each of `full_tcp`, `any_tcp`, and `udp`: the range's addresses outside `scanner.target_exclusions` that no `covering` monitor of the bucket scans, as `cidrs`, the fewest aligned CIDR blocks, at most 256; `truncated`; and `total`, the number of blocks before the cap. An IPv6 range lists its blocks too. |
 | `addresses_per_monitor`, `monitors_needed` | `PerimeterModeCounts` with a count for each suggestion mode: `full_tcp`, `selected_tcp`, and `udp`. |
-| `suggestions` | Up to 64 `PerimeterSuggestion` objects per mode: `mode`, `targets`, `addresses`, `estimated_probes`, and `protocol`. Full TCP suggestions may also include `minimum_duration_seconds`. |
+| `suggestions` | Up to 64 gaps-only `PerimeterSuggestion` objects per mode: `mode`, `targets`, `addresses`, `already_covered_addresses` (0), `estimated_probes`, and `protocol`. Full TCP suggestions may also include `minimum_duration_seconds`. |
 | `suggestions_truncated`, `budget_too_low` | `PerimeterModeFlags` with a flag for each mode. |
+| `coalesced_monitors_needed` | `PerimeterModeCounts` for the bounded coalesced alternative. When `coalesced_suggestions_truncated` is true, `17` means 17 or more monitors. It is 0 when there is no alternative that bridges covered space. |
+| `coalesced_suggestions` | A complete alternative plan, when one can bridge already-covered space within the limits below. Each `PerimeterSuggestion` gives the repeated address count in `already_covered_addresses`. |
+| `coalesced_suggestions_truncated` | `PerimeterModeFlags`; true when the complete coalesced plan needs more than 16 monitors and is withheld. |
 
 Suggestions fill uncovered IPv4 space, of owned and authorized ranges alike.
 An IPv6 range gets none, and its `monitors_needed` are 0, while its
@@ -676,8 +679,22 @@ room. `monitors_needed` counts every monitor; `suggestions_truncated` is
 address. A Full TCP suggestion may include `minimum_duration_seconds`, a
 lower-bound estimate based on the built-in Naabu probe rate; it excludes host
 response time, retries, and Nmap confirmation. Other suggestion modes omit
-this field, and the estimate is not a scan-duration promise. A suggestion
-creates nothing: a client that wants the monitor sends it to
+this field, and the estimate is not a scan-duration promise.
+
+When packing the gaps-only option would leave fragmentation that can be
+reduced, `coalesced_suggestions` gives a second, complete plan that may also
+scan already-covered addresses. Each coalesced target is no larger than a
+`/24` (256 IPv4 addresses), further limited by the mode's probe budget; each
+monitor has at most 16 target CIDRs; and the complete plan has at most 16
+monitors per mode. If it needs more, the array is empty, the truncation flag
+is true, and `coalesced_monitors_needed` is 17 to mean 17 or more. Thus a
+target may repeat up to 255 already-covered addresses when only one address
+in its `/24` is uncovered, but probe budgets still limit the whole monitor.
+`already_covered_addresses` and `estimated_probes` include that repeated
+space. Coalesced targets remain inside scannable declared space and never
+include `scanner.target_exclusions`. Full TCP duration estimates apply to
+either plan and are lower bounds, not promises. A suggestion creates nothing:
+a client that wants the monitor sends it to
 `POST /api/v1/jobs`, which checks it like any other new job.
 
 ### Live updates and generated types

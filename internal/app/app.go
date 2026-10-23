@@ -93,6 +93,10 @@ type App struct {
 	scannerIdentityInspectionFailing atomic.Bool
 	scheduledJobActiveSkips          atomic.Uint64
 	scheduledCycleStalledSkips       atomic.Uint64
+	// scanSlotDemand remembers the schedules' runs per day and the job
+	// revisions' duration keys of the scan-slot demand estimate; see
+	// scan_slot_demand.go.
+	scanSlotDemand scanSlotDemandCache
 }
 
 type activeRun struct {

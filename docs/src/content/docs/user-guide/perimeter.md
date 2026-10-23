@@ -249,15 +249,21 @@ Administrators and operators open **Perimeter** from the navigation. A unit
 without declared ranges sees an explanation and, for administrators, the
 declare form. The page also shows the business unit's scheduled scan-slot
 demand and effective capacity. The estimate uses the median duration of recent
-completed scan samples. A completed cycle sums the recorded durations of its
-attempts, excluding idle time between scheduled attempts, and a successful or
-incomplete scan without a cycle is one sample. Without history, known work at
-configured maximum scanner rates is shown as a lower bound only when the
-configured scope is known to fit both the job's **Maximum expanded hosts** and
-the deployment's `scanner.max_job_hosts`. An over-limit or unresolved DNS
-scope adds no lower bound because the scanner may reject it before sending
-probes. The warning starts at 80% utilization. When the unit has declared
-ranges, the page also shows:
+completed scan samples with each job's current scan settings, so renaming,
+rescheduling, or pausing and resuming a monitor keeps them. A completed cycle
+sums the recorded durations of its attempts, excluding idle time between
+scheduled attempts, and a successful or incomplete scan without a cycle is one
+sample. Each run counts at most the monitor's timeout, which ends it, and each
+monitor adds at most one slot-day, because it runs at most once at a time; the
+notice counts the monitors that run longer than their schedules allow. Without
+history, known work at configured maximum scanner rates is shown as a lower
+bound only when the configured scope is known to fit both the job's **Maximum
+expanded hosts** and the deployment's `scanner.max_job_hosts`. An over-limit
+or unresolved DNS scope adds no lower bound because the scanner may reject it
+before sending probes. The warning starts at 80% utilization. See [Jobs,
+baselines, and incidents](/user-guide/jobs-baselines-incidents/) for which
+edits start new samples. When the unit has declared ranges, the page also
+shows:
 
 - **Summary:** the declared IPv4 addresses; the covered percentage for full
   TCP, any TCP, and UDP; and the numbers of monitors that cannot scan, of

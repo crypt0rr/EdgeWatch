@@ -9,6 +9,8 @@ import (
 func reconstructSchema77(t *testing.T, db *sql.DB) {
 	t.Helper()
 	for _, statement := range []string{
+		// Schema 79's index covers the column.
+		`DROP INDEX IF EXISTS ` + scanCyclesCompletedExecutionIndex,
 		`ALTER TABLE scan_cycles DROP COLUMN attempt_started_at`,
 		`PRAGMA user_version=77`,
 	} {

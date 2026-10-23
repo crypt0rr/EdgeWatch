@@ -46,7 +46,7 @@ describe('application shell', () => {
     vi.mocked(incidentInboxSummary).mockResolvedValue({ active_count: 0 })
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 0, server_now: new Date().toISOString(), next_follow_up_at: null, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] } as never)
-    vi.mocked(scanSlotDemand).mockResolvedValue({ enabled_jobs: 0, history_jobs: 0, lower_bound_jobs: 0, unestimated_jobs: 0, slots: 1, estimated_slot_seconds_per_day: 0, capacity_slot_seconds_per_day: 86_400, utilization_percent: 0, over_capacity: false })
+    vi.mocked(scanSlotDemand).mockResolvedValue({ enabled_jobs: 0, history_jobs: 0, lower_bound_jobs: 0, unestimated_jobs: 0, cadence_unattainable_jobs: 0, slots: 1, estimated_slot_seconds_per_day: 0, capacity_slot_seconds_per_day: 86_400, utilization_percent: 0, over_capacity: false })
     vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'incidents.read', 'incidents.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
     vi.mocked(login).mockResolvedValue({ role: 'administrator', username: 'admin', permissions: ['jobs.write'], csrf_token: '', totp_required: false } as never)
     vi.mocked(logout).mockResolvedValue(undefined)
@@ -232,6 +232,19 @@ describe('application shell', () => {
       act(() => stream.emit(type, 'job-9'))
       expect(invalidate, type).toHaveBeenCalledWith({ queryKey: ['perimeter'] })
       expect(invalidate, type).not.toHaveBeenCalledWith()
+    }
+    // The scan-slot demand estimate follows every job lifecycle change and
+    // every completed scan or cycle, which is a new duration sample, but not
+    // a scan that only started or failed.
+    for (const type of ['job.created', 'job.updated', 'job.archived', 'job.restored', 'job.deleted', 'job.paused', 'job.resumed', 'scan.completed', 'scan-recovered']) {
+      invalidate.mockClear()
+      act(() => stream.emit(type, 'job-9'))
+      expect(invalidate, type).toHaveBeenCalledWith({ queryKey: ['scan-slot-demand'] })
+    }
+    for (const type of ['scan.started', 'scan-failure', 'scan-canceled', 'scan.cycle_discarded', 'changes-detected', 'job-silent']) {
+      invalidate.mockClear()
+      act(() => stream.emit(type, 'job-9'))
+      expect(invalidate, type).not.toHaveBeenCalledWith({ queryKey: ['scan-slot-demand'] })
     }
     invalidate.mockClear()
     act(() => stream.emit('perimeter.updated'))

@@ -275,31 +275,48 @@ var cycleTenantLeakCases = map[string]tenantLeakCase{
 	"ListCompletedScanCycleDurations": {run: func(t *testing.T, _ tenantFixture) {
 		ctx := context.Background()
 		f := newCycleTenantFixture(t)
+		// The fixture's cycles record no execution hash, so each key names
+		// that one; each tenant also saves a scan without a cycle.
+		keyOf := func(scope TenantScope, jobID string) ScanDurationKey {
+			t.Helper()
+			record, err := f.store.Tenant(scope).GetJob(ctx, jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := NewScanDurationKey(record)
+			key.ExecutionHash = ""
+			return key
+		}
+		keys := []ScanDurationKey{keyOf(f.a, f.jobA), keyOf(f.a, f.archivedA), keyOf(f.b, f.jobB), keyOf(f.b, f.archivedB)}
+		for _, owner := range []struct {
+			scope         TenantScope
+			job, archived string
+			key           ScanDurationKey
+		}{{f.a, f.jobA, f.archivedA, keys[0]}, {f.b, f.jobB, f.archivedB, keys[2]}} {
+			finished := time.Now().UTC()
+			if err := f.store.System().SaveScan(ctx, model.Scan{
+				ID: "scan-demand-standalone-" + owner.scope.ID(), JobID: owner.job, Job: "edge",
+				StartedAt: finished.Add(-30 * time.Second), FinishedAt: finished, Status: "success",
+				ConfigHash: owner.key.ConfigHash,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
 		for _, owner := range []struct {
 			scope         TenantScope
 			job, archived string
 		}{{f.a, f.jobA, f.archivedA}, {f.b, f.jobB, f.archivedB}} {
-			finished := time.Now().UTC()
-			record, err := f.store.Tenant(owner.scope).GetJob(ctx, owner.job)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := f.store.System().SaveScan(ctx, model.Scan{
-				ID: "scan-demand-standalone-" + owner.scope.ID(), JobID: owner.job, Job: "edge", JobRevision: record.Revision,
-				StartedAt: finished.Add(-30 * time.Second), FinishedAt: finished, Status: "success",
-				ConfigHash: "tenant-cycle-demand",
-			}); err != nil {
-				t.Fatal(err)
-			}
-			durations, err := f.store.Tenant(owner.scope).ListCompletedScanCycleDurations(ctx, 11)
+			// Each tenant asks for both tenants' jobs; another tenant's
+			// keys read as unknown jobs.
+			durations, err := f.store.Tenant(owner.scope).ListCompletedScanCycleDurations(ctx, keys, 11)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if len(durations[owner.job]) != 2 || len(durations[owner.archived]) != 0 {
-				t.Errorf("tenant %s: current-revision scan samples = %#v; want two for its job and none for its archived job without saved attempts", owner.scope.ID(), durations)
+				t.Errorf("tenant %s: scan samples = %#v; want its completed cycle and scan for its job and none for its archived job", owner.scope.ID(), durations)
 			}
 			if len(durations) != 1 {
-				t.Errorf("tenant %s: completed cycle samples include another tenant's jobs: %#v", owner.scope.ID(), durations)
+				t.Errorf("tenant %s: completed samples include another tenant's jobs: %#v", owner.scope.ID(), durations)
 			}
 			for jobID, samples := range durations {
 				if jobID != owner.job && jobID != owner.archived {

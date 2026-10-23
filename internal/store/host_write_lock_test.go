@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -203,6 +204,28 @@ func TestHostCommandWritesWaitForAConcurrentWriter(t *testing.T) {
 						summary, err := defaultTenant(s).RuntimeStateSummary(ctx, job.ID)
 						if err != nil || summary.HasBaseline || summary.BaselineScanID != "" {
 							t.Fatalf("baseline after the reset = %+v, %v; want none", summary, err)
+						}
+					}
+			},
+		},
+		{
+			// "edgewatch perimeter declare" reads the unit and its stored
+			// ranges before it inserts the new ones and their audit record.
+			name: "perimeter declaration",
+			prepare: func(t *testing.T, ctx context.Context, s *Store) (func(context.Context) error, func(*testing.T)) {
+				entries := []PerimeterEntry{prefixEntry("192.0.2.0/24", "writer wait"), authorizedEntry("2001:db8::/32", "")}
+				return func(ctx context.Context) error {
+						result, err := defaultTenant(s).DeclarePerimeterSeeds(ctx, entries, hostAudit(auditPerimeterSeedsAdded))
+						if err == nil && result != (PerimeterDeclareResult{Created: 2}) {
+							t.Errorf("declaration result = %+v, want 2 created", result)
+						}
+						return err
+					}, func(t *testing.T) {
+						if got, want := perimeterRows(t, s, DefaultTenantID), []string{"authorized:2001:db8::/32:", "prefix:192.0.2.0/24:writer wait"}; !slices.Equal(got, want) {
+							t.Fatalf("declared ranges = %q, want %q", got, want)
+						}
+						if got := queryStrings(t, s.DB, `SELECT actor_username FROM security_audit WHERE tenant_id=? AND action=?`, DefaultTenantID, auditPerimeterSeedsAdded); len(got) != 1 || got[0] != "host-cli" {
+							t.Fatalf("declaration audit actors = %v, want host-cli", got)
 						}
 					}
 			},

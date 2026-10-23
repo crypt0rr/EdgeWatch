@@ -244,10 +244,16 @@ a running backup delays its last step until the backup ends. The unit's page
 shows its progress. The records of platform administrators' actions and of
 the deletion stay in the platform audit; the unit's other audit records are
 erased. Afterwards the unit's name and slug can be used again. Backups taken
-before the deletion still contain the unit. Releases before schema 55 could
-finish a deletion before the compaction and the log truncation had, and
-releases before schema 56 did not overwrite free pages; the upgrades to
-schema 55 and 56 finish that work once, as described in
+before the deletion still contain the unit: scheduled backups until
+`backup.keep` newer ones replace them, backups taken with the backup command,
+and the automatic `edgewatch-preupgrade-*` copies that the daemon writes to
+`backup.directory` before a schema upgrade. The daemon removes a pre-upgrade
+copy only when newer pre-upgrade copies replace it, never by age, so on a
+deployment that upgrades rarely it can hold the unit's data long after the
+deletion; delete the copies you no longer need for a rollback. Releases before
+schema 55 could finish a deletion before the compaction and the log truncation
+had, and releases before schema 56 did not overwrite free pages; the upgrades
+to schema 55 and 56 finish that work once, as described in
 [Data, backup, and recovery](/operations/backup-recovery/).
 
 ## Limits

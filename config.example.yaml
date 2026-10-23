@@ -151,8 +151,11 @@ notifications:
 # is published as edgewatch-scheduled-YYYYMMDDTHHMMSSZ.db, and the daemon keeps
 # the newest keep of those files, removing older scheduled backups. When an
 # existing database needs a schema upgrade, the daemon also writes and verifies
-# a pre-migration backup there before schema writes begin, retaining the latest
-# three separately from keep. If it cannot be created or verified, migration
+# a pre-migration backup there before schema writes begin. Separately from
+# keep, it retains the copy just written, the latest three other copies, and,
+# from each schema below the database's current schema, the newest copy for an
+# upgrade beyond it, so retrying a failed upgrade never removes the copy the
+# previous release can open. If it cannot be created or verified, migration
 # stops. Without directory, the daemon warns and continues without a backup.
 # schedule is a five-field cron expression in the timezone above, or UTC,
 # without a TZ= prefix; it defaults to "0 3 * * *", and keep to 7 (1 to 1000).

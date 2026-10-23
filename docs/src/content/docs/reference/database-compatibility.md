@@ -36,11 +36,14 @@ keys with the database or encrypted web-managed destinations and never
 commit them.
 
 When `backup.directory` is configured, the daemon creates and verifies a
-pre-migration backup before it starts schema writes and keeps the latest three
-automatic copies separately from scheduled backups. A failure to create or
-verify that backup stops the migration. If no directory is configured, the
-daemon warns and continues without an automatic pre-migration copy. Keep a
-separate off-host backup and the matching keys for recovery from storage loss.
+pre-migration backup before it starts schema writes. Separately from scheduled
+backups, it keeps the copy just written, the latest three other automatic
+copies, and, from each schema below the database's current schema, the newest
+copy for an upgrade beyond it, so retrying a failed upgrade never removes the
+copy the previous release can open. A failure to create or verify that backup
+stops the migration. If no directory is configured, the daemon warns and
+continues without an automatic pre-migration copy. Keep a separate off-host
+backup and the matching keys for recovery from storage loss.
 
 ## Schema 69
 

@@ -296,6 +296,7 @@ export type ScanSlotDemand = {
   history_jobs: number
   lower_bound_jobs: number
   unestimated_jobs: number
+  cadence_unattainable_jobs: number
   slots: number
   estimated_slot_seconds_per_day: number
   capacity_slot_seconds_per_day: number

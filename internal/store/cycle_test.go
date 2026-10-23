@@ -26,20 +26,26 @@ func cycleFixture(t *testing.T) (context.Context, *Store, JobRecord, scanner.Wor
 func TestListCompletedScanCycleDurationsHandlesScopeLimitAndQueryErrors(t *testing.T) {
 	t.Parallel()
 	var missingScope *TenantStore
-	if _, err := missingScope.ListCompletedScanCycleDurations(context.Background(), 11); !errors.Is(err, ErrNoTenantScope) {
+	if _, err := missingScope.ListCompletedScanCycleDurations(context.Background(), nil, 11); !errors.Is(err, ErrNoTenantScope) {
 		t.Fatalf("missing tenant scope error = %v, want ErrNoTenantScope", err)
 	}
 
-	s := openTestStore(t)
+	ctx, s, job, _ := cycleFixture(t)
 	tenant := defaultTenant(s)
-	durations, err := tenant.ListCompletedScanCycleDurations(context.Background(), 0)
-	if err != nil || len(durations) != 0 {
-		t.Fatalf("zero-limit durations = %#v, %v; want an empty result", durations, err)
+	keys := []ScanDurationKey{NewScanDurationKey(job)}
+	for name, test := range map[string]struct {
+		keys  []ScanDurationKey
+		limit int
+	}{"zero limit": {keys, 0}, "no keys": {nil, 11}} {
+		durations, err := tenant.ListCompletedScanCycleDurations(ctx, test.keys, test.limit)
+		if err != nil || len(durations) != 0 {
+			t.Fatalf("%s: durations = %#v, %v; want an empty result", name, durations, err)
+		}
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tenant.ListCompletedScanCycleDurations(context.Background(), 11); err == nil {
+	if _, err := tenant.ListCompletedScanCycleDurations(ctx, keys, 11); err == nil {
 		t.Fatal("closed-database query succeeded; want the database closed error")
 	}
 }
@@ -55,7 +61,7 @@ func TestListCompletedScanCycleDurationsSumsAttemptsAndExcludesPause(t *testing.
 	stamp := func(value time.Time) string { return value.Format(time.RFC3339Nano) }
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,attempt_count,total_units,total_probes,started_at,updated_at,expires_at,finished_at)
 		VALUES(?,?,?,?,?,?,?,'completed',2,1,2,?,?,?,?)`,
-		"paused-demand-cycle", job.ID, job.Job.Name, job.Revision, job.Job.SecurityHash(), "execution", []byte(`{}`),
+		"paused-demand-cycle", job.ID, job.Job.Name, job.Revision, job.Job.SecurityHash(), job.Job.ExecutionHash(), []byte(`{}`),
 		stamp(firstStart), stamp(secondFinish), stamp(secondFinish), stamp(secondFinish)); err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +83,7 @@ func TestListCompletedScanCycleDurationsSumsAttemptsAndExcludesPause(t *testing.
 		}
 	}
 
-	durations, err := defaultTenant(s).ListCompletedScanCycleDurations(ctx, 11)
+	durations, err := defaultTenant(s).ListCompletedScanCycleDurations(ctx, []ScanDurationKey{NewScanDurationKey(job)}, 11)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +103,7 @@ func TestListCompletedScanCycleDurationsExcludesRecoveryInvocation(t *testing.T)
 	stamp := func(value time.Time) string { return value.Format(time.RFC3339Nano) }
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,attempt_count,total_units,total_probes,started_at,updated_at,expires_at,finished_at)
 		VALUES(?,?,?,?,?,?,?,'completed',2,1,2,?,?,?,?)`,
-		"recovery-duration-cycle", job.ID, job.Job.Name, job.Revision, job.Job.SecurityHash(), "execution", []byte(`{}`),
+		"recovery-duration-cycle", job.ID, job.Job.Name, job.Revision, job.Job.SecurityHash(), job.Job.ExecutionHash(), []byte(`{}`),
 		stamp(started), stamp(cycleFinished), stamp(cycleFinished), stamp(cycleFinished)); err != nil {
 		t.Fatal(err)
 	}
@@ -119,62 +125,12 @@ func TestListCompletedScanCycleDurationsExcludesRecoveryInvocation(t *testing.T)
 		}
 	}
 
-	durations, err := defaultTenant(s).ListCompletedScanCycleDurations(ctx, 11)
+	durations, err := defaultTenant(s).ListCompletedScanCycleDurations(ctx, []ScanDurationKey{NewScanDurationKey(job)}, 11)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := durations[job.ID]; len(got) != 1 || got[0] != 2*time.Minute {
 		t.Fatalf("completed cycle duration samples = %v; want only the two minutes of recorded scan work, excluding recovery invocation", got)
-	}
-}
-
-func TestListCompletedScanCycleDurationsUsesOnlyCurrentJobRevision(t *testing.T) {
-	t.Parallel()
-	ctx, s, job, _ := cycleFixture(t)
-	defer s.Close()
-	stamp := func(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
-	started := time.Now().UTC().Add(-2 * time.Hour)
-	finished := started.Add(time.Minute)
-	cycleID := "old-revision-demand-cycle"
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,total_units,total_probes,started_at,updated_at,expires_at,finished_at)
-		VALUES(?,?,?,?,?,?,?,'completed',0,0,?,?,?,?)`, cycleID, job.ID, job.Job.Name, job.Revision, job.Job.SecurityHash(), job.Job.ExecutionHash(), []byte(`{}`), stamp(started), stamp(finished), stamp(finished), stamp(finished)); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.System().SaveScan(ctx, model.Scan{
-		ID: "old-revision-cycle-scan", JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
-		StartedAt: started, FinishedAt: finished, Status: "success", ConfigHash: job.Job.SecurityHash(),
-		CycleID: cycleID, CycleAttempt: 1, CycleStatus: "completed", Resumable: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	standaloneStarted := started.Add(time.Minute)
-	if err := s.System().SaveScan(ctx, model.Scan{
-		ID: "old-revision-standalone-scan", JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
-		StartedAt: standaloneStarted, FinishedAt: standaloneStarted.Add(30 * time.Second), Status: "success", ConfigHash: job.Job.SecurityHash(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	changedJob := job.Job
-	changedJob.Name = "cycle-revision-demand-renamed"
-	updated, _, err := defaultTenant(s).UpdateJob(ctx, job.ID, job.Revision, changedJob, job.Enabled, job.Archived, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	currentStarted := started.Add(2 * time.Minute)
-	if err := s.System().SaveScan(ctx, model.Scan{
-		ID: "current-revision-standalone-scan", JobID: updated.ID, Job: updated.Job.Name, JobRevision: updated.Revision,
-		StartedAt: currentStarted, FinishedAt: currentStarted.Add(2 * time.Minute), Status: "success", ConfigHash: updated.Job.SecurityHash(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	durations, err := defaultTenant(s).ListCompletedScanCycleDurations(ctx, 11)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := durations[job.ID]; len(got) != 1 || got[0] != 2*time.Minute {
-		t.Fatalf("completed samples after job revision %d = %v; want only its 2m sample, excluding the earlier cycle and standalone scan", updated.Revision, got)
 	}
 }
 

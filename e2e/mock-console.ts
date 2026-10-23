@@ -103,6 +103,7 @@ const scanSlotDemand: ScanSlotDemand = {
   history_jobs: 1,
   lower_bound_jobs: 0,
   unestimated_jobs: 0,
+  cadence_unattainable_jobs: 0,
   slots: 2,
   estimated_slot_seconds_per_day: 3_600,
   capacity_slot_seconds_per_day: 7_200,

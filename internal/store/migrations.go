@@ -19,7 +19,7 @@ import (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 78
+const schemaVersion = 79
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -385,6 +385,9 @@ func schemaMigrationStatements() map[int][]string {
 		77: migration77Statements(),
 		// The attempt start is a recovery boundary on scan_cycles. See migration78.go.
 		78: migration78Statements(),
+		// The scan-slot demand estimate reads each job's newest completed
+		// cycles from an index. See migration79.go.
+		79: migration79Statements(),
 	}
 }
 

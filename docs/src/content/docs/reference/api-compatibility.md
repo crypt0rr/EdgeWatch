@@ -23,6 +23,7 @@ capacity. The response is tenant-scoped; it contains no job names or IDs.
   "history_jobs": 1,
   "lower_bound_jobs": 1,
   "unestimated_jobs": 1,
+  "cadence_unattainable_jobs": 0,
   "slots": 1,
   "estimated_slot_seconds_per_day": 21600,
   "capacity_slot_seconds_per_day": 86400,
@@ -32,23 +33,39 @@ capacity. The response is tenant-scoped; it contains no job names or IDs.
 ```
 
 `history_jobs` use the median duration from each job's 11 most recent
-completed scan samples for its current revision, multiplied by the average
-number of scheduled runs per day. Each completed cycle is one sample that sums
-its recorded scan-attempt durations, excluding idle time between attempts. A
-successful or incomplete scan without a cycle is its own sample. Scan history
-from older job revisions remains available in history but is excluded from
-this estimate; after any revision change, a job uses its known-work lower
-bound until a scan of the current revision completes. For a job without
-current-revision history, `lower_bound_jobs` count estimates that include only
-known probe work divided by configured maximum scanner rates. A configured
+completed scan samples with its current scan settings, multiplied by the
+average number of scheduled runs per day. Each completed cycle is one sample
+that sums its recorded scan-attempt durations, excluding idle time between
+attempts; it counts while it recorded the job's current execution hash, which
+covers the monitored scope, the timeout, resume window and timing, and the
+scanner profile revisions and arguments. A successful or incomplete scan
+without a cycle is its own sample; it counts while it recorded the job's
+current scope hash and TCP scanner profile revision, and only when it is one
+of the job's 44 most recent successful or incomplete scans, so the estimate
+never reads further back in a job's history. A rename, a schedule or
+notification edit, or a pause and resume therefore keeps a job's samples. Other
+history remains available but is excluded from this estimate; a job without
+samples uses its known-work lower bound until a scan with its current settings
+completes. For a job without such history, `lower_bound_jobs` count estimates
+that include only known probe work divided by configured maximum scanner
+rates. A configured
 scope contributes only when it is known to fit both the job's
 `max_expanded_hosts` and deployment's `scanner.max_job_hosts`; over-limit or
 unresolved DNS scopes add no lower bound because the scanner may reject them
 before sending probes. These values are lower bounds, because DNS, target
 responses, retries, and data-dependent Nmap confirmation can add time.
 `unestimated_jobs` counts jobs with additional work that has no configured rate
-ceiling, or whose schedule cannot be estimated. The console shows a warning at
-80% utilization and above.
+ceiling, or whose schedule cannot be estimated. The job's timeout ends each
+run, so each run counts at most the timeout, whether its duration comes from
+samples or from the lower bound: a resumable cycle whose attempts add up to
+more continues in later runs. A job runs at most once at a time, so each job
+adds at most one slot-day, 86,400 slot-seconds, to
+`estimated_slot_seconds_per_day`. The additive `cadence_unattainable_jobs`
+field counts the jobs whose own estimate exceeds that: even with each run
+ended by the timeout, their runs take longer than their schedules allow, so
+the scheduler skips some of them. The console shows a warning at 80%
+utilization and above, and names the count of jobs that cannot keep their
+cadence.
 
 ## Job creation preview
 

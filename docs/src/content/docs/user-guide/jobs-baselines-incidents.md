@@ -55,22 +55,53 @@ can keep concurrent times.
 
 The **Jobs** and **Perimeter** pages show the business unit's scheduled
 scan-slot demand against its effective slot capacity. Jobs with completed scan
-history from the current job revision use the median duration of their 11 most
-recent samples, multiplied by their scheduled runs per day. Each completed
+history from their current scan settings use the median duration of their 11
+most recent samples, multiplied by their scheduled runs per day. Each completed
 resumable cycle sums the recorded durations of its scan attempts, excluding
 idle time between scheduled attempts. A successful or incomplete scan without
-a cycle is one sample. Samples from earlier revisions remain in scan history
-but do not determine the current estimate; after any job revision change,
-EdgeWatch uses the known-work lower bound until a scan of the current revision
-completes. That lower bound divides only known probe work by a configured
-maximum scanner rate, and is counted only when the configured scope is known to
-fit both the job's **Maximum expanded hosts** and the deployment's
-`scanner.max_job_hosts`. An over-limit or unresolved DNS scope adds no lower
-bound because the scanner may reject it before sending probes. DNS, target
-responses, retries, and data-dependent Nmap confirmation can make a scan take
-longer, and work without a configured rate ceiling is called out as
-unestimated. A warning appears at 80% utilization and when estimated demand
-exceeds capacity.
+a cycle is one sample.
+
+Which edits keep a job's samples depends on what a scan records:
+
+- Renaming a job, editing its schedule or its notification destinations, and
+  pausing and resuming it keep its samples, because none of these changes how
+  a scan runs. A paused job adds no demand until it is resumed, and a schedule
+  edit changes the runs per day immediately.
+- Editing its targets, ports, protocols, or other monitored scope, such as
+  the TCP scanner engine, service detection, or the NSE script, or selecting
+  another TCP scanner profile or profile revision, starts new samples.
+- A completed resumable cycle records the job's execution settings, so for
+  it any other scan setting edit starts new samples too: the timeout, the
+  resume window, the timing, the UDP scanner profile, and the scanner
+  arguments. A scan without a cycle records only its scope and its TCP scanner
+  profile revision, so these edits keep its samples.
+
+Samples from earlier settings remain in scan history but do not determine the
+current estimate. A scan without a cycle counts only while it is one of the
+job's 44 most recent successful or incomplete scans, so the estimate never
+reads further back in a job's history. Until a scan with the current settings
+completes, EdgeWatch uses the known-work lower bound. That lower bound divides
+only known probe work by a configured maximum scanner rate, and is counted only
+when the configured scope is known to fit both the job's **Maximum expanded
+hosts** and the deployment's `scanner.max_job_hosts`. An over-limit or
+unresolved DNS scope adds no lower bound because the scanner may reject it
+before sending probes. DNS, target responses, retries, and data-dependent Nmap
+confirmation can make a scan take longer, and work without a configured rate
+ceiling is called out as unestimated.
+
+The job's **Timeout** ends each run, so a run counts at most the timeout,
+whether its duration comes from samples or from the lower bound. A resumable
+cycle whose attempts add up to more than the timeout continues in the job's
+later runs, so it adds the timeout for each run rather than its whole duration.
+A job runs at most once at a time: when its previous run is still going, the
+scheduler skips the next run. Each job therefore adds at most one slot-day, 24
+slot-hours, to the estimate. When a job's own estimated demand exceeds that,
+its runs, each ended by the timeout at the latest, take longer than its
+schedule allows and some of them are skipped; the notice counts such jobs.
+Lengthen the job's schedule interval or shorten its scans to keep its cadence.
+A warning appears at 80% utilization and when estimated demand exceeds
+capacity. The notice refreshes when live updates report a job change or a
+completed scan, and at least every five minutes.
 
 ## Planned change windows
 

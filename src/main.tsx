@@ -7,7 +7,7 @@ import { adminStatus, APIError, getSession, incidentInboxSummary, listIncidents,
 import type { SessionUser, UnitRef } from './api'
 import { useActivityHeartbeat, useNavigationDrawer } from './components/navigation'
 import { ErrorNotice } from './components/ErrorNotice'
-import { ScanSlotDemandNotice } from './components/ScanSlotDemand'
+import { ScanSlotDemandNotice, scanSlotDemandQueryKey } from './components/ScanSlotDemand'
 import { PageErrorBoundary } from './components/PageErrorBoundary'
 import { Audit } from './pages/Audit'
 import { PlatformShell } from './pages/platform/PlatformShell'
@@ -169,6 +169,8 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
               // A scan's outcome decides whether the perimeter report calls
               // its monitor's coverage proven.
               void client.invalidateQueries({ queryKey: ['perimeter'] })
+              // A completed scan or cycle is a new duration sample.
+              if (event.type === 'scan.completed' || event.type === 'scan-recovered') void client.invalidateQueries({ queryKey: scanSlotDemandQueryKey })
               if (event.job_id) {
                 void client.invalidateQueries({ queryKey: ['job-scans', event.job_id] })
                 void client.invalidateQueries({ queryKey: ['job-baseline-overview', event.job_id] })
@@ -212,6 +214,8 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
               // The perimeter report classifies every unarchived job from its
               // configuration, so each job change can change its coverage.
               void client.invalidateQueries({ queryKey: ['perimeter'] })
+              // Scheduled demand follows the enabled jobs and their schedules.
+              void client.invalidateQueries({ queryKey: scanSlotDemandQueryKey })
               if (event.job_id) void client.invalidateQueries({ queryKey: ['job', event.job_id] })
               break
             case 'change-window.updated':

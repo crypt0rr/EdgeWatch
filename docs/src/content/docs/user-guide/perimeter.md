@@ -296,7 +296,8 @@ A range's detail shows:
   addresses left out: at most 256 blocks per bucket, with their total;
 - how many addresses one suggested monitor of each mode holds, and the
   gaps-only suggestions for the range's uncovered IPv4 space, plus a bounded
-  coalesced alternative when it needs fewer targets or fewer monitors.
+  coalesced alternative when it needs fewer targets or fewer monitors, or the
+  count of monitors it would need when it needs more than 16.
 
 ## Suggested monitors
 
@@ -320,8 +321,10 @@ exclusions and probe budgets.
 
 A mode shows the coalesced alternative only when it improves on that mode's
 gaps-only option: it needs fewer targets in total, counted across all its
-monitors, or fewer monitors. Otherwise the mode shows no alternative,
-because it would only rescan covered addresses. For example, at the default
+monitors, or fewer monitors. Otherwise the mode shows no alternative: it
+would rescan covered addresses without reducing the targets or monitors, and
+can even need more of them, because a coalesced target is at most a `/24`
+while a gaps-only target can be larger. For example, at the default
 budgets, when the lower half of a `/24` is covered, the gaps-only option is a
 single `/25` target, and a coalesced `/24` would be a single target too, so
 the page shows no alternative. When only the lowest `/26` is covered, one

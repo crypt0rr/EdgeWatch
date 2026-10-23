@@ -87,13 +87,15 @@ describe('historical scan detail', () => {
     vi.mocked(getScanSummary).mockRejectedValue(Object.assign(new Error('missing'), { code: 'not_found' }))
     await renderPage()
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('could not be found')
-    expect(container.querySelector('h1')).toBeNull()
+    // The page keeps its level-one heading while the scan is unavailable (#1680).
+    expect(container.querySelector('h1')?.textContent).toBe('Scan unavailable')
   })
 
   it('offers retry for transient historical scan failures', async () => {
     vi.mocked(getScanSummary).mockRejectedValue(new Error('scan service unavailable'))
     await renderPage()
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('could not be loaded')
+    expect(container.querySelector('h1')?.textContent).toBe('Scan unavailable')
     const retry = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Retry') as HTMLButtonElement
     expect(retry).toBeTruthy()
     vi.mocked(getScanSummary).mockResolvedValueOnce({ scan: summary })

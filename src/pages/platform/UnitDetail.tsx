@@ -30,7 +30,7 @@ export function UnitDetail({ permissions }: { permissions: string[] }) {
   const visibleTabs = tabs.filter(item => !item.permission || permissions.includes(item.permission))
   const active = visibleTabs.some(item => item.key === tab) ? tab : 'overview'
   if (unit.isLoading) return <Loading label="Loading business unit…" />
-  if (unit.error || !unit.data) return <section className="page"><Link className="back-link" to="/platform/units">← Business units</Link><ErrorNotice message="This business unit could not be loaded." onRetry={() => unit.refetch()} /></section>
+  if (unit.error || !unit.data) return <section className="page"><div className="page-heading"><div><Link className="back-link" to="/platform/units">← Business units</Link><h1>Business unit unavailable</h1></div></div><ErrorNotice message="This business unit could not be loaded." onRetry={() => unit.refetch()} /></section>
   const value = unit.data
   return <section className="page">
     <div className="page-heading"><div><Link className="back-link" to="/platform/units">← Business units</Link><div className="title-row"><h1>{value.name}</h1><UnitStatusPill status={value.status} />{value.is_default && <span className="pill blue">Default</span>}</div><p className="muted">/public/{value.slug} · {plural(value.accounts, 'account')} · {plural(value.jobs, 'job')} · {plural(value.stored_scans, 'stored scan')} · created {formatDateTime(value.created_at)}</p></div></div>

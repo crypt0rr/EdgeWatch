@@ -929,6 +929,8 @@ describe('business unit detail', () => {
     vi.mocked(getUnit).mockRejectedValueOnce(new APIError('business unit not found', 'not_found'))
     const view = renderUnit()
     expect(await screen.findByRole('alert')).toHaveTextContent('This business unit could not be loaded.')
+    // The page keeps its level-one heading while the unit is unavailable (#1680).
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Business unit unavailable')
     view.unmount()
     renderUnit('notifications')
     expect(await screen.findByRole('heading', { name: 'Name and public link' })).toBeInTheDocument()

@@ -108,6 +108,10 @@ describe('authentication pages', () => {
 
   it('logs in and routes administrators to the dashboard', async () => {
     await renderPage(<Login />, '/login')
+    // The sign-in card is the page's main landmark, and the brand art beside
+    // it is complementary (#1680).
+    expect(container.querySelector('main.auth-side h1')?.textContent).toBe('Sign in to EdgeWatch')
+    expect(container.querySelector('aside.auth-art')?.getAttribute('aria-label')).toBe('About EdgeWatch')
     expect(container.querySelector('a[href="/source"]')).toBeNull()
     const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
     setInputValue(inputs[0], 'admin')

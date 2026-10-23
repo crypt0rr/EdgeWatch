@@ -20,7 +20,7 @@ export function ScanDetail() {
 
   if (scan.isLoading) return <div className="loading"><span className="spinner" />Loading scan…</div>
   const notFound = (scan.error as { code?: string } | null)?.code === 'not_found'
-  if (scan.error || !scan.data) return <section className="page"><Link className="back-link" to="/">← Overview</Link><ErrorNotice message={scan.error ? (notFound ? 'This scan could not be found.' : 'This scan could not be loaded.') : 'This scan could not be found.'} onRetry={scan.error && !notFound ? () => scan.refetch() : undefined} /></section>
+  if (scan.error || !scan.data) return <section className="page"><div className="page-heading"><div><Link className="back-link" to="/">← Overview</Link><p className="eyebrow">Historical scan</p><h1>Scan unavailable</h1></div></div><ErrorNotice message={scan.error ? (notFound ? 'This scan could not be found.' : 'This scan could not be loaded.') : 'This scan could not be found.'} onRetry={scan.error && !notFound ? () => scan.refetch() : undefined} /></section>
   const value = scan.data.scan
   return <section className="page">
     <div className="page-heading"><div><Link className="back-link" to="/">← Overview</Link><p className="eyebrow">Historical scan</p><h1>{value.job}</h1><p className="muted">Scan {value.id}</p></div><Clock3 className="muted-icon" size={24} /></div>

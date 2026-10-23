@@ -122,6 +122,8 @@ Report the checks you ran and any failures or checks you could not run.
   Add each new route to `apiRoutes` in `internal/web/permissions.go` with its permission and handler; it is the only router, and `TestRoutingStaysInTheRouteTable` fails when other code reads the request path or registers a ServeMux pattern.
   Send each live update through `broadcastTo` with an explicit audience.
   `TestIsolationMatrix` sends every route in `apiRoutes` as each role, including `platform_admin`, and requires another unit's ID to get the same response as an unknown ID; teach it any new path placeholder.
+- Give each new console `<Route>` and `UnitDetail` tab an entry in `e2e/console-routes.ts`, which the axe audit and the role matrix visit, or a reasoned exclusion in `routesWithoutInventoryEntry`; `src/console-route-inventory.test.ts` fails on a route without either and on an entry whose route is gone.
+  The axe audit also fails on `heading-order`, `page-has-heading-one`, and `landmark-*` violations; accept one only through `axeAllowances` in `e2e/route-accessibility.spec.ts`, with its reason.
 - Keep public status limited to explicitly published data and exclude private fingerprints and raw scan evidence.
 - Preserve secret redaction in logs and API responses, including the write-only contract for notification URLs.
 - Never commit notification URLs, authentication tokens, passwords, or encryption keys.

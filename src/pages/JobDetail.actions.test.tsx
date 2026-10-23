@@ -695,6 +695,8 @@ describe('job detail actions', () => {
     vi.mocked(getJob).mockRejectedValueOnce(new Error('job service unavailable'))
     renderPage()
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('could not be loaded'))
+    // The page keeps its level-one heading while the job is unavailable (#1680).
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Job unavailable')
     const retry = screen.getByRole('button', { name: 'Retry' })
     expect(retry).toBeInTheDocument()
     vi.mocked(getJob).mockResolvedValueOnce(job as never)

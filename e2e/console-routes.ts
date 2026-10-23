@@ -1,7 +1,19 @@
 import { rolePermissions, type ConsoleRole } from './mock-console'
 
+/**
+ * This file is the inventory of every page the console renders. The axe
+ * audit in route-accessibility.spec.ts and the role matrix in
+ * role-matrix.spec.ts iterate it, and src/console-route-inventory.test.ts,
+ * which `npm run test:coverage` runs before the browser tests, compares it
+ * with the routers: every `<Route>` in src and every UnitDetail tab needs an
+ * entry here or a reasoned exclusion in `routesWithoutInventoryEntry`, and
+ * every entry must still reach the route it stands for. Paths are concrete
+ * examples; the check matches them with React Router, so `:id` and the other
+ * parameters match any value.
+ */
 export type ConsoleRouteCase = {
   path: string
+  /** unit: the unit console (Shell); platform: PlatformShell; shared: both shells. */
   scope: 'unit' | 'platform' | 'shared'
   permission?: string
   allowedPath?: string
@@ -12,13 +24,9 @@ export type ConsoleRouteCase = {
 /**
  * Representative paths for every route rendered by the authenticated unit
  * console, including the nested job-creation routes and both host-detail
- * routes. The auth pages (/setup, /activate, /login) and public status routes
- * (/public and /public/:slug) are outside either console shell and have their
- * own browser coverage: admin.spec.ts enters /setup from /, sign-in-return and
- * signed-in-account-link exercise /login and /activate, and public-dashboard
- * and real-stack-units exercise the public routes. Redirect-only console
- * routes remain in this inventory so each role's actual route behavior is
- * still checked.
+ * routes. The pages outside either console shell are in `entrySurfaces`.
+ * Redirect-only console routes remain in this inventory so each role's
+ * actual route behavior is still checked.
  */
 export const unitConsoleRoutes: ConsoleRouteCase[] = [
   { path: '/', scope: 'unit', permission: 'overview.read' },
@@ -65,6 +73,77 @@ export const platformConsoleRoutes: ConsoleRouteCase[] = [
 ]
 
 export const allConsoleRoutes = [...unitConsoleRoutes, ...platformConsoleRoutes]
+
+/**
+ * The router of each console scope, named by the component that renders its
+ * `<Routes>`. A shared entry must reach a page in each of them.
+ */
+export const consoleScopeRouters: Record<ConsoleRouteCase['scope'], string[]> = {
+  unit: ['Shell'],
+  platform: ['PlatformShell'],
+  shared: ['Shell', 'PlatformShell'],
+}
+
+export type EntrySurfaceCase = {
+  /** The address to open. The inventory check reads only its path. */
+  path: string
+  /**
+   * The component whose `<Routes>` serve the page, or public for the status
+   * pages that AppContent serves before any router or session read.
+   */
+  router: 'AuthRoutes' | 'TotpEnrollmentShell' | 'public'
+  /**
+   * The session that shows the page: signed-out and unconfigured have no
+   * session, on an installation that is set up or not; enrolment is a
+   * platform administrator without TOTP once two units exist, which may
+   * only enrol; public needs none and reads no console data.
+   */
+  state: 'signed-out' | 'unconfigured' | 'enrolment' | 'public'
+  /** The level-one heading that shows that the page rendered. */
+  heading: string
+}
+
+/**
+ * The pages a visitor reaches outside either console shell: sign-in,
+ * first-run setup, account activation, the TOTP enrolment that restricts a
+ * session until it is done, and the public status pages, both published and
+ * unavailable. The axe audit opens each with the mock console's fixtures.
+ */
+export const entrySurfaces: EntrySurfaceCase[] = [
+  { path: '/login', router: 'AuthRoutes', state: 'signed-out', heading: 'Sign in to EdgeWatch' },
+  { path: '/setup', router: 'AuthRoutes', state: 'unconfigured', heading: 'Create your administrator' },
+  { path: '/activate#token=FIXTURE-TOKEN', router: 'AuthRoutes', state: 'signed-out', heading: 'Choose your password' },
+  { path: '/security', router: 'TotpEnrollmentShell', state: 'enrolment', heading: 'Set up an authenticator' },
+  { path: '/public', router: 'public', state: 'public', heading: 'Fixture public status' },
+  { path: '/public/retail', router: 'public', state: 'public', heading: 'Retail status' },
+  { path: '/public/unpublished', router: 'public', state: 'public', heading: 'Public status unavailable' },
+]
+
+export type RouteExclusion = {
+  /** The component that renders the route's `<Routes>`. */
+  router: string
+  /** The route's full path pattern, as the inventory check reports it. */
+  path: string
+  reason: string
+}
+
+/**
+ * Routes that render no page of their own and so have no inventory entry.
+ * The inventory check fails when a route is neither listed above nor here,
+ * and when an exclusion no longer names a route.
+ */
+export const routesWithoutInventoryEntry: RouteExclusion[] = [
+  {
+    router: 'AuthRoutes',
+    path: '*',
+    reason: 'Renders no page: it sends every other signed-out address to /login with the requested page as its return path, or to /setup before setup; sign-in-return.spec.ts checks the redirect and the return.',
+  },
+  {
+    router: 'TotpEnrollmentShell',
+    path: '*',
+    reason: 'Renders no page: it sends every address of a session that must enrol TOTP to /security, the enrolment page in entrySurfaces; platform-console.spec.ts checks that the session lands there.',
+  },
+]
 
 function unitHome(role: ConsoleRole) {
   if (rolePermissions[role].includes('overview.read')) return '/'

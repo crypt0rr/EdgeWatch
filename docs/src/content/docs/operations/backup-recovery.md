@@ -154,26 +154,34 @@ migration without an automatic pre-migration backup.
 Each schema step commits on its own, so an upgrade that fails part way leaves
 the database at an intermediate schema, and every restart until it succeeds
 writes another copy, of that intermediate schema. The previous release refuses
-those copies. After writing a copy, the daemon therefore keeps:
+those copies. After writing a copy, the daemon therefore keeps these copies,
+where the current schema is the one the database has at this start:
 
-- for each schema below the one the database had at this start, the newest
-  copy whose `<from>` is that schema and whose `<to>` is the running release's
-  schema. These are the copies taken at each earlier schema of the interrupted
-  upgrade, one from each start that committed a step before it failed, and the
-  copy at the schema the previous release used is among them;
+- the copy just written, even when a host clock that is behind gives it an
+  older timestamp than earlier copies;
+- for each schema below the current schema, the newest copy whose `<from>` is
+  that schema and whose `<to>` is above the current schema: a copy for an
+  upgrade that has not passed the database's schema yet. These are the copies
+  taken at the earlier schemas of this upgrade, one from each start that
+  committed a step before it failed, and at those of any attempt that was
+  rolled back. The copy at the schema the previous release used is among them,
+  also when a release with another schema is started to retry the failed
+  upgrade;
 - the latest three other automatic pre-migration backups by the timestamp in
-  their names, whatever their schemas, including the copies of the schema the
-  database had at this start, such as the one just written.
+  their names, whatever their schemas, including earlier copies of the current
+  schema and copies for upgrades that finished. Of two equal timestamps, the
+  name that sorts later counts as the later one.
 
 It removes the rest, separately from the scheduled `keep` count. The directory
-therefore holds at most three automatic copies plus one per earlier schema of
-the upgrade, and retries at one schema never grow it. Copies written for an
-earlier release's upgrade count only toward the latest three. A copy that an
-earlier attempt to reach the same release left before it was rolled back is
-kept too when it is the newest from its schema, so neither the oldest copy nor
-the one with the lowest `<from>` is necessarily the right rollback point:
-choose the copy whose `<from>` is the schema of the version you ran before the
-upgrade, as [Rollback](/deployment/updates/#rollback) describes. A new copy is
+therefore holds at most three automatic copies plus the copy just written plus
+one per schema below the database's current schema that has a copy for an
+upgrade beyond it (the earlier schemas of this upgrade and of any rolled-back
+attempt), so retries at one schema never grow it. Because a copy that an
+earlier, rolled-back attempt left is kept when it is the newest from its
+schema, neither the oldest copy nor the one with the lowest `<from>` is
+necessarily the right rollback point: choose the newest copy whose `<from>` is
+the schema of the version you ran before the upgrade, as
+[Rollback](/deployment/updates/#rollback) describes. A new copy is
 written on every start that needs a migration, because a database restored and
 run on the previous release in between holds newer data. The daemon removes
 only regular owner-only files with the reserved automatic name; manual backups

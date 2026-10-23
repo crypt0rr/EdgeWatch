@@ -270,11 +270,11 @@ Jobs are configured in the console, which enforces these limits:
   `backup` command does before it publishes it, and keeps the newest
   `backup.keep` of them. When an existing database needs a schema upgrade, the
   daemon also creates and verifies a backup in that directory before migration
-  writes begin. Separately from `backup.keep`, it keeps the newest copy taken
-  at each earlier schema of an interrupted upgrade to the running release, so
+  writes begin. Separately from `backup.keep`, it keeps the copy just written,
+  the latest three other pre-migration backups, and, from each schema below
+  the database's current schema, the newest copy for an upgrade beyond it, so
   retrying a failed upgrade never removes the copy the previous release can
-  open, and the latest three other pre-migration backups, as
-  [Scheduled backups](/operations/backup-recovery/#scheduled-backups)
+  open, as [Scheduled backups](/operations/backup-recovery/#scheduled-backups)
   describes. A failure to create or verify this pre-migration backup stops the
   migration; without `backup.directory`, startup warns and continues.
   Scheduled rotation removes only its own files, named

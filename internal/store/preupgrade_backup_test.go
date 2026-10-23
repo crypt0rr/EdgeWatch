@@ -140,7 +140,7 @@ func TestPrunePreUpgradeBackupsPreservesMalformedAndNonOwnerFiles(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	removed, err := prunePreUpgradeBackups(directory, schemaVersion-1, schemaVersion, 0)
+	removed, err := prunePreUpgradeBackups(directory, schemaVersion-1, 0, "")
 	if err != nil {
 		t.Fatalf("prune automatic pre-migration backups: %v", err)
 	}
@@ -154,21 +154,25 @@ func TestPrunePreUpgradeBackupsPreservesMalformedAndNonOwnerFiles(t *testing.T) 
 	}
 }
 
-// For each source schema below the database's current schema, retention
-// keeps the newest copy to the running schema: the copies taken at the
-// earlier schemas of the upgrade in progress. Every other copy, including
-// those at the current schema and those for another target, falls under the
-// count of three, which keeps the newest by timestamp.
-func TestPrunePreUpgradeBackupsKeepEachEarlierSchemaCopyOfTheUpgrade(t *testing.T) {
+// Retention keeps the copy just written and, for each source schema below the
+// database's current schema, the newest copy to a schema above the current
+// one: the copies of upgrades that have not yet passed the database's schema,
+// whichever release wrote them. Every other copy, including earlier copies at
+// the current schema and those of finished upgrades, falls under keep, which
+// keeps the newest by timestamp.
+func TestPrunePreUpgradeBackupsKeepEachUnfinishedUpgradeCopy(t *testing.T) {
 	for _, test := range []struct {
-		name            string
-		current, target int
-		files, kept     []string
+		name          string
+		current, keep int
+		// written, when set, names the copy that the start just wrote.
+		written     string
+		files, kept []string
 	}{
 		{
 			name:    "retries at one intermediate schema",
 			current: 77,
-			target:  78,
+			keep:    preUpgradeBackupRetention,
+			written: "edgewatch-preupgrade-s77-s78-20220601T000000.000000000Z.db",
 			files: []string{
 				"edgewatch-preupgrade-s74-s76-20210101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s75-s78-20220101T000000.000000000Z.db",
@@ -180,6 +184,7 @@ func TestPrunePreUpgradeBackupsKeepEachEarlierSchemaCopyOfTheUpgrade(t *testing.
 			},
 			kept: []string{
 				"edgewatch-preupgrade-s75-s78-20220201T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20220301T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20220401T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20220501T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20220601T000000.000000000Z.db",
@@ -191,9 +196,11 @@ func TestPrunePreUpgradeBackupsKeepEachEarlierSchemaCopyOfTheUpgrade(t *testing.
 			// to 78 started at 76 and failed at 77, followed by three
 			// retries. The March copy is what the previous release opens; the
 			// lowest source schema would pick January's stale copy instead.
+			// Without a copy just written, the count of three takes the
+			// retries, and the February copy of a finished upgrade goes.
 			name:    "an earlier attempt and a step upgrade",
 			current: 77,
-			target:  78,
+			keep:    preUpgradeBackupRetention,
 			files: []string{
 				"edgewatch-preupgrade-s75-s78-20260101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s75-s76-20260201T000000.000000000Z.db",
@@ -215,7 +222,8 @@ func TestPrunePreUpgradeBackupsKeepEachEarlierSchemaCopyOfTheUpgrade(t *testing.
 			// restart at 76 committed the step to 77 and failed again.
 			name:    "steps committed by two starts",
 			current: 77,
-			target:  78,
+			keep:    preUpgradeBackupRetention,
+			written: "edgewatch-preupgrade-s77-s78-20260106T000000.000000000Z.db",
 			files: []string{
 				"edgewatch-preupgrade-s74-s76-20250101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s75-s78-20260101T000000.000000000Z.db",
@@ -228,9 +236,36 @@ func TestPrunePreUpgradeBackupsKeepEachEarlierSchemaCopyOfTheUpgrade(t *testing.
 			kept: []string{
 				"edgewatch-preupgrade-s75-s78-20260101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s76-s78-20260102T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260103T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20260104T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20260105T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20260106T000000.000000000Z.db",
+			},
+		},
+		{
+			// Release 0.43.0, with schema 78, started at 76, committed the
+			// step to 77, and failed on that start and two restarts. Release
+			// 0.43.1, with schema 79, then took over the upgrade and failed
+			// three times at 77. The copy at 76 is still the one the previous
+			// release opens, although its target is not the running schema.
+			name:    "a release with another target takes over the upgrade",
+			current: 77,
+			keep:    preUpgradeBackupRetention,
+			written: "edgewatch-preupgrade-s77-s79-20260302T000200.000000000Z.db",
+			files: []string{
+				"edgewatch-preupgrade-s76-s78-20260301T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260301T000100.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260301T000200.000000000Z.db",
+				"edgewatch-preupgrade-s77-s79-20260302T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s79-20260302T000100.000000000Z.db",
+				"edgewatch-preupgrade-s77-s79-20260302T000200.000000000Z.db",
+			},
+			kept: []string{
+				"edgewatch-preupgrade-s76-s78-20260301T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260301T000200.000000000Z.db",
+				"edgewatch-preupgrade-s77-s79-20260302T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s79-20260302T000100.000000000Z.db",
+				"edgewatch-preupgrade-s77-s79-20260302T000200.000000000Z.db",
 			},
 		},
 		{
@@ -238,7 +273,8 @@ func TestPrunePreUpgradeBackupsKeepEachEarlierSchemaCopyOfTheUpgrade(t *testing.
 			// previous release used. Its new copy supersedes the old one.
 			name:    "a new attempt from the previous release's schema",
 			current: 75,
-			target:  78,
+			keep:    preUpgradeBackupRetention,
+			written: "edgewatch-preupgrade-s75-s78-20260110T000000.000000000Z.db",
 			files: []string{
 				"edgewatch-preupgrade-s75-s78-20260101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20260102T000000.000000000Z.db",
@@ -248,6 +284,7 @@ func TestPrunePreUpgradeBackupsKeepEachEarlierSchemaCopyOfTheUpgrade(t *testing.
 			},
 			kept: []string{
 				"edgewatch-preupgrade-s75-s78-20260110T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260102T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20260103T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20260104T000000.000000000Z.db",
 			},
@@ -256,7 +293,8 @@ func TestPrunePreUpgradeBackupsKeepEachEarlierSchemaCopyOfTheUpgrade(t *testing.
 			// Copies from a schema above the current one are not protected.
 			name:    "a restart from a copy at an intermediate schema",
 			current: 76,
-			target:  78,
+			keep:    preUpgradeBackupRetention,
+			written: "edgewatch-preupgrade-s76-s78-20260106T000000.000000000Z.db",
 			files: []string{
 				"edgewatch-preupgrade-s75-s78-20260101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s76-s78-20260102T000000.000000000Z.db",
@@ -268,25 +306,94 @@ func TestPrunePreUpgradeBackupsKeepEachEarlierSchemaCopyOfTheUpgrade(t *testing.
 			kept: []string{
 				"edgewatch-preupgrade-s75-s78-20260101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s76-s78-20260106T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260103T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20260104T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20260105T000000.000000000Z.db",
 			},
 		},
 		{
-			name:    "no copy for the target",
+			// No copy goes beyond the current schema 78, so every copy but
+			// the new one falls under the count.
+			name:    "copies of finished upgrades only",
 			current: 78,
-			target:  79,
+			keep:    preUpgradeBackupRetention,
+			written: "edgewatch-preupgrade-s78-s79-20230101T000000.000000000Z.db",
 			files: []string{
 				"edgewatch-preupgrade-s74-s76-20210101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s75-s78-20220101T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20220301T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20220401T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20220501T000000.000000000Z.db",
+				"edgewatch-preupgrade-s78-s79-20230101T000000.000000000Z.db",
 			},
 			kept: []string{
 				"edgewatch-preupgrade-s77-s78-20220301T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20220401T000000.000000000Z.db",
 				"edgewatch-preupgrade-s77-s78-20220501T000000.000000000Z.db",
+				"edgewatch-preupgrade-s78-s79-20230101T000000.000000000Z.db",
+			},
+		},
+		{
+			// Without a count, only the newest copy beyond 77 from each
+			// earlier schema, whatever its target, and the new copy remain.
+			name:    "keep 0",
+			current: 77,
+			keep:    0,
+			written: "edgewatch-preupgrade-s77-s79-20260105T000000.000000000Z.db",
+			files: []string{
+				"edgewatch-preupgrade-s74-s76-20250101T000000.000000000Z.db",
+				"edgewatch-preupgrade-s75-s78-20260101T000000.000000000Z.db",
+				"edgewatch-preupgrade-s75-s78-20260102T000000.000000000Z.db",
+				"edgewatch-preupgrade-s76-s79-20260103T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s79-20260104T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s79-20260105T000000.000000000Z.db",
+			},
+			kept: []string{
+				"edgewatch-preupgrade-s75-s78-20260102T000000.000000000Z.db",
+				"edgewatch-preupgrade-s76-s79-20260103T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s79-20260105T000000.000000000Z.db",
+			},
+		},
+		{
+			// The host clock was behind when the start wrote its copy, so its
+			// name sorts before the three copies of earlier retries and an
+			// older one. The new copy stays, and the count still applies to
+			// the others.
+			name:    "a copy just written with an older timestamp",
+			current: 77,
+			keep:    preUpgradeBackupRetention,
+			written: "edgewatch-preupgrade-s77-s78-20250101T000000.000000000Z.db",
+			files: []string{
+				"edgewatch-preupgrade-s76-s78-20260301T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20240601T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260401T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260402T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260403T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20250101T000000.000000000Z.db",
+			},
+			kept: []string{
+				"edgewatch-preupgrade-s76-s78-20260301T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20250101T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260401T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260402T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s78-20260403T000000.000000000Z.db",
+			},
+		},
+		{
+			// Two copies of finished upgrades from different schemas carry
+			// the same timestamp; the greater name counts as newer.
+			name:    "equal timestamps",
+			current: 77,
+			keep:    1,
+			written: "edgewatch-preupgrade-s77-s79-20260105T000000.000000000Z.db",
+			files: []string{
+				"edgewatch-preupgrade-s74-s76-20260101T000000.000000000Z.db",
+				"edgewatch-preupgrade-s75-s76-20260101T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s79-20260105T000000.000000000Z.db",
+			},
+			kept: []string{
+				"edgewatch-preupgrade-s75-s76-20260101T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s79-20260105T000000.000000000Z.db",
 			},
 		},
 	} {
@@ -306,7 +413,7 @@ func TestPrunePreUpgradeBackupsKeepEachEarlierSchemaCopyOfTheUpgrade(t *testing.
 			slices.Sort(wantRemoved)
 			wantKept := slices.Sorted(slices.Values(test.kept))
 
-			removed, err := prunePreUpgradeBackups(directory, test.current, test.target, preUpgradeBackupRetention)
+			removed, err := prunePreUpgradeBackups(directory, test.current, test.keep, test.written)
 			if err != nil {
 				t.Fatalf("prune automatic pre-migration backups: %v", err)
 			}
@@ -319,7 +426,7 @@ func TestPrunePreUpgradeBackupsKeepEachEarlierSchemaCopyOfTheUpgrade(t *testing.
 			}
 
 			// Retention is stable: a second pass removes nothing more.
-			removed, err = prunePreUpgradeBackups(directory, test.current, test.target, preUpgradeBackupRetention)
+			removed, err = prunePreUpgradeBackups(directory, test.current, test.keep, test.written)
 			if err != nil || len(removed) != 0 {
 				t.Errorf("second prune removed %q (error %v), want nothing", removed, err)
 			}
@@ -334,7 +441,8 @@ func TestPrunePreUpgradeBackupsKeepEachEarlierSchemaCopyOfTheUpgrade(t *testing.
 // the step to 76 and fails, and the restart at 76 commits the step to 77 and
 // fails again. No retry at 77 may evict the copy taken at 75, where the
 // upgrade started, or the one taken at 76, and repeated retries do not grow
-// the directory past the retention bound.
+// the directory past the retention bound: those two, the copy just written,
+// and three more.
 func TestPreMigrationBackupRetriesKeepTheStartingSchemaCopy(t *testing.T) {
 	ctx := context.Background()
 	path := newSchema75TestDatabase(t, false)
@@ -380,7 +488,7 @@ func TestPreMigrationBackupRetriesKeepTheStartingSchemaCopy(t *testing.T) {
 				t.Fatalf("retry %d removed the earlier-schema copy %q; automatic backups = %q", retry, name, automatic)
 			}
 		}
-		if want := len(earlier) + min(retry, preUpgradeBackupRetention); len(automatic) != want {
+		if want := len(earlier) + min(retry, preUpgradeBackupRetention+1); len(automatic) != want {
 			t.Fatalf("automatic backups after retry %d = %q, want %d", retry, automatic, want)
 		}
 	}
@@ -388,7 +496,7 @@ func TestPreMigrationBackupRetriesKeepTheStartingSchemaCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := len(earlier) + preUpgradeBackupRetention; len(entries) != want {
+	if want := len(earlier) + preUpgradeBackupRetention + 1; len(entries) != want {
 		t.Errorf("backup directory holds %d entries after %d retries, want only the %d automatic copies", len(entries), retries, want)
 	}
 
@@ -435,15 +543,16 @@ func TestPreMigrationBackupRetriesKeepTheStartingSchemaCopy(t *testing.T) {
 	}
 }
 
-// The first start of an upgrade has no earlier schema to protect, so its new
-// copy and copies for an earlier upgrade all fall under the count of three.
-func TestPreMigrationBackupsRetainExactlyLatestThreeAndPreserveManualFiles(t *testing.T) {
+// The first start of an upgrade has no earlier schema to protect, so beside
+// its new copy, the copies of an earlier, finished upgrade fall under the
+// count of three.
+func TestPreMigrationBackupsRetainNewCopyAndLatestThreeOthersAndPreserveManualFiles(t *testing.T) {
 	requireLinuxDaemonStartup(t)
 	path := newSchema75TestDatabase(t, false)
 	backupDirectory := t.TempDir()
 	old := make([]string, 0, 4)
 	for year := 2020; year <= 2023; year++ {
-		name := fmt.Sprintf("edgewatch-preupgrade-s74-s76-%d0101T000000.000000000Z.db", year)
+		name := fmt.Sprintf("edgewatch-preupgrade-s74-s75-%d0101T000000.000000000Z.db", year)
 		old = append(old, name)
 		if err := os.WriteFile(filepath.Join(backupDirectory, name), []byte("automatic backup fixture"), 0o600); err != nil {
 			t.Fatal(err)
@@ -467,8 +576,8 @@ func TestPreMigrationBackupsRetainExactlyLatestThreeAndPreserveManualFiles(t *te
 	}
 
 	automatic := automaticPreUpgradeBackups(t, backupDirectory)
-	if len(automatic) != preUpgradeBackupRetention {
-		t.Fatalf("automatic pre-migration backups = %v, want exactly %d", automatic, preUpgradeBackupRetention)
+	if len(automatic) != preUpgradeBackupRetention+1 {
+		t.Fatalf("automatic pre-migration backups = %v, want exactly %d", automatic, preUpgradeBackupRetention+1)
 	}
 	// The names sort by source schema first, so the new schema 75 copy sorts
 	// after the seeded schema 74 copies.
@@ -476,10 +585,10 @@ func TestPreMigrationBackupsRetainExactlyLatestThreeAndPreserveManualFiles(t *te
 	if !strings.HasPrefix(newest, fmt.Sprintf("edgewatch-preupgrade-s75-s%d-", schemaVersion)) {
 		t.Fatalf("newest automatic backup = %q, want the schema 75 copy", newest)
 	}
-	if want := append(slices.Clone(old[2:]), newest); !reflect.DeepEqual(automatic, want) {
+	if want := append(slices.Clone(old[1:]), newest); !reflect.DeepEqual(automatic, want) {
 		t.Errorf("retained automatic backups = %q, want %q", automatic, want)
 	}
-	for _, name := range old[:2] {
+	for _, name := range old[:1] {
 		if _, err := os.Stat(filepath.Join(backupDirectory, name)); !os.IsNotExist(err) {
 			t.Errorf("older automatic backup %q remains: %v", name, err)
 		}

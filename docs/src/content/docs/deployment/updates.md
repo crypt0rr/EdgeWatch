@@ -27,11 +27,13 @@ prepare the rollback before you pull.
 
 When `backup.directory` is configured, the daemon also creates and verifies a
 pre-migration backup immediately before an existing database's schema is
-upgraded. For the release being upgraded to, it keeps the newest copy taken
-at each earlier schema of an interrupted upgrade, so retrying a failed upgrade
-never removes the copy the previous release can open. Beside them, the daemon
-keeps the latest three other automatic pre-migration backups, separately from
-scheduled backup retention;
+upgraded. Separately from scheduled backup retention, it keeps the copy just
+written, the latest three other automatic copies, and, from each schema below
+the database's current schema, the newest copy for an upgrade beyond it: the
+earlier schemas of this upgrade and of any rolled-back attempt. Retrying a
+failed upgrade therefore never removes the copy the previous release can open,
+also when you start another release to retry it, and retries at one schema
+never grow the directory;
 [Backup and recovery](/operations/backup-recovery/#scheduled-backups) gives
 the exact rule. If creation or verification fails, the migration stops
 before its schema writes; without a configured directory, the daemon warns and
@@ -136,16 +138,25 @@ services:
 If automatic pre-migration backups are configured, the matching
 `edgewatch-preupgrade-s<from>-s<to>-<UTC timestamp>.db` file in
 `backup.directory` is also a pre-update recovery point. Pick the newest file
-whose `s<to>` is the new release's schema and whose `s<from>` is the schema of
-the version you noted: the `schema_version` that the backup you took before
-the update reported. Copies that restarts wrote after a failed update hold a
-partly upgraded schema, which the older version refuses, and a copy that an
-earlier, rolled-back attempt left can have a lower `s<from>` than that schema.
-Before you restore the file with the same procedure as another backup, check
-it with `edgewatch verify --from`, which must report it as `valid` with that
-`schema_version`. The daemon keeps the newest such file from each earlier
-schema of an interrupted upgrade and the latest three others, and does not
-include them in scheduled backup rotation.
+whose `s<from>` is the schema of the version you noted: the `schema_version`
+that the backup you took before the update reported. Without that backup, find
+the schema in either of these ways:
+
+- the `from_schema` of the first `pre-migration backup started` record that
+  `docker compose logs edgewatch` shows after the update, which also names the
+  file it wrote under `backup`;
+- the `schema_version` that `edgewatch verify --from` reports for the newest
+  `edgewatch-scheduled-YYYYMMDDTHHMMSSZ.db` backup written before the update.
+
+Copies that restarts wrote after a failed update hold a partly upgraded
+schema, which the older version refuses, and a copy that an earlier,
+rolled-back attempt left can have a lower `s<from>` than that schema. Before
+you restore the file with the same procedure as another backup, check it with
+`edgewatch verify --from`, which must report it as `valid` with that
+`schema_version`. From each schema below the database's current schema, the
+daemon keeps the newest file for an upgrade beyond it, also when you start
+another release to retry the upgrade, and does not include these files in
+scheduled backup rotation.
 
 Replace `0.25.23` with the noted version, without the leading `v`, and add
 the digest you [verified](#verify-a-release), as in

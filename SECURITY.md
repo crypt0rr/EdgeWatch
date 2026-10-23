@@ -963,11 +963,11 @@ database starts from a frozen copy of schema 54 that a test keeps identical
 to what the retired migrations created.
 When `backup.directory` is configured, a schema upgrade first writes and
 verifies a pre-migration backup there. Separately from scheduled backups, it
-retains, for the release being upgraded to, the newest copy taken at each
-earlier schema of an interrupted upgrade, so retrying a failed upgrade never
-removes the copy the previous release can open, and the latest three other
-automatic copies. If it cannot create or verify that copy, migration stops
-before schema writes; without the directory, startup warns and continues.
+retains the copy just written, the latest three other automatic copies, and,
+from each schema below the database's current schema, the newest copy for an
+upgrade beyond it, so retrying a failed upgrade never removes the copy the
+previous release can open. If it cannot create or verify that copy, migration
+stops before schema writes; without the directory, startup warns and continues.
 Retain the backup with the database's encryption keys.
 Schema 63 also marks legacy unsent deliveries with at least eight attempts
 and a retry scheduled before v0.22.1 as terminal; deliveries still retrying
@@ -1182,15 +1182,17 @@ also receives a verified `edgewatch-preupgrade-s<from>-s<to>-*.db` copy of the
 old schema, on every start that needs a migration. Each schema step commits on
 its own, so restarts after a failed upgrade write copies of an intermediate
 schema that the previous release refuses. After each copy, the daemon keeps,
-for each schema below the one the database had at that start, the newest copy
-from that schema to the running release's schema, so retrying a failed upgrade
-never removes the copy the previous release can open, and the latest three
-other automatic copies by timestamp, separately from scheduled retention; it
-leaves manual backups alone. The directory thus holds at most three automatic
-copies plus one per earlier schema of the upgrade, however often a start is
-retried. If the configured pre-migration copy cannot be created or verified,
-schema migration stops before it writes; without `backup.directory`, startup
-warns and continues.
+separately from scheduled retention, the copy just written; from each schema
+below the database's current schema, the newest copy for an upgrade beyond
+it, whichever release wrote it, so retrying a failed upgrade never removes the
+copy the previous release can open; and the latest three other automatic
+copies by timestamp. It leaves manual backups alone. The directory thus holds
+at most three automatic copies plus the copy just written plus one per schema
+below the database's current schema that has a copy for an upgrade beyond it
+(the earlier schemas of this upgrade and of any rolled-back attempt), so
+retries at one schema never grow it. If the configured pre-migration copy
+cannot be created or verified, schema migration stops before it writes;
+without `backup.directory`, startup warns and continues.
 These copies hold all units' data and encrypted secrets, so protect them and
 retain their keys like other database backups. They have no age limit: only a
 later pre-migration copy removes one, so on a deployment that upgrades rarely

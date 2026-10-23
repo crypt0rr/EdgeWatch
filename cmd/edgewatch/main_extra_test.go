@@ -470,6 +470,87 @@ func TestStatusFallsBackToUTCForInvalidTimezone(t *testing.T) {
 	}
 }
 
+// When a completed cycle's finalization fails, the run saves a failed
+// fallback row, and the run that recovers the cycle saves the promoted scan
+// at the cycle's own, earlier finish time. status reports the recovered
+// scan as the job's last scan, as the Jobs list does, not the failure it
+// superseded.
+func TestStatusReportsARecoveredCycleAsTheLastScan(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ts := s.Tenant(store.DefaultTenantScope())
+	job := config.NormalizeJob(config.Job{
+		Name: "recovered", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"},
+		TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced",
+	})
+	record, err := ts.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	for _, scan := range []model.Scan{
+		{ID: "fallback", Status: "failed", Error: model.ScanFinalizationFailureMessage, FinishedAt: finished.Add(time.Second)},
+		{ID: "recovered", Status: "success", FinishedAt: finished},
+	} {
+		scan.JobID, scan.JobRevision, scan.Job, scan.StartedAt = record.ID, record.Revision, job.Name, finished.Add(-time.Minute)
+		scan.CycleID, scan.CycleStatus, scan.Resumable, scan.ConfigHash = "cycle", "completed", true, job.SecurityHash()
+		if err := s.System().SaveScan(ctx, scan); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stdout, _, err := captureCLIOutput(t, func() error {
+		return status(ctx, ts, store.TenantStateActive, &config.Config{}, "", "json")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []struct {
+		Name             string `json:"name"`
+		LastScanID       string `json:"last_scan_id"`
+		LastScanStatus   string `json:"last_scan_status"`
+		LastScanFinished string `json:"last_scan_finished"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &rows); err != nil {
+		t.Fatalf("status output %q: %v", stdout, err)
+	}
+	if len(rows) != 1 || rows[0].Name != "recovered" || rows[0].LastScanID != "recovered" || rows[0].LastScanStatus != "success" || rows[0].LastScanFinished != finished.Format(time.RFC3339) {
+		t.Fatalf("status rows = %+v; want the recovered scan as the last scan, with the cycle's finish time", rows)
+	}
+}
+
+// status reads the latest attempts of all managed jobs in one query, and a
+// failure of that query fails the command instead of printing jobs without
+// their last scan.
+func TestStatusReportsAnUnreadableScanHistory(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ts := s.Tenant(store.DefaultTenantScope())
+	job := config.NormalizeJob(config.Job{
+		Name: "unreadable", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"},
+		TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced",
+	})
+	if _, err := ts.CreateJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE scans RENAME TO scans_unreadable`); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, err := captureCLIOutput(t, func() error {
+		return status(ctx, ts, store.TenantStateActive, &config.Config{}, "", "json")
+	})
+	if err == nil || !strings.Contains(err.Error(), "scans") {
+		t.Fatalf("status error = %v, output %q; want the scan history query error", err, stdout)
+	}
+}
+
 func TestRunStatusHistoryAndBaselineForManagedJob(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

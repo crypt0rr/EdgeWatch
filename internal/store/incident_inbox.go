@@ -32,8 +32,13 @@ var (
 // newestIncidentEvidenceScanIDSQL seeks one same-job, same-tenant scan after
 // the incident's last positive observation. The job/time order is backed by
 // scansJobHistoryIndex, and the page CTE bounds executions to returned rows.
+// It skips a failed fallback row whose cycle a later run recovered and
+// promoted (recoveredCycleFailureSQL), so the recovered scan, not the
+// failure it superseded, is the newer evidence; only a failed candidate reads
+// its scan row, by rowid, for its cycle.
 const newestIncidentEvidenceScanIDSQL = `SELECT candidate.id FROM scans AS candidate
 	WHERE candidate.job_id=page.job_id AND candidate.tenant_id=page.tenant_id AND candidate.finished_at>page.last_seen_at_sort
+	AND (candidate.status<>'failed' OR NOT EXISTS (` + recoveredCycleFailureSQL + `))
 	ORDER BY candidate.finished_at DESC,candidate.id DESC LIMIT 1`
 
 // incidentInboxEvidenceJoinsSQL reads scan identity and comparison metadata

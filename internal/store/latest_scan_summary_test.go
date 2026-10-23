@@ -117,6 +117,85 @@ func TestListJobExecutionSummariesSeparatesLatestAttemptAndSuccess(t *testing.T)
 	}
 }
 
+// When a completed cycle's finalization fails, the run saves a failed
+// fallback row that claims the cycle completed, and the run that recovers
+// the cycle saves the promoted scan at the cycle's own finish time, before
+// the fallback row. The promoted scan, success or incomplete, supersedes the
+// fallback row as the latest attempt. A failure that no run recovered, a
+// later failure, a failure outside a cycle, and a promotion of the same
+// cycle ID in another unit leave the failure the latest attempt.
+func TestListJobExecutionSummariesSkipsRecoveredCycleFailures(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newTenantFixture(t)
+	ts := f.store.Tenant(f.a)
+	stamp := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	jobs := map[string]string{}
+	for _, name := range []string{"recovered", "recovered-incomplete", "unrecovered", "failed-again", "outside-cycle", "other-unit"} {
+		record, err := ts.CreateJob(ctx, testJob(name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		jobs[name] = record.ID
+	}
+	jobs["unit-b"] = f.jobB
+	scan := func(id, job, status, cycle, cycleStatus string, finished time.Time) model.Scan {
+		scan := model.Scan{ID: id, JobID: jobs[job], Job: job, StartedAt: finished.Add(-time.Hour), FinishedAt: finished, Status: status, CycleID: cycle, CycleStatus: cycleStatus, Resumable: cycle != ""}
+		if status == "failed" {
+			scan.Error = model.ScanFinalizationFailureMessage
+		}
+		return scan
+	}
+	later := stamp.Add(time.Minute)
+	for _, saved := range []model.Scan{
+		scan("recovered-fallback", "recovered", "failed", "cycle-recovered", "completed", later),
+		scan("recovered-success", "recovered", "success", "cycle-recovered", "completed", stamp),
+		scan("incomplete-fallback", "recovered-incomplete", "failed", "cycle-incomplete", "completed", later),
+		scan("incomplete-promoted", "recovered-incomplete", "incomplete", "cycle-incomplete", "completed", stamp),
+		scan("unrecovered-older-success", "unrecovered", "success", "cycle-older", "completed", stamp.Add(-time.Hour)),
+		scan("unrecovered-fallback", "unrecovered", "failed", "cycle-unrecovered", "completed", later),
+		scan("again-fallback", "failed-again", "failed", "cycle-again", "completed", later),
+		scan("again-success", "failed-again", "success", "cycle-again", "completed", stamp),
+		scan("again-later-failure", "failed-again", "failed", "", "", later.Add(time.Minute)),
+		scan("outside-success", "outside-cycle", "success", "", "", stamp),
+		scan("outside-failure", "outside-cycle", "failed", "", "", later),
+		scan("other-unit-fallback", "other-unit", "failed", "cycle-shared", "completed", later),
+		scan("unit-b-success", "unit-b", "success", "cycle-shared", "completed", stamp),
+	} {
+		if err := f.store.System().SaveScan(ctx, saved); err != nil {
+			t.Fatalf("save %s: %v", saved.ID, err)
+		}
+	}
+
+	got, err := ts.ListJobExecutionSummaries(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for job, want := range map[string]struct{ attempt, success string }{
+		"recovered":            {"recovered-success", "recovered-success"},
+		"recovered-incomplete": {"incomplete-promoted", ""},
+		"unrecovered":          {"unrecovered-fallback", "unrecovered-older-success"},
+		"failed-again":         {"again-later-failure", "again-success"},
+		"outside-cycle":        {"outside-failure", "outside-success"},
+		"other-unit":           {"other-unit-fallback", ""},
+	} {
+		summary := got[jobs[job]]
+		var attempt, success string
+		if summary.LatestAttempt != nil {
+			attempt = summary.LatestAttempt.ID
+		}
+		if summary.LatestSuccessfulScan != nil {
+			success = summary.LatestSuccessfulScan.ID
+		}
+		if attempt != want.attempt || success != want.success {
+			t.Errorf("%s: latest attempt %q, latest success %q; want %q and %q", job, attempt, success, want.attempt, want.success)
+		}
+	}
+	if attempt := got[jobs["recovered"]].LatestAttempt; attempt == nil || attempt.Status != "success" || attempt.CycleID != "cycle-recovered" || attempt.CycleStatus != "completed" || !attempt.FinishedAt.Equal(stamp) {
+		t.Fatalf("recovered latest attempt = %+v; want the promoted scan with its cycle's finish time", attempt)
+	}
+}
+
 func TestListJobExecutionSummariesDoesNotLoadScanJSON(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -154,7 +233,28 @@ func TestListJobExecutionSummariesUsesHistoryIndex(t *testing.T) {
 	if strings.Contains(joined, "TEMP B-TREE") {
 		t.Fatalf("execution summary plan sorts into a temporary B-tree: %s", joined)
 	}
-	if reads := scanRowReads(plan, "candidate"); len(reads) != 0 {
+	if reads := scanRowReads(plan, "candidate", "promoted"); len(reads) != 0 {
 		t.Fatalf("execution summary plan reads scan rows during its indexed lookups: %q (%s)", reads, joined)
+	}
+	assertRecoveredCycleFailurePlan(t, "execution summary", plan)
+}
+
+// assertRecoveredCycleFailurePlan checks the plan of a latest-scan lookup
+// that skips a recovered cycle's fallback row (recoveredCycleFailureSQL):
+// only a failed candidate reads its own row, by rowid, for its cycle, and
+// the promotion of that cycle comes from scans_cycle_outcome.
+func assertRecoveredCycleFailurePlan(t *testing.T, label string, plan []string) {
+	t.Helper()
+	joined := strings.Join(plan, " | ")
+	if !strings.Contains(joined, "SEARCH promoted USING COVERING INDEX "+scansCycleOutcomeIndex+" ") {
+		t.Errorf("%s plan does not check the cycle's promotion in %s: %s", label, scansCycleOutcomeIndex, joined)
+	}
+	for _, step := range plan {
+		if fields := strings.Fields(step); len(fields) > 1 && fields[1] == "fallback" && step != "SEARCH fallback USING INTEGER PRIMARY KEY (rowid=?)" {
+			t.Errorf("%s plan reads the failed candidate's row other than by rowid: %q (%s)", label, step, joined)
+		}
+	}
+	if !strings.Contains(joined, "SEARCH fallback USING INTEGER PRIMARY KEY (rowid=?)") {
+		t.Errorf("%s plan does not read the failed candidate's row by rowid: %s", label, joined)
 	}
 }

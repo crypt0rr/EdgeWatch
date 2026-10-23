@@ -115,6 +115,24 @@ describe('monitor next actions', () => {
     expect(screen.queryByRole('link', { name: 'Review scan evidence →' })).not.toBeInTheDocument()
   })
 
+  it('does not call a failed attempt the latest after a later run recovered its completed cycle', () => {
+    const cycle = { cycle_id: 'cycle-1', cycle_status: 'completed', resumable: true }
+    const fallback: ScanSummary = { ...incompleteScan, ...cycle, id: 'scan-fallback', status: 'failed', error: 'scan finalization failed', finished_at: '2026-10-09T08:02:00Z' }
+    const recovered: ScanSummary = { ...incompleteScan, ...cycle, id: 'scan-recovered', status: 'success', error: '', finished_at: '2026-10-09T08:01:00Z' }
+    const view = renderActions({ scans: [fallback, recovered] })
+
+    expect(screen.queryByText(/The latest scan did not complete successfully/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Review scan evidence →' })).not.toBeInTheDocument()
+
+    // A failure that no run recovered, or a later failure, is still the latest attempt.
+    view.rerenderActions({ scans: [fallback] })
+    expect(screen.getByText(/The latest scan did not complete successfully/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Review scan evidence →' })).toHaveAttribute('href', '/jobs/job-1/scans/scan-fallback')
+    const laterFailure: ScanSummary = { ...incompleteScan, id: 'scan-later-failure', status: 'failed', finished_at: '2026-10-09T09:00:00Z' }
+    view.rerenderActions({ scans: [laterFailure, fallback, recovered] })
+    expect(screen.getByRole('link', { name: 'Review scan evidence →' })).toHaveAttribute('href', '/jobs/job-1/scans/scan-later-failure')
+  })
+
   it('treats zero positive ports as a valid active baseline and gates evidence links by permission', () => {
     const job = { ...baseJob, baseline: { status: 'complete', samples: 2, host_count: 0 } }
     const baseline = { snapshot: { units: [{ target: '192.0.2.10', protocol: 'tcp', ports: [] }] }, pagination: { limit: 10, offset: 0, total: 1, has_more: false, next_offset: null } }

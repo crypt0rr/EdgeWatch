@@ -256,9 +256,13 @@ monitors. See [Perimeter coverage](/user-guide/perimeter/#host-commands).
 Each `status` row has a `state`: `scheduled`, `paused`, `archived`,
 `unit_disabled` for an enabled job of a disabled unit, which is off the
 schedule until the unit is enabled, or `legacy` for an inactive YAML job.
-Only scheduled jobs have a `next_run`. For a unit without jobs, `status
---output json` prints `[]`, and `history --output json` prints empty `scans`
-and `events` lists for a unit without history. Commands print
+Only scheduled jobs have a `next_run`. A managed job's `last_scan_id`,
+`last_scan_status`, and `last_scan_finished` describe its latest attempt as
+the **Jobs** list shows it: a scan that recovers a completed scan cycle whose
+result an earlier attempt could not finalize replaces that failed attempt,
+and reports the cycle's earlier completion time. For a unit without jobs,
+`status --output json` prints `[]`, and `history --output json` prints empty
+`scans` and `events` lists for a unit without history. Commands print
 their result on stdout and write log lines to stderr, so `--output json` output
 can be piped straight into a JSON parser. Only the daemon logs to stdout.
 

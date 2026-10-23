@@ -178,7 +178,10 @@ lists it when it:
   settings, `max_expanded_hosts`, and `assume_alive`. Renaming a monitor or
   changing its schedule does not invalidate this proof; a successful scan
   with the current scope does;
-- has a latest attempt that failed, timed out, or was incomplete.
+- has a latest attempt that failed, timed out, or was incomplete. A scan that
+  recovers a completed cycle whose finalization failed counts as the latest
+  attempt instead of that failed attempt, although it keeps the cycle's
+  earlier completion time.
 
 The list says **Not scanned yet**, **No successful scan since** a date,
 **Schedule never fires**, **Scan cycle stalled**, **Last attempt failed**,

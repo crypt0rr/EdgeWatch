@@ -752,6 +752,30 @@ type JobExecutionSummary struct {
 	LatestSuccessfulScan *JobScanStatusSummary
 }
 
+// recoveredCycleFailureSQL matches a failed candidate scan, aliased
+// candidate, that a recovered cycle superseded: a failed row that claims its
+// cycle completed, of a cycle that has a promoted scan by the rule of
+// scanCycleHasScanQuery. When a completed cycle's finalization fails, its
+// fallback row finishes when finalization gave up, and the run that recovers
+// the cycle records the promoted scan at the cycle's own, earlier finish
+// time; ordered by finish time alone, the superseded failure would stay the
+// job's newest scan. The latest-attempt lookup of jobExecutionSummariesSQL
+// and the Investigation Inbox's newer-scan seek,
+// newestIncidentEvidenceScanIDSQL, skip such a row.
+//
+// scans_job_id_history holds the candidate's status and rowid, so a
+// candidate that did not fail never reads its scan row. The cycle columns
+// are stored after the snapshot, so a failed candidate reads its own row, by
+// rowid, and the promotion check reads only scans_cycle_outcome.
+const recoveredCycleFailureSQL = `SELECT 1 FROM scans AS fallback
+ JOIN scans AS promoted ON promoted.cycle_id=fallback.cycle_id AND promoted.cycle_status='completed' AND promoted.status IN ('success','incomplete') AND promoted.tenant_id=fallback.tenant_id
+ WHERE fallback.rowid=candidate.rowid AND fallback.tenant_id=candidate.tenant_id AND fallback.cycle_id<>'' AND fallback.cycle_status='completed'`
+
+// jobExecutionSummariesSQL selects each visible job's latest attempt and
+// latest successful scan. The latest attempt is the newest scan by finish
+// time, skipping a failed fallback row whose cycle a later run recovered and
+// promoted (recoveredCycleFailureSQL): the promoted scan supersedes it, even
+// though it records the cycle's earlier finish time.
 const jobExecutionSummariesSQL = `SELECT j.id,
  attempt.id,attempt.status,attempt.started_at,attempt.finished_at,attempt.config_hash,attempt.cycle_id,attempt.cycle_status,attempt.resumable,
  successful.id,successful.status,successful.started_at,successful.finished_at,successful.config_hash
@@ -760,6 +784,7 @@ LEFT JOIN scans AS attempt ON attempt.id=(
  SELECT candidate.id FROM scans AS candidate
  WHERE candidate.tenant_id=j.tenant_id AND candidate.job_id=j.id
  AND NOT EXISTS (SELECT 1 FROM job_history_purges AS purge WHERE purge.tenant_id=j.tenant_id AND purge.job_id=j.id)
+ AND (candidate.status<>'failed' OR NOT EXISTS (` + recoveredCycleFailureSQL + `))
  ORDER BY candidate.finished_at DESC,candidate.id DESC LIMIT 1
 ) AND attempt.tenant_id=j.tenant_id
 LEFT JOIN scans AS successful ON successful.id=(
@@ -773,7 +798,8 @@ WHERE j.tenant_id=? AND (?=1 OR j.archived=0)
 
 // ListJobExecutionSummaries returns at most one latest attempt and one latest
 // successful scan for each visible job in one tenant-scoped query. The
-// correlated lookups use the job-history index and never select scan JSON.
+// correlated lookups use the job-history index and never select scan JSON;
+// only a failed candidate reads its scan row, for its cycle.
 func (ts *TenantStore) ListJobExecutionSummaries(ctx context.Context, includeArchived bool) (map[string]JobExecutionSummary, error) {
 	if err := ts.ready(); err != nil {
 		return nil, err

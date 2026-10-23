@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
@@ -323,6 +325,88 @@ func TestJobListMonitoringFieldsArePermissionScopedAndDoNotExposeScanErrors(t *t
 	adminSuccess := adminMonitoring["latest_successful_scan"].(map[string]any)
 	if adminAttempt["scan_id"] != "private-scan-id" || adminSuccess["scan_id"] != "private-success-id" || adminMonitoring["attention_reason"] != "probe_budget_skipped" || strings.Contains(adminRaw, "private-budget-projection") || !strings.Contains(adminRaw, "private-scan-id") || !strings.Contains(adminRaw, "private-success-id") {
 		t.Fatalf("scans.read admin response = %s", adminRaw)
+	}
+}
+
+// completingCycleScanner plans a two-unit resumable cycle and completes it
+// in one attempt.
+type completingCycleScanner struct{}
+
+func (completingCycleScanner) Version(context.Context) string { return "completing-cycle" }
+func (completingCycleScanner) Scan(context.Context, config.Job) (model.Snapshot, error) {
+	return model.Snapshot{}, errors.New("ordinary scan path is not expected")
+}
+func (completingCycleScanner) Plan(context.Context, config.Job) (scanner.WorkPlan, error) {
+	target := []scanner.ResolvedTarget{{Name: "192.0.2.1", ConfiguredTarget: "192.0.2.1", Addresses: []string{"192.0.2.1"}}}
+	return scanner.WorkPlan{CreatedAt: time.Now().UTC(), Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-2"}}, Units: []scanner.WorkUnit{
+		{Sequence: 0, Protocol: "tcp", Family: 4, Targets: target, Addresses: []string{"192.0.2.1"}, Ports: "1", PortCount: 1, Probes: 1},
+		{Sequence: 1, Protocol: "tcp", Family: 4, Targets: target, Addresses: []string{"192.0.2.1"}, Ports: "2", PortCount: 1, Probes: 1},
+	}, TotalUnits: 2, TotalProbes: 2}, nil
+}
+func (completingCycleScanner) ScanWorkUnit(_ context.Context, _ config.Job, unit scanner.WorkUnit, _ scanner.ProgressReporter) (model.Snapshot, error) {
+	return model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Addresses: unit.Addresses, Ports: []model.PortState{{Port: unit.Sequence + 1, State: "open"}}}}}, nil
+}
+
+// A completed cycle whose finalization fails leaves a failed fallback row,
+// and the next run recovers the cycle with a scan that keeps the cycle's
+// earlier finish time. The Jobs list shows that recovered scan as the latest
+// attempt, without failure attention.
+func TestJobListShowsRecoveredCycleAfterFinalizationFailure(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	server.App.Scanner = completingCycleScanner{}
+	record, err := defaultTenantStore(server).CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name: "recovered-cycle", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
+		TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}, Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour),
+		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The promotion of the completed cycle fails once.
+	if _, err := db.DB.ExecContext(ctx, `CREATE TRIGGER reject_cycle_promotion BEFORE INSERT ON scans WHEN NEW.status='success' BEGIN SELECT RAISE(ABORT, 'injected finalization failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	failed, _, err := server.App.RunJobRecord(ctx, record)
+	if err == nil || failed.Status != "failed" || failed.Error != model.ScanFinalizationFailureMessage || failed.CycleStatus != "completed" {
+		t.Fatalf("first run = %+v, %v; want a finalization failure of the completed cycle", failed, err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `DROP TRIGGER reject_cycle_promotion`); err != nil {
+		t.Fatal(err)
+	}
+	recovered, _, err := server.App.RunJobRecord(ctx, record)
+	if err != nil || recovered.Status != "success" || recovered.CycleID != failed.CycleID || !recovered.FinishedAt.Before(failed.FinishedAt) {
+		t.Fatalf("recovery run = %+v, %v; want the cycle promoted at its earlier finish time (fallback row finished %s)", recovered, err, failed.FinishedAt)
+	}
+
+	const token = "recovered-cycle-admin-token"
+	now := time.Now().UTC()
+	if err := storetest.CreateSession(ctx, db, admin.UserID, digest(token), "recovered-cycle-csrf", now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil)
+	addTestSessionCookie(request, token)
+	response := httptest.NewRecorder()
+	server.api(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /jobs = %d: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Jobs []struct {
+			ID         string                   `json:"id"`
+			Monitoring jobMonitoringSummaryView `json:"monitoring"`
+		} `json:"jobs"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || len(body.Jobs) != 1 || body.Jobs[0].ID != record.ID {
+		t.Fatalf("GET /jobs payload = %s, %v", response.Body.String(), err)
+	}
+	monitoring := body.Jobs[0].Monitoring
+	if attempt := monitoring.LatestAttempt; attempt == nil || attempt.ScanID != recovered.ID || attempt.Status != "success" {
+		t.Fatalf("latest attempt = %+v; want the recovered scan %s (%s)", attempt, recovered.ID, response.Body.String())
+	}
+	if monitoring.AttentionReason != "none" {
+		t.Fatalf("attention reason = %q, want none after the recovery (%s)", monitoring.AttentionReason, response.Body.String())
 	}
 }
 

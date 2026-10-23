@@ -169,9 +169,12 @@ DNS answers, job settings, or the unit's budget can change. The job keeps its
 next scheduled time, and a later scan clears the marker when its result is
 finalized. Queued or running work supersedes an older failed or incomplete
 attempt or budget-skip marker; a later successful attempt clears that older
-failure. A progressing resumable cycle is also current work and does not add
-failure attention for its latest timed-out attempt. A stalled cycle remains
-actionable while a retry waits or runs. The
+failure. When a run recovers a completed scan cycle whose result an earlier
+attempt could not finalize, the recovered scan clears that attempt's failure
+too, although it keeps the cycle's earlier completion time; the failed attempt
+stays in scan history. A progressing resumable cycle is also current work and
+does not add failure attention for its latest timed-out attempt. A stalled
+cycle remains actionable while a retry waits or runs. The
 filter does not infer problems from elapsed time or the absence of a schedule.
 Unavailable summaries remain visible in **All jobs** and are reported as
 unavailable rather than treated as healthy or as having no scan history. When
@@ -245,7 +248,9 @@ waits in the queue and can be canceled before it starts.
 
 Only successful scans with complete coverage count toward learning. Failed,
 canceled, timed-out, and incomplete scans stay in history but do not count as
-samples or remove expected results. If learning stalls after incomplete
+samples or remove expected results. Next steps reports the latest attempt as
+the **Jobs** list does, so a scan that recovers a completed cycle replaces the
+failed attempt that could not finalize it. If learning stalls after incomplete
 coverage, open the scan evidence and correct target reachability or the saved
 scanner profile, then retry. The scan uses the job's current saved settings;
 the next scheduled run also uses the current revision. Once the configured
@@ -316,8 +321,10 @@ order. The displayed total follows the selected view and filters; the global
 active-incident count remains unfiltered. Opening an incident keeps these
 filters and its page in the URL. Its evidence panel shows the observed change,
 scan provenance, reviewer metadata, and any known observation uncertainty.
-When scan or host evidence is available, its link is labelled as opening in a
-new tab so the inbox context stays open.
+That uncertainty comes from the job's newest scan after the incident was last
+seen; a scan that recovers a completed cycle replaces the failed attempt that
+could not finalize it. When scan or host evidence is available, its link is
+labelled as opening in a new tab so the inbox context stays open.
 
 A plain-text review note is shared with other reviewers and can contain up to
 4096 UTF-8 bytes. A follow-up is an exact instant entered in the console's

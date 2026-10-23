@@ -425,8 +425,7 @@ write lock first too: `admin setup-token`, `admin reissue-setup-token`,
 progress of `scan` wait for the running daemon's write, up to the same busy
 timeout, instead of failing with `database is locked`. During service, a
 heartbeat that receives `SQLITE_BUSY` retries on the next heartbeat tick
-without counting it
-as a missed heartbeat; lease loss, `SQLITE_LOCKED`, and other database errors
+without counting it as a missed heartbeat; lease loss, `SQLITE_LOCKED`, and other database errors
 keep their existing failure behavior. A host process holding SQLite's writer
 lock for more than two minutes can still prevent a successful heartbeat long
 enough for the daemon lease to become stale. If a second daemon acquires the

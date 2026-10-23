@@ -1067,8 +1067,7 @@ as a setup token, an account recovery, a baseline approval or reset, a
 perimeter declaration, and the scan cycle progress of `scan`, also take the
 write lock first, so a running daemon delays them up to the five-second busy
 timeout instead of failing them with `database is locked`. A heartbeat that
-receives `SQLITE_BUSY`
-retries at the next tick without counting as missed; lease loss,
+receives `SQLITE_BUSY` retries at the next tick without counting as missed; lease loss,
 `SQLITE_LOCKED`, and other database errors keep their existing failure
 behavior. A host process that holds SQLite's writer lock for more than two
 minutes can still prevent a successful heartbeat long enough for the daemon

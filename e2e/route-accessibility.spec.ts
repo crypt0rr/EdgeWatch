@@ -214,6 +214,7 @@ const readErrors = [
   { path: '/scans/scan-1', api: '/api/v1/scans/scan-1/summary', heading: 'Scan unavailable', notice: 'This scan could not be loaded.' },
   { path: '/jobs/job-1', api: '/api/v1/jobs/job-1', heading: 'Job unavailable', notice: 'This job could not be loaded.' },
   { path: '/scans/scan-1/hosts/192.0.2.10', api: '/api/v1/scans/scan-1/hosts/192.0.2.10', heading: 'Host unavailable', notice: 'Host evidence could not be loaded.' },
+  { path: '/perimeter/ranges/range-1', api: '/api/v1/perimeter/seeds/range-1', heading: 'Range unavailable', notice: 'This range could not be loaded.' },
 ]
 
 test('axe audits the error notice of pages whose read failed', async ({ page }, testInfo) => {
@@ -249,6 +250,25 @@ test('axe audits a business unit whose read failed', async ({ page }, testInfo) 
   await expect(page.locator('#main-content .content').getByRole('alert')).toContainText('This business unit could not be loaded.')
   await settle(page)
   await expectAccessible(page, 'read error on /platform/units/unit-retail', 'the read error on /platform/units/unit-retail')
+})
+
+// Each empty state stands directly under its page's level-one heading.
+const emptyStates = [
+  { path: '/incidents', heading: 'No matching incidents' },
+  { path: '/jobs/job-1/baseline', heading: 'No active baseline' },
+]
+
+test('axe audits the empty investigation inbox and a job without a baseline', async ({ page }, testInfo) => {
+  test.skip(!auditedProjects.has(testInfo.project.name), 'The page states are audited at desktop, narrow-mobile, and iPhone 13 widths.')
+
+  await expectProjectDevice(page, testInfo)
+  await mockConsole(page, 'administrator', { routeAuditFixtures: true, emptyInbox: true, withoutBaseline: true })
+  for (const state of emptyStates) {
+    await page.goto(state.path)
+    await expect(page.locator('#main-content .content').getByRole('heading', { level: 2, name: state.heading, exact: true })).toBeVisible()
+    await settle(page)
+    await expectAccessible(page, `empty state on ${state.path}`, `the empty state on ${state.path}`)
+  }
 })
 
 test('axe audits a job with baseline changes that await confirmation', async ({ page }, testInfo) => {

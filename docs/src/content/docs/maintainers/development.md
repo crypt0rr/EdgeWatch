@@ -167,9 +167,9 @@ The axe audit fails on serious and critical violations, on visible link or
 button text missing from the accessible name, and on the moderate
 `heading-order`, `page-has-heading-one`, and `landmark-*` rules. Besides each
 route in its default fixture state, it audits an open dialog, a failed
-confirmation, failed page reads, pending baseline changes, a near-capacity
-scan-slot demand notice, and every step of a monitor setup that Perimeter
-prefilled. Accept a violation only with an `axeAllowances` entry in the spec
+confirmation, failed page reads, an empty investigation inbox, a job without a
+baseline, pending baseline changes, a near-capacity scan-slot demand notice,
+and every step of a monitor setup that Perimeter prefilled. Accept a violation only with an `axeAllowances` entry in the spec
 that names the rule, the audited surface, the node, and the reason; an entry
 that no longer matches a violation fails the audit.
 

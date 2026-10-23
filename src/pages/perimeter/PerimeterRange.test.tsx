@@ -283,6 +283,8 @@ describe('Perimeter range detail', () => {
     vi.mocked(getPerimeterRange).mockRejectedValue(new APIError('perimeter range not found', 'not_found', undefined, 404))
     renderDetail(administrator, 'missing')
     expect(await screen.findByRole('alert')).toHaveTextContent('This range could not be found. It may have been removed.')
+    // The page keeps its level-one heading while the range is unavailable (#1680).
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Range unavailable')
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
     expect(screen.getByRole('link', { name: '← Perimeter' })).toHaveAttribute('href', '/perimeter')
   })
@@ -293,13 +295,15 @@ describe('Perimeter range detail', () => {
     vi.mocked(getPerimeterRange).mockRejectedValue(new APIError('perimeter range not found', 'not_found', undefined, 404))
     await client.invalidateQueries({ queryKey: ['perimeter'] })
     expect(await screen.findByRole('alert')).toHaveTextContent('This range could not be found. It may have been removed.')
-    expect(screen.queryByRole('heading', { level: 1 })).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Range unavailable')
+    expect(screen.queryByRole('heading', { name: '203.0.113.0/24' })).not.toBeInTheDocument()
   })
 
   it('offers a retry when the range cannot be loaded, and keeps a loaded range when a refresh fails', async () => {
     vi.mocked(getPerimeterRange).mockRejectedValueOnce(new APIError('boom', 'internal_error', undefined, 500))
     const { client } = renderDetail()
     expect(await screen.findByRole('alert')).toHaveTextContent('This range could not be loaded.')
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Range unavailable')
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     expect(await screen.findByRole('heading', { level: 1, name: '203.0.113.0/24' })).toBeInTheDocument()
 

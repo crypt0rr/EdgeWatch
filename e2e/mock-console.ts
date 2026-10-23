@@ -54,6 +54,10 @@ export type ConsoleMockOptions = {
   pendingBaselineChanges?: boolean
   /** Serves this scheduled scan-slot demand, over the route audit's fixture, to every role that reads jobs. */
   scanSlotDemand?: Partial<ScanSlotDemand>
+  /** The unit has no active incident, so the investigation inbox shows its empty state. */
+  emptyInbox?: boolean
+  /** job-1's baseline explorer answers as the server does before a baseline completes: no data quality and no hosts. */
+  withoutBaseline?: boolean
 }
 
 const job: Job = {
@@ -533,7 +537,7 @@ function declarePerimeter(ranges: PerimeterRange[], entries: Array<{ kind?: unkn
  * unit starts without declared ranges.
  */
 export async function mockConsole(page: Page, role: ConsoleRole = 'administrator', options: ConsoleMockOptions = {}): Promise<ConsoleMockControls> {
-  const { platformTOTP = true, emptyPerimeter = false, accessibilityFixtures = false, routeAuditFixtures = false, signedOut = false, unconfigured = false, enrolmentRequired = false, pendingBaselineChanges = false } = options
+  const { platformTOTP = true, emptyPerimeter = false, accessibilityFixtures = false, routeAuditFixtures = false, signedOut = false, unconfigured = false, enrolmentRequired = false, pendingBaselineChanges = false, emptyInbox = false, withoutBaseline = false } = options
   // A platform administrator who must enrol has no TOTP while two units exist.
   const platformHasTOTP = platformTOTP && !enrolmentRequired
   const unitJob: Job = pendingBaselineChanges ? { ...job, job: { ...job.job, change_confirmations: 2 }, baseline: { ...job.baseline, pending: pendingChanges.length } } : job
@@ -557,6 +561,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     review: { status: 'needs_review', reviewer_label: null, reviewed_at: null, note: '', follow_up_at: null, revision: 0 },
     observation_uncertainty: { status: 'unknown', reason: 'no_newer_observation' },
   }]
+  if (emptyInbox) incidents = []
   let publicDashboard: any = {
     enabled: false,
     title: 'Fixture public status',
@@ -805,7 +810,12 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/jobs/job-1/scans/scan-1/hosts/192.0.2.10/rdap' && method === 'GET') { await json({ rdap: { status: 'private', address: host.address } }); return }
     if (path === '/jobs/job-1/scans/scan-1/hosts/192.0.2.10' && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, scan, data_quality: 'detailed', host, expected: host }); return }
     if (path === '/jobs/job-1/baseline' && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, revision: 1, security_hash: job.security_hash, baseline: job.baseline, snapshot: { units: [], scopes: [] }, pagination: pagination(0) }); return }
-    if (path === '/jobs/job-1/baseline/hosts' && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, source_scan: scan, data_quality: 'detailed', hosts: [host], pagination: pagination(1) }); return }
+    if (path === '/jobs/job-1/baseline/hosts' && method === 'GET') {
+      await json(withoutBaseline
+        ? { job_id: 'job-1', job: job.job.name, source_scan: null, data_quality: 'none', hosts: [], pagination: pagination(0) }
+        : { job_id: 'job-1', job: job.job.name, source_scan: scan, data_quality: 'detailed', hosts: [host], pagination: pagination(1) })
+      return
+    }
     if (path.startsWith('/jobs/job-1/baseline/hosts/') && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, source_scan: scan, data_quality: 'detailed', host, expected: host }); return }
     if (path === '/scans' && method === 'GET') { await json({ scans: activityScans, pagination: pagination(activityScans.length, 20) }); return }
     if (path === '/scans/scan-1/summary' && method === 'GET') { await json({ scan: scanSummary }); return }

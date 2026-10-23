@@ -191,7 +191,7 @@ func TestOperationalHealthAlertsAreRateLimitedPerCondition(t *testing.T) {
 			break
 		}
 	}
-	if scannerIdentityAlert == nil || scannerIdentityAlert.Current != "3 free, 4 required" {
+	if scannerIdentityAlert == nil || scannerIdentityAlert.Current != "3 reachable, 4 required" {
 		t.Errorf("scanner identity alert = %+v", scannerIdentityAlert)
 	}
 	if count := countHealthAudit(t, f.store); count != 4 {

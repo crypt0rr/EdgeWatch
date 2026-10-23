@@ -69,6 +69,12 @@ groups:
         annotations:
           summary: EdgeWatch scheduled backups are failing
           description: The scheduled backup failure count is {{ $value }}.
+      - alert: EdgeWatchScannerIdentitiesUnreachable
+        # Replace 40 with your scheduler.max_concurrent_scans.
+        expr: sum without (state) (edgewatch_scanner_identities{state=~"active|free"}) < 40
+        annotations:
+          summary: EdgeWatch scanner identities are below max_concurrent_scans
+          description: The daemon's scans can reach {{ $value }} scanner identities.
 ```
 
 The unknown-status alert clears when status becomes readable with a recorded
@@ -76,9 +82,15 @@ outcome. A failure alert remains active when that outcome still reports
 failures. Both clear after a successful backup is recorded for the configured
 directory; a directory change, a timestamp without a backup filename, or a
 missing status file does not count as recovery. The daemon's durable
-deployment alert follows the same recovery rule. Also alert on
-`edgewatch_scanner_identities{state="free"}` below your
-`scheduler.max_concurrent_scans`; deployment alerts also report a new failure
+deployment alert follows the same recovery rule.
+
+The scanner identity rule compares the identities that the daemon's scans can
+reach with `scheduler.max_concurrent_scans`: the pool's 64 less the
+`quarantined` ones and those `in_use_by_other_processes`, which `active` plus
+`free` gives. The daemon's own running scans hold the `active` leases and
+release them when they end, so do not alert on `free` alone, which falls with
+each scan a busy daemon starts. The daemon's low-identity deployment alert
+uses the same comparison, and deployment alerts also report a new failure
 transition to platform destinations. The metric names are listed in
 [the API reference](/reference/api-compatibility/#health-and-metrics). Keep
 `/metrics` off a public reverse proxy; see

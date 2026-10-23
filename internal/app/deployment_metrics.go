@@ -76,7 +76,11 @@ func (a *App) deploymentHealthObservation(ctx context.Context, now time.Time) de
 		observed.identityPoolOff = true
 		return observed
 	}
-	if sandboxStatus.IdentityPool == nil {
+	// The policy keeps the pool state that startup found. A pool that was not
+	// enforced then, as for a daemon that does not run as root, refuses every
+	// scanner launch for the daemon's life, so inspecting it would only repeat
+	// that failure with each heartbeat and /metrics refresh.
+	if sandboxStatus.IdentityPool == nil || sandboxStatus.IdentityPool.State != sandbox.StateEnforced {
 		return observed
 	}
 	inspect := a.inspectScannerIdentities
@@ -86,16 +90,30 @@ func (a *App) deploymentHealthObservation(ctx context.Context, now time.Time) de
 	inspectCtx, cancel := context.WithTimeout(ctx, scannerIdentityHealthInspectionTimeout)
 	pool, inspectErr := inspect(inspectCtx)
 	cancel()
+	a.noteScannerIdentityInspection(inspectErr)
 	if inspectErr != nil || pool == nil || pool.State != sandbox.StateEnforced {
-		if inspectErr != nil {
-			a.silenceLogger().Warn("scanner identity pool health could not be inspected", "error", inspectErr)
-		}
 		return observed
 	}
 	observed.identitiesKnown = true
 	observed.identities = pool
 	observed.identityRequired = a.Config.Scheduler.MaxConcurrent
 	return observed
+}
+
+// noteScannerIdentityInspection logs when the inspection of a pool that
+// startup enforced starts to fail and when it recovers. The heartbeat and the
+// /metrics refresh both inspect the pool, so a lasting failure is logged once
+// rather than with each of them.
+func (a *App) noteScannerIdentityInspection(err error) {
+	if err != nil {
+		if !a.scannerIdentityInspectionFailing.Swap(true) {
+			a.silenceLogger().Warn("scanner identity pool health could not be inspected", "error", err)
+		}
+		return
+	}
+	if a.scannerIdentityInspectionFailing.Swap(false) {
+		a.silenceLogger().Info("scanner identity pool health can be inspected again")
+	}
 }
 
 // DeploymentMetrics returns cached-by-caller deployment aggregates and
@@ -214,13 +232,13 @@ func (a *App) RecordDeploymentOperationalHealth(ctx context.Context, now time.Ti
 		}
 	}
 	if observed.identitiesKnown && (observed.identityPoolOff || observed.identities != nil) {
-		free, required := 0, observed.identityRequired
+		reachable, required := 0, observed.identityRequired
 		if observed.identityPoolOff {
 			required = 0
 		} else {
-			free = observed.identities.Free
+			reachable = observed.identities.Reachable()
 		}
-		recorded, err := platform.RecordScannerIdentityHealth(ctx, free, required, now)
+		recorded, err := platform.RecordScannerIdentityHealth(ctx, reachable, required, now)
 		if err != nil {
 			return queued, err
 		}

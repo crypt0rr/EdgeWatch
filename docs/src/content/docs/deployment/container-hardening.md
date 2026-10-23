@@ -228,8 +228,11 @@ docker compose exec edgewatch edgewatch health --config /etc/edgewatch/config.ya
 reports the pool state, the `per_invocation` strategy, the UID range, its
 maximum parallel capacity of 64, active and quarantined leases, identities in
 use by unleased processes, and free identities. The health command inspects
-the journal without leasing an identity and warns when free slots fall below
-`max_concurrent_scans`. If the pool is exhausted, stop other EdgeWatch
+the journal without leasing an identity and warns when the identities that
+scans can reach fall below `max_concurrent_scans`. These are the pool's 64
+less the quarantined ones and those in use by unleased processes; active
+leases count as reachable, because the daemon's running scans hold them and
+release them when they end. If the pool is exhausted, stop other EdgeWatch
 processes using the data volume and restart the container. Since concurrent
 scans can use different identities, the scanner status does not report one
 `uid`, `gid`, or
@@ -568,9 +571,16 @@ that does not run as root counts as confined by identity, and a sandbox set
 to `off` as unconfined when the daemon runs as UID 0. See
 [Notifications](/user-guide/notifications/#deployment-alerts), which also
 describes the scheduled-backup, low-identity-capacity, rollback, and
-failed-delivery alerts. A low-identity alert means the free pool is below
-`scheduler.max_concurrent_scans`; stop other EdgeWatch processes using the
-data volume or lower that limit until capacity recovers.
+failed-delivery alerts. A low-identity alert means that quarantined
+identities and identities in use by processes without a lease leave the
+daemon's scans fewer than `scheduler.max_concurrent_scans`; the leases of its
+own running scans count as reachable, so a busy daemon raises no alert.
+Restart the container once no other EdgeWatch process uses the data volume, or
+lower that limit until capacity recovers. The daemon inspects the pool with
+each heartbeat only when startup enforced it: a pool that was unavailable at
+startup, as for a daemon that does not run as root, is not inspected again,
+and an inspection that starts to fail is logged once, not with each
+heartbeat.
 `scanner.sandbox: required` and `notifications.sandbox: required` remain the
 way to refuse to run degraded.
 

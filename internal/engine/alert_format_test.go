@@ -167,9 +167,10 @@ func TestFormatHealthAlerts(t *testing.T) {
 		},
 		{
 			name:  "low scanner identity capacity",
-			alert: &model.AlertDetail{Kind: model.HealthAlertScannerIdentitiesLow, Current: "2 free, 4 required"},
+			alert: &model.AlertDetail{Kind: model.HealthAlertScannerIdentitiesLow, Current: "2 reachable, 4 required"},
 			want: "⚠️ EdgeWatch deployment alert: scanner identity capacity is below max_concurrent_scans\n" +
-				"Pool: 2 free, 4 required\nStop other EdgeWatch processes using the data volume or reduce max_concurrent_scans; see the container hardening guide.",
+				"Pool: 2 reachable, 4 required\nQuarantined identities or processes without a lease hold the rest of the pool; the daemon's own running scans do not count. " +
+				"Restart the container once no other EdgeWatch process uses the data volume, or reduce max_concurrent_scans; see the container hardening guide.",
 		},
 		{
 			name:  "unknown",

@@ -186,11 +186,11 @@ Schema 77 adds four columns to the platform's existing deployment-alert
 state: the last reported scheduled-backup failure condition and its alert
 time, plus the last reported scanner identity-capacity condition and its alert
 time. The daemon uses them to report a new failure transition at most once an
-hour, even across restarts. A successful backup or a pool that regains enough
-free identities clears the condition without sending a recovery alert. The
-columns default to healthy and empty; the migration changes no existing alert
-or delivery. An older release refuses the upgraded database; restore the
-matching pre-upgrade `./data` backup to roll back.
+hour, even across restarts. A successful backup or a pool whose scans can
+reach enough identities again clears the condition without sending a recovery
+alert. The columns default to healthy and empty; the migration changes no
+existing alert or delivery. An older release refuses the upgraded database;
+restore the matching pre-upgrade `./data` backup to roll back.
 
 ## Schema 78
 

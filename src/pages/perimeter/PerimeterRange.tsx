@@ -162,6 +162,9 @@ function ModeSuggestions({ mode, detail, suggestions, coalescedSuggestions, canW
   const perMonitor = detail.addresses_per_monitor[mode]
   const needed = detail.monitors_needed[mode]
   const coalescedNeeded = detail.coalesced_monitors_needed[mode]
+  // The report compares only a complete coalesced plan with the gaps-only
+  // one; a plan above 16 monitors is withheld uncompared.
+  const coalescedTruncated = detail.coalesced_suggestions_truncated[mode]
   const headingID = `perimeter-mode-${mode}`
   return <section className="perimeter-mode" aria-labelledby={`${headingID}-title`}>
     <div className="perimeter-mode-heading">
@@ -176,8 +179,8 @@ function ModeSuggestions({ mode, detail, suggestions, coalescedSuggestions, canW
         : <>
           <SuggestionPlan title="Gaps-only option" id={`${headingID}-gaps`} mode={mode} detail={detail} needed={needed} truncated={detail.suggestions_truncated[mode]} suggestions={suggestions} canWriteJobs={canWriteJobs} />
           {coalescedNeeded > 0 && <div className="perimeter-suggestion-alternative">
-            <p className="muted">Targets may include already-covered addresses to reduce fragmentation. Each target is at most a /24 (256 addresses), each monitor has at most 16 targets, and the probe budget still applies. The probe estimate includes repeated addresses.</p>
-            <SuggestionPlan title="Coalesced alternative" id={`${headingID}-coalesced`} mode={mode} detail={detail} needed={coalescedNeeded} truncated={detail.coalesced_suggestions_truncated[mode]} suggestions={coalescedSuggestions} canWriteJobs={canWriteJobs} coalesced />
+            <p className="muted">{!coalescedTruncated && 'Offered because it needs fewer targets in total, or fewer monitors, than the gaps-only option. '}Targets may include already-covered addresses. Each target is at most a /24 (256 addresses), each monitor has at most 16 targets, and the probe budget still applies. The probe estimate includes repeated addresses.</p>
+            <SuggestionPlan title="Coalesced alternative" id={`${headingID}-coalesced`} mode={mode} detail={detail} needed={coalescedNeeded} truncated={coalescedTruncated} suggestions={coalescedSuggestions} canWriteJobs={canWriteJobs} coalesced />
           </div>}
         </>}
   </section>
@@ -187,7 +190,7 @@ function SuggestionPlan({ title, id, mode, detail, needed, truncated, suggestion
   const navigate = useNavigate()
   const perMonitor = detail.addresses_per_monitor[mode]
   let body
-  if (truncated && coalesced) body = <p className="perimeter-needs"><strong>Needs more than {maxListedSuggestions} monitors</strong> <span className="muted">The complete coalesced option is too large to list. Use the gaps-only option or declare smaller ranges.</span></p>
+  if (truncated && coalesced) body = <p className="perimeter-needs"><strong>Needs more than {maxListedSuggestions} monitors</strong> <span className="muted">The complete coalesced option is too large to list or to compare with the gaps-only option. Use the gaps-only option or declare smaller ranges.</span></p>
   else if (needed > maxListedSuggestions) body = <p className="perimeter-needs"><strong>Needs {needed.toLocaleString()} monitors</strong> <span className="muted">of up to {countLabel(perMonitor, 'address', 'addresses')} each. That is too many to list here: declare smaller ranges to work through this one in parts, or ask a platform administrator about the unit’s probe budget.</span></p>
   else body = <ol className="perimeter-suggestion-list">{suggestions.map((suggestion, index) => {
     const descriptionID = `${id}-${index}`

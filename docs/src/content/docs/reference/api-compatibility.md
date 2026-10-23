@@ -645,9 +645,9 @@ least that many.
 | `addresses_per_monitor`, `monitors_needed` | `PerimeterModeCounts` with a count for each suggestion mode: `full_tcp`, `selected_tcp`, and `udp`. |
 | `suggestions` | Up to 64 gaps-only `PerimeterSuggestion` objects per mode: `mode`, `targets`, `addresses`, `already_covered_addresses` (0), `estimated_probes`, and `protocol`. Full TCP suggestions may also include `minimum_duration_seconds`. |
 | `suggestions_truncated`, `budget_too_low` | `PerimeterModeFlags` with a flag for each mode. |
-| `coalesced_monitors_needed` | `PerimeterModeCounts` for the bounded coalesced alternative. When `coalesced_suggestions_truncated` is true, `17` means 17 or more monitors. It is 0 when there is no alternative that bridges covered space. |
-| `coalesced_suggestions` | A complete alternative plan, when one can bridge already-covered space within the limits below. Each `PerimeterSuggestion` gives the repeated address count in `already_covered_addresses`. |
-| `coalesced_suggestions_truncated` | `PerimeterModeFlags`; true when the complete coalesced plan needs more than 16 monitors and is withheld. |
+| `coalesced_monitors_needed` | `PerimeterModeCounts` for the bounded coalesced alternative. When `coalesced_suggestions_truncated` is true, `17` means 17 or more monitors. It is 0 when the mode has no alternative: none bridges covered space, or the complete one does not improve on the mode's gaps-only plan. |
+| `coalesced_suggestions` | A complete alternative plan per mode, when one can bridge already-covered space within the limits below and improves on the mode's gaps-only plan, as described below. Each `PerimeterSuggestion` gives the repeated address count in `already_covered_addresses`. |
+| `coalesced_suggestions_truncated` | `PerimeterModeFlags`; true when the complete coalesced plan needs more than 16 monitors and is withheld without being compared with the gaps-only plan. |
 
 Suggestions fill uncovered IPv4 space, of owned and authorized ranges alike.
 An IPv6 range gets none, and its `monitors_needed` are 0, while its
@@ -681,13 +681,17 @@ lower-bound estimate based on the built-in Naabu probe rate; it excludes host
 response time, retries, and Nmap confirmation. Other suggestion modes omit
 this field, and the estimate is not a scan-duration promise.
 
-When packing the gaps-only option would leave fragmentation that can be
-reduced, `coalesced_suggestions` gives a second, complete plan that may also
-scan already-covered addresses. Each coalesced target is no larger than a
+`coalesced_suggestions` can give each mode a second, complete plan that may
+also scan already-covered addresses. A mode has one only when it improves on
+that mode's gaps-only plan: its monitors hold fewer targets in total than the
+gaps-only monitors do, or it needs fewer monitors than the mode's
+`monitors_needed`. Otherwise the mode has no coalesced suggestions and its
+`coalesced_monitors_needed` is 0. Each coalesced target is no larger than a
 `/24` (256 IPv4 addresses), further limited by the mode's probe budget; each
 monitor has at most 16 target CIDRs; and the complete plan has at most 16
-monitors per mode. If it needs more, the array is empty, the truncation flag
-is true, and `coalesced_monitors_needed` is 17 to mean 17 or more. Thus a
+monitors per mode. If it needs more, it is not compared with the gaps-only
+plan: the array is empty, the truncation flag is true, and
+`coalesced_monitors_needed` is 17 to mean 17 or more. Thus a
 target may repeat up to 255 already-covered addresses when only one address
 in its `/24` is uncovered, but probe budgets still limit the whole monitor.
 `already_covered_addresses` and `estimated_probes` include that repeated

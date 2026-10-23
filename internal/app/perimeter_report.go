@@ -257,9 +257,12 @@ type PerimeterRangeDetail struct {
 	Suggestions          []PerimeterSuggestion `json:"suggestions"`
 	SuggestionsTruncated PerimeterModeFlags    `json:"suggestions_truncated"`
 	// CoalescedSuggestions is a complete alternative that may include already
-	// covered, but never excluded, addresses. It is withheld when more than
-	// 16 monitors would be needed; then CoalescedSuggestionsTruncated is true
-	// and CoalescedMonitorsNeeded is 17 (meaning 17 or more).
+	// covered, but never excluded, addresses. A mode has one only when it
+	// improves on that mode's gaps-only plan, as perimeterCoalescedImproves
+	// decides; otherwise the mode has none and its CoalescedMonitorsNeeded is
+	// 0. It is withheld when more than 16 monitors would be needed; then
+	// CoalescedSuggestionsTruncated is true and CoalescedMonitorsNeeded is 17
+	// (meaning 17 or more).
 	CoalescedMonitorsNeeded       PerimeterModeCounts   `json:"coalesced_monitors_needed"`
 	CoalescedSuggestions          []PerimeterSuggestion `json:"coalesced_suggestions"`
 	CoalescedSuggestionsTruncated PerimeterModeFlags    `json:"coalesced_suggestions_truncated"`
@@ -498,6 +501,9 @@ func (a *App) PerimeterRangeDetail(ctx context.Context, ts *store.TenantStore, i
 			detail.Suggestions = append(detail.Suggestions, suggestion)
 		}
 		coalescedSets, coalescedCount, coalescedCut := perimeterCoalescedSuggestionSets(base, gaps[preset.bucket], size)
+		if !coalescedCut && !perimeterCoalescedImproves(coalescedSets, sets, total) {
+			coalescedSets, coalescedCount = nil, 0
+		}
 		coalescedNeeded[index], coalescedTruncated[index] = coalescedCount, coalescedCut
 		for _, set := range coalescedSets {
 			suggestion, err := perimeterSuggestion(preset, set.targets)
@@ -1005,6 +1011,30 @@ func perimeterCoalescedPrefixFitsBase(a, b netip.Addr, minPrefixBits int, base [
 func perimeterContains(merged []addrspace.Range, r addrspace.Range) bool {
 	index := sort.Search(len(merged), func(index int) bool { return merged[index].To.Compare(r.From) >= 0 })
 	return index < len(merged) && merged[index].From.Compare(r.From) <= 0 && merged[index].To.Compare(r.To) >= 0
+}
+
+// perimeterCoalescedImproves reports whether a complete coalesced plan
+// improves on the gaps-only plan of the same mode, whose first sets Pack
+// returned and which needs gapsOnlyMonitors monitors in all. It improves when
+// it needs fewer monitors, or fewer targets in total across its monitors. An
+// empty plan never improves.
+func perimeterCoalescedImproves(coalesced []perimeterCoalescedSet, gapsOnly [][]netip.Prefix, gapsOnlyMonitors int) bool {
+	if len(coalesced) == 0 {
+		return false
+	}
+	if len(coalesced) < gapsOnlyMonitors {
+		return true
+	}
+	// The gaps-only plan needs no more monitors than this plan, which has at
+	// most 16, and Pack lists up to 64 sets, so gapsOnly is the whole plan.
+	coalescedTargets, gapsOnlyTargets := 0, 0
+	for _, set := range coalesced {
+		coalescedTargets += len(set.targets)
+	}
+	for _, set := range gapsOnly {
+		gapsOnlyTargets += len(set)
+	}
+	return coalescedTargets < gapsOnlyTargets
 }
 
 // perimeterBlocks returns the fewest aligned CIDRs that hold gaps, which is

@@ -13,9 +13,10 @@ answers three questions:
 3. Which monitored IP and CIDR targets lie outside the declared space?
 
 For uncovered IPv4 space, the page suggests gaps-only monitors sized to the
-unit's probe budget. When combining gaps can reduce fragmentation, it also
-offers a bounded coalesced alternative that may rescan already-covered
-addresses. **Create monitor** opens the guided monitor setup with the chosen
+unit's probe budget. It also offers a bounded coalesced alternative that may
+rescan already-covered addresses, but only when that alternative needs fewer
+targets in total, or fewer monitors, than the gaps-only suggestions.
+**Create monitor** opens the guided monitor setup with the chosen
 suggestion filled in. You still review and save every monitor yourself.
 
 Apart from declaring and removing ranges, the page only reads: it sends no
@@ -295,7 +296,7 @@ A range's detail shows:
   addresses left out: at most 256 blocks per bucket, with their total;
 - how many addresses one suggested monitor of each mode holds, and the
   gaps-only suggestions for the range's uncovered IPv4 space, plus a bounded
-  coalesced alternative when it can bridge already-covered space.
+  coalesced alternative when it needs fewer targets or fewer monitors.
 
 ## Suggested monitors
 
@@ -317,12 +318,24 @@ counts those repeated addresses and includes them in the estimated probes.
 The job API still validates every created monitor against the current
 exclusions and probe budgets.
 
+A mode shows the coalesced alternative only when it improves on that mode's
+gaps-only option: it needs fewer targets in total, counted across all its
+monitors, or fewer monitors. Otherwise the mode shows no alternative,
+because it would only rescan covered addresses. For example, at the default
+budgets, when the lower half of a `/24` is covered, the gaps-only option is a
+single `/25` target, and a coalesced `/24` would be a single target too, so
+the page shows no alternative. When only the lowest `/26` is covered, one
+`/24` replaces the gaps-only `/26` and `/25` targets, and the page shows it.
+Fewer targets can still mean more monitors or more probes, so compare the
+two options before you choose.
+
 The coalesced alternative is deliberately bounded: each target is at most a
 `/24` (256 addresses), or a smaller power-of-two block when the mode's probe
 budget is lower; each suggested monitor has at most 16 CIDR targets; and the
 report returns a complete plan only when it needs at most 16 monitors per
 mode. If a complete plan needs more, the page says **Needs more than 16
-monitors** and withholds it. The normal gaps-only option remains available.
+monitors** and withholds it without comparing it with the gaps-only option.
+The normal gaps-only option remains available.
 These limits keep each repeated block small and each plan reviewable, while
 the probe budget can make blocks narrower still. A `/24` can repeat up to
 255 already-covered addresses when only one address in it is uncovered.

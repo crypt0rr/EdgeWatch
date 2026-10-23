@@ -293,6 +293,52 @@ func checkPerimeterCoalescedPlan(t *testing.T, name string, base, gaps []addrspa
 	}
 }
 
+// The coalesced plan is offered only when it needs fewer monitors or fewer
+// targets in total than the gaps-only plan.
+func TestPerimeterCoalescedImprovesOnlyWithFewerMonitorsOrTargets(t *testing.T) {
+	t.Parallel()
+	prefix := netip.MustParsePrefix
+	coalesced := func(targetsPerMonitor ...int) []perimeterCoalescedSet {
+		var sets []perimeterCoalescedSet
+		for _, count := range targetsPerMonitor {
+			sets = append(sets, perimeterCoalescedSet{targets: make([]netip.Prefix, count)})
+		}
+		return sets
+	}
+	gapsOnly := func(targetsPerMonitor ...int) [][]netip.Prefix {
+		var sets [][]netip.Prefix
+		for _, count := range targetsPerMonitor {
+			sets = append(sets, make([]netip.Prefix, count))
+		}
+		return sets
+	}
+	tests := []struct {
+		name             string
+		coalesced        []perimeterCoalescedSet
+		gapsOnly         [][]netip.Prefix
+		gapsOnlyMonitors int
+		want             bool
+	}{
+		{name: "no coalesced plan", gapsOnly: gapsOnly(2), gapsOnlyMonitors: 1},
+		{name: "same targets and monitors", coalesced: []perimeterCoalescedSet{{targets: []netip.Prefix{prefix("10.80.0.0/24")}, alreadyCovered: 128}}, gapsOnly: [][]netip.Prefix{{prefix("10.80.0.128/25")}}, gapsOnlyMonitors: 1},
+		{name: "fewer targets in one monitor", coalesced: coalesced(1), gapsOnly: gapsOnly(2), gapsOnlyMonitors: 1, want: true},
+		{name: "fewer targets across monitors", coalesced: coalesced(16, 16), gapsOnly: gapsOnly(30, 3), gapsOnlyMonitors: 2, want: true},
+		{name: "fewer targets in more monitors", coalesced: coalesced(16, 16, 16), gapsOnly: gapsOnly(40, 40), gapsOnlyMonitors: 2, want: true},
+		{name: "more targets in fewer monitors", coalesced: coalesced(16), gapsOnly: gapsOnly(4, 4), gapsOnlyMonitors: 2, want: true},
+		{name: "more targets in as many monitors", coalesced: coalesced(16, 16), gapsOnly: gapsOnly(8, 8), gapsOnlyMonitors: 2},
+		{name: "same targets in more monitors", coalesced: coalesced(8, 8), gapsOnly: gapsOnly(16), gapsOnlyMonitors: 1},
+		{name: "gaps-only plan beyond its listed sets", coalesced: coalesced(16), gapsOnly: gapsOnly(1, 1), gapsOnlyMonitors: 65, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := perimeterCoalescedImproves(test.coalesced, test.gapsOnly, test.gapsOnlyMonitors); got != test.want {
+				t.Fatalf("improves = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 // alternatingPerimeterGaps returns a /16 as base and its odd addresses as
 // gaps: 32,768 single-address gaps, each next to a covered address.
 func alternatingPerimeterGaps() (base, gaps []addrspace.Range) {

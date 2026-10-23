@@ -421,10 +421,11 @@ through SQLite's busy timeout instead of causing a failed read-to-write
 upgrade. A host command's write that reads the current state first takes the
 write lock first too: `admin setup-token`, `admin reissue-setup-token`,
 `admin platform-setup-token`, `admin reset-password`, `admin disable-totp`,
-`baseline approve`, `baseline reset`, and the scan cycle progress of `scan`
-wait for the running daemon's write, up to the same busy timeout, instead of
-failing with `database is locked`. During service, a heartbeat that
-receives `SQLITE_BUSY` retries on the next heartbeat tick without counting it
+`baseline approve`, `baseline reset`, `perimeter declare`, and the scan cycle
+progress of `scan` wait for the running daemon's write, up to the same busy
+timeout, instead of failing with `database is locked`. During service, a
+heartbeat that receives `SQLITE_BUSY` retries on the next heartbeat tick
+without counting it
 as a missed heartbeat; lease loss, `SQLITE_LOCKED`, and other database errors
 keep their existing failure behavior. A host process holding SQLite's writer
 lock for more than two minutes can still prevent a successful heartbeat long

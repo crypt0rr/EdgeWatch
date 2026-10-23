@@ -87,7 +87,7 @@ export function MonitorNextActions({
     : job.baseline.status === 'stalled'
       ? 'Retry baseline scan'
       : collectedSamples === 0 ? 'Run first sample' : 'Run another sample'
-  const latestAttempt = scans?.[0]
+  const latestAttempt = scans ? latestAttemptOf(scans) : undefined
   const latestFailedAttempt = latestAttempt && latestAttempt.status !== 'success' ? latestAttempt : undefined
   const zeroPositivePorts = canReadBaseline
     && !baselineLoading
@@ -202,6 +202,20 @@ export function MonitorNextActions({
       )}
     </section>
   )
+}
+
+/**
+ * The newest scan of a newest-first page that a later run did not supersede,
+ * as the Jobs list chooses a job's latest attempt. When a completed cycle's
+ * result could not be finalized, its failed attempt stays in history with a
+ * later finish time than the scan that recovers the cycle, which keeps the
+ * cycle's own completion time; that recovered scan is the latest attempt.
+ */
+function latestAttemptOf(scans: ScanSummary[]) {
+  const promotedCycles = new Set(scans
+    .filter((scan) => scan.cycle_id && scan.cycle_status === 'completed' && (scan.status === 'success' || scan.status === 'incomplete'))
+    .map((scan) => scan.cycle_id))
+  return scans.find((scan) => !(scan.status === 'failed' && scan.cycle_id && scan.cycle_status === 'completed' && promotedCycles.has(scan.cycle_id)))
 }
 
 function hasPositivePorts(units: Unit[]) {

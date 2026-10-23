@@ -752,14 +752,16 @@ type JobExecutionSummary struct {
 	LatestSuccessfulScan *JobScanStatusSummary
 }
 
-// recoveredCycleFailureSQL matches a failed candidate scan of
-// jobExecutionSummariesSQL that a recovered cycle superseded: a failed row
-// that claims its cycle completed, of a cycle that has a promoted scan by the
-// rule of scanCycleHasScanQuery. When a completed cycle's finalization fails,
-// its fallback row finishes when finalization gave up, and the run that
-// recovers the cycle records the promoted scan at the cycle's own, earlier
-// finish time; ordered by finish time alone, the superseded failure would
-// stay the job's latest attempt.
+// recoveredCycleFailureSQL matches a failed candidate scan, aliased
+// candidate, that a recovered cycle superseded: a failed row that claims its
+// cycle completed, of a cycle that has a promoted scan by the rule of
+// scanCycleHasScanQuery. When a completed cycle's finalization fails, its
+// fallback row finishes when finalization gave up, and the run that recovers
+// the cycle records the promoted scan at the cycle's own, earlier finish
+// time; ordered by finish time alone, the superseded failure would stay the
+// job's newest scan. The latest-attempt lookup of jobExecutionSummariesSQL
+// and the Investigation Inbox's newer-scan seek,
+// newestIncidentEvidenceScanIDSQL, skip such a row.
 //
 // scans_job_id_history holds the candidate's status and rowid, so a
 // candidate that did not fail never reads its scan row. The cycle columns

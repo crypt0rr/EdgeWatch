@@ -457,6 +457,115 @@ func insertIncidentEvidenceScan(t *testing.T, ctx context.Context, s *Store, job
 	}
 }
 
+// When a completed cycle's finalization fails, the run saves a failed
+// fallback row that claims the cycle completed, and the run that recovers
+// the cycle saves the promoted scan at the cycle's own finish time, before
+// the fallback row. The inbox takes the recovered scan, not the failure it
+// superseded, as an incident's newer evidence, and an incident that the
+// recovered scan last saw has no newer evidence. A failure that no run
+// recovered, or whose cycle ID another unit promoted, stays the newer
+// evidence.
+func TestIncidentInboxSkipsRecoveredCycleFailures(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newTenantFixture(t)
+	ts := f.store.Tenant(f.a)
+	jobB, err := f.store.Tenant(f.b).GetJob(ctx, f.jobB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastSeen := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	scope := []model.Scope{{Target: "edge.example", Protocol: "tcp", Ports: "443"}}
+	down := model.Snapshot{
+		Scopes:     scope,
+		Hosts:      []model.HostObservation{{Address: "192.0.2.44", SourceTargets: []string{"edge.example"}, Status: "unreachable", StatusReason: "no-response", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unreachable", DiscoveryState: "down"}}}},
+		HostStates: []model.HostState{{Address: "192.0.2.44", State: "down"}},
+	}
+	cycleScan := func(job JobRecord, id, cycleID string, finished time.Time, status, comparison string, snapshot model.Snapshot) {
+		t.Helper()
+		insertIncidentEvidenceScan(t, ctx, f.store, job, id, finished, status, comparison, snapshot)
+		if _, err := f.store.DB.ExecContext(ctx, `UPDATE scans SET cycle_id=?,cycle_status='completed',resumable=1 WHERE id=?`, cycleID, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	type want struct {
+		status IncidentObservationStatus
+		reason IncidentObservationReason
+		scanID string
+	}
+	for _, test := range []struct {
+		name  string
+		seen  time.Time
+		scans func(JobRecord)
+		want  want
+	}{
+		{
+			name: "recovered after the last observation",
+			seen: lastSeen,
+			scans: func(job JobRecord) {
+				cycleScan(job, "recovered-success", "cycle-recovered", lastSeen.Add(time.Second), "success", model.ScanComparisonCompared, down)
+				cycleScan(job, "recovered-fallback", "cycle-recovered", lastSeen.Add(2*time.Second), "failed", model.ScanComparisonNotCompared, model.Snapshot{})
+			},
+			want: want{IncidentObservationIncomplete, IncidentReasonTargetHostDown, "recovered-success"},
+		},
+		{
+			name: "recovered as an incomplete scan",
+			seen: lastSeen,
+			scans: func(job JobRecord) {
+				cycleScan(job, "promoted-incomplete", "cycle-incomplete", lastSeen.Add(time.Second), "incomplete", model.ScanComparisonNotCompared, model.Snapshot{})
+				cycleScan(job, "incomplete-fallback", "cycle-incomplete", lastSeen.Add(2*time.Second), "failed", model.ScanComparisonNotCompared, model.Snapshot{})
+			},
+			want: want{IncidentObservationIncomplete, IncidentReasonLatestScanIncomplete, "promoted-incomplete"},
+		},
+		{
+			name: "last observed by the recovered scan",
+			seen: lastSeen.Add(time.Second),
+			scans: func(job JobRecord) {
+				cycleScan(job, "observing-success", "cycle-observing", lastSeen.Add(time.Second), "success", model.ScanComparisonCompared, down)
+				cycleScan(job, "observing-fallback", "cycle-observing", lastSeen.Add(2*time.Second), "failed", model.ScanComparisonNotCompared, model.Snapshot{})
+			},
+			want: want{IncidentObservationUnknown, IncidentReasonNoNewerObservation, ""},
+		},
+		{
+			name: "unrecovered",
+			seen: lastSeen,
+			scans: func(job JobRecord) {
+				cycleScan(job, "unrecovered-fallback", "cycle-unrecovered", lastSeen.Add(2*time.Second), "failed", model.ScanComparisonNotCompared, model.Snapshot{})
+			},
+			want: want{IncidentObservationIncomplete, IncidentReasonLatestScanFailed, "unrecovered-fallback"},
+		},
+		{
+			name: "promoted in another unit",
+			seen: lastSeen,
+			scans: func(job JobRecord) {
+				cycleScan(jobB, "unit-b-success", "cycle-shared", lastSeen.Add(time.Second), "success", model.ScanComparisonCompared, down)
+				cycleScan(job, "shared-fallback", "cycle-shared", lastSeen.Add(2*time.Second), "failed", model.ScanComparisonNotCompared, model.Snapshot{})
+			},
+			want: want{IncidentObservationIncomplete, IncidentReasonLatestScanFailed, "shared-fallback"},
+		},
+	} {
+		job, err := ts.CreateJob(ctx, testJob("inbox-"+strings.ReplaceAll(test.name, " ", "-")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		test.scans(job)
+		incident := model.Incident{
+			Change:   model.Change{Key: "edge", Kind: "port-address", Severity: "critical", Target: "edge.example", Address: "192.0.2.44", Protocol: "tcp", Port: 443, Old: "closed", New: "open"},
+			OpenedAt: lastSeen.Add(-time.Hour), LastSeenAt: test.seen,
+		}
+		if _, err := f.store.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+			state.Incidents[incident.Change.Key] = incident
+			return nil, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got := findIncidentInboxItem(t, ts, ctx, job.ID, incident.Change.Key, lastSeen.Add(time.Hour)).ObservationUncertainty
+		if got.Status != test.want.status || got.Reason != test.want.reason || got.ScanID != test.want.scanID {
+			t.Errorf("%s: observation uncertainty = %+v; want status %s, reason %s, scan %q", test.name, got, test.want.status, test.want.reason, test.want.scanID)
+		}
+	}
+}
+
 func seedLargeIncidentInboxPage(t *testing.T, incidentCount, hostCount, paddingBytes int) (*Store, *TenantStore, JobRecord, time.Time, int) {
 	t.Helper()
 	ctx := context.Background()

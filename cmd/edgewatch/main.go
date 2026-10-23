@@ -1258,6 +1258,14 @@ func status(ctx context.Context, ts *store.TenantStore, unitState string, cfg *c
 	if err != nil {
 		return err
 	}
+	// A managed job's last scan is its latest attempt as the Jobs list
+	// shows it: a scan that recovers a completed cycle supersedes the failed
+	// attempt that could not finalize the cycle, although it keeps the
+	// cycle's earlier finish time.
+	executions, err := ts.ListJobExecutionSummaries(ctx, true)
+	if err != nil {
+		return err
+	}
 	managedNames := map[string]bool{}
 	for _, record := range managed {
 		managedNames[record.Job.Name] = true
@@ -1275,11 +1283,9 @@ func status(ctx context.Context, ts *store.TenantStore, unitState string, cfg *c
 			progress = fmt.Sprintf("updating %d/%d", state.CandidateCount, record.Job.Baseline.Samples)
 		}
 		entry := row{Name: record.Job.Name, State: managedJobState(record, unitState), Schedule: record.Job.Schedule, Timezone: record.Job.Timezone, BaselineScanID: state.BaselineScanID, BaselineProgress: progress, ActiveIncidents: len(state.Incidents), ConsecutiveFailures: state.ConsecutiveFailures, FailedDeliveries: failedDeliveries}
-		if scans, listErr := ts.ListJobScans(ctx, record.ID, 1); listErr != nil {
-			return listErr
-		} else if len(scans) == 1 {
-			entry.LastScanID, entry.LastScanStatus = scans[0].ID, scans[0].Status
-			entry.LastScanFinished = statusTime(scans[0].FinishedAt, display)
+		if attempt := executions[record.ID].LatestAttempt; attempt != nil {
+			entry.LastScanID, entry.LastScanStatus = attempt.ID, attempt.Status
+			entry.LastScanFinished = statusTime(attempt.FinishedAt, display)
 		}
 		// The daemon schedules only the enabled, non-archived managed jobs of
 		// an active unit.

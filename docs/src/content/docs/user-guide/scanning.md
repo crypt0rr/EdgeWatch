@@ -109,9 +109,11 @@ not counted as a finalization failure, and a restart between cycle completion
 and scan-history insertion still recovers the completed result. Recovery keeps
 the cycle's original completion time in scan history and the job silence
 watchdog, rather than treating the recovery attempt as a new successful scan.
-The recovered scan is still the job's latest attempt in the Jobs list and the
-Perimeter report: it supersedes the failed attempt whose result could not be
-finalized, which stays in scan history with its later time.
+The recovered scan is still the job's latest attempt in the Jobs list, the
+Perimeter report, the job page's Next steps card, and `edgewatch status`, and
+the Investigation Inbox reads it as an incident's newer evidence: it
+supersedes the failed attempt whose result could not be finalized, which stays
+in scan history with its later time.
 A paused resumable cycle with recent completed work inside its resume window is
 reported as in progress; the watchdog treats that progress as activity, and
 the latest timed-out attempt does not count as a failure while the saved work

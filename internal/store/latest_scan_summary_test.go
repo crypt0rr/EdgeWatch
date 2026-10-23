@@ -236,17 +236,25 @@ func TestListJobExecutionSummariesUsesHistoryIndex(t *testing.T) {
 	if reads := scanRowReads(plan, "candidate", "promoted"); len(reads) != 0 {
 		t.Fatalf("execution summary plan reads scan rows during its indexed lookups: %q (%s)", reads, joined)
 	}
-	// Only a failed candidate reads its own row, by rowid, for its cycle,
-	// and the promotion of that cycle comes from scans_cycle_outcome.
+	assertRecoveredCycleFailurePlan(t, "execution summary", plan)
+}
+
+// assertRecoveredCycleFailurePlan checks the plan of a latest-scan lookup
+// that skips a recovered cycle's fallback row (recoveredCycleFailureSQL):
+// only a failed candidate reads its own row, by rowid, for its cycle, and
+// the promotion of that cycle comes from scans_cycle_outcome.
+func assertRecoveredCycleFailurePlan(t *testing.T, label string, plan []string) {
+	t.Helper()
+	joined := strings.Join(plan, " | ")
 	if !strings.Contains(joined, "SEARCH promoted USING COVERING INDEX "+scansCycleOutcomeIndex+" ") {
-		t.Fatalf("execution summary plan does not check the cycle's promotion in %s: %s", scansCycleOutcomeIndex, joined)
+		t.Errorf("%s plan does not check the cycle's promotion in %s: %s", label, scansCycleOutcomeIndex, joined)
 	}
 	for _, step := range plan {
 		if fields := strings.Fields(step); len(fields) > 1 && fields[1] == "fallback" && step != "SEARCH fallback USING INTEGER PRIMARY KEY (rowid=?)" {
-			t.Fatalf("execution summary plan reads the failed candidate's row other than by rowid: %q (%s)", step, joined)
+			t.Errorf("%s plan reads the failed candidate's row other than by rowid: %q (%s)", label, step, joined)
 		}
 	}
 	if !strings.Contains(joined, "SEARCH fallback USING INTEGER PRIMARY KEY (rowid=?)") {
-		t.Fatalf("execution summary plan does not read the failed candidate's row by rowid: %s", joined)
+		t.Errorf("%s plan does not read the failed candidate's row by rowid: %s", label, joined)
 	}
 }

@@ -64,9 +64,15 @@ recreated and reviewed explicitly in the console.
 
 The **Jobs** and **Perimeter** pages compare each business unit's scheduled
 scan demand with its effective scan-slot capacity, which is the lower of this
-deployment limit and the unit's own limit. See [Jobs, baselines, and
-incidents](/user-guide/jobs-baselines-incidents/) for how demand is estimated
-and when the warning appears.
+deployment limit and the unit's own limit. That capacity is shared, not
+reserved: `scheduler.max_concurrent_scans` is one pool of slots for every
+unit's scans, and a unit's own limit only caps its share, so units that each
+fit their own capacity can still need more slots together than the
+deployment has. The platform console's **Status** page compares the
+scheduled demand of all active units together with this limit. See [Jobs,
+baselines, and incidents](/user-guide/jobs-baselines-incidents/) for how
+demand is estimated and when the warning appears, and [Business
+units](/administration/business-units/) for the platform's view.
 
 Jobs are configured in the console, which enforces these limits:
 

@@ -89,6 +89,14 @@ type Server struct {
 	// metrics so a scrape does not repeatedly inspect the identity allocator
 	// or walk every active job.
 	deploymentMetrics singleFlight[app.DeploymentMetrics]
+	// deploymentScanDemand caches the last estimate of the scheduled scan
+	// demand of every active unit together for the platform status, a
+	// failed one too; see cachedDeploymentScanDemand.
+	deploymentScanDemand singleFlight[deploymentScanDemandEstimate]
+	// deploymentScanDemandFunc is used by deterministic tests to count, fail,
+	// or inspect the estimates of the scan demand. Production uses
+	// App.DeploymentScanDemand.
+	deploymentScanDemandFunc func(context.Context) (app.DeploymentScanDemand, error)
 	// healthMu guards health, the cached answer of GET /healthz.
 	healthMu sync.Mutex
 	health   healthAnswer

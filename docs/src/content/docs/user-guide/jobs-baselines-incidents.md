@@ -103,6 +103,14 @@ A warning appears at 80% utilization and when estimated demand exceeds
 capacity. The notice refreshes when live updates report a job change or a
 completed scan, and at least every five minutes.
 
+The effective slot capacity is the most slots the unit may use, not slots
+reserved for it: every business unit's scans share the deployment's scan
+slots, so other units' scans can take them, and the notice says so. A unit
+whose own demand stays below its capacity can therefore still wait for slots
+when other units are busy. Platform administrators see the scheduled demand of
+all active units together on the platform console's **Status** page; see
+[Business units](/administration/business-units/#the-platform-administrator).
+
 ## Planned change windows
 
 On a job page, an operator or administrator can schedule one finite change

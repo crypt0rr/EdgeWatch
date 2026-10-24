@@ -280,6 +280,11 @@ func (s *Server) legacyPlatformStatus(w http.ResponseWriter, r *http.Request) {
 	if telemetry, err := s.cachedDeploymentTelemetry(r.Context()); err == nil {
 		status["telemetry"] = telemetry
 	}
+	// Added on purpose too: the active units' scheduled scan demand
+	// together, from the same one-minute cache.
+	if demand, err := s.cachedDeploymentScanDemand(r.Context()); err == nil {
+		status["scan_demand"] = demand
+	}
 	s.legacyAddVersionReleaseURL(status)
 	writeJSON(w, http.StatusOK, status)
 }

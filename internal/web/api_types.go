@@ -38,6 +38,7 @@ func ResponseTypes() []apitypes.Type {
 		{Name: "PlatformCapacityStatus", Value: platformCapacityStatusView{}},
 		{Name: "DeploymentLimits", Value: platformLimitsView{}},
 		{Name: "DeploymentSlots", Value: platformDeploymentSlotsView{}},
+		{Name: "PlatformScanDemand", Value: app.DeploymentScanDemand{}},
 		{Name: "PlatformTelemetry", Value: store.DeploymentTelemetry{}},
 
 		// A scan with its snapshot, and the summary that scan lists hold.

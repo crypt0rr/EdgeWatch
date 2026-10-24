@@ -48,6 +48,24 @@ scan slots in use, and lists the unit's accounts without credentials. The
 jobs. Retention reduces this count. While a unit is being deleted, the count
 shows the scans that remain to be erased.
 
+The platform console's **Status** page shows the deployment as numbers: the
+units by state, their accounts, jobs, and stored scans in total, the platform
+administrators, the deployment's scan limits and slots in use, the version,
+and the database size and notification backlog. From v0.44.0 its **Scheduled
+scan demand** panel adds the estimated scheduled scan work of all active units
+together against the `scheduler.max_concurrent_scans` slots that every unit
+shares, for example "Scheduled scan demand: 43.2 of 24 slot-hours/day
+(180%)". Each active unit contributes the estimate that its own **Jobs** page
+shows; disabled units and units being deleted schedule no scans and are left
+out. A warning appears at 80% and when the demand exceeds the slots, because
+scans then wait for a free slot and start late, and the panel counts the jobs
+that run longer than their schedules allow. The estimate is at most a minute
+old. When an estimate fails or takes longer than 10 seconds, the panel is
+missing for that minute and the daemon logs one warning,
+`deployment scan demand estimate failed`. The panel holds sums and counts only
+and names no unit or job: a unit's administrators see their own unit's demand
+and jobs on its **Jobs** page.
+
 The host creates the first platform administrator, after the first
 administrator exists. Print a one-time platform setup token:
 
@@ -163,10 +181,12 @@ account then enrolls again.
   tab then shows the current values with the edits, to review before saving
   again. API clients send the `revision` from the capacity they read. A slot
   cap is a limit, not a reservation: free slots go in turn to the units that
-  have queued scans, up to each unit's cap. A unit's **Overview** shows its
-  own limit, the cap where it has one and the deployment's setting
-  otherwise, as "N scans at a time", and
-  the API's status reports the unit's own slots and probe budgets the same
+  have queued scans, up to each unit's cap. Units that each fit their own
+  capacity can therefore need more slots together than the deployment has;
+  the **Status** page shows their scheduled demand together. A unit's
+  **Overview** shows its own limit, the cap where it has one and the
+  deployment's setting otherwise, as "N scans at a time", and the API's
+  status reports the unit's own slots and probe budgets the same
   way. The unit's **Perimeter** page sizes its suggested monitors to the
   unit's probe budgets, so a lower cap gives smaller suggested monitors; the
   page shows a capacity change the next time it loads its data. The

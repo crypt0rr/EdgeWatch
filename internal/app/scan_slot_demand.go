@@ -60,11 +60,32 @@ type scheduledDemandJob struct {
 // by an explicitly configured scanner rate. Each run counts at most the job's
 // timeout, which ends it, and a job adds at most one slot-day, because it
 // runs at most once at a time.
+//
+// The effective capacity is a limit, not a reservation: every unit's scans
+// share the deployment's one pool of slots, so DeploymentScanDemand compares
+// the units' estimates together with that pool.
 func (a *App) ScanSlotDemand(ctx context.Context, ts *store.TenantStore) (ScanSlotDemand, error) {
-	var result ScanSlotDemand
 	if a == nil || ts == nil {
-		return result, store.ErrNoTenantScope
+		return ScanSlotDemand{}, store.ErrNoTenantScope
 	}
+	result, err := a.scheduledScanDemand(ctx, ts)
+	if err != nil {
+		return result, err
+	}
+	limits, err := a.TenantCapacityLimits(ctx, ts)
+	if err != nil {
+		return result, err
+	}
+	result.Slots = limits.MaxConcurrentScans
+	result.CapacitySlotSecondsPerDay, result.UtilizationPercent, result.OverCapacity = compareSlotDemand(result.EstimatedSlotSecondsPerDay, limits.MaxConcurrentScans)
+	return result, nil
+}
+
+// scheduledScanDemand estimates the scheduled demand of the enabled jobs of
+// the unit of ts, as ScanSlotDemand describes, and counts the jobs by the
+// source of their estimate. It leaves the capacity fields zero.
+func (a *App) scheduledScanDemand(ctx context.Context, ts *store.TenantStore) (ScanSlotDemand, error) {
+	var result ScanSlotDemand
 	jobs, err := ts.ListJobs(ctx, false)
 	if err != nil {
 		return result, err
@@ -94,12 +115,6 @@ func (a *App) ScanSlotDemand(ctx context.Context, ts *store.TenantStore) (ScanSl
 	if err != nil {
 		return result, err
 	}
-	limits, err := a.TenantCapacityLimits(ctx, ts)
-	if err != nil {
-		return result, err
-	}
-	result.Slots = limits.MaxConcurrentScans
-	result.CapacitySlotSecondsPerDay = float64(max(limits.MaxConcurrentScans, 0)) * slotSecondsPerDay
 	for _, job := range scheduled {
 		var perRun float64
 		if samples := history[job.record.ID]; len(samples) > 0 {
@@ -124,11 +139,19 @@ func (a *App) ScanSlotDemand(ctx context.Context, ts *store.TenantStore) (ScanSl
 		}
 		result.EstimatedSlotSecondsPerDay += demand
 	}
-	if result.CapacitySlotSecondsPerDay > 0 {
-		result.UtilizationPercent = result.EstimatedSlotSecondsPerDay / result.CapacitySlotSecondsPerDay * 100
-	}
-	result.OverCapacity = result.EstimatedSlotSecondsPerDay > result.CapacitySlotSecondsPerDay
 	return result, nil
+}
+
+// compareSlotDemand compares an estimated demand in slot-seconds per day
+// with what the slots provide in a day, and returns that capacity, the
+// demand as a percentage of it, and whether the demand exceeds it. Without
+// slots the percentage is 0 and any demand exceeds the capacity.
+func compareSlotDemand(estimated float64, slots int) (capacity, utilization float64, over bool) {
+	capacity = float64(max(slots, 0)) * slotSecondsPerDay
+	if capacity > 0 {
+		utilization = estimated / capacity * 100
+	}
+	return capacity, utilization, estimated > capacity
 }
 
 // runSlotSeconds returns how long one run of the job holds a scan slot when

@@ -2220,6 +2220,9 @@ label small,
 .status-dot.limited i { background: var(--amber); box-shadow: 0 0 0 4px #f1bd6a1c; }
 .status-dot.unavailable i { background: #8296ae; box-shadow: 0 0 0 4px #8296ae1c; }
 .platform-update-notice { margin-bottom: 16px; }
+.platform-scan-demand .notice { margin-bottom: 12px; }
+.platform-scan-demand .notice:last-child { margin-bottom: 0; }
+.platform-scan-demand-summary { margin: 0; color: #d4e5f6; font-size: 13px; line-height: 1.55; }
 
 @media (max-width: 760px) {
   .topbar-actions .status-dot {

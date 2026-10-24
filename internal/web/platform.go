@@ -994,9 +994,10 @@ func (s *Server) togglePlatformNotificationRouting(w http.ResponseWriter, r *htt
 
 // platformStatus reports the deployment as numbers: the units by state,
 // their accounts, jobs and stored scans, the platform administrators, the
-// scan capacity and its use, the version and update status, the outcome of
-// the scheduled backups when they are on, and the deployment's telemetry:
-// the database size and the notification outbox backlog.
+// scan capacity and its use, the scheduled scan demand of the active units
+// together against the shared slots, the version and update status, the
+// outcome of the scheduled backups when they are on, and the deployment's
+// telemetry: the database size and the notification outbox backlog.
 func (s *Server) platformStatus(w http.ResponseWriter, r *http.Request) {
 	platform := s.Store.Platform()
 	records, err := platform.ListTenants(r.Context())
@@ -1034,6 +1035,14 @@ func (s *Server) platformStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	usage := s.App.SlotUsage()
 	status.Capacity = platformCapacityStatusView{Limits: s.platformLimits(), Slots: platformDeploymentSlotsView{Capacity: usage.Capacity, InUse: usage.InUse, Queued: usage.Queued}}
+	// The scheduled scan demand of every active unit together, against the
+	// deployment's shared slots, estimated at most every
+	// deploymentScanDemandTTL. Like the units' counts, it is sums and counts
+	// only; it is left out when it cannot be estimated, and the estimate
+	// logs its own failure, once per estimate.
+	if demand, err := s.cachedDeploymentScanDemand(r.Context()); err == nil {
+		status.ScanDemand = &demand
+	}
 	if proxy, seen := s.Auth.UntrustedProxy(); seen {
 		status.UntrustedProxy = &proxy
 	}
@@ -1048,4 +1057,77 @@ func (s *Server) platformStatus(w http.ResponseWriter, r *http.Request) {
 		s.Log.Warn("deployment telemetry refresh failed", "error", err)
 	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+const (
+	// deploymentScanDemandTTL is how long the platform status reuses an
+	// estimate of the scheduled scan demand of the active units together,
+	// whether it succeeded or failed. The estimate goes through every active
+	// unit's enabled jobs and their recent scan history, and the console
+	// polls the platform status every 15 seconds, so the daemon starts at
+	// most one estimate a minute, however many platform administrators
+	// watch the page and however often the estimate fails or times out.
+	// Demand changes with job edits and completed scans, which a minute's
+	// delay hardly affects.
+	deploymentScanDemandTTL = time.Minute
+	// deploymentScanDemandTimeout bounds one estimate. A slower one fails,
+	// and the platform status leaves the scan demand out until the next
+	// estimate, a minute later.
+	deploymentScanDemandTimeout = 10 * time.Second
+)
+
+// errNoApplication is returned for a value that only the application can
+// compute when the server has none.
+var errNoApplication = errors.New("the application is not available")
+
+// deploymentScanDemandEstimate is one estimate of the scheduled scan demand
+// of the active units together: the demand, or the error that ended the
+// estimate. The server caches either for deploymentScanDemandTTL, so a
+// failing or slow estimate is not repeated on every poll.
+type deploymentScanDemandEstimate struct {
+	demand app.DeploymentScanDemand
+	err    error
+}
+
+// cachedDeploymentScanDemand returns the scheduled scan demand of every
+// active unit together, or the error of the estimate, from an estimate at
+// most deploymentScanDemandTTL old. Concurrent requests share one estimate.
+// It returns ctx's error, without an estimate, when ctx ends while the
+// request waits for another request's estimate.
+func (s *Server) cachedDeploymentScanDemand(ctx context.Context) (app.DeploymentScanDemand, error) {
+	estimate := s.deploymentScanDemandFunc
+	if estimate == nil {
+		if s.App == nil {
+			return app.DeploymentScanDemand{}, errNoApplication
+		}
+		estimate = s.App.DeploymentScanDemand
+	}
+	cached, err := s.deploymentScanDemand.get(ctx, deploymentScanDemandTTL, func(ctx context.Context) (deploymentScanDemandEstimate, error) {
+		return s.estimateDeploymentScanDemand(ctx, estimate), nil
+	})
+	if err != nil {
+		return app.DeploymentScanDemand{}, err
+	}
+	return cached.demand, cached.err
+}
+
+// estimateDeploymentScanDemand runs estimate within
+// deploymentScanDemandTimeout and logs a failure. The estimate is every
+// caller's, so it ignores the cancellation of the request that starts it: a
+// platform administrator who closes the page must not leave the others
+// without the demand for a minute. A panic fails the estimate like an
+// error, so it is cached and logged once too.
+func (s *Server) estimateDeploymentScanDemand(ctx context.Context, estimate func(context.Context) (app.DeploymentScanDemand, error)) (result deploymentScanDemandEstimate) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deploymentScanDemandTimeout)
+	defer cancel()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = deploymentScanDemandEstimate{err: fmt.Errorf("scan demand estimate panic: %v", recovered)}
+		}
+		if result.err != nil && s.Log != nil {
+			s.Log.Warn("deployment scan demand estimate failed; the platform status leaves it out until the next estimate", "error", result.err, "retry_after", deploymentScanDemandTTL)
+		}
+	}()
+	result.demand, result.err = estimate(ctx)
+	return result
 }

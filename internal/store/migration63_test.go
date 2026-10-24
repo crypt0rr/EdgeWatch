@@ -12,7 +12,15 @@ func TestMigration63KeepsLegacyExhaustedDeliveriesTerminal(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
-	oldRetry := time.Now().UTC().Add(-21 * 24 * time.Hour)
+	// The migration compares the scheduled retry time with the fixed release
+	// time of the larger retry budget, so the legacy retry must be dated
+	// before that time rather than relative to the clock: a date three weeks
+	// before now crossed it on 2026-10-24 and made the test fail from then on.
+	budgetStart, err := time.Parse(time.RFC3339, legacyDeliveryRetryBudgetStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRetry := budgetStart.Add(-21 * 24 * time.Hour)
 	postBudgetRelease := time.Date(2026, time.October, 3, 0, 20, 0, 0, time.UTC)
 	rows := []struct {
 		destination string

@@ -2197,11 +2197,18 @@ func TestPrivateTemporaryCleanupBoundsEntryCountAndAllowsDeepTrees(t *testing.T)
 		if err := unix.Fstat(int(temporary.leaf.Fd()), &stat); err != nil {
 			t.Fatal(err)
 		}
-		request := privateTemporaryCleanupRequest{
-			device: uint64(stat.Dev), inode: stat.Ino, leafUID: stat.Uid, leafGID: stat.Gid,
-			leafMode: privateScannerTemporaryMode, uid: uint32(os.Geteuid()), gid: uint32(os.Getegid()),
+		// This case proves that descent holds a bounded number of file
+		// descriptors, beyond any descriptor limit. Removing 70,000 levels
+		// under the race detector takes close to the production cleanup
+		// budget on a shared CI runner, so the removal gets a budget that
+		// does not depend on runner speed; the expired-deadline test covers
+		// the budget itself.
+		duplicate, err := unix.Openat(int(temporary.leaf.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if err := cleanupPrivateTemporaryDirectoryFD(request, int(temporary.leaf.Fd())); err != nil {
+		budget := cleanupBudget{deadline: time.Now().Add(2 * time.Minute)}
+		if err := removePrivateDirectoryContents(duplicate, uint64(stat.Dev), stat.Uid, stat.Gid, &budget); err != nil {
 			t.Fatalf("clean %d-deep tree without exhausting file descriptors: %v", depth, err)
 		}
 		if entries, err := os.ReadDir(temporary.path()); err != nil || len(entries) != 0 {

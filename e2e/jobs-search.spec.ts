@@ -106,6 +106,9 @@ test('jobs search matches names and targets for every reader and keeps the selec
         expect(transitionLayout.stacked, 'search controls should fit side by side just above the container threshold').toBe(false)
         await expectNoHorizontalScroll(page)
         await page.setViewportSize({ width: 320, height: 720 })
+        const phoneLayout = await getJobSearchLayout(page)
+        expect(phoneLayout.inputWidth, `search input width at 320px: ${JSON.stringify(phoneLayout)}`).toBeGreaterThanOrEqual(200)
+        expect(phoneLayout.stacked, 'search controls should stack at 320px').toBe(true)
       }
       if (role === 'viewer') await expect(page.getByRole('button', { name: /New job/ })).toHaveCount(0)
       else await expect(page.getByRole('button', { name: /New job/ })).toBeVisible()

@@ -2,7 +2,7 @@
 
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { StrictMode, useEffect, type ReactNode } from 'react'
+import { act, StrictMode, useEffect, type ReactNode } from 'react'
 import { Link, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, BUILTIN_NAABU_PROFILE_ID, createJob, createNotificationDestination, getJob, getSession, listNotificationDestinations, listScannerProfiles, previewJob, scannerCapabilities, scheduleSuggestion, testNotificationDestination, updateJob } from '../api'
@@ -123,6 +123,12 @@ function renderJourney(route = '/jobs/new') {
   return renderWithProviders(<TestJourney />, { route: [route] })
 }
 
+async function waitForInAct(assertion: () => unknown) {
+  await act(async () => {
+    await vi.waitFor(assertion, { timeout: 1000 })
+  })
+}
+
 function creationDraft(): JobCreationDraft {
   return JSON.parse(screen.getByTestId('creation-draft').textContent ?? '{}')
 }
@@ -152,13 +158,13 @@ function perimeterRoute(state: unknown) {
 }
 
 async function goToSchedule() {
-  await screen.findByRole('heading', { name: 'Choose targets' })
+  await waitForInAct(() => expect(screen.getByRole('heading', { name: 'Choose targets' })).toBeInTheDocument())
   fireEvent.change(screen.getByLabelText(/^Monitor name/), { target: { value: 'Public edge' } })
   fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: '198.51.100.20' } })
   fireEvent.click(screen.getByRole('button', { name: /Continue to coverage/ }))
-  await screen.findByRole('heading', { name: 'Set scan coverage' })
+  await waitForInAct(() => expect(screen.getByRole('heading', { name: 'Set scan coverage' })).toBeInTheDocument())
   fireEvent.click(screen.getByRole('button', { name: /Continue to schedule/ }))
-  await screen.findByRole('heading', { name: 'Set schedule and alerts' })
+  await waitForInAct(() => expect(screen.getByRole('heading', { name: 'Set schedule and alerts' })).toBeInTheDocument())
 }
 
 async function goToReview() {
@@ -397,6 +403,63 @@ describe('guided monitor creation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Use no alerts' }))
     expect(screen.getByText(/This monitor will not send notifications/)).toBeInTheDocument()
     expect(screen.queryByText(/A selected destination is paused or locked/)).not.toBeInTheDocument()
+  })
+
+  it('requires an explicit no-alert choice before reviewing an empty destination selection', async () => {
+    renderJourney()
+    await goToSchedule()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review monitor' }))
+    expect(screen.getByRole('alert')).toHaveTextContent('Select notification destinations or choose Use no alerts.')
+    expect(screen.getByRole('heading', { name: 'Set schedule and alerts' })).toBeInTheDocument()
+    expect(previewJob).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Use no alerts' }))
+    expect(screen.getByText('This monitor will not send notifications.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Review monitor' }))
+    await screen.findByRole('heading', { name: 'Review and create' })
+    await waitFor(() => expect(previewJob).toHaveBeenCalled())
+    expect(vi.mocked(previewJob).mock.calls.at(-1)![0].notification_destinations).toEqual([])
+    expect(createJob).not.toHaveBeenCalled()
+  })
+
+  it('offers a no-alert review when notification destinations cannot be loaded', async () => {
+    vi.mocked(listNotificationDestinations).mockRejectedValueOnce(new Error('offline'))
+    renderJourney()
+    await goToSchedule()
+
+    await waitForInAct(() => expect(screen.getByText(/Notification destinations could not be loaded\. Retry to select a destination, or choose Use no alerts\./)).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Use no alerts' }))
+    expect(screen.getByText('This monitor will not send notifications.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Review monitor' }))
+    await screen.findByRole('heading', { name: 'Review and create' })
+    await waitForInAct(() => expect(previewJob).toHaveBeenCalled())
+    expect(vi.mocked(previewJob).mock.calls.at(-1)![0].notification_destinations).toEqual([])
+    expect(createJob).not.toHaveBeenCalled()
+  })
+
+  it('restores available destination choices after Retry recovers a failed load', async () => {
+    vi.mocked(listNotificationDestinations)
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce({ destinations: [destination], status: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' } })
+    renderJourney()
+    await goToSchedule()
+
+    await waitForInAct(() => expect(screen.getByText(/Notification destinations could not be loaded\. Retry to select a destination, or choose Use no alerts\./)).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    let operations!: HTMLInputElement
+    await waitForInAct(() => {
+      operations = screen.getByRole('checkbox', { name: /Operations/ })
+      expect(operations).toBeInTheDocument()
+    })
+    if (!operations.checked) fireEvent.click(operations)
+    await waitForInAct(() => expect(operations).toBeChecked())
+    fireEvent.click(screen.getByRole('button', { name: 'Review monitor' }))
+    await waitForInAct(() => expect(screen.getByRole('heading', { name: 'Review and create' })).toBeInTheDocument())
+    await waitForInAct(() => expect(previewJob).toHaveBeenCalled())
+    expect(vi.mocked(previewJob).mock.calls.at(-1)![0].notification_destinations).toEqual([destination.id])
+    expect(createJob).not.toHaveBeenCalled()
   })
 
   it.each([

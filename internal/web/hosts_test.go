@@ -384,6 +384,25 @@ func TestAllHostsReturnsLatestSuccessfulResultPerAddress(t *testing.T) {
 	if len(response.Hosts) != 1 || response.Hosts[0].Address != "198.51.100.222" {
 		t.Fatalf("query returned unrelated hosts: %#v", response.Hosts)
 	}
+	jobRecorder := httptest.NewRecorder()
+	server.listHosts(jobRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/hosts?q=global-hosts", nil), defaultTenantStore(server))
+	if jobRecorder.Code != http.StatusOK {
+		t.Fatalf("job search status %d: %s", jobRecorder.Code, jobRecorder.Body.String())
+	}
+	response = struct {
+		Hosts []allHostSummary `json:"hosts"`
+	}{}
+	if err := json.Unmarshal(jobRecorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Hosts) != 3 {
+		t.Fatalf("job search returned %d hosts, want all three hosts in the matching job: %#v", len(response.Hosts), response.Hosts)
+	}
+	for _, host := range response.Hosts {
+		if host.Job != "global-hosts" {
+			t.Fatalf("job search returned a different job: %#v", response.Hosts)
+		}
+	}
 }
 
 func TestAllHostsSeparatesArchivedJobsAfterActiveHosts(t *testing.T) {

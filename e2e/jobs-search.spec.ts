@@ -79,6 +79,14 @@ test('jobs search matches names and targets for every reader and keeps the selec
       await expect(search).toBeVisible()
       await expect(page.getByRole('status').filter({ hasText: 'Showing 4 of 4 jobs' })).toBeVisible()
       await expect(page.getByRole('link', { name: 'Gateway monitor' })).toHaveAttribute('href', '/jobs/gateway')
+      if (role === 'viewer') {
+        for (const width of [428, 430]) {
+          await page.setViewportSize({ width, height: 720 })
+          const searchWidth = await search.evaluate(element => element.getBoundingClientRect().width)
+          expect(searchWidth, `search input width at ${width}px`).toBeGreaterThanOrEqual(240)
+        }
+        await page.setViewportSize({ width: 320, height: 720 })
+      }
       if (role === 'viewer') await expect(page.getByRole('button', { name: /New job/ })).toHaveCount(0)
       else await expect(page.getByRole('button', { name: /New job/ })).toBeVisible()
 

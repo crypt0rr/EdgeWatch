@@ -3197,7 +3197,7 @@ label small,
   }
 }
 
-@media (max-width: 420px) {
+@media (max-width: 560px) {
   .job-list-controls {
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
@@ -3211,7 +3211,9 @@ label small,
   .job-list-controls > .muted {
     justify-self: start;
   }
+}
 
+@media (max-width: 420px) {
   .job-monitoring-grid {
     grid-template-columns: minmax(0, 1fr);
   }

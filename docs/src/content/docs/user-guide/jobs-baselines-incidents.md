@@ -177,6 +177,11 @@ Creation errors remain by the form, cancellation errors stay in the open
 confirmation dialog so the operator can retry, and review errors remain beside
 the affected window.
 
+The **Jobs** list can be searched case-insensitively by job name or configured
+target. Search applies to the jobs already shown, including archived jobs,
+updates the result count, and combines with the **Needs attention** filter.
+Clear the search to return to the selected filter's full list.
+
 The **Jobs** list shows each job's latest scan attempt separately from its
 latest successful scan, along with its next scheduled run and current queued,
 running, resumable, or progressing work. A paused cycle with a recent completed

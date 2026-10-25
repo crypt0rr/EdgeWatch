@@ -600,6 +600,52 @@ describe('application shell', () => {
     expect(screen.getByText(/Needs attention · Last scheduled run skipped \(probe budget\)/)).toBeInTheDocument()
   })
 
+  it('searches job names and configured targets, composes with attention, and clears to that filter', async () => {
+    const allJobs = [
+      { id: 'gateway', revision: 1, enabled: true, archived: false, job: { name: 'Gateway monitor', targets: ['192.0.2.10'], schedule: '0 * * * *' }, baseline: { status: 'complete', samples: 1 }, monitoring: { availability: 'available', attention_reason: 'none' } },
+      { id: 'database', revision: 1, enabled: true, archived: false, job: { name: 'Database monitor', targets: ['API.EXAMPLE.NET', 'db.internal'], schedule: '0 * * * *' }, baseline: { status: 'complete', samples: 1 }, monitoring: { availability: 'available', attention_reason: 'failed' } },
+      { id: 'retired', revision: 1, enabled: false, archived: true, job: { name: 'Retired router', targets: ['legacy-gateway.internal'], schedule: '0 * * * *' }, baseline: { status: 'complete', samples: 1 }, monitoring: { availability: 'available', attention_reason: 'none' } },
+      { id: 'heartbeat', revision: 1, enabled: true, archived: false, job: { name: 'Heartbeat', targets: ['203.0.113.20'], schedule: '0 * * * *' }, baseline: { status: 'complete', samples: 1 }, monitoring: { availability: 'available', attention_reason: 'none' } },
+    ]
+    vi.mocked(listJobs).mockResolvedValue({ jobs: allJobs } as never)
+    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: ['jobs.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    renderWithProviders(<Jobs />)
+
+    const search = await screen.findByRole('searchbox', { name: 'Search jobs by name or target' })
+    await screen.findByRole('heading', { name: 'Gateway monitor' })
+    expect(screen.getByText('Showing 4 of 4 jobs')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Retired router' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /New job/ })).not.toBeInTheDocument()
+
+    fireEvent.change(search, { target: { value: 'gAtEwAy' } })
+    expect(screen.getByRole('heading', { name: 'Gateway monitor' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Retired router' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Database monitor' })).not.toBeInTheDocument()
+    expect(screen.getByText('Showing 2 of 4 jobs')).toBeInTheDocument()
+
+    fireEvent.change(search, { target: { value: '' } })
+    fireEvent.change(search, { target: { value: 'api.example.net' } })
+    expect(screen.getByRole('heading', { name: 'Database monitor' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Gateway monitor' })).not.toBeInTheDocument()
+    expect(screen.getByText('Showing 1 of 4 jobs')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter jobs' }), { target: { value: 'attention' } })
+    expect(screen.getByRole('heading', { name: 'Database monitor' })).toBeInTheDocument()
+    expect(screen.getByText('Showing 1 of 4 jobs')).toBeInTheDocument()
+    fireEvent.change(search, { target: { value: 'legacy-gateway' } })
+    expect(screen.getByRole('heading', { name: 'No jobs match your search', level: 2 })).toBeInTheDocument()
+    expect(screen.getByText('Showing 0 of 4 jobs')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Clear' })).toBeEnabled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+    expect(search).toHaveValue('')
+    expect(search).toHaveFocus()
+    expect(screen.getByRole('combobox', { name: 'Filter jobs' })).toHaveValue('attention')
+    expect(screen.getByRole('heading', { name: 'Database monitor' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'No jobs match your search' })).not.toBeInTheDocument()
+    expect(screen.getByText('Showing 1 of 4 jobs')).toBeInTheDocument()
+  })
+
   it('refreshes the attention filter for a viewer without stream events', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const jobResponse = (status: string, attention: string, nextRunAt: string) => ({ jobs: [{

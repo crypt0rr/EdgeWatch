@@ -416,13 +416,20 @@ export function Jobs() {
   const jobs = useQuery({ queryKey: ['jobs', true], queryFn: () => listJobs(true), refetchInterval: 30_000 })
   const session = useQuery({ queryKey: ['session'], queryFn: getSession })
   const [filter, setFilter] = useState<'all' | 'attention'>('all')
+  const [search, setSearch] = useState('')
+  const searchInputRef = useRef<HTMLInputElement>(null)
   const canWrite = session.data?.permissions.includes('jobs.write') ?? false
   const canReadScans = session.data?.permissions.includes('scans.read') ?? false
   const allJobs = jobs.data?.jobs ?? []
-  const visibleJobs = filter === 'attention' ? allJobs.filter(job => job.monitoring?.attention_reason !== undefined && job.monitoring.attention_reason !== 'none') : allJobs
+  const attentionJobs = filter === 'attention' ? allJobs.filter(job => job.monitoring?.attention_reason !== undefined && job.monitoring.attention_reason !== 'none') : allJobs
+  const normalizedSearch = search.trim().toLowerCase()
+  const visibleJobs = normalizedSearch
+    ? attentionJobs.filter(job => job.job.name.toLowerCase().includes(normalizedSearch) || job.job.targets.some(target => target.toLowerCase().includes(normalizedSearch)))
+    : attentionJobs
   const unavailableMonitoringCount = allJobs.filter(job => !job.monitoring || job.monitoring.availability !== 'available').length
+  const noSearchResults = normalizedSearch.length > 0 && allJobs.length > 0 && visibleJobs.length === 0
   return (
-    <section className="page">
+    <section className="page jobs-page">
       <div className="page-heading">
         <div>
           <p className="eyebrow">Configuration</p>
@@ -435,16 +442,26 @@ export function Jobs() {
       {jobs.isLoading ? <Loading /> : jobs.error ? <ErrorNotice message="Could not load jobs." onRetry={() => jobs.refetch()} /> : (
         <>
           <div className="job-list-controls">
-            <label htmlFor="jobs-filter">Filter jobs
-              <select id="jobs-filter" value={filter} onChange={event => setFilter(event.target.value as 'all' | 'attention')}>
-                <option value="all">All jobs</option>
-                <option value="attention">Needs attention</option>
-              </select>
-            </label>
+            <div className="job-list-control-fields">
+              <div className="job-list-search">
+                <label htmlFor="jobs-search">Search jobs by name or target</label>
+                <div className="job-list-search-field">
+                  <input ref={searchInputRef} id="jobs-search" type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Name or target" />
+                  <button className="clear-job-search" type="button" onClick={() => { setSearch(''); searchInputRef.current?.focus() }} disabled={!search}>Clear</button>
+                </div>
+              </div>
+              <label htmlFor="jobs-filter">Filter jobs
+                <select id="jobs-filter" value={filter} onChange={event => setFilter(event.target.value as 'all' | 'attention')}>
+                  <option value="all">All jobs</option>
+                  <option value="attention">Needs attention</option>
+                </select>
+              </label>
+            </div>
             <p className="muted" role="status" aria-live="polite">Showing {visibleJobs.length} of {allJobs.length} jobs</p>
           </div>
           {filter === 'attention' && unavailableMonitoringCount > 0 ? <p className="job-monitoring-unavailable" role="status">Monitoring data is incomplete for {unavailableMonitoringCount} job{unavailableMonitoringCount === 1 ? '' : 's'}; known attention reasons remain visible in this filter.</p> : null}
-          {filter === 'attention' && allJobs.length > 0 && visibleJobs.length === 0 ? <div className="empty"><h2>No available jobs need attention</h2><p>No available job shows a latest failed or incomplete attempt, a stalled cycle, or a saved probe-budget skip.</p></div> : null}
+          {noSearchResults ? <div className="empty"><h2>No jobs match your search</h2><p>Try another name or target, or clear your search to see jobs in the selected filter.</p></div> : null}
+          {!normalizedSearch && filter === 'attention' && allJobs.length > 0 && attentionJobs.length === 0 ? <div className="empty"><h2>No available jobs need attention</h2><p>No available job shows a latest failed or incomplete attempt, a stalled cycle, or a saved probe-budget skip.</p></div> : null}
           <div className="job-grid">
           {visibleJobs.map(job => {
             const baseline = baselinePresentation(job.baseline)

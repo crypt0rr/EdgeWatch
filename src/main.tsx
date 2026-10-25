@@ -429,7 +429,7 @@ export function Jobs() {
   const unavailableMonitoringCount = allJobs.filter(job => !job.monitoring || job.monitoring.availability !== 'available').length
   const noSearchResults = normalizedSearch.length > 0 && allJobs.length > 0 && visibleJobs.length === 0
   return (
-    <section className="page">
+    <section className="page jobs-page">
       <div className="page-heading">
         <div>
           <p className="eyebrow">Configuration</p>

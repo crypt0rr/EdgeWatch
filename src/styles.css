@@ -2663,6 +2663,10 @@ label small,
   margin: 0 0 16px;
 }
 
+.jobs-page {
+  container: jobs-page / inline-size;
+}
+
 .job-list-control-fields {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(180px, .7fr);
@@ -3197,7 +3201,7 @@ label small,
   }
 }
 
-@media (max-width: 560px) {
+@container jobs-page (max-width: 700px) {
   .job-list-controls {
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;

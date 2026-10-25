@@ -50,6 +50,19 @@ async function expectNoHorizontalScroll(page: Page) {
   expect(widths.scroll, `page scroll width ${widths.scroll} exceeds viewport ${widths.client}`).toBeLessThanOrEqual(widths.client)
 }
 
+async function getJobSearchLayout(page: Page) {
+  return page.evaluate(() => {
+    const search = document.querySelector<HTMLInputElement>('#jobs-search')!
+    const filter = document.querySelector<HTMLSelectElement>('#jobs-filter')!
+    const searchBounds = search.getBoundingClientRect()
+    const filterBounds = filter.getBoundingClientRect()
+    return {
+      inputWidth: searchBounds.width,
+      stacked: filterBounds.top > searchBounds.bottom + 1,
+    }
+  })
+}
+
 test('jobs search matches names and targets for every reader and keeps the selected filter', async ({ browser, baseURL }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'This test covers all roles and controls its own desktop and phone viewports.')
 
@@ -80,11 +93,18 @@ test('jobs search matches names and targets for every reader and keeps the selec
       await expect(page.getByRole('status').filter({ hasText: 'Showing 4 of 4 jobs' })).toBeVisible()
       await expect(page.getByRole('link', { name: 'Gateway monitor' })).toHaveAttribute('href', '/jobs/gateway')
       if (role === 'viewer') {
-        for (const width of [428, 430]) {
+        for (const width of [428, 430, 761, 1012]) {
           await page.setViewportSize({ width, height: 720 })
-          const searchWidth = await search.evaluate(element => element.getBoundingClientRect().width)
-          expect(searchWidth, `search input width at ${width}px`).toBeGreaterThanOrEqual(240)
+          const layout = await getJobSearchLayout(page)
+          expect(layout.inputWidth, `search input width at ${width}px: ${JSON.stringify(layout)}`).toBeGreaterThanOrEqual(240)
+          expect(layout.stacked, `search controls should stack at ${width}px`).toBe(true)
+          await expectNoHorizontalScroll(page)
         }
+        await page.setViewportSize({ width: 1013, height: 720 })
+        const transitionLayout = await getJobSearchLayout(page)
+        expect(transitionLayout.inputWidth, 'search input width just above the 700px controls threshold').toBeGreaterThanOrEqual(240)
+        expect(transitionLayout.stacked, 'search controls should fit side by side just above the container threshold').toBe(false)
+        await expectNoHorizontalScroll(page)
         await page.setViewportSize({ width: 320, height: 720 })
       }
       if (role === 'viewer') await expect(page.getByRole('button', { name: /New job/ })).toHaveCount(0)

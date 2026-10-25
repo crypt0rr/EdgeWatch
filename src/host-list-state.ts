@@ -1,10 +1,13 @@
-import { useLocation, useSearchParams } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { useLocation, useNavigationType, useSearchParams } from 'react-router-dom'
 
 /** URL-backed filters and pagination shared by the global and baseline host explorers. */
 export function useHostListState() {
   const [searchParams, setSearchParams] = useSearchParams()
   const location = useLocation()
-  const search = searchParams.get('q') ?? ''
+  const navigationType = useNavigationType()
+  const urlSearch = searchParams.get('q') ?? ''
+  const [search, setSearch] = useState(urlSearch)
   const rawProtocol = searchParams.get('protocol')
   const protocol = rawProtocol === 'tcp' || rawProtocol === 'udp' ? rawProtocol : ''
   const rawOpen = searchParams.get('has_open_ports')
@@ -13,6 +16,13 @@ export function useHostListState() {
   const parsedOffset = rawOffset === null ? 0 : Number(rawOffset)
   const offset = Number.isSafeInteger(parsedOffset) && parsedOffset > 0 ? parsedOffset : 0
   const returnTo = `${location.pathname}${location.search}`
+
+  // Keep typing independent of router transitions. Search URL replacements
+  // are intentionally skipped; PUSH and POP navigations restore the value
+  // from the URL.
+  useEffect(() => {
+    if (navigationType !== 'REPLACE') setSearch(urlSearch)
+  }, [location.key, location.pathname, location.search, navigationType, urlSearch])
 
   // Replace the current list entry so a detail navigation has one clean
   // history step, while the URL remains reloadable and shareable.
@@ -45,13 +55,18 @@ export function useHostListState() {
     }, { replace: true })
   }
 
+  function updateSearch(value: string) {
+    setSearch(value)
+    updateParam('q', value)
+  }
+
   return {
     search,
     protocol,
     open,
     offset,
     returnTo,
-    updateSearch: (value: string) => updateParam('q', value),
+    updateSearch,
     updateProtocol: (value: string) => updateParam('protocol', value),
     updateOpen: (value: string) => updateParam('has_open_ports', value),
     updateOffset,

@@ -256,6 +256,16 @@ describe('host detail', () => {
     expect(container.querySelector('.back-link')?.getAttribute('href')).toBe(returnTo)
   })
 
+  it('accepts a trailing slash on a global host list return URL', async () => {
+    await renderRoute('/scans/scan-1/hosts/198.51.100.10', '/scans/:scanId/hosts/:address', { returnTo: '/hosts/?q=router' })
+    expect(container.querySelector('.back-link')?.getAttribute('href')).toBe('/hosts/?q=router')
+  })
+
+  it('accepts a trailing slash on a baseline host list return URL', async () => {
+    await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address', { returnTo: '/jobs/job-1/baseline/?q=router' })
+    expect(container.querySelector('.back-link')?.getAttribute('href')).toBe('/jobs/job-1/baseline/?q=router')
+  })
+
   it('keeps job-scoped historical evidence visible when RDAP is unavailable', async () => {
     vi.mocked(scanHostRDAP).mockRejectedValue(new Error('registry timeout'))
     await renderRoute('/jobs/job-1/scans/scan-1/hosts/198.51.100.10', '/jobs/:id/scans/:scanId/hosts/:address')

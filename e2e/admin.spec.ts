@@ -215,7 +215,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   await expect(page.getByText('192.0.2.1')).toBeVisible()
   const hostSearch = page.getByRole('searchbox', { name: 'Search hosts' })
   await hostSearch.focus()
-  await page.keyboard.type('222', { delay: 100 })
+  await page.keyboard.type('222')
   await expect(hostSearch).toHaveValue('222')
   await expect(page.locator('.global-host-row')).toHaveCount(1)
   await expect(page.getByText('192.0.2.222')).toBeVisible()

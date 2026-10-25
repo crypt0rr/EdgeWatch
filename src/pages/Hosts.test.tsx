@@ -31,7 +31,7 @@ function NavigationProbe() {
   const location = useLocation()
   const navigate = useNavigate()
   const returnTo = (location.state as { returnTo?: unknown } | null)?.returnTo
-  return <><output data-testid="current-location">{location.pathname}{location.search}</output><output data-testid="return-to">{typeof returnTo === 'string' ? returnTo : ''}</output><button type="button" onClick={() => navigate(-1)}>Browser Back</button></>
+  return <><output data-testid="current-location">{location.pathname}{location.search}</output><output data-testid="return-to">{typeof returnTo === 'string' ? returnTo : ''}</output><button type="button" onClick={() => navigate(-1)}>Browser Back</button><button type="button" onClick={() => navigate(1)}>Browser Forward</button></>
 }
 
 describe('global hosts explorer', () => {
@@ -142,6 +142,55 @@ describe('global hosts explorer', () => {
     expect((container.querySelectorAll('select')[0] as HTMLSelectElement).value).toBe('tcp')
     expect((container.querySelectorAll('select')[1] as HTMLSelectElement).value).toBe('true')
     expect(container.textContent).toContain('51–100 of 100')
+  })
+
+  it('syncs search from browser Back and Forward URL changes', async () => {
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={['/hosts?q=router', '/hosts?q=database']}>
+        <Routes><Route path="/hosts" element={<Hosts />} /></Routes>
+        <NavigationProbe />
+      </MemoryRouter></QueryClientProvider>)
+    })
+    const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement
+    await vi.waitFor(() => expect(search.value).toBe('database'))
+
+    fireEvent.click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Browser Back')!)
+    await vi.waitFor(() => expect(search.value).toBe('router'))
+    fireEvent.click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Browser Forward')!)
+    await vi.waitFor(() => expect(search.value).toBe('database'))
+  })
+
+  it('replaces search edits without adding a browser history entry per character', async () => {
+    const previous = '/hosts?q=previous&protocol=udp&has_open_ports=false&offset=50'
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={[previous, '/hosts?protocol=tcp&has_open_ports=true&offset=50']}>
+        <Routes><Route path="/hosts" element={<Hosts />} /></Routes>
+        <NavigationProbe />
+      </MemoryRouter></QueryClientProvider>)
+    })
+    const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement
+    await vi.waitFor(() => expect(search.value).toBe(''))
+
+    for (const character of 'router') act(() => setInputValue(search, `${search.value}${character}`))
+    await vi.waitFor(() => {
+      const location = new URL(container.querySelector('[data-testid="current-location"]')?.textContent ?? '', 'http://localhost')
+      expect(location.pathname).toBe('/hosts')
+      expect(location.searchParams.get('q')).toBe('router')
+      expect(location.searchParams.get('protocol')).toBe('tcp')
+      expect(location.searchParams.get('has_open_ports')).toBe('true')
+      expect(location.searchParams.has('offset')).toBe(false)
+    })
+    expect((container.querySelectorAll('select')[0] as HTMLSelectElement).value).toBe('tcp')
+    expect((container.querySelectorAll('select')[1] as HTMLSelectElement).value).toBe('true')
+
+    fireEvent.click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Browser Back')!)
+    await vi.waitFor(() => expect(container.querySelector('[data-testid="current-location"]')?.textContent).toBe(previous))
+    expect(search.value).toBe('previous')
+    expect((container.querySelectorAll('select')[0] as HTMLSelectElement).value).toBe('udp')
+    expect((container.querySelectorAll('select')[1] as HTMLSelectElement).value).toBe('false')
+    fireEvent.click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Browser Forward')!)
+    await vi.waitFor(() => expect(new URL(container.querySelector('[data-testid="current-location"]')?.textContent ?? '', 'http://localhost').searchParams.get('q')).toBe('router'))
+    expect(search.value).toBe('router')
   })
 
   it('shows the loading state, not a false empty result, while a newly valid search settles', async () => {

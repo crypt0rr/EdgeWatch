@@ -196,7 +196,11 @@ function formatDuration(ms?: number) {
 function returnToFromState(state: unknown, listPath: string) {
   if (!state || typeof state !== 'object' || !('returnTo' in state)) return undefined
   const returnTo = (state as { returnTo?: unknown }).returnTo
-  return typeof returnTo === 'string' && (returnTo === listPath || returnTo.startsWith(`${listPath}?`))
+  const trailingSlashPath = `${listPath}/`
+  return typeof returnTo === 'string' && (
+    returnTo === listPath || returnTo === trailingSlashPath ||
+    returnTo.startsWith(`${listPath}?`) || returnTo.startsWith(`${trailingSlashPath}?`)
+  )
     ? returnTo
     : undefined
 }

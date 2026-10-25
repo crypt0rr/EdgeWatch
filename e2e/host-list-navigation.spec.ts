@@ -70,9 +70,58 @@ test('global and baseline host lists restore their URL state through detail link
         await expect(page.getByLabel('Open ports filter')).toHaveValue('true')
         await expect(page.getByRole('navigation', { name: 'Pagination' })).toContainText('51–100 of 100')
         await expectNoHorizontalOverflow(page)
+
+        await page.goForward()
+        await expect(page).toHaveURL(/\/hosts\/192\.0\.2\.10$/)
+        await expect(page.locator('.back-link').first()).toBeVisible()
+        await page.goBack()
+        await expect(page).toHaveURL(new RegExp(`${listPath.replaceAll('/', '\\/')}${returnQuery.replaceAll('?', '\\?')}$`))
+        await expect(page.getByRole('searchbox', { name: 'Search hosts' })).toHaveValue('router')
+        await expect(page.getByLabel('Protocol')).toHaveValue('tcp')
+        await expect(page.getByLabel('Open ports filter')).toHaveValue('true')
       }
     } finally {
       await context.close()
     }
+  }
+})
+
+test('rapid typing keeps host search, URL, results, and focus synchronized on both lists', async ({ browser, baseURL }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'The rapid typing regression runs once on desktop.')
+
+  const context = await browser.newContext({ baseURL })
+  try {
+    const page = await context.newPage()
+    await mockConsole(page, 'administrator')
+    const query = 'router.example'
+    await page.route(url => {
+      const parsed = new URL(url)
+      return parsed.pathname === '/api/v1/hosts' || parsed.pathname === '/api/v1/jobs/job-1/baseline/hosts'
+    }, route => {
+      const request = new URL(route.request().url())
+      const matches = request.searchParams.get('q') === query
+      const hosts = matches ? [host] : []
+      const pagination = { limit: 50, offset: 0, total: hosts.length, has_more: false, next_offset: null }
+      return route.fulfill({
+        json: request.pathname === '/api/v1/hosts'
+          ? { hosts, pagination }
+          : { job_id: 'job-1', job: 'fixture-job', data_quality: 'detailed', hosts, pagination },
+      })
+    })
+
+    for (const listPath of ['/hosts', '/jobs/job-1/baseline']) {
+      await page.goto(listPath)
+      const search = page.getByRole('searchbox', { name: 'Search hosts' })
+      await search.focus()
+      await page.keyboard.type(query)
+
+      await expect(search).toHaveValue(query)
+      await expect(search).toBeFocused()
+      await expect(page).toHaveURL(new RegExp(`${listPath.replaceAll('/', '\\/')}\\?q=${query}$`))
+      await expect(page.locator('.host-row')).toHaveCount(1)
+      await expect(page.locator('.host-row').first()).toContainText(host.address)
+    }
+  } finally {
+    await context.close()
   }
 })

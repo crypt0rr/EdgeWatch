@@ -2656,15 +2656,60 @@ label small,
 }
 
 .job-list-controls {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
-  justify-content: space-between;
   gap: 16px;
   margin: 0 0 16px;
 }
 
-.job-list-controls label {
-  width: min(240px, 100%);
+.job-list-control-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, .7fr);
+  align-items: end;
+  gap: 12px;
+  width: min(620px, 100%);
+  min-width: 0;
+}
+
+.job-list-control-fields label,
+.job-list-search > label {
+  width: 100%;
+}
+
+.job-list-search {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  color: #bfd0e3;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.job-list-search-field {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 0;
+}
+
+.job-list-search-field input {
+  min-width: 0;
+}
+
+.clear-job-search {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 12px;
+  background: #10243a;
+  color: #b7c7d9;
+  font-size: 12px;
+}
+
+.clear-job-search:disabled {
+  cursor: default;
+  opacity: .55;
 }
 
 .job-card h2 a:focus-visible {
@@ -3154,12 +3199,17 @@ label small,
 
 @media (max-width: 420px) {
   .job-list-controls {
+    grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
-    flex-direction: column;
   }
 
-  .job-list-controls label {
+  .job-list-control-fields {
+    grid-template-columns: minmax(0, 1fr);
     width: 100%;
+  }
+
+  .job-list-controls > .muted {
+    justify-self: start;
   }
 
   .job-monitoring-grid {

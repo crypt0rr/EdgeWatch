@@ -122,7 +122,7 @@ test('operational text stays at least 11px on narrow screens', async ({ page }, 
       await expect(page.getByRole('heading', { name: 'Set schedule and alerts' })).toBeVisible()
       await expectNarrowTextAndLayout(page, 'guided setup schedule and alerts')
 
-      await page.getByRole('button', { name: 'Continue without alerts' }).click()
+      await page.getByRole('button', { name: 'Use no alerts' }).click()
       await page.getByRole('button', { name: 'Review monitor' }).click()
       await expect(page.getByRole('heading', { name: 'Coverage and scan cost' })).toBeVisible()
       await expectNarrowTextAndLayout(page, 'guided setup review')

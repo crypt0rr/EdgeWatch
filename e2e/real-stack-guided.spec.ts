@@ -14,7 +14,7 @@ async function openReview(page: import('@playwright/test').Page, harness: Harnes
   await page.getByRole('textbox', { name: /TCP ports/ }).fill('22')
   await page.getByRole('button', { name: 'Continue to schedule' }).click()
   if (destinationName) await page.getByRole('checkbox', { name: new RegExp(destinationName) }).check()
-  else await page.getByRole('button', { name: 'Continue without alerts' }).click()
+  else await page.getByRole('button', { name: 'Use no alerts' }).click()
   await page.getByRole('button', { name: 'Review monitor' }).click()
   await expect(page.getByRole('heading', { name: 'Coverage and scan cost' })).toBeVisible()
   await expect(page.locator('.estimate-grid')).toBeVisible()

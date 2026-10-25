@@ -13,8 +13,9 @@ Open **Notifications** and choose Email (SMTP), Discord webhook, ntfy, or
 account password. Credentials are write-only and encrypted; the console does
 not return them after you save them. Use **Test** and check that the message
 arrives. You can also create a destination while setting up a monitor. An
-operator can select destinations but cannot create or test them. A monitor can
-also be created with the explicit **Continue without alerts** choice.
+operator can select destinations but cannot create or test them. During setup,
+choose **Use no alerts** to leave the destination list empty. Then use the
+separate **Review monitor** action to review the draft.
 
 The [notification guide](/user-guide/notifications/)
 covers routing, delivery health, and destinations imported from older deployments.

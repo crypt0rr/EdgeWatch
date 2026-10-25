@@ -310,7 +310,7 @@ test('axe audits each step of a monitor setup that Perimeter prefilled', async (
   const steps = [
     { heading: 'Choose targets', next: 'Continue to coverage' },
     { heading: 'Set scan coverage', next: 'Continue to schedule' },
-    { heading: 'Set schedule and alerts', next: 'Continue without alerts' },
+    { heading: 'Set schedule and alerts', next: 'Use no alerts' },
     { heading: 'Set schedule and alerts', next: 'Review monitor' },
     { heading: 'Review and create' },
   ]

@@ -58,7 +58,7 @@ async function openReview(page: import('@playwright/test').Page, name = 'guided-
   await page.getByRole('radio', { name: /Selected TCP ports/ }).check()
   await page.getByRole('textbox', { name: /TCP ports/ }).fill('22,443')
   await page.getByRole('button', { name: 'Continue to schedule' }).click()
-  await page.getByRole('button', { name: 'Continue without alerts' }).click()
+  await page.getByRole('button', { name: 'Use no alerts' }).click()
   await page.getByRole('button', { name: 'Review monitor' }).click()
   await expect(page.getByRole('heading', { name: 'Coverage and scan cost' })).toBeVisible()
   await expect(page.locator('.estimate-grid')).toBeVisible()
@@ -143,7 +143,7 @@ test('an out-of-order preview cannot replace the current draft estimate', async 
   await page.getByRole('radio', { name: /Selected TCP ports/ }).check()
   await page.getByRole('textbox', { name: /TCP ports/ }).fill('22')
   await page.getByRole('button', { name: 'Continue to schedule' }).click()
-  await page.getByRole('button', { name: 'Continue without alerts' }).click()
+  await page.getByRole('button', { name: 'Use no alerts' }).click()
   await page.getByRole('button', { name: 'Review monitor' }).click()
   await stale.started
 
@@ -244,7 +244,7 @@ test('guided setup fits narrow mobile viewports without horizontal scrolling', a
   await expect(page.getByRole('heading', { name: 'Set schedule and alerts' })).toBeVisible()
   await expectNoHorizontalOverflow(page)
 
-  await page.getByRole('button', { name: 'Continue without alerts' }).click()
+  await page.getByRole('button', { name: 'Use no alerts' }).click()
   await page.getByRole('button', { name: 'Review monitor' }).click()
   await expect(page.getByRole('heading', { name: 'Coverage and scan cost' })).toBeVisible()
   await expectNoHorizontalOverflow(page)
@@ -263,6 +263,65 @@ test('operators can select a saved destination but cannot manage destinations or
   await expect(page.getByText(/high-cost approval/i)).toHaveCount(0)
   await expect(page.getByText(/administrator can add destinations/i)).toBeVisible()
 })
+
+for (const role of ['administrator', 'operator'] as const) {
+  test(`${role} can select no alerts and reach Review by keyboard at 320 px`, async ({ page }, testInfo) => {
+    test.skip(!desktopOnly(testInfo.project.name), 'The no-alert role and narrow-layout checks run once on desktop.')
+    const controls = await mockConsole(page, role)
+    await page.route('**/api/v1/notifications/destinations', route => route.fulfill({
+      json: { destinations: [], status: { deployment: 0, managed: 0, active: 0, locked: 0, key_state: 'not_required' } },
+    }))
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto('/jobs/new')
+    await page.getByLabel('Monitor name').fill(`${role}-no-alerts`)
+    await page.getByLabel('Target 1').fill('192.0.2.10')
+    await page.getByRole('button', { name: 'Continue to coverage' }).click()
+    await page.getByRole('button', { name: 'Continue to schedule' }).click()
+    await expect(page.getByRole('heading', { name: 'Set schedule and alerts' })).toBeVisible()
+    await expect(page.getByText('No notification destinations are configured.')).toBeVisible()
+    if (role === 'administrator') {
+      await expect(page.getByRole('button', { name: 'Add destination' })).toBeVisible()
+    } else {
+      await expect(page.getByRole('button', { name: 'Add destination' })).toHaveCount(0)
+      await expect(page.getByText(/An administrator can add destinations/i)).toBeVisible()
+    }
+
+    const chooseNoAlerts = page.getByRole('button', { name: 'Use no alerts', exact: true })
+    await expect(chooseNoAlerts).toBeVisible()
+    await chooseNoAlerts.focus()
+    await page.keyboard.press('Enter')
+    await expect(page.getByText('This monitor will not send notifications.', { exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Set schedule and alerts' })).toBeVisible()
+    expect(controls.calls['job-create'] ?? 0).toBe(0)
+
+    const review = page.getByRole('button', { name: 'Review monitor', exact: true })
+    await review.focus()
+    await expect(review).toBeInViewport()
+    await page.keyboard.press('Enter')
+    await expect(page.getByRole('heading', { name: 'Review and create' })).toBeVisible()
+    await expect(page.getByText('No alerts', { exact: true })).toBeVisible()
+    expect(controls.calls['job-create'] ?? 0).toBe(0)
+
+    await page.getByRole('button', { name: 'Previous step' }).click()
+    await expect(page.getByRole('heading', { name: 'Set schedule and alerts' })).toBeVisible()
+    await expect(page.getByText('This monitor will not send notifications.', { exact: true })).toBeVisible()
+
+    await page.setViewportSize({ width: 320, height: 720 })
+    const widths = await page.evaluate(() => ({ viewport: document.documentElement.clientWidth, page: document.documentElement.scrollWidth }))
+    expect(widths.page).toBeLessThanOrEqual(widths.viewport)
+    const noAlertsAtNarrowWidth = page.getByRole('button', { name: 'Use no alerts', exact: true })
+    await noAlertsAtNarrowWidth.focus()
+    await expect(noAlertsAtNarrowWidth).toBeInViewport()
+    await page.keyboard.press('Enter')
+    await expect(page.getByText('This monitor will not send notifications.', { exact: true })).toBeVisible()
+    await review.focus()
+    await expect(review).toBeInViewport()
+    await page.keyboard.press('Enter')
+    await expect(page.getByRole('heading', { name: 'Review and create' })).toBeVisible()
+    await expect(page.getByText('No alerts', { exact: true })).toBeVisible()
+    expect(controls.calls['job-create'] ?? 0).toBe(0)
+  })
+}
 
 test('viewers and platform administrators are redirected away from unit monitor setup', async ({ page }, testInfo) => {
   test.skip(!desktopOnly(testInfo.project.name), 'The role boundary check runs once on desktop.')

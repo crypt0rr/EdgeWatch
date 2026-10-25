@@ -101,9 +101,13 @@ describe('host detail', () => {
     vi.clearAllMocks()
   })
 
-  async function renderRoute(path: string, pattern: string) {
+  async function renderRoute(path: string, pattern: string, state?: unknown) {
+    const queryAt = path.indexOf('?')
+    const entry = state === undefined
+      ? path
+      : { pathname: queryAt < 0 ? path : path.slice(0, queryAt), search: queryAt < 0 ? '' : path.slice(queryAt), state }
     await act(async () => {
-      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={[path]}><Routes><Route path={pattern} element={<HostDetail />} /></Routes></MemoryRouter></QueryClientProvider>)
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={[entry]}><Routes><Route path={pattern} element={<HostDetail />} /></Routes></MemoryRouter></QueryClientProvider>)
     })
     await vi.waitFor(() => expect(container.textContent).not.toContain('Loading host evidence'), { timeout: 1000 })
   }
@@ -118,6 +122,7 @@ describe('host detail', () => {
     expect(container.textContent).toContain('Example Network')
     expect(container.textContent).toContain('NET-1')
     expect(container.textContent).toContain('Naabu discovery → Nmap confirmation')
+    expect(container.querySelector('.back-link')?.getAttribute('href')).toBe('/jobs/job-1/baseline')
     expect(container.textContent).toContain('UDP scan coverage: unreachable')
     expect(container.textContent).toContain('nmap-host-timeout')
     expect(container.textContent).toContain('nginx · 1.25')
@@ -245,6 +250,22 @@ describe('host detail', () => {
     expect(container.querySelector('a[href="/hosts"]')).toBeTruthy()
   })
 
+  it('returns a global host to the exact originating filtered page', async () => {
+    const returnTo = '/hosts?q=router&protocol=tcp&has_open_ports=true&offset=50'
+    await renderRoute('/scans/scan-1/hosts/198.51.100.10', '/scans/:scanId/hosts/:address', { returnTo })
+    expect(container.querySelector('.back-link')?.getAttribute('href')).toBe(returnTo)
+  })
+
+  it('accepts a trailing slash on a global host list return URL', async () => {
+    await renderRoute('/scans/scan-1/hosts/198.51.100.10', '/scans/:scanId/hosts/:address', { returnTo: '/hosts/?q=router' })
+    expect(container.querySelector('.back-link')?.getAttribute('href')).toBe('/hosts/?q=router')
+  })
+
+  it('accepts a trailing slash on a baseline host list return URL', async () => {
+    await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address', { returnTo: '/jobs/job-1/baseline/?q=router' })
+    expect(container.querySelector('.back-link')?.getAttribute('href')).toBe('/jobs/job-1/baseline/?q=router')
+  })
+
   it('keeps job-scoped historical evidence visible when RDAP is unavailable', async () => {
     vi.mocked(scanHostRDAP).mockRejectedValue(new Error('registry timeout'))
     await renderRoute('/jobs/job-1/scans/scan-1/hosts/198.51.100.10', '/jobs/:id/scans/:scanId/hosts/:address')
@@ -258,6 +279,17 @@ describe('host detail', () => {
     const back = container.querySelector('.back-link')
     expect(back?.getAttribute('href')).toBe('/jobs/job-1/scans/scan-1?results=50')
     expect(back?.textContent).toBe('← Scan')
+  })
+
+  it('returns a baseline host to the exact originating list URL', async () => {
+    const returnTo = '/jobs/job-1/baseline?q=router&protocol=tcp&has_open_ports=true&offset=50'
+    await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address', { returnTo })
+    expect(container.querySelector('.back-link')?.getAttribute('href')).toBe(returnTo)
+  })
+
+  it('ignores a return destination that is outside the matching host list', async () => {
+    await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address', { returnTo: '//example.test' })
+    expect(container.querySelector('.back-link')?.getAttribute('href')).toBe('/jobs/job-1/baseline')
   })
 
   it('opens the first results page when a job-scan host has no results offset', async () => {

@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Globe2, Info, LoaderCircle, Network, Server, ShieldCheck } from 'lucide-react'
 import { useMemo, useState } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useLocation, useParams, useSearchParams } from 'react-router-dom'
 import { baselineHost, baselineHostRDAP, historicalScanHost, historicalScanHostRDAP, scanHost, scanHostRDAP } from '../api'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { PortScopeDetails } from '../components/PortScopeDetails'
@@ -193,16 +193,34 @@ function formatDuration(ms?: number) {
   return `${(ms / 1000).toFixed(ms >= 10000 ? 0 : 1)} s`
 }
 
+function returnToFromState(state: unknown, listPath: string) {
+  if (!state || typeof state !== 'object' || !('returnTo' in state)) return undefined
+  const returnTo = (state as { returnTo?: unknown }).returnTo
+  const trailingSlashPath = `${listPath}/`
+  return typeof returnTo === 'string' && (
+    returnTo === listPath || returnTo === trailingSlashPath ||
+    returnTo.startsWith(`${listPath}?`) || returnTo.startsWith(`${trailingSlashPath}?`)
+  )
+    ? returnTo
+    : undefined
+}
+
 export function HostDetail() {
   const params = useParams()
   const id = params.id ?? ''
   const address = params.address ?? ''
   const scanID = params.scanId
+  const location = useLocation()
   const [searchParams] = useSearchParams()
   const historical = !!scanID && !id
   // Return a job-scan host to the scan's result list, on the page it came from.
   const resultsOffset = Number(searchParams.get('results'))
-  const back = historical ? '/hosts' : scanID ? `/jobs/${id}/scans/${encodeURIComponent(scanID)}?results=${Number.isSafeInteger(resultsOffset) && resultsOffset > 0 ? resultsOffset : 0}` : `/jobs/${id}/baseline`
+  const listReturnTo = historical
+    ? returnToFromState(location.state, '/hosts')
+    : !scanID && id
+      ? returnToFromState(location.state, `/jobs/${encodeURIComponent(id)}/baseline`)
+      : undefined
+  const back = listReturnTo ?? (historical ? '/hosts' : scanID ? `/jobs/${id}/scans/${encodeURIComponent(scanID)}?results=${Number.isSafeInteger(resultsOffset) && resultsOffset > 0 ? resultsOffset : 0}` : `/jobs/${id}/baseline`)
   const backLabel = historical ? 'Hosts' : scanID ? 'Scan' : 'Baseline hosts'
   const detail = useQuery({ queryKey: ['host-detail', id, scanID, address], queryFn: () => scanID ? historical ? historicalScanHost(scanID, address) : scanHost(id, scanID, address) : baselineHost(id, address), enabled: !!address && (historical || !!id) })
   const rdap = useQuery({ queryKey: ['host-rdap', id, scanID, address], queryFn: () => scanID ? historical ? historicalScanHostRDAP(scanID, address) : scanHostRDAP(id, scanID, address) : baselineHostRDAP(id, address), enabled: !!address && (historical || !!id), retry: false })

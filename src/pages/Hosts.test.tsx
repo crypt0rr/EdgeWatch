@@ -1,9 +1,10 @@
 /** @vitest-environment jsdom */
 
 import { act } from 'react'
+import { fireEvent } from '@testing-library/react'
 import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { listHosts } from '../api'
 import type { GlobalHostsResponse } from '../types'
@@ -24,6 +25,13 @@ const response: GlobalHostsResponse = {
 const emptyResponse: GlobalHostsResponse = {
   hosts: [],
   pagination: { limit: 25, offset: 0, total: 0, has_more: false, next_offset: null },
+}
+
+function NavigationProbe() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const returnTo = (location.state as { returnTo?: unknown } | null)?.returnTo
+  return <><output data-testid="current-location">{location.pathname}{location.search}</output><output data-testid="return-to">{typeof returnTo === 'string' ? returnTo : ''}</output><button type="button" onClick={() => navigate(-1)}>Browser Back</button><button type="button" onClick={() => navigate(1)}>Browser Forward</button></>
 }
 
 describe('global hosts explorer', () => {
@@ -83,25 +91,106 @@ describe('global hosts explorer', () => {
       setInputValue(search, 'r')
       setInputValue(search, 'ro')
       setInputValue(search, 'router')
+    })
+    // Commit the input update before waiting so its debounce timer runs inside a separate act.
+    await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 300))
     })
+    await vi.waitFor(() => expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: 'router', offset: 0 })), { timeout: 1000 })
     expect(listHosts).toHaveBeenCalledTimes(1)
-    expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: 'router', offset: 0 }))
     const selects = Array.from(container.querySelectorAll('select')) as HTMLSelectElement[]
-    await act(async () => {
-      selects[0].value = 'udp'
-      selects[0].dispatchEvent(new Event('change', { bubbles: true }))
-      selects[1].value = 'true'
-      selects[1].dispatchEvent(new Event('change', { bubbles: true }))
-      await vi.waitFor(() => expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: 'router', protocol: 'udp', has_open_ports: true, offset: 0 })), { timeout: 1000 })
-    })
+    fireEvent.change(selects[0], { target: { value: 'udp' } })
+    fireEvent.change(selects[1], { target: { value: 'true' } })
+    await vi.waitFor(() => expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: 'router', protocol: 'udp', has_open_ports: true, offset: 0 })), { timeout: 1000 })
 
     await vi.waitFor(() => expect(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Next')).toBeTruthy(), { timeout: 1000 })
     const next = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Next') as HTMLButtonElement
-    await act(async () => {
-      next.click()
-      await vi.waitFor(() => expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ offset: 1 })), { timeout: 1000 })
+    fireEvent.click(next)
+    await vi.waitFor(() => expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ offset: 1 })), { timeout: 1000 })
+  })
+
+  it('keeps search, filters, and page in the URL when returning from a host', async () => {
+    const returnTo = '/hosts?q=router&protocol=tcp&has_open_ports=true&offset=50'
+    vi.mocked(listHosts).mockResolvedValue({
+      ...response,
+      pagination: { limit: 50, offset: 50, total: 100, has_more: false, next_offset: null },
     })
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={[returnTo]}>
+        <Routes>
+          <Route path="/hosts" element={<Hosts />} />
+          <Route path="/scans/:scanId/hosts/:address" element={<p>Host detail</p>} />
+        </Routes>
+        <NavigationProbe />
+      </MemoryRouter></QueryClientProvider>)
+    })
+    await vi.waitFor(() => expect(container.textContent).toContain('Scanned hosts'), { timeout: 1000 })
+    expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: 'router', protocol: 'tcp', has_open_ports: true, offset: 50 }))
+    expect((container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement).value).toBe('router')
+    expect((container.querySelectorAll('select')[0] as HTMLSelectElement).value).toBe('tcp')
+    expect((container.querySelectorAll('select')[1] as HTMLSelectElement).value).toBe('true')
+    expect(container.textContent).toContain('51–100 of 100')
+
+    const hostLink = container.querySelector('a[href="/scans/scan-1/hosts/198.51.100.10"]') as HTMLAnchorElement
+    fireEvent.click(hostLink)
+    await vi.waitFor(() => expect(container.querySelector('[data-testid="current-location"]')?.textContent).toBe('/scans/scan-1/hosts/198.51.100.10'), { timeout: 1000 })
+    expect(container.querySelector('[data-testid="return-to"]')?.textContent).toBe(returnTo)
+
+    fireEvent.click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Browser Back')!)
+    await vi.waitFor(() => expect(container.querySelector('[data-testid="current-location"]')?.textContent).toBe(returnTo), { timeout: 1000 })
+    expect((container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement).value).toBe('router')
+    expect((container.querySelectorAll('select')[0] as HTMLSelectElement).value).toBe('tcp')
+    expect((container.querySelectorAll('select')[1] as HTMLSelectElement).value).toBe('true')
+    expect(container.textContent).toContain('51–100 of 100')
+  })
+
+  it('syncs search from browser Back and Forward URL changes', async () => {
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={['/hosts?q=router', '/hosts?q=database']}>
+        <Routes><Route path="/hosts" element={<Hosts />} /></Routes>
+        <NavigationProbe />
+      </MemoryRouter></QueryClientProvider>)
+    })
+    const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement
+    await vi.waitFor(() => expect(search.value).toBe('database'))
+
+    fireEvent.click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Browser Back')!)
+    await vi.waitFor(() => expect(search.value).toBe('router'))
+    fireEvent.click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Browser Forward')!)
+    await vi.waitFor(() => expect(search.value).toBe('database'))
+  })
+
+  it('replaces search edits without adding a browser history entry per character', async () => {
+    const previous = '/hosts?q=previous&protocol=udp&has_open_ports=false&offset=50'
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={[previous, '/hosts?protocol=tcp&has_open_ports=true&offset=50']}>
+        <Routes><Route path="/hosts" element={<Hosts />} /></Routes>
+        <NavigationProbe />
+      </MemoryRouter></QueryClientProvider>)
+    })
+    const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement
+    await vi.waitFor(() => expect(search.value).toBe(''))
+
+    for (const character of 'router') act(() => setInputValue(search, `${search.value}${character}`))
+    await vi.waitFor(() => {
+      const location = new URL(container.querySelector('[data-testid="current-location"]')?.textContent ?? '', 'http://localhost')
+      expect(location.pathname).toBe('/hosts')
+      expect(location.searchParams.get('q')).toBe('router')
+      expect(location.searchParams.get('protocol')).toBe('tcp')
+      expect(location.searchParams.get('has_open_ports')).toBe('true')
+      expect(location.searchParams.has('offset')).toBe(false)
+    })
+    expect((container.querySelectorAll('select')[0] as HTMLSelectElement).value).toBe('tcp')
+    expect((container.querySelectorAll('select')[1] as HTMLSelectElement).value).toBe('true')
+
+    fireEvent.click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Browser Back')!)
+    await vi.waitFor(() => expect(container.querySelector('[data-testid="current-location"]')?.textContent).toBe(previous))
+    expect(search.value).toBe('previous')
+    expect((container.querySelectorAll('select')[0] as HTMLSelectElement).value).toBe('udp')
+    expect((container.querySelectorAll('select')[1] as HTMLSelectElement).value).toBe('false')
+    fireEvent.click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Browser Forward')!)
+    await vi.waitFor(() => expect(new URL(container.querySelector('[data-testid="current-location"]')?.textContent ?? '', 'http://localhost').searchParams.get('q')).toBe('router'))
+    expect(search.value).toBe('router')
   })
 
   it('shows the loading state, not a false empty result, while a newly valid search settles', async () => {
@@ -138,6 +227,7 @@ describe('global hosts explorer', () => {
 
     setInputValue(search, '198')
     await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    await vi.waitFor(() => expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: '198', offset: 0 })), { timeout: 1000 })
     expect(listHosts).toHaveBeenCalledTimes(1)
     expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: '198', offset: 0 }))
   })
@@ -150,6 +240,7 @@ describe('global hosts explorer', () => {
     const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement
     setInputValue(search, 'missing')
     await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    await vi.waitFor(() => expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: 'missing', offset: 0 })), { timeout: 1000 })
     expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: 'missing', offset: 0 }))
     await vi.waitFor(() => expect(container.textContent).toContain('No hosts match “missing”.'), { timeout: 1000 })
     expect(hostEmptyState()).toHaveTextContent('No hosts match “missing”.')
@@ -157,32 +248,21 @@ describe('global hosts explorer', () => {
     expect(Array.from(container.querySelectorAll('button')).some(button => button.textContent === 'Clear search')).toBe(true)
 
     const clearSearch = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Clear search') as HTMLButtonElement
-    act(() => clearSearch.click())
+    fireEvent.click(clearSearch)
     await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
     expect(search.value).toBe('')
     await vi.waitFor(() => expect(hostEmptyState()).toHaveTextContent('No completed scans have produced effective hosts yet.'), { timeout: 1000 })
     const selects = Array.from(container.querySelectorAll('select')) as HTMLSelectElement[]
-    await act(async () => {
-      selects[0]!.value = 'tcp'
-      selects[0]!.dispatchEvent(new Event('change', { bubbles: true }))
-      await Promise.resolve()
-    })
+    fireEvent.change(selects[0]!, { target: { value: 'tcp' } })
     await vi.waitFor(() => expect(hostEmptyState()).toHaveTextContent('No hosts match TCP.'), { timeout: 1000 })
     expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ protocol: 'tcp', offset: 0 }))
 
-    await act(async () => {
-      selects[1]!.value = 'false'
-      selects[1]!.dispatchEvent(new Event('change', { bubbles: true }))
-      await Promise.resolve()
-    })
+    fireEvent.change(selects[1]!, { target: { value: 'false' } })
     await vi.waitFor(() => expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ protocol: 'tcp', has_open_ports: false, offset: 0 })), { timeout: 1000 })
     await vi.waitFor(() => expect(hostEmptyState()).toHaveTextContent('No hosts match TCP and hosts with no positive ports.'), { timeout: 1000 })
     expect(Array.from(container.querySelectorAll('button')).some(button => button.textContent === 'Reset filters')).toBe(true)
-    await act(async () => {
-      const resetFilters = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Reset filters') as HTMLButtonElement
-      resetFilters.click()
-      await Promise.resolve()
-    })
+    const resetFilters = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Reset filters') as HTMLButtonElement
+    fireEvent.click(resetFilters)
     expect(selects[0]?.value).toBe('')
     expect(selects[1]?.value).toBe('')
     await vi.waitFor(() => expect(hostEmptyState()).toHaveTextContent('No completed scans have produced effective hosts yet.'), { timeout: 1000 })
@@ -220,11 +300,15 @@ describe('global hosts explorer', () => {
     const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement
     await act(async () => {
       setInputValue(search, 'old')
+    })
+    await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 300))
     })
     await vi.waitFor(() => expect(requests).toHaveLength(2), { timeout: 1000 })
     await act(async () => {
       setInputValue(search, 'new')
+    })
+    await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 300))
     })
     await vi.waitFor(() => expect(requests).toHaveLength(3), { timeout: 1000 })

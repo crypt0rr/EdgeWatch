@@ -281,7 +281,7 @@ export function MonitorSetup() {
     }
     if (!draft.notificationSelectionTouched) {
       if (draft.notificationIDs.length === 0) {
-        setFieldError('Select notification destinations or choose explicitly to continue without alerts.')
+        setFieldError('Select notification destinations or choose Use no alerts.')
         return
       }
       // Enabled defaults are already visible as checked. Advancing from this
@@ -487,7 +487,7 @@ export function MonitorSetup() {
 
       <div className="panel form-panel job-notification-panel">
         <div className="panel-heading"><div><h2>Alerts for this monitor</h2><p className="muted">Choose destinations for this monitor's incidents and scan events.</p></div><Bell className="muted-icon" size={19} /></div>
-        {destinations.isLoading ? <div className="loading"><span className="spinner" />Loading destinations…</div> : destinations.error ? <ErrorNotice message="Notification destinations could not be loaded. Retry to select a destination, or choose explicitly to continue without alerts." onRetry={() => destinations.refetch()} /> : destinations.data?.destinations.length ? <div className="job-notification-list">
+        {destinations.isLoading ? <div className="loading"><span className="spinner" />Loading destinations…</div> : destinations.error ? <ErrorNotice message="Notification destinations could not be loaded. Retry to select a destination, or choose Use no alerts." onRetry={() => destinations.refetch()} /> : destinations.data?.destinations.length ? <div className="job-notification-list">
           {destinations.data.destinations.map(destination => <label className="switch-row job-notification-option" key={destination.id}>
             <input type="checkbox" checked={draft.notificationIDs.includes(destination.id)} onChange={event => updateNotificationSelection(destination.id, event.currentTarget.checked)} />
             <span><strong title={destination.name}>{destination.name}</strong><small>{destination.provider || 'unknown provider'} · {destination.source === 'deployment' ? 'deployment-managed' : 'web-managed'}{destination.locked ? ' · credentials locked' : !destination.enabled ? ' · paused' : ''}</small></span>
@@ -499,9 +499,9 @@ export function MonitorSetup() {
         {draft.notificationIDs.some(id => destinations.data?.destinations.some(destination => destination.id === id && (!destination.enabled || destination.locked))) && <div className="notice warning" role="status"><TriangleAlert size={16} /><span>A selected destination is paused or locked. Alerts may not be delivered through it until an administrator enables it or unlocks its credentials in Notifications.</span></div>}
         {addedDestination && <div className="success-banner" role="status"><Check size={16} />{addedDestination} was created and selected. It is a separate resource and will remain in Notifications if you cancel this monitor.</div>}
         <div className="notification-setup-actions">
-          <button type="button" className="button secondary" onClick={chooseNoAlerts}>Continue without alerts</button>
+          <button type="button" className="button secondary" onClick={chooseNoAlerts}>Use no alerts</button>
           {session.data?.permissions.includes('notifications.manage') && <button type="button" className="button secondary" onClick={() => setCreateDestinationOpen(value => !value)}>{createDestinationOpen ? 'Close destination form' : 'Add destination'}</button>}
-          {!session.data?.permissions.includes('notifications.manage') && <p className="helper">An administrator can add destinations in Notifications. Operators can select available destinations or continue without alerts.</p>}
+          {!session.data?.permissions.includes('notifications.manage') && <p className="helper">An administrator can add destinations in Notifications. Operators can select available destinations or choose Use no alerts.</p>}
         </div>
         {createDestinationOpen && session.data?.permissions.includes('notifications.manage') && <div className="notification-inline-create"><h3>Add a notification destination</h3><p className="muted">The account password confirms this separate change. Credentials are encrypted and cannot be read back.</p><NotificationDestinationCreateForm idPrefix="monitor-destination" create={createNotificationDestination} onCreated={onDestinationCreated} onTest={destination => testNotificationDestination(destination.id)} onCancel={() => setCreateDestinationOpen(false)} createLabel="Save and select destination" /></div>}
       </div>

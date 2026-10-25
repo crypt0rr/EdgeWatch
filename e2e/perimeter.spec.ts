@@ -398,7 +398,7 @@ test('Create monitor opens the guided setup with a one-time prefill and creates 
   await expect(page.getByRole('checkbox', { name: /Include UDP/ })).toBeChecked()
   await expect(page.getByRole('textbox', { name: /UDP ports/ })).toHaveValue('53,123,161,500,1194,4500')
   await page.getByRole('button', { name: 'Continue to schedule' }).click()
-  await page.getByRole('button', { name: 'Continue without alerts' }).click()
+  await page.getByRole('button', { name: 'Use no alerts' }).click()
   await page.getByRole('button', { name: 'Review monitor' }).click()
   await expect(page.locator('.estimate-grid')).toBeVisible()
   expect(controls.calls['job-create'] ?? 0).toBe(0)

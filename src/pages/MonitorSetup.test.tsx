@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { fireEvent, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { StrictMode, useEffect, type ReactNode } from 'react'
 import { Link, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -58,6 +59,7 @@ vi.mock('../job-creation-draft', async () => {
 
 const destination: NotificationDestination = { id: 'destination-1', name: 'Operations', provider: 'smtp', source: 'web', enabled: true, locked: false, read_only: false, revision: 1 }
 const session = { role: 'administrator' as const, user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'jobs.read', 'users.manage', 'notifications.manage'], high_cost_override: true, csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, scope: 'unit' as const, unit: { id: 'unit-1', name: 'Unit', slug: 'unit' }, multi_unit: false }
+const operatorSession = { ...session, role: 'operator' as const, user_id: 'operator', username: 'operator', permissions: ['jobs.read', 'jobs.write'], high_cost_override: false }
 const profile = { id: 'profile-advanced', name: 'Tuned discovery', description: '', built_in: false, archived: false, revision: 7, definition: { engine: 'naabu_nmap', naabu: { scan_type: 'connect', rate: 1800, workers: 20, retries: 2, timeout_ms: 1200, warm_up_seconds: 2, verify: true, address_batch_size: 16 }, nmap_args: ['-sV'], naabu_args: [], enrichment_args: [] } }
 const capabilities = { engines: ['nmap', 'naabu_nmap'], nmap: { available: true, path: '/usr/bin/nmap', version: '7.99' }, naabu: { available: true, path: '/usr/bin/naabu', version: '2.6.1', syn_supported: false } }
 
@@ -161,7 +163,7 @@ async function goToSchedule() {
 
 async function goToReview() {
   await goToSchedule()
-  fireEvent.click(screen.getByRole('button', { name: 'Continue without alerts' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Use no alerts' }))
   fireEvent.click(screen.getByRole('button', { name: /Review monitor/ }))
   await screen.findByRole('heading', { name: 'Review and create' })
   await waitFor(() => expect(previewJob).toHaveBeenCalled())
@@ -284,7 +286,7 @@ describe('guided monitor creation', () => {
     fireEvent.change(screen.getByLabelText(/^UDP ports/), { target: { value: '53,123' } })
     fireEvent.click(screen.getByRole('button', { name: /Continue to schedule/ }))
     await screen.findByRole('heading', { name: 'Set schedule and alerts' })
-    fireEvent.click(screen.getByRole('button', { name: 'Continue without alerts' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Use no alerts' }))
     fireEvent.click(screen.getByRole('button', { name: /Review monitor/ }))
     await screen.findByRole('heading', { name: 'Review and create' })
     await waitFor(() => expect(previewJob).toHaveBeenCalled())
@@ -360,7 +362,7 @@ describe('guided monitor creation', () => {
     vi.mocked(previewJob).mockRejectedValueOnce(new APIError('Probe budget unavailable', 'preview_unavailable', { reason: 'scan_budget_unavailable' }, 503)).mockImplementationOnce(async value => previewResponse(value))
     renderJourney()
     await goToSchedule()
-    fireEvent.click(screen.getByRole('button', { name: 'Continue without alerts' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Use no alerts' }))
     fireEvent.click(screen.getByRole('button', { name: /Review monitor/ }))
     await screen.findByRole('heading', { name: 'Review and create' })
     expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument()
@@ -392,9 +394,38 @@ describe('guided monitor creation', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: /Paused alerts/ }))
     fireEvent.click(screen.getByRole('checkbox', { name: /Locked alerts/ }))
     expect(screen.getByText(/A selected destination is paused or locked/)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Continue without alerts' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Use no alerts' }))
     expect(screen.getByText(/This monitor will not send notifications/)).toBeInTheDocument()
     expect(screen.queryByText(/A selected destination is paused or locked/)).not.toBeInTheDocument()
+  })
+
+  it.each([
+    { role: 'administrator', userSession: session, canManageDestinations: true },
+    { role: 'operator', userSession: operatorSession, canManageDestinations: false },
+  ])('$role can select no alerts by keyboard and review the unchanged draft', async ({ userSession, canManageDestinations }) => {
+    vi.mocked(getSession).mockResolvedValue(userSession)
+    renderJourney()
+    await goToSchedule()
+
+    const noAlerts = screen.getByRole('button', { name: 'Use no alerts' })
+    if (canManageDestinations) {
+      expect(screen.getByRole('button', { name: 'Add destination' })).toBeInTheDocument()
+    } else {
+      expect(screen.queryByRole('button', { name: 'Add destination' })).not.toBeInTheDocument()
+      expect(screen.getByText(/An administrator can add destinations/i)).toBeInTheDocument()
+    }
+
+    const user = userEvent.setup()
+    noAlerts.focus()
+    await user.keyboard('{Enter}')
+
+    expect(noAlerts).toHaveFocus()
+    expect(screen.getByText('This monitor will not send notifications.')).toHaveAttribute('role', 'status')
+    expect(screen.getByRole('heading', { name: 'Set schedule and alerts' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Review monitor' })).toBeInTheDocument()
+    expect(creationDraft()).toMatchObject({ fields: { name: 'Public edge' }, targets: ['198.51.100.20'], notificationIDs: [], notificationSelectionTouched: true })
+    expect(previewJob).not.toHaveBeenCalled()
+    expect(createJob).not.toHaveBeenCalled()
   })
 
   it('keeps a destination created before cancellation and starts a fresh monitor draft on the next journey', async () => {
@@ -532,7 +563,7 @@ describe('guided monitor creation', () => {
     vi.mocked(previewJob).mockImplementation(async value => previewResponse(value, 40_000, { exceeded: true, estimated_probes: 40_000, limit: 10_000, approval_would_fit: true }))
     renderJourney()
     await goToSchedule()
-    fireEvent.click(screen.getByRole('button', { name: 'Continue without alerts' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Use no alerts' }))
     fireEvent.click(screen.getByRole('button', { name: /Review monitor/ }))
     await screen.findByRole('heading', { name: 'Review and create' })
     await waitFor(() => expect(screen.getByRole('button', { name: 'Create without starting' })).toBeEnabled())
@@ -554,7 +585,7 @@ describe('guided monitor creation', () => {
     vi.mocked(previewJob).mockImplementation(value => new Promise(resolve => pending.push({ resolve, payload: value })) as Promise<JobPreview>)
     renderJourney()
     await goToSchedule()
-    fireEvent.click(screen.getByRole('button', { name: 'Continue without alerts' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Use no alerts' }))
     fireEvent.click(screen.getByRole('button', { name: /Review monitor/ }))
     await screen.findByRole('heading', { name: 'Review and create' })
     await waitFor(() => expect(pending).toHaveLength(1))
@@ -599,7 +630,7 @@ describe('guided monitor creation', () => {
     fireEvent.click(screen.getByRole('radio', { name: /Full TCP range/ }))
     expect(screen.getByText(/revision 7 is pinned/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Continue to schedule/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue without alerts' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Use no alerts' }))
     fireEvent.click(screen.getByRole('button', { name: /Review monitor/ }))
     await screen.findByRole('heading', { name: 'Review and create' })
     await waitFor(() => expect(previewJob).toHaveBeenCalled())
@@ -762,7 +793,7 @@ describe('guided monitor creation', () => {
       }
       fireEvent.click(screen.getByRole('button', { name: /Continue to schedule/ }))
       await screen.findByRole('heading', { name: 'Set schedule and alerts' })
-      fireEvent.click(screen.getByRole('button', { name: 'Continue without alerts' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Use no alerts' }))
       fireEvent.click(screen.getByRole('button', { name: /Review monitor/ }))
       await screen.findByRole('heading', { name: 'Review and create' })
       await waitFor(() => expect(previewJob).toHaveBeenCalled())

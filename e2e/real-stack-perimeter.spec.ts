@@ -71,7 +71,7 @@ test('a monitor created from a perimeter suggestion covers the range until it is
     // paused, on a cron that cannot fire during this test.
     await page.getByLabel('Five-field cron').fill('0 3 1 1 *')
     await expect(page.getByRole('checkbox', { name: /Schedule enabled/ })).toBeChecked()
-    await page.getByRole('button', { name: 'Continue without alerts' }).click()
+    await page.getByRole('button', { name: 'Use no alerts' }).click()
     await page.getByRole('button', { name: 'Review monitor' }).click()
     await expect(page.getByRole('heading', { name: 'Coverage and scan cost' })).toBeVisible()
     await expect(page.locator('.estimate-grid')).toBeVisible()

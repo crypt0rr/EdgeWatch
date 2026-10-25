@@ -58,9 +58,10 @@ const pickerResponse: GlobalHostsResponse = {
   hosts: [
     { address: '198.51.100.10', job_id: 'job-1', job: 'production', scan_id: 'scan-1', scanned_at: '2026-09-12T07:00:00Z', data_quality: 'detailed', open_ports: 1, open_filtered_ports: 0, has_open_ports: true, archived: false },
     { address: '198.51.100.11', job_id: 'job-2', job: 'retired', scan_id: 'scan-2', scanned_at: '2026-09-11T07:00:00Z', data_quality: 'detailed', open_ports: 0, open_filtered_ports: 0, has_open_ports: false, archived: true },
+    { address: '198.51.100.13', job_id: 'job-3', job: 'older retired', scan_id: 'scan-4', scanned_at: '2026-09-09T07:00:00Z', data_quality: 'detailed', open_ports: 0, open_filtered_ports: 0, has_open_ports: false, archived: true },
     { address: '198.51.100.12', job_id: '', job: 'legacy', scan_id: 'scan-3', scanned_at: '2026-09-10T07:00:00Z', data_quality: 'legacy', open_ports: 0, open_filtered_ports: 0, has_open_ports: false },
   ],
-  pagination: { limit: 100, offset: 0, total: 3, has_more: false, next_offset: null },
+  pagination: { limit: 100, offset: 0, total: 4, has_more: false, next_offset: null },
 }
 
 describe('public dashboard pages', () => {
@@ -207,18 +208,30 @@ describe('public dashboard pages', () => {
   })
 
   it('separates archived and legacy hosts and saves checkbox changes', async () => {
+    vi.mocked(getPublicDashboardConfig).mockResolvedValueOnce({
+      ...publicConfig,
+      hosts: [
+        { job_id: 'job-2', address: '198.51.100.11' },
+        { job_id: '', address: '198.51.100.12' },
+      ],
+    })
     await renderPage(<PublicDashboardAdmin />)
     expect(container.textContent).toContain('Active jobs')
     expect(container.textContent).toContain('Archived jobs')
     expect(container.textContent).toContain('recreate this host in a web-managed job')
-    const checkboxes = Array.from(container.querySelectorAll('input[id^="public-host-"]')) as HTMLInputElement[]
-    expect(checkboxes).toHaveLength(3)
-    expect(checkboxes[0].disabled).toBe(false)
-    expect(checkboxes[1].disabled).toBe(true)
-    expect(checkboxes[2].disabled).toBe(true)
+    const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"][id^="public-host-"]')) as HTMLInputElement[]
+    expect(checkboxes).toHaveLength(4)
+    const checkbox = (address: string) => checkboxes.find(input => input.id.includes(address))!
+    expect(checkbox('198.51.100.10').disabled).toBe(false)
+    expect(checkbox('198.51.100.11').disabled).toBe(false)
+    expect(checkbox('198.51.100.11').checked).toBe(true)
+    expect(checkbox('198.51.100.13').disabled).toBe(true)
+    expect(checkbox('198.51.100.13').checked).toBe(false)
+    expect(checkbox('198.51.100.12').disabled).toBe(true)
+    expect(checkbox('198.51.100.12').checked).toBe(true)
 
-    act(() => checkboxes[0].click())
-    const enabled = checkboxes[0]
+    act(() => checkbox('198.51.100.10').click())
+    const enabled = checkbox('198.51.100.10')
     expect(enabled.checked).toBe(true)
     const saveButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Save public view')) as HTMLButtonElement
     await act(async () => {
@@ -227,10 +240,126 @@ describe('public dashboard pages', () => {
       await Promise.resolve()
     })
     expect(savePublicDashboardConfig).toHaveBeenCalledWith(expect.objectContaining({
-      hosts: [{ job_id: 'job-1', address: '198.51.100.10' }],
+      hosts: [
+        { job_id: 'job-2', address: '198.51.100.11' },
+        { job_id: '', address: '198.51.100.12' },
+        { job_id: 'job-1', address: '198.51.100.10' },
+      ],
       updated_at: publicConfig.updated_at,
     }))
     expect(container.textContent).toContain('Public view saved.')
+  })
+
+  it('searches by address and job, resets pagination, and keeps off-page draft selections', async () => {
+    const selected = pickerResponse.hosts[0]
+    const laterHost = { ...selected, address: '198.51.100.99', job_id: 'job-later', job: 'later-job' }
+    const firstPage: GlobalHostsResponse = {
+      hosts: [selected],
+      pagination: { limit: 100, offset: 0, total: 221, has_more: true, next_offset: 100 },
+    }
+    const secondPage: GlobalHostsResponse = {
+      hosts: [laterHost],
+      pagination: { limit: 100, offset: 100, total: 221, has_more: true, next_offset: 200 },
+    }
+    const matchPage: GlobalHostsResponse = {
+      hosts: [laterHost],
+      pagination: { limit: 100, offset: 0, total: 1, has_more: false, next_offset: null },
+    }
+    vi.mocked(listHosts).mockImplementation(async filters => {
+      if (filters?.q) return matchPage
+      return filters?.offset === 100 ? secondPage : firstPage
+    })
+
+    await renderPage(<PublicDashboardAdmin />)
+    const search = container.querySelector('#public-host-search') as HTMLInputElement
+    const hostCheckbox = (address: string) => Array.from(container.querySelectorAll('input[type="checkbox"][id^="public-host-"]')).find(input => (input as HTMLInputElement).id.includes(address)) as HTMLInputElement
+    expect(search).toHaveAccessibleName('Search hosts by address or job')
+    expect(container.querySelector('.public-picker-count')?.textContent).toContain('221 hosts in the inventory')
+    expect(container.querySelector('.public-picker-count')?.textContent).toContain('0 selected for publication')
+
+    const firstHost = hostCheckbox('198.51.100.10')
+    act(() => firstHost.click())
+    expect(firstHost.checked).toBe(true)
+
+    const next = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Next') as HTMLButtonElement
+    expect(next).toBeTruthy()
+    await act(async () => {
+      next.click()
+      await vi.waitFor(() => expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ offset: 100 })), { timeout: 1000 })
+    })
+    expect(hostCheckbox('198.51.100.99')).toBeTruthy()
+
+    const setSearch = (value: string) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+      act(() => {
+        setter?.call(search, value)
+        search.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+      })
+    }
+    vi.mocked(listHosts).mockClear()
+    setSearch('later-job')
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    await vi.waitFor(() => expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: 'later-job', offset: 0 })), { timeout: 1000 })
+    const searchedHost = await vi.waitFor(() => {
+      const found = hostCheckbox('198.51.100.99')
+      expect(found).toBeTruthy()
+      return found
+    }, { timeout: 1000 })
+    expect(searchedHost.checked).toBe(false)
+    expect(container.querySelector('.public-picker-count')?.textContent).toContain('1 host matches “later-job”')
+    expect(container.querySelector('.public-picker-count')?.textContent).toContain('1 selected for publication')
+    expect(savePublicDashboardConfig).not.toHaveBeenCalled()
+
+    setSearch('198.51.100.99')
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    await vi.waitFor(() => expect(listHosts).toHaveBeenLastCalledWith(expect.objectContaining({ q: '198.51.100.99', offset: 0 })), { timeout: 1000 })
+    await vi.waitFor(() => expect(hostCheckbox('198.51.100.99').checked).toBe(false), { timeout: 1000 })
+
+    const clear = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Clear search') as HTMLButtonElement
+    act(() => clear.click())
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    await vi.waitFor(() => expect(search.value).toBe(''), { timeout: 1000 })
+    const retainedHost = hostCheckbox('198.51.100.10')
+    expect(retainedHost.checked).toBe(true)
+    expect(container.querySelector('.public-picker-count')?.textContent).toContain('1 selected for publication')
+    expect(savePublicDashboardConfig).not.toHaveBeenCalled()
+
+    const save = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Save public view')) as HTMLButtonElement
+    await act(async () => {
+      save.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(savePublicDashboardConfig).toHaveBeenCalledWith(expect.objectContaining({
+      hosts: [{ job_id: 'job-1', address: '198.51.100.10' }],
+    }))
+  })
+
+  it('shows a searchable no-results state and disables queries shorter than three characters', async () => {
+    vi.mocked(listHosts).mockImplementation(async filters => filters?.q
+      ? { hosts: [], pagination: { limit: 100, offset: 0, total: 0, has_more: false, next_offset: null } }
+      : pickerResponse)
+    await renderPage(<PublicDashboardAdmin />)
+    const search = container.querySelector('#public-host-search') as HTMLInputElement
+    vi.mocked(listHosts).mockClear()
+
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    act(() => {
+      setter?.call(search, 'ab')
+      search.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+    })
+    expect(container.querySelector('.public-picker-message')?.textContent).toContain('at least 3 characters')
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    expect(listHosts).not.toHaveBeenCalled()
+
+    act(() => {
+      setter?.call(search, 'missing-job')
+      search.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+    })
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    await vi.waitFor(() => expect(container.querySelector('.public-picker-empty')?.textContent).toContain('No hosts match “missing-job”.'), { timeout: 1000 })
+    expect(container.querySelector('.public-picker-count')?.textContent).toContain('0 hosts match “missing-job”')
+    expect(Array.from(container.querySelectorAll('.public-picker-search button')).find(button => button.textContent === 'Clear search')).toBeTruthy()
   })
 
   it('keeps the draft after a 409 and lets the administrator rebase it', async () => {

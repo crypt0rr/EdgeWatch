@@ -75,6 +75,9 @@ describe('baseline host explorer', () => {
       search.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
       setter?.call(search, 'router')
       search.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+    })
+    // Commit the input update before waiting so its debounce timer runs inside a separate act.
+    await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 300))
     })
     await vi.waitFor(() => expect(baselineHosts).toHaveBeenCalledWith('job-1', expect.objectContaining({ q: 'router', offset: 0 })), { timeout: 1000 })
@@ -137,6 +140,8 @@ describe('baseline host explorer', () => {
     await act(async () => {
       setter?.call(search, '443')
       search.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+    })
+    await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 300))
     })
     await vi.waitFor(() => expect(baselineHosts).toHaveBeenCalledWith('job-1', expect.objectContaining({ q: '443' })), { timeout: 1000 })
@@ -155,6 +160,8 @@ describe('baseline host explorer', () => {
     await act(async () => {
       setter?.call(search, 'no-such-host.example.com')
       search.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+    })
+    await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 300))
     })
     await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('No hosts match “no-such-host.example.com”.'), { timeout: 1000 })

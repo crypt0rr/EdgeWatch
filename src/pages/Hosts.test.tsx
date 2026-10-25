@@ -91,6 +91,9 @@ describe('global hosts explorer', () => {
       setInputValue(search, 'r')
       setInputValue(search, 'ro')
       setInputValue(search, 'router')
+    })
+    // Commit the input update before waiting so its debounce timer runs inside a separate act.
+    await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 300))
     })
     await vi.waitFor(() => expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: 'router', offset: 0 })), { timeout: 1000 })
@@ -248,11 +251,15 @@ describe('global hosts explorer', () => {
     const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement
     await act(async () => {
       setInputValue(search, 'old')
+    })
+    await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 300))
     })
     await vi.waitFor(() => expect(requests).toHaveLength(2), { timeout: 1000 })
     await act(async () => {
       setInputValue(search, 'new')
+    })
+    await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 300))
     })
     await vi.waitFor(() => expect(requests).toHaveLength(3), { timeout: 1000 })

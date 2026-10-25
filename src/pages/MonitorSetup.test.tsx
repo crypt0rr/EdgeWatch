@@ -213,11 +213,19 @@ describe('guided monitor creation', () => {
     })
 
     renderJourney()
-    await goToSchedule()
+    fireEvent.change(screen.getByLabelText(/^Monitor name/), { target: { value: 'Public edge' } })
+    fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: '198.51.100.20' } })
+    fireEvent.click(screen.getByRole('button', { name: /Continue to coverage/ }))
+    expect(screen.getByRole('heading', { name: 'Set scan coverage' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Continue to schedule/ }))
+    expect(screen.getByRole('heading', { name: 'Set schedule and alerts' })).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText(/^Timezone/), { target: { value: unsupportedZone } })
 
     const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone
     const firstRunLocal = new Date(runAt).toLocaleString(undefined, { timeZone: browserZone })
+    await act(async () => {
+      await new Promise(resolve => window.setTimeout(resolve, 400))
+    })
     await waitFor(() => {
       expect(screen.getByText(/first scheduled scan is expected at/)).toHaveTextContent(`${firstRunLocal} (${browserZone})`)
       expect(screen.getByText(/Factory neighbour is next at/)).toHaveTextContent(`${firstRunLocal} (${browserZone})`)

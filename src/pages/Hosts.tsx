@@ -1,6 +1,5 @@
 import { Search, Server, SlidersHorizontal } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { listHosts } from '../api'
 import { Pagination } from '../components/Pagination'
@@ -10,6 +9,7 @@ import type { GlobalHostSummary } from '../types'
 import { useDebouncedValue } from '../useDebouncedValue'
 import { formatDateTime } from '../format'
 import { hostSearchValidationMessage } from '../hostSearch'
+import { useHostListState } from '../host-list-state'
 
 function addressKind(address: string) {
   return address.includes(':') ? 'IPv6' : 'IPv4'
@@ -21,11 +21,11 @@ function visibilityLabel(visibility: GlobalHostSummary['visibility']) {
   return 'Unknown'
 }
 
-function HostRow({ host }: { host: GlobalHostSummary }) {
+function HostRow({ host, returnTo }: { host: GlobalHostSummary; returnTo: string }) {
   const source = host.source_targets?.length ? host.source_targets.join(', ') : host.dns_names?.join(', ')
   const scannedAt = host.scanned_at ? formatDateTime(host.scanned_at) : 'Unknown time'
   const visibility = visibilityLabel(host.visibility)
-  return <Link className="host-row global-host-row" to={`/scans/${encodeURIComponent(host.scan_id)}/hosts/${encodeURIComponent(host.address)}`}>
+  return <Link className="host-row global-host-row" to={`/scans/${encodeURIComponent(host.scan_id)}/hosts/${encodeURIComponent(host.address)}`} state={{ returnTo }}>
     <span className="host-address"><strong title={host.address}>{host.address}</strong><span className="host-badges"><span className="pill blue">{host.address_family ?? addressKind(host.address)}</span><span className={host.visibility === 'public' ? 'pill green' : 'pill gray'}>{visibility}</span>{host.legacy && <span className="pill amber">Legacy detail</span>}</span></span>
     <span className="host-source"><strong title={host.job || 'Legacy scan'}>{host.job || 'Legacy scan'}</strong><small>{scannedAt}</small><span title={source || 'Configured target'}>{source || 'Configured target'}</span></span>
     <span className="host-coverage">{host.protocols?.map(protocol => <span key={protocol.protocol} className="coverage-chip"><b>{protocol.protocol.toUpperCase()}</b> {protocol.open_ports} open{protocol.open_filtered_ports ? ` · ${protocol.open_filtered_ports} open|filtered` : ''}</span>)}</span>
@@ -33,32 +33,26 @@ function HostRow({ host }: { host: GlobalHostSummary }) {
   </Link>
 }
 
-function HostGroup({ title, description, hosts }: { title: string; description: string; hosts: GlobalHostSummary[] }) {
+function HostGroup({ title, description, hosts, returnTo }: { title: string; description: string; hosts: GlobalHostSummary[]; returnTo: string }) {
   if (!hosts.length) return null
   return <section className="host-group" aria-labelledby={`host-group-${title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`}>
     <div className="host-group-heading"><div><h3 id={`host-group-${title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`}>{title}</h3><p className="muted">{description}</p></div></div>
-    <div className="host-list">{hosts.map(host => <HostRow key={`${host.scan_id}-${host.address}`} host={host} />)}</div>
+    <div className="host-list">{hosts.map(host => <HostRow key={`${host.scan_id}-${host.address}`} host={host} returnTo={returnTo} />)}</div>
   </section>
 }
 
 export function Hosts() {
   // Until a valid search settles, its query is disabled and has neither data
   // nor an error; the page shows the loading state then, not "No hosts match".
-  const [search, setSearch] = useState('')
+  const { search, protocol, open, offset, returnTo, updateSearch, updateProtocol, updateOpen, updateOffset, resetFilters } = useHostListState()
   const q = useDebouncedValue(search)
   const searchMessage = hostSearchValidationMessage(search)
-  const [protocol, setProtocol] = useState('')
-  const [open, setOpen] = useState('')
-  const [offset, setOffset] = useState(0)
   const data = useQueryHosts(q, protocol, open, offset, !searchMessage && search === q)
-  function updateSearch(value: string) { setSearch(value); setOffset(0) }
-  function updateProtocol(value: string) { setProtocol(value); setOffset(0) }
-  function updateOpen(value: string) { setOpen(value); setOffset(0) }
 
   return <section className="page host-explorer-page">
     <div className="page-heading"><div><p className="eyebrow">Discovered assets</p><h1>Hosts</h1><p className="muted">Every effective IP found by completed scans. Select a host to open its latest historical evidence.</p></div></div>
     <div className="host-toolbar"><label className="search-field"><Search size={16} aria-hidden="true" /><span className="sr-only">Search hosts</span><input type="search" aria-describedby={searchMessage ? 'host-search-help' : undefined} value={search} onInput={event => updateSearch(event.currentTarget.value)} placeholder="Search IP, DNS name, target, or job" /></label><label><SlidersHorizontal size={16} aria-hidden="true" /><span className="sr-only">Protocol</span><select value={protocol} onChange={event => updateProtocol(event.target.value)}><option value="">All protocols</option><option value="tcp">TCP</option><option value="udp">UDP</option></select></label><label><SlidersHorizontal size={16} aria-hidden="true" /><span className="sr-only">Open ports filter</span><select value={open} onChange={event => updateOpen(event.target.value)}><option value="">Any result</option><option value="true">Has positive ports</option><option value="false">No positive ports</option></select></label></div>
-    {searchMessage ? <p id="host-search-help" className="muted host-search-hint" role="status">{searchMessage}</p> : !data.data && !data.error ? <div className="loading" role="status"><span className="spinner" />Loading hosts…</div> : data.error ? <ErrorNotice message="Could not load scanned hosts." onRetry={() => data.refetch()} /> : <div className="panel host-list-panel" aria-busy={data.isFetching}><div className="panel-heading"><div><h2>Scanned hosts</h2><p className="muted">{data.data?.pagination.total ?? 0} effective address{data.data?.pagination.total === 1 ? '' : 'es'} · latest successful result per IP</p></div><Server className="muted-icon" size={18} /></div>{data.data?.hosts.length ? <><HostGroup title="Active jobs" description="Hosts from scheduled, paused, or newly configured jobs." hosts={data.data.hosts.filter(host => !host.archived)} /><HostGroup title="Archived jobs" description="Historical host results retained from archived jobs." hosts={data.data.hosts.filter(host => host.archived)} /></> : <HostEmptyState search={q} protocol={protocol} open={open} emptyMessage="No completed scans have produced effective hosts yet." onClearSearch={() => updateSearch('')} onResetFilters={() => { updateProtocol(''); updateOpen('') }} />}<Pagination page={data.data?.pagination} onChange={setOffset} /></div>}
+    {searchMessage ? <p id="host-search-help" className="muted host-search-hint" role="status">{searchMessage}</p> : !data.data && !data.error ? <div className="loading" role="status"><span className="spinner" />Loading hosts…</div> : data.error ? <ErrorNotice message="Could not load scanned hosts." onRetry={() => data.refetch()} /> : <div className="panel host-list-panel" aria-busy={data.isFetching}><div className="panel-heading"><div><h2>Scanned hosts</h2><p className="muted">{data.data?.pagination.total ?? 0} effective address{data.data?.pagination.total === 1 ? '' : 'es'} · latest successful result per IP</p></div><Server className="muted-icon" size={18} /></div>{data.data?.hosts.length ? <><HostGroup title="Active jobs" description="Hosts from scheduled, paused, or newly configured jobs." hosts={data.data.hosts.filter(host => !host.archived)} returnTo={returnTo} /><HostGroup title="Archived jobs" description="Historical host results retained from archived jobs." hosts={data.data.hosts.filter(host => host.archived)} returnTo={returnTo} /></> : <HostEmptyState search={q} protocol={protocol} open={open} emptyMessage="No completed scans have produced effective hosts yet." onClearSearch={() => updateSearch('')} onResetFilters={resetFilters} />}<Pagination page={data.data?.pagination} onChange={updateOffset} /></div>}
   </section>
 }
 

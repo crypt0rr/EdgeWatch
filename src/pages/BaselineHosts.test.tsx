@@ -4,7 +4,7 @@ import { act } from 'react'
 import { fireEvent } from '@testing-library/react'
 import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { baselineHosts } from '../api'
 import type { BaselineHostsResponse } from '../types'
@@ -22,6 +22,13 @@ const detailed: BaselineHostsResponse = {
     { address: '198.51.100.10', address_family: 'IPv4', source_targets: ['router.example'], protocols: [{ protocol: 'tcp', scanned_ports: '443', scanned_port_count: 1, service_detection: true, open_ports: 1, open_filtered_ports: 0 }], open_ports: 1, open_filtered_ports: 0, has_open_ports: true },
   ],
   pagination: { limit: 1, offset: 0, total: 2, has_more: true, next_offset: 1 },
+}
+
+function NavigationProbe() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const returnTo = (location.state as { returnTo?: unknown } | null)?.returnTo
+  return <><output data-testid="current-location">{location.pathname}{location.search}</output><output data-testid="return-to">{typeof returnTo === 'string' ? returnTo : ''}</output><button type="button" onClick={() => navigate(-1)}>Browser Back</button></>
 }
 
 describe('baseline host explorer', () => {
@@ -70,14 +77,47 @@ describe('baseline host explorer', () => {
       search.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
       await new Promise(resolve => setTimeout(resolve, 300))
     })
+    await vi.waitFor(() => expect(baselineHosts).toHaveBeenCalledWith('job-1', expect.objectContaining({ q: 'router', offset: 0 })), { timeout: 1000 })
     expect(baselineHosts).toHaveBeenCalledTimes(1)
     expect(baselineHosts).toHaveBeenCalledWith('job-1', expect.objectContaining({ q: 'router', offset: 0 }))
     const protocol = container.querySelectorAll('select')[0] as HTMLSelectElement
-    await act(async () => {
-      protocol.value = 'tcp'
-      protocol.dispatchEvent(new Event('change', { bubbles: true }))
-      await vi.waitFor(() => expect(baselineHosts).toHaveBeenCalledWith('job-1', expect.objectContaining({ protocol: 'tcp', offset: 0 })), { timeout: 1000 })
+    fireEvent.change(protocol, { target: { value: 'tcp' } })
+    await vi.waitFor(() => expect(baselineHosts).toHaveBeenCalledWith('job-1', expect.objectContaining({ protocol: 'tcp', offset: 0 })), { timeout: 1000 })
+  })
+
+  it('keeps search, filters, and page in the URL when returning from a baseline host', async () => {
+    const returnTo = '/jobs/job-1/baseline?q=router&protocol=tcp&has_open_ports=true&offset=50'
+    vi.mocked(baselineHosts).mockResolvedValue({
+      ...detailed,
+      pagination: { limit: 50, offset: 50, total: 100, has_more: false, next_offset: null },
     })
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={[returnTo]}>
+        <Routes>
+          <Route path="/jobs/:id/baseline" element={<BaselineHosts />} />
+          <Route path="/jobs/:id/baseline/hosts/:address" element={<p>Baseline host detail</p>} />
+        </Routes>
+        <NavigationProbe />
+      </MemoryRouter></QueryClientProvider>)
+    })
+    await vi.waitFor(() => expect(container.textContent).toContain('Baseline hosts'), { timeout: 1000 })
+    expect(baselineHosts).toHaveBeenCalledWith('job-1', expect.objectContaining({ q: 'router', protocol: 'tcp', has_open_ports: true, offset: 50 }))
+    expect((container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement).value).toBe('router')
+    expect((container.querySelectorAll('select')[0] as HTMLSelectElement).value).toBe('tcp')
+    expect((container.querySelectorAll('select')[1] as HTMLSelectElement).value).toBe('true')
+    expect(container.textContent).toContain('51–100 of 100')
+
+    const hostLink = container.querySelector('a[href="/jobs/job-1/baseline/hosts/198.51.100.10"]') as HTMLAnchorElement
+    fireEvent.click(hostLink)
+    await vi.waitFor(() => expect(container.querySelector('[data-testid="current-location"]')?.textContent).toBe('/jobs/job-1/baseline/hosts/198.51.100.10'), { timeout: 1000 })
+    expect(container.querySelector('[data-testid="return-to"]')?.textContent).toBe(returnTo)
+
+    fireEvent.click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Browser Back')!)
+    await vi.waitFor(() => expect(container.querySelector('[data-testid="current-location"]')?.textContent).toBe(returnTo), { timeout: 1000 })
+    expect((container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement).value).toBe('router')
+    expect((container.querySelectorAll('select')[0] as HTMLSelectElement).value).toBe('tcp')
+    expect((container.querySelectorAll('select')[1] as HTMLSelectElement).value).toBe('true')
+    expect(container.textContent).toContain('51–100 of 100')
   })
 
   it('keeps short searches local and explains the minimum before querying', async () => {
@@ -99,6 +139,7 @@ describe('baseline host explorer', () => {
       search.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
       await new Promise(resolve => setTimeout(resolve, 300))
     })
+    await vi.waitFor(() => expect(baselineHosts).toHaveBeenCalledWith('job-1', expect.objectContaining({ q: '443' })), { timeout: 1000 })
     expect(baselineHosts).toHaveBeenCalledTimes(1)
     expect(baselineHosts).toHaveBeenCalledWith('job-1', expect.objectContaining({ q: '443' }))
   })
@@ -186,11 +227,9 @@ describe('baseline host explorer', () => {
     await vi.waitFor(() => expect(baselineHosts).toHaveBeenLastCalledWith('job-1', expect.objectContaining({ offset: 1 })), { timeout: 1000 })
 
     const selects = container.querySelectorAll('select')
-    await act(async () => {
-      fireEvent.change(selects[1], { target: { value: 'true' } })
-      await vi.waitFor(() => expect(baselineHosts).toHaveBeenLastCalledWith('job-1', expect.objectContaining({ has_open_ports: true, offset: 0 })), { timeout: 1000 })
-      fireEvent.change(selects[1], { target: { value: 'false' } })
-      await vi.waitFor(() => expect(baselineHosts).toHaveBeenLastCalledWith('job-1', expect.objectContaining({ has_open_ports: false, offset: 0 })), { timeout: 1000 })
-    })
+    fireEvent.change(selects[1], { target: { value: 'true' } })
+    await vi.waitFor(() => expect(baselineHosts).toHaveBeenLastCalledWith('job-1', expect.objectContaining({ has_open_ports: true, offset: 0 })), { timeout: 1000 })
+    fireEvent.change(selects[1], { target: { value: 'false' } })
+    await vi.waitFor(() => expect(baselineHosts).toHaveBeenLastCalledWith('job-1', expect.objectContaining({ has_open_ports: false, offset: 0 })), { timeout: 1000 })
   })
 })

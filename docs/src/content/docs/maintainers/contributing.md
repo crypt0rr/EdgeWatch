@@ -228,6 +228,11 @@ library of the Go version that runs it.
 The `Scheduled checks` workflow runs every day and on demand. It checks what
 changes outside the repository, so it can fail without a new commit:
 
+- release verification runs the unsharded, race-enabled Go suite with a
+  40-minute package timeout and a 60-minute job limit. The daily job runs it
+  twice, including once with Go's wall clock shifted 90 days, in a 100-minute
+  job. This catches tests that depend on dates before they reach `main`; the
+  overlay changes Go `time.Now` and does not shift SQLite's clock;
 - `./scripts/check-apk-pins.sh` compares every `apk add` pin in the Dockerfile
   with the current Alpine package index for x86_64 and aarch64. A stable
   Alpine branch keeps only the newest build of each package and removes the

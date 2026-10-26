@@ -68,7 +68,7 @@ jobs:
     name: Verify release candidate
     runs-on: ubuntu-latest
     # Runs the complete race-enabled Go suite; CI splits store tests across shards.
-    timeout-minutes: 40
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -184,7 +184,7 @@ jobs:
       - name: Test
         run: |
           set -o pipefail
-          go test -race -timeout=25m -coverprofile=coverage.out ./... | tee go-coverage-summary.txt
+          go test -race -timeout=40m -coverprofile=coverage.out ./... | tee go-coverage-summary.txt
       - name: Check Go coverage
         run: ./scripts/check-go-coverage.sh coverage.out go-coverage-summary.txt
       - name: Go diff coverage

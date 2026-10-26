@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,6 +99,59 @@ func TestScanSlotDemandUsesCompletedSingleUnitNmapScanWithoutCycle(t *testing.T)
 	}
 	if demand.UtilizationPercent < 80 || demand.OverCapacity {
 		t.Fatalf("capacity comparison = %+v; want an 80%% warning without exceeding one slot", demand)
+	}
+}
+
+func TestScanSlotDemandUsesTimeoutWhenRecentCurrentKeyRunsTimedOut(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	ts := defaultTenant(db)
+	job := config.NormalizeJob(config.Job{
+		Name: "always-times-out", Schedule: "0 * * * *", Timezone: "UTC", Timeout: config.Duration(50 * time.Minute),
+		Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+	})
+	record, err := ts.CreateJobWithEnabled(ctx, job, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := store.NewScanDurationKey(record)
+	base := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < scanSlotDemandHistoryLimit; i++ {
+		finished := base.Add(time.Duration(i) * time.Hour)
+		if err := db.System().SaveScan(ctx, model.Scan{
+			ID: fmt.Sprintf("timed-out-demand-%02d", i), JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision,
+			StartedAt: finished.Add(-job.Timeout.Value()), FinishedAt: finished, Status: "timed_out", ConfigHash: key.ConfigHash,
+			ScannerProfileID: key.ScannerProfileID, ScannerProfileRevision: key.ScannerProfileRevision,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}
+	demand, err := app.ScanSlotDemand(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demand.HistoryJobs != 1 || demand.LowerBoundJobs != 0 || demand.UnestimatedJobs != 0 {
+		t.Fatalf("timeout history source counts = %+v; want a history-based timeout estimate", demand)
+	}
+	if want := float64(20 * time.Hour / time.Second); math.Abs(demand.EstimatedSlotSecondsPerDay-want) > 0.01 {
+		t.Fatalf("all-timeout demand = %.2f seconds/day, want 50m × 24 = %.2f", demand.EstimatedSlotSecondsPerDay, want)
+	}
+	if demand.CadenceUnattainableJobs != 0 {
+		t.Fatalf("50-minute runs on an hourly schedule skipped ticks: %+v", demand)
+	}
+
+	// A later successful run means the newest current-key runs are mixed, so
+	// the completed sample remains the duration estimate instead of treating
+	// the job as an all-timeout workload.
+	insertCompletedScan(t, db, record, "successful-demand-after-timeouts", base.Add(12*time.Hour), 15*time.Minute)
+	demand, err = app.ScanSlotDemand(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demand.HistoryJobs != 1 || math.Abs(demand.EstimatedSlotSecondsPerDay-float64(6*time.Hour/time.Second)) > 0.01 {
+		t.Fatalf("demand after a newer successful scan = %+v; want its 15m sample × 24", demand)
 	}
 }
 
@@ -637,10 +691,10 @@ func TestScanSlotDemandDropsSamplesAfterScanScopeEdits(t *testing.T) {
 	}
 }
 
-// A job runs at most once at a time, so one whose runs outlast its interval
-// adds one slot-day, not its uncapped demand, and is counted as unable to
-// keep its cadence. Each job's timeout lets its samples run in one attempt.
-func TestScanSlotDemandCapsEachJobAtOneSlotDay(t *testing.T) {
+// The scheduler skips hourly ticks while a 90-minute run is active. The
+// estimate counts the 12 runs that can start, then adds the separate daily
+// job's two-hour run.
+func TestScanSlotDemandModelsSkippedTicks(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	db := storetest.OpenFresh(t)
@@ -667,18 +721,44 @@ func TestScanSlotDemandCapsEachJobAtOneSlotDay(t *testing.T) {
 	for slots, want := range map[int]struct {
 		utilization float64
 		over        bool
-	}{1: {utilization: 2600.0 / 24, over: true}, 2: {utilization: 2600.0 / 48, over: false}} {
+	}{1: {utilization: 2000.0 / 24, over: false}, 2: {utilization: 2000.0 / 48, over: false}} {
 		demand, err := (&App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: slots}}}).ScanSlotDemand(ctx, ts)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// 90 minutes × 24 runs is 36 hours a day; the job adds 24.
-		if got := demand.EstimatedSlotSecondsPerDay / 3600; demand.HistoryJobs != 2 || demand.CadenceUnattainableJobs != 1 || math.Abs(got-26) > 0.001 {
-			t.Fatalf("%d slots: demand = %+v (%.3f slot-hours/day); want 24 for the capped hourly job plus 2, and one job unable to keep its cadence", slots, demand, got)
+		// The scheduler starts the hourly job every two hours: 12 × 90m =
+		// 18 slot-hours, plus the daily job's two hours.
+		if got := demand.EstimatedSlotSecondsPerDay / 3600; demand.HistoryJobs != 2 || demand.CadenceUnattainableJobs != 1 || math.Abs(got-20) > 0.001 {
+			t.Fatalf("%d slots: demand = %+v (%.3f slot-hours/day); want 18 for the skipped hourly job plus 2, and one job with skipped ticks", slots, demand, got)
 		}
 		if math.Abs(demand.UtilizationPercent-want.utilization) > 0.001 || demand.OverCapacity != want.over {
 			t.Fatalf("%d slots: capacity comparison = %+v; want %.2f%% and over capacity %t", slots, demand, want.utilization, want.over)
 		}
+	}
+}
+
+func TestScanSlotDemandUsesSkippedTickCountForDenseWindowSchedule(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	ts := defaultTenant(db)
+	record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+		Name: "dense-window", Schedule: "*/10 8-17 * * *", Timezone: "UTC", Timeout: config.Duration(time.Hour),
+		Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+	}), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertCompletedCycle(t, db, record, "dense-window-cycle", 15*time.Minute)
+	demand, err := (&App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}).ScanSlotDemand(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demand.CadenceUnattainableJobs != 1 {
+		t.Fatalf("cadence jobs = %d, want one job whose 15-minute run skips 10-minute ticks", demand.CadenceUnattainableJobs)
+	}
+	if want := float64(27_000); math.Abs(demand.EstimatedSlotSecondsPerDay-want) > 0.01 {
+		t.Fatalf("dense-window demand = %.2f seconds/day, want 30 × 15m = %.2f", demand.EstimatedSlotSecondsPerDay, want)
 	}
 }
 
@@ -830,7 +910,7 @@ func TestScanSlotDemandComputesRunsPerDayOncePerSchedule(t *testing.T) {
 	}
 }
 
-// A full runs-per-day cache starts over rather than growing without bound.
+// A full runs-per-day cache retains no more than its configured bound.
 func TestScanJobRunsPerDayCacheIsBounded(t *testing.T) {
 	t.Parallel()
 	app := &App{Config: &config.Config{}}
@@ -842,8 +922,220 @@ func TestScanJobRunsPerDayCacheIsBounded(t *testing.T) {
 	}
 	app.scanSlotDemand.mu.Lock()
 	defer app.scanSlotDemand.mu.Unlock()
-	if got := len(app.scanSlotDemand.runsPerDay); got != 1 {
-		t.Fatalf("runs-per-day cache holds %d schedules after it filled, want 1", got)
+	if got := len(app.scanSlotDemand.runsPerDay); got != scanRunsPerDayCacheLimit {
+		t.Fatalf("runs-per-day cache holds %d schedules after it filled, want its %d-entry bound", got, scanRunsPerDayCacheLimit)
+	}
+}
+
+// A fixed traversal larger than the cache used to reset it on every pass.
+// The retained subset now stays hot, so the third pass recomputes only the
+// keys that cannot fit, rather than all 1,100 schedules.
+func TestScanJobRunsPerDayCacheKeepsStableKeysAboveCapacity(t *testing.T) {
+	t.Parallel()
+	const schedules = scanRunsPerDayCacheLimit + 76
+	app := &App{Config: &config.Config{}}
+	computed := func() int {
+		app.scanSlotDemand.mu.Lock()
+		defer app.scanSlotDemand.mu.Unlock()
+		return app.scanSlotDemand.runsPerDayComputed
+	}
+	previous := 0
+	for pass := 1; pass <= 3; pass++ {
+		for i := 0; i < schedules; i++ {
+			job := config.Job{Schedule: fmt.Sprintf("%d %d 1 1 *", i%60, i/60)}
+			if _, ok := app.scanJobRunsPerDay(job); !ok {
+				t.Fatalf("pass %d schedule %d was rejected", pass, i)
+			}
+		}
+		current := computed()
+		growth := current - previous
+		if pass > 1 && growth > schedules/8 {
+			t.Fatalf("pass %d recomputed %d of %d schedules; want well under a full pass", pass, growth, schedules)
+		}
+		previous = current
+	}
+	if got := len(app.scanSlotDemand.runsPerDay); got != scanRunsPerDayCacheLimit {
+		t.Fatalf("runs-per-day cache holds %d schedules after repeated passes, want %d", got, scanRunsPerDayCacheLimit)
+	}
+}
+
+func TestScanJobRunsPerDayCacheEvictionRecomputesTheEvictedKey(t *testing.T) {
+	t.Parallel()
+	app := &App{Config: &config.Config{}}
+	for i := 0; i < scanRunsPerDayCacheLimit; i++ {
+		key := scanRunsPerDayKey{timezone: "UTC", schedule: fmt.Sprintf("%d %d 1 1 *", i%60, i/60)}
+		if _, ok := app.scanJobRunsPerDay(config.Job{Schedule: key.schedule}); !ok {
+			t.Fatalf("initial schedule %d was rejected", i)
+		}
+	}
+	app.scanSlotDemand.mu.Lock()
+	var largest scanRunsPerDayKey
+	var largestRank uint64
+	for key, value := range app.scanSlotDemand.runsPerDay {
+		if value.rank > largestRank {
+			largest, largestRank = key, value.rank
+		}
+	}
+	app.scanSlotDemand.mu.Unlock()
+	candidate := ""
+	for i := scanRunsPerDayCacheLimit; i < 1440; i++ {
+		schedule := fmt.Sprintf("%d %d 1 1 *", i%60, i/60)
+		if scanCacheRank("UTC", schedule) < largestRank {
+			candidate = schedule
+			break
+		}
+	}
+	if candidate == "" {
+		t.Fatal("could not find a deterministic replacement schedule")
+	}
+	if _, ok := app.scanJobRunsPerDay(config.Job{Schedule: candidate}); !ok {
+		t.Fatalf("replacement schedule %q was rejected", candidate)
+	}
+	app.scanSlotDemand.mu.Lock()
+	_, replacementRetained := app.scanSlotDemand.runsPerDay[scanRunsPerDayKey{timezone: "UTC", schedule: candidate}]
+	_, evictedRetained := app.scanSlotDemand.runsPerDay[largest]
+	gotEntries := len(app.scanSlotDemand.runsPerDay)
+	computedBefore := app.scanSlotDemand.runsPerDayComputed
+	app.scanSlotDemand.mu.Unlock()
+	if !replacementRetained || evictedRetained || gotEntries != scanRunsPerDayCacheLimit {
+		t.Fatalf("cache after replacement holds %d entries, replacement present %t, old maximum present %t", gotEntries, replacementRetained, evictedRetained)
+	}
+	gotRuns, gotOK := app.scanJobRunsPerDay(config.Job{Schedule: largest.schedule})
+	wantRuns, wantOK := scheduleRunsPerDay("UTC", largest.schedule)
+	if gotRuns != wantRuns || gotOK != wantOK {
+		t.Fatalf("evicted schedule recomputed as %v, %t; want %v, %t", gotRuns, gotOK, wantRuns, wantOK)
+	}
+	app.scanSlotDemand.mu.Lock()
+	computedAfter := app.scanSlotDemand.runsPerDayComputed
+	app.scanSlotDemand.mu.Unlock()
+	if computedAfter != computedBefore+1 {
+		t.Fatalf("schedule computations after cache eviction = %d, want %d", computedAfter, computedBefore+1)
+	}
+}
+
+func TestScheduleDemandSkipsTicksLikeTheCronScheduler(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name        string
+		timezone    string
+		schedule    string
+		runDuration time.Duration
+		wantRuns    float64
+		wantSkipped bool
+	}{
+		{name: "ten minute window with fifteen minute run", timezone: "UTC", schedule: "*/10 8-17 * * *", runDuration: 15 * time.Minute, wantRuns: 30, wantSkipped: true},
+		{name: "two hourly ticks with ten minute run", timezone: "UTC", schedule: "0,5 * * * *", runDuration: 10 * time.Minute, wantRuns: 24, wantSkipped: true},
+		{name: "completion exactly at next tick", timezone: "UTC", schedule: "*/15 * * * *", runDuration: 15 * time.Minute, wantRuns: 96},
+		{name: "hourly across daylight saving", timezone: "Europe/Amsterdam", schedule: "0 * * * *", runDuration: 61 * time.Minute, wantRuns: 12, wantSkipped: true},
+		{name: "dense schedule with long run", timezone: "UTC", schedule: "* * * * *", runDuration: 15 * 24 * time.Hour, wantRuns: 1.0 / 15, wantSkipped: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			pattern, err := schedulePattern(context.Background(), test.timezone, test.schedule)
+			if err != nil || !pattern.ok {
+				t.Fatalf("schedule pattern = %+v, error %v", pattern, err)
+			}
+			runs, skipped, err := pattern.runsForDuration(context.Background(), test.runDuration.Seconds())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if math.Abs(runs-test.wantRuns) > 0.01 || skipped != test.wantSkipped {
+				t.Fatalf("runs/day = %.4f, skipped %t; want %.4f and skipped %t", runs, skipped, test.wantRuns, test.wantSkipped)
+			}
+		})
+	}
+}
+
+func TestScanJobRunsPerDayHonorsCancellationAndConcurrentCalls(t *testing.T) {
+	t.Parallel()
+	app := &App{Config: &config.Config{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := app.scanJobSchedule(ctx, config.Job{Schedule: "0 0 1 1 *"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled schedule estimate error = %v, want context.Canceled", err)
+	}
+
+	const workers = 32
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runs, ok := app.scanJobRunsPerDay(config.Job{Schedule: "0 0 1 1 *"})
+			if !ok || math.Abs(runs-1.0/366.0) > 0.001 {
+				errs <- fmt.Errorf("concurrent cached schedule = %.6f, valid %t", runs, ok)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	app.scanSlotDemand.mu.Lock()
+	runScheduleEntries := len(app.scanSlotDemand.runsPerDay)
+	if runScheduleEntries != 1 {
+		app.scanSlotDemand.mu.Unlock()
+		t.Fatalf("concurrent cache holds %d schedule entries, want one", runScheduleEntries)
+	}
+	app.scanSlotDemand.mu.Unlock()
+
+	oldRecord := store.JobRecord{
+		ID: "concurrent-duration-key", Revision: 1, UpdatedAt: time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC),
+		Job: config.NormalizeJob(config.Job{Name: "old-revision", Targets: []string{"192.0.2.1"}}),
+	}
+	newRecord := oldRecord
+	newRecord.Revision = 2
+	newRecord.UpdatedAt = oldRecord.UpdatedAt.Add(time.Minute)
+	newRecord.Job.Name = "new-revision"
+	newRecord.Job.Targets = []string{"192.0.2.2"}
+	var keyWG sync.WaitGroup
+	keyErrs := make(chan error, workers)
+	for i := range workers {
+		record := oldRecord
+		if i%2 == 1 {
+			record = newRecord
+		}
+		keyWG.Add(1)
+		go func() {
+			defer keyWG.Done()
+			got := app.scanDurationKey(record)
+			if want := store.NewScanDurationKey(record); got != want {
+				keyErrs <- fmt.Errorf("revision %d cached duration key = %+v, want %+v", record.Revision, got, want)
+			}
+		}()
+	}
+	keyWG.Wait()
+	close(keyErrs)
+	for err := range keyErrs {
+		t.Error(err)
+	}
+	if got, want := app.scanDurationKey(newRecord), store.NewScanDurationKey(newRecord); got != want {
+		t.Fatalf("latest duration key = %+v, want %+v", got, want)
+	}
+	app.scanSlotDemand.mu.Lock()
+	cachedKey := app.scanSlotDemand.keys[newRecord.ID]
+	app.scanSlotDemand.mu.Unlock()
+	if cachedKey.revision != newRecord.Revision || cachedKey.key != store.NewScanDurationKey(newRecord) {
+		t.Fatalf("concurrent cache retained revision %d key %+v, want revision %d key %+v", cachedKey.revision, cachedKey.key, newRecord.Revision, store.NewScanDurationKey(newRecord))
+	}
+}
+
+func TestScanDurationKeyCacheIsBounded(t *testing.T) {
+	t.Parallel()
+	app := &App{}
+	for i := 0; i <= scanDurationKeyCacheLimit; i++ {
+		record := store.JobRecord{
+			ID: fmt.Sprintf("bounded-duration-key-%05d", i), Revision: 1,
+			Job: config.NormalizeJob(config.Job{Name: fmt.Sprintf("bounded-%05d", i)}),
+		}
+		app.scanDurationKey(record)
+	}
+	app.scanSlotDemand.mu.Lock()
+	defer app.scanSlotDemand.mu.Unlock()
+	if got := len(app.scanSlotDemand.keys); got != scanDurationKeyCacheLimit {
+		t.Fatalf("duration-key cache holds %d entries, want its %d-entry bound", got, scanDurationKeyCacheLimit)
 	}
 }
 

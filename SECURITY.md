@@ -553,14 +553,19 @@ its accounts as summaries without credentials; and its
 capacity as numbers. The stored scan count is a number of rows, never a
 scan's content. The platform status adds deployment totals, and the
 scheduled scan demand of all active units together against the deployment's
-scan slots: the daemon sums each unit's own estimate, which it derives from
-the schedules, timeouts, scopes, scanner rates, and recent scan durations of
-the unit's enabled jobs, and returns only the sums and counts of jobs, never
-a unit or job ID or name, a target, or any unit's own figure. With a single
-active unit, that total is the unit's own estimate. The platform's own
-notification destinations are write-only like a unit's, and the platform
-cannot read, select, or change a unit's destinations. Usernames stay unique
-across every unit and the platform.
+scan slots: the daemon estimates the schedules, timeouts, scopes, scanner
+rates, and recent scan durations of each unit's enabled jobs. It simulates
+their cron ticks and skips a tick while an estimated run is still active; when
+the newest runs with a current key all timed out, it uses the job's timeout as
+the expected run duration. It caps each unit's contribution at its effective
+scan-slot capacity for a day. It returns only the sums and counts of jobs,
+never a unit or job ID
+or name, a target, or any unit's own figure. With a single active unit, the
+platform total can be lower than the Jobs page estimate when that estimate
+exceeds the unit's effective capacity. The platform's own notification
+destinations are write-only like a unit's, and the platform cannot read,
+select, or change a unit's destinations. Usernames stay unique across every
+unit and the platform.
 
 Only the host creates the first platform administrator: `edgewatch admin
 platform-setup-token` prints a one-time token, valid for 15 minutes, once the

@@ -16,10 +16,10 @@ var errNoDeploymentScanDemand = errors.New("the deployment's scan demand cannot 
 // share and reserves nothing, so units that each fit their own capacity can
 // still oversubscribe the pool together.
 //
-// Each unit contributes the estimate that ScanSlotDemand reports to the unit
-// itself. The value holds sums and counts only, never a unit, job, or
-// per-unit figure, so it tells a platform administrator nothing about any
-// one unit's data.
+// Each unit contributes its estimate up to the slot-seconds its effective
+// slot limit can provide in a day. The value holds sums and counts only,
+// never a unit, job, or per-unit figure, so it tells a platform administrator
+// nothing about any one unit's data.
 type DeploymentScanDemand struct {
 	// Units counts the active units whose jobs the estimate sums. Disabled
 	// units and units being deleted schedule no scans, so they are left out.
@@ -28,8 +28,8 @@ type DeploymentScanDemand struct {
 	HistoryJobs     int `json:"history_jobs"`
 	LowerBoundJobs  int `json:"lower_bound_jobs"`
 	UnestimatedJobs int `json:"unestimated_jobs"`
-	// CadenceUnattainableJobs counts the jobs, in every active unit, whose
-	// own estimated demand is more than one slot-day; see ScanSlotDemand.
+	// CadenceUnattainableJobs counts jobs, in every active unit, for which
+	// the estimated run duration makes the scheduler skip a cron tick.
 	CadenceUnattainableJobs int `json:"cadence_unattainable_jobs"`
 	// Slots is the deployment's scheduler.max_concurrent_scans, the size of
 	// the shared pool, whatever the units' own caps are.
@@ -41,12 +41,12 @@ type DeploymentScanDemand struct {
 }
 
 // DeploymentScanDemand estimates the scheduled demand of every active unit,
-// each as ScanSlotDemand estimates it for the unit, and compares the sum with
-// the deployment's shared slot pool. It goes through each active unit's
-// enabled jobs and their recent scan history, so a caller that serves it
-// repeatedly should cache it; the App's schedule and duration-key caches
-// already spare the units' repeated work. A unit that cannot be read fails
-// the whole estimate rather than leaving its demand out of the sum.
+// capped by the unit's effective slot limit, and compares the sum with the
+// deployment's shared slot pool. It goes through each active unit's enabled
+// jobs and their recent scan history, so a caller that serves it repeatedly
+// should cache it; the App's schedule and duration-key caches already spare
+// the units' repeated work. A unit that cannot be read fails the whole
+// estimate rather than leaving its demand out of the sum.
 func (a *App) DeploymentScanDemand(ctx context.Context) (DeploymentScanDemand, error) {
 	var result DeploymentScanDemand
 	if a == nil || a.Store == nil || a.Config == nil {
@@ -57,7 +57,12 @@ func (a *App) DeploymentScanDemand(ctx context.Context) (DeploymentScanDemand, e
 		return DeploymentScanDemand{}, err
 	}
 	for _, scope := range scopes {
-		unit, err := a.scheduledScanDemand(ctx, a.Store.Tenant(scope))
+		ts := a.Store.Tenant(scope)
+		unit, err := a.scheduledScanDemand(ctx, ts)
+		if err != nil {
+			return DeploymentScanDemand{}, err
+		}
+		limits, err := a.TenantCapacityLimits(ctx, ts)
 		if err != nil {
 			return DeploymentScanDemand{}, err
 		}
@@ -67,7 +72,8 @@ func (a *App) DeploymentScanDemand(ctx context.Context) (DeploymentScanDemand, e
 		result.LowerBoundJobs += unit.LowerBoundJobs
 		result.UnestimatedJobs += unit.UnestimatedJobs
 		result.CadenceUnattainableJobs += unit.CadenceUnattainableJobs
-		result.EstimatedSlotSecondsPerDay += unit.EstimatedSlotSecondsPerDay
+		unitCapacity := float64(limits.MaxConcurrentScans) * slotSecondsPerDay
+		result.EstimatedSlotSecondsPerDay += min(unit.EstimatedSlotSecondsPerDay, unitCapacity)
 	}
 	result.Slots = max(a.Config.Scheduler.MaxConcurrent, 0)
 	result.CapacitySlotSecondsPerDay, result.UtilizationPercent, result.OverCapacity = compareSlotDemand(result.EstimatedSlotSecondsPerDay, result.Slots)

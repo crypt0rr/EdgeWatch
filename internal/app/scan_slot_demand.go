@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"hash/fnv"
 	"math"
 	"sort"
 	"strconv"
@@ -21,10 +22,11 @@ const (
 	// to the demand.
 	slotSecondsPerDay = 24 * 60 * 60
 	// scanRunsPerDayCacheLimit bounds the remembered schedules, and
-	// scanDurationKeyCacheLimit the remembered job revisions. A full cache
-	// starts over, which costs one computation per schedule or job in use.
-	scanRunsPerDayCacheLimit  = 1024
-	scanDurationKeyCacheLimit = 16384
+	// scanDurationKeyCacheLimit bounds the remembered job revisions. Full
+	// caches retain a deterministic subset instead of discarding every entry.
+	scanRunsPerDayCacheLimit     = 1024
+	scanDurationKeyCacheLimit    = 16384
+	scanScheduleObservationLimit = 20_000
 )
 
 // ScanSlotDemand is a tenant's estimated scheduled scan work compared with
@@ -34,11 +36,8 @@ type ScanSlotDemand struct {
 	HistoryJobs     int `json:"history_jobs"`
 	LowerBoundJobs  int `json:"lower_bound_jobs"`
 	UnestimatedJobs int `json:"unestimated_jobs"`
-	// CadenceUnattainableJobs counts the jobs whose own estimated demand is
-	// more than one slot-day. Each run counts at most the job's timeout,
-	// which ends it, so such a job's runs take longer than its schedule
-	// leaves between them, and the scheduler skips some of them. Each adds
-	// one slot-day to the estimate.
+	// CadenceUnattainableJobs counts jobs for which the estimated run duration
+	// makes the scheduler skip at least one scheduled tick.
 	CadenceUnattainableJobs    int     `json:"cadence_unattainable_jobs"`
 	Slots                      int     `json:"slots"`
 	EstimatedSlotSecondsPerDay float64 `json:"estimated_slot_seconds_per_day"`
@@ -49,17 +48,19 @@ type ScanSlotDemand struct {
 
 // scheduledDemandJob is an enabled job whose schedule runs it.
 type scheduledDemandJob struct {
-	record     store.JobRecord
-	runsPerDay float64
+	record   store.JobRecord
+	schedule scanRunsPerDayValue
 }
 
 // ScanSlotDemand estimates the unit's scheduled demand from enabled jobs and
 // compares it with the unit's effective slot capacity. The most recent
 // completed scan-history samples that ran with a job's current scan settings
-// are the expected duration; jobs without that history use only work bounded
-// by an explicitly configured scanner rate. Each run counts at most the job's
-// timeout, which ends it, and a job adds at most one slot-day, because it
-// runs at most once at a time.
+// are the expected duration. If the newest runs with that key all timed out,
+// the job's timeout is the expected duration. Jobs without that history use
+// only work bounded by an explicitly configured scanner rate. The estimate
+// simulates the schedule ticks a job can start after each prior run ends. Each
+// run counts at most the job's timeout, which ends it, and a job adds at most
+// one slot-day, because it runs at most once at a time.
 //
 // The effective capacity is a limit, not a reservation: every unit's scans
 // share the deployment's one pool of slots, so DeploymentScanDemand compares
@@ -93,6 +94,9 @@ func (a *App) scheduledScanDemand(ctx context.Context, ts *store.TenantStore) (S
 	var scheduled []scheduledDemandJob
 	var keys []store.ScanDurationKey
 	for _, record := range jobs {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
 		if !record.Enabled || record.Archived {
 			continue
 		}
@@ -100,24 +104,34 @@ func (a *App) scheduledScanDemand(ctx context.Context, ts *store.TenantStore) (S
 		if strings.TrimSpace(record.Job.Schedule) == "" {
 			continue
 		}
-		runsPerDay, ok := a.scanJobRunsPerDay(record.Job)
-		if !ok {
+		schedule, err := a.scanJobSchedule(ctx, record.Job)
+		if err != nil {
+			return result, err
+		}
+		if !schedule.ok {
 			result.UnestimatedJobs++
 			continue
 		}
-		if runsPerDay <= 0 {
+		if schedule.runsPerDay <= 0 {
 			continue
 		}
-		scheduled = append(scheduled, scheduledDemandJob{record: record, runsPerDay: runsPerDay})
+		scheduled = append(scheduled, scheduledDemandJob{record: record, schedule: schedule})
 		keys = append(keys, a.scanDurationKey(record))
 	}
 	history, err := ts.ListCompletedScanCycleDurations(ctx, keys, scanSlotDemandHistoryLimit)
 	if err != nil {
 		return result, err
 	}
+	timedOutOnly, err := ts.LatestScanRunsTimedOut(ctx, keys, scanSlotDemandHistoryLimit)
+	if err != nil {
+		return result, err
+	}
 	for _, job := range scheduled {
 		var perRun float64
-		if samples := history[job.record.ID]; len(samples) > 0 {
+		if timedOutOnly[job.record.ID] {
+			perRun = job.record.Job.Timeout.Value().Seconds()
+			result.HistoryJobs++
+		} else if samples := history[job.record.ID]; len(samples) > 0 {
 			perRun = medianCycleDuration(samples).Seconds()
 			result.HistoryJobs++
 		} else {
@@ -132,9 +146,16 @@ func (a *App) scheduledScanDemand(ctx context.Context, ts *store.TenantStore) (S
 				result.UnestimatedJobs++
 			}
 		}
-		demand := runSlotSeconds(job.record.Job, perRun) * job.runsPerDay
-		if demand > slotSecondsPerDay {
+		runSeconds := runSlotSeconds(job.record.Job, perRun)
+		runsPerDay, skipped, err := job.schedule.runsForDuration(ctx, runSeconds)
+		if err != nil {
+			return result, err
+		}
+		demand := runSeconds * runsPerDay
+		if skipped {
 			result.CadenceUnattainableJobs++
+		}
+		if demand > slotSecondsPerDay {
 			demand = slotSecondsPerDay
 		}
 		result.EstimatedSlotSecondsPerDay += demand
@@ -183,8 +204,15 @@ type scanRunsPerDayKey struct {
 }
 
 type scanRunsPerDayValue struct {
-	runsPerDay float64
-	ok         bool
+	runsPerDay    float64
+	ok            bool
+	start         time.Time
+	end           time.Time
+	windowSeconds float64
+	minimumGap    time.Duration
+	schedule      cron.Schedule
+	occurrences   []uint32
+	rank          uint64
 }
 
 // cachedScanDurationKey is the duration key of one revision of a job.
@@ -192,14 +220,15 @@ type cachedScanDurationKey struct {
 	revision int64
 	updated  time.Time
 	key      store.ScanDurationKey
+	rank     uint64
 }
 
 // scanSlotDemandCache remembers, for every business unit of the process,
 // the parts of the scan-slot demand estimate that a request would otherwise
-// compute again for each job: each schedule's runs per day, which depend
-// only on its text and timezone, and each job revision's duration key,
-// whose hashes a revision fixes. Each map starts over when it is full. Its
-// zero value is ready to use.
+// compute again for each job: each schedule's bounded occurrence pattern,
+// which depends only on its text and timezone, and each job revision's
+// duration key, whose hashes a revision fixes. Its zero value is ready to
+// use.
 type scanSlotDemandCache struct {
 	mu         sync.Mutex
 	runsPerDay map[scanRunsPerDayKey]scanRunsPerDayValue
@@ -212,26 +241,40 @@ type scanSlotDemandCache struct {
 // the App remembers across requests by the timezone and schedule text. A
 // job without its own timezone uses the deployment's, as its schedule does.
 func (a *App) scanJobRunsPerDay(job config.Job) (float64, bool) {
+	value, err := a.scanJobSchedule(context.Background(), job)
+	return value.runsPerDay, value.ok && err == nil
+}
+
+func (a *App) scanJobSchedule(ctx context.Context, job config.Job) (scanRunsPerDayValue, error) {
 	key := scanRunsPerDayKey{timezone: scheduleTimezone(job, a.Config.Timezone), schedule: job.Schedule}
 	cache := &a.scanSlotDemand
+	if err := ctx.Err(); err != nil {
+		return scanRunsPerDayValue{}, err
+	}
 	cache.mu.Lock()
 	value, found := cache.runsPerDay[key]
 	cache.mu.Unlock()
 	if found {
-		return value.runsPerDay, value.ok
+		return value, nil
 	}
-	// The computation can take tens of milliseconds for a dense schedule,
-	// so it runs without the lock; two requests may both compute a new
-	// schedule, with the same result.
-	value.runsPerDay, value.ok = scheduleRunsPerDay(key.timezone, key.schedule)
+	// Schedule expansion runs without the lock. Two requests may compute the
+	// same new key, but one slow schedule cannot block cache hits for others.
+	value, err := schedulePattern(ctx, key.timezone, key.schedule)
+	if err != nil {
+		return scanRunsPerDayValue{}, err
+	}
+	value.rank = scanCacheRank(key.timezone, key.schedule)
 	cache.mu.Lock()
-	if cache.runsPerDay == nil || len(cache.runsPerDay) >= scanRunsPerDayCacheLimit {
+	if cache.runsPerDay == nil {
 		cache.runsPerDay = make(map[scanRunsPerDayKey]scanRunsPerDayValue)
 	}
-	cache.runsPerDay[key] = value
+	retainBoundedCache(cache.runsPerDay, key, value, scanRunsPerDayCacheLimit,
+		func(v scanRunsPerDayValue) uint64 { return v.rank },
+		func(k scanRunsPerDayKey) string { return k.timezone + "\x00" + k.schedule },
+		value.rank, key.timezone+"\x00"+key.schedule)
 	cache.runsPerDayComputed++
 	cache.mu.Unlock()
-	return value.runsPerDay, value.ok
+	return value, nil
 }
 
 // scanDurationKey returns the duration key of the job's revision, which the
@@ -245,14 +288,59 @@ func (a *App) scanDurationKey(record store.JobRecord) store.ScanDurationKey {
 	if found && cached.revision == record.Revision && cached.updated.Equal(record.UpdatedAt) {
 		return cached.key
 	}
-	cached = cachedScanDurationKey{revision: record.Revision, updated: record.UpdatedAt, key: store.NewScanDurationKey(record)}
+	cached = cachedScanDurationKey{revision: record.Revision, updated: record.UpdatedAt, key: store.NewScanDurationKey(record), rank: scanCacheRank(record.ID)}
 	cache.mu.Lock()
-	if cache.keys == nil || len(cache.keys) >= scanDurationKeyCacheLimit {
+	if cache.keys == nil {
 		cache.keys = make(map[string]cachedScanDurationKey)
 	}
-	cache.keys[record.ID] = cached
+	current, exists := cache.keys[record.ID]
+	if !exists || cached.revision > current.revision || cached.revision == current.revision && !cached.updated.Before(current.updated) {
+		retainBoundedCache(cache.keys, record.ID, cached, scanDurationKeyCacheLimit,
+			func(v cachedScanDurationKey) uint64 { return v.rank },
+			func(k string) string { return k },
+			cached.rank, record.ID)
+	}
 	cache.mu.Unlock()
 	return cached.key
+}
+
+// retainBoundedCache keeps the entries with the lowest stable ranks. Unlike
+// recency eviction, the chosen set does not depend on request order, so a
+// repeated traversal of more keys than fit still gets cache hits for its
+// retained keys. Replaced or rejected values are always recomputed on demand.
+func retainBoundedCache[K comparable, V any](entries map[K]V, key K, value V, limit int, rankOf func(V) uint64, tieOf func(K) string, rank uint64, tie string) {
+	if _, exists := entries[key]; exists {
+		entries[key] = value
+		return
+	}
+	if len(entries) < limit {
+		entries[key] = value
+		return
+	}
+	var largest K
+	var largestRank uint64
+	var largestTie string
+	first := true
+	for candidate, current := range entries {
+		currentRank, currentTie := rankOf(current), tieOf(candidate)
+		if first || currentRank > largestRank || currentRank == largestRank && currentTie > largestTie {
+			largest, largestRank, largestTie, first = candidate, currentRank, currentTie, false
+		}
+	}
+	if rank > largestRank || rank == largestRank && tie >= largestTie {
+		return
+	}
+	delete(entries, largest)
+	entries[key] = value
+}
+
+func scanCacheRank(values ...string) uint64 {
+	h := fnv.New64a()
+	for _, value := range values {
+		_, _ = h.Write([]byte(value))
+		_, _ = h.Write([]byte{0})
+	}
+	return h.Sum64()
 }
 
 // scheduleTimezone returns the IANA name of the timezone a job's schedule
@@ -279,38 +367,167 @@ func scanJobRunsPerDay(job config.Job, defaultTimezone string) (float64, bool) {
 // captures the daily and weekly pattern without iterating hundreds of
 // thousands of one-minute runs.
 func scheduleRunsPerDay(timezone, scheduleText string) (float64, bool) {
+	value, err := schedulePattern(context.Background(), timezone, scheduleText)
+	return value.runsPerDay, value.ok && err == nil
+}
+
+// schedulePattern averages a valid five-field schedule over one calendar
+// year and retains its bounded tick offsets for simulating the scheduler's
+// skip-while-active rule. Dense schedules stop after 20,000 ticks, which
+// captures their daily and weekly pattern without storing a whole year's
+// minute-by-minute calendar.
+func schedulePattern(ctx context.Context, timezone, scheduleText string) (scanRunsPerDayValue, error) {
+	var value scanRunsPerDayValue
 	location, err := time.LoadLocation(timezone)
 	if err != nil {
-		return 0, false
+		return value, nil
 	}
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	schedule, err := parser.Parse(scheduleText)
 	if err != nil {
-		return 0, false
+		return value, nil
 	}
-	start := time.Date(2024, time.January, 1, 0, 0, 0, 0, location)
-	end := time.Date(2025, time.January, 1, 0, 0, 0, 0, location)
-	const observationLimit = 20_000
-	var runs int
+	value.start = time.Date(2024, time.January, 1, 0, 0, 0, 0, location)
+	value.end = time.Date(2025, time.January, 1, 0, 0, 0, 0, location)
+	value.schedule = schedule
+	value.windowSeconds = value.end.Sub(value.start).Seconds()
+	value.occurrences = make([]uint32, 0, min(scanScheduleObservationLimit, 128))
+	var previous time.Time
 	var observedThrough time.Time
-	for next := schedule.Next(start.Add(-time.Nanosecond)); next.Before(end); next = schedule.Next(next) {
-		runs++
+	for next := schedule.Next(value.start.Add(-time.Nanosecond)); next.Before(value.end); next = schedule.Next(next) {
+		if err := ctx.Err(); err != nil {
+			return scanRunsPerDayValue{}, err
+		}
+		value.occurrences = append(value.occurrences, uint32(next.Sub(value.start)/time.Second))
+		if !previous.IsZero() {
+			gap := next.Sub(previous)
+			if value.minimumGap == 0 || gap < value.minimumGap {
+				value.minimumGap = gap
+			}
+		}
+		previous = next
 		observedThrough = next
-		if runs >= observationLimit {
+		if len(value.occurrences) >= scanScheduleObservationLimit {
 			break
 		}
 	}
+	runs := len(value.occurrences)
 	if runs == 0 {
-		return 0, true
+		value.ok = true
+		return value, nil
 	}
-	windowDays := end.Sub(start).Hours() / 24
-	if runs >= observationLimit && observedThrough.After(start) {
-		windowDays = observedThrough.Sub(start).Hours() / 24
+	if runs >= scanScheduleObservationLimit && observedThrough.After(value.start) {
+		local := observedThrough.In(location)
+		completeDayEnd := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, location)
+		if completeDayEnd.After(value.start) {
+			value.windowSeconds = completeDayEnd.Sub(value.start).Seconds()
+			cutoff := sort.Search(len(value.occurrences), func(i int) bool {
+				return float64(value.occurrences[i]) >= value.windowSeconds
+			})
+			value.occurrences = value.occurrences[:cutoff]
+			value.minimumGap = 0
+			for i := 1; i < len(value.occurrences); i++ {
+				gap := time.Duration(value.occurrences[i]-value.occurrences[i-1]) * time.Second
+				if value.minimumGap == 0 || gap < value.minimumGap {
+					value.minimumGap = gap
+				}
+			}
+			runs = len(value.occurrences)
+		}
 	}
+	if value.windowSeconds <= 0 {
+		return scanRunsPerDayValue{}, nil
+	}
+	value.runsPerDay = float64(runs) / (value.windowSeconds / float64(24*time.Hour/time.Second))
+	value.ok = true
+	return value, nil
+}
+
+func (value scanRunsPerDayValue) runsForDuration(ctx context.Context, runSeconds float64) (runsPerDay float64, skipped bool, err error) {
+	if !value.ok || len(value.occurrences) == 0 || runSeconds <= 0 {
+		return 0, false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	if value.minimumGap > 0 && runSeconds <= value.minimumGap.Seconds() {
+		return value.runsPerDay, false, nil
+	}
+	runDuration := time.Duration(runSeconds * float64(time.Second))
+	if runSeconds > value.windowSeconds {
+		// Dense schedules are observed for two weeks when compiling their
+		// cached pattern. A longer run needs the full calendar year to model
+		// skipped ticks accurately; skipping ahead over each active run keeps
+		// this bounded by the number of actual starts.
+		return simulateSchedule(ctx, value.schedule, value.start, value.end, runDuration)
+	}
+	busyUntil := simulateSchedulePrefix(ctx, value.schedule, value.start, runDuration)
+	var starts float64
+	for i, offset := range value.occurrences {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return 0, false, err
+			}
+		}
+		tick := value.start.Add(time.Duration(offset) * time.Second)
+		if tick.Before(busyUntil) {
+			skipped = true
+			continue
+		}
+		starts++
+		busyUntil = tick.Add(runDuration)
+	}
+	windowDays := value.windowSeconds / float64(24*time.Hour/time.Second)
 	if windowDays <= 0 {
-		return 0, false
+		return 0, false, nil
 	}
-	return float64(runs) / windowDays, true
+	return starts / windowDays, skipped, nil
+}
+
+func simulateSchedulePrefix(ctx context.Context, schedule cron.Schedule, start time.Time, runDuration time.Duration) time.Time {
+	warmStart := start.Add(-2 * runDuration)
+	busyUntil := warmStart
+	for next := schedule.Next(warmStart.Add(-time.Nanosecond)); next.Before(start); {
+		if ctx.Err() != nil {
+			return busyUntil
+		}
+		if next.Before(busyUntil) {
+			next = schedule.Next(busyUntil.Add(-time.Nanosecond))
+			continue
+		}
+		busyUntil = next.Add(runDuration)
+		next = schedule.Next(next)
+	}
+	return busyUntil
+}
+
+func simulateSchedule(ctx context.Context, schedule cron.Schedule, start, end time.Time, runDuration time.Duration) (float64, bool, error) {
+	warmStart := start.Add(-2 * runDuration)
+	busyUntil := warmStart
+	var starts float64
+	skipped := false
+	for next := schedule.Next(warmStart.Add(-time.Nanosecond)); next.Before(end); {
+		if err := ctx.Err(); err != nil {
+			return 0, false, err
+		}
+		if next.Before(busyUntil) {
+			if !next.Before(start) {
+				skipped = true
+			}
+			next = schedule.Next(busyUntil.Add(-time.Nanosecond))
+			continue
+		}
+		if !next.Before(start) {
+			starts++
+		}
+		busyUntil = next.Add(runDuration)
+		next = schedule.Next(next)
+	}
+	windowDays := end.Sub(start).Seconds() / float64(24*time.Hour/time.Second)
+	if windowDays <= 0 {
+		return 0, false, nil
+	}
+	return starts / windowDays, skipped, nil
 }
 
 // scanRateLowerBound returns seconds per run that are provably bounded by

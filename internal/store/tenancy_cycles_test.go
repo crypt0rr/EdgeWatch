@@ -272,6 +272,38 @@ func tenantCycleRows(t *testing.T, s *Store, scope TenantScope) string {
 // cycleTenantLeakCases hold the leak cases of the scan cycle reads and the
 // cycle discard. Each case opens its own copy of the cycle fixture.
 var cycleTenantLeakCases = map[string]tenantLeakCase{
+	"LatestScanRunsTimedOut": {run: func(t *testing.T, _ tenantFixture) {
+		ctx := context.Background()
+		f := newCycleTenantFixture(t)
+		owners := []struct {
+			scope TenantScope
+			job   string
+		}{{f.a, f.jobA}, {f.b, f.jobB}}
+		keys := make([]ScanDurationKey, 0, len(owners))
+		for _, owner := range owners {
+			record, err := f.store.Tenant(owner.scope).GetJob(ctx, owner.job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			keys = append(keys, NewScanDurationKey(record))
+			finished := time.Now().UTC()
+			if err := f.store.System().SaveScan(ctx, model.Scan{
+				ID: "timed-out-leak-" + owner.scope.ID(), JobID: owner.job, Job: record.Job.Name, JobRevision: record.Revision,
+				StartedAt: finished.Add(-time.Minute), FinishedAt: finished, Status: "timed_out", ConfigHash: record.Job.SecurityHash(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, owner := range owners {
+			runs, err := f.store.Tenant(owner.scope).LatestScanRunsTimedOut(ctx, keys, 11)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(runs) != 1 || !runs[owner.job] {
+				t.Errorf("tenant %s timed-out run evidence = %v; want only its own timed-out job", owner.scope.ID(), runs)
+			}
+		}
+	}},
 	"ListCompletedScanCycleDurations": {run: func(t *testing.T, _ tenantFixture) {
 		ctx := context.Background()
 		f := newCycleTenantFixture(t)

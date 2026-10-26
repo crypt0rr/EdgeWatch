@@ -56,17 +56,20 @@ can keep concurrent times.
 The **Jobs** and **Perimeter** pages show the business unit's scheduled
 scan-slot demand against its effective slot capacity. Jobs with completed scan
 history from their current scan settings use the median duration of their 11
-most recent samples, multiplied by their scheduled runs per day. Each completed
-resumable cycle sums the recorded durations of its scan attempts, excluding
-idle time between scheduled attempts. A successful or incomplete scan without
-a cycle is one sample.
+most recent samples. Each completed resumable cycle sums the recorded durations
+of its scan attempts, excluding idle time between scheduled attempts. A
+successful or incomplete scan without a cycle is one sample. If the newest
+runs with the current settings all timed out, the configured timeout supplies
+the expected run duration. Cycle attempts match by their cycle's execution
+hash; scans without a cycle match by their recorded scope and TCP scanner
+profile revision.
 
 Which edits keep a job's samples depends on what a scan records:
 
 - Renaming a job, editing its schedule or its notification destinations, and
   pausing and resuming it keep its samples, because none of these changes how
   a scan runs. A paused job adds no demand until it is resumed, and a schedule
-  edit changes the runs per day immediately.
+  edit changes the simulated schedule and its expected starts immediately.
 - Editing its targets, ports, protocols, or other monitored scope, such as
   the TCP scanner engine, service detection, or the NSE script, or selecting
   another TCP scanner profile or profile revision, starts new samples.
@@ -93,12 +96,13 @@ The job's **Timeout** ends each run, so a run counts at most the timeout,
 whether its duration comes from samples or from the lower bound. A resumable
 cycle whose attempts add up to more than the timeout continues in the job's
 later runs, so it adds the timeout for each run rather than its whole duration.
-A job runs at most once at a time: when its previous run is still going, the
-scheduler skips the next run. Each job therefore adds at most one slot-day, 24
-slot-hours, to the estimate. When a job's own estimated demand exceeds that,
-its runs, each ended by the timeout at the latest, take longer than its
-schedule allows and some of them are skipped; the notice counts such jobs.
-Lengthen the job's schedule interval or shorten its scans to keep its cadence.
+The estimate simulates the job's cron ticks in its timezone over a calendar
+year. When a previous estimated run is still active at a tick, the scheduler
+skips that tick; the estimate counts only runs that could start. A job runs at
+most once at a time, so its estimate adds at most one slot-day, 24 slot-hours,
+per day. The cadence count includes any job for which at least one scheduled
+tick is skipped, even when its daily demand is below one slot-day. Lengthen the
+job's schedule interval or shorten its scans to keep its cadence.
 A warning appears at 80% utilization and when estimated demand exceeds
 capacity. The notice refreshes when live updates report a job change or a
 completed scan, and at least every five minutes.

@@ -612,13 +612,13 @@ describe('platform status', () => {
     renderWithProviders(<PlatformStatusPage />)
     const panel = (await screen.findByRole('heading', { name: 'Scheduled scan demand' })).closest('.panel') as HTMLElement
     expect(within(panel).getByText('Scheduled scan demand: 43.2 of 24 slot-hours/day (180%)')).toBeInTheDocument()
-    expect(within(panel).getByText(/The enabled jobs of 3 active units together, against the 1 scan slot that all units share\. A unit’s slot cap limits its share and reserves no slot\./)).toBeInTheDocument()
+    expect(within(panel).getByText(/The enabled jobs of 3 active units together, against the 1 scan slot that all units share\. Each unit’s contribution is capped at its effective slot capacity; its Jobs page shows its own estimate\./)).toBeInTheDocument()
     const warning = within(panel).getByRole('status')
     expect(warning).toHaveClass('notice', 'warning')
     expect(warning).toHaveTextContent('Scheduled scan demand exceeds the shared capacity.')
     expect(warning).toHaveTextContent('Raise scheduler.max_concurrent_scans in config.yaml')
     expect(within(panel).getByText('Not fully estimated').nextSibling).toHaveTextContent('2')
-    expect(within(panel).getByText(/2 jobs run longer than their schedules allow, so some of their scheduled runs are skipped\. Each unit’s Jobs page counts its own\./).closest('.notice')).toHaveClass('warning')
+    expect(within(panel).getByText(/2 jobs’ estimated runs would still be active at one or more scheduled ticks, so the scheduler skips those ticks\./).closest('.notice')).toHaveClass('warning')
     expect(within(panel).getByText('2 enabled jobs have work or a schedule frequency the estimate cannot fully bound, so actual demand may be higher.')).toBeInTheDocument()
     expect(within(panel).getByText('Enabled jobs').nextSibling).toHaveTextContent('3')
     expect(within(panel).getByText('Estimated from scan history').nextSibling).toHaveTextContent('3')
@@ -631,7 +631,7 @@ describe('platform status', () => {
     let panel = (await screen.findByRole('heading', { name: 'Scheduled scan demand' })).closest('.panel') as HTMLElement
     expect(within(panel).getByText('Scheduled scan demand: 38.4 of 48 slot-hours/day (80%)')).toBeInTheDocument()
     expect(within(panel).getByRole('status')).toHaveTextContent('Scheduled scan demand is near the shared capacity.')
-    expect(within(panel).getByText(/^1 job runs longer than its schedule allows, so some of its scheduled runs are skipped\./)).toBeInTheDocument()
+    expect(within(panel).getByText(/^1 job’s estimated run would still be active at one or more scheduled ticks, so the scheduler skips those ticks\./)).toBeInTheDocument()
     expect(within(panel).queryByText(/estimate cannot fully bound/)).not.toBeInTheDocument()
     near.unmount()
 
@@ -639,7 +639,7 @@ describe('platform status', () => {
     renderWithProviders(<PlatformStatusPage />)
     panel = (await screen.findByRole('heading', { name: 'Scheduled scan demand' })).closest('.panel') as HTMLElement
     expect(within(panel).getByText('Scheduled scan demand: 6 of 48 slot-hours/day (12.5%)')).toBeInTheDocument()
-    expect(within(panel).getByText(/The enabled jobs of 1 active unit together, against the 2 scan slots/)).toBeInTheDocument()
+    expect(within(panel).getByText(/Each unit’s contribution is capped at its effective slot capacity/)).toBeInTheDocument()
     expect(within(panel).queryByRole('status')).not.toBeInTheDocument()
     expect(within(panel).queryByText(/near the shared capacity|exceeds the shared capacity|longer than (its|their) schedules? allows?/)).not.toBeInTheDocument()
   })

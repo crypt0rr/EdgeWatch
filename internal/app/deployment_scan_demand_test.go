@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -178,6 +179,42 @@ func TestDeploymentScanDemandUsesThePoolNotUnitCapsAndSumsTheUnitsCounts(t *test
 	// 0.6 + 1 slot-days of 4.
 	if want := 1.6 / 4 * 100; demand.OverCapacity || math.Abs(demand.UtilizationPercent-want) > 0.01 {
 		t.Fatalf("deployment utilization = %+v, want %.0f%% within capacity", demand, want)
+	}
+}
+
+func TestDeploymentScanDemandCapsEachUnitsContributionAtItsEffectiveSlots(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	application := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 4}}}
+	unit, ts := demandUnit(t, db, "One-slot unit", "one-slot")
+	if _, err := db.DB.ExecContext(ctx, `UPDATE tenants SET max_concurrent_scans=1 WHERE id=?`, unit.ID); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+			Name: fmt.Sprintf("full-day-%d", i), Schedule: "0 * * * *", Timezone: "UTC", Timeout: config.Duration(24 * time.Hour),
+			Targets: []string{fmt.Sprintf("192.0.2.%d", i+1)},
+			TCP:     &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+		}), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		insertCompletedScan(t, db, record, fmt.Sprintf("full-day-scan-%d", i), time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC), 24*time.Hour)
+	}
+	unitDemand, err := application.ScanSlotDemand(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unitDemand.Slots != 1 || unitDemand.EstimatedSlotSecondsPerDay != 2*slotSecondsPerDay || !unitDemand.OverCapacity {
+		t.Fatalf("unit demand = %+v; want two slot-days against its one-slot cap", unitDemand)
+	}
+	demand, err := application.DeploymentScanDemand(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demand.Slots != 4 || demand.EnabledJobs != 2 || demand.HistoryJobs != 2 || demand.EstimatedSlotSecondsPerDay != slotSecondsPerDay || demand.OverCapacity {
+		t.Fatalf("deployment demand = %+v; want this unit capped at one slot-day against the four-slot pool", demand)
 	}
 }
 

@@ -39,12 +39,14 @@ describe('ScanSlotDemandNotice', () => {
     expect(screen.getByText(/configured maximum scanner rates, as a lower bound/)).toBeInTheDocument()
     expect(screen.getByText(/samples with its current scan settings/)).toBeInTheDocument()
     expect(screen.getByText(/pausing and resuming it keeps its samples/)).toBeInTheDocument()
+    expect(screen.getByText(/newest runs with those settings all timed out/)).toBeInTheDocument()
+    expect(screen.getByText(/skips a tick when the previous estimated run is still active/)).toBeInTheDocument()
     expect(screen.getByText(/Each run counts at most the job’s timeout, which ends it/)).toBeInTheDocument()
     expect(screen.getByText(/adds at most 24 slot-hours\/day/)).toBeInTheDocument()
     expect(screen.queryByText(/longer than (its|their) schedules? allows?/)).not.toBeInTheDocument()
   })
 
-  it('names the jobs that run longer than their schedules allow', async () => {
+  it('counts jobs whose estimated runs make the scheduler skip ticks', async () => {
     vi.mocked(scanSlotDemand).mockResolvedValue({
       enabled_jobs: 3,
       history_jobs: 3,
@@ -58,7 +60,7 @@ describe('ScanSlotDemandNotice', () => {
       over_capacity: false,
     })
     const first = renderWithProviders(<ScanSlotDemandNotice />)
-    expect(await screen.findByText('1 job runs longer than its schedule allows, so some of its scheduled runs are skipped.')).toBeInTheDocument()
+    expect(await screen.findByText('1 job’s estimated run would still be active at one or more scheduled ticks, so the scheduler skips those ticks.')).toBeInTheDocument()
     first.unmount()
 
     vi.mocked(scanSlotDemand).mockResolvedValue({
@@ -74,7 +76,7 @@ describe('ScanSlotDemandNotice', () => {
       over_capacity: false,
     })
     renderWithProviders(<ScanSlotDemandNotice />)
-    expect(await screen.findByText('2 jobs run longer than their schedules allow, so some of their scheduled runs are skipped.')).toBeInTheDocument()
+    expect(await screen.findByText('2 jobs’ estimated runs would still be active at one or more scheduled ticks, so the scheduler skips those ticks.')).toBeInTheDocument()
   })
 
   it('polls every five minutes, between the live updates that refresh it', async () => {

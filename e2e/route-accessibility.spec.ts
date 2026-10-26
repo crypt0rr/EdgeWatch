@@ -43,6 +43,34 @@ type AxeAllowance = {
  */
 const axeAllowances: AxeAllowance[] = []
 
+/** Surfaces this spec passes to expectAccessible, including fixture states. */
+const auditedSurfaceNames = new Set([
+  ...allConsoleRoutes
+    .filter(route => roles.some(role => routeIsRenderedForRole(role, route.path) && expectedConsolePath(role, route) === route.path))
+    .map(route => route.path),
+  ...entrySurfaces.map(surface => surface.path),
+  'open action dialog',
+  'action dialog with a failed confirmation',
+  'read error on /scans/scan-1',
+  'read error on /jobs/job-1',
+  'read error on /scans/scan-1/hosts/192.0.2.10',
+  'read error on /perimeter/ranges/range-1',
+  'read error on /platform/units/unit-retail',
+  'empty state on /incidents',
+  'empty state on /jobs/job-1/baseline',
+  'pending baseline changes',
+  'scan-slot demand near capacity',
+  'prefilled monitor setup: Choose targets',
+  'prefilled monitor setup: Set scan coverage',
+  'prefilled monitor setup: Set schedule and alerts',
+  'prefilled monitor setup: Review and create',
+])
+
+function assertAuditedAllowanceSurfaces(allowances: AxeAllowance[]) {
+  const unknown = [...new Set(allowances.filter(allowance => !auditedSurfaceNames.has(allowance.surface)).map(allowance => allowance.surface))]
+  if (unknown.length) throw new Error(`axeAllowances names surfaces this spec does not audit: ${unknown.join(', ')}`)
+}
+
 /**
  * The gated violations of an axe run on one surface, one per node, except
  * the nodes that an allowance for that surface accepts, and the allowances
@@ -66,6 +94,8 @@ function gateFindings(violations: AxeViolation[], surface: string, allowances: A
  * except where axeAllowances accepts the node.
  */
 async function expectAccessible(page: Page, surface: string, context: string) {
+  expect(auditedSurfaceNames.has(surface), `${context} is missing from the static axe surface inventory`).toBe(true)
+  assertAuditedAllowanceSurfaces(axeAllowances)
   const results = await consoleAxe(page).analyze()
   const labelMismatches = results.violations.filter(violation => violation.id === labelNameMismatchRule)
   expect(labelMismatches, `${context} has visible link or button text missing from its accessible name`).toEqual([])
@@ -73,6 +103,14 @@ async function expectAccessible(page: Page, surface: string, context: string) {
   expect(blocking, `${context}: ${blocking.join('; ')}`).toEqual([])
   expect(unused, `${context} no longer has the violations that these axeAllowances entries accept; remove them`).toEqual([])
 }
+
+test('axe allowances reject surfaces that the audit does not visit', async ({}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'The allowance-surface gate regression runs once; route audits cover each configured device project.')
+
+  const probe: AxeAllowance = { rule: 'page-has-heading-one', surface: '/no-such-route', target: 'html', reason: 'Regression fixture.' }
+  expect(() => assertAuditedAllowanceSurfaces([...axeAllowances, probe])).toThrow(/does not audit: \/no-such-route/)
+  expect(() => assertAuditedAllowanceSurfaces(axeAllowances)).not.toThrow()
+})
 
 async function expectProjectDevice(page: Page, testInfo: TestInfo) {
   const { viewport } = testInfo.project.use

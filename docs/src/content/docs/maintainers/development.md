@@ -158,6 +158,10 @@ parameter matches any value. It fails when a route or tab has no entry, and
 when an entry no longer reaches the route it stands for. A route that renders
 no page of its own, such as a catch-all redirect outside the console shells,
 goes in `routesWithoutInventoryEntry` with its reason instead.
+The parser fails closed on namespace or default router imports, re-exports
+from a router module, source-less re-exports of imported `Route` or `Routes`,
+and JSX member forms such as `<RR.Route>`; teach the inventory check before
+introducing any of these forms.
 
 To add a console page, add its `<Route>` with a string-literal `path`, then an
 entry with its scope and permission to `unitConsoleRoutes` or
@@ -171,8 +175,9 @@ route in its default fixture state, it audits an open dialog, a failed
 confirmation, failed page reads, an empty investigation inbox, a job without a
 baseline, pending baseline changes, a near-capacity scan-slot demand notice,
 and every step of a monitor setup that Perimeter prefilled. Accept a violation only with an `axeAllowances` entry in the spec
-that names the rule, the audited surface, the node, and the reason; an entry
-that no longer matches a violation fails the audit.
+that names the rule, an audited surface, the node, and the reason. The spec
+fails when an allowance names a surface it does not audit or when an entry no
+longer matches a violation.
 
 ## Notification destination policy
 

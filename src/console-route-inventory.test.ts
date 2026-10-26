@@ -81,6 +81,15 @@ function jsxName(node: Node): string | undefined {
   return name.type === 'JSXIdentifier' ? String(name.name) : undefined
 }
 
+function jsxRouterMemberName(node: Node): string | undefined {
+  if (node.type !== 'JSXElement') return undefined
+  const name = (node.openingElement as Node).name as Node
+  if (name.type !== 'JSXMemberExpression') return undefined
+  const property = name.property as Node
+  const member = property.type === 'JSXIdentifier' ? String(property.name) : undefined
+  return member === 'Route' || member === 'Routes' ? member : undefined
+}
+
 function jsxAttribute(element: Node, name: string): Node | undefined {
   const attributes = (element.openingElement as Node).attributes as Node[]
   return attributes.find(attribute => attribute.type === 'JSXAttribute' && ((attribute.name as Node).name === name))
@@ -121,13 +130,33 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
     for (const statement of program.body as Node[]) {
       if (statement.type !== 'ImportDeclaration' || !routerModules.has(String((statement.source as Node).value))) continue
       for (const specifier of statement.specifiers as Node[]) {
-        if (specifier.type !== 'ImportSpecifier') continue
+        if (specifier.type !== 'ImportSpecifier') throw new Error(`${file} uses ${specifier.type} from a router module; the console route inventory check requires named router imports so it can read every route`)
         const imported = String((specifier.imported as Node).name)
         const localName = String((specifier.local as Node).name)
         if (imported === 'Route' || imported === 'Routes') local[imported].add(localName)
         if (unreadRouterAPIs.has(imported)) throw new Error(`${file} imports ${imported}; the console route inventory check reads only <Routes> and <Route> elements, so declare routes as JSX or teach src/console-route-inventory.test.ts the new API`)
       }
     }
+
+    const importedRouterAPI = (name: string) => local.Route.has(name) ? 'Route' : local.Routes.has(name) ? 'Routes' : undefined
+    for (const statement of program.body as Node[]) {
+      if (statement.type !== 'ExportNamedDeclaration' && statement.type !== 'ExportAllDeclaration') continue
+      const source = statement.source as Node | null | undefined
+      if (source && routerModules.has(String(source.value))) throw new Error(`${file} re-exports router APIs from ${String(source.value)}; the console route inventory check requires routes to be declared through named JSX imports`)
+      if (source || statement.type !== 'ExportNamedDeclaration') continue
+      for (const specifier of (statement.specifiers as Node[] | undefined) ?? []) {
+        const localName = String((specifier.local as Node).name)
+        const api = importedRouterAPI(localName)
+        if (api) throw new Error(`${file} re-exports local ${localName}, imported as ${api}; the console route inventory check cannot follow router API re-exports`)
+      }
+    }
+
+    const rejectRouterMemberElements = (node: Node) => {
+      const api = jsxRouterMemberName(node)
+      if (api) throw new Error(`${file} uses a JSX member expression ending in ${api}; the console route inventory check requires directly named <Route> and <Routes> elements`)
+      childNodes(node).forEach(rejectRouterMemberElements)
+    }
+    rejectRouterMemberElements(program)
     if (!local.Route.size && !local.Routes.size) continue
 
     let routeElements = 0
@@ -462,6 +491,12 @@ export function PlatformShell() { return <Routes><Route path="/units/:id/:tab" e
       expect(() => extractRouters([{ file: 'src/c.tsx', code: `import { Route } from 'react-router-dom'\nexport const routes = <Route path="/c" element={<p />} />` }])).toThrow(/outside every <Routes>/)
       // An aliased import is still read.
       expect(extractRouters([{ file: 'src/d.tsx', code: `import { Route as Page, Routes as Pages } from 'react-router'\nexport function D() { return <Pages><Page path="/d" element={<p />} /></Pages> }` }]).map(router => [router.name, router.routes.map(route => route.path)])).toEqual([['D', ['/d']]])
+      expect(() => extractRouters([{ file: 'src/e.tsx', code: `import * as RR from 'react-router-dom'\nexport function E() { return <RR.Routes><RR.Route path="/e" /></RR.Routes> }` }])).toThrow(/ImportNamespaceSpecifier/)
+      expect(() => extractRouters([{ file: 'src/f.ts', code: `export { Route, Routes } from 'react-router-dom'` }])).toThrow(/re-exports router APIs/)
+      expect(() => extractRouters([{ file: 'src/g.ts', code: `import { Route as Page, Routes as Pages } from 'react-router-dom'\nexport { Page as Route, Pages as Routes }` }])).toThrow(/re-exports local Page, imported as Route/)
+      // A namespace-style element is refused even when the file also has
+      // readable named imports, so its route cannot hide beside them.
+      expect(() => extractRouters([{ file: 'src/h.tsx', code: `import { Route, Routes } from 'react-router-dom'\nexport function H() { return <Routes><Route path="/visible" /><RR.Route path="/hidden" /></Routes> }` }])).toThrow(/JSX member expression ending in Route/)
     })
   })
 })

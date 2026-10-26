@@ -272,6 +272,53 @@ func TestPrunePreUpgradeBackupsAbortsWhenSchemaProbeFails(t *testing.T) {
 	}
 }
 
+func TestPrunePreUpgradeBackupsCancellationBeforeRemovalPreservesRollbackCopy(t *testing.T) {
+	directory := t.TempDir()
+	fixtures := make(map[int][]byte)
+	rollbackCopy := "edgewatch-preupgrade-s75-s78-20250101T000000.000000000Z.db"
+	writeValidPreUpgradeBackup(t, directory, rollbackCopy, fixtures)
+	newer := []string{
+		"edgewatch-preupgrade-s77-s78-20260101T000000.000000000Z.db",
+		"edgewatch-preupgrade-s77-s78-20260102T000000.000000000Z.db",
+		"edgewatch-preupgrade-s77-s78-20260103T000000.000000000Z.db",
+	}
+	for _, name := range newer {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte("completed upgrade"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var schemaProbeCalls, removalChecks int
+	probe := func(context.Context, edgeWatchSchemaQueryer) (bool, error) {
+		schemaProbeCalls++
+		return true, nil
+	}
+	beforeRemovalCheck := func() {
+		removalChecks++
+		cancel()
+	}
+	removed, err := prunePreUpgradeBackupsWithSchemaProbeAndBeforeRemovalCheck(ctx, directory, 77, preUpgradeBackupRetention, "", probe, beforeRemovalCheck)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("prune after cancellation at the removal boundary = %v, want context.Canceled", err)
+	}
+	if schemaProbeCalls != 1 || removalChecks != 1 {
+		t.Fatalf("schema probe calls = %d, removal checks = %d; want successful candidate verification and one removal-boundary check", schemaProbeCalls, removalChecks)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("removed backups = %q, want no removals after cancellation", removed)
+	}
+	if _, err := os.Stat(filepath.Join(directory, rollbackCopy)); err != nil {
+		t.Fatalf("qualifying rollback backup was removed after cancellation: %v", err)
+	}
+	for _, name := range newer {
+		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
+			t.Errorf("backup %q was removed after cancellation: %v", name, err)
+		}
+	}
+}
+
 func writeValidPreUpgradeBackup(t *testing.T, directory, name string, fixtures map[int][]byte) {
 	t.Helper()
 	match := preUpgradeBackupName.FindStringSubmatch(name)

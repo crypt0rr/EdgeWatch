@@ -106,6 +106,12 @@ func prunePreUpgradeBackups(ctx context.Context, directory string, current, keep
 }
 
 func prunePreUpgradeBackupsWithSchemaProbe(ctx context.Context, directory string, current, keep int, written string, probe edgeWatchSchemaProbe) ([]string, error) {
+	return prunePreUpgradeBackupsWithSchemaProbeAndBeforeRemovalCheck(ctx, directory, current, keep, written, probe, nil)
+}
+
+// beforeRemovalCheck is a test seam for cancellation at the boundary guarded
+// by the removal loop's context check, after candidate verification is done.
+func prunePreUpgradeBackupsWithSchemaProbeAndBeforeRemovalCheck(ctx context.Context, directory string, current, keep int, written string, probe edgeWatchSchemaProbe, beforeRemovalCheck func()) ([]string, error) {
 	if keep < 0 {
 		return nil, errors.New("pre-migration backup retention cannot be negative")
 	}
@@ -193,6 +199,9 @@ func prunePreUpgradeBackupsWithSchemaProbe(ctx context.Context, directory string
 	var removed []string
 	kept := 0
 	for _, file := range files {
+		if beforeRemovalCheck != nil {
+			beforeRemovalCheck()
+		}
 		if err := ctx.Err(); err != nil {
 			return removed, err
 		}

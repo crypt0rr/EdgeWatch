@@ -13,6 +13,15 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
+type fixedDeadlineContext struct {
+	context.Context
+	deadline time.Time
+}
+
+func (ctx fixedDeadlineContext) Deadline() (time.Time, bool) {
+	return ctx.deadline, true
+}
+
 func acquireFullScanLease(t *testing.T, admission *fullScanAdmission, tenantID string) func() {
 	t.Helper()
 	release, result := admission.acquire(context.Background(), tenantID, 0)
@@ -171,8 +180,10 @@ func TestFullScanAdmissionWaitBudgetUsesRequestStartAndContextDeadline(t *testin
 	if !ok || wait != writeTimeout-reserve-300*time.Millisecond {
 		t.Fatalf("elapsed admission budget = %s, %v", wait, ok)
 	}
-	ctx, cancel := context.WithDeadline(context.Background(), now.Add(75*time.Millisecond))
-	defer cancel()
+	// Keep the deadline fixed to the simulated clock above. context.WithDeadline
+	// compares it with the process clock and starts already canceled when this
+	// test's fixed timestamp moves into the past.
+	ctx := fixedDeadlineContext{Context: context.Background(), deadline: now.Add(75 * time.Millisecond)}
 	wait, ok = fullScanAdmissionWaitBudget(ctx, now, started, writeTimeout, maxWait)
 	if !ok || wait != 75*time.Millisecond {
 		t.Fatalf("context-clamped admission budget = %s, %v", wait, ok)

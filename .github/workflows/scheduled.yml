@@ -5,7 +5,9 @@ name: Scheduled checks
 # which breaks the next image build without a cache, such as the release. New
 # vulnerabilities are published for the packages and the Naabu build of the
 # image that users already run, and for the Go code and toolchain of the
-# latest release. Start a run before tagging a release with
+# latest release. Go tests that depend on dates can also fail as the clock
+# advances, so the daily Go suite runs once more with a 90-day clock shift.
+# Start a run before tagging a release with
 # `gh workflow run scheduled.yml`. GitHub reports a failed scheduled run to
 # whoever last changed the schedule.
 
@@ -36,6 +38,29 @@ jobs:
           persist-credentials: false
       - name: Compare the Dockerfile apk pins with the Alpine indexes
         run: ./scripts/check-apk-pins.sh
+
+  go-suite:
+    name: Release Go suite (unsharded)
+    runs-on: ubuntu-latest
+    # Two full suite runs need room for the same 40-minute package timeout as
+    # release verification, with time left for checkout, setup, and overlay.
+    timeout-minutes: 100
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Run the release Go suite
+        run: go test -race -timeout=40m -coverprofile=coverage.out ./...
+      - name: Prepare a 90-day Go clock overlay
+        run: python3 scripts/go-clock-overlay.py 90 "$RUNNER_TEMP/go-clock-overlay.json"
+      - name: Run the release Go suite with a 90-day Go clock shift
+        run: go test -race -timeout=40m -coverprofile=coverage-clock-shift.out -overlay "$RUNNER_TEMP/go-clock-overlay.json" ./...
 
   published-image:
     name: Scan the published image for known vulnerabilities

@@ -83,7 +83,12 @@ test('jobs search matches names and targets for every reader and keeps the selec
       await mockConsole(page, role)
       await page.route('**/api/v1/jobs**', async route => {
         const request = route.request()
-        if (request.method() !== 'GET' || new URL(request.url()).pathname !== '/api/v1/jobs') return route.fallback()
+        const pathname = new URL(request.url()).pathname
+        if (request.method() === 'GET' && pathname === '/api/v1/jobs/database') {
+          await route.fulfill({ json: jobs.find(job => job.id === 'database') })
+          return
+        }
+        if (request.method() !== 'GET' || pathname !== '/api/v1/jobs') return route.fallback()
         await route.fulfill({ json: { jobs } })
       })
       await page.goto('/jobs')
@@ -128,8 +133,28 @@ test('jobs search matches names and targets for every reader and keeps the selec
       await filter.selectOption('attention')
       await expect(page.getByRole('heading', { name: 'Database monitor' })).toBeVisible()
       await search.fill('gateway')
-      await expect(page.getByRole('heading', { name: 'No jobs match your search' })).toBeVisible()
+      await expect(page.getByRole('heading', { name: 'No jobs that need attention match your search' })).toBeVisible()
       await expect(page.getByRole('status').filter({ hasText: 'Showing 0 of 4 jobs' })).toBeVisible()
+      await page.getByRole('button', { name: 'Show all jobs' }).click()
+      await expect(filter).toHaveValue('all')
+      await expect(filter).toBeFocused()
+      await expect(page.getByRole('heading', { name: 'Gateway monitor' })).toBeVisible()
+      await expect(page.getByRole('heading', { name: 'Retired router' })).toBeVisible()
+
+      await search.fill('api.example.net')
+      await filter.selectOption('attention')
+      await expect(page.getByRole('heading', { name: 'Database monitor' })).toBeVisible()
+      await page.getByRole('link', { name: 'Database monitor' }).click()
+      await expect(page).toHaveURL(/\/jobs\/database$/)
+      await page.goBack()
+      await expect(search).toHaveValue('api.example.net')
+      await expect(filter).toHaveValue('attention')
+
+      await page.getByRole('link', { name: 'Database monitor' }).click()
+      await expect(page).toHaveURL(/\/jobs\/database$/)
+      await page.getByRole('link', { name: '← Jobs' }).click()
+      await expect(search).toHaveValue('api.example.net')
+      await expect(filter).toHaveValue('attention')
 
       const clear = page.getByRole('button', { name: 'Clear' })
       await clear.focus()
@@ -139,7 +164,7 @@ test('jobs search matches names and targets for every reader and keeps the selec
       await expect(search).toBeFocused()
       await expect(filter).toHaveValue('attention')
       await expect(page.getByRole('heading', { name: 'Database monitor' })).toBeVisible()
-      await expect(page.getByRole('heading', { name: 'No jobs match your search' })).toHaveCount(0)
+      await expect(page.getByRole('heading', { name: 'No jobs that need attention match your search' })).toHaveCount(0)
       await expect(page.getByRole('status').filter({ hasText: 'Showing 1 of 4 jobs' })).toBeVisible()
       expect(nonGetJobRequests).toEqual([])
       if (role === 'viewer') await expectNoHorizontalScroll(page)

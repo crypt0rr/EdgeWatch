@@ -221,6 +221,25 @@ describe('job surface overview', () => {
     expect(dots[1]).toHaveClass('fail')
   })
 
+  it('keeps Next steps on the newest scan when scan history is paged', async () => {
+    vi.mocked(getJob).mockResolvedValue({ ...job, baseline: { status: 'learning', samples: 0, attempts: 1 } })
+    const newest: ScanSummary = { ...summary, id: 'scan-newest', status: 'success' }
+    const oldPage = Array.from({ length: 20 }, (_, index) => ({ ...summary, id: `scan-${index + 1}` }))
+    const laterPage: ScanSummary = { ...summary, id: 'scan-old-incomplete', status: 'incomplete', error: 'An older scan was incomplete' }
+    vi.mocked(jobScans).mockImplementation(async (_jobID, offset = 0) => offset === 0
+      ? { scans: [newest, ...oldPage.slice(1)], pagination: { limit: 20, offset: 0, total: 21, has_more: true, next_offset: 20 } }
+      : { scans: [laterPage], pagination: { limit: 20, offset: 20, total: 21, has_more: false, next_offset: null } })
+
+    await renderPage()
+    await vi.waitFor(() => expect(container.querySelectorAll('.scan-row')).toHaveLength(20), { timeout: 1000 })
+    expect(jobScans).toHaveBeenCalledWith('job-1', 0)
+    const next = container.querySelector('nav[aria-label="Scan history pagination"] .pagination-actions .button:last-child') as HTMLButtonElement
+    await act(async () => next.click())
+    await vi.waitFor(() => expect(container.querySelector('.scan-row')?.textContent).toContain('An older scan was incomplete'), { timeout: 1000 })
+    expect(jobScans).toHaveBeenCalledWith('job-1', 20)
+    expect(container.textContent).not.toContain('The latest scan was incomplete.')
+  })
+
   it('provides the full success description as a title when scan rows are constrained', async () => {
     await renderPage()
     await vi.waitFor(() => expect(container.querySelector('.scan-row span')).not.toBeNull(), { timeout: 1000 })

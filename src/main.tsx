@@ -17,6 +17,7 @@ import { Activity as ActivityPage } from './pages/Activity'
 import { JobEditor } from './pages/JobEditor'
 import { MonitorSetup } from './pages/MonitorSetup'
 import { JobCreationDraftProvider } from './job-creation-draft'
+import { useJobListState } from './job-list-state'
 import { JobDetail } from './pages/JobDetail'
 import { Activate, activationTokenFromLocation, Login, Setup, SignedInActivation, signInReturnPath } from './pages/Auth'
 import { Security } from './pages/Security'
@@ -413,21 +414,25 @@ function JobCreationJourney() {
 
 export function Jobs() {
   const navigate = useNavigate()
+  const { search, filter, returnTo, updateSearch, updateFilter } = useJobListState()
   const jobs = useQuery({ queryKey: ['jobs', true], queryFn: () => listJobs(true), refetchInterval: 30_000 })
   const session = useQuery({ queryKey: ['session'], queryFn: getSession })
-  const [filter, setFilter] = useState<'all' | 'attention'>('all')
-  const [search, setSearch] = useState('')
   const searchInputRef = useRef<HTMLInputElement>(null)
+  const filterInputRef = useRef<HTMLSelectElement>(null)
   const canWrite = session.data?.permissions.includes('jobs.write') ?? false
   const canReadScans = session.data?.permissions.includes('scans.read') ?? false
   const allJobs = jobs.data?.jobs ?? []
-  const attentionJobs = filter === 'attention' ? allJobs.filter(job => job.monitoring?.attention_reason !== undefined && job.monitoring.attention_reason !== 'none') : allJobs
   const normalizedSearch = search.trim().toLowerCase()
-  const visibleJobs = normalizedSearch
-    ? attentionJobs.filter(job => job.job.name.toLowerCase().includes(normalizedSearch) || job.job.targets.some(target => target.toLowerCase().includes(normalizedSearch)))
-    : attentionJobs
+  const searchMatches = normalizedSearch
+    ? allJobs.filter(job => job.job.name.toLowerCase().includes(normalizedSearch) || job.job.targets.some(target => target.toLowerCase().includes(normalizedSearch)))
+    : allJobs
+  const attentionJobs = filter === 'attention' ? allJobs.filter(job => job.monitoring?.attention_reason !== undefined && job.monitoring.attention_reason !== 'none') : allJobs
+  const visibleJobs = filter === 'attention'
+    ? searchMatches.filter(job => job.monitoring?.attention_reason !== undefined && job.monitoring.attention_reason !== 'none')
+    : searchMatches
   const unavailableMonitoringCount = allJobs.filter(job => !job.monitoring || job.monitoring.availability !== 'available').length
   const noSearchResults = normalizedSearch.length > 0 && allJobs.length > 0 && visibleJobs.length === 0
+  const searchMatchesHiddenByFilter = noSearchResults && filter === 'attention' && searchMatches.length > 0
   return (
     <section className="page jobs-page">
       <div className="page-heading">
@@ -446,12 +451,12 @@ export function Jobs() {
               <div className="job-list-search">
                 <label htmlFor="jobs-search">Search jobs by name or target</label>
                 <div className="job-list-search-field">
-                  <input ref={searchInputRef} id="jobs-search" type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Name or target" />
-                  <button className="clear-job-search" type="button" onClick={() => { setSearch(''); searchInputRef.current?.focus() }} disabled={!search}>Clear</button>
+                  <input ref={searchInputRef} id="jobs-search" type="search" value={search} onChange={event => updateSearch(event.target.value)} placeholder="Name or target" />
+                  <button className="clear-job-search" type="button" onClick={() => { updateSearch(''); searchInputRef.current?.focus() }} disabled={!search}>Clear</button>
                 </div>
               </div>
               <label htmlFor="jobs-filter">Filter jobs
-                <select id="jobs-filter" value={filter} onChange={event => setFilter(event.target.value as 'all' | 'attention')}>
+                <select ref={filterInputRef} id="jobs-filter" value={filter} onChange={event => updateFilter(event.target.value as 'all' | 'attention')}>
                   <option value="all">All jobs</option>
                   <option value="attention">Needs attention</option>
                 </select>
@@ -460,7 +465,7 @@ export function Jobs() {
             <p className="muted" role="status" aria-live="polite">Showing {visibleJobs.length} of {allJobs.length} jobs</p>
           </div>
           {filter === 'attention' && unavailableMonitoringCount > 0 ? <p className="job-monitoring-unavailable" role="status">Monitoring data is incomplete for {unavailableMonitoringCount} job{unavailableMonitoringCount === 1 ? '' : 's'}; known attention reasons remain visible in this filter.</p> : null}
-          {noSearchResults ? <div className="empty"><h2>No jobs match your search</h2><p>Try another name or target, or clear your search to see jobs in the selected filter.</p></div> : null}
+          {noSearchResults ? <div className="empty"><h2>{searchMatchesHiddenByFilter ? 'No jobs that need attention match your search' : 'No jobs match your search'}</h2><p>{searchMatchesHiddenByFilter ? 'Matches are available in All jobs.' : 'Try another name or target, or clear your search to see jobs in the selected filter.'}</p>{searchMatchesHiddenByFilter && <button className="button secondary" type="button" onClick={() => { updateFilter('all'); filterInputRef.current?.focus() }}>Show all jobs</button>}</div> : null}
           {!normalizedSearch && filter === 'attention' && allJobs.length > 0 && attentionJobs.length === 0 ? <div className="empty"><h2>No available jobs need attention</h2><p>No available job shows a latest failed or incomplete attempt, a stalled cycle, or a saved probe-budget skip.</p></div> : null}
           <div className="job-grid">
           {visibleJobs.map(job => {
@@ -472,7 +477,7 @@ export function Jobs() {
                   <span className={`pill ${state.tone}`}>{state.label}</span>
                   <span className="revision">r{job.revision}</span>
                 </div>
-                <h2 id={`job-title-${job.id}`}><Link to={`/jobs/${job.id}`}>{job.job.name}</Link></h2>
+                <h2 id={`job-title-${job.id}`}><Link to={`/jobs/${job.id}`} state={{ returnTo }}>{job.job.name}</Link></h2>
                 <p className="muted">{job.job.targets.length} target{job.job.targets.length === 1 ? '' : 's'} · {protocolSummary(job)}</p>
                 <div className="job-card-bottom">
                   <span className={`baseline${baseline.status === 'complete' ? ' complete' : baseline.status === 'stalled' ? ' stalled' : ''}`}>

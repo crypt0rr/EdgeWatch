@@ -70,10 +70,20 @@ function routeResultsOffset(value: string | null): number | null {
   return Number.isSafeInteger(offset) && offset >= 0 ? offset : 0
 }
 
+function jobListReturnToFromState(state: unknown) {
+  if (!state || typeof state !== 'object' || !('returnTo' in state)) return '/jobs'
+  const returnTo = (state as { returnTo?: unknown }).returnTo
+  return typeof returnTo === 'string' && (
+    returnTo === '/jobs' || returnTo === '/jobs/' ||
+    returnTo.startsWith('/jobs?') || returnTo.startsWith('/jobs/?')
+  ) ? returnTo : '/jobs'
+}
+
 export function JobDetail() {
   const { id = '', scanId: routeScanID } = useParams()
   const [searchParams] = useSearchParams()
   const location = useLocation()
+  const jobsReturnTo = jobListReturnToFromState(location.state)
   const routeResults = routeScanID ? routeResultsOffset(searchParams.get('results')) : null
   const navigate = useNavigate()
   const client = useQueryClient()
@@ -134,6 +144,12 @@ export function JobDetail() {
   const scans = useQuery({
     queryKey: ['job-scans', id, scanOffset],
     queryFn: () => jobScans(id, scanOffset),
+    enabled: !!id && canReadScans,
+    refetchInterval: pendingScanRequest ? 2000 : 10000,
+  })
+  const latestScans = useQuery({
+    queryKey: ['job-scans', id, 0],
+    queryFn: () => jobScans(id, 0),
     enabled: !!id && canReadScans,
     refetchInterval: pendingScanRequest ? 2000 : 10000,
   })
@@ -656,7 +672,7 @@ export function JobDetail() {
     <section className="page">
       <div className="page-heading">
         <div>
-          <Link className="back-link" to="/jobs">← Jobs</Link>
+          <Link className="back-link" to={jobsReturnTo}>← Jobs</Link>
           <div className="title-row">
             <h1>{value.job.name}</h1>
             <span className={`pill ${jobStatus.tone}`}>{jobStatus.label}</span>
@@ -703,9 +719,9 @@ export function JobDetail() {
         pendingRun={!!pendingScanRequest}
         cycleKnown={canReadScans && cycle.isSuccess && !cycle.error}
         cycle={cycle.data ? cycle.data.cycle : value.scan_cycle}
-        scans={scans.data?.scans}
-        scansLoading={canReadScans && scans.isLoading}
-        scansError={canReadScans && !!scans.error}
+        scans={latestScans.data?.scans}
+        scansLoading={canReadScans && latestScans.isLoading}
+        scansError={canReadScans && !!latestScans.error}
         baseline={baseline.data}
         baselineLoading={canReadBaseline && baseline.isLoading}
         baselineError={canReadBaseline && !!baseline.error}
@@ -715,7 +731,7 @@ export function JobDetail() {
         scheduleError={!!job.data?.enabled && !!nextRun.error}
         runBusy={!!actionBusy}
         onRun={run}
-        onRetryScans={() => { void scans.refetch() }}
+        onRetryScans={() => { void latestScans.refetch() }}
         onRetrySchedule={() => { void nextRun.refetch() }}
       />
 

@@ -57,9 +57,9 @@ describe('baseline host explorer', () => {
     vi.clearAllMocks()
   })
 
-  async function renderPage() {
+  async function renderPage(initialEntry = '/jobs/job-1/baseline') {
     await act(async () => {
-      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={['/jobs/job-1/baseline']}><Routes><Route path="/jobs/:id/baseline" element={<BaselineHosts />} /></Routes></MemoryRouter></QueryClientProvider>)
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={[initialEntry]}><Routes><Route path="/jobs/:id/baseline" element={<BaselineHosts />} /></Routes></MemoryRouter></QueryClientProvider>)
     })
     await vi.waitFor(() => expect(container.textContent).toContain('Baseline hosts'), { timeout: 1000 })
   }
@@ -92,6 +92,25 @@ describe('baseline host explorer', () => {
     const protocol = container.querySelectorAll('select')[0] as HTMLSelectElement
     fireEvent.change(protocol, { target: { value: 'tcp' } })
     await vi.waitFor(() => expect(baselineHosts).toHaveBeenCalledWith('job-1', expect.objectContaining({ protocol: 'tcp', offset: 0 })), { timeout: 1000 })
+  })
+
+  it('offers the first page when a restored offset is past the baseline end', async () => {
+    const stalePage: BaselineHostsResponse = {
+      ...detailed,
+      hosts: [],
+      pagination: { limit: 50, offset: 500, total: 30, has_more: false, next_offset: null },
+    }
+    vi.mocked(baselineHosts).mockImplementation(async (_job, filters) => filters?.offset === 500 ? stalePage : detailed)
+    await renderPage('/jobs/job-1/baseline?offset=500')
+
+    expect(baselineHosts).toHaveBeenCalledWith('job-1', expect.objectContaining({ offset: 500 }))
+    expect(container).toHaveTextContent('No hosts on this page.')
+    expect(container).not.toHaveTextContent('No hosts are in this baseline.')
+    const goToFirstPage = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Go to first page') as HTMLButtonElement
+    expect(goToFirstPage).toBeTruthy()
+    await act(async () => fireEvent.click(goToFirstPage))
+    await vi.waitFor(() => expect(baselineHosts).toHaveBeenLastCalledWith('job-1', expect.objectContaining({ offset: 0 })), { timeout: 1000 })
+    await vi.waitFor(() => expect(container.textContent).toContain('router.example'), { timeout: 1000 })
   })
 
   it('keeps search, filters, and page in the URL when returning from a baseline host', async () => {

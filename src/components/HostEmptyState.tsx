@@ -24,3 +24,10 @@ export function HostEmptyState({ search, protocol, open, emptyMessage, onClearSe
     </div>}
   </div>
 }
+
+export function HostPageEmptyState({ onGoToFirstPage }: { onGoToFirstPage: () => void }) {
+  return <div className="inline-empty host-empty-results" role="status">
+    <p>No hosts on this page.</p>
+    <button type="button" className="button secondary" onClick={onGoToFirstPage}>Go to first page</button>
+  </div>
+}

@@ -125,3 +125,36 @@ test('rapid typing keeps host search, URL, results, and focus synchronized on bo
     await context.close()
   }
 })
+
+test('host explorers recover restored pages past the inventory end and clamp invalid large offsets', async ({ page }) => {
+  await mockConsole(page, 'administrator')
+  const offsets: Array<{ path: string; offset: number }> = []
+  await page.route(url => {
+    const pathname = new URL(url).pathname
+    return pathname === '/api/v1/hosts' || pathname === '/api/v1/jobs/job-1/baseline/hosts'
+  }, route => {
+    const request = new URL(route.request().url())
+    const offset = Number(request.searchParams.get('offset') ?? 0)
+    offsets.push({ path: request.pathname, offset })
+    const outOfRange = offset === 500
+    const hosts = outOfRange ? [] : [host]
+    const pagination = { limit: 50, offset, total: 30, has_more: false, next_offset: null }
+    return route.fulfill({ json: request.pathname === '/api/v1/hosts'
+      ? { hosts, pagination }
+      : { job_id: 'job-1', job: 'fixture-job', data_quality: 'detailed', hosts, pagination } })
+  })
+
+  for (const listPath of ['/hosts', '/jobs/job-1/baseline']) {
+    await page.goto(`${listPath}?offset=500`)
+    await expect(page.getByText('No hosts on this page.')).toBeVisible()
+    await expect(page.getByText(/No completed scans have produced effective hosts yet\.|No hosts are in this baseline\./)).toHaveCount(0)
+    await page.getByRole('button', { name: 'Go to first page' }).click()
+    await expect(page).toHaveURL(new RegExp(`${listPath.replaceAll('/', '\\/')}$`))
+    await expect(page.locator('.host-row').first()).toContainText(host.address)
+  }
+
+  await page.goto('/hosts?offset=20000000')
+  await expect(page.locator('.host-row').first()).toContainText(host.address)
+  expect(offsets).toContainEqual({ path: '/api/v1/hosts', offset: 0 })
+  expect(offsets.every(({ offset }) => offset <= 10_000_000)).toBe(true)
+})

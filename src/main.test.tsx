@@ -4,7 +4,7 @@ import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQuery } from '@tanstack/react-query'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { APIError, adminStatus, getPerimeter, getPerimeterRange, getSession, incidentInboxSummary, listEvents, listIncidents, listJobs, login, logout, recordActivity, scanSlotDemand, setupStatus } from './api'
 import { formatDateTimeInTimeZone, setDisplayTimeZone } from './format'
 import { AppContent, AuthRoutes, createQueryClient, Jobs, ProtectedApp, retryQuery, retryQueryDelay, Shell, unitBreadcrumb } from './main'
@@ -37,6 +37,11 @@ function CurrentPath() {
 
 function CurrentSearch() {
   return <output data-testid="current-search">{useLocation().search}</output>
+}
+
+function HistoryButtons() {
+  const navigate = useNavigate()
+  return <><button type="button" onClick={() => navigate(-1)}>Back in browser history</button><button type="button" onClick={() => navigate(1)}>Forward in browser history</button></>
 }
 
 describe('application shell', () => {
@@ -633,9 +638,16 @@ describe('application shell', () => {
     expect(screen.getByRole('heading', { name: 'Database monitor' })).toBeInTheDocument()
     expect(screen.getByText('Showing 1 of 4 jobs')).toBeInTheDocument()
     fireEvent.change(search, { target: { value: 'legacy-gateway' } })
-    expect(screen.getByRole('heading', { name: 'No jobs match your search', level: 2 })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'No jobs that need attention match your search', level: 2 })).toBeInTheDocument()
     expect(screen.getByText('Showing 0 of 4 jobs')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Clear' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Show all jobs' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show all jobs' }))
+    expect(screen.getByRole('combobox', { name: 'Filter jobs' })).toHaveValue('all')
+    expect(screen.getByRole('combobox', { name: 'Filter jobs' })).toHaveFocus()
+    expect(screen.getByRole('heading', { name: 'Retired router' })).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter jobs' }), { target: { value: 'attention' } })
 
     fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
     expect(search).toHaveValue('')
@@ -644,6 +656,30 @@ describe('application shell', () => {
     expect(screen.getByRole('heading', { name: 'Database monitor' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'No jobs match your search' })).not.toBeInTheDocument()
     expect(screen.getByText('Showing 1 of 4 jobs')).toBeInTheDocument()
+  })
+
+  it('keeps the job search and filter in the URL and restores them with browser history', async () => {
+    const allJobs = [
+      { id: 'gateway', revision: 1, enabled: true, archived: false, job: { name: 'Gateway monitor', targets: ['192.0.2.10'] }, baseline: { status: 'complete', samples: 1 }, monitoring: { availability: 'available', attention_reason: 'none' } },
+      { id: 'database', revision: 1, enabled: true, archived: false, job: { name: 'Database monitor', targets: ['api.example.net'] }, baseline: { status: 'complete', samples: 1 }, monitoring: { availability: 'available', attention_reason: 'failed' } },
+    ]
+    vi.mocked(listJobs).mockResolvedValue({ jobs: allJobs } as never)
+    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: ['jobs.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    renderWithProviders(<><Jobs /><CurrentSearch /><HistoryButtons /></>, { route: ['/jobs?q=previous&filter=attention', '/jobs'] })
+
+    const search = await screen.findByRole('searchbox', { name: 'Search jobs by name or target' })
+    const filter = screen.getByRole('combobox', { name: 'Filter jobs' })
+    fireEvent.change(search, { target: { value: 'gateway' } })
+    expect(new URLSearchParams(screen.getByTestId('current-search').textContent ?? '').get('q')).toBe('gateway')
+    fireEvent.change(filter, { target: { value: 'attention' } })
+    expect(new URLSearchParams(screen.getByTestId('current-search').textContent ?? '').get('filter')).toBe('attention')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back in browser history' }))
+    await waitFor(() => expect(search).toHaveValue('previous'))
+    expect(filter).toHaveValue('attention')
+    fireEvent.click(screen.getByRole('button', { name: 'Forward in browser history' }))
+    await waitFor(() => expect(search).toHaveValue('gateway'))
+    expect(filter).toHaveValue('attention')
   })
 
   it('refreshes the attention filter for a viewer without stream events', async () => {

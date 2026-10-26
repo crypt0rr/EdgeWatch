@@ -55,9 +55,9 @@ describe('global hosts explorer', () => {
     vi.useRealTimers()
   })
 
-  async function renderPage() {
+  async function renderPage(initialEntry = '/hosts') {
     await act(async () => {
-      root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Hosts /></MemoryRouter></QueryClientProvider>)
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={[initialEntry]}><Hosts /></MemoryRouter></QueryClientProvider>)
     })
     await vi.waitFor(() => expect(container.textContent).toContain('Scanned hosts'), { timeout: 1000 })
   }
@@ -107,6 +107,31 @@ describe('global hosts explorer', () => {
     const next = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Next') as HTMLButtonElement
     fireEvent.click(next)
     await vi.waitFor(() => expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ offset: 1 })), { timeout: 1000 })
+  })
+
+  it('recovers an empty page with remaining hosts', async () => {
+    const stalePage: GlobalHostsResponse = {
+      hosts: [],
+      pagination: { limit: 50, offset: 500, total: 30, has_more: false, next_offset: null },
+    }
+    vi.mocked(listHosts).mockImplementation(async filters => filters?.offset === 500 ? stalePage : response)
+    await renderPage('/hosts?offset=500')
+
+    expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ offset: 500 }))
+    expect(container).toHaveTextContent('No hosts on this page.')
+    expect(container).not.toHaveTextContent('No completed scans have produced effective hosts yet.')
+    const goToFirstPage = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Go to first page') as HTMLButtonElement
+    expect(goToFirstPage).toBeTruthy()
+    fireEvent.click(goToFirstPage)
+    await vi.waitFor(() => expect(listHosts).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 0 })), { timeout: 1000 })
+    await vi.waitFor(() => expect(container.textContent).toContain('198.51.100.10'), { timeout: 1000 })
+
+  })
+
+  it('never requests a restored offset above the server maximum', async () => {
+    await renderPage('/hosts?offset=20000000')
+    expect(listHosts).toHaveBeenCalledTimes(1)
+    expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ offset: 0 }))
   })
 
   it('keeps search, filters, and page in the URL when returning from a host', async () => {

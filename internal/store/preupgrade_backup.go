@@ -102,6 +102,10 @@ type preUpgradeBackupFile struct {
 // written plus one per qualifying (limit, source schema) pair in the
 // descending chain, so retries at one schema never grow it.
 func prunePreUpgradeBackups(ctx context.Context, directory string, current, keep int, written string) ([]string, error) {
+	return prunePreUpgradeBackupsWithSchemaProbe(ctx, directory, current, keep, written, detectEdgeWatchSchema)
+}
+
+func prunePreUpgradeBackupsWithSchemaProbe(ctx context.Context, directory string, current, keep int, written string, probe edgeWatchSchemaProbe) ([]string, error) {
 	if keep < 0 {
 		return nil, errors.New("pre-migration backup retention cannot be negative")
 	}
@@ -165,7 +169,7 @@ func prunePreUpgradeBackups(ctx context.Context, directory string, current, keep
 					// Names are only hints. A candidate must be a verified restore
 					// source whose detected schema agrees with its source-schema
 					// field before it can satisfy a protected pair.
-					report, err := VerifyBackupFile(ctx, filepath.Join(directory, file.name), BackupFileOptions{})
+					report, err := verifyBackupFileWithSchemaProbe(ctx, filepath.Join(directory, file.name), BackupFileOptions{}, probe)
 					if err != nil && ctx.Err() != nil {
 						return nil, ctx.Err()
 					}

@@ -140,6 +140,10 @@ func (s *Store) Verify(ctx context.Context) (DatabaseVerification, error) {
 // QuickCheck. Both put their result in IntegrityCheck, which is "ok" for a
 // database without damage.
 func (s *Store) verify(ctx context.Context, check string) (DatabaseVerification, error) {
+	return s.verifyWithSchemaProbe(ctx, check, detectEdgeWatchSchema)
+}
+
+func (s *Store) verifyWithSchemaProbe(ctx context.Context, check string, probe edgeWatchSchemaProbe) (DatabaseVerification, error) {
 	result := DatabaseVerification{ForeignKeyViolations: []ForeignKeyViolation{}, FTSBackfill: []FTSBackfillProgress{}}
 	if check != IntegrityCheck && check != QuickCheck {
 		return result, fmt.Errorf("unknown database check %q", check)
@@ -154,7 +158,11 @@ func (s *Store) verify(ctx context.Context, check string) (DatabaseVerification,
 	}
 	result.SchemaVersion = schemaVersionValue
 	result.SchemaSupported = schemaVersionValue >= minimumUpgradeSchema && schemaVersionValue <= schemaVersion
-	result.EdgeWatchSchema = detectEdgeWatchSchema(ctx, reader)
+	edgeWatchSchema, err := probe(ctx, reader)
+	if err != nil {
+		return result, fmt.Errorf("detect EdgeWatch schema: %w", err)
+	}
+	result.EdgeWatchSchema = edgeWatchSchema
 	var autoVacuum int
 	if err := reader.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&autoVacuum); err != nil {
 		return result, err
@@ -227,9 +235,13 @@ func (s *Store) verify(ctx context.Context, check string) (DatabaseVerification,
 // The scans/events/outbox/daemon_lease set is present in the original v1
 // schema and every later migration; checking a few stable columns avoids
 // accepting an unrelated file that happens to use one familiar table name.
-func detectEdgeWatchSchema(ctx context.Context, queryer interface {
+type edgeWatchSchemaQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}) bool {
+}
+
+type edgeWatchSchemaProbe func(context.Context, edgeWatchSchemaQueryer) (bool, error)
+
+func detectEdgeWatchSchema(ctx context.Context, queryer edgeWatchSchemaQueryer) (bool, error) {
 	// Keep the probe to one bounded query. Besides avoiding a second metadata
 	// cursor while verifying a live database, this makes a cancelled or damaged
 	// connection fail atomically instead of leaving a partial schema decision.
@@ -239,12 +251,9 @@ func detectEdgeWatchSchema(ctx context.Context, queryer interface {
 		THEN 1 ELSE 0 END`
 	var valid int
 	if err := queryer.QueryRowContext(ctx, probe).Scan(&valid); err != nil {
-		// A metadata read failure is treated as an unsupported schema. Verify
-		// still completes its remaining checks and returns a structured
-		// VerificationError, while a restore remains fail-closed.
-		return false
+		return false, err
 	}
-	return valid != 0
+	return valid != 0, nil
 }
 
 // BackupOptions selects the check that a backup passes before it is
@@ -367,11 +376,15 @@ func (s *Store) BackupWithOptions(ctx context.Context, output string, options Ba
 // verifyDatabaseFile opens the database file at path read-only and runs the
 // verification checks with the consistency check named by check.
 func verifyDatabaseFile(ctx context.Context, path, check string) (DatabaseVerification, error) {
+	return verifyDatabaseFileWithSchemaProbe(ctx, path, check, detectEdgeWatchSchema)
+}
+
+func verifyDatabaseFileWithSchemaProbe(ctx context.Context, path, check string, probe edgeWatchSchemaProbe) (DatabaseVerification, error) {
 	reader, err := OpenReadOnlyExistingContext(ctx, path)
 	if err != nil {
 		return DatabaseVerification{ForeignKeyViolations: []ForeignKeyViolation{}, FTSBackfill: []FTSBackfillProgress{}}, err
 	}
-	verification, err := reader.verify(ctx, check)
+	verification, err := reader.verifyWithSchemaProbe(ctx, check, probe)
 	return verification, errors.Join(err, reader.Close())
 }
 
@@ -445,7 +458,11 @@ type BackupFileVerification struct {
 // and no sidecar is created next to it. The report is filled in as far as
 // the checks progressed, and the returned error is the first failed check.
 func VerifyBackupFile(ctx context.Context, source string, options BackupFileOptions) (BackupFileVerification, error) {
-	report, err := verifyBackupFile(ctx, source, options)
+	return verifyBackupFileWithSchemaProbe(ctx, source, options, detectEdgeWatchSchema)
+}
+
+func verifyBackupFileWithSchemaProbe(ctx context.Context, source string, options BackupFileOptions, probe edgeWatchSchemaProbe) (BackupFileVerification, error) {
+	report, err := verifyBackupFileContents(ctx, source, options, probe)
 	report.Valid = err == nil
 	if err != nil {
 		report.Error = err.Error()
@@ -453,7 +470,7 @@ func VerifyBackupFile(ctx context.Context, source string, options BackupFileOpti
 	return report, err
 }
 
-func verifyBackupFile(ctx context.Context, source string, options BackupFileOptions) (BackupFileVerification, error) {
+func verifyBackupFileContents(ctx context.Context, source string, options BackupFileOptions, probe edgeWatchSchemaProbe) (BackupFileVerification, error) {
 	report := BackupFileVerification{
 		SourceSidecars:       []RestoreSidecar{},
 		DatabaseVerification: DatabaseVerification{ForeignKeyViolations: []ForeignKeyViolation{}, FTSBackfill: []FTSBackfillProgress{}},
@@ -512,7 +529,7 @@ func verifyBackupFile(ctx context.Context, source string, options BackupFileOpti
 	if _, err := copyRestoreFile(ctx, sourcePath, staged); err != nil {
 		return report, err
 	}
-	verification, err := verifyDatabaseFile(ctx, staged, IntegrityCheck)
+	verification, err := verifyDatabaseFileWithSchemaProbe(ctx, staged, IntegrityCheck, probe)
 	report.DatabaseVerification = verification
 	if err != nil {
 		err = fmt.Errorf("verify backup file: %w", err)

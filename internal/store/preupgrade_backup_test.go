@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -229,6 +230,44 @@ func TestPrunePreUpgradeBackupsAbortsWhenVerificationCannotStageCopy(t *testing.
 	for _, name := range append(newer, olderPairCopy) {
 		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
 			t.Errorf("backup %q was removed after verification failed: %v", name, err)
+		}
+	}
+}
+
+func TestPrunePreUpgradeBackupsAbortsWhenSchemaProbeFails(t *testing.T) {
+	directory := t.TempDir()
+	fixtures := make(map[int][]byte)
+	olderPairCopy := "edgewatch-preupgrade-s75-s78-20250101T000000.000000000Z.db"
+	writeValidPreUpgradeBackup(t, directory, olderPairCopy, fixtures)
+	olderPath := filepath.Join(directory, olderPairCopy)
+	validReport, err := VerifyBackupFile(context.Background(), olderPath, BackupFileOptions{})
+	if err != nil || !validReport.Valid || validReport.SchemaVersion != 75 {
+		t.Fatalf("verify older rollback copy before inducing the probe failure = %+v, %v", validReport, err)
+	}
+	newer := []string{
+		"edgewatch-preupgrade-s77-s78-20260101T000000.000000000Z.db",
+		"edgewatch-preupgrade-s77-s78-20260102T000000.000000000Z.db",
+		"edgewatch-preupgrade-s77-s78-20260103T000000.000000000Z.db",
+	}
+	for _, name := range newer {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte("completed upgrade"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	probeErr := errors.New("temporary SQLite schema-probe I/O failure")
+	probe := func(context.Context, edgeWatchSchemaQueryer) (bool, error) {
+		return false, probeErr
+	}
+	removed, err := prunePreUpgradeBackupsWithSchemaProbe(context.Background(), directory, 77, preUpgradeBackupRetention, "", probe)
+	if !errors.Is(err, probeErr) {
+		t.Fatalf("prune after schema-probe failure = %v, want the operational probe error", err)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("removed backups = %v, want no pruning after schema-probe failure", removed)
+	}
+	for _, name := range append(newer, olderPairCopy) {
+		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
+			t.Errorf("backup %q was removed after schema-probe failure: %v", name, err)
 		}
 	}
 }

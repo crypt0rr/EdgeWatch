@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -152,7 +153,7 @@ func TestPrunePreUpgradeBackupsPreservesMalformedAndNonOwnerFiles(t *testing.T) 
 	}
 	operatorFiles = append(operatorFiles, symlink, subdirectory)
 
-	removed, err := prunePreUpgradeBackups(directory, schemaVersion-1, 0, "")
+	removed, err := prunePreUpgradeBackups(context.Background(), directory, schemaVersion-1, 0, "")
 	if err != nil {
 		t.Fatalf("prune automatic pre-migration backups: %v", err)
 	}
@@ -166,6 +167,79 @@ func TestPrunePreUpgradeBackupsPreservesMalformedAndNonOwnerFiles(t *testing.T) 
 	}
 }
 
+func TestPrunePreUpgradeBackupsDoesNotLetCorruptCopyReplaceValidPairCopy(t *testing.T) {
+	directory := t.TempDir()
+	fixtures := make(map[int][]byte)
+	valid := "edgewatch-preupgrade-s75-s78-20260401T000000.000000000Z.db"
+	mismatched := "edgewatch-preupgrade-s75-s78-20260430T000000.000000000Z.db"
+	corrupt := "edgewatch-preupgrade-s75-s78-20260501T000000.000000000Z.db"
+	writeValidPreUpgradeBackup(t, directory, valid, fixtures)
+	writePreUpgradeBackupAtSchema(t, directory, mismatched, 76, fixtures)
+	if err := os.WriteFile(filepath.Join(directory, corrupt), []byte("not a SQLite database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// These three newer completed-upgrade copies fill the regular retention
+	// set, which would otherwise evict valid outside the newest three.
+	for _, name := range []string{
+		"edgewatch-preupgrade-s77-s78-20260402T000000.000000000Z.db",
+		"edgewatch-preupgrade-s77-s78-20260403T000000.000000000Z.db",
+		"edgewatch-preupgrade-s77-s78-20260404T000000.000000000Z.db",
+	} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte("not a SQLite database"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removed, err := prunePreUpgradeBackups(context.Background(), directory, 77, preUpgradeBackupRetention, "")
+	if err != nil {
+		t.Fatalf("prune automatic pre-migration backups: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(directory, valid)); err != nil {
+		t.Fatalf("valid older backup for the unfinished upgrade was removed; removed %q: %v", removed, err)
+	}
+}
+
+func writeValidPreUpgradeBackup(t *testing.T, directory, name string, fixtures map[int][]byte) {
+	t.Helper()
+	match := preUpgradeBackupName.FindStringSubmatch(name)
+	if match == nil {
+		t.Fatalf("pre-upgrade backup fixture name %q does not match the automatic backup format", name)
+	}
+	sourceSchema, err := strconv.Atoi(match[1])
+	if err != nil {
+		t.Fatalf("parse fixture source schema from %q: %v", name, err)
+	}
+	writePreUpgradeBackupAtSchema(t, directory, name, sourceSchema, fixtures)
+}
+
+func writePreUpgradeBackupAtSchema(t *testing.T, directory, name string, sourceSchema int, fixtures map[int][]byte) {
+	t.Helper()
+	contents, ok := fixtures[sourceSchema]
+	if !ok {
+		s, _ := openFreshFileStore(t)
+		if _, err := s.DB.ExecContext(context.Background(), fmt.Sprintf("PRAGMA user_version = %d", sourceSchema)); err != nil {
+			t.Fatalf("set fixture source schema %d: %v", sourceSchema, err)
+		}
+		backupPath, err := s.Backup(context.Background(), filepath.Join(t.TempDir(), "fixture.db"))
+		if err != nil {
+			t.Fatalf("write verified pre-upgrade backup fixture at schema %d: %v", sourceSchema, err)
+		}
+		contents, err = os.ReadFile(backupPath)
+		if err != nil {
+			t.Fatalf("read verified pre-upgrade backup fixture at schema %d: %v", sourceSchema, err)
+		}
+		fixtures[sourceSchema] = contents
+	}
+	path := filepath.Join(directory, name)
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatalf("write verified pre-upgrade backup fixture %q: %v", name, err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("set verified pre-upgrade backup fixture mode %q: %v", name, err)
+	}
+}
+
 // Retention keeps the copy just written and, for each source schema below the
 // database's current schema, the newest copy to a schema above the current
 // one: the copies of upgrades that have not yet passed the database's schema,
@@ -173,6 +247,7 @@ func TestPrunePreUpgradeBackupsPreservesMalformedAndNonOwnerFiles(t *testing.T) 
 // the current schema and those of finished upgrades, falls under keep, which
 // keeps the newest by timestamp.
 func TestPrunePreUpgradeBackupsKeepEachUnfinishedUpgradeCopy(t *testing.T) {
+	fixtures := make(map[int][]byte)
 	for _, test := range []struct {
 		name          string
 		current, keep int
@@ -470,9 +545,7 @@ func TestPrunePreUpgradeBackupsKeepEachUnfinishedUpgradeCopy(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			directory := t.TempDir()
 			for _, name := range test.files {
-				if err := os.WriteFile(filepath.Join(directory, name), []byte("automatic backup fixture"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				writeValidPreUpgradeBackup(t, directory, name, fixtures)
 			}
 			var wantRemoved []string
 			for _, name := range test.files {
@@ -483,7 +556,7 @@ func TestPrunePreUpgradeBackupsKeepEachUnfinishedUpgradeCopy(t *testing.T) {
 			slices.Sort(wantRemoved)
 			wantKept := slices.Sorted(slices.Values(test.kept))
 
-			removed, err := prunePreUpgradeBackups(directory, test.current, test.keep, test.written)
+			removed, err := prunePreUpgradeBackups(context.Background(), directory, test.current, test.keep, test.written)
 			if err != nil {
 				t.Fatalf("prune automatic pre-migration backups: %v", err)
 			}
@@ -496,7 +569,7 @@ func TestPrunePreUpgradeBackupsKeepEachUnfinishedUpgradeCopy(t *testing.T) {
 			}
 
 			// Retention is stable: a second pass removes nothing more.
-			removed, err = prunePreUpgradeBackups(directory, test.current, test.keep, test.written)
+			removed, err = prunePreUpgradeBackups(context.Background(), directory, test.current, test.keep, test.written)
 			if err != nil || len(removed) != 0 {
 				t.Errorf("second prune removed %q (error %v), want nothing", removed, err)
 			}

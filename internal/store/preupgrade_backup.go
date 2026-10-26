@@ -59,7 +59,7 @@ func preparePreMigrationBackup(ctx context.Context, db *sql.DB, dsn string, vers
 	if result.SchemaVersion != version {
 		return fmt.Errorf("automatic pre-migration backup has schema version %d, expected %d", result.SchemaVersion, version)
 	}
-	removed, err := prunePreUpgradeBackups(directory, version, preUpgradeBackupRetention, name)
+	removed, err := prunePreUpgradeBackups(ctx, directory, version, preUpgradeBackupRetention, name)
 	if err != nil {
 		return fmt.Errorf("retain automatic pre-migration backups: %w", err)
 	}
@@ -84,7 +84,7 @@ type preUpgradeBackupFile struct {
 // from a schema below current to a schema above it belongs to an upgrade that
 // has not yet passed the database's schema: this upgrade, whichever release
 // started it, or an attempt that was rolled back. For each pair of an upgrade
-// limit and an earlier source schema, the newest such copy is therefore kept.
+// limit and an earlier source schema, the newest verified such copy is kept.
 // The limit starts at current and descends to each protected copy's source
 // schema. The same source schema can be protected at different limits, so the
 // copy at the schema the previous release used stays among them even after a
@@ -101,7 +101,7 @@ type preUpgradeBackupFile struct {
 // The directory thus holds at most keep automatic copies plus the copy just
 // written plus one per qualifying (limit, source schema) pair in the
 // descending chain, so retries at one schema never grow it.
-func prunePreUpgradeBackups(directory string, current, keep int, written string) ([]string, error) {
+func prunePreUpgradeBackups(ctx context.Context, directory string, current, keep int, written string) ([]string, error) {
 	if keep < 0 {
 		return nil, errors.New("pre-migration backup retention cannot be negative")
 	}
@@ -153,11 +153,27 @@ func prunePreUpgradeBackups(directory string, current, keep int, written string)
 	protected := make(map[string]bool)
 	type limitSource struct{ limit, from int }
 	seen := make(map[limitSource]bool)
+	checked := make(map[string]bool)
+	verified := make(map[string]bool)
 	for limits := []int{current}; len(limits) > 0; limits = limits[1:] {
 		limit := limits[0]
 		for _, file := range files {
 			pair := limitSource{limit: limit, from: file.from}
 			if file.from < limit && file.to > limit && !seen[pair] {
+				if !checked[file.name] {
+					checked[file.name] = true
+					// Names are only hints. A candidate must be a verified restore
+					// source whose detected schema agrees with its source-schema
+					// field before it can satisfy a protected pair.
+					report, err := VerifyBackupFile(ctx, filepath.Join(directory, file.name), BackupFileOptions{})
+					if err != nil && ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
+					verified[file.name] = err == nil && report.Valid && report.SchemaVersion == file.from
+				}
+				if !verified[file.name] {
+					continue
+				}
 				seen[pair] = true
 				protected[file.name] = true
 				limits = append(limits, file.from)

@@ -312,6 +312,35 @@ func TestPrunePreUpgradeBackupsKeepEachUnfinishedUpgradeCopy(t *testing.T) {
 			},
 		},
 		{
+			// The 79 release first tried from 76 and failed. A 78 release
+			// then committed 76->77 and failed; a 79 release took over,
+			// committed 77->78, and failed. The newest schema 76 copy at
+			// limit 77 is the rollback point for the previous release, even
+			// though a newer, different schema 76 copy is kept at limit 78.
+			name:    "retention is per upgrade limit and source schema",
+			current: 78,
+			keep:    3,
+			written: "edgewatch-preupgrade-s78-s79-20260109T000000.000000000Z.db",
+			files: []string{
+				"edgewatch-preupgrade-s76-s79-20251201T000000.000000000Z.db",
+				"edgewatch-preupgrade-s76-s78-20260101T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s79-20260105T000000.000000000Z.db",
+				"edgewatch-preupgrade-s78-s79-20260106T000000.000000000Z.db",
+				"edgewatch-preupgrade-s78-s79-20260107T000000.000000000Z.db",
+				"edgewatch-preupgrade-s78-s79-20260108T000000.000000000Z.db",
+				"edgewatch-preupgrade-s78-s79-20260109T000000.000000000Z.db",
+			},
+			kept: []string{
+				"edgewatch-preupgrade-s76-s78-20260101T000000.000000000Z.db",
+				"edgewatch-preupgrade-s76-s79-20251201T000000.000000000Z.db",
+				"edgewatch-preupgrade-s77-s79-20260105T000000.000000000Z.db",
+				"edgewatch-preupgrade-s78-s79-20260106T000000.000000000Z.db",
+				"edgewatch-preupgrade-s78-s79-20260107T000000.000000000Z.db",
+				"edgewatch-preupgrade-s78-s79-20260108T000000.000000000Z.db",
+				"edgewatch-preupgrade-s78-s79-20260109T000000.000000000Z.db",
+			},
+		},
+		{
 			name:    "a new attempt from the previous release's schema",
 			current: 75,
 			keep:    preUpgradeBackupRetention,

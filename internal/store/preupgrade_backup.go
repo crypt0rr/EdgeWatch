@@ -16,9 +16,10 @@ import (
 
 // preUpgradeBackupRetention is the number of automatic pre-migration backups
 // kept by the timestamp in their names. prunePreUpgradeBackups also keeps, in
-// addition to them, the copy just written and, from each schema below the
-// database's current schema, the newest copy for an upgrade beyond it, so
-// retries at one schema never grow the directory.
+// addition to them, the copy just written and the newest copy for each
+// (upgrade limit, source schema) pair in the unfinished-upgrade chain. A
+// source schema can therefore have more than one protected copy when the
+// chain has different limits.
 const preUpgradeBackupRetention = 3
 
 var preUpgradeBackupName = regexp.MustCompile(`^edgewatch-preupgrade-s([0-9]+)-s([0-9]+)-([0-9]{8}T[0-9]{6}\.[0-9]{9}Z)\.db$`)
@@ -82,12 +83,13 @@ type preUpgradeBackupFile struct {
 // copy of that schema, which the previous release refuses to open. A copy
 // from a schema below current to a schema above it belongs to an upgrade that
 // has not yet passed the database's schema: this upgrade, whichever release
-// started it, or an attempt that was rolled back. For each source schema
-// below current, the newest such copy is therefore kept, and so, in turn, is
-// the newest copy from each schema below a kept copy's schema to one above
-// it, so the copy at the schema the previous release used stays among them
-// even after a release with a later target took over and passed the first
-// release's target. The running release's
+// started it, or an attempt that was rolled back. For each pair of an upgrade
+// limit and an earlier source schema, the newest such copy is therefore kept.
+// The limit starts at current and descends to each protected copy's source
+// schema. The same source schema can be protected at different limits, so the
+// copy at the schema the previous release used stays among them even after a
+// release with a later target took over and passed the first release's target.
+// The running release's
 // target does not decide, because a release with another target can take over
 // a failing upgrade, and neither the timestamps nor the lowest source schema
 // single that copy out, because a rolled-back attempt can leave a copy at a
@@ -97,9 +99,8 @@ type preUpgradeBackupFile struct {
 // falls under keep: the newest keep of them by the UTC timestamp in their
 // names remain, and of two equal timestamps the greater name counts as newer.
 // The directory thus holds at most keep automatic copies plus the copy just
-// written plus one per schema below current that has a copy for an upgrade
-// beyond it (the earlier schemas of this upgrade and of any rolled-back
-// attempt), so retries at one schema never grow it.
+// written plus one per qualifying (limit, source schema) pair in the
+// descending chain, so retries at one schema never grow it.
 func prunePreUpgradeBackups(directory string, current, keep int, written string) ([]string, error) {
 	if keep < 0 {
 		return nil, errors.New("pre-migration backup retention cannot be negative")
@@ -144,19 +145,20 @@ func prunePreUpgradeBackups(directory string, current, keep int, written string)
 		}
 		return files[i].time.After(files[j].time)
 	})
-	// Newest first, so the first match from each earlier schema is the newest
-	// of them. A protected copy's own schema becomes a further limit: when a
-	// release with a later target took over the upgrade and passed the first
-	// release's target before it failed too, the copy the takeover started
-	// from is beyond current, and the copy that the first release took is
-	// beyond that copy's schema.
+	// Newest first, so the first match for each earlier source schema at a
+	// given limit is the newest of them. A protected copy's own schema becomes
+	// another limit. If a later-target release takes over and passes the first
+	// release's target, that earlier copy is still considered at the takeover's
+	// source schema when its target is above that schema.
 	protected := make(map[string]bool)
-	earlier := make(map[int]bool)
+	type limitSource struct{ limit, from int }
+	seen := make(map[limitSource]bool)
 	for limits := []int{current}; len(limits) > 0; limits = limits[1:] {
 		limit := limits[0]
 		for _, file := range files {
-			if file.from < limit && file.to > limit && !earlier[file.from] {
-				earlier[file.from] = true
+			pair := limitSource{limit: limit, from: file.from}
+			if file.from < limit && file.to > limit && !seen[pair] {
+				seen[pair] = true
 				protected[file.name] = true
 				limits = append(limits, file.from)
 			}

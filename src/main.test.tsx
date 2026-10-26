@@ -39,6 +39,11 @@ function CurrentSearch() {
   return <output data-testid="current-search">{useLocation().search}</output>
 }
 
+function CurrentReturnTo() {
+  const location = useLocation()
+  return <output data-testid="current-return-to">{(location.state as { returnTo?: string } | null)?.returnTo ?? ''}</output>
+}
+
 function HistoryButtons() {
   const navigate = useNavigate()
   return <><button type="button" onClick={() => navigate(-1)}>Back in browser history</button><button type="button" onClick={() => navigate(1)}>Forward in browser history</button></>
@@ -789,6 +794,30 @@ describe('application shell', () => {
     renderWithProviders(<Jobs />)
     const attemptLink = await screen.findByRole('link', { name: 'View attempt' })
     expect(attemptLink).toHaveAttribute('href', '/jobs/monitoring-job/scans/private-scan')
+  })
+
+  it.each([
+    { shortcut: 'View attempt', scanID: 'attempt-scan' },
+    { shortcut: 'View successful scan', scanID: 'successful-scan' },
+  ])('$shortcut preserves the Jobs search and filter when opening a scan', async ({ shortcut, scanID }) => {
+    const returnTo = '/jobs?q=database&filter=attention'
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [{
+      id: 'monitoring-job', revision: 1, enabled: true, archived: false,
+      job: { name: 'Database monitor', targets: ['api.example.net'], schedule: '' },
+      baseline: { status: 'complete', samples: 1 },
+      monitoring: {
+        availability: 'available', history_available: true, activity: 'none', schedule_state: 'manual', next_run_at: null, timezone: 'UTC',
+        latest_attempt: { scan_id: 'attempt-scan', status: 'failed', started_at: null, finished_at: null },
+        latest_successful_scan: { scan_id: 'successful-scan', status: 'success', started_at: null, finished_at: null }, attention_reason: 'failed',
+      },
+    }] } as never)
+    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: ['jobs.read', 'scans.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    renderWithProviders(<><Jobs /><CurrentReturnTo /></>, { route: [returnTo] })
+
+    const scanLink = await screen.findByRole('link', { name: shortcut })
+    expect(scanLink).toHaveAttribute('href', `/jobs/monitoring-job/scans/${scanID}`)
+    fireEvent.click(scanLink)
+    await waitFor(() => expect(screen.getByTestId('current-return-to')).toHaveTextContent(returnTo))
   })
 
   it('distinguishes unavailable history from an available no-scan job', async () => {

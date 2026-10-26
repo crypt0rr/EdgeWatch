@@ -51,6 +51,7 @@ const frontendReport = (overrides = {}) => {
     'src/incident-time.ts',
     'src/hostSearch.ts',
     'src/host-list-state.ts',
+    'src/pagination.ts',
     'src/job-list-state.ts',
     'src/job-creation-draft.tsx',
     'src/job-form.ts',

@@ -273,7 +273,7 @@ describe('public dashboard pages', () => {
     await renderPage(<PublicDashboardAdmin />)
     const search = container.querySelector('#public-host-search') as HTMLInputElement
     const hostCheckbox = (address: string) => Array.from(container.querySelectorAll('input[type="checkbox"][id^="public-host-"]')).find(input => (input as HTMLInputElement).id.includes(address)) as HTMLInputElement
-    expect(search).toHaveAccessibleName('Search hosts by address, DNS name, target, job, service, or port')
+    expect(search).toHaveAccessibleName('Search hosts by address, DNS name, target, job, service, product, or port')
     const countRegion = container.querySelector('.public-picker-count')
     expect(countRegion).toHaveAttribute('aria-atomic', 'true')
     expect(countRegion?.textContent).toContain('221 hosts in the inventory')

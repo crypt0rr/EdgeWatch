@@ -485,7 +485,7 @@ export function Jobs() {
                   </span>
                   <span>{job.job.schedule}</span>
                 </div>
-                <JobMonitoringStatus job={job} canReadScans={canReadScans} />
+                <JobMonitoringStatus job={job} canReadScans={canReadScans} returnTo={returnTo} />
                 <JobChangeWindowStatus status={job.change_window} jobID={job.id} />
               </article>
             )
@@ -499,7 +499,7 @@ export function Jobs() {
   )
 }
 
-function JobMonitoringStatus({ job, canReadScans }: { job: Job; canReadScans: boolean }) {
+function JobMonitoringStatus({ job, canReadScans, returnTo }: { job: Job; canReadScans: boolean; returnTo: string }) {
   const monitoring = job.monitoring
   if (!monitoring) {
     return <p className="job-monitoring-unavailable" role="status">Monitoring status unavailable.</p>
@@ -536,12 +536,12 @@ function JobMonitoringStatus({ job, canReadScans }: { job: Job; canReadScans: bo
           <dt>Latest attempt</dt>
           <dd>{!monitoring.history_available ? 'Unavailable' : attempt ? `${attempt.status.replaceAll('_', ' ')}${monitoring.cycle_in_progress ? ' · saved progress' : ''}` : 'No scan recorded yet'}</dd>
           {monitoring.history_available && attempt && <small>{attemptTime ? formatDateTime(attemptTime) : 'Unknown time'}</small>}
-          {canReadScans && attempt?.scan_id && <Link className="job-scan-link" to={`/jobs/${job.id}/scans/${attempt.scan_id}`}>View attempt</Link>}
+          {canReadScans && attempt?.scan_id && <Link className="job-scan-link" to={`/jobs/${job.id}/scans/${attempt.scan_id}`} state={{ returnTo }}>View attempt</Link>}
         </div>
         <div>
           <dt>Last successful scan</dt>
           <dd>{!monitoring.history_available ? 'Unavailable' : successful ? (successTime ? formatDateTime(successTime) : 'Unknown time') : 'No successful scan yet'}</dd>
-          {canReadScans && successful?.scan_id && <Link className="job-scan-link" to={`/jobs/${job.id}/scans/${successful.scan_id}`}>View successful scan</Link>}
+          {canReadScans && successful?.scan_id && <Link className="job-scan-link" to={`/jobs/${job.id}/scans/${successful.scan_id}`} state={{ returnTo }}>View successful scan</Link>}
         </div>
         <div>
           <dt>Current work</dt>

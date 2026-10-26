@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useLocation, useNavigationType, useSearchParams } from 'react-router-dom'
-
-const MAX_PAGINATION_OFFSET = 10_000_000
+import { MAX_PAGINATION_OFFSET } from './pagination'
 
 /** URL-backed filters and pagination shared by the global and baseline host explorers. */
 export function useHostListState() {

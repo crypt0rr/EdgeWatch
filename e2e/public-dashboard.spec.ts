@@ -65,7 +65,7 @@ test('public status controls remain interactive and navigation leaves the page',
   await enabled.check()
   await expect(enabled).toBeChecked()
 
-  const search = page.getByRole('searchbox', { name: 'Search hosts by address, DNS name, target, job, service, or port' })
+  const search = page.getByRole('searchbox', { name: 'Search hosts by address, DNS name, target, job, service, product, or port' })
   await search.focus()
   await page.keyboard.type('later-job')
   await expect(page.getByText('1 host matches “later-job” · 0 selected for publication.')).toBeVisible()

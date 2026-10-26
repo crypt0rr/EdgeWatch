@@ -61,4 +61,17 @@ describe('Pagination', () => {
 		act(() => buttons[1].click())
 		expect(onChange).not.toHaveBeenCalled()
 	})
+
+	it('stops at the server offset limit and keeps Previous available', () => {
+		const onChange = vi.fn()
+		act(() => root.render(<Pagination page={{ limit: 100, offset: 10_000_000, total: 10_000_101, has_more: true, next_offset: 10_000_100 }} onChange={onChange} />))
+		expect(container.querySelector('[role="status"]')?.textContent).toContain('Maximum page offset reached. Further results are unavailable. Use Previous to return to earlier results.')
+		const [previous, next] = Array.from(container.querySelectorAll('button')) as HTMLButtonElement[]
+		expect(previous.disabled).toBe(false)
+		expect(next.disabled).toBe(true)
+		act(() => next.click())
+		expect(onChange).not.toHaveBeenCalled()
+		act(() => previous.click())
+		expect(onChange).toHaveBeenCalledWith(9_999_900)
+	})
 })

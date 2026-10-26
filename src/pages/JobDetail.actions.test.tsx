@@ -60,7 +60,7 @@ describe('job detail actions', () => {
   function RouteState() {
     const location = useLocation()
     const navigate = useNavigate()
-    return <><span data-testid="route-state">{JSON.stringify(location.state)}</span><button type="button" onClick={() => navigate(-1)}>Back</button><button type="button" onClick={() => navigate(1)}>Forward</button><button type="button" onClick={() => navigate('/jobs/job-2', { state: { startFirstScanToken: routeJobTwoToken } })}>Open job 2</button></>
+    return <><span data-testid="route-state">{JSON.stringify(location.state)}</span><span data-testid="route-location">{location.pathname}{location.search}</span><button type="button" onClick={() => navigate(-1)}>Back</button><button type="button" onClick={() => navigate(1)}>Forward</button><button type="button" onClick={() => navigate('/jobs/job-2', { state: { startFirstScanToken: routeJobTwoToken } })}>Open job 2</button></>
   }
 
   function renderPage(route: NonNullable<MemoryRouterProps['initialEntries']> = ['/jobs/job-1'], strict = false, client?: QueryClient) {
@@ -96,6 +96,20 @@ describe('job detail actions', () => {
     await screen.findByRole('button', { name: 'Scan now' })
     expect(runJob).not.toHaveBeenCalled()
     expect(screen.getByTestId('route-state')).toHaveTextContent('null')
+  })
+
+  it('returns from latest scan details to the filtered Jobs list', async () => {
+    const returnTo = '/jobs?q=database&filter=attention'
+    renderPage([
+      { pathname: '/jobs', search: '?q=database&filter=attention' },
+      { pathname: '/jobs/job-1', state: { returnTo } },
+    ])
+
+    fireEvent.click(await screen.findByRole('link', { name: 'Open scan details →' }))
+    await waitFor(() => expect(screen.getByTestId('route-state')).toHaveTextContent(JSON.stringify({ returnTo })))
+
+    fireEvent.click(screen.getByRole('link', { name: '← Jobs' }))
+    await waitFor(() => expect(screen.getByTestId('route-location')).toHaveTextContent(returnTo))
   })
 
   it('does not dispatch again after back and forward through the cleared history entry', async () => {

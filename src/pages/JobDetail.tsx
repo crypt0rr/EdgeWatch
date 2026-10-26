@@ -857,7 +857,7 @@ export function JobDetail() {
             <>
               <div className="latest-scan-meta">
                 <div><strong>{formatDateTime(latest.data.scan.finished_at)}</strong><span className="muted">Scan {latest.data.scan.id.slice(0, 8)}</span></div>
-                <Link className="button ghost" to={`/jobs/${id}/scans/${encodeURIComponent(latest.data.scan.id)}`}>Open scan details →</Link>
+                <Link className="button ghost" to={`/jobs/${id}/scans/${encodeURIComponent(latest.data.scan.id)}`} state={{ returnTo: jobsReturnTo }}>Open scan details →</Link>
               </div>
               <div className="overview-results">
                 {latestResults.isLoading ? <div className="skeleton-list" /> : latestResults.error ? <ErrorNotice message="Could not load latest scan results." onRetry={() => latestResults.refetch()} /> : latestResults.data?.results?.length ? <SurfaceUnitList units={latestResults.data.results} emptyLabel="No positive ports were found in this scan." /> : <div className="inline-empty">No positive ports were found in this scan.</div>}

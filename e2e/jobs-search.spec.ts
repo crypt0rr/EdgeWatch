@@ -173,3 +173,35 @@ test('jobs search matches names and targets for every reader and keeps the selec
     }
   }
 })
+
+test('opening latest scan details keeps the filtered Jobs return path', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'This navigation test runs once on desktop Chromium.')
+
+  await mockConsole(page, 'administrator')
+  const job = monitoringJob('job-1', 'Database monitor', ['db.internal'], { attentionReason: 'failed' })
+  job.monitoring = {
+    ...job.monitoring!,
+    latest_successful_scan: { scan_id: 'scan-1', status: 'success', started_at: null, finished_at: null },
+  }
+  await page.route('**/api/v1/jobs**', async route => {
+    const request = route.request()
+    const url = new URL(request.url())
+    if (request.method() === 'GET' && url.pathname === '/api/v1/jobs') {
+      await route.fulfill({ json: { jobs: [job] } })
+      return
+    }
+    await route.fallback()
+  })
+
+  await page.goto('/jobs?q=database&filter=attention')
+  await expect(page.getByRole('heading', { name: 'Database monitor' })).toBeVisible()
+  await page.getByRole('link', { name: 'Database monitor' }).click()
+  await expect(page).toHaveURL(/\/jobs\/job-1$/)
+  await page.getByRole('link', { name: 'Open scan details →' }).click()
+  await expect(page).toHaveURL(/\/jobs\/job-1\/scans\/scan-1$/)
+  await page.getByRole('link', { name: '← Jobs' }).click()
+
+  await expect(page).toHaveURL(/\/jobs\?q=database&filter=attention$/)
+  await expect(page.getByRole('searchbox', { name: 'Search jobs by name or target' })).toHaveValue('database')
+  await expect(page.getByRole('combobox', { name: 'Filter jobs' })).toHaveValue('attention')
+})

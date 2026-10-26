@@ -1449,11 +1449,12 @@ test('no release job restores an Actions cache', () => {
 test('release verification keeps schema, scanner, build, and race gates current', () => {
   const verify = jobBlock('verify')
   assert.match(verify, /Runs the complete race-enabled Go suite/)
+  assert.match(verify, /^ {4}timeout-minutes: 60$/m, 'release verification needs room beyond the Go suite timeout')
   assert.doesNotMatch(verify, /see the CI test job for its budget/)
   assert.match(stepBlock(verify, 'Verify schema documentation'), /\.\/scripts\/check-schema-docs\.sh/)
   assert.match(stepBlock(verify, 'Verify pinned Naabu release'), /\.\/scripts\/verify-naabu-pin\.sh/)
   assert.match(stepBlock(verify, 'Build'), /go build -trimpath \.\/cmd\/edgewatch/)
-  assert.match(stepBlock(verify, 'Test'), /go test -race -timeout=25m -coverprofile=coverage\.out \.\/\.\.\./)
+  assert.match(stepBlock(verify, 'Test'), /go test -race -timeout=40m -coverprofile=coverage\.out \.\/\.\.\./)
 })
 
 test('every Node runtime pin matches the frontend image and Renovate groups them together', () => {
@@ -2255,7 +2256,7 @@ test('a daily workflow checks the apk pins and scans the published image', async
     'the checks must run daily and on demand, and never for untrusted pull request code')
   assert.deepEqual(permissionsOf(scheduled.slice(0, scheduled.indexOf('\njobs:\n')), 0), { contents: 'read' })
   const jobs = Object.fromEntries(jobsOf(scheduled).map(({ name, block }) => [name, block]))
-  assert.deepEqual(Object.keys(jobs), ['apk-pins', 'published-image', 'release-source'])
+  assert.deepEqual(Object.keys(jobs), ['apk-pins', 'go-suite', 'published-image', 'release-source'])
   for (const [name, block] of Object.entries(jobs)) {
     assert.equal(permissionsOf(block, 4), null, `scheduled job ${name} must keep the read-only default`)
   }
@@ -2330,6 +2331,62 @@ test('a daily workflow checks the apk pins and scans the published image', async
   const amd64Only = await runScan([{ digest: amd64, platform: { os: 'linux', architecture: 'amd64' } }, attestation])
   assert.equal(amd64Only.status, 1)
   assert.match(amd64Only.stderr, /ghcr\.io\/crypt0rr\/edgewatch:latest has no single linux\/arm64 manifest/)
+})
+
+test('the daily workflow runs the unsharded release Go suite with a 90-day clock canary', async (t) => {
+  const scheduled = workflows.find(({ file }) => file === '.github/workflows/scheduled.yml')?.text
+  assert.ok(scheduled, 'the scheduled checks workflow must exist')
+  const job = jobsOf(scheduled).find(({ name }) => name === 'go-suite')?.block
+  assert.ok(job, 'the scheduled workflow must run the unsharded Go suite')
+  assert.match(job, /^ {4}timeout-minutes: 100$/m, 'both suite runs need room for their 40-minute package timeout')
+  assert.deepEqual(stepsOf(job).map((step) => /^ {6}- name: (.*)$/m.exec(step)?.[1]), [
+    'Check out source',
+    'Set up Go',
+    'Run the release Go suite',
+    'Prepare a 90-day Go clock overlay',
+    'Run the release Go suite with a 90-day Go clock shift',
+  ])
+  assert.match(stepBlock(job, 'Check out source'), /^ {10}persist-credentials: false$/m)
+  const setupGo = stepBlock(job, 'Set up Go')
+  assert.match(setupGo, /^ {10}go-version-file: go\.mod$/m)
+  assert.match(setupGo, /^ {10}cache: false$/m)
+  assert.match(stepBlock(job, 'Run the release Go suite'), /^ {8}run: go test -race -timeout=40m -coverprofile=coverage\.out \.\/\.\.\.$/m)
+  assert.match(stepBlock(job, 'Prepare a 90-day Go clock overlay'), /python3 scripts\/go-clock-overlay\.py 90 "\$RUNNER_TEMP\/go-clock-overlay\.json"/)
+  assert.match(stepBlock(job, 'Run the release Go suite with a 90-day Go clock shift'),
+    /go test -race -timeout=40m -coverprofile=coverage-clock-shift\.out -overlay "\$RUNNER_TEMP\/go-clock-overlay\.json" \.\/\.\.\./)
+
+  const directory = await mkdtemp(join(tmpdir(), 'edgewatch-go-clock-overlay-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const goroot = join(directory, 'goroot')
+  const timeDirectory = join(goroot, 'src', 'time')
+  const fakeBin = join(directory, 'bin')
+  await mkdir(timeDirectory, { recursive: true })
+  await mkdir(fakeBin)
+  const sourcePath = join(timeDirectory, 'time.go')
+  await writeFile(sourcePath, [
+    'package time',
+    'func Now() Time {',
+    '\tsec, nsec, mono := runtimeNow()',
+    '\tmono -= startNano',
+    '\treturn Time{uint64(sec), mono, Local}',
+    '}',
+    '',
+  ].join('\n'))
+  const fakeGo = join(fakeBin, 'go')
+  await writeFile(fakeGo, '#!/bin/sh\n[ "$1 $2" = "env GOROOT" ] || exit 2\nprintf "%s\\n" "$FAKE_GOROOT"\n')
+  await chmod(fakeGo, 0o755)
+  const overlayPath = join(directory, 'overlay.json')
+  const result = spawnSync('python3', [resolve(repositoryRoot, 'scripts/go-clock-overlay.py'), '90', overlayPath], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, FAKE_GOROOT: goroot },
+  })
+  assert.equal(result.status, 0, result.stderr)
+  const overlay = JSON.parse(await readFile(overlayPath, 'utf8'))
+  const shiftedSource = overlay.Replace[sourcePath]
+  assert.ok(shiftedSource, 'the overlay must replace the Go time source')
+  const shifted = await readFile(shiftedSource, 'utf8')
+  assert.match(shifted, /runtimeNow\(\)\n\tsec \+= 90 \* 24 \* 60 \* 60\n\tmono -= startNano/,
+    'the overlay must shift wall time while preserving the monotonic clock')
 })
 
 test('the daily workflow runs govulncheck on the latest release with the Go it was built with', async (t) => {

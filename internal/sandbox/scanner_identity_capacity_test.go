@@ -5,9 +5,8 @@ import (
 	"testing"
 )
 
-// The identities the daemon's scans can reach exclude quarantined leases and
-// identities in use without a lease, but keep the active leases its own
-// running scans hold.
+// Shared health capacity excludes quarantined leases and identities in use
+// without a lease, and treats every active lease as reachable.
 func TestScannerIdentityPoolReachableKeepsActiveLeases(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -16,13 +15,33 @@ func TestScannerIdentityPoolReachableKeepsActiveLeases(t *testing.T) {
 		want   int
 	}{
 		{"idle pool", &ScannerIdentityPoolStatus{MaxParallel: 64, Free: 64}, 64},
-		{"own scans running", &ScannerIdentityPoolStatus{MaxParallel: 64, Active: 25, Free: 39}, 64},
+		{"own scans running", &ScannerIdentityPoolStatus{MaxParallel: 64, Active: 25, OwnActive: 25, Free: 39}, 64},
 		{"quarantined and unleased use", &ScannerIdentityPoolStatus{MaxParallel: 64, Active: 3, Quarantined: 20, InUseByOtherProcesses: 5, Free: 36}, 39},
 		{"overcommitted counts", &ScannerIdentityPoolStatus{MaxParallel: 1, Active: 1, Quarantined: 1, InUseByOtherProcesses: 2}, 0},
 		{"nil status", nil, 0},
 	} {
 		if got := test.status.Reachable(); got != test.want {
 			t.Errorf("%s: reachable = %d, want %d", test.name, got, test.want)
+		}
+	}
+}
+
+func TestScannerIdentityPoolDaemonReachabilitySubtractsOtherActiveLeases(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		status *ScannerIdentityPoolStatus
+		want   int
+	}{
+		{"idle pool", &ScannerIdentityPoolStatus{MaxParallel: 64, Free: 64}, 64},
+		{"daemon scans", &ScannerIdentityPoolStatus{MaxParallel: 64, Active: 25, OwnActive: 25, Free: 39}, 64},
+		{"active lease held by another process", &ScannerIdentityPoolStatus{MaxParallel: 64, Active: 1, Free: 63}, 63},
+		{"mixed active leases", &ScannerIdentityPoolStatus{MaxParallel: 64, Active: 25, OwnActive: 20, Quarantined: 3, InUseByOtherProcesses: 2}, 54},
+		{"overcommitted counts", &ScannerIdentityPoolStatus{MaxParallel: 1, Active: 1, Quarantined: 1, InUseByOtherProcesses: 2}, 0},
+		{"nil status", nil, 0},
+	} {
+		if got := test.status.ReachableByDaemon(); got != test.want {
+			t.Errorf("%s: daemon reachable = %d, want %d", test.name, got, test.want)
 		}
 	}
 }

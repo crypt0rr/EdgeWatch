@@ -236,7 +236,7 @@ func (a *App) RecordDeploymentOperationalHealth(ctx context.Context, now time.Ti
 		if observed.identityPoolOff {
 			required = 0
 		} else {
-			reachable = observed.identities.Reachable()
+			reachable = observed.identities.ReachableByDaemon()
 		}
 		recorded, err := platform.RecordScannerIdentityHealth(ctx, reachable, required, now)
 		if err != nil {

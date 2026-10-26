@@ -21,6 +21,8 @@ import (
 // sidecar is treated as ambiguous rather than guessed to be safe.
 var ErrRestoreSidecars = errors.New("restore refused because SQLite sidecars are present")
 
+var errRestoreSourceNotSQLite = errors.New("restore source is not a SQLite database")
+
 // ErrRestoreDaemonLive is returned when the destination database still has a
 // recently-heartbeating EdgeWatch daemon owner. Replacing the file in that
 // state would leave the running process attached to the old inode while new
@@ -1252,7 +1254,7 @@ func validateSQLiteRestoreSource(path string) error {
 		return fmt.Errorf("read restore source header: %w", err)
 	}
 	if string(header[:]) != "SQLite format 3\x00" {
-		return errors.New("restore source is not a SQLite database")
+		return errRestoreSourceNotSQLite
 	}
 	return nil
 }

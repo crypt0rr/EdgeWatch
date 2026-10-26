@@ -169,6 +169,9 @@ func prunePreUpgradeBackups(ctx context.Context, directory string, current, keep
 					if err != nil && ctx.Err() != nil {
 						return nil, ctx.Err()
 					}
+					if err != nil && !isInvalidBackupFile(err) {
+						return nil, fmt.Errorf("verify pre-migration backup %q before pruning: %w", file.name, err)
+					}
 					verified[file.name] = err == nil && report.Valid && report.SchemaVersion == file.from
 				}
 				if !verified[file.name] {
@@ -180,9 +183,15 @@ func prunePreUpgradeBackups(ctx context.Context, directory string, current, keep
 			}
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var removed []string
 	kept := 0
 	for _, file := range files {
+		if err := ctx.Err(); err != nil {
+			return removed, err
+		}
 		if file.name == written || protected[file.name] {
 			continue
 		}

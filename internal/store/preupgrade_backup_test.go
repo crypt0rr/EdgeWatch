@@ -200,6 +200,39 @@ func TestPrunePreUpgradeBackupsDoesNotLetCorruptCopyReplaceValidPairCopy(t *test
 	}
 }
 
+func TestPrunePreUpgradeBackupsAbortsWhenVerificationCannotStageCopy(t *testing.T) {
+	directory := t.TempDir()
+	fixtures := make(map[int][]byte)
+	olderPairCopy := "edgewatch-preupgrade-s75-s78-20250101T000000.000000000Z.db"
+	writeValidPreUpgradeBackup(t, directory, olderPairCopy, fixtures)
+	newer := []string{
+		"edgewatch-preupgrade-s77-s78-20260101T000000.000000000Z.db",
+		"edgewatch-preupgrade-s77-s78-20260102T000000.000000000Z.db",
+		"edgewatch-preupgrade-s77-s78-20260103T000000.000000000Z.db",
+	}
+	for _, name := range newer {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte("completed upgrade"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// This valid pair copy is older than the newest three and would otherwise
+	// be removed. Verification cannot decide whether it is valid when staging
+	// is unavailable, so pruning must stop before removing any candidate.
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+	removed, err := prunePreUpgradeBackups(context.Background(), directory, 77, preUpgradeBackupRetention, "")
+	if err == nil || !strings.Contains(err.Error(), "create backup verification directory") {
+		t.Fatalf("prune with unavailable verification staging = %v, want a staging failure", err)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("removed backups = %v, want no pruning after verification failed", removed)
+	}
+	for _, name := range append(newer, olderPairCopy) {
+		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
+			t.Errorf("backup %q was removed after verification failed: %v", name, err)
+		}
+	}
+}
+
 func writeValidPreUpgradeBackup(t *testing.T, directory, name string, fixtures map[int][]byte) {
 	t.Helper()
 	match := preUpgradeBackupName.FindStringSubmatch(name)

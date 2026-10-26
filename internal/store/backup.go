@@ -5,9 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // DatabaseVerification is the bounded result of the SQLite consistency checks
@@ -383,6 +387,41 @@ type BackupFileOptions struct {
 	AllowKeyMismatch bool
 }
 
+// invalidBackupFileError marks a conclusive failure of a restore-source
+// check. Callers that make retention decisions can discard these candidates
+// while preserving candidates whose verification could not complete.
+type invalidBackupFileError struct {
+	err error
+}
+
+func (e *invalidBackupFileError) Error() string { return e.err.Error() }
+func (e *invalidBackupFileError) Unwrap() error { return e.err }
+
+func markBackupFileInvalid(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &invalidBackupFileError{err: err}
+}
+
+func isInvalidBackupFile(err error) bool {
+	var invalid *invalidBackupFileError
+	return errors.As(err, &invalid)
+}
+
+func isConclusiveBackupDatabaseFailure(err error) bool {
+	var verificationErr *VerificationError
+	if errors.As(err, &verificationErr) {
+		return true
+	}
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	code := sqliteErr.Code() & 0xff
+	return code == sqlite3.SQLITE_CORRUPT || code == sqlite3.SQLITE_NOTADB
+}
+
 // BackupFileVerification is the report of VerifyBackupFile. Valid reports
 // whether the file passed every check that a restore runs on its source:
 // the SQLite header, no sidecars, the consistency and foreign-key checks,
@@ -442,6 +481,9 @@ func verifyBackupFile(ctx context.Context, source string, options BackupFileOpti
 	}
 	report.Bytes = info.Size()
 	if err := validateSQLiteRestoreSource(sourcePath); err != nil {
+		if errors.Is(err, errRestoreSourceNotSQLite) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return report, markBackupFileInvalid(err)
+		}
 		return report, err
 	}
 	// A backup written by the backup command has no sidecars. A file with
@@ -456,7 +498,7 @@ func verifyBackupFile(ctx context.Context, source string, options BackupFileOpti
 		for _, sidecar := range report.SourceSidecars {
 			paths = append(paths, sidecar.Path)
 		}
-		return report, &RestoreSidecarError{Paths: paths}
+		return report, markBackupFileInvalid(&RestoreSidecarError{Paths: paths})
 	}
 	dir, err := os.MkdirTemp("", ".edgewatch-verify-")
 	if err != nil {
@@ -473,8 +515,15 @@ func verifyBackupFile(ctx context.Context, source string, options BackupFileOpti
 	verification, err := verifyDatabaseFile(ctx, staged, IntegrityCheck)
 	report.DatabaseVerification = verification
 	if err != nil {
-		return report, fmt.Errorf("verify backup file: %w", err)
+		err = fmt.Errorf("verify backup file: %w", err)
+		if isConclusiveBackupDatabaseFailure(err) {
+			return report, markBackupFileInvalid(err)
+		}
+		return report, err
 	}
 	report.KeyCheck, err = checkStagedKeys(ctx, staged, options.InspectStaged, options.AllowKeyMismatch)
+	if errors.Is(err, ErrRestoreKeyMismatch) {
+		return report, markBackupFileInvalid(err)
+	}
 	return report, err
 }

@@ -205,3 +205,72 @@ test('opening latest scan details keeps the filtered Jobs return path', async ({
   await expect(page.getByRole('searchbox', { name: 'Search jobs by name or target' })).toHaveValue('database')
   await expect(page.getByRole('combobox', { name: 'Filter jobs' })).toHaveValue('attention')
 })
+
+test('closing latest scan details returns through the filtered Jobs state', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'This navigation test runs once on desktop Chromium.')
+
+  await mockConsole(page, 'administrator')
+  const job = monitoringJob('job-1', 'Database monitor', ['db.internal'], { attentionReason: 'failed' })
+  job.monitoring = {
+    ...job.monitoring!,
+    latest_successful_scan: { scan_id: 'scan-1', status: 'success', started_at: null, finished_at: null },
+  }
+  await page.route('**/api/v1/jobs**', async route => {
+    const request = route.request()
+    const url = new URL(request.url())
+    if (request.method() === 'GET' && url.pathname === '/api/v1/jobs') {
+      await route.fulfill({ json: { jobs: [job] } })
+      return
+    }
+    if (request.method() === 'GET' && url.pathname === '/api/v1/jobs/job-1') {
+      await route.fulfill({ json: job })
+      return
+    }
+    await route.fallback()
+  })
+
+  await page.goto('/jobs?q=database&filter=attention')
+  await expect(page.getByRole('heading', { name: 'Database monitor' })).toBeVisible()
+  await page.getByRole('link', { name: 'Database monitor' }).click()
+  await expect(page).toHaveURL(/\/jobs\/job-1$/)
+  await page.getByRole('link', { name: 'Open scan details →' }).click()
+  await expect(page).toHaveURL(/\/jobs\/job-1\/scans\/scan-1$/)
+  await page.getByRole('button', { name: 'Close scan detail' }).click()
+  await expect(page).toHaveURL(/\/jobs\/job-1$/)
+  await page.getByRole('link', { name: '← Jobs' }).click()
+
+  await expect(page).toHaveURL(/\/jobs\?q=database&filter=attention$/)
+  await expect(page.getByRole('searchbox', { name: 'Search jobs by name or target' })).toHaveValue('database')
+  await expect(page.getByRole('combobox', { name: 'Filter jobs' })).toHaveValue('attention')
+})
+
+test('a missing job returns to the filtered Jobs list', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'This navigation test runs once on desktop Chromium.')
+
+  await mockConsole(page, 'administrator')
+  const job = monitoringJob('job-1', 'Database monitor', ['db.internal'], { attentionReason: 'failed' })
+  await page.route('**/api/v1/jobs**', async route => {
+    const request = route.request()
+    const url = new URL(request.url())
+    if (request.method() === 'GET' && url.pathname === '/api/v1/jobs') {
+      await route.fulfill({ json: { jobs: [job] } })
+      return
+    }
+    if (request.method() === 'GET' && url.pathname === '/api/v1/jobs/job-1') {
+      await route.fulfill({ status: 404, json: { error: { code: 'not_found', message: 'job not found' } } })
+      return
+    }
+    await route.fallback()
+  })
+
+  await page.goto('/jobs?q=database&filter=attention')
+  await expect(page.getByRole('heading', { name: 'Database monitor' })).toBeVisible()
+  await page.getByRole('link', { name: 'Database monitor' }).click()
+  await expect(page.getByRole('heading', { name: 'Job unavailable' })).toBeVisible()
+  await expect(page.getByRole('alert')).toHaveText('This job could not be found.')
+  await page.getByRole('link', { name: '← Jobs' }).click()
+
+  await expect(page).toHaveURL(/\/jobs\?q=database&filter=attention$/)
+  await expect(page.getByRole('searchbox', { name: 'Search jobs by name or target' })).toHaveValue('database')
+  await expect(page.getByRole('combobox', { name: 'Filter jobs' })).toHaveValue('attention')
+})

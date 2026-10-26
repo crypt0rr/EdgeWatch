@@ -368,7 +368,7 @@ export function JobDetail() {
     // A deleted job, or another unit's, answers 404: say so instead of
     // offering a retry that fails the same way.
     const jobNotFound = isNotFound(job.error)
-    return <section className="page"><div className="page-heading"><div><Link className="back-link" to="/jobs">← Jobs</Link><h1>Job unavailable</h1></div></div><ErrorNotice message={job.error && !jobNotFound ? 'This job could not be loaded.' : 'This job could not be found.'} onRetry={job.error && !jobNotFound ? () => job.refetch() : undefined} /></section>
+    return <section className="page"><div className="page-heading"><div><Link className="back-link" to={jobsReturnTo}>← Jobs</Link><h1>Job unavailable</h1></div></div><ErrorNotice message={job.error && !jobNotFound ? 'This job could not be loaded.' : 'This job could not be found.'} onRetry={job.error && !jobNotFound ? () => job.refetch() : undefined} /></section>
   }
 
   const value = job.data
@@ -624,7 +624,7 @@ export function JobDetail() {
             </div>
             <div className="heading-actions">
               {(detail.data.scan.status === 'success' || detail.data.scan.status === 'incomplete') && <button className="button ghost" onClick={() => { setShowResults((shown) => !shown); setResultsOffset(0) }}>{showResults ? 'Hide results' : 'View results'}</button>}
-              <button className="icon-button" onClick={() => routeScanID ? navigate(`/jobs/${encodeURIComponent(id)}`) : setSelectedScan('')} aria-label="Close scan detail">×</button>
+              <button className="icon-button" onClick={() => routeScanID ? navigate(`/jobs/${encodeURIComponent(id)}`, { state: { returnTo: jobsReturnTo } }) : setSelectedScan('')} aria-label="Close scan detail">×</button>
             </div>
           </div>
           {detail.data.scan.error && <div className="form-error scan-error" role="alert">{detail.data.scan.error}</div>}

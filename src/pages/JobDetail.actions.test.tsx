@@ -112,6 +112,23 @@ describe('job detail actions', () => {
     await waitFor(() => expect(screen.getByTestId('route-location')).toHaveTextContent(returnTo))
   })
 
+  it('preserves the filtered Jobs return path when closing route-selected scan details', async () => {
+    const returnTo = '/jobs?q=database&filter=attention'
+    renderPage([
+      { pathname: '/jobs', search: '?q=database&filter=attention' },
+      { pathname: '/jobs/job-1', state: { returnTo } },
+    ])
+
+    fireEvent.click(await screen.findByRole('link', { name: 'Open scan details →' }))
+    await screen.findByRole('region', { name: 'Scan diff' })
+    fireEvent.click(screen.getByRole('button', { name: 'Close scan detail' }))
+
+    await waitFor(() => expect(screen.getByTestId('route-location')).toHaveTextContent('/jobs/job-1'))
+    expect(screen.getByTestId('route-state')).toHaveTextContent(JSON.stringify({ returnTo }))
+    fireEvent.click(screen.getByRole('link', { name: '← Jobs' }))
+    await waitFor(() => expect(screen.getByTestId('route-location')).toHaveTextContent(returnTo))
+  })
+
   it('does not dispatch again after back and forward through the cleared history entry', async () => {
     const token = issueFirstScanIntent('job-1')
     renderPage(['/jobs', { pathname: '/jobs/job-1', state: { startFirstScanToken: token } }])
@@ -720,10 +737,16 @@ describe('job detail actions', () => {
 
   it('says a deleted job is not found after one request, without a retry', async () => {
     vi.mocked(getJob).mockRejectedValue(new APIError('job not found', 'not_found', undefined, 404))
-    renderPage(['/jobs/job-1'], false, createQueryClient())
+    const returnTo = '/jobs?q=database&filter=attention'
+    renderPage([
+      '/jobs',
+      { pathname: '/jobs/job-1', state: { returnTo } },
+    ], false, createQueryClient())
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('This job could not be found.'))
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
     expect(getJob).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('link', { name: '← Jobs' }))
+    await waitFor(() => expect(screen.getByTestId('route-location')).toHaveTextContent(returnTo))
   })
 
   it('says a pruned scan no longer exists instead of offering a retry', async () => {

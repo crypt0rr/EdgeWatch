@@ -353,6 +353,13 @@ function jsxAttribute(element: Node, name: string): Node | undefined {
   return attributes.find(attribute => attribute.type === 'JSXAttribute' && ((attribute.name as Node).name === name))
 }
 
+function isComponentValueProp(attribute: Node): boolean {
+  if (attribute.type !== 'JSXAttribute') return false
+  const name = String(((attribute.name as Node).name))
+  const normalized = name.toLowerCase()
+  return normalized.includes('component') || ['as', 'element', 'elementtype', 'layout', 'page', 'render', 'renderer', 'route', 'routes'].includes(normalized)
+}
+
 function routeIndexAttribute(element: Node, file: string, where: string): boolean {
   const attribute = jsxAttribute(element, 'index')
   if (!attribute) return false
@@ -477,12 +484,163 @@ function reactCreateElementAliases(program: Node, importedFactories: Set<string>
   return { factories, namespaces }
 }
 
+/** Tracks React.lazy aliases so opaque dynamic package components can be guarded. */
+function reactLazyAliases(program: Node, importedLazies: Set<string>, namespaces: Set<string>): Set<string> {
+  const dependents = new Map<string, Set<string>>()
+  const namespaceLazies = new Map<string, Set<string>>()
+  const add = (map: Map<string, Set<string>>, dependency: string, alias: string) => {
+    const aliases = map.get(dependency) ?? new Set<string>()
+    aliases.add(alias)
+    map.set(dependency, aliases)
+  }
+  const bindPattern = (pattern: Node, namespace: string) => {
+    if (pattern.type !== 'ObjectPattern') return
+    for (const property of pattern.properties as Node[]) {
+      if (property.type !== 'Property' && property.type !== 'ObjectProperty') continue
+      const key = property.key as Node
+      const imported = property.computed ? staticStringValue(key) : key.type === 'Identifier' ? String(key.name) : staticStringValue(key)
+      if (imported !== 'lazy') continue
+      const value = property.value as Node
+      if (value.type === 'Identifier') add(namespaceLazies, namespace, String(value.name))
+    }
+  }
+  const collect = (node: Node) => {
+    if (node.type === 'VariableDeclarator' || node.type === 'AssignmentExpression') {
+      const binding = (node.type === 'VariableDeclarator' ? node.id : node.left) as Node
+      const value = unwrapTransparentExpression((node.type === 'VariableDeclarator' ? node.init : node.right) as Node | undefined)
+      if (binding.type === 'Identifier' && value?.type === 'Identifier') {
+        add(dependents, String(value.name), String(binding.name))
+      } else if (binding.type === 'Identifier' && value
+        && (value.type === 'MemberExpression' || value.type === 'OptionalMemberExpression')
+        && memberPropertyName(value) === 'lazy') {
+        const object = unwrapTransparentExpression(value.object as Node | undefined)
+        if (object?.type === 'Identifier' && namespaces.has(String(object.name))) importedLazies.add(String(binding.name))
+      } else if (value?.type === 'Identifier' && namespaces.has(String(value.name))) {
+        bindPattern(binding, String(value.name))
+      }
+    }
+    childNodes(node).forEach(collect)
+  }
+  collect(program)
+
+  const lazies = new Set(importedLazies)
+  for (const namespace of namespaces) {
+    for (const alias of namespaceLazies.get(namespace) ?? []) lazies.add(alias)
+  }
+  const queue = [...lazies]
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    for (const alias of dependents.get(queue[cursor]) ?? []) {
+      if (lazies.has(alias)) continue
+      lazies.add(alias)
+      queue.push(alias)
+    }
+  }
+  return lazies
+}
+
+function dynamicLazyComponentImports(
+  program: Node,
+  lazyFactories: Set<string>,
+  namespaces: Set<string>,
+  isLocalSpecifier: (specifier: string) => boolean,
+): { bindings: Map<string, { source: string }>; calls: Map<Node, { component: string; source: string }> } {
+  const imports = new Map<string, { source: string }>()
+  const calls = new Map<Node, { component: string; source: string }>()
+  const isOpaquePackage = (specifier: string) => !isLocalSpecifier(specifier)
+    && !specifier.startsWith('node:')
+    && !specifier.startsWith('#')
+    && !/^[a-z][a-z\d+.-]*:/i.test(specifier)
+    && specifier !== 'react'
+    && !specifier.startsWith('react/')
+    && specifier !== 'react-dom'
+    && !specifier.startsWith('react-dom/')
+    && ![...routerModules].some(module => specifier === module || specifier.startsWith(`${module}/`))
+  const lazyCall = (node: Node | undefined) => {
+    const callee = unwrapTransparentExpression(node)
+    if (callee?.type === 'Identifier') return lazyFactories.has(String(callee.name))
+    if (!callee || (callee.type !== 'MemberExpression' && callee.type !== 'OptionalMemberExpression')) return false
+    const object = unwrapTransparentExpression(callee.object as Node | undefined)
+    return memberPropertyName(callee) === 'lazy' && object?.type === 'Identifier' && namespaces.has(String(object.name))
+  }
+  const opaqueImportsIn = (node: Node | undefined): string[] => {
+    if (!node) return []
+    const sources: string[] = []
+    const visit = (current: Node) => {
+      let specifier: string | undefined
+      if (current.type === 'ImportExpression') specifier = staticStringValue(current.source as Node | undefined)
+      else if ((current.type === 'CallExpression' || current.type === 'OptionalCallExpression')
+        && (current.callee as Node).type === 'Import') {
+        specifier = staticStringValue((current.arguments as Node[] | undefined)?.[0])
+      }
+      if (specifier && isOpaquePackage(specifier)) sources.push(specifier)
+      childNodes(current).forEach(visit)
+    }
+    visit(node)
+    return sources
+  }
+  const lazyReturnExpressions = (callback: Node | undefined): Node[] => {
+    const fn = unwrapTransparentExpression(callback)
+    if (fn?.type !== 'ArrowFunctionExpression' && fn?.type !== 'FunctionExpression') return []
+    const body = fn.body as Node
+    if (body.type !== 'BlockStatement') return [body]
+    const values: Node[] = []
+    const visit = (node: Node) => {
+      if (node !== body && ['ArrowFunctionExpression', 'FunctionExpression', 'FunctionDeclaration'].includes(node.type)) return
+      if (node.type === 'ReturnStatement' && isNode(node.argument)) values.push(node.argument as Node)
+      childNodes(node).forEach(visit)
+    }
+    visit(body)
+    return values
+  }
+  const opaqueLazyCall = (node: Node): { component: string; source: string } | undefined => {
+    if ((node.type !== 'CallExpression' && node.type !== 'OptionalCallExpression') || !lazyCall(node.callee as Node | undefined)) return undefined
+    const callee = unwrapTransparentExpression(node.callee as Node | undefined)
+    const object = callee && (callee.type === 'MemberExpression' || callee.type === 'OptionalMemberExpression')
+      ? unwrapTransparentExpression(callee.object as Node | undefined)
+      : undefined
+    const component = callee?.type === 'Identifier' ? String(callee.name) : `${String(object?.type === 'Identifier' ? object.name : 'React')}.lazy`
+    const callback = (node.arguments as Node[] | undefined)?.[0]
+    const source = lazyReturnExpressions(callback).flatMap(opaqueImportsIn)[0]
+    return source ? { component, source } : undefined
+  }
+  const originIn = (node: Node | undefined): { component: string; source: string } | undefined => {
+    if (!node || node.type === 'ArrowFunctionExpression' || node.type === 'FunctionExpression' || node.type === 'FunctionDeclaration') return undefined
+    const origin = calls.get(node)
+    if (origin) return origin
+    for (const child of childNodes(node)) {
+      const nested = originIn(child)
+      if (nested) return nested
+    }
+    return undefined
+  }
+  const inspectCalls = (node: Node) => {
+    if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') {
+      const origin = opaqueLazyCall(node)
+      if (origin) calls.set(node, origin)
+    }
+    childNodes(node).forEach(inspectCalls)
+  }
+  const inspectBindings = (node: Node) => {
+    if (node.type === 'VariableDeclarator' || node.type === 'AssignmentExpression') {
+      const binding = (node.type === 'VariableDeclarator' ? node.id : node.left) as Node
+      const value = unwrapTransparentExpression((node.type === 'VariableDeclarator' ? node.init : node.right) as Node | undefined)
+      const origin = originIn(value)
+      if (binding.type === 'Identifier' && origin) imports.set(String(binding.name), { source: origin.source })
+    }
+    childNodes(node).forEach(inspectBindings)
+  }
+  inspectCalls(program)
+  inspectBindings(program)
+  return { bindings: imports, calls }
+}
+
 function renderedImportedComponents(
   node: Node | undefined,
   imports: Map<string, { source: string }>,
   file: string,
   factories: Set<string>,
   namespaces: Set<string>,
+  dynamicLazyCalls: Map<Node, { component: string; source: string }>,
 ): { component: string; source: string; file: string }[] {
   if (!node) return []
   const rendered = new Map<string, { component: string; source: string; file: string }>()
@@ -506,6 +664,11 @@ function renderedImportedComponents(
     visitValues(value)
   }
   const visit = (current: Node, parent?: Node, field?: string) => {
+    const dynamicLazyComponent = dynamicLazyCalls.get(current)
+    if (dynamicLazyComponent) {
+      const key = `lazy:${String(current.start ?? rendered.size)}:${dynamicLazyComponent.source}`
+      rendered.set(key, { ...dynamicLazyComponent, file })
+    }
     if (current.type === 'Identifier') {
       const isStaticPropertyName = (parent?.type === 'Property' || parent?.type === 'ObjectProperty') && field === 'key' && !parent.computed
         || (parent?.type === 'MemberExpression' || parent?.type === 'OptionalMemberExpression') && field === 'property' && !parent.computed
@@ -537,6 +700,12 @@ function renderedImportedComponents(
           ? jsxMemberRootIdentifier(name)
           : undefined
       add(binding)
+      for (const attribute of (current.openingElement as Node).attributes as Node[]) {
+        const value = attribute.value as Node | null | undefined
+        if (isComponentValueProp(attribute) && value?.type === 'JSXExpressionContainer') {
+          addImportedValues(value.expression as Node)
+        }
+      }
     }
     for (const [key, value] of Object.entries(current)) {
       if (key === 'parent') continue
@@ -597,6 +766,7 @@ function importedComponentAliases(program: Node, imports: Map<string, { source: 
         return
       }
       if (node.type === 'LogicalExpression') {
+        visitReferences(node.left as Node | undefined)
         visitReferences(node.right as Node | undefined)
         return
       }
@@ -658,6 +828,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
     const reactFragments = new Set<string>()
     const reactNamespaces = new Set<string>()
     const reactCreateElementImports = new Set<string>()
+    const reactLazyImports = new Set<string>()
     for (const statement of program.body as Node[]) {
       if (statement.type !== 'ImportDeclaration') continue
       const source = String((statement.source as Node).value)
@@ -667,6 +838,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
           if (specifier.type === 'ImportSpecifier') {
             if (String((specifier.imported as Node).name) === 'Fragment') reactFragments.add(localName)
             if (source === 'react' && String((specifier.imported as Node).name) === 'createElement') reactCreateElementImports.add(localName)
+            if (source === 'react' && String((specifier.imported as Node).name) === 'lazy') reactLazyImports.add(localName)
           } else {
             reactNamespaces.add(localName)
           }
@@ -710,8 +882,14 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
       }
     }
 
-    const importedExternalComponentBindings = importedComponentAliases(program, uninspectableExternalComponentImports)
     const reactFactories = reactCreateElementAliases(program, reactCreateElementImports, reactNamespaces)
+    const reactLazies = reactLazyAliases(program, reactLazyImports, reactFactories.namespaces)
+    const dynamicComponents = dynamicLazyComponentImports(program, reactLazies, reactFactories.namespaces, moduleResolver.isLocalSpecifier)
+    const opaqueComponentImports = new Map(uninspectableExternalComponentImports)
+    for (const [binding, origin] of dynamicComponents.bindings) {
+      if (!opaqueComponentImports.has(binding)) opaqueComponentImports.set(binding, origin)
+    }
+    const importedExternalComponentBindings = importedComponentAliases(program, opaqueComponentImports)
 
     // An unresolved local import can carry Route or Routes under any local
     // alias, including aliases created by destructuring or object properties.
@@ -930,7 +1108,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
             path: pathAttribute ? stringValue(pathAttribute.value as Node, `A <Route> path in ${where} in ${file}`) : undefined,
             index,
             renders: renderedComponents(jsxAttribute(node, 'element')?.value as Node | undefined),
-            uninspectableRenders: renderedImportedComponents(jsxAttribute(node, 'element')?.value as Node | undefined, importedExternalComponentBindings, file, reactFactories.factories, reactFactories.namespaces),
+            uninspectableRenders: renderedImportedComponents(jsxAttribute(node, 'element')?.value as Node | undefined, importedExternalComponentBindings, file, reactFactories.factories, reactFactories.namespaces, dynamicComponents.calls),
             children: collect(node.children as Node[], where),
           })
           return
@@ -1487,6 +1665,116 @@ export function Shell() {
           source.file,
         ).toThrow(/renders imported component (?:NestedRoutes|PackageNestedRoutes|Routed|localRoutes|nestedRoutes|nestedRoutesAlias) from third-party-router in wildcard route \/known\/\*; the console route inventory cannot inspect whether it owns nested <Routes>/)
       }
+    })
+
+    it('tracks lowercase opaque package components forwarded through JSX props', () => {
+      const exactInventory: Inventory = {
+        consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
+        surfaces: [],
+        scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
+        exclusions: [],
+        tabKeys: [],
+      }
+      const source = {
+        file: 'src/external-jsx-component-prop.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes as nestedRoutes } from 'third-party-router'
+function RouteHost({ Component }: { Component: React.ComponentType }) { return <Component /> }
+export function Shell() {
+  return <Routes><Route path="/known/*" element={<RouteHost Component={nestedRoutes} />} /></Routes>
+}`,
+      }
+
+      expect(() => inventoryProblems(resolveRouters(extractRouters([source])), exactInventory)).toThrow(
+        /renders imported component nestedRoutes from third-party-router in wildcard route \/known\/\*/,
+      )
+    })
+
+    it('preserves opaque package provenance from both logical expression operands', () => {
+      const exactInventory: Inventory = {
+        consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
+        surfaces: [],
+        scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
+        exclusions: [],
+        tabKeys: [],
+      }
+      const source = {
+        file: 'src/external-logical-component-prop.tsx',
+        code: `import { createElement as make } from 'react'
+import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes as nestedRoutes } from 'third-party-router'
+const target = nestedRoutes || null
+function RouteHost({ Component }: { Component: React.ComponentType }) { return <Component /> }
+export function Shell() {
+  return <Routes><Route path="/known/*" element={make(RouteHost, { Component: target })} /></Routes>
+}`,
+      }
+
+      expect(() => inventoryProblems(resolveRouters(extractRouters([source])), exactInventory)).toThrow(
+        /renders imported component target from third-party-router in wildcard route \/known\/\*/,
+      )
+    })
+
+    it('tracks opaque dynamic package components produced by React.lazy', () => {
+      const exactInventory: Inventory = {
+        consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
+        surfaces: [],
+        scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
+        exclusions: [],
+        tabKeys: [],
+      }
+      const sources = [
+        {
+          file: 'src/dynamic-external-route-component.tsx',
+          code: `import * as React from 'react'
+import { Route, Routes } from 'react-router-dom'
+const NestedRoutes = React.lazy(() => import('third-party-router'))
+export function Shell() {
+  return <Routes><Route path="/known/*" element={<NestedRoutes />} /></Routes>
+}`,
+        },
+        {
+          file: 'src/dynamic-external-route-lazy-alias.tsx',
+          code: `import { lazy as defer } from 'react'
+import { Route, Routes } from 'react-router-dom'
+const NestedRoutes = defer(() => import('third-party-router'))
+export function Shell() {
+  return <Routes><Route path="/known/*" element={<NestedRoutes />} /></Routes>
+}`,
+        },
+        {
+          file: 'src/dynamic-external-inline-route-component.tsx',
+          code: `import * as React from 'react'
+import { Route, Routes } from 'react-router-dom'
+export function Shell() {
+  return <Routes><Route path="/known/*" element={React.createElement(React.lazy(() => import('third-party-router')))} /></Routes>
+}`,
+        },
+      ]
+
+      for (const source of sources) {
+        expect(() => inventoryProblems(resolveRouters(extractRouters([source])), exactInventory), source.file).toThrow(
+          /renders imported component (?:NestedRoutes|React\.lazy) from third-party-router in wildcard route \/known\/\*/,
+        )
+      }
+    })
+
+    it('keeps route-irrelevant package loads and readable local lazy imports allowed', () => {
+      const source = {
+        file: 'src/safe-dynamic-component-loads.tsx',
+        code: `import * as React from 'react'
+import { Route, Routes } from 'react-router-dom'
+const unusedPackage = import('third-party-utility')
+const LocalPage = React.lazy(() => {
+  void import('third-party-utility')
+  return import('./local-page')
+})
+export function Shell() {
+  return <Routes><Route path="/known/*" element={<LocalPage />} /></Routes>
+}`,
+      }
+
+      expect(resolveRouters(extractRouters([source]))[0].handles.map(label)).toEqual(['Shell /known/*'])
     })
 
     it('does not treat a self-mapped allowedPath as a redirect', () => {

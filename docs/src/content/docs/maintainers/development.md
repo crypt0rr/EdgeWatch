@@ -191,13 +191,19 @@ values passed in a route element. If an uninspectable package component is
 rendered or forwarded by a wildcard `<Route>` (`path="*"` or a path ending in
 `/*`), the check fails closed with the component and package in its diagnostic.
 This includes values passed as the element type or through the props argument
-to `React.createElement` or an aliased `createElement` factory. Local aliases
-and transparent TypeScript wrappers are followed. The component could render
-nested `<Routes>` whose paths would otherwise be missing from the axe and role
-audits. Readable local TypeScript components are followed as usual, and
-third-party page or presentation components on non-wildcard routes remain
-allowed. React primitives and recognized router exports are treated as known
-wrappers and redirects.
+to `React.createElement` or an aliased `createElement` factory. Component-valued
+JSX props are followed regardless of identifier capitalization; this includes
+props whose names contain `component` and common `as`, `element`, `elementType`,
+`layout`, `page`, `render`, `renderer`, `route`, and `routes` props. Local aliases
+and transparent TypeScript wrappers are followed through both logical-expression
+operands and both value branches of conditional expressions. Literal bare-package
+dynamic imports returned by `React.lazy` or an imported `lazy` alias also carry
+opaque component provenance. These components could render nested `<Routes>`
+whose paths would otherwise be missing from the axe and role audits. Readable local
+TypeScript components and local lazy imports are followed as usual; unrelated
+package loads and third-party page or presentation components on non-wildcard
+routes remain allowed. React primitives and recognized router exports are
+treated as known wrappers and redirects.
 
 `<Route>` props must be explicit: any JSX prop spread is rejected because a
 spread can override `path`, including when it appears after a direct `path`

@@ -75,6 +75,90 @@ function childNodes(node: Node): Node[] {
   return result
 }
 
+function staticStringValue(node: Node | undefined): string | undefined {
+  if (!node) return undefined
+  if (node.type === 'Literal' && typeof node.value === 'string') return node.value
+  if (node.type === 'TemplateLiteral' && (node.expressions as Node[]).length === 0) {
+    const value = (node.quasis as Node[])[0].value as { cooked: string | null; raw: string }
+    return value.cooked ?? value.raw
+  }
+  if (node.type === 'BinaryExpression' && node.operator === '+') {
+    const left = staticStringValue(node.left as Node)
+    const right = staticStringValue(node.right as Node)
+    if (left !== undefined && right !== undefined) return left + right
+  }
+  if (node.type === 'TSAsExpression' || node.type === 'TSTypeAssertion' || node.type === 'TSNonNullExpression' || node.type === 'ParenthesizedExpression') {
+    return staticStringValue(node.expression as Node)
+  }
+  return undefined
+}
+
+function isCommonJSLoader(node: Node | undefined, loaderAliases: Set<string>): boolean {
+  if (!node) return false
+  if (node.type === 'Identifier') return loaderAliases.has(String(node.name))
+  if (node.type !== 'MemberExpression') return false
+  const object = node.object as Node
+  const property = node.computed ? staticStringValue(node.property as Node) : String((node.property as Node).name)
+  return object.type === 'Identifier' && object.name === 'module' && property === 'require'
+}
+
+function rejectUninspectableRouterLoads(program: Node, file: string): void {
+  const loaderAliases = new Set(['require'])
+  let aliasesChanged = true
+  while (aliasesChanged) {
+    aliasesChanged = false
+    const findAliases = (node: Node) => {
+      if (node.type === 'VariableDeclarator') {
+        const id = node.id as Node
+        if (id.type === 'Identifier' && isCommonJSLoader(node.init as Node | undefined, loaderAliases) && !loaderAliases.has(String(id.name))) {
+          loaderAliases.add(String(id.name))
+          aliasesChanged = true
+        }
+      }
+      if (node.type === 'AssignmentExpression') {
+        const left = node.left as Node
+        if (left.type === 'Identifier' && isCommonJSLoader(node.right as Node | undefined, loaderAliases) && !loaderAliases.has(String(left.name))) {
+          loaderAliases.add(String(left.name))
+          aliasesChanged = true
+        }
+      }
+      childNodes(node).forEach(findAliases)
+    }
+    findAliases(program)
+  }
+
+  const isRouterModule = (specifier: string) => [...routerModules].some(module => specifier === module || specifier.startsWith(`${module}/`))
+  const inspect = (node: Node) => {
+    let source: Node | undefined
+    let kind: string | undefined
+    if (node.type === 'ImportExpression') {
+      source = node.source as Node
+      kind = 'dynamic import'
+    } else if (node.type === 'CallExpression') {
+      const callee = node.callee as Node
+      if (callee.type === 'Import') {
+        source = (node.arguments as Node[])[0]
+        kind = 'dynamic import'
+      } else if (isCommonJSLoader(callee, loaderAliases)) {
+        source = (node.arguments as Node[])[0]
+        kind = 'CommonJS module load'
+      }
+    }
+
+    if (kind) {
+      const specifier = staticStringValue(source)
+      if (specifier === undefined) {
+        throw new Error(`${file} uses a ${kind} with a non-static module specifier; the console route inventory cannot rule out router APIs`)
+      }
+      if (isRouterModule(specifier)) {
+        throw new Error(`${file} dynamically loads router module ${specifier}; the console route inventory requires static named router imports`)
+      }
+    }
+    childNodes(node).forEach(inspect)
+  }
+  inspect(program)
+}
+
 function jsxName(node: Node): string | undefined {
   if (node.type !== 'JSXElement') return undefined
   const name = (node.openingElement as Node).name as Node
@@ -150,6 +234,7 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
     const parsed = parseSync(file, code, { lang: file.endsWith('.tsx') ? 'tsx' : 'ts' })
     if (parsed.errors.length) throw new Error(`${file}: ${parsed.errors.map(error => error.message).join('; ')}`)
     const program = parsed.program as unknown as Node
+    rejectUninspectableRouterLoads(program, file)
 
     const local = { Route: new Set<string>(), Routes: new Set<string>() }
     const reactFragments = new Set<string>()
@@ -326,6 +411,10 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
       if (name && local.Route.has(name)) routeElements += 1
       if (name && local.Routes.has(name)) {
         if (!current) throw new Error(`${file}: a <Routes> outside a named component`)
+        const attributes = (node.openingElement as Node).attributes as Node[]
+        if (attributes.some(attribute => attribute.type === 'JSXSpreadAttribute') || jsxAttribute(node, 'children')) {
+          throw new Error(`${file}: <Routes> in ${current} must declare route children as direct JSX children, not a children prop or prop spread`)
+        }
         const count = routers.filter(router => router.name === current || router.name.startsWith(`${current}#`)).length
         routers.push({ name: count ? `${current}#${count + 1}` : current, routes: collect(node.children as Node[], current) })
       }
@@ -632,6 +721,91 @@ export function PlatformShell() { return <Routes><Route path="/units/:id/:tab" e
       expect(() => extractRouters([{ file: 'src/h.tsx', code: `import { Route, Routes } from 'react-router-dom'\nexport function H() { return <Routes><Route path="/visible" /><RR.Route path="/hidden" /></Routes> }` }])).toThrow(/JSX member expression ending in Route/)
     })
 
+    it('refuses dynamic router module loads before checking for static router imports', () => {
+      const cases = [
+        {
+          file: 'src/dynamic-a.tsx',
+          code: `export async function HiddenRouter() {
+  const { Route, Routes } = await import('react-router-dom')
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+          error: /dynamically loads router module react-router-dom/,
+        },
+        {
+          file: 'src/dynamic-b.tsx',
+          code: `export async function HiddenRouter() {
+  const router = await import(\`react-router\`)
+  const { Route: Page, Routes: Pages } = router
+  return <Pages><Page path="/hidden" /></Pages>
+}`,
+          error: /dynamically loads router module react-router/,
+        },
+        {
+          file: 'src/dynamic-c.tsx',
+          code: `const routerModule = 'react-router-dom'
+export async function HiddenRouter() {
+  const { Route, Routes } = await import(routerModule)
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+          error: /dynamic import with a non-static module specifier/,
+        },
+        {
+          file: 'src/dynamic-d.tsx',
+          code: `export async function HiddenRouter() {
+  const { Route, Routes } = await import('react-router-' + 'dom')
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+          error: /dynamically loads router module react-router-dom/,
+        },
+        {
+          file: 'src/dynamic-e.tsx',
+          code: `export function HiddenRouter() {
+  const { Route, Routes } = require('react-router-dom')
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+          error: /dynamically loads router module react-router-dom/,
+        },
+        {
+          file: 'src/dynamic-f.tsx',
+          code: `const loadModule = require
+export function HiddenRouter() {
+  const { Route, Routes } = loadModule('react-router-dom')
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+          error: /dynamically loads router module react-router-dom/,
+        },
+        {
+          file: 'src/dynamic-g.tsx',
+          code: `export function HiddenRouter() {
+  const { Route, Routes } = module.require('react-router-dom')
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+          error: /dynamically loads router module react-router-dom/,
+        },
+        {
+          file: 'src/dynamic-h.tsx',
+          code: `const loadModule = module['require']
+export function HiddenRouter() {
+  const { Route, Routes } = loadModule('react-router-dom')
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+          error: /dynamically loads router module react-router-dom/,
+        },
+        {
+          file: 'src/dynamic-i.tsx',
+          code: `export function HiddenRouter(moduleName: string) {
+  const { Route, Routes } = require(moduleName)
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+          error: /CommonJS module load with a non-static module specifier/,
+        },
+      ]
+
+      for (const fixture of cases) {
+        expect(() => extractRouters([fixture])).toThrow(fixture.error)
+      }
+    })
+
     it('refuses local aliases that could hide routes inside a readable router', () => {
       expect(() => extractRouters([{ file: 'src/i.tsx', code: `import { Route, Routes } from 'react-router-dom'\nconst HiddenRoute = Route\nexport function I() { return <Routes><Route path="/visible" /><HiddenRoute path="/hidden" /></Routes> }` }])).toThrow(/aliases imported Route as HiddenRoute/)
       expect(() => extractRouters([{ file: 'src/j.tsx', code: `import { Route, Routes } from 'react-router-dom'\nconst HiddenRoutes = Routes\nexport function J() { return <HiddenRoutes><Route path="/visible" /></HiddenRoutes> }` }])).toThrow(/aliases imported Routes as HiddenRoutes/)
@@ -674,6 +848,32 @@ export function K() { return <Routes><Route path="/visible" element={<Visible />
       expect(() => extractRouters([{ file: 'src/l.tsx', code: source(`${reactRouterImports}\nimport * as React from 'react'`, `React.createElement(Route, { path: '/hidden', element: <Hidden /> })`) }])).toThrow(/unsupported non-JSX child \(CallExpression\)/)
       expect(() => extractRouters([{ file: 'src/m.tsx', code: source(`${reactRouterImports}\nimport { createElement as makeElement } from 'react'`, `makeElement(Route, { path: '/hidden', element: <Hidden /> })`) }])).toThrow(/unsupported non-JSX child \(CallExpression\)/)
       expect(() => extractRouters([{ file: 'src/n.tsx', code: source(`${reactRouterImports}\nimport { createElement } from 'react'\nconst makeElement = createElement`, `makeElement(Route, { path: '/hidden', element: <Hidden /> })`) }])).toThrow(/unsupported non-JSX child \(CallExpression\)/)
+    })
+
+    it('refuses Routes children props and spreads that bypass JSX child inspection', () => {
+      const header = `import { createElement } from 'react'
+import { Route, Routes } from 'react-router-dom'`
+      const routes = (attribute: string, declarations = '') => `${header}
+${declarations}
+export function HiddenRouter() { return <Routes ${attribute} /> }`
+      const cases = [
+        {
+          file: 'src/children-a.tsx',
+          code: routes(`children={createElement(Route, { ...hiddenProps, path: '/hidden' })}`),
+        },
+        {
+          file: 'src/children-b.tsx',
+          code: routes(`children={<Route path="/hidden" />}`),
+        },
+        {
+          file: 'src/children-c.tsx',
+          code: routes(`{...routerProps}`),
+        },
+      ]
+
+      for (const fixture of cases) {
+        expect(() => extractRouters([fixture])).toThrow(/must declare route children as direct JSX children/)
+      }
     })
 
     it('keeps shorthand and imported React fragments readable as route children', () => {

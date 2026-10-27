@@ -170,7 +170,10 @@ The parser follows statically resolvable local TypeScript imports, re-exports,
 dynamic imports, and CommonJS loads, including helpers outside `src/` and
 aliases configured directly in the root `tsconfig.json`. A config that extends
 another `tsconfig` fails closed because the inventory does not resolve
-inherited aliases. It rejects renamed `Route` or `Routes` re-exports anywhere
+inherited aliases. Alias patterns and targets with at most one `*` are
+supported; multiple wildcards fail closed. Wildcard captures are substituted as
+literal path text, including characters that have meaning in regular
+expressions. It rejects renamed `Route` or `Routes` re-exports anywhere
 in those chains. A local module load or local re-export that cannot be read as
 TypeScript fails closed; JSX components from an unresolved static local import
 fail closed when used. Unresolved namespace JSX components are checked from

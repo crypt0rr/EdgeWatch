@@ -773,8 +773,22 @@ type LocalModuleResolver = {
   resolve(importer: string, specifier: string): string | undefined
 }
 
+function pathWildcardIndex(value: string, description: string): number {
+  const wildcard = value.indexOf('*')
+  if (wildcard >= 0 && value.indexOf('*', wildcard + 1) >= 0) {
+    throw new Error(`${description} contains more than one '*' wildcard; the console route inventory cannot resolve it`)
+  }
+  return wildcard
+}
+
+function substitutePathWildcard(target: string, substitution: string): string {
+  const wildcard = pathWildcardIndex(target, `TypeScript path target ${target}`)
+  if (wildcard < 0) return target
+  return `${target.slice(0, wildcard)}${substitution}${target.slice(wildcard + 1)}`
+}
+
 function pathAliasMatches(specifier: string, pattern: string): boolean {
-  const wildcard = pattern.indexOf('*')
+  const wildcard = pathWildcardIndex(pattern, `TypeScript path pattern ${pattern}`)
   if (wildcard < 0) return specifier === pattern
   const prefix = pattern.slice(0, wildcard)
   const suffix = pattern.slice(wildcard + 1)
@@ -835,7 +849,11 @@ function localModuleResolver(configRoot: string): LocalModuleResolver {
     ? compilerOptions.paths as Record<string, unknown>
     : {}
   const aliases = Object.entries(paths).flatMap(([pattern, targets]) => Array.isArray(targets)
-    ? targets.filter((target): target is string => typeof target === 'string').map(target => ({ pattern, target }))
+    ? targets.filter((target): target is string => typeof target === 'string').map(target => {
+        pathWildcardIndex(pattern, `TypeScript path pattern ${pattern}`)
+        pathWildcardIndex(target, `TypeScript path target ${target}`)
+        return { pattern, target }
+      })
     : [])
   const pathAliases = aliases.map(alias => alias.pattern)
   const isLocalSpecifier = (specifier: string) => specifier.startsWith('.')
@@ -877,10 +895,10 @@ function localModuleResolver(configRoot: string): LocalModuleResolver {
           return rightPrefix - leftPrefix || right.pattern.length - left.pattern.length
         })
       for (const alias of matchingAliases) {
-        const wildcard = alias.pattern.indexOf('*')
+        const wildcard = pathWildcardIndex(alias.pattern, `TypeScript path pattern ${alias.pattern}`)
         const suffix = wildcard < 0 ? '' : alias.pattern.slice(wildcard + 1)
         const substitution = wildcard < 0 ? '' : specifier.slice(wildcard, specifier.length - suffix.length)
-        const target = wildcard < 0 ? alias.target : alias.target.replace('*', substitution)
+        const target = wildcard < 0 ? alias.target : substitutePathWildcard(alias.target, substitution)
         const candidate = typeScriptFile(resolve(baseUrl, target), target)
         if (candidate) return candidate
       }
@@ -1140,12 +1158,50 @@ export function PlatformShell() { return <Routes><Route path="/units/:id/:tab" e
         expect(aliasSources.some(source => source.file.endsWith('/router-bindings.ts'))).toBe(true)
         expect(() => extractRouters(aliasSources, fixtureRoot)).toThrow(/re-exports router APIs from react-router-dom/)
 
+        const wildcardHelperName = 'router+bindings[1]$&'
+        mkdirSync(join(fixtureRoot, 'helpers'), { recursive: true })
+        writeFileSync(join(fixtureRoot, 'helpers', `${wildcardHelperName}.ts`), `export { Route as Page, Routes as Pages } from 'react-router-dom'\n`)
+        writeFileSync(join(fixtureRoot, 'tsconfig.json'), JSON.stringify({
+          compilerOptions: {
+            module: 'ESNext',
+            moduleResolution: 'Bundler',
+            target: 'ES2022',
+            baseUrl: '.',
+            paths: { '@edgewatch/*': ['helpers/*'] },
+          },
+        }))
+        writeFileSync(routePath, `import { Page, Pages } from '@edgewatch/${wildcardHelperName}'\nexport function HiddenRoutes() { return <Pages><Page path="/hidden" /></Pages> }\n`)
+        const wildcardSources = sourceFiles(sourceDirectory, fixtureRoot)
+        expect(wildcardSources.some(source => source.file.endsWith(`/helpers/${wildcardHelperName}.ts`))).toBe(true)
+        expect(() => extractRouters(wildcardSources, fixtureRoot)).toThrow(/re-exports router APIs from react-router-dom/)
+
         writeFileSync(join(fixtureRoot, 'router-runtime.js'), `export { Route, Routes } from 'react-router-dom'\n`)
         writeFileSync(helperPath, `export { Route as Page, Routes as Pages } from './router-runtime.js'\n`)
         writeFileSync(routePath, `import { Page, Pages } from '../router-bindings'\nexport function HiddenRoutes() { return <Pages><Page path="/hidden" /></Pages> }\n`)
         const unreadableReexportSources = sourceFiles(sourceDirectory)
         expect(unreadableReexportSources.some(source => source.file.endsWith('/router-bindings.ts'))).toBe(true)
         expect(() => extractRouters(unreadableReexportSources)).toThrow(/re-exports from unreadable local module \.\/router-runtime\.js/)
+      } finally {
+        rmSync(fixtureRoot, { recursive: true, force: true })
+      }
+    })
+
+    it('fails closed on path aliases with multiple wildcards', () => {
+      const fixtureRoot = mkdtempSync(join(tmpdir(), 'edgewatch-route-alias-wildcard-'))
+      const sourceDirectory = join(fixtureRoot, 'src')
+      mkdirSync(sourceDirectory, { recursive: true })
+      writeFileSync(join(sourceDirectory, 'HiddenRoutes.tsx'), `import { Page, Pages } from '@edgewatch/router-bindings'\nexport function HiddenRoutes() { return <Pages><Page path="/hidden" /></Pages> }\n`)
+
+      try {
+        writeFileSync(join(fixtureRoot, 'tsconfig.json'), JSON.stringify({
+          compilerOptions: { baseUrl: '.', paths: { '@edgewatch/**': ['helpers/*'] } },
+        }))
+        expect(() => sourceFiles(sourceDirectory, fixtureRoot)).toThrow(/path pattern @edgewatch\/\*\* contains more than one/)
+
+        writeFileSync(join(fixtureRoot, 'tsconfig.json'), JSON.stringify({
+          compilerOptions: { baseUrl: '.', paths: { '@edgewatch/*': ['helpers/**'] } },
+        }))
+        expect(() => sourceFiles(sourceDirectory, fixtureRoot)).toThrow(/path target helpers\/\*\* contains more than one/)
       } finally {
         rmSync(fixtureRoot, { recursive: true, force: true })
       }

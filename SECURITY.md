@@ -1059,9 +1059,13 @@ Schema 78 records the latest scan-cycle attempt start for recovery and capacity
 history; it does not alter existing scan or baseline rows. An older release
 must not open the upgraded database.
 Schema 79 adds an index of completed scan cycles by job and execution hash for
-the scan-slot demand estimate, which still reads only the requesting unit's
-jobs; it changes no rows. An older release must not open the upgraded
-database.
+the scan-slot demand estimate. A unit's own estimate reads only that unit's
+enabled jobs and bounded recent duration history. Platform status estimates
+all active units together, reading each unit's enabled jobs, bounded recent
+duration history, and effective capacity through that unit's tenant-scoped
+store; it returns aggregate counts and sums only, with no per-unit values.
+Building the index changes no rows. An older release must not open the
+upgraded database.
 Only the daemon migrates, and only one process at a time: from v0.36.0 the
 daemon holds an advisory lock on the database directory, which restores take
 too, from before it opens the database until migration and startup finish and

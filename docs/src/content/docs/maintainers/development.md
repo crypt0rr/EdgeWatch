@@ -186,6 +186,16 @@ these aliases could hide router components from the inventory. Statically
 readable local TypeScript component imports continue to be followed. Import
 router components directly from a recognized router module.
 
+The parser also tracks bare-package component imports through local aliases and
+values passed in a route element. If an uninspectable package component is
+rendered or forwarded by a wildcard `<Route>` (`path="*"` or a path ending in
+`/*`), the check fails closed with the component and package in its diagnostic.
+It could render nested `<Routes>` whose paths would otherwise be missing from
+the axe and role audits. Readable local TypeScript components are followed as
+usual, and third-party page or presentation components on non-wildcard routes
+remain allowed. React primitives and recognized router exports are treated as
+known wrappers and redirects.
+
 `<Route>` props must be explicit: any JSX prop spread is rejected because a
 spread can override `path`, including when it appears after a direct `path`
 attribute or uses an object alias or conditional expression. Only a shorthand

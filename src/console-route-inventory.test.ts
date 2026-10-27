@@ -51,6 +51,8 @@ type SourceRoute = {
   index: boolean
   /** The components that its element renders, such as a descendant router. */
   renders: string[]
+  /** External package components the inventory cannot inspect for nested routes. */
+  uninspectableRenders: { component: string; source: string; file: string }[]
   children: SourceRoute[]
 }
 
@@ -407,6 +409,129 @@ function stringValue(node: Node | undefined, where: string): string {
   throw new Error(`${where} must be a string literal so the inventory check can read it`)
 }
 
+function renderedImportedComponents(node: Node | undefined, imports: Map<string, { source: string }>, file: string): { component: string; source: string; file: string }[] {
+  if (!node) return []
+  const rendered = new Map<string, { component: string; source: string; file: string }>()
+  const add = (binding: string | undefined) => {
+    const source = binding ? imports.get(binding)?.source : undefined
+    if (binding && source) rendered.set(binding, { component: binding, source, file })
+  }
+  const addComponentValues = (value: Node) => {
+    const visitValues = (current: Node) => {
+      if (current.type === 'Identifier' && /^[A-Z]/.test(String(current.name))) add(String(current.name))
+      childNodes(current).forEach(visitValues)
+    }
+    visitValues(value)
+  }
+  const visit = (current: Node) => {
+    if (current.type === 'JSXElement') {
+      const name = (current.openingElement as Node).name as Node
+      const binding = name.type === 'JSXIdentifier'
+        ? String(name.name)
+        : name.type === 'JSXMemberExpression'
+          ? jsxMemberRootIdentifier(name)
+          : undefined
+      add(binding)
+      for (const attribute of (current.openingElement as Node).attributes as Node[]) {
+        if (attribute.type === 'JSXAttribute' && isNode(attribute.value)) addComponentValues(attribute.value)
+        if (attribute.type === 'JSXSpreadAttribute') addComponentValues(attribute.argument as Node)
+      }
+    }
+    childNodes(current).forEach(visit)
+  }
+  visit(node)
+  return [...rendered.values()]
+}
+
+/** Propagates package-component provenance through local bindings and values. */
+function importedComponentAliases(program: Node, imports: Map<string, { source: string }>): Map<string, { source: string }> {
+  const dependents = new Map<string, Set<string>>()
+  const addBindingNames = (pattern: Node | undefined, names: Set<string>) => {
+    if (!pattern) return
+    if (pattern.type === 'Identifier') {
+      names.add(String(pattern.name))
+      return
+    }
+    if (pattern.type === 'RestElement' || pattern.type === 'AssignmentPattern') {
+      addBindingNames((pattern.argument ?? pattern.left) as Node | undefined, names)
+      return
+    }
+    if (pattern.type === 'ObjectPattern') {
+      for (const property of pattern.properties as Node[]) {
+        addBindingNames((property.type === 'RestElement' ? property.argument : property.value) as Node | undefined, names)
+      }
+      return
+    }
+    if (pattern.type === 'ArrayPattern') {
+      for (const element of pattern.elements as (Node | null)[]) if (element) addBindingNames(element, names)
+    }
+  }
+  const addDependencies = (binding: Node | undefined, value: Node | undefined) => {
+    const names = new Set<string>()
+    addBindingNames(binding, names)
+    if (!names.size || !value) return
+    const references = new Set<string>()
+    const visitReferences = (node: Node | undefined) => {
+      if (!node) return
+      const expression = unwrapTransparentExpression(node)
+      if (expression !== node) {
+        if (expression) visitReferences(expression)
+        return
+      }
+      if (node.type === 'Identifier') {
+        references.add(String(node.name))
+        return
+      }
+      if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
+        visitReferences(node.object as Node | undefined)
+        return
+      }
+      if (node.type === 'ConditionalExpression') {
+        visitReferences(node.consequent as Node | undefined)
+        visitReferences(node.alternate as Node | undefined)
+        return
+      }
+      if (node.type === 'LogicalExpression') {
+        visitReferences(node.right as Node | undefined)
+        return
+      }
+      if (node.type === 'ArrayExpression') {
+        for (const element of node.elements as (Node | null)[]) if (element) visitReferences(element)
+        return
+      }
+      if (node.type === 'ObjectExpression') {
+        for (const property of node.properties as Node[]) {
+          visitReferences((property.type === 'RestElement' ? property.argument : property.value) as Node | undefined)
+        }
+      }
+    }
+    visitReferences(value)
+    for (const reference of references) {
+      const aliases = dependents.get(reference) ?? new Set<string>()
+      for (const name of names) aliases.add(name)
+      dependents.set(reference, aliases)
+    }
+  }
+  const collect = (node: Node) => {
+    if (node.type === 'VariableDeclarator') addDependencies(node.id as Node | undefined, node.init as Node | undefined)
+    if (node.type === 'AssignmentExpression') addDependencies(node.left as Node | undefined, node.right as Node | undefined)
+    childNodes(node).forEach(collect)
+  }
+  collect(program)
+
+  const resolved = new Map(imports)
+  const worklist = [...imports.keys()]
+  for (let cursor = 0; cursor < worklist.length; cursor += 1) {
+    const source = resolved.get(worklist[cursor])!
+    for (const alias of dependents.get(worklist[cursor]) ?? []) {
+      if (resolved.has(alias)) continue
+      resolved.set(alias, source)
+      worklist.push(alias)
+    }
+  }
+  return resolved
+}
+
 /**
  * Reads every `<Routes>` of the given sources, named by the component that
  * renders it, with its `<Route>` tree.
@@ -424,6 +549,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
     const local = { Route: new Set<string>(), Routes: new Set<string>() }
     const unresolvedRouterImports = new Map<string, { api: 'Route' | 'Routes'; source: string }>()
     const unresolvedLocalComponentImports = new Map<string, { source: string }>()
+    const uninspectableExternalComponentImports = new Map<string, { source: string }>()
     const reactFragments = new Set<string>()
     const reactNamespaces = new Set<string>()
     for (const statement of program.body as Node[]) {
@@ -460,6 +586,12 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
             unresolvedLocalComponentImports.set(localName, { source })
           }
         }
+      } else if (source !== 'react' && source !== 'react/jsx-runtime' && ![...routerModules].some(module => source === module || source.startsWith(`${module}/`))) {
+        for (const specifier of statement.specifiers as Node[]) {
+          if (statement.importKind === 'type' || specifier.importKind === 'type') continue
+          const localName = String((specifier.local as Node).name)
+          uninspectableExternalComponentImports.set(localName, { source })
+        }
       }
       if (!routerModules.has(source)) continue
       for (const specifier of statement.specifiers as Node[]) {
@@ -470,6 +602,8 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
         if (unreadRouterAPIs.has(imported)) throw new Error(`${file} imports ${imported}; the console route inventory check reads only <Routes> and <Route> elements, so declare routes as JSX or teach src/console-route-inventory.test.ts the new API`)
       }
     }
+
+    const importedExternalComponentBindings = importedComponentAliases(program, uninspectableExternalComponentImports)
 
     // An unresolved local import can carry Route or Routes under any local
     // alias, including aliases created by destructuring or object properties.
@@ -688,6 +822,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
             path: pathAttribute ? stringValue(pathAttribute.value as Node, `A <Route> path in ${where} in ${file}`) : undefined,
             index,
             renders: renderedComponents(jsxAttribute(node, 'element')?.value as Node | undefined),
+            uninspectableRenders: renderedImportedComponents(jsxAttribute(node, 'element')?.value as Node | undefined, importedExternalComponentBindings, file),
             children: collect(node.children as Node[], where),
           })
           return
@@ -773,6 +908,12 @@ function resolveRouters(routers: SourceRouter[]): ResolvedRouter[] {
   const build = (declaring: string, routes: SourceRoute[], parent: string, handles: RouteHandle[], seen: Set<string>): RouteObject[] => routes.map(route => {
     const pattern = joinPattern(parent, route.path)
     const base = pattern.replace(/\/\*$/, '') || '/'
+    if (route.path === '*' || route.path?.endsWith('/*')) {
+      const uninspectable = route.uninspectableRenders[0]
+      if (uninspectable) {
+        throw new Error(`${uninspectable.file} renders imported component ${uninspectable.component} from ${uninspectable.source} in wildcard route ${pattern}; the console route inventory cannot inspect whether it owns nested <Routes>. Import a readable local TypeScript component or declare the nested routes directly in the audited JSX tree`)
+      }
+    }
     const descendants = route.renders.filter(name => byName.has(name))
     const handle: RouteHandle = { router: declaring, pattern: route.index ? `${pattern} (index)` : pattern, splat: false }
     handles.push(handle)
@@ -1119,6 +1260,47 @@ export function Shell({ admin }: { admin: boolean }) {
       tabKeys: [],
     }
     const problems = (routes: string, inventory: Partial<Inventory> = {}) => inventoryProblems(resolveRouters(extractRouters([shell(routes)])), { ...baseInventory, ...inventory })
+
+    it('fails closed when an imported package component could own routes under a wildcard parent', () => {
+      const sources = [
+        {
+          file: 'src/external-nested-routes.tsx',
+          code: `import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes as PackageNestedRoutes } from 'third-party-router'
+const NestedRoutes = PackageNestedRoutes
+export function Shell() {
+  return <Routes><Route path="/known/*" element={<NestedRoutes />} /></Routes>
+}`,
+        },
+        {
+          file: 'src/external-nested-routes-prop.tsx',
+          code: `import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes } from 'third-party-router'
+function Wrapper({ Component }: { Component: React.ComponentType }) { return <Component /> }
+export function Shell() {
+  return <Routes><Route path="/known/*" element={<Wrapper Component={NestedRoutes} />} /></Routes>
+}`,
+        },
+      ]
+
+      // An inventory entry for /known cannot cover a hidden /known/child route.
+      for (const source of sources) {
+        expect(() => resolveRouters(extractRouters([source])), source.file).toThrow(/renders imported component NestedRoutes from third-party-router in wildcard route \/known\/\*; the console route inventory cannot inspect whether it owns nested <Routes>/)
+      }
+    })
+
+    it('keeps external page elements on static paths and router redirects on wildcard paths', () => {
+      const source = {
+        file: 'src/external-presentational-page.tsx',
+        code: `import { Route, Routes, Navigate } from 'react-router-dom'
+import { Panel } from 'third-party-ui'
+export function Shell() {
+  return <Routes><Route path="/known" element={<Panel />} /><Route path="*" element={<Navigate to="/known" />} /></Routes>
+}`,
+      }
+
+      expect(resolveRouters(extractRouters([source]))[0].handles.map(label)).toEqual(['Shell /known', 'Shell *'])
+    })
 
     it('accepts an inventory that matches, whatever the JSX formatting', () => {
       expect(problems(baseRoutes)).toEqual([])

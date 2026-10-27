@@ -204,6 +204,30 @@ function jsxAttribute(element: Node, name: string): Node | undefined {
   return attributes.find(attribute => attribute.type === 'JSXAttribute' && ((attribute.name as Node).name === name))
 }
 
+/** Router imports may only appear as JSX tag names, never as component values. */
+function rejectRouterAPIValues(program: Node, file: string, local: { Route: Set<string>; Routes: Set<string> }): void {
+  const visit = (node: Node, parent?: Node, field?: string) => {
+    if (node.type === 'Identifier') {
+      const name = String(node.name)
+      const api = local.Route.has(name) ? 'Route' : local.Routes.has(name) ? 'Routes' : undefined
+      if (api) {
+        const isStaticPropertyName = (parent?.type === 'Property' || parent?.type === 'MethodDefinition' || parent?.type === 'ClassMethod') && field === 'key' && !parent.computed
+          || parent?.type === 'MemberExpression' && field === 'property' && !parent.computed
+        if (!isStaticPropertyName) {
+          throw new Error(`${file} uses imported ${api} as a value outside a JSX tag; the console route inventory cannot follow router components passed through props, objects, or function calls`)
+        }
+      }
+    }
+    if (node.type === 'ImportDeclaration') return
+    for (const [key, value] of Object.entries(node)) {
+      if (key === 'parent') continue
+      if (Array.isArray(value)) value.filter(isNode).forEach(child => visit(child, node, key))
+      else if (isNode(value)) visit(value, node, key)
+    }
+  }
+  visit(program)
+}
+
 /** The components that a JSX expression renders, by name. */
 function renderedComponents(node: Node | undefined): string[] {
   if (!node) return []
@@ -425,6 +449,7 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
     }
     walk(program, '')
     if (routeElements !== collectedRoutes) throw new Error(`${file}: a <Route> is outside every <Routes>, which the console route inventory check cannot place`)
+    rejectRouterAPIValues(program, file, local)
   }
   return routers
 }
@@ -812,6 +837,46 @@ export function HiddenRouter() {
     it('refuses local aliases that could hide routes inside a readable router', () => {
       expect(() => extractRouters([{ file: 'src/i.tsx', code: `import { Route, Routes } from 'react-router-dom'\nconst HiddenRoute = Route\nexport function I() { return <Routes><Route path="/visible" /><HiddenRoute path="/hidden" /></Routes> }` }])).toThrow(/aliases imported Route as HiddenRoute/)
       expect(() => extractRouters([{ file: 'src/j.tsx', code: `import { Route, Routes } from 'react-router-dom'\nconst HiddenRoutes = Routes\nexport function J() { return <HiddenRoutes><Route path="/visible" /></HiddenRoutes> }` }])).toThrow(/aliases imported Routes as HiddenRoutes/)
+    })
+
+    it('refuses imported router components passed as values to wrappers', () => {
+      const imports = `import { Route as RouterRoute, Routes as RouterRoutes } from 'react-router-dom'`
+      const cases = [
+        {
+          file: 'src/wrapper-props.tsx',
+          code: `${imports}
+function HiddenRouter({ Route: RouteComponent, Routes: RoutesComponent }) {
+  return <RoutesComponent><RouteComponent path="/hidden" element={<HiddenPage />} /></RoutesComponent>
+}
+function App() {
+  return <HiddenRouter Route={RouterRoute} Routes={RouterRoutes} />
+}`,
+        },
+        {
+          file: 'src/wrapper-object-props.tsx',
+          code: `${imports}
+function HiddenRouter({ Route: RouteComponent, Routes: RoutesComponent }) {
+  return <RoutesComponent><RouteComponent path="/hidden" /></RoutesComponent>
+}
+function App() {
+  return <HiddenRouter {...{ Route: RouterRoute, Routes: RouterRoutes }} />
+}`,
+        },
+        {
+          file: 'src/wrapper-call-args.tsx',
+          code: `${imports}
+function makeRouter(RouteComponent, RoutesComponent) {
+  return { Route: RouteComponent, Routes: RoutesComponent }
+}
+function App() {
+  return makeRouter(RouterRoute, RouterRoutes)
+}`,
+        },
+      ]
+
+      for (const fixture of cases) {
+        expect(() => extractRouters([fixture])).toThrow(/uses imported (Route|Routes) as a value outside a JSX tag/)
+      }
     })
 
     it('refuses Route prop spreads that could override the inventoried path', () => {

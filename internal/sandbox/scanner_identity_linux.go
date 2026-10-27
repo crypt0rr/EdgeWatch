@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -63,6 +64,7 @@ type scannerIdentityAllocator struct {
 	persistRuntimeLiveness   bool
 	runtimeLivenessMu        sync.Mutex
 	runtimeLivenessReference *os.File
+	ownActiveLeases          atomic.Int32
 }
 
 type scannerIdentityJournal struct {
@@ -89,6 +91,7 @@ type scannerIdentityLease struct {
 	privateRuntime bool
 	livenessRef    *os.File
 	finished       bool
+	ownActive      bool
 }
 
 func productionScannerIdentityAllocator() *scannerIdentityAllocator {
@@ -232,6 +235,8 @@ func (allocator *scannerIdentityAllocator) acquire(ctx context.Context) (*scanne
 			_ = livenessRef.Close()
 			return nil, err
 		}
+		allocator.ownActiveLeases.Add(1)
+		lease.ownActive = true
 		return lease, nil
 	}
 	counts := scannerIdentityPoolCounts(allocator, journal, identitiesInUse)
@@ -244,6 +249,7 @@ func scannerIdentityPoolCounts(allocator *scannerIdentityAllocator, journal scan
 	status.UIDStart = int(allocator.uidStart)
 	status.UIDEnd = int(allocator.uidStart + allocator.count - 1)
 	status.MaxParallel = int(allocator.count)
+	status.OwnActive = int(allocator.ownActiveLeases.Load())
 	for _, entry := range journal.Leases {
 		switch entry.State {
 		case "active":
@@ -397,10 +403,18 @@ func (lease *scannerIdentityLease) quarantine() error {
 	// must never turn uncertain cleanup into an ordinary release. Keep the
 	// liveness reference open so a later allocator still sees the scope as live.
 	lease.finished = true
+	lease.retireOwnActive()
 	if err := lease.update("quarantined"); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (lease *scannerIdentityLease) retireOwnActive() {
+	if lease != nil && lease.ownActive && lease.allocator != nil {
+		lease.allocator.ownActiveLeases.Add(-1)
+		lease.ownActive = false
+	}
 }
 
 func (lease *scannerIdentityLease) closeLivenessReference() error {
@@ -471,6 +485,7 @@ func (lease *scannerIdentityLease) release() error {
 		return errors.New("release scanner identity: durable release failed")
 	}
 	lease.finished = true
+	lease.retireOwnActive()
 	if err := lease.closeLivenessReference(); err != nil {
 		return errors.New("release scanner identity: liveness reference close failed")
 	}

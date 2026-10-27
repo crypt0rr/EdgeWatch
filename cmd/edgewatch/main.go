@@ -1026,8 +1026,9 @@ func notificationSandboxOptions(cfg *config.Config) sandbox.Options {
 // scannerSandboxWarnings reports a sandbox that auto mode could not enforce
 // while scanner processes run as UID 0. A daemon that runs as another user
 // starts scanner processes as that user, which the sandbox would not improve
-// on. It also reports a pool whose reachable identities, which include the
-// ones the daemon's running scans hold, are fewer than maxConcurrent.
+// on. It also reports a pool whose shared reachable identities, including
+// every active lease because health cannot identify its owner, are fewer than
+// maxConcurrent.
 func scannerSandboxWarnings(status sandbox.Status, maxConcurrent int) []string {
 	if status.Mode != sandbox.ModeOff && status.IdentityPool != nil && status.IdentityPool.State == sandbox.StateUnavailable {
 		return []string{"scanner launches are refused because the per-invocation identity pool could not be enforced: " + status.IdentityPool.Reason}

@@ -19,7 +19,7 @@ import (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 79
+const schemaVersion = 80
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -57,6 +57,9 @@ var conditionalMigrationStatements = map[int]func(context.Context, *sql.Tx) ([]s
 	// Schema 78 records the start of the latest scan-cycle attempt so a
 	// completed cycle remains a duration sample after a finalization crash.
 	78: migration78ConditionalStatements,
+	// Schema 80 stores each scan's cycle execution key and indexes both
+	// timeout-history key shapes for bounded lookups.
+	80: migration80ConditionalStatements,
 }
 
 // newerSchemaError is the refusal for a database that a newer release has
@@ -388,6 +391,9 @@ func schemaMigrationStatements() map[int][]string {
 		// The scan-slot demand estimate reads each job's newest completed
 		// cycles from an index. See migration79.go.
 		79: migration79Statements(),
+		// Timed-out scan history is indexed by the exact settings key before
+		// applying its history limit. See migration80.go.
+		80: migration80Statements(),
 	}
 }
 

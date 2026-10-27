@@ -5,6 +5,7 @@ import (
 	"errors"
 	"hash/fnv"
 	"math"
+	"math/bits"
 	"sort"
 	"strconv"
 	"strings"
@@ -131,28 +132,44 @@ func (a *App) scheduledScanDemand(ctx context.Context, ts *store.TenantStore) (S
 	}
 	for _, job := range scheduled {
 		var perRun float64
+		historyJob := false
+		lowerBoundJob := false
+		unestimatedJob := false
 		if timedOutOnly[job.record.ID] {
 			perRun = job.record.Job.Timeout.Value().Seconds()
-			result.HistoryJobs++
+			historyJob = true
 		} else if samples := history[job.record.ID]; len(samples) > 0 {
 			perRun = medianCycleDuration(samples).Seconds()
-			result.HistoryJobs++
+			historyJob = true
 		} else {
 			lowerBound, hasBound, incomplete := scanRateLowerBound(job.record.Job, a.Config.Scanner.MaxJobHostsValue())
 			if hasBound {
 				perRun = lowerBound
-				result.LowerBoundJobs++
+				lowerBoundJob = true
 			} else {
-				result.UnestimatedJobs++
+				unestimatedJob = true
 			}
 			if incomplete && hasBound {
-				result.UnestimatedJobs++
+				unestimatedJob = true
 			}
 		}
 		runSeconds := runSlotSeconds(job.record.Job, perRun)
 		runsPerDay, skipped, err := job.schedule.runsForDuration(ctx, runSeconds)
 		if err != nil {
+			if errors.Is(err, errInvalidScanSchedulePattern) {
+				result.UnestimatedJobs++
+				continue
+			}
 			return result, err
+		}
+		if historyJob {
+			result.HistoryJobs++
+		}
+		if lowerBoundJob {
+			result.LowerBoundJobs++
+		}
+		if unestimatedJob {
+			result.UnestimatedJobs++
 		}
 		demand := runSeconds * runsPerDay
 		if skipped {
@@ -207,15 +224,16 @@ type scanRunsPerDayKey struct {
 }
 
 type scanRunsPerDayValue struct {
-	runsPerDay    float64
-	ok            bool
-	start         time.Time
-	end           time.Time
-	windowSeconds float64
-	minimumGap    time.Duration
-	schedule      cron.Schedule
-	occurrences   []uint32
-	rank          uint64
+	runsPerDay           float64
+	ok                   bool
+	observationsComplete bool
+	start                time.Time
+	end                  time.Time
+	windowSeconds        float64
+	minimumGap           time.Duration
+	schedule             cron.Schedule
+	occurrences          []uint32
+	rank                 uint64
 }
 
 // cachedScanDurationKey is the duration key of one revision of a job.
@@ -371,21 +389,23 @@ func scanJobRunsPerDay(job config.Job, defaultTimezone string) (float64, bool) {
 }
 
 // scheduleRunsPerDay averages a valid five-field schedule over one calendar
-// year. For dense schedules it stops after two weeks of observations, which
-// captures the daily and weekly pattern without iterating hundreds of
-// thousands of one-minute runs.
+// year. Dense schedules use calendar-field counts instead of expanding every
+// tick; see schedulePattern.
 func scheduleRunsPerDay(timezone, scheduleText string) (float64, bool) {
 	value, err := schedulePattern(context.Background(), timezone, scheduleText)
 	return value.runsPerDay, value.ok && err == nil
 }
 
 // schedulePattern averages a valid five-field schedule over one calendar
-// year and retains its bounded tick offsets for simulating the scheduler's
-// skip-while-active rule. Dense schedules stop after 20,000 ticks, which
-// captures their daily and weekly pattern without storing a whole year's
-// minute-by-minute calendar.
+// year and retains its tick offsets for simulating the scheduler's
+// skip-while-active rule when the year fits within the observation limit.
+// Denser schedules use their calendar fields to count the full year without
+// storing or expanding every minute.
 func schedulePattern(ctx context.Context, timezone, scheduleText string) (scanRunsPerDayValue, error) {
 	var value scanRunsPerDayValue
+	if err := ctx.Err(); err != nil {
+		return value, err
+	}
 	location, err := time.LoadLocation(timezone)
 	if err != nil {
 		return value, errInvalidScanSchedulePattern
@@ -400,47 +420,54 @@ func schedulePattern(ctx context.Context, timezone, scheduleText string) (scanRu
 	value.schedule = schedule
 	value.windowSeconds = value.end.Sub(value.start).Seconds()
 	value.occurrences = make([]uint32, 0, min(scanScheduleObservationLimit, 128))
-	var previous time.Time
-	var observedThrough time.Time
-	for next := schedule.Next(value.start.Add(-time.Nanosecond)); next.Before(value.end); next = schedule.Next(next) {
-		if err := ctx.Err(); err != nil {
-			return scanRunsPerDayValue{}, err
-		}
-		value.occurrences = append(value.occurrences, uint32(next.Sub(value.start)/time.Second))
-		if !previous.IsZero() {
-			gap := next.Sub(previous)
-			if value.minimumGap == 0 || gap < value.minimumGap {
-				value.minimumGap = gap
-			}
-		}
-		previous = next
-		observedThrough = next
-		if len(value.occurrences) >= scanScheduleObservationLimit {
-			break
-		}
+	if err := ctx.Err(); err != nil {
+		return scanRunsPerDayValue{}, err
 	}
-	runs := len(value.occurrences)
+	first := schedule.Next(value.start.Add(-time.Nanosecond))
+	if err := ctx.Err(); err != nil {
+		return scanRunsPerDayValue{}, err
+	}
+	if first.IsZero() {
+		return scanRunsPerDayValue{}, errInvalidScanSchedulePattern
+	}
+	spec, ok := schedule.(*cron.SpecSchedule)
+	if !ok {
+		return scanRunsPerDayValue{}, errInvalidScanSchedulePattern
+	}
+	runs, err := countScheduleRunsInYear(ctx, schedule, spec, value.start, value.end)
+	if err != nil {
+		return scanRunsPerDayValue{}, err
+	}
+	value.observationsComplete = runs <= scanScheduleObservationLimit
 	if runs == 0 {
 		value.ok = true
 		return value, nil
 	}
-	if runs >= scanScheduleObservationLimit && observedThrough.After(value.start) {
-		local := observedThrough.In(location)
-		completeDayEnd := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, location)
-		if completeDayEnd.After(value.start) {
-			value.windowSeconds = completeDayEnd.Sub(value.start).Seconds()
-			cutoff := sort.Search(len(value.occurrences), func(i int) bool {
-				return float64(value.occurrences[i]) >= value.windowSeconds
-			})
-			value.occurrences = value.occurrences[:cutoff]
-			value.minimumGap = 0
-			for i := 1; i < len(value.occurrences); i++ {
-				gap := time.Duration(value.occurrences[i]-value.occurrences[i-1]) * time.Second
+	if !value.observationsComplete {
+		// Five-field schedules fire on minute boundaries. This conservative
+		// gap lets one-minute runs use the exact annual count; longer runs
+		// simulate their starts across the full year below.
+		value.minimumGap = time.Minute
+	} else {
+		var previous time.Time
+		for next := first; next.Before(value.end); next = schedule.Next(next) {
+			if err := ctx.Err(); err != nil {
+				return scanRunsPerDayValue{}, err
+			}
+			if next.IsZero() {
+				return scanRunsPerDayValue{}, errInvalidScanSchedulePattern
+			}
+			value.occurrences = append(value.occurrences, uint32(next.Sub(value.start)/time.Second))
+			if !previous.IsZero() {
+				gap := next.Sub(previous)
 				if value.minimumGap == 0 || gap < value.minimumGap {
 					value.minimumGap = gap
 				}
 			}
-			runs = len(value.occurrences)
+			previous = next
+		}
+		if len(value.occurrences) != runs {
+			return scanRunsPerDayValue{}, errInvalidScanSchedulePattern
 		}
 	}
 	if value.windowSeconds <= 0 {
@@ -451,8 +478,76 @@ func schedulePattern(ctx context.Context, timezone, scheduleText string) (scanRu
 	return value, nil
 }
 
+const cronStarBit = uint64(1) << 63
+
+// countScheduleRunsInYear counts ordinary local days from the cron field
+// bitsets, then uses cron.Next on the handful of days whose local duration
+// differs from 24 hours. This keeps dense schedules bounded without dropping
+// their month, day-of-month, weekday, or daylight-saving behavior.
+func countScheduleRunsInYear(ctx context.Context, schedule cron.Schedule, spec *cron.SpecSchedule, start, end time.Time) (int, error) {
+	ticksPerOrdinaryDay := bits.OnesCount64(spec.Second&^cronStarBit) * bits.OnesCount64(spec.Minute&^cronStarBit) * bits.OnesCount64(spec.Hour&^cronStarBit)
+	var runs int
+	for dayStart := start; dayStart.Before(end); {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		year, month, day := dayStart.Date()
+		dayEnd := time.Date(year, month, day+1, 0, 0, 0, 0, start.Location())
+		if !dayEnd.After(dayStart) {
+			return 0, errInvalidScanSchedulePattern
+		}
+		if dayEnd.After(end) {
+			dayEnd = end
+		}
+		if scheduleMatchesDay(spec, dayStart) {
+			if dayEnd.Sub(dayStart) != 24*time.Hour || dayStart.Hour() != 0 || dayStart.Minute() != 0 || dayStart.Second() != 0 {
+				count, err := countScheduleTicks(ctx, schedule, dayStart, dayEnd)
+				if err != nil {
+					return 0, err
+				}
+				runs += count
+			} else {
+				runs += ticksPerOrdinaryDay
+			}
+		}
+		dayStart = dayEnd
+	}
+	return runs, nil
+}
+
+func scheduleMatchesDay(schedule *cron.SpecSchedule, day time.Time) bool {
+	if 1<<uint(day.Month())&schedule.Month == 0 {
+		return false
+	}
+	domMatches := 1<<uint(day.Day())&schedule.Dom != 0
+	dowMatches := 1<<uint(day.Weekday())&schedule.Dow != 0
+	if schedule.Dom&cronStarBit != 0 || schedule.Dow&cronStarBit != 0 {
+		return domMatches && dowMatches
+	}
+	return domMatches || dowMatches
+}
+
+func countScheduleTicks(ctx context.Context, schedule cron.Schedule, start, end time.Time) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	var count int
+	for next := schedule.Next(start.Add(-time.Nanosecond)); ; next = schedule.Next(next) {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		if next.IsZero() {
+			return 0, errInvalidScanSchedulePattern
+		}
+		if !next.Before(end) {
+			return count, nil
+		}
+		count++
+	}
+}
+
 func (value scanRunsPerDayValue) runsForDuration(ctx context.Context, runSeconds float64) (runsPerDay float64, skipped bool, err error) {
-	if !value.ok || len(value.occurrences) == 0 || runSeconds <= 0 {
+	if !value.ok || value.runsPerDay <= 0 || runSeconds <= 0 {
 		return 0, false, nil
 	}
 	if err := ctx.Err(); err != nil {
@@ -462,14 +557,16 @@ func (value scanRunsPerDayValue) runsForDuration(ctx context.Context, runSeconds
 		return value.runsPerDay, false, nil
 	}
 	runDuration := time.Duration(runSeconds * float64(time.Second))
-	if runSeconds > value.windowSeconds {
-		// Dense schedules are observed for two weeks when compiling their
-		// cached pattern. A longer run needs the full calendar year to model
-		// skipped ticks accurately; skipping ahead over each active run keeps
-		// this bounded by the number of actual starts.
+	if runSeconds > value.windowSeconds || !value.observationsComplete {
+		// A truncated set of offsets cannot represent inactive calendar
+		// periods or daylight-saving changes. Model starts over the same full
+		// year used for the rate; skipping ahead over active runs bounds work.
 		return simulateSchedule(ctx, value.schedule, value.start, value.end, runDuration)
 	}
-	busyUntil := simulateSchedulePrefix(ctx, value.schedule, value.start, runDuration)
+	busyUntil, err := simulateSchedulePrefix(ctx, value.schedule, value.start, runDuration)
+	if err != nil {
+		return 0, false, err
+	}
 	var starts float64
 	for i, offset := range value.occurrences {
 		if i&255 == 0 {
@@ -492,12 +589,18 @@ func (value scanRunsPerDayValue) runsForDuration(ctx context.Context, runSeconds
 	return starts / windowDays, skipped, nil
 }
 
-func simulateSchedulePrefix(ctx context.Context, schedule cron.Schedule, start time.Time, runDuration time.Duration) time.Time {
+func simulateSchedulePrefix(ctx context.Context, schedule cron.Schedule, start time.Time, runDuration time.Duration) (time.Time, error) {
 	warmStart := start.Add(-2 * runDuration)
 	busyUntil := warmStart
-	for next := schedule.Next(warmStart.Add(-time.Nanosecond)); next.Before(start); {
-		if ctx.Err() != nil {
-			return busyUntil
+	for next := schedule.Next(warmStart.Add(-time.Nanosecond)); ; {
+		if err := ctx.Err(); err != nil {
+			return busyUntil, err
+		}
+		if next.IsZero() {
+			return busyUntil, errInvalidScanSchedulePattern
+		}
+		if !next.Before(start) {
+			return busyUntil, nil
 		}
 		if next.Before(busyUntil) {
 			next = schedule.Next(busyUntil.Add(-time.Nanosecond))
@@ -506,7 +609,6 @@ func simulateSchedulePrefix(ctx context.Context, schedule cron.Schedule, start t
 		busyUntil = next.Add(runDuration)
 		next = schedule.Next(next)
 	}
-	return busyUntil
 }
 
 func simulateSchedule(ctx context.Context, schedule cron.Schedule, start, end time.Time, runDuration time.Duration) (float64, bool, error) {
@@ -514,9 +616,15 @@ func simulateSchedule(ctx context.Context, schedule cron.Schedule, start, end ti
 	busyUntil := warmStart
 	var starts float64
 	skipped := false
-	for next := schedule.Next(warmStart.Add(-time.Nanosecond)); next.Before(end); {
+	for next := schedule.Next(warmStart.Add(-time.Nanosecond)); ; {
 		if err := ctx.Err(); err != nil {
 			return 0, false, err
+		}
+		if next.IsZero() {
+			return 0, false, errInvalidScanSchedulePattern
+		}
+		if !next.Before(end) {
+			break
 		}
 		if next.Before(busyUntil) {
 			if !next.Before(start) {

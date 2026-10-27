@@ -14,6 +14,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
+	"github.com/robfig/cron/v3"
 )
 
 func TestScanSlotDemandUsesMedianCompletedCycleDuration(t *testing.T) {
@@ -456,6 +457,88 @@ func TestScanJobRunsPerDayHandlesFallbackInvalidAndDenseSchedules(t *testing.T) 
 			t.Fatalf("dense schedule = %.4f runs/day, valid %v; want about 1440", got, ok)
 		}
 	})
+}
+
+func TestScanJobRunsPerDayCountsDenseCalendarScheduleAcrossYear(t *testing.T) {
+	t.Parallel()
+	pattern, err := schedulePattern(context.Background(), "UTC", "* * 1-15 * *")
+	if err != nil || !pattern.ok {
+		t.Fatalf("dense calendar schedule pattern = %+v, error %v; want a valid yearly estimate", pattern, err)
+	}
+	// The schedule runs every minute for the first 15 days of each month:
+	// 180 active days × 1,440 ticks divided by the 366-day 2024 calendar.
+	if got, want := pattern.runsPerDay, float64(180*24*60)/366; math.Abs(got-want) > 0.001 {
+		t.Fatalf("dense calendar schedule = %.4f runs/day; want the full-year average %.4f", got, want)
+	}
+	if pattern.observationsComplete || len(pattern.occurrences) != 0 {
+		t.Fatalf("dense calendar schedule retained %d of %d observations; want bounded offsets marked incomplete", len(pattern.occurrences), scanScheduleObservationLimit)
+	}
+	runs, skipped, err := pattern.runsForDuration(context.Background(), (15 * time.Minute).Seconds())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := float64(180*24*4) / 366; math.Abs(runs-want) > 0.001 || !skipped {
+		t.Fatalf("dense calendar schedule with 15m runs = %.4f starts/day, skipped %t; want %.4f and skipped", runs, skipped, want)
+	}
+}
+
+func TestScanJobScheduleTreatsNeverFiringCronAsUnestimatedPromptly(t *testing.T) {
+	t.Parallel()
+	app := &App{Config: &config.Config{}}
+	job := config.Job{Schedule: "0 3 30 2 *", Timezone: "UTC"}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	type result struct {
+		value scanRunsPerDayValue
+		err   error
+	}
+	done := make(chan result, 1)
+	started := time.Now()
+	go func() {
+		value, err := app.scanJobSchedule(ctx, job)
+		done <- result{value: value, err: err}
+	}()
+	select {
+	case got := <-done:
+		if got.err != nil || got.value.ok {
+			t.Fatalf("never-firing schedule returned %+v, error %v; want unestimated without an error", got.value, got.err)
+		}
+		if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+			t.Fatalf("never-firing schedule took %s to classify; want prompt completion", elapsed)
+		}
+	case <-ctx.Done():
+		t.Fatalf("never-firing schedule did not return promptly: %v", ctx.Err())
+	}
+
+	canceled, stop := context.WithCancel(context.Background())
+	stop()
+	if _, err := app.scanJobSchedule(canceled, job); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled never-firing schedule error = %v; want context.Canceled", err)
+	}
+}
+
+func TestScheduleSimulationStopsOnZeroNextAndPreservesCancellation(t *testing.T) {
+	t.Parallel()
+	schedule, err := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow).Parse("0 3 30 2 *")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	if _, _, err := simulateSchedule(ctx, schedule, start, end, time.Minute); !errors.Is(err, errInvalidScanSchedulePattern) {
+		t.Fatalf("simulation for a never-firing schedule error = %v; want invalid schedule", err)
+	}
+	if _, err := simulateSchedulePrefix(ctx, schedule, start, time.Minute); !errors.Is(err, errInvalidScanSchedulePattern) {
+		t.Fatalf("prefix simulation for a never-firing schedule error = %v; want invalid schedule", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := simulateSchedule(canceled, schedule, start, end, time.Minute); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled schedule simulation error = %v; want context.Canceled", err)
+	}
 }
 
 func TestScanJobScheduleTreatsInvalidSettingsAsUnestimated(t *testing.T) {

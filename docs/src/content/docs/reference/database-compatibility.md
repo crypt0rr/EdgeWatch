@@ -211,9 +211,12 @@ requires the complete pre-upgrade backup.
 Schema 79 adds a partial index of completed scan cycles by job, execution
 hash, and completion time. The scan-slot demand estimate reads each job's
 newest completed cycles through it instead of reading and sorting the job's
-whole cycle history. Building the index reads each scan cycle once; the
-migration changes no cycle, scan, or baseline rows. An older release must not
-open the upgraded database; rollback requires the complete pre-upgrade backup.
+whole cycle history. A unit's Jobs estimate reads only that unit's jobs;
+platform status uses the index to estimate every active unit's demand through
+each unit's tenant-scoped store and returns only aggregate counts and sums.
+Building the index reads each scan cycle once; the migration changes no cycle,
+scan, or baseline rows. An older release must not open the upgraded database;
+rollback requires the complete pre-upgrade backup.
 
 ## Schema 80
 

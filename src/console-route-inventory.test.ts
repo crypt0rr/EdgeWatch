@@ -90,6 +90,31 @@ function jsxRouterMemberName(node: Node): string | undefined {
   return member === 'Route' || member === 'Routes' ? member : undefined
 }
 
+function referencedRouterAPI(node: Node | undefined, local: { Route: Set<string>; Routes: Set<string> }): string | undefined {
+  if (!node) return undefined
+  if (node.type === 'Identifier') {
+    const name = String(node.name)
+    return local.Route.has(name) ? 'Route' : local.Routes.has(name) ? 'Routes' : undefined
+  }
+  if (node.type === 'Property') {
+    const api = referencedRouterAPI(node.value as Node, local)
+    return api ?? (node.computed ? referencedRouterAPI(node.key as Node, local) : undefined)
+  }
+  if (node.type === 'MemberExpression') {
+    const api = referencedRouterAPI(node.object as Node, local)
+    return api ?? (node.computed ? referencedRouterAPI(node.property as Node, local) : undefined)
+  }
+  if (node.type === 'VariableDeclarator') return referencedRouterAPI(node.init as Node | undefined, local)
+  if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') {
+    return referencedRouterAPI(node.body as Node | undefined, local)
+  }
+  if (node.type === 'ClassDeclaration' || node.type === 'ClassExpression') {
+    const api = referencedRouterAPI(node.superClass as Node | undefined, local)
+    return api ?? referencedRouterAPI(node.body as Node | undefined, local)
+  }
+  return childNodes(node).map(child => referencedRouterAPI(child, local)).find(Boolean)
+}
+
 function jsxAttribute(element: Node, name: string): Node | undefined {
   const attributes = (element.openingElement as Node).attributes as Node[]
   return attributes.find(attribute => attribute.type === 'JSXAttribute' && ((attribute.name as Node).name === name))
@@ -137,6 +162,23 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
         if (unreadRouterAPIs.has(imported)) throw new Error(`${file} imports ${imported}; the console route inventory check reads only <Routes> and <Route> elements, so declare routes as JSX or teach src/console-route-inventory.test.ts the new API`)
       }
     }
+
+    const rejectRouterAPIAliases = (node: Node) => {
+      if (node.type === 'VariableDeclarator') {
+        const api = referencedRouterAPI(node.init as Node | undefined, local)
+        if (api) {
+          const id = node.id as Node
+          const alias = id.type === 'Identifier' ? String(id.name) : 'a local binding'
+          throw new Error(`${file} aliases imported ${api} as ${alias}; the console route inventory check requires directly named JSX router APIs`)
+        }
+      }
+      if (node.type === 'AssignmentExpression') {
+        const api = referencedRouterAPI(node.right as Node | undefined, local)
+        if (api) throw new Error(`${file} assigns imported ${api} to a local alias; the console route inventory check requires directly named JSX router APIs`)
+      }
+      childNodes(node).forEach(rejectRouterAPIAliases)
+    }
+    rejectRouterAPIAliases(program)
 
     const importedRouterAPI = (name: string) => local.Route.has(name) ? 'Route' : local.Routes.has(name) ? 'Routes' : undefined
     for (const statement of program.body as Node[]) {
@@ -497,6 +539,11 @@ export function PlatformShell() { return <Routes><Route path="/units/:id/:tab" e
       // A namespace-style element is refused even when the file also has
       // readable named imports, so its route cannot hide beside them.
       expect(() => extractRouters([{ file: 'src/h.tsx', code: `import { Route, Routes } from 'react-router-dom'\nexport function H() { return <Routes><Route path="/visible" /><RR.Route path="/hidden" /></Routes> }` }])).toThrow(/JSX member expression ending in Route/)
+    })
+
+    it('refuses local aliases that could hide routes inside a readable router', () => {
+      expect(() => extractRouters([{ file: 'src/i.tsx', code: `import { Route, Routes } from 'react-router-dom'\nconst HiddenRoute = Route\nexport function I() { return <Routes><Route path="/visible" /><HiddenRoute path="/hidden" /></Routes> }` }])).toThrow(/aliases imported Route as HiddenRoute/)
+      expect(() => extractRouters([{ file: 'src/j.tsx', code: `import { Route, Routes } from 'react-router-dom'\nconst HiddenRoutes = Routes\nexport function J() { return <HiddenRoutes><Route path="/visible" /></HiddenRoutes> }` }])).toThrow(/aliases imported Routes as HiddenRoutes/)
     })
   })
 })

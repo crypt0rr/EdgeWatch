@@ -159,9 +159,9 @@ when an entry no longer reaches the route it stands for. A route that renders
 no page of its own, such as a catch-all redirect outside the console shells,
 goes in `routesWithoutInventoryEntry` with its reason instead.
 The parser fails closed on namespace or default router imports, re-exports
-from a router module, source-less re-exports of imported `Route` or `Routes`,
-and JSX member forms such as `<RR.Route>`; teach the inventory check before
-introducing any of these forms.
+from a router module, source-less re-exports and local aliases of imported
+`Route` or `Routes`, and JSX member forms such as `<RR.Route>`; teach the
+inventory check before introducing any of these forms.
 
 To add a console page, add its `<Route>` with a string-literal `path`, then an
 entry with its scope and permission to `unitConsoleRoutes` or

@@ -518,6 +518,36 @@ func TestScanJobScheduleTreatsNeverFiringCronAsUnestimatedPromptly(t *testing.T)
 	}
 }
 
+type cancelAfterContextChecks struct {
+	context.Context
+	cancel    context.CancelFunc
+	remaining int
+}
+
+func (ctx *cancelAfterContextChecks) Err() error {
+	if ctx.remaining == 0 {
+		ctx.cancel()
+	} else {
+		ctx.remaining--
+	}
+	return ctx.Context.Err()
+}
+
+func TestScanJobSchedulePropagatesCancellationDuringExpansion(t *testing.T) {
+	t.Parallel()
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := &cancelAfterContextChecks{Context: base, cancel: cancel, remaining: 2}
+	app := &App{Config: &config.Config{}}
+
+	if _, err := app.scanJobSchedule(ctx, config.Job{Schedule: "0 0 1 1 *", Timezone: "UTC"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation during schedule expansion error = %v; want context.Canceled", err)
+	}
+	if got := len(app.scanSlotDemand.runsPerDay); got != 0 {
+		t.Fatalf("canceled schedule expansion cached %d entries; want none", got)
+	}
+}
+
 func TestScheduleSimulationStopsOnZeroNextAndPreservesCancellation(t *testing.T) {
 	t.Parallel()
 	schedule, err := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow).Parse("0 3 30 2 *")

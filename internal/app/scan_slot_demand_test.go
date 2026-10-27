@@ -542,6 +542,23 @@ func TestDenseScheduleDemandMemoizesByNormalizedScheduleAndDuration(t *testing.T
 	}
 }
 
+func TestScheduleSimulationBudgetPreservesCancellationWhenExhausted(t *testing.T) {
+	t.Parallel()
+	pattern, err := schedulePattern(context.Background(), "UTC", "* * * * *")
+	if err != nil || !pattern.ok {
+		t.Fatalf("dense schedule pattern = %+v, error %v", pattern, err)
+	}
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Let memo lookup and run projection begin, then cancel inside simulation
+	// after its first Schedule.Next call is refused by the empty budget.
+	ctx := &cancelAfterContextChecks{Context: base, cancel: cancel, remaining: 2}
+	budget := &scanScheduleSimulationBudget{limit: 0}
+	if _, _, err := memoizedScheduleRunsForDurationWithBudget(ctx, make(map[scanScheduleDurationKey]scanScheduleDurationEstimate), pattern, 61, budget); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation at exhausted schedule budget = %v; want context.Canceled", err)
+	}
+}
+
 func TestScanJobScheduleTreatsNeverFiringCronAsUnestimatedPromptly(t *testing.T) {
 	t.Parallel()
 	app := &App{Config: &config.Config{}}

@@ -29,9 +29,15 @@ const (
 	scanRunsPerDayCacheLimit     = 1024
 	scanDurationKeyCacheLimit    = 16384
 	scanScheduleObservationLimit = 20_000
+	// deploymentScheduleSimulationNextCallLimit bounds expensive cron
+	// projections across all active units in one platform demand request.
+	deploymentScheduleSimulationNextCallLimit = 540_000
 )
 
-var errInvalidScanSchedulePattern = errors.New("invalid scan schedule pattern")
+var (
+	errInvalidScanSchedulePattern       = errors.New("invalid scan schedule pattern")
+	errScheduleSimulationBudgetExceeded = errors.New("deployment schedule simulation budget exceeded")
+)
 
 // ScanSlotDemand is a tenant's estimated scheduled scan work compared with
 // the slot-hours its effective scan-slot limit can provide in a day.
@@ -90,6 +96,13 @@ func (a *App) ScanSlotDemand(ctx context.Context, ts *store.TenantStore) (ScanSl
 // the unit of ts, as ScanSlotDemand describes, and counts the jobs by the
 // source of their estimate. It leaves the capacity fields zero.
 func (a *App) scheduledScanDemand(ctx context.Context, ts *store.TenantStore) (ScanSlotDemand, error) {
+	return a.scheduledScanDemandWithSimulationCache(ctx, ts, make(map[scanScheduleDurationKey]scanScheduleDurationEstimate), nil)
+}
+
+// scheduledScanDemandWithSimulationCache lets one deployment request share
+// pure schedule-duration projections across its unit-scoped store reads. Its
+// cache and work budget belong to that request, so no tenant data is shared.
+func (a *App) scheduledScanDemandWithSimulationCache(ctx context.Context, ts *store.TenantStore, simulations map[scanScheduleDurationKey]scanScheduleDurationEstimate, budget *scanScheduleSimulationBudget) (ScanSlotDemand, error) {
 	var result ScanSlotDemand
 	jobs, err := ts.ListJobs(ctx, false)
 	if err != nil {
@@ -130,10 +143,6 @@ func (a *App) scheduledScanDemand(ctx context.Context, ts *store.TenantStore) (S
 	if err != nil {
 		return result, err
 	}
-	// Many jobs can share a cron schedule and effective run duration. Keep the
-	// per-request memo bounded by the number of scheduled jobs, so one dense
-	// annual simulation serves every equivalent job in this estimate.
-	simulations := make(map[scanScheduleDurationKey]scanScheduleDurationEstimate)
 	for _, job := range scheduled {
 		var perRun float64
 		historyJob := false
@@ -158,9 +167,9 @@ func (a *App) scheduledScanDemand(ctx context.Context, ts *store.TenantStore) (S
 			}
 		}
 		runSeconds := runSlotSeconds(job.record.Job, perRun)
-		runsPerDay, skipped, err := memoizedScheduleRunsForDuration(ctx, simulations, job.schedule, runSeconds)
+		runsPerDay, skipped, err := memoizedScheduleRunsForDurationWithBudget(ctx, simulations, job.schedule, runSeconds, budget)
 		if err != nil {
-			if errors.Is(err, errInvalidScanSchedulePattern) {
+			if errors.Is(err, errInvalidScanSchedulePattern) || errors.Is(err, errScheduleSimulationBudgetExceeded) {
 				result.UnestimatedJobs++
 				continue
 			}
@@ -243,6 +252,29 @@ type scanScheduleDurationKey struct {
 type scanScheduleDurationEstimate struct {
 	runsPerDay float64
 	skipped    bool
+}
+
+// scanScheduleSimulationBudget bounds calls to cron.Schedule.Next during one
+// deployment projection. A projection that cannot finish within the budget
+// is left unestimated instead of returning a partial or undercounted result.
+type scanScheduleSimulationBudget struct {
+	limit int
+	used  int
+}
+
+type budgetedCronSchedule struct {
+	schedule  cron.Schedule
+	budget    *scanScheduleSimulationBudget
+	exhausted *bool
+}
+
+func (schedule budgetedCronSchedule) Next(after time.Time) time.Time {
+	if schedule.budget.used >= schedule.budget.limit {
+		*schedule.exhausted = true
+		return time.Time{}
+	}
+	schedule.budget.used++
+	return schedule.schedule.Next(after)
 }
 
 type scanRunsPerDayValue struct {
@@ -618,6 +650,10 @@ func (value scanRunsPerDayValue) runsForDuration(ctx context.Context, runSeconds
 }
 
 func memoizedScheduleRunsForDuration(ctx context.Context, cache map[scanScheduleDurationKey]scanScheduleDurationEstimate, value scanRunsPerDayValue, runSeconds float64) (float64, bool, error) {
+	return memoizedScheduleRunsForDurationWithBudget(ctx, cache, value, runSeconds, nil)
+}
+
+func memoizedScheduleRunsForDurationWithBudget(ctx context.Context, cache map[scanScheduleDurationKey]scanScheduleDurationEstimate, value scanRunsPerDayValue, runSeconds float64, budget *scanScheduleSimulationBudget) (float64, bool, error) {
 	if !value.ok || value.runsPerDay <= 0 || runSeconds <= 0 {
 		return value.runsForDuration(ctx, runSeconds)
 	}
@@ -628,7 +664,17 @@ func memoizedScheduleRunsForDuration(ctx context.Context, cache map[scanSchedule
 	if estimate, ok := cache[key]; ok {
 		return estimate.runsPerDay, estimate.skipped, nil
 	}
+	var budgetExhausted bool
+	if budget != nil {
+		value.schedule = budgetedCronSchedule{schedule: value.schedule, budget: budget, exhausted: &budgetExhausted}
+	}
 	runsPerDay, skipped, err := value.runsForDuration(ctx, runSeconds)
+	if budgetExhausted {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, false, ctxErr
+		}
+		return 0, false, errScheduleSimulationBudgetExceeded
+	}
 	if err == nil {
 		cache[key] = scanScheduleDurationEstimate{runsPerDay: runsPerDay, skipped: skipped}
 	}

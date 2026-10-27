@@ -137,12 +137,12 @@ CROSS JOIN scans AS s NOT INDEXED ON s.tenant_id=?2 AND s.rowid IN (
 		AND r.scanner_profile_id=b.profile_id AND r.scanner_profile_revision=b.profile_revision
 	ORDER BY y.finished_at DESC,y.id DESC LIMIT ?3)`
 
-// latestScanRunsTimedOutSQL checks the newest current-key run records inside
-// the same bounded scan-history window used for standalone duration samples.
-// It returns true only when at least one current-key run is present and every
-// one of the newest perJobLimit such runs timed out. Cycle attempts are keyed
-// by the cycle's execution hash; scans without a cycle use their recorded
-// scope hash and TCP scanner profile, as their duration samples do.
+// latestScanRunsTimedOutSQL filters the bounded set of newest matching-key
+// run records for each job. It returns true only when at least one current-key
+// run is present and every one of the newest perJobLimit such runs timed out.
+// Cycle attempts are keyed by the cycle's execution hash; scans without a
+// cycle use their recorded scope hash and TCP scanner profile, as their
+// duration samples do.
 const latestScanRunsTimedOutSQL = `WITH wanted AS MATERIALIZED (
 	SELECT j.id AS job_id,
 		CAST(json_extract(k.value,'$.execution_hash') AS TEXT) AS execution_hash,
@@ -157,20 +157,20 @@ const latestScanRunsTimedOutSQL = `WITH wanted AS MATERIALIZED (
 SELECT w.job_id, (
 	SELECT CASE WHEN COUNT(*)>0 AND SUM(CASE WHEN recent.status='timed_out' THEN 1 ELSE 0 END)=COUNT(*) THEN 1 ELSE 0 END
 	FROM (
-		SELECT recent.status
+		SELECT matching.status
 		FROM (
 			SELECT s.id,s.job_id,s.status,s.finished_at,s.cycle_id,s.config_hash,s.scanner_profile_id,s.scanner_profile_revision
 			FROM scans AS s INDEXED BY ` + scansJobHistoryIndex + `
+			LEFT JOIN scan_cycles AS c ON c.id=s.cycle_id AND c.job_id=s.job_id
+			LEFT JOIN jobs AS cycle_job ON cycle_job.id=c.job_id AND cycle_job.tenant_id=?2
 			WHERE s.job_id=w.job_id AND s.tenant_id=?2
+				AND ((s.cycle_id<>'' AND cycle_job.id IS NOT NULL AND c.execution_hash=w.execution_hash)
+					OR (s.cycle_id='' AND
+						(s.config_hash=w.config_hash OR (w.legacy_config_hash<>'' AND s.config_hash=w.legacy_config_hash))
+						AND s.scanner_profile_id=w.profile_id AND s.scanner_profile_revision=w.profile_revision))
 			ORDER BY s.finished_at DESC,s.id DESC LIMIT ?3
-		) AS recent
-		LEFT JOIN scan_cycles AS c ON c.id=recent.cycle_id AND c.job_id=recent.job_id
-		LEFT JOIN jobs AS cycle_job ON cycle_job.id=c.job_id AND cycle_job.tenant_id=?2
-		WHERE (recent.cycle_id<>'' AND cycle_job.id IS NOT NULL AND c.execution_hash=w.execution_hash)
-			OR (recent.cycle_id='' AND
-				(recent.config_hash=w.config_hash OR (w.legacy_config_hash<>'' AND recent.config_hash=w.legacy_config_hash))
-				AND recent.scanner_profile_id=w.profile_id AND recent.scanner_profile_revision=w.profile_revision)
-		ORDER BY recent.finished_at DESC,recent.id DESC LIMIT ?4
+		) AS matching
+		ORDER BY matching.finished_at DESC,matching.id DESC LIMIT ?4
 	) AS recent
 ) AS only_timed_out
 FROM wanted AS w`
@@ -271,10 +271,11 @@ func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, keys
 }
 
 // LatestScanRunsTimedOut reports whether each named job's newest current-key
-// run records all timed out. It examines at most perJobLimit times
-// scanDurationScanWindow newest scans per job, and returns only job IDs from
-// the requesting tenant. A result is true only when at least one matching
-// run was found and every one of the newest matching runs timed out.
+// run records all timed out. It considers at most perJobLimit times
+// scanDurationScanWindow newest matching-key records per job, then compares
+// the newest perJobLimit. It returns only job IDs from the requesting tenant.
+// A result is true only when at least one matching run was found and every
+// one of the newest matching runs timed out.
 func (ts *TenantStore) LatestScanRunsTimedOut(ctx context.Context, keys []ScanDurationKey, perJobLimit int) (map[string]bool, error) {
 	if err := ts.ready(); err != nil {
 		return nil, err

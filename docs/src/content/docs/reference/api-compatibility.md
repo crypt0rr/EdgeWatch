@@ -70,7 +70,11 @@ whether the job's demand exceeds a slot-day. The console shows a warning at
 80% utilization and above, and names the count of jobs with skipped ticks.
 `lower_bound_jobs` and `unestimated_jobs` are not disjoint counts: a job with a
 known-rate lower bound may also have additional work that cannot be fully
-estimated. The platform panel labels this possible overlap explicitly.
+estimated. The platform panel labels this possible overlap explicitly. The
+deployment estimate shares equivalent schedule-duration projections across
+active units and bounds total simulation work for each request. A job whose
+projection cannot finish within that budget is counted as unestimated and its
+slot-seconds are left out of the total.
 
 A unit's capacity is a limit, not a reservation: every unit's scans share the
 deployment's `scheduler.max_concurrent_scans` slots, so units that each stay

@@ -83,6 +83,79 @@ func TestLatestScanRunsTimedOutUsesCurrentKeysAndNewestRuns(t *testing.T) {
 	}
 }
 
+func TestLatestScanRunsTimedOutFiltersSettingsBeforeHistoryLimit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	defer s.Close()
+	tenant := defaultTenant(s)
+	job, err := tenant.CreateJob(ctx, testJob("restored-timeout-settings"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyA := NewScanDurationKey(job)
+	base := time.Date(2026, time.March, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 11; i++ {
+		saveDurationScan(t, s, model.Scan{
+			ID: fmt.Sprintf("settings-a-timeout-%02d", i), JobID: job.ID, Job: job.Job.Name,
+			JobRevision: job.Revision, FinishedAt: base.Add(time.Duration(i) * time.Hour), Status: "timed_out",
+			ConfigHash: keyA.ConfigHash, ScannerProfileID: keyA.ScannerProfileID,
+			ScannerProfileRevision: keyA.ScannerProfileRevision,
+		}, time.Minute)
+	}
+	changedSettings := job.Job
+	changedSettings.Targets = []string{"192.0.2.2"}
+	jobB, _, err := tenant.UpdateJob(ctx, job.ID, job.Revision, changedSettings, true, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB := NewScanDurationKey(jobB)
+	for i := 0; i < 44; i++ {
+		saveDurationScan(t, s, model.Scan{
+			ID: fmt.Sprintf("settings-b-newer-%02d", i), JobID: job.ID, Job: job.Job.Name,
+			JobRevision: jobB.Revision, FinishedAt: base.Add(time.Duration(100+i) * time.Hour), Status: "success",
+			ConfigHash: keyB.ConfigHash, ScannerProfileID: keyB.ScannerProfileID,
+			ScannerProfileRevision: keyB.ScannerProfileRevision,
+		}, time.Minute)
+	}
+
+	jobA, _, err := tenant.UpdateJob(ctx, jobB.ID, jobB.Revision, job.Job, true, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyRestoredA := NewScanDurationKey(jobA)
+	if keyRestoredA != keyA {
+		t.Fatalf("restored settings key = %+v, want original key %+v", keyRestoredA, keyA)
+	}
+	latest, err := tenant.LatestScanRunsTimedOut(ctx, []ScanDurationKey{keyRestoredA}, 11)
+	if err != nil || !latest[job.ID] {
+		t.Fatalf("restored settings' 11 matching timeouts behind newer settings = %v, %v; want true", latest, err)
+	}
+
+	otherTenant, err := s.Platform().CreateTenant(ctx, "Other timeout tenant", "other-timeouts", AuditEntry{ActorKind: AuditActorHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherScope, err := s.TenantScopeByID(ctx, otherTenant.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherJob, err := s.Tenant(otherScope).CreateJob(ctx, testJob("other-tenant-timeout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKey := NewScanDurationKey(otherJob)
+	saveDurationScan(t, s, model.Scan{
+		ID: "other-tenant-timeout-scan", JobID: otherJob.ID, Job: otherJob.Job.Name,
+		FinishedAt: base.Add(300 * time.Hour), Status: "timed_out", ConfigHash: otherKey.ConfigHash,
+		ScannerProfileID: otherKey.ScannerProfileID, ScannerProfileRevision: otherKey.ScannerProfileRevision,
+	}, time.Minute)
+	foreign, err := tenant.LatestScanRunsTimedOut(ctx, []ScanDurationKey{otherKey}, 11)
+	if err != nil || len(foreign) != 0 {
+		t.Fatalf("timeout history for another tenant = %v, %v; want no rows", foreign, err)
+	}
+}
+
 // saveDurationCycle records a completed one-attempt cycle of the job that
 // ran for duration and finished at finished, with the execution hash given,
 // and its saved scan.

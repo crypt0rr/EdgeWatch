@@ -218,6 +218,72 @@ func TestDeploymentScanDemandCapsEachUnitsContributionAtItsEffectiveSlots(t *tes
 	}
 }
 
+func TestDeploymentScanDemandSharesAndBoundsDenseScheduleSimulationAcrossUnits(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	const unitCount = 100
+	application := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: unitCount}}}
+
+	pattern, err := schedulePattern(ctx, "UTC", "* * * * *")
+	if err != nil || !pattern.ok {
+		t.Fatalf("dense schedule pattern = %+v, error %v", pattern, err)
+	}
+	ticks := &countingMinuteSchedule{}
+	pattern.schedule = ticks
+	application.scanSlotDemand.runsPerDay = map[scanRunsPerDayKey]scanRunsPerDayValue{
+		{timezone: "UTC", schedule: "* * * * *"}: pattern,
+	}
+
+	units := make([]*store.TenantStore, 0, unitCount)
+	units = append(units, defaultTenant(db))
+	for i := 1; i < unitCount; i++ {
+		_, ts := demandUnit(t, db, fmt.Sprintf("Dense unit %03d", i), fmt.Sprintf("dense-%03d", i))
+		units = append(units, ts)
+	}
+	finished := time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC)
+	for i, ts := range units {
+		for _, sample := range []struct {
+			name     string
+			duration time.Duration
+		}{
+			{name: fmt.Sprintf("a-shared-%03d", i), duration: 61 * time.Second},
+			{name: fmt.Sprintf("b-distinct-%03d", i), duration: time.Duration(62+i) * time.Second},
+		} {
+			record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+				Name: sample.name, Schedule: "* * * * *", Timezone: "UTC",
+				Targets: []string{"192.0.2.1"},
+				TCP:     &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+			}), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			insertCompletedScan(t, db, record, "scan-"+sample.name, finished, sample.duration)
+		}
+	}
+
+	demand, err := application.DeploymentScanDemand(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// All units reuse the exact 61-second projection and contribute 720 starts
+	// per day. Each distinct-duration projection beyond the request's bounded
+	// Next-call budget is reported as unestimated instead of a partial estimate.
+	want := DeploymentScanDemand{
+		Units: unitCount, EnabledJobs: 2 * unitCount, HistoryJobs: unitCount,
+		UnestimatedJobs: unitCount, CadenceUnattainableJobs: unitCount, Slots: unitCount,
+		EstimatedSlotSecondsPerDay: float64(unitCount) * 61 * 720,
+		CapacitySlotSecondsPerDay:  float64(unitCount) * slotSecondsPerDay,
+		UtilizationPercent:         float64(61*720) / float64(slotSecondsPerDay) * 100,
+	}
+	if demand != want {
+		t.Fatalf("deployment demand = %+v, want %+v", demand, want)
+	}
+	if ticks.NextCalls > deploymentScheduleSimulationNextCallLimit {
+		t.Fatalf("deployment estimate called Schedule.Next %d times; want at most %d", ticks.NextCalls, deploymentScheduleSimulationNextCallLimit)
+	}
+}
+
 // Without active units or jobs, the demand is zero against the pool, and an
 // application without a store, or a read that fails, gives no estimate.
 func TestDeploymentScanDemandWithoutWorkAndOnErrors(t *testing.T) {

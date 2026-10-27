@@ -61,7 +61,10 @@ and units being deleted schedule no scans and are left out. The job counts are
 sums, while the estimated slot-seconds sum those capped contributions. The
 **Lower bound from scanner rates** and **Not fully estimated** counts may
 overlap for the same job. A warning appears at 80% and when demand exceeds the
-shared pool. The panel also
+shared pool. Equivalent schedule-duration projections are shared across the
+active units, and the combined calculation has a bounded simulation budget.
+Jobs whose projection cannot finish within that budget are included in **Not
+fully estimated** and left out of the estimated slot-seconds. The panel also
 counts jobs whose estimated runs would still be active at scheduled ticks, so
 the scheduler skips those ticks. The estimate is at most a minute old. When
 an estimate fails or takes longer than 10 seconds, the panel is missing for

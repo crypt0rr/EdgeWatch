@@ -420,6 +420,58 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
       }
     }
 
+    // An unresolved local import can carry Route or Routes under any local
+    // alias, including aliases created by destructuring or object properties.
+    // Reject forwarding that value before the no-router-import fast path can
+    // skip the file and leave its JSX outside the inventory.
+    const forwardedUnresolvedImport = (node: Node | undefined): { source: string } | undefined => {
+      if (!node) return undefined
+      const expression = unwrapTransparentExpression(node)
+      if (expression !== node) return forwardedUnresolvedImport(expression)
+      if (node.type === 'VariableDeclarator') return forwardedUnresolvedImport(node.init as Node | undefined)
+      if (node.type === 'Identifier') return unresolvedLocalComponentImports.get(String(node.name))
+      if (node.type.startsWith('TS')) return undefined
+      if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression'
+        || node.type === 'ObjectMethod' || node.type === 'ClassMethod' || node.type === 'MethodDefinition') return undefined
+      if (node.type === 'Property' || node.type === 'ObjectProperty') {
+        return forwardedUnresolvedImport(node.value as Node | undefined)
+          ?? (node.computed ? forwardedUnresolvedImport(node.key as Node | undefined) : undefined)
+      }
+      if (node.type === 'ClassProperty' || node.type === 'PropertyDefinition') {
+        return forwardedUnresolvedImport(node.value as Node | undefined)
+          ?? (node.computed ? forwardedUnresolvedImport(node.key as Node | undefined) : undefined)
+      }
+      if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
+        return forwardedUnresolvedImport(node.object as Node | undefined)
+          ?? (node.computed ? forwardedUnresolvedImport(node.property as Node | undefined) : undefined)
+      }
+      return childNodes(node).map(forwardedUnresolvedImport).find(Boolean)
+    }
+    const rejectUnresolvedLocalImportForwarding = (node: Node) => {
+      const forwardedValues: (Node | undefined)[] = []
+      if (node.type === 'VariableDeclarator') forwardedValues.push(node.init as Node | undefined)
+      if (node.type === 'AssignmentExpression') forwardedValues.push(node.right as Node | undefined)
+      if (node.type === 'AssignmentPattern') forwardedValues.push(node.right as Node | undefined)
+      if (node.type === 'ArrowFunctionExpression' && (node.body as Node | undefined)?.type !== 'BlockStatement') {
+        forwardedValues.push(node.body as Node | undefined)
+      }
+      if (node.type === 'ReturnStatement' || node.type === 'ExportDefaultDeclaration') {
+        forwardedValues.push((node.argument ?? node.declaration) as Node | undefined)
+      }
+      if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') {
+        forwardedValues.push(node.callee as Node | undefined, ...((node.arguments as Node[] | undefined) ?? []))
+      }
+      if (node.type === 'JSXAttribute') forwardedValues.push(node.value as Node | undefined)
+      for (const value of forwardedValues) {
+        const forwarded = forwardedUnresolvedImport(value)
+        if (forwarded) {
+          throw new Error(`${file} forwards values from unresolved local module ${forwarded.source}; the console route inventory cannot rule out router APIs`)
+        }
+      }
+      childNodes(node).forEach(rejectUnresolvedLocalImportForwarding)
+    }
+    rejectUnresolvedLocalImportForwarding(program)
+
     const rejectRouterAPIAliases = (node: Node) => {
       if (node.type === 'VariableDeclarator') {
         const api = referencedRouterAPI(node.init as Node | undefined, local)
@@ -1127,6 +1179,37 @@ export default function Router() { return <Routes><Route path="/safe/child" elem
         expect(extractRouters(sources, fixtureRoot).map(router => router.name)).toEqual(expect.arrayContaining(['Shell', 'Router']))
       } finally {
         rmSync(fixtureRoot, { recursive: true, force: true })
+      }
+    })
+
+    it('refuses router components destructured from an unresolved local import', () => {
+      const source = {
+        file: 'src/destructured-unresolved-router.tsx',
+        code: `import Router from './router-bindings.js'
+const { Route, Routes } = Router
+export function Shell() { return <Routes><Route path='/hidden' /></Routes> }`,
+      }
+
+      expect(() => extractRouters([source])).toThrow(/forwards values from unresolved local module \.\/router-bindings\.js/)
+    })
+
+    it('refuses router components forwarded through local property aliases', () => {
+      const propertyAlias = {
+        file: 'src/property-alias-unresolved-router.tsx',
+        code: `import Router from './router-bindings.js'
+const Route = Router.Route
+const Routes = Router.Routes
+export function Shell() { return <Routes><Route path='/hidden' /></Routes> }`,
+      }
+      const objectPropertyAlias = {
+        file: 'src/object-property-alias-unresolved-router.tsx',
+        code: `import Router from './router-bindings.js'
+const Components = { Route: Router.Route, Routes: Router.Routes }
+export function Shell() { return <Components.Routes><Components.Route path='/hidden' /></Components.Routes> }`,
+      }
+
+      for (const source of [propertyAlias, objectPropertyAlias]) {
+        expect(() => extractRouters([source]), source.file).toThrow(/forwards values from unresolved local module \.\/router-bindings\.js/)
       }
     })
 

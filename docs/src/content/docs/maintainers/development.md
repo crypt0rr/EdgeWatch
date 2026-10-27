@@ -177,7 +177,11 @@ expressions. It rejects renamed `Route` or `Routes` re-exports anywhere
 in those chains. A local module load or local re-export that cannot be read as
 TypeScript fails closed; JSX uses of components from an unresolved static local
 import fail closed, including member expressions rooted at default, namespace,
-or named imports through every member level. Import router components directly
+or named imports through every member level. Values from unresolved local
+imports also fail closed when forwarded through assignments, destructuring,
+object properties, calls, returns, or JSX props, since these aliases could hide
+router components from the inventory. Statically readable local TypeScript
+component imports continue to be followed. Import router components directly
 from a recognized router module.
 
 `<Route>` props must be explicit: any JSX prop spread is rejected because a

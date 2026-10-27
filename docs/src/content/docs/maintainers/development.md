@@ -168,26 +168,30 @@ these forms.
 
 The parser follows statically resolvable local TypeScript imports, re-exports,
 dynamic imports, and CommonJS loads, including helpers outside `src/` and
-aliases configured directly in the root `tsconfig.json`. A config that extends
-another `tsconfig` fails closed because the inventory does not resolve
-inherited aliases. Alias patterns and targets with at most one `*` are
-supported; multiple wildcards fail closed. Wildcard captures are substituted as
-literal path text, including characters that have meaning in regular
-expressions. It rejects renamed `Route` or `Routes` re-exports anywhere
-in those chains. A local module load or local re-export that cannot be read as
-TypeScript fails closed; JSX uses of components from an unresolved static local
-import fail closed, including member expressions rooted at default, namespace,
-or named imports through every member level. Values from unresolved local
+aliases configured directly in the root `tsconfig.json`. CommonJS loader aliases
+use one AST pass and a dependency worklist so reverse-declared chains stay
+linear. A config that extends another `tsconfig` fails closed because the
+inventory does not resolve inherited aliases. Alias patterns and targets with
+at most one `*` are supported; multiple wildcards fail closed. Wildcard
+captures are substituted as literal path text, including characters that have
+meaning in regular expressions. It rejects renamed `Route` or `Routes`
+re-exports anywhere in those chains. A local module load or local re-export
+that cannot be read as TypeScript fails closed; JSX uses of components from an
+unresolved static local import fail closed, including member expressions
+rooted at default, namespace, or named imports through every member level.
+Values from unresolved local
 imports also fail closed when forwarded through assignments, destructuring,
-object properties, calls, returns, or JSX props, since these aliases could hide
-router components from the inventory. Statically readable local TypeScript
-component imports continue to be followed. Import router components directly
-from a recognized router module.
+object properties, calls, returns, JSX props, or JSX spread arguments, since
+these aliases could hide router components from the inventory. Statically
+readable local TypeScript component imports continue to be followed. Import
+router components directly from a recognized router module.
 
 `<Route>` props must be explicit: any JSX prop spread is rejected because a
 spread can override `path`, including when it appears after a direct `path`
-attribute or uses an object alias or conditional expression. Router APIs must
-use static named imports; dynamic imports or `require` loads of router modules
+attribute or uses an object alias or conditional expression. Only a shorthand
+`index` or literal `index={true}` is an index route; `index={false}` is a normal
+path route, and dynamic `index` values fail closed. Router APIs must use static
+named imports; dynamic imports or `require` loads of router modules
 are rejected, including direct, aliased, bound, and destructured CommonJS loader
 forms. Optional calls through any recognized CommonJS loader are rejected,
 including calls through aliases and optional member access.
@@ -216,8 +220,13 @@ button text missing from the accessible name, and on the moderate
 route in its default fixture state, it audits an open dialog, a failed
 confirmation, failed page reads, an empty investigation inbox, a job without a
 baseline, pending baseline changes, a near-capacity scan-slot demand notice,
-and every step of a monitor setup that Perimeter prefilled. Accept a violation only with an `axeAllowances` entry in the spec
-that names the rule, a distinct audited surface key, the node, and the reason.
+and every step of a monitor setup that Perimeter prefilled. A separate
+`requiredStateSurfaceManifest` ensures removing a required fixture or entry
+also fails when its generating case disappears. An `allowedPath` with a
+different destination is an alias and does not receive a separate axe run;
+when `allowedPath` equals the requested path, the route is still audited.
+Accept a violation only with an `axeAllowances` entry in the spec that names
+the rule, a distinct audited surface key, the node, and the reason.
 Console routes and entry surfaces use different keys even when they share a
 path, and the spec rejects duplicate keys. It also fails when an allowance
 names a surface it does not audit or when an entry no longer matches a

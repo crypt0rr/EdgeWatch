@@ -153,48 +153,87 @@ function isOptionalCommonJSLoaderCall(node: Node, callee: Node): boolean {
     || (unwrappedCallee?.type === 'MemberExpression' && unwrappedCallee.optional === true)
 }
 
-function rejectUninspectableRouterLoads(program: Node, file: string): string[] {
-  const loaderAliases = new Set(['require'])
-  const moduleAliases = new Set(['module'])
-  const moduleLoads: string[] = []
-  let aliasesChanged = true
-  while (aliasesChanged) {
-    aliasesChanged = false
-    const findAliases = (node: Node) => {
-      if (node.type === 'VariableDeclarator') {
-        const id = node.id as Node
-        const init = node.init as Node | undefined
-        if (id.type === 'Identifier') {
-          const name = String(id.name)
-          if (isCommonJSModuleObject(init, moduleAliases) && !moduleAliases.has(name)) {
-            moduleAliases.add(name)
-            aliasesChanged = true
-          }
-          if (isCommonJSLoader(init, loaderAliases, moduleAliases) && !loaderAliases.has(name)) {
-            loaderAliases.add(name)
-            aliasesChanged = true
-          }
-        }
-      }
-      if (node.type === 'AssignmentExpression') {
-        const left = node.left as Node
-        const right = node.right as Node | undefined
-        if (left.type === 'Identifier') {
-          const name = String(left.name)
-          if (isCommonJSModuleObject(right, moduleAliases) && !moduleAliases.has(name)) {
-            moduleAliases.add(name)
-            aliasesChanged = true
-          }
-          if (isCommonJSLoader(right, loaderAliases, moduleAliases) && !loaderAliases.has(name)) {
-            loaderAliases.add(name)
-            aliasesChanged = true
-          }
-        }
-      }
-      childNodes(node).forEach(findAliases)
-    }
-    findAliases(program)
+/**
+ * Finds CommonJS loader aliases in one syntax-tree pass, then propagates
+ * aliases through a dependency worklist. A chain declared in reverse order
+ * therefore takes linear work instead of rescanning the whole program for
+ * each newly discovered alias.
+ */
+function discoverCommonJSAliases(program: Node): { loaderAliases: Set<string>; moduleAliases: Set<string>; workItems: number } {
+  const moduleAliasDependents = new Map<string, string[]>()
+  const loaderAliasDependents = new Map<string, string[]>()
+  const moduleLoaderDependents = new Map<string, string[]>()
+  let workItems = 0
+
+  const addDependent = (dependents: Map<string, string[]>, dependency: string, alias: string) => {
+    const aliases = dependents.get(dependency) ?? []
+    aliases.push(alias)
+    dependents.set(dependency, aliases)
   }
+  const collectAlias = (id: Node, value: Node | undefined) => {
+    if (id.type !== 'Identifier' || !value) return
+    const alias = String(id.name)
+    const expression = unwrapTransparentExpression(value)
+    if (expression?.type === 'Identifier') {
+      const dependency = String(expression.name)
+      // An identifier can be either kind of alias. Preserve both edges so
+      // chains remain correct even when a binding has more than one role.
+      addDependent(moduleAliasDependents, dependency, alias)
+      addDependent(loaderAliasDependents, dependency, alias)
+      return
+    }
+    if (expression && (expression.type === 'MemberExpression' || expression.type === 'OptionalMemberExpression')
+      && memberPropertyName(expression) === 'require') {
+      const object = unwrapTransparentExpression(expression.object as Node)
+      if (object?.type === 'Identifier') addDependent(moduleLoaderDependents, String(object.name), alias)
+    }
+  }
+  const collect = (node: Node) => {
+    workItems += 1
+    if (node.type === 'VariableDeclarator') collectAlias(node.id as Node, node.init as Node | undefined)
+    if (node.type === 'AssignmentExpression') collectAlias(node.left as Node, node.right as Node | undefined)
+    childNodes(node).forEach(collect)
+  }
+  collect(program)
+
+  const moduleAliases = new Set(['module'])
+  const loaderAliases = new Set(['require'])
+  const processedModules = new Set<string>()
+  const processedLoaders = new Set<string>()
+  const worklist: { kind: 'module' | 'loader'; name: string }[] = [
+    { kind: 'module', name: 'module' },
+    { kind: 'loader', name: 'require' },
+  ]
+  for (let cursor = 0; cursor < worklist.length; cursor += 1) {
+    const item = worklist[cursor]
+    workItems += 1
+    const aliases = item.kind === 'module' ? moduleAliases : loaderAliases
+    const processed = item.kind === 'module' ? processedModules : processedLoaders
+    if (processed.has(item.name)) continue
+    processed.add(item.name)
+    const dependents = item.kind === 'module' ? moduleAliasDependents : loaderAliasDependents
+    for (const alias of dependents.get(item.name) ?? []) {
+      workItems += 1
+      if (aliases.has(alias)) continue
+      aliases.add(alias)
+      worklist.push({ kind: item.kind, name: alias })
+    }
+    if (item.kind === 'module') {
+      for (const alias of moduleLoaderDependents.get(item.name) ?? []) {
+        workItems += 1
+        if (loaderAliases.has(alias)) continue
+        loaderAliases.add(alias)
+        worklist.push({ kind: 'loader', name: alias })
+      }
+    }
+  }
+
+  return { loaderAliases, moduleAliases, workItems }
+}
+
+function rejectUninspectableRouterLoads(program: Node, file: string): string[] {
+  const { loaderAliases, moduleAliases } = discoverCommonJSAliases(program)
+  const moduleLoads: string[] = []
 
   const isRouterModule = (specifier: string) => [...routerModules].some(module => specifier === module || specifier.startsWith(`${module}/`))
   const inspect = (node: Node) => {
@@ -310,6 +349,18 @@ function referencedRouterAPI(node: Node | undefined, local: { Route: Set<string>
 function jsxAttribute(element: Node, name: string): Node | undefined {
   const attributes = (element.openingElement as Node).attributes as Node[]
   return attributes.find(attribute => attribute.type === 'JSXAttribute' && ((attribute.name as Node).name === name))
+}
+
+function routeIndexAttribute(element: Node, file: string, where: string): boolean {
+  const attribute = jsxAttribute(element, 'index')
+  if (!attribute) return false
+  if (attribute.value === null) return true
+  const value = attribute.value as Node
+  const expression = value.type === 'JSXExpressionContainer'
+    ? unwrapTransparentExpression(value.expression as Node)
+    : undefined
+  if (expression?.type === 'Literal' && typeof expression.value === 'boolean') return expression.value
+  throw new Error(`${file}: <Route> in ${where} has a non-literal index prop; use shorthand or a boolean literal so the console route inventory can determine whether it is an index route`)
 }
 
 /** Router imports may only appear as JSX tag names, never as component values. */
@@ -462,6 +513,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
         forwardedValues.push(node.callee as Node | undefined, ...((node.arguments as Node[] | undefined) ?? []))
       }
       if (node.type === 'JSXAttribute') forwardedValues.push(node.value as Node | undefined)
+      if (node.type === 'JSXSpreadAttribute') forwardedValues.push(node.argument as Node | undefined)
       for (const value of forwardedValues) {
         const forwarded = forwardedUnresolvedImport(value)
         if (forwarded) {
@@ -630,7 +682,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
         const name = jsxName(node)
         if (name && local.Route.has(name)) {
           collectedRoutes += 1
-          const index = !!jsxAttribute(node, 'index')
+          const index = routeIndexAttribute(node, file, where)
           const pathAttribute = jsxAttribute(node, 'path')
           routes.push({
             path: pathAttribute ? stringValue(pathAttribute.value as Node, `A <Route> path in ${where} in ${file}`) : undefined,
@@ -1162,6 +1214,40 @@ export function HiddenRoutes() {
       expect(() => extractRouters([unresolvedDefaultMemberSource])).toThrow(/uses JSX component Router from unresolved local module \.\.\/unreadable-router/)
     })
 
+    it('treats only shorthand and literal true index props as index routes', () => {
+      const source = {
+        file: 'src/index-props.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+export function IndexProps() {
+  return <Routes>
+    <Route path="/short"><Route index element={<p />} /></Route>
+    <Route path="/literal"><Route index={true} element={<p />} /></Route>
+    <Route path="/parent"><Route index={false} path="child"><Route path="deep" element={<p />} /></Route></Route>
+  </Routes>
+}`,
+      }
+      const router = resolveRouters(extractRouters([source]))[0]
+      expect(router.handles.map(label)).toEqual([
+        'IndexProps /short',
+        'IndexProps /short (index)',
+        'IndexProps /literal',
+        'IndexProps /literal (index)',
+        'IndexProps /parent',
+        'IndexProps /parent/child',
+        'IndexProps /parent/child/deep',
+      ])
+      expect(matchRoutes(router.objects, '/short')?.at(-1)?.route.handle).toEqual(router.handles[1])
+      expect(matchRoutes(router.objects, '/literal')?.at(-1)?.route.handle).toEqual(router.handles[3])
+      expect(matchRoutes(router.objects, '/parent/child/deep')?.at(-1)?.route.handle).toEqual(router.handles[6])
+
+      const dynamicIndex = {
+        file: 'src/dynamic-index.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+export function DynamicIndex({ isIndex }: { isIndex: boolean }) { return <Routes><Route index={isIndex} path="/dynamic" /></Routes> }`,
+      }
+      expect(() => extractRouters([dynamicIndex])).toThrow(/non-literal index prop/)
+    })
+
     it('accepts default component imports when their local TypeScript module is readable', () => {
       const fixtureRoot = mkdtempSync(join(tmpdir(), 'edgewatch-readable-router-import-'))
       const sourceDirectory = join(fixtureRoot, 'src')
@@ -1191,6 +1277,22 @@ export function Shell() { return <Routes><Route path='/hidden' /></Routes> }`,
       }
 
       expect(() => extractRouters([source])).toThrow(/forwards values from unresolved local module \.\/router-bindings\.js/)
+    })
+
+    it('refuses unresolved local router imports forwarded through JSX spreads', () => {
+      const source = {
+        file: 'src/spread-unresolved-router.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+import * as UnreadableRouter from './router-runtime.js'
+function Wrapper({ Route: RouteComponent, Routes: RoutesComponent }) {
+  return <RoutesComponent><RouteComponent path="/hidden" /></RoutesComponent>
+}
+export function Shell() {
+  return <Routes><Route path="/outer" element={<Wrapper {...UnreadableRouter} />} /></Routes>
+}`,
+      }
+
+      expect(() => extractRouters([source])).toThrow(/forwards values from unresolved local module \.\/router-runtime\.js/)
     })
 
     it('refuses router components forwarded through local property aliases', () => {
@@ -1428,6 +1530,24 @@ export function HiddenRouter() {
       for (const fixture of cases) {
         expect(() => extractRouters([fixture]), fixture.file).toThrow(fixture.error)
       }
+    })
+
+    it('resolves reverse-ordered CommonJS loader aliases with linear work', () => {
+      const aliasCount = 10_000
+      const aliases = Array.from({ length: aliasCount }, (_, index) =>
+        `const loader${index} = ${index + 1 === aliasCount ? 'require' : `loader${index + 1}`}`,
+      ).join('\n')
+      const program = parseSync('src/long-loader-chain.ts', aliases, { lang: 'ts' }).program as unknown as Node
+      const discovered = discoverCommonJSAliases(program)
+
+      expect(discovered.loaderAliases.has('loader0')).toBe(true)
+      expect(discovered.workItems).toBeLessThan(aliasCount * 8)
+
+      const source = {
+        file: 'src/long-loader-chain.tsx',
+        code: `${aliases}\nconst { Route, Routes } = loader0('react-router-dom')\nexport function Shell() { return <Routes><Route path="/hidden" /></Routes> }`,
+      }
+      expect(() => extractRouters([source])).toThrow(/dynamically loads router module react-router-dom/)
     })
 
     it('refuses bound and destructured CommonJS loaders before skipping files without router imports', () => {

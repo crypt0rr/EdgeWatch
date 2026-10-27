@@ -132,7 +132,7 @@ function routeIsRenderedForRole(role: ConsoleRole, route: ConsoleRouteCase) {
   // destination. Aliases (/highlights and the unmatched job-creation branch),
   // permission redirects, and catch-all paths do not render a separate page;
   // their rendered destinations are audited through their own route entries.
-  if (!route || route.redirectToHome || route.allowedPath) return false
+  if (!route || route.redirectToHome || (route.allowedPath && route.allowedPath !== route.path)) return false
   if (route.scope === 'shared') return true
   if (route.scope === 'platform') return role === 'platform_admin'
   return role !== 'platform_admin' && (!route.permission || rolePermissions[role].includes(route.permission))
@@ -379,7 +379,44 @@ function auditedSurfaceNamesFor(
   return new Set(names)
 }
 
+/**
+ * Accessibility states that must keep an axe audit even if their fixture or
+ * entry case is removed. Keep these semantic keys independent of the arrays
+ * that generate the audits, so deleting a case cannot delete its expectation.
+ */
+const requiredStateSurfaceManifest = [
+  'entry:signed-out:/login',
+  'entry:unconfigured:/setup',
+  'entry:signed-out:/activate#token=FIXTURE-TOKEN',
+  'entry:enrolment:/security',
+  'entry:public:/public',
+  'entry:public:/public/retail',
+  'entry:public:/public/unpublished',
+  'fixture:open-remove-range-dialog',
+  'fixture:failed-remove-range-confirmation',
+  'fixture:read-error:/scans/scan-1',
+  'fixture:read-error:/jobs/job-1',
+  'fixture:read-error:/scans/scan-1/hosts/192.0.2.10',
+  'fixture:read-error:/perimeter/ranges/range-1',
+  'fixture:platform-unit-read-error:/platform/units/unit-retail',
+  'fixture:empty-state:/incidents',
+  'fixture:empty-state:/jobs/job-1/baseline',
+  'fixture:pending-baseline-changes',
+  'fixture:scan-slot-demand-near-capacity',
+  'fixture:monitor-setup-step:1:choose-targets',
+  'fixture:monitor-setup-step:2:set-scan-coverage',
+  'fixture:monitor-setup-step:3:set-schedule-and-alerts',
+  'fixture:monitor-setup-step:4:set-schedule-and-alerts',
+  'fixture:monitor-setup-step:5:review-and-create',
+] as const
+
+function assertRequiredStateAudits(required: readonly string[], audited: ReadonlySet<string>) {
+  const missing = required.filter(surface => !audited.has(surface))
+  if (missing.length) throw new Error(`required axe audit surfaces are missing: ${missing.join(', ')}`)
+}
+
 const auditedSurfaceNames = auditedSurfaceNamesFor(fixtureAxeAudits)
+assertRequiredStateAudits(requiredStateSurfaceManifest, auditedSurfaceNames)
 
 test('axe allowances reject unaudited surfaces, including removed fixture audits', async ({}, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'The allowance-surface gate regression runs once; route audits cover each configured device project.')
@@ -401,11 +438,31 @@ test('axe allowances reject unaudited surfaces, including removed fixture audits
   expect(routeIsRenderedForRole('platform_admin', samePathAcrossScopes[1])).toBe(true)
   expect(samePathSurfaces).toEqual(new Set(['console-route:unit:/same-path', 'console-route:platform:/same-path']))
 
+  const samePathAlias: ConsoleRouteCase = { path: '/reports', scope: 'unit', allowedPath: '/reports' }
+  expect(routeIsRenderedForRole('administrator', samePathAlias)).toBe(true)
+  expect(auditedSurfaceNamesFor([], [], [samePathAlias])).toContain(consoleRouteSurfaceKey(samePathAlias))
+
   const removedAudit = fixtureAxeAudits.find(fixture => fixture.surface === 'fixture:open-remove-range-dialog')!
   const remainingAudits = fixtureAxeAudits.filter(fixture => fixture !== removedAudit)
   const surfacesWithoutRemovedAudit = auditedSurfaceNamesFor(remainingAudits)
   const staleAllowance: AxeAllowance = { ...unknown, surface: removedAudit.surface }
   expect(() => assertAuditedAllowanceSurfaces([...axeAllowances, staleAllowance], surfacesWithoutRemovedAudit)).toThrow(/does not audit: fixture:open-remove-range-dialog/)
+
+  // Required-state expectations stand alone from the arrays that generate
+  // the tests and audited surface keys. Removing either side of a case still
+  // fails, even when a broader public route pattern could match its path.
+  const failedConfirmation = fixtureAxeAudits.find(fixture => fixture.surface === 'fixture:failed-remove-range-confirmation')!
+  const auditsWithoutConfirmation = auditedSurfaceNamesFor(fixtureAxeAudits.filter(fixture => fixture !== failedConfirmation))
+  expect(() => assertRequiredStateAudits(requiredStateSurfaceManifest, auditsWithoutConfirmation))
+    .toThrow('required axe audit surfaces are missing: fixture:failed-remove-range-confirmation')
+
+  const unpublishedEntry = entrySurfaces.find(surface => surface.path === '/public/unpublished')!
+  const auditsWithoutUnpublishedEntry = auditedSurfaceNamesFor(
+    fixtureAxeAudits,
+    entrySurfaces.filter(surface => surface !== unpublishedEntry),
+  )
+  expect(() => assertRequiredStateAudits(requiredStateSurfaceManifest, auditsWithoutUnpublishedEntry))
+    .toThrow('required axe audit surfaces are missing: entry:public:/public/unpublished')
 
   const totpEntry = entrySurfaces.find(surface => surface.state === 'enrolment')!
   const totpSurface = entrySurfaceKey(totpEntry)

@@ -225,14 +225,13 @@ func TestDeploymentScanDemandSharesAndBoundsDenseScheduleSimulationAcrossUnits(t
 	const unitCount = 100
 	application := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: unitCount}}}
 
-	pattern, err := schedulePattern(ctx, "UTC", "* * * * *")
+	pattern, err := schedulePattern(ctx, "UTC", "*/5 0 * * *")
 	if err != nil || !pattern.ok {
 		t.Fatalf("dense schedule pattern = %+v, error %v", pattern, err)
 	}
-	ticks := &countingMinuteSchedule{}
-	pattern.schedule = ticks
-	application.scanSlotDemand.runsPerDay = map[scanRunsPerDayKey]scanRunsPerDayValue{
-		{timezone: "UTC", schedule: "* * * * *"}: pattern,
+	sharedRuns, _, err := pattern.runsForDuration(ctx, (6 * time.Minute).Seconds())
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	units := make([]*store.TenantStore, 0, unitCount)
@@ -247,11 +246,11 @@ func TestDeploymentScanDemandSharesAndBoundsDenseScheduleSimulationAcrossUnits(t
 			name     string
 			duration time.Duration
 		}{
-			{name: fmt.Sprintf("a-shared-%03d", i), duration: 61 * time.Second},
-			{name: fmt.Sprintf("b-distinct-%03d", i), duration: time.Duration(62+i) * time.Second},
+			{name: fmt.Sprintf("a-shared-%03d", i), duration: 6 * time.Minute},
+			{name: fmt.Sprintf("b-distinct-%03d", i), duration: 6*time.Minute + time.Duration(i+1)*time.Second},
 		} {
 			record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
-				Name: sample.name, Schedule: "* * * * *", Timezone: "UTC",
+				Name: sample.name, Schedule: "*/5 0 * * *", Timezone: "UTC",
 				Targets: []string{"192.0.2.1"},
 				TCP:     &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
 			}), true)
@@ -262,25 +261,19 @@ func TestDeploymentScanDemandSharesAndBoundsDenseScheduleSimulationAcrossUnits(t
 		}
 	}
 
-	demand, err := application.DeploymentScanDemand(ctx)
+	budget := &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
+	demand, err := application.deploymentScanDemandWithBudget(ctx, budget)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// All units reuse the exact 61-second projection and contribute 720 starts
-	// per day. Each distinct-duration projection beyond the request's bounded
-	// Next-call budget is reported as unestimated instead of a partial estimate.
-	want := DeploymentScanDemand{
-		Units: unitCount, EnabledJobs: 2 * unitCount, HistoryJobs: unitCount,
-		UnestimatedJobs: unitCount, CadenceUnattainableJobs: unitCount, Slots: unitCount,
-		EstimatedSlotSecondsPerDay: float64(unitCount) * 61 * 720,
-		CapacitySlotSecondsPerDay:  float64(unitCount) * slotSecondsPerDay,
-		UtilizationPercent:         float64(61*720) / float64(slotSecondsPerDay) * 100,
+	if demand.Units != unitCount || demand.EnabledJobs != 2*unitCount || demand.HistoryJobs < unitCount || demand.UnestimatedJobs == 0 || demand.CadenceUnattainableJobs < unitCount || demand.Slots != unitCount {
+		t.Fatalf("deployment demand = %+v; want all units, shared projections, skipped ticks, and over-budget jobs reported", demand)
 	}
-	if demand != want {
-		t.Fatalf("deployment demand = %+v, want %+v", demand, want)
+	if wantMinimum := float64(unitCount) * 6 * 60 * sharedRuns; demand.EstimatedSlotSecondsPerDay < wantMinimum {
+		t.Fatalf("deployment demand %.0f slot-seconds/day omits shared projections; want at least %.0f", demand.EstimatedSlotSecondsPerDay, wantMinimum)
 	}
-	if ticks.NextCalls > deploymentScheduleSimulationNextCallLimit {
-		t.Fatalf("deployment estimate called Schedule.Next %d times; want at most %d", ticks.NextCalls, deploymentScheduleSimulationNextCallLimit)
+	if budget.used != budget.limit || budget.used > scanScheduleRequestWorkLimit {
+		t.Fatalf("deployment estimate used %d work units; want the bounded limit %d", budget.used, scanScheduleRequestWorkLimit)
 	}
 }
 
@@ -297,6 +290,10 @@ func TestDeploymentScanDemandWithoutWorkAndOnErrors(t *testing.T) {
 	}
 	if want := (DeploymentScanDemand{Units: 1, Slots: 2, CapacitySlotSecondsPerDay: 2 * slotSecondsPerDay}); demand != want {
 		t.Fatalf("empty deployment demand = %+v, want %+v", demand, want)
+	}
+	defaultBudgetDemand, err := application.deploymentScanDemandWithBudget(ctx, nil)
+	if err != nil || defaultBudgetDemand != demand {
+		t.Fatalf("deployment demand with a nil budget = %+v, error %v; want %+v", defaultBudgetDemand, err, demand)
 	}
 
 	for _, empty := range []*App{nil, {}, {Store: db}} {

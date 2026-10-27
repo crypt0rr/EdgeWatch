@@ -256,9 +256,11 @@ time between scheduled attempts, and a successful or incomplete scan without
 a cycle is one sample. If the newest runs with current settings all timed out,
 the configured timeout supplies the expected run duration. Each run counts at
 most the monitor's timeout, which ends it. The estimate follows its cron ticks
-over a calendar year, skipping a tick when the previous estimated run is still
-active; each monitor adds at most one slot-day because it cannot overlap with
-itself. The notice counts jobs with one or more skipped ticks. Without history,
+over a representative four-year calendar cycle in the job's timezone, which
+averages leap-day schedules over the longer cycle, skipping a tick when the
+previous estimated run is still active; each monitor adds at most one slot-day
+because it cannot overlap with itself. The notice counts jobs with one or more
+skipped ticks. Without history,
 known work at configured maximum scanner rates is shown as a lower
 bound only when the configured scope is known to fit both the job's **Maximum
 expanded hosts** and the deployment's `scanner.max_job_hosts`. An over-limit

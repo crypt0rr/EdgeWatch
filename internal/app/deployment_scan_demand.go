@@ -45,11 +45,17 @@ type DeploymentScanDemand struct {
 // deployment's shared slot pool. It goes through each active unit's enabled
 // jobs and their recent scan history, so a caller that serves it repeatedly
 // should cache it. Equivalent schedule-duration projections are shared across
-// units within this request, and total projection work is bounded; jobs that
-// cannot be projected within that bound are counted as unestimated. A unit
+// units within this request, and schedule expansion plus projection work share
+// one request-wide bound; jobs that exceed it are counted as unestimated. A unit
 // that cannot be read fails the whole estimate rather than leaving its demand
 // out of the sum.
 func (a *App) DeploymentScanDemand(ctx context.Context) (DeploymentScanDemand, error) {
+	return a.deploymentScanDemandWithBudget(ctx, &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit})
+}
+
+// deploymentScanDemandWithBudget keeps the budget visible to package tests so
+// they can assert the request-wide work bound without timing the endpoint.
+func (a *App) deploymentScanDemandWithBudget(ctx context.Context, budget *scanScheduleSimulationBudget) (DeploymentScanDemand, error) {
 	var result DeploymentScanDemand
 	if a == nil || a.Store == nil || a.Config == nil {
 		return result, errNoDeploymentScanDemand
@@ -60,9 +66,11 @@ func (a *App) DeploymentScanDemand(ctx context.Context) (DeploymentScanDemand, e
 	}
 	// Schedule-duration projections contain no tenant data, so this request
 	// local memo can safely share equivalent work across units. The budget
-	// bounds distinct dense projections when their exact durations differ.
+	// covers both pattern expansion and distinct duration projections.
 	simulations := make(map[scanScheduleDurationKey]scanScheduleDurationEstimate)
-	budget := &scanScheduleSimulationBudget{limit: deploymentScheduleSimulationNextCallLimit}
+	if budget == nil {
+		budget = &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
+	}
 	for _, scope := range scopes {
 		ts := a.Store.Tenant(scope)
 		unit, err := a.scheduledScanDemandWithSimulationCache(ctx, ts, simulations, budget)

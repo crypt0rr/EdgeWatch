@@ -61,7 +61,9 @@ ceiling, or whose schedule cannot be estimated. The job's timeout ends each
 run, so each run counts at most the timeout, whether its duration comes from
 samples or from the lower bound: a resumable cycle whose attempts add up to
 more continues in later runs. The estimate follows the job's cron ticks over a
-calendar year and skips a tick when the previous estimated run is still active.
+representative four-year calendar cycle in its timezone, which averages
+leap-day schedules over the longer cycle, and skips a tick when the previous
+estimated run is still active.
 It counts only the runs the scheduler can start. A job runs at most once at a
 time, so it adds at most one slot-day, 86,400 slot-seconds, to
 `estimated_slot_seconds_per_day`. The additive `cadence_unattainable_jobs`
@@ -71,10 +73,11 @@ whether the job's demand exceeds a slot-day. The console shows a warning at
 `lower_bound_jobs` and `unestimated_jobs` are not disjoint counts: a job with a
 known-rate lower bound may also have additional work that cannot be fully
 estimated. The platform panel labels this possible overlap explicitly. The
-deployment estimate shares equivalent schedule-duration projections across
-active units and bounds total simulation work for each request. A job whose
-projection cannot finish within that budget is counted as unestimated and its
-slot-seconds are left out of the total.
+Tenant and deployment estimates bound schedule work per request, including
+pattern expansion and duration projection. The deployment estimate also shares
+equivalent schedule-duration projections across active units. A job whose
+pattern or projection cannot finish within that budget is counted as
+unestimated and its slot-seconds are left out of the total.
 
 A unit's capacity is a limit, not a reservation: every unit's scans share the
 deployment's `scheduler.max_concurrent_scans` slots, so units that each stay

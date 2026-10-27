@@ -28,18 +28,21 @@ const (
 	// caches retain a deterministic subset instead of discarding every entry.
 	scanRunsPerDayCacheLimit     = 1024
 	scanRunsPerDayCacheByteLimit = 8 * 1024 * 1024
-	// scanRunsPerDayCacheEntrySize approximates fixed map and cached-value overhead.
-	scanRunsPerDayCacheEntrySize = 512
+	// scanRunsPerDayCacheEntrySize conservatively covers fixed map buckets,
+	// value/string headers, and allocator overhead for a retained entry.
+	scanRunsPerDayCacheEntrySize = 4096
 	scanDurationKeyCacheLimit    = 16384
 	scanScheduleObservationLimit = 20_000
-	// deploymentScheduleSimulationNextCallLimit bounds expensive cron
-	// projections across all active units in one platform demand request.
-	deploymentScheduleSimulationNextCallLimit = 540_000
+	// scanScheduleRequestWorkLimit bounds schedule work across expansion and
+	// duration projection in one tenant or deployment demand request.
+	scanScheduleRequestWorkLimit = 540_000
+	scanScheduleSampleStartYear  = 2024
+	scanScheduleSampleEndYear    = 2028
 )
 
 var (
 	errInvalidScanSchedulePattern       = errors.New("invalid scan schedule pattern")
-	errScheduleSimulationBudgetExceeded = errors.New("deployment schedule simulation budget exceeded")
+	errScheduleSimulationBudgetExceeded = errors.New("scan schedule work budget exceeded")
 )
 
 // ScanSlotDemand is a tenant's estimated scheduled scan work compared with
@@ -103,10 +106,14 @@ func (a *App) scheduledScanDemand(ctx context.Context, ts *store.TenantStore) (S
 }
 
 // scheduledScanDemandWithSimulationCache lets one deployment request share
-// pure schedule-duration projections across its unit-scoped store reads. Its
-// cache and work budget belong to that request, so no tenant data is shared.
+// pure schedule-duration projections across its unit-scoped store reads. A
+// tenant request supplies its own cache for its one unit. Both caches and work
+// budgets belong to the current request, so no tenant data is shared.
 func (a *App) scheduledScanDemandWithSimulationCache(ctx context.Context, ts *store.TenantStore, simulations map[scanScheduleDurationKey]scanScheduleDurationEstimate, budget *scanScheduleSimulationBudget) (ScanSlotDemand, error) {
 	var result ScanSlotDemand
+	if budget == nil {
+		budget = &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
+	}
 	jobs, err := ts.ListJobs(ctx, false)
 	if err != nil {
 		return result, err
@@ -124,8 +131,12 @@ func (a *App) scheduledScanDemandWithSimulationCache(ctx context.Context, ts *st
 		if strings.TrimSpace(record.Job.Schedule) == "" {
 			continue
 		}
-		schedule, err := a.scanJobSchedule(ctx, record.Job)
+		schedule, err := a.scanJobScheduleWithBudget(ctx, record.Job, budget)
 		if err != nil {
+			if errors.Is(err, errScheduleSimulationBudgetExceeded) {
+				result.UnestimatedJobs++
+				continue
+			}
 			return result, err
 		}
 		if !schedule.ok {
@@ -257,12 +268,21 @@ type scanScheduleDurationEstimate struct {
 	skipped    bool
 }
 
-// scanScheduleSimulationBudget bounds calls to cron.Schedule.Next during one
-// deployment projection. A projection that cannot finish within the budget
-// is left unestimated instead of returning a partial or undercounted result.
+// scanScheduleSimulationBudget bounds schedule work during one demand request.
+// It counts Schedule.Next calls, calendar-day expansion steps, and retained
+// occurrence offsets examined during projection. Jobs that exceed the budget
+// are left unestimated instead of returning a partial result.
 type scanScheduleSimulationBudget struct {
 	limit int
 	used  int
+}
+
+func (budget *scanScheduleSimulationBudget) take() bool {
+	if budget.used >= budget.limit {
+		return false
+	}
+	budget.used++
+	return true
 }
 
 type budgetedCronSchedule struct {
@@ -272,23 +292,31 @@ type budgetedCronSchedule struct {
 }
 
 func (schedule budgetedCronSchedule) Next(after time.Time) time.Time {
-	if schedule.budget.used >= schedule.budget.limit {
+	if !schedule.budget.take() {
 		*schedule.exhausted = true
 		return time.Time{}
 	}
-	schedule.budget.used++
 	return schedule.schedule.Next(after)
+}
+
+func takeScheduleWork(ctx context.Context, budget *scanScheduleSimulationBudget) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if budget != nil && !budget.take() {
+		return errScheduleSimulationBudgetExceeded
+	}
+	return nil
 }
 
 type scanRunsPerDayValue struct {
 	runsPerDay           float64
 	ok                   bool
 	observationsComplete bool
-	start                time.Time
-	end                  time.Time
+	startYear            int
+	endYear              int
 	windowSeconds        float64
 	minimumGap           time.Duration
-	schedule             cron.Schedule
 	identity             scanScheduleIdentity
 	occurrences          []uint32
 	rank                 uint64
@@ -326,6 +354,10 @@ func (a *App) scanJobRunsPerDay(job config.Job) (float64, bool) {
 }
 
 func (a *App) scanJobSchedule(ctx context.Context, job config.Job) (scanRunsPerDayValue, error) {
+	return a.scanJobScheduleWithBudget(ctx, job, nil)
+}
+
+func (a *App) scanJobScheduleWithBudget(ctx context.Context, job config.Job, budget *scanScheduleSimulationBudget) (scanRunsPerDayValue, error) {
 	key := scanRunsPerDayKey{timezone: scheduleTimezone(job, a.Config.Timezone), schedule: job.Schedule}
 	cache := &a.scanSlotDemand
 	if err := ctx.Err(); err != nil {
@@ -339,7 +371,7 @@ func (a *App) scanJobSchedule(ctx context.Context, job config.Job) (scanRunsPerD
 	}
 	// Schedule expansion runs without the lock. Two requests may compute the
 	// same new key, but one slow schedule cannot block cache hits for others.
-	value, err := schedulePattern(ctx, key.timezone, key.schedule)
+	value, err := schedulePatternWithBudget(ctx, key.timezone, key.schedule, budget)
 	if errors.Is(err, errInvalidScanSchedulePattern) {
 		// Invalid persisted settings make the estimate unavailable for this job,
 		// but should not fail the whole tenant's demand estimate.
@@ -393,7 +425,24 @@ func (cache *scanSlotDemandCache) retainRunsPerDay(key scanRunsPerDayKey, value 
 }
 
 func scanRunsPerDayCacheEntryWeight(key scanRunsPerDayKey, value scanRunsPerDayValue) int {
-	return scanRunsPerDayCacheEntrySize + cap(value.occurrences)*4 + len(key.timezone) + len(key.schedule) + len(value.identity.timezone)
+	occurrenceStorage := conservativeScanDemandCacheStorage(cap(value.occurrences) * 4)
+	timezoneStorage := conservativeScanDemandCacheStorage(len(key.timezone))
+	scheduleStorage := conservativeScanDemandCacheStorage(len(key.schedule))
+	identityTimezoneStorage := conservativeScanDemandCacheStorage(len(value.identity.timezone))
+	return scanRunsPerDayCacheEntrySize + occurrenceStorage + timezoneStorage + scheduleStorage + identityTimezoneStorage
+}
+
+// conservativeScanDemandCacheStorage adds room for allocator rounding on
+// larger backing arrays and strings, on top of the fixed per-entry allowance.
+func conservativeScanDemandCacheStorage(size int) int {
+	switch {
+	case size > 32*1024:
+		return size + 16*1024
+	case size > 8*1024:
+		return size + 4*1024
+	default:
+		return size
+	}
 }
 
 // scanDurationKey returns the duration key of the job's revision, which the
@@ -475,27 +524,37 @@ func scheduleTimezone(job config.Job, defaultTimezone string) string {
 	return timezone
 }
 
-// scanJobRunsPerDay averages a valid five-field schedule over one calendar
-// year in the job's timezone; see scheduleRunsPerDay.
+// scanJobRunsPerDay averages a valid five-field schedule over a representative
+// four-year calendar cycle in the job's timezone; see scheduleRunsPerDay.
 func scanJobRunsPerDay(job config.Job, defaultTimezone string) (float64, bool) {
 	return scheduleRunsPerDay(scheduleTimezone(job, defaultTimezone), job.Schedule)
 }
 
-// scheduleRunsPerDay averages a valid five-field schedule over one calendar
-// year. Dense schedules use calendar-field counts instead of expanding every
+// scheduleRunsPerDay averages a valid five-field schedule over a representative
+// four-year cycle. Dense schedules use calendar-field counts instead of expanding every
 // tick; see schedulePattern.
 func scheduleRunsPerDay(timezone, scheduleText string) (float64, bool) {
 	value, err := schedulePattern(context.Background(), timezone, scheduleText)
 	return value.runsPerDay, value.ok && err == nil
 }
 
-// schedulePattern averages a valid five-field schedule over one calendar
-// year and retains its tick offsets for simulating the scheduler's
-// skip-while-active rule when the year fits within the observation limit.
-// Denser schedules use their calendar fields to count the full year without
-// storing or expanding every minute.
+// schedulePattern averages a valid five-field schedule over a representative
+// four-year calendar cycle and retains its tick offsets for simulating the
+// scheduler's skip-while-active rule when the sample fits within the
+// observation limit. Denser schedules use their calendar fields to count the
+// full sample without storing or expanding every minute.
 func schedulePattern(ctx context.Context, timezone, scheduleText string) (scanRunsPerDayValue, error) {
+	return schedulePatternWithBudget(ctx, timezone, scheduleText, nil)
+}
+
+// schedulePatternWithBudget charges the same request-local Schedule.Next
+// budget used by duration projections. A failed or canceled expansion is
+// never returned as a partial pattern, so callers cannot cache or estimate it.
+func schedulePatternWithBudget(ctx context.Context, timezone, scheduleText string, budget *scanScheduleSimulationBudget) (scanRunsPerDayValue, error) {
 	var value scanRunsPerDayValue
+	if budget == nil {
+		budget = &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
+	}
 	if err := ctx.Err(); err != nil {
 		return value, err
 	}
@@ -508,31 +567,43 @@ func schedulePattern(ctx context.Context, timezone, scheduleText string) (scanRu
 	if err != nil {
 		return value, errInvalidScanSchedulePattern
 	}
-	value.start = time.Date(2024, time.January, 1, 0, 0, 0, 0, location)
-	value.end = time.Date(2025, time.January, 1, 0, 0, 0, 0, location)
-	value.schedule = schedule
-	value.windowSeconds = value.end.Sub(value.start).Seconds()
+	value.startYear = scanScheduleSampleStartYear
+	value.endYear = scanScheduleSampleEndYear
+	start := time.Date(value.startYear, time.January, 1, 0, 0, 0, 0, location)
+	end := time.Date(value.endYear, time.January, 1, 0, 0, 0, 0, location)
+	value.windowSeconds = end.Sub(start).Seconds()
 	value.occurrences = make([]uint32, 0, min(scanScheduleObservationLimit, 128))
 	if err := ctx.Err(); err != nil {
 		return scanRunsPerDayValue{}, err
-	}
-	first := schedule.Next(value.start.Add(-time.Nanosecond))
-	if err := ctx.Err(); err != nil {
-		return scanRunsPerDayValue{}, err
-	}
-	if first.IsZero() {
-		return scanRunsPerDayValue{}, errInvalidScanSchedulePattern
 	}
 	spec, ok := schedule.(*cron.SpecSchedule)
 	if !ok {
 		return scanRunsPerDayValue{}, errInvalidScanSchedulePattern
 	}
+	spec.Location = location
 	value.identity = scanScheduleIdentity{
 		timezone: location.String(), second: spec.Second &^ cronStarBit,
 		minute: spec.Minute &^ cronStarBit, hour: spec.Hour &^ cronStarBit,
 		dayOfMonth: spec.Dom, month: spec.Month &^ cronStarBit, dayOfWeek: spec.Dow,
 	}
-	runs, err := countScheduleRunsInYear(ctx, schedule, spec, value.start, value.end)
+	var budgetExhausted bool
+	if budget != nil {
+		schedule = budgetedCronSchedule{schedule: schedule, budget: budget, exhausted: &budgetExhausted}
+	}
+	first := schedule.Next(start.Add(-time.Nanosecond))
+	if err := ctx.Err(); err != nil {
+		return scanRunsPerDayValue{}, err
+	}
+	if budgetExhausted {
+		return scanRunsPerDayValue{}, errScheduleSimulationBudgetExceeded
+	}
+	if first.IsZero() {
+		return scanRunsPerDayValue{}, errInvalidScanSchedulePattern
+	}
+	runs, err := countScheduleRunsInWindow(ctx, schedule, spec, start, end, budget)
+	if err := scheduleBudgetError(ctx, budgetExhausted); err != nil {
+		return scanRunsPerDayValue{}, err
+	}
 	if err != nil {
 		return scanRunsPerDayValue{}, err
 	}
@@ -543,19 +614,22 @@ func schedulePattern(ctx context.Context, timezone, scheduleText string) (scanRu
 	}
 	if !value.observationsComplete {
 		// Five-field schedules fire on minute boundaries. This conservative
-		// gap lets one-minute runs use the exact annual count; longer runs
-		// simulate their starts across the full year below.
+		// gap lets one-minute runs use the exact sample count; longer runs
+		// simulate their starts across the full sample below.
 		value.minimumGap = time.Minute
 	} else {
 		var previous time.Time
-		for next := first; next.Before(value.end); next = schedule.Next(next) {
+		for next := first; next.Before(end); next = schedule.Next(next) {
 			if err := ctx.Err(); err != nil {
 				return scanRunsPerDayValue{}, err
+			}
+			if budgetExhausted {
+				return scanRunsPerDayValue{}, errScheduleSimulationBudgetExceeded
 			}
 			if next.IsZero() {
 				return scanRunsPerDayValue{}, errInvalidScanSchedulePattern
 			}
-			value.occurrences = append(value.occurrences, uint32(next.Sub(value.start)/time.Second))
+			value.occurrences = append(value.occurrences, uint32(next.Sub(start)/time.Second))
 			if !previous.IsZero() {
 				gap := next.Sub(previous)
 				if value.minimumGap == 0 || gap < value.minimumGap {
@@ -563,6 +637,9 @@ func schedulePattern(ctx context.Context, timezone, scheduleText string) (scanRu
 				}
 			}
 			previous = next
+		}
+		if err := scheduleBudgetError(ctx, budgetExhausted); err != nil {
+			return scanRunsPerDayValue{}, err
 		}
 		if len(value.occurrences) != runs {
 			return scanRunsPerDayValue{}, errInvalidScanSchedulePattern
@@ -576,17 +653,27 @@ func schedulePattern(ctx context.Context, timezone, scheduleText string) (scanRu
 	return value, nil
 }
 
+func scheduleBudgetError(ctx context.Context, exhausted bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if exhausted {
+		return errScheduleSimulationBudgetExceeded
+	}
+	return nil
+}
+
 const cronStarBit = uint64(1) << 63
 
-// countScheduleRunsInYear counts ordinary local days from the cron field
+// countScheduleRunsInWindow counts ordinary local days from the cron field
 // bitsets, then uses cron.Next on the handful of days whose local duration
 // differs from 24 hours. This keeps dense schedules bounded without dropping
 // their month, day-of-month, weekday, or daylight-saving behavior.
-func countScheduleRunsInYear(ctx context.Context, schedule cron.Schedule, spec *cron.SpecSchedule, start, end time.Time) (int, error) {
+func countScheduleRunsInWindow(ctx context.Context, schedule cron.Schedule, spec *cron.SpecSchedule, start, end time.Time, budget *scanScheduleSimulationBudget) (int, error) {
 	ticksPerOrdinaryDay := bits.OnesCount64(spec.Second&^cronStarBit) * bits.OnesCount64(spec.Minute&^cronStarBit) * bits.OnesCount64(spec.Hour&^cronStarBit)
 	var runs int
 	for dayStart := start; dayStart.Before(end); {
-		if err := ctx.Err(); err != nil {
+		if err := takeScheduleWork(ctx, budget); err != nil {
 			return 0, err
 		}
 		year, month, day := dayStart.Date()
@@ -655,13 +742,46 @@ func (value scanRunsPerDayValue) runsForDuration(ctx context.Context, runSeconds
 		return value.runsPerDay, false, nil
 	}
 	runDuration := time.Duration(runSeconds * float64(time.Second))
+	if allMinuteSchedule(value.identity) && runSeconds <= value.windowSeconds {
+		return simulateEveryMinuteSchedule(ctx, value, runDuration)
+	}
+	schedule, start, end, err := value.runtimeSchedule()
+	if err != nil {
+		return 0, false, err
+	}
+	return value.runsForDurationWithSchedule(ctx, runSeconds, runDuration, schedule, start, end, nil)
+}
+
+// runtimeSchedule reconstructs timezone-bearing values only for the duration
+// of one projection. The shared cache retains only the IANA key and numeric
+// calendar fields, never time.Location or cron.SpecSchedule pointers.
+func (value scanRunsPerDayValue) runtimeSchedule() (cron.Schedule, time.Time, time.Time, error) {
+	location, err := time.LoadLocation(value.identity.timezone)
+	if err != nil {
+		return nil, time.Time{}, time.Time{}, errInvalidScanSchedulePattern
+	}
+	schedule := &cron.SpecSchedule{
+		Second: value.identity.second, Minute: value.identity.minute,
+		Hour: value.identity.hour, Dom: value.identity.dayOfMonth,
+		Month: value.identity.month, Dow: value.identity.dayOfWeek,
+		Location: location,
+	}
+	start := time.Date(value.startYear, time.January, 1, 0, 0, 0, 0, location)
+	end := time.Date(value.endYear, time.January, 1, 0, 0, 0, 0, location)
+	return schedule, start, end, nil
+}
+
+func (value scanRunsPerDayValue) runsForDurationWithSchedule(ctx context.Context, runSeconds float64, runDuration time.Duration, schedule cron.Schedule, start, end time.Time, budget *scanScheduleSimulationBudget) (runsPerDay float64, skipped bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
 	if runSeconds > value.windowSeconds || !value.observationsComplete {
 		// A truncated set of offsets cannot represent inactive calendar
 		// periods or daylight-saving changes. Model starts over the same full
-		// year used for the rate; skipping ahead over active runs bounds work.
-		return simulateSchedule(ctx, value.schedule, value.start, value.end, runDuration)
+		// sample used for the rate; skipping ahead over active runs bounds work.
+		return simulateSchedule(ctx, schedule, start, end, runDuration)
 	}
-	busyUntil, err := simulateSchedulePrefix(ctx, value.schedule, value.start, runDuration)
+	busyUntil, err := simulateSchedulePrefix(ctx, schedule, start, runDuration)
 	if err != nil {
 		return 0, false, err
 	}
@@ -672,7 +792,10 @@ func (value scanRunsPerDayValue) runsForDuration(ctx context.Context, runSeconds
 				return 0, false, err
 			}
 		}
-		tick := value.start.Add(time.Duration(offset) * time.Second)
+		if err := takeScheduleWork(ctx, budget); err != nil {
+			return 0, false, err
+		}
+		tick := start.Add(time.Duration(offset) * time.Second)
 		if tick.Before(busyUntil) {
 			skipped = true
 			continue
@@ -687,8 +810,64 @@ func (value scanRunsPerDayValue) runsForDuration(ctx context.Context, runSeconds
 	return starts / windowDays, skipped, nil
 }
 
-func memoizedScheduleRunsForDuration(ctx context.Context, cache map[scanScheduleDurationKey]scanScheduleDurationEstimate, value scanRunsPerDayValue, runSeconds float64) (float64, bool, error) {
-	return memoizedScheduleRunsForDurationWithBudget(ctx, cache, value, runSeconds, nil)
+func allMinuteSchedule(identity scanScheduleIdentity) bool {
+	return bits.OnesCount64(identity.second) == 1 && identity.second&1 != 0 &&
+		bits.OnesCount64(identity.minute) == 60 && bits.OnesCount64(identity.hour) == 24 &&
+		bits.OnesCount64(identity.month) == 12 && identity.dayOfMonth&cronStarBit != 0 && identity.dayOfWeek&cronStarBit != 0
+}
+
+// simulateEveryMinuteSchedule uses the exact repeated-tick cadence instead
+// of asking cron.Next for every minute over a four-year sample. It reproduces
+// the same two-run warm start used by simulateSchedule, including the phase
+// of the first run relative to the sample boundary.
+func simulateEveryMinuteSchedule(ctx context.Context, value scanRunsPerDayValue, runDuration time.Duration) (float64, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	if runDuration <= 0 {
+		return 0, false, nil
+	}
+	location, err := time.LoadLocation(value.identity.timezone)
+	if err != nil {
+		return 0, false, errInvalidScanSchedulePattern
+	}
+	start := time.Date(value.startYear, time.January, 1, 0, 0, 0, 0, location)
+	end := time.Date(value.endYear, time.January, 1, 0, 0, 0, 0, location)
+	if end.Sub(start).Seconds() != value.windowSeconds {
+		return 0, false, errInvalidScanSchedulePattern
+	}
+	return simulateEveryMinuteScheduleWindow(ctx, start, end, runDuration)
+}
+
+func simulateEveryMinuteScheduleWindow(ctx context.Context, start, end time.Time, runDuration time.Duration) (float64, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	windowSeconds := end.Sub(start).Seconds()
+	if windowSeconds <= 0 || runDuration <= 0 || runDuration.Seconds() > windowSeconds {
+		return 0, false, nil
+	}
+	warmStart := start.Add(-2 * runDuration)
+	// The sample start is itself a cron tick. Truncating against Unix minute
+	// boundaries would misalign schedules in zones whose UTC offset has seconds.
+	first := start.Add((warmStart.Sub(start) / time.Minute) * time.Minute)
+	stepMinutes := int64(runDuration / time.Minute)
+	if runDuration%time.Minute != 0 {
+		stepMinutes++
+	}
+	step := time.Duration(stepMinutes) * time.Minute
+	if first.Before(start) {
+		delta := start.Sub(first)
+		jumps := delta / step
+		if delta%step != 0 {
+			jumps++
+		}
+		first = first.Add(jumps * step)
+	}
+	starts := float64((end.Sub(first)-1)/step + 1)
+	windowDays := windowSeconds / float64(24*time.Hour/time.Second)
+	skipped := stepMinutes > 1 && starts < windowSeconds/float64(time.Minute/time.Second)
+	return starts / windowDays, skipped, nil
 }
 
 func memoizedScheduleRunsForDurationWithBudget(ctx context.Context, cache map[scanScheduleDurationKey]scanScheduleDurationEstimate, value scanRunsPerDayValue, runSeconds float64, budget *scanScheduleSimulationBudget) (float64, bool, error) {
@@ -702,11 +881,23 @@ func memoizedScheduleRunsForDurationWithBudget(ctx context.Context, cache map[sc
 	if estimate, ok := cache[key]; ok {
 		return estimate.runsPerDay, estimate.skipped, nil
 	}
+	if allMinuteSchedule(value.identity) && runSeconds <= value.windowSeconds {
+		runsPerDay, skipped, err := value.runsForDuration(ctx, runSeconds)
+		if err == nil {
+			cache[key] = scanScheduleDurationEstimate{runsPerDay: runsPerDay, skipped: skipped}
+		}
+		return runsPerDay, skipped, err
+	}
+	schedule, start, end, err := value.runtimeSchedule()
+	if err != nil {
+		return 0, false, err
+	}
 	var budgetExhausted bool
 	if budget != nil {
-		value.schedule = budgetedCronSchedule{schedule: value.schedule, budget: budget, exhausted: &budgetExhausted}
+		schedule = budgetedCronSchedule{schedule: schedule, budget: budget, exhausted: &budgetExhausted}
 	}
-	runsPerDay, skipped, err := value.runsForDuration(ctx, runSeconds)
+	runDuration := time.Duration(runSeconds * float64(time.Second))
+	runsPerDay, skipped, err := value.runsForDurationWithSchedule(ctx, runSeconds, runDuration, schedule, start, end, budget)
 	if budgetExhausted {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return 0, false, ctxErr

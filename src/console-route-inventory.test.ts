@@ -353,11 +353,33 @@ function jsxAttribute(element: Node, name: string): Node | undefined {
   return attributes.find(attribute => attribute.type === 'JSXAttribute' && ((attribute.name as Node).name === name))
 }
 
-function isComponentValueProp(attribute: Node): boolean {
-  if (attribute.type !== 'JSXAttribute') return false
-  const name = String(((attribute.name as Node).name))
-  const normalized = name.toLowerCase()
-  return normalized.includes('component') || ['as', 'element', 'elementtype', 'layout', 'page', 'render', 'renderer', 'route', 'routes'].includes(normalized)
+function jsxExpressionAttribute(attribute: Node | undefined): Node | undefined {
+  const value = attribute?.value as Node | null | undefined
+  if (value?.type !== 'JSXExpressionContainer') return undefined
+  return unwrapTransparentExpression(value.expression as Node)
+}
+
+function readableComponentExpression(node: Node | undefined, readableLazyCalls: Set<Node>, reactNamespaces: Set<string>): boolean {
+  const expression = unwrapTransparentExpression(node)
+  if (!expression) return false
+  if (expression.type === 'Identifier' || readableLazyCalls.has(expression)) return true
+  if (expression.type === 'Literal' && expression.value === null) return true
+  if (expression.type === 'MemberExpression' || expression.type === 'OptionalMemberExpression') {
+    const property = expression.property as Node
+    const object = unwrapTransparentExpression(expression.object as Node)
+    return (!expression.computed || staticStringValue(property) !== undefined)
+      && object?.type === 'Identifier'
+      && reactNamespaces.has(String(object.name))
+  }
+  if (expression.type === 'ConditionalExpression') {
+    return readableComponentExpression(expression.consequent as Node, readableLazyCalls, reactNamespaces)
+      && readableComponentExpression(expression.alternate as Node, readableLazyCalls, reactNamespaces)
+  }
+  if (expression.type === 'LogicalExpression') {
+    return readableComponentExpression(expression.left as Node, readableLazyCalls, reactNamespaces)
+      && readableComponentExpression(expression.right as Node, readableLazyCalls, reactNamespaces)
+  }
+  return false
 }
 
 function routeIndexAttribute(element: Node, file: string, where: string): boolean {
@@ -543,9 +565,11 @@ function dynamicLazyComponentImports(
   lazyFactories: Set<string>,
   namespaces: Set<string>,
   isLocalSpecifier: (specifier: string) => boolean,
-): { bindings: Map<string, { source: string }>; calls: Map<Node, { component: string; source: string }> } {
+  file: string,
+): { bindings: Map<string, { source: string }>; calls: Map<Node, { component: string; source: string }>; readableCalls: Set<Node> } {
   const imports = new Map<string, { source: string }>()
   const calls = new Map<Node, { component: string; source: string }>()
+  const readableCalls = new Set<Node>()
   const isOpaquePackage = (specifier: string) => !isLocalSpecifier(specifier)
     && !specifier.startsWith('node:')
     && !specifier.startsWith('#')
@@ -561,6 +585,44 @@ function dynamicLazyComponentImports(
     if (!callee || (callee.type !== 'MemberExpression' && callee.type !== 'OptionalMemberExpression')) return false
     const object = unwrapTransparentExpression(callee.object as Node | undefined)
     return memberPropertyName(callee) === 'lazy' && object?.type === 'Identifier' && namespaces.has(String(object.name))
+  }
+  const loaderFunctions = new Map<string, Set<Node>>()
+  const loaderAliases = new Map<string, Set<string>>()
+  const addLoaderFunction = (name: string, fn: Node) => {
+    const functions = loaderFunctions.get(name) ?? new Set<Node>()
+    functions.add(fn)
+    loaderFunctions.set(name, functions)
+  }
+  const addLoaderAlias = (name: string, target: string) => {
+    const aliases = loaderAliases.get(name) ?? new Set<string>()
+    aliases.add(target)
+    loaderAliases.set(name, aliases)
+  }
+  const collectLoaderBindings = (node: Node, parent?: Node) => {
+    if (node.type === 'FunctionDeclaration' && isNode(node.id)) {
+      addLoaderFunction(String((node.id as Node).name), node)
+    }
+    if (node.type === 'VariableDeclarator' && parent?.type === 'VariableDeclaration' && parent.kind === 'const') {
+      const binding = node.id as Node
+      const value = unwrapTransparentExpression(node.init as Node | undefined)
+      if (binding.type === 'Identifier' && value) {
+        const name = String(binding.name)
+        if (value.type === 'ArrowFunctionExpression' || value.type === 'FunctionExpression') addLoaderFunction(name, value)
+        else if (value.type === 'Identifier') addLoaderAlias(name, String(value.name))
+      }
+    }
+    for (const child of childNodes(node)) collectLoaderBindings(child, node)
+  }
+  collectLoaderBindings(program)
+  const resolveLoaderFunction = (name: string, seen = new Set<string>()): Node | undefined => {
+    if (seen.has(name)) return undefined
+    seen.add(name)
+    const functions = loaderFunctions.get(name)
+    const aliases = loaderAliases.get(name)
+    if ((functions?.size ?? 0) > 1 || (functions?.size && aliases?.size)) return undefined
+    if (functions?.size === 1) return [...functions][0]
+    if (aliases?.size !== 1) return undefined
+    return resolveLoaderFunction([...aliases][0], seen)
   }
   const opaqueImportsIn = (node: Node | undefined): string[] => {
     if (!node) return []
@@ -578,11 +640,16 @@ function dynamicLazyComponentImports(
     visit(node)
     return sources
   }
-  const lazyReturnExpressions = (callback: Node | undefined): Node[] => {
-    const fn = unwrapTransparentExpression(callback)
-    if (fn?.type !== 'ArrowFunctionExpression' && fn?.type !== 'FunctionExpression') return []
+  const lazyReturnExpressions = (callback: Node | undefined): { readable: boolean; values: Node[] } => {
+    const expression = unwrapTransparentExpression(callback)
+    const fn = expression?.type === 'Identifier'
+      ? resolveLoaderFunction(String(expression.name))
+      : expression
+    if (fn?.type !== 'ArrowFunctionExpression' && fn?.type !== 'FunctionExpression' && fn?.type !== 'FunctionDeclaration') {
+      return { readable: false, values: [] }
+    }
     const body = fn.body as Node
-    if (body.type !== 'BlockStatement') return [body]
+    if (body.type !== 'BlockStatement') return { readable: true, values: [body] }
     const values: Node[] = []
     const visit = (node: Node) => {
       if (node !== body && ['ArrowFunctionExpression', 'FunctionExpression', 'FunctionDeclaration'].includes(node.type)) return
@@ -590,7 +657,7 @@ function dynamicLazyComponentImports(
       childNodes(node).forEach(visit)
     }
     visit(body)
-    return values
+    return { readable: true, values }
   }
   const opaqueLazyCall = (node: Node): { component: string; source: string } | undefined => {
     if ((node.type !== 'CallExpression' && node.type !== 'OptionalCallExpression') || !lazyCall(node.callee as Node | undefined)) return undefined
@@ -600,7 +667,12 @@ function dynamicLazyComponentImports(
       : undefined
     const component = callee?.type === 'Identifier' ? String(callee.name) : `${String(object?.type === 'Identifier' ? object.name : 'React')}.lazy`
     const callback = (node.arguments as Node[] | undefined)?.[0]
-    const source = lazyReturnExpressions(callback).flatMap(opaqueImportsIn)[0]
+    const loader = lazyReturnExpressions(callback)
+    if (!loader.readable) {
+      throw new Error(`${file}: ${component} has a React.lazy callback the route inventory cannot read; use an inline function or a statically declared loader function/arrow binding`)
+    }
+    readableCalls.add(node)
+    const source = loader.values.flatMap(opaqueImportsIn)[0]
     return source ? { component, source } : undefined
   }
   const originIn = (node: Node | undefined): { component: string; source: string } | undefined => {
@@ -631,7 +703,7 @@ function dynamicLazyComponentImports(
   }
   inspectCalls(program)
   inspectBindings(program)
-  return { bindings: imports, calls }
+  return { bindings: imports, calls, readableCalls }
 }
 
 function renderedImportedComponents(
@@ -641,6 +713,7 @@ function renderedImportedComponents(
   factories: Set<string>,
   namespaces: Set<string>,
   dynamicLazyCalls: Map<Node, { component: string; source: string }>,
+  inspectRootValues = false,
 ): { component: string; source: string; file: string }[] {
   if (!node) return []
   const rendered = new Map<string, { component: string; source: string; file: string }>()
@@ -663,6 +736,7 @@ function renderedImportedComponents(
     }
     visitValues(value)
   }
+  if (inspectRootValues && node) addImportedValues(node)
   const visit = (current: Node, parent?: Node, field?: string) => {
     const dynamicLazyComponent = dynamicLazyCalls.get(current)
     if (dynamicLazyComponent) {
@@ -692,6 +766,9 @@ function renderedImportedComponents(
         if (propsArgument) addImportedValues(propsArgument)
       }
     }
+    if (current.type === 'CallExpression' || current.type === 'OptionalCallExpression' || current.type === 'NewExpression') {
+      for (const argument of (current.arguments as Node[]).filter(isNode)) addImportedValues(argument)
+    }
     if (current.type === 'JSXElement') {
       const name = (current.openingElement as Node).name as Node
       const binding = name.type === 'JSXIdentifier'
@@ -701,8 +778,12 @@ function renderedImportedComponents(
           : undefined
       add(binding)
       for (const attribute of (current.openingElement as Node).attributes as Node[]) {
+        if (attribute.type === 'JSXSpreadAttribute') {
+          addImportedValues(attribute.argument as Node)
+          continue
+        }
         const value = attribute.value as Node | null | undefined
-        if (isComponentValueProp(attribute) && value?.type === 'JSXExpressionContainer') {
+        if (value?.type === 'JSXExpressionContainer') {
           addImportedValues(value.expression as Node)
         }
       }
@@ -865,7 +946,12 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
             unresolvedLocalComponentImports.set(localName, { source })
           }
         }
-      } else if (source !== 'react' && source !== 'react/jsx-runtime' && ![...routerModules].some(module => source === module || source.startsWith(`${module}/`))) {
+      } else if (
+        source !== 'react'
+        && source !== 'react/jsx-runtime'
+        // lucide-react exports presentation-only SVG icons and cannot own a route tree.
+        && source !== 'lucide-react'
+        && ![...routerModules].some(module => source === module || source.startsWith(`${module}/`))) {
         for (const specifier of statement.specifiers as Node[]) {
           if (statement.importKind === 'type' || specifier.importKind === 'type') continue
           const localName = String((specifier.local as Node).name)
@@ -884,7 +970,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
 
     const reactFactories = reactCreateElementAliases(program, reactCreateElementImports, reactNamespaces)
     const reactLazies = reactLazyAliases(program, reactLazyImports, reactFactories.namespaces)
-    const dynamicComponents = dynamicLazyComponentImports(program, reactLazies, reactFactories.namespaces, moduleResolver.isLocalSpecifier)
+    const dynamicComponents = dynamicLazyComponentImports(program, reactLazies, reactFactories.namespaces, moduleResolver.isLocalSpecifier, file)
     const opaqueComponentImports = new Map(uninspectableExternalComponentImports)
     for (const [binding, origin] of dynamicComponents.bindings) {
       if (!opaqueComponentImports.has(binding)) opaqueComponentImports.set(binding, origin)
@@ -1104,11 +1190,44 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
           collectedRoutes += 1
           const index = routeIndexAttribute(node, file, where)
           const pathAttribute = jsxAttribute(node, 'path')
+          const path = pathAttribute ? stringValue(pathAttribute.value as Node, `A <Route> path in ${where} in ${file}`) : undefined
+          const elementValue = jsxAttribute(node, 'element')?.value as Node | undefined
+          const componentAttribute = jsxAttribute(node, 'Component')
+          const componentExpression = jsxExpressionAttribute(componentAttribute)
+          const wildcard = path === '*' || !!path?.endsWith('/*')
+          if (componentAttribute && wildcard && !readableComponentExpression(componentExpression, dynamicComponents.readableCalls, reactNamespaces)) {
+            throw new Error(`${file}: <Route> in ${where} has a Component prop the route inventory cannot read in wildcard route ${path}; use a statically readable component value so it can check for nested routes`)
+          }
+          const componentReferences = (value: Node | undefined): string[] => {
+            const expression = unwrapTransparentExpression(value)
+            if (!expression) return []
+            if (expression.type === 'Identifier') return [String(expression.name)]
+            if (expression.type === 'MemberExpression' || expression.type === 'OptionalMemberExpression') {
+              return componentReferences(expression.object as Node)
+            }
+            if (expression.type === 'ConditionalExpression') {
+              return [
+                ...componentReferences(expression.consequent as Node),
+                ...componentReferences(expression.alternate as Node),
+              ]
+            }
+            if (expression.type === 'LogicalExpression') {
+              return [
+                ...componentReferences(expression.left as Node),
+                ...componentReferences(expression.right as Node),
+              ]
+            }
+            return renderedComponents(expression)
+          }
+          const uninspectableRenders = [
+            ...renderedImportedComponents(elementValue, importedExternalComponentBindings, file, reactFactories.factories, reactFactories.namespaces, dynamicComponents.calls),
+            ...renderedImportedComponents(componentAttribute?.value as Node | undefined, importedExternalComponentBindings, file, reactFactories.factories, reactFactories.namespaces, dynamicComponents.calls, true),
+          ]
           routes.push({
-            path: pathAttribute ? stringValue(pathAttribute.value as Node, `A <Route> path in ${where} in ${file}`) : undefined,
+            path,
             index,
-            renders: renderedComponents(jsxAttribute(node, 'element')?.value as Node | undefined),
-            uninspectableRenders: renderedImportedComponents(jsxAttribute(node, 'element')?.value as Node | undefined, importedExternalComponentBindings, file, reactFactories.factories, reactFactories.namespaces, dynamicComponents.calls),
+            renders: [...renderedComponents(elementValue), ...componentReferences(componentExpression)],
+            uninspectableRenders,
             children: collect(node.children as Node[], where),
           })
           return
@@ -1575,6 +1694,49 @@ export function Shell() {
       }
     })
 
+    it('checks Route.Component values in the full inventory under wildcard paths', () => {
+      const exactInventory: Inventory = {
+        consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
+        surfaces: [],
+        scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
+        exclusions: [],
+        tabKeys: [],
+      }
+      const sources = [
+        {
+          file: 'src/external-route-component-prop.tsx',
+          code: `import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes } from 'third-party-router'
+export function Shell() {
+  return <Routes><Route path="/known/*" Component={NestedRoutes} /></Routes>
+}`,
+        },
+        {
+          file: 'src/external-route-component-lowercase-prop.tsx',
+          code: `import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes as nestedRoutes } from 'third-party-router'
+export function Shell() {
+  return <Routes><Route path="/known/*" Component={nestedRoutes} /></Routes>
+}`,
+        },
+      ]
+
+      for (const source of sources) {
+        expect(() => inventoryProblems(resolveRouters(extractRouters([source])), exactInventory), source.file).toThrow(
+          /renders imported component (NestedRoutes|nestedRoutes) from third-party-router in wildcard route \/known\/\*/,
+        )
+      }
+
+      const unreadable = {
+        file: 'src/unreadable-route-component-prop.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+export function Shell() {
+  return <Routes><Route path="/known/*" Component={resolveComponent()} /></Routes>
+}`,
+      }
+      expect(() => extractRouters([unreadable])).toThrow(/Component prop the route inventory cannot read in wildcard route \/known\/\*/)
+    })
+
     it('fails the full inventory check when a factory-created package component could own wildcard routes', () => {
       const exactInventory: Inventory = {
         consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
@@ -1690,6 +1852,53 @@ export function Shell() {
       )
     })
 
+    it('tracks opaque package components in arbitrary JSX props and spread values', () => {
+      const exactInventory: Inventory = {
+        consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
+        surfaces: [],
+        scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
+        exclusions: [],
+        tabKeys: [],
+      }
+      const sources = [
+        {
+          file: 'src/external-arbitrary-jsx-prop.tsx',
+          code: `import * as React from 'react'
+import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes as nestedRoutes } from 'third-party-router'
+function RouteHost({ view }: { view: React.ComponentType }) { return React.createElement(view) }
+export function Shell() {
+  return <Routes><Route path="/known/*" element={<RouteHost view={nestedRoutes} />} /></Routes>
+}`,
+        },
+        {
+          file: 'src/external-jsx-spread-prop.tsx',
+          code: `import * as React from 'react'
+import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes as nestedRoutes } from 'third-party-router'
+function RouteHost({ view }: { view: React.ComponentType }) { return React.createElement(view) }
+export function Shell() {
+  return <Routes><Route path="/known/*" element={<RouteHost {...{ view: nestedRoutes }} />} /></Routes>
+}`,
+        },
+        {
+          file: 'src/external-call-argument.tsx',
+          code: `import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes as nestedRoutes } from 'third-party-router'
+function forward(component: React.ComponentType) { return component }
+export function Shell() {
+  return <Routes><Route path="/known/*" element={forward(nestedRoutes)} /></Routes>
+}`,
+        },
+      ]
+
+      for (const source of sources) {
+        expect(() => inventoryProblems(resolveRouters(extractRouters([source])), exactInventory), source.file).toThrow(
+          /renders imported component nestedRoutes from third-party-router in wildcard route \/known\/\*/,
+        )
+      }
+    })
+
     it('preserves opaque package provenance from both logical expression operands', () => {
       const exactInventory: Inventory = {
         consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
@@ -1750,6 +1959,27 @@ export function Shell() {
   return <Routes><Route path="/known/*" element={React.createElement(React.lazy(() => import('third-party-router')))} /></Routes>
 }`,
         },
+        {
+          file: 'src/dynamic-external-named-loader.tsx',
+          code: `import * as React from 'react'
+import { Route, Routes } from 'react-router-dom'
+const load = () => import('third-party-router')
+const NestedRoutes = React.lazy(load)
+export function Shell() {
+  return <Routes><Route path="/known/*" element={<NestedRoutes />} /></Routes>
+}`,
+        },
+        {
+          file: 'src/dynamic-external-loader-alias.tsx',
+          code: `import * as React from 'react'
+import { Route, Routes } from 'react-router-dom'
+function loadRoutes() { return import('third-party-router') }
+const load = loadRoutes
+const NestedRoutes = React.lazy(load)
+export function Shell() {
+  return <Routes><Route path="/known/*" element={<NestedRoutes />} /></Routes>
+}`,
+        },
       ]
 
       for (const source of sources) {
@@ -1757,6 +1987,20 @@ export function Shell() {
           /renders imported component (?:NestedRoutes|React\.lazy) from third-party-router in wildcard route \/known\/\*/,
         )
       }
+    })
+
+    it('fails closed when a React.lazy loader callback cannot be resolved statically', () => {
+      const source = {
+        file: 'src/unreadable-lazy-loader.tsx',
+        code: `import * as React from 'react'
+import { Route, Routes } from 'react-router-dom'
+const NestedRoutes = React.lazy(resolveRoutes)
+export function Shell() {
+  return <Routes><Route path="/known/*" element={<NestedRoutes />} /></Routes>
+}`,
+      }
+
+      expect(() => extractRouters([source])).toThrow(/React\.lazy callback the route inventory cannot read/)
     })
 
     it('keeps route-irrelevant package loads and readable local lazy imports allowed', () => {

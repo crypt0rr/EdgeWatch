@@ -130,6 +130,10 @@ func (a *App) scheduledScanDemand(ctx context.Context, ts *store.TenantStore) (S
 	if err != nil {
 		return result, err
 	}
+	// Many jobs can share a cron schedule and effective run duration. Keep the
+	// per-request memo bounded by the number of scheduled jobs, so one dense
+	// annual simulation serves every equivalent job in this estimate.
+	simulations := make(map[scanScheduleDurationKey]scanScheduleDurationEstimate)
 	for _, job := range scheduled {
 		var perRun float64
 		historyJob := false
@@ -154,7 +158,7 @@ func (a *App) scheduledScanDemand(ctx context.Context, ts *store.TenantStore) (S
 			}
 		}
 		runSeconds := runSlotSeconds(job.record.Job, perRun)
-		runsPerDay, skipped, err := job.schedule.runsForDuration(ctx, runSeconds)
+		runsPerDay, skipped, err := memoizedScheduleRunsForDuration(ctx, simulations, job.schedule, runSeconds)
 		if err != nil {
 			if errors.Is(err, errInvalidScanSchedulePattern) {
 				result.UnestimatedJobs++
@@ -223,6 +227,24 @@ type scanRunsPerDayKey struct {
 	timezone, schedule string
 }
 
+// scanScheduleIdentity contains the parsed cron fields, so schedules with
+// different whitespace or equivalent field syntax share duration estimates.
+type scanScheduleIdentity struct {
+	timezone                     string
+	second, minute, hour         uint64
+	dayOfMonth, month, dayOfWeek uint64
+}
+
+type scanScheduleDurationKey struct {
+	schedule   scanScheduleIdentity
+	runSeconds uint64
+}
+
+type scanScheduleDurationEstimate struct {
+	runsPerDay float64
+	skipped    bool
+}
+
 type scanRunsPerDayValue struct {
 	runsPerDay           float64
 	ok                   bool
@@ -232,6 +254,7 @@ type scanRunsPerDayValue struct {
 	windowSeconds        float64
 	minimumGap           time.Duration
 	schedule             cron.Schedule
+	identity             scanScheduleIdentity
 	occurrences          []uint32
 	rank                 uint64
 }
@@ -434,6 +457,11 @@ func schedulePattern(ctx context.Context, timezone, scheduleText string) (scanRu
 	if !ok {
 		return scanRunsPerDayValue{}, errInvalidScanSchedulePattern
 	}
+	value.identity = scanScheduleIdentity{
+		timezone: location.String(), second: spec.Second &^ cronStarBit,
+		minute: spec.Minute &^ cronStarBit, hour: spec.Hour &^ cronStarBit,
+		dayOfMonth: spec.Dom, month: spec.Month &^ cronStarBit, dayOfWeek: spec.Dow,
+	}
 	runs, err := countScheduleRunsInYear(ctx, schedule, spec, value.start, value.end)
 	if err != nil {
 		return scanRunsPerDayValue{}, err
@@ -587,6 +615,24 @@ func (value scanRunsPerDayValue) runsForDuration(ctx context.Context, runSeconds
 		return 0, false, nil
 	}
 	return starts / windowDays, skipped, nil
+}
+
+func memoizedScheduleRunsForDuration(ctx context.Context, cache map[scanScheduleDurationKey]scanScheduleDurationEstimate, value scanRunsPerDayValue, runSeconds float64) (float64, bool, error) {
+	if !value.ok || value.runsPerDay <= 0 || runSeconds <= 0 {
+		return value.runsForDuration(ctx, runSeconds)
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	key := scanScheduleDurationKey{schedule: value.identity, runSeconds: math.Float64bits(runSeconds)}
+	if estimate, ok := cache[key]; ok {
+		return estimate.runsPerDay, estimate.skipped, nil
+	}
+	runsPerDay, skipped, err := value.runsForDuration(ctx, runSeconds)
+	if err == nil {
+		cache[key] = scanScheduleDurationEstimate{runsPerDay: runsPerDay, skipped: skipped}
+	}
+	return runsPerDay, skipped, err
 }
 
 func simulateSchedulePrefix(ctx context.Context, schedule cron.Schedule, start time.Time, runDuration time.Duration) (time.Time, error) {

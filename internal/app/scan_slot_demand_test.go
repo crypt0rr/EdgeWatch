@@ -482,6 +482,66 @@ func TestScanJobRunsPerDayCountsDenseCalendarScheduleAcrossYear(t *testing.T) {
 	}
 }
 
+type countingMinuteSchedule struct {
+	NextCalls int
+}
+
+func (schedule *countingMinuteSchedule) Next(after time.Time) time.Time {
+	schedule.NextCalls++
+	return after.Truncate(time.Minute).Add(time.Minute)
+}
+
+func TestDenseScheduleDemandMemoizesByNormalizedScheduleAndDuration(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	first, err := schedulePattern(ctx, "UTC", "* * * * *")
+	if err != nil || !first.ok {
+		t.Fatalf("first dense schedule = %+v, error %v", first, err)
+	}
+	second, err := schedulePattern(ctx, "UTC", "0-59 * * * *")
+	if err != nil || !second.ok {
+		t.Fatalf("equivalent dense schedule = %+v, error %v", second, err)
+	}
+	if first.identity != second.identity {
+		t.Fatalf("equivalent cron expressions have different identities: %+v != %+v", first.identity, second.identity)
+	}
+	firstTicks, secondTicks := &countingMinuteSchedule{}, &countingMinuteSchedule{}
+	first.schedule, second.schedule = firstTicks, secondTicks
+	cache := make(map[scanScheduleDurationKey]scanScheduleDurationEstimate)
+
+	const jobs = 100
+	var gotRuns float64
+	var gotSkipped bool
+	for i := 0; i < jobs; i++ {
+		pattern := first
+		if i%2 != 0 {
+			pattern = second
+		}
+		gotRuns, gotSkipped, err = memoizedScheduleRunsForDuration(ctx, cache, pattern, 61)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if math.Abs(gotRuns-720) > 0.001 || !gotSkipped {
+		t.Fatalf("100 dense jobs with 61s runs = %.4f starts/day, skipped %t; want 720 and skipped", gotRuns, gotSkipped)
+	}
+	if len(cache) != 1 {
+		t.Fatalf("memoized %d schedule-duration pairs, want one normalized pair", len(cache))
+	}
+	if calls := firstTicks.NextCalls + secondTicks.NextCalls; calls > 540_000 {
+		t.Fatalf("100 equivalent dense jobs called Schedule.Next %d times; want at most 540000", calls)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	callsBeforeCanceledRequest := firstTicks.NextCalls + secondTicks.NextCalls
+	if _, _, err := memoizedScheduleRunsForDuration(canceled, cache, first, 61); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled cached schedule estimate error = %v; want context.Canceled", err)
+	}
+	if calls := firstTicks.NextCalls + secondTicks.NextCalls; calls != callsBeforeCanceledRequest {
+		t.Fatalf("canceled cached estimate made %d more Schedule.Next calls", calls-callsBeforeCanceledRequest)
+	}
+}
+
 func TestScanJobScheduleTreatsNeverFiringCronAsUnestimatedPromptly(t *testing.T) {
 	t.Parallel()
 	app := &App{Config: &config.Config{}}
@@ -537,7 +597,9 @@ func TestScanJobSchedulePropagatesCancellationDuringExpansion(t *testing.T) {
 	t.Parallel()
 	base, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ctx := &cancelAfterContextChecks{Context: base, cancel: cancel, remaining: 2}
+	// Checks one through five reach the first annual day; cancel at the next
+	// day boundary while countScheduleRunsInYear is still active.
+	ctx := &cancelAfterContextChecks{Context: base, cancel: cancel, remaining: 5}
 	app := &App{Config: &config.Config{}}
 
 	if _, err := app.scanJobSchedule(ctx, config.Job{Schedule: "0 0 1 1 *", Timezone: "UTC"}); !errors.Is(err, context.Canceled) {

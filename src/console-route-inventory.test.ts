@@ -152,8 +152,22 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
     const program = parsed.program as unknown as Node
 
     const local = { Route: new Set<string>(), Routes: new Set<string>() }
+    const reactFragments = new Set<string>()
+    const reactNamespaces = new Set<string>()
     for (const statement of program.body as Node[]) {
-      if (statement.type !== 'ImportDeclaration' || !routerModules.has(String((statement.source as Node).value))) continue
+      if (statement.type !== 'ImportDeclaration') continue
+      const source = String((statement.source as Node).value)
+      if (source === 'react' || source === 'react/jsx-runtime') {
+        for (const specifier of statement.specifiers as Node[]) {
+          const localName = String((specifier.local as Node).name)
+          if (specifier.type === 'ImportSpecifier') {
+            if (String((specifier.imported as Node).name) === 'Fragment') reactFragments.add(localName)
+          } else {
+            reactNamespaces.add(localName)
+          }
+        }
+      }
+      if (!routerModules.has(source)) continue
       for (const specifier of statement.specifiers as Node[]) {
         if (specifier.type !== 'ImportSpecifier') throw new Error(`${file} uses ${specifier.type} from a router module; the console route inventory check requires named router imports so it can read every route`)
         const imported = String((specifier.imported as Node).name)
@@ -203,8 +217,78 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
 
     let routeElements = 0
     let collectedRoutes = 0
+    const rejectUninspectableRouteChild = (node: Node, where: string): never => {
+      throw new Error(`${file}: <Routes> in ${where} contains an unsupported non-JSX child (${node.type}); the console route inventory can only audit JSX <Route> elements`)
+    }
+    const isReactFragment = (node: Node) => {
+      if (node.type === 'JSXFragment') return true
+      if (node.type !== 'JSXElement') return false
+      const name = (node.openingElement as Node).name as Node
+      if (name.type === 'JSXIdentifier') return reactFragments.has(String(name.name))
+      if (name.type !== 'JSXMemberExpression') return false
+      const object = name.object as Node
+      const property = name.property as Node
+      return object.type === 'JSXIdentifier' && reactNamespaces.has(String(object.name)) && property.type === 'JSXIdentifier' && property.name === 'Fragment'
+    }
+    function assertReadableRouteExpression(node: Node, where: string): void {
+      if (node.type === 'JSXEmptyExpression') return
+      if (node.type === 'Literal' && (node.value === null || typeof node.value === 'boolean')) return
+      if (node.type === 'JSXElement' || node.type === 'JSXFragment') {
+        assertReadableRouteChild(node, where)
+        return
+      }
+      // Conditional JSX routes are readable, but an arbitrary expression may
+      // evaluate to a Route created outside JSX (for example with
+      // React.createElement or an alias of createElement), which this
+      // inventory cannot enumerate.
+      if (node.type === 'LogicalExpression' && node.operator === '&&') {
+        assertReadableRouteExpression(node.right as Node, where)
+        return
+      }
+      if (node.type === 'ConditionalExpression') {
+        assertReadableRouteExpression(node.consequent as Node, where)
+        assertReadableRouteExpression(node.alternate as Node, where)
+        return
+      }
+      if (node.type === 'ArrayExpression') {
+        for (const child of node.elements as (Node | null)[]) {
+          if (child) assertReadableRouteExpression(child, where)
+        }
+        return
+      }
+      if (node.type === 'TSAsExpression' || node.type === 'TSTypeAssertion' || node.type === 'TSNonNullExpression' || node.type === 'ParenthesizedExpression') {
+        assertReadableRouteExpression(node.expression as Node, where)
+        return
+      }
+      rejectUninspectableRouteChild(node, where)
+    }
+    function assertReadableRouteChild(node: Node, where: string): void {
+      if (node.type === 'JSXText') {
+        if (!String(node.value).trim()) return
+        rejectUninspectableRouteChild(node, where)
+      }
+      if (node.type === 'JSXExpressionContainer') {
+        assertReadableRouteExpression(node.expression as Node, where)
+        return
+      }
+      if (node.type === 'JSXFragment') {
+        for (const child of node.children as Node[]) assertReadableRouteChild(child, where)
+        return
+      }
+      if (node.type === 'JSXElement') {
+        if (isReactFragment(node)) {
+          for (const child of node.children as Node[]) assertReadableRouteChild(child, where)
+          return
+        }
+        const name = jsxName(node)
+        if (name && (local.Route.has(name) || local.Routes.has(name))) return
+        rejectUninspectableRouteChild(node, where)
+      }
+      rejectUninspectableRouteChild(node, where)
+    }
     const collect = (nodes: Node[], where: string): SourceRoute[] => {
       const routes: SourceRoute[] = []
+      nodes.forEach(node => assertReadableRouteChild(node, where))
       const visit = (node: Node) => {
         const name = jsxName(node)
         if (name && local.Route.has(name)) {
@@ -544,6 +628,24 @@ export function PlatformShell() { return <Routes><Route path="/units/:id/:tab" e
     it('refuses local aliases that could hide routes inside a readable router', () => {
       expect(() => extractRouters([{ file: 'src/i.tsx', code: `import { Route, Routes } from 'react-router-dom'\nconst HiddenRoute = Route\nexport function I() { return <Routes><Route path="/visible" /><HiddenRoute path="/hidden" /></Routes> }` }])).toThrow(/aliases imported Route as HiddenRoute/)
       expect(() => extractRouters([{ file: 'src/j.tsx', code: `import { Route, Routes } from 'react-router-dom'\nconst HiddenRoutes = Routes\nexport function J() { return <HiddenRoutes><Route path="/visible" /></HiddenRoutes> }` }])).toThrow(/aliases imported Routes as HiddenRoutes/)
+    })
+
+    it('refuses non-JSX route children that could hide routes from the inventory', () => {
+      const visible = `<Route path="/visible" element={<Visible />} />`
+      const source = (imports: string, child: string) => `${imports}\nexport function K() { return <Routes>${visible}{${child}}</Routes> }`
+      const reactRouterImports = `import { Route, Routes } from 'react-router-dom'`
+
+      expect(() => extractRouters([{ file: 'src/k.tsx', code: source(`${reactRouterImports}\nimport { createElement } from 'react'`, `createElement(Route, { path: '/hidden', element: <Hidden /> })`) }])).toThrow(/unsupported non-JSX child \(CallExpression\)/)
+      expect(() => extractRouters([{ file: 'src/l.tsx', code: source(`${reactRouterImports}\nimport * as React from 'react'`, `React.createElement(Route, { path: '/hidden', element: <Hidden /> })`) }])).toThrow(/unsupported non-JSX child \(CallExpression\)/)
+      expect(() => extractRouters([{ file: 'src/m.tsx', code: source(`${reactRouterImports}\nimport { createElement as makeElement } from 'react'`, `makeElement(Route, { path: '/hidden', element: <Hidden /> })`) }])).toThrow(/unsupported non-JSX child \(CallExpression\)/)
+      expect(() => extractRouters([{ file: 'src/n.tsx', code: source(`${reactRouterImports}\nimport { createElement } from 'react'\nconst makeElement = createElement`, `makeElement(Route, { path: '/hidden', element: <Hidden /> })`) }])).toThrow(/unsupported non-JSX child \(CallExpression\)/)
+    })
+
+    it('keeps shorthand and imported React fragments readable as route children', () => {
+      const source = `import React, { Fragment as Group } from 'react'
+import { Route, Routes } from 'react-router-dom'
+export function O() { return <Routes><><Route path="/short" /></><React.Fragment><Route path="/qualified" /></React.Fragment><Group><Route path="/named" /></Group></Routes> }`
+      expect(extractRouters([{ file: 'src/o.tsx', code: source }]).map(router => router.routes.map(route => route.path))).toEqual([['/short', '/qualified', '/named']])
     })
   })
 })

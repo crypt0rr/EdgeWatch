@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -997,6 +998,18 @@ test('prebuilt Docker builds fail when frontend assets are missing', () => {
   assert.match(prebuiltFrontendTest, /prebuilt frontend is missing index\.html/)
 })
 
+test('historical Dockerfile fixture stays frozen and outside Renovate managers', async () => {
+  const path = 'scripts/fixtures/release-image-1517-ae82e4f.txt'
+  const fixture = await readRepositoryFile(path)
+  assert.equal(createHash('sha256').update(fixture).digest('hex'),
+    'cbbed365974168c0ab41ff48d9f8da6090a81cf901f864f2f6326e433d3cb847',
+    'fixture must remain byte-for-byte equal to the Dockerfile from ae82e4f')
+  assert.doesNotMatch(path.split('/').at(-1), /^Dockerfile/,
+    'the fixture name must stay outside Renovate’s built-in Dockerfile manager match')
+  assert.deepEqual(renovateDependencies(path, fixture), [],
+    'Renovate custom managers must not match the historical Dockerfile fixture')
+})
+
 test('release image accepts only reviewed RUN forms on its reachable Dockerfile stage graph', async () => {
   const dockerfilePath = releaseImageDockerfilePath()
   assert.equal(releaseImageInput(workflow, 'file'), undefined,
@@ -1019,14 +1032,14 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   }
   const staticUnsafeFile = workflow.replace(
     '          context: .\n',
-    '          context: .\n          file: scripts/fixtures/Dockerfile-1517-ae82e4f\n',
+    '          context: .\n          file: scripts/fixtures/release-image-1517-ae82e4f.txt\n',
   )
   assert.notEqual(staticUnsafeFile, workflow, 'static alternate Dockerfile mutation marker must exist')
   assert.throws(() => releaseImageDockerfilePath(staticUnsafeFile), /Dockerfile at the root/,
     'a static alternate Dockerfile with historical npm RUNs must fail closed')
   const quotedFile = workflow.replace(
     '          context: .\n',
-    '          context: .\n          "file": scripts/fixtures/Dockerfile-1517-ae82e4f\n',
+    '          context: .\n          "file": scripts/fixtures/release-image-1517-ae82e4f.txt\n',
   )
   assert.throws(() => releaseImageDockerfilePath(quotedFile), /unsupported release image action input syntax/,
     'a quoted alternate file key must not be ignored')
@@ -1064,7 +1077,7 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   'renaming the build step must require updating the reviewed selector')
   assert.throws(() => releaseImageActionInputs(workflow.replace(
     '      - name: Build and push image\n',
-    '      - { name: Hidden build, uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc, with: {context: ., file: scripts/fixtures/Dockerfile-1517-ae82e4f} }\n      - name: Build and push image\n',
+    '      - { name: Hidden build, uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc, with: {context: ., file: scripts/fixtures/release-image-1517-ae82e4f.txt} }\n      - name: Build and push image\n',
   )), /exactly one Docker image build action/,
   'a flow-style second image build must not be skipped by the reviewed step selector')
   for (const [name, unsupported] of [
@@ -1126,7 +1139,7 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
     'the frontend stage ARG default must select the local npm path when no release build arg is supplied',
   )
 
-  const oldDockerfile = await readRepositoryFile('scripts/fixtures/Dockerfile-1517-ae82e4f')
+  const oldDockerfile = await readRepositoryFile('scripts/fixtures/release-image-1517-ae82e4f.txt')
   assert.ok(runViolations(oldDockerfile).length > 0, 'the historical Dockerfile must be rejected')
 
   function replaceOnce(source, marker, replacement, name) {
@@ -1361,7 +1374,7 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
     'target inputs on other actions must not select a Dockerfile stage')
   const unrelatedDockerfile = workflow.replace(
     '          images: ${{ env.REGISTRY_IMAGE }}',
-    '          images: ${{ env.REGISTRY_IMAGE }}\n          file: scripts/fixtures/Dockerfile-1517-ae82e4f',
+    '          images: ${{ env.REGISTRY_IMAGE }}\n          file: scripts/fixtures/release-image-1517-ae82e4f.txt',
   )
   assert.notEqual(unrelatedDockerfile, workflow, 'unrelated Dockerfile input mutation marker must exist')
   assert.equal(releaseImageDockerfilePath(unrelatedDockerfile), 'Dockerfile',

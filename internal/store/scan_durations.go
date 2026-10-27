@@ -137,6 +137,56 @@ CROSS JOIN scans AS s NOT INDEXED ON s.tenant_id=?2 AND s.rowid IN (
 		AND r.scanner_profile_id=b.profile_id AND r.scanner_profile_revision=b.profile_revision
 	ORDER BY y.finished_at DESC,y.id DESC LIMIT ?3)`
 
+// latestScanRunsTimedOutSQL reads at most ?3 newest rows from each matching
+// key index before merging the candidates and keeping ?4. This bounds both
+// matching and missing-key lookups independently of the retained history.
+// Cycle attempts use the execution hash copied from their cycle; scans
+// without a cycle use their scope hash and TCP scanner profile.
+const latestScanRunsTimedOutSQL = `WITH wanted AS MATERIALIZED (
+	SELECT j.id AS job_id,
+		CAST(json_extract(k.value,'$.execution_hash') AS TEXT) AS execution_hash,
+		CAST(json_extract(k.value,'$.config_hash') AS TEXT) AS config_hash,
+		CAST(json_extract(k.value,'$.legacy_config_hash') AS TEXT) AS legacy_config_hash,
+		CAST(json_extract(k.value,'$.scanner_profile_id') AS TEXT) AS profile_id,
+		CAST(json_extract(k.value,'$.scanner_profile_revision') AS INTEGER) AS profile_revision
+	FROM json_each(?1) AS k
+	CROSS JOIN jobs AS j ON j.id=CAST(json_extract(k.value,'$.job_id') AS TEXT) AND j.tenant_id=?2
+	WHERE j.archived=0
+)
+SELECT w.job_id, (
+	SELECT CASE WHEN COUNT(*)>0 AND SUM(CASE WHEN recent.status='timed_out' THEN 1 ELSE 0 END)=COUNT(*) THEN 1 ELSE 0 END
+	FROM (
+		SELECT candidate.status,candidate.finished_at,candidate.id
+		FROM (
+			SELECT s.status,s.finished_at,s.id
+			FROM scans AS s INDEXED BY ` + scansTimeoutCycleKeyIndex + `
+			WHERE s.tenant_id=?2 AND s.job_id=w.job_id AND s.cycle_id<>'' AND s.cycle_execution_hash=w.execution_hash
+			ORDER BY s.finished_at DESC,s.id DESC LIMIT ?3
+		) AS candidate
+		UNION ALL
+		SELECT candidate.status,candidate.finished_at,candidate.id
+		FROM (
+			SELECT s.status,s.finished_at,s.id
+			FROM scans AS s INDEXED BY ` + scansTimeoutConfigKeyIndex + `
+			WHERE s.tenant_id=?2 AND s.job_id=w.job_id AND s.cycle_id=''
+				AND s.config_hash=w.config_hash AND s.scanner_profile_id=w.profile_id AND s.scanner_profile_revision=w.profile_revision
+			ORDER BY s.finished_at DESC,s.id DESC LIMIT ?3
+		) AS candidate
+		UNION ALL
+		SELECT candidate.status,candidate.finished_at,candidate.id
+		FROM (
+			SELECT s.status,s.finished_at,s.id
+			FROM scans AS s INDEXED BY ` + scansTimeoutConfigKeyIndex + `
+			WHERE s.tenant_id=?2 AND s.job_id=w.job_id AND s.cycle_id=''
+				AND w.legacy_config_hash<>'' AND w.legacy_config_hash<>w.config_hash
+				AND s.config_hash=w.legacy_config_hash AND s.scanner_profile_id=w.profile_id AND s.scanner_profile_revision=w.profile_revision
+			ORDER BY s.finished_at DESC,s.id DESC LIMIT ?3
+		) AS candidate
+		ORDER BY finished_at DESC,id DESC LIMIT ?4
+	) AS recent
+) AS only_timed_out
+FROM wanted AS w`
+
 // ListCompletedScanCycleDurations returns, for each job that keys names and
 // that is an unarchived job of the tenant, the durations of its perJobLimit
 // newest completed samples that ran with the job's current scan settings. A
@@ -228,6 +278,52 @@ func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, keys
 		for _, kept := range ranked {
 			out[jobID] = append(out[jobID], kept.duration)
 		}
+	}
+	return out, nil
+}
+
+// LatestScanRunsTimedOut reports whether each named job's newest current-key
+// run records all timed out. For each distinct current settings key, it reads
+// at most perJobLimit times scanDurationScanWindow newest rows from the cycle,
+// current-config, and legacy-config indexes, then merges those bounded sets
+// and compares the newest perJobLimit. It returns only job IDs from the
+// requesting tenant. A result is true only when at least one matching run
+// was found and every one of the newest matching runs timed out.
+func (ts *TenantStore) LatestScanRunsTimedOut(ctx context.Context, keys []ScanDurationKey, perJobLimit int) (map[string]bool, error) {
+	if err := ts.ready(); err != nil {
+		return nil, err
+	}
+	if perJobLimit < 1 || len(keys) == 0 {
+		return map[string]bool{}, nil
+	}
+	unique := make([]ScanDurationKey, 0, len(keys))
+	seen := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		if !seen[key.JobID] {
+			seen[key.JobID] = true
+			unique = append(unique, key)
+		}
+	}
+	raw, err := json.Marshal(unique)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := ts.store.reader().QueryContext(ctx, latestScanRunsTimedOutSQL, string(raw), ts.scope.id, perJobLimit*scanDurationScanWindow, perJobLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]bool, len(unique))
+	for rows.Next() {
+		var jobID string
+		var onlyTimedOut int
+		if err := rows.Scan(&jobID, &onlyTimedOut); err != nil {
+			return nil, err
+		}
+		out[jobID] = onlyTimedOut != 0
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

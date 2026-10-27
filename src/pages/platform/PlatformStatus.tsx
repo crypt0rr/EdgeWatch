@@ -31,18 +31,18 @@ const scanDemandWarningPercent = 80
 export function PlatformScanDemandPanel({ demand }: { demand: PlatformScanDemand }) {
   const overCapacity = demand.over_capacity
   const nearCapacity = overCapacity || demand.utilization_percent >= scanDemandWarningPercent
-  return <div className="panel platform-scan-demand"><div className="panel-heading"><div><h2>Scheduled scan demand</h2><p className="muted">The enabled jobs of {plural(demand.units, 'active unit')} together, against the {plural(demand.slots, 'scan slot')} that all units share. A unit’s slot cap limits its share and reserves no slot. Estimated at most every minute.</p></div></div>
+  return <div className="panel platform-scan-demand"><div className="panel-heading"><div><h2>Scheduled scan demand</h2><p className="muted">The enabled jobs of {plural(demand.units, 'active unit')} together, against the {plural(demand.slots, 'scan slot')} that all units share. Each unit’s contribution is capped at its effective slot capacity; its Jobs page shows its own estimate. Unit slots are shared and none are reserved. Estimated at most every minute.</p></div></div>
     {nearCapacity && <div className="notice warning platform-scan-demand-warning" role="status"><AlertTriangle size={15} aria-hidden="true" /><span><strong>{overCapacity ? 'Scheduled scan demand exceeds the shared capacity.' : 'Scheduled scan demand is near the shared capacity.'}</strong> {overCapacity ? 'Scans wait for free slots, so they start late and some scheduled runs are skipped.' : 'Scans may wait for free slots at busy times.'} Raise scheduler.max_concurrent_scans in config.yaml, or ask the units to space out or shorten their scans.</span></div>}
     <p className="platform-scan-demand-summary">Scheduled scan demand: {formatSlotHours(demand.estimated_slot_seconds_per_day)} of {formatSlotHours(demand.capacity_slot_seconds_per_day)} slot-hours/day ({formatSlotPercent(demand.utilization_percent)}%)</p>
     <dl className="fact-grid">
       <div><dt>Enabled jobs</dt><dd>{formatCount(demand.enabled_jobs)}</dd></div>
       <div><dt>Estimated from scan history</dt><dd>{formatCount(demand.history_jobs)}</dd></div>
       <div><dt>Lower bound from scanner rates</dt><dd>{formatCount(demand.lower_bound_jobs)}</dd></div>
-      <div><dt>Not fully estimated</dt><dd>{formatCount(demand.unestimated_jobs)}</dd></div>
+      <div><dt>Not fully estimated (may overlap lower bound)</dt><dd>{formatCount(demand.unestimated_jobs)}</dd></div>
     </dl>
     {demand.cadence_unattainable_jobs > 0 && <div className="notice warning platform-scan-demand-cadence"><AlertTriangle size={15} aria-hidden="true" /><span>{demand.cadence_unattainable_jobs === 1
-      ? '1 job runs longer than its schedule allows, so some of its scheduled runs are skipped.'
-      : `${formatCount(demand.cadence_unattainable_jobs)} jobs run longer than their schedules allow, so some of their scheduled runs are skipped.`} Each unit’s Jobs page counts its own.</span></div>}
+      ? '1 job’s estimated run would still be active at one or more scheduled ticks, so the scheduler skips those ticks.'
+      : `${formatCount(demand.cadence_unattainable_jobs)} jobs’ estimated runs would still be active at one or more scheduled ticks, so the scheduler skips those ticks.`}</span></div>}
     {demand.unestimated_jobs > 0 && <p className="muted">{plural(demand.unestimated_jobs, 'enabled job')} {demand.unestimated_jobs === 1 ? 'has' : 'have'} work or a schedule frequency the estimate cannot fully bound, so actual demand may be higher.</p>}
   </div>
 }

@@ -180,6 +180,23 @@ func TestScannerSandboxWarningsWhenReachableCapacityIsBelowConcurrency(t *testin
 	}
 }
 
+func TestScannerSandboxHealthTreatsAllActiveLeasesAsReachable(t *testing.T) {
+	t.Parallel()
+	for name, pool := range map[string]sandbox.ScannerIdentityPoolStatus{
+		"daemon scans":        {State: sandbox.StateEnforced, MaxParallel: 10, Active: 10, OwnActive: 10},
+		"other process lease": {State: sandbox.StateEnforced, MaxParallel: 10, Active: 1},
+	} {
+		status := sandbox.Status{
+			Mode:         sandbox.ModeAuto,
+			State:        sandbox.StateEnforced,
+			IdentityPool: &pool,
+		}
+		if got := scannerSandboxWarnings(status, 10); len(got) != 0 {
+			t.Errorf("health warned with %s: %q", name, got)
+		}
+	}
+}
+
 func sandboxUIDPointer(uid int) *int { return &uid }
 
 func TestLogNotificationSandboxNamesTheOutcome(t *testing.T) {

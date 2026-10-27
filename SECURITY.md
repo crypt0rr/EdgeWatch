@@ -553,14 +553,19 @@ its accounts as summaries without credentials; and its
 capacity as numbers. The stored scan count is a number of rows, never a
 scan's content. The platform status adds deployment totals, and the
 scheduled scan demand of all active units together against the deployment's
-scan slots: the daemon sums each unit's own estimate, which it derives from
-the schedules, timeouts, scopes, scanner rates, and recent scan durations of
-the unit's enabled jobs, and returns only the sums and counts of jobs, never
-a unit or job ID or name, a target, or any unit's own figure. With a single
-active unit, that total is the unit's own estimate. The platform's own
-notification destinations are write-only like a unit's, and the platform
-cannot read, select, or change a unit's destinations. Usernames stay unique
-across every unit and the platform.
+scan slots: the daemon estimates the schedules, timeouts, scopes, scanner
+rates, and recent scan durations of each unit's enabled jobs. It simulates
+their cron ticks and skips a tick while an estimated run is still active; when
+the newest runs with a current key all timed out, it uses the job's timeout as
+the expected run duration. It caps each unit's contribution at its effective
+scan-slot capacity for a day. It returns only the sums and counts of jobs,
+never a unit or job ID
+or name, a target, or any unit's own figure. With a single active unit, the
+platform total can be lower than the Jobs page estimate when that estimate
+exceeds the unit's effective capacity. The platform's own notification
+destinations are write-only like a unit's, and the platform cannot read,
+select, or change a unit's destinations. Usernames stay unique across every
+unit and the platform.
 
 Only the host creates the first platform administrator: `edgewatch admin
 platform-setup-token` prints a one-time token, valid for 15 minutes, once the
@@ -956,7 +961,7 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 79 must not be opened by an older EdgeWatch
+database upgraded to schema 80 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
@@ -1054,9 +1059,13 @@ Schema 78 records the latest scan-cycle attempt start for recovery and capacity
 history; it does not alter existing scan or baseline rows. An older release
 must not open the upgraded database.
 Schema 79 adds an index of completed scan cycles by job and execution hash for
-the scan-slot demand estimate, which still reads only the requesting unit's
-jobs; it changes no rows. An older release must not open the upgraded
-database.
+the scan-slot demand estimate. A unit's own estimate reads only that unit's
+enabled jobs and bounded recent duration history. Platform status estimates
+all active units together, reading each unit's enabled jobs, bounded recent
+duration history, and effective capacity through that unit's tenant-scoped
+store; it returns aggregate counts and sums only, with no per-unit values.
+Building the index changes no rows. An older release must not open the
+upgraded database.
 Only the daemon migrates, and only one process at a time: from v0.36.0 the
 daemon holds an advisory lock on the database directory, which restores take
 too, from before it opens the database until migration and startup finish and

@@ -15,7 +15,9 @@ the probe count alone.
 
 `GET /api/v1/jobs/slot-demand` requires `jobs.read` and returns the current
 business unit's scheduled scan demand compared with its effective scan-slot
-capacity. The response is tenant-scoped; it contains no job names or IDs.
+capacity. It reads only that unit's enabled jobs and bounded recent
+scan-duration history. The response is tenant-scoped; it contains no job names
+or IDs.
 
 ```json
 {
@@ -33,23 +35,25 @@ capacity. The response is tenant-scoped; it contains no job names or IDs.
 ```
 
 `history_jobs` use the median duration from each job's 11 most recent
-completed scan samples with its current scan settings, multiplied by the
-average number of scheduled runs per day. Each completed cycle is one sample
-that sums its recorded scan-attempt durations, excluding idle time between
-attempts; it counts while it recorded the job's current execution hash, which
-covers the monitored scope, the timeout, resume window and timing, and the
-scanner profile revisions and arguments. A successful or incomplete scan
-without a cycle is its own sample; it counts while it recorded the job's
+completed scan samples with its current scan settings. Each completed cycle is
+one sample that sums its recorded scan-attempt durations, excluding idle time
+between attempts; it counts while it recorded the job's current execution
+hash, which covers the monitored scope, the timeout, resume window and timing,
+and the scanner profile revisions and arguments. A successful or incomplete
+scan without a cycle is its own sample; it counts while it recorded the job's
 current scope hash and TCP scanner profile revision, and only when it is one
 of the job's 44 most recent successful or incomplete scans, so the estimate
-never reads further back in a job's history. A rename, a schedule or
-notification edit, or a pause and resume therefore keeps a job's samples. Other
-history remains available but is excluded from this estimate; a job without
-samples uses its known-work lower bound until a scan with its current settings
-completes. For a job without such history, `lower_bound_jobs` count estimates
-that include only known probe work divided by configured maximum scanner
-rates. A configured
-scope contributes only when it is known to fit both the job's
+never reads further back in a job's history. If the newest runs with the
+current key all timed out, the configured timeout supplies the expected run
+duration. For a cycle attempt, the key is its cycle's execution hash; for a
+scan without a cycle, it is the recorded scope hash and TCP scanner profile
+revision. A rename, a schedule or notification edit, or a pause and resume
+therefore keeps a job's samples. Other history remains available but is
+excluded from this estimate; a job without samples uses its known-work lower
+bound until a scan with its current settings completes. For a job without such
+history, `lower_bound_jobs` count estimates that include only known probe work
+divided by configured maximum scanner rates. A configured scope contributes
+only when it is known to fit both the job's
 `max_expanded_hosts` and deployment's `scanner.max_job_hosts`; over-limit or
 unresolved DNS scopes add no lower bound because the scanner may reject them
 before sending probes. These values are lower bounds, because DNS, target
@@ -58,14 +62,24 @@ responses, retries, and data-dependent Nmap confirmation can add time.
 ceiling, or whose schedule cannot be estimated. The job's timeout ends each
 run, so each run counts at most the timeout, whether its duration comes from
 samples or from the lower bound: a resumable cycle whose attempts add up to
-more continues in later runs. A job runs at most once at a time, so each job
-adds at most one slot-day, 86,400 slot-seconds, to
+more continues in later runs. The estimate follows the job's cron ticks over a
+representative four-year calendar cycle in its timezone, which averages
+leap-day schedules over the longer cycle, and skips a tick when the previous
+estimated run is still active.
+It counts only the runs the scheduler can start. A job runs at most once at a
+time, so it adds at most one slot-day, 86,400 slot-seconds, to
 `estimated_slot_seconds_per_day`. The additive `cadence_unattainable_jobs`
-field counts the jobs whose own estimate exceeds that: even with each run
-ended by the timeout, their runs take longer than their schedules allow, so
-the scheduler skips some of them. The console shows a warning at 80%
-utilization and above, and names the count of jobs that cannot keep their
-cadence.
+field counts jobs for which at least one tick is skipped; it does not depend on
+whether the job's demand exceeds a slot-day. The console shows a warning at
+80% utilization and above, and names the count of jobs with skipped ticks.
+`lower_bound_jobs` and `unestimated_jobs` are not disjoint counts: a job with a
+known-rate lower bound may also have additional work that cannot be fully
+estimated. The platform panel labels this possible overlap explicitly. The
+Tenant and deployment estimates bound schedule work per request, including
+pattern expansion and duration projection. The deployment estimate also shares
+equivalent schedule-duration projections across active units. A job whose
+pattern or projection cannot finish within that budget is counted as
+unestimated and its slot-seconds are left out of the total.
 
 A unit's capacity is a limit, not a reservation: every unit's scans share the
 deployment's `scheduler.max_concurrent_scans` slots, so units that each stay
@@ -93,14 +107,20 @@ active unit together, compared with the slots of the whole deployment.
 ```
 
 `units` counts the active units included; disabled units and units being
-deleted schedule no scans and are left out. Each unit contributes the same
-estimate that its own `GET /api/v1/jobs/slot-demand` reports, and the job
-counts and `estimated_slot_seconds_per_day` are the sums of the units'
-values. `slots` is the deployment's `scheduler.max_concurrent_scans`, whatever
-the units' own caps are, and `capacity_slot_seconds_per_day` is `slots` ×
-86,400. `utilization_percent` and `over_capacity` compare the two as a unit's
-own estimate does. The object holds sums and counts only: no unit or job ID or
-name, and no per-unit figure. The daemon starts at most one estimate a
+deleted schedule no scans and are left out. Each unit contributes its own
+estimate capped at its effective slot limit × 86,400 slot-seconds per day.
+The daemon calculates each contribution from that unit's enabled jobs,
+bounded recent scan-duration history, and effective capacity through its
+tenant-scoped store.
+The job counts are sums of the units' counts, while
+`estimated_slot_seconds_per_day` is the sum of these capped contributions.
+`slots` is the deployment's `scheduler.max_concurrent_scans`, and
+`capacity_slot_seconds_per_day` is `slots` × 86,400. `utilization_percent`
+and `over_capacity` compare the capped sum with that deployment capacity.
+The object holds sums and counts only: no unit or job ID or name, and no
+per-unit figure. With one active unit, this aggregate can be lower than its
+Jobs page estimate when that estimate exceeds the unit's effective capacity.
+The daemon starts at most one estimate a
 minute, however often the status is requested, and reuses its outcome for that
 minute: when an estimate fails or takes longer than 10 seconds, the status
 leaves `scan_demand` out until the next estimate, and the daemon logs one
@@ -497,7 +517,7 @@ holds only `edgewatch_build_info`, `edgewatch_health_status`, and the
 | `edgewatch_backup_status_known` | | `1` when the enabled backup status has a recorded outcome for the configured directory, `0` when it is missing, unreadable, for another directory, or has no outcome. Once the daemon opens its database, present whenever scheduled backups are enabled. |
 | `edgewatch_backup_last_success_timestamp_seconds` | | When a scheduled backup last succeeded, as a Unix time; zero means none has succeeded. Present when backup status is known. |
 | `edgewatch_backup_consecutive_failures` | | Consecutive scheduled backup failures since the last success. Present when backup status is known. |
-| `edgewatch_scanner_identities` | `state`: `active`, `quarantined`, `in_use_by_other_processes`, `free` | Number of scanner identities in each allocation state. Present when startup enforced the pool and the bounded pool inspection succeeds. `active` plus `free` is the number that the daemon's scans can reach. |
+| `edgewatch_scanner_identities` | `state`: `active`, `quarantined`, `in_use_by_other_processes`, `free` | Number of scanner identities in each allocation state. Present when startup enforced the pool and the bounded pool inspection succeeds. `active` plus `free` is shared capacity and counts every active lease as reachable; the metric does not identify lease owners. The daemon's built-in low-capacity alert separately subtracts active leases its own allocator did not acquire. |
 | `edgewatch_scheduled_runs_skipped_total` | `reason`: `job_active`, `cycle_stalled` | Counter since this daemon started for scheduled runs skipped because their job was already active or their resumable cycle was stalled. |
 | `edgewatch_jobs_overdue` | | Enabled schedules currently due for the job-silence watchdog; live scans and alert retry windows are excluded. |
 | `edgewatch_scan_cycles_stalled` | | Stalled cycles for visible jobs in active business units. |

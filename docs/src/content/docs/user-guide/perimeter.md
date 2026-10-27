@@ -248,15 +248,20 @@ only IPv6 space reaches, means at least that many.
 Administrators and operators open **Perimeter** from the navigation. A unit
 without declared ranges sees an explanation and, for administrators, the
 declare form. The page also shows the business unit's scheduled scan-slot
-demand and effective capacity. The estimate uses the median duration of recent
-completed scan samples with each job's current scan settings, so renaming,
-rescheduling, or pausing and resuming a monitor keeps them. A completed cycle
-sums the recorded durations of its attempts, excluding idle time between
-scheduled attempts, and a successful or incomplete scan without a cycle is one
-sample. Each run counts at most the monitor's timeout, which ends it, and each
-monitor adds at most one slot-day, because it runs at most once at a time; the
-notice counts the monitors that run longer than their schedules allow. Without
-history, known work at configured maximum scanner rates is shown as a lower
+demand and effective capacity. The estimate uses the median duration of
+recent completed scan samples with each job's current scan settings, so
+renaming, rescheduling, or pausing and resuming a monitor keeps them. A
+completed cycle sums the recorded durations of its attempts, excluding idle
+time between scheduled attempts, and a successful or incomplete scan without
+a cycle is one sample. If the newest runs with current settings all timed out,
+the configured timeout supplies the expected run duration. Each run counts at
+most the monitor's timeout, which ends it. The estimate follows its cron ticks
+over a representative four-year calendar cycle in the job's timezone, which
+averages leap-day schedules over the longer cycle, skipping a tick when the
+previous estimated run is still active; each monitor adds at most one slot-day
+because it cannot overlap with itself. The notice counts jobs with one or more
+skipped ticks. Without history,
+known work at configured maximum scanner rates is shown as a lower
 bound only when the configured scope is known to fit both the job's **Maximum
 expanded hosts** and the deployment's `scanner.max_job_hosts`. An over-limit
 or unresolved DNS scope adds no lower bound because the scanner may reject it

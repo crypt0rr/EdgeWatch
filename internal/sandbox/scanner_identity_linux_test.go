@@ -290,6 +290,94 @@ func TestScannerIdentityAllocatorInspectionAttestsPrivateScopeFromNonPID1(t *tes
 	}
 }
 
+func TestScannerIdentityAllocatorInspectionCountsOrphanedActiveLeaseForDaemon(t *testing.T) {
+	bootstrap := usePrivateScannerRuntime(newTestScannerIdentityAllocator(t, 2))
+	initial, err := bootstrap.acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initial.release(); err != nil {
+		t.Fatal(err)
+	}
+
+	newAttestedAllocator := func() *scannerIdentityAllocator {
+		return useAttestedPrivateScannerScope(newScannerIdentityAllocatorForTest(
+			bootstrap.directory, bootstrap.uidStart, bootstrap.count, testScannerBootID, 17,
+		), 17)
+	}
+	daemon := newAttestedAllocator()
+	daemonLease, err := daemon.acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemonReleased := false
+	t.Cleanup(func() {
+		if !daemonReleased {
+			_ = daemonLease.release()
+		}
+	})
+	status, err := daemon.inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Active != 1 || status.OwnActive != 1 || status.ReachableByDaemon() != 2 {
+		t.Fatalf("daemon's own lease reduced daemon capacity: %+v, reachable=%d", status, status.ReachableByDaemon())
+	}
+
+	host := newAttestedAllocator()
+	hostLease, err := host.acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hostLease.uid == daemonLease.uid {
+		t.Fatalf("host lease reused daemon identity %d", daemonLease.uid)
+	}
+	// Model a killed host `edgewatch scan`: its active journal entry remains,
+	// but its liveness reference closes without the normal release transition.
+	if err := hostLease.closeLivenessReference(); err != nil {
+		t.Fatal(err)
+	}
+	hostLease = nil
+
+	status, err = daemon.inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Active != 2 || status.OwnActive != 1 || status.Reachable() != 2 || status.ReachableByDaemon() != 1 {
+		t.Fatalf("orphaned host lease was not deducted from daemon-only capacity: %+v, shared=%d daemon=%d", status, status.Reachable(), status.ReachableByDaemon())
+	}
+
+	if err := daemonLease.release(); err != nil {
+		t.Fatal(err)
+	}
+	daemonReleased = true
+	status, err = daemon.inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Active != 1 || status.OwnActive != 0 || status.ReachableByDaemon() != 1 {
+		t.Fatalf("released daemon lease accounting = %+v, daemon reachable=%d; want one orphaned active lease", status, status.ReachableByDaemon())
+	}
+}
+
+func TestScannerIdentityAllocatorQuarantineRetiresOwnActiveCount(t *testing.T) {
+	allocator := newTestScannerIdentityAllocator(t, 1)
+	lease, err := allocator.acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.quarantine(); err != nil {
+		t.Fatal(err)
+	}
+	status, err := allocator.inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Active != 0 || status.Quarantined != 1 || status.OwnActive != 0 || status.ReachableByDaemon() != 0 {
+		t.Fatalf("quarantined lease accounting = %+v, daemon reachable=%d", status, status.ReachableByDaemon())
+	}
+}
+
 func TestScannerIdentityPoolExhaustionErrorIncludesCountsAndRecovery(t *testing.T) {
 	allocator := newTestScannerIdentityAllocator(t, 1)
 	lease, err := allocator.acquire(context.Background())

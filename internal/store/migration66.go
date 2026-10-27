@@ -25,6 +25,12 @@ const (
 	// scansCycleOutcomeIndex finds the scans recorded for a cycle by their
 	// cycle and scan outcome.
 	scansCycleOutcomeIndex = "scans_cycle_outcome"
+	// scansTimeoutCycleKeyIndex lists cycle scans by the execution hash
+	// recorded by their cycle, newest first.
+	scansTimeoutCycleKeyIndex = "scans_timeout_cycle_key"
+	// scansTimeoutConfigKeyIndex lists non-cycle scans by their scope and
+	// scanner profile key, newest first.
+	scansTimeoutConfigKeyIndex = "scans_timeout_config_key"
 
 	// legacyScanHostIndexState is the fts_backfill_state checkpoint of the
 	// legacy host index backfill. It is complete once no successful scan is

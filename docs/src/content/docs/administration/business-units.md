@@ -55,13 +55,23 @@ and the database size and notification backlog. From v0.44.0 its **Scheduled
 scan demand** panel adds the estimated scheduled scan work of all active units
 together against the `scheduler.max_concurrent_scans` slots that every unit
 shares, for example "Scheduled scan demand: 43.2 of 24 slot-hours/day
-(180%)". Each active unit contributes the estimate that its own **Jobs** page
-shows; disabled units and units being deleted schedule no scans and are left
-out. A warning appears at 80% and when the demand exceeds the slots, because
-scans then wait for a free slot and start late, and the panel counts the jobs
-that run longer than their schedules allow. The estimate is at most a minute
-old. When an estimate fails or takes longer than 10 seconds, the panel is
-missing for that minute and the daemon logs one warning,
+(180%)". Each active unit contributes its own **Jobs** page estimate up to the
+slot-seconds its effective slot limit can provide in a day; disabled units
+and units being deleted schedule no scans and are left out. The job counts are
+sums, while the estimated slot-seconds sum those capped contributions. The
+daemon calculates the total from each active unit's enabled jobs, bounded
+recent scan-duration history, and effective slot capacity through that unit's
+tenant-scoped store. The
+**Lower bound from scanner rates** and **Not fully estimated** counts may
+overlap for the same job. A warning appears at 80% and when demand exceeds the
+shared pool. Equivalent schedule-duration projections are shared across the
+active units, and the combined calculation has a bounded simulation budget.
+Jobs whose projection cannot finish within that budget are included in **Not
+fully estimated** and left out of the estimated slot-seconds. The panel also
+counts jobs whose estimated runs would still be active at scheduled ticks, so
+the scheduler skips those ticks. The estimate is at most a minute old. When
+an estimate fails or takes longer than 10 seconds, the panel is missing for
+that minute and the daemon logs one warning,
 `deployment scan demand estimate failed`. The panel holds sums and counts only
 and names no unit or job: a unit's administrators see their own unit's demand
 and jobs on its **Jobs** page.

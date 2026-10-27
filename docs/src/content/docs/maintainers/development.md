@@ -169,10 +169,12 @@ because a spread can override `path`, including when it appears after a direct
 `path` attribute or uses an object alias or conditional expression. Router APIs
 must use static named imports; dynamic imports or `require` loads of router
 modules are rejected, including direct, aliased, bound, and destructured
-CommonJS loader forms. Loader identity is still recognized through transparent
-TypeScript expression wrappers such as `as` and angle-bracket type assertions,
-non-null assertions, `satisfies`, generic instantiation, and parentheses, so
-wrapping a loader does not bypass the check. Runtime module loads whose
+CommonJS loader forms. Optional calls through any recognized CommonJS loader
+are rejected, including calls through aliases and optional member access.
+Loader identity is still recognized through transparent TypeScript expression
+wrappers such as `as` and angle-bracket type assertions, non-null assertions,
+`satisfies`, generic instantiation, and parentheses, so wrapping a loader does
+not bypass the check. Runtime module loads whose
 specifier is not statically readable are rejected too. Declare nested routes
 directly as JSX children on a `<Route>`: its `children` attribute is rejected
 because it can hide nested routes from the inventory. Declare `<Routes>`
@@ -195,9 +197,11 @@ route in its default fixture state, it audits an open dialog, a failed
 confirmation, failed page reads, an empty investigation inbox, a job without a
 baseline, pending baseline changes, a near-capacity scan-slot demand notice,
 and every step of a monitor setup that Perimeter prefilled. Accept a violation only with an `axeAllowances` entry in the spec
-that names the rule, an audited surface, the node, and the reason. The spec
-fails when an allowance names a surface it does not audit or when an entry no
-longer matches a violation.
+that names the rule, a distinct audited surface key, the node, and the reason.
+Console routes and entry surfaces use different keys even when they share a
+path, and the spec rejects duplicate keys. It also fails when an allowance
+names a surface it does not audit or when an entry no longer matches a
+violation.
 
 ## Notification destination policy
 

@@ -75,7 +75,7 @@ function childNodes(node: Node): Node[] {
   return result
 }
 
-/** TypeScript and parenthesized wrappers that do not change an expression's runtime value. */
+/** TypeScript, parenthesized, and parser wrappers ignored when identifying a loader expression. */
 const transparentExpressionTypes = new Set([
   'TSAsExpression',
   'TSTypeAssertion',
@@ -83,6 +83,7 @@ const transparentExpressionTypes = new Set([
   'TSSatisfiesExpression',
   'TSInstantiationExpression',
   'ParenthesizedExpression',
+  'ChainExpression',
 ])
 
 function unwrapTransparentExpression(node: Node | undefined): Node | undefined {
@@ -114,7 +115,7 @@ function staticStringValue(node: Node | undefined): string | undefined {
 
 function memberPropertyName(node: Node): string | undefined {
   node = unwrapTransparentExpression(node) ?? node
-  if (node.type !== 'MemberExpression') return undefined
+  if (node.type !== 'MemberExpression' && node.type !== 'OptionalMemberExpression') return undefined
   const property = node.property as Node
   return node.computed ? staticStringValue(property) : property.type === 'Identifier' ? String(property.name) : undefined
 }
@@ -138,9 +139,17 @@ function isCommonJSLoader(node: Node | undefined, loaderAliases: Set<string>, mo
   node = unwrapTransparentExpression(node)
   if (!node) return false
   if (node.type === 'Identifier') return loaderAliases.has(String(node.name))
-  if (node.type !== 'MemberExpression') return false
+  if (node.type !== 'MemberExpression' && node.type !== 'OptionalMemberExpression') return false
   const object = node.object as Node
   return isCommonJSModuleObject(object, moduleAliases) && memberPropertyName(node) === 'require'
+}
+
+function isOptionalCommonJSLoaderCall(node: Node, callee: Node): boolean {
+  const unwrappedCallee = unwrapTransparentExpression(callee)
+  return node.type === 'OptionalCallExpression'
+    || node.optional === true
+    || unwrappedCallee?.type === 'OptionalMemberExpression'
+    || (unwrappedCallee?.type === 'MemberExpression' && unwrappedCallee.optional === true)
 }
 
 function rejectUninspectableRouterLoads(program: Node, file: string): void {
@@ -208,7 +217,7 @@ function rejectUninspectableRouterLoads(program: Node, file: string): void {
       }
     }
 
-    if (node.type === 'MemberExpression') {
+    if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
       const member = node as Node
       if (['apply', 'bind', 'call'].includes(memberPropertyName(member) ?? '') && isCommonJSLoader(member.object as Node, loaderAliases, moduleAliases)) {
         throw new Error(`${file} binds or rebinds a CommonJS module loader; the console route inventory cannot rule out router APIs`)
@@ -220,12 +229,15 @@ function rejectUninspectableRouterLoads(program: Node, file: string): void {
     if (node.type === 'ImportExpression') {
       source = node.source as Node
       kind = 'dynamic import'
-    } else if (node.type === 'CallExpression') {
+    } else if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') {
       const callee = node.callee as Node
       if (callee.type === 'Import') {
         source = (node.arguments as Node[])[0]
         kind = 'dynamic import'
       } else if (isCommonJSLoader(callee, loaderAliases, moduleAliases)) {
+        if (isOptionalCommonJSLoaderCall(node, callee)) {
+          throw new Error(`${file} uses an optional CommonJS module load; the console route inventory cannot rule out router APIs`)
+        }
         source = (node.arguments as Node[])[0]
         kind = 'CommonJS module load'
       }
@@ -915,10 +927,35 @@ export function HiddenRouter() {
 }`,
           error: /CommonJS module load with a non-static module specifier/,
         },
+        {
+          file: 'src/optional-loader.tsx',
+          code: `export function HiddenRouter() {
+  const { Route, Routes } = module.require?.('react-router-dom')
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+          error: /optional CommonJS module load/,
+        },
+        {
+          file: 'src/optional-module-member-loader.tsx',
+          code: `export function HiddenRouter() {
+  const { Route, Routes } = module?.require('react-router-dom')
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+          error: /optional CommonJS module load/,
+        },
+        {
+          file: 'src/optional-aliased-loader.tsx',
+          code: `const loadRouter = (module?.require as typeof require)
+export function HiddenRouter() {
+  const { Route, Routes } = loadRouter?.('react-router-dom')
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+          error: /optional CommonJS module load/,
+        },
       ]
 
       for (const fixture of cases) {
-        expect(() => extractRouters([fixture])).toThrow(fixture.error)
+        expect(() => extractRouters([fixture]), fixture.file).toThrow(fixture.error)
       }
     })
 

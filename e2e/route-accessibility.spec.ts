@@ -1,6 +1,6 @@
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test, type Page, type TestInfo } from '@playwright/test'
-import { allConsoleRoutes, entrySurfaces, expectedConsolePath, type EntrySurfaceCase } from './console-routes'
+import { allConsoleRoutes, entrySurfaces, expectedConsolePath, type ConsoleRouteCase, type EntrySurfaceCase } from './console-routes'
 import { mockConsole, mockPublicStatus, rolePermissions, type ConsoleRole } from './mock-console'
 
 const roles: ConsoleRole[] = ['administrator', 'operator', 'viewer', 'platform_admin']
@@ -37,6 +37,7 @@ type AxeAllowance = {
 
 type FixtureAxeAudit = {
   name: string
+  /** A stable, unique key for this specific audited surface. */
   surface: string
   context: string
   setup: (page: Page, testInfo: TestInfo) => Promise<void>
@@ -162,7 +163,7 @@ for (const role of roles) {
         await expect(content.locator('.loading, .skeleton-list')).toHaveCount(0)
         await expectRouteDataReady(page, route.path)
 
-        await expectAccessible(page, route.path, `${role} on ${route.path}`)
+        await expectAccessible(page, consoleRouteSurfaceKey(route), `${role} on ${route.path}`)
       }
     })
   }
@@ -193,7 +194,7 @@ for (const surface of entrySurfaces) {
     await expect.poll(() => new URL(page.url()).pathname).toBe(new URL(surface.path, page.url()).pathname)
     await page.waitForLoadState('networkidle')
     await expect(page.locator('.loading')).toHaveCount(0)
-    await expectAccessible(page, surface.path, `${surface.state} visitor on ${surface.path}`)
+    await expectAccessible(page, entrySurfaceKey(surface), `${surface.state} visitor on ${surface.path}`)
   })
 }
 
@@ -238,13 +239,13 @@ const monitorSetupSteps = [
 const fixtureAxeAudits: FixtureAxeAudit[] = [
   {
     name: 'axe audits an open action dialog',
-    surface: 'open action dialog',
+    surface: 'fixture:open-remove-range-dialog',
     context: 'the open Remove this range? dialog',
     setup: async page => { await openRemoveRangeDialog(page) },
   },
   {
     name: 'axe audits a dialog after its confirmation fails',
-    surface: 'action dialog with a failed confirmation',
+    surface: 'fixture:failed-remove-range-confirmation',
     context: 'the Remove this range? dialog after its confirmation failed',
     setup: async page => {
       const { controls, dialog } = await openRemoveRangeDialog(page)
@@ -255,7 +256,7 @@ const fixtureAxeAudits: FixtureAxeAudit[] = [
   },
   ...readErrors.map(failure => ({
     name: `axe audits the read error on ${failure.path}`,
-    surface: `read error on ${failure.path}`,
+    surface: `fixture:read-error:${failure.path}`,
     context: `the read error on ${failure.path}`,
     setup: async (page: Page) => {
       await mockConsole(page, 'administrator', { routeAuditFixtures: true })
@@ -271,7 +272,7 @@ const fixtureAxeAudits: FixtureAxeAudit[] = [
   })),
   {
     name: 'axe audits a business unit whose read failed',
-    surface: 'read error on /platform/units/unit-retail',
+    surface: 'fixture:platform-unit-read-error:/platform/units/unit-retail',
     context: 'the read error on /platform/units/unit-retail',
     setup: async page => {
       await mockConsole(page, 'platform_admin')
@@ -286,7 +287,7 @@ const fixtureAxeAudits: FixtureAxeAudit[] = [
   },
   ...emptyStates.map(state => ({
     name: `axe audits the empty state on ${state.path}`,
-    surface: `empty state on ${state.path}`,
+    surface: `fixture:empty-state:${state.path}`,
     context: `the empty state on ${state.path}`,
     setup: async (page: Page) => {
       await mockConsole(page, 'administrator', {
@@ -301,7 +302,7 @@ const fixtureAxeAudits: FixtureAxeAudit[] = [
   })),
   {
     name: 'axe audits a job with baseline changes that await confirmation',
-    surface: 'pending baseline changes',
+    surface: 'fixture:pending-baseline-changes',
     context: 'job-1 with pending baseline changes',
     setup: async page => {
       await mockConsole(page, 'administrator', { routeAuditFixtures: true, pendingBaselineChanges: true })
@@ -314,7 +315,7 @@ const fixtureAxeAudits: FixtureAxeAudit[] = [
   },
   {
     name: 'axe audits the scan-slot demand notice near capacity',
-    surface: 'scan-slot demand near capacity',
+    surface: 'fixture:scan-slot-demand-near-capacity',
     context: '/jobs with scan-slot demand near capacity',
     setup: async page => {
       await mockConsole(page, 'administrator', { routeAuditFixtures: true, scanSlotDemand: { estimated_slot_seconds_per_day: 6_120, utilization_percent: 85 } })
@@ -327,7 +328,7 @@ const fixtureAxeAudits: FixtureAxeAudit[] = [
   },
   ...monitorSetupSteps.map((step, index) => ({
     name: `axe audits prefilled monitor setup step ${index + 1}: ${step.heading}`,
-    surface: `prefilled monitor setup step ${index + 1}: ${step.heading}`,
+    surface: `fixture:monitor-setup-step:${index + 1}:${step.heading.toLowerCase().replaceAll(' ', '-')}`,
     context: `step ${index + 1} of the prefilled monitor setup (${step.heading})`,
     setup: async (page: Page) => {
       await mockConsole(page, 'administrator', { routeAuditFixtures: true })
@@ -345,14 +346,34 @@ const fixtureAxeAudits: FixtureAxeAudit[] = [
   })),
 ]
 
-function auditedSurfaceNamesFor(fixtures: FixtureAxeAudit[]) {
-  return new Set([
+function consoleRouteSurfaceKey(route: ConsoleRouteCase) {
+  return `console-route:${route.scope}:${route.path}`
+}
+
+function entrySurfaceKey(surface: EntrySurfaceCase) {
+  return `entry:${surface.state}:${surface.path}`
+}
+
+function assertUniqueAuditedSurfaceNames(names: string[]) {
+  const seen = new Set<string>()
+  const duplicates = new Set<string>()
+  for (const name of names) {
+    if (seen.has(name)) duplicates.add(name)
+    seen.add(name)
+  }
+  if (duplicates.size) throw new Error(`axe audit surface keys are not unique: ${[...duplicates].join(', ')}`)
+}
+
+function auditedSurfaceNamesFor(fixtures: FixtureAxeAudit[], entries: EntrySurfaceCase[] = entrySurfaces) {
+  const names = [
     ...allConsoleRoutes
       .filter(route => roles.some(role => routeIsRenderedForRole(role, route.path) && expectedConsolePath(role, route) === route.path))
-      .map(route => route.path),
-    ...entrySurfaces.map(surface => surface.path),
+      .map(route => consoleRouteSurfaceKey(route)),
+    ...entries.map(entrySurfaceKey),
     ...fixtures.map(fixture => fixture.surface),
-  ])
+  ]
+  assertUniqueAuditedSurfaceNames(names)
+  return new Set(names)
 }
 
 const auditedSurfaceNames = auditedSurfaceNamesFor(fixtureAxeAudits)
@@ -364,15 +385,33 @@ test('axe allowances reject unaudited surfaces, including removed fixture audits
   expect(() => assertAuditedAllowanceSurfaces([...axeAllowances, unknown])).toThrow(/does not audit: \/no-such-route/)
   expect(() => assertAuditedAllowanceSurfaces(axeAllowances)).not.toThrow()
 
-  const removedAudit = fixtureAxeAudits.find(fixture => fixture.surface === 'open action dialog')!
+  const consoleSecurityRoute = allConsoleRoutes.find(route => route.path === '/security')!
+  expect(() => assertUniqueAuditedSurfaceNames([consoleRouteSurfaceKey(consoleSecurityRoute), consoleRouteSurfaceKey(consoleSecurityRoute)]))
+    .toThrow(/surface keys are not unique: console-route:shared:\/security/)
+
+  const removedAudit = fixtureAxeAudits.find(fixture => fixture.surface === 'fixture:open-remove-range-dialog')!
   const remainingAudits = fixtureAxeAudits.filter(fixture => fixture !== removedAudit)
   const surfacesWithoutRemovedAudit = auditedSurfaceNamesFor(remainingAudits)
   const staleAllowance: AxeAllowance = { ...unknown, surface: removedAudit.surface }
-  expect(() => assertAuditedAllowanceSurfaces([...axeAllowances, staleAllowance], surfacesWithoutRemovedAudit)).toThrow(/does not audit: open action dialog/)
+  expect(() => assertAuditedAllowanceSurfaces([...axeAllowances, staleAllowance], surfacesWithoutRemovedAudit)).toThrow(/does not audit: fixture:open-remove-range-dialog/)
+
+  const totpEntry = entrySurfaces.find(surface => surface.state === 'enrolment')!
+  const totpSurface = entrySurfaceKey(totpEntry)
+  const surfacesWithoutTotpEntry = auditedSurfaceNamesFor(
+    fixtureAxeAudits,
+    entrySurfaces.filter(surface => surface !== totpEntry),
+  )
+  expect(surfacesWithoutTotpEntry).toContain(consoleRouteSurfaceKey(consoleSecurityRoute))
+  expect(surfacesWithoutTotpEntry).not.toContain(totpSurface)
+  const staleTotpAllowance: AxeAllowance = { ...unknown, surface: totpSurface }
+  expect(() => assertAuditedAllowanceSurfaces([...axeAllowances, staleTotpAllowance], surfacesWithoutTotpEntry))
+    .toThrow(`axeAllowances names surfaces this spec does not audit: ${totpSurface}`)
 
   const matchingScheduleAudits = fixtureAxeAudits.filter(fixture => fixture.name.endsWith(': Set schedule and alerts'))
   expect(matchingScheduleAudits).toHaveLength(2)
   const [removedScheduleAudit, retainedScheduleAudit] = matchingScheduleAudits
+  expect(removedScheduleAudit.surface).toContain('monitor-setup-step:3:')
+  expect(retainedScheduleAudit.surface).toContain('monitor-setup-step:4:')
   const auditsWithoutScheduleStep = fixtureAxeAudits.filter(fixture => fixture !== removedScheduleAudit)
   const surfacesWithoutScheduleStep = auditedSurfaceNamesFor(auditsWithoutScheduleStep)
   expect(surfacesWithoutScheduleStep).toContain(retainedScheduleAudit.surface)
@@ -439,7 +478,8 @@ test('legacy scan detail route audit checks successful scan content before axe',
   await expect(content.locator('.loading, .skeleton-list')).toHaveCount(0)
   await expectRouteDataReady(page, '/scans/scan-1')
 
-  await expectAccessible(page, '/scans/scan-1', 'administrator on /scans/scan-1')
+  const scanRoute = allConsoleRoutes.find(route => route.path === '/scans/scan-1')!
+  await expectAccessible(page, consoleRouteSurfaceKey(scanRoute), 'administrator on /scans/scan-1')
 })
 
 test('activity error text remains in visible row link names (#1629)', async ({ page }, testInfo) => {

@@ -372,7 +372,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
 
     const local = { Route: new Set<string>(), Routes: new Set<string>() }
     const unresolvedRouterImports = new Map<string, { api: 'Route' | 'Routes'; source: string }>()
-    const unresolvedLocalComponentImports = new Map<string, { source: string; namespace: boolean }>()
+    const unresolvedLocalComponentImports = new Map<string, { source: string }>()
     const reactFragments = new Set<string>()
     const reactNamespaces = new Set<string>()
     for (const statement of program.body as Node[]) {
@@ -406,7 +406,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
           for (const specifier of statement.specifiers as Node[]) {
             if (statement.importKind === 'type' || specifier.importKind === 'type') continue
             const localName = String((specifier.local as Node).name)
-            unresolvedLocalComponentImports.set(localName, { source, namespace: specifier.type === 'ImportNamespaceSpecifier' })
+            unresolvedLocalComponentImports.set(localName, { source })
           }
         }
       }
@@ -473,10 +473,10 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
         throw new Error(`${file} imports ${api} from ${source} and uses it as JSX; the console route inventory cannot resolve local router API re-exports`)
       }
     }
-    for (const [localName, { source, namespace }] of unresolvedLocalComponentImports) {
+    for (const [localName, { source }] of unresolvedLocalComponentImports) {
       const usesImportedComponent = (node: Node): boolean => {
         if (jsxName(node) === localName) return true
-        if (namespace && node.type === 'JSXElement') {
+        if (node.type === 'JSXElement') {
           const name = (node.openingElement as Node).name as Node
           if (name.type === 'JSXMemberExpression' && jsxMemberRootIdentifier(name) === localName) return true
         }
@@ -1098,6 +1098,36 @@ export function PlatformShell() { return <Routes><Route path="/units/:id/:tab" e
         code: `import * as Router from '../router-bindings'\nexport function HiddenRoutes() { return <Router.Components.Pages><Router.Components.Page path="/hidden" /></Router.Components.Pages> }`,
       }
       expect(() => extractRouters([deeplyNestedNamespaceSource])).toThrow(/uses JSX component Router from unresolved local module \.\.\/router-bindings/)
+
+      const unresolvedDefaultMemberSource = {
+        file: 'src/HiddenRoutes.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+import Router from '../unreadable-router'
+export function HiddenRoutes() {
+  return <Routes><Route path="/excluded/*" element={<Router.Components.Pages><Router.Components.Page path="child" /></Router.Components.Pages>} /></Routes>
+}`,
+      }
+      expect(() => extractRouters([unresolvedDefaultMemberSource])).toThrow(/uses JSX component Router from unresolved local module \.\.\/unreadable-router/)
+    })
+
+    it('accepts default component imports when their local TypeScript module is readable', () => {
+      const fixtureRoot = mkdtempSync(join(tmpdir(), 'edgewatch-readable-router-import-'))
+      const sourceDirectory = join(fixtureRoot, 'src')
+      mkdirSync(sourceDirectory, { recursive: true })
+      writeFileSync(join(sourceDirectory, 'Shell.tsx'), `import { Route, Routes } from 'react-router-dom'
+import Router from './ReadableRouter'
+export function Shell() { return <Routes><Route path="/safe" element={<Router />} /></Routes> }
+`)
+      writeFileSync(join(sourceDirectory, 'ReadableRouter.tsx'), `import { Route, Routes } from 'react-router-dom'
+export default function Router() { return <Routes><Route path="/safe/child" element={<p />} /></Routes> }
+`)
+
+      try {
+        const sources = sourceFiles(sourceDirectory, fixtureRoot)
+        expect(extractRouters(sources, fixtureRoot).map(router => router.name)).toEqual(expect.arrayContaining(['Shell', 'Router']))
+      } finally {
+        rmSync(fixtureRoot, { recursive: true, force: true })
+      }
     })
 
     it('fails closed when renamed Route and Routes re-exports pass through root-level helpers', () => {

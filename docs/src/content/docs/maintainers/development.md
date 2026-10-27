@@ -175,9 +175,9 @@ supported; multiple wildcards fail closed. Wildcard captures are substituted as
 literal path text, including characters that have meaning in regular
 expressions. It rejects renamed `Route` or `Routes` re-exports anywhere
 in those chains. A local module load or local re-export that cannot be read as
-TypeScript fails closed; JSX components from an unresolved static local import
-fail closed when used. Unresolved namespace JSX components are checked from
-the root binding through every member level. Import router components directly
+TypeScript fails closed; JSX uses of components from an unresolved static local
+import fail closed, including member expressions rooted at default, namespace,
+or named imports through every member level. Import router components directly
 from a recognized router module.
 
 `<Route>` props must be explicit: any JSX prop spread is rejected because a

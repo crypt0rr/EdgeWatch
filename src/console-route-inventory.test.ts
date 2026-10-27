@@ -371,6 +371,9 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
           if (attributes.some(attribute => attribute.type === 'JSXSpreadAttribute')) {
             throw new Error(`${file}: <Route> in ${where} uses a JSX prop spread; the console route inventory requires explicit props so it can determine the effective path`)
           }
+          if (jsxAttribute(node, 'children')) {
+            throw new Error(`${file}: <Route> in ${where} uses a children attribute; nested routes must be declared as direct JSX children so the console route inventory can audit them`)
+          }
           return
         }
         if (name && local.Routes.has(name)) return
@@ -836,6 +839,33 @@ export function K() { return <Routes><Route path="/visible" element={<Visible />
 
       for (const fixture of spreads) {
         expect(() => extractRouters([fixture])).toThrow(/JSX prop spread; the console route inventory requires explicit props/)
+      }
+    })
+
+    it('refuses Route children props that could hide nested routes', () => {
+      const header = `import { Route, Routes } from 'react-router-dom'`
+      const route = (attribute: string, declarations = '') => `${header}
+${declarations}
+export function ParentRouter() {
+  return <Routes><Route path="/parent" ${attribute} /></Routes>
+}`
+      const cases = [
+        {
+          file: 'src/route-children-a.tsx',
+          code: route(`children={<Route path="hidden" element={<HiddenPage />} />}`),
+        },
+        {
+          file: 'src/route-children-b.tsx',
+          code: route(`children={hiddenRoutes}`, `const hiddenRoutes = getHiddenRoutes()`),
+        },
+        {
+          file: 'src/route-children-c.tsx',
+          code: route(`children={showHidden ? getHiddenRoutes() : null}`),
+        },
+      ]
+
+      for (const fixture of cases) {
+        expect(() => extractRouters([fixture])).toThrow(/uses a children attribute; nested routes must be declared as direct JSX children/)
       }
     })
 

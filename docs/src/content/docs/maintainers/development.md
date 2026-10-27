@@ -169,9 +169,11 @@ because a spread can override `path`, including when it appears after a direct
 `path` attribute or uses an object alias or conditional expression. Router APIs
 must use static named imports; dynamic imports or `require` loads of router
 modules are rejected, as are runtime module loads whose specifier is not
-statically readable. Declare `<Routes>` children directly as JSX children:
-`children` attributes and prop spreads are rejected because they can hide an
-uninspectable route tree.
+statically readable. Declare nested routes directly as JSX children on a
+`<Route>`: its `children` attribute is rejected because it can hide nested
+routes from the inventory. Declare `<Routes>` children directly as JSX
+children too; `children` attributes and prop spreads are rejected because they
+can hide an uninspectable route tree.
 
 To add a console page, add its `<Route>` with a string-literal `path`, then an
 entry with its scope and permission to `unitConsoleRoutes` or

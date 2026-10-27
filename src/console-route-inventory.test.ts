@@ -281,7 +281,14 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
           return
         }
         const name = jsxName(node)
-        if (name && (local.Route.has(name) || local.Routes.has(name))) return
+        if (name && local.Route.has(name)) {
+          const attributes = ((node.openingElement as Node).attributes as Node[])
+          if (attributes.some(attribute => attribute.type === 'JSXSpreadAttribute')) {
+            throw new Error(`${file}: <Route> in ${where} uses a JSX prop spread; the console route inventory requires explicit props so it can determine the effective path`)
+          }
+          return
+        }
+        if (name && local.Routes.has(name)) return
         rejectUninspectableRouteChild(node, where)
       }
       rejectUninspectableRouteChild(node, where)
@@ -628,6 +635,34 @@ export function PlatformShell() { return <Routes><Route path="/units/:id/:tab" e
     it('refuses local aliases that could hide routes inside a readable router', () => {
       expect(() => extractRouters([{ file: 'src/i.tsx', code: `import { Route, Routes } from 'react-router-dom'\nconst HiddenRoute = Route\nexport function I() { return <Routes><Route path="/visible" /><HiddenRoute path="/hidden" /></Routes> }` }])).toThrow(/aliases imported Route as HiddenRoute/)
       expect(() => extractRouters([{ file: 'src/j.tsx', code: `import { Route, Routes } from 'react-router-dom'\nconst HiddenRoutes = Routes\nexport function J() { return <HiddenRoutes><Route path="/visible" /></HiddenRoutes> }` }])).toThrow(/aliases imported Routes as HiddenRoutes/)
+    })
+
+    it('refuses Route prop spreads that could override the inventoried path', () => {
+      const source = (declarations: string, route: string) => `import { Route, Routes } from 'react-router-dom'
+${declarations}
+export function K() { return <Routes><Route path="/visible" element={<Visible />} />${route}</Routes> }`
+      const spreads = [
+        {
+          file: 'src/k.tsx',
+          code: source('', `<Route path="/known" {...{ path: "/hidden", element: <HiddenPage /> }} />`),
+        },
+        {
+          file: 'src/l.tsx',
+          code: source('', `<Route {...{ path: "/hidden", element: <HiddenPage /> }} path="/known" />`),
+        },
+        {
+          file: 'src/m.tsx',
+          code: source(`const hiddenProps = { path: '/hidden', element: <HiddenPage /> }`, `<Route path="/known" {...hiddenProps} />`),
+        },
+        {
+          file: 'src/n.tsx',
+          code: source(`const hiddenProps = { path: '/hidden', element: <HiddenPage /> }`, `<Route {...(showHidden ? hiddenProps : {})} path="/known" />`),
+        },
+      ]
+
+      for (const fixture of spreads) {
+        expect(() => extractRouters([fixture])).toThrow(/JSX prop spread; the console route inventory requires explicit props/)
+      }
     })
 
     it('refuses non-JSX route children that could hide routes from the inventory', () => {

@@ -164,7 +164,9 @@ imports, re-exports from a router module, source-less re-exports and local
 aliases of imported `Route` or `Routes`, JSX member forms such as `<RR.Route>`,
 and opaque non-JSX children inside `<Routes>`, including `React.createElement`
 calls and their aliases. Teach the inventory check before introducing any of
-these forms.
+these forms. `<Route>` props must be explicit: any JSX prop spread is rejected
+because a spread can override `path`, including when it appears after a direct
+`path` attribute or uses an object alias or conditional expression.
 
 To add a console page, add its `<Route>` with a string-literal `path`, then an
 entry with its scope and permission to `unitConsoleRoutes` or

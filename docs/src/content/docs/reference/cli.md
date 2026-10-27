@@ -172,8 +172,14 @@ daemon prints its status, and `warnings` list actions that do not stop
 EdgeWatch, such as removing imported notification URLs from `config.yaml` or a
 scanner identity-pool or seccomp failure. Scanner health reads the lease
 journal without leasing an identity and reports active, quarantined,
-in-use-by-other-processes, and free counts; it warns when free capacity falls
-below `max_concurrent_scans`. In `auto` mode, such a scanner failure
+in-use-by-other-processes, and free counts. Its warning uses shared pool
+capacity and treats every active lease as reachable because the journal does
+not identify its owner; this keeps the daemon's own running scans from causing
+a health warning, and means the command cannot identify an orphaned active
+lease. The daemon's low-capacity deployment alert separately counts leases
+acquired by its allocator and subtracts active leases held by other processes,
+so it detects a lease left active by a killed host `edgewatch scan`. A live host
+scan can temporarily trigger that alert. In `auto` mode, a scanner failure
 prevents launches; it does not start scanners as UID 0. The scanner sandbox is
 unconfined only when `scanner.sandbox: off` is explicit. Notifications in
 `notifications.sandbox: auto` can fall back to the daemon's identity. Both

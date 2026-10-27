@@ -5,7 +5,7 @@ description: Understand the current SQLite schema, the oldest schema that upgrad
 
 ## Current schema and rollback
 
-The current schema is version 79. Schema 31 records terminal notification
+The current schema is version 80. Schema 31 records terminal notification
 deliveries and marks rows that had already exhausted the original eight
 attempts. Schema 63 repairs databases that had already passed schema 31 by
 marking still-unsent rows with at least eight attempts and a scheduled retry
@@ -213,9 +213,22 @@ requires the complete pre-upgrade backup.
 Schema 79 adds a partial index of completed scan cycles by job, execution
 hash, and completion time. The scan-slot demand estimate reads each job's
 newest completed cycles through it instead of reading and sorting the job's
-whole cycle history. Building the index reads each scan cycle once; the
-migration changes no cycle, scan, or baseline rows. An older release must not
-open the upgraded database; rollback requires the complete pre-upgrade backup.
+whole cycle history. A unit's Jobs estimate reads only that unit's jobs;
+platform status uses the index to estimate every active unit's demand through
+each unit's tenant-scoped store and returns only aggregate counts and sums.
+Building the index reads each scan cycle once; the migration changes no cycle,
+scan, or baseline rows. An older release must not open the upgraded database;
+rollback requires the complete pre-upgrade backup.
+
+## Schema 80
+
+Schema 80 copies each scan cycle's execution hash onto its scan rows and adds
+partial indexes for cycle and non-cycle timeout history. The estimate can seek
+the current settings key and read only the newest bounded candidates, even
+when newer scans used different settings. The migration backfills the copied
+hash from retained cycle records and builds both indexes from scan history.
+An older release must not open the upgraded database; rollback requires the
+complete pre-upgrade backup.
 
 ## Upgrade floor
 

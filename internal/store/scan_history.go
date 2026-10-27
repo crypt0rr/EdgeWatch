@@ -65,6 +65,13 @@ func clearCompletedScanCycleCheckpointsTx(ctx context.Context, tx *sql.Tx, cycle
 }
 
 func saveScanExec(ctx context.Context, tx *sql.Tx, scan model.Scan) error {
+	cycleExecutionHash := ""
+	if scan.CycleID != "" && scan.JobID != "" {
+		err := tx.QueryRowContext(ctx, `SELECT execution_hash FROM scan_cycles WHERE id=? AND job_id=?`, scan.CycleID, scan.JobID).Scan(&cycleExecutionHash)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+	}
 	snapshot, err := json.Marshal(scan.Snapshot)
 	if err != nil {
 		return err
@@ -85,8 +92,8 @@ func saveScanExec(ctx context.Context, tx *sql.Tx, scan model.Scan) error {
 	// The insert returns it, so the host rows take it from here rather than
 	// from the scan row, which stores it after the snapshot.
 	var tenantID string
-	err = tx.QueryRowContext(ctx, `INSERT INTO scans(id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,comparison,changes_json,snapshot_json,results_json,results_unit_count,coverage_summary_json,tenant_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,`+jobTenantSQL+`) RETURNING tenant_id`,
-		scan.ID, nullString(scan.JobID), nullInt64(scan.JobRevision), scan.Job, sqliteTimestamp(scan.StartedAt), sqliteTimestamp(scan.FinishedAt), scan.Status, scan.Error, scan.NmapVersion, scan.ScannerEngine, scan.ScannerProfileID, scan.ScannerProfileRevision, scan.NaabuVersion, scan.DiscoveryPorts, scan.ConfirmedPorts, scan.DiscoveryDurationMS, scan.EnrichmentDurationMS, scan.ConfigHash, scan.CycleID, scan.CycleAttempt, scan.CycleStatus, boolInt(scan.Resumable), scan.CompletedProbes, scan.TotalProbes, scan.CompletedUnits, scan.TotalUnits, scan.NoProgressTries, scan.BaselineScanID, scan.BaselineConfigHash, scan.Comparison, changesJSON, snapshot, results, len(scan.Snapshot.Units), coverage, scan.JobID).Scan(&tenantID)
+	err = tx.QueryRowContext(ctx, `INSERT INTO scans(id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_execution_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,comparison,changes_json,snapshot_json,results_json,results_unit_count,coverage_summary_json,tenant_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,`+jobTenantSQL+`) RETURNING tenant_id`,
+		scan.ID, nullString(scan.JobID), nullInt64(scan.JobRevision), scan.Job, sqliteTimestamp(scan.StartedAt), sqliteTimestamp(scan.FinishedAt), scan.Status, scan.Error, scan.NmapVersion, scan.ScannerEngine, scan.ScannerProfileID, scan.ScannerProfileRevision, scan.NaabuVersion, scan.DiscoveryPorts, scan.ConfirmedPorts, scan.DiscoveryDurationMS, scan.EnrichmentDurationMS, scan.ConfigHash, cycleExecutionHash, scan.CycleID, scan.CycleAttempt, scan.CycleStatus, boolInt(scan.Resumable), scan.CompletedProbes, scan.TotalProbes, scan.CompletedUnits, scan.TotalUnits, scan.NoProgressTries, scan.BaselineScanID, scan.BaselineConfigHash, scan.Comparison, changesJSON, snapshot, results, len(scan.Snapshot.Units), coverage, scan.JobID).Scan(&tenantID)
 	if err != nil {
 		return err
 	}

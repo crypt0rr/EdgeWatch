@@ -148,10 +148,10 @@ func TestCheckDeploymentAlertsReportsBackupAndIdentityCapacity(t *testing.T) {
 	a.Config.Scheduler.MaxConcurrent = 4
 	a.Config.Backup.Directory = t.TempDir()
 	a.sandbox = sandbox.NewEnforced().WithLandlock("/usr/local/bin/edgewatch", 3)
-	// The daemon's own running scan holds one lease, which stays reachable;
-	// 61 quarantined identities leave it three of the four it needs.
+	// The daemon's own running scan holds one lease, which does not reduce its
+	// alert capacity; 61 quarantined identities leave it three of the four it needs.
 	a.inspectScannerIdentities = func(context.Context) (*sandbox.ScannerIdentityPoolStatus, error) {
-		return &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Active: 1, Quarantined: 61, Free: 2}, nil
+		return &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Active: 1, OwnActive: 1, Quarantined: 61, Free: 2}, nil
 	}
 	if err := writeBackupStatusFile(BackupStatusPath(f.db.Path), BackupStatus{Directory: a.Config.Backup.Directory, ConsecutiveFailures: 2}); err != nil {
 		t.Fatal(err)
@@ -281,12 +281,12 @@ func TestScannerIdentityCapacityCountsOwnScansAsReachable(t *testing.T) {
 		pool          sandbox.ScannerIdentityPoolStatus
 		want          int
 	}{
-		// 25 of 40 slots run scans, which hold 25 leases; 39 identities are free.
-		{"busy daemon", 40, sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Active: 25, Free: 39}, 0},
+		// 25 of 40 slots run daemon scans; their leases do not reduce capacity.
+		{"busy daemon", 40, sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Active: 25, OwnActive: 25, Free: 39}, 0},
 		// max_concurrent_scans equals the pool's 64 identities; one scan runs.
-		{"one scan at the pool's capacity", 64, sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Active: 1, Free: 63}, 0},
+		{"one scan at the pool's capacity", 64, sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Active: 1, OwnActive: 1, Free: 63}, 0},
 		// The same 25 scans with 25 quarantined identities leave 39 of 40.
-		{"quarantined identities", 40, sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Active: 25, Quarantined: 25, Free: 14}, 1},
+		{"quarantined identities", 40, sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Active: 25, OwnActive: 25, Quarantined: 25, Free: 14}, 1},
 	} {
 		a.Config.Scheduler.MaxConcurrent = test.maxConcurrent
 		pool = &test.pool
@@ -297,6 +297,27 @@ func TestScannerIdentityCapacityCountsOwnScansAsReachable(t *testing.T) {
 	want := []model.AlertDetail{{Kind: model.HealthAlertScannerIdentitiesLow, Subject: "scanner identity pool", Current: "39 reachable, 40 required"}}
 	if alerts := healthAlerts(t, f.db); !reflect.DeepEqual(alerts, want) {
 		t.Fatalf("scanner identity alerts = %+v, want %+v", alerts, want)
+	}
+}
+
+func TestScannerIdentityCapacityAlertsOnOrphanedActiveLease(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
+	a := f.app
+	routeDeploymentAlerts(t, f.db)
+	a.sandbox = sandbox.NewEnforced()
+	a.Config.Scheduler.MaxConcurrent = 64
+	a.inspectScannerIdentities = func(context.Context) (*sandbox.ScannerIdentityPoolStatus, error) {
+		return &sandbox.ScannerIdentityPoolStatus{State: sandbox.StateEnforced, MaxParallel: 64, Active: 1, Free: 63}, nil
+	}
+
+	if recorded, err := a.RecordDeploymentOperationalHealth(ctx, time.Now().UTC()); err != nil || recorded != 1 {
+		t.Fatalf("orphaned active lease alert = %d, %v; want one alert", recorded, err)
+	}
+	want := []model.AlertDetail{{Kind: model.HealthAlertScannerIdentitiesLow, Subject: "scanner identity pool", Current: "63 reachable, 64 required"}}
+	if alerts := healthAlerts(t, f.db); !reflect.DeepEqual(alerts, want) {
+		t.Fatalf("orphaned active lease alerts = %+v, want %+v", alerts, want)
 	}
 }
 

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -181,6 +182,101 @@ func TestDeploymentScanDemandUsesThePoolNotUnitCapsAndSumsTheUnitsCounts(t *test
 	}
 }
 
+func TestDeploymentScanDemandCapsEachUnitsContributionAtItsEffectiveSlots(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	application := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 4}}}
+	unit, ts := demandUnit(t, db, "One-slot unit", "one-slot")
+	if _, err := db.DB.ExecContext(ctx, `UPDATE tenants SET max_concurrent_scans=1 WHERE id=?`, unit.ID); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+			Name: fmt.Sprintf("full-day-%d", i), Schedule: "0 * * * *", Timezone: "UTC", Timeout: config.Duration(24 * time.Hour),
+			Targets: []string{fmt.Sprintf("192.0.2.%d", i+1)},
+			TCP:     &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+		}), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		insertCompletedScan(t, db, record, fmt.Sprintf("full-day-scan-%d", i), time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC), 24*time.Hour)
+	}
+	unitDemand, err := application.ScanSlotDemand(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unitDemand.Slots != 1 || unitDemand.EstimatedSlotSecondsPerDay != 2*slotSecondsPerDay || !unitDemand.OverCapacity {
+		t.Fatalf("unit demand = %+v; want two slot-days against its one-slot cap", unitDemand)
+	}
+	demand, err := application.DeploymentScanDemand(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demand.Slots != 4 || demand.EnabledJobs != 2 || demand.HistoryJobs != 2 || demand.EstimatedSlotSecondsPerDay != slotSecondsPerDay || demand.OverCapacity {
+		t.Fatalf("deployment demand = %+v; want this unit capped at one slot-day against the four-slot pool", demand)
+	}
+}
+
+func TestDeploymentScanDemandSharesAndBoundsDenseScheduleSimulationAcrossUnits(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	const unitCount = 100
+	application := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: unitCount}}}
+
+	pattern, err := schedulePattern(ctx, "UTC", "*/5 0 * * *")
+	if err != nil || !pattern.ok {
+		t.Fatalf("dense schedule pattern = %+v, error %v", pattern, err)
+	}
+	sharedRuns, _, err := pattern.runsForDuration(ctx, (6 * time.Minute).Seconds())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	units := make([]*store.TenantStore, 0, unitCount)
+	units = append(units, defaultTenant(db))
+	for i := 1; i < unitCount; i++ {
+		_, ts := demandUnit(t, db, fmt.Sprintf("Dense unit %03d", i), fmt.Sprintf("dense-%03d", i))
+		units = append(units, ts)
+	}
+	finished := time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC)
+	for i, ts := range units {
+		for _, sample := range []struct {
+			name     string
+			duration time.Duration
+		}{
+			{name: fmt.Sprintf("a-shared-%03d", i), duration: 6 * time.Minute},
+			{name: fmt.Sprintf("b-distinct-%03d", i), duration: 6*time.Minute + time.Duration(i+1)*time.Second},
+		} {
+			record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+				Name: sample.name, Schedule: "*/5 0 * * *", Timezone: "UTC",
+				Targets: []string{"192.0.2.1"},
+				TCP:     &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+			}), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			insertCompletedScan(t, db, record, "scan-"+sample.name, finished, sample.duration)
+		}
+	}
+
+	budget := &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
+	demand, err := application.deploymentScanDemandWithBudget(ctx, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demand.Units != unitCount || demand.EnabledJobs != 2*unitCount || demand.HistoryJobs < unitCount || demand.UnestimatedJobs == 0 || demand.CadenceUnattainableJobs < unitCount || demand.Slots != unitCount {
+		t.Fatalf("deployment demand = %+v; want all units, shared projections, skipped ticks, and over-budget jobs reported", demand)
+	}
+	if wantMinimum := float64(unitCount) * 6 * 60 * sharedRuns; demand.EstimatedSlotSecondsPerDay < wantMinimum {
+		t.Fatalf("deployment demand %.0f slot-seconds/day omits shared projections; want at least %.0f", demand.EstimatedSlotSecondsPerDay, wantMinimum)
+	}
+	if budget.used != budget.limit || budget.used > scanScheduleRequestWorkLimit {
+		t.Fatalf("deployment estimate used %d work units; want the bounded limit %d", budget.used, scanScheduleRequestWorkLimit)
+	}
+}
+
 // Without active units or jobs, the demand is zero against the pool, and an
 // application without a store, or a read that fails, gives no estimate.
 func TestDeploymentScanDemandWithoutWorkAndOnErrors(t *testing.T) {
@@ -194,6 +290,10 @@ func TestDeploymentScanDemandWithoutWorkAndOnErrors(t *testing.T) {
 	}
 	if want := (DeploymentScanDemand{Units: 1, Slots: 2, CapacitySlotSecondsPerDay: 2 * slotSecondsPerDay}); demand != want {
 		t.Fatalf("empty deployment demand = %+v, want %+v", demand, want)
+	}
+	defaultBudgetDemand, err := application.deploymentScanDemandWithBudget(ctx, nil)
+	if err != nil || defaultBudgetDemand != demand {
+		t.Fatalf("deployment demand with a nil budget = %+v, error %v; want %+v", defaultBudgetDemand, err, demand)
 	}
 
 	for _, empty := range []*App{nil, {}, {Store: db}} {

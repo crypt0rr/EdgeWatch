@@ -84,14 +84,20 @@ directory; a directory change, a timestamp without a backup filename, or a
 missing status file does not count as recovery. The daemon's durable
 deployment alert follows the same recovery rule.
 
-The scanner identity rule compares the identities that the daemon's scans can
-reach with `scheduler.max_concurrent_scans`: the pool's 64 less the
-`quarantined` ones and those `in_use_by_other_processes`, which `active` plus
-`free` gives. The daemon's own running scans hold the `active` leases and
-release them when they end, so do not alert on `free` alone, which falls with
-each scan a busy daemon starts. The daemon's low-identity deployment alert
-uses the same comparison, and deployment alerts also report a new failure
-transition to platform destinations. The metric names are listed in
+The Prometheus rule compares shared pool capacity with
+`scheduler.max_concurrent_scans`: `active` plus `free` excludes quarantined
+identities and identities in use by processes without a lease. Every active
+lease counts as reachable in this metric, because it does not identify the
+lease owner; this rule cannot detect an orphaned active lease. The daemon's
+built-in low-identity deployment alert uses the same pool snapshot and also
+subtracts active leases that its own allocator did not acquire. Its running
+scans therefore do not lower alert capacity, while a live host `edgewatch
+scan` can temporarily trigger the alert and a lease left by a killed host
+scan stays counted until the clean-restart recovery described in the
+[container hardening guide](/deployment/container-hardening/#upgrading-an-existing-deployment).
+`edgewatch health` retains the shared-capacity calculation and also counts all
+active leases as reachable. Deployment alerts report new failure transitions
+to platform destinations. The metric names are listed in
 [the API reference](/reference/api-compatibility/#health-and-metrics). Keep
 `/metrics` off a public reverse proxy; see
 [Reverse proxies](/deployment/reverse-proxies/).

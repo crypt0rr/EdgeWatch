@@ -86,11 +86,16 @@ unit data in its console, API, streams, and public pages, but host operators
 can access every unit. Backups and restores cover all units together. Use
 separate deployments for parties that must not trust the same operators.
 
-The platform administrator manages unit lifecycle and accounts without direct
-access to unit scan data. Account invitations and password resets are still
-trusted operations: keep unit administrators on TOTP and review platform
-account actions in the unit audit. The security policy describes these trust
-boundaries and the signals that units can observe about one another.
+The platform administrator manages unit lifecycle and accounts without being
+able to open a unit's scan data in the console. The platform status demand
+estimate does read each active unit's enabled jobs, bounded recent
+scan-duration history, and effective slot capacity through that unit's
+tenant-scoped store. It returns aggregate counts and sums only, without
+per-unit figures or unit or job names. Account invitations and password resets
+are still trusted operations: keep unit administrators on TOTP and review
+platform account actions in the unit audit. The security policy describes
+these trust boundaries and the signals that units can observe about one
+another.
 
 ## Public and outbound information
 

@@ -215,6 +215,9 @@ type ScannerIdentityPoolStatus struct {
 	// Active and Quarantined are durable scanner leases in the journal.
 	Active      int `json:"active"`
 	Quarantined int `json:"quarantined"`
+	// OwnActive is the active-lease count acquired by this allocator process.
+	// It is used for the daemon's alert calculation and is not part of the API.
+	OwnActive int `json:"-"`
 	// InUseByOtherProcesses counts pool identities occupied by a process
 	// without a journal lease; Free counts identities available to acquire.
 	InUseByOtherProcesses int `json:"in_use_by_other_processes"`
@@ -223,18 +226,27 @@ type ScannerIdentityPoolStatus struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// Reachable returns how many identities the daemon's scans can hold at once:
-// the pool's capacity less quarantined leases and the identities that
-// processes without a lease occupy. Active leases stay reachable, because the
-// daemon's own running scans hold them and release them when they end. The
-// journal cannot tell those leases from the ones of an `edgewatch scan` that
-// shares the data volume, so they count as reachable too. A nil status has
-// none.
+// Reachable returns the shared pool capacity reported by `edgewatch health`:
+// pool capacity less quarantined leases and identities that processes without
+// a lease occupy. The journal does not identify active-lease owners, so all
+// active leases count as reachable. A nil status has none.
 func (status *ScannerIdentityPoolStatus) Reachable() int {
 	if status == nil {
 		return 0
 	}
 	return max(status.MaxParallel-status.Quarantined-status.InUseByOtherProcesses, 0)
+}
+
+// ReachableByDaemon returns how many identities the daemon can reach for new
+// scans. Active leases acquired by this allocator process remain available to
+// its configured concurrency; active leases held by other processes reduce
+// capacity along with quarantined leases and unleased process use.
+func (status *ScannerIdentityPoolStatus) ReachableByDaemon() int {
+	if status == nil {
+		return 0
+	}
+	activeByOtherProcesses := max(status.Active-status.OwnActive, 0)
+	return max(status.MaxParallel-status.Quarantined-status.InUseByOtherProcesses-activeByOtherProcesses, 0)
 }
 
 func scannerIdentityPoolStatus(state, reason string) *ScannerIdentityPoolStatus {

@@ -27,6 +27,9 @@ const (
 	// scanDurationKeyCacheLimit bounds the remembered job revisions. Full
 	// caches retain a deterministic subset instead of discarding every entry.
 	scanRunsPerDayCacheLimit     = 1024
+	scanRunsPerDayCacheByteLimit = 8 * 1024 * 1024
+	// scanRunsPerDayCacheEntrySize approximates fixed map and cached-value overhead.
+	scanRunsPerDayCacheEntrySize = 512
 	scanDurationKeyCacheLimit    = 16384
 	scanScheduleObservationLimit = 20_000
 	// deploymentScheduleSimulationNextCallLimit bounds expensive cron
@@ -306,9 +309,10 @@ type cachedScanDurationKey struct {
 // duration key, whose hashes a revision fixes. Its zero value is ready to
 // use.
 type scanSlotDemandCache struct {
-	mu         sync.Mutex
-	runsPerDay map[scanRunsPerDayKey]scanRunsPerDayValue
-	keys       map[string]cachedScanDurationKey
+	mu              sync.Mutex
+	runsPerDay      map[scanRunsPerDayKey]scanRunsPerDayValue
+	runsPerDayBytes int
+	keys            map[string]cachedScanDurationKey
 	// runsPerDayComputed counts the schedules computed, for tests.
 	runsPerDayComputed int
 }
@@ -349,13 +353,47 @@ func (a *App) scanJobSchedule(ctx context.Context, job config.Job) (scanRunsPerD
 	if cache.runsPerDay == nil {
 		cache.runsPerDay = make(map[scanRunsPerDayKey]scanRunsPerDayValue)
 	}
-	retainBoundedCache(cache.runsPerDay, key, value, scanRunsPerDayCacheLimit,
-		func(v scanRunsPerDayValue) uint64 { return v.rank },
-		func(k scanRunsPerDayKey) string { return k.timezone + "\x00" + k.schedule },
-		value.rank, key.timezone+"\x00"+key.schedule)
+	cache.retainRunsPerDay(key, value)
 	cache.runsPerDayComputed++
 	cache.mu.Unlock()
 	return value, nil
+}
+
+// retainRunsPerDay keeps the lowest-ranked schedule entries that fit both
+// the count and byte budgets. Weight uses the retained slice capacity, not
+// its length, because that is the memory the cache keeps alive.
+func (cache *scanSlotDemandCache) retainRunsPerDay(key scanRunsPerDayKey, value scanRunsPerDayValue) {
+	if cache.runsPerDay == nil {
+		cache.runsPerDay = make(map[scanRunsPerDayKey]scanRunsPerDayValue)
+	}
+	if previous, exists := cache.runsPerDay[key]; exists {
+		cache.runsPerDayBytes -= scanRunsPerDayCacheEntryWeight(key, previous)
+		delete(cache.runsPerDay, key)
+	}
+	weight := scanRunsPerDayCacheEntryWeight(key, value)
+	if weight > scanRunsPerDayCacheByteLimit {
+		return
+	}
+	cache.runsPerDay[key] = value
+	cache.runsPerDayBytes += weight
+	for len(cache.runsPerDay) > scanRunsPerDayCacheLimit || cache.runsPerDayBytes > scanRunsPerDayCacheByteLimit {
+		var largest scanRunsPerDayKey
+		var largestValue scanRunsPerDayValue
+		var largestTie string
+		first := true
+		for candidate, current := range cache.runsPerDay {
+			tie := candidate.timezone + "\x00" + candidate.schedule
+			if first || current.rank > largestValue.rank || current.rank == largestValue.rank && tie > largestTie {
+				largest, largestValue, largestTie, first = candidate, current, tie, false
+			}
+		}
+		delete(cache.runsPerDay, largest)
+		cache.runsPerDayBytes -= scanRunsPerDayCacheEntryWeight(largest, largestValue)
+	}
+}
+
+func scanRunsPerDayCacheEntryWeight(key scanRunsPerDayKey, value scanRunsPerDayValue) int {
+	return scanRunsPerDayCacheEntrySize + cap(value.occurrences)*4 + len(key.timezone) + len(key.schedule) + len(value.identity.timezone)
 }
 
 // scanDurationKey returns the duration key of the job's revision, which the

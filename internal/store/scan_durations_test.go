@@ -54,6 +54,17 @@ func TestLatestScanRunsTimedOutUsesCurrentKeysAndNewestRuns(t *testing.T) {
 	if err != nil || latest[job.ID] {
 		t.Fatalf("other-scope timeout changed current-key status = %v, %v; want false", latest, err)
 	}
+	legacyKey := key
+	legacyKey.LegacyConfigHash = "legacy-scope"
+	saveDurationScan(t, s, model.Scan{
+		ID: "timed-out-legacy-scope", JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
+		FinishedAt: base.Add(14 * time.Hour), Status: "timed_out", ConfigHash: legacyKey.LegacyConfigHash,
+		ScannerProfileID: legacyKey.ScannerProfileID, ScannerProfileRevision: legacyKey.ScannerProfileRevision,
+	}, time.Minute)
+	latest, err = tenant.LatestScanRunsTimedOut(ctx, []ScanDurationKey{legacyKey}, 1)
+	if err != nil || !latest[job.ID] {
+		t.Fatalf("legacy-scope timeout = %v, %v; want true", latest, err)
+	}
 
 	cycleJob, err := tenant.CreateJob(ctx, testJob("timed-out-cycle-evidence"))
 	if err != nil {

@@ -1133,6 +1133,53 @@ func TestScanJobRunsPerDayCacheIsBounded(t *testing.T) {
 	}
 }
 
+func TestScanJobRunsPerDayCacheHasWeightedBoundForDenseSchedules(t *testing.T) {
+	t.Parallel()
+	// Thirty-minute schedules have 17,568 starts in leap year 2024. Reuse
+	// one computed backing array to model the retained weight of many distinct
+	// dense keys without making the test itself retain tens of MiB.
+	value, err := schedulePattern(context.Background(), "UTC", "*/30 * * * *")
+	if err != nil || !value.ok || len(value.occurrences) != 17_568 {
+		t.Fatalf("dense schedule pattern has %d occurrences, ok %t, err %v; want 17,568", len(value.occurrences), value.ok, err)
+	}
+	const schedules = scanRunsPerDayCacheLimit
+	keyForWeight := scanRunsPerDayKey{timezone: "UTC", schedule: "dense-key-0000"}
+	entryWeight := scanRunsPerDayCacheEntryWeight(keyForWeight, value)
+	wantEntries := scanRunsPerDayCacheByteLimit / entryWeight
+	if wantEntries >= schedules {
+		t.Fatalf("test schedule entry weight %d only retains %d entries under %d bytes", entryWeight, wantEntries, scanRunsPerDayCacheByteLimit)
+	}
+	cache := scanSlotDemandCache{}
+	for i := 0; i < schedules; i++ {
+		key := scanRunsPerDayKey{timezone: "UTC", schedule: fmt.Sprintf("dense-key-%04d", i)}
+		entry := value
+		entry.rank = uint64(i)
+		cache.retainRunsPerDay(key, entry)
+	}
+	firstKey := scanRunsPerDayKey{timezone: "UTC", schedule: fmt.Sprintf("dense-key-%04d", 0)}
+	cache.retainRunsPerDay(firstKey, value)
+	if len(cache.runsPerDay) != wantEntries || cache.runsPerDayBytes != wantEntries*entryWeight || cache.runsPerDayBytes > scanRunsPerDayCacheByteLimit {
+		t.Fatalf("dense cache retained %d entries weighing %d bytes; want %d entries and at most %d bytes", len(cache.runsPerDay), cache.runsPerDayBytes, wantEntries, scanRunsPerDayCacheByteLimit)
+	}
+	for i := 0; i < schedules; i++ {
+		key := scanRunsPerDayKey{timezone: "UTC", schedule: fmt.Sprintf("dense-key-%04d", i)}
+		_, retained := cache.runsPerDay[key]
+		if retained != (i < wantEntries) {
+			t.Fatalf("dense schedule rank %d retained = %t; want %t under weighted eviction", i, retained, i < wantEntries)
+		}
+	}
+}
+
+func TestScanJobRunsPerDayCacheSkipsOversizedEntry(t *testing.T) {
+	t.Parallel()
+	cache := scanSlotDemandCache{}
+	key := scanRunsPerDayKey{timezone: "UTC", schedule: string(make([]byte, scanRunsPerDayCacheByteLimit))}
+	cache.retainRunsPerDay(key, scanRunsPerDayValue{})
+	if len(cache.runsPerDay) != 0 || cache.runsPerDayBytes != 0 {
+		t.Fatalf("oversized schedule entry retained %d keys weighing %d bytes", len(cache.runsPerDay), cache.runsPerDayBytes)
+	}
+}
+
 // A fixed traversal larger than the cache used to reset it on every pass.
 // The retained subset now stays hot, so the third pass recomputes only the
 // keys that cannot fit, rather than all 1,100 schedules.

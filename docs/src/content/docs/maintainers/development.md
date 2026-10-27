@@ -164,17 +164,21 @@ imports, re-exports from a router module, source-less re-exports and local
 aliases of imported `Route` or `Routes`, JSX member forms such as `<RR.Route>`,
 and opaque non-JSX children inside `<Routes>`, including `React.createElement`
 calls and their aliases. Teach the inventory check before introducing any of
-these forms. The parser does not follow local import/re-export graphs, so it
-also fails closed when JSX uses `Route` or `Routes` imported from an
-unrecognized module, including a local helper outside `src/`. Import router
-components directly from a recognized router module. `<Route>` props must be
-explicit: any JSX prop spread is rejected because a spread can override `path`,
-including when it appears after a direct `path` attribute or uses an object
-alias or conditional expression. Router APIs
-must use static named imports; dynamic imports or `require` loads of router
-modules are rejected, including direct, aliased, bound, and destructured
-CommonJS loader forms. Optional calls through any recognized CommonJS loader
-are rejected, including calls through aliases and optional member access.
+these forms.
+
+The parser follows static relative `.ts` and `.tsx` imports and re-exports,
+including helpers outside `src/`, and rejects renamed `Route` or `Routes`
+re-exports in that chain. If a relative module cannot be read as a TypeScript
+source file, JSX use of its imported components fails closed. Import router
+components directly from a recognized router module.
+
+`<Route>` props must be explicit: any JSX prop spread is rejected because a
+spread can override `path`, including when it appears after a direct `path`
+attribute or uses an object alias or conditional expression. Router APIs must
+use static named imports; dynamic imports or `require` loads of router modules
+are rejected, including direct, aliased, bound, and destructured CommonJS loader
+forms. Optional calls through any recognized CommonJS loader are rejected,
+including calls through aliases and optional member access.
 Loader identity is still recognized through transparent TypeScript expression
 wrappers such as `as` and angle-bracket type assertions, non-null assertions,
 `satisfies`, generic instantiation, and parentheses, so wrapping a loader does

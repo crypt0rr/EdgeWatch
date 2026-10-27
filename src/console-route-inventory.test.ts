@@ -1,5 +1,5 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, extname, join, relative, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { matchRoutes, type RouteObject } from 'react-router-dom'
@@ -353,6 +353,7 @@ function stringValue(node: Node | undefined, where: string): string {
  */
 function extractRouters(sources: SourceFile[]): SourceRouter[] {
   const routers: SourceRouter[] = []
+  const sourcePaths = new Set(sources.map(source => resolve(repositoryRoot, source.file)))
   for (const { file, code } of sources) {
     const parsed = parseSync(file, code, { lang: file.endsWith('.tsx') ? 'tsx' : 'ts' })
     if (parsed.errors.length) throw new Error(`${file}: ${parsed.errors.map(error => error.message).join('; ')}`)
@@ -361,6 +362,7 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
 
     const local = { Route: new Set<string>(), Routes: new Set<string>() }
     const unresolvedRouterImports = new Map<string, { api: 'Route' | 'Routes'; source: string }>()
+    const unresolvedLocalComponentImports = new Map<string, { source: string; namespace: boolean }>()
     const reactFragments = new Set<string>()
     const reactNamespaces = new Set<string>()
     for (const statement of program.body as Node[]) {
@@ -386,6 +388,16 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
               ? localName
               : undefined
           if (api) unresolvedRouterImports.set(localName, { api, source })
+        }
+      }
+      if (source.startsWith('.')) {
+        const modulePath = localTypeScriptModule(resolve(repositoryRoot, file), source)
+        if (!modulePath || !sourcePaths.has(resolve(modulePath))) {
+          for (const specifier of statement.specifiers as Node[]) {
+            if (statement.importKind === 'type' || specifier.importKind === 'type') continue
+            const localName = String((specifier.local as Node).name)
+            unresolvedLocalComponentImports.set(localName, { source, namespace: specifier.type === 'ImportNamespaceSpecifier' })
+          }
         }
       }
       if (!routerModules.has(source)) continue
@@ -438,6 +450,19 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
       const usesImportedComponent = (node: Node): boolean => jsxName(node) === localName || childNodes(node).some(usesImportedComponent)
       if (usesImportedComponent(program)) {
         throw new Error(`${file} imports ${api} from ${source} and uses it as JSX; the console route inventory cannot resolve local router API re-exports`)
+      }
+    }
+    for (const [localName, { source, namespace }] of unresolvedLocalComponentImports) {
+      const usesImportedComponent = (node: Node): boolean => {
+        if (jsxName(node) === localName) return true
+        if (namespace && node.type === 'JSXElement') {
+          const name = (node.openingElement as Node).name as Node
+          if (name.type === 'JSXMemberExpression' && (name.object as Node).type === 'JSXIdentifier' && String(((name.object as Node).name)) === localName) return true
+        }
+        return childNodes(node).some(usesImportedComponent)
+      }
+      if (usesImportedComponent(program)) {
+        throw new Error(`${file} uses JSX component ${localName} from unresolved local module ${source}; the console route inventory requires a statically readable relative TypeScript module`)
       }
     }
     if (!local.Route.size && !local.Routes.size) continue
@@ -722,15 +747,73 @@ function inventoryProblems(routers: ResolvedRouter[], inventory: Inventory): str
   return problems
 }
 
+function localTypeScriptModule(importer: string, specifier: string): string | undefined {
+  if (!specifier.startsWith('.')) return undefined
+
+  const path = resolve(dirname(importer), specifier)
+  const extension = extname(specifier)
+  const tsExtensions = new Set(['.ts', '.tsx', '.mts', '.cts'])
+  const jsExtensions = new Set(['.js', '.jsx', '.mjs', '.cjs'])
+  if (extension && !tsExtensions.has(extension) && !jsExtensions.has(extension)) return undefined
+
+  const base = jsExtensions.has(extension) ? path.slice(0, -extension.length) : path
+  const candidates = tsExtensions.has(extension)
+    ? [path]
+    : [
+        `${base}.ts`,
+        `${base}.tsx`,
+        `${base}.mts`,
+        `${base}.cts`,
+        join(base, 'index.ts'),
+        join(base, 'index.tsx'),
+        join(base, 'index.mts'),
+        join(base, 'index.cts'),
+      ]
+
+  return candidates.find(candidate => existsSync(candidate) && statSync(candidate).isFile() && !candidate.endsWith('.d.ts') && !/\.test\.(?:ts|tsx)$/.test(candidate))
+}
+
 function sourceFiles(directory = sourceRoot): SourceFile[] {
   const files: SourceFile[] = []
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name)
-    const file = relative(repositoryRoot, path).split('\\').join('/')
-    if (entry.isDirectory()) {
-      if (file !== 'src/test' && file !== 'src/generated') files.push(...sourceFiles(path))
-    } else if (/\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name) && !entry.name.endsWith('.d.ts')) {
-      files.push({ file, code: readFileSync(path, 'utf8') })
+  const seen = new Set<string>()
+  const addFile = (path: string) => {
+    const absolutePath = resolve(path)
+    if (seen.has(absolutePath)) return
+    seen.add(absolutePath)
+    const file = relative(repositoryRoot, absolutePath).split(/[\\/]/).join('/')
+    files.push({ file, code: readFileSync(absolutePath, 'utf8') })
+  }
+  const scanDirectory = (path: string) => {
+    for (const entry of readdirSync(path, { withFileTypes: true })) {
+      const childPath = join(path, entry.name)
+      const file = relative(repositoryRoot, childPath).split(/[\\/]/).join('/')
+      if (entry.isDirectory()) {
+        if (file !== 'src/test' && file !== 'src/generated') scanDirectory(childPath)
+      } else if (/\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name) && !entry.name.endsWith('.d.ts')) {
+        addFile(childPath)
+      }
+    }
+  }
+
+  scanDirectory(directory)
+  // Route modules outside src can be imported through a relative path. Follow
+  // those static TypeScript modules too, or a helper can hide renamed Route
+  // and Routes re-exports from the source scan.
+  for (let index = 0; index < files.length; index += 1) {
+    const source = files[index]
+    const parsed = parseSync(source.file, source.code, { lang: source.file.endsWith('.tsx') ? 'tsx' : 'ts' })
+    if (parsed.errors.length) continue
+    const program = parsed.program as unknown as Node
+    const importer = resolve(repositoryRoot, source.file)
+    for (const statement of program.body as Node[]) {
+      const hasModuleSource = statement.type === 'ImportDeclaration'
+        || statement.type === 'ExportNamedDeclaration'
+        || statement.type === 'ExportAllDeclaration'
+      if (!hasModuleSource || (statement.type === 'ImportDeclaration' && statement.importKind === 'type') || (statement.type !== 'ImportDeclaration' && statement.exportKind === 'type')) continue
+      const moduleSource = statement.source as Node | null | undefined
+      if (moduleSource?.type !== 'Literal' || typeof moduleSource.value !== 'string') continue
+      const path = localTypeScriptModule(importer, moduleSource.value)
+      if (path) addFile(path)
     }
   }
   return files
@@ -869,31 +952,44 @@ export function PlatformShell() { return <Routes><Route path="/units/:id/:tab" e
       expect(() => extractRouters([{ file: 'src/h.tsx', code: `import { Route, Routes } from 'react-router-dom'\nexport function H() { return <Routes><Route path="/visible" /><RR.Route path="/hidden" /></Routes> }` }])).toThrow(/JSX member expression ending in Route/)
     })
 
-    it('fails closed when Route and Routes are imported through a root-level helper', () => {
+    it('fails closed when renamed Route and Routes re-exports pass through root-level helpers', () => {
       const fixtureRoot = mkdtempSync(join(tmpdir(), 'edgewatch-route-inventory-'))
       const sourceDirectory = join(fixtureRoot, 'src')
       const helperPath = join(fixtureRoot, 'router-bindings.ts')
+      const bridgePath = join(sourceDirectory, 'router-bridge.ts')
       const routePath = join(sourceDirectory, 'HiddenRoutes.tsx')
-      const helper = {
-        file: 'router-bindings.ts',
-        code: `export { Route, Routes } from 'react-router-dom'`,
-      }
 
       mkdirSync(sourceDirectory, { recursive: true })
-      writeFileSync(helperPath, `${helper.code}\n`)
-      writeFileSync(routePath, `import { Route, Routes } from '../router-bindings'\nexport function HiddenRoutes() { return <Routes><Route path="/hidden" /></Routes> }\n`)
+      writeFileSync(helperPath, `export { Route as Page, Routes as Pages } from 'react-router-dom'\n`)
+      writeFileSync(routePath, `import { Page, Pages } from '../router-bindings'\nexport function HiddenRoutes() { return <Pages><Page path="/hidden" /></Pages> }\n`)
 
       try {
-        const scannedSources = sourceFiles(sourceDirectory)
-        expect(scannedSources).toHaveLength(1)
-        expect(scannedSources[0].file).toMatch(/src[\\/]HiddenRoutes\.tsx$/)
-        expect(() => extractRouters(scannedSources)).toThrow(/cannot resolve.*router API re-export/)
+        const directSources = sourceFiles(sourceDirectory)
+        expect(directSources.some(source => source.file.endsWith('/router-bindings.ts'))).toBe(true)
+        expect(() => extractRouters(directSources)).toThrow(/re-exports router APIs from react-router-dom/)
+
+        writeFileSync(bridgePath, `export { Page, Pages } from '../router-bindings'\n`)
+        writeFileSync(routePath, `import { Page, Pages } from './router-bridge'\nexport function HiddenRoutes() { return <Pages><Page path="/hidden" /></Pages> }\n`)
+        const chainedSources = sourceFiles(sourceDirectory)
+        expect(chainedSources.some(source => source.file.endsWith('/router-bridge.ts'))).toBe(true)
+        expect(chainedSources.some(source => source.file.endsWith('/router-bindings.ts'))).toBe(true)
+        expect(() => extractRouters(chainedSources)).toThrow(/re-exports router APIs from react-router-dom/)
+
         const aliasedRouteSource = {
-          ...scannedSources[0],
+          file: 'src/HiddenRoutes.tsx',
           code: `import { Route as Page, Routes as Pages } from '../router-bindings'\nexport function HiddenRoutes() { return <Pages><Page path="/hidden" /></Pages> }`,
         }
         expect(() => extractRouters([aliasedRouteSource])).toThrow(/imports Route from \.\.\/router-bindings/)
-        expect(() => extractRouters([helper, ...scannedSources])).toThrow(/re-exports router APIs/)
+        const unresolvedAliasSource = {
+          file: 'src/HiddenRoutes.tsx',
+          code: `import { Page, Pages } from '../router-bindings'\nexport function HiddenRoutes() { return <Pages><Page path="/hidden" /></Pages> }`,
+        }
+        expect(() => extractRouters([unresolvedAliasSource])).toThrow(/uses JSX component Page from unresolved local module \.\.\/router-bindings/)
+        const unresolvedNamespaceSource = {
+          file: 'src/HiddenRoutes.tsx',
+          code: `import * as Router from '../router-bindings'\nexport function HiddenRoutes() { return <Router.Pages><Router.Page path="/hidden" /></Router.Pages> }`,
+        }
+        expect(() => extractRouters([unresolvedNamespaceSource])).toThrow(/uses JSX component Router from unresolved local module \.\.\/router-bindings/)
       } finally {
         rmSync(fixtureRoot, { recursive: true, force: true })
       }

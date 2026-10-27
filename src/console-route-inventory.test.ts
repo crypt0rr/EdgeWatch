@@ -153,9 +153,10 @@ function isOptionalCommonJSLoaderCall(node: Node, callee: Node): boolean {
     || (unwrappedCallee?.type === 'MemberExpression' && unwrappedCallee.optional === true)
 }
 
-function rejectUninspectableRouterLoads(program: Node, file: string): void {
+function rejectUninspectableRouterLoads(program: Node, file: string): string[] {
   const loaderAliases = new Set(['require'])
   const moduleAliases = new Set(['module'])
+  const moduleLoads: string[] = []
   let aliasesChanged = true
   while (aliasesChanged) {
     aliasesChanged = false
@@ -252,10 +253,12 @@ function rejectUninspectableRouterLoads(program: Node, file: string): void {
       if (isRouterModule(specifier)) {
         throw new Error(`${file} dynamically loads router module ${specifier}; the console route inventory requires static named router imports`)
       }
+      moduleLoads.push(specifier)
     }
     childNodes(node).forEach(inspect)
   }
   inspect(program)
+  return moduleLoads
 }
 
 function jsxName(node: Node): string | undefined {
@@ -271,6 +274,12 @@ function jsxRouterMemberName(node: Node): string | undefined {
   const property = name.property as Node
   const member = property.type === 'JSXIdentifier' ? String(property.name) : undefined
   return member === 'Route' || member === 'Routes' ? member : undefined
+}
+
+function jsxMemberRootIdentifier(node: Node): string | undefined {
+  let current = node
+  while (current.type === 'JSXMemberExpression') current = current.object as Node
+  return current.type === 'JSXIdentifier' ? String(current.name) : undefined
 }
 
 function referencedRouterAPI(node: Node | undefined, local: { Route: Set<string>; Routes: Set<string> }): string | undefined {
@@ -351,9 +360,10 @@ function stringValue(node: Node | undefined, where: string): string {
  * Reads every `<Routes>` of the given sources, named by the component that
  * renders it, with its `<Route>` tree.
  */
-function extractRouters(sources: SourceFile[]): SourceRouter[] {
+function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): SourceRouter[] {
   const routers: SourceRouter[] = []
   const sourcePaths = new Set(sources.map(source => resolve(repositoryRoot, source.file)))
+  const moduleResolver = localModuleResolver(configRoot)
   for (const { file, code } of sources) {
     const parsed = parseSync(file, code, { lang: file.endsWith('.tsx') ? 'tsx' : 'ts' })
     if (parsed.errors.length) throw new Error(`${file}: ${parsed.errors.map(error => error.message).join('; ')}`)
@@ -390,8 +400,8 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
           if (api) unresolvedRouterImports.set(localName, { api, source })
         }
       }
-      if (source.startsWith('.')) {
-        const modulePath = localTypeScriptModule(resolve(repositoryRoot, file), source)
+      if (moduleResolver.isLocalSpecifier(source)) {
+        const modulePath = moduleResolver.resolve(resolve(repositoryRoot, file), source)
         if (!modulePath || !sourcePaths.has(resolve(modulePath))) {
           for (const specifier of statement.specifiers as Node[]) {
             if (statement.importKind === 'type' || specifier.importKind === 'type') continue
@@ -432,6 +442,17 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
       if (statement.type !== 'ExportNamedDeclaration' && statement.type !== 'ExportAllDeclaration') continue
       const source = statement.source as Node | null | undefined
       if (source && routerModules.has(String(source.value))) throw new Error(`${file} re-exports router APIs from ${String(source.value)}; the console route inventory check requires routes to be declared through named JSX imports`)
+      if (source && moduleResolver.isLocalSpecifier(String(source.value))) {
+        const specifier = String(source.value)
+        const modulePath = moduleResolver.resolve(resolve(repositoryRoot, file), specifier)
+        const included = modulePath && sourcePaths.has(resolve(modulePath))
+        const specifiers = (statement.specifiers as Node[] | undefined) ?? []
+        const hasRuntimeExports = statement.exportKind !== 'type'
+          && (statement.type === 'ExportAllDeclaration' || specifiers.some(specifier => specifier.exportKind !== 'type'))
+        if (hasRuntimeExports && !included) {
+          throw new Error(`${file} re-exports from unreadable local module ${specifier}; the console route inventory cannot rule out router APIs`)
+        }
+      }
       if (source || statement.type !== 'ExportNamedDeclaration') continue
       for (const specifier of (statement.specifiers as Node[] | undefined) ?? []) {
         const localName = String((specifier.local as Node).name)
@@ -457,12 +478,12 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
         if (jsxName(node) === localName) return true
         if (namespace && node.type === 'JSXElement') {
           const name = (node.openingElement as Node).name as Node
-          if (name.type === 'JSXMemberExpression' && (name.object as Node).type === 'JSXIdentifier' && String(((name.object as Node).name)) === localName) return true
+          if (name.type === 'JSXMemberExpression' && jsxMemberRootIdentifier(name) === localName) return true
         }
         return childNodes(node).some(usesImportedComponent)
       }
       if (usesImportedComponent(program)) {
-        throw new Error(`${file} uses JSX component ${localName} from unresolved local module ${source}; the console route inventory requires a statically readable relative TypeScript module`)
+        throw new Error(`${file} uses JSX component ${localName} from unresolved local module ${source}; the console route inventory requires a statically readable local TypeScript module`)
       }
     }
     if (!local.Route.size && !local.Routes.size) continue
@@ -747,35 +768,131 @@ function inventoryProblems(routers: ResolvedRouter[], inventory: Inventory): str
   return problems
 }
 
-function localTypeScriptModule(importer: string, specifier: string): string | undefined {
-  if (!specifier.startsWith('.')) return undefined
-
-  const path = resolve(dirname(importer), specifier)
-  const extension = extname(specifier)
-  const tsExtensions = new Set(['.ts', '.tsx', '.mts', '.cts'])
-  const jsExtensions = new Set(['.js', '.jsx', '.mjs', '.cjs'])
-  if (extension && !tsExtensions.has(extension) && !jsExtensions.has(extension)) return undefined
-
-  const base = jsExtensions.has(extension) ? path.slice(0, -extension.length) : path
-  const candidates = tsExtensions.has(extension)
-    ? [path]
-    : [
-        `${base}.ts`,
-        `${base}.tsx`,
-        `${base}.mts`,
-        `${base}.cts`,
-        join(base, 'index.ts'),
-        join(base, 'index.tsx'),
-        join(base, 'index.mts'),
-        join(base, 'index.cts'),
-      ]
-
-  return candidates.find(candidate => existsSync(candidate) && statSync(candidate).isFile() && !candidate.endsWith('.d.ts') && !/\.test\.(?:ts|tsx)$/.test(candidate))
+type LocalModuleResolver = {
+  isLocalSpecifier(specifier: string): boolean
+  resolve(importer: string, specifier: string): string | undefined
 }
 
-function sourceFiles(directory = sourceRoot): SourceFile[] {
+function pathAliasMatches(specifier: string, pattern: string): boolean {
+  const wildcard = pattern.indexOf('*')
+  if (wildcard < 0) return specifier === pattern
+  const prefix = pattern.slice(0, wildcard)
+  const suffix = pattern.slice(wildcard + 1)
+  return specifier.startsWith(prefix) && specifier.endsWith(suffix) && specifier.length >= prefix.length + suffix.length
+}
+
+function parseJsonConfig(source: string): unknown {
+  let uncommented = ''
+  let inString = false
+  let escaped = false
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]
+    const next = source[index + 1]
+    if (inString) {
+      uncommented += character
+      if (escaped) escaped = false
+      else if (character === '\\') escaped = true
+      else if (character === '"') inString = false
+      continue
+    }
+    if (character === '"') {
+      inString = true
+      uncommented += character
+      continue
+    }
+    if (character === '/' && next === '/') {
+      while (index < source.length && source[index] !== '\n') index += 1
+      uncommented += '\n'
+      continue
+    }
+    if (character === '/' && next === '*') {
+      index += 2
+      while (index < source.length && !(source[index] === '*' && source[index + 1] === '/')) index += 1
+      index += 1
+      continue
+    }
+    if (character === ',') {
+      let lookahead = index + 1
+      while (/\s/.test(source[lookahead] ?? '')) lookahead += 1
+      if (source[lookahead] === '}' || source[lookahead] === ']') continue
+    }
+    uncommented += character
+  }
+  return JSON.parse(uncommented) as unknown
+}
+
+function localModuleResolver(configRoot: string): LocalModuleResolver {
+  const configPath = join(configRoot, 'tsconfig.json')
+  const config = existsSync(configPath)
+    ? parseJsonConfig(readFileSync(configPath, 'utf8')) as { extends?: unknown; compilerOptions?: { baseUrl?: unknown; paths?: unknown } }
+    : {}
+  if (config.extends !== undefined) {
+    throw new Error(`${configPath} extends another config; the console route inventory cannot resolve aliases through an extended tsconfig`)
+  }
+  const compilerOptions = config.compilerOptions ?? {}
+  const baseUrl = typeof compilerOptions.baseUrl === 'string' ? resolve(configRoot, compilerOptions.baseUrl) : configRoot
+  const paths = typeof compilerOptions.paths === 'object' && compilerOptions.paths !== null
+    ? compilerOptions.paths as Record<string, unknown>
+    : {}
+  const aliases = Object.entries(paths).flatMap(([pattern, targets]) => Array.isArray(targets)
+    ? targets.filter((target): target is string => typeof target === 'string').map(target => ({ pattern, target }))
+    : [])
+  const pathAliases = aliases.map(alias => alias.pattern)
+  const isLocalSpecifier = (specifier: string) => specifier.startsWith('.')
+    || specifier.startsWith('/')
+    || pathAliases.some(pattern => pathAliasMatches(specifier, pattern))
+
+  const typeScriptFile = (path: string, specifier: string): string | undefined => {
+    const extension = extname(specifier)
+    const tsExtensions = new Set(['.ts', '.tsx', '.mts', '.cts'])
+    const jsExtensions = new Set(['.js', '.jsx', '.mjs', '.cjs'])
+    if (extension && !tsExtensions.has(extension) && !jsExtensions.has(extension)) return undefined
+    const base = jsExtensions.has(extension) ? path.slice(0, -extension.length) : path
+    const candidates = tsExtensions.has(extension)
+      ? [path]
+      : [
+          `${base}.ts`,
+          `${base}.tsx`,
+          `${base}.mts`,
+          `${base}.cts`,
+          join(base, 'index.ts'),
+          join(base, 'index.tsx'),
+          join(base, 'index.mts'),
+          join(base, 'index.cts'),
+        ]
+    return candidates.find(candidate => existsSync(candidate) && statSync(candidate).isFile() && !candidate.endsWith('.d.ts') && !/\.test\.(?:ts|tsx)$/.test(candidate))
+  }
+
+  return {
+    isLocalSpecifier,
+    resolve(importer, specifier) {
+      if (!isLocalSpecifier(specifier)) return undefined
+      if (specifier.startsWith('.') || specifier.startsWith('/')) return typeScriptFile(resolve(dirname(importer), specifier), specifier)
+
+      const matchingAliases = aliases
+        .filter(alias => pathAliasMatches(specifier, alias.pattern))
+        .sort((left, right) => {
+          const leftPrefix = left.pattern.indexOf('*') < 0 ? left.pattern.length : left.pattern.indexOf('*')
+          const rightPrefix = right.pattern.indexOf('*') < 0 ? right.pattern.length : right.pattern.indexOf('*')
+          return rightPrefix - leftPrefix || right.pattern.length - left.pattern.length
+        })
+      for (const alias of matchingAliases) {
+        const wildcard = alias.pattern.indexOf('*')
+        const suffix = wildcard < 0 ? '' : alias.pattern.slice(wildcard + 1)
+        const substitution = wildcard < 0 ? '' : specifier.slice(wildcard, specifier.length - suffix.length)
+        const target = wildcard < 0 ? alias.target : alias.target.replace('*', substitution)
+        const candidate = typeScriptFile(resolve(baseUrl, target), target)
+        if (candidate) return candidate
+      }
+      return undefined
+    },
+  }
+}
+
+function sourceFiles(directory = sourceRoot, configRoot = repositoryRoot): SourceFile[] {
   const files: SourceFile[] = []
   const seen = new Set<string>()
+  const moduleResolver = localModuleResolver(configRoot)
   const addFile = (path: string) => {
     const absolutePath = resolve(path)
     if (seen.has(absolutePath)) return
@@ -796,23 +913,31 @@ function sourceFiles(directory = sourceRoot): SourceFile[] {
   }
 
   scanDirectory(directory)
-  // Route modules outside src can be imported through a relative path. Follow
-  // those static TypeScript modules too, or a helper can hide renamed Route
-  // and Routes re-exports from the source scan.
+  // Follow statically resolvable local module edges, including dynamic loads
+  // and configured tsconfig path aliases. A helper can otherwise hide renamed
+  // Route and Routes re-exports outside src.
   for (let index = 0; index < files.length; index += 1) {
     const source = files[index]
     const parsed = parseSync(source.file, source.code, { lang: source.file.endsWith('.tsx') ? 'tsx' : 'ts' })
     if (parsed.errors.length) continue
     const program = parsed.program as unknown as Node
     const importer = resolve(repositoryRoot, source.file)
+    const runtimeModuleLoads = rejectUninspectableRouterLoads(program, source.file)
+    const moduleSpecifiers = new Set(runtimeModuleLoads)
     for (const statement of program.body as Node[]) {
       const hasModuleSource = statement.type === 'ImportDeclaration'
         || statement.type === 'ExportNamedDeclaration'
         || statement.type === 'ExportAllDeclaration'
       if (!hasModuleSource || (statement.type === 'ImportDeclaration' && statement.importKind === 'type') || (statement.type !== 'ImportDeclaration' && statement.exportKind === 'type')) continue
       const moduleSource = statement.source as Node | null | undefined
-      if (moduleSource?.type !== 'Literal' || typeof moduleSource.value !== 'string') continue
-      const path = localTypeScriptModule(importer, moduleSource.value)
+      if (moduleSource?.type === 'Literal' && typeof moduleSource.value === 'string') moduleSpecifiers.add(moduleSource.value)
+    }
+    for (const specifier of moduleSpecifiers) {
+      if (!moduleResolver.isLocalSpecifier(specifier)) continue
+      const path = moduleResolver.resolve(importer, specifier)
+      if (!path && runtimeModuleLoads.includes(specifier)) {
+        throw new Error(`${source.file} loads local module ${specifier} that the console route inventory cannot inspect as TypeScript`)
+      }
       if (path) addFile(path)
     }
   }
@@ -950,6 +1075,11 @@ export function PlatformShell() { return <Routes><Route path="/units/:id/:tab" e
       // A namespace-style element is refused even when the file also has
       // readable named imports, so its route cannot hide beside them.
       expect(() => extractRouters([{ file: 'src/h.tsx', code: `import { Route, Routes } from 'react-router-dom'\nexport function H() { return <Routes><Route path="/visible" /><RR.Route path="/hidden" /></Routes> }` }])).toThrow(/JSX member expression ending in Route/)
+      const deeplyNestedNamespaceSource = {
+        file: 'src/HiddenRoutes.tsx',
+        code: `import * as Router from '../router-bindings'\nexport function HiddenRoutes() { return <Router.Components.Pages><Router.Components.Page path="/hidden" /></Router.Components.Pages> }`,
+      }
+      expect(() => extractRouters([deeplyNestedNamespaceSource])).toThrow(/uses JSX component Router from unresolved local module \.\.\/router-bindings/)
     })
 
     it('fails closed when renamed Route and Routes re-exports pass through root-level helpers', () => {
@@ -990,6 +1120,32 @@ export function PlatformShell() { return <Routes><Route path="/units/:id/:tab" e
           code: `import * as Router from '../router-bindings'\nexport function HiddenRoutes() { return <Router.Pages><Router.Page path="/hidden" /></Router.Pages> }`,
         }
         expect(() => extractRouters([unresolvedNamespaceSource])).toThrow(/uses JSX component Router from unresolved local module \.\.\/router-bindings/)
+
+        writeFileSync(routePath, `export async function HiddenRoutes() {\n  const { Page, Pages } = await import('../router-bindings')\n  return <Pages><Page path="/hidden" /></Pages>\n}\n`)
+        const dynamicSources = sourceFiles(sourceDirectory)
+        expect(dynamicSources.some(source => source.file.endsWith('/router-bindings.ts'))).toBe(true)
+        expect(() => extractRouters(dynamicSources)).toThrow(/re-exports router APIs from react-router-dom/)
+
+        writeFileSync(join(fixtureRoot, 'tsconfig.json'), JSON.stringify({
+          compilerOptions: {
+            module: 'ESNext',
+            moduleResolution: 'Bundler',
+            target: 'ES2022',
+            baseUrl: '.',
+            paths: { '@edgewatch/*': ['*'] },
+          },
+        }))
+        writeFileSync(routePath, `import { Page, Pages } from '@edgewatch/router-bindings'\nexport function HiddenRoutes() { return <Pages><Page path="/hidden" /></Pages> }\n`)
+        const aliasSources = sourceFiles(sourceDirectory, fixtureRoot)
+        expect(aliasSources.some(source => source.file.endsWith('/router-bindings.ts'))).toBe(true)
+        expect(() => extractRouters(aliasSources, fixtureRoot)).toThrow(/re-exports router APIs from react-router-dom/)
+
+        writeFileSync(join(fixtureRoot, 'router-runtime.js'), `export { Route, Routes } from 'react-router-dom'\n`)
+        writeFileSync(helperPath, `export { Route as Page, Routes as Pages } from './router-runtime.js'\n`)
+        writeFileSync(routePath, `import { Page, Pages } from '../router-bindings'\nexport function HiddenRoutes() { return <Pages><Page path="/hidden" /></Pages> }\n`)
+        const unreadableReexportSources = sourceFiles(sourceDirectory)
+        expect(unreadableReexportSources.some(source => source.file.endsWith('/router-bindings.ts'))).toBe(true)
+        expect(() => extractRouters(unreadableReexportSources)).toThrow(/re-exports from unreadable local module \.\/router-runtime\.js/)
       } finally {
         rmSync(fixtureRoot, { recursive: true, force: true })
       }

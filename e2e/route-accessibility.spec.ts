@@ -127,8 +127,7 @@ async function expectRouteDataReady(page: Page, routePath: string) {
   }
 }
 
-function routeIsRenderedForRole(role: ConsoleRole, routePath: string) {
-  const route = allConsoleRoutes.find(item => item.path === routePath)
+function routeIsRenderedForRole(role: ConsoleRole, route: ConsoleRouteCase) {
   // The route matrix still checks these requested paths and their actual
   // destination. Aliases (/highlights and the unmatched job-creation branch),
   // permission redirects, and catch-all paths do not render a separate page;
@@ -155,7 +154,7 @@ for (const role of roles) {
         // A role that cannot open a page is sent to its permitted home or
         // fallback. The route matrix checks every requested path and final
         // destination; axe runs on pages the role can actually see.
-        if (!routeIsRenderedForRole(role, route.path) || expectedPath !== route.path) continue
+        if (!routeIsRenderedForRole(role, route) || expectedPath !== route.path) continue
 
         const content = page.locator('#main-content .content')
         await expect(content.locator('.page').last()).toBeVisible()
@@ -364,10 +363,14 @@ function assertUniqueAuditedSurfaceNames(names: string[]) {
   if (duplicates.size) throw new Error(`axe audit surface keys are not unique: ${[...duplicates].join(', ')}`)
 }
 
-function auditedSurfaceNamesFor(fixtures: FixtureAxeAudit[], entries: EntrySurfaceCase[] = entrySurfaces) {
+function auditedSurfaceNamesFor(
+  fixtures: FixtureAxeAudit[],
+  entries: EntrySurfaceCase[] = entrySurfaces,
+  routes: ConsoleRouteCase[] = allConsoleRoutes,
+) {
   const names = [
-    ...allConsoleRoutes
-      .filter(route => roles.some(role => routeIsRenderedForRole(role, route.path) && expectedConsolePath(role, route) === route.path))
+    ...routes
+      .filter(route => roles.some(role => routeIsRenderedForRole(role, route) && expectedConsolePath(role, route) === route.path))
       .map(route => consoleRouteSurfaceKey(route)),
     ...entries.map(entrySurfaceKey),
     ...fixtures.map(fixture => fixture.surface),
@@ -388,6 +391,15 @@ test('axe allowances reject unaudited surfaces, including removed fixture audits
   const consoleSecurityRoute = allConsoleRoutes.find(route => route.path === '/security')!
   expect(() => assertUniqueAuditedSurfaceNames([consoleRouteSurfaceKey(consoleSecurityRoute), consoleRouteSurfaceKey(consoleSecurityRoute)]))
     .toThrow(/surface keys are not unique: console-route:shared:\/security/)
+
+  const samePathAcrossScopes: ConsoleRouteCase[] = [
+    { path: '/same-path', scope: 'unit' },
+    { path: '/same-path', scope: 'platform' },
+  ]
+  const samePathSurfaces = auditedSurfaceNamesFor([], [], samePathAcrossScopes)
+  expect(routeIsRenderedForRole('administrator', samePathAcrossScopes[0])).toBe(true)
+  expect(routeIsRenderedForRole('platform_admin', samePathAcrossScopes[1])).toBe(true)
+  expect(samePathSurfaces).toEqual(new Set(['console-route:unit:/same-path', 'console-route:platform:/same-path']))
 
   const removedAudit = fixtureAxeAudits.find(fixture => fixture.surface === 'fixture:open-remove-range-dialog')!
   const remainingAudits = fixtureAxeAudits.filter(fixture => fixture !== removedAudit)

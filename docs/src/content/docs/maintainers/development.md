@@ -166,11 +166,16 @@ and opaque non-JSX children inside `<Routes>`, including `React.createElement`
 calls and their aliases. Teach the inventory check before introducing any of
 these forms.
 
-The parser follows static relative `.ts` and `.tsx` imports and re-exports,
-including helpers outside `src/`, and rejects renamed `Route` or `Routes`
-re-exports in that chain. If a relative module cannot be read as a TypeScript
-source file, JSX use of its imported components fails closed. Import router
-components directly from a recognized router module.
+The parser follows statically resolvable local TypeScript imports, re-exports,
+dynamic imports, and CommonJS loads, including helpers outside `src/` and
+aliases configured directly in the root `tsconfig.json`. A config that extends
+another `tsconfig` fails closed because the inventory does not resolve
+inherited aliases. It rejects renamed `Route` or `Routes` re-exports anywhere
+in those chains. A local module load or local re-export that cannot be read as
+TypeScript fails closed; JSX components from an unresolved static local import
+fail closed when used. Unresolved namespace JSX components are checked from
+the root binding through every member level. Import router components directly
+from a recognized router module.
 
 `<Route>` props must be explicit: any JSX prop spread is rejected because a
 spread can override `path`, including when it appears after a direct `path`

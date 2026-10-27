@@ -93,33 +93,69 @@ function staticStringValue(node: Node | undefined): string | undefined {
   return undefined
 }
 
-function isCommonJSLoader(node: Node | undefined, loaderAliases: Set<string>): boolean {
+function memberPropertyName(node: Node): string | undefined {
+  if (node.type !== 'MemberExpression') return undefined
+  const property = node.property as Node
+  return node.computed ? staticStringValue(property) : property.type === 'Identifier' ? String(property.name) : undefined
+}
+
+function isCommonJSModuleObject(node: Node | undefined, moduleAliases: Set<string>): boolean {
+  return node?.type === 'Identifier' && moduleAliases.has(String(node.name))
+}
+
+function destructuresCommonJSRequire(pattern: Node): boolean {
+  if (pattern.type !== 'ObjectPattern') return false
+  return (pattern.properties as Node[]).some(property => {
+    if (property.type !== 'Property' && property.type !== 'ObjectProperty') return false
+    const key = property.key as Node
+    const name = property.computed ? staticStringValue(key) : key.type === 'Identifier' ? String(key.name) : staticStringValue(key)
+    return name === 'require'
+  })
+}
+
+function isCommonJSLoader(node: Node | undefined, loaderAliases: Set<string>, moduleAliases: Set<string>): boolean {
   if (!node) return false
   if (node.type === 'Identifier') return loaderAliases.has(String(node.name))
   if (node.type !== 'MemberExpression') return false
   const object = node.object as Node
-  const property = node.computed ? staticStringValue(node.property as Node) : String((node.property as Node).name)
-  return object.type === 'Identifier' && object.name === 'module' && property === 'require'
+  return isCommonJSModuleObject(object, moduleAliases) && memberPropertyName(node) === 'require'
 }
 
 function rejectUninspectableRouterLoads(program: Node, file: string): void {
   const loaderAliases = new Set(['require'])
+  const moduleAliases = new Set(['module'])
   let aliasesChanged = true
   while (aliasesChanged) {
     aliasesChanged = false
     const findAliases = (node: Node) => {
       if (node.type === 'VariableDeclarator') {
         const id = node.id as Node
-        if (id.type === 'Identifier' && isCommonJSLoader(node.init as Node | undefined, loaderAliases) && !loaderAliases.has(String(id.name))) {
-          loaderAliases.add(String(id.name))
-          aliasesChanged = true
+        const init = node.init as Node | undefined
+        if (id.type === 'Identifier') {
+          const name = String(id.name)
+          if (isCommonJSModuleObject(init, moduleAliases) && !moduleAliases.has(name)) {
+            moduleAliases.add(name)
+            aliasesChanged = true
+          }
+          if (isCommonJSLoader(init, loaderAliases, moduleAliases) && !loaderAliases.has(name)) {
+            loaderAliases.add(name)
+            aliasesChanged = true
+          }
         }
       }
       if (node.type === 'AssignmentExpression') {
         const left = node.left as Node
-        if (left.type === 'Identifier' && isCommonJSLoader(node.right as Node | undefined, loaderAliases) && !loaderAliases.has(String(left.name))) {
-          loaderAliases.add(String(left.name))
-          aliasesChanged = true
+        const right = node.right as Node | undefined
+        if (left.type === 'Identifier') {
+          const name = String(left.name)
+          if (isCommonJSModuleObject(right, moduleAliases) && !moduleAliases.has(name)) {
+            moduleAliases.add(name)
+            aliasesChanged = true
+          }
+          if (isCommonJSLoader(right, loaderAliases, moduleAliases) && !loaderAliases.has(name)) {
+            loaderAliases.add(name)
+            aliasesChanged = true
+          }
         }
       }
       childNodes(node).forEach(findAliases)
@@ -129,6 +165,34 @@ function rejectUninspectableRouterLoads(program: Node, file: string): void {
 
   const isRouterModule = (specifier: string) => [...routerModules].some(module => specifier === module || specifier.startsWith(`${module}/`))
   const inspect = (node: Node) => {
+    if (node.type === 'VariableDeclarator' && (node.id as Node).type === 'ObjectPattern') {
+      const id = node.id as Node
+      const init = node.init as Node | undefined
+      if (isCommonJSModuleObject(init, moduleAliases) && destructuresCommonJSRequire(id)) {
+        throw new Error(`${file} destructures a CommonJS module loader; the console route inventory cannot rule out router APIs`)
+      }
+      if (isCommonJSLoader(init, loaderAliases, moduleAliases)) {
+        throw new Error(`${file} destructures properties from a CommonJS module loader; the console route inventory cannot rule out router APIs`)
+      }
+    }
+    if (node.type === 'AssignmentExpression' && (node.left as Node).type === 'ObjectPattern') {
+      const left = node.left as Node
+      const right = node.right as Node
+      if (isCommonJSModuleObject(right, moduleAliases) && destructuresCommonJSRequire(left)) {
+        throw new Error(`${file} destructures a CommonJS module loader; the console route inventory cannot rule out router APIs`)
+      }
+      if (isCommonJSLoader(right, loaderAliases, moduleAliases)) {
+        throw new Error(`${file} destructures properties from a CommonJS module loader; the console route inventory cannot rule out router APIs`)
+      }
+    }
+
+    if (node.type === 'MemberExpression') {
+      const member = node as Node
+      if (['apply', 'bind', 'call'].includes(memberPropertyName(member) ?? '') && isCommonJSLoader(member.object as Node, loaderAliases, moduleAliases)) {
+        throw new Error(`${file} binds or rebinds a CommonJS module loader; the console route inventory cannot rule out router APIs`)
+      }
+    }
+
     let source: Node | undefined
     let kind: string | undefined
     if (node.type === 'ImportExpression') {
@@ -139,7 +203,7 @@ function rejectUninspectableRouterLoads(program: Node, file: string): void {
       if (callee.type === 'Import') {
         source = (node.arguments as Node[])[0]
         kind = 'dynamic import'
-      } else if (isCommonJSLoader(callee, loaderAliases)) {
+      } else if (isCommonJSLoader(callee, loaderAliases, moduleAliases)) {
         source = (node.arguments as Node[])[0]
         kind = 'CommonJS module load'
       }
@@ -826,6 +890,62 @@ export function HiddenRouter() {
   return <Routes><Route path="/hidden" /></Routes>
 }`,
           error: /CommonJS module load with a non-static module specifier/,
+        },
+      ]
+
+      for (const fixture of cases) {
+        expect(() => extractRouters([fixture])).toThrow(fixture.error)
+      }
+    })
+
+    it('refuses bound and destructured CommonJS loaders before skipping files without router imports', () => {
+      const cases = [
+        {
+          file: 'src/bound-loader.tsx',
+          code: `const loadRouter = module.require.bind(module)
+const { Route, Routes } = loadRouter('react-router-dom')
+export function HiddenRouter() {
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+          error: /binds or rebinds a CommonJS module loader/,
+        },
+        {
+          file: 'src/destructured-loader-alias.tsx',
+          code: `const { require: loadRouter } = module
+const { Route, Routes } = loadRouter('react-router-dom')
+export function HiddenRouter() {
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+          error: /destructures a CommonJS module loader/,
+        },
+        {
+          file: 'src/destructured-loader-shorthand.tsx',
+          code: `const { require } = module
+const { Route, Routes } = require('react-router-dom')
+export function HiddenRouter() {
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+          error: /destructures a CommonJS module loader/,
+        },
+        {
+          file: 'src/destructured-loader-module-alias.tsx',
+          code: `const nodeModule = module
+const { ['require']: loadRouter } = nodeModule
+const { Route, Routes } = loadRouter('react-router-dom')
+export function HiddenRouter() {
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+          error: /destructures a CommonJS module loader/,
+        },
+        {
+          file: 'src/destructured-loader-assignment.tsx',
+          code: `let loadRouter
+({ require: loadRouter } = module)
+const { Route, Routes } = loadRouter('react-router-dom')
+export function HiddenRouter() {
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+          error: /destructures a CommonJS module loader/,
         },
       ]
 

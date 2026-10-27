@@ -168,8 +168,9 @@ these forms. `<Route>` props must be explicit: any JSX prop spread is rejected
 because a spread can override `path`, including when it appears after a direct
 `path` attribute or uses an object alias or conditional expression. Router APIs
 must use static named imports; dynamic imports or `require` loads of router
-modules are rejected, as are runtime module loads whose specifier is not
-statically readable. Declare nested routes directly as JSX children on a
+modules are rejected, including direct, aliased, bound, and destructured
+CommonJS loader forms. Runtime module loads whose specifier is not statically
+readable are rejected too. Declare nested routes directly as JSX children on a
 `<Route>`: its `children` attribute is rejected because it can hide nested
 routes from the inventory. Declare `<Routes>` children directly as JSX
 children too; `children` attributes and prop spreads are rejected because they

@@ -15,7 +15,9 @@ the probe count alone.
 
 `GET /api/v1/jobs/slot-demand` requires `jobs.read` and returns the current
 business unit's scheduled scan demand compared with its effective scan-slot
-capacity. The response is tenant-scoped; it contains no job names or IDs.
+capacity. It reads only that unit's enabled jobs and bounded recent
+scan-duration history. The response is tenant-scoped; it contains no job names
+or IDs.
 
 ```json
 {
@@ -107,6 +109,9 @@ active unit together, compared with the slots of the whole deployment.
 `units` counts the active units included; disabled units and units being
 deleted schedule no scans and are left out. Each unit contributes its own
 estimate capped at its effective slot limit × 86,400 slot-seconds per day.
+The daemon calculates each contribution from that unit's enabled jobs,
+bounded recent scan-duration history, and effective capacity through its
+tenant-scoped store.
 The job counts are sums of the units' counts, while
 `estimated_slot_seconds_per_day` is the sum of these capped contributions.
 `slots` is the deployment's `scheduler.max_concurrent_scans`, and

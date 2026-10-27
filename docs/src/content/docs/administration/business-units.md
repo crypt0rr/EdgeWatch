@@ -59,6 +59,9 @@ shares, for example "Scheduled scan demand: 43.2 of 24 slot-hours/day
 slot-seconds its effective slot limit can provide in a day; disabled units
 and units being deleted schedule no scans and are left out. The job counts are
 sums, while the estimated slot-seconds sum those capped contributions. The
+daemon calculates the total from each active unit's enabled jobs, bounded
+recent scan-duration history, and effective slot capacity through that unit's
+tenant-scoped store. The
 **Lower bound from scanner rates** and **Not fully estimated** counts may
 overlap for the same job. A warning appears at 80% and when demand exceeds the
 shared pool. Equivalent schedule-duration projections are shared across the

@@ -72,11 +72,13 @@ the initial scan and baseline workflow.
 
 Set `backup.directory` to keep verified scheduled backups and automatic
 pre-migration backups. Of the latter, the daemon keeps the copy just written,
-the latest three others, and, from each schema below the database's current
-schema, the newest copy for an upgrade beyond it, so retrying a failed upgrade
-never removes the copy the previous release can open. An upgrade stops before
-schema writes if its configured pre-migration backup cannot be created or
-verified; without a configured directory, startup warns and continues.
+the latest three others, and the newest copy for each qualifying `(upgrade
+limit, source schema)` pair in the unfinished-upgrade chain. Each limit is
+considered separately, so the same source schema can have more than one
+protected copy. Retrying a failed upgrade never removes the copy the previous
+release can open. An upgrade stops before schema writes if its configured
+pre-migration backup cannot be created or verified; without a configured
+directory, startup warns and continues.
 
 ## Documentation
 

@@ -152,11 +152,13 @@ notifications:
 # the newest keep of those files, removing older scheduled backups. When an
 # existing database needs a schema upgrade, the daemon also writes and verifies
 # a pre-migration backup there before schema writes begin. Separately from
-# keep, it retains the copy just written, the latest three other copies, and,
-# from each schema below the database's current schema, the newest copy for an
-# upgrade beyond it, so retrying a failed upgrade never removes the copy the
-# previous release can open. If it cannot be created or verified, migration
-# stops. Without directory, the daemon warns and continues without a backup.
+# keep, it retains the copy just written, the latest three other copies, and
+# the newest copy for each qualifying (upgrade limit, source schema) pair in
+# the unfinished-upgrade chain. Each limit is considered separately, so a
+# source schema can have multiple protected copies. Retrying a failed upgrade
+# never removes the copy the previous release can open. If the backup cannot be
+# created or verified, migration stops. Without directory, the daemon warns and
+# continues without a backup.
 # schedule is a five-field cron expression in the timezone above, or UTC,
 # without a TZ= prefix; it defaults to "0 3 * * *", and keep to 7 (1 to 1000).
 # edgewatch health and the console report the newest good backup and any

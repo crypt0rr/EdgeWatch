@@ -169,16 +169,19 @@ because a spread can override `path`, including when it appears after a direct
 `path` attribute or uses an object alias or conditional expression. Router APIs
 must use static named imports; dynamic imports or `require` loads of router
 modules are rejected, including direct, aliased, bound, and destructured
-CommonJS loader forms. Runtime module loads whose specifier is not statically
-readable are rejected too. Declare nested routes directly as JSX children on a
-`<Route>`: its `children` attribute is rejected because it can hide nested
-routes from the inventory. Declare `<Routes>` children directly as JSX
-children too; `children` attributes and prop spreads are rejected because they
-can hide an uninspectable route tree. Use imported `Route` and `Routes`
-bindings only as JSX tag names. Passing them as component values through
-wrapper props, object props, or function calls is rejected because the
-inventory cannot safely resolve destructured wrapper parameters or their JSX
-tags.
+CommonJS loader forms. Loader identity is still recognized through transparent
+TypeScript expression wrappers such as `as` and angle-bracket type assertions,
+non-null assertions, `satisfies`, generic instantiation, and parentheses, so
+wrapping a loader does not bypass the check. Runtime module loads whose
+specifier is not statically readable are rejected too. Declare nested routes
+directly as JSX children on a `<Route>`: its `children` attribute is rejected
+because it can hide nested routes from the inventory. Declare `<Routes>`
+children directly as JSX children too; `children` attributes and prop spreads
+are rejected because they can hide an uninspectable route tree. Use imported
+`Route` and `Routes` bindings only as JSX tag names. Passing them as component
+values through wrapper props, object props, or function calls is rejected
+because the inventory cannot safely resolve destructured wrapper parameters
+or their JSX tags.
 
 To add a console page, add its `<Route>` with a string-literal `path`, then an
 entry with its scope and permission to `unitConsoleRoutes` or

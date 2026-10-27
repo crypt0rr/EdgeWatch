@@ -327,7 +327,7 @@ const fixtureAxeAudits: FixtureAxeAudit[] = [
   },
   ...monitorSetupSteps.map((step, index) => ({
     name: `axe audits prefilled monitor setup step ${index + 1}: ${step.heading}`,
-    surface: `prefilled monitor setup: ${step.heading}`,
+    surface: `prefilled monitor setup step ${index + 1}: ${step.heading}`,
     context: `step ${index + 1} of the prefilled monitor setup (${step.heading})`,
     setup: async (page: Page) => {
       await mockConsole(page, 'administrator', { routeAuditFixtures: true })
@@ -369,6 +369,17 @@ test('axe allowances reject unaudited surfaces, including removed fixture audits
   const surfacesWithoutRemovedAudit = auditedSurfaceNamesFor(remainingAudits)
   const staleAllowance: AxeAllowance = { ...unknown, surface: removedAudit.surface }
   expect(() => assertAuditedAllowanceSurfaces([...axeAllowances, staleAllowance], surfacesWithoutRemovedAudit)).toThrow(/does not audit: open action dialog/)
+
+  const matchingScheduleAudits = fixtureAxeAudits.filter(fixture => fixture.name.endsWith(': Set schedule and alerts'))
+  expect(matchingScheduleAudits).toHaveLength(2)
+  const [removedScheduleAudit, retainedScheduleAudit] = matchingScheduleAudits
+  const auditsWithoutScheduleStep = fixtureAxeAudits.filter(fixture => fixture !== removedScheduleAudit)
+  const surfacesWithoutScheduleStep = auditedSurfaceNamesFor(auditsWithoutScheduleStep)
+  expect(surfacesWithoutScheduleStep).toContain(retainedScheduleAudit.surface)
+  expect(surfacesWithoutScheduleStep).not.toContain(removedScheduleAudit.surface)
+  const staleScheduleAllowance: AxeAllowance = { ...unknown, surface: removedScheduleAudit.surface }
+  expect(() => assertAuditedAllowanceSurfaces([...axeAllowances, staleScheduleAllowance], surfacesWithoutScheduleStep))
+    .toThrow(`axeAllowances names surfaces this spec does not audit: ${removedScheduleAudit.surface}`)
 })
 
 for (const audit of fixtureAxeAudits) {

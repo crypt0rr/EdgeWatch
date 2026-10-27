@@ -75,6 +75,26 @@ function childNodes(node: Node): Node[] {
   return result
 }
 
+/** TypeScript and parenthesized wrappers that do not change an expression's runtime value. */
+const transparentExpressionTypes = new Set([
+  'TSAsExpression',
+  'TSTypeAssertion',
+  'TSNonNullExpression',
+  'TSSatisfiesExpression',
+  'TSInstantiationExpression',
+  'ParenthesizedExpression',
+])
+
+function unwrapTransparentExpression(node: Node | undefined): Node | undefined {
+  let expression = node
+  while (expression && transparentExpressionTypes.has(expression.type)) {
+    const inner = expression.expression
+    if (!isNode(inner)) return undefined
+    expression = inner
+  }
+  return expression
+}
+
 function staticStringValue(node: Node | undefined): string | undefined {
   if (!node) return undefined
   if (node.type === 'Literal' && typeof node.value === 'string') return node.value
@@ -87,19 +107,20 @@ function staticStringValue(node: Node | undefined): string | undefined {
     const right = staticStringValue(node.right as Node)
     if (left !== undefined && right !== undefined) return left + right
   }
-  if (node.type === 'TSAsExpression' || node.type === 'TSTypeAssertion' || node.type === 'TSNonNullExpression' || node.type === 'ParenthesizedExpression') {
-    return staticStringValue(node.expression as Node)
-  }
+  const expression = unwrapTransparentExpression(node)
+  if (expression !== node) return staticStringValue(expression)
   return undefined
 }
 
 function memberPropertyName(node: Node): string | undefined {
+  node = unwrapTransparentExpression(node) ?? node
   if (node.type !== 'MemberExpression') return undefined
   const property = node.property as Node
   return node.computed ? staticStringValue(property) : property.type === 'Identifier' ? String(property.name) : undefined
 }
 
 function isCommonJSModuleObject(node: Node | undefined, moduleAliases: Set<string>): boolean {
+  node = unwrapTransparentExpression(node)
   return node?.type === 'Identifier' && moduleAliases.has(String(node.name))
 }
 
@@ -114,6 +135,7 @@ function destructuresCommonJSRequire(pattern: Node): boolean {
 }
 
 function isCommonJSLoader(node: Node | undefined, loaderAliases: Set<string>, moduleAliases: Set<string>): boolean {
+  node = unwrapTransparentExpression(node)
   if (!node) return false
   if (node.type === 'Identifier') return loaderAliases.has(String(node.name))
   if (node.type !== 'MemberExpression') return false
@@ -404,6 +426,12 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
       return object.type === 'JSXIdentifier' && reactNamespaces.has(String(object.name)) && property.type === 'JSXIdentifier' && property.name === 'Fragment'
     }
     function assertReadableRouteExpression(node: Node, where: string): void {
+      const expression = unwrapTransparentExpression(node)
+      if (expression !== node) {
+        if (expression) assertReadableRouteExpression(expression, where)
+        else rejectUninspectableRouteChild(node, where)
+        return
+      }
       if (node.type === 'JSXEmptyExpression') return
       if (node.type === 'Literal' && (node.value === null || typeof node.value === 'boolean')) return
       if (node.type === 'JSXElement' || node.type === 'JSXFragment') {
@@ -427,10 +455,6 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
         for (const child of node.elements as (Node | null)[]) {
           if (child) assertReadableRouteExpression(child, where)
         }
-        return
-      }
-      if (node.type === 'TSAsExpression' || node.type === 'TSTypeAssertion' || node.type === 'TSNonNullExpression' || node.type === 'ParenthesizedExpression') {
-        assertReadableRouteExpression(node.expression as Node, where)
         return
       }
       rejectUninspectableRouteChild(node, where)
@@ -951,6 +975,60 @@ export function HiddenRouter() {
 
       for (const fixture of cases) {
         expect(() => extractRouters([fixture])).toThrow(fixture.error)
+      }
+    })
+
+    it('recognizes CommonJS loaders through transparent TypeScript and parenthesized wrappers', () => {
+      const cases = [
+        {
+          file: 'src/asserted-loader.tsx',
+          code: `const loadRouter = module.require as typeof require
+const { Route, Routes } = loadRouter('react-router-dom')
+export function HiddenRouter() {
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+        },
+        {
+          file: 'src/non-null-parenthesized-loader.tsx',
+          code: `const loadRouter = ((module.require))!
+const { Route, Routes } = loadRouter('react-router-dom')
+export function HiddenRouter() {
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+        },
+        {
+          file: 'src/satisfies-loader.tsx',
+          code: `const loadRouter = module.require satisfies typeof require
+const { Route, Routes } = loadRouter('react-router-dom')
+export function HiddenRouter() {
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+        },
+        {
+          file: 'src/instantiated-loader.tsx',
+          code: `const loadRouter = module.require<typeof require>
+const { Route, Routes } = loadRouter('react-router-dom')
+export function HiddenRouter() {
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+        },
+        {
+          file: 'src/type-asserted-loader.ts',
+          code: `const { Route, Routes } = (<typeof require>module.require)('react-router-dom')`,
+        },
+        {
+          file: 'src/asserted-module-object.tsx',
+          code: `const nodeModule = module as NodeModule
+const loadRouter = nodeModule.require as typeof require
+const { Route, Routes } = loadRouter('react-router-dom')
+export function HiddenRouter() {
+  return <Routes><Route path="/hidden" /></Routes>
+}`,
+        },
+      ]
+
+      for (const fixture of cases) {
+        expect(() => extractRouters([fixture]), fixture.file).toThrow(/dynamically loads router module react-router-dom/)
       }
     })
 

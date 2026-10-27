@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useLocation, useNavigationType, useSearchParams } from 'react-router-dom'
+import { MAX_PAGINATION_OFFSET } from './pagination'
 
 /** URL-backed filters and pagination shared by the global and baseline host explorers. */
 export function useHostListState() {
@@ -13,8 +14,8 @@ export function useHostListState() {
   const rawOpen = searchParams.get('has_open_ports')
   const open = rawOpen === 'true' || rawOpen === 'false' ? rawOpen : ''
   const rawOffset = searchParams.get('offset')
-  const parsedOffset = rawOffset === null ? 0 : Number(rawOffset)
-  const offset = Number.isSafeInteger(parsedOffset) && parsedOffset > 0 ? parsedOffset : 0
+  const parsedOffset = rawOffset !== null && /^\d+$/.test(rawOffset) ? Number(rawOffset) : 0
+  const offset = Number.isSafeInteger(parsedOffset) && parsedOffset > 0 && parsedOffset <= MAX_PAGINATION_OFFSET ? parsedOffset : 0
   const returnTo = `${location.pathname}${location.search}`
 
   // Keep typing independent of router transitions. Search URL replacements

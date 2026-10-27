@@ -273,9 +273,11 @@ describe('public dashboard pages', () => {
     await renderPage(<PublicDashboardAdmin />)
     const search = container.querySelector('#public-host-search') as HTMLInputElement
     const hostCheckbox = (address: string) => Array.from(container.querySelectorAll('input[type="checkbox"][id^="public-host-"]')).find(input => (input as HTMLInputElement).id.includes(address)) as HTMLInputElement
-    expect(search).toHaveAccessibleName('Search hosts by address or job')
-    expect(container.querySelector('.public-picker-count')?.textContent).toContain('221 hosts in the inventory')
-    expect(container.querySelector('.public-picker-count')?.textContent).toContain('0 selected for publication')
+    expect(search).toHaveAccessibleName('Search hosts by address, DNS name, target, job, service, product, or port')
+    const countRegion = container.querySelector('.public-picker-count')
+    expect(countRegion).toHaveAttribute('aria-atomic', 'true')
+    expect(countRegion?.textContent).toContain('221 hosts in the inventory')
+    expect(countRegion?.textContent).toContain('0 selected for publication')
 
     const firstHost = hostCheckbox('198.51.100.10')
     act(() => firstHost.click())
@@ -306,8 +308,9 @@ describe('public dashboard pages', () => {
       return found
     }, { timeout: 1000 })
     expect(searchedHost.checked).toBe(false)
-    expect(container.querySelector('.public-picker-count')?.textContent).toContain('1 host matches “later-job”')
-    expect(container.querySelector('.public-picker-count')?.textContent).toContain('1 selected for publication')
+    expect(container.querySelector('.public-picker-count')).toBe(countRegion)
+    expect(countRegion?.textContent).toContain('1 host matches “later-job”')
+    expect(countRegion?.textContent).toContain('1 selected for publication')
     expect(savePublicDashboardConfig).not.toHaveBeenCalled()
 
     setSearch('198.51.100.99')
@@ -316,12 +319,15 @@ describe('public dashboard pages', () => {
     await vi.waitFor(() => expect(hostCheckbox('198.51.100.99').checked).toBe(false), { timeout: 1000 })
 
     const clear = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Clear search') as HTMLButtonElement
+    clear.focus()
     act(() => clear.click())
+    expect(search).toHaveFocus()
     await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
     await vi.waitFor(() => expect(search.value).toBe(''), { timeout: 1000 })
     const retainedHost = hostCheckbox('198.51.100.10')
     expect(retainedHost.checked).toBe(true)
-    expect(container.querySelector('.public-picker-count')?.textContent).toContain('1 selected for publication')
+    expect(container.querySelector('.public-picker-count')).toBe(countRegion)
+    expect(countRegion?.textContent).toContain('1 selected for publication')
     expect(savePublicDashboardConfig).not.toHaveBeenCalled()
 
     const save = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Save public view')) as HTMLButtonElement
@@ -341,6 +347,7 @@ describe('public dashboard pages', () => {
       : pickerResponse)
     await renderPage(<PublicDashboardAdmin />)
     const search = container.querySelector('#public-host-search') as HTMLInputElement
+    const countRegion = container.querySelector('.public-picker-count')
     vi.mocked(listHosts).mockClear()
 
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
@@ -348,7 +355,9 @@ describe('public dashboard pages', () => {
       setter?.call(search, 'ab')
       search.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
     })
-    expect(container.querySelector('.public-picker-message')?.textContent).toContain('at least 3 characters')
+    expect(countRegion).toHaveAttribute('aria-atomic', 'true')
+    expect(container.querySelector('.public-picker-count')).toBe(countRegion)
+    expect(countRegion?.textContent).toContain('at least 3 characters')
     await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
     expect(listHosts).not.toHaveBeenCalled()
 
@@ -358,8 +367,13 @@ describe('public dashboard pages', () => {
     })
     await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
     await vi.waitFor(() => expect(container.querySelector('.public-picker-empty')?.textContent).toContain('No hosts match “missing-job”.'), { timeout: 1000 })
-    expect(container.querySelector('.public-picker-count')?.textContent).toContain('0 hosts match “missing-job”')
-    expect(Array.from(container.querySelectorAll('.public-picker-search button')).find(button => button.textContent === 'Clear search')).toBeTruthy()
+    expect(container.querySelector('.public-picker-count')).toBe(countRegion)
+    expect(countRegion?.textContent).toContain('0 hosts match “missing-job”')
+    const clearNoMatches = Array.from(container.querySelectorAll('.public-picker-empty button')).find(button => button.textContent === 'Clear search') as HTMLButtonElement
+    expect(clearNoMatches).toBeTruthy()
+    clearNoMatches.focus()
+    act(() => clearNoMatches.click())
+    expect(search).toHaveFocus()
   })
 
   it('keeps the draft after a 409 and lets the administrator rebase it', async () => {

@@ -81,15 +81,18 @@ names, latest successful scan time, positive ports, service names, and cached
 normalized network-registration data. It does not expose raw Nmap evidence,
 product fingerprints, credentials, or an arbitrary RDAP proxy.
 
-In **Published hosts**, search an address or job name to find a host without
-paging through the full inventory. Search accepts 3 to 256 characters; the
-picker shows the total number of matches and provides **Clear search**. A new
-search starts at the first results page. Searching and paging only filter the
-rows shown: they do not check hosts or save settings, and selections remain in
-your draft even while their rows are off page or outside the current search.
-Only checked hosts are included when you choose **Save public view**. Archived
-hosts remain grouped under archived jobs and can only stay selected if they
-were already selected; legacy hosts remain read-only.
+In **Published hosts**, search an address, DNS name, configured target, job,
+service, product, or port to find a host without paging through the full
+inventory. Search accepts 3 to 256 characters; the picker shows the total
+number of matches and provides **Clear search**. A new search starts at the
+first results page. Clearing a search returns keyboard focus to the search
+field, and its result count remains available to screen readers while results
+load. Searching and paging only filter the rows shown: they do not check hosts
+or save settings, and selections remain in your draft even while their rows
+are off page or outside the current search. Only checked hosts are included
+when you choose **Save public view**. Archived hosts remain grouped under
+archived jobs and can only stay selected if they were already selected; legacy
+hosts remain read-only.
 
 Each business unit publishes its own page; see
 [Business units](/administration/business-units/).

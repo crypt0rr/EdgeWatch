@@ -185,6 +185,9 @@ the affected window.
 The **Jobs** list can be searched case-insensitively by job name or configured
 target. Search applies to the jobs already shown, including archived jobs,
 updates the result count, and combines with the **Needs attention** filter.
+The search and filter stay in the URL while you inspect a job, so browser Back
+and **← Jobs** restore the same list. If a search finds jobs that the
+**Needs attention** filter hides, choose **Show all jobs** to see those matches.
 Clear the search to return to the selected filter's full list.
 
 The **Jobs** list shows each job's latest scan attempt separately from its
@@ -403,7 +406,8 @@ authoritative registry; raw responses and contact records are not retained.
 Host searches cover partial IP addresses, DNS names, targets, job names, and
 service names or products. Enter at least 3 and no more than 256 characters;
 searches stay on the indexed path and service names/products are prioritized
-within the bounded search document.
+within the bounded search document. A later page can become empty if the
+inventory shrinks; choose **Go to first page** to return to the remaining hosts.
 
 ## Scan comparison
 

@@ -65,7 +65,7 @@ test('public status controls remain interactive and navigation leaves the page',
   await enabled.check()
   await expect(enabled).toBeChecked()
 
-  const search = page.getByRole('searchbox', { name: 'Search hosts by address or job' })
+  const search = page.getByRole('searchbox', { name: 'Search hosts by address, DNS name, target, job, service, product, or port' })
   await search.focus()
   await page.keyboard.type('later-job')
   await expect(page.getByText('1 host matches “later-job” · 0 selected for publication.')).toBeVisible()
@@ -89,9 +89,19 @@ test('public status controls remain interactive and navigation leaves the page',
   await clear.focus()
   await page.keyboard.press('Enter')
   await expect(search).toHaveValue('')
+  await expect(search).toBeFocused()
   await expect(page.getByText('221 hosts in the inventory · 1 selected for publication.')).toBeVisible()
   await expect(host).toHaveCount(0)
   expect(saved).toBeUndefined()
+
+  await search.fill('missing-host')
+  await expect(page.getByText('0 hosts match “missing-host” · 1 selected for publication.')).toBeVisible()
+  const clearFromNoMatches = page.getByRole('button', { name: 'Clear search' }).nth(1)
+  await clearFromNoMatches.focus()
+  await page.keyboard.press('Enter')
+  await expect(search).toHaveValue('')
+  await expect(search).toBeFocused()
+  await expect(page.getByText('221 hosts in the inventory · 1 selected for publication.')).toBeVisible()
 
   const pagination = page.getByRole('navigation', { name: 'Host search results pagination' })
   await pagination.getByRole('button', { name: 'Next' }).focus()

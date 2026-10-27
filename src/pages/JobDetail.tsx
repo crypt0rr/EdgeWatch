@@ -70,10 +70,20 @@ function routeResultsOffset(value: string | null): number | null {
   return Number.isSafeInteger(offset) && offset >= 0 ? offset : 0
 }
 
+function jobListReturnToFromState(state: unknown) {
+  if (!state || typeof state !== 'object' || !('returnTo' in state)) return '/jobs'
+  const returnTo = (state as { returnTo?: unknown }).returnTo
+  return typeof returnTo === 'string' && (
+    returnTo === '/jobs' || returnTo === '/jobs/' ||
+    returnTo.startsWith('/jobs?') || returnTo.startsWith('/jobs/?')
+  ) ? returnTo : '/jobs'
+}
+
 export function JobDetail() {
   const { id = '', scanId: routeScanID } = useParams()
   const [searchParams] = useSearchParams()
   const location = useLocation()
+  const jobsReturnTo = jobListReturnToFromState(location.state)
   const routeResults = routeScanID ? routeResultsOffset(searchParams.get('results')) : null
   const navigate = useNavigate()
   const client = useQueryClient()
@@ -134,6 +144,12 @@ export function JobDetail() {
   const scans = useQuery({
     queryKey: ['job-scans', id, scanOffset],
     queryFn: () => jobScans(id, scanOffset),
+    enabled: !!id && canReadScans,
+    refetchInterval: pendingScanRequest ? 2000 : 10000,
+  })
+  const latestScans = useQuery({
+    queryKey: ['job-scans', id, 0],
+    queryFn: () => jobScans(id, 0),
     enabled: !!id && canReadScans,
     refetchInterval: pendingScanRequest ? 2000 : 10000,
   })
@@ -352,7 +368,7 @@ export function JobDetail() {
     // A deleted job, or another unit's, answers 404: say so instead of
     // offering a retry that fails the same way.
     const jobNotFound = isNotFound(job.error)
-    return <section className="page"><div className="page-heading"><div><Link className="back-link" to="/jobs">← Jobs</Link><h1>Job unavailable</h1></div></div><ErrorNotice message={job.error && !jobNotFound ? 'This job could not be loaded.' : 'This job could not be found.'} onRetry={job.error && !jobNotFound ? () => job.refetch() : undefined} /></section>
+    return <section className="page"><div className="page-heading"><div><Link className="back-link" to={jobsReturnTo}>← Jobs</Link><h1>Job unavailable</h1></div></div><ErrorNotice message={job.error && !jobNotFound ? 'This job could not be loaded.' : 'This job could not be found.'} onRetry={job.error && !jobNotFound ? () => job.refetch() : undefined} /></section>
   }
 
   const value = job.data
@@ -608,7 +624,7 @@ export function JobDetail() {
             </div>
             <div className="heading-actions">
               {(detail.data.scan.status === 'success' || detail.data.scan.status === 'incomplete') && <button className="button ghost" onClick={() => { setShowResults((shown) => !shown); setResultsOffset(0) }}>{showResults ? 'Hide results' : 'View results'}</button>}
-              <button className="icon-button" onClick={() => routeScanID ? navigate(`/jobs/${encodeURIComponent(id)}`) : setSelectedScan('')} aria-label="Close scan detail">×</button>
+              <button className="icon-button" onClick={() => routeScanID ? navigate(`/jobs/${encodeURIComponent(id)}`, { state: { returnTo: jobsReturnTo } }) : setSelectedScan('')} aria-label="Close scan detail">×</button>
             </div>
           </div>
           {detail.data.scan.error && <div className="form-error scan-error" role="alert">{detail.data.scan.error}</div>}
@@ -656,7 +672,7 @@ export function JobDetail() {
     <section className="page">
       <div className="page-heading">
         <div>
-          <Link className="back-link" to="/jobs">← Jobs</Link>
+          <Link className="back-link" to={jobsReturnTo}>← Jobs</Link>
           <div className="title-row">
             <h1>{value.job.name}</h1>
             <span className={`pill ${jobStatus.tone}`}>{jobStatus.label}</span>
@@ -703,9 +719,9 @@ export function JobDetail() {
         pendingRun={!!pendingScanRequest}
         cycleKnown={canReadScans && cycle.isSuccess && !cycle.error}
         cycle={cycle.data ? cycle.data.cycle : value.scan_cycle}
-        scans={scans.data?.scans}
-        scansLoading={canReadScans && scans.isLoading}
-        scansError={canReadScans && !!scans.error}
+        scans={latestScans.data?.scans}
+        scansLoading={canReadScans && latestScans.isLoading}
+        scansError={canReadScans && !!latestScans.error}
         baseline={baseline.data}
         baselineLoading={canReadBaseline && baseline.isLoading}
         baselineError={canReadBaseline && !!baseline.error}
@@ -715,7 +731,7 @@ export function JobDetail() {
         scheduleError={!!job.data?.enabled && !!nextRun.error}
         runBusy={!!actionBusy}
         onRun={run}
-        onRetryScans={() => { void scans.refetch() }}
+        onRetryScans={() => { void latestScans.refetch() }}
         onRetrySchedule={() => { void nextRun.refetch() }}
       />
 
@@ -841,7 +857,7 @@ export function JobDetail() {
             <>
               <div className="latest-scan-meta">
                 <div><strong>{formatDateTime(latest.data.scan.finished_at)}</strong><span className="muted">Scan {latest.data.scan.id.slice(0, 8)}</span></div>
-                <Link className="button ghost" to={`/jobs/${id}/scans/${encodeURIComponent(latest.data.scan.id)}`}>Open scan details →</Link>
+                <Link className="button ghost" to={`/jobs/${id}/scans/${encodeURIComponent(latest.data.scan.id)}`} state={{ returnTo: jobsReturnTo }}>Open scan details →</Link>
               </div>
               <div className="overview-results">
                 {latestResults.isLoading ? <div className="skeleton-list" /> : latestResults.error ? <ErrorNotice message="Could not load latest scan results." onRetry={() => latestResults.refetch()} /> : latestResults.data?.results?.length ? <SurfaceUnitList units={latestResults.data.results} emptyLabel="No positive ports were found in this scan." /> : <div className="inline-empty">No positive ports were found in this scan.</div>}

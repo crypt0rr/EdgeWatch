@@ -883,7 +883,6 @@
 .public-picker-search-help,
 .public-picker-count { margin: 0; color: #8eabc8; font-size: 11px; line-height: 1.5; }
 .public-picker-count { margin: 0 0 8px; }
-.public-picker-message { margin: 0 0 12px; color: #8eabc8; font-size: 11px; }
 .public-picker-empty { display: grid; justify-items: start; gap: 10px; }
 .public-picker-empty p { margin: 0; }
 .public-picker-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin: 0 8px 8px; }

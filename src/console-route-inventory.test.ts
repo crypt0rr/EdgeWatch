@@ -1,5 +1,6 @@
-import { readdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { matchRoutes, type RouteObject } from 'react-router-dom'
 import { parseSync } from 'vite'
@@ -359,6 +360,7 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
     rejectUninspectableRouterLoads(program, file)
 
     const local = { Route: new Set<string>(), Routes: new Set<string>() }
+    const unresolvedRouterImports = new Map<string, { api: 'Route' | 'Routes'; source: string }>()
     const reactFragments = new Set<string>()
     const reactNamespaces = new Set<string>()
     for (const statement of program.body as Node[]) {
@@ -372,6 +374,18 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
           } else {
             reactNamespaces.add(localName)
           }
+        }
+      }
+      if (!routerModules.has(source)) {
+        for (const specifier of statement.specifiers as Node[]) {
+          const localName = String((specifier.local as Node).name)
+          const imported = specifier.type === 'ImportSpecifier' ? String((specifier.imported as Node).name) : localName
+          const api = imported === 'Route' || imported === 'Routes'
+            ? imported
+            : localName === 'Route' || localName === 'Routes'
+              ? localName
+              : undefined
+          if (api) unresolvedRouterImports.set(localName, { api, source })
         }
       }
       if (!routerModules.has(source)) continue
@@ -420,6 +434,12 @@ function extractRouters(sources: SourceFile[]): SourceRouter[] {
       childNodes(node).forEach(rejectRouterMemberElements)
     }
     rejectRouterMemberElements(program)
+    for (const [localName, { api, source }] of unresolvedRouterImports) {
+      const usesImportedComponent = (node: Node): boolean => jsxName(node) === localName || childNodes(node).some(usesImportedComponent)
+      if (usesImportedComponent(program)) {
+        throw new Error(`${file} imports ${api} from ${source} and uses it as JSX; the console route inventory cannot resolve local router API re-exports`)
+      }
+    }
     if (!local.Route.size && !local.Routes.size) continue
 
     let routeElements = 0
@@ -847,6 +867,36 @@ export function PlatformShell() { return <Routes><Route path="/units/:id/:tab" e
       // A namespace-style element is refused even when the file also has
       // readable named imports, so its route cannot hide beside them.
       expect(() => extractRouters([{ file: 'src/h.tsx', code: `import { Route, Routes } from 'react-router-dom'\nexport function H() { return <Routes><Route path="/visible" /><RR.Route path="/hidden" /></Routes> }` }])).toThrow(/JSX member expression ending in Route/)
+    })
+
+    it('fails closed when Route and Routes are imported through a root-level helper', () => {
+      const fixtureRoot = mkdtempSync(join(tmpdir(), 'edgewatch-route-inventory-'))
+      const sourceDirectory = join(fixtureRoot, 'src')
+      const helperPath = join(fixtureRoot, 'router-bindings.ts')
+      const routePath = join(sourceDirectory, 'HiddenRoutes.tsx')
+      const helper = {
+        file: 'router-bindings.ts',
+        code: `export { Route, Routes } from 'react-router-dom'`,
+      }
+
+      mkdirSync(sourceDirectory, { recursive: true })
+      writeFileSync(helperPath, `${helper.code}\n`)
+      writeFileSync(routePath, `import { Route, Routes } from '../router-bindings'\nexport function HiddenRoutes() { return <Routes><Route path="/hidden" /></Routes> }\n`)
+
+      try {
+        const scannedSources = sourceFiles(sourceDirectory)
+        expect(scannedSources).toHaveLength(1)
+        expect(scannedSources[0].file).toMatch(/src[\\/]HiddenRoutes\.tsx$/)
+        expect(() => extractRouters(scannedSources)).toThrow(/cannot resolve.*router API re-export/)
+        const aliasedRouteSource = {
+          ...scannedSources[0],
+          code: `import { Route as Page, Routes as Pages } from '../router-bindings'\nexport function HiddenRoutes() { return <Pages><Page path="/hidden" /></Pages> }`,
+        }
+        expect(() => extractRouters([aliasedRouteSource])).toThrow(/imports Route from \.\.\/router-bindings/)
+        expect(() => extractRouters([helper, ...scannedSources])).toThrow(/re-exports router APIs/)
+      } finally {
+        rmSync(fixtureRoot, { recursive: true, force: true })
+      }
     })
 
     it('refuses dynamic router module loads before checking for static router imports', () => {

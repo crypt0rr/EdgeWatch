@@ -96,13 +96,14 @@ The job's **Timeout** ends each run, so a run counts at most the timeout,
 whether its duration comes from samples or from the lower bound. A resumable
 cycle whose attempts add up to more than the timeout continues in the job's
 later runs, so it adds the timeout for each run rather than its whole duration.
-The estimate simulates the job's cron ticks in its timezone over a calendar
-year. When a previous estimated run is still active at a tick, the scheduler
-skips that tick; the estimate counts only runs that could start. A job runs at
-most once at a time, so its estimate adds at most one slot-day, 24 slot-hours,
-per day. The cadence count includes any job for which at least one scheduled
-tick is skipped, even when its daily demand is below one slot-day. Lengthen the
-job's schedule interval or shorten its scans to keep its cadence.
+The estimate simulates the job's cron ticks in its timezone over a
+representative four-year calendar cycle, averaging leap-day schedules over
+that cycle. When a previous estimated run is still active at a tick, the
+scheduler skips that tick; the estimate counts only runs that could start. A
+job runs at most once at a time, so its estimate adds at most one slot-day, 24
+slot-hours, per day. The cadence count includes any job for which at least one
+scheduled tick is skipped, even when its daily demand is below one slot-day.
+Lengthen the job's schedule interval or shorten its scans to keep its cadence.
 A warning appears at 80% utilization and when estimated demand exceeds
 capacity. The notice refreshes when live updates report a job change or a
 completed scan, and at least every five minutes.

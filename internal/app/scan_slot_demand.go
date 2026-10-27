@@ -330,6 +330,11 @@ type cachedScanDurationKey struct {
 	rank     uint64
 }
 
+type scanDurationKeyRank struct {
+	id   string
+	rank uint64
+}
+
 // scanSlotDemandCache remembers, for every business unit of the process,
 // the parts of the scan-slot demand estimate that a request would otherwise
 // compute again for each job: each schedule's bounded occurrence pattern,
@@ -341,6 +346,10 @@ type scanSlotDemandCache struct {
 	runsPerDay      map[scanRunsPerDayKey]scanRunsPerDayValue
 	runsPerDayBytes int
 	keys            map[string]cachedScanDurationKey
+	keyRanks        []scanDurationKeyRank
+	// keyAdmissionWork counts rank comparisons so tests can detect an
+	// accidental return to per-admission map scans.
+	keyAdmissionWork uint64
 	// runsPerDayComputed counts the schedules computed, for tests.
 	runsPerDayComputed int
 }
@@ -463,43 +472,102 @@ func (a *App) scanDurationKey(record store.JobRecord) store.ScanDurationKey {
 	}
 	current, exists := cache.keys[record.ID]
 	if !exists || cached.revision > current.revision || cached.revision == current.revision && !cached.updated.Before(current.updated) {
-		retainBoundedCache(cache.keys, record.ID, cached, scanDurationKeyCacheLimit,
-			func(v cachedScanDurationKey) uint64 { return v.rank },
-			func(k string) string { return k },
-			cached.rank, record.ID)
+		cache.retainScanDurationKey(record.ID, cached)
 	}
 	cache.mu.Unlock()
 	return cached.key
 }
 
-// retainBoundedCache keeps the entries with the lowest stable ranks. Unlike
-// recency eviction, the chosen set does not depend on request order, so a
-// repeated traversal of more keys than fit still gets cache hits for its
-// retained keys. Replaced or rejected values are always recomputed on demand.
-func retainBoundedCache[K comparable, V any](entries map[K]V, key K, value V, limit int, rankOf func(V) uint64, tieOf func(K) string, rank uint64, tie string) {
-	if _, exists := entries[key]; exists {
-		entries[key] = value
+// retainScanDurationKey keeps the entries with the lowest stable ranks.
+// Its max-heap identifies the worst retained rank in logarithmic work, so the
+// deterministic subset does not depend on request order without scanning the
+// full cache for each new job. Replaced or rejected values are recomputed on
+// demand.
+func (cache *scanSlotDemandCache) retainScanDurationKey(id string, value cachedScanDurationKey) {
+	if cache.keys == nil {
+		cache.keys = make(map[string]cachedScanDurationKey)
+	}
+	if _, exists := cache.keys[id]; exists {
+		cache.keys[id] = value
 		return
 	}
-	if len(entries) < limit {
-		entries[key] = value
-		return
-	}
-	var largest K
-	var largestRank uint64
-	var largestTie string
-	first := true
-	for candidate, current := range entries {
-		currentRank, currentTie := rankOf(current), tieOf(candidate)
-		if first || currentRank > largestRank || currentRank == largestRank && currentTie > largestTie {
-			largest, largestRank, largestTie, first = candidate, currentRank, currentTie, false
+	candidate := scanDurationKeyRank{id: id, rank: value.rank}
+	if len(cache.keys) >= scanDurationKeyCacheLimit {
+		if cache.compareScanDurationKeyRanks(candidate, cache.keyRanks[0]) >= 0 {
+			return
 		}
+		largest := cache.popLargestScanDurationKeyRank()
+		delete(cache.keys, largest.id)
 	}
-	if rank > largestRank || rank == largestRank && tie >= largestTie {
-		return
+	cache.keys[id] = value
+	cache.pushScanDurationKeyRank(candidate)
+}
+
+// compareScanDurationKeyRanks orders entries by rank and then ID. All
+// admission comparisons pass through this method so the complexity regression
+// test measures the work used to maintain the deterministic subset.
+func (cache *scanSlotDemandCache) compareScanDurationKeyRanks(a, b scanDurationKeyRank) int {
+	cache.keyAdmissionWork++
+	if a.rank < b.rank {
+		return -1
 	}
-	delete(entries, largest)
-	entries[key] = value
+	if a.rank > b.rank {
+		return 1
+	}
+	if a.id < b.id {
+		return -1
+	}
+	if a.id > b.id {
+		return 1
+	}
+	return 0
+}
+
+// pushScanDurationKeyRank inserts an entry into the max-heap of retained
+// duration keys.
+func (cache *scanSlotDemandCache) pushScanDurationKeyRank(value scanDurationKeyRank) {
+	cache.keyRanks = append(cache.keyRanks, value)
+	child := len(cache.keyRanks) - 1
+	for child > 0 {
+		parent := (child - 1) / 2
+		if cache.compareScanDurationKeyRanks(cache.keyRanks[parent], cache.keyRanks[child]) >= 0 {
+			break
+		}
+		cache.keyRanks[parent], cache.keyRanks[child] = cache.keyRanks[child], cache.keyRanks[parent]
+		child = parent
+	}
+}
+
+// popLargestScanDurationKeyRank removes the heap root, the highest-ranked
+// retained key.
+func (cache *scanSlotDemandCache) popLargestScanDurationKeyRank() scanDurationKeyRank {
+	largest := cache.keyRanks[0]
+	lastIndex := len(cache.keyRanks) - 1
+	last := cache.keyRanks[lastIndex]
+	cache.keyRanks[lastIndex] = scanDurationKeyRank{}
+	cache.keyRanks = cache.keyRanks[:lastIndex]
+	if lastIndex == 0 {
+		return largest
+	}
+	cache.keyRanks[0] = last
+	parent := 0
+	for {
+		left := parent*2 + 1
+		if left >= len(cache.keyRanks) {
+			break
+		}
+		largestChild := left
+		right := left + 1
+		if right < len(cache.keyRanks) && cache.compareScanDurationKeyRanks(cache.keyRanks[left], cache.keyRanks[right]) < 0 {
+			largestChild = right
+		}
+		if cache.compareScanDurationKeyRanks(cache.keyRanks[parent], cache.keyRanks[largestChild]) >= 0 {
+			break
+		}
+		cache.keyRanks[parent], cache.keyRanks[largestChild] = cache.keyRanks[largestChild], cache.keyRanks[parent]
+		parent = largestChild
+	}
+	return largest
 }
 
 func scanCacheRank(values ...string) uint64 {

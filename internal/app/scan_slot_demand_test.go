@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/bits"
 	"reflect"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -1694,6 +1696,67 @@ func TestScanDurationKeyCacheIsBounded(t *testing.T) {
 	defer app.scanSlotDemand.mu.Unlock()
 	if got := len(app.scanSlotDemand.keys); got != scanDurationKeyCacheLimit {
 		t.Fatalf("duration-key cache holds %d entries, want its %d-entry bound", got, scanDurationKeyCacheLimit)
+	}
+}
+
+func TestScanDurationKeyCacheAdmissionWorkIsBoundedAndDeterministic(t *testing.T) {
+	t.Parallel()
+	const jobCount = 25_000
+	records := make([]store.JobRecord, jobCount)
+	ranked := make([]scanDurationKeyRank, jobCount)
+	for i := range records {
+		id := fmt.Sprintf("bounded-admission-%05d", i)
+		records[i] = store.JobRecord{
+			ID: id, Revision: 1,
+			Job: config.NormalizeJob(config.Job{Name: fmt.Sprintf("job-%05d", i)}),
+		}
+		ranked[i] = scanDurationKeyRank{id: id, rank: scanCacheRank(id)}
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].rank != ranked[j].rank {
+			return ranked[i].rank < ranked[j].rank
+		}
+		return ranked[i].id < ranked[j].id
+	})
+	wantIDs := make(map[string]struct{}, scanDurationKeyCacheLimit)
+	for _, entry := range ranked[:scanDurationKeyCacheLimit] {
+		wantIDs[entry.id] = struct{}{}
+	}
+
+	maxComparisonsPerAdmission := uint64(3*bits.Len(uint(scanDurationKeyCacheLimit)) + 2)
+	maxComparisons := uint64(jobCount) * maxComparisonsPerAdmission
+	for _, reverse := range []bool{false, true} {
+		app := &App{}
+		for i := range records {
+			index := i
+			if reverse {
+				index = len(records) - i - 1
+			}
+			app.scanDurationKey(records[index])
+		}
+
+		app.scanSlotDemand.mu.Lock()
+		gotIDs := make(map[string]struct{}, len(app.scanSlotDemand.keys))
+		for id, value := range app.scanSlotDemand.keys {
+			gotIDs[id] = struct{}{}
+			if value.rank != scanCacheRank(id) {
+				app.scanSlotDemand.mu.Unlock()
+				t.Fatalf("cached duration key %q has rank %d, want %d", id, value.rank, scanCacheRank(id))
+			}
+		}
+		heapEntries := len(app.scanSlotDemand.keyRanks)
+		comparisons := app.scanSlotDemand.keyAdmissionWork
+		app.scanSlotDemand.mu.Unlock()
+
+		if len(gotIDs) != scanDurationKeyCacheLimit || heapEntries != scanDurationKeyCacheLimit {
+			t.Fatalf("reverse insertion %t retained %d keys and %d heap entries, want %d each", reverse, len(gotIDs), heapEntries, scanDurationKeyCacheLimit)
+		}
+		if !reflect.DeepEqual(gotIDs, wantIDs) {
+			t.Fatalf("reverse insertion %t retained a request-order-dependent subset", reverse)
+		}
+		if comparisons == 0 || comparisons > maxComparisons {
+			t.Fatalf("reverse insertion %t used %d rank comparisons for %d jobs; want 1..%d bounded comparisons", reverse, comparisons, jobCount, maxComparisons)
+		}
 	}
 }
 

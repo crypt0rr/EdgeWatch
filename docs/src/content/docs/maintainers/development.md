@@ -190,11 +190,13 @@ The parser also tracks bare-package component imports through local aliases and
 values passed in a route element. If an uninspectable package component is
 rendered or forwarded by a wildcard `<Route>` (`path="*"` or a path ending in
 `/*`), the check fails closed with the component and package in its diagnostic.
-It could render nested `<Routes>` whose paths would otherwise be missing from
-the axe and role audits. Readable local TypeScript components are followed as
-usual, and third-party page or presentation components on non-wildcard routes
-remain allowed. React primitives and recognized router exports are treated as
-known wrappers and redirects.
+This includes values passed to `React.createElement` or an aliased
+`createElement` factory in the route element. The component could render nested `<Routes>`
+whose paths would otherwise be missing from the axe and role audits. Readable
+local TypeScript components are followed as usual, and third-party page or
+presentation components on non-wildcard routes remain allowed. React
+primitives and recognized router exports are treated as known wrappers and
+redirects.
 
 `<Route>` props must be explicit: any JSX prop spread is rejected because a
 spread can override `path`, including when it appears after a direct `path`

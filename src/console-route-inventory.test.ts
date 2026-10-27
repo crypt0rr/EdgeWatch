@@ -409,21 +409,118 @@ function stringValue(node: Node | undefined, where: string): string {
   throw new Error(`${where} must be a string literal so the inventory check can read it`)
 }
 
-function renderedImportedComponents(node: Node | undefined, imports: Map<string, { source: string }>, file: string): { component: string; source: string; file: string }[] {
+function reactCreateElementAliases(program: Node, importedFactories: Set<string>, importedNamespaces: Set<string>): { factories: Set<string>; namespaces: Set<string> } {
+  const namespaceDependents = new Map<string, Set<string>>()
+  const factoryDependents = new Map<string, Set<string>>()
+  const namespaceFactoryDependents = new Map<string, Set<string>>()
+  const addDependent = (dependents: Map<string, Set<string>>, dependency: string, alias: string) => {
+    const aliases = dependents.get(dependency) ?? new Set<string>()
+    aliases.add(alias)
+    dependents.set(dependency, aliases)
+  }
+  const bindFactoryFromNamespace = (namespace: string, binding: Node) => {
+    if (binding.type === 'Identifier') addDependent(namespaceFactoryDependents, namespace, String(binding.name))
+  }
+  const collect = (node: Node) => {
+    if (node.type === 'VariableDeclarator' || node.type === 'AssignmentExpression') {
+      const binding = (node.type === 'VariableDeclarator' ? node.id : node.left) as Node
+      const value = unwrapTransparentExpression((node.type === 'VariableDeclarator' ? node.init : node.right) as Node | undefined)
+      if (binding.type === 'Identifier') {
+        const name = String(binding.name)
+        if (value?.type === 'Identifier') {
+          addDependent(namespaceDependents, String(value.name), name)
+          addDependent(factoryDependents, String(value.name), name)
+        } else if (value && (value.type === 'MemberExpression' || value.type === 'OptionalMemberExpression')
+          && memberPropertyName(value) === 'createElement') {
+          const object = unwrapTransparentExpression(value.object as Node | undefined)
+          if (object?.type === 'Identifier') bindFactoryFromNamespace(String(object.name), binding)
+        }
+      } else if (binding.type === 'ObjectPattern' && value?.type === 'Identifier') {
+        for (const property of binding.properties as Node[]) {
+          if (property.type !== 'Property' && property.type !== 'ObjectProperty') continue
+          const key = property.key as Node
+          const imported = property.computed ? staticStringValue(key) : key.type === 'Identifier' ? String(key.name) : staticStringValue(key)
+          if (imported === 'createElement') bindFactoryFromNamespace(String(value.name), property.value as Node)
+        }
+      }
+    }
+    childNodes(node).forEach(collect)
+  }
+  collect(program)
+
+  const namespaces = new Set(importedNamespaces)
+  const namespaceQueue = [...namespaces]
+  for (let cursor = 0; cursor < namespaceQueue.length; cursor += 1) {
+    for (const alias of namespaceDependents.get(namespaceQueue[cursor]) ?? []) {
+      if (namespaces.has(alias)) continue
+      namespaces.add(alias)
+      namespaceQueue.push(alias)
+    }
+  }
+
+  const factories = new Set(importedFactories)
+  const factoryQueue = [...factories]
+  for (const namespace of namespaces) {
+    for (const alias of namespaceFactoryDependents.get(namespace) ?? []) {
+      if (factories.has(alias)) continue
+      factories.add(alias)
+      factoryQueue.push(alias)
+    }
+  }
+  for (let cursor = 0; cursor < factoryQueue.length; cursor += 1) {
+    for (const alias of factoryDependents.get(factoryQueue[cursor]) ?? []) {
+      if (factories.has(alias)) continue
+      factories.add(alias)
+      factoryQueue.push(alias)
+    }
+  }
+  return { factories, namespaces }
+}
+
+function renderedImportedComponents(
+  node: Node | undefined,
+  imports: Map<string, { source: string }>,
+  file: string,
+  factories: Set<string>,
+  namespaces: Set<string>,
+): { component: string; source: string; file: string }[] {
   if (!node) return []
   const rendered = new Map<string, { component: string; source: string; file: string }>()
   const add = (binding: string | undefined) => {
     const source = binding ? imports.get(binding)?.source : undefined
     if (binding && source) rendered.set(binding, { component: binding, source, file })
   }
-  const addComponentValues = (value: Node) => {
-    const visitValues = (current: Node) => {
-      if (current.type === 'Identifier' && /^[A-Z]/.test(String(current.name))) add(String(current.name))
-      childNodes(current).forEach(visitValues)
+  const addImportedValues = (value: Node) => {
+    const visitValues = (current: Node, parent?: Node, field?: string) => {
+      if (current.type === 'Identifier') {
+        const isStaticPropertyName = (parent?.type === 'Property' || parent?.type === 'ObjectProperty') && field === 'key' && !parent.computed
+          || (parent?.type === 'MemberExpression' || parent?.type === 'OptionalMemberExpression') && field === 'property' && !parent.computed
+        if (!isStaticPropertyName) add(String(current.name))
+      }
+      for (const [key, child] of Object.entries(current)) {
+        if (key === 'parent') continue
+        if (Array.isArray(child)) child.filter(isNode).forEach(item => visitValues(item, current, key))
+        else if (isNode(child)) visitValues(child, current, key)
+      }
     }
     visitValues(value)
   }
-  const visit = (current: Node) => {
+  const visit = (current: Node, parent?: Node, field?: string) => {
+    if (current.type === 'Identifier') {
+      const isStaticPropertyName = (parent?.type === 'Property' || parent?.type === 'ObjectProperty') && field === 'key' && !parent.computed
+        || (parent?.type === 'MemberExpression' || parent?.type === 'OptionalMemberExpression') && field === 'property' && !parent.computed
+      if (!isStaticPropertyName && /^[A-Z]/.test(String(current.name))) add(String(current.name))
+    }
+    if (current.type === 'CallExpression' || current.type === 'OptionalCallExpression') {
+      const callee = unwrapTransparentExpression(current.callee as Node | undefined)
+      const isCreateElement = callee?.type === 'Identifier'
+        ? factories.has(String(callee.name))
+        : !!callee && (callee.type === 'MemberExpression' || callee.type === 'OptionalMemberExpression')
+          && isNode(callee.object) && callee.object.type === 'Identifier' && namespaces.has(String(callee.object.name))
+          && memberPropertyName(callee) === 'createElement'
+      const firstArgument = (current.arguments as Node[] | undefined)?.[0]
+      if (isCreateElement && firstArgument) addImportedValues(firstArgument)
+    }
     if (current.type === 'JSXElement') {
       const name = (current.openingElement as Node).name as Node
       const binding = name.type === 'JSXIdentifier'
@@ -432,12 +529,12 @@ function renderedImportedComponents(node: Node | undefined, imports: Map<string,
           ? jsxMemberRootIdentifier(name)
           : undefined
       add(binding)
-      for (const attribute of (current.openingElement as Node).attributes as Node[]) {
-        if (attribute.type === 'JSXAttribute' && isNode(attribute.value)) addComponentValues(attribute.value)
-        if (attribute.type === 'JSXSpreadAttribute') addComponentValues(attribute.argument as Node)
-      }
     }
-    childNodes(current).forEach(visit)
+    for (const [key, value] of Object.entries(current)) {
+      if (key === 'parent') continue
+      if (Array.isArray(value)) value.filter(isNode).forEach(child => visit(child, current, key))
+      else if (isNode(value)) visit(value, current, key)
+    }
   }
   visit(node)
   return [...rendered.values()]
@@ -552,6 +649,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
     const uninspectableExternalComponentImports = new Map<string, { source: string }>()
     const reactFragments = new Set<string>()
     const reactNamespaces = new Set<string>()
+    const reactCreateElementImports = new Set<string>()
     for (const statement of program.body as Node[]) {
       if (statement.type !== 'ImportDeclaration') continue
       const source = String((statement.source as Node).value)
@@ -560,6 +658,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
           const localName = String((specifier.local as Node).name)
           if (specifier.type === 'ImportSpecifier') {
             if (String((specifier.imported as Node).name) === 'Fragment') reactFragments.add(localName)
+            if (source === 'react' && String((specifier.imported as Node).name) === 'createElement') reactCreateElementImports.add(localName)
           } else {
             reactNamespaces.add(localName)
           }
@@ -604,6 +703,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
     }
 
     const importedExternalComponentBindings = importedComponentAliases(program, uninspectableExternalComponentImports)
+    const reactFactories = reactCreateElementAliases(program, reactCreateElementImports, reactNamespaces)
 
     // An unresolved local import can carry Route or Routes under any local
     // alias, including aliases created by destructuring or object properties.
@@ -822,7 +922,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
             path: pathAttribute ? stringValue(pathAttribute.value as Node, `A <Route> path in ${where} in ${file}`) : undefined,
             index,
             renders: renderedComponents(jsxAttribute(node, 'element')?.value as Node | undefined),
-            uninspectableRenders: renderedImportedComponents(jsxAttribute(node, 'element')?.value as Node | undefined, importedExternalComponentBindings, file),
+            uninspectableRenders: renderedImportedComponents(jsxAttribute(node, 'element')?.value as Node | undefined, importedExternalComponentBindings, file, reactFactories.factories, reactFactories.namespaces),
             children: collect(node.children as Node[], where),
           })
           return
@@ -940,7 +1040,7 @@ type InventoryEntry = { path: string; routers: string[]; redirectToHome: boolean
 
 function inventoryEntries(consoleRoutes: ConsoleRouteCase[], surfaces: EntrySurfaceCase[], scopeRouters: Record<ConsoleRouteCase['scope'], string[]>): InventoryEntry[] {
   return [
-    ...consoleRoutes.map(route => ({ path: route.path, routers: scopeRouters[route.scope], redirectToHome: !!route.redirectToHome, redirects: !!route.redirectToHome || !!route.allowedPath, label: `${route.scope} ${route.path}` })),
+    ...consoleRoutes.map(route => ({ path: route.path, routers: scopeRouters[route.scope], redirectToHome: !!route.redirectToHome, redirects: !!route.redirectToHome || (!!route.allowedPath && route.allowedPath !== route.path), label: `${route.scope} ${route.path}` })),
     ...surfaces.map(surface => ({ path: new URL(surface.path, 'http://inventory.invalid').pathname, routers: [surface.router], redirectToHome: false, redirects: false, label: `${surface.router} ${surface.path}` })),
   ]
 }
@@ -1287,6 +1387,93 @@ export function Shell() {
       for (const source of sources) {
         expect(() => resolveRouters(extractRouters([source])), source.file).toThrow(/renders imported component NestedRoutes from third-party-router in wildcard route \/known\/\*; the console route inventory cannot inspect whether it owns nested <Routes>/)
       }
+    })
+
+    it('fails the full inventory check when a factory-created package component could own wildcard routes', () => {
+      const exactInventory: Inventory = {
+        consoleRoutes: [{ path: '/known', scope: 'unit', allowedPath: '/known' }],
+        surfaces: [],
+        scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
+        exclusions: [],
+        tabKeys: [],
+      }
+      const sources = [
+        {
+          file: 'src/external-factory-routes.tsx',
+          code: `import { createElement } from 'react'
+import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes } from 'third-party-router'
+export function Shell() {
+  return <Routes><Route path="/known/*" element={createElement(NestedRoutes)} /></Routes>
+}`,
+        },
+        {
+          file: 'src/external-factory-route-aliases.tsx',
+          code: `import * as React from 'react'
+import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes as PackageNestedRoutes } from 'third-party-router'
+const create = React.createElement
+const NestedRoutes = PackageNestedRoutes
+export function Shell() {
+  return <Routes><Route path="/known/*" element={create(NestedRoutes)} /></Routes>
+}`,
+        },
+        {
+          file: 'src/external-factory-route-import-aliases.tsx',
+          code: `import { createElement as makeElement } from 'react'
+import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes } from 'third-party-router'
+const make = makeElement
+const Routed = NestedRoutes
+export function Shell() {
+  return <Routes><Route path="/known/*" element={make(Routed)} /></Routes>
+}`,
+        },
+        {
+          file: 'src/external-factory-lowercase-component-alias.tsx',
+          code: `import { createElement as makeElement } from 'react'
+import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes as nestedRoutes } from 'third-party-router'
+const make = makeElement
+const localRoutes = nestedRoutes
+export function Shell() {
+  return <Routes><Route path="/known/*" element={make(localRoutes)} /></Routes>
+}`,
+        },
+      ]
+
+      // This is the whole route-inventory pipeline for the reported case:
+      // the self-mapped allowedPath must not let the opaque wildcard look covered.
+      for (const source of sources) {
+        expect(
+          () => inventoryProblems(resolveRouters(extractRouters([source])), exactInventory),
+          source.file,
+        ).toThrow(/renders imported component (?:NestedRoutes|PackageNestedRoutes|Routed|localRoutes) from third-party-router in wildcard route \/known\/\*; the console route inventory cannot inspect whether it owns nested <Routes>/)
+      }
+    })
+
+    it('does not treat a self-mapped allowedPath as a redirect', () => {
+      const inventory: Inventory = {
+        consoleRoutes: [{ path: '/known', scope: 'unit', allowedPath: '/known' }],
+        surfaces: [
+          { path: '/public', router: 'public', state: 'public', heading: '' },
+          { path: '/public/unit', router: 'public', state: 'public', heading: '' },
+        ],
+        scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
+        exclusions: [{ router: 'Shell', path: '*', reason: 'The shell fallback has no page of its own.' }],
+        tabKeys: [],
+      }
+      const source = {
+        file: 'src/self-mapped-allowed-path.tsx',
+        code: `import { Navigate, Route, Routes } from 'react-router-dom'
+export function Shell() {
+  return <Routes><Route path="/known/*" element={<KnownPage />} /><Route path="*" element={<Navigate to="/" />} /></Routes>
+}`,
+      }
+
+      expect(inventoryProblems(resolveRouters(extractRouters([source])), inventory)).toEqual([
+        'inventory entry unit /known reaches only the catch-all Shell /known/*; remove it, restore its route, or mark the redirect',
+      ])
     })
 
     it('keeps external page elements on static paths and router redirects on wildcard paths', () => {

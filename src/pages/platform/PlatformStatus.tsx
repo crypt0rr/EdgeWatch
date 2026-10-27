@@ -38,7 +38,7 @@ export function PlatformScanDemandPanel({ demand }: { demand: PlatformScanDemand
       <div><dt>Enabled jobs</dt><dd>{formatCount(demand.enabled_jobs)}</dd></div>
       <div><dt>Estimated from scan history</dt><dd>{formatCount(demand.history_jobs)}</dd></div>
       <div><dt>Lower bound from scanner rates</dt><dd>{formatCount(demand.lower_bound_jobs)}</dd></div>
-      <div><dt>Not fully estimated</dt><dd>{formatCount(demand.unestimated_jobs)}</dd></div>
+      <div><dt>Not fully estimated (may overlap lower bound)</dt><dd>{formatCount(demand.unestimated_jobs)}</dd></div>
     </dl>
     {demand.cadence_unattainable_jobs > 0 && <div className="notice warning platform-scan-demand-cadence"><AlertTriangle size={15} aria-hidden="true" /><span>{demand.cadence_unattainable_jobs === 1
       ? '1 job’s estimated run would still be active at one or more scheduled ticks, so the scheduler skips those ticks.'

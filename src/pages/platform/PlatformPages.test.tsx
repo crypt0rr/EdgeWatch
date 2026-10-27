@@ -617,12 +617,32 @@ describe('platform status', () => {
     expect(warning).toHaveClass('notice', 'warning')
     expect(warning).toHaveTextContent('Scheduled scan demand exceeds the shared capacity.')
     expect(warning).toHaveTextContent('Raise scheduler.max_concurrent_scans in config.yaml')
-    expect(within(panel).getByText('Not fully estimated').nextSibling).toHaveTextContent('2')
+    expect(within(panel).getByText('Not fully estimated (may overlap lower bound)').nextSibling).toHaveTextContent('2')
     expect(within(panel).getByText(/2 jobs’ estimated runs would still be active at one or more scheduled ticks, so the scheduler skips those ticks\./).closest('.notice')).toHaveClass('warning')
     expect(within(panel).getByText('2 enabled jobs have work or a schedule frequency the estimate cannot fully bound, so actual demand may be higher.')).toBeInTheDocument()
     expect(within(panel).getByText('Enabled jobs').nextSibling).toHaveTextContent('3')
     expect(within(panel).getByText('Estimated from scan history').nextSibling).toHaveTextContent('3')
     expect(within(panel).getByText('Lower bound from scanner rates').nextSibling).toHaveTextContent('0')
+  })
+
+  it('labels the not-fully-estimated count as overlapping lower-bound jobs', async () => {
+    vi.mocked(platformStatus).mockResolvedValue(statusWithDemand(scanDemand({
+      units: 1,
+      enabled_jobs: 1,
+      history_jobs: 0,
+      lower_bound_jobs: 1,
+      unestimated_jobs: 1,
+      slots: 1,
+      estimated_slot_seconds_per_day: 0,
+      capacity_slot_seconds_per_day: 86_400,
+      utilization_percent: 0,
+      over_capacity: false,
+    })))
+    renderWithProviders(<PlatformStatusPage />)
+
+    const panel = (await screen.findByRole('heading', { name: 'Scheduled scan demand' })).closest('.panel') as HTMLElement
+    expect(within(panel).getByText('Lower bound from scanner rates').nextSibling).toHaveTextContent('1')
+    expect(within(panel).getByText('Not fully estimated (may overlap lower bound)').nextSibling).toHaveTextContent('1')
   })
 
   it('warns from 80% of the shared slots, and not below', async () => {

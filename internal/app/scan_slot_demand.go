@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"hash/fnv"
 	"math"
 	"sort"
@@ -28,6 +29,8 @@ const (
 	scanDurationKeyCacheLimit    = 16384
 	scanScheduleObservationLimit = 20_000
 )
+
+var errInvalidScanSchedulePattern = errors.New("invalid scan schedule pattern")
 
 // ScanSlotDemand is a tenant's estimated scheduled scan work compared with
 // the slot-hours its effective scan-slot limit can provide in a day.
@@ -260,6 +263,11 @@ func (a *App) scanJobSchedule(ctx context.Context, job config.Job) (scanRunsPerD
 	// Schedule expansion runs without the lock. Two requests may compute the
 	// same new key, but one slow schedule cannot block cache hits for others.
 	value, err := schedulePattern(ctx, key.timezone, key.schedule)
+	if errors.Is(err, errInvalidScanSchedulePattern) {
+		// Invalid persisted settings make the estimate unavailable for this job,
+		// but should not fail the whole tenant's demand estimate.
+		err = nil
+	}
 	if err != nil {
 		return scanRunsPerDayValue{}, err
 	}
@@ -380,12 +388,12 @@ func schedulePattern(ctx context.Context, timezone, scheduleText string) (scanRu
 	var value scanRunsPerDayValue
 	location, err := time.LoadLocation(timezone)
 	if err != nil {
-		return value, nil
+		return value, errInvalidScanSchedulePattern
 	}
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	schedule, err := parser.Parse(scheduleText)
 	if err != nil {
-		return value, nil
+		return value, errInvalidScanSchedulePattern
 	}
 	value.start = time.Date(2024, time.January, 1, 0, 0, 0, 0, location)
 	value.end = time.Date(2025, time.January, 1, 0, 0, 0, 0, location)

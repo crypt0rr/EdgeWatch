@@ -68,6 +68,9 @@ time, so it adds at most one slot-day, 86,400 slot-seconds, to
 field counts jobs for which at least one tick is skipped; it does not depend on
 whether the job's demand exceeds a slot-day. The console shows a warning at
 80% utilization and above, and names the count of jobs with skipped ticks.
+`lower_bound_jobs` and `unestimated_jobs` are not disjoint counts: a job with a
+known-rate lower bound may also have additional work that cannot be fully
+estimated. The platform panel labels this possible overlap explicitly.
 
 A unit's capacity is a limit, not a reservation: every unit's scans share the
 deployment's `scheduler.max_concurrent_scans` slots, so units that each stay

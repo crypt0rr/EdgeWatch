@@ -458,6 +458,20 @@ func TestScanJobRunsPerDayHandlesFallbackInvalidAndDenseSchedules(t *testing.T) 
 	})
 }
 
+func TestScanJobScheduleTreatsInvalidSettingsAsUnestimated(t *testing.T) {
+	t.Parallel()
+	app := &App{Config: &config.Config{}}
+	for _, job := range []config.Job{
+		{Schedule: "0 * * * *", Timezone: "Mars/Olympus"},
+		{Schedule: "not cron", Timezone: "UTC"},
+	} {
+		value, err := app.scanJobSchedule(context.Background(), job)
+		if err != nil || value.ok {
+			t.Fatalf("invalid job schedule returned %+v, error %v; want an unestimated value without a fatal error", value, err)
+		}
+	}
+}
+
 func TestScanSlotDemandDoesNotCountManualOnlyJobsAsUnestimated(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

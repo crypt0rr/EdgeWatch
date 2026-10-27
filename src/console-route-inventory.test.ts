@@ -519,7 +519,15 @@ function renderedImportedComponents(
           && isNode(callee.object) && callee.object.type === 'Identifier' && namespaces.has(String(callee.object.name))
           && memberPropertyName(callee) === 'createElement'
       const firstArgument = (current.arguments as Node[] | undefined)?.[0]
-      if (isCreateElement && firstArgument) addImportedValues(firstArgument)
+      const propsArgument = (current.arguments as Node[] | undefined)?.[1]
+      if (isCreateElement) {
+        // A factory can render its first argument directly or forward an
+        // imported component through props to a wrapper's JSX tag. Inspect
+        // both values; the alias map includes local bindings and transparent
+        // TypeScript expressions.
+        if (firstArgument) addImportedValues(firstArgument)
+        if (propsArgument) addImportedValues(propsArgument)
+      }
     }
     if (current.type === 'JSXElement') {
       const name = (current.openingElement as Node).name as Node
@@ -1391,7 +1399,7 @@ export function Shell() {
 
     it('fails the full inventory check when a factory-created package component could own wildcard routes', () => {
       const exactInventory: Inventory = {
-        consoleRoutes: [{ path: '/known', scope: 'unit', allowedPath: '/known' }],
+        consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
         surfaces: [],
         scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
         exclusions: [],
@@ -1440,15 +1448,44 @@ export function Shell() {
   return <Routes><Route path="/known/*" element={make(localRoutes)} /></Routes>
 }`,
         },
+        {
+          file: 'src/external-factory-component-prop.tsx',
+          code: `import { Route, Routes } from 'react-router-dom'
+import { createElement as make } from 'react'
+import { NestedRoutes as nestedRoutes } from 'third-party-router'
+function RouteHost({ Component }: { Component: React.ComponentType }) {
+  return <Component />
+}
+export function Shell() {
+  return <Routes>
+    <Route path="/known/*" element={make(RouteHost, { Component: nestedRoutes })} />
+  </Routes>
+}`,
+        },
+        {
+          file: 'src/external-factory-component-prop-alias.tsx',
+          code: `import { Route, Routes } from 'react-router-dom'
+import { createElement as make } from 'react'
+import { NestedRoutes as nestedRoutes } from 'third-party-router'
+const nestedRoutesAlias = nestedRoutes
+function RouteHost({ Component }: { Component: React.ComponentType }) {
+  return <Component />
+}
+export function Shell() {
+  return <Routes>
+    <Route path="/known/*" element={make(RouteHost, { Component: nestedRoutesAlias as React.ComponentType })} />
+  </Routes>
+}`,
+        },
       ]
 
-      // This is the whole route-inventory pipeline for the reported case:
-      // the self-mapped allowedPath must not let the opaque wildcard look covered.
+      // A direct child entry can match the catch-all path while the third-party
+      // component hides still deeper nested routes from the inventory.
       for (const source of sources) {
         expect(
           () => inventoryProblems(resolveRouters(extractRouters([source])), exactInventory),
           source.file,
-        ).toThrow(/renders imported component (?:NestedRoutes|PackageNestedRoutes|Routed|localRoutes) from third-party-router in wildcard route \/known\/\*; the console route inventory cannot inspect whether it owns nested <Routes>/)
+        ).toThrow(/renders imported component (?:NestedRoutes|PackageNestedRoutes|Routed|localRoutes|nestedRoutes|nestedRoutesAlias) from third-party-router in wildcard route \/known\/\*; the console route inventory cannot inspect whether it owns nested <Routes>/)
       }
     })
 

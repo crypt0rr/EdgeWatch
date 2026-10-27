@@ -299,11 +299,25 @@ func TestVerifyRejectsCanceledSchemaChecks(t *testing.T) {
 	defer s.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := s.Verify(ctx); err == nil {
-		t.Fatal("canceled verification unexpectedly succeeded")
+	if _, err := s.Verify(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled verification = %v, want context cancellation", err)
 	}
-	if detectEdgeWatchSchema(ctx, s.reader()) {
-		t.Fatal("canceled schema probe reported a valid schema")
+	if valid, err := detectEdgeWatchSchema(ctx, s.reader()); valid || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled schema probe = %t, %v; want false with context cancellation", valid, err)
+	}
+}
+
+func TestDetectEdgeWatchSchemaPropagatesQueryError(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	valid, err := detectEdgeWatchSchema(context.Background(), db)
+	if valid || err == nil {
+		t.Fatalf("schema probe on a closed database = %t, %v; want a propagated query error", valid, err)
 	}
 }
 

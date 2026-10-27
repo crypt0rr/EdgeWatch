@@ -159,17 +159,13 @@ where the current schema is the one the database has at this start:
 
 - the copy just written, even when a host clock that is behind gives it an
   older timestamp than earlier copies;
-- for each schema below the current schema, the newest copy whose `<from>` is
-  that schema and whose `<to>` is above the current schema: a copy for an
-  upgrade that has not passed the database's schema yet. These are the copies
-  taken at the earlier schemas of this upgrade, one from each start that
-  committed a step before it failed, and at those of any attempt that was
-  rolled back. The same applies in turn below each kept copy: from each schema
-  below a kept copy's `<from>`, the newest copy whose `<to>` is above that
-  `<from>` is kept too. The copy at the schema the previous release used is
-  therefore among them, also when a release with another schema is started to
-  retry the failed upgrade and passes the first release's schema before it
-  fails;
+- for each upgrade limit in the unfinished-upgrade chain (starting with the
+  current schema and continuing with the `<from>` of each protected copy), the
+  newest copy for each earlier `<from>` whose `<to>` is above that limit. This
+  is evaluated separately at each limit, so the same source schema can have
+  more than one protected copy. That preserves the newest copy at the schema
+  the previous release used even when a later release takes over and advances
+  farther before failing;
 - the latest three other automatic pre-migration backups by the timestamp in
   their names, whatever their schemas, including earlier copies of the current
   schema and copies for upgrades that finished. Of two equal timestamps, the
@@ -177,11 +173,10 @@ where the current schema is the one the database has at this start:
 
 It removes the rest, separately from the scheduled `keep` count. The directory
 therefore holds at most three automatic copies plus the copy just written plus
-one per schema below the database's current schema that has a copy for an
-upgrade beyond it (the earlier schemas of this upgrade and of any rolled-back
-attempt), so retries at one schema never grow it. Because a copy that an
-earlier, rolled-back attempt left is kept when it is the newest from its
-schema, neither the oldest copy nor the one with the lowest `<from>` is
+one per qualifying `(limit, from)` pair in the descending chain, so retries at
+one schema never grow it. Because a rolled-back attempt can leave a retained
+copy from an earlier schema, neither the oldest copy nor the one with the
+lowest `<from>` is
 necessarily the right rollback point: choose the newest copy whose `<from>` is
 the schema of the version you ran before the upgrade, as
 [Rollback](/deployment/updates/#rollback) describes. A new copy is

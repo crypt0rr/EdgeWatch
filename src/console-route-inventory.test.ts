@@ -826,39 +826,138 @@ function importedComponentAliases(program: Node, imports: Map<string, { source: 
     addBindingNames(binding, names)
     if (!names.size || !value) return
     const references = new Set<string>()
-    const visitReferences = (node: Node | undefined) => {
+    const addReference = (node: Node, parent?: Node, field?: string) => {
+      if (node.type !== 'Identifier') return
+      const isStaticPropertyName = ((parent?.type === 'Property' || parent?.type === 'ObjectProperty') && field === 'key' && !parent.computed)
+        || ((parent?.type === 'MemberExpression' || parent?.type === 'OptionalMemberExpression') && field === 'property' && !parent.computed)
+      const isBindingIdentifier = (parent?.type === 'VariableDeclarator' && field === 'id')
+        || ((parent?.type === 'FunctionDeclaration' || parent?.type === 'FunctionExpression' || parent?.type === 'ClassDeclaration' || parent?.type === 'ClassExpression') && field === 'id')
+      if (!isStaticPropertyName && !isBindingIdentifier) references.add(String(node.name))
+    }
+    function visitComponentValueReferences(node: Node | undefined, parent?: Node, field?: string): void {
       if (!node) return
       const expression = unwrapTransparentExpression(node)
       if (expression !== node) {
-        if (expression) visitReferences(expression)
+        if (expression) visitComponentValueReferences(expression, parent, field)
         return
       }
+      if (node.type.startsWith('TS')) return
       if (node.type === 'Identifier') {
-        references.add(String(node.name))
+        addReference(node, parent, field)
+        return
+      }
+      if (node.type === 'JSXElement') {
+        const opening = node.openingElement as Node
+        const name = opening.name as Node
+        if (name.type === 'JSXIdentifier') references.add(String(name.name))
+        else if (name.type === 'JSXMemberExpression') {
+          const root = jsxMemberRootIdentifier(name)
+          if (root) references.add(root)
+        }
+        for (const attribute of opening.attributes as Node[]) {
+          if (attribute.type === 'JSXSpreadAttribute') {
+            visitComponentValueReferences(attribute.argument as Node | undefined, attribute, 'argument')
+            continue
+          }
+          const attributeValue = attribute.value as Node | null | undefined
+          if (attributeValue?.type === 'JSXExpressionContainer') {
+            visitComponentValueReferences(attributeValue.expression as Node | undefined, attributeValue, 'expression')
+          }
+        }
+        for (const child of node.children as Node[]) visitComponentBodyReferences(child)
+        return
+      }
+      if (node.type === 'JSXFragment') {
+        for (const child of node.children as Node[]) visitComponentBodyReferences(child)
+        return
+      }
+      if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression'
+        || node.type === 'ObjectMethod' || node.type === 'ClassMethod' || node.type === 'MethodDefinition') {
+        visitComponentBodyReferences(node.body as Node | undefined)
+        return
+      }
+      for (const [key, value] of Object.entries(node)) {
+        if (key === 'parent') continue
+        if (Array.isArray(value)) value.filter(isNode).forEach(child => visitComponentValueReferences(child, node, key))
+        else if (isNode(value)) visitComponentValueReferences(value, node, key)
+      }
+    }
+    function visitComponentBodyReferences(node: Node | undefined): void {
+      if (!node) return
+      if (node.type === 'JSXElement' || node.type === 'JSXFragment') {
+        visitComponentValueReferences(node)
+        return
+      }
+      if (node.type === 'ReturnStatement') {
+        visitComponentValueReferences(node.argument as Node | undefined, node, 'argument')
+        return
+      }
+      if (node.type === 'JSXExpressionContainer') {
+        visitComponentValueReferences(node.expression as Node | undefined, node, 'expression')
+        return
+      }
+      if (node.type === 'JSXSpreadChild') {
+        visitComponentValueReferences(node.expression as Node | undefined, node, 'expression')
+        return
+      }
+      if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression' || node.type === 'NewExpression') {
+        for (const argument of (node.arguments as Node[] | undefined) ?? []) visitComponentValueReferences(argument, node, 'arguments')
+        return
+      }
+      if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression'
+        || node.type === 'ObjectMethod' || node.type === 'ClassMethod' || node.type === 'MethodDefinition') return
+      for (const [key, value] of Object.entries(node)) {
+        if (key === 'parent') continue
+        if (Array.isArray(value)) value.filter(isNode).forEach(visitComponentBodyReferences)
+        else if (isNode(value)) visitComponentBodyReferences(value)
+      }
+    }
+    const visitReferences = (node: Node | undefined, parent?: Node, field?: string) => {
+      if (!node) return
+      const expression = unwrapTransparentExpression(node)
+      if (expression !== node) {
+        if (expression) visitReferences(expression, parent, field)
+        return
+      }
+      if (node.type.startsWith('TS')) return
+      if (node.type === 'Identifier') {
+        addReference(node, parent, field)
+        return
+      }
+      if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression'
+        || node.type === 'ObjectMethod' || node.type === 'ClassMethod' || node.type === 'MethodDefinition') {
+        visitComponentBodyReferences(node.body as Node | undefined)
         return
       }
       if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
-        visitReferences(node.object as Node | undefined)
+        visitReferences(node.object as Node | undefined, node, 'object')
         return
       }
       if (node.type === 'ConditionalExpression') {
-        visitReferences(node.consequent as Node | undefined)
-        visitReferences(node.alternate as Node | undefined)
+        visitReferences(node.consequent as Node | undefined, node, 'consequent')
+        visitReferences(node.alternate as Node | undefined, node, 'alternate')
         return
       }
       if (node.type === 'LogicalExpression') {
-        visitReferences(node.left as Node | undefined)
-        visitReferences(node.right as Node | undefined)
+        visitReferences(node.left as Node | undefined, node, 'left')
+        visitReferences(node.right as Node | undefined, node, 'right')
         return
       }
       if (node.type === 'ArrayExpression') {
-        for (const element of node.elements as (Node | null)[]) if (element) visitReferences(element)
+        for (const element of node.elements as (Node | null)[]) if (element) visitReferences(element, node, 'elements')
         return
       }
       if (node.type === 'ObjectExpression') {
         for (const property of node.properties as Node[]) {
-          visitReferences((property.type === 'RestElement' ? property.argument : property.value) as Node | undefined)
+          visitReferences((property.type === 'RestElement' ? property.argument : property.value) as Node | undefined, property, 'value')
         }
+        return
+      }
+      if (node.type === 'ImportDeclaration') return
+      for (const [key, value] of Object.entries(node)) {
+        if (key === 'parent') continue
+        if (Array.isArray(value)) value.filter(isNode).forEach(child => visitReferences(child, node, key))
+        else if (isNode(value)) visitReferences(value, node, key)
       }
     }
     visitReferences(value)
@@ -871,6 +970,8 @@ function importedComponentAliases(program: Node, imports: Map<string, { source: 
   const collect = (node: Node) => {
     if (node.type === 'VariableDeclarator') addDependencies(node.id as Node | undefined, node.init as Node | undefined)
     if (node.type === 'AssignmentExpression') addDependencies(node.left as Node | undefined, node.right as Node | undefined)
+    if (node.type === 'FunctionDeclaration' && isNode(node.id)) addDependencies(node.id, node)
+    if (node.type === 'ClassDeclaration' && isNode(node.id)) addDependencies(node.id, node)
     childNodes(node).forEach(collect)
   }
   collect(program)
@@ -1691,6 +1792,97 @@ export function Shell() {
       // An inventory entry for /known cannot cover a hidden /known/child route.
       for (const source of sources) {
         expect(() => resolveRouters(extractRouters([source])), source.file).toThrow(/renders imported component NestedRoutes from third-party-router in wildcard route \/known\/\*; the console route inventory cannot inspect whether it owns nested <Routes>/)
+      }
+    })
+
+    it('fails closed when a local wildcard fallback renders an opaque package component', () => {
+      const sources = [
+        {
+          file: 'src/local-fallback-with-external-routes.tsx',
+          code: `import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes } from 'third-party-router'
+function Fallback() { return <NestedRoutes /> }
+export function AuthRoutes() { return <Routes><Route path="*" element={<Fallback />} /></Routes> }`,
+        },
+        {
+          file: 'src/local-fallback-forwards-external-routes.tsx',
+          code: `import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes } from 'third-party-router'
+function Fallback() { const child = NestedRoutes; return <RouteHost Component={child} /> }
+function RouteHost({ Component }: { Component: React.ComponentType }) { return <Component /> }
+export function AuthRoutes() { return <Routes><Route path="*" element={<Fallback />} /></Routes> }`,
+        },
+        {
+          file: 'src/local-fallback-passes-external-routes.tsx',
+          code: `import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes } from 'third-party-router'
+function Fallback() { registerRoutes(NestedRoutes); return <main /> }
+export function AuthRoutes() { return <Routes><Route path="*" element={<Fallback />} /></Routes> }`,
+        },
+      ]
+      const inventory: Inventory = {
+        consoleRoutes: [],
+        surfaces: [
+          { path: '/public', router: 'public', state: 'public', heading: '' },
+          { path: '/public/unit', router: 'public', state: 'public', heading: '' },
+        ],
+        scopeRouters: { unit: ['AuthRoutes'], platform: [], shared: [] },
+        exclusions: [{ router: 'AuthRoutes', path: '*', reason: 'The fallback has no page of its own.' }],
+        tabKeys: [],
+      }
+
+      // Excluding the visible fallback must not hide a package-owned child route.
+      for (const source of sources) {
+        expect(() => inventoryProblems(resolveRouters(extractRouters([source])), inventory), source.file).toThrow(
+          /renders imported component (?:NestedRoutes|Fallback) from third-party-router in wildcard route \*; the console route inventory cannot inspect whether it owns nested <Routes>/,
+        )
+      }
+
+      const safeWrapper = {
+        file: 'src/local-fallback-with-package-hook.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+import { useTitle } from 'third-party-router'
+function Fallback() { useTitle('fallback'); return <main /> }
+export function AuthRoutes() { return <Routes><Route path="*" element={<Fallback />} /></Routes> }`,
+      }
+      expect(resolveRouters(extractRouters([safeWrapper]))[0].handles.map(label)).toEqual(['AuthRoutes *'])
+    })
+
+    it('tracks opaque package provenance through React component wrapper call results', () => {
+      const inventory: Inventory = {
+        consoleRoutes: [],
+        surfaces: [
+          { path: '/public', router: 'public', state: 'public', heading: '' },
+          { path: '/public/unit', router: 'public', state: 'public', heading: '' },
+        ],
+        scopeRouters: { unit: ['AuthRoutes'], platform: [], shared: [] },
+        exclusions: [{ router: 'AuthRoutes', path: '*', reason: 'The fallback has no page of its own.' }],
+        tabKeys: [],
+      }
+      const sources = [
+        {
+          file: 'src/memoized-external-fallback.tsx',
+          code: `import * as React from 'react'
+import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes } from 'third-party-router'
+const Wrapped = React.memo(NestedRoutes)
+export function AuthRoutes() { return <Routes><Route path="*" element={<Wrapped />} /></Routes> }`,
+        },
+        {
+          file: 'src/aliased-memoized-external-fallback.tsx',
+          code: `import { memo as wrap } from 'react'
+import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes } from 'third-party-router'
+const memoComponent = wrap
+const Wrapped = memoComponent(NestedRoutes)
+export function AuthRoutes() { return <Routes><Route path="*" element={<Wrapped />} /></Routes> }`,
+        },
+      ]
+
+      for (const source of sources) {
+        expect(() => inventoryProblems(resolveRouters(extractRouters([source])), inventory), source.file).toThrow(
+          /renders imported component (?:NestedRoutes|Wrapped) from third-party-router in wildcard route \*; the console route inventory cannot inspect whether it owns nested <Routes>/,
+        )
       }
     })
 

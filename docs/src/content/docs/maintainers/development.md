@@ -202,11 +202,16 @@ imported `lazy` alias also carry opaque component provenance. The lazy loader ma
 be inline or a statically declared function/arrow binding reached through
 identifier aliases; an unreadable callback fails closed. These components could
 render nested `<Routes>` whose paths would otherwise be missing from the axe and
-role audits. Readable local TypeScript components and local lazy imports are
-followed as usual; unrelated package loads and third-party page or presentation
-components on non-wildcard routes remain allowed. React primitives and recognized
-router exports are treated as known wrappers and redirects; `lucide-react` SVG
-icons are treated as presentation-only components.
+role audits. Readable local function and class component bodies are inspected
+for package components they render or forward, including through local component
+chains. Call-result aliases retain provenance through component wrappers such as
+`React.memo`, named `memo` imports, and their aliases. The wildcard guard still
+runs when the wildcard route itself is listed in `routesWithoutInventoryEntry`.
+Readable local TypeScript components and local lazy imports are followed as
+usual; unrelated package loads and third-party page or presentation components
+on non-wildcard routes remain allowed. React primitives and recognized router
+exports are treated as known wrappers and redirects; `lucide-react` SVG icons
+are treated as presentation-only components.
 
 `<Route>` props must be explicit: any JSX prop spread is rejected because a
 spread can override `path`, including when it appears after a direct `path`

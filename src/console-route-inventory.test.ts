@@ -2614,6 +2614,8 @@ type ComponentOrigin = {
   api?: 'Route' | 'Routes' | '*'
   /** Canonical local declaration name for a named component export. */
   componentName?: string
+  /** Whether this component declares a `<Routes>` table in its source module. */
+  routeTable?: boolean
   /** Its local render tree contains values the route inventory cannot inspect. */
   unreadable?: boolean
 }
@@ -2825,6 +2827,7 @@ function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<s
         return {
           source: source.file,
           componentName: localName,
+          routeTable: componentReadability.routeTableNames.has(localName),
           unreadable: componentReadability.routeTableNames.has(localName)
             && componentReadability.unreadableComponents.has(localName),
         }
@@ -2902,6 +2905,7 @@ function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<s
         if (current.get(name)?.source === origin.source
           && current.get(name)?.api === origin.api
           && current.get(name)?.componentName === origin.componentName
+          && current.get(name)?.routeTable === origin.routeTable
           && current.get(name)?.unreadable === origin.unreadable) continue
         current.set(name, origin)
         changed = true
@@ -3083,8 +3087,16 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
             const origin = moduleOrigins?.get(importedName)
               ?? (specifier.type === 'ImportSpecifier' ? moduleOrigins?.get('*') : undefined)
             if (origin?.componentName) {
-              localComponentImports.set(localName, { source: origin.componentName })
-              if (origin.unreadable) {
+              // Only attach a local component to a same-named route table
+              // when that table is declared by the imported module. Otherwise
+              // an unrelated table from another module could make an opaque
+              // component look inspectable.
+              localComponentImports.set(localName, {
+                source: origin.routeTable
+                  ? origin.componentName
+                  : `@unmodeled-local:${source} export ${importedName}`,
+              })
+              if (origin.routeTable && origin.unreadable) {
                 unreadableLocalComponentImports.set(localName, {
                   source: `local module ${source} export ${importedName}`,
                 })
@@ -3604,6 +3616,11 @@ function joinPattern(parent: string, path: string | undefined) {
  * its children, as React Router resolves descendant routes.
  */
 function resolveRouters(routers: SourceRouter[]): ResolvedRouter[] {
+  const localRenderLabel = (name: string) => {
+    if (!name.startsWith('@unmodeled-local:')) return name
+    const exportSeparator = name.lastIndexOf(' export ')
+    return exportSeparator >= 0 ? name.slice(exportSeparator + ' export '.length) : name
+  }
   const byName = new Map<string, SourceRouter>()
   for (const router of routers) {
     if (byName.has(router.name)) {
@@ -3623,7 +3640,7 @@ function resolveRouters(routers: SourceRouter[]): ResolvedRouter[] {
       }
       const unmodeledLocalRender = route.localRenders?.find(name => !byName.has(name))
       if (unmodeledLocalRender) {
-        throw new Error(`wildcard route ${pattern} renders local component ${unmodeledLocalRender} without a statically named nested <Routes>; the console route inventory cannot verify routes owned by an imported component`)
+        throw new Error(`wildcard route ${pattern} renders local component ${localRenderLabel(unmodeledLocalRender)} without a statically named nested <Routes>; the console route inventory cannot verify routes owned by an imported component`)
       }
       const unreadableLocalRender = route.unreadableLocalRenders?.[0]
       if (unreadableLocalRender) {
@@ -4707,6 +4724,40 @@ export function Fallback() { return <Routes><Route path="child" element={<p>Safe
 
         expect(() => resolveRouters(extractRouters(sourceFiles(sourceDirectory, fixtureRoot), fixtureRoot))).toThrow(
           /renders imported component ImportedFallback from local module \.\/runtime-routes export Fallback in wildcard route \/known\/\*/,
+        )
+      } finally {
+        rmSync(fixtureRoot, { recursive: true, force: true })
+      }
+    })
+
+    it('does not attach a local component without a route table to a same-named table elsewhere', () => {
+      const fixtureRoot = mkdtempSync(join(tmpdir(), 'edgewatch-unreadable-component-name-collision-'))
+      const sourceDirectory = join(fixtureRoot, 'src')
+      mkdirSync(sourceDirectory, { recursive: true })
+
+      try {
+        writeFileSync(join(sourceDirectory, 'Shell.tsx'), `import { Route, Routes } from 'react-router-dom'
+import { Fallback as ImportedFallback } from './runtime-fallback'
+import { Fallback as SafeFallback } from './safe-fallback'
+export function Shell() {
+  return <Routes>
+    <Route path="/known/*" element={<ImportedFallback />} />
+    <Route path="/safe/*" element={<SafeFallback />} />
+  </Routes>
+}
+`)
+        writeFileSync(join(sourceDirectory, 'runtime-fallback.tsx'), `function Fallback() {
+  const Page = window.routeRegistry.current
+  return <Page />
+}
+export { Fallback }
+`)
+        writeFileSync(join(sourceDirectory, 'safe-fallback.tsx'), `import { Route, Routes } from 'react-router-dom'
+export function Fallback() { return <Routes><Route path="child" element={<p>Safe</p>} /></Routes> }
+`)
+
+        expect(() => resolveRouters(extractRouters(sourceFiles(sourceDirectory, fixtureRoot), fixtureRoot))).toThrow(
+          /wildcard route \/known\/\* renders local component Fallback without a statically named nested <Routes>/,
         )
       } finally {
         rmSync(fixtureRoot, { recursive: true, force: true })

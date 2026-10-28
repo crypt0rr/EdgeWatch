@@ -296,10 +296,11 @@ such as `https:`, `data:`, or `file:` are opaque because the inventory cannot
 inspect them; `node:` built-ins are the exception.
 
 A component imported from another local module may appear directly in a
-wildcard route only when its source declares a statically named `<Routes>`
-table that the inventory can attach. Named import aliases retain the exported
-component's canonical declaration name, including a named re-export alias;
-unreadable render trees retain their module provenance across those aliases.
+wildcard route only when its own source declares a statically named `<Routes>`
+table that the inventory can attach; a same-named table in another module is
+not a substitute. Named import aliases retain the exported component's
+canonical declaration name, including a named re-export alias; unreadable
+render trees retain their module provenance across those aliases.
 Namespace-member components fail closed because the inventory cannot reliably
 identify their route table. Import the component by name or declare its routes
 in the audited JSX tree instead.

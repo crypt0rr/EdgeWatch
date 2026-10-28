@@ -101,8 +101,9 @@ gh attestation verify EdgeWatch_0.33.0_linux_amd64.tar.gz \
 
 Use `EdgeWatch_0.33.0_linux_arm64.tar.gz` for ARM64. The provenance covers
 each archive, not `checksums.txt` itself. The release's `release-manifest.json`
-records the source commit, the toolchain, and the Naabu release. Schema 2 also
-records the SHA-256 digest of the `edgewatch` member in each Linux archive.
+records the source commit, the toolchain, the Naabu release, and the x/net
+version used to build Naabu. Schema 2 also records the SHA-256 digest of the
+`edgewatch` member in each Linux archive.
 Before publication, the workflow checks that the extracted AMD64 and ARM64
 binaries match those archive-member digests, then copies
 `/usr/local/bin/edgewatch` from each digest-pinned image and checks it against

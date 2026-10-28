@@ -37,6 +37,8 @@ test -n "$canonical_goreleaser"
 env -u GORELEASER_VERSION DIST_DIR="$root/dist" FRONTEND_DIST="$root/frontend-dist" RELEASE_BINARIES="$root/release-binaries" \
   ./scripts/generate-release-manifest.sh v0.0.0 "$root/dist/release-manifest.json"
 test "$(jq -r '.toolchain.goreleaser' "$root/dist/release-manifest.json")" = "$canonical_goreleaser"
+expected_naabu_x_net="$(awk '$1 == "ARG" && $2 ~ /^NAABU_X_NET_VERSION=/ { sub(/^NAABU_X_NET_VERSION=/, "", $2); print $2; exit }' Dockerfile)"
+test "$(jq -r '.dependencies.naabu_x_net_version' "$root/dist/release-manifest.json")" = "$expected_naabu_x_net"
 GORELEASER_VERSION="$canonical_goreleaser" DIST_DIR="$root/dist" FRONTEND_DIST="$root/frontend-dist" RELEASE_BINARIES="$root/release-binaries" \
   ./scripts/generate-release-manifest.sh v0.0.0 "$root/dist/release-manifest-explicit.json"
 test "$(jq -r '.toolchain.goreleaser' "$root/dist/release-manifest-explicit.json")" = "$canonical_goreleaser"

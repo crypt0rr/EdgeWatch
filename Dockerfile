@@ -22,6 +22,7 @@ RUN if [ "$PREBUILT_FRONTEND" = "1" ]; then \
 FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS naabu
 ARG NAABU_VERSION=v2.6.1
 ARG NAABU_COMMIT=5a0ca8bde91b5bb16213e9e8b5c6871eac954bd8
+ARG NAABU_X_NET_VERSION=v0.62.0
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /naabu
@@ -34,6 +35,12 @@ RUN git init . \
     && git fetch --depth 1 origin refs/tags/${NAABU_VERSION}:refs/tags/${NAABU_VERSION} \
     && test "$(git rev-parse ${NAABU_VERSION}^{commit})" = "${NAABU_COMMIT}" \
     && git checkout --detach ${NAABU_COMMIT}
+# Naabu v2.6.1 pins x/net v0.48.0, which contains two newly reported
+# vulnerabilities in html. Keep the scanner source pin and resolve x/net at
+# the Go project's fixed release; Go records the compatible module graph and
+# checksums in this build stage. The image scan checks the resulting binary on
+# both supported architectures.
+RUN go get golang.org/x/net@${NAABU_X_NET_VERSION}
 # Naabu's dependencies import symbols dynamically even without cgo, so the
 # binary needs an ELF interpreter. Go names the build host's loader, which for
 # a cross-compiled architecture is glibc's; gcompat would then re-execute it

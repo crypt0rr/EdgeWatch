@@ -760,6 +760,7 @@ const reviewedReleaseRunForms = new Map([
   ['naabu', [
     'apk add --no-cache ca-certificates=20260909-r0 git=2.54.0-r0',
     'git init . && git remote add origin https://github.com/projectdiscovery/naabu.git && git fetch --depth 1 origin ${NAABU_COMMIT} && git fetch --depth 1 origin refs/tags/${NAABU_VERSION}:refs/tags/${NAABU_VERSION} && test "$(git rev-parse ${NAABU_VERSION}^{commit})" = "${NAABU_COMMIT}" && git checkout --detach ${NAABU_COMMIT}',
+    'go get golang.org/x/net@${NAABU_X_NET_VERSION}',
     'case "${TARGETARCH}" in amd64) loader=/lib/ld-musl-x86_64.so.1 ;; arm64) loader=/lib/ld-musl-aarch64.so.1 ;; *) echo "no musl loader known for ${TARGETARCH}" >&2; exit 1 ;; esac && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -I ${loader}" -o /out/naabu ./cmd/naabu && printf \'%s\\n\' \'package main\' \'import ("debug/elf"; "fmt"; "os")\' \'func main() { f, err := elf.Open(os.Args[1]); if err != nil { panic(err) }; for _, p := range f.Progs { if p.Type == elf.PT_INTERP { b := make([]byte, p.Filesz); if _, err := p.ReadAt(b, 0); err != nil { panic(err) }; fmt.Print(string(b[:len(b)-1])) } } }\' >/tmp/interp.go && interp="$(go run /tmp/interp.go /out/naabu)" && if [ -n "${interp}" ] && [ "${interp}" != "${loader}" ]; then echo "naabu names ${interp}, not ${loader}" >&2; exit 1; fi',
   ]],
   ['build', [
@@ -780,6 +781,7 @@ const reviewedStageArguments = new Map([
   ['naabu', new Map([
     ['NAABU_VERSION', { default: /^v[0-9]+\.[0-9]+\.[0-9]+$/, value: /^v[0-9]+\.[0-9]+\.[0-9]+$/ }],
     ['NAABU_COMMIT', { default: /^[0-9a-f]{40}$/, value: /^[0-9a-f]{40}$/ }],
+    ['NAABU_X_NET_VERSION', { default: /^v[0-9]+\.[0-9]+\.[0-9]+$/, value: /^v[0-9]+\.[0-9]+\.[0-9]+$/ }],
     ['TARGETOS', { automatic: true, value: /^linux$/ }],
     ['TARGETARCH', { automatic: true, value: /^(?:amd64|arm64)$/ }],
   ])],
@@ -1305,6 +1307,14 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   )
   assert.ok(runViolations(unsafeNaabuVersion).some((run) => run.stage === 'naabu'),
     'an unchecked version value must not enter an approved command form')
+  const unsafeNaabuXNetVersion = replaceOnce(
+    sourceDockerfile,
+    `ARG NAABU_X_NET_VERSION=${dockerfileArg('NAABU_X_NET_VERSION')}`,
+    'ARG NAABU_X_NET_VERSION=$(npm ci)',
+    'Naabu x/net version validation',
+  )
+  assert.ok(runViolations(unsafeNaabuXNetVersion).some((run) => run.stage === 'naabu'),
+    'an unchecked x/net version must not enter an approved command form')
   assert.ok(runViolations(sourceDockerfile, { ...buildArgs, VERSION: '$(npm ci)' }).some((run) => run.stage === 'build'),
     'an unchecked release version build argument must fail closed')
   assert.ok(runViolations(sourceDockerfile, { ...buildArgs, TARGETARCH: '$(npm ci)' }).some((run) => run.stage === 'naabu'),
@@ -2089,6 +2099,13 @@ test('Renovate updates every pinned image, package, and the Naabu release', () =
   // scripts/verify-naabu-pin.sh keep passing on a Renovate update.
   assert.deepEqual(renovateDependencies('Dockerfile', dockerfile).filter((dependency) => dependency.datasource === 'github-tags'), [
     { datasource: 'github-tags', depName: 'projectdiscovery/naabu', currentValue: dockerfileArg('NAABU_VERSION'), currentDigest: dockerfileArg('NAABU_COMMIT') },
+  ])
+  const naabuXNetVersion = dockerfileArg('NAABU_X_NET_VERSION')
+  const [naabuXNetMajor, naabuXNetMinor] = naabuXNetVersion.slice(1).split('.').map(Number)
+  assert.ok(naabuXNetMajor > 0 || (naabuXNetMajor === 0 && naabuXNetMinor >= 62),
+    'the Naabu build must use x/net v0.62.0 or newer for GO-2026-6860 and GO-2026-6866')
+  assert.deepEqual(renovateDependencies('Dockerfile', dockerfile).filter((dependency) => dependency.datasource === 'go'), [
+    { datasource: 'go', depName: 'golang.org/x/net', currentValue: naabuXNetVersion, currentDigest: undefined },
   ])
   const apkPins = assertApkPinsManaged(dockerfile)
   assert.ok(apkPins.includes('zlib=1.3.2-r1') || apkPins.some((pin) => pin.startsWith('zlib=')), 'the image pins zlib')

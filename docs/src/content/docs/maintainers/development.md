@@ -214,7 +214,16 @@ Readable local TypeScript components and local lazy imports are followed as
 usual; unrelated package loads and third-party page or presentation components
 on non-wildcard routes remain allowed. React primitives and recognized router
 exports are treated as known wrappers and redirects; `lucide-react` SVG icons
-are treated as presentation-only components.
+are treated as presentation-only components. Custom component tags and member
+tags in wildcard JSX element trees must use statically declared component
+bindings; runtime component parameters, dynamic prop spreads, or other
+unreadable component values fail closed. Local namespace imports inherit opaque
+provenance when their module exposes an opaque package export. Extracted
+same-named router components receive deterministic source-order suffixes, and
+duplicate router names supplied to the resolver fail closed instead of
+overwriting a route tree. JSX values imported through an unresolved `#`
+package-import-map specifier fail closed because this parser does not resolve
+`package.json` imports mappings.
 Opaque origins also follow package values, including `#` package-import-map
 specifiers, loaded by literal dynamic `import()` or `require()` calls through
 awaited module values, destructuring, member access and assignments, conditional

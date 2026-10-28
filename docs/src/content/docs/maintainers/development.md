@@ -254,6 +254,7 @@ different destination is an alias and does not receive a separate axe run;
 when `allowedPath` equals the requested path, the route is still audited.
 Accept a violation only with an `axeAllowances` entry in the spec that names
 the rule, a distinct audited surface key, the node, and the reason.
+The reason must contain non-whitespace text.
 Console routes and entry surfaces use different keys even when they share a
 path, and the spec rejects duplicate keys. It also fails when an allowance
 names a surface it does not audit or when an entry no longer matches a

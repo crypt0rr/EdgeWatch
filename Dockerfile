@@ -26,6 +26,7 @@ ARG NAABU_X_NET_VERSION=v0.62.0
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /naabu
+COPY scripts/verify-naabu-x-net-version.sh /usr/local/bin/verify-naabu-x-net-version.sh
 RUN apk add --no-cache ca-certificates=20261020-r0 git=2.54.0-r0
 # Fetch the immutable commit and the human-readable release tag, then verify
 # that the tag still resolves to the pinned commit before compiling.
@@ -40,7 +41,8 @@ RUN git init . \
 # the Go project's fixed release; Go records the compatible module graph and
 # checksums in this build stage. The image scan checks the resulting binary on
 # both supported architectures.
-RUN go get golang.org/x/net@${NAABU_X_NET_VERSION}
+RUN go get golang.org/x/net@${NAABU_X_NET_VERSION} \
+    && sh /usr/local/bin/verify-naabu-x-net-version.sh "${NAABU_X_NET_VERSION}"
 # Naabu's dependencies import symbols dynamically even without cgo, so the
 # binary needs an ELF interpreter. Go names the build host's loader, which for
 # a cross-compiled architecture is glibc's; gcompat would then re-execute it

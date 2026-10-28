@@ -102,7 +102,9 @@ gh attestation verify EdgeWatch_0.33.0_linux_amd64.tar.gz \
 Use `EdgeWatch_0.33.0_linux_arm64.tar.gz` for ARM64. The provenance covers
 each archive, not `checksums.txt` itself. The release's `release-manifest.json`
 records the source commit, the toolchain, the Naabu release, and the x/net
-version used to build Naabu. Schema 2 also records the SHA-256 digest of the
+version used to build Naabu. The Naabu build checks Go's selected module graph
+against the pinned version before compiling, so the manifest's x/net value is
+the version actually selected for that build. Schema 2 also records the SHA-256 digest of the
 `edgewatch` member in each Linux archive.
 Before publication, the workflow checks that the extracted AMD64 and ARM64
 binaries match those archive-member digests, then copies

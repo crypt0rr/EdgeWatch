@@ -52,6 +52,11 @@ type FixtureAxeAudit = {
 const axeAllowances: AxeAllowance[] = []
 
 function assertAuditedAllowanceSurfaces(allowances: AxeAllowance[], auditedSurfaces: ReadonlySet<string> = auditedSurfaceNames) {
+  const missingReasons = [...new Set(allowances
+    .filter(allowance => typeof allowance.reason !== 'string' || !allowance.reason.trim())
+    .map(allowance => `${allowance.rule} on ${allowance.surface} at ${allowance.target}`))]
+  if (missingReasons.length) throw new Error(`axeAllowances need a non-empty reason: ${missingReasons.join(', ')}`)
+
   const unknown = [...new Set(allowances.filter(allowance => !auditedSurfaces.has(allowance.surface)).map(allowance => allowance.surface))]
   if (unknown.length) throw new Error(`axeAllowances names surfaces this spec does not audit: ${unknown.join(', ')}`)
 }
@@ -368,10 +373,18 @@ function auditedSurfaceNamesFor(
   entries: EntrySurfaceCase[] = entrySurfaces,
   routes: ConsoleRouteCase[] = allConsoleRoutes,
 ) {
+  const requiredPageRoutes = routes.filter(route =>
+    !route.redirectToHome && !(route.allowedPath && route.allowedPath !== route.path),
+  )
+  const unreachable = requiredPageRoutes.filter(route =>
+    !roles.some(role => routeIsRenderedForRole(role, route) && expectedConsolePath(role, route) === route.path),
+  )
+  if (unreachable.length) {
+    throw new Error(`console page routes are not reachable by any configured role: ${unreachable.map(consoleRouteSurfaceKey).join(', ')}`)
+  }
+
   const names = [
-    ...routes
-      .filter(route => roles.some(role => routeIsRenderedForRole(role, route) && expectedConsolePath(role, route) === route.path))
-      .map(route => consoleRouteSurfaceKey(route)),
+    ...requiredPageRoutes.map(route => consoleRouteSurfaceKey(route)),
     ...entries.map(entrySurfaceKey),
     ...fixtures.map(fixture => fixture.surface),
   ]
@@ -424,6 +437,11 @@ test('axe allowances reject unaudited surfaces, including removed fixture audits
   const unknown: AxeAllowance = { rule: 'page-has-heading-one', surface: '/no-such-route', target: 'html', reason: 'Regression fixture.' }
   expect(() => assertAuditedAllowanceSurfaces([...axeAllowances, unknown])).toThrow(/does not audit: \/no-such-route/)
   expect(() => assertAuditedAllowanceSurfaces(axeAllowances)).not.toThrow()
+  for (const reason of ['', '   ', '\n\t']) {
+    expect(() => assertAuditedAllowanceSurfaces([
+      { ...unknown, surface: consoleRouteSurfaceKey(allConsoleRoutes[0]), reason },
+    ])).toThrow(/axeAllowances need a non-empty reason/)
+  }
 
   const consoleSecurityRoute = allConsoleRoutes.find(route => route.path === '/security')!
   expect(() => assertUniqueAuditedSurfaceNames([consoleRouteSurfaceKey(consoleSecurityRoute), consoleRouteSurfaceKey(consoleSecurityRoute)]))
@@ -441,6 +459,14 @@ test('axe allowances reject unaudited surfaces, including removed fixture audits
   const samePathAlias: ConsoleRouteCase = { path: '/reports', scope: 'unit', allowedPath: '/reports' }
   expect(routeIsRenderedForRole('administrator', samePathAlias)).toBe(true)
   expect(auditedSurfaceNamesFor([], [], [samePathAlias])).toContain(consoleRouteSurfaceKey(samePathAlias))
+
+  const misspelledPermission = {
+    path: '/unreachable-page',
+    scope: 'unit',
+    permission: 'jobs.reaad',
+  } as ConsoleRouteCase
+  expect(() => auditedSurfaceNamesFor([], [], [misspelledPermission]))
+    .toThrow('console page routes are not reachable by any configured role: console-route:unit:/unreachable-page')
 
   const removedAudit = fixtureAxeAudits.find(fixture => fixture.surface === 'fixture:open-remove-range-dialog')!
   const remainingAudits = fixtureAxeAudits.filter(fixture => fixture !== removedAudit)

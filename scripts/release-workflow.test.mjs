@@ -35,6 +35,7 @@ const golangciLintVersion = await readRepositoryFile('.golangci-lint-version')
 const renovate = JSON.parse(await readRepositoryFile('renovate.json'))
 const thirdPartyLicenses = await readRepositoryFile('THIRD_PARTY_LICENSES.md')
 const releaseManifestScript = await readRepositoryFile('scripts/generate-release-manifest.sh')
+const naabuXNetVersionVerifier = await readRepositoryFile('scripts/verify-naabu-x-net-version.sh')
 const scanScriptPath = 'scripts/scan-image-vulnerabilities.sh'
 const scanScript = await readRepositoryFile(scanScriptPath)
 const naabuAllowlist = await readRepositoryFile('scripts/naabu-vulncheck-allowlist.txt')
@@ -760,7 +761,7 @@ const reviewedReleaseRunForms = new Map([
   ['naabu', [
     'apk add --no-cache ca-certificates=20260909-r0 git=2.54.0-r0',
     'git init . && git remote add origin https://github.com/projectdiscovery/naabu.git && git fetch --depth 1 origin ${NAABU_COMMIT} && git fetch --depth 1 origin refs/tags/${NAABU_VERSION}:refs/tags/${NAABU_VERSION} && test "$(git rev-parse ${NAABU_VERSION}^{commit})" = "${NAABU_COMMIT}" && git checkout --detach ${NAABU_COMMIT}',
-    'go get golang.org/x/net@${NAABU_X_NET_VERSION}',
+    'go get golang.org/x/net@${NAABU_X_NET_VERSION} && sh /usr/local/bin/verify-naabu-x-net-version.sh "${NAABU_X_NET_VERSION}"',
     'case "${TARGETARCH}" in amd64) loader=/lib/ld-musl-x86_64.so.1 ;; arm64) loader=/lib/ld-musl-aarch64.so.1 ;; *) echo "no musl loader known for ${TARGETARCH}" >&2; exit 1 ;; esac && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -I ${loader}" -o /out/naabu ./cmd/naabu && printf \'%s\\n\' \'package main\' \'import ("debug/elf"; "fmt"; "os")\' \'func main() { f, err := elf.Open(os.Args[1]); if err != nil { panic(err) }; for _, p := range f.Progs { if p.Type == elf.PT_INTERP { b := make([]byte, p.Filesz); if _, err := p.ReadAt(b, 0); err != nil { panic(err) }; fmt.Print(string(b[:len(b)-1])) } } }\' >/tmp/interp.go && interp="$(go run /tmp/interp.go /out/naabu)" && if [ -n "${interp}" ] && [ "${interp}" != "${loader}" ]; then echo "naabu names ${interp}, not ${loader}" >&2; exit 1; fi',
   ]],
   ['build', [
@@ -1446,6 +1447,32 @@ test('release manifests bind archive members to extracted and image executables'
   assert.match(armCandidate, /verify-release-artifacts\.sh .*release-binaries$/)
   const armImage = stepBlock(arm, 'Verify ARM64 image binary matches the release archive')
   assert.match(armImage, /verify-release-image-binary\.sh .* arm64 linux\/arm64/)
+})
+
+test('the Naabu build rejects an x/net module graph that differs from its requested pin', async (t) => {
+  assert.match(dockerfile, /COPY scripts\/verify-naabu-x-net-version\.sh \/usr\/local\/bin\/verify-naabu-x-net-version\.sh/)
+  assert.match(dockerfile, /RUN go get golang\.org\/x\/net@\$\{NAABU_X_NET_VERSION\} \\\n\s+&& sh \/usr\/local\/bin\/verify-naabu-x-net-version\.sh "\$\{NAABU_X_NET_VERSION\}"/)
+  assert.match(naabuXNetVersionVerifier, /go list -m -f '\{\{\.Version\}\}' golang\.org\/x\/net/)
+
+  const directory = await mkdtemp(join(tmpdir(), 'edgewatch-naabu-x-net-version-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const fakeBin = join(directory, 'bin')
+  await mkdir(fakeBin)
+  const fakeGo = join(fakeBin, 'go')
+  await writeFile(fakeGo, '#!/bin/sh\nprintf \'%s\\n\' "$FAKE_GO_MODULE_VERSION"\n')
+  await chmod(fakeGo, 0o755)
+  const verifierPath = resolve(repositoryRoot, 'scripts/verify-naabu-x-net-version.sh')
+  const runVerifier = (resolvedVersion) => spawnSync('sh', [verifierPath, 'v0.62.0'], {
+    cwd: directory,
+    env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, FAKE_GO_MODULE_VERSION: resolvedVersion },
+    encoding: 'utf8',
+  })
+
+  const matching = runVerifier('v0.62.0')
+  assert.equal(matching.status, 0, matching.stderr || matching.stdout)
+  const mismatched = runVerifier('v0.63.0')
+  assert.notEqual(mismatched.status, 0)
+  assert.match(mismatched.stderr, /Go selected golang\.org\/x\/net v0\.63\.0, expected v0\.62\.0/)
 })
 
 // The verify job builds the release binaries and the frontend that the image

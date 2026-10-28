@@ -214,7 +214,9 @@ exports are treated as known wrappers and redirects; `lucide-react` SVG icons
 are treated as presentation-only components.
 Opaque origins also follow bare-package values loaded by literal dynamic
 `import()` or `require()` calls through awaited module values, destructuring,
-member access, aliases, and `React.lazy` promise aliases. A lowercase package
+member access, conditional and logical branches, local helper return values,
+callable aliases, and `React.lazy` promise aliases. Inline opaque loads in a
+wildcard route's JSX values are recorded directly. A lowercase package
 component passed to a local wrapper call also retains provenance when that
 wrapper is exported. A runtime component value shadowing a statically declared
 name does not count as readable. Local extensionless imports follow Vite's

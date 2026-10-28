@@ -214,16 +214,20 @@ exports are treated as known wrappers and redirects; `lucide-react` SVG icons
 are treated as presentation-only components.
 Opaque origins also follow bare-package values loaded by literal dynamic
 `import()` or `require()` calls through awaited module values, destructuring,
-member access, conditional and logical branches, local helper return values,
-callable aliases, and `React.lazy` promise aliases. Inline opaque loads in a
-wildcard route's JSX values are recorded directly. A lowercase package
-component passed to a local wrapper call also retains provenance when that
-wrapper is exported. A runtime component value shadowing a statically declared
-name does not count as readable. Local extensionless imports follow Vite's
-extension order; if JavaScript or JSON wins before a TypeScript candidate, the
-inventory fails closed instead of inspecting the TypeScript sibling. A local
-router mounted with `React.createElement(LocalRouter)` is attached to the
-declaring route so its child paths remain in the inventory.
+member access and assignments, conditional and logical branches, local helper
+returns, statically named object/class method returns, callable aliases, and
+`React.lazy` promise aliases. Function and method chains use a dependency
+worklist instead of recursively rescanning their source. Inline opaque loads in
+a wildcard route's JSX values are recorded directly. Anonymous default-export
+components preserve provenance from inline runtime loads. A lowercase package
+component passed to a local function or object/class method wrapper also retains
+provenance when that wrapper is exported, including through mutable callable
+aliases. A runtime component value shadowing a statically declared name does
+not count as readable. Local extensionless imports follow Vite's extension
+order; if JavaScript or JSON wins before a TypeScript candidate, the inventory
+fails closed instead of inspecting the TypeScript sibling. A local router
+mounted with `React.createElement(LocalRouter)` is attached to the declaring
+route so its child paths remain in the inventory.
 
 Wildcard route `element`, `errorElement`, and `hydrateFallbackElement` props
 must use literal JSX, fragments, primitive values, `null`, or statically

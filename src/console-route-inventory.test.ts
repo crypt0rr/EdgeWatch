@@ -123,6 +123,25 @@ function memberPropertyName(node: Node): string | undefined {
   return node.computed ? staticStringValue(property) : property.type === 'Identifier' ? String(property.name) : undefined
 }
 
+/** Returns a statically named identifier/member chain such as `registry.Page`. */
+function staticMemberPath(node: Node | undefined): string | undefined {
+  const expression = unwrapTransparentExpression(node)
+  if (!expression) return undefined
+  if (expression.type === 'Identifier') return String(expression.name)
+  if (expression.type !== 'MemberExpression' && expression.type !== 'OptionalMemberExpression') return undefined
+  const object = staticMemberPath(expression.object as Node | undefined)
+  const property = memberPropertyName(expression)
+  return object && property !== undefined ? `${object}.${property}` : undefined
+}
+
+function memberRootIdentifier(node: Node | undefined): string | undefined {
+  let expression = unwrapTransparentExpression(node)
+  while (expression && (expression.type === 'MemberExpression' || expression.type === 'OptionalMemberExpression')) {
+    expression = unwrapTransparentExpression(expression.object as Node | undefined)
+  }
+  return expression?.type === 'Identifier' ? String(expression.name) : undefined
+}
+
 function isCommonJSModuleObject(node: Node | undefined, moduleAliases: Set<string>): boolean {
   node = unwrapTransparentExpression(node)
   return node?.type === 'Identifier' && moduleAliases.has(String(node.name))
@@ -434,8 +453,11 @@ function opaqueRuntimeModuleBindings(
     .filter(load => isOpaqueExternalPackage(load.specifier, isLocalSpecifier))
     .map(load => [load.node, load.specifier]))
   const direct = new Map<string, { source: string }>()
+  const functionOrigins = new Map<string, { source: string }>()
   const localFunctions = new Map<string, Set<Node>>()
   const localFunctionAliases = new Map<string, Set<string>>()
+  const functionSourceCache = new Map<string, { version: number; source?: string }>()
+  let directVersion = 0
   const addLocalFunction = (name: string, fn: Node) => {
     const overloads = localFunctions.get(name) ?? new Set<Node>()
     overloads.add(fn)
@@ -446,24 +468,83 @@ function opaqueRuntimeModuleBindings(
     aliases.add(target)
     localFunctionAliases.set(name, aliases)
   }
-  const collectLocalFunctions = (node: Node, parent?: Node) => {
+  const isFunctionValue = (node: Node | undefined) => !!node && [
+    'ArrowFunctionExpression', 'FunctionExpression', 'ObjectMethod', 'ClassMethod', 'ClassPrivateMethod', 'MethodDefinition',
+  ].includes(node.type)
+  const staticKey = (node: Node | undefined) => node?.type === 'Identifier' ? String(node.name) : staticStringValue(node)
+  const collectObjectMethods = (object: Node, owner: string) => {
+    for (const property of (object.properties as Node[] | undefined) ?? []) {
+      const key = staticKey(property.key as Node | undefined)
+      if (!key) continue
+      const path = `${owner}.${key}`
+      const value = property.type === 'RestElement' ? property.argument as Node | undefined : property.value as Node | undefined
+      if (isFunctionValue(property) || isFunctionValue(value)) addLocalFunction(path, (isFunctionValue(property) ? property : value) as Node)
+      if (value?.type === 'ObjectExpression') collectObjectMethods(value, path)
+    }
+  }
+  const collectClassMethods = (classNode: Node, owner: string) => {
+    const body = classNode.body as Node | undefined
+    for (const method of (body?.body as Node[] | undefined) ?? []) {
+      if (!['ClassMethod', 'ClassPrivateMethod', 'MethodDefinition'].includes(method.type)) continue
+      const key = staticKey(method.key as Node | undefined)
+      if (!key) continue
+      addLocalFunction(method.static === true ? `${owner}.${key}` : `${owner}.prototype.${key}`, method)
+    }
+  }
+  const functionReference = (node: Node | undefined) => {
+    const value = unwrapTransparentExpression(node)
+    return value?.type === 'Identifier' || value?.type === 'MemberExpression' || value?.type === 'OptionalMemberExpression'
+      ? staticMemberPath(value)
+      : undefined
+  }
+  const collectLocalFunctions = (node: Node, parent?: Node, enclosingClass?: string) => {
+    let className = enclosingClass
+    if ((node.type === 'ClassDeclaration' || node.type === 'ClassExpression')) {
+      const id = node.id as Node | undefined
+      if (id?.type === 'Identifier') className = String(id.name)
+      else if (parent?.type === 'VariableDeclarator' && (parent.id as Node | undefined)?.type === 'Identifier') {
+        className = String((parent.id as Node).name)
+      }
+      if (className) collectClassMethods(node, className)
+    }
     if (node.type === 'FunctionDeclaration' && isNode(node.id)) {
       addLocalFunction(String((node.id as Node).name), node)
     }
-    if (node.type === 'VariableDeclarator' && parent?.type === 'VariableDeclaration' && parent.kind === 'const'
-      && (node.id as Node).type === 'Identifier') {
+    if ((node.type === 'ClassMethod' || node.type === 'ClassPrivateMethod' || node.type === 'MethodDefinition') && className) {
+      const key = staticKey(node.key as Node | undefined)
+      if (key) addLocalFunction(node.static === true ? `${className}.${key}` : `${className}.prototype.${key}`, node)
+    }
+    if (node.type === 'VariableDeclarator' && (node.id as Node).type === 'Identifier') {
       const name = String((node.id as Node).name)
       const value = unwrapTransparentExpression(node.init as Node | undefined)
-      if (value?.type === 'ArrowFunctionExpression' || value?.type === 'FunctionExpression') addLocalFunction(name, value)
-      else if (value?.type === 'Identifier') addLocalFunctionAlias(name, String(value.name))
+      if (value && isFunctionValue(value)) addLocalFunction(name, value)
+      else {
+        const reference = functionReference(value)
+        if (reference) addLocalFunctionAlias(name, reference)
+        if (value?.type === 'ObjectExpression') collectObjectMethods(value, name)
+        if (value?.type === 'ClassExpression') collectClassMethods(value, name)
+      }
     }
-    childNodes(node).forEach(child => collectLocalFunctions(child, node))
+    if (node.type === 'AssignmentExpression' && (node.left as Node | undefined)?.type === 'Identifier') {
+      const target = String((node.left as Node).name)
+      const reference = functionReference(node.right as Node | undefined)
+      if (reference) addLocalFunctionAlias(target, reference)
+    }
+    childNodes(node).forEach(child => collectLocalFunctions(child, node, className))
   }
   collectLocalFunctions(program)
 
   const namesInPattern = (pattern: Node | undefined, target: Set<string>) => {
     if (!pattern) return
     if (pattern.type === 'Identifier') target.add(String(pattern.name))
+    else if (pattern.type === 'MemberExpression' || pattern.type === 'OptionalMemberExpression') {
+      const path = staticMemberPath(pattern)
+      if (path) target.add(`@member:${path}`)
+      else {
+        const root = memberRootIdentifier(pattern)
+        if (root) target.add(`@member-root:${root}`)
+      }
+    }
     else if (pattern.type === 'RestElement' || pattern.type === 'AssignmentPattern') {
       namesInPattern((pattern.argument ?? pattern.left) as Node | undefined, target)
     } else if (pattern.type === 'ObjectPattern') {
@@ -475,9 +556,11 @@ function opaqueRuntimeModuleBindings(
     }
   }
   const returnedExpressions = (fn: Node): Node[] => {
-    const body = fn.type === 'FunctionDeclaration' || fn.type === 'FunctionExpression' || fn.type === 'ArrowFunctionExpression'
-      ? fn.body as Node | undefined
-      : undefined
+    const body = fn.type === 'MethodDefinition'
+      ? ((fn.value as Node | undefined)?.body as Node | undefined)
+      : ['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression', 'ObjectMethod', 'ClassMethod', 'ClassPrivateMethod'].includes(fn.type)
+        ? fn.body as Node | undefined
+        : undefined
     if (!body) return []
     if (body.type !== 'BlockStatement') return [body]
     const expressions: Node[] = []
@@ -489,71 +572,110 @@ function opaqueRuntimeModuleBindings(
     visit(body)
     return expressions
   }
-  const sourceFromLocalFunction = (name: string, seen: Set<string>): string | undefined => {
-    if (seen.has(name)) return undefined
-    seen.add(name)
-    const functions = localFunctions.get(name)
-    const aliases = localFunctionAliases.get(name)
-    for (const fn of functions ?? []) {
-      for (const value of returnedExpressions(fn)) {
-        const source = sourceIn(value, new Set(seen))
-        if (source) return source
-      }
-    }
-    for (const alias of aliases ?? []) {
-      const source = sourceFromLocalFunction(alias, new Set(seen))
-      if (source) return source
-    }
-    return undefined
-  }
-  const sourceIn = (node: Node | undefined, seenFunctions = new Set<string>()): string | undefined => {
+  const scanSource = (node: Node | undefined, functionQueue: Set<string>): string | undefined => {
     if (!node) return undefined
     const expression = unwrapTransparentExpression(node)
     if (!expression) return undefined
     const loaded = loads.get(expression)
     if (loaded) return loaded
     if (expression.type === 'Identifier') {
-      return direct.get(String(expression.name))?.source
-        ?? sourceFromLocalFunction(String(expression.name), seenFunctions)
+      const name = String(expression.name)
+      const known = direct.get(name)?.source
+      if (known) return known
+      if (localFunctions.has(name) || localFunctionAliases.has(name)) functionQueue.add(name)
+      return undefined
     }
     if (expression.type === 'AwaitExpression' || expression.type === 'ChainExpression') {
-      return sourceIn((expression.argument ?? expression.expression) as Node | undefined, seenFunctions)
+      return scanSource((expression.argument ?? expression.expression) as Node | undefined, functionQueue)
     }
     if (expression.type === 'MemberExpression' || expression.type === 'OptionalMemberExpression') {
-      return sourceIn(expression.object as Node | undefined, seenFunctions)
+      const path = staticMemberPath(expression)
+      const memberSource = path ? direct.get(`@member:${path}`)?.source : undefined
+      if (memberSource) return memberSource
+      const root = memberRootIdentifier(expression)
+      const rootSource = root ? direct.get(`@member-root:${root}`)?.source : undefined
+      if (rootSource) return rootSource
+      if (path && (localFunctions.has(path) || localFunctionAliases.has(path))) functionQueue.add(path)
+      return scanSource(expression.object as Node | undefined, functionQueue)
     }
     if (expression.type === 'ConditionalExpression') {
-      return sourceIn(expression.consequent as Node | undefined, seenFunctions)
-        ?? sourceIn(expression.alternate as Node | undefined, seenFunctions)
-        ?? sourceIn(expression.test as Node | undefined, seenFunctions)
+      return scanSource(expression.consequent as Node | undefined, functionQueue)
+        ?? scanSource(expression.alternate as Node | undefined, functionQueue)
+        ?? scanSource(expression.test as Node | undefined, functionQueue)
     }
     if (expression.type === 'LogicalExpression') {
-      return sourceIn(expression.left as Node | undefined, seenFunctions)
-        ?? sourceIn(expression.right as Node | undefined, seenFunctions)
+      return scanSource(expression.left as Node | undefined, functionQueue)
+        ?? scanSource(expression.right as Node | undefined, functionQueue)
     }
     if (expression.type === 'CallExpression' || expression.type === 'OptionalCallExpression') {
       // Promise transformations such as import('pkg').then(...) keep the load
       // in the callee tree. Local calls can hide the load in their return body.
-      const calleeSource = sourceIn(expression.callee as Node | undefined, seenFunctions)
+      const calleeSource = scanSource(expression.callee as Node | undefined, functionQueue)
       if (calleeSource) return calleeSource
       for (const argument of (expression.arguments as Node[] | undefined) ?? []) {
-        const source = sourceIn(argument, seenFunctions)
+        const source = scanSource(argument, functionQueue)
         if (source) return source
       }
       return undefined
     }
-    if (expression.type === 'FunctionDeclaration' || expression.type === 'FunctionExpression' || expression.type === 'ArrowFunctionExpression') {
+    if (isFunctionValue(expression) || expression.type === 'FunctionDeclaration') {
       for (const value of returnedExpressions(expression)) {
-        const source = sourceIn(value, seenFunctions)
+        const source = scanSource(value, functionQueue)
         if (source) return source
       }
       return undefined
     }
     for (const child of childNodes(expression)) {
-      const source = sourceIn(child, seenFunctions)
+      const source = scanSource(child, functionQueue)
       if (source) return source
     }
     return undefined
+  }
+  const sourceFromLocalFunctions = (names: Set<string>): string | undefined => {
+    const pending = [...names]
+    const queued = new Set(pending)
+    const visited = new Set<string>()
+    let source: string | undefined
+    for (let cursor = 0; cursor < pending.length && !source; cursor += 1) {
+      const name = pending[cursor]
+      const cached = functionSourceCache.get(name)
+      if (cached?.source) {
+        source = cached.source
+        continue
+      }
+      if (cached?.version === directVersion) {
+        continue
+      }
+      if (visited.has(name)) continue
+      visited.add(name)
+      const enqueue = (dependency: string) => {
+        if (queued.has(dependency)) return
+        queued.add(dependency)
+        pending.push(dependency)
+      }
+      for (const alias of localFunctionAliases.get(name) ?? []) enqueue(alias)
+      for (const fn of localFunctions.get(name) ?? []) {
+        for (const value of returnedExpressions(fn)) {
+          const dependencies = new Set<string>()
+          source = scanSource(value, dependencies)
+          for (const dependency of dependencies) enqueue(dependency)
+          if (source) break
+        }
+        if (source) break
+      }
+    }
+    for (const name of visited) functionSourceCache.set(name, { version: directVersion, source })
+    return source
+  }
+  const sourceIn = (node: Node | undefined): string | undefined => {
+    const functionQueue = new Set<string>()
+    const source = scanSource(node, functionQueue)
+    return source ?? sourceFromLocalFunctions(functionQueue)
+  }
+  const setDirect = (name: string, source: string) => {
+    if (direct.get(name)?.source === source) return
+    direct.set(name, { source })
+    directVersion += 1
   }
   const collect = (node: Node) => {
     if (node.type === 'VariableDeclarator') {
@@ -561,7 +683,7 @@ function opaqueRuntimeModuleBindings(
       if (source) {
         const names = new Set<string>()
         namesInPattern(node.id as Node | undefined, names)
-        for (const name of names) direct.set(name, { source })
+        for (const name of names) setDirect(name, source)
       }
     }
     if (node.type === 'AssignmentExpression') {
@@ -569,16 +691,17 @@ function opaqueRuntimeModuleBindings(
       if (source) {
         const names = new Set<string>()
         namesInPattern(node.left as Node | undefined, names)
-        for (const name of names) direct.set(name, { source })
+        for (const name of names) setDirect(name, source)
       }
     }
     if (node.type === 'FunctionDeclaration' && isNode(node.id)) {
       const source = sourceIn(node)
-      if (source) direct.set(String((node.id as Node).name), { source })
+      if (source) functionOrigins.set(String((node.id as Node).name), { source })
     }
     childNodes(node).forEach(collect)
   }
   collect(program)
+  for (const [name, origin] of functionOrigins) direct.set(name, origin)
   return importedComponentAliases(program, direct)
 }
 
@@ -1177,6 +1300,14 @@ function renderedImportedComponents(
   }
   const addImportedValues = (value: Node) => {
     const visitValues = (current: Node, parent?: Node, field?: string) => {
+      if (current.type === 'MemberExpression' || current.type === 'OptionalMemberExpression') {
+        const path = staticMemberPath(current)
+        if (path) add(`@member:${path}`)
+        else {
+          const root = memberRootIdentifier(current)
+          if (root) add(`@member-root:${root}`)
+        }
+      }
       if (current.type === 'Identifier') {
         const isStaticPropertyName = (parent?.type === 'Property' || parent?.type === 'ObjectProperty') && field === 'key' && !parent.computed
           || (parent?.type === 'MemberExpression' || parent?.type === 'OptionalMemberExpression') && field === 'property' && !parent.computed
@@ -1263,6 +1394,15 @@ function importedComponentAliases(program: Node, imports: Map<string, { source: 
     if (!pattern) return
     if (pattern.type === 'Identifier') {
       names.add(String(pattern.name))
+      return
+    }
+    if (pattern.type === 'MemberExpression' || pattern.type === 'OptionalMemberExpression') {
+      const path = staticMemberPath(pattern)
+      if (path) names.add(`@member:${path}`)
+      else {
+        const root = memberRootIdentifier(pattern)
+        if (root) names.add(`@member-root:${root}`)
+      }
       return
     }
     if (pattern.type === 'RestElement' || pattern.type === 'AssignmentPattern') {
@@ -1388,7 +1528,13 @@ function importedComponentAliases(program: Node, imports: Map<string, { source: 
         return
       }
       if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
-        visitReferences(node.object as Node | undefined, node, 'object')
+        const path = staticMemberPath(node)
+        if (path) references.add(`@member:${path}`)
+        else {
+          const root = memberRootIdentifier(node)
+          if (root) references.add(`@member-root:${root}`)
+          visitReferences(node.object as Node | undefined, node, 'object')
+        }
         return
       }
       if (node.type === 'ConditionalExpression') {
@@ -1529,14 +1675,54 @@ function componentBindingsPassedToLocalCalls(program: Node): Set<string> {
     aliases.add(alias)
     callableAliases.set(target, aliases)
   }
+  const functionValue = (node: Node | undefined) => !!node && [
+    'ArrowFunctionExpression', 'FunctionExpression', 'ObjectMethod', 'ClassMethod', 'ClassPrivateMethod', 'MethodDefinition',
+  ].includes(node.type)
+  const staticKey = (node: Node | undefined) => node?.type === 'Identifier' ? String(node.name) : staticStringValue(node)
+  const collectObjectCallables = (object: Node, owner: string) => {
+    for (const property of (object.properties as Node[] | undefined) ?? []) {
+      const key = staticKey(property.key as Node | undefined)
+      if (!key) continue
+      const path = `${owner}.${key}`
+      const value = (property.type === 'RestElement' ? property.argument : property.value) as Node | undefined
+      if (functionValue(property) || functionValue(value)) callableBindings.add(path)
+      if (value?.type === 'ObjectExpression') collectObjectCallables(value, path)
+    }
+  }
+  const collectClassCallables = (classNode: Node, owner: string) => {
+    const body = classNode.body as Node | undefined
+    for (const method of (body?.body as Node[] | undefined) ?? []) {
+      if (!['ClassMethod', 'ClassPrivateMethod', 'MethodDefinition'].includes(method.type)) continue
+      const key = staticKey(method.key as Node | undefined)
+      if (key) callableBindings.add(method.static === true ? `${owner}.${key}` : `${owner}.prototype.${key}`)
+    }
+  }
   const collectCallables = (node: Node, parent?: Node) => {
     if (node.type === 'FunctionDeclaration' && isNode(node.id)) callableBindings.add(String((node.id as Node).name))
+    if ((node.type === 'ClassDeclaration' || node.type === 'ClassExpression')) {
+      const id = node.id as Node | undefined
+      const owner = id?.type === 'Identifier'
+        ? String(id.name)
+        : parent?.type === 'VariableDeclarator' && (parent.id as Node | undefined)?.type === 'Identifier'
+          ? String((parent.id as Node).name)
+          : undefined
+      if (owner) collectClassCallables(node, owner)
+    }
     if (node.type === 'VariableDeclarator' && parent?.type === 'VariableDeclaration'
       && (node.id as Node).type === 'Identifier') {
       const value = unwrapTransparentExpression(node.init as Node | undefined)
-      if (value?.type === 'ArrowFunctionExpression' || value?.type === 'FunctionExpression') {
-        callableBindings.add(String((node.id as Node).name))
-      } else if (parent.kind === 'const' && value?.type === 'Identifier') addCallableAlias(String(value.name), String((node.id as Node).name))
+      const name = String((node.id as Node).name)
+      if (value?.type === 'ArrowFunctionExpression' || value?.type === 'FunctionExpression') callableBindings.add(name)
+      else if (value?.type === 'Identifier' || value?.type === 'MemberExpression' || value?.type === 'OptionalMemberExpression') {
+        const target = staticMemberPath(value)
+        if (target) addCallableAlias(target, name)
+      }
+      if (value?.type === 'ObjectExpression') collectObjectCallables(value, name)
+      if (value?.type === 'ClassExpression') collectClassCallables(value, name)
+    }
+    if (node.type === 'AssignmentExpression' && (node.left as Node | undefined)?.type === 'Identifier') {
+      const target = staticMemberPath(node.right as Node | undefined)
+      if (target) addCallableAlias(target, String((node.left as Node).name))
     }
     childNodes(node).forEach(child => collectCallables(child, node))
   }
@@ -1562,7 +1748,8 @@ function componentBindingsPassedToLocalCalls(program: Node): Set<string> {
     const callee = (node.type === 'CallExpression' || node.type === 'OptionalCallExpression')
       ? unwrapTransparentExpression(node.callee as Node | undefined)
       : undefined
-    const localCall = callee?.type === 'Identifier' && callableBindings.has(String(callee.name))
+    const calleePath = staticMemberPath(callee)
+    const localCall = calleePath !== undefined && callableBindings.has(calleePath)
     for (const [key, value] of Object.entries(node)) {
       if (key === 'parent') continue
       const captureArguments = insideLocalCallArgument || (localCall && key === 'arguments')
@@ -1730,7 +1917,7 @@ function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<s
             for (const rendered of renderedImportedComponents(
               declaration, aliases, source.file, new Set(), new Set(), new Map(), true, source.opaqueRuntimeModuleLoads,
             )) {
-              addExport(nextExports, 'default', aliases.get(rendered.component))
+              addExport(nextExports, 'default', rendered.source ? { source: rendered.source } : aliases.get(rendered.component))
             }
           }
           continue
@@ -2769,6 +2956,27 @@ export function AuthRoutes() { return <Routes><Route path="*" element={<Fallback
       expect(resolveRouters(extractRouters([safeWrapper]))[0].handles.map(label)).toEqual(['AuthRoutes *'])
     })
 
+    it('resolves long local runtime-loader chains without recursive rescans', () => {
+      const functionCount = 2000
+      const functions = [
+        `function load0() { return require('third-party-router').NestedRoutes }`,
+        ...Array.from({ length: functionCount - 1 }, (_unused, index) => `function load${index + 1}() { return load${index}() }`),
+      ].join('\n')
+      const source = {
+        file: 'src/long-runtime-loader-chain.tsx',
+        code: `import * as React from 'react'
+import { Route, Routes } from 'react-router-dom'
+${functions}
+const NestedRoutes = load${functionCount - 1}()
+function Fallback() { return React.createElement(NestedRoutes) }
+export function Shell() { return <Routes><Route path="*" element={<Fallback />} /></Routes> }`,
+      }
+
+      expect(() => resolveRouters(extractRouters([source]))).toThrow(
+        /renders imported component (?:Fallback|NestedRoutes) from third-party-router in wildcard route \*; the console route inventory cannot inspect whether it owns nested <Routes>/,
+      )
+    })
+
     it('carries opaque nested-router provenance across local TypeScript modules', () => {
       const fixtureRoot = mkdtempSync(join(tmpdir(), 'edgewatch-cross-module-router-'))
       const sourceDirectory = join(fixtureRoot, 'src')
@@ -2810,11 +3018,73 @@ export function Fallback() { return renderAlias(nestedRoutes) }
         )
 
         writeFileSync(wrapperPath, `import * as React from 'react'
+import { NestedRoutes as nestedRoutes } from 'third-party-router'
+function renderComponent(Component: React.ComponentType) { return React.createElement(Component) }
+let renderAlias = renderComponent
+export function Fallback() { return renderAlias(nestedRoutes) }
+`)
+        const mutableAliasSources = sourceFiles(sourceDirectory, fixtureRoot)
+        expect(() => resolveRouters(extractRouters(mutableAliasSources, fixtureRoot))).toThrow(
+          /renders imported component Fallback from third-party-router in wildcard route \*; the console route inventory cannot inspect whether it owns nested <Routes>/,
+        )
+
+        writeFileSync(wrapperPath, `import * as React from 'react'
+import { NestedRoutes as nestedRoutes } from 'third-party-router'
+const wrappers = { render(Component: React.ComponentType) { return React.createElement(Component) } }
+export function Fallback() { return wrappers.render(nestedRoutes) }
+`)
+        const memberCallSources = sourceFiles(sourceDirectory, fixtureRoot)
+        expect(() => resolveRouters(extractRouters(memberCallSources, fixtureRoot))).toThrow(
+          /renders imported component Fallback from third-party-router in wildcard route \*; the console route inventory cannot inspect whether it owns nested <Routes>/,
+        )
+
+        writeFileSync(wrapperPath, `import * as React from 'react'
+import { NestedRoutes as nestedRoutes } from 'third-party-router'
+class Wrappers { static render(Component: React.ComponentType) { return React.createElement(Component) } }
+export function Fallback() { return Wrappers.render(nestedRoutes) }
+`)
+        const classMethodCallSources = sourceFiles(sourceDirectory, fixtureRoot)
+        expect(() => resolveRouters(extractRouters(classMethodCallSources, fixtureRoot))).toThrow(
+          /renders imported component Fallback from third-party-router in wildcard route \*; the console route inventory cannot inspect whether it owns nested <Routes>/,
+        )
+
+        writeFileSync(wrapperPath, `import * as React from 'react'
 function loadRoutes() { return require('third-party-router').NestedRoutes }
 export function Fallback() { const NestedRoutes = loadRoutes(); return React.createElement(NestedRoutes) }
 `)
         const runtimeLoaderSources = sourceFiles(sourceDirectory, fixtureRoot)
         expect(() => resolveRouters(extractRouters(runtimeLoaderSources, fixtureRoot))).toThrow(
+          /renders imported component Fallback from third-party-router in wildcard route \*; the console route inventory cannot inspect whether it owns nested <Routes>/,
+        )
+
+        writeFileSync(wrapperPath, `import * as React from 'react'
+class Loader { static async load() { return (await import('third-party-router')).NestedRoutes } }
+const NestedRoutes = await Loader.load()
+export function Fallback() { return React.createElement(NestedRoutes) }
+`)
+        const classLoaderSources = sourceFiles(sourceDirectory, fixtureRoot)
+        expect(() => resolveRouters(extractRouters(classLoaderSources, fixtureRoot))).toThrow(
+          /renders imported component Fallback from third-party-router in wildcard route \*; the console route inventory cannot inspect whether it owns nested <Routes>/,
+        )
+
+        writeFileSync(wrapperPath, `import * as React from 'react'
+const registry: Record<string, React.ComponentType> = {}
+registry.NestedRoutes = (await import('third-party-router')).NestedRoutes
+export function Fallback() { return React.createElement(registry.NestedRoutes) }
+`)
+        const memberAssignmentSources = sourceFiles(sourceDirectory, fixtureRoot)
+        expect(() => resolveRouters(extractRouters(memberAssignmentSources, fixtureRoot))).toThrow(
+          /renders imported component Fallback from third-party-router in wildcard route \*; the console route inventory cannot inspect whether it owns nested <Routes>/,
+        )
+
+        writeFileSync(join(sourceDirectory, 'Shell.tsx'), `import { Route, Routes } from 'react-router-dom'
+import Fallback from './Fallback'
+export function Shell() { return <Routes><Route path="*" element={<Fallback />} /></Routes> }
+`)
+        writeFileSync(wrapperPath, `export default () => <RouteHost Component={require('third-party-router').NestedRoutes} />
+`)
+        const anonymousDefaultSources = sourceFiles(sourceDirectory, fixtureRoot)
+        expect(() => resolveRouters(extractRouters(anonymousDefaultSources, fixtureRoot))).toThrow(
           /renders imported component Fallback from third-party-router in wildcard route \*; the console route inventory cannot inspect whether it owns nested <Routes>/,
         )
 

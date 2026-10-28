@@ -212,6 +212,16 @@ usual; unrelated package loads and third-party page or presentation components
 on non-wildcard routes remain allowed. React primitives and recognized router
 exports are treated as known wrappers and redirects; `lucide-react` SVG icons
 are treated as presentation-only components.
+Opaque origins also follow bare-package values loaded by literal dynamic
+`import()` or `require()` calls through awaited module values, destructuring,
+member access, aliases, and `React.lazy` promise aliases. A lowercase package
+component passed to a local wrapper call also retains provenance when that
+wrapper is exported. A runtime component value shadowing a statically declared
+name does not count as readable. Local extensionless imports follow Vite's
+extension order; if JavaScript or JSON wins before a TypeScript candidate, the
+inventory fails closed instead of inspecting the TypeScript sibling. A local
+router mounted with `React.createElement(LocalRouter)` is attached to the
+declaring route so its child paths remain in the inventory.
 
 Wildcard route `element`, `errorElement`, and `hydrateFallbackElement` props
 must use literal JSX, fragments, primitive values, `null`, or statically

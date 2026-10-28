@@ -283,6 +283,27 @@ values through wrapper props, object props, or function calls is rejected
 because the inventory cannot safely resolve destructured wrapper parameters
 or their JSX tags.
 
+The inventory also rejects `<Routes location>` because it can make React
+Router render a different location from the browser URL visited by the axe and
+role checks. Static `caseSensitive` route props are copied into the modeled
+route table; use shorthand or a boolean literal, since a dynamic value cannot
+be represented safely. In wildcard route elements, local function and class
+components are followed through their render trees. A custom tag backed by a
+runtime registry value or component parameter fails closed, including through
+local component chains. Unresolved local imports also fail closed when
+forwarded through JSX expression children. Runtime imports using URI schemes
+such as `https:`, `data:`, or `file:` are opaque because the inventory cannot
+inspect them; `node:` built-ins are the exception.
+
+A component imported from another local module may appear directly in a
+wildcard route only when its source declares a statically named `<Routes>`
+table that the inventory can attach. Named import aliases retain the exported
+component's canonical declaration name, including a named re-export alias;
+unreadable render trees retain their module provenance across those aliases.
+Namespace-member components fail closed because the inventory cannot reliably
+identify their route table. Import the component by name or declare its routes
+in the audited JSX tree instead.
+
 To add a console page, add its `<Route>` with a string-literal `path`, then an
 entry with its scope and permission to `unitConsoleRoutes` or
 `platformConsoleRoutes`, or to `entrySurfaces` for a page outside both

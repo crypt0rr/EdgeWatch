@@ -35,7 +35,7 @@ const golangciLintVersion = await readRepositoryFile('.golangci-lint-version')
 const renovate = JSON.parse(await readRepositoryFile('renovate.json'))
 const thirdPartyLicenses = await readRepositoryFile('THIRD_PARTY_LICENSES.md')
 const releaseManifestScript = await readRepositoryFile('scripts/generate-release-manifest.sh')
-const naabuXNetVersionVerifier = await readRepositoryFile('scripts/verify-naabu-x-net-version.sh')
+const naabuModuleVersionsVerifier = await readRepositoryFile('scripts/verify-naabu-module-versions.sh')
 const scanScriptPath = 'scripts/scan-image-vulnerabilities.sh'
 const scanScript = await readRepositoryFile(scanScriptPath)
 const naabuAllowlist = await readRepositoryFile('scripts/naabu-vulncheck-allowlist.txt')
@@ -761,7 +761,7 @@ const reviewedReleaseRunForms = new Map([
   ['naabu', [
     'apk add --no-cache ca-certificates=20260909-r0 git=2.54.0-r0',
     'git init . && git remote add origin https://github.com/projectdiscovery/naabu.git && git fetch --depth 1 origin ${NAABU_COMMIT} && git fetch --depth 1 origin refs/tags/${NAABU_VERSION}:refs/tags/${NAABU_VERSION} && test "$(git rev-parse ${NAABU_VERSION}^{commit})" = "${NAABU_COMMIT}" && git checkout --detach ${NAABU_COMMIT}',
-    'go get golang.org/x/net@${NAABU_X_NET_VERSION} && sh /usr/local/bin/verify-naabu-x-net-version.sh "${NAABU_X_NET_VERSION}"',
+    'go get golang.org/x/net@${NAABU_X_NET_VERSION} github.com/yuin/goldmark@${NAABU_GOLDMARK_VERSION} github.com/klauspost/compress@${NAABU_COMPRESS_VERSION} && sh /usr/local/bin/verify-naabu-module-versions.sh "${NAABU_X_NET_VERSION}" "${NAABU_GOLDMARK_VERSION}" "${NAABU_COMPRESS_VERSION}"',
     'case "${TARGETARCH}" in amd64) loader=/lib/ld-musl-x86_64.so.1 ;; arm64) loader=/lib/ld-musl-aarch64.so.1 ;; *) echo "no musl loader known for ${TARGETARCH}" >&2; exit 1 ;; esac && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -I ${loader}" -o /out/naabu ./cmd/naabu && printf \'%s\\n\' \'package main\' \'import ("debug/elf"; "fmt"; "os")\' \'func main() { f, err := elf.Open(os.Args[1]); if err != nil { panic(err) }; for _, p := range f.Progs { if p.Type == elf.PT_INTERP { b := make([]byte, p.Filesz); if _, err := p.ReadAt(b, 0); err != nil { panic(err) }; fmt.Print(string(b[:len(b)-1])) } } }\' >/tmp/interp.go && interp="$(go run /tmp/interp.go /out/naabu)" && if [ -n "${interp}" ] && [ "${interp}" != "${loader}" ]; then echo "naabu names ${interp}, not ${loader}" >&2; exit 1; fi',
   ]],
   ['build', [
@@ -783,6 +783,8 @@ const reviewedStageArguments = new Map([
     ['NAABU_VERSION', { default: /^v[0-9]+\.[0-9]+\.[0-9]+$/, value: /^v[0-9]+\.[0-9]+\.[0-9]+$/ }],
     ['NAABU_COMMIT', { default: /^[0-9a-f]{40}$/, value: /^[0-9a-f]{40}$/ }],
     ['NAABU_X_NET_VERSION', { default: /^v[0-9]+\.[0-9]+\.[0-9]+$/, value: /^v[0-9]+\.[0-9]+\.[0-9]+$/ }],
+    ['NAABU_GOLDMARK_VERSION', { default: /^v[0-9]+\.[0-9]+\.[0-9]+$/, value: /^v[0-9]+\.[0-9]+\.[0-9]+$/ }],
+    ['NAABU_COMPRESS_VERSION', { default: /^v[0-9]+\.[0-9]+\.[0-9]+$/, value: /^v[0-9]+\.[0-9]+\.[0-9]+$/ }],
     ['TARGETOS', { automatic: true, value: /^linux$/ }],
     ['TARGETARCH', { automatic: true, value: /^(?:amd64|arm64)$/ }],
   ])],
@@ -825,9 +827,23 @@ function reviewedStageInputs(stage, stageKey) {
       continue
     }
     if (!policy.value.test(String(resolvedValue))) return false
-    if (stageKey === 'naabu' && declaration.name === 'NAABU_X_NET_VERSION') {
-      const [major, minor] = String(resolvedValue).slice(1).split('.').map(Number)
-      if (!(major > 0 || (major === 0 && minor >= 62))) return false
+    if (stageKey === 'naabu') {
+      const floors = {
+        NAABU_X_NET_VERSION: [0, 62, 0],
+        NAABU_GOLDMARK_VERSION: [1, 7, 17],
+        NAABU_COMPRESS_VERSION: [1, 18, 7],
+      }
+      const floor = floors[declaration.name]
+      if (floor) {
+        const actual = String(resolvedValue).slice(1).split('.').map(Number)
+        const belowFloor = actual.some((part, index) => {
+          for (let earlier = 0; earlier < index; earlier++) {
+            if (actual[earlier] !== floor[earlier]) return actual[earlier] < floor[earlier]
+          }
+          return part < floor[index]
+        })
+        if (belowFloor) return false
+      }
     }
   }
   return seen.size === expected.size
@@ -1320,6 +1336,15 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   )
   assert.ok(runViolations(unsafeNaabuXNetVersion).some((run) => run.stage === 'naabu'),
     'an unchecked x/net version must not enter an approved command form')
+  for (const [name, value, floor] of [
+    ['NAABU_GOLDMARK_VERSION', dockerfileArg('NAABU_GOLDMARK_VERSION'), 'v1.7.16'],
+    ['NAABU_COMPRESS_VERSION', dockerfileArg('NAABU_COMPRESS_VERSION'), 'v1.18.6'],
+  ]) {
+    const unsafeVersion = replaceOnce(sourceDockerfile, `ARG ${name}=${value}`, `ARG ${name}=$(npm ci)`, `${name} validation`)
+    assert.ok(runViolations(unsafeVersion).some((run) => run.stage === 'naabu'), `${name} must reject shell-derived values`)
+    assert.ok(runViolations(sourceDockerfile, { ...buildArgs, [name]: floor }).some((run) => run.stage === 'naabu'),
+      `${name} must stay at or above its fixed advisory version`)
+  }
   assert.ok(runViolations(sourceDockerfile, { ...buildArgs, NAABU_X_NET_VERSION: 'v0.61.9' }).some((run) => run.stage === 'naabu'),
     'the effective Naabu x/net build argument must stay at or above the vulnerability fix floor')
   assert.ok(runViolations(sourceDockerfile, { ...buildArgs, VERSION: '$(npm ci)' }).some((run) => run.stage === 'build'),
@@ -1455,30 +1480,41 @@ test('release manifests bind archive members to extracted and image executables'
   assert.match(armImage, /verify-release-image-binary\.sh .* arm64 linux\/arm64/)
 })
 
-test('the Naabu build rejects an x/net module graph that differs from its requested pin', async (t) => {
-  assert.match(dockerfile, /COPY scripts\/verify-naabu-x-net-version\.sh \/usr\/local\/bin\/verify-naabu-x-net-version\.sh/)
-  assert.match(dockerfile, /RUN go get golang\.org\/x\/net@\$\{NAABU_X_NET_VERSION\} \\\n\s+&& sh \/usr\/local\/bin\/verify-naabu-x-net-version\.sh "\$\{NAABU_X_NET_VERSION\}"/)
-  assert.match(naabuXNetVersionVerifier, /go list -m -f '\{\{\.Version\}\}' golang\.org\/x\/net/)
+test('the Naabu build verifies the selected fixed versions of its vulnerable modules', async (t) => {
+  assert.match(dockerfile, /COPY scripts\/verify-naabu-module-versions\.sh \/usr\/local\/bin\/verify-naabu-module-versions\.sh/)
+  assert.match(dockerfile, /NAABU_GOLDMARK_VERSION/)
+  assert.match(dockerfile, /NAABU_COMPRESS_VERSION/)
+  assert.match(naabuModuleVersionsVerifier, /go list -m -f '\{\{\.Version\}\}'/)
+  for (const module of ['golang.org/x/net', 'github.com/yuin/goldmark', 'github.com/klauspost/compress']) {
+    assert.ok(naabuModuleVersionsVerifier.includes(module), `the module-version guard checks ${module}`)
+  }
 
-  const directory = await mkdtemp(join(tmpdir(), 'edgewatch-naabu-x-net-version-'))
+  const directory = await mkdtemp(join(tmpdir(), 'edgewatch-naabu-module-versions-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
   const fakeBin = join(directory, 'bin')
   await mkdir(fakeBin)
   const fakeGo = join(fakeBin, 'go')
-  await writeFile(fakeGo, '#!/bin/sh\nprintf \'%s\\n\' "$FAKE_GO_MODULE_VERSION"\n')
+  await writeFile(fakeGo, `#!/bin/sh
+case "$5" in
+  golang.org/x/net) printf '%s\\n' "\${FAKE_X_NET_VERSION:-v0.62.0}" ;;
+  github.com/yuin/goldmark) printf '%s\\n' "\${FAKE_GOLDMARK_VERSION:-v1.7.17}" ;;
+  github.com/klauspost/compress) printf '%s\\n' "\${FAKE_COMPRESS_VERSION:-v1.18.7}" ;;
+  *) exit 2 ;;
+esac
+`)
   await chmod(fakeGo, 0o755)
-  const verifierPath = resolve(repositoryRoot, 'scripts/verify-naabu-x-net-version.sh')
-  const runVerifier = (resolvedVersion) => spawnSync('sh', [verifierPath, 'v0.62.0'], {
+  const verifierPath = resolve(repositoryRoot, 'scripts/verify-naabu-module-versions.sh')
+  const runVerifier = (versions = {}) => spawnSync('sh', [verifierPath, 'v0.62.0', 'v1.7.17', 'v1.18.7'], {
     cwd: directory,
-    env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, FAKE_GO_MODULE_VERSION: resolvedVersion },
+    env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, ...versions },
     encoding: 'utf8',
   })
 
-  const matching = runVerifier('v0.62.0')
+  const matching = runVerifier()
   assert.equal(matching.status, 0, matching.stderr || matching.stdout)
-  const mismatched = runVerifier('v0.63.0')
+  const mismatched = runVerifier({ FAKE_COMPRESS_VERSION: 'v1.18.6' })
   assert.notEqual(mismatched.status, 0)
-  assert.match(mismatched.stderr, /Go selected golang\.org\/x\/net v0\.63\.0, expected v0\.62\.0/)
+  assert.match(mismatched.stderr, /Go selected github\.com\/klauspost\/compress v1\.18\.6, expected v1\.18\.7/)
 })
 
 // The verify job builds the release binaries and the frontend that the image
@@ -2139,6 +2175,8 @@ test('Renovate updates every pinned image, package, and the Naabu release', () =
     'the Naabu build must use x/net v0.62.0 or newer for GO-2026-6860 and GO-2026-6866')
   assert.deepEqual(renovateDependencies('Dockerfile', dockerfile).filter((dependency) => dependency.datasource === 'go'), [
     { datasource: 'go', depName: 'golang.org/x/net', currentValue: naabuXNetVersion, currentDigest: undefined },
+    { datasource: 'go', depName: 'github.com/yuin/goldmark', currentValue: dockerfileArg('NAABU_GOLDMARK_VERSION'), currentDigest: undefined },
+    { datasource: 'go', depName: 'github.com/klauspost/compress', currentValue: dockerfileArg('NAABU_COMPRESS_VERSION'), currentDigest: undefined },
   ])
   const apkPins = assertApkPinsManaged(dockerfile)
   assert.ok(apkPins.includes('zlib=1.3.2-r1') || apkPins.some((pin) => pin.startsWith('zlib=')), 'the image pins zlib')

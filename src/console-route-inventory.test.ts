@@ -489,7 +489,7 @@ function rejectUninspectableRouterLoads(program: Node, file: string): RuntimeMod
       if (specifier === undefined) {
         throw new Error(`${file} uses a ${kind} with a non-static module specifier; the console route inventory cannot rule out router APIs`)
       }
-      if (kind === 'CommonJS module load' && (specifier === 'module' || specifier === 'node:module')) {
+      if ((kind === 'CommonJS module load' || kind === 'dynamic import') && (specifier === 'module' || specifier === 'node:module')) {
         throw new Error(`${file} loads the CommonJS module factory ${specifier}; the console route inventory cannot rule out router APIs created with createRequire`)
       }
       if (isRouterModule(specifier)) {
@@ -1400,6 +1400,18 @@ function dynamicLazyComponentImports(
     visit(node)
     return sources
   }
+  const hasLiteralDynamicImport = (nodes: Node[]): boolean => {
+    let found = false
+    const visit = (current: Node) => {
+      if (current.type === 'ImportExpression' && staticStringValue(current.source as Node | undefined) !== undefined) found = true
+      if ((current.type === 'CallExpression' || current.type === 'OptionalCallExpression')
+        && (current.callee as Node).type === 'Import'
+        && staticStringValue((current.arguments as Node[] | undefined)?.[0]) !== undefined) found = true
+      childNodes(current).forEach(visit)
+    }
+    nodes.forEach(visit)
+    return found
+  }
   const lazyReturnExpressions = (callback: Node | undefined): { readable: boolean; values: Node[] } => {
     const expression = unwrapTransparentExpression(callback)
     const fn = expression?.type === 'Identifier'
@@ -1431,8 +1443,15 @@ function dynamicLazyComponentImports(
     if (!loader.readable) {
       throw new Error(`${file}: ${component} has a React.lazy callback the route inventory cannot read; use an inline function or a statically declared loader function/arrow binding`)
     }
+    const importedSources = loader.values.flatMap(opaqueImportsIn)
+    // A syntactically readable callback can still return a component from a
+    // runtime registry or other value the inventory cannot trace. Only accept
+    // loaders whose returned expression contains a literal dynamic import or
+    // a tracked opaque module value; wildcard route checks can then distinguish
+    // inspectable local pages from opaque package components.
+    if (!hasLiteralDynamicImport(loader.values) && importedSources.length === 0) return undefined
     readableCalls.add(node)
-    const source = loader.values.flatMap(opaqueImportsIn)[0]
+    const source = importedSources[0]
     return source ? { component, source } : undefined
   }
   const originIn = (node: Node | undefined): { component: string; source: string } | undefined => {
@@ -2144,8 +2163,10 @@ function namespacesDestructuredIntoJSXBindings(program: Node, jsxBindings: Set<s
   return required
 }
 
-/** Carries opaque package-component provenance through statically read local modules. */
-function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<string, Map<string, { source: string }>> {
+type ComponentOrigin = { source: string; api?: 'Route' | 'Routes' | '*' }
+
+/** Carries opaque package-component and router-API provenance through local modules. */
+function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<string, Map<string, ComponentOrigin>> {
   const moduleResolver = localModuleResolver(configRoot)
   const programs = sources.map(source => {
     const parsed = parseSync(source.file, source.code, { lang: source.file.endsWith('.tsx') ? 'tsx' : 'ts' })
@@ -2167,12 +2188,12 @@ function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<s
     }
   })
   const byPath = new Map(programs.map(source => [source.absolutePath, source]))
-  const exportsByPath = new Map<string, Map<string, { source: string }>>()
+  const exportsByPath = new Map<string, Map<string, ComponentOrigin>>()
   const isOpaquePackage = (specifier: string) => isOpaqueExternalPackage(specifier, moduleResolver.isLocalSpecifier)
   const nameOf = (node: Node | undefined) => node?.type === 'Identifier' ? String(node.name) : undefined
   const maxExportPropagationSteps = 50_000
   let exportPropagationSteps = 0
-  const addExport = (target: Map<string, { source: string }>, name: string, origin: { source: string } | undefined) => {
+  const addExport = (target: Map<string, ComponentOrigin>, name: string, origin: ComponentOrigin | undefined) => {
     if (!origin) return
     exportPropagationSteps += 1
     if (exportPropagationSteps > maxExportPropagationSteps) {
@@ -2206,7 +2227,7 @@ function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<s
       queued.delete(path)
       const source = byPath.get(path)!
       let changed = false
-      const importedOrigins = opaqueRuntimeModuleBindings(source.program, source.runtimeModuleLoads, moduleResolver.isLocalSpecifier)
+      const importedOrigins: Map<string, ComponentOrigin> = new Map(opaqueRuntimeModuleBindings(source.program, source.runtimeModuleLoads, moduleResolver.isLocalSpecifier))
       const jsxBindings = source.jsxBindings
       const callBindings = source.callBindings
       const jsxNamespaceBindings = source.jsxNamespaceBindings
@@ -2224,10 +2245,17 @@ function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<s
             for (const specifier of statement.specifiers as Node[]) {
               if (specifier.importKind === 'type') continue
               const localName = String((specifier.local as Node).name)
+              const importedName = specifier.type === 'ImportSpecifier'
+                ? nameOf(specifier.imported as Node)
+                : undefined
+              const api = importedName === 'Route' || importedName === 'Routes'
+                ? importedName
+                : undefined
               if (specifier.type === 'ImportNamespaceSpecifier'
+                || api
                 || /^[A-Z]/.test(localName) || jsxBindings.has(localName) || jsxNamespaceBindings.has(localName)
                 || callBindings.has(localName) || exportedValueBindings.has(localName)) {
-                importedOrigins.set(localName, { source: moduleSource })
+                importedOrigins.set(localName, { source: moduleSource, ...(api ? { api } : {}) })
               }
             }
           }
@@ -2263,7 +2291,7 @@ function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<s
       }
 
       const aliases = importedComponentAliases(source.program, importedOrigins)
-      const nextExports = new Map<string, { source: string }>()
+      const nextExports = new Map<string, ComponentOrigin>()
       for (const statement of source.program.body as Node[]) {
         if (statement.type === 'ExportDefaultDeclaration') {
           const declaration = statement.declaration as Node
@@ -2298,14 +2326,16 @@ function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<s
             }
           } else if (isOpaquePackage(specifier) && statement.type === 'ExportNamedDeclaration') {
             for (const exportSpecifier of statement.specifiers as Node[]) {
+              const importedName = nameOf(exportSpecifier.local as Node)
               const exportedName = nameOf(exportSpecifier.exported as Node)
-              if (exportedName) addExport(nextExports, exportedName, { source: specifier })
+              const api = importedName === 'Route' || importedName === 'Routes' ? importedName : undefined
+              if (exportedName) addExport(nextExports, exportedName, { source: specifier, ...(api ? { api } : {}) })
             }
           } else if (isOpaquePackage(specifier) && statement.type === 'ExportAllDeclaration') {
             // An external export-star exposes unknown names. Mark named imports
             // from a local barrel as opaque instead of pretending its export
             // inventory is complete.
-            addExport(nextExports, '*', { source: specifier })
+            addExport(nextExports, '*', { source: specifier, api: '*' })
           }
           continue
         }
@@ -2329,9 +2359,9 @@ function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<s
         }
       }
 
-      const current = exportsByPath.get(source.absolutePath) ?? new Map<string, { source: string }>()
+      const current = exportsByPath.get(source.absolutePath) ?? new Map<string, ComponentOrigin>()
       for (const [name, origin] of nextExports) {
-        if (current.get(name)?.source === origin.source) continue
+        if (current.get(name)?.source === origin.source && current.get(name)?.api === origin.api) continue
         current.set(name, origin)
         changed = true
       }
@@ -2341,6 +2371,71 @@ function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<s
       }
   }
   return exportsByPath
+}
+
+/** Finds Route/Routes values loaded from unknown runtime modules, including aliases. */
+function opaqueRuntimeRouterAPIImports(
+  program: Node,
+  moduleLoads: RuntimeModuleLoad[],
+  runtimeBindings: Map<string, { source: string }>,
+  isLocalSpecifier: (specifier: string) => boolean,
+): { bindings: Map<string, { source: string }>; namespaces: Map<string, { source: string }> } {
+  const loads = new Map(moduleLoads
+    .filter(load => isOpaqueExternalPackage(load.specifier, isLocalSpecifier))
+    .map(load => [load.node, load.specifier] as const))
+  const sourceOf = (node: Node | undefined): string | undefined => {
+    if (!node) return undefined
+    const expression = unwrapTransparentExpression(node)
+    if (!expression) return undefined
+    if (expression.type === 'Identifier') return runtimeBindings.get(String(expression.name))?.source
+    if (expression.type === 'MemberExpression' || expression.type === 'OptionalMemberExpression') {
+      const path = staticMemberPath(expression)
+      const pathSource = path ? runtimeBindings.get(`@member:${path}`)?.source : undefined
+      if (pathSource) return pathSource
+      const root = memberRootIdentifier(expression)
+      const rootSource = root ? runtimeBindings.get(`@member-root:${root}`)?.source : undefined
+      return rootSource ?? sourceOf(expression.object as Node | undefined)
+    }
+    const found = new Set<string>()
+    const visit = (current: Node) => {
+      const loaded = loads.get(current)
+      if (loaded) found.add(loaded)
+      for (const child of childNodes(current)) visit(child)
+    }
+    visit(expression)
+    return found.size === 1 ? [...found][0] : undefined
+  }
+  const propertyName = (property: Node, computed: boolean) => computed
+    ? staticStringValue(property)
+    : property.type === 'Identifier' ? String(property.name) : staticStringValue(property)
+  const bindingName = (node: Node | undefined): string | undefined => {
+    if (node?.type === 'Identifier') return String(node.name)
+    if (node?.type === 'AssignmentPattern') return bindingName(node.left as Node | undefined)
+    return undefined
+  }
+  const bindings = new Map<string, { source: string }>()
+  const namespaces = new Map<string, { source: string }>()
+  const collect = (node: Node) => {
+    const binding = node.type === 'VariableDeclarator'
+      ? node.id as Node
+      : node.type === 'AssignmentExpression' ? node.left as Node : undefined
+    const value = node.type === 'VariableDeclarator'
+      ? node.init as Node | undefined
+      : node.type === 'AssignmentExpression' ? node.right as Node | undefined : undefined
+    const source = sourceOf(value)
+    if (source && binding?.type === 'Identifier') namespaces.set(String(binding.name), { source })
+    if (source && binding?.type === 'ObjectPattern') {
+      for (const property of binding.properties as Node[]) {
+        if (property.type !== 'Property' && property.type !== 'ObjectProperty') continue
+        const api = propertyName(property.key as Node, property.computed === true)
+        const name = bindingName(property.value as Node | undefined)
+        if ((api === 'Route' || api === 'Routes') && name) bindings.set(name, { source })
+      }
+    }
+    childNodes(node).forEach(collect)
+  }
+  collect(program)
+  return { bindings, namespaces }
 }
 
 /**
@@ -2400,7 +2495,8 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
             unresolvedRouterImports.set(localName, { api, source })
             unresolvedRouterBindings.set(localName, { source })
           } else if ((specifier.type === 'ImportNamespaceSpecifier' || specifier.type === 'ImportDefaultSpecifier')
-            && source !== 'react' && source !== 'react/jsx-runtime' && source !== 'lucide-react') {
+            && source !== 'react' && source !== 'react/jsx-runtime' && source !== 'lucide-react'
+            && !moduleResolver.isLocalSpecifier(source)) {
             unresolvedRouterBindings.set(localName, { source })
           }
         }
@@ -2422,9 +2518,11 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
               const unknownExports = moduleOrigins?.get('*')
               if (unknownExports) {
                 uninspectableExternalComponentImports.set(localName, unknownExports)
+                if (unknownExports.api === '*') unresolvedRouterBindings.set(`@member-root:${localName}`, unknownExports)
               } else {
                 for (const [exportName, origin] of moduleOrigins ?? []) {
                   uninspectableExternalComponentImports.set(`@member:${localName}.${exportName}`, origin)
+                  if (origin.api) unresolvedRouterBindings.set(`@member:${localName}.${exportName}`, { source: origin.source })
                 }
               }
               continue
@@ -2432,7 +2530,15 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
             const importedName = specifier.type === 'ImportSpecifier' ? String((specifier.imported as Node).name) : 'default'
             const origin = moduleOrigins?.get(importedName)
               ?? (specifier.type === 'ImportSpecifier' ? moduleOrigins?.get('*') : undefined)
-            if (origin) uninspectableExternalComponentImports.set(localName, origin)
+            if (origin) {
+              uninspectableExternalComponentImports.set(localName, origin)
+              if (origin.api) {
+                unresolvedRouterBindings.set(localName, { source: origin.source })
+                if (origin.api === 'Route' || origin.api === 'Routes') {
+                  unresolvedRouterImports.set(localName, { api: origin.api, source: origin.source })
+                }
+              }
+            }
           }
         }
       } else if (
@@ -2461,6 +2567,18 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
     const reactFactories = reactCreateElementAliases(program, reactCreateElementImports, reactNamespaces)
     const reactLazies = reactLazyAliases(program, reactLazyImports, reactFactories.namespaces)
     const runtimeOpaqueModuleBindings = opaqueRuntimeModuleBindings(program, runtimeModuleLoads, moduleResolver.isLocalSpecifier)
+    const runtimeRouterAPIs = opaqueRuntimeRouterAPIImports(
+      program,
+      runtimeModuleLoads,
+      runtimeOpaqueModuleBindings,
+      moduleResolver.isLocalSpecifier,
+    )
+    for (const [binding, origin] of runtimeRouterAPIs.bindings) unresolvedRouterBindings.set(binding, origin)
+    const runtimeRouterNamespaces = importedComponentAliases(program, runtimeRouterAPIs.namespaces)
+    for (const [binding, origin] of runtimeRouterNamespaces) {
+      unresolvedRouterBindings.set(`@member:${binding}.Route`, origin)
+      unresolvedRouterBindings.set(`@member:${binding}.Routes`, origin)
+    }
     const dynamicComponents = dynamicLazyComponentImports(program, reactLazies, reactFactories.namespaces, moduleResolver.isLocalSpecifier, runtimeOpaqueModuleBindings, file)
     const readableComponentBindings = staticallyReadableComponentBindings(program, reactNamespaces, dynamicComponents.readableCalls)
     const opaqueComponentImports = new Map(uninspectableExternalComponentImports)
@@ -2596,9 +2714,15 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
     const uninspectableRouterTag = (node: Node): string | undefined => {
       if (node.type === 'JSXElement') {
         const name = (node.openingElement as Node).name as Node
-        if (name.type === 'JSXIdentifier' && (name.name === 'Route' || name.name === 'Routes')) {
+        if (name.type === 'JSXIdentifier') {
           const alias = String(name.name)
           if (unresolvedRouterAliases.has(alias)) return alias
+        }
+        if (name.type === 'JSXMemberExpression') {
+          const path = jsxMemberStaticPath(name)
+          const root = jsxMemberRootIdentifier(name)
+          if (path && unresolvedRouterAliases.has(`@member:${path}`)) return `@member:${path}`
+          if (root && unresolvedRouterAliases.has(`@member-root:${root}`)) return `@member-root:${root}`
         }
       }
       for (const child of childNodes(node)) {
@@ -3545,7 +3669,7 @@ export function Shell() { return <Routes><Route path="*" element={<Fallback />} 
 `)
         const exportStarSources = sourceFiles(sourceDirectory, fixtureRoot)
         expect(() => resolveRouters(extractRouters(exportStarSources, fixtureRoot))).toThrow(
-          /renders imported component Fallback from third-party-router in wildcard route \*/,
+          /uses <Fallback> from unresolved router import third-party-router/,
         )
       } finally {
         rmSync(fixtureRoot, { recursive: true, force: true })
@@ -3562,7 +3686,7 @@ export function Shell() { return <Routes><Route path="*" element={<Page />} /></
       }
 
       expect(() => resolveRouters(extractRouters([source]))).toThrow(
-        /renders imported component Page from third-party-router in wildcard route \*; the console route inventory cannot inspect whether it owns nested <Routes>/,
+        /uses <Page> from unresolved router import third-party-router/,
       )
     })
 
@@ -4301,6 +4425,18 @@ export function Shell() {
       expect(() => extractRouters([source])).toThrow(/React\.lazy callback the route inventory cannot read/)
     })
 
+    it('rejects a readable React.lazy callback that returns a runtime component value', () => {
+      const source = {
+        file: 'src/runtime-lazy-route-component.tsx',
+        code: `import * as React from 'react'
+import { Route, Routes } from 'react-router-dom'
+const NestedRoutes = React.lazy(() => Promise.resolve({ default: window.routeRegistry.current }))
+export function Shell() { return <Routes><Route path="/known/*" element={<NestedRoutes />} /></Routes> }`,
+      }
+
+      expect(() => extractRouters([source])).toThrow(/unreadable element prop in wildcard route \/known\/\*/)
+    })
+
     it('keeps route-irrelevant package loads and readable local lazy imports allowed', () => {
       const source = {
         file: 'src/safe-dynamic-component-loads.tsx',
@@ -4809,6 +4945,22 @@ export async function HiddenRouter() {
           error: /dynamically loads router module react-router-dom/,
         },
         {
+          file: 'src/dynamic-router-adapter.tsx',
+          code: `export async function HiddenRouter() {
+  const { Route: Page, Routes: Pages } = await import('router-adapter')
+  return <Pages><Page path="/hidden" /></Pages>
+}`,
+          error: /uses <(?:Pages|Page)> from unresolved router import router-adapter/,
+        },
+        {
+          file: 'src/dynamic-create-require-loader.tsx',
+          code: `const { createRequire } = await import('node:module')
+const loadRouter = createRequire(import.meta.url)
+const { Route, Routes } = loadRouter('react-router-dom')
+export function HiddenRouter() { return <Routes><Route path="/hidden" /></Routes> }`,
+          error: /loads the CommonJS module factory node:module/,
+        },
+        {
           file: 'src/dynamic-f.tsx',
           code: `const loadModule = require
 export function HiddenRouter() {
@@ -4945,6 +5097,26 @@ export function HiddenRouter() { return <Routes><Route path="/hidden" /></Routes
 
       for (const fixture of cases) {
         expect(() => extractRouters([fixture]), fixture.file).toThrow(/from unresolved router import router-adapter/)
+      }
+    })
+
+    it('preserves Route and Routes identity through renamed local re-export barrels', () => {
+      const fixtureRoot = mkdtempSync(join(tmpdir(), 'edgewatch-renamed-router-api-barrel-'))
+      const sourceDirectory = join(fixtureRoot, 'src')
+      mkdirSync(sourceDirectory, { recursive: true })
+      writeFileSync(join(fixtureRoot, 'tsconfig.json'), JSON.stringify({ compilerOptions: { baseUrl: '.' } }))
+      writeFileSync(join(sourceDirectory, 'router-bindings.ts'), `import { Route as ImportedRoute, Routes as ImportedRoutes } from 'router-adapter'
+export { ImportedRoute as Page, ImportedRoutes as Pages }
+`)
+      writeFileSync(join(sourceDirectory, 'HiddenRoutes.tsx'), `import { Page, Pages } from './router-bindings'
+export function HiddenRoutes() { return <Pages><Page path="/hidden" /></Pages> }
+`)
+
+      try {
+        const sources = sourceFiles(sourceDirectory, fixtureRoot)
+        expect(() => extractRouters(sources, fixtureRoot)).toThrow(/imports Route from router-adapter and uses it as JSX/)
+      } finally {
+        rmSync(fixtureRoot, { recursive: true, force: true })
       }
     })
 

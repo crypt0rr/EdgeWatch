@@ -187,6 +187,10 @@ object properties, calls, returns, JSX props, or JSX spread arguments, since
 these aliases could hide router components from the inventory. Statically
 readable local TypeScript component imports continue to be followed. Import
 router components directly from a recognized router module.
+The check also tracks `Route` and `Routes` through renamed exports from local
+TypeScript barrels and through destructured values returned by literal dynamic
+imports of unknown packages. Do not load router APIs with `import()` or build a
+CommonJS loader from a dynamic import of `module` or `node:module`.
 
 The parser also tracks bare-package component imports through local aliases and
 values passed in a route element. If an uninspectable package component is
@@ -205,9 +209,11 @@ component provenance. The lazy loader may be inline or a statically declared
 function/arrow binding reached through
 identifier aliases; an unreadable callback fails closed. These components could
 render nested `<Routes>` whose paths would otherwise be missing from the axe and
-role audits. Readable local function and class component bodies are inspected
-for package components they render or forward, including through local component
-chains. Call-result aliases retain provenance through component wrappers such as
+role audits. A loader that returns a runtime component value instead of a
+statically visible module import also fails closed. Readable local function and
+class component bodies are inspected for package components they render or
+forward, including through local component chains. Call-result aliases retain
+provenance through component wrappers such as
 `React.memo`, named `memo` imports, and their aliases. The wildcard guard still
 runs when the wildcard route itself is listed in `routesWithoutInventoryEntry`.
 Readable local TypeScript components and local lazy imports are followed as

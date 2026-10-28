@@ -71,7 +71,7 @@ function gateFindings(violations: AxeViolation[], surface: string, allowances: A
   const used = new Set<AxeAllowance>()
   const blocking = violations.filter(gatesViolation).flatMap(violation => violation.nodes.flatMap(node => {
     const target = node.target.map(String).join(' ')
-    const allowance = candidates.find(item => item.rule === violation.id && item.target === target)
+    const allowance = candidates.find(item => !used.has(item) && item.rule === violation.id && item.target === target)
     if (allowance) { used.add(allowance); return [] }
     return [`${violation.id} (${violation.impact}) at ${target}`]
   }))
@@ -138,9 +138,10 @@ function routeIsRenderedForRole(role: ConsoleRole, route: ConsoleRouteCase) {
   // permission redirects, and catch-all paths do not render a separate page;
   // their rendered destinations are audited through their own route entries.
   if (!route || route.redirectToHome || (route.allowedPath && route.allowedPath !== route.path)) return false
+  if (route.permission && !rolePermissions[role].includes(route.permission)) return false
   if (route.scope === 'shared') return true
   if (route.scope === 'platform') return role === 'platform_admin'
-  return role !== 'platform_admin' && (!route.permission || rolePermissions[role].includes(route.permission))
+  return role !== 'platform_admin'
 }
 
 for (const role of roles) {
@@ -467,6 +468,13 @@ test('axe allowances reject unaudited surfaces, including removed fixture audits
   } as ConsoleRouteCase
   expect(() => auditedSurfaceNamesFor([], [], [misspelledPermission]))
     .toThrow('console page routes are not reachable by any configured role: console-route:unit:/unreachable-page')
+  const inaccessibleSharedRoute = {
+    path: '/shared-unreachable',
+    scope: 'shared',
+    permission: 'jobs.reaad',
+  } as ConsoleRouteCase
+  expect(() => auditedSurfaceNamesFor([], [], [inaccessibleSharedRoute]))
+    .toThrow('console page routes are not reachable by any configured role: console-route:shared:/shared-unreachable')
 
   const removedAudit = fixtureAxeAudits.find(fixture => fixture.surface === 'fixture:open-remove-range-dialog')!
   const remainingAudits = fixtureAxeAudits.filter(fixture => fixture !== removedAudit)
@@ -554,6 +562,13 @@ test('the axe gate fails on structure rules and serious violations unless an all
   const findings = gateFindings(structure, 'fixture', [allowance, stale, elsewhere])
   expect(findings.blocking.sort()).toEqual(['landmark-one-main (moderate) at html', 'page-has-heading-one (moderate) at html'])
   expect(findings.unused).toEqual(['landmark-unique at nav'])
+
+  const headingOrder = structure.find(violation => violation.id === 'heading-order')!
+  const repeatedTarget = { ...headingOrder, nodes: [headingOrder.nodes[0], headingOrder.nodes[0]] }
+  const singleNodeAllowance = { rule: 'heading-order', surface: 'fixture', target: '#skipped', reason: 'One known fixture node.' }
+  const repeatedFindings = gateFindings([repeatedTarget], 'fixture', [singleNodeAllowance])
+  expect(repeatedFindings.blocking).toEqual(['heading-order (moderate) at #skipped'])
+  expect(repeatedFindings.unused).toEqual([])
 
   // An open modal dialog without an accessible name.
   await page.setContent('<!doctype html><html lang="en"><head><title>Gate fixture</title></head><body><main><h1>Page</h1><div role="dialog" aria-modal="true" id="unnamed"><button type="button">Close</button></div></main></body></html>')

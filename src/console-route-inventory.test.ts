@@ -63,6 +63,7 @@ type SourceRouter = {
 }
 
 type SourceFile = { file: string; code: string }
+const compareSourceFiles = (left: SourceFile, right: SourceFile) => left.file < right.file ? -1 : left.file > right.file ? 1 : 0
 
 function isNode(value: unknown): value is Node {
   return typeof value === 'object' && value !== null && typeof (value as Node).type === 'string'
@@ -132,6 +133,20 @@ function staticMemberPath(node: Node | undefined): string | undefined {
   const object = staticMemberPath(expression.object as Node | undefined)
   const property = memberPropertyName(expression)
   return object && property !== undefined ? `${object}.${property}` : undefined
+}
+
+/** Returns a statically named JSX member chain such as `Pages.NestedRoutes`. */
+function jsxMemberStaticPath(node: Node | undefined): string | undefined {
+  if (!node) return undefined
+  const members: string[] = []
+  let current = node
+  while (current.type === 'JSXMemberExpression') {
+    const property = current.property as Node | undefined
+    if (property?.type !== 'JSXIdentifier') return undefined
+    members.unshift(String(property.name))
+    current = current.object as Node
+  }
+  return current.type === 'JSXIdentifier' ? [String(current.name), ...members].join('.') : undefined
 }
 
 function memberRootIdentifier(node: Node | undefined): string | undefined {
@@ -871,15 +886,20 @@ function staticallyReadableComponentBindings(program: Node, reactNamespaces: Set
     parameterAliasDependents.set(source, dependents)
   }
   const valueAliases = (node: Node | undefined): string[] => {
-    const value = unwrapTransparentExpression(node)
-    if (!value) return []
-    if (value.type === 'Identifier') return [String(value.name)]
-    if (value.type === 'MemberExpression' || value.type === 'OptionalMemberExpression') return valueAliases(value.object as Node | undefined)
-    if (value.type === 'ConditionalExpression') {
-      return [...valueAliases(value.consequent as Node | undefined), ...valueAliases(value.alternate as Node | undefined)]
+    const aliases = new Set<string>()
+    const pending = [node]
+    while (pending.length) {
+      const value = unwrapTransparentExpression(pending.pop())
+      if (!value) continue
+      if (value.type === 'Identifier') aliases.add(String(value.name))
+      else if (value.type === 'MemberExpression' || value.type === 'OptionalMemberExpression') pending.push(value.object as Node | undefined)
+      else if (value.type === 'ConditionalExpression') {
+        pending.push(value.consequent as Node | undefined, value.alternate as Node | undefined)
+      } else if (value.type === 'LogicalExpression') {
+        pending.push(value.left as Node | undefined, value.right as Node | undefined)
+      }
     }
-    if (value.type === 'LogicalExpression') return [...valueAliases(value.left as Node | undefined), ...valueAliases(value.right as Node | undefined)]
-    return []
+    return [...aliases]
   }
   const collectParameterAliases = (node: Node) => {
     if (node.type === 'VariableDeclarator' || node.type === 'AssignmentExpression') {
@@ -994,33 +1014,16 @@ function readableRouteElementExpression(
   reactNamespaces: Set<string>,
   readableBindings: Set<string>,
   parameterBindings: Set<string>,
+  knownRouterComponents: Set<string>,
 ): boolean {
   const expression = unwrapTransparentExpression(node)
   if (!expression) return false
-  const referencesParameter = (value: Node): boolean => {
-    const visit = (current: Node, parent?: Node, field?: string): boolean => {
-      if (current.type === 'Identifier' && parameterBindings.has(String(current.name))) {
-        const staticPropertyName = ((parent?.type === 'Property' || parent?.type === 'ObjectProperty') && field === 'key' && parent.computed !== true)
-          || ((parent?.type === 'MemberExpression' || parent?.type === 'OptionalMemberExpression') && field === 'property' && parent.computed !== true)
-        if (!staticPropertyName) return true
-      }
-      for (const [key, child] of Object.entries(current)) {
-        if (key === 'parent') continue
-        if (Array.isArray(child)) {
-          if (child.some(item => isNode(item) && visit(item, current, key))) return true
-        } else if (isNode(child) && visit(child, current, key)) return true
-      }
-      return false
-    }
-    return visit(value)
-  }
-  const embeddedJSXIsReadable = (value: Node): boolean => {
-    if (value.type === 'JSXElement' || value.type === 'JSXFragment') return readableJSX(value)
-    return childNodes(value).every(embeddedJSXIsReadable)
-  }
-  const jsxValueIsReadable = (value: Node): boolean => {
+  const jsxValueIsReadable = (value: Node, allowRuntimeDOMProp = false): boolean => {
     const item = unwrapTransparentExpression(value)
     if (!item) return false
+    // DOM attributes and event handlers do not create React descendants. Their
+    // runtime values therefore cannot add routes to the JSX tree being read.
+    if (allowRuntimeDOMProp) return true
     if (item.type === 'JSXElement' || item.type === 'JSXFragment') return readableJSX(item)
     if (item.type === 'ConditionalExpression') {
       return jsxValueIsReadable(item.consequent as Node) && jsxValueIsReadable(item.alternate as Node)
@@ -1030,7 +1033,25 @@ function readableRouteElementExpression(
         ? jsxValueIsReadable(item.right as Node)
         : jsxValueIsReadable(item.left as Node) && jsxValueIsReadable(item.right as Node)
     }
-    return !referencesParameter(item) && embeddedJSXIsReadable(item)
+    if (item.type === 'Literal') return item.value === null || ['string', 'number', 'boolean'].includes(typeof item.value)
+    if (item.type === 'Identifier') {
+      const name = String(item.name)
+      return readableBindings.has(name) && !parameterBindings.has(name)
+    }
+    if (item.type === 'ArrayExpression') {
+      return (item.elements as (Node | null)[]).every(element => element === null || jsxValueIsReadable(element))
+    }
+    if (item.type === 'ObjectExpression') {
+      return (item.properties as Node[]).every(property => {
+        if (property.type === 'SpreadElement' || property.type === 'SpreadProperty' || property.type === 'RestElement') return false
+        const key = property.key as Node | undefined
+        if (property.computed && staticStringValue(key) === undefined) return false
+        const candidate = (property.type === 'Property' || property.type === 'ObjectProperty') ? property.value as Node | undefined : undefined
+        return !!candidate && jsxValueIsReadable(candidate)
+      })
+    }
+    if (item.type === 'TemplateLiteral' && (item.expressions as Node[]).length === 0) return true
+    return readableRouteElementExpression(item, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings, knownRouterComponents)
   }
   const readableJSX = (value: Node): boolean => {
     if (value.type === 'JSXFragment') {
@@ -1042,6 +1063,9 @@ function readableRouteElementExpression(
     if (value.type !== 'JSXElement') return false
     const opening = value.openingElement as Node
     const tag = opening.name as Node
+    const componentName = tag.type === 'JSXIdentifier' ? String(tag.name) : undefined
+    const intrinsic = !!componentName && (/^[a-z]/.test(componentName) || componentName.includes('-'))
+    const knownRouter = !!componentName && knownRouterComponents.has(componentName)
     if (tag.type === 'JSXIdentifier') {
       const name = String(tag.name)
       if (!/^[a-z]/.test(name) && !name.includes('-')
@@ -1055,8 +1079,12 @@ function readableRouteElementExpression(
     for (const attribute of opening.attributes as Node[]) {
       if (attribute.type === 'JSXSpreadAttribute') return false
       const attributeValue = attribute.value as Node | null | undefined
+      const attributeName = (attribute.name as Node | undefined)?.type === 'JSXIdentifier'
+        ? String((attribute.name as Node).name)
+        : undefined
+      const eventHandler = attributeName !== undefined && /^on[A-Z]/.test(attributeName)
       if (attributeValue?.type === 'JSXExpressionContainer'
-        && !jsxValueIsReadable(attributeValue.expression as Node)) return false
+        && !jsxValueIsReadable(attributeValue.expression as Node, intrinsic || knownRouter || eventHandler)) return false
     }
     return (value.children as Node[]).every(child => child.type === 'JSXText'
       || (child.type === 'JSXExpressionContainer'
@@ -1067,17 +1095,17 @@ function readableRouteElementExpression(
   if (expression.type === 'Literal') return expression.value === null || ['string', 'number', 'boolean'].includes(typeof expression.value)
   if (expression.type === 'ArrayExpression') {
     return (expression.elements as (Node | null)[]).every(element => element === null
-      || readableRouteElementExpression(element, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings))
+      || readableRouteElementExpression(element, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings, knownRouterComponents))
   }
   if (readableLazyCalls.has(expression)) return true
   if (expression.type === 'ConditionalExpression') {
-    return readableRouteElementExpression(expression.consequent as Node, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings)
-      && readableRouteElementExpression(expression.alternate as Node, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings)
+    return readableRouteElementExpression(expression.consequent as Node, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings, knownRouterComponents)
+      && readableRouteElementExpression(expression.alternate as Node, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings, knownRouterComponents)
   }
   if (expression.type === 'LogicalExpression') {
-    if (expression.operator === '&&') return readableRouteElementExpression(expression.right as Node, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings)
-    return readableRouteElementExpression(expression.left as Node, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings)
-      && readableRouteElementExpression(expression.right as Node, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings)
+    if (expression.operator === '&&') return readableRouteElementExpression(expression.right as Node, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings, knownRouterComponents)
+    return readableRouteElementExpression(expression.left as Node, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings, knownRouterComponents)
+      && readableRouteElementExpression(expression.right as Node, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings, knownRouterComponents)
   }
   if (expression.type === 'CallExpression') {
     const callee = unwrapTransparentExpression(expression.callee as Node | undefined)
@@ -1452,7 +1480,12 @@ function renderedImportedComponents(
   const rendered = new Map<string, { component: string; source: string; file: string }>()
   const add = (binding: string | undefined) => {
     const source = binding ? imports.get(binding)?.source : undefined
-    if (binding && source) rendered.set(binding, { component: binding, source, file })
+    if (binding && source) {
+      const component = binding.startsWith('@member:') ? binding.slice('@member:'.length)
+        : binding.startsWith('@member-root:') ? binding.slice('@member-root:'.length)
+          : binding
+      rendered.set(binding, { component, source, file })
+    }
   }
   const addImportedValues = (value: Node) => {
     const visitValues = (current: Node, parent?: Node, field?: string) => {
@@ -1520,12 +1553,12 @@ function renderedImportedComponents(
     }
     if (current.type === 'JSXElement') {
       const name = (current.openingElement as Node).name as Node
-      const binding = name.type === 'JSXIdentifier'
-        ? String(name.name)
-        : name.type === 'JSXMemberExpression'
-          ? jsxMemberRootIdentifier(name)
-          : undefined
-      add(binding)
+      if (name.type === 'JSXIdentifier') add(String(name.name))
+      else if (name.type === 'JSXMemberExpression') {
+        const path = jsxMemberStaticPath(name)
+        if (path) add(`@member:${path}`)
+        add(jsxMemberRootIdentifier(name))
+      }
       for (const attribute of (current.openingElement as Node).attributes as Node[]) {
         if (attribute.type === 'JSXSpreadAttribute') {
           addImportedValues(attribute.argument as Node)
@@ -1610,6 +1643,8 @@ function importedComponentAliases(program: Node, imports: Map<string, { source: 
         if (name.type === 'JSXIdentifier') references.add(String(name.name))
         else if (name.type === 'JSXMemberExpression') {
           const root = jsxMemberRootIdentifier(name)
+          const path = jsxMemberStaticPath(name)
+          if (path) references.add(`@member:${path}`)
           if (root) references.add(root)
         }
         for (const attribute of opening.attributes as Node[]) {
@@ -1815,6 +1850,8 @@ function runtimeExportedValueBindings(program: Node): Set<string> {
       if (name.type === 'JSXIdentifier') references.add(String(name.name))
       else if (name.type === 'JSXMemberExpression') {
         const root = jsxMemberRootIdentifier(name)
+        const path = jsxMemberStaticPath(name)
+        if (path) references.add(`@member:${path}`)
         if (root) references.add(root)
       }
       for (const attribute of opening.attributes as Node[]) {
@@ -2204,14 +2241,23 @@ function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<s
         if (isImport) {
           for (const specifier of statement.specifiers as Node[]) {
             if (specifier.importKind === 'type') continue
-            const importedName = specifier.type === 'ImportSpecifier' ? nameOf(specifier.imported as Node)
-              : specifier.type === 'ImportDefaultSpecifier' ? 'default' : undefined
+            const localName = String((specifier.local as Node).name)
+            if (specifier.type === 'ImportNamespaceSpecifier') {
+              const unknownExports = targetExports.get('*')
+              if (unknownExports) {
+                importedOrigins.set(localName, unknownExports)
+              } else {
+                for (const [exportName, origin] of targetExports) {
+                  importedOrigins.set(`@member:${localName}.${exportName}`, origin)
+                }
+              }
+              continue
+            }
+            const importedName = specifier.type === 'ImportSpecifier' ? nameOf(specifier.imported as Node) : 'default'
             const origin = importedName
               ? targetExports.get(importedName) ?? (importedName === 'default' ? undefined : targetExports.get('*'))
-              : specifier.type === 'ImportNamespaceSpecifier'
-                ? targetExports.get('*') ?? targetExports.values().next().value
-                : undefined
-            if (origin) importedOrigins.set(String((specifier.local as Node).name), origin)
+              : undefined
+            if (origin) importedOrigins.set(localName, origin)
           }
         }
       }
@@ -2305,8 +2351,9 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
   const routers: SourceRouter[] = []
   const sourcePaths = new Set(sources.map(source => resolve(repositoryRoot, source.file)))
   const moduleResolver = localModuleResolver(configRoot)
-  const crossModuleComponentOrigins = localComponentOrigins(sources, configRoot)
-  for (const { file, code } of sources) {
+  const orderedSources = [...sources].sort((left, right) => left.file < right.file ? -1 : left.file > right.file ? 1 : 0)
+  const crossModuleComponentOrigins = localComponentOrigins(orderedSources, configRoot)
+  for (const { file, code } of orderedSources) {
     const parsed = parseSync(file, code, { lang: file.endsWith('.tsx') ? 'tsx' : 'ts' })
     if (parsed.errors.length) throw new Error(`${file}: ${parsed.errors.map(error => error.message).join('; ')}`)
     const program = parsed.program as unknown as Node
@@ -2316,6 +2363,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
       .map(load => [load.node, load.specifier] as const))
 
     const local = { Route: new Set<string>(), Routes: new Set<string>() }
+    const knownRouterComponents = new Set<string>()
     const unresolvedRouterImports = new Map<string, { api: 'Route' | 'Routes'; source: string }>()
     const unresolvedRouterBindings = new Map<string, { source: string }>()
     const unresolvedLocalComponentImports = new Map<string, { source: string }>()
@@ -2369,12 +2417,22 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
           const moduleOrigins = crossModuleComponentOrigins.get(resolve(modulePath))
           for (const specifier of statement.specifiers as Node[]) {
             if (statement.importKind === 'type' || specifier.importKind === 'type') continue
+            const localName = String((specifier.local as Node).name)
+            if (specifier.type === 'ImportNamespaceSpecifier') {
+              const unknownExports = moduleOrigins?.get('*')
+              if (unknownExports) {
+                uninspectableExternalComponentImports.set(localName, unknownExports)
+              } else {
+                for (const [exportName, origin] of moduleOrigins ?? []) {
+                  uninspectableExternalComponentImports.set(`@member:${localName}.${exportName}`, origin)
+                }
+              }
+              continue
+            }
             const importedName = specifier.type === 'ImportSpecifier' ? String((specifier.imported as Node).name) : 'default'
-            const origin = specifier.type === 'ImportNamespaceSpecifier'
-              ? moduleOrigins?.get('*') ?? moduleOrigins?.values().next().value
-              : moduleOrigins?.get(importedName)
-                ?? (specifier.type === 'ImportSpecifier' ? moduleOrigins?.get('*') : undefined)
-            if (origin) uninspectableExternalComponentImports.set(String((specifier.local as Node).name), origin)
+            const origin = moduleOrigins?.get(importedName)
+              ?? (specifier.type === 'ImportSpecifier' ? moduleOrigins?.get('*') : undefined)
+            if (origin) uninspectableExternalComponentImports.set(localName, origin)
           }
         }
       } else if (
@@ -2394,6 +2452,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
         if (specifier.type !== 'ImportSpecifier') throw new Error(`${file} uses ${specifier.type} from a router module; the console route inventory check requires named router imports so it can read every route`)
         const imported = String((specifier.imported as Node).name)
         const localName = String((specifier.local as Node).name)
+        if (!unreadRouterAPIs.has(imported)) knownRouterComponents.add(localName)
         if (imported === 'Route' || imported === 'Routes') local[imported].add(localName)
         if (unreadRouterAPIs.has(imported)) throw new Error(`${file} imports ${imported}; the console route inventory check reads only <Routes> and <Route> elements, so declare routes as JSX or teach src/console-route-inventory.test.ts the new API`)
       }
@@ -2691,6 +2750,7 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
                 reactNamespaces,
                 readableComponentBindings.bindings,
                 readableComponentBindings.parameters,
+                knownRouterComponents,
               )) {
                 throw new Error(`${file}: <Route> in ${where} has an unreadable ${name} prop in wildcard route ${path}; use literal JSX so the inventory can check for nested routes`)
               }
@@ -3122,7 +3182,7 @@ function sourceFiles(directory = sourceRoot, configRoot = repositoryRoot): Sourc
     if (!pathIsWithin(canonicalConfigRoot, canonicalPath)) {
       throw new Error(`source directory ${path} resolves outside allowed root ${canonicalConfigRoot}`)
     }
-    for (const entry of readdirSync(canonicalPath, { withFileTypes: true })) {
+    for (const entry of readdirSync(canonicalPath, { withFileTypes: true }).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
       const childPath = join(canonicalPath, entry.name)
       const file = relative(repositoryRoot, childPath).split(/[\\/]/).join('/')
       if (entry.isDirectory()) {
@@ -3162,7 +3222,7 @@ function sourceFiles(directory = sourceRoot, configRoot = repositoryRoot): Sourc
       if (path) addFile(path)
     }
   }
-  return files
+  return files.sort(compareSourceFiles)
 }
 
 const repositoryInventory: Inventory = {
@@ -3203,6 +3263,7 @@ export function SharedRoutes() { return <Routes><Route path="/two" /></Routes> }
     const resolved = resolveRouters(extractRouters(sources))
     expect(resolved.map(router => router.name)).toEqual(['SharedRoutes', 'SharedRoutes#2'])
     expect(resolved.flatMap(router => router.handles.map(label))).toEqual(['SharedRoutes /one', 'SharedRoutes#2 /two'])
+    expect(resolveRouters(extractRouters([...sources].reverse()))).toEqual(resolved)
     expect(() => resolveRouters([
       { name: 'Ambiguous', routes: [] },
       { name: 'Ambiguous', routes: [] },
@@ -3521,8 +3582,20 @@ export function Shell() {
       try {
         const sources = sourceFiles(sourceDirectory, fixtureRoot)
         expect(() => resolveRouters(extractRouters(sources, fixtureRoot))).toThrow(
-          /renders imported component Pages from third-party-router in wildcard route \/known\/\*/,
+          /renders imported component Pages\.NestedRoutes from third-party-router in wildcard route \/known\/\*/,
         )
+
+        writeFileSync(join(sourceDirectory, 'Shell.tsx'), `import { Route, Routes } from 'react-router-dom'
+import * as Pages from './barrel'
+export function Shell() {
+  return <Routes><Route path="/known/*" element={<Pages.SafePage />} /></Routes>
+}
+`)
+        writeFileSync(join(sourceDirectory, 'barrel.ts'), `export { NestedRoutes } from 'third-party-router'
+export function SafePage() { return null }
+`)
+        const safeNamespaceSources = sourceFiles(sourceDirectory, fixtureRoot)
+        expect(resolveRouters(extractRouters(safeNamespaceSources, fixtureRoot))[0].handles.map(label)).toEqual(['Shell /known/*'])
       } finally {
         rmSync(fixtureRoot, { recursive: true, force: true })
       }
@@ -3636,7 +3709,7 @@ export function Shell() { return <Routes><Route path="/known/*" element={<Nested
         expect(
           () => inventoryProblems(resolveRouters(extractRouters([source])), exactInventory),
           source.file,
-        ).toThrow(/renders imported component .* from third-party-router in wildcard route \/known\/\*/)
+        ).toThrow(/(?:renders imported component .* from third-party-router|unreadable element prop) in wildcard route \/known\/\*/)
       }
     })
 
@@ -3788,6 +3861,28 @@ export function Shell({ Page }: { Page: React.ComponentType }) {
 }`,
       }
       expect(() => extractRouters([forwardedParameter])).toThrow(/unreadable element prop in wildcard route \/known\/\*/)
+
+      const opaqueCallResult = {
+        file: 'src/wildcard-opaque-call-result.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+function RouteHost({ view }: { view: React.ComponentType }) { return React.createElement(view) }
+function getRuntimePage(): React.ComponentType { return window.routeRegistry.current }
+export function Shell() {
+  return <Routes><Route path="/known/*" element={<RouteHost view={getRuntimePage()} />} /></Routes>
+}`,
+      }
+      expect(() => extractRouters([opaqueCallResult])).toThrow(/unreadable element prop in wildcard route \/known\/\*/)
+
+      const eventCallback = {
+        file: 'src/wildcard-event-callback.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+function RouteHost({ onClick }: { onClick: (event: Event) => void }) { return <button onClick={onClick} /> }
+function handleClick(event: Event) { void event }
+export function Shell() {
+  return <Routes><Route path="/known/*" element={<RouteHost onClick={(event) => handleClick(event)} />} /></Routes>
+}`,
+      }
+      expect(resolveRouters(extractRouters([eventCallback]))[0].handles.map(label)).toEqual(['Shell /known/*'])
     })
 
     it('fails the full inventory check when a factory-created package component could own wildcard routes', () => {

@@ -213,6 +213,16 @@ on non-wildcard routes remain allowed. React primitives and recognized router
 exports are treated as known wrappers and redirects; `lucide-react` SVG icons
 are treated as presentation-only components.
 
+Wildcard route `element`, `errorElement`, and `hydrateFallbackElement` props
+must use literal JSX, fragments, primitive values, `null`, or statically
+inspectable conditional/logical expressions. A statically inspectable
+`React.createElement` call with a readable type and arguments is also allowed;
+other runtime element values fail closed. Wildcard `lazy` route props and
+`Component`, `ErrorBoundary`, or `HydrateFallback` props that are parameters or
+other runtime values fail closed. Use canonical wildcard paths only: `*` or a
+final `/*` segment. Explicit local JavaScript imports are not resolved to
+same-named TypeScript files; unreadable JavaScript route modules fail closed.
+
 `<Route>` props must be explicit: any JSX prop spread is rejected because a
 spread can override `path`, including when it appears after a direct `path`
 attribute or uses an object alias or conditional expression. Only a shorthand

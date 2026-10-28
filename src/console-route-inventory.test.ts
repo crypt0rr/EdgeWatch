@@ -395,6 +395,9 @@ function rejectUninspectableRouterLoads(program: Node, file: string): string[] {
       if (specifier === undefined) {
         throw new Error(`${file} uses a ${kind} with a non-static module specifier; the console route inventory cannot rule out router APIs`)
       }
+      if (kind === 'CommonJS module load' && (specifier === 'module' || specifier === 'node:module')) {
+        throw new Error(`${file} loads the CommonJS module factory ${specifier}; the console route inventory cannot rule out router APIs created with createRequire`)
+      }
       if (isRouterModule(specifier)) {
         throw new Error(`${file} dynamically loads router module ${specifier}; the console route inventory requires static named router imports`)
       }
@@ -463,10 +466,80 @@ function jsxExpressionAttribute(attribute: Node | undefined): Node | undefined {
   return unwrapTransparentExpression(value.expression as Node)
 }
 
-function readableComponentExpression(node: Node | undefined, readableLazyCalls: Set<Node>, reactNamespaces: Set<string>): boolean {
+function staticallyReadableComponentBindings(program: Node, reactNamespaces: Set<string>, readableLazyCalls: Set<Node>): { bindings: Set<string>; parameters: Set<string> } {
+  const bindings = new Set<string>()
+  const parameters = new Set<string>()
+  const aliasDependents = new Map<string, Set<string>>()
+  const addPatternNames = (pattern: Node | undefined, target: Set<string>) => {
+    if (!pattern) return
+    if (pattern.type === 'Identifier') target.add(String(pattern.name))
+    else if (pattern.type === 'RestElement' || pattern.type === 'AssignmentPattern') {
+      addPatternNames((pattern.argument ?? pattern.left) as Node | undefined, target)
+    } else if (pattern.type === 'ObjectPattern') {
+      for (const property of pattern.properties as Node[]) {
+        addPatternNames((property.type === 'RestElement' ? property.argument : property.value) as Node | undefined, target)
+      }
+    } else if (pattern.type === 'ArrayPattern') {
+      for (const element of pattern.elements as (Node | null)[]) if (element) addPatternNames(element, target)
+    }
+  }
+  const addAlias = (source: string, target: string) => {
+    const aliases = aliasDependents.get(source) ?? new Set<string>()
+    aliases.add(target)
+    aliasDependents.set(source, aliases)
+  }
+  const visit = (node: Node, parent?: Node) => {
+    if (node.type === 'ImportDeclaration') {
+      for (const specifier of node.specifiers as Node[]) addPatternNames(specifier.local as Node | undefined, bindings)
+    }
+    if ((node.type === 'FunctionDeclaration' || node.type === 'ClassDeclaration') && isNode(node.id)) {
+      bindings.add(String((node.id as Node).name))
+    }
+    if (['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression', 'ObjectMethod', 'ClassMethod', 'MethodDefinition'].includes(node.type)) {
+      for (const parameter of (node.params as Node[] | undefined) ?? []) addPatternNames(parameter, parameters)
+    }
+    if (node.type === 'VariableDeclarator' && parent?.type === 'VariableDeclaration' && parent.kind === 'const'
+      && (node.id as Node).type === 'Identifier') {
+      const name = String((node.id as Node).name)
+      const value = unwrapTransparentExpression(node.init as Node | undefined)
+      if (value?.type === 'ArrowFunctionExpression' || value?.type === 'FunctionExpression' || (value && readableLazyCalls.has(value))) {
+        bindings.add(name)
+      } else if (value?.type === 'Identifier') {
+        addAlias(String(value.name), name)
+      } else if ((value?.type === 'MemberExpression' || value?.type === 'OptionalMemberExpression')
+        && (value.object as Node).type === 'Identifier'
+        && reactNamespaces.has(String((value.object as Node).name))) {
+        bindings.add(name)
+      }
+    }
+    childNodes(node).forEach(child => visit(child, node))
+  }
+  visit(program)
+  const queue = [...bindings]
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    for (const alias of aliasDependents.get(queue[cursor]) ?? []) {
+      if (bindings.has(alias)) continue
+      bindings.add(alias)
+      queue.push(alias)
+    }
+  }
+  return { bindings, parameters }
+}
+
+function readableComponentExpression(
+  node: Node | undefined,
+  readableLazyCalls: Set<Node>,
+  reactNamespaces: Set<string>,
+  staticallyReadableBindings: Set<string>,
+  parameterBindings: Set<string>,
+): boolean {
   const expression = unwrapTransparentExpression(node)
   if (!expression) return false
-  if (expression.type === 'Identifier' || readableLazyCalls.has(expression)) return true
+  if (expression.type === 'Identifier') {
+    const name = String(expression.name)
+    return staticallyReadableBindings.has(name) && !parameterBindings.has(name)
+  }
+  if (readableLazyCalls.has(expression)) return true
   if (expression.type === 'Literal' && expression.value === null) return true
   if (expression.type === 'MemberExpression' || expression.type === 'OptionalMemberExpression') {
     const property = expression.property as Node
@@ -474,14 +547,85 @@ function readableComponentExpression(node: Node | undefined, readableLazyCalls: 
     return (!expression.computed || staticStringValue(property) !== undefined)
       && object?.type === 'Identifier'
       && reactNamespaces.has(String(object.name))
+      && staticallyReadableBindings.has(String(object.name))
+      && !parameterBindings.has(String(object.name))
   }
   if (expression.type === 'ConditionalExpression') {
-    return readableComponentExpression(expression.consequent as Node, readableLazyCalls, reactNamespaces)
-      && readableComponentExpression(expression.alternate as Node, readableLazyCalls, reactNamespaces)
+    return readableComponentExpression(expression.consequent as Node, readableLazyCalls, reactNamespaces, staticallyReadableBindings, parameterBindings)
+      && readableComponentExpression(expression.alternate as Node, readableLazyCalls, reactNamespaces, staticallyReadableBindings, parameterBindings)
   }
   if (expression.type === 'LogicalExpression') {
-    return readableComponentExpression(expression.left as Node, readableLazyCalls, reactNamespaces)
-      && readableComponentExpression(expression.right as Node, readableLazyCalls, reactNamespaces)
+    return readableComponentExpression(expression.left as Node, readableLazyCalls, reactNamespaces, staticallyReadableBindings, parameterBindings)
+      && readableComponentExpression(expression.right as Node, readableLazyCalls, reactNamespaces, staticallyReadableBindings, parameterBindings)
+  }
+  return false
+}
+
+function isCanonicalWildcardPath(path: string | undefined, file: string, where: string): boolean {
+  if (!path || !path.includes('*')) return false
+  if ((path === '*' || path.endsWith('/*')) && path.indexOf('*') === path.length - 1) return true
+  throw new Error(`${file}: <Route> in ${where} uses non-canonical wildcard path ${path}; put the splat '*' in its own final path segment so the inventory can audit it`)
+}
+
+function readableRouteElementExpression(
+  node: Node | undefined,
+  reactFactories: { factories: Set<string>; namespaces: Set<string> },
+  readableLazyCalls: Set<Node>,
+  reactNamespaces: Set<string>,
+  readableBindings: Set<string>,
+  parameterBindings: Set<string>,
+): boolean {
+  const expression = unwrapTransparentExpression(node)
+  if (!expression) return false
+  if (expression.type === 'JSXElement' || expression.type === 'JSXFragment') return true
+  if (expression.type === 'Literal') return expression.value === null || ['string', 'number', 'boolean'].includes(typeof expression.value)
+  if (expression.type === 'ArrayExpression') {
+    return (expression.elements as (Node | null)[]).every(element => element === null
+      || readableRouteElementExpression(element, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings))
+  }
+  if (readableLazyCalls.has(expression)) return true
+  if (expression.type === 'ConditionalExpression') {
+    return readableRouteElementExpression(expression.consequent as Node, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings)
+      && readableRouteElementExpression(expression.alternate as Node, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings)
+  }
+  if (expression.type === 'LogicalExpression') {
+    if (expression.operator === '&&') return readableRouteElementExpression(expression.right as Node, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings)
+    return readableRouteElementExpression(expression.left as Node, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings)
+      && readableRouteElementExpression(expression.right as Node, reactFactories, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings)
+  }
+  if (expression.type === 'CallExpression') {
+    const callee = unwrapTransparentExpression(expression.callee as Node | undefined)
+    const isCreateElement = callee?.type === 'Identifier'
+      ? reactFactories.factories.has(String(callee.name))
+      : !!callee && (callee.type === 'MemberExpression' || callee.type === 'OptionalMemberExpression')
+        && (callee.object as Node).type === 'Identifier'
+        && reactFactories.namespaces.has(String((callee.object as Node).name))
+        && memberPropertyName(callee) === 'createElement'
+    if (!isCreateElement) return false
+    const args = ((expression.arguments as Node[] | undefined) ?? []).filter(isNode)
+    if (args.length === 0) return false
+    const component = unwrapTransparentExpression(args[0])
+    const intrinsicTag = component?.type === 'Literal' && typeof component.value === 'string'
+    if (!intrinsicTag && !readableComponentExpression(component, readableLazyCalls, reactNamespaces, readableBindings, parameterBindings)) return false
+    const readableValue = (value: Node): boolean => {
+      const item = unwrapTransparentExpression(value)
+      if (!item) return false
+      if (item.type === 'Literal' || item.type === 'JSXElement' || item.type === 'JSXFragment') return true
+      if (item.type === 'Identifier') return readableBindings.has(String(item.name)) && !parameterBindings.has(String(item.name))
+      if (item.type === 'ArrayExpression') return (item.elements as (Node | null)[]).every(element => element === null || readableValue(element))
+      if (item.type === 'ObjectExpression') {
+        return (item.properties as Node[]).every(property => {
+          if (property.type === 'SpreadElement' || property.type === 'SpreadProperty') return false
+          const candidate = (property.type === 'Property' || property.type === 'ObjectProperty') ? property.value as Node | undefined : undefined
+          return !!candidate && readableValue(candidate)
+        })
+      }
+      if (item.type === 'ConditionalExpression') return readableValue(item.consequent as Node) && readableValue(item.alternate as Node)
+      if (item.type === 'LogicalExpression') return readableValue(item.left as Node) && readableValue(item.right as Node)
+      return false
+    }
+    if (args.length > 1 && args[1].type !== 'Literal' && !readableValue(args[1])) return false
+    return args.slice(2).every(readableValue)
   }
   return false
 }
@@ -1095,6 +1239,18 @@ function importedComponentAliases(program: Node, imports: Map<string, { source: 
 
 function componentBindingsUsedInJSX(program: Node): Set<string> {
   const bindings = new Set<string>()
+  const importedFactories = new Set<string>()
+  const importedNamespaces = new Set<string>()
+  for (const statement of program.body as Node[]) {
+    if (statement.type !== 'ImportDeclaration' || String((statement.source as Node).value) !== 'react') continue
+    for (const specifier of statement.specifiers as Node[]) {
+      if (specifier.type === 'ImportNamespaceSpecifier') importedNamespaces.add(String((specifier.local as Node).name))
+      if (specifier.type === 'ImportSpecifier' && String((specifier.imported as Node).name) === 'createElement') {
+        importedFactories.add(String((specifier.local as Node).name))
+      }
+    }
+  }
+  const reactFactories = reactCreateElementAliases(program, importedFactories, importedNamespaces)
   const addExpressionBindings = (node: Node | undefined, parent?: Node, field?: string) => {
     if (!node) return
     if (node.type === 'Identifier') {
@@ -1110,6 +1266,22 @@ function componentBindingsUsedInJSX(program: Node): Set<string> {
     }
   }
   const visit = (node: Node) => {
+    if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression' || node.type === 'NewExpression') {
+      const callee = unwrapTransparentExpression(node.callee as Node | undefined)
+      const isCreateElement = callee?.type === 'Identifier'
+        ? reactFactories.factories.has(String(callee.name))
+        : !!callee && (callee.type === 'MemberExpression' || callee.type === 'OptionalMemberExpression')
+          && (callee.object as Node).type === 'Identifier'
+          && reactFactories.namespaces.has(String((callee.object as Node).name))
+          && memberPropertyName(callee) === 'createElement'
+      if (isCreateElement) {
+        // A local component can create an imported package component without
+        // JSX (for example React.createElement(lowercaseComponent)). Track the
+        // element type and props values without treating ordinary hook or
+        // resolver arguments as route components.
+        for (const argument of ((node.arguments as Node[] | undefined) ?? []).slice(0, 2)) addExpressionBindings(argument)
+      }
+    }
     if (node.type === 'JSXElement') {
       const opening = node.openingElement as Node
       const name = opening.name as Node
@@ -1139,12 +1311,12 @@ function componentBindingsUsedInJSX(program: Node): Set<string> {
 }
 
 function namespacesDestructuredIntoJSXBindings(program: Node, jsxBindings: Set<string>): Set<string> {
-  const namespaceAliases = new Map<string, Set<string>>()
+  const namespaceDependents = new Map<string, Set<string>>()
   const destructuredValues = new Set<string>()
   const addNamespaceAlias = (source: string, alias: string) => {
-    const aliases = namespaceAliases.get(source) ?? new Set<string>()
-    aliases.add(alias)
-    namespaceAliases.set(source, aliases)
+    const dependents = namespaceDependents.get(alias) ?? new Set<string>()
+    dependents.add(source)
+    namespaceDependents.set(alias, dependents)
   }
   const collectBindingNames = (pattern: Node, names: Set<string>) => {
     if (pattern.type === 'Identifier') names.add(String(pattern.name))
@@ -1176,14 +1348,12 @@ function namespacesDestructuredIntoJSXBindings(program: Node, jsxBindings: Set<s
   collect(program)
 
   const required = new Set(destructuredValues)
-  let changed = true
-  while (changed) {
-    changed = false
-    for (const [source, aliases] of namespaceAliases) {
-      if (!required.has(source) && [...aliases].some(alias => required.has(alias))) {
-        required.add(source)
-        changed = true
-      }
+  const queue = [...required]
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    for (const source of namespaceDependents.get(queue[cursor]) ?? []) {
+      if (required.has(source)) continue
+      required.add(source)
+      queue.push(source)
     }
   }
   return required
@@ -1427,11 +1597,13 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
     const reactFactories = reactCreateElementAliases(program, reactCreateElementImports, reactNamespaces)
     const reactLazies = reactLazyAliases(program, reactLazyImports, reactFactories.namespaces)
     const dynamicComponents = dynamicLazyComponentImports(program, reactLazies, reactFactories.namespaces, moduleResolver.isLocalSpecifier, file)
+    const readableComponentBindings = staticallyReadableComponentBindings(program, reactNamespaces, dynamicComponents.readableCalls)
     const opaqueComponentImports = new Map(uninspectableExternalComponentImports)
     for (const [binding, origin] of dynamicComponents.bindings) {
       if (!opaqueComponentImports.has(binding)) opaqueComponentImports.set(binding, origin)
     }
     const importedExternalComponentBindings = importedComponentAliases(program, opaqueComponentImports)
+    for (const binding of importedExternalComponentBindings.keys()) readableComponentBindings.bindings.add(binding)
 
     // An unresolved local import can carry Route or Routes under any local
     // alias, including aliases created by destructuring or object properties.
@@ -1667,12 +1839,37 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
           const index = routeIndexAttribute(node, file, where)
           const pathAttribute = jsxAttribute(node, 'path')
           const path = pathAttribute ? stringValue(pathAttribute.value as Node, `A <Route> path in ${where} in ${file}`) : undefined
-          const elementValue = jsxAttribute(node, 'element')?.value as Node | undefined
-          const componentAttribute = jsxAttribute(node, 'Component')
-          const componentExpression = jsxExpressionAttribute(componentAttribute)
-          const wildcard = path === '*' || !!path?.endsWith('/*')
-          if (componentAttribute && wildcard && !readableComponentExpression(componentExpression, dynamicComponents.readableCalls, reactNamespaces)) {
-            throw new Error(`${file}: <Route> in ${where} has a Component prop the route inventory cannot read in wildcard route ${path}; use a statically readable component value so it can check for nested routes`)
+          const wildcard = isCanonicalWildcardPath(path, file, where)
+          const componentAttributeNames = ['Component', 'ErrorBoundary', 'HydrateFallback']
+          const elementAttributeNames = ['element', 'errorElement', 'hydrateFallbackElement']
+          const componentAttributes = componentAttributeNames
+            .map(name => ({ name, attribute: jsxAttribute(node, name) }))
+            .filter((item): item is { name: string; attribute: Node } => item.attribute !== undefined)
+          const elementAttributes = elementAttributeNames
+            .map(name => ({ name, attribute: jsxAttribute(node, name) }))
+            .filter((item): item is { name: string; attribute: Node } => item.attribute !== undefined)
+          if (wildcard && jsxAttribute(node, 'lazy')) {
+            throw new Error(`${file}: <Route> in ${where} uses a lazy prop in wildcard route ${path}; the inventory cannot inspect route components returned at runtime`)
+          }
+          if (wildcard) {
+            for (const { name, attribute } of componentAttributes) {
+              const expression = jsxExpressionAttribute(attribute)
+              if (!readableComponentExpression(expression, dynamicComponents.readableCalls, reactNamespaces, readableComponentBindings.bindings, readableComponentBindings.parameters)) {
+                throw new Error(`${file}: <Route> in ${where} has a ${name} prop the route inventory cannot read in wildcard route ${path}; use a statically declared component value so it can check for nested routes`)
+              }
+            }
+            for (const { name, attribute } of elementAttributes) {
+              if (!readableRouteElementExpression(
+                jsxExpressionAttribute(attribute),
+                reactFactories,
+                dynamicComponents.readableCalls,
+                reactNamespaces,
+                readableComponentBindings.bindings,
+                readableComponentBindings.parameters,
+              )) {
+                throw new Error(`${file}: <Route> in ${where} has an unreadable ${name} prop in wildcard route ${path}; use literal JSX so the inventory can check for nested routes`)
+              }
+            }
           }
           const componentReferences = (value: Node | undefined): string[] => {
             const expression = unwrapTransparentExpression(value)
@@ -1695,14 +1892,17 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
             }
             return renderedComponents(expression)
           }
-          const uninspectableRenders = [
-            ...renderedImportedComponents(elementValue, importedExternalComponentBindings, file, reactFactories.factories, reactFactories.namespaces, dynamicComponents.calls),
-            ...renderedImportedComponents(componentAttribute?.value as Node | undefined, importedExternalComponentBindings, file, reactFactories.factories, reactFactories.namespaces, dynamicComponents.calls, true),
-          ]
+          const uninspectableRenders = elementAttributes.flatMap(({ attribute }) =>
+            renderedImportedComponents(attribute.value as Node | undefined, importedExternalComponentBindings, file, reactFactories.factories, reactFactories.namespaces, dynamicComponents.calls, true))
+            .concat(componentAttributes.flatMap(({ attribute }) =>
+              renderedImportedComponents(attribute.value as Node | undefined, importedExternalComponentBindings, file, reactFactories.factories, reactFactories.namespaces, dynamicComponents.calls, true)))
           routes.push({
             path,
             index,
-            renders: [...renderedComponents(elementValue), ...componentReferences(componentExpression)],
+            renders: [
+              ...elementAttributes.flatMap(({ attribute }) => renderedComponents(attribute.value as Node | undefined)),
+              ...componentAttributes.flatMap(({ attribute }) => componentReferences(jsxExpressionAttribute(attribute))),
+            ],
             uninspectableRenders,
             children: collect(node.children as Node[], where),
           })
@@ -2004,18 +2204,21 @@ function localModuleResolver(configRoot: string): LocalModuleResolver {
     const tsExtensions = new Set(['.ts', '.tsx', '.mts', '.cts'])
     const jsExtensions = new Set(['.js', '.jsx', '.mjs', '.cjs'])
     if (extension && !tsExtensions.has(extension) && !jsExtensions.has(extension)) return undefined
-    const base = jsExtensions.has(extension) ? path.slice(0, -extension.length) : path
+    // An explicit JavaScript extension names a runtime file. Do not substitute
+    // a nearby TypeScript file with the same stem; that could make the audit
+    // inspect different route code from the application.
+    if (jsExtensions.has(extension)) return undefined
     const candidates = tsExtensions.has(extension)
       ? [path]
       : [
-          `${base}.ts`,
-          `${base}.tsx`,
-          `${base}.mts`,
-          `${base}.cts`,
-          join(base, 'index.ts'),
-          join(base, 'index.tsx'),
-          join(base, 'index.mts'),
-          join(base, 'index.cts'),
+          `${path}.ts`,
+          `${path}.tsx`,
+          `${path}.mts`,
+          `${path}.cts`,
+          join(path, 'index.ts'),
+          join(path, 'index.tsx'),
+          join(path, 'index.mts'),
+          join(path, 'index.cts'),
         ]
     for (const candidate of candidates) {
       if (!existsSync(candidate) || !statSync(candidate).isFile() || candidate.endsWith('.d.ts') || /\.test\.(?:ts|tsx)$/.test(candidate)) continue
@@ -2109,7 +2312,7 @@ function sourceFiles(directory = sourceRoot, configRoot = repositoryRoot): Sourc
     for (const specifier of moduleSpecifiers) {
       if (!moduleResolver.isLocalSpecifier(specifier)) continue
       const path = moduleResolver.resolve(importer, specifier)
-      if (!path && runtimeModuleLoads.includes(specifier)) {
+      if (!path && (runtimeModuleLoads.includes(specifier) || /\.(?:js|jsx|mjs|cjs)$/i.test(specifier))) {
         throw new Error(`${source.file} loads local module ${specifier} that the console route inventory cannot inspect as TypeScript`)
       }
       if (path) addFile(path)
@@ -2282,6 +2485,29 @@ export function Fallback() { useTitle('safe'); return <main /> }
       }
     })
 
+    it('tracks lowercase package components created without JSX in local wrapper modules', () => {
+      const fixtureRoot = mkdtempSync(join(tmpdir(), 'edgewatch-lowercase-factory-router-'))
+      const sourceDirectory = join(fixtureRoot, 'src')
+      mkdirSync(sourceDirectory, { recursive: true })
+      writeFileSync(join(sourceDirectory, 'Shell.tsx'), `import { Route, Routes } from 'react-router-dom'
+import { Fallback } from './Fallback'
+export function Shell() { return <Routes><Route path="*" element={<Fallback />} /></Routes> }
+`)
+      writeFileSync(join(sourceDirectory, 'Fallback.tsx'), `import * as React from 'react'
+import { NestedRoutes as nestedRoutes } from 'third-party-router'
+export function Fallback() { return React.createElement(nestedRoutes) }
+`)
+
+      try {
+        const sources = sourceFiles(sourceDirectory, fixtureRoot)
+        expect(() => resolveRouters(extractRouters(sources, fixtureRoot))).toThrow(
+          /renders imported component Fallback from third-party-router in wildcard route \*; the console route inventory cannot inspect whether it owns nested <Routes>/,
+        )
+      } finally {
+        rmSync(fixtureRoot, { recursive: true, force: true })
+      }
+    })
+
     it('tracks opaque package provenance through React component wrapper call results', () => {
       const inventory: Inventory = {
         consoleRoutes: [],
@@ -2361,6 +2587,93 @@ export function Shell() {
 }`,
       }
       expect(() => extractRouters([unreadable])).toThrow(/Component prop the route inventory cannot read in wildcard route \/known\/\*/)
+
+      const parameter = {
+        file: 'src/parameter-route-component-prop.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+export function Shell({ Page }: { Page: React.ComponentType }) {
+  return <Routes><Route path="/known/*" Component={Page} /></Routes>
+}`,
+      }
+      expect(() => extractRouters([parameter])).toThrow(/Component prop the route inventory cannot read in wildcard route \/known\/\*/)
+
+      const localFunction = {
+        file: 'src/local-route-component-prop.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+function KnownPage() { return <main /> }
+export function Shell() { return <Routes><Route path="/known/*" Component={KnownPage} /></Routes> }`,
+      }
+      expect(resolveRouters(extractRouters([localFunction]))[0].handles.map(label)).toEqual(['Shell /known/*'])
+    })
+
+    it('rejects trailing-star paths that React Router normalizes to a splat', () => {
+      expect(matchRoutes([{ path: '/known*' }], '/known/child')).not.toBeNull()
+      const source = {
+        file: 'src/non-canonical-splat.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes } from 'third-party-router'
+export function Shell() { return <Routes><Route path="/known*" element={<NestedRoutes />} /></Routes> }`,
+      }
+      expect(() => extractRouters([source])).toThrow(/non-canonical wildcard path \/known\*; put the splat '\*' in its own final path segment/)
+    })
+
+    it('checks wildcard error and hydration render props for opaque components', () => {
+      const routes = [
+        {
+          label: 'ErrorBoundary',
+          prop: 'ErrorBoundary={NestedRoutes}',
+        },
+        {
+          label: 'errorElement',
+          prop: 'errorElement={<NestedRoutes />}',
+        },
+        {
+          label: 'HydrateFallback',
+          prop: 'HydrateFallback={NestedRoutes}',
+        },
+        {
+          label: 'hydrateFallbackElement',
+          prop: 'hydrateFallbackElement={<NestedRoutes />}',
+        },
+      ]
+      for (const { label: prop, prop: value } of routes) {
+        const source = {
+          file: `src/wildcard-${prop}.tsx`,
+          code: `import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes } from 'third-party-router'
+export function Shell() { return <Routes><Route path="/known/*" ${value} /></Routes> }`,
+        }
+        expect(() => resolveRouters(extractRouters([source])), prop).toThrow(
+          /renders imported component NestedRoutes from third-party-router in wildcard route \/known\/\*/,
+        )
+      }
+
+      const lazy = {
+        file: 'src/wildcard-lazy-route-prop.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+export function Shell() { return <Routes><Route path="/known/*" lazy={loadRoute} /></Routes> }`,
+      }
+      expect(() => extractRouters([lazy])).toThrow(/uses a lazy prop in wildcard route \/known\/\*/)
+    })
+
+    it('rejects runtime values for wildcard element props', () => {
+      const source = {
+        file: 'src/wildcard-runtime-element.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+export function Shell({ page }: { page: React.ReactNode }) {
+  return <Routes><Route path="/known/*" element={page} /></Routes>
+}`,
+      }
+      expect(() => extractRouters([source])).toThrow(/unreadable element prop in wildcard route \/known\/\*/)
+
+      const literal = {
+        file: 'src/wildcard-literal-element.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+export function Shell({ visible }: { visible: boolean }) {
+  return <Routes><Route path="/known/*" element={visible ? <main /> : null} /></Routes>
+}`,
+      }
+      expect(resolveRouters(extractRouters([literal]))[0].handles.map(label)).toEqual(['Shell /known/*'])
     })
 
     it('fails the full inventory check when a factory-created package component could own wildcard routes', () => {
@@ -2519,9 +2832,10 @@ export function Shell() {
       ]
 
       for (const source of sources) {
-        expect(() => inventoryProblems(resolveRouters(extractRouters([source])), exactInventory), source.file).toThrow(
-          /renders imported component nestedRoutes from third-party-router in wildcard route \/known\/\*/,
-        )
+        const expected = source.file === 'src/external-call-argument.tsx'
+          ? /unreadable element prop in wildcard route \/known\/\*/
+          : /renders imported component nestedRoutes from third-party-router in wildcard route \/known\/\*/
+        expect(() => inventoryProblems(resolveRouters(extractRouters([source])), exactInventory), source.file).toThrow(expected)
       }
     })
 
@@ -2832,6 +3146,29 @@ export default function Router() { return <Routes><Route path="/safe/child" elem
       }
     })
 
+    it('does not substitute a TypeScript sibling for an explicitly imported JSX module', () => {
+      const fixtureRoot = mkdtempSync(join(tmpdir(), 'edgewatch-explicit-jsx-router-import-'))
+      const sourceDirectory = join(fixtureRoot, 'src')
+      mkdirSync(sourceDirectory, { recursive: true })
+      writeFileSync(join(sourceDirectory, 'Shell.tsx'), `import { Route, Routes } from 'react-router-dom'
+import Fallback from './Fallback.jsx'
+export function Shell() { return <Routes><Route path="*" element={<Fallback />} /></Routes> }
+`)
+      writeFileSync(join(sourceDirectory, 'Fallback.jsx'), `export default function Fallback() { return null }
+`)
+      writeFileSync(join(sourceDirectory, 'Fallback.tsx'), `import { Route, Routes } from 'react-router-dom'
+export default function Fallback() { return <Routes><Route path="child" /></Routes> }
+`)
+
+      try {
+        expect(() => sourceFiles(sourceDirectory, fixtureRoot)).toThrow(
+          /loads local module \.\/Fallback\.jsx that the console route inventory cannot inspect as TypeScript/,
+        )
+      } finally {
+        rmSync(fixtureRoot, { recursive: true, force: true })
+      }
+    })
+
     it('does not read local TypeScript modules that escape their canonical fixture root', () => {
       const fixtureRoot = mkdtempSync(join(tmpdir(), 'edgewatch-router-root-'))
       const outsideRoot = mkdtempSync(join(tmpdir(), 'edgewatch-router-outside-'))
@@ -2988,9 +3325,9 @@ export function Shell() { return <Components.Routes><Components.Route path='/hid
         writeFileSync(join(fixtureRoot, 'router-runtime.js'), `export { Route, Routes } from 'react-router-dom'\n`)
         writeFileSync(helperPath, `export { Route as Page, Routes as Pages } from './router-runtime.js'\n`)
         writeFileSync(routePath, `import { Page, Pages } from '../router-bindings'\nexport function HiddenRoutes() { return <Pages><Page path="/hidden" /></Pages> }\n`)
-        const unreadableReexportSources = sourceFiles(sourceDirectory, fixtureRoot)
-        expect(unreadableReexportSources.some(source => source.file.endsWith('/router-bindings.ts'))).toBe(true)
-        expect(() => extractRouters(unreadableReexportSources, fixtureRoot)).toThrow(/re-exports from unreadable local module \.\/router-runtime\.js/)
+        expect(() => sourceFiles(sourceDirectory, fixtureRoot)).toThrow(
+          /loads local module \.\/router-runtime\.js that the console route inventory cannot inspect as TypeScript/,
+        )
       } finally {
         rmSync(fixtureRoot, { recursive: true, force: true })
       }
@@ -3113,6 +3450,14 @@ const loadRouter = makeRequire(import.meta.url)
 const { Route, Routes } = loadRouter('react-router-dom')
 export function HiddenRouter() { return <Routes><Route path="/hidden" /></Routes> }`,
           error: /dynamically loads router module react-router-dom/,
+        },
+        {
+          file: 'src/commonjs-created-create-require-loader.tsx',
+          code: `const { createRequire: makeRequire } = require('node:module')
+const loadRouter = makeRequire(import.meta.url)
+const { Route, Routes } = loadRouter('react-router-dom')
+export function HiddenRouter() { return <Routes><Route path="/hidden" /></Routes> }`,
+          error: /loads the CommonJS module factory node:module/,
         },
         {
           file: 'src/dynamic-i.tsx',

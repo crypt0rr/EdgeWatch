@@ -361,7 +361,6 @@ type RuntimeModuleLoad = { node: Node; specifier: string }
 function isOpaqueExternalPackage(specifier: string, isLocalSpecifier: (specifier: string) => boolean): boolean {
   return !isLocalSpecifier(specifier)
     && !specifier.startsWith('node:')
-    && !specifier.startsWith('#')
     && !/^[a-z][a-z\d+.-]*:/i.test(specifier)
     && specifier !== 'react'
     && !specifier.startsWith('react/')
@@ -376,7 +375,29 @@ function rejectUninspectableRouterLoads(program: Node, file: string): RuntimeMod
   const moduleLoads: RuntimeModuleLoad[] = []
 
   const isRouterModule = (specifier: string) => [...routerModules].some(module => specifier === module || specifier.startsWith(`${module}/`))
-  const inspect = (node: Node) => {
+  const isLoaderBindingPosition = (node: Node, ancestors: { node: Node; field: string }[]) => {
+    let index = ancestors.length - 1
+    while (index >= 0 && transparentExpressionTypes.has(ancestors[index].node.type) && ancestors[index].field === 'expression') index -= 1
+    const parent = ancestors[index]?.node
+    const field = ancestors[index]?.field
+    return (parent?.type === 'VariableDeclarator' && field === 'init')
+      || (parent?.type === 'AssignmentExpression' && field === 'right')
+  }
+  const isLoaderCallCallee = (ancestors: { node: Node; field: string }[]) => {
+    let index = ancestors.length - 1
+    while (index >= 0 && transparentExpressionTypes.has(ancestors[index].node.type) && ancestors[index].field === 'expression') index -= 1
+    const parent = ancestors[index]?.node
+    return (parent?.type === 'CallExpression' || parent?.type === 'OptionalCallExpression') && ancestors[index].field === 'callee'
+  }
+  const isLoaderBindingName = (node: Node, ancestors: { node: Node; field: string }[]) => {
+    if (node.type !== 'Identifier') return false
+    const parent = ancestors.at(-1)
+    return (parent?.node.type === 'VariableDeclarator' && parent.field === 'id')
+      || (parent?.node.type === 'AssignmentExpression' && parent.field === 'left')
+  }
+  const isTypePosition = (node: Node, ancestors: { node: Node; field: string }[]) => node.type === 'Identifier'
+    && ancestors.some(({ node: ancestor, field }) => ancestor.type.startsWith('TS') && field !== 'expression')
+  const inspect = (node: Node, ancestors: { node: Node; field: string }[] = []) => {
     if (node.type === 'VariableDeclarator' && (node.id as Node).type === 'ObjectPattern') {
       const id = node.id as Node
       const init = node.init as Node | undefined
@@ -403,6 +424,22 @@ function rejectUninspectableRouterLoads(program: Node, file: string): RuntimeMod
       if (['apply', 'bind', 'call'].includes(memberPropertyName(member) ?? '') && isCommonJSLoader(member.object as Node, loaderAliases, moduleAliases)) {
         throw new Error(`${file} binds or rebinds a CommonJS module loader; the console route inventory cannot rule out router APIs`)
       }
+    }
+
+    const parent = ancestors.at(-1)
+    const isStaticProperty = node.type === 'Identifier'
+      && ((parent?.field === 'property' && (parent.node.type === 'MemberExpression' || parent.node.type === 'OptionalMemberExpression')
+        && parent.node.computed !== true)
+        || ((parent?.node.type === 'Property' || parent?.node.type === 'ObjectProperty') && parent.field === 'key'
+          && parent.node.computed !== true))
+    if ((node.type === 'Identifier' || node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression')
+      && !isStaticProperty
+      && !isLoaderBindingName(node, ancestors)
+      && !isTypePosition(node, ancestors)
+      && isCommonJSLoader(node, loaderAliases, moduleAliases)
+      && !isLoaderBindingPosition(node, ancestors)
+      && !isLoaderCallCallee(ancestors)) {
+      throw new Error(`${file} uses a CommonJS module loader as a value outside a direct module load; the console route inventory cannot rule out router APIs`)
     }
 
     let source: Node | undefined
@@ -437,7 +474,11 @@ function rejectUninspectableRouterLoads(program: Node, file: string): RuntimeMod
       }
       moduleLoads.push({ node, specifier })
     }
-    childNodes(node).forEach(inspect)
+    for (const [field, value] of Object.entries(node)) {
+      if (field === 'parent') continue
+      if (Array.isArray(value)) value.filter(isNode).forEach(child => inspect(child, [...ancestors, { node, field }]))
+      else if (isNode(value)) inspect(value, [...ancestors, { node, field }])
+    }
   }
   inspect(program)
   return moduleLoads
@@ -1302,7 +1343,11 @@ function renderedImportedComponents(
     const visitValues = (current: Node, parent?: Node, field?: string) => {
       if (current.type === 'MemberExpression' || current.type === 'OptionalMemberExpression') {
         const path = staticMemberPath(current)
-        if (path) add(`@member:${path}`)
+        if (path) {
+          add(`@member:${path}`)
+          const root = memberRootIdentifier(current)
+          if (root) add(root)
+        }
         else {
           const root = memberRootIdentifier(current)
           if (root) add(`@member-root:${root}`)
@@ -1529,7 +1574,11 @@ function importedComponentAliases(program: Node, imports: Map<string, { source: 
       }
       if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
         const path = staticMemberPath(node)
-        if (path) references.add(`@member:${path}`)
+        if (path) {
+          references.add(`@member:${path}`)
+          const root = memberRootIdentifier(node)
+          if (root) references.add(root)
+        }
         else {
           const root = memberRootIdentifier(node)
           if (root) references.add(`@member-root:${root}`)
@@ -1591,6 +1640,139 @@ function importedComponentAliases(program: Node, imports: Map<string, { source: 
     }
   }
   return resolved
+}
+
+/** Finds imported values that flow through local aliases to a runtime export. */
+function runtimeExportedValueBindings(program: Node): Set<string> {
+  const dependencies = new Map<string, Set<string>>()
+  const addBindingNames = (pattern: Node | undefined, names: Set<string>) => {
+    if (!pattern) return
+    if (pattern.type === 'Identifier') names.add(String(pattern.name))
+    else if (pattern.type === 'MemberExpression' || pattern.type === 'OptionalMemberExpression') {
+      const path = staticMemberPath(pattern)
+      if (path) names.add(`@member:${path}`)
+      const root = memberRootIdentifier(pattern)
+      if (root) names.add(root)
+    } else if (pattern.type === 'RestElement' || pattern.type === 'AssignmentPattern') {
+      addBindingNames((pattern.argument ?? pattern.left) as Node | undefined, names)
+    } else if (pattern.type === 'ObjectPattern') {
+      for (const property of pattern.properties as Node[]) {
+        addBindingNames((property.type === 'RestElement' ? property.argument : property.value) as Node | undefined, names)
+      }
+    } else if (pattern.type === 'ArrayPattern') {
+      for (const element of pattern.elements as (Node | null)[]) if (element) addBindingNames(element, names)
+    }
+  }
+  const addValueReferences = (node: Node | undefined, references: Set<string>, parent?: Node, field?: string) => {
+    if (!node) return
+    const expression = unwrapTransparentExpression(node)
+    if (expression !== node) {
+      if (expression) addValueReferences(expression, references, parent, field)
+      return
+    }
+    if (node.type.startsWith('TS') || node.type === 'ImportDeclaration') return
+    if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression'
+      || node.type === 'ObjectMethod' || node.type === 'ClassMethod' || node.type === 'MethodDefinition') return
+    if (node.type === 'Identifier') {
+      const staticProperty = ((parent?.type === 'Property' || parent?.type === 'ObjectProperty') && field === 'key' && parent.computed !== true)
+        || ((parent?.type === 'MemberExpression' || parent?.type === 'OptionalMemberExpression') && field === 'property' && parent.computed !== true)
+      if (!staticProperty) references.add(String(node.name))
+      return
+    }
+    if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
+      const path = staticMemberPath(node)
+      if (path) references.add(`@member:${path}`)
+      const root = memberRootIdentifier(node)
+      if (root) references.add(root)
+      if (!path) {
+        addValueReferences(node.object as Node | undefined, references, node, 'object')
+        if (node.computed) addValueReferences(node.property as Node | undefined, references, node, 'property')
+      }
+      return
+    }
+    if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression' || node.type === 'NewExpression') {
+      for (const argument of (node.arguments as Node[] | undefined) ?? []) addValueReferences(argument, references, node, 'arguments')
+      return
+    }
+    if (node.type === 'JSXElement') {
+      const opening = node.openingElement as Node
+      const name = opening.name as Node
+      if (name.type === 'JSXIdentifier') references.add(String(name.name))
+      else if (name.type === 'JSXMemberExpression') {
+        const root = jsxMemberRootIdentifier(name)
+        if (root) references.add(root)
+      }
+      for (const attribute of opening.attributes as Node[]) {
+        const value = attribute.type === 'JSXSpreadAttribute' ? attribute.argument as Node
+          : (attribute.value as Node | null | undefined)?.type === 'JSXExpressionContainer'
+            ? ((attribute.value as Node).expression as Node)
+            : undefined
+        addValueReferences(value, references, attribute, 'value')
+      }
+      for (const child of node.children as Node[]) addValueReferences(child, references, node, 'children')
+      return
+    }
+    if (node.type === 'JSXFragment') {
+      for (const child of node.children as Node[]) addValueReferences(child, references, node, 'children')
+      return
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (key === 'parent') continue
+      if (Array.isArray(value)) value.filter(isNode).forEach(child => addValueReferences(child, references, node, key))
+      else if (isNode(value)) addValueReferences(value, references, node, key)
+    }
+  }
+  const addDependency = (binding: Node | undefined, value: Node | undefined) => {
+    const outputs = new Set<string>()
+    addBindingNames(binding, outputs)
+    if (!outputs.size || !value) return
+    const references = new Set<string>()
+    addValueReferences(value, references)
+    for (const output of outputs) {
+      const inputs = dependencies.get(output) ?? new Set<string>()
+      for (const reference of references) inputs.add(reference)
+      dependencies.set(output, inputs)
+    }
+  }
+  const exported = new Set<string>()
+  const collect = (node: Node) => {
+    if (node.type === 'VariableDeclarator') addDependency(node.id as Node | undefined, node.init as Node | undefined)
+    if (node.type === 'AssignmentExpression') addDependency(node.left as Node | undefined, node.right as Node | undefined)
+    for (const statement of (node.type === 'Program' ? node.body as Node[] : [])) {
+      if (statement.type === 'ExportDefaultDeclaration') {
+        const declaration = statement.declaration as Node
+        if (declaration.type === 'Identifier') exported.add(String(declaration.name))
+        else if ((declaration.type === 'FunctionDeclaration' || declaration.type === 'ClassDeclaration') && isNode(declaration.id)) {
+          exported.add(String((declaration.id as Node).name))
+        } else addValueReferences(declaration, exported)
+      }
+      if (statement.type === 'ExportNamedDeclaration') {
+        const declaration = statement.declaration as Node | undefined
+        if (declaration?.type === 'VariableDeclaration') {
+          for (const declarator of declaration.declarations as Node[]) addBindingNames(declarator.id as Node | undefined, exported)
+        } else if ((declaration?.type === 'FunctionDeclaration' || declaration?.type === 'ClassDeclaration') && isNode(declaration.id)) {
+          exported.add(String((declaration.id as Node).name))
+        }
+        for (const specifier of (statement.specifiers as Node[] | undefined) ?? []) {
+          const local = specifier.local as Node | undefined
+          if (local?.type === 'Identifier') exported.add(String(local.name))
+        }
+      }
+    }
+    childNodes(node).forEach(collect)
+  }
+  collect(program)
+
+  const reachable = new Set(exported)
+  const pending = [...exported]
+  for (let cursor = 0; cursor < pending.length; cursor += 1) {
+    for (const dependency of dependencies.get(pending[cursor]) ?? []) {
+      if (reachable.has(dependency)) continue
+      reachable.add(dependency)
+      pending.push(dependency)
+    }
+  }
+  return reachable
 }
 
 function componentBindingsUsedInJSX(program: Node): Set<string> {
@@ -1836,8 +2018,15 @@ function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<s
   const exportsByPath = new Map<string, Map<string, { source: string }>>()
   const isOpaquePackage = (specifier: string) => isOpaqueExternalPackage(specifier, moduleResolver.isLocalSpecifier)
   const nameOf = (node: Node | undefined) => node?.type === 'Identifier' ? String(node.name) : undefined
+  const maxExportPropagationSteps = 50_000
+  let exportPropagationSteps = 0
   const addExport = (target: Map<string, { source: string }>, name: string, origin: { source: string } | undefined) => {
-    if (origin) target.set(name, origin)
+    if (!origin) return
+    exportPropagationSteps += 1
+    if (exportPropagationSteps > maxExportPropagationSteps) {
+      throw new Error(`local component export provenance exceeded ${maxExportPropagationSteps} propagation steps; the console route inventory cannot inspect this module graph`)
+    }
+    target.set(name, origin)
   }
   const importersByPath = new Map<string, Set<string>>()
   for (const source of programs) {
@@ -1869,6 +2058,7 @@ function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<s
       const jsxBindings = source.jsxBindings
       const callBindings = source.callBindings
       const jsxNamespaceBindings = source.jsxNamespaceBindings
+      const exportedValueBindings = runtimeExportedValueBindings(source.program)
       for (const statement of source.program.body as Node[]) {
         const isImport = statement.type === 'ImportDeclaration'
         const isReexport = statement.type === 'ExportNamedDeclaration' || statement.type === 'ExportAllDeclaration'
@@ -1882,7 +2072,9 @@ function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<s
             for (const specifier of statement.specifiers as Node[]) {
               if (specifier.importKind === 'type') continue
               const localName = String((specifier.local as Node).name)
-              if (/^[A-Z]/.test(localName) || jsxBindings.has(localName) || jsxNamespaceBindings.has(localName) || callBindings.has(localName)) {
+              if (specifier.type === 'ImportNamespaceSpecifier'
+                || /^[A-Z]/.test(localName) || jsxBindings.has(localName) || jsxNamespaceBindings.has(localName)
+                || callBindings.has(localName) || exportedValueBindings.has(localName)) {
                 importedOrigins.set(localName, { source: moduleSource })
               }
             }
@@ -1897,8 +2089,11 @@ function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<s
         if (isImport) {
           for (const specifier of statement.specifiers as Node[]) {
             if (specifier.importKind === 'type') continue
-            const importedName = specifier.type === 'ImportSpecifier' ? nameOf(specifier.imported as Node) : 'default'
-            const origin = importedName ? targetExports.get(importedName) : undefined
+            const importedName = specifier.type === 'ImportSpecifier' ? nameOf(specifier.imported as Node)
+              : specifier.type === 'ImportDefaultSpecifier' ? 'default' : undefined
+            const origin = importedName
+              ? targetExports.get(importedName) ?? (importedName === 'default' ? undefined : targetExports.get('*'))
+              : specifier.type === 'ImportNamespaceSpecifier' ? targetExports.get('*') : undefined
             if (origin) importedOrigins.set(String((specifier.local as Node).name), origin)
           }
         }
@@ -1943,6 +2138,11 @@ function localComponentOrigins(sources: SourceFile[], configRoot: string): Map<s
               const exportedName = nameOf(exportSpecifier.exported as Node)
               if (exportedName) addExport(nextExports, exportedName, { source: specifier })
             }
+          } else if (isOpaquePackage(specifier) && statement.type === 'ExportAllDeclaration') {
+            // An external export-star exposes unknown names. Mark named imports
+            // from a local barrel as opaque instead of pretending its export
+            // inventory is complete.
+            addExport(nextExports, '*', { source: specifier })
           }
           continue
         }
@@ -2054,6 +2254,9 @@ function extractRouters(sources: SourceFile[], configRoot = repositoryRoot): Sou
             if (statement.importKind === 'type' || specifier.importKind === 'type') continue
             const importedName = specifier.type === 'ImportSpecifier' ? String((specifier.imported as Node).name) : 'default'
             const origin = moduleOrigins?.get(importedName)
+              ?? (specifier.type === 'ImportSpecifier' || specifier.type === 'ImportNamespaceSpecifier'
+                ? moduleOrigins?.get('*')
+                : undefined)
             if (origin) uninspectableExternalComponentImports.set(String((specifier.local as Node).name), origin)
           }
         }
@@ -2722,7 +2925,9 @@ function localModuleResolver(configRoot: string): LocalModuleResolver {
         throw new Error(`local module ${specifier} resolves first to ${relative(canonicalConfigRoot, candidate)} under Vite's extension order, which the console route inventory cannot inspect as TypeScript`)
       }
       const canonical = isAllowedPath(candidate)
-      if (!canonical) return undefined
+      if (!canonical) {
+        throw new Error(`local module ${specifier} resolves outside allowed root ${canonicalConfigRoot}; the console route inventory cannot inspect the module selected by the application`)
+      }
       return canonical
     }
     return undefined
@@ -3093,9 +3298,47 @@ export function Fallback() { useTitle('safe'); return <main /> }
 `)
         const safeSources = sourceFiles(sourceDirectory, fixtureRoot)
         expect(resolveRouters(extractRouters(safeSources, fixtureRoot))[0].handles.map(label)).toEqual(['Shell *'])
+
+        writeFileSync(join(sourceDirectory, 'Shell.tsx'), `import { Route, Routes } from 'react-router-dom'
+import Fallback from './Fallback'
+export function Shell() { return <Routes><Route path="*" element={<Fallback />} /></Routes> }
+`)
+        writeFileSync(wrapperPath, `import { NestedRoutes as routes } from 'third-party-router'
+const forwarded = routes
+export default forwarded
+`)
+        const reexportedAliasSources = sourceFiles(sourceDirectory, fixtureRoot)
+        expect(() => resolveRouters(extractRouters(reexportedAliasSources, fixtureRoot))).toThrow(
+          /renders imported component Fallback from third-party-router in wildcard route \*; the console route inventory cannot inspect whether it owns nested <Routes>/,
+        )
+
+        writeFileSync(wrapperPath, `export * from 'third-party-router'
+`)
+        writeFileSync(join(sourceDirectory, 'Shell.tsx'), `import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes as Fallback } from './Fallback'
+export function Shell() { return <Routes><Route path="*" element={<Fallback />} /></Routes> }
+`)
+        const exportStarSources = sourceFiles(sourceDirectory, fixtureRoot)
+        expect(() => resolveRouters(extractRouters(exportStarSources, fixtureRoot))).toThrow(
+          /renders imported component Fallback from third-party-router in wildcard route \*/,
+        )
       } finally {
         rmSync(fixtureRoot, { recursive: true, force: true })
       }
+    })
+
+    it('tracks lowercase components read from opaque package namespaces', () => {
+      const source = {
+        file: 'src/namespace-member-alias.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+import * as thirdParty from 'third-party-router'
+const Page = thirdParty.NestedRoutes
+export function Shell() { return <Routes><Route path="*" element={<Page />} /></Routes> }`,
+      }
+
+      expect(() => resolveRouters(extractRouters([source]))).toThrow(
+        /renders imported component Page from third-party-router in wildcard route \*; the console route inventory cannot inspect whether it owns nested <Routes>/,
+      )
     })
 
     it('tracks lowercase package components created without JSX in local wrapper modules', () => {
@@ -3593,6 +3836,27 @@ export function Shell() {
       }
     })
 
+    it('fails closed when local export-barrel provenance exceeds its work budget', () => {
+      const fixtureRoot = mkdtempSync(join(tmpdir(), 'edgewatch-route-export-provenance-budget-'))
+      const sourceDirectory = join(fixtureRoot, 'src')
+      mkdirSync(sourceDirectory, { recursive: true })
+      writeFileSync(join(sourceDirectory, 'Shell.tsx'), `import { Route, Routes } from 'react-router-dom'
+import { NestedRoutes0 as Fallback } from './barrel'
+export function Shell() { return <Routes><Route path="*" element={<Fallback />} /></Routes> }
+`)
+      writeFileSync(join(sourceDirectory, 'base.ts'), `export { ${Array.from({ length: 100 }, (_unused, index) => `NestedRoutes as NestedRoutes${index}`).join(', ')} } from 'third-party-router'\n`)
+      writeFileSync(join(sourceDirectory, 'barrel.ts'), `${Array.from({ length: 510 }, () => "export * from './base'").join('\n')}\n`)
+
+      try {
+        const sources = sourceFiles(sourceDirectory, fixtureRoot)
+        expect(() => extractRouters(sources, fixtureRoot)).toThrow(
+          /local component export provenance exceeded 50000 propagation steps/,
+        )
+      } finally {
+        rmSync(fixtureRoot, { recursive: true, force: true })
+      }
+    })
+
     it('tracks opaque component provenance from runtime package loads and lazy promise aliases', () => {
       const exactInventory: Inventory = {
         consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
@@ -3637,6 +3901,27 @@ export function Shell() { return <Routes><Route path="/known/*" element={<Nested
           /renders imported component (?:NestedRoutes|routes) from third-party-router in wildcard route \/known\/\*/,
         )
       }
+    })
+
+    it('treats package import-map loads as opaque in wildcard lazy routes', () => {
+      const source = {
+        file: 'src/package-import-map-route.tsx',
+        code: `import * as React from 'react'
+import { Route, Routes } from 'react-router-dom'
+const NestedRoutes = React.lazy(() => import('#route-tree'))
+export function Shell() { return <Routes><Route path="/known/*" element={<NestedRoutes />} /></Routes> }`,
+      }
+      const inventory: Inventory = {
+        consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
+        surfaces: [],
+        scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
+        exclusions: [],
+        tabKeys: [],
+      }
+
+      expect(() => inventoryProblems(resolveRouters(extractRouters([source])), inventory)).toThrow(
+        /renders imported component NestedRoutes from #route-tree in wildcard route \/known\/\*/,
+      )
     })
 
     it('rejects a runtime component alias that shadows a statically declared wildcard component', () => {
@@ -3960,9 +4245,9 @@ export function LinkedShell() { return <Routes><Route path="/linked" element={<L
         symlinkSync(outsideRoot, linkedDirectory, 'dir')
         expect(() => sourceFiles(linkedDirectory, fixtureRoot)).toThrow(/source directory .* resolves outside allowed root/)
 
-        const sources = sourceFiles(sourceDirectory, fixtureRoot)
-        expect(sources.some(source => source.file.includes('OutsideRouter.tsx'))).toBe(false)
-        expect(() => extractRouters(sources, fixtureRoot)).toThrow(/uses JSX component (?:OutsideRouter|LinkedRouter) from unresolved local module/)
+        expect(() => sourceFiles(sourceDirectory, fixtureRoot)).toThrow(/local module .* resolves outside allowed root/)
+        rmSync(join(sourceDirectory, 'Traversal.tsx'))
+        expect(() => sourceFiles(sourceDirectory, fixtureRoot)).toThrow(/local module .* resolves outside allowed root/)
       } finally {
         rmSync(fixtureRoot, { recursive: true, force: true })
         rmSync(outsideRoot, { recursive: true, force: true })
@@ -4123,6 +4408,34 @@ export function Shell() { return <Components.Routes><Components.Route path='/hid
       }
     })
 
+    it('does not fall back to a different TypeScript path alias target after an out-of-root match', () => {
+      const fixtureRoot = mkdtempSync(join(tmpdir(), 'edgewatch-route-alias-root-'))
+      const outsideRoot = mkdtempSync(join(tmpdir(), 'edgewatch-route-alias-outside-'))
+      const sourceDirectory = join(fixtureRoot, 'src')
+      const fallbackDirectory = join(sourceDirectory, 'routes')
+      mkdirSync(fallbackDirectory, { recursive: true })
+      writeFileSync(join(outsideRoot, 'router-bindings.ts'), `export { Route as Page, Routes as Pages } from 'react-router-dom'\n`)
+      writeFileSync(join(fallbackDirectory, 'router-bindings.tsx'), `export function Page() { return <main /> }\nexport function Pages({ children }) { return <>{children}</> }\n`)
+      writeFileSync(join(sourceDirectory, 'HiddenRoutes.tsx'), `import { Page, Pages } from '@edgewatch/router-bindings'
+export function HiddenRoutes() { return <Pages><Page path="/hidden" /></Pages> }
+`)
+
+      try {
+        const outsideTarget = `${relative(fixtureRoot, outsideRoot).split(/[\\/]/).join('/')}/*`
+        writeFileSync(join(fixtureRoot, 'tsconfig.json'), JSON.stringify({
+          compilerOptions: {
+            baseUrl: '.',
+            paths: { '@edgewatch/*': [outsideTarget, 'src/routes/*'] },
+          },
+        }))
+
+        expect(() => sourceFiles(sourceDirectory, fixtureRoot)).toThrow(/local module .*resolves outside allowed root/)
+      } finally {
+        rmSync(fixtureRoot, { recursive: true, force: true })
+        rmSync(outsideRoot, { recursive: true, force: true })
+      }
+    })
+
     it('refuses dynamic router module loads before checking for static router imports', () => {
       const cases = [
         {
@@ -4227,6 +4540,14 @@ const loadRouter = makeRequire(import.meta.url)
 const { Route, Routes } = loadRouter('react-router-dom')
 export function HiddenRouter() { return <Routes><Route path="/hidden" /></Routes> }`,
           error: /loads the CommonJS module factory node:module/,
+        },
+        {
+          file: 'src/reflective-create-require-loader.tsx',
+          code: `import { Route, Routes } from 'react-router-dom'
+const router = Reflect.apply(module.require, module, ['react-router-dom'])
+const { Route: Page, Routes: Pages } = router
+export function HiddenRouter() { return <Pages><Page path="/hidden" /></Pages> }`,
+          error: /uses a CommonJS module loader as a value outside a direct module load/,
         },
         {
           file: 'src/dynamic-i.tsx',

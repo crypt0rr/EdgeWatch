@@ -172,9 +172,11 @@ aliases configured directly in the root `tsconfig.json`. CommonJS loader aliases
 use one AST pass and a dependency worklist so reverse-declared chains stay
 linear. A config that extends another `tsconfig` fails closed because the
 inventory does not resolve inherited aliases. Alias patterns and targets with
-at most one `*` are supported; multiple wildcards fail closed. Wildcard
-captures are substituted as literal path text, including characters that have
-meaning in regular expressions. It rejects renamed `Route` or `Routes`
+at most one `*` are supported; multiple wildcards fail closed. If an alias
+candidate exists outside the canonical fixture root, the inventory fails closed
+instead of falling through to a later candidate. Wildcard captures are
+substituted as literal path text, including characters that have meaning in
+regular expressions. It rejects renamed `Route` or `Routes`
 re-exports anywhere in those chains. A local module load or local re-export
 that cannot be read as TypeScript fails closed; JSX uses of components from an
 unresolved static local import fail closed, including member expressions
@@ -197,9 +199,10 @@ the route's `Component` prop as well as `element`, and follows every JSX
 attribute value and spread value regardless of prop name or identifier
 capitalization. Local aliases and transparent TypeScript wrappers are followed
 through both logical-expression operands and both value branches of conditional
-expressions. Literal bare-package dynamic imports returned by `React.lazy` or an
-imported `lazy` alias also carry opaque component provenance. The lazy loader may
-be inline or a statically declared function/arrow binding reached through
+expressions. Literal package dynamic imports, including `#` package-import-map
+imports, returned by `React.lazy` or an imported `lazy` alias also carry opaque
+component provenance. The lazy loader may be inline or a statically declared
+function/arrow binding reached through
 identifier aliases; an unreadable callback fails closed. These components could
 render nested `<Routes>` whose paths would otherwise be missing from the axe and
 role audits. Readable local function and class component bodies are inspected
@@ -212,13 +215,16 @@ usual; unrelated package loads and third-party page or presentation components
 on non-wildcard routes remain allowed. React primitives and recognized router
 exports are treated as known wrappers and redirects; `lucide-react` SVG icons
 are treated as presentation-only components.
-Opaque origins also follow bare-package values loaded by literal dynamic
-`import()` or `require()` calls through awaited module values, destructuring,
-member access and assignments, conditional and logical branches, local helper
+Opaque origins also follow package values, including `#` package-import-map
+specifiers, loaded by literal dynamic `import()` or `require()` calls through
+awaited module values, destructuring, member access and assignments, conditional
+and logical branches, local helper
 returns, statically named object/class method returns, callable aliases, and
 `React.lazy` promise aliases. Function and method chains use a dependency
-worklist instead of recursively rescanning their source. Inline opaque loads in
-a wildcard route's JSX values are recorded directly. Anonymous default-export
+worklist instead of recursively rescanning their source. Local export provenance
+uses a bounded worklist and fails closed when a module graph exceeds its
+propagation budget. Inline opaque loads in a wildcard route's JSX values are
+recorded directly. Anonymous default-export
 components preserve provenance from inline runtime loads. A lowercase package
 component passed to a local function or object/class method wrapper also retains
 provenance when that wrapper is exported, including through mutable callable

@@ -825,6 +825,10 @@ function reviewedStageInputs(stage, stageKey) {
       continue
     }
     if (!policy.value.test(String(resolvedValue))) return false
+    if (stageKey === 'naabu' && declaration.name === 'NAABU_X_NET_VERSION') {
+      const [major, minor] = String(resolvedValue).slice(1).split('.').map(Number)
+      if (!(major > 0 || (major === 0 && minor >= 62))) return false
+    }
   }
   return seen.size === expected.size
 }
@@ -1316,6 +1320,8 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   )
   assert.ok(runViolations(unsafeNaabuXNetVersion).some((run) => run.stage === 'naabu'),
     'an unchecked x/net version must not enter an approved command form')
+  assert.ok(runViolations(sourceDockerfile, { ...buildArgs, NAABU_X_NET_VERSION: 'v0.61.9' }).some((run) => run.stage === 'naabu'),
+    'the effective Naabu x/net build argument must stay at or above the vulnerability fix floor')
   assert.ok(runViolations(sourceDockerfile, { ...buildArgs, VERSION: '$(npm ci)' }).some((run) => run.stage === 'build'),
     'an unchecked release version build argument must fail closed')
   assert.ok(runViolations(sourceDockerfile, { ...buildArgs, TARGETARCH: '$(npm ci)' }).some((run) => run.stage === 'naabu'),

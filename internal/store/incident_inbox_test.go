@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/model"
@@ -1061,70 +1062,73 @@ func TestIncidentInboxSnapshotDecodesAreSerializedAcrossRequests(t *testing.T) {
 }
 
 func TestIncidentInboxSnapshotDecodeYieldsBetweenKeys(t *testing.T) {
-	firstRequest := map[incidentInboxSnapshotKey][]int{
-		{tenantID: "tenant-a", jobID: "job-one", scanID: "scan-one"}: {0},
-		{tenantID: "tenant-a", jobID: "job-two", scanID: "scan-two"}: {1},
-	}
-	secondRequest := map[incidentInboxSnapshotKey][]int{
-		{tenantID: "tenant-b", jobID: "job", scanID: "scan"}: {0},
-	}
-	firstPending := make([]incidentInboxPendingItem, 2)
-	secondPending := make([]incidentInboxPendingItem, 1)
-	firstDecodeStarted := make(chan struct{})
-	releaseFirstDecode := make(chan struct{})
-	secondRequestRead := make(chan struct{}, 1)
-	firstRequestSecondRead := make(chan struct{}, 1)
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releaseFirstDecode) }) }
-	t.Cleanup(release)
-	var firstRequestDecodes atomic.Int32
-	decode := func([]byte, *model.Snapshot) error {
-		if firstRequestDecodes.Add(1) == 1 {
-			close(firstDecodeStarted)
-			<-releaseFirstDecode
+	// Keep this test serial: the slot must belong to the synctest bubble so
+	// waiting for admission is durably blocked rather than an external event.
+	originalSlot := incidentInboxSnapshotDecodeSlot
+	defer func() { incidentInboxSnapshotDecodeSlot = originalSlot }()
+	synctest.Test(t, func(t *testing.T) {
+		incidentInboxSnapshotDecodeSlot = make(chan struct{}, 1)
+		firstRequest := map[incidentInboxSnapshotKey][]int{
+			{tenantID: "tenant-a", jobID: "job-one", scanID: "scan-one"}: {0},
+			{tenantID: "tenant-a", jobID: "job-two", scanID: "scan-two"}: {1},
 		}
-		return nil
-	}
-	var firstRequestReads atomic.Int32
-	read := func(_ context.Context, key incidentInboxSnapshotKey) ([]byte, error) {
-		switch key.tenantID {
-		case "tenant-a":
-			if firstRequestReads.Add(1) == 2 {
-				firstRequestSecondRead <- struct{}{}
+		secondRequest := map[incidentInboxSnapshotKey][]int{
+			{tenantID: "tenant-b", jobID: "job", scanID: "scan"}: {0},
+		}
+		firstDecodeStarted := make(chan struct{})
+		releaseFirstDecode := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(releaseFirstDecode) }) }
+		defer release()
+		var decodeCalls atomic.Int32
+		decode := func([]byte, *model.Snapshot) error {
+			if decodeCalls.Add(1) == 1 {
+				close(firstDecodeStarted)
+				<-releaseFirstDecode
 			}
-		case "tenant-b":
-			secondRequestRead <- struct{}{}
+			return nil
 		}
-		return []byte(key.tenantID), nil
-	}
-	firstDone := make(chan error, 1)
-	go func() {
-		firstDone <- classifyIncidentInboxSnapshots(context.Background(), firstRequest, firstPending, read, decode)
-	}()
-	select {
-	case <-firstDecodeStarted:
-	case <-time.After(5 * time.Second):
-		t.Fatal("first request did not start its snapshot decode")
-	}
-	secondDone := make(chan error, 1)
-	go func() {
-		secondDone <- classifyIncidentInboxSnapshots(context.Background(), secondRequest, secondPending, read, decode)
-	}()
-	// Let the second request queue on the slot while the first decode is held.
-	time.Sleep(30 * time.Millisecond)
-	release()
-	select {
-	case <-secondRequestRead:
-	case <-firstRequestSecondRead:
-		t.Fatal("multi-snapshot page retained the admission slot between keys")
-	case <-time.After(5 * time.Second):
-		t.Fatal("neither request read resumed after the first decode released the slot")
-	}
-	for _, done := range []<-chan error{firstDone, secondDone} {
-		if err := <-done; err != nil {
-			t.Fatal(err)
+		// A single channel preserves read order even if the observer resumes
+		// after both requests have finished. Selecting between two ready event
+		// channels cannot establish which request was admitted first.
+		reads := make(chan string, 3)
+		read := func(_ context.Context, key incidentInboxSnapshotKey) ([]byte, error) {
+			reads <- key.tenantID
+			return []byte(key.tenantID), nil
 		}
-	}
+		completed := make(chan error, 2)
+		go func() {
+			completed <- classifyIncidentInboxSnapshots(context.Background(), firstRequest, make([]incidentInboxPendingItem, 2), read, decode)
+		}()
+		select {
+		case <-firstDecodeStarted:
+		case <-time.After(5 * time.Second):
+			t.Fatal("first request did not start its snapshot decode")
+		}
+		go func() {
+			completed <- classifyIncidentInboxSnapshots(context.Background(), secondRequest, make([]incidentInboxPendingItem, 1), read, decode)
+		}()
+		// The second request must actually be waiting for admission before
+		// releasing the first decode; elapsed wall time cannot guarantee this.
+		synctest.Wait()
+		release()
+		synctest.Wait()
+		for range 2 {
+			if err := <-completed; err != nil {
+				t.Fatal(err)
+			}
+		}
+		var got []string
+		for range 3 {
+			got = append(got, <-reads)
+		}
+		if strings.Join(got, ",") != "tenant-a,tenant-b,tenant-a" {
+			t.Fatalf("snapshot read order = %v; want the queued request admitted between the page's keys", got)
+		}
+		if decodeCalls.Load() != 3 {
+			t.Fatalf("decoded %d snapshots; want all three", decodeCalls.Load())
+		}
+	})
 }
 
 func TestIncidentInboxSnapshotDecodeWaitHonorsCancellation(t *testing.T) {

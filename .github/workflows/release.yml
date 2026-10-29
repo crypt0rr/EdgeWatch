@@ -54,7 +54,7 @@ env:
   # Docker image references must be lowercase even though GitHub repository
   # names may contain uppercase characters.
   REGISTRY_IMAGE: ghcr.io/crypt0rr/edgewatch
-  NODE_VERSION: 24.22.1
+  NODE_VERSION: 24.22.2
   GORELEASER_VERSION: v2.19.0
   # docker/build-push-action uploads a build-record artifact for every image
   # build. The job summary still reports the build; skip the artifact.

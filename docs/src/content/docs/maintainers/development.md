@@ -11,7 +11,7 @@ and builds, but is not included in the production image.
 
 The project uses Go 1.27.3 or newer and Node.js 24.16.0 or newer within the
 Node 24 release line. CI, the release workflow, and the container build are
-pinned to 24.22.1 along with this guide. The documentation workflow and local
+pinned to 24.22.2 along with this guide. The documentation workflow and local
 version managers read
 [.node-version](https://github.com/crypt0rr/EdgeWatch/blob/main/.node-version),
 and the pull-request title check uses the same runtime pin.

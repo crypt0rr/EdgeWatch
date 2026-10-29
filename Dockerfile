@@ -22,9 +22,13 @@ RUN if [ "$PREBUILT_FRONTEND" = "1" ]; then \
 FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS naabu
 ARG NAABU_VERSION=v2.6.1
 ARG NAABU_COMMIT=5a0ca8bde91b5bb16213e9e8b5c6871eac954bd8
+ARG NAABU_X_NET_VERSION=v0.62.0
+ARG NAABU_GOLDMARK_VERSION=v1.7.17
+ARG NAABU_COMPRESS_VERSION=v1.18.7
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /naabu
+COPY scripts/verify-naabu-module-versions.sh /usr/local/bin/verify-naabu-module-versions.sh
 RUN apk add --no-cache ca-certificates=20261020-r0 git=2.54.0-r0
 # Fetch the immutable commit and the human-readable release tag, then verify
 # that the tag still resolves to the pinned commit before compiling.
@@ -34,6 +38,15 @@ RUN git init . \
     && git fetch --depth 1 origin refs/tags/${NAABU_VERSION}:refs/tags/${NAABU_VERSION} \
     && test "$(git rev-parse ${NAABU_VERSION}^{commit})" = "${NAABU_COMMIT}" \
     && git checkout --detach ${NAABU_COMMIT}
+# Naabu v2.6.1 pins older x/net, goldmark, and compress versions with known
+# advisories. Keep the scanner source pin while resolving those modules at
+# fixed releases; Go records the compatible module graph and checksums in this
+# build stage. The image scan checks the resulting binary on both architectures.
+RUN go get golang.org/x/net@${NAABU_X_NET_VERSION} \
+      github.com/yuin/goldmark@${NAABU_GOLDMARK_VERSION} \
+      github.com/klauspost/compress@${NAABU_COMPRESS_VERSION} \
+    && sh /usr/local/bin/verify-naabu-module-versions.sh \
+      "${NAABU_X_NET_VERSION}" "${NAABU_GOLDMARK_VERSION}" "${NAABU_COMPRESS_VERSION}"
 # Naabu's dependencies import symbols dynamically even without cgo, so the
 # binary needs an ELF interpreter. Go names the build host's loader, which for
 # a cross-compiled architecture is glibc's; gcompat would then re-execute it

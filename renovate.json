@@ -38,6 +38,36 @@
     },
     {
       "customType": "regex",
+      "description": "Update the x/net version the pinned Naabu build overrides for the scanner image.",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": [
+        "ARG NAABU_X_NET_VERSION=(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)\\n"
+      ],
+      "depNameTemplate": "golang.org/x/net",
+      "datasourceTemplate": "go"
+    },
+    {
+      "customType": "regex",
+      "description": "Update the Goldmark version the pinned Naabu build overrides to a fixed release.",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": [
+        "ARG NAABU_GOLDMARK_VERSION=(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)\\n"
+      ],
+      "depNameTemplate": "github.com/yuin/goldmark",
+      "datasourceTemplate": "go"
+    },
+    {
+      "customType": "regex",
+      "description": "Update the klauspost/compress version the pinned Naabu build overrides to a fixed release.",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": [
+        "ARG NAABU_COMPRESS_VERSION=(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)\\n"
+      ],
+      "depNameTemplate": "github.com/klauspost/compress",
+      "datasourceTemplate": "go"
+    },
+    {
+      "customType": "regex",
       "description": "Update the digest-pinned images that workflow steps and scripts start: the QEMU binfmt installer, BuildKit, the BuildKit SBOM generator, and Grype.",
       "managerFilePatterns": [
         "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/",

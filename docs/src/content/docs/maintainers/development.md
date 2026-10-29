@@ -158,6 +158,152 @@ parameter matches any value. It fails when a route or tab has no entry, and
 when an entry no longer reaches the route it stands for. A route that renders
 no page of its own, such as a catch-all redirect outside the console shells,
 goes in `routesWithoutInventoryEntry` with its reason instead.
+The parser reads `<Route>` elements in direct, fragment, and supported
+conditional JSX children. It fails closed on namespace or default router
+imports, re-exports from a router module, source-less re-exports and local
+aliases of imported `Route` or `Routes`, JSX member forms such as `<RR.Route>`,
+and opaque non-JSX children inside `<Routes>`, including `React.createElement`
+calls and their aliases. Teach the inventory check before introducing any of
+these forms.
+
+The parser follows statically resolvable local TypeScript imports, re-exports,
+dynamic imports, and CommonJS loads, including helpers outside `src/` and
+aliases configured directly in the root `tsconfig.json`. CommonJS loader aliases
+use one AST pass and a dependency worklist so reverse-declared chains stay
+linear. A config that extends another `tsconfig` fails closed because the
+inventory does not resolve inherited aliases. Alias patterns and targets with
+at most one `*` are supported; multiple wildcards fail closed. If an alias
+candidate exists outside the canonical fixture root, the inventory fails closed
+instead of falling through to a later candidate. Wildcard captures are
+substituted as literal path text, including characters that have meaning in
+regular expressions. It rejects renamed `Route` or `Routes`
+re-exports anywhere in those chains. A local module load or local re-export
+that cannot be read as TypeScript fails closed; JSX uses of components from an
+unresolved static local import fail closed, including member expressions
+rooted at default, namespace, or named imports through every member level.
+Values from unresolved local
+imports also fail closed when forwarded through assignments, destructuring,
+object properties, calls, returns, JSX props, or JSX spread arguments, since
+these aliases could hide router components from the inventory. Statically
+readable local TypeScript component imports continue to be followed. Import
+router components directly from a recognized router module.
+The check also tracks `Route` and `Routes` through renamed exports from local
+TypeScript barrels and through destructured values returned by literal dynamic
+imports of unknown packages. Do not load router APIs with `import()` or build a
+CommonJS loader from a dynamic import of `module` or `node:module`.
+
+The parser also tracks bare-package component imports through local aliases and
+values passed in a route element. If an uninspectable package component is
+rendered or forwarded by a wildcard `<Route>` (`path="*"` or a path ending in
+`/*`), the check fails closed with the component and package in its diagnostic.
+This includes values passed as the element type, as function-call arguments in
+a route element, or through the props argument to `React.createElement` or an
+aliased `createElement` factory. The check reads
+the route's `Component` prop as well as `element`, and follows every JSX
+attribute value and spread value regardless of prop name or identifier
+capitalization. Local aliases and transparent TypeScript wrappers are followed
+through both logical-expression operands and both value branches of conditional
+expressions. Literal package dynamic imports, including `#` package-import-map
+imports, returned by `React.lazy` or an imported `lazy` alias also carry opaque
+component provenance. The lazy loader may be inline or a statically declared
+function/arrow binding reached through
+identifier aliases; an unreadable callback fails closed. These components could
+render nested `<Routes>` whose paths would otherwise be missing from the axe and
+role audits. A loader that returns a runtime component value instead of a
+statically visible module import also fails closed. Readable local function and
+class component bodies are inspected for package components they render or
+forward, including through local component chains. Call-result aliases retain
+provenance through component wrappers such as
+`React.memo`, named `memo` imports, and their aliases. The wildcard guard still
+runs when the wildcard route itself is listed in `routesWithoutInventoryEntry`.
+Readable local TypeScript components and local lazy imports are followed as
+usual; unrelated package loads and third-party page or presentation components
+on non-wildcard routes remain allowed. React primitives and recognized router
+exports are treated as known wrappers and redirects; `lucide-react` SVG icons
+are treated as presentation-only components. Custom component tags and member
+tags in wildcard JSX element trees must use statically declared component
+bindings; runtime component parameters, prop spreads, or other
+unreadable component values fail closed. Local namespace imports inherit opaque
+provenance when their module exposes an opaque package export. Extracted
+same-named router components receive deterministic file-order suffixes, and
+duplicate router names supplied to the resolver fail closed instead of
+overwriting a route tree. JSX values imported through an unresolved `#`
+package-import-map specifier fail closed because this parser does not resolve
+`package.json` imports mappings.
+Opaque origins also follow package values, including `#` package-import-map
+specifiers, loaded by literal dynamic `import()` or `require()` calls through
+awaited module values, destructuring, member access and assignments, conditional
+and logical branches, local helper
+returns, statically named object/class method returns, callable aliases, and
+`React.lazy` promise aliases. Function and method chains use a dependency
+worklist instead of recursively rescanning their source. Local export provenance
+uses a bounded worklist and fails closed when a module graph exceeds its
+propagation budget. Inline opaque loads in a wildcard route's JSX values are
+recorded directly. Anonymous default-export
+components preserve provenance from inline runtime loads. A lowercase package
+component passed to a local function or object/class method wrapper also retains
+provenance when that wrapper is exported, including through mutable callable
+aliases. A runtime component value shadowing a statically declared name does
+not count as readable. Local extensionless imports follow Vite's extension
+order; if JavaScript or JSON wins before a TypeScript candidate, the inventory
+fails closed instead of inspecting the TypeScript sibling. A local router
+mounted with `React.createElement(LocalRouter)` is attached to the declaring
+route so its child paths remain in the inventory.
+
+Wildcard route `element`, `errorElement`, and `hydrateFallbackElement` props
+must use literal JSX, fragments, primitive values, `null`, or statically
+inspectable conditional/logical expressions. A statically inspectable
+`React.createElement` call with a readable type and arguments is also allowed;
+other runtime element values fail closed. Wildcard `lazy` route props and
+`Component`, `ErrorBoundary`, or `HydrateFallback` props that are parameters or
+other runtime values fail closed. Use canonical wildcard paths only: `*` or a
+final `/*` segment. Explicit local JavaScript imports are not resolved to
+same-named TypeScript files; unreadable JavaScript route modules fail closed.
+
+`<Route>` props must be explicit: any JSX prop spread is rejected because a
+spread can override `path`, including when it appears after a direct `path`
+attribute or uses an object alias or conditional expression. Only a shorthand
+`index` or literal `index={true}` is an index route; `index={false}` is a normal
+path route, and dynamic `index` values fail closed. Router APIs must use static
+named imports; dynamic imports or `require` loads of router modules
+are rejected, including direct, aliased, bound, and destructured CommonJS loader
+forms. Optional calls through any recognized CommonJS loader are rejected,
+including calls through aliases and optional member access.
+Loader identity is still recognized through transparent TypeScript expression
+wrappers such as `as` and angle-bracket type assertions, non-null assertions,
+`satisfies`, generic instantiation, and parentheses, so wrapping a loader does
+not bypass the check. Runtime module loads whose
+specifier is not statically readable are rejected too. Declare nested routes
+directly as JSX children on a `<Route>`: its `children` attribute is rejected
+because it can hide nested routes from the inventory. Declare `<Routes>`
+children directly as JSX children too; `children` attributes and prop spreads
+are rejected because they can hide an uninspectable route tree. Use imported
+`Route` and `Routes` bindings only as JSX tag names. Passing them as component
+values through wrapper props, object props, or function calls is rejected
+because the inventory cannot safely resolve destructured wrapper parameters
+or their JSX tags.
+
+The inventory also rejects `<Routes location>` because it can make React
+Router render a different location from the browser URL visited by the axe and
+role checks. Static `caseSensitive` route props are copied into the modeled
+route table; use shorthand or a boolean literal, since a dynamic value cannot
+be represented safely. In wildcard route elements, local function and class
+components are followed through their render trees. A custom tag backed by a
+runtime registry value or component parameter fails closed, including through
+local component chains. Unresolved local imports also fail closed when
+forwarded through JSX expression children. Runtime imports using URI schemes
+such as `https:`, `data:`, or `file:` are opaque because the inventory cannot
+inspect them; `node:` built-ins are the exception.
+
+A component imported from another local module may appear directly in a
+wildcard route only when its own source declares a statically named `<Routes>`
+table that the inventory can attach; a same-named table in another module is
+not a substitute. Named import aliases retain the exported component's
+canonical declaration name, including a named re-export alias; unreadable
+render trees retain their module provenance across those aliases.
+Namespace-member components fail closed because the inventory cannot reliably
+identify their route table. Import the component by name or declare its routes
+in the audited JSX tree instead.
 
 To add a console page, add its `<Route>` with a string-literal `path`, then an
 entry with its scope and permission to `unitConsoleRoutes` or
@@ -170,9 +316,18 @@ button text missing from the accessible name, and on the moderate
 route in its default fixture state, it audits an open dialog, a failed
 confirmation, failed page reads, an empty investigation inbox, a job without a
 baseline, pending baseline changes, a near-capacity scan-slot demand notice,
-and every step of a monitor setup that Perimeter prefilled. Accept a violation only with an `axeAllowances` entry in the spec
-that names the rule, the audited surface, the node, and the reason; an entry
-that no longer matches a violation fails the audit.
+and every step of a monitor setup that Perimeter prefilled. A separate
+`requiredStateSurfaceManifest` ensures removing a required fixture or entry
+also fails when its generating case disappears. An `allowedPath` with a
+different destination is an alias and does not receive a separate axe run;
+when `allowedPath` equals the requested path, the route is still audited.
+Accept a violation only with an `axeAllowances` entry in the spec that names
+the rule, a distinct audited surface key, the node, and the reason.
+The reason must contain non-whitespace text.
+Console routes and entry surfaces use different keys even when they share a
+path, and the spec rejects duplicate keys. It also fails when an allowance
+names a surface it does not audit or when an entry no longer matches a
+violation.
 
 ## Notification destination policy
 

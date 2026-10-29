@@ -50,9 +50,15 @@ fi
 repository="${GITHUB_REPOSITORY:-crypt0rr/EdgeWatch}"
 naabu_version="$(awk '$1 == "ARG" && $2 ~ /^NAABU_VERSION=/ { sub(/^NAABU_VERSION=/, "", $2); print $2; exit }' "$dockerfile")"
 naabu_commit="$(awk '$1 == "ARG" && $2 ~ /^NAABU_COMMIT=/ { sub(/^NAABU_COMMIT=/, "", $2); print $2; exit }' "$dockerfile")"
+naabu_x_net_version="$(awk '$1 == "ARG" && $2 ~ /^NAABU_X_NET_VERSION=/ { sub(/^NAABU_X_NET_VERSION=/, "", $2); print $2; exit }' "$dockerfile")"
+naabu_goldmark_version="$(awk '$1 == "ARG" && $2 ~ /^NAABU_GOLDMARK_VERSION=/ { sub(/^NAABU_GOLDMARK_VERSION=/, "", $2); print $2; exit }' "$dockerfile")"
+naabu_compress_version="$(awk '$1 == "ARG" && $2 ~ /^NAABU_COMPRESS_VERSION=/ { sub(/^NAABU_COMPRESS_VERSION=/, "", $2); print $2; exit }' "$dockerfile")"
 
-if [[ -z "$naabu_version" || -z "$naabu_commit" ]]; then
-  echo "could not read the pinned Naabu inputs from Dockerfile" >&2
+if [[ -z "$naabu_version" || -z "$naabu_commit" \
+  || ! "$naabu_x_net_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ \
+  || ! "$naabu_goldmark_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ \
+  || ! "$naabu_compress_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "could not read the pinned Naabu inputs and module versions from Dockerfile" >&2
   exit 1
 fi
 
@@ -135,10 +141,13 @@ jq -n \
   --arg goreleaser_version "$goreleaser_version" \
   --arg naabu_version "$naabu_version" \
   --arg naabu_commit "$naabu_commit" \
+  --arg naabu_x_net_version "$naabu_x_net_version" \
+  --arg naabu_goldmark_version "$naabu_goldmark_version" \
+  --arg naabu_compress_version "$naabu_compress_version" \
   --arg frontend_sha256 "$frontend_hash" \
   --argjson artifacts "$artifact_json" \
   --argjson binaries "$binary_json" \
-  '{schema_version: ($schema_version | tonumber), repository: $repository, tag: $tag, version: $version, source_commit: $commit, toolchain: {go: $go_version, node: $node_version, goreleaser: $goreleaser_version}, dependencies: {naabu_version: $naabu_version, naabu_commit: $naabu_commit}, frontend_sha256: $frontend_sha256, binaries: $binaries, artifacts: $artifacts}' \
+  '{schema_version: ($schema_version | tonumber), repository: $repository, tag: $tag, version: $version, source_commit: $commit, toolchain: {go: $go_version, node: $node_version, goreleaser: $goreleaser_version}, dependencies: {naabu_version: $naabu_version, naabu_commit: $naabu_commit, naabu_x_net_version: $naabu_x_net_version, naabu_goldmark_version: $naabu_goldmark_version, naabu_compress_version: $naabu_compress_version}, frontend_sha256: $frontend_sha256, binaries: $binaries, artifacts: $artifacts}' \
   > "$tmp"
 mv "$tmp" "$manifest"
 printf 'release manifest: %s (%s)\n' "$manifest" "$commit"

@@ -13,8 +13,8 @@ import (
 )
 
 // allOpenNaabuFixture returns a fake Naabu that reports every TCP port open
-// on each address and, like Naabu v2.6.1, prints every result twice: once when
-// found and again when the scan ends. The records carry the fields Naabu emits
+// on each address and, as Naabu v2.6.1 did, prints every result twice: once
+// when found and again when the scan ends. The records carry the fields Naabu emits
 // with EdgeWatch's arguments, so the raw output is far larger than the
 // distinct results (more than 16 MiB for two IPv4 addresses or one long IPv6
 // address).

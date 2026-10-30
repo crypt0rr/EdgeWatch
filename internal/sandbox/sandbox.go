@@ -86,8 +86,8 @@ const (
 	ScannerOOMScoreAdj = 1000
 	// ScannerMaxOpenFiles bounds the descriptors a restricted scanner process
 	// can hold, and so the sockets it can open at once. Nmap raises its own
-	// soft limit to the hard limit; Naabu holds about one socket for each of
-	// at most 1024 workers.
+	// soft limit to the hard limit, and Naabu v2.7.0 keeps at most the limit
+	// less 128 connect sockets in flight, however high its rate.
 	ScannerMaxOpenFiles = 65536
 )
 

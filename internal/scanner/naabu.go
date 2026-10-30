@@ -128,9 +128,10 @@ func naabuCancellationError(ctxErr, invocationErr error) error {
 	return canceled
 }
 
-// Naabu emits one JSON object per discovered port, and v2.6.1 prints every
-// result twice: once when found and again when the scan ends. EdgeWatch
-// parses the stream as it arrives and keeps one bit per distinct
+// Naabu emits one JSON object per discovered port. v2.7.0 prints each result
+// once (with -verify, only the verified results, after the scan), while
+// v2.6.1 printed every result twice: once when found and again when the scan
+// ended. EdgeWatch relies on neither and parses the stream as it arrives and keeps one bit per distinct
 // address:port, so the retained data is bounded by distinct results rather
 // than raw bytes. These are variables only so tests can exercise the limits
 // without generating millions of records.

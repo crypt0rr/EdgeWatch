@@ -470,8 +470,9 @@ restricts the scanner:
   before the daemon, which every business unit shares. The scan fails; the
   daemon keeps running.
 - The soft and hard open file limits are at most 65,536 descriptors. Nmap
-  raises its soft limit to the hard limit for connect scans, and Naabu holds
-  about one socket for each of at most 1,024 workers.
+  raises its soft limit to the hard limit for connect scans, and Naabu keeps
+  at most 65,408 connect sockets in flight, the limit less 128, however high
+  its rate.
 - For Nmap only, the soft and hard per-file size limits are 16 MiB plus one
   byte. The parser accepts at most 16 MiB; the extra byte lets EdgeWatch
   recognize an oversized XML file after Nmap exits, including when it exits

@@ -145,7 +145,7 @@ func TestUnavailableScannerIdentityRefusesNaabuBeforeExecution(t *testing.T) {
 	n := NewWithNaabu("missing-nmap", naabu)
 	n.workDir = workDir
 	n.SetSandbox(sandbox.Detect(sandbox.Options{Mode: sandbox.ModeAuto}))
-	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"})
 	if err == nil || !strings.Contains(err.Error(), "distinct scanner identity is unavailable") {
 		t.Fatalf("Naabu with unavailable identity = results %#v, stderr %q, error %v", results, stderr, err)
 	}
@@ -183,7 +183,7 @@ printf '%s\n' '{"ip":"192.0.2.1","port":443,"protocol":"tcp"}'
 `)
 	n := NewWithNaabu("missing-nmap", naabu)
 	n.SetSandbox(sandbox.Detect(sandbox.Options{Mode: sandbox.ModeOff}))
-	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"})
 	if err != nil {
 		t.Fatalf("mode-off Naabu = %v (stderr %q)", err, stderr)
 	}
@@ -197,7 +197,7 @@ printf '%s\n' '{"ip":"192.0.2.1","port":443,"protocol":"tcp"}'
 
 func TestNaabuArgsUseTheInheritedTargetsPath(t *testing.T) {
 	t.Parallel()
-	args := naabuArgsWithTemplate(testNaabuOptions(), "/dev/fd/3", true, nil)
+	args := naabuArgsWithTemplate(testNaabuOptions(), "/dev/fd/3", nil)
 	if len(args) < 2 || args[0] != "-list" || args[1] != "/dev/fd/3" {
 		t.Fatalf("Naabu args = %q", args)
 	}
@@ -341,7 +341,7 @@ func TestRestrictedNaabuReadsTargetsThroughSandboxExec(t *testing.T) {
 	}
 	n := NewWithNaabu("nmap", "/bin/true")
 	n.SetSandbox((*sandbox.Policy)(nil).WithLandlock(helper, int(abi)))
-	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"})
 	if err != nil {
 		t.Fatalf("restricted Naabu = %v (stderr %q)", err, stderr)
 	}
@@ -354,7 +354,7 @@ func TestRestrictedScannerThatIsMissingIsAConfigurationError(t *testing.T) {
 	t.Parallel()
 	n := NewWithNaabu("nmap", filepath.Join(t.TempDir(), "naabu"))
 	n.SetSandbox((*sandbox.Policy)(nil).WithLandlock("/usr/local/bin/edgewatch", 6))
-	_, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+	_, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"})
 	if !IsConfigurationError(err) {
 		t.Fatalf("missing restricted Naabu = %v, want a configuration error", err)
 	}

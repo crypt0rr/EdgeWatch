@@ -227,10 +227,12 @@ its targets list:
   shows how many DNS targets a monitor has. List addresses as IP or CIDR
   targets when you want them counted.
 - **Host discovery:** a monitor with host discovery enabled
-  (`assume_alive: false`) port-scans only the hosts that answer host
-  discovery, so perimeter addresses that drop discovery probes are not
-  scanned. It still counts as coverage, and the page marks it with
-  **Scans only hosts that answer host discovery**.
+  (`assume_alive: false`) has Nmap port-scan only the hosts that answer host
+  discovery, so its UDP and Nmap-only TCP scans skip perimeter addresses that
+  drop discovery probes. It still counts as coverage, and the page marks it
+  with **Scans only hosts that answer host discovery**. Naabu never runs host
+  discovery, so a monitor whose only scan is Naabu TCP discovery probes every
+  address and is not marked.
 
 ### IPv6 ranges
 

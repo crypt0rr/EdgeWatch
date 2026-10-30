@@ -34,10 +34,12 @@ Naabu reports open ports only, so Nmap also confirms every TCP port the job
 still tracks: baseline ports and the ports of open incidents, pending changes,
 and suppressed changes. It checks them on every address the target resolves
 to in that scan, also after a DNS name has moved to a new address. A single
-Naabu miss cannot close them. An address with no Naabu result counts as
-complete coverage only when host discovery is skipped (`assume_alive`, the
-default). With SYN host discovery, Naabu cannot tell a down address from one
-without open ports, so that address stays incomplete. With **Nmap only** and
+Naabu miss cannot close them. EdgeWatch never runs Naabu's own host
+discovery, so Naabu probes every address it is given, in both modes. An
+address with no Naabu result counts as complete coverage only when the job
+assumes its targets are alive (`assume_alive`, the default). Naabu cannot
+tell a down address from one without open ports, so with
+`assume_alive: false` that address stays incomplete. With **Nmap only** and
 host discovery enabled (`assume_alive: false`), EdgeWatch adds Nmap verbosity
 level 1 (`-v`) so explicit down hosts appear in Nmap's XML output. Those results
 are tracked as host-state changes, not as sets of closed ports, and the
@@ -45,10 +47,11 @@ incidents of a down host's ports do not recover while it is down. During Naabu
 enrichment, each address has already been discovered, so Nmap uses `-Pn` to
 confirm discovered ports without a second host-discovery pass or a verbose
 down-host signal. Omitted Nmap hosts and timed-out probes remain incomplete.
-Naabu connect discovery cannot use host discovery: a job that uses it must
-keep `assume_alive` enabled, and EdgeWatch rejects the job when it is saved
-otherwise. For host-state tracking, use **Nmap only**, or a Naabu SYN profile
-when the runtime grants `NET_RAW` and `NET_ADMIN`.
+Naabu connect discovery requires `assume_alive`: EdgeWatch rejects a job
+that combines it with `assume_alive: false` when the job is saved. Naabu SYN
+discovery accepts `assume_alive: false`, but still runs without host
+discovery and only leaves silent addresses incomplete. For host-state
+tracking, use **Nmap only**.
 
 Repeated Naabu results are
 counted once. One Naabu invocation keeps at most 131,070 distinct open ports,

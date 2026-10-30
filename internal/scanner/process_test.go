@@ -133,7 +133,7 @@ func TestNaabuStopsItsProcessGroupWhenCancelled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	started := time.Now()
-	if _, _, err := n.runNaabu(ctx, testNaabuOptions(), nil, []string{"192.0.2.1"}, true); !errors.Is(err, context.DeadlineExceeded) {
+	if _, _, err := n.runNaabu(ctx, testNaabuOptions(), nil, []string{"192.0.2.1"}); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("cancelled Naabu = %v", err)
 	}
 	if elapsed := time.Since(started); elapsed > time.Second+scannerWaitDelay/2 {
@@ -337,7 +337,7 @@ func TestScannerFilesStayInItsTemporaryDirectory(t *testing.T) {
 	if _, err := n.Scan(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true); err != nil {
+	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, record := range []string{nmapPaths, naabuPaths} {

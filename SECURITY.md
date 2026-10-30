@@ -90,7 +90,14 @@ daemon that every unit shares. Naabu discovery is JSONL and Nmap confirmation re
 authoritative for baselines and incidents. EdgeWatch parses Naabu output as a
 stream, rejects records for addresses outside the invocation, keeps each
 distinct result once, and stops the child on an oversized line or an
-implausible number of repeated records. Connect discovery is the least
+implausible number of repeated records. Naabu never runs its own host
+discovery: EdgeWatch never passes its host-discovery switches, a scanner
+profile can add only Naabu's verbosity flags, and EdgeWatch states the
+policy with `-skip-host-discovery` for every scan type and profile. Naabu
+therefore probes only the addresses EdgeWatch gives it. Only Nmap runs host
+discovery, in the Nmap-only TCP and UDP scans of a job with
+`assume_alive: false`; Naabu discovery and its Nmap confirmation (`-Pn`) run
+without it. Connect discovery is the least
 privileged default; SYN discovery additionally requires the explicitly opted-in
 `NET_ADMIN` and `NET_RAW` container capabilities.
 

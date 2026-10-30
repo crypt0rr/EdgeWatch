@@ -76,7 +76,7 @@ describe('job editor workflow coverage', () => {
   })
 
   it('shows the server rejection of host discovery with Naabu connect discovery next to the toggle', async () => {
-    const message = 'job Public edge: Naabu connect discovery cannot use host discovery; keep assume_alive enabled, choose a Naabu SYN profile, or use Nmap only'
+    const message = 'job Public edge: Naabu connect discovery requires assume_alive; keep it enabled, or use Nmap only for host discovery'
     vi.mocked(createJob).mockRejectedValueOnce(new APIError(message, 'validation_failed', { assume_alive: message }, 400))
     renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())

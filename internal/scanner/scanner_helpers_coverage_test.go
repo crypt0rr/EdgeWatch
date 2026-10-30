@@ -151,36 +151,32 @@ func TestScannerOutputSanitizationAndFingerprint(t *testing.T) {
 
 func TestNaabuTemplateAndSmallNormalizationHelpers(t *testing.T) {
 	options := config.NaabuOptions{ScanType: "syn"}
-	for _, assumeAlive := range []bool{true, false} {
-		args := renderNaabuTemplate([]string{
-			config.PlaceholderTargetsFile,
-			config.PlaceholderPorts,
-			config.PlaceholderAddressFamily,
-			config.PlaceholderHostDiscovery,
-			config.PlaceholderScanType,
-			config.PlaceholderAddress,
-			config.PlaceholderAddresses,
-			config.PlaceholderServiceDetection,
-			config.PlaceholderNSE,
-			"--custom",
-		}, "/tmp/targets", options, assumeAlive)
-		joined := strings.Join(args, " ")
-		if !strings.Contains(joined, "-list /tmp/targets") || !strings.Contains(joined, "-p -") || !strings.Contains(joined, "-scan-type s") || !strings.Contains(joined, "--custom") {
-			t.Fatalf("Naabu template rendering = %v", args)
-		}
-		wantDiscovery := "-with-host-discovery"
-		if assumeAlive || options.ScanType == "connect" {
-			wantDiscovery = "-skip-host-discovery"
-		}
-		if !strings.Contains(joined, wantDiscovery) {
-			t.Fatalf("Naabu host discovery rendering = %v", args)
-		}
+	args := renderNaabuTemplate([]string{
+		config.PlaceholderTargetsFile,
+		config.PlaceholderPorts,
+		config.PlaceholderAddressFamily,
+		config.PlaceholderHostDiscovery,
+		config.PlaceholderScanType,
+		config.PlaceholderAddress,
+		config.PlaceholderAddresses,
+		config.PlaceholderServiceDetection,
+		config.PlaceholderNSE,
+		"--custom",
+	}, "/tmp/targets", options)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-list /tmp/targets") || !strings.Contains(joined, "-p -") || !strings.Contains(joined, "-scan-type s") || !strings.Contains(joined, "--custom") {
+		t.Fatalf("Naabu template rendering = %v", args)
 	}
-	if got := naabuArgsWithTemplate(config.NaabuOptions{ScanType: "connect", Rate: 10, Workers: 2, Retries: 1, TimeoutMS: 100, Verify: true}, "/tmp/targets", true, []string{config.PlaceholderTargetsFile, config.PlaceholderPorts, config.PlaceholderStructuredOutput}); !strings.Contains(strings.Join(got, " "), "-skip-host-discovery") {
+	// The host-discovery placeholder renders the one switch EdgeWatch passes
+	// to Naabu, whatever the scan type.
+	if !strings.Contains(joined, "-skip-host-discovery") || strings.Contains(joined, "-with-host-discovery") {
+		t.Fatalf("Naabu host discovery rendering = %v", args)
+	}
+	if got := naabuArgsWithTemplate(config.NaabuOptions{ScanType: "connect", Rate: 10, Workers: 2, Retries: 1, TimeoutMS: 100, Verify: true}, "/tmp/targets", []string{config.PlaceholderTargetsFile, config.PlaceholderPorts, config.PlaceholderStructuredOutput}); !strings.Contains(strings.Join(got, " "), "-skip-host-discovery") {
 		t.Fatalf("Naabu template default discovery flag missing: %v", got)
 	}
-	if got := naabuArgsWithTemplate(config.NaabuOptions{ScanType: "connect", Rate: 10, Workers: 2, Retries: 1, TimeoutMS: 100}, "/tmp/targets", false, nil); !strings.Contains(strings.Join(got, " "), "-skip-host-discovery") || strings.Contains(strings.Join(got, " "), "-with-host-discovery") {
-		t.Fatalf("Naabu connect mode must not request host discovery: %v", got)
+	if got := naabuArgsWithTemplate(config.NaabuOptions{ScanType: "syn", Rate: 10, Workers: 2, Retries: 1, TimeoutMS: 100}, "/tmp/targets", []string{config.PlaceholderTargetsFile, config.PlaceholderPorts, config.PlaceholderStructuredOutput}); !strings.Contains(strings.Join(got, " "), "-skip-host-discovery") || strings.Contains(strings.Join(got, " "), "-with-host-discovery") {
+		t.Fatalf("Naabu SYN template must not request host discovery: %v", got)
 	}
 
 	if got := dedupeStrings([]string{"a", "a", "b", "b", "c"}); !reflect.DeepEqual(got, []string{"a", "b", "c"}) {

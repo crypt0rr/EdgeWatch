@@ -164,13 +164,15 @@ type naabuDiscovery struct {
 	truncated []string
 }
 
-// naabuSkipsHostDiscovery reports whether the invocation probes every port of
-// every address. Only then does an address without JSONL records prove that
-// no port was open. With host discovery, Naabu silently skips addresses that
-// did not answer, which is indistinguishable from an address with no open
-// port.
-func naabuSkipsHostDiscovery(options config.NaabuOptions, assumeAlive bool) bool {
-	return naabuHostDiscoveryFlag(options, assumeAlive) == "-skip-host-discovery"
+// naabuSilentAddressesComplete reports whether an address without JSONL
+// records counts as complete coverage with no open port. Naabu probes every
+// port of every address it is given, because EdgeWatch never runs Naabu's
+// host discovery, but a down address prints nothing either. A job that
+// assumes its targets are alive treats that silence as complete (#718); with
+// assume_alive=false the address keeps the incomplete unknown/no-response
+// marker, as a down host does with Nmap.
+func naabuSilentAddressesComplete(assumeAlive bool) bool {
+	return assumeAlive
 }
 
 // recordNaabuDiscovery merges one invocation's deduplicated results into the
@@ -287,7 +289,7 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 		localInvocation := int64(start/batchSize) + 1
 		reportProgress(report, Progress{StartedAt: started, Phase: "tcp discovery", Protocol: "tcp", CurrentInvocation: localInvocation, TotalBatches: totalInvocations, TotalInvocations: totalInvocations, TotalProbes: discoveryTotal, CompletedProbes: int64(start) * 65535, ProcessAlive: true, UnitAddresses: len(batch), UnitPorts: naabuFullPortExpression, DiscoveryPortsFound: portsFound, DiscoveryAddresses: addressesFound})
 		batchProbes := int64(len(batch)) * 65535
-		results, stderr, err := n.runNaabu(ctx, options, job.TCP.NaabuArgs, batch, job.AssumesAlive(), func(update invocationProgress) {
+		results, stderr, err := n.runNaabu(ctx, options, job.TCP.NaabuArgs, batch, func(update invocationProgress) {
 			completed := int64(start) * 65535
 			if update.Fraction > 0 {
 				completed += int64(float64(batchProbes) * update.Fraction)
@@ -307,11 +309,7 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 	}
 	discoveryDuration := time.Since(discoveryStarted).Milliseconds()
 	discoveryHosts = materializeNaabuDiscoveryHosts(targets, addresses, discovered, discoveryHosts, options, job)
-	if naabuSkipsHostDiscovery(options, job.AssumesAlive()) {
-		// Every port of every address was probed, so an address without
-		// records is complete zero-positive coverage (#718). With host
-		// discovery a silent address may simply be down; it keeps the
-		// incomplete unknown/no-response marker, as a down host does with Nmap.
+	if naabuSilentAddressesComplete(job.AssumesAlive()) {
 		markCompletedNaabuDiscoveryHosts(discoveryHosts)
 	}
 	// Discovery units carry no authoritative ports. They preserve logical DNS
@@ -413,7 +411,7 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 			reportProgress(report, Progress{StartedAt: started, Phase: "tcp discovery", Protocol: "tcp", CurrentInvocation: localInvocation, TotalBatches: progress.TotalInvocations, TotalInvocations: progress.TotalInvocations, TotalProbes: discoveryTotal, CompletedProbes: int64(start) * 65535, ProcessAlive: true, UnitAddresses: len(batch), UnitPorts: naabuFullPortExpression, DiscoveryPortsFound: portsFound, DiscoveryAddresses: addressesFound})
 		}
 		batchProbes := int64(len(batch)) * 65535
-		results, stderr, err := n.runNaabu(ctx, options, job.TCP.NaabuArgs, batch, job.AssumesAlive(), func(update invocationProgress) {
+		results, stderr, err := n.runNaabu(ctx, options, job.TCP.NaabuArgs, batch, func(update invocationProgress) {
 			completed := int64(start) * 65535
 			if update.Fraction > 0 {
 				completed += int64(float64(batchProbes) * update.Fraction)
@@ -438,7 +436,7 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 	// for which no port replied. This distinguishes complete zero-open coverage
 	// from the absence of an address in a legacy snapshot.
 	enrichmentStarted := time.Now()
-	silentAddressesComplete := naabuSkipsHostDiscovery(options, job.AssumesAlive())
+	silentAddressesComplete := naabuSilentAddressesComplete(job.AssumesAlive())
 	for _, address := range addresses {
 		host := discoveryHosts[address]
 		host.Address = address
@@ -446,18 +444,17 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 			host.AddressFamily = addressFamily(address)
 		}
 		if host.Status == "" {
-			// Naabu JSONL reports positive ports only. Without host discovery
-			// a target that produced no records was still covered by the
-			// full-range pass, but its reachability is unknown. With host
-			// discovery Naabu skips addresses that did not answer, so a silent
-			// address stays incomplete.
+			// Naabu JSONL reports positive ports only. Naabu probed every port
+			// of a target that produced no records, but its reachability is
+			// unknown: it counts as complete coverage only when the job assumes
+			// its targets are alive (naabuSilentAddressesComplete).
 			host.Status = "unknown"
 			host.StatusReason = "no-response"
 			if silentAddressesComplete {
 				host.StatusReason = naabuFullRangeCompleteReason
 			}
 		}
-		fingerprintArgs := naabuArgsWithTemplate(options, "<targets-file>", job.AssumesAlive(), job.TCP.NaabuArgs)
+		fingerprintArgs := naabuArgsWithTemplate(options, "<targets-file>", job.TCP.NaabuArgs)
 		protocol := model.ProtocolObservation{Protocol: "tcp", Status: strings.ToLower(host.Status), StatusReason: host.StatusReason, ScanType: "naabu", ScannedPorts: naabuFullPortExpression, ScannedPortCount: 65535, ServiceDetection: job.TCP.ServiceDetection, DiscoveryEngine: "naabu", NSEProfile: job.TCP.NSEProfile, NSEArgs: cloneStringMap(job.TCP.NSEArgs), CommandFingerprint: commandFingerprint(fingerprintArgs)}
 		for port := range discovered[address] {
 			protocol.DiscoveredPorts = append(protocol.DiscoveredPorts, model.PortObservation{Port: port, State: "open", Reason: "naabu", Verification: "discovered"})
@@ -667,10 +664,11 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 }
 
 // markCompletedNaabuDiscoveryHosts changes only the successful discovery
-// checkpoint's empty-result marker, and only callers whose invocation skipped
-// host discovery may use it. Error and cancellation snapshots, and silent
-// addresses under host discovery, keep unknown/no-response and therefore
-// remain protected from baseline and change detection.
+// checkpoint's empty-result marker, and only for jobs that assume their
+// targets are alive (naabuSilentAddressesComplete). Error and cancellation
+// snapshots, and silent addresses with assume_alive=false, keep
+// unknown/no-response and therefore remain protected from baseline and change
+// detection.
 func markCompletedNaabuDiscoveryHosts(hosts map[string]model.HostObservation) {
 	for address, host := range hosts {
 		if strings.EqualFold(host.Status, "unknown") && strings.EqualFold(host.StatusReason, "no-response") {
@@ -737,7 +735,7 @@ func materializeNaabuDiscoveryHosts(targets []resolvedTarget, addresses []string
 	for address, host := range existing {
 		hosts[address] = host
 	}
-	fingerprintArgs := naabuArgsWithTemplate(options, "<targets-file>", job.AssumesAlive(), job.TCP.NaabuArgs)
+	fingerprintArgs := naabuArgsWithTemplate(options, "<targets-file>", job.TCP.NaabuArgs)
 	for _, address := range addresses {
 		host := hosts[address]
 		host.Address = address
@@ -815,7 +813,7 @@ func (n *Nmap) scanUDPAfterNaabu(ctx context.Context, job config.Job, targets []
 	return snapshot, nil
 }
 
-func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profileArgs, addresses []string, assumeAlive bool, statusReports ...func(invocationProgress)) (result naabuDiscovery, diagnostic string, resultErr error) {
+func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profileArgs, addresses []string, statusReports ...func(invocationProgress)) (result naabuDiscovery, diagnostic string, resultErr error) {
 	file, err := os.CreateTemp(n.workDir, "edgewatch-naabu-targets-*")
 	if err != nil {
 		return naabuDiscovery{}, "", err
@@ -932,7 +930,7 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 			return naabuDiscovery{}, "", err
 		}
 	}
-	args := naabuArgsWithTemplate(options, targetsPath, assumeAlive, profileArgs)
+	args := naabuArgsWithTemplate(options, targetsPath, profileArgs)
 	cmd.Args = append([]string{naabuPath}, args...)
 	// Naabu should not read an operator's home configuration or inherit
 	// credentials. A non-existent home/config directory makes profile
@@ -1090,8 +1088,8 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	return results, stderr.String(), err
 }
 
-func naabuArgs(options config.NaabuOptions, targetsFile string, assumeAlive bool) []string {
-	return naabuArgsWithTemplate(options, targetsFile, assumeAlive, nil)
+func naabuArgs(options config.NaabuOptions, targetsFile string) []string {
+	return naabuArgsWithTemplate(options, targetsFile, nil)
 }
 
 // naabuArgsWithTemplate renders the fixed Naabu safety contract and an
@@ -1099,7 +1097,7 @@ func naabuArgs(options config.NaabuOptions, targetsFile string, assumeAlive bool
 // complete argv fragments; all other switches remain fixed or are appended
 // as safe profile tuning. This keeps the executable, target source, JSONL
 // output, and full-range scope under EdgeWatch's control.
-func naabuArgsWithTemplate(options config.NaabuOptions, targetsFile string, assumeAlive bool, template []string) []string {
+func naabuArgsWithTemplate(options config.NaabuOptions, targetsFile string, template []string) []string {
 	scanType := "c"
 	if options.ScanType == "syn" {
 		scanType = "s"
@@ -1109,7 +1107,7 @@ func naabuArgsWithTemplate(options config.NaabuOptions, targetsFile string, assu
 		if options.Verify {
 			args = append(args, "-verify")
 		}
-		args = append(args, naabuHostDiscoveryFlag(options, assumeAlive))
+		args = append(args, naabuNoHostDiscovery)
 		return args
 	}
 
@@ -1129,13 +1127,13 @@ func naabuArgsWithTemplate(options config.NaabuOptions, targetsFile string, assu
 		args = append(args, "-verify")
 	}
 	if !templateContains(template, config.PlaceholderHostDiscovery) {
-		args = append(args, naabuHostDiscoveryFlag(options, assumeAlive))
+		args = append(args, naabuNoHostDiscovery)
 	}
-	args = append(args, renderNaabuTemplate(template, targetsFile, options, assumeAlive)...)
+	args = append(args, renderNaabuTemplate(template, targetsFile, options)...)
 	return args
 }
 
-func renderNaabuTemplate(template []string, targetsFile string, options config.NaabuOptions, assumeAlive bool) []string {
+func renderNaabuTemplate(template []string, targetsFile string, options config.NaabuOptions) []string {
 	var out []string
 	for _, value := range template {
 		switch value {
@@ -1151,7 +1149,7 @@ func renderNaabuTemplate(template []string, targetsFile string, options config.N
 			// extra argument when the fixed target resolver already supplies both
 			// families.
 		case config.PlaceholderHostDiscovery:
-			out = append(out, naabuHostDiscoveryFlag(options, assumeAlive))
+			out = append(out, naabuNoHostDiscovery)
 		case config.PlaceholderScanType:
 			scanType := "c"
 			if options.ScanType == "syn" {
@@ -1169,15 +1167,11 @@ func renderNaabuTemplate(template []string, targetsFile string, options config.N
 	return out
 }
 
-// Naabu v2.6.1 validates -with-host-discovery by changing any non-SYN
-// scan-type to a raw SYN scan. That behavior is unsafe for EdgeWatch because
-// the job's scan type, capability check, and evidence would no longer match
-// the process that actually ran. Connect mode therefore cannot be combined
-// with assume_alive=false; operators must either keep the default assumed-live
-// policy or explicitly select SYN with both raw-packet capabilities.
+// validateNaabuInvocation keeps connect mode with assume_alive=true, as job
+// validation does, and requires both raw-packet capabilities for SYN mode.
 func validateNaabuInvocation(options config.NaabuOptions, assumeAlive, rawPrivileges bool) error {
 	if options.ScanType == "connect" && !assumeAlive {
-		return ConfigurationError(errors.New("naabu connect mode cannot use host discovery; keep assume_alive enabled or select SYN mode with NET_RAW and NET_ADMIN"))
+		return ConfigurationError(errors.New("naabu connect mode requires assume_alive; keep it enabled, or use Nmap only for host discovery"))
 	}
 	if options.ScanType == "syn" && !rawPrivileges {
 		return ConfigurationError(errors.New("naabu SYN scanning requires NET_RAW and NET_ADMIN capabilities; choose connect mode or grant the capabilities explicitly"))
@@ -1185,15 +1179,17 @@ func validateNaabuInvocation(options config.NaabuOptions, assumeAlive, rawPrivil
 	return nil
 }
 
-// naabuHostDiscoveryFlag is defensive for previews and any future caller that
-// renders arguments before runtime validation. Never emit the upstream switch
-// that converts connect scans into SYN scans.
-func naabuHostDiscoveryFlag(options config.NaabuOptions, assumeAlive bool) string {
-	if assumeAlive || options.ScanType == "connect" {
-		return "-skip-host-discovery"
-	}
-	return "-with-host-discovery"
-}
+// naabuNoHostDiscovery is the only host-discovery switch EdgeWatch passes to
+// Naabu, for every scan type and profile template. It states the policy;
+// Naabu v2.6.1 and v2.7.0 accept it but ignore it, because their host
+// discovery runs only with -with-host-discovery (-wn) or -host-discovery
+// (-sn). EdgeWatch never passes those, and a Naabu profile can add only
+// verbosity flags (approvedNaabuProfileFlags). Naabu's host discovery adds
+// every address whose ICMP echo or timestamp reply reaches the host to its
+// scan targets, whether or not the target list names it, and turns connect
+// scans into SYN scans, so EdgeWatch must not use it: Naabu probes the
+// addresses EdgeWatch gives it, and only Nmap runs host discovery.
+const naabuNoHostDiscovery = "-skip-host-discovery"
 
 // naabuResultCollector parses Naabu's JSONL stdout as the child writes it.
 // Each record is validated against the invocation's address batch and

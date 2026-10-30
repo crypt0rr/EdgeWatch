@@ -502,10 +502,16 @@ func TestPerimeterReportFlagsCoverageThatIsNotProven(t *testing.T) {
 	f := newPerimeterFixture(t)
 	declarePerimeter(t, f.ts, store.PerimeterKindPrefix, "198.51.100.0/24")
 	records := map[string]store.JobRecord{}
-	for index, name := range []string{"healthy", "stalled", "discovery", "failed", "incomplete", "recovered", "paused-stalled", "timed-out"} {
+	for index, name := range []string{"healthy", "stalled", "discovery", "failed", "incomplete", "recovered", "paused-stalled", "timed-out", "naabu-syn"} {
 		job := perimeterJob(name, fmt.Sprintf("198.51.100.%d", index+1))
 		if name == "discovery" {
 			job.AssumeAlive = ptrTo(false)
+		}
+		// Naabu never runs host discovery, so a TCP-only Naabu SYN monitor
+		// probes every address even with assume_alive false.
+		if name == "naabu-syn" {
+			job.AssumeAlive = ptrTo(false)
+			job.TCP = &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Mode: "syn", Naabu: &config.NaabuOptions{ScanType: "syn"}}
 		}
 		records[name] = createPerimeterJob(t, f.ts, job, name != "paused-stalled")
 	}
@@ -554,6 +560,7 @@ func TestPerimeterReportFlagsCoverageThatIsNotProven(t *testing.T) {
 		"incomplete": {"covering", false, false, "incomplete", true, true},
 		"recovered":  {"covering", false, false, "success", true, false},
 		"timed-out":  {"covering", false, false, "timed_out", false, true},
+		"naabu-syn":  {"covering", false, false, "", false, true},
 		// The flags belong to covering monitors only.
 		"paused-stalled": {"paused", false, false, "", false, false},
 	}
@@ -566,10 +573,10 @@ func TestPerimeterReportFlagsCoverageThatIsNotProven(t *testing.T) {
 	}
 	// Covering monitors stay unproven until a successful scan establishes the
 	// current scope, and later stalled/failed attempts keep that proof invalid.
-	if report.Totals.UnprovenMonitors != 6 || report.Totals.CannotScanMonitors != 1 {
+	if report.Totals.UnprovenMonitors != 7 || report.Totals.CannotScanMonitors != 1 {
 		t.Fatalf("totals = %+v", report.Totals)
 	}
-	if got := perimeterRangeValued(t, report.Ranges, "198.51.100.0/24").Coverage; got != (PerimeterCoverage{AnyTCP: 7}) {
+	if got := perimeterRangeValued(t, report.Ranges, "198.51.100.0/24").Coverage; got != (PerimeterCoverage{FullTCP: 1, AnyTCP: 8}) {
 		t.Fatalf("unproven monitors still cover: %+v", got)
 	}
 }

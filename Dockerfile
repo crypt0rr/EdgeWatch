@@ -38,7 +38,7 @@ RUN git init . \
     && git fetch --depth 1 origin refs/tags/${NAABU_VERSION}:refs/tags/${NAABU_VERSION} \
     && test "$(git rev-parse ${NAABU_VERSION}^{commit})" = "${NAABU_COMMIT}" \
     && git checkout --detach ${NAABU_COMMIT}
-# Naabu v2.6.1 pins older x/net, goldmark, and compress versions with known
+# Naabu v2.7.0 pins older x/net, goldmark, and compress versions with known
 # advisories. Keep the scanner source pin while resolving those modules at
 # fixed releases; Go records the compatible module graph and checksums in this
 # build stage. The image scan checks the resulting binary on both architectures.

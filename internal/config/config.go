@@ -990,7 +990,7 @@ func (c Config) Validate() error {
 				// The scanner refuses this combination on every run, so
 				// reject it when the job is saved instead.
 				if j.TCP.Naabu.ScanType == "connect" && !j.AssumesAlive() {
-					return NewFieldValidationError("assume_alive", fmt.Errorf("job %s: Naabu connect discovery cannot use host discovery; keep assume_alive enabled, choose a Naabu SYN profile, or use Nmap only", j.Name))
+					return NewFieldValidationError("assume_alive", fmt.Errorf("job %s: Naabu connect discovery cannot use host discovery; keep assume_alive enabled, or use Nmap only for host discovery", j.Name))
 				}
 				if j.TCP.Mode != "syn" && j.TCP.Mode != "connect" {
 					return NewFieldValidationError("tcp", fmt.Errorf("job %s: tcp mode must be syn or connect", j.Name))

@@ -169,20 +169,20 @@ func TestNaabuDiscoveryMarksAddressesBeyondResultLimitIncomplete(t *testing.T) {
 	}
 }
 
-// With host discovery (SYN and assume_alive=false) Naabu prints nothing for an
-// address that did not answer discovery. That address was not probed, so it
-// must stay incomplete, as a down host does with the Nmap engine. Without host
-// discovery every port was probed and a silent address is complete (#718).
-func TestNaabuSilentAddressesAreCompleteOnlyWithoutHostDiscovery(t *testing.T) {
+// Naabu runs without its own host discovery for every job, so it probes every
+// address. A down address prints nothing, like one without open ports, so with
+// assume_alive=false a silent address stays incomplete, as a down host does
+// with the Nmap engine. A job that assumes its targets are alive counts a
+// silent address as complete (#718).
+func TestNaabuSilentAddressesAreCompleteOnlyWhenAssumedAlive(t *testing.T) {
 	allowNaabuSYNForTest(t)
 	for _, test := range []struct {
 		name        string
 		assumeAlive bool
-		flag        string
 		reason      string
 	}{
-		{name: "host discovery", assumeAlive: false, flag: "-with-host-discovery", reason: "no-response"},
-		{name: "assume alive", assumeAlive: true, flag: "-skip-host-discovery", reason: naabuFullRangeCompleteReason},
+		{name: "assume_alive false", assumeAlive: false, reason: "no-response"},
+		{name: "assume alive", assumeAlive: true, reason: naabuFullRangeCompleteReason},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -202,8 +202,9 @@ func TestNaabuSilentAddressesAreCompleteOnlyWithoutHostDiscovery(t *testing.T) {
 				t.Fatalf("SYN discovery = %v", err)
 			}
 			args, err := os.ReadFile(argsPath)
-			if err != nil || !slices.Contains(strings.Split(strings.TrimSpace(string(args)), "\n"), test.flag) {
-				t.Fatalf("Naabu arguments = %q (%v), want %s", args, err, test.flag)
+			argv := strings.Split(strings.TrimSpace(string(args)), "\n")
+			if err != nil || !slices.Contains(argv, "-skip-host-discovery") || slices.Contains(argv, "-with-host-discovery") {
+				t.Fatalf("Naabu arguments = %q (%v), want -skip-host-discovery only", args, err)
 			}
 			// The resumable path merges the discovery checkpoint into the cycle
 			// result; the direct pipeline builds the same observation itself.

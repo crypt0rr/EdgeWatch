@@ -50,7 +50,7 @@ func TestRunNaabuSuccessParsesJSONAndReportsLiveness(t *testing.T) {
 	path := writeNaabuFixture(t, "printf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":443,\"protocol\":\"tcp\",\"mac_address\":\"aa:bb\"}' >&1\nprintf '%s\\n' 'discovery complete' >&2\n")
 	n := NewWithNaabu("missing-nmap", path)
 	var reports []invocationProgress
-	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true, func(progress invocationProgress) {
+	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, func(progress invocationProgress) {
 		reports = append(reports, progress)
 	})
 	if err != nil {
@@ -82,7 +82,7 @@ printf '%s\n' '{"ip":"192.0.2.1","port":443,"protocol":"tcp"}'
 mkfifo "$TMPDIR/scanner-fifo"
 `)
 	n := NewWithNaabu("missing-nmap", path)
-	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+	results, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"})
 	if err != nil {
 		t.Fatalf("runNaabu cleanup = %v (stderr %q)", err, stderr)
 	}
@@ -149,7 +149,7 @@ func TestRunNaabuSerializesStatusCallbacksAcrossOutputAndHeartbeat(t *testing.T)
 	var active atomic.Int32
 	var reentrant atomic.Bool
 	var delayed atomic.Bool
-	_, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true, func(invocationProgress) {
+	_, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, func(invocationProgress) {
 		if active.Add(1) != 1 {
 			reentrant.Store(true)
 		}
@@ -168,17 +168,17 @@ func TestRunNaabuSerializesStatusCallbacksAcrossOutputAndHeartbeat(t *testing.T)
 
 func TestRunNaabuRejectsInvalidProfileAndStartFailures(t *testing.T) {
 	n := NewWithNaabu("missing-nmap", writeNaabuFixture(t, "exit 0\n"))
-	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), []string{"--script"}, []string{"192.0.2.1"}, true); err == nil || !IsConfigurationError(err) {
+	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), []string{"--script"}, []string{"192.0.2.1"}); err == nil || !IsConfigurationError(err) {
 		t.Fatalf("invalid profile error = %v", err)
 	}
 
 	n.NaabuPath = filepath.Join(t.TempDir(), "does-not-exist")
-	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true); err == nil || !IsConfigurationError(err) {
+	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}); err == nil || !IsConfigurationError(err) {
 		t.Fatalf("missing Naabu executable error = %v, want typed configuration failure", err)
 	}
 	// An empty path uses the fixed image path rather than the ambient PATH.
 	n.NaabuPath = ""
-	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true); err == nil || !IsConfigurationError(err) {
+	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}); err == nil || !IsConfigurationError(err) {
 		t.Fatalf("empty Naabu path error = %v, want typed configuration failure", err)
 	}
 }
@@ -212,7 +212,7 @@ func TestRunNaabuMissingExecutableReleasesUnusedReservation(t *testing.T) {
 				return lease, nil
 			}
 
-			_, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+			_, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"})
 			if err == nil || !IsConfigurationError(err) || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("missing Naabu executable error = %v, want permanent failure containing %q", err, test.want)
 			}
@@ -227,7 +227,7 @@ func TestNaabuTemporaryTargetFileFailureRemainsRetryable(t *testing.T) {
 	missingDirectory := filepath.Join(t.TempDir(), "missing")
 	t.Setenv("TMPDIR", missingDirectory)
 	n := NewWithNaabu("missing-nmap", writeNaabuFixture(t, "exit 0\n"))
-	_, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+	_, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"})
 	if err == nil || IsConfigurationError(err) {
 		t.Fatalf("temporary target-file error = %v, want untyped retryable failure", err)
 	}
@@ -235,19 +235,19 @@ func TestNaabuTemporaryTargetFileFailureRemainsRetryable(t *testing.T) {
 
 func TestRunNaabuProcessAndJSONFailures(t *testing.T) {
 	n := NewWithNaabu("missing-nmap", writeNaabuFixture(t, "printf '%s\\n' 'not-json'\n"))
-	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true); err == nil || !strings.Contains(err.Error(), "parse naabu JSON") || IsConfigurationError(err) {
+	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}); err == nil || !strings.Contains(err.Error(), "parse naabu JSON") || IsConfigurationError(err) {
 		t.Fatalf("malformed JSON error = %v", err)
 	}
 
 	n.NaabuPath = writeNaabuFixture(t, "printf '%s\\n' 'scanner failed' >&2\nexit 7\n")
-	if _, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true); err == nil || !strings.Contains(stderr, "scanner failed") || IsConfigurationError(err) {
+	if _, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}); err == nil || !strings.Contains(stderr, "scanner failed") || IsConfigurationError(err) {
 		t.Fatalf("process failure = %v (stderr %q)", err, stderr)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	n.NaabuPath = writeNaabuFixture(t, "sleep 1\n")
-	if _, _, err := n.runNaabu(ctx, testNaabuOptions(), nil, []string{"192.0.2.1"}, true); !errors.Is(err, context.DeadlineExceeded) {
+	if _, _, err := n.runNaabu(ctx, testNaabuOptions(), nil, []string{"192.0.2.1"}); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("timeout error = %v", err)
 	}
 }
@@ -257,7 +257,7 @@ func TestRunNaabuDiagnosticOutputLimitFailsSafely(t *testing.T) {
 	// process. The scanner's bounded stderr writer should terminate the child
 	// and return a diagnostic-limit error.
 	n := NewWithNaabu("missing-nmap", writeNaabuFixture(t, "while :; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' >&2; done\n"))
-	_, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+	_, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"})
 	if err == nil || !strings.Contains(err.Error(), "diagnostic output exceeded") {
 		t.Fatalf("diagnostic limit error = %v (stderr bytes %d)", err, len(stderr))
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -228,5 +229,60 @@ func TestNaabuSilentAddressesAreCompleteOnlyWhenAssumedAlive(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestNaabuAddressBatchesKeepOneFamilyPerInvocation(t *testing.T) {
+	addresses := []string{"192.0.2.1", "2001:db8::1", "192.0.2.2", "2001:db8::2", "192.0.2.3"}
+	batches, offsets := naabuAddressBatches(addresses, 2)
+	want := [][]string{{"192.0.2.1", "192.0.2.2"}, {"192.0.2.3"}, {"2001:db8::1", "2001:db8::2"}}
+	if !reflect.DeepEqual(batches, want) || !reflect.DeepEqual(offsets, []int{0, 2, 3}) {
+		t.Fatalf("batches = %v offsets = %v, want %v and [0 2 3]", batches, offsets, want)
+	}
+	if batches, offsets := naabuAddressBatches(addresses[:1], 0); !reflect.DeepEqual(batches, [][]string{{"192.0.2.1"}}) || !reflect.DeepEqual(offsets, []int{0}) {
+		t.Fatalf("default batch size = %v %v", batches, offsets)
+	}
+}
+
+// Naabu v2.7.0 paces IPv4 SYN probes and its other probes separately, each at
+// -rate, so the direct pipeline gives each invocation one address family, as
+// the resumable plan does.
+func TestNaabuPipelineInvocationsHoldOneAddressFamily(t *testing.T) {
+	dir := t.TempDir()
+	listLog := filepath.Join(dir, "lists")
+	naabuPath := writeNaabuFixture(t, `list=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-list" ]; then list="$2"; fi
+  shift
+done
+cat "$list" >> `+listLog+`
+printf '%s\n' '--' >> `+listLog+`
+`)
+	nmapPath := filepath.Join(dir, "nmap")
+	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\nprintf '%s' '"+sampleXMLSinglePort+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	addresses := []string{"192.0.2.1", "2001:db8::1", "192.0.2.2", "2001:db8::2"}
+	job := naabuDiscoveryJob(true, "connect", addresses...)
+	if _, err := NewWithNaabu(nmapPath, naabuPath).scanNaabuPipelineResolved(context.Background(), job, importResolvedTargets(naabuDiscoveryUnit(addresses...).Targets), nil); err != nil {
+		t.Fatalf("direct pipeline = %v", err)
+	}
+	logged, err := os.ReadFile(listLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var invocations [][]string
+	var current []string
+	for _, line := range strings.Split(strings.TrimSpace(string(logged)), "\n") {
+		if line == "--" {
+			invocations = append(invocations, current)
+			current = nil
+			continue
+		}
+		current = append(current, line)
+	}
+	want := [][]string{{"192.0.2.1", "192.0.2.2"}, {"2001:db8::1", "2001:db8::2"}}
+	if !reflect.DeepEqual(invocations, want) {
+		t.Fatalf("Naabu invocations = %v, want %v", invocations, want)
 	}
 }

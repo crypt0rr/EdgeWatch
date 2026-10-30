@@ -28,7 +28,9 @@ Naabu connect discovery is the built-in default for new TCP jobs. Naabu SYN
 discovery requires both `NET_RAW` and `NET_ADMIN`, which the `compose.syn.yaml`
 override adds. Nmap-only SYN scans need only `NET_RAW`, which the default
 Compose file grants. UDP is always Nmap-only. Naabu evidence and disagreements are retained as diagnostic
-data, but they do not independently create incidents.
+data, but they do not independently create incidents. Each Naabu invocation
+scans addresses of one family, IPv4 or IPv6, so the profile's rate bounds all
+of its probes; Naabu paces SYN probes of the two families separately.
 
 Naabu reports open ports only, so Nmap also confirms every TCP port the job
 still tracks: baseline ports and the ports of open incidents, pending changes,

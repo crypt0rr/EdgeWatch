@@ -268,7 +268,8 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 		batchSize = 16
 	}
 	discoveryTotal := int64(len(addresses)) * 65535
-	totalInvocations := int64((len(addresses) + batchSize - 1) / batchSize)
+	batches, offsets := naabuAddressBatches(addresses, batchSize)
+	totalInvocations := int64(len(batches))
 	reportProgress(report, Progress{StartedAt: started, Phase: "tcp discovery", Protocol: "tcp", TotalProbes: discoveryTotal, TotalInvocations: totalInvocations})
 	discovered := map[string]map[int]bool{}
 	discoveryHosts := map[string]model.HostObservation{}
@@ -284,10 +285,10 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 		snapshot.Normalize()
 		return snapshot
 	}
-	for start := 0; start < len(addresses); start += batchSize {
-		end := min(start+batchSize, len(addresses))
-		batch := addresses[start:end]
-		localInvocation := int64(start/batchSize) + 1
+	for index, batch := range batches {
+		start := offsets[index]
+		end := start + len(batch)
+		localInvocation := int64(index) + 1
 		reportProgress(report, Progress{StartedAt: started, Phase: "tcp discovery", Protocol: "tcp", CurrentInvocation: localInvocation, TotalBatches: totalInvocations, TotalInvocations: totalInvocations, TotalProbes: discoveryTotal, CompletedProbes: int64(start) * 65535, ProcessAlive: true, UnitAddresses: len(batch), UnitPorts: naabuFullPortExpression, DiscoveryPortsFound: portsFound, DiscoveryAddresses: addressesFound})
 		batchProbes := int64(len(batch)) * 65535
 		results, stderr, err := n.runNaabu(ctx, options, job.TCP.NaabuArgs, batch, func(update invocationProgress) {
@@ -377,7 +378,8 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 	// Discovery is the expensive full-range phase. Its progress is reported in
 	// exact probe units, while Naabu's stderr remains sanitized and advisory.
 	discoveryTotal := int64(len(addresses)) * 65535
-	discoveryInvocations := int64((len(addresses) + batchSize - 1) / batchSize)
+	batches, offsets := naabuAddressBatches(addresses, batchSize)
+	discoveryInvocations := int64(len(batches))
 	udpProbes := int64(0)
 	if job.UDP != nil {
 		udpProbes, _ = protocolProgressTotals(targets, *job.UDP, nil)
@@ -404,10 +406,10 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 		snapshot.Normalize()
 		return snapshot
 	}
-	for start := 0; start < len(addresses); start += batchSize {
-		end := min(start+batchSize, len(addresses))
-		batch := addresses[start:end]
-		localInvocation := int64(start/batchSize) + 1
+	for index, batch := range batches {
+		start := offsets[index]
+		end := start + len(batch)
+		localInvocation := int64(index) + 1
 		if report != nil {
 			reportProgress(report, Progress{StartedAt: started, Phase: "tcp discovery", Protocol: "tcp", CurrentInvocation: localInvocation, TotalBatches: progress.TotalInvocations, TotalInvocations: progress.TotalInvocations, TotalProbes: discoveryTotal, CompletedProbes: int64(start) * 65535, ProcessAlive: true, UnitAddresses: len(batch), UnitPorts: naabuFullPortExpression, DiscoveryPortsFound: portsFound, DiscoveryAddresses: addressesFound})
 		}
@@ -1412,6 +1414,36 @@ func uniqueAddresses(targets []resolvedTarget) []string {
 	}
 	sort.Strings(addresses)
 	return addresses
+}
+
+// naabuAddressBatches splits addresses into Naabu invocations of at most size
+// addresses that each hold one address family, IPv4 first, in the given order
+// within each family, as the resumable plan's work units do. Naabu v2.7.0
+// paces IPv4 SYN probes and its other probes with separate limiters, each at
+// -rate, so an invocation with both families could send twice the configured
+// rate. offsets[i] is the number of addresses before batches[i], for progress.
+func naabuAddressBatches(addresses []string, size int) (batches [][]string, offsets []int) {
+	if size < 1 {
+		size = 16
+	}
+	var ipv4, ipv6 []string
+	for _, address := range addresses {
+		if addressFamily(address) == "IPv4" {
+			ipv4 = append(ipv4, address)
+		} else {
+			ipv6 = append(ipv6, address)
+		}
+	}
+	offset := 0
+	for _, family := range [][]string{ipv4, ipv6} {
+		for start := 0; start < len(family); start += size {
+			batch := family[start:min(start+size, len(family))]
+			batches = append(batches, batch)
+			offsets = append(offsets, offset)
+			offset += len(batch)
+		}
+	}
+	return batches, offsets
 }
 
 func sortedPortSet(values map[int]bool) []int {

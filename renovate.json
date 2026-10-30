@@ -139,6 +139,16 @@
       "groupName": "Node.js runtime"
     },
     {
+      "description": "Keep @types/node on the Node 24 release line that package.json's engines field and the Node.js runtime group allow: newer types would accept APIs that Node 24 lacks.",
+      "matchDepNames": ["@types/node"],
+      "allowedVersions": "<25.0.0"
+    },
+    {
+      "description": "Naabu imports Goldmark v1 by its module path github.com/yuin/goldmark. Goldmark v2 is the separate module github.com/yuin/goldmark/v2, which go get cannot select for that path, so propose only v1 releases for the Naabu build.",
+      "matchDepNames": ["github.com/yuin/goldmark"],
+      "allowedVersions": "<2.0.0"
+    },
+    {
       "description": "Wait three days before proposing an npm release: the registry lets its author unpublish it within 72 hours, and most malicious releases are found and removed in that time. Security updates are not delayed.",
       "matchDatasources": ["npm"],
       "minimumReleaseAge": "3 days"

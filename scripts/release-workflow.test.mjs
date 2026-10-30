@@ -1665,6 +1665,11 @@ test('every Node runtime pin matches the frontend image and Renovate groups them
     assert.notEqual(renovateRuleSettings({ manager: 'npm', datasource: 'npm', depName: name, packageName: name }).groupName, 'Node.js runtime',
       `the Node group must not take the npm package ${name}`)
   }
+  // @types/node describes the Node API, so it stays on the runtime's release
+  // line: newer types would accept APIs that Node 24 lacks.
+  assert.match(packageJson.devDependencies['@types/node'], new RegExp(`^\\^${major}\\.`), '@types/node must name the Node runtime release line')
+  assert.equal(renovateRuleSettings({ manager: 'npm', datasource: 'npm', depName: '@types/node', packageName: '@types/node' }).allowedVersions, `<${major + 1}.0.0`,
+    'Renovate must not propose @types/node for a newer Node release line')
 })
 
 // CI's Go jobs and the release binaries use the Go that go.mod names, the
@@ -2178,6 +2183,10 @@ test('Renovate updates every pinned image, package, and the Naabu release', () =
     { datasource: 'go', depName: 'github.com/yuin/goldmark', currentValue: dockerfileArg('NAABU_GOLDMARK_VERSION'), currentDigest: undefined },
     { datasource: 'go', depName: 'github.com/klauspost/compress', currentValue: dockerfileArg('NAABU_COMPRESS_VERSION'), currentDigest: undefined },
   ])
+  // Naabu imports Goldmark v1 by its module path; v2 is the separate module
+  // github.com/yuin/goldmark/v2, which go get cannot select for that path.
+  const goldmark = renovateCustomDependencies('Dockerfile', dockerfile).find((dependency) => dependency.depName === 'github.com/yuin/goldmark')
+  assert.equal(renovateRuleSettings(goldmark).allowedVersions, '<2.0.0', 'Renovate must not propose Goldmark v2 for the v1 module path that Naabu imports')
   const apkPins = assertApkPinsManaged(dockerfile)
   assert.ok(apkPins.includes('zlib=1.3.2-r1') || apkPins.some((pin) => pin.startsWith('zlib=')), 'the image pins zlib')
   assertAlpineRepologyMatchesBases(dockerfile)

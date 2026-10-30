@@ -192,7 +192,12 @@ name `node`, because Renovate looks `setup-node` versions up as the package
 `actions/node-versions`. Those versions, the `node` image, and the nodejs.org
 releases behind `.node-version` publish separately, so that pull request can
 first change only some of the pins and fail the test until the last of them
-is published.
+is published. Renovate keeps `@types/node` on the same release line, because
+newer types would accept APIs that Node 24 lacks.
+
+Renovate proposes only Goldmark v1 releases for the Naabu build. Naabu
+imports `github.com/yuin/goldmark`, and Goldmark v2 is the separate module
+`github.com/yuin/goldmark/v2`, which `go get` cannot select for that path.
 
 For release helper scripts, run `./scripts/test-release-artifacts.sh`; it uses
 fixture binaries and does not build a release candidate. Follow the workflow's

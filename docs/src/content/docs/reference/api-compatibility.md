@@ -680,8 +680,9 @@ reports a resumable cycle with recent completed work; `cycle_completed_units`
 and `cycle_total_units` report that cycle's progress. Every monitor has
 `last_attempt_status`, the status of its latest scan attempt or an empty
 string, and `last_success_at`, when its latest successful scan finished or
-`null`. `host_discovery` is true for a job with `assume_alive: false`, which
-scans only hosts that answer host discovery. `dns_targets` counts the
+`null`. `host_discovery` is true for a job with `assume_alive: false` and a
+UDP or Nmap-only TCP scan, which scans only hosts that answer host discovery;
+Naabu TCP discovery never uses host discovery. `dns_targets` counts the
 DNS-name targets, which never count as coverage. `protocols` names the
 buckets that the job's protocol settings fill, whatever its state:
 

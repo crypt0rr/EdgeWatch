@@ -41,7 +41,7 @@ func TestNaabuArgsUseFixedFullRangeAndDiscoveryPolicy(t *testing.T) {
 
 func TestNaabuConnectHostDiscoveryIsRejected(t *testing.T) {
 	connect := config.NaabuOptions{ScanType: "connect"}
-	if err := validateNaabuInvocation(connect, false, true); err == nil || !strings.Contains(err.Error(), "cannot use host discovery") {
+	if err := validateNaabuInvocation(connect, false, true); err == nil || !strings.Contains(err.Error(), "connect mode requires assume_alive") {
 		t.Fatalf("connect plus host discovery error = %v", err)
 	}
 	if err := validateNaabuInvocation(connect, true, false); err != nil {
@@ -79,7 +79,7 @@ func TestNaabuConnectHostDiscoveryFailsBeforeProcessStart(t *testing.T) {
 		TCP:              &config.Protocol{Engine: config.EngineNaabuNmap, Naabu: &config.NaabuOptions{ScanType: "connect"}},
 	})
 	_, err := NewWithNaabu("missing-nmap", naabuPath).Scan(context.Background(), job)
-	if err == nil || !strings.Contains(err.Error(), "cannot use host discovery") {
+	if err == nil || !strings.Contains(err.Error(), "connect mode requires assume_alive") {
 		t.Fatalf("connect discovery result = %v", err)
 	}
 	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {

@@ -290,7 +290,7 @@ func TestNaabuDiscoveryValidationAndPartialResults(t *testing.T) {
 
 	falseAlive := job
 	falseAlive.AssumeAlive = boolPtr(false)
-	if _, err := n.scanNaabuDiscoveryResolved(context.Background(), falseAlive, []resolvedTarget{validTarget}, nil); err == nil || !strings.Contains(err.Error(), "cannot use host discovery") {
+	if _, err := n.scanNaabuDiscoveryResolved(context.Background(), falseAlive, []resolvedTarget{validTarget}, nil); err == nil || !strings.Contains(err.Error(), "connect mode requires assume_alive") {
 		t.Fatalf("connect host discovery error = %v", err)
 	}
 

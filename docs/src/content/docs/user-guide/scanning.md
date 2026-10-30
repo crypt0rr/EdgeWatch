@@ -47,9 +47,11 @@ incidents of a down host's ports do not recover while it is down. During Naabu
 enrichment, each address has already been discovered, so Nmap uses `-Pn` to
 confirm discovered ports without a second host-discovery pass or a verbose
 down-host signal. Omitted Nmap hosts and timed-out probes remain incomplete.
-Naabu connect discovery cannot use host discovery: a job that uses it must
-keep `assume_alive` enabled, and EdgeWatch rejects the job when it is saved
-otherwise. For host-state tracking, use **Nmap only**.
+Naabu connect discovery requires `assume_alive`: EdgeWatch rejects a job
+that combines it with `assume_alive: false` when the job is saved. Naabu SYN
+discovery accepts `assume_alive: false`, but still runs without host
+discovery and only leaves silent addresses incomplete. For host-state
+tracking, use **Nmap only**.
 
 Repeated Naabu results are
 counted once. One Naabu invocation keeps at most 131,070 distinct open ports,

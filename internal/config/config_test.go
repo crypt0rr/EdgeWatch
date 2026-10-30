@@ -917,7 +917,7 @@ func TestValidateJobRejectsNaabuConnectHostDiscovery(t *testing.T) {
 	if !errors.As(err, &field) || field.Field != "assume_alive" {
 		t.Fatalf("Naabu connect with host discovery error = %v, want an assume_alive field error", err)
 	}
-	if !strings.Contains(err.Error(), "Naabu connect discovery cannot use host discovery") {
+	if !strings.Contains(err.Error(), "Naabu connect discovery requires assume_alive") {
 		t.Fatalf("error = %q, want the scanner's explanation", err)
 	}
 	for name, valid := range map[string]Job{

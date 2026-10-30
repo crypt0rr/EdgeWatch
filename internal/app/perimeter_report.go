@@ -216,8 +216,10 @@ type PerimeterMonitorRef struct {
 	// LastAttemptStatus is the status of the latest scan, or empty.
 	LastAttemptStatus string     `json:"last_attempt_status"`
 	LastSuccessAt     *time.Time `json:"last_success_at"`
-	// HostDiscovery reports a monitor that port-scans only the hosts that
-	// answer host discovery: its assume_alive is false.
+	// HostDiscovery reports a monitor with an Nmap scan that port-scans only
+	// the hosts that answer host discovery: its assume_alive is false and it
+	// has a UDP scan or an Nmap-only TCP scan. Naabu never runs host
+	// discovery, so a Naabu TCP scan probes every address.
 	HostDiscovery bool `json:"host_discovery"`
 	// Protocols are the buckets the monitor's settings fill, from full_tcp,
 	// any_tcp and udp, whatever its state.
@@ -608,12 +610,22 @@ func (a *App) readPerimeterState(ctx context.Context, ts *store.TenantStore) (pe
 	return state, nil
 }
 
+// perimeterMonitorUsesHostDiscovery reports whether one of the job's Nmap
+// scans runs host discovery: a job with assume_alive false and a UDP scan,
+// which is always Nmap's, or an Nmap-only TCP scan.
+func perimeterMonitorUsesHostDiscovery(job config.Job) bool {
+	if job.AssumesAlive() {
+		return false
+	}
+	return job.UDP != nil || (job.TCP != nil && job.TCP.Engine != config.EngineNaabuNmap)
+}
+
 // classifyPerimeterMonitor gives a job its state: every check a scheduled
 // run would fail, in the order the run meets them.
 func (a *App) classifyPerimeterMonitor(state *perimeterState, record store.JobRecord) (perimeterMonitor, error) {
 	monitor := perimeterMonitor{ref: PerimeterMonitorRef{
 		JobID: record.ID, Name: record.Job.Name, Reasons: []string{}, Protocols: []string{},
-		HostDiscovery: record.Job.AssumeAlive != nil && !*record.Job.AssumeAlive,
+		HostDiscovery: perimeterMonitorUsesHostDiscovery(record.Job),
 	}}
 	var ranges []addrspace.Range
 	for _, target := range record.Job.Targets {

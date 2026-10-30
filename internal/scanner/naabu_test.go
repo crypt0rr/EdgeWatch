@@ -17,7 +17,7 @@ import (
 
 func TestNaabuArgsUseFixedFullRangeAndDiscoveryPolicy(t *testing.T) {
 	options := config.NaabuOptions{ScanType: "connect", Rate: 1000, Workers: 25, Retries: 3, TimeoutMS: 1000, WarmUpSeconds: 2, Verify: true}
-	withDiscovery := naabuArgs(options, "/tmp/targets", true)
+	withDiscovery := naabuArgs(options, "/tmp/targets")
 	for _, expected := range []string{"-list", "/tmp/targets", "-p", "-", "-json", "-silent", "-no-stdin", "-disable-update-check", "-scan-type", "c", "-verify", "-skip-host-discovery"} {
 		if !slices.Contains(withDiscovery, expected) {
 			t.Fatalf("Naabu args omitted %q: %v", expected, withDiscovery)
@@ -30,15 +30,18 @@ func TestNaabuArgsUseFixedFullRangeAndDiscoveryPolicy(t *testing.T) {
 	if timeoutIndex < 0 || timeoutIndex+1 >= len(withDiscovery) || withDiscovery[timeoutIndex+1] != "1000ms" {
 		t.Fatalf("Naabu timeout must preserve milliseconds: %v", withDiscovery)
 	}
-	synDiscovery := naabuArgs(config.NaabuOptions{ScanType: "syn", Rate: 1000, Workers: 25, Retries: 3, TimeoutMS: 1000, WarmUpSeconds: 2, Verify: true}, "/tmp/targets", false)
-	if !slices.Contains(synDiscovery, "-with-host-discovery") || slices.Contains(synDiscovery, "-skip-host-discovery") {
-		t.Fatalf("SYN host-discovery policy was not rendered: %v", synDiscovery)
+	// Naabu's host discovery would choose targets of its own, so SYN mode
+	// skips it too; a job's assume_alive decides only how silent addresses
+	// count (naabuSilentAddressesComplete).
+	syn := naabuArgs(config.NaabuOptions{ScanType: "syn", Rate: 1000, Workers: 25, Retries: 3, TimeoutMS: 1000, WarmUpSeconds: 2, Verify: true}, "/tmp/targets")
+	if !slices.Contains(syn, "-skip-host-discovery") || slices.Contains(syn, "-with-host-discovery") {
+		t.Fatalf("SYN mode must skip Naabu host discovery: %v", syn)
 	}
 }
 
 func TestNaabuConnectHostDiscoveryIsRejected(t *testing.T) {
 	connect := config.NaabuOptions{ScanType: "connect"}
-	if err := validateNaabuInvocation(connect, false, true); err == nil || !strings.Contains(err.Error(), "cannot use host discovery") {
+	if err := validateNaabuInvocation(connect, false, true); err == nil || !strings.Contains(err.Error(), "connect mode requires assume_alive") {
 		t.Fatalf("connect plus host discovery error = %v", err)
 	}
 	if err := validateNaabuInvocation(connect, true, false); err != nil {
@@ -76,7 +79,7 @@ func TestNaabuConnectHostDiscoveryFailsBeforeProcessStart(t *testing.T) {
 		TCP:              &config.Protocol{Engine: config.EngineNaabuNmap, Naabu: &config.NaabuOptions{ScanType: "connect"}},
 	})
 	_, err := NewWithNaabu("missing-nmap", naabuPath).Scan(context.Background(), job)
-	if err == nil || !strings.Contains(err.Error(), "cannot use host discovery") {
+	if err == nil || !strings.Contains(err.Error(), "connect mode requires assume_alive") {
 		t.Fatalf("connect discovery result = %v", err)
 	}
 	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
@@ -93,7 +96,7 @@ func TestNaabuConfirmationUsesResolvedConnectMode(t *testing.T) {
 	if !slices.Contains(args, "-sT") || slices.Contains(args, "-sS") {
 		t.Fatalf("Naabu confirmation did not use connect mode: %v", args)
 	}
-	if naabu := naabuArgs(*job.TCP.Naabu, "/tmp/targets", true); !slices.Contains(naabu, "c") {
+	if naabu := naabuArgs(*job.TCP.Naabu, "/tmp/targets"); !slices.Contains(naabu, "c") {
 		t.Fatalf("Naabu discovery did not use connect scan type: %v", naabu)
 	}
 }
@@ -131,7 +134,7 @@ func TestNaabuPipelineEnrichmentSkipsNmapHostDiscoveryAndVerbosity(t *testing.T)
 func TestNaabuProfilePlaceholdersRenderManagedArguments(t *testing.T) {
 	options := config.NaabuOptions{ScanType: "connect", Rate: 1000, Workers: 25, Retries: 3, TimeoutMS: 1000, WarmUpSeconds: 2, Verify: true}
 	template := []string{config.PlaceholderTargetsFile, config.PlaceholderPorts, config.PlaceholderStructuredOutput, config.PlaceholderHostDiscovery, "-verbose"}
-	args := naabuArgsWithTemplate(options, "/tmp/targets", false, template)
+	args := naabuArgsWithTemplate(options, "/tmp/targets", template)
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "{targets_file}") || strings.Contains(joined, "{ports}") || strings.Contains(joined, "{structured_output}") {
 		t.Fatalf("placeholder leaked into Naabu command: %v", args)
@@ -157,7 +160,7 @@ func TestNaabuProfilePlaceholdersRenderManagedArguments(t *testing.T) {
 func TestNaabuCustomProfileKeepsHostDiscoveryDefaultWhenOmitted(t *testing.T) {
 	options := config.NaabuOptions{ScanType: "connect", Rate: 1000, Workers: 25, Retries: 3, TimeoutMS: 1000, WarmUpSeconds: 2, Verify: true}
 	template := []string{config.PlaceholderTargetsFile, config.PlaceholderPorts, config.PlaceholderStructuredOutput}
-	args := naabuArgsWithTemplate(options, "/tmp/targets", false, template)
+	args := naabuArgsWithTemplate(options, "/tmp/targets", template)
 	if !slices.Contains(args, "-skip-host-discovery") {
 		t.Fatalf("custom Naabu connect profile omitted safe host-discovery default: %v", args)
 	}
@@ -261,7 +264,7 @@ func TestRunNaabuKillsChildWhenJSONLineLimitExceeded(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "finished")
 	script := "i=0\nwhile [ \"$i\" -lt 17 ]; do\n  printf '%1048576s' x\n  i=$((i + 1))\ndone\nsleep 1\ntouch " + marker + "\n"
 	n := NewWithNaabu("missing-nmap", writeNaabuFixture(t, script))
-	_, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+	_, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"})
 	if err == nil || !strings.Contains(err.Error(), "naabu JSON line exceeded") {
 		t.Fatalf("Naabu oversized output error = %v", err)
 	}
@@ -279,7 +282,7 @@ func TestRunNaabuKillsChildThatRepeatsResults(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "finished")
 	script := "i=0\nwhile [ \"$i\" -lt 100000 ]; do\n  printf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":22,\"protocol\":\"tcp\"}'\n  i=$((i + 1))\ndone\ntouch " + marker + "\n"
 	n := NewWithNaabu("missing-nmap", writeNaabuFixture(t, script))
-	_, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+	_, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"})
 	if err == nil || !strings.Contains(err.Error(), "more than 1000 JSON records") {
 		t.Fatalf("repeated Naabu output error = %v", err)
 	}
@@ -522,7 +525,7 @@ func TestRunNaabuReportsOutputAndHeartbeat(t *testing.T) {
 	n := NewWithNaabu("missing-nmap", path)
 	options := config.BuiltinNaabuProfile().Naabu
 	updates := make(chan invocationProgress, 32)
-	results, _, err := n.runNaabu(context.Background(), options, nil, []string{"192.0.2.1"}, true, func(update invocationProgress) {
+	results, _, err := n.runNaabu(context.Background(), options, nil, []string{"192.0.2.1"}, func(update invocationProgress) {
 		select {
 		case updates <- update:
 		default:

@@ -1322,7 +1322,7 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
 
   const unsafeNaabuVersion = replaceOnce(
     sourceDockerfile,
-    'ARG NAABU_VERSION=v2.6.1',
+    `ARG NAABU_VERSION=${dockerfileArg('NAABU_VERSION')}`,
     'ARG NAABU_VERSION=$(npm ci)',
     'Naabu version validation',
   )

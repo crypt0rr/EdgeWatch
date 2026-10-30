@@ -321,7 +321,7 @@ func (n *Nmap) NaabuVersion(ctx context.Context) string {
 		return "unknown"
 	}
 	// Naabu prints an ASCII banner before the actual version line (currently
-	// `[INF] Current Version: 2.6.1`). Do not report the banner as the version;
+	// `[INF] Current Version: 2.7.0`). Do not report the banner as the version;
 	// scan metadata and the capabilities endpoint need a stable, compact value.
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
@@ -339,7 +339,7 @@ func (n *Nmap) NaabuVersion(ctx context.Context) string {
 			}
 		}
 		// Older/newer builds may put the version directly after the product
-		// name (for example, `naabu v2.6.1`). Keep this fallback conservative
+		// name (for example, `naabu v2.7.0`). Keep this fallback conservative
 		// so an ASCII-art line is never mistaken for a version.
 		fields := strings.Fields(line)
 		if len(fields) >= 2 && strings.EqualFold(strings.Trim(fields[0], "[]"), "naabu") {

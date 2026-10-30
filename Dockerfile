@@ -20,8 +20,8 @@ RUN if [ "$PREBUILT_FRONTEND" = "1" ]; then \
     fi
 
 FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS naabu
-ARG NAABU_VERSION=v2.6.1
-ARG NAABU_COMMIT=5a0ca8bde91b5bb16213e9e8b5c6871eac954bd8
+ARG NAABU_VERSION=v2.7.0
+ARG NAABU_COMMIT=041b70fd396e95b5ed2c19f879c18247078243bc
 ARG NAABU_X_NET_VERSION=v0.62.0
 ARG NAABU_GOLDMARK_VERSION=v1.8.7
 ARG NAABU_COMPRESS_VERSION=v1.20.3
@@ -38,7 +38,7 @@ RUN git init . \
     && git fetch --depth 1 origin refs/tags/${NAABU_VERSION}:refs/tags/${NAABU_VERSION} \
     && test "$(git rev-parse ${NAABU_VERSION}^{commit})" = "${NAABU_COMMIT}" \
     && git checkout --detach ${NAABU_COMMIT}
-# Naabu v2.6.1 pins older x/net, goldmark, and compress versions with known
+# Naabu v2.7.0 pins older x/net, goldmark, and compress versions with known
 # advisories. Keep the scanner source pin while resolving those modules at
 # fixed releases; Go records the compatible module graph and checksums in this
 # build stage. The image scan checks the resulting binary on both architectures.

@@ -2,10 +2,10 @@
 
 EdgeWatch bundles the following scanner binary in its container image:
 
-* **Naabu v2.6.1** — Copyright ProjectDiscovery contributors, licensed under
-  the MIT License. Source: <https://github.com/projectdiscovery/naabu/tree/v2.6.1>.
+* **Naabu v2.7.0** — Copyright ProjectDiscovery contributors, licensed under
+  the MIT License. Source: <https://github.com/projectdiscovery/naabu/tree/v2.7.0>.
   The image is built from immutable commit
-  `5a0ca8bde91b5bb16213e9e8b5c6871eac954bd8`, and the Docker build verifies
+  `041b70fd396e95b5ed2c19f879c18247078243bc`, and the Docker build verifies
   that the release tag resolves to this commit.
 
 The image also installs the distribution-provided **Nmap** and

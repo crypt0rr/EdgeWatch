@@ -182,19 +182,22 @@ func requireProbeInitialCapabilities(status string, profile capabilityProfile) e
 	return nil
 }
 
-// Naabu v2.6.1's pkg/privileges/privileges_linux.go reads the capability
-// state, replaces only Inheritable with CAP_NET_RAW, and writes it back. That
+// Naabu imports github.com/projectdiscovery/utils/permission (for its resume
+// file mode), whose package init reads the capability state of the main
+// thread, replaces only Inheritable with CAP_NET_RAW, and writes it back. That
 // keeps both permitted/effective network caps while the kernel drops
 // CAP_NET_ADMIN from Ambient because ambient must remain a subset of
-// inheritable. Reproduce that exact transition before checking/probing.
+// inheritable. Naabu v2.7.0's own pkg/privileges only reads the state.
+// Reproduce that exact transition before checking/probing. Version 3 reads
+// and writes two data structs.
 func applyNaabuCapabilityTransition() error {
 	header := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3, Pid: int32(os.Getpid())}
-	data := unix.CapUserData{}
-	if err := unix.Capget(&header, &data); err != nil {
+	var data [2]unix.CapUserData
+	if err := unix.Capget(&header, &data[0]); err != nil {
 		return fmt.Errorf("read capability state: %w", err)
 	}
-	data.Inheritable = 1 << unix.CAP_NET_RAW
-	if err := unix.Capset(&header, &data); err != nil {
+	data[0].Inheritable = 1 << unix.CAP_NET_RAW
+	if err := unix.Capset(&header, &data[0]); err != nil {
 		return fmt.Errorf("apply Naabu inheritable capability state: %w", err)
 	}
 	return nil

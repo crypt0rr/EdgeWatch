@@ -179,6 +179,7 @@ async function openEntrySurface(page: Page, surface: EntrySurfaceCase) {
   switch (surface.state) {
     case 'signed-out': await mockConsole(page, 'administrator', { signedOut: true }); break
     case 'unconfigured': await mockConsole(page, 'administrator', { unconfigured: true }); break
+    case 'signed-in': await mockConsole(page, 'administrator'); break
     case 'enrolment': await mockConsole(page, 'platform_admin', { enrolmentRequired: true }); break
     case 'public': await mockConsole(page, 'administrator', { signedOut: true }); await mockPublicStatus(page); break
   }
@@ -186,9 +187,9 @@ async function openEntrySurface(page: Page, surface: EntrySurfaceCase) {
 }
 
 // The pages outside either console shell: sign-in, first-run setup,
-// activation with a fixture token, the forced TOTP enrolment, and the public
-// status pages. Each opens in a fresh page because each needs another
-// session state.
+// activation with a fixture token, both signed out and in a browser that is
+// still signed in, the forced TOTP enrolment, and the public status pages.
+// Each opens in a fresh page because each needs another session state.
 for (const surface of entrySurfaces) {
   test(`axe audits the ${surface.state} surface at ${surface.path}`, async ({ page }, testInfo) => {
     test.skip(!auditedProjects.has(testInfo.project.name), 'The entry surfaces are audited at desktop, narrow-mobile, and iPhone 13 widths.')
@@ -402,6 +403,7 @@ const requiredStateSurfaceManifest = [
   'entry:signed-out:/login',
   'entry:unconfigured:/setup',
   'entry:signed-out:/activate#token=FIXTURE-TOKEN',
+  'entry:signed-in:/activate#token=FIXTURE-TOKEN',
   'entry:enrolment:/security',
   'entry:public:/public',
   'entry:public:/public/retail',
@@ -497,6 +499,17 @@ test('axe allowances reject unaudited surfaces, including removed fixture audits
   )
   expect(() => assertRequiredStateAudits(requiredStateSurfaceManifest, auditsWithoutUnpublishedEntry))
     .toThrow('required axe audit surfaces are missing: entry:public:/public/unpublished')
+
+  // The account-link notice shares its address with the signed-out
+  // activation page, so only its own entry keeps its audit.
+  const signedInLinkEntry = entrySurfaces.find(surface => surface.state === 'signed-in' && surface.path === '/activate#token=FIXTURE-TOKEN')!
+  const auditsWithoutSignedInLink = auditedSurfaceNamesFor(
+    fixtureAxeAudits,
+    entrySurfaces.filter(surface => surface !== signedInLinkEntry),
+  )
+  expect(auditsWithoutSignedInLink).toContain('entry:signed-out:/activate#token=FIXTURE-TOKEN')
+  expect(() => assertRequiredStateAudits(requiredStateSurfaceManifest, auditsWithoutSignedInLink))
+    .toThrow('required axe audit surfaces are missing: entry:signed-in:/activate#token=FIXTURE-TOKEN')
 
   const totpEntry = entrySurfaces.find(surface => surface.state === 'enrolment')!
   const totpSurface = entrySurfaceKey(totpEntry)

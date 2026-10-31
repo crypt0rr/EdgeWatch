@@ -155,7 +155,8 @@ type scanDemandWork struct {
 	// schedules holds every expansion of the request by timezone and
 	// schedule text, whether or not the App's cache keeps it, and those
 	// that failed or wait for the second pass, so that each schedule is
-	// expanded at most once in each pass.
+	// expanded at most once in each pass. Each span of an expansion took a
+	// unit of the request's work, so its bound also bounds what this holds.
 	schedules map[scanRunsPerDayKey]scanDemandSchedule
 	budget    *scanScheduleSimulationBudget
 	jobs      []scanDemandJob
@@ -1504,13 +1505,10 @@ func (e *scheduleExpansion) ordinaryDays(from, to int) error {
 	return nil
 }
 
-// addOrdinaryDays adds the days ordinary days that start index days after
-// first, extending the previous span of ordinary days when they follow it.
-// A new span takes a unit of work.
+// addOrdinaryDays adds the days ordinary days, at least one, that start
+// index days after first, extending the previous span of ordinary days when
+// they follow it. A new span takes a unit of work.
 func (e *scheduleExpansion) addOrdinaryDays(first time.Time, index, days int) error {
-	if days <= 0 {
-		return nil
-	}
 	spanStart := first.Add(time.Duration(index) * scheduleDay)
 	offset, ok := scheduleSpanSeconds(spanStart.Sub(e.start))
 	if !ok {

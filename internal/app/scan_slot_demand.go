@@ -40,11 +40,13 @@ const (
 	scanScheduleRequestWorkLimit = 540_000
 	// scanScheduleJobWorkLimit bounds the work of expanding one job's
 	// schedule and, separately, of projecting its runs on that schedule. A
-	// request takes its units' jobs in turn, and each projection first gets
-	// only scanScheduleJobFirstPassWorkLimit; the jobs that need more get the
-	// rest of their limit after every other job has been projected. One
-	// unit's dense schedules therefore cannot use up the request's work
-	// before other units' ordinary jobs are estimated.
+	// request takes its units' jobs in turn, and each job's projections
+	// first get only scanScheduleJobFirstPassWorkLimit, and only until half
+	// of the request's work is spent; the jobs that need more, or that came
+	// later, get the rest of their limit after every other job. A projection
+	// that a schedule's known work shows to need more than the share waits
+	// without spending it, so dense schedules cannot spend the request's
+	// work before ordinary jobs are estimated.
 	scanScheduleJobWorkLimit          = 50_000
 	scanScheduleJobFirstPassWorkLimit = 1_000
 	scanScheduleSampleStartYear       = 2024
@@ -78,12 +80,14 @@ type ScanSlotDemand struct {
 
 // ScanSlotDemand estimates the unit's scheduled demand from enabled jobs and
 // compares it with the unit's effective slot capacity. A job's runs are the
-// attempts of its most recent completed scan samples that ran with its
-// current scan settings: each scan without a cycle, whether it succeeded or
-// timed out, and each attempt of a completed resumable cycle. Each run holds
-// a slot for its recorded duration, at most the job's timeout, and the
-// estimate uses the mean over those runs. A job without such samples whose
-// newest runs all timed out runs for its timeout; other jobs use only work
+// attempts of its most recent scan samples that ran with its current scan
+// settings: each completed scan without a cycle, whether it succeeded, was
+// incomplete or timed out, each attempt of a completed resumable cycle, and
+// each recorded attempt of the job's cycle in progress. Each run holds a
+// slot for its recorded duration, at most the job's timeout, and a run that
+// timed out holds it for the job's current timeout; the estimate uses the
+// mean over those runs. A job whose newest runs with its current settings
+// all timed out runs for its timeout; jobs without samples use only work
 // bounded by an explicitly configured scanner rate. The estimate simulates
 // the schedule ticks a job can start after each prior run ends. A run that
 // its timeout ends holds the job until after the tick at its timeout, so
@@ -140,9 +144,19 @@ type scanDemandWork struct {
 	jobs        []scanDemandJob
 	// units counts the units whose jobs the request has collected.
 	units int
-	// deferred holds the projections that needed more than a job's
-	// first-pass share of work, which wait for the second pass.
-	deferred map[scanScheduleDurationKey]bool
+	// firstPassLimit is the request's work after which the first pass gives
+	// no projection a share, so that the jobs that wait for the second pass
+	// keep at least the rest.
+	firstPassLimit int
+	// deferred holds the projections, and deferredSchedules the schedules,
+	// of which one projection needed more than a job's first-pass share on
+	// its own. The first pass leaves other jobs' projections of them for the
+	// second pass without spending that share again.
+	deferred          map[scanScheduleDurationKey]bool
+	deferredSchedules map[scanScheduleIdentity]bool
+	// exceeded holds the projections that needed more than a job's whole
+	// work limit on their own, which fail for every other job at once.
+	exceeded map[scanScheduleDurationKey]bool
 }
 
 func newScanDemandWork(simulations map[scanScheduleDurationKey]scanScheduleDurationEstimate, budget *scanScheduleSimulationBudget) *scanDemandWork {
@@ -152,8 +166,18 @@ func newScanDemandWork(simulations map[scanScheduleDurationKey]scanScheduleDurat
 	if budget == nil {
 		budget = &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
 	}
-	return &scanDemandWork{simulations: simulations, budget: budget}
+	return &scanDemandWork{
+		simulations: simulations, budget: budget,
+		firstPassLimit:    budget.used + max(budget.limit-budget.used, 0)/2,
+		deferred:          make(map[scanScheduleDurationKey]bool),
+		deferredSchedules: make(map[scanScheduleIdentity]bool),
+		exceeded:          make(map[scanScheduleDurationKey]bool),
+	}
 }
+
+// errScanDemandDeferred reports that a job's projection waits for the
+// second pass.
+var errScanDemandDeferred = errors.New("scan demand projection deferred to the second pass")
 
 // scanDemandJob is an enabled scheduled job whose demand a request adds to
 // its unit's estimate once it has projected the job's schedule.
@@ -195,8 +219,11 @@ func newScanDemandRun(seconds, timeout, weight float64) scanDemandRun {
 	return run
 }
 
-// historyDemandRuns returns the runs of a job's completed samples, each
-// attempt at its recorded duration up to the job's timeout. A completed
+// historyDemandRuns returns the runs of a job's samples, each attempt at its
+// recorded duration up to the job's timeout. An attempt that its timeout
+// ended needed at least that timeout, so it runs for the job's current
+// timeout, which ends it: a scan without a cycle keeps its samples across a
+// timeout edit, and a raised timeout lets such a run take longer. A completed
 // cycle whose attempt count exceeds its recorded attempts adds the missing
 // attempts as runs without slot time, so the cycle's runs average its
 // recorded time over its attempt count.
@@ -211,7 +238,11 @@ func historyDemandRuns(samples []store.ScanDurationSample, timeout float64) []sc
 	}
 	for _, sample := range samples {
 		for _, attempt := range sample.Attempts {
-			add(newScanDemandRun(attempt.Seconds(), timeout, 1))
+			seconds := attempt.Duration.Seconds()
+			if attempt.TimedOut && timeout > 0 {
+				seconds = timeout
+			}
+			add(newScanDemandRun(seconds, timeout, 1))
 		}
 		if missing := sample.Runs - len(sample.Attempts); missing > 0 {
 			add(scanDemandRun{weight: float64(missing)})
@@ -261,29 +292,21 @@ func (a *App) collectScheduledScanDemand(ctx context.Context, ts *store.TenantSt
 	if err != nil {
 		return err
 	}
-	// Only a job without completed samples needs to know whether its newest
-	// runs all timed out: an unfinished resumable cycle has no sample yet.
-	var withoutSamples []store.ScanDurationKey
-	for i, record := range scheduled {
-		if len(history[record.ID]) == 0 {
-			withoutSamples = append(withoutSamples, keys[i])
-		}
-	}
-	timedOutOnly := map[string]bool{}
-	if len(withoutSamples) > 0 {
-		if timedOutOnly, err = ts.LatestScanRunsTimedOut(ctx, withoutSamples, scanSlotDemandHistoryLimit); err != nil {
-			return err
-		}
+	timedOutOnly, err := ts.LatestScanRunsTimedOut(ctx, keys, scanSlotDemandHistoryLimit)
+	if err != nil {
+		return err
 	}
 	unitIndex := work.units
 	work.units++
 	for position, record := range scheduled {
 		job := scanDemandJob{unit: unit, unitIndex: unitIndex, position: position, job: record.Job}
 		timeout := record.Job.Timeout.Value().Seconds()
-		if samples := history[record.ID]; len(samples) > 0 {
-			job.runs, job.history = historyDemandRuns(samples, timeout), true
-		} else if timedOutOnly[record.ID] {
+		// A job whose newest runs with its current settings all timed out
+		// times out now, whatever its older samples took.
+		if timedOutOnly[record.ID] {
 			job.runs, job.history = []scanDemandRun{newScanDemandRun(timeout, timeout, 1)}, true
+		} else if samples := history[record.ID]; len(samples) > 0 {
+			job.runs, job.history = historyDemandRuns(samples, timeout), true
 		} else {
 			lowerBound, hasBound, incomplete := scanRateLowerBound(record.Job, a.Config.Scanner.MaxJobHostsValue())
 			if hasBound {
@@ -298,11 +321,16 @@ func (a *App) collectScheduledScanDemand(ctx context.Context, ts *store.TenantSt
 
 // projectScheduledScanDemand projects the schedule of every queued job and
 // adds its demand to its unit. It takes the units' jobs in turn, each unit's
-// first job, then each unit's second, and so on, and gives each projection
-// the first-pass share of its work limit; the jobs that need more are
-// projected after all others. Dense schedules therefore cannot crowd other
-// jobs out of the request's work. A job that its own limit or the request's
-// remaining work cannot finish counts as work-limited and adds nothing.
+// first job, then each unit's second, and so on. In the first pass each
+// job's projections get only a small share of its work limit, and none at
+// all once half of the request's work is spent. A job whose projection needs
+// more than its share, by the schedule's known work or by trying it, or
+// that the first pass gave no share, waits for the second pass, which gives
+// the waiting jobs, in the same order, their whole limit from what is left.
+// Ordinary jobs are therefore projected before dense schedules take more,
+// and those cannot spend the request's work for the second pass in the
+// first. A job that its own limit or the request's remaining work cannot
+// finish counts as work-limited and adds nothing.
 func (a *App) projectScheduledScanDemand(ctx context.Context, work *scanDemandWork) error {
 	order := make([]int, len(work.jobs))
 	for i := range order {
@@ -336,9 +364,15 @@ func (a *App) projectScheduledScanDemand(ctx context.Context, work *scanDemandWo
 // projectScanDemandJob expands the job's schedule and projects its runs on
 // it, and adds the job to its unit's estimate and counts. Each step gets its
 // own work limit, of which the projection gets only the first-pass share in
-// the first pass. It reports retry when that share alone did not suffice,
-// and leaves the job uncounted for the second pass.
+// the first pass. It reports retry when the projection waits for the second
+// pass, and leaves the job uncounted until then. A job without any run to
+// project is unestimated, whatever its schedule, so its schedule is not
+// expanded.
 func (a *App) projectScanDemandJob(ctx context.Context, work *scanDemandWork, job *scanDemandJob, firstPass bool) (retry bool, err error) {
+	if len(job.runs) == 0 {
+		job.unit.UnestimatedJobs++
+		return false, nil
+	}
 	// An expansion is shared by every job with the schedule and remembered
 	// across requests, so it gets the whole limit in either pass.
 	expansion := &scanScheduleSimulationBudget{limit: scanScheduleJobWorkLimit, parent: work.budget}
@@ -365,10 +399,10 @@ func (a *App) projectScanDemandJob(ctx context.Context, work *scanDemandWork, jo
 	demand, skipped, err := projectScanDemandRuns(job.runs, func(run scanDemandRun) (float64, bool, error) {
 		return work.project(ctx, schedule, run, projection, firstPass)
 	})
+	if errors.Is(err, errScanDemandDeferred) {
+		return true, nil
+	}
 	if errors.Is(err, errScheduleSimulationBudgetExceeded) {
-		if firstPass && !work.budget.exhausted() {
-			return true, nil
-		}
 		job.unit.WorkLimitedJobs++
 		return false, nil
 	}
@@ -397,20 +431,54 @@ func (a *App) projectScanDemandJob(ctx context.Context, work *scanDemandWork, jo
 
 // project returns the runs per day that the schedule starts for runs of one
 // kind, and whether they skip a tick, from the request's memo when another
-// job has the same schedule and run. In the first pass, a projection that
-// has already needed more than a job's first-pass share waits for the
-// second pass without spending that work again.
+// job has the same schedule and projected run. budget is the job's own
+// share or limit. A projection that the remaining work cannot cover even by
+// the schedule's known work fails without spending any. In the first pass, a
+// projection waits for the second, with errScanDemandDeferred, when it needs
+// more than the job's share, when one of its key or of its schedule already
+// did, or when the first pass has spent its half of the request's work.
 func (work *scanDemandWork) project(ctx context.Context, schedule scanRunsPerDayValue, run scanDemandRun, budget *scanScheduleSimulationBudget, firstPass bool) (float64, bool, error) {
-	key := scanScheduleDurationKey{schedule: schedule.identity, runSeconds: math.Float64bits(run.seconds), endsAtTimeout: run.endsAtTimeout}
-	if firstPass && work.deferred[key] {
+	if !schedule.ok || schedule.runsPerDay <= 0 {
+		return 0, false, nil
+	}
+	seconds, endsAtTimeout := schedule.projectedRun(run.seconds, run.endsAtTimeout)
+	if schedule.runFitsEveryGap(seconds, endsAtTimeout) {
+		return schedule.runsPerDay, false, nil
+	}
+	key := schedule.durationKey(seconds, endsAtTimeout)
+	if estimate, ok := work.simulations[key]; ok {
+		return estimate.runsPerDay, estimate.skipped, nil
+	}
+	floor := schedule.projectionWorkFloor(seconds)
+	if work.exceeded[key] || work.budget.remaining() < floor {
 		return 0, false, errScheduleSimulationBudgetExceeded
 	}
-	runsPerDay, skipped, err := memoizedScheduleRunsForDurationWithBudget(ctx, work.simulations, schedule, run.seconds, run.endsAtTimeout, budget)
-	if firstPass && errors.Is(err, errScheduleSimulationBudgetExceeded) && !work.budget.exhausted() {
-		if work.deferred == nil {
-			work.deferred = make(map[scanScheduleDurationKey]bool)
+	alone := budget.used == 0
+	if budget.remaining() < floor {
+		if firstPass {
+			return 0, false, errScanDemandDeferred
 		}
-		work.deferred[key] = true
+		if alone {
+			work.exceeded[key] = true
+		}
+		return 0, false, errScheduleSimulationBudgetExceeded
+	}
+	if firstPass && (work.deferred[key] || work.deferredSchedules[key.schedule] || work.budget.used >= work.firstPassLimit) {
+		return 0, false, errScanDemandDeferred
+	}
+	runsPerDay, skipped, err := memoizedScheduleRunsForDurationWithBudget(ctx, work.simulations, schedule, seconds, endsAtTimeout, budget)
+	if !errors.Is(err, errScheduleSimulationBudgetExceeded) || work.budget.exhausted() {
+		return runsPerDay, skipped, err
+	}
+	// The job's own share or limit ran out.
+	if firstPass {
+		if alone {
+			work.deferred[key], work.deferredSchedules[key.schedule] = true, true
+		}
+		return 0, false, errScanDemandDeferred
+	}
+	if alone {
+		work.exceeded[key] = true
 	}
 	return runsPerDay, skipped, err
 }
@@ -509,6 +577,16 @@ func (budget *scanScheduleSimulationBudget) exhausted() bool {
 	return budget.used >= budget.limit
 }
 
+// remaining returns how much work the budget, and every budget it counts
+// against, has left.
+func (budget *scanScheduleSimulationBudget) remaining() int {
+	left := max(budget.limit-budget.used, 0)
+	if budget.parent != nil {
+		left = min(left, budget.parent.remaining())
+	}
+	return left
+}
+
 type budgetedCronSchedule struct {
 	schedule  cron.Schedule
 	budget    *scanScheduleSimulationBudget
@@ -543,7 +621,15 @@ type scanRunsPerDayValue struct {
 	// next, or zero when the sample has fewer than two ticks. A run that
 	// ends within it never makes the scheduler skip a tick.
 	minimumGap time.Duration
-	identity   scanScheduleIdentity
+	// minuteTicks is set when every tick of the sample falls a whole number
+	// of minutes after every other, so that the ticks a run blocks depend
+	// only on the first whole minute after its start at which it no longer
+	// holds the job; see projectedRun.
+	minuteTicks bool
+	// projectionFloor is the least work that walkScheduleDays takes for a
+	// run on the schedule; see scheduleWindow.
+	projectionFloor int
+	identity        scanScheduleIdentity
 	// days are the sample's days on which the schedule ticks, in order.
 	days []scheduleDaySpan
 	rank uint64
@@ -914,11 +1000,34 @@ func schedulePatternWithBudget(ctx context.Context, timezone, scheduleText strin
 		return scanRunsPerDayValue{}, nil
 	}
 	value.minimumGap = window.minimumGap
+	value.minuteTicks = scheduleTicksOnWholeMinutes(value.identity.second, location, start, end)
+	value.projectionFloor = window.projectionFloor
 	// The cache weighs a value by its slice capacity, so keep no spare room.
 	value.days = append([]scheduleDaySpan(nil), window.days...)
 	value.runsPerDay = float64(window.runs) / (value.windowSeconds / scheduleDay.Seconds())
 	value.ok = true
 	return value, nil
+}
+
+// scheduleTicksOnWholeMinutes reports whether every tick from start until
+// end of a schedule whose cron second field is second falls a whole number
+// of minutes after every other: each tick starts a local minute, and every
+// UTC offset that location has in that time is a whole number of minutes.
+func scheduleTicksOnWholeMinutes(second uint64, location *time.Location, start, end time.Time) bool {
+	if second != 1 {
+		return false
+	}
+	for at := start; at.Before(end); {
+		if _, offset := at.Zone(); offset%60 != 0 {
+			return false
+		}
+		_, next := at.ZoneBounds()
+		if !next.After(at) {
+			return true
+		}
+		at = next
+	}
+	return true
 }
 
 func scheduleBudgetError(ctx context.Context, exhausted bool) error {
@@ -944,6 +1053,12 @@ type scheduleWindow struct {
 	runs       int
 	minimumGap time.Duration
 	days       []scheduleDaySpan
+	// projectionFloor is the least work that walkScheduleDays takes to
+	// project a run over these days: a Schedule.Next call for the warm
+	// start, two units for each span of ordinary days, and, for each
+	// irregular day, one unit and a Schedule.Next call for each of its ticks
+	// and for the one after it.
+	projectionFloor int
 }
 
 // scanScheduleWindow walks the sample's local days. An ordinary day's ticks
@@ -966,6 +1081,7 @@ func scanScheduleWindow(ctx context.Context, schedule cron.Schedule, spec *cron.
 			ordinaryGap = gap
 		}
 	}
+	window.projectionFloor = 1
 	// lastTick is the latest tick so far; the scheduler finds each tick
 	// from the one before it.
 	lastTick := start.Add(-time.Nanosecond)
@@ -1005,6 +1121,7 @@ func scanScheduleWindow(ctx context.Context, schedule cron.Schedule, spec *cron.
 					uint64(window.days[n-1].start)+uint64(window.days[n-1].days)*uint64(scheduleDay/time.Second) == uint64(offset) {
 					window.days[n-1].days++
 				} else {
+					window.projectionFloor += 2
 					window.days = append(window.days, scheduleDaySpan{start: offset, days: 1})
 				}
 			}
@@ -1020,6 +1137,7 @@ func scanScheduleWindow(ctx context.Context, schedule cron.Schedule, spec *cron.
 				}
 				noteTicks(ticks.first, ticks.last, ticks.minimumGap)
 				window.runs += ticks.count
+				window.projectionFloor += ticks.count + 2
 				window.days = append(window.days, scheduleDaySpan{start: offset, length: length})
 			}
 		}
@@ -1149,7 +1267,7 @@ func (value scanRunsPerDayValue) runsForDurationWithBudget(ctx context.Context, 
 		return value.runsPerDay, false, nil
 	}
 	runDuration := scheduleRunDuration(runSeconds)
-	if allMinuteSchedule(value.identity) && runSeconds <= value.windowSeconds {
+	if value.everyMinuteProjection(runSeconds) {
 		return simulateEveryMinuteSchedule(ctx, value, runDuration, endsAtTimeout)
 	}
 	schedule, start, _, err := value.runtimeSchedule()
@@ -1182,6 +1300,48 @@ func (value scanRunsPerDayValue) runFitsEveryGap(runSeconds float64, endsAtTimeo
 	}
 	gap := value.minimumGap.Seconds()
 	return runSeconds < gap || !endsAtTimeout && runSeconds == gap
+}
+
+// everyMinuteProjection reports whether runs of runSeconds on the schedule
+// are projected by the every-minute formula, which takes no work.
+func (value scanRunsPerDayValue) everyMinuteProjection(runSeconds float64) bool {
+	return allMinuteSchedule(value.identity) && runSeconds <= value.windowSeconds
+}
+
+// projectionWorkFloor returns the least work that projecting runs of
+// runSeconds that skip ticks on the schedule takes.
+func (value scanRunsPerDayValue) projectionWorkFloor(runSeconds float64) int {
+	if value.everyMinuteProjection(runSeconds) {
+		return 0
+	}
+	return value.projectionFloor
+}
+
+// projectedRun returns the run that a projection on the schedule uses for a
+// run of runSeconds, which its timeout ends when endsAtTimeout is set. When
+// every tick falls a whole number of minutes after every other, a run that
+// starts at a tick blocks exactly the ticks before the first whole minute
+// after its start at which it no longer holds the job: the minute in which
+// it ends, or the next one when it ends on a minute and its timeout ends it,
+// because it is still being finalized then. That run of whole minutes, which
+// ends before a tick at its end, blocks the same ticks, so runs that differ
+// by fractions of a minute share one projection. Only the warm start before
+// the sample, which begins two runs before it, can begin up to two minutes
+// earlier than for the exact run.
+func (value scanRunsPerDayValue) projectedRun(runSeconds float64, endsAtTimeout bool) (float64, bool) {
+	if !value.minuteTicks || runSeconds <= 0 || math.IsInf(runSeconds, 0) || math.IsNaN(runSeconds) {
+		return runSeconds, endsAtTimeout
+	}
+	minutes := math.Ceil(runSeconds / 60)
+	if endsAtTimeout {
+		minutes = math.Floor(runSeconds/60) + 1
+	}
+	return minutes * 60, false
+}
+
+// durationKey is the memo key of runs of runSeconds on the schedule.
+func (value scanRunsPerDayValue) durationKey(runSeconds float64, endsAtTimeout bool) scanScheduleDurationKey {
+	return scanScheduleDurationKey{schedule: value.identity, runSeconds: math.Float64bits(runSeconds), endsAtTimeout: endsAtTimeout}
 }
 
 // scheduleRunDuration converts a run's seconds to a duration, bounded so
@@ -1506,9 +1666,9 @@ func simulateEveryMinuteScheduleWindow(ctx context.Context, start, end time.Time
 
 // memoizedScheduleRunsForDurationWithBudget projects runs of runSeconds on
 // the schedule once per request and remembers the result for the other jobs
-// with the same schedule and run. A run that ends before the schedule's
-// shortest gap between ticks starts at every tick, which needs neither a
-// projection nor work.
+// with the same schedule and projected run; see projectedRun. A run that
+// ends before the schedule's shortest gap between ticks starts at every
+// tick, which needs neither a projection nor work.
 func memoizedScheduleRunsForDurationWithBudget(ctx context.Context, cache map[scanScheduleDurationKey]scanScheduleDurationEstimate, value scanRunsPerDayValue, runSeconds float64, endsAtTimeout bool, budget *scanScheduleSimulationBudget) (float64, bool, error) {
 	if !value.ok || value.runsPerDay <= 0 {
 		return 0, false, nil
@@ -1516,10 +1676,11 @@ func memoizedScheduleRunsForDurationWithBudget(ctx context.Context, cache map[sc
 	if err := ctx.Err(); err != nil {
 		return 0, false, err
 	}
+	runSeconds, endsAtTimeout = value.projectedRun(runSeconds, endsAtTimeout)
 	if value.runFitsEveryGap(runSeconds, endsAtTimeout) {
 		return value.runsPerDay, false, nil
 	}
-	key := scanScheduleDurationKey{schedule: value.identity, runSeconds: math.Float64bits(runSeconds), endsAtTimeout: endsAtTimeout}
+	key := value.durationKey(runSeconds, endsAtTimeout)
 	if estimate, ok := cache[key]; ok {
 		return estimate.runsPerDay, estimate.skipped, nil
 	}

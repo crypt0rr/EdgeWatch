@@ -634,7 +634,8 @@ describe('platform status', () => {
     expect(within(panel).getByText('Left out at the work limit').nextSibling).toHaveTextContent('2')
     expect(within(panel).getByText('Not fully estimated (may overlap lower bound)').nextSibling).toHaveTextContent('0')
     expect(within(panel).getByText(/^2 enabled jobs have schedules too costly to simulate within the estimate’s work limit, so they are left out and actual demand may be higher\./)).toBeInTheDocument()
-    expect(within(panel).getByText(/one unit’s dense schedules cannot crowd out another unit’s jobs/)).toBeInTheDocument()
+    expect(within(panel).getByText(/take turns with a small first share each, so ordinary jobs are usually estimated before dense schedules get more work/)).toBeInTheDocument()
+    expect(within(panel).queryByText(/cannot crowd out/)).not.toBeInTheDocument()
     expect(within(panel).queryByText(/cannot fully bound/)).not.toBeInTheDocument()
     several.unmount()
 

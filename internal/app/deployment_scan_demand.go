@@ -50,11 +50,13 @@ type DeploymentScanDemand struct {
 // jobs and their recent scan history, so a caller that serves it repeatedly
 // should cache it. Equivalent schedule-duration projections are shared
 // across units within this request. Each job's schedule work has its own
-// limit and the request's work has one bound, and every job gets a first
-// share of its limit before any job gets more, so one unit's dense schedules
-// cannot push other units' jobs out of the estimate. Jobs that exceed their
-// limit or the bound are counted as work-limited. A unit that cannot be read
-// fails the whole estimate rather than leaving its demand out of the sum.
+// limit and the request's work has one bound. The units' jobs take turns,
+// and each first gets a small share of its limit, until half of the bound
+// is spent; the jobs that need more get the rest only after the others, so
+// ordinary jobs are estimated before dense schedules take more work. Jobs
+// that exceed their limit or the bound are counted as work-limited. A unit
+// that cannot be read fails the whole estimate rather than leaving its
+// demand out of the sum.
 func (a *App) DeploymentScanDemand(ctx context.Context) (DeploymentScanDemand, error) {
 	return a.deploymentScanDemandWithBudget(ctx, &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit})
 }

@@ -220,11 +220,12 @@ func TestDeploymentScanDemandCapsEachUnitsContributionAtItsEffectiveSlots(t *tes
 	}
 }
 
-// Every two minutes in a timezone with daylight saving, three-minute runs
-// skip ticks, and each distinct run needs thousands of work units to
-// project. The units' jobs with the same run share one projection, while
-// the distinct ones exceed the request's bound, which leaves some of them
-// counted as work-limited.
+// Every two minutes in a timezone with daylight saving, runs of three
+// minutes or more skip ticks, and each run of a distinct number of minutes
+// needs thousands of work units to project. The units' jobs with the same
+// run share one projection, while the distinct ones exceed the request's
+// bound, which leaves some of them counted as work-limited without spending
+// work on projections that the remaining work cannot cover.
 func TestDeploymentScanDemandSharesAndBoundsDenseScheduleSimulationAcrossUnits(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -262,10 +263,11 @@ func TestDeploymentScanDemandSharesAndBoundsDenseScheduleSimulationAcrossUnits(t
 			duration time.Duration
 		}{
 			{name: fmt.Sprintf("a-shared-%03d", i), duration: 3 * time.Minute},
-			{name: fmt.Sprintf("b-distinct-%03d", i), duration: 3*time.Minute + time.Duration(i+1)*time.Second},
+			{name: fmt.Sprintf("b-distinct-%03d", i), duration: time.Duration(3+i)*time.Minute + time.Duration(i%59+1)*time.Second},
 		} {
+			// The timeout outlasts every run, so it does not end any.
 			record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
-				Name: sample.name, Schedule: schedule, Timezone: timezone,
+				Name: sample.name, Schedule: schedule, Timezone: timezone, Timeout: config.Duration(3 * time.Hour),
 				Targets: []string{"192.0.2.1"},
 				TCP:     &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
 			}), true)
@@ -290,8 +292,8 @@ func TestDeploymentScanDemandSharesAndBoundsDenseScheduleSimulationAcrossUnits(t
 	if wantMinimum := float64(unitCount) * 3 * 60 * sharedRuns; demand.EstimatedSlotSecondsPerDay < wantMinimum {
 		t.Fatalf("deployment demand %.0f slot-seconds/day omits shared projections; want at least %.0f", demand.EstimatedSlotSecondsPerDay, wantMinimum)
 	}
-	if budget.used != budget.limit || budget.used > scanScheduleRequestWorkLimit {
-		t.Fatalf("deployment estimate used %d work units; want the bounded limit %d", budget.used, scanScheduleRequestWorkLimit)
+	if budget.used > budget.limit || budget.remaining() >= pattern.projectionFloor {
+		t.Fatalf("deployment estimate used %d work units; want at most the bound %d, and less left than one projection takes, %d", budget.used, scanScheduleRequestWorkLimit, pattern.projectionFloor)
 	}
 }
 
@@ -369,13 +371,14 @@ func TestDeploymentScanDemandKeepsOtherUnitsJobsWhenOneUnitsSchedulesAreDense(t 
 	dense := defaultTenant(db)
 	const denseJobs = 40
 	for i := range denseJobs {
-		// The known work of a full Naabu port range at 100 probes a second
-		// outlasts each job's own timeout, which ends each run after 181
-		// seconds or more, longer than the two-minute gap.
+		// The known work of a full Naabu port range at 10 probes a second
+		// outlasts each job's own timeout, which ends each run after a
+		// distinct number of minutes from 3 to 42, longer than the
+		// two-minute gap.
 		if _, err := dense.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
 			Name: fmt.Sprintf("dense-%02d", i), Schedule: "*/2 * * * *", Timezone: "Europe/Amsterdam",
-			Timeout: config.Duration(time.Duration(181+i) * time.Second), Targets: []string{"192.0.2.1"},
-			TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{Rate: 100}},
+			Timeout: config.Duration(time.Duration(3+i) * time.Minute), Targets: []string{"192.0.2.1"},
+			TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{Rate: 10}},
 		}), true); err != nil {
 			t.Fatal(err)
 		}
@@ -391,7 +394,7 @@ func TestDeploymentScanDemandKeepsOtherUnitsJobsWhenOneUnitsSchedulesAreDense(t 
 		if err != nil {
 			t.Fatal(err)
 		}
-		insertCompletedScan(t, db, record, fmt.Sprintf("slow-hourly-scan-%02d", i), time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), 90*time.Minute+time.Duration(i+1)*time.Second)
+		insertCompletedScan(t, db, record, fmt.Sprintf("slow-hourly-scan-%02d", i), time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), time.Duration(90+i)*time.Minute+time.Duration(i+1)*time.Second)
 	}
 	own, err := application.ScanSlotDemand(ctx, ordinary)
 	if err != nil {
@@ -414,6 +417,144 @@ func TestDeploymentScanDemandKeepsOtherUnitsJobsWhenOneUnitsSchedulesAreDense(t 
 	}
 	if budget.used > budget.limit {
 		t.Fatalf("deployment estimate used %d work units; want at most %d", budget.used, budget.limit)
+	}
+}
+
+// Hourly jobs in a timezone with daylight saving whose runs take 50 to 70
+// minutes, each recorded to the millisecond, skip ticks. A tick falls on a
+// whole minute, so the runs that end in the same minute block the same
+// ticks and share one projection, within a job and across the units' jobs:
+// the estimate's work does not grow with the number of such jobs.
+func TestDeploymentScanDemandSharesProjectionsOfRunsThatEndInTheSameMinute(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	const unitCount = 4
+	application := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 400}}}
+	units := []*store.TenantStore{defaultTenant(db)}
+	for i := 1; i < unitCount; i++ {
+		_, ts := demandUnit(t, db, fmt.Sprintf("Varied unit %02d", i), fmt.Sprintf("varied-%02d", i))
+		units = append(units, ts)
+	}
+	base := time.Date(2026, time.May, 1, 0, 0, 0, 0, time.UTC)
+	samples := 0
+	addJobs := func(count int) {
+		t.Helper()
+		for u, ts := range units {
+			for range count {
+				name := fmt.Sprintf("varied-%02d-%03d", u, samples)
+				record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+					Name: name, Schedule: "0 * * * *", Timezone: "Europe/Amsterdam", Timeout: config.Duration(3 * time.Hour),
+					Targets: []string{"192.0.2.1"},
+					TCP:     &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+				}), true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for k := range 6 {
+					samples++
+					duration := 50*time.Minute + time.Duration(4*k)*time.Minute + time.Duration(samples)*time.Millisecond
+					insertCompletedScan(t, db, record, fmt.Sprintf("%s-scan-%d", name, k), base.Add(time.Duration(k)*2*time.Hour), duration)
+				}
+			}
+		}
+	}
+	estimate := func() (DeploymentScanDemand, int) {
+		t.Helper()
+		budget := &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
+		demand, err := application.deploymentScanDemandWithBudget(ctx, budget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return demand, budget.used
+	}
+	addJobs(10)
+	// The first estimate expands the schedule, which the App remembers.
+	if demand, _ := estimate(); demand.HistoryJobs != 10*unitCount {
+		t.Fatalf("first deployment demand = %+v; want every job estimated", demand)
+	}
+	demand, used := estimate()
+	pattern, err := schedulePattern(ctx, "Europe/Amsterdam", "0 * * * *")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The runs that end after 63, 67 and 71 minutes skip ticks; the others
+	// end within the hour.
+	if demand.HistoryJobs != 10*unitCount || demand.WorkLimitedJobs != 0 || demand.CadenceUnattainableJobs != 10*unitCount || used < 3*pattern.projectionFloor || used > 3*scanScheduleJobFirstPassWorkLimit {
+		t.Fatalf("deployment demand = %+v after %d work units; want every job estimated with three projections", demand, used)
+	}
+	addJobs(20)
+	more, moreUsed := estimate()
+	if more.HistoryJobs != 30*unitCount || more.WorkLimitedJobs != 0 || moreUsed != used {
+		t.Fatalf("deployment demand with three times the jobs = %+v after %d work units; want every job estimated with the same %d work units", more, moreUsed, used)
+	}
+}
+
+// Adding jobs never lowers how many jobs the estimate covers, even when the
+// request's bound leaves some out. Each unit has two ordinary hourly jobs,
+// each with a run of its own that skips ticks, which are projected within
+// their first share, and a growing number of jobs every ten minutes whose
+// runs each need a projection of more than that share. Those wait for the
+// second pass without spending a share in the first, so new ones cannot
+// take the work that the jobs before them need.
+func TestDeploymentScanDemandEstimatesNoFewerJobsAsJobsAreAdded(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	const unitCount = 3
+	application := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 100}}}
+	units := []*store.TenantStore{defaultTenant(db)}
+	for i := 1; i < unitCount; i++ {
+		_, ts := demandUnit(t, db, fmt.Sprintf("Growing unit %02d", i), fmt.Sprintf("growing-%02d", i))
+		units = append(units, ts)
+	}
+	dense, err := schedulePattern(ctx, "Europe/Amsterdam", "*/10 * * * *")
+	if err != nil || dense.projectionFloor <= scanScheduleJobFirstPassWorkLimit {
+		t.Fatalf("ten-minute pattern = %+v, error %v; want projections over a first-pass share", dense, err)
+	}
+	jobs := 0
+	add := func(ts *store.TenantStore, schedule string, duration time.Duration) {
+		t.Helper()
+		jobs++
+		name := fmt.Sprintf("growing-%03d", jobs)
+		record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+			Name: name, Schedule: schedule, Timezone: "Europe/Amsterdam", Timeout: config.Duration(12 * time.Hour),
+			Targets: []string{"192.0.2.1"},
+			TCP:     &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+		}), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		insertCompletedScan(t, db, record, name+"-scan", time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), duration+time.Second)
+	}
+	for _, ts := range units {
+		for range 2 {
+			add(ts, "0 * * * *", time.Duration(60+jobs)*time.Minute)
+		}
+	}
+	const hourlyJobs = 2 * unitCount
+	// The bound covers the two schedules' expansions, which the first
+	// estimate remembers, the hourly projections and some dense ones.
+	const bound = 30_000
+	previous := 0
+	for step := range 6 {
+		for _, ts := range units {
+			for range 4 {
+				add(ts, "*/10 * * * *", time.Duration(10+jobs)*time.Minute)
+			}
+		}
+		demand, err := application.deploymentScanDemandWithBudget(ctx, &scanScheduleSimulationBudget{limit: bound})
+		if err != nil {
+			t.Fatal(err)
+		}
+		estimated := demand.HistoryJobs
+		if estimated+demand.WorkLimitedJobs != jobs || estimated < previous {
+			t.Fatalf("step %d: deployment demand = %+v of %d jobs; want every job estimated or work-limited, and no fewer estimated than %d before", step, demand, jobs, previous)
+		}
+		previous = estimated
+	}
+	if last, err := application.deploymentScanDemandWithBudget(ctx, &scanScheduleSimulationBudget{limit: bound}); err != nil || last.WorkLimitedJobs == 0 || last.HistoryJobs <= hourlyJobs {
+		t.Fatalf("deployment demand = %+v, error %v; want the bound to leave some dense jobs out after estimating some", last, err)
 	}
 }
 

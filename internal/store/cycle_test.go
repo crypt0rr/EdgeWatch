@@ -88,8 +88,8 @@ func TestListCompletedScanCycleDurationsSumsAttemptsAndExcludesPause(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := durations[job.ID]; len(got) != 1 || got[0].Duration() != 5*time.Minute || got[0].Runs != 2 || !slices.Equal(got[0].Attempts, []time.Duration{2 * time.Minute, 3 * time.Minute}) {
-		t.Fatalf("completed cycle duration samples = %+v, want the 2m and 3m held attempts as two runs, 5m without the 48h pause", got)
+	if got := durations[job.ID]; len(got) != 1 || got[0].Duration() != 5*time.Minute || got[0].Runs != 2 || !slices.Equal(got[0].Attempts, []ScanDurationAttempt{{Duration: 2 * time.Minute, TimedOut: true}, {Duration: 3 * time.Minute}}) {
+		t.Fatalf("completed cycle duration samples = %+v, want the timed-out 2m and the 3m held attempts as two runs, 5m without the 48h pause", got)
 	}
 }
 

@@ -489,9 +489,9 @@ func TestScanSlotDemandSpreadsACycleOverItsAttempts(t *testing.T) {
 	}
 }
 
-// A resumable job whose first cycle has not completed has no sample yet; if
-// its newest attempts all timed out, each run lasts its timeout, which also
-// ends it.
+// A resumable job whose first cycle has not completed has only that cycle's
+// recorded attempts as runs; when they all timed out, each run lasts its
+// timeout, which also ends it.
 func TestScanSlotDemandUsesTimeoutForUnfinishedCycleWhoseAttemptsTimedOut(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -532,6 +532,141 @@ func TestScanSlotDemandUsesTimeoutForUnfinishedCycleWhoseAttemptsTimedOut(t *tes
 	if demand.HistoryJobs != 1 || demand.LowerBoundJobs != 0 || demand.CadenceUnattainableJobs != 1 || math.Abs(demand.EstimatedSlotSecondsPerDay-24*1800) > 0.01 {
 		t.Fatalf("demand = %+v; want the 30m timeout × 24 starts and skipped ticks", demand)
 	}
+}
+
+// A scan without a cycle keeps its samples when its job's timeout changes,
+// and a timed-out scan needed at least its old timeout, so after a raise
+// each timed-out run counts at the new timeout rather than at the time the
+// old one allowed.
+func TestScanSlotDemandCountsTimedOutRunsAtTheCurrentTimeout(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	ts := defaultTenant(db)
+	record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+		Name: "raised-timeout", Schedule: "0 */4 * * *", Timezone: "UTC", Timeout: config.Duration(30 * time.Minute),
+		Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+	}), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newest := time.Date(2026, time.March, 1, 12, 0, 0, 0, time.UTC)
+	insertTimedOutScans(t, db, record, "timed-out-before-raise", 6, newest.Add(-6*time.Hour))
+	app := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}
+	demand, err := app.ScanSlotDemand(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := 6 * 1800.0; demand.HistoryJobs != 1 || math.Abs(demand.EstimatedSlotSecondsPerDay-want) > 0.01 {
+		t.Fatalf("demand before the raise = %+v; want six 30-minute runs a day, %.0f", demand, want)
+	}
+
+	job := record.Job
+	job.Timeout = config.Duration(2 * time.Hour)
+	updated, _, err := ts.UpdateJob(ctx, record.ID, record.Revision, job, true, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.NewScanDurationKey(updated).ConfigHash != store.NewScanDurationKey(record).ConfigHash {
+		t.Fatal("a timeout edit changed the scope hash; the samples would not be kept")
+	}
+	demand, err = app.ScanSlotDemand(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := 6 * 7200.0; demand.HistoryJobs != 1 || math.Abs(demand.EstimatedSlotSecondsPerDay-want) > 0.01 {
+		t.Fatalf("demand after raising the timeout = %+v; want six runs of the new two-hour timeout a day, %.0f", demand, want)
+	}
+
+	// Among successful runs, each timed-out one counts at the new timeout.
+	for i := range 5 {
+		insertCompletedScan(t, db, updated, fmt.Sprintf("success-after-raise-%d", i), newest.Add(time.Duration(i+1)*time.Hour), 10*time.Minute)
+	}
+	demand, err = app.ScanSlotDemand(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := 6 * (6*7200 + 5*600) / 11.0; demand.HistoryJobs != 1 || math.Abs(demand.EstimatedSlotSecondsPerDay-want) > 0.01 {
+		t.Fatalf("demand after newer successes = %+v; want the mean of six 2-hour and five 10-minute runs × 6 = %.2f", demand, want)
+	}
+}
+
+// insertCycleInProgress records the record's paused cycle in progress with
+// the given recorded attempts, which the timeout ended, an hour apart from
+// started.
+func insertCycleInProgress(t *testing.T, db *store.Store, record store.JobRecord, id string, started time.Time, attempts int) {
+	t.Helper()
+	key := store.NewScanDurationKey(record)
+	stamp := func(value time.Time) string { return value.Format(time.RFC3339Nano) }
+	last := started.Add(time.Duration(attempts) * time.Hour)
+	if _, err := db.DB.Exec(`INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,attempt_count,total_units,total_probes,started_at,updated_at,expires_at)
+		VALUES(?,?,?,?,?,?,?,'paused',?,1,1,?,?,?)`, id, record.ID, record.Job.Name, record.Revision, key.ConfigHash, key.ExecutionHash, []byte(`{}`),
+		attempts, stamp(started), stamp(last), stamp(last.Add(48*time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	for n := 1; n <= attempts; n++ {
+		attemptStarted := started.Add(time.Duration(n-1) * time.Hour)
+		if err := db.System().SaveScan(context.Background(), model.Scan{
+			ID: fmt.Sprintf("%s-attempt-%02d", id, n), JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision,
+			StartedAt: attemptStarted, FinishedAt: attemptStarted.Add(record.Job.Timeout.Value()), Status: "timed_out", ConfigHash: key.ConfigHash,
+			CycleID: id, CycleAttempt: n, CycleStatus: "paused", Resumable: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The recorded attempts of a resumable job's cycle in progress are its
+// newest runs. When its newest runs all timed out, every run counts at its
+// timeout, whatever its older completed cycles took; otherwise the attempts
+// of the cycle in progress join the mean over its runs.
+func TestScanSlotDemandCountsTheAttemptsOfTheCycleInProgress(t *testing.T) {
+	t.Parallel()
+	create := func(t *testing.T, db *store.Store, name string) store.JobRecord {
+		t.Helper()
+		record, err := defaultTenant(db).CreateJobWithEnabled(context.Background(), config.NormalizeJob(config.Job{
+			Name: name, Schedule: "0 * * * *", Timezone: "UTC", Timeout: config.Duration(30 * time.Minute),
+			Targets: []string{"192.0.2.1"},
+			TCP:     &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{Rate: 1000}},
+		}), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	demand := func(t *testing.T, db *store.Store) ScanSlotDemand {
+		t.Helper()
+		demand, err := (&App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}).ScanSlotDemand(context.Background(), defaultTenant(db))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return demand
+	}
+	t.Run("newest runs all timed out", func(t *testing.T) {
+		t.Parallel()
+		db := storetest.OpenFresh(t)
+		record := create(t, db, "stuck-cycle")
+		// An older cycle of a timed-out attempt and a 5-minute final one,
+		// then a cycle in progress whose 11 attempts all timed out.
+		insertCycleAttempts(t, db, record, "older-cycle", time.Date(2026, time.February, 1, 1, 5, 0, 0, time.UTC), []time.Duration{30 * time.Minute, 5 * time.Minute}, time.Hour)
+		insertCycleInProgress(t, db, record, "stuck-in-progress", time.Date(2026, time.March, 1, 0, 0, 0, 0, time.UTC), scanSlotDemandHistoryLimit)
+		if got := demand(t, db); got.HistoryJobs != 1 || math.Abs(got.EstimatedSlotSecondsPerDay-24*1800) > 0.01 {
+			t.Fatalf("demand = %+v; want every hourly run at the 30-minute timeout, 43200 slot-seconds/day", got)
+		}
+	})
+	t.Run("some newest runs timed out", func(t *testing.T) {
+		t.Parallel()
+		db := storetest.OpenFresh(t)
+		record := create(t, db, "slowing-cycle")
+		for i := range 10 {
+			insertCycleAttempts(t, db, record, fmt.Sprintf("completed-cycle-%02d", i), time.Date(2026, time.February, 1, i, 10, 0, 0, time.UTC), []time.Duration{10 * time.Minute}, time.Hour)
+		}
+		insertCycleInProgress(t, db, record, "slowing-in-progress", time.Date(2026, time.March, 1, 0, 0, 0, 0, time.UTC), 2)
+		// Ten 10-minute runs and two 30-minute ones.
+		if got, want := demand(t, db), 24*(10*600+2*1800)/12.0; got.HistoryJobs != 1 || got.CadenceUnattainableJobs != 0 || math.Abs(got.EstimatedSlotSecondsPerDay-want) > 0.01 {
+			t.Fatalf("demand = %+v; want the mean of ten 10-minute runs and the cycle in progress's two 30-minute ones × 24 = %.0f", got, want)
+		}
+	})
 }
 
 func TestScanSlotDemandIgnoresEarlierScanSettingsSamplesAfterScopeAndRateEdit(t *testing.T) {
@@ -804,23 +939,39 @@ func TestScanSlotDemandReturnsTenantAndStorageErrors(t *testing.T) {
 }
 
 // Every recorded attempt is a run at its duration up to the timeout, which
-// ends it; a cycle's unrecorded attempts are runs without slot time.
+// ends it, and an attempt that timed out is a run of the current timeout
+// whatever it recorded; a cycle's unrecorded attempts are runs without slot
+// time.
 func TestHistoryDemandRunsCountEachAttemptUpToTheTimeout(t *testing.T) {
 	t.Parallel()
-	runs := historyDemandRuns([]store.ScanDurationSample{
-		{Attempts: []time.Duration{10 * time.Minute}, Runs: 1},
-		{Attempts: []time.Duration{90 * time.Minute, 30 * time.Minute}, Runs: 3},
-		{Attempts: []time.Duration{time.Hour}, Runs: 1},
-		{Attempts: []time.Duration{10 * time.Minute}, Runs: 1},
-	}, time.Hour.Seconds())
+	attempts := func(durations ...time.Duration) []store.ScanDurationAttempt {
+		out := make([]store.ScanDurationAttempt, len(durations))
+		for i, duration := range durations {
+			out[i] = store.ScanDurationAttempt{Duration: duration}
+		}
+		return out
+	}
+	samples := []store.ScanDurationSample{
+		{Attempts: attempts(10 * time.Minute), Runs: 1},
+		{Attempts: attempts(90*time.Minute, 30*time.Minute), Runs: 3},
+		{Attempts: attempts(time.Hour), Runs: 1},
+		{Attempts: attempts(10 * time.Minute), Runs: 1},
+		// A timeout of 30 minutes, since raised to the hour, ended it.
+		{Attempts: []store.ScanDurationAttempt{{Duration: 30 * time.Minute, TimedOut: true}}, Runs: 1},
+	}
+	runs := historyDemandRuns(samples, time.Hour.Seconds())
 	want := []scanDemandRun{
 		{seconds: 0, weight: 1},
 		{seconds: 600, weight: 2},
 		{seconds: 1800, weight: 1},
-		{seconds: 3600, endsAtTimeout: true, weight: 2},
+		{seconds: 3600, endsAtTimeout: true, weight: 3},
 	}
 	if !reflect.DeepEqual(runs, want) {
 		t.Fatalf("history runs = %+v, want %+v", runs, want)
+	}
+	// Without a timeout, a timed-out attempt is a run of what it recorded.
+	if runs := historyDemandRuns(samples[4:], 0); !reflect.DeepEqual(runs, []scanDemandRun{{seconds: 1800, weight: 1}}) {
+		t.Fatalf("history runs without a timeout = %+v, want one 30-minute run", runs)
 	}
 }
 
@@ -856,26 +1007,88 @@ func TestProjectScanDemandRunsCombinesRunsByTheirTimeBetweenStarts(t *testing.T)
 		t.Fatalf("demand of runs without slot time = %.2f, skipped %t, error %v; want none", demand, skipped, err)
 	}
 
-	// A first-pass projection that runs out of its job's share waits for the
-	// second pass, and other jobs with the same run wait without spending
-	// work on it again.
-	dense, err := schedulePattern(ctx, "Europe/Amsterdam", "*/2 * * * *")
-	if err != nil || !dense.ok {
-		t.Fatalf("dense pattern = %+v, error %v", dense, err)
+}
+
+// A first-pass projection gets at most its job's share of work. One whose
+// schedule's known work exceeds that share waits for the second pass without
+// spending any. One that runs out of the share waits too, and the other
+// jobs' projections of the same run or schedule wait without spending it
+// again. A projection that needs more than a job's whole limit fails for
+// every job, and once half of the request's work is spent the first pass
+// gives no projection a share.
+func TestScanDemandWorkSparesTheFirstPassShareAndTheRequestBound(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	share := func(work *scanDemandWork, limit int) *scanScheduleSimulationBudget {
+		return &scanScheduleSimulationBudget{limit: limit, parent: work.budget}
 	}
+	dense, err := schedulePattern(ctx, "Europe/Amsterdam", "*/2 * * * *")
+	if err != nil || !dense.ok || dense.projectionFloor <= scanScheduleJobFirstPassWorkLimit {
+		t.Fatalf("dense pattern = %+v, error %v; want known work over a first-pass share", dense, err)
+	}
+	work := newScanDemandWork(nil, nil)
 	slow := scanDemandRun{seconds: 180, weight: 1}
-	usedBefore := work.budget.used
-	for range 3 {
-		share := &scanScheduleSimulationBudget{limit: scanScheduleJobFirstPassWorkLimit, parent: work.budget}
-		if _, _, err := work.project(ctx, dense, slow, share, true); !errors.Is(err, errScheduleSimulationBudgetExceeded) {
-			t.Fatalf("first-pass dense projection error = %v; want the job's share exceeded", err)
+	if _, _, err := work.project(ctx, dense, slow, share(work, scanScheduleJobFirstPassWorkLimit), true); !errors.Is(err, errScanDemandDeferred) || work.budget.used != 0 {
+		t.Fatalf("first-pass dense projection = error %v after %d work units; want it deferred without work", err, work.budget.used)
+	}
+	runs, skipped, err := work.project(ctx, dense, slow, share(work, scanScheduleJobWorkLimit), false)
+	if err != nil || !skipped || math.Abs(runs-360) > 0.01 {
+		t.Fatalf("second-pass dense projection = %.4f runs/day, skipped %t, error %v; want 360 and skipped", runs, skipped, err)
+	}
+	if work.budget.used < dense.projectionFloor {
+		t.Fatalf("dense projection used %d work units, less than its known work %d", work.budget.used, dense.projectionFloor)
+	}
+
+	// An hourly schedule with daylight saving: its 61-minute runs need a
+	// little more than its known work.
+	hourly, err := schedulePattern(ctx, "Europe/Amsterdam", "0 * * * *")
+	if err != nil || !hourly.ok {
+		t.Fatalf("hourly pattern = %+v, error %v", hourly, err)
+	}
+	tight := hourly.projectionFloor + 1
+	work = newScanDemandWork(nil, nil)
+	first := scanDemandRun{seconds: 61 * 60, weight: 1}
+	if _, _, err := work.project(ctx, hourly, first, share(work, tight), true); !errors.Is(err, errScanDemandDeferred) || work.budget.used != tight {
+		t.Fatalf("first-pass projection over its share = error %v after %d work units; want it deferred after the share, %d", err, work.budget.used, tight)
+	}
+	// The same run of a few seconds more, and another run on the schedule,
+	// wait without spending another share.
+	for _, run := range []scanDemandRun{{seconds: 61*60 - 30, weight: 1}, {seconds: 71 * 60, weight: 1}} {
+		if _, _, err := work.project(ctx, hourly, run, share(work, tight), true); !errors.Is(err, errScanDemandDeferred) || work.budget.used != tight {
+			t.Fatalf("first-pass projection of %.0f seconds after a deferred one = error %v after %d work units; want it deferred without work", run.seconds, err, work.budget.used)
 		}
 	}
-	if used := work.budget.used - usedBefore; used != scanScheduleJobFirstPassWorkLimit {
-		t.Fatalf("three first-pass attempts of one projection used %d work units; want one share, %d", used, scanScheduleJobFirstPassWorkLimit)
+	if runs, _, err := work.project(ctx, hourly, first, share(work, scanScheduleJobWorkLimit), false); err != nil || math.Abs(runs-12) > 0.01 {
+		t.Fatalf("second-pass hourly projection = %.4f runs/day, error %v; want 12", runs, err)
 	}
-	if runs, skipped, err := work.project(ctx, dense, slow, &scanScheduleSimulationBudget{limit: scanScheduleJobWorkLimit, parent: work.budget}, false); err != nil || !skipped || math.Abs(runs-360) > 0.01 {
-		t.Fatalf("second-pass dense projection = %.4f runs/day, skipped %t, error %v; want 360 and skipped", runs, skipped, err)
+
+	// A projection that needs more than a job's whole limit fails for the
+	// next job without spending it again.
+	work = newScanDemandWork(nil, nil)
+	if _, _, err := work.project(ctx, hourly, first, share(work, tight), false); !errors.Is(err, errScheduleSimulationBudgetExceeded) || work.budget.used != tight {
+		t.Fatalf("second-pass projection over its limit = error %v after %d work units; want it exceeded after the limit", err, work.budget.used)
+	}
+	if _, _, err := work.project(ctx, hourly, first, share(work, scanScheduleJobWorkLimit), false); !errors.Is(err, errScheduleSimulationBudgetExceeded) || work.budget.used != tight {
+		t.Fatalf("second projection of a run over the limit = error %v after %d work units; want it exceeded without work", err, work.budget.used)
+	}
+	// A projection that the request's remaining work cannot cover fails at
+	// once in either pass.
+	work = newScanDemandWork(nil, &scanScheduleSimulationBudget{limit: hourly.projectionFloor - 1})
+	for _, firstPass := range []bool{true, false} {
+		if _, _, err := work.project(ctx, hourly, first, share(work, scanScheduleJobWorkLimit), firstPass); !errors.Is(err, errScheduleSimulationBudgetExceeded) || work.budget.used != 0 {
+			t.Fatalf("projection beyond the request's work, first pass %t = error %v after %d work units; want it exceeded without work", firstPass, err, work.budget.used)
+		}
+	}
+
+	// Once half of the request's work is spent, the first pass gives no
+	// share, and the second pass projects the job.
+	work = newScanDemandWork(nil, &scanScheduleSimulationBudget{limit: 4 * hourly.projectionFloor})
+	work.budget.used = work.firstPassLimit
+	if _, _, err := work.project(ctx, hourly, first, share(work, scanScheduleJobFirstPassWorkLimit), true); !errors.Is(err, errScanDemandDeferred) || work.budget.used != work.firstPassLimit {
+		t.Fatalf("first-pass projection after half of the request = error %v after %d work units; want it deferred without work", err, work.budget.used-work.firstPassLimit)
+	}
+	if runs, _, err := work.project(ctx, hourly, first, share(work, scanScheduleJobWorkLimit), false); err != nil || math.Abs(runs-12) > 0.01 {
+		t.Fatalf("second-pass projection after half of the request = %.4f runs/day, error %v; want 12", runs, err)
 	}
 }
 
@@ -1509,7 +1722,8 @@ func insertMultiAttemptCycle(t *testing.T, db *store.Store, record store.JobReco
 // insertCycleAttempts records a completed cycle of the record that finished
 // at finished after attempts of the durations given, each starting one
 // interval after the one before, with a saved timed-out scan for every
-// attempt before the final one, which the cycle row records.
+// attempt before the final one, which the cycle row records, and the final
+// attempt's successful scan, as a run that completes its cycle saves.
 func insertCycleAttempts(t *testing.T, db *store.Store, record store.JobRecord, id string, finished time.Time, attempts []time.Duration, interval time.Duration) {
 	t.Helper()
 	key := store.NewScanDurationKey(record)
@@ -1522,12 +1736,16 @@ func insertCycleAttempts(t *testing.T, db *store.Store, record store.JobRecord, 
 		stamp(firstStart), stamp(finalStart), stamp(finished), stamp(finished), stamp(finished)); err != nil {
 		t.Fatal(err)
 	}
-	for n := 1; n < len(attempts); n++ {
+	for n := 1; n <= len(attempts); n++ {
 		started := firstStart.Add(time.Duration(n-1) * interval)
+		status, cycleStatus := "timed_out", "paused"
+		if n == len(attempts) {
+			status, cycleStatus = "success", "completed"
+		}
 		if err := db.System().SaveScan(context.Background(), model.Scan{
 			ID: fmt.Sprintf("%s-attempt-%02d", id, n), JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision,
-			StartedAt: started, FinishedAt: started.Add(attempts[n-1]), Status: "timed_out", ConfigHash: key.ConfigHash,
-			CycleID: id, CycleAttempt: n, CycleStatus: "paused", Resumable: true,
+			StartedAt: started, FinishedAt: started.Add(attempts[n-1]), Status: status, ConfigHash: key.ConfigHash,
+			CycleID: id, CycleAttempt: n, CycleStatus: cycleStatus, Resumable: true,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1544,9 +1762,11 @@ func TestScanSlotDemandComputesRunsPerDayOncePerSchedule(t *testing.T) {
 	ts := defaultTenant(db)
 	create := func(name, schedule, timezone string) {
 		t.Helper()
+		// Each job's known Naabu work bounds its runs, so its schedule is
+		// expanded.
 		if _, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
 			Name: name, Schedule: schedule, Timezone: timezone, Targets: []string{"192.0.2.1"},
-			TCP: &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+			TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{Rate: 1000}},
 		}), true); err != nil {
 			t.Fatal(err)
 		}
@@ -1586,6 +1806,27 @@ func TestScanSlotDemandComputesRunsPerDayOncePerSchedule(t *testing.T) {
 	}
 	if got := computed(); got != 3 {
 		t.Fatalf("runs per day computed %d times after a new schedule, want 3", got)
+	}
+	// A job without history or a scanner rate has no run to project, so it
+	// is not estimated and its schedule is not expanded.
+	if _, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+		Name: "unbounded", Schedule: "*/5 * * * *", Timezone: "Europe/Amsterdam", Targets: []string{"192.0.2.1"},
+		TCP: &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+	}), true); err != nil {
+		t.Fatal(err)
+	}
+	unbounded, err := app.ScanSlotDemand(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The four Naabu jobs' enrichment is unbounded too.
+	if got := computed(); got != 3 || unbounded.EnabledJobs != 5 || unbounded.LowerBoundJobs != 4 || unbounded.UnestimatedJobs != 5 || unbounded.WorkLimitedJobs != 0 {
+		t.Fatalf("demand with a job without a run = %+v after %d schedule computations; want it unestimated and 3 computations", unbounded, got)
+	}
+	// Without any work to spend, it is still unestimated, not work-limited.
+	limited, err := app.scheduledScanDemandWithSimulationCache(ctx, ts, nil, &scanScheduleSimulationBudget{limit: 0})
+	if err != nil || limited.UnestimatedJobs != 5 || limited.WorkLimitedJobs != 0 {
+		t.Fatalf("demand without work = %+v, error %v; want the four jobs with unbounded Nmap enrichment and the unbounded job unestimated, none work-limited", limited, err)
 	}
 	for _, job := range []config.Job{
 		{Schedule: "0 * * * *"}, {Schedule: "0 * * * *", Timezone: " Europe/Amsterdam "}, {Schedule: "0 * * * *", Timezone: "America/New_York"},
@@ -1869,7 +2110,8 @@ func simulateScheduleTicks(ctx context.Context, schedule cron.Schedule, start, e
 
 // The day walk reproduces a tick-by-tick simulation of the whole sample,
 // including irregular days: daylight-saving changes, half-hour shifts,
-// midnights that daylight saving skips, and Ramadan offset changes.
+// midnights that daylight saving skips, and Ramadan offset changes. It
+// takes at least the schedule's known work.
 func TestCompactSchedulePatternsPreserveTransitionHeavyTimezoneProjection(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -1926,9 +2168,106 @@ func TestCompactSchedulePatternsPreserveTransitionHeavyTimezoneProjection(t *tes
 					if math.Abs(gotRuns-wantRuns) > 1e-9 || gotSkipped != wantSkipped {
 						t.Fatalf("%s run, ends at timeout %t: compact projection = %.8f, skipped %t; timezone-aware cron projection = %.8f, skipped %t", runDuration, endsAtTimeout, gotRuns, gotSkipped, wantRuns, wantSkipped)
 					}
+					// The schedule's known work is a lower bound, so a
+					// projection that cannot have it is never begun.
+					if !pattern.runFitsEveryGap(runDuration.Seconds(), endsAtTimeout) && budget.used < pattern.projectionWorkFloor(runDuration.Seconds()) {
+						t.Fatalf("%s run, ends at timeout %t: projection used %d work units, less than the schedule's known work %d", runDuration, endsAtTimeout, budget.used, pattern.projectionFloor)
+					}
 				}
 			}
 		})
+	}
+}
+
+// A tick falls on a whole minute, so a run blocks the same ticks as the
+// run of whole minutes that projectedRun gives it, and the memoized
+// projection of a run matches a tick-by-tick simulation of the exact run.
+// Runs that block the same ticks share one memo entry. A timezone with an
+// offset of seconds keeps the exact run.
+func TestProjectedRunBlocksTheSameTicksAsTheExactRun(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		timezone, schedule string
+		runs               []time.Duration
+	}{
+		{timezone: "Europe/Amsterdam", schedule: "0 * * * *", runs: []time.Duration{59*time.Minute + 30*time.Second, time.Hour, time.Hour + time.Millisecond, 61*time.Minute + 59*time.Second}},
+		{timezone: "Australia/Lord_Howe", schedule: "0,30 * * * *", runs: []time.Duration{29*time.Minute + 59*time.Second, 30 * time.Minute, 45*time.Minute + 500*time.Millisecond}},
+		{timezone: "America/Santiago", schedule: "0 0,12 * * *", runs: []time.Duration{12*time.Hour - time.Second, 12 * time.Hour, 13*time.Hour + time.Second}},
+		{timezone: "UTC", schedule: "*/7 8-17 * * 1-5", runs: []time.Duration{6*time.Minute + time.Second, 7 * time.Minute, 20*time.Minute + 30*time.Second}},
+	} {
+		t.Run(test.timezone+" "+test.schedule, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			pattern, err := schedulePattern(ctx, test.timezone, test.schedule)
+			if err != nil || !pattern.ok || !pattern.minuteTicks {
+				t.Fatalf("schedule pattern = %+v, error %v; want ticks on whole minutes", pattern, err)
+			}
+			location := mustLoadLocation(t, test.timezone)
+			parsed, err := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow).Parse(test.schedule)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed.(*cron.SpecSchedule).Location = location
+			start := time.Date(scanScheduleSampleStartYear, time.January, 1, 0, 0, 0, 0, location)
+			end := time.Date(scanScheduleSampleEndYear, time.January, 1, 0, 0, 0, 0, location)
+			memo := make(map[scanScheduleDurationKey]scanScheduleDurationEstimate)
+			for _, run := range test.runs {
+				for _, endsAtTimeout := range []bool{false, true} {
+					got, gotSkipped, err := memoizedScheduleRunsForDurationWithBudget(ctx, memo, pattern, run.Seconds(), endsAtTimeout, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want, wantSkipped, err := simulateScheduleTicks(ctx, parsed, start, end, run, endsAtTimeout)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if math.Abs(got-want) > 1e-9 || gotSkipped != wantSkipped {
+						t.Fatalf("%s run, ends at timeout %t: projection = %.8f runs/day, skipped %t; cron = %.8f, skipped %t", run, endsAtTimeout, got, gotSkipped, want, wantSkipped)
+					}
+				}
+			}
+		})
+	}
+
+	pattern, err := schedulePattern(context.Background(), "Europe/Amsterdam", "0 * * * *")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range []struct {
+		seconds       float64
+		endsAtTimeout bool
+		want          float64
+	}{
+		{seconds: 3600.001, want: 3660}, {seconds: 3659.999, want: 3660}, {seconds: 3660, want: 3660},
+		{seconds: 3600, endsAtTimeout: true, want: 3660}, {seconds: 3659.999, endsAtTimeout: true, want: 3660},
+		{seconds: 3660, endsAtTimeout: true, want: 3720},
+	} {
+		if seconds, endsAtTimeout := pattern.projectedRun(run.seconds, run.endsAtTimeout); seconds != run.want || endsAtTimeout {
+			t.Fatalf("projected run of %.3f seconds, ends at timeout %t = %.3f, %t; want %.0f seconds that end before the tick", run.seconds, run.endsAtTimeout, seconds, endsAtTimeout, run.want)
+		}
+	}
+	memo := make(map[scanScheduleDurationKey]scanScheduleDurationEstimate)
+	for _, seconds := range []float64{3600.001, 3620.5, 3659.999, 3660} {
+		if _, _, err := memoizedScheduleRunsForDurationWithBudget(context.Background(), memo, pattern, seconds, false, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := memoizedScheduleRunsForDurationWithBudget(context.Background(), memo, pattern, 3600, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(memo) != 1 {
+		t.Fatalf("runs that block the same ticks left %d memo entries, want one", len(memo))
+	}
+
+	odd := time.FixedZone("odd", 3600+30)
+	start := time.Date(scanScheduleSampleStartYear, time.January, 1, 0, 0, 0, 0, odd)
+	if scheduleTicksOnWholeMinutes(1, odd, start, start.AddDate(4, 0, 0)) || scheduleTicksOnWholeMinutes(3, time.UTC, start, start.AddDate(4, 0, 0)) {
+		t.Fatal("ticks with an offset of seconds, or a schedule with seconds, counted as falling on whole minutes")
+	}
+	exact := pattern
+	exact.minuteTicks = false
+	if seconds, endsAtTimeout := exact.projectedRun(3600.5, true); seconds != 3600.5 || !endsAtTimeout {
+		t.Fatalf("projected run without whole-minute ticks = %.1f, %t; want the exact run", seconds, endsAtTimeout)
 	}
 }
 

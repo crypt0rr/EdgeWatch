@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -886,6 +887,10 @@ func TestScannerProfilePreviewDoesNotDuplicateManagedArguments(t *testing.T) {
 	}
 	if got := strings.Count(strings.Join(previews[0].Args, " "), "/tmp/edgewatch-targets.txt"); got != 1 {
 		t.Fatalf("Naabu preview rendered target file %d times: %#v", got, previews[0].Args)
+	}
+	// A stored profile's Naabu verbosity flag is dropped, as at run time.
+	if slices.Contains(previews[0].Args, "-verbose") {
+		t.Fatalf("Naabu preview kept a verbosity flag beside -silent: %#v", previews[0].Args)
 	}
 	if got := strings.Count(strings.Join(previews[1].Args, " "), "192.0.2.10"); got != 1 {
 		t.Fatalf("Nmap preview rendered address %d times: %#v", got, previews[1].Args)

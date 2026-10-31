@@ -158,3 +158,59 @@ test('host explorers recover restored pages past the inventory end and clamp inv
   expect(offsets).toContainEqual({ path: '/api/v1/hosts', offset: 0 })
   expect(offsets.every(({ offset }) => offset <= 10_000_000)).toBe(true)
 })
+
+test('host explorer recovery actions keep keyboard focus on the explorer (#1759)', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'The focus regression runs once on desktop Chromium.')
+
+  await mockConsole(page, 'administrator')
+  await page.route(url => {
+    const pathname = new URL(url).pathname
+    return pathname === '/api/v1/hosts' || pathname === '/api/v1/jobs/job-1/baseline/hosts'
+  }, async route => {
+    const request = new URL(route.request().url())
+    const offset = Number(request.searchParams.get('offset') ?? 0)
+    const total = request.searchParams.get('q') === 'no-such-host' || request.searchParams.get('protocol') === 'udp' ? 0 : 30
+    const hosts = total && offset < total ? [host] : []
+    // Hold each answer briefly, so the loading state replaces the panel as it
+    // does on a slow connection.
+    await new Promise(resolve => setTimeout(resolve, 150))
+    const pagination = { limit: 50, offset, total, has_more: false, next_offset: null }
+    await route.fulfill({ json: request.pathname === '/api/v1/hosts'
+      ? { hosts, pagination }
+      : { job_id: 'job-1', job: 'fixture-job', data_quality: 'detailed', hosts, pagination } })
+  })
+  const focusIsOnBody = () => page.evaluate(() => document.activeElement === document.body || document.activeElement === null)
+
+  for (const [listPath, headingName] of [['/hosts', 'Scanned hosts'], ['/jobs/job-1/baseline', 'Baseline hosts']] as const) {
+    const search = page.getByRole('searchbox', { name: 'Search hosts' })
+    const heading = page.getByRole('heading', { name: headingName })
+
+    await page.goto(`${listPath}?offset=500`)
+    const goToFirstPage = page.getByRole('button', { name: 'Go to first page' })
+    await goToFirstPage.focus()
+    await page.keyboard.press('Enter')
+    await expect(page.locator('.host-row').first()).toContainText(host.address)
+    await expect(heading).toBeFocused()
+    expect(await focusIsOnBody(), `${listPath}: Go to first page`).toBe(false)
+
+    await search.fill('no-such-host')
+    await expect(page.getByText('No hosts match “no-such-host”.')).toBeVisible()
+    const clearSearch = page.getByRole('button', { name: 'Clear search' })
+    await clearSearch.focus()
+    await page.keyboard.press('Enter')
+    await expect(search).toHaveValue('')
+    await expect(page.locator('.host-row').first()).toContainText(host.address)
+    await expect(search).toBeFocused()
+    expect(await focusIsOnBody(), `${listPath}: Clear search`).toBe(false)
+
+    await page.getByLabel('Protocol').selectOption('udp')
+    await expect(page.getByText('No hosts match UDP.')).toBeVisible()
+    const resetFilters = page.getByRole('button', { name: 'Reset filters' })
+    await resetFilters.focus()
+    await page.keyboard.press('Enter')
+    await expect(page.getByLabel('Protocol')).toHaveValue('')
+    await expect(page.locator('.host-row').first()).toContainText(host.address)
+    await expect(heading).toBeFocused()
+    expect(await focusIsOnBody(), `${listPath}: Reset filters`).toBe(false)
+  }
+})

@@ -411,6 +411,10 @@ service names or products. Enter at least 3 and no more than 256 characters;
 searches stay on the indexed path and service names/products are prioritized
 within the bounded search document. A later page can become empty if the
 inventory shrinks; choose **Go to first page** to return to the remaining hosts.
+On the **Hosts** page and a job's baseline explorer, **Clear search** returns
+keyboard focus to the search field. **Go to first page** and **Reset filters**
+move it to the host list's heading once the reloaded list appears, or to the
+search field if the list cannot be loaded.
 
 ## Scan comparison
 

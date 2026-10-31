@@ -551,10 +551,11 @@ type scanScheduleDurationEstimate struct {
 }
 
 // scanScheduleSimulationBudget bounds schedule work. It counts
-// Schedule.Next calls, calendar days examined, and the runs and day spans
-// that a projection simulates. A job's budget has the request's budget as
-// its parent, and work counts against both. Work that exceeds a budget
-// leaves its job unestimated instead of returning a partial result.
+// Schedule.Next calls, the timezone transitions, day spans and months that
+// an expansion examines, and the runs and day spans that a projection
+// simulates. A job's budget has the request's budget as its parent, and
+// work counts against both. Work that exceeds a budget leaves its job
+// unestimated instead of returning a partial result.
 type scanScheduleSimulationBudget struct {
 	limit  int
 	used   int
@@ -638,13 +639,15 @@ type scanRunsPerDayValue struct {
 // scheduleDaySpan is a run of consecutive sample days on which a schedule
 // ticks. An ordinary day lasts 24 hours from midnight without a change of
 // its timezone's offset, so its ticks are the schedule's times of day; the
-// cron schedule itself gives the ticks of any other, irregular, day.
+// cron schedule itself gives the ticks of any other, irregular, day, and of
+// a day into which the scheduler's search for the tick after an irregular
+// day drifts, skipping some of its first ticks.
 type scheduleDaySpan struct {
 	// start is the offset of the span's first day from the sample start, in
 	// seconds.
 	start uint32
 	// days is the number of ordinary days in the span, or zero for a single
-	// irregular day, which lasts length seconds.
+	// day whose ticks the cron schedule gives, which lasts length seconds.
 	days   uint32
 	length uint32
 }
@@ -1061,107 +1064,405 @@ type scheduleWindow struct {
 	projectionFloor int
 }
 
-// scanScheduleWindow walks the sample's local days. An ordinary day's ticks
-// are the cron fields' times of day after its start. On the handful of
-// irregular days, whose local duration differs from 24 hours or whose offset
-// changes, it follows the cron schedule from the previous tick, as the
-// scheduler does. This keeps dense schedules bounded without dropping their
-// month, day-of-month, weekday, or daylight-saving behavior, and finds the
-// real shortest gap between ticks, including across midnight and on the
-// daylight-saving days.
+// scanScheduleWindow expands the schedule over the sample's local days. An
+// ordinary day's ticks are the cron fields' times of day after its start.
+// The handful of irregular days, whose local duration differs from 24 hours
+// or whose offset changes, lie next to the timezone's transitions, so it
+// finds them from those, and on each it follows the cron schedule from the
+// previous tick, as the scheduler does. The cron search for the tick after
+// such a day can drift past the first ticks of the days after it, so until
+// that search arrives at the next ordinary day's first tick it follows the
+// cron schedule over the day the search reaches too. It takes the ordinary
+// days between those a month at a time, or all at once when the schedule
+// ticks on every day, so its work grows with the timezone's transitions, the
+// runs of days on which the schedule ticks, and the months it examines day
+// by day, not with the sample's days. This keeps dense schedules bounded
+// without dropping their month, day-of-month, weekday, or daylight-saving
+// behavior, and finds the real shortest gap between ticks, including across
+// midnight and on the daylight-saving days.
 func scanScheduleWindow(ctx context.Context, schedule cron.Schedule, spec *cron.SpecSchedule, start, end time.Time, budget *scanScheduleSimulationBudget) (scheduleWindow, error) {
-	var window scheduleWindow
 	offsets := scheduleDayOffsets(spec.Second&^cronStarBit, spec.Minute&^cronStarBit, spec.Hour&^cronStarBit)
 	if len(offsets) == 0 {
-		return window, errInvalidScanSchedulePattern
+		return scheduleWindow{}, errInvalidScanSchedulePattern
 	}
-	var ordinaryGap time.Duration
-	for i := 1; i < len(offsets); i++ {
-		if gap := offsets[i] - offsets[i-1]; ordinaryGap == 0 || gap < ordinaryGap {
-			ordinaryGap = gap
-		}
+	expansion := scheduleExpansion{
+		ctx: ctx, schedule: schedule, spec: spec, start: start, end: end, budget: budget,
+		offsets: offsets, lastTick: start.Add(-time.Nanosecond),
 	}
-	window.projectionFloor = 1
-	// lastTick is the latest tick so far; the scheduler finds each tick
-	// from the one before it.
-	lastTick := start.Add(-time.Nanosecond)
-	ticked := false
-	noteGap := func(gap time.Duration) {
-		if gap > 0 && (window.minimumGap == 0 || gap < window.minimumGap) {
-			window.minimumGap = gap
-		}
+	if err := expansion.expand(); err != nil {
+		return scheduleWindow{}, err
 	}
-	noteTicks := func(first, last time.Time, gap time.Duration) {
-		if ticked {
-			noteGap(first.Sub(lastTick))
-		}
-		noteGap(gap)
-		lastTick, ticked = last, true
-	}
-	for dayStart := start; dayStart.Before(end); {
-		if err := takeScheduleWork(ctx, budget); err != nil {
-			return scheduleWindow{}, err
-		}
-		dayEnd, ok := scheduleNextDayStart(dayStart)
-		if !ok {
-			return scheduleWindow{}, errInvalidScanSchedulePattern
-		}
-		if dayEnd.After(end) {
-			dayEnd = end
-		}
-		offset, ok := scheduleSpanSeconds(dayStart.Sub(start))
-		if !ok {
-			return scheduleWindow{}, errInvalidScanSchedulePattern
-		}
-		if ordinaryScheduleDay(dayStart, dayEnd) {
-			if scheduleMatchesDay(spec, dayStart) {
-				noteTicks(dayStart.Add(offsets[0]), dayStart.Add(offsets[len(offsets)-1]), ordinaryGap)
-				window.runs += len(offsets)
-				if n := len(window.days); n > 0 && window.days[n-1].days > 0 &&
-					uint64(window.days[n-1].start)+uint64(window.days[n-1].days)*uint64(scheduleDay/time.Second) == uint64(offset) {
-					window.days[n-1].days++
-				} else {
-					window.projectionFloor += 2
-					window.days = append(window.days, scheduleDaySpan{start: offset, days: 1})
-				}
-			}
-		} else {
-			ticks, err := scheduleDayTicks(ctx, schedule, lastTick, dayStart, dayEnd)
-			if err != nil {
-				return scheduleWindow{}, err
-			}
-			if ticks.count > 0 {
-				length, ok := scheduleSpanSeconds(dayEnd.Sub(dayStart))
-				if !ok {
-					return scheduleWindow{}, errInvalidScanSchedulePattern
-				}
-				noteTicks(ticks.first, ticks.last, ticks.minimumGap)
-				window.runs += ticks.count
-				window.projectionFloor += ticks.count + 2
-				window.days = append(window.days, scheduleDaySpan{start: offset, length: length})
-			}
-		}
-		dayStart = dayEnd
-	}
-	return window, nil
+	return expansion.window, nil
 }
 
-// scheduleNextDayStart returns the start of the local day after the one
-// that starts at dayStart: its midnight or, when daylight saving skips its
-// midnight, the first instant of that day.
-func scheduleNextDayStart(dayStart time.Time) (time.Time, bool) {
-	year, month, day := dayStart.Date()
-	next := time.Date(year, month, day+1, 0, 0, 0, 0, dayStart.Location())
-	wantYear, wantMonth, wantDay := time.Date(year, month, day+1, 12, 0, 0, 0, time.UTC).Date()
-	if gotYear, gotMonth, gotDay := next.Date(); gotYear != wantYear || gotMonth != wantMonth || gotDay != wantDay {
+// scheduleExpansion is the state of one scanScheduleWindow expansion. It
+// numbers the sample's local dates from the first, and a day is the time
+// from the start of its date to the start of the next.
+type scheduleExpansion struct {
+	ctx        context.Context
+	schedule   cron.Schedule
+	spec       *cron.SpecSchedule
+	start, end time.Time
+	budget     *scanScheduleSimulationBudget
+	// offsets are an ordinary day's ticks; ordinaryGap is the shortest time
+	// between two of them, or zero when it has one, and acrossMidnight the
+	// time from its last tick to the next day's first.
+	offsets                     []time.Duration
+	ordinaryGap, acrossMidnight time.Duration
+	// firstDate is the sample's first date, at noon UTC, and dates the
+	// number of its dates.
+	firstDate time.Time
+	dates     int
+	// irregular holds the numbers of the sample's irregular days, in order.
+	irregular []int
+	window    scheduleWindow
+	// lastTick is the latest tick so far; the scheduler finds each tick
+	// from the one before it.
+	lastTick time.Time
+	ticked   bool
+}
+
+func (e *scheduleExpansion) expand() error {
+	e.window.projectionFloor = 1
+	for i := 1; i < len(e.offsets); i++ {
+		if gap := e.offsets[i] - e.offsets[i-1]; e.ordinaryGap == 0 || gap < e.ordinaryGap {
+			e.ordinaryGap = gap
+		}
+	}
+	e.acrossMidnight = scheduleDay - (e.offsets[len(e.offsets)-1] - e.offsets[0])
+	year, month, day := e.start.Date()
+	e.firstDate = time.Date(year, month, day, 12, 0, 0, 0, time.UTC)
+	year, month, day = e.end.Date()
+	e.dates = int(time.Date(year, month, day, 12, 0, 0, 0, time.UTC).Sub(e.firstDate) / scheduleDay)
+	if err := e.findIrregularDays(); err != nil {
+		return err
+	}
+	follow := false
+	for day := 0; day < e.dates; {
+		if follow || e.isIrregular(day) {
+			next, followNext, err := e.cronDay(day)
+			if err != nil {
+				return err
+			}
+			day, follow = next, followNext
+			continue
+		}
+		stretchEnd := e.dates
+		if i := sort.SearchInts(e.irregular, day); i < len(e.irregular) {
+			stretchEnd = e.irregular[i]
+		}
+		if err := e.ordinaryDays(day, stretchEnd); err != nil {
+			return err
+		}
+		day = stretchEnd
+	}
+	return nil
+}
+
+// findIrregularDays finds the sample's irregular days. A day can only be
+// irregular when one of the timezone's transitions falls in it or at one of
+// its ends, so it checks the days around each transition, and the sample's
+// first and last days, whose ends the sample sets.
+func (e *scheduleExpansion) findIrregularDays() error {
+	checked := make(map[int]bool)
+	check := func(day int) error {
+		if day < 0 || day >= e.dates || checked[day] {
+			return nil
+		}
+		checked[day] = true
+		dayStart, dayEnd, err := e.dayBounds(day)
+		if err != nil {
+			return err
+		}
+		if !ordinaryScheduleDay(dayStart, dayEnd) {
+			e.irregular = append(e.irregular, day)
+		}
+		return nil
+	}
+	if err := check(0); err != nil {
+		return err
+	}
+	if err := check(e.dates - 1); err != nil {
+		return err
+	}
+	for at := e.start; at.Before(e.end); {
+		if err := takeScheduleWork(e.ctx, e.budget); err != nil {
+			return err
+		}
+		_, transition := at.ZoneBounds()
+		if transition.IsZero() || !transition.After(at) || !transition.Before(e.end) {
+			break
+		}
+		for _, instant := range []time.Time{transition.Add(-time.Nanosecond), transition} {
+			day := e.dayOf(instant)
+			for candidate := day - 1; candidate <= day+1; candidate++ {
+				if err := check(candidate); err != nil {
+					return err
+				}
+			}
+		}
+		at = transition
+	}
+	sort.Ints(e.irregular)
+	return nil
+}
+
+func (e *scheduleExpansion) isIrregular(day int) bool {
+	i := sort.SearchInts(e.irregular, day)
+	return i < len(e.irregular) && e.irregular[i] == day
+}
+
+// dayOf returns the number of the day whose date the instant has.
+func (e *scheduleExpansion) dayOf(instant time.Time) int {
+	year, month, day := instant.In(e.start.Location()).Date()
+	return int(time.Date(year, month, day, 12, 0, 0, 0, time.UTC).Sub(e.firstDate) / scheduleDay)
+}
+
+// dayStart returns the start of the day: the sample's start for the first,
+// the sample's end after the last, and otherwise its date's midnight or,
+// when daylight saving skips that midnight, its date's first instant.
+func (e *scheduleExpansion) dayStart(day int) (time.Time, error) {
+	if day <= 0 {
+		return e.start, nil
+	}
+	if day >= e.dates {
+		return e.end, nil
+	}
+	start, ok := scheduleDateStart(e.firstDate.AddDate(0, 0, day), e.start.Location())
+	if !ok || !start.After(e.start) || !start.Before(e.end) {
+		return time.Time{}, errInvalidScanSchedulePattern
+	}
+	return start, nil
+}
+
+func (e *scheduleExpansion) dayBounds(day int) (time.Time, time.Time, error) {
+	dayStart, err := e.dayStart(day)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	dayEnd, err := e.dayStart(day + 1)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	if !dayEnd.After(dayStart) {
+		return time.Time{}, time.Time{}, errInvalidScanSchedulePattern
+	}
+	return dayStart, dayEnd, nil
+}
+
+// cronDay follows the cron schedule over the day from the previous tick. It
+// returns the next day to expand, and whether the scheduler's search from
+// this day's last tick drifted into that day, so that it is followed with
+// the cron schedule too: the ordinary days after this one tick at their
+// times of day once that search arrives at the first tick of the next of
+// them on which the schedule ticks, and until then they have no ticks.
+func (e *scheduleExpansion) cronDay(day int) (int, bool, error) {
+	if err := takeScheduleWork(e.ctx, e.budget); err != nil {
+		return 0, false, err
+	}
+	dayStart, dayEnd, err := e.dayBounds(day)
+	if err != nil {
+		return 0, false, err
+	}
+	ticks, err := scheduleDayTicks(e.ctx, e.schedule, e.lastTick, dayStart, dayEnd)
+	if err != nil {
+		return 0, false, err
+	}
+	if ticks.count > 0 {
+		offset, offsetOK := scheduleSpanSeconds(dayStart.Sub(e.start))
+		length, lengthOK := scheduleSpanSeconds(dayEnd.Sub(dayStart))
+		if !offsetOK || !lengthOK {
+			return 0, false, errInvalidScanSchedulePattern
+		}
+		e.noteTicks(ticks.first, ticks.last, ticks.minimumGap)
+		e.window.runs += ticks.count
+		e.window.projectionFloor += ticks.count + 2
+		e.window.days = append(e.window.days, scheduleDaySpan{start: offset, length: length})
+	}
+	following := day + 1
+	expected := e.nextTickingDay(following)
+	if expected >= e.dates || e.isIrregular(expected) {
+		return following, false, nil
+	}
+	expectedStart, err := e.dayStart(expected)
+	if err != nil {
+		return 0, false, err
+	}
+	if ticks.next.Equal(expectedStart.Add(e.offsets[0])) {
+		return following, false, nil
+	}
+	if ticks.next.IsZero() || !ticks.next.Before(e.end) {
+		return e.dates, false, nil
+	}
+	drifted := max(e.dayOf(ticks.next), following)
+	return drifted, !e.isIrregular(drifted), nil
+}
+
+// nextTickingDay returns the first day from day on that is irregular or an
+// ordinary day on which the schedule ticks, or the number of dates when
+// there is none.
+func (e *scheduleExpansion) nextTickingDay(day int) int {
+	limit := e.dates
+	if i := sort.SearchInts(e.irregular, day); i < len(e.irregular) {
+		limit = e.irregular[i]
+	}
+	for day < limit {
+		date := e.firstDate.AddDate(0, 0, day)
+		monthEnd := min(day+scheduleDaysLeftInMonth(date), limit)
+		if e.monthMatches(date.Month()) {
+			for d := day; d < monthEnd; d++ {
+				if e.dateMatches(date.Day()+d-day, (int(date.Weekday())+d-day)%7) {
+					return d
+				}
+			}
+		}
+		day = monthEnd
+	}
+	return limit
+}
+
+// ordinaryDays expands the ordinary days from day from until day to. They
+// keep one UTC offset, so each starts a whole number of 24 hours after the
+// first. It adds them all at once when the schedule ticks on every day, and
+// otherwise takes them a month at a time, examining day by day only the
+// days of the months whose days the schedule restricts.
+func (e *scheduleExpansion) ordinaryDays(from, to int) error {
+	first, err := e.dayStart(from)
+	if err != nil {
+		return err
+	}
+	everyDate := e.matchesEveryDate()
+	if everyDate && e.spec.Month&scheduleAllMonths == scheduleAllMonths {
+		return e.addOrdinaryDays(first, 0, to-from)
+	}
+	for day := from; day < to; {
+		date := e.firstDate.AddDate(0, 0, day)
+		monthEnd := min(day+scheduleDaysLeftInMonth(date), to)
+		switch {
+		case !e.monthMatches(date.Month()):
+		case everyDate:
+			if err := e.addOrdinaryDays(first, day-from, monthEnd-day); err != nil {
+				return err
+			}
+		default:
+			if err := takeScheduleWork(e.ctx, e.budget); err != nil {
+				return err
+			}
+			for d := day; d < monthEnd; d++ {
+				if !e.dateMatches(date.Day()+d-day, (int(date.Weekday())+d-day)%7) {
+					continue
+				}
+				if err := e.addOrdinaryDays(first, d-from, 1); err != nil {
+					return err
+				}
+			}
+		}
+		day = monthEnd
+	}
+	return nil
+}
+
+// addOrdinaryDays adds the days ordinary days that start index days after
+// first, extending the previous span of ordinary days when they follow it.
+// A new span takes a unit of work.
+func (e *scheduleExpansion) addOrdinaryDays(first time.Time, index, days int) error {
+	if days <= 0 {
+		return nil
+	}
+	spanStart := first.Add(time.Duration(index) * scheduleDay)
+	offset, ok := scheduleSpanSeconds(spanStart.Sub(e.start))
+	if !ok {
+		return errInvalidScanSchedulePattern
+	}
+	gap := e.ordinaryGap
+	if days > 1 && (gap == 0 || e.acrossMidnight < gap) {
+		gap = e.acrossMidnight
+	}
+	e.noteTicks(spanStart.Add(e.offsets[0]), spanStart.Add(time.Duration(days-1)*scheduleDay+e.offsets[len(e.offsets)-1]), gap)
+	e.window.runs += days * len(e.offsets)
+	if n := len(e.window.days); n > 0 && e.window.days[n-1].days > 0 &&
+		uint64(e.window.days[n-1].start)+uint64(e.window.days[n-1].days)*uint64(scheduleDay/time.Second) == uint64(offset) {
+		e.window.days[n-1].days += uint32(days)
+		return nil
+	}
+	if err := takeScheduleWork(e.ctx, e.budget); err != nil {
+		return err
+	}
+	e.window.projectionFloor += 2
+	e.window.days = append(e.window.days, scheduleDaySpan{start: offset, days: uint32(days)})
+	return nil
+}
+
+// noteTicks records ticks from first to last whose shortest gap is gap,
+// after the ticks before them.
+func (e *scheduleExpansion) noteTicks(first, last time.Time, gap time.Duration) {
+	if e.ticked {
+		e.noteGap(first.Sub(e.lastTick))
+	}
+	e.noteGap(gap)
+	e.lastTick, e.ticked = last, true
+}
+
+func (e *scheduleExpansion) noteGap(gap time.Duration) {
+	if gap > 0 && (e.window.minimumGap == 0 || gap < e.window.minimumGap) {
+		e.window.minimumGap = gap
+	}
+}
+
+func (e *scheduleExpansion) monthMatches(month time.Month) bool {
+	return 1<<uint(month)&e.spec.Month != 0
+}
+
+// dateMatches reports whether the schedule ticks on a date with the day of
+// the month and weekday given, in a month that it ticks in, as the cron
+// schedule decides it.
+func (e *scheduleExpansion) dateMatches(dayOfMonth, weekday int) bool {
+	domMatches := 1<<uint(dayOfMonth)&e.spec.Dom != 0
+	dowMatches := 1<<uint(weekday)&e.spec.Dow != 0
+	if e.spec.Dom&cronStarBit != 0 || e.spec.Dow&cronStarBit != 0 {
+		return domMatches && dowMatches
+	}
+	return domMatches || dowMatches
+}
+
+// matchesEveryDate reports whether the schedule ticks on every date of the
+// months it ticks in.
+func (e *scheduleExpansion) matchesEveryDate() bool {
+	everyDayOfMonth := e.spec.Dom&scheduleAllDaysOfMonth == scheduleAllDaysOfMonth
+	everyWeekday := e.spec.Dow&scheduleAllWeekdays == scheduleAllWeekdays
+	if e.spec.Dom&cronStarBit != 0 || e.spec.Dow&cronStarBit != 0 {
+		return everyDayOfMonth && everyWeekday
+	}
+	return everyDayOfMonth || everyWeekday
+}
+
+const (
+	scheduleAllMonths      = uint64(1<<13 - 1<<1)
+	scheduleAllDaysOfMonth = uint64(1<<32 - 1<<1)
+	scheduleAllWeekdays    = uint64(1<<7 - 1)
+)
+
+// scheduleDaysLeftInMonth returns the days from date to the end of its
+// month, both included.
+func scheduleDaysLeftInMonth(date time.Time) int {
+	return time.Date(date.Year(), date.Month()+1, 0, 12, 0, 0, 0, time.UTC).Day() - date.Day() + 1
+}
+
+// scheduleDateStart returns the start of the date that date, a time in
+// UTC, has in location: its midnight or, when daylight saving skips that
+// midnight, its first instant.
+func scheduleDateStart(date time.Time, location *time.Location) (time.Time, bool) {
+	year, month, day := date.Date()
+	start := time.Date(year, month, day, 0, 0, 0, 0, location)
+	if gotYear, gotMonth, gotDay := start.Date(); gotYear != year || gotMonth != month || gotDay != day {
 		// Go placed the missing midnight before the gap, on the previous
 		// date; the day starts where the gap ends.
-		_, next = next.ZoneBounds()
-		if gotYear, gotMonth, gotDay := next.Date(); gotYear != wantYear || gotMonth != wantMonth || gotDay != wantDay {
+		_, start = start.ZoneBounds()
+		if gotYear, gotMonth, gotDay := start.Date(); gotYear != year || gotMonth != month || gotDay != day {
 			return time.Time{}, false
 		}
 	}
-	return next, next.After(dayStart)
+	return start, true
 }
 
 // scheduleDayOffsets returns the times of day of the cron second, minute and
@@ -1206,23 +1507,13 @@ func scheduleSpanSeconds(offset time.Duration) (uint32, bool) {
 	return uint32(offset / time.Second), true
 }
 
-func scheduleMatchesDay(schedule *cron.SpecSchedule, day time.Time) bool {
-	if 1<<uint(day.Month())&schedule.Month == 0 {
-		return false
-	}
-	domMatches := 1<<uint(day.Day())&schedule.Dom != 0
-	dowMatches := 1<<uint(day.Weekday())&schedule.Dow != 0
-	if schedule.Dom&cronStarBit != 0 || schedule.Dow&cronStarBit != 0 {
-		return domMatches && dowMatches
-	}
-	return domMatches || dowMatches
-}
-
-// scheduleDayTickSummary summarizes the cron schedule's ticks on one day.
+// scheduleDayTickSummary summarizes the cron schedule's ticks on one day,
+// and the first tick after them, next, which is zero when there is none.
 type scheduleDayTickSummary struct {
 	count       int
 	first, last time.Time
 	minimumGap  time.Duration
+	next        time.Time
 }
 
 // scheduleDayTicks follows the cron schedule from the tick after, as the
@@ -1230,7 +1521,8 @@ type scheduleDayTickSummary struct {
 // ticks from start until end.
 func scheduleDayTicks(ctx context.Context, schedule cron.Schedule, after, start, end time.Time) (scheduleDayTickSummary, error) {
 	var ticks scheduleDayTickSummary
-	for next := schedule.Next(after); !next.IsZero() && next.Before(end); next = schedule.Next(next) {
+	next := schedule.Next(after)
+	for ; !next.IsZero() && next.Before(end); next = schedule.Next(next) {
 		if err := ctx.Err(); err != nil {
 			return scheduleDayTickSummary{}, err
 		}
@@ -1245,6 +1537,7 @@ func scheduleDayTicks(ctx context.Context, schedule cron.Schedule, after, start,
 		ticks.last = next
 		ticks.count++
 	}
+	ticks.next = next
 	return ticks, ctx.Err()
 }
 
@@ -1374,8 +1667,9 @@ func (value scanRunsPerDayValue) runtimeSchedule() (cron.Schedule, time.Time, ti
 // a tick-by-tick simulation of the whole sample would. A run of ordinary
 // days repeats one day's ticks, so it simulates such a day once for each
 // first tick at which the job is free, and once those states repeat it adds
-// whole repetitions without simulating them. On irregular days it follows
-// the cron schedule from the previous tick, as the scheduler does.
+// whole repetitions without simulating them. On the days whose ticks the
+// cron schedule gives, it follows the cron schedule from the previous tick,
+// as the scheduler does.
 func (value scanRunsPerDayValue) walkScheduleDays(ctx context.Context, schedule cron.Schedule, start time.Time, runDuration time.Duration, endsAtTimeout bool, budget *scanScheduleSimulationBudget) (float64, bool, error) {
 	busyUntil, err := simulateSchedulePrefix(ctx, schedule, start, runDuration, endsAtTimeout)
 	if err != nil {

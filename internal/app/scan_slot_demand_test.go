@@ -144,6 +144,48 @@ func TestTenantScanSlotDemandEstimatesEveryDailyJob(t *testing.T) {
 	}
 }
 
+// The first request of a new App expands every schedule. A unit with 400
+// daily jobs at their own times in a timezone with daylight saving has 400
+// schedules to expand, and each expansion takes work for the timezone's
+// changes and runs of days, not for each day of the sample, so all of them
+// fit the request's bound and every job is estimated.
+func TestTenantScanSlotDemandEstimatesDistinctDailySchedulesOnTheFirstRequest(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	ts := defaultTenant(db)
+	const jobs = 400
+	var want float64
+	for i := range jobs {
+		record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+			Name: fmt.Sprintf("daily-%03d", i), Schedule: fmt.Sprintf("%d %d * * *", i%60, i/60), Timezone: "Europe/Amsterdam",
+			Targets: []string{"192.0.2.1"},
+			TCP:     &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+		}), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		duration := time.Minute + time.Duration(i+1)*time.Second
+		insertCompletedScan(t, db, record, fmt.Sprintf("daily-scan-%03d", i), time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), duration)
+		want += duration.Seconds()
+	}
+	app := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}
+	budget := &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
+	demand, err := app.scheduledScanDemandWithSimulationCache(ctx, ts, nil, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demand.EnabledJobs != jobs || demand.HistoryJobs != jobs || demand.WorkLimitedJobs != 0 || demand.UnestimatedJobs != 0 || demand.CadenceUnattainableJobs != 0 {
+		t.Fatalf("first request's demand = %+v after %d work units; want all %d jobs estimated", demand, budget.used, jobs)
+	}
+	if math.Abs(demand.EstimatedSlotSecondsPerDay-want) > 0.01 {
+		t.Fatalf("first request's demand = %.2f slot-seconds/day, want the jobs' runs together, %.2f", demand.EstimatedSlotSecondsPerDay, want)
+	}
+	if budget.used > scanScheduleRequestWorkLimit/10 {
+		t.Fatalf("expanding %d daily schedules used %d work units; want a small part of the request's %d", jobs, budget.used, scanScheduleRequestWorkLimit)
+	}
+}
+
 func TestTenantDemandSharesExpansionAndProjectionWorkBudget(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -203,8 +245,8 @@ func TestScheduleExpansionAndDurationProjectionShareBudget(t *testing.T) {
 		t.Fatalf("budgeted schedule expansion = %+v, error %v", pattern, err)
 	}
 	expansionWork := budget.used
-	if expansionWork < 1_461 {
-		t.Fatalf("schedule expansion used %d work units; want one for each of the sample's 1,461 days", expansionWork)
+	if expansionWork <= 0 {
+		t.Fatalf("schedule expansion used %d work units; want some", expansionWork)
 	}
 	budget.limit = expansionWork + 3
 	projections := make(map[scanScheduleDurationKey]scanScheduleDurationEstimate)
@@ -216,6 +258,133 @@ func TestScheduleExpansionAndDurationProjectionShareBudget(t *testing.T) {
 	}
 	if len(projections) != 0 {
 		t.Fatalf("cached %d incomplete projections after shared budget exhaustion", len(projections))
+	}
+}
+
+// Expanding a schedule takes work for the timezone's transitions, the days
+// whose ticks the cron schedule gives, the runs of days on which it ticks
+// and the months whose days it restricts, not for each of the sample's
+// 1,461 days: at most a little more than the least work of projecting a run
+// over those days.
+func TestScheduleExpansionWorkGrowsWithTransitionsAndSpansNotDays(t *testing.T) {
+	t.Parallel()
+	const transitionsAndMonths = 100
+	for _, test := range []struct{ timezone, schedule string }{
+		{"UTC", "0 3 * * *"},
+		{"Europe/Amsterdam", "17 3 * * *"},
+		{"Europe/Amsterdam", "0 * * * *"},
+		{"Australia/Lord_Howe", "0 0 * * *"},
+		{"Africa/Casablanca", "30 1 * * *"},
+		{"Europe/Amsterdam", "0 3 * * 1"},
+		{"Europe/Amsterdam", "0 3 * * 1-5"},
+		{"Europe/Amsterdam", "0 3 1 * *"},
+		{"America/New_York", "0 3 * 6-8 *"},
+		{"UTC", "0 0 */2 * *"},
+		{"Europe/Amsterdam", "*/2 * * * *"},
+	} {
+		budget := &scanScheduleSimulationBudget{limit: scanScheduleJobWorkLimit}
+		pattern, err := schedulePatternWithBudget(context.Background(), test.timezone, test.schedule, budget)
+		if err != nil || !pattern.ok {
+			t.Fatalf("%s %q: pattern = %+v, error %v", test.timezone, test.schedule, pattern, err)
+		}
+		if budget.used <= 0 || budget.used > pattern.projectionFloor+transitionsAndMonths {
+			t.Errorf("%s %q: expansion used %d work units for %d day spans; want at most %d, a little more than the %d its days take to project", test.timezone, test.schedule, budget.used, len(pattern.days), pattern.projectionFloor+transitionsAndMonths, pattern.projectionFloor)
+		}
+	}
+}
+
+// The expansion's days are the cron scheduler's: each tick follows the one
+// before it, so on an ordinary day the ticks are the schedule's times of
+// day, the days whose ticks the cron schedule gives have some, and no other
+// day has any. The scheduler's search for the tick after a daylight-saving
+// change can drift past the first ticks of the following days, as with
+// midnight in Lord Howe after its half-hour change, which skips the next
+// day, or 2:00 to 2:59 in Chatham, whose change at 2:45 leaves only 15 of
+// the next day's 60 ticks.
+func TestScheduleExpansionMatchesTheCronSchedulersDays(t *testing.T) {
+	t.Parallel()
+	type check struct{ timezone, schedule string }
+	var checks []check
+	for _, timezone := range []string{"UTC", "Europe/Amsterdam", "America/Santiago", "America/Havana", "Asia/Beirut", "Africa/Casablanca", "Australia/Lord_Howe", "Pacific/Chatham", "Antarctica/Troll", "America/St_Johns"} {
+		for _, schedule := range []string{"0 0 * * *", "30 2 * * *", "0 0 * * 0,2", "45 1 1-7 * 0", "0 23 * * *"} {
+			checks = append(checks, check{timezone, schedule})
+		}
+	}
+	checks = append(checks, check{"Pacific/Chatham", "* 2 * * *"}, check{"Australia/Lord_Howe", "15 */3 * * *"}, check{"Europe/Amsterdam", "*/20 0-3 * * 0,6"})
+	for _, test := range checks {
+		t.Run(test.timezone+" "+test.schedule, func(t *testing.T) {
+			t.Parallel()
+			pattern, err := schedulePattern(context.Background(), test.timezone, test.schedule)
+			if err != nil || !pattern.ok {
+				t.Fatalf("pattern = %+v, error %v", pattern, err)
+			}
+			location := mustLoadLocation(t, test.timezone)
+			parsed, err := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow).Parse(test.schedule)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed.(*cron.SpecSchedule).Location = location
+			start := time.Date(scanScheduleSampleStartYear, time.January, 1, 0, 0, 0, 0, location)
+			end := time.Date(scanScheduleSampleEndYear, time.January, 1, 0, 0, 0, 0, location)
+			// The cron ticks by the offset of their day's start from the
+			// sample's start, in seconds.
+			ticks := make(map[int64][]time.Time)
+			var count int
+			var shortest time.Duration
+			var last time.Time
+			for next := parsed.Next(start.Add(-time.Nanosecond)); !next.IsZero() && next.Before(end); next = parsed.Next(next) {
+				if count > 0 && (shortest == 0 || next.Sub(last) < shortest) {
+					shortest = next.Sub(last)
+				}
+				count, last = count+1, next
+				year, month, day := next.In(location).Date()
+				dayStart := start
+				if year != scanScheduleSampleStartYear || month != time.January || day != 1 {
+					var ok bool
+					if dayStart, ok = scheduleDateStart(time.Date(year, month, day, 12, 0, 0, 0, time.UTC), location); !ok {
+						t.Fatalf("no start for the day of tick %s", next)
+					}
+				}
+				key := int64(dayStart.Sub(start) / time.Second)
+				ticks[key] = append(ticks[key], next)
+			}
+			if want := float64(count) / (end.Sub(start).Hours() / 24); math.Abs(pattern.runsPerDay-want) > 1e-9 {
+				t.Fatalf("expansion = %.8f runs/day; cron ticks = %.8f", pattern.runsPerDay, want)
+			}
+			if pattern.minimumGap != shortest {
+				t.Fatalf("expansion's shortest gap = %s; cron's = %s", pattern.minimumGap, shortest)
+			}
+			offsets := scheduleDayOffsets(pattern.identity.second, pattern.identity.minute, pattern.identity.hour)
+			covered := make(map[int64]bool)
+			for _, span := range pattern.days {
+				if span.days == 0 {
+					covered[int64(span.start)] = true
+					if len(ticks[int64(span.start)]) == 0 {
+						t.Fatalf("day %s, whose ticks the cron schedule gives, has no cron ticks", start.Add(time.Duration(span.start)*time.Second))
+					}
+					continue
+				}
+				for day := range int64(span.days) {
+					key := int64(span.start) + day*int64(scheduleDay/time.Second)
+					covered[key] = true
+					dayStart := start.Add(time.Duration(key) * time.Second)
+					got := ticks[key]
+					if len(got) != len(offsets) {
+						t.Fatalf("ordinary day %s has %d cron ticks; want its %d times of day", dayStart, len(got), len(offsets))
+					}
+					for i, tick := range got {
+						if !tick.Equal(dayStart.Add(offsets[i])) {
+							t.Fatalf("ordinary day %s ticks at %s; want %s", dayStart, tick, dayStart.Add(offsets[i]))
+						}
+					}
+				}
+			}
+			for key, dayTicks := range ticks {
+				if !covered[key] {
+					t.Fatalf("day %s has %d cron ticks but no expanded span", start.Add(time.Duration(key)*time.Second), len(dayTicks))
+				}
+			}
+		})
 	}
 }
 
@@ -2110,7 +2279,8 @@ func simulateScheduleTicks(ctx context.Context, schedule cron.Schedule, start, e
 
 // The day walk reproduces a tick-by-tick simulation of the whole sample,
 // including irregular days: daylight-saving changes, half-hour shifts,
-// midnights that daylight saving skips, and Ramadan offset changes. It
+// midnights that daylight saving skips, and Ramadan offset changes, and the
+// days after them into which the cron search for the next tick drifts. It
 // takes at least the schedule's known work.
 func TestCompactSchedulePatternsPreserveTransitionHeavyTimezoneProjection(t *testing.T) {
 	t.Parallel()
@@ -2129,6 +2299,12 @@ func TestCompactSchedulePatternsPreserveTransitionHeavyTimezoneProjection(t *tes
 		{name: "midnight change with every other day", timezone: "Asia/Beirut", schedule: "0 3 */2 * *", runDurations: []time.Duration{24 * time.Hour, 48 * time.Hour, 50 * time.Hour}},
 		{name: "month window", timezone: "America/New_York", schedule: "*/30 1-3 1-7 * *", runDurations: []time.Duration{30 * time.Minute, 40 * time.Minute, 3 * time.Hour}},
 		{name: "leap day", timezone: "UTC", schedule: "0 0 29 2 *", runDurations: []time.Duration{time.Hour, 400 * 24 * time.Hour}},
+		// The search after the half-hour change finds no tick on the next
+		// day, 2024-10-07.
+		{name: "midnight after a half-hour change", timezone: "Australia/Lord_Howe", schedule: "0 0 * * *", runDurations: []time.Duration{23 * time.Hour, 24 * time.Hour, 25 * time.Hour, 47 * time.Hour}},
+		{name: "weekdays after a half-hour change", timezone: "Australia/Lord_Howe", schedule: "0 0 * * 0,2", runDurations: []time.Duration{24 * time.Hour, 48 * time.Hour, 72 * time.Hour}},
+		// The change at 2:45 leaves the next day 15 ticks, from 2:45.
+		{name: "hour after a change at 2:45", timezone: "Pacific/Chatham", schedule: "* 2 * * *", runDurations: []time.Duration{time.Minute, 90 * time.Second, 15 * time.Minute, 2 * time.Hour}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()

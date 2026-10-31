@@ -151,6 +151,11 @@ func TestNaabuProfilePlaceholdersRenderManagedArguments(t *testing.T) {
 	if count("-list") != 1 || count("-p") != 1 || count("-json") != 1 || !strings.Contains(joined, "-skip-host-discovery") || strings.Contains(joined, "-with-host-discovery") {
 		t.Fatalf("Naabu placeholders were not rendered exactly once: %v", args)
 	}
+	// Naabu exits when -silent meets verbose output, so a stored profile's
+	// verbosity flag never reaches it (#1755).
+	if count("-silent") != 1 || count("-verbose") != 0 {
+		t.Fatalf("Naabu arguments = %v, want -silent once and no verbosity flag", args)
+	}
 	timeoutIndex := slices.Index(args, "-timeout")
 	if timeoutIndex < 0 || timeoutIndex+1 >= len(args) || args[timeoutIndex+1] != "1000ms" {
 		t.Fatalf("custom Naabu profile must preserve timeout milliseconds: %v", args)

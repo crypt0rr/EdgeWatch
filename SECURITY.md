@@ -92,7 +92,9 @@ stream, rejects records for addresses outside the invocation, keeps each
 distinct result once, and stops the child on an oversized line or an
 implausible number of repeated records. Naabu never runs its own host
 discovery: EdgeWatch never passes its host-discovery switches, a scanner
-profile can add only Naabu's verbosity flags, and EdgeWatch states the
+profile can add no Naabu flags of its own (verbosity flags in profiles saved
+by earlier releases are ignored, because Naabu runs with `-silent`), and
+EdgeWatch states the
 policy with `-skip-host-discovery` for every scan type and profile. Naabu
 therefore probes only the addresses EdgeWatch gives it. Only Nmap runs host
 discovery, in the Nmap-only TCP and UDP scans of a job with

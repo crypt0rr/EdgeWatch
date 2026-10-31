@@ -47,8 +47,12 @@ between attempts, and whose recorded time is spread over its attempt count; it
 counts while it recorded the job's current execution hash, which covers the
 monitored scope, the timeout, resume window and timing, and the scanner
 profile revisions and arguments. The job's cycle in progress is its newest
-sample while it has the current execution hash: each of its recorded attempts
-among the job's 11 most recent cycle scans with that hash is a run. A run that
+sample while it has the current execution hash and has not stalled: each of
+its recorded attempts among the job's 11 most recent cycle scans with that
+hash is a run. Scheduled runs skip a job whose cycle stalled until someone
+retries the cycle or its resume window ends, so until then the job adds no
+demand and is counted only in `enabled_jobs`; afterwards its next run expires
+the cycle, and its other samples estimate its runs. A run that
 timed out counts at the job's current timeout rather than its recorded
 duration, because it needed at least the timeout; a scan without a cycle keeps
 its samples when the timeout changes. When the newest 11 runs with the
@@ -74,7 +78,9 @@ from samples or from the lower bound: a resumable cycle whose attempts add up
 to more continues in later runs. The estimate follows the job's cron ticks
 over a representative four-year calendar cycle in its timezone, which averages
 leap-day schedules over the longer cycle and follows the schedule through
-daylight-saving changes, and skips a tick when the previous estimated run is
+daylight-saving changes as the scheduler does, including the days after some
+changes whose first ticks the scheduler's search for the next tick skips, and
+skips a tick when the previous estimated run is
 still active. A run that the timeout ends is still being finished at a tick at
 exactly its timeout, so that tick is skipped too. Runs of different lengths
 each skip the ticks they overlap, and the estimate combines them by how often
@@ -89,22 +95,29 @@ whether the job's demand exceeds a slot-day. The console shows a warning at
 known-rate lower bound may also have additional work that cannot be fully
 estimated. The platform panel labels this possible overlap explicitly.
 
-A run that ends before the schedule's next tick needs no simulation. Ticks
-fall on whole minutes, so runs that end in the same minute share one
-simulation of their schedule. The tenant and deployment estimates bound the
-work of simulating the other schedules: each job has its own work limit, and
-the whole request has one bound, which keeps it within its deadline. Every job
-first gets a small share of its limit, with the units' jobs taking turns in
-the deployment estimate, until half of the bound is spent; the jobs that need
-more, including those whose schedule's daylight-saving days alone need more
-than the share, get the rest after every other job. The deployment estimate
-also shares equivalent schedule-duration projections across active units. The
-additive `work_limited_jobs` field counts the jobs whose schedule cannot be
-simulated within those limits; their slot-seconds are left out of the total.
+A schedule's expansion takes work for its timezone's daylight-saving changes
+and the runs of days on which it ticks, and a run that ends before the
+schedule's next tick needs no simulation. Ticks fall on whole minutes, so runs
+that end in the same minute share one simulation of their schedule. The daemon
+remembers schedule expansions and these simulations across requests; each
+holds only a schedule and a run length. The tenant and deployment estimates
+bound the work of expanding schedules and of simulating the runs that skip
+ticks: each job has its own work limit for each, and the whole request has
+one bound, which keeps it within its deadline. Every job first gets a small
+share of its limit for each, with the units' jobs taking turns in the
+deployment estimate, until half of the bound is spent. A job whose schedule's
+daylight-saving days alone show that its simulation needs more than the share
+waits without spending it, and an expansion or simulation that runs over the
+share spends it once for its schedule, whose jobs then wait without spending
+more; the jobs that wait get the rest after every other job. The deployment
+estimate also shares equivalent schedule-duration projections across active
+units. The additive `work_limited_jobs` field counts the jobs whose schedule
+cannot be expanded or simulated within those limits; their slot-seconds are
+left out of the total.
 Such a job is not counted in `history_jobs`, `lower_bound_jobs`, or
 `unestimated_jobs`. Releases before `work_limited_jobs` counted these jobs in
 `unestimated_jobs`. A job without any run estimate is counted in
-`unestimated_jobs` without simulating its schedule.
+`unestimated_jobs` without expanding its schedule.
 
 A unit's capacity is a limit, not a reservation: every unit's scans share the
 deployment's `scheduler.max_concurrent_scans` slots, so units that each stay

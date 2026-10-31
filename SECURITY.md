@@ -563,16 +563,20 @@ capacity as numbers. The stored scan count is a number of rows, never a
 scan's content. The platform status adds deployment totals, and the
 scheduled scan demand of all active units together against the deployment's
 scan slots: the daemon estimates the schedules, timeouts, scopes, scanner
-rates, and recent scan durations of each unit's enabled jobs. Each run lasts
-the mean of a job's recent run durations with its current key, including the
-recorded attempts of a cycle in progress, at most its timeout, and a timed-out
-run lasts the job's current timeout; when a job's newest runs all timed out,
-every run does. It simulates their cron ticks and skips a tick
-while an estimated run is still active, and a tick at exactly the timeout of a
-run that the timeout ends. Each job's simulation and the whole estimate have
-work limits, and jobs over them are counted, not estimated. The estimate reads
-each unit through that unit's tenant-scoped store and keeps its jobs only for
-the request. It caps each unit's contribution at its effective
+rates, and recent scan durations of each unit's enabled jobs, and which of
+them have a stalled resumable cycle. Each run lasts the mean of a job's
+recent run durations with its current key, including the recorded attempts
+of a cycle in progress that has not stalled, at most its timeout, and a
+timed-out run lasts the job's current timeout; when a job's newest runs all
+timed out, every run does. A job whose cycle stalled adds nothing until the
+cycle is retried or its resume window ends. It simulates their cron ticks and
+skips a tick while an estimated run is still active, and a tick at exactly the
+timeout of a run that the timeout ends. Each job's simulation and the whole
+estimate have work limits, and jobs over them are counted, not estimated. The
+estimate reads each unit through that unit's tenant-scoped store and keeps its
+jobs only for the request; across requests the daemon remembers only schedule
+expansions and simulations, each keyed by a schedule and a run length, never a
+unit, job, or target. It caps each unit's contribution at its effective
 scan-slot capacity for a day. It returns only the sums and counts of jobs,
 never a unit or job ID
 or name, a target, or any unit's own figure. With a single active unit, the

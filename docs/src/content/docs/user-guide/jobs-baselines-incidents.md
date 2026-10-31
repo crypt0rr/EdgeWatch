@@ -65,7 +65,11 @@ for the mean of those samples' run durations:
   between scheduled attempts. A cycle whose attempt count is higher than its
   recorded attempts spreads its recorded time over all its attempts.
 - Each recorded attempt of the job's cycle in progress is one run, so a cycle
-  that keeps timing out counts before it completes.
+  that keeps timing out counts before it completes. A stalled cycle's
+  attempts are not runs: scheduled runs skip a job whose cycle stalled until
+  someone retries the cycle or its resume window ends, so until then the job
+  adds no demand, and afterwards its next run expires the cycle and its
+  other samples estimate its runs.
 
 A run that timed out needed at least the timeout, so it counts at the job's
 current timeout rather than at its recorded duration: a job whose runs often
@@ -111,7 +115,9 @@ cycle whose attempts add up to more than the timeout continues in the job's
 later runs, so each attempt counts at most the timeout rather than the whole
 cycle. The estimate simulates the job's cron ticks in its timezone over a
 representative four-year calendar cycle, averaging leap-day schedules over
-that cycle and following the schedule through daylight-saving changes. When a
+that cycle and following the schedule through daylight-saving changes as the
+scheduler does, including the days after some changes whose first ticks the
+scheduler's search for the next tick skips. When a
 previous estimated run is still active at a tick, the scheduler skips that
 tick; the estimate counts only runs that could start. A run that the timeout
 ends is still being finished when the timeout passes, so it also skips a tick
@@ -126,21 +132,27 @@ A warning appears at 80% utilization and when estimated demand exceeds
 capacity. The notice refreshes when live updates report a job change or a
 completed scan, and at least every five minutes.
 
-A run that ends before the schedule's next tick needs no simulation, so the
-estimate of ordinary schedules costs almost nothing. A tick always falls on a
-whole minute, so runs that end in the same minute skip the same ticks and
-share one simulation, within a job and across jobs. Simulating the schedules
-whose runs skip ticks is bounded: each job has its own work limit, and the
-whole estimate has a bound. Every job first gets a small share of its limit,
-until half of the bound is spent. A job that needs more, because its schedule
-ticks often through the daylight-saving days or its simulation did not fit
-the share, waits without spending more and gets the rest of its limit after
-every other job. A job whose schedule cannot be simulated within its limit,
-or within the bound of the whole estimate, is counted as left out at the
-work limit, separately from jobs whose work cannot be estimated, and adds
-nothing to the total, so actual demand may be higher. A job whose run time
-cannot be estimated at all is counted as not fully estimated without
-simulating its schedule.
+Expanding a schedule over the sample takes work for its timezone's
+daylight-saving changes and for the runs of days on which it ticks, not for
+each day, and a run that ends before the schedule's next tick needs no
+simulation, so the estimate of ordinary schedules costs almost nothing. A
+tick always falls on a whole minute, so runs that end in the same minute skip
+the same ticks and share one simulation, within a job and across jobs. The
+daemon remembers each schedule's expansion and the simulations of runs that
+skip ticks across estimates. Expanding a schedule and simulating its runs are
+bounded: each job has its own work limit for each, and the whole estimate has
+a bound. Every job first gets a small share of its limit for each, until half
+of the bound is spent. A job whose schedule's known work, such as ticking
+often through the daylight-saving days, shows that its simulation needs more
+than the share waits without spending it. An expansion or simulation that
+runs over the share spends it once for its schedule, and that schedule's
+jobs then wait without spending more. The jobs that wait get the rest of
+their limit after every other job. A job whose schedule cannot be expanded
+or simulated within its limit, or within the bound of the whole estimate, is
+counted as left out at the work limit, separately from jobs whose work cannot
+be estimated, and adds nothing to the total, so actual demand may be higher.
+A job whose run time cannot be estimated at all is counted as not fully
+estimated without expanding its schedule.
 
 The effective slot capacity is the most slots the unit may use, not slots
 reserved for it: every business unit's scans share the deployment's scan

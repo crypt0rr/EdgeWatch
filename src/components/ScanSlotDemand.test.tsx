@@ -41,6 +41,7 @@ describe('ScanSlotDemandNotice', () => {
     expect(screen.getByText(/samples with its current scan settings/)).toBeInTheDocument()
     expect(screen.getByText(/whether it succeeded, was incomplete, or timed out, is one run, and so is each attempt of a completed resumable cycle or of the cycle in progress/)).toBeInTheDocument()
     expect(screen.getByText(/the estimate uses the mean run duration/)).toBeInTheDocument()
+    expect(screen.getByText(/A job whose resumable cycle stalled adds nothing until someone retries the cycle or its resume window ends/)).toBeInTheDocument()
     expect(screen.getByText(/pausing and resuming it keeps its samples/)).toBeInTheDocument()
     expect(screen.getByText(/A run that timed out counts at the job’s current timeout, and if the job’s newest runs with those settings all timed out, every run does/)).toBeInTheDocument()
     expect(screen.getByText(/skips a tick when the previous estimated run is still active/)).toBeInTheDocument()

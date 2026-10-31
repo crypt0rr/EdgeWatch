@@ -255,7 +255,9 @@ recent scan samples with each job's current scan settings, so renaming,
 rescheduling, or pausing and resuming a monitor keeps them. Each attempt of a
 completed cycle or of the cycle in progress is one run, excluding idle time
 between scheduled attempts, and a successful, incomplete, or timed-out scan
-without a cycle is one run. A run that timed out counts at the monitor's
+without a cycle is one run. A monitor whose cycle stalled adds nothing until
+someone retries the cycle or its resume window ends, because scheduled runs
+skip it until then. A run that timed out counts at the monitor's
 current timeout, and when its newest runs with current settings all timed
 out, every run does. Each run counts at most the monitor's timeout, which
 ends it. The estimate follows its cron ticks

@@ -146,10 +146,12 @@ The few paths served outside the two APIs, such as `/healthz` and
 renders: the unit console's routes in `Shell` in `src/main.tsx`, including the
 guided job-creation steps of `JobCreationJourney`, the platform console's in
 `PlatformShell`, each `UnitDetail` tab, and the pages outside either shell:
-sign-in, first-run setup, activation, the forced TOTP enrolment, and the
-public status pages. The axe audit in `e2e/route-accessibility.spec.ts`
-visits every entry; the role matrix in `e2e/role-matrix.spec.ts` visits the
-console routes, but not the pages outside both shells (`entrySurfaces`).
+sign-in, first-run setup, activation, the account-link notice that a
+signed-in browser shows for an activation or password-reset link, the forced
+TOTP enrolment, and the public status pages. The axe audit in
+`e2e/route-accessibility.spec.ts` visits every entry; the role matrix in
+`e2e/role-matrix.spec.ts` visits the console routes, but not the pages outside
+both shells (`entrySurfaces`).
 
 `src/console-route-inventory.test.ts`, which `npm run test:coverage` runs
 before the browser tests, parses every `<Route>` in `src/` and the `UnitDetail`
@@ -158,6 +160,17 @@ parameter matches any value. It fails when a route or tab has no entry, and
 when an entry no longer reaches the route it stands for. A route that renders
 no page of its own, such as a catch-all redirect outside the console shells,
 goes in `routesWithoutInventoryEntry` with its reason instead.
+
+Every read of a path is classified too: each `.pathname` read or destructure,
+and each use of `matchPath`, `matchRoutes`, `useMatch`, or `useMatches`,
+counted by the top-level declaration that holds it. `pathReaders` gives each
+such declaration its count and a reason. When the reads choose a page outside
+every `<Route>`, as `AppContent` chooses the public status pages and the
+account-link notice, `serves` lists the route patterns of those pages, and
+each pattern needs an entry surface whose `router` names the declaration. A
+new read changes the count and fails the check until its entry says which
+page it serves or why it serves none, such as a breadcrumb, an active
+navigation link, or a `returnTo` path.
 The parser reads `<Route>` elements in direct, fragment, and supported
 conditional JSX children. It fails closed on namespace or default router
 imports, re-exports from a router module, source-less re-exports and local

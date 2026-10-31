@@ -17,11 +17,12 @@ import {
 
 // The browser audits (e2e/route-accessibility.spec.ts and
 // e2e/role-matrix.spec.ts) visit only the pages that e2e/console-routes.ts
-// lists. This check compares that inventory with the routers themselves, so
-// a new page cannot skip the audit unnoticed and a removed page cannot leave
-// an entry behind. It parses the JSX with the TypeScript parser that Vite
-// ships instead of matching text, so formatting, attribute order, and
-// conditional routes do not change what it reads.
+// lists. This check compares that inventory with the routers themselves and
+// with the pages that src chooses from the path outside every <Route>, which
+// pathReaders classifies, so a new page cannot skip the audit unnoticed and a
+// removed page cannot leave an entry behind. It parses the JSX with the
+// TypeScript parser that Vite ships instead of matching text, so formatting,
+// attribute order, and conditional routes do not change what it reads.
 
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url))
 const sourceRoot = join(repositoryRoot, 'src')
@@ -31,19 +32,113 @@ const routerModules = new Set(['react-router-dom', 'react-router'])
 /** Router APIs that build routes outside JSX, which this check cannot read. */
 const unreadRouterAPIs = new Set(['useRoutes', 'createBrowserRouter', 'createHashRouter', 'createMemoryRouter', 'createStaticRouter', 'createRoutesFromElements', 'createRoutesFromChildren', 'RouterProvider'])
 
+type PathReader = {
+  file: string
+  /** The top-level declaration that holds the reads. */
+  declaration: string
+  /** Its reads of a path: each `.pathname` read or destructure and each use of a path matcher. */
+  reads: number
+  /**
+   * The route patterns of the pages that these reads choose outside every
+   * <Route>. The comparison treats them as a router named after the
+   * declaration, so each needs an entry surface that names it.
+   */
+  serves?: string[]
+  /** How the reads choose those pages, or why they choose none. */
+  reason: string
+}
+
 /**
- * AppContent serves the public status pages from the address alone, before
- * any router or session read, so they have no `<Route>`. These patterns
- * stand for them.
+ * Every declaration in non-test src that reads a path. A page chosen from the
+ * path outside every <Route> would escape the JSX route reader, so the check
+ * fails when a declaration gains or loses a read until its entry here says
+ * which inventoried pages the reads serve or why they serve none.
  */
-const publicStatusRoutes = ['/public', '/public/:slug']
+const pathReaders: PathReader[] = [
+  {
+    file: 'src/main.tsx',
+    declaration: 'AppContent',
+    reads: 2,
+    serves: ['/public', '/public/:slug', '/activate'],
+    reason: 'Serves the public status pages before any session read, and the account-link notice when a signed-in browser opens an activation or password-reset link.',
+  },
+  {
+    file: 'src/main.tsx',
+    declaration: 'Shell',
+    reads: 9,
+    reason: 'Names the breadcrumb and document title, moves focus to the main region when the path changes, and marks the active navigation link.',
+  },
+  {
+    file: 'src/main.tsx',
+    declaration: 'ProtectedApp',
+    reads: 1,
+    reason: 'Redirects a console that sign-in mounted on /login to the page that sent the visitor to sign in; it renders a redirect, not a page.',
+  },
+  {
+    file: 'src/main.tsx',
+    declaration: 'AuthRoutes',
+    reads: 1,
+    reason: 'Records the requested page as the return path of the catch-all redirect to /login.',
+  },
+  {
+    file: 'src/pages/platform/PlatformShell.tsx',
+    declaration: 'PlatformShell',
+    reads: 6,
+    reason: 'Marks the active navigation link and moves focus to the main region when the path changes.',
+  },
+  {
+    file: 'src/pages/JobEditor.tsx',
+    declaration: 'JobEditor',
+    reads: 7,
+    reason: 'Tells /jobs/new/advanced, which has its own route, from the guided creation, and keeps the unsaved-changes guard on the current history entry.',
+  },
+  {
+    file: 'src/pages/MonitorSetup.tsx',
+    declaration: 'MonitorSetup',
+    reads: 8,
+    reason: 'Clears consumed navigation state in place and keeps the unsaved-changes guard on the current history entry.',
+  },
+  {
+    file: 'src/pages/JobDetail.tsx',
+    declaration: 'JobDetail',
+    reads: 2,
+    reason: 'Clears the first-scan token from the navigation state in place.',
+  },
+  {
+    file: 'src/pages/Auth.tsx',
+    declaration: 'signInReturnPath',
+    reads: 4,
+    reason: 'Checks that the stored return path is a local path before the console opens it.',
+  },
+  {
+    file: 'src/pages/Auth.tsx',
+    declaration: 'Activate',
+    reads: 2,
+    reason: 'Removes the token from the address bar in place.',
+  },
+  {
+    file: 'src/host-list-state.ts',
+    declaration: 'useHostListState',
+    reads: 2,
+    reason: 'Builds the returnTo path of the host list and restores its search when the list address changes.',
+  },
+  {
+    file: 'src/job-list-state.ts',
+    declaration: 'useJobListState',
+    reads: 2,
+    reason: 'Builds the returnTo path of the job list and restores its search when the list address changes.',
+  },
+]
+
+/** The router APIs that match a path; each use counts as a path read. */
+const pathMatchers = new Set(['matchPath', 'matchRoutes', 'useMatch', 'useMatches'])
 
 /** The UnitDetail tabs, which /platform/units/:id/:tab selects. */
 const unitDetailFile = 'src/pages/platform/UnitDetail.tsx'
 const unitDetailTabsVariable = 'tabs'
 const unitDetailTabParam = 'tab'
 
-type Node = { type: string; [key: string]: unknown }
+type Node = { type: string; start?: number; [key: string]: unknown }
 
 type SourceRoute = {
   /** As written; undefined for an index route. */
@@ -70,6 +165,110 @@ type SourceRouter = {
 
 type SourceFile = { file: string; code: string }
 const compareSourceFiles = (left: SourceFile, right: SourceFile) => left.file < right.file ? -1 : left.file > right.file ? 1 : 0
+
+const field = (node: Node | undefined, key: string): Node | undefined => node && isNode(node[key]) ? node[key] as Node : undefined
+const list = (node: Node | undefined, key: string): Node[] => node && Array.isArray(node[key]) ? (node[key] as unknown[]).filter(isNode) : []
+const nameOf = (node: Node | undefined): string | undefined => node && (node.type === 'Identifier' || node.type === 'JSXIdentifier') ? String(node.name) : undefined
+
+/** Parentheses and TypeScript wrappers that leave the value they wrap unchanged. */
+const transparentPathExpressions = new Set(['ParenthesizedExpression', 'ChainExpression', 'TSAsExpression', 'TSSatisfiesExpression', 'TSNonNullExpression', 'TSTypeAssertion', 'TSInstantiationExpression'])
+
+function unwrap(node: Node | undefined): Node | undefined {
+  while (node && transparentPathExpressions.has(node.type)) node = field(node, 'expression')
+  return node
+}
+
+function staticString(node: Node | undefined): string | undefined {
+  node = unwrap(node)
+  if (node?.type === 'Literal') return typeof node.value === 'string' ? node.value : undefined
+  if (node?.type === 'TemplateLiteral' && !list(node, 'expressions').length) {
+    const value = list(node, 'quasis')[0]?.value as { cooked?: string | null; raw: string } | undefined
+    return value ? value.cooked ?? value.raw : undefined
+  }
+  if (node?.type === 'BinaryExpression' && node.operator === '+') {
+    const left = staticString(field(node, 'left'))
+    const right = staticString(field(node, 'right'))
+    return left !== undefined && right !== undefined ? left + right : undefined
+  }
+  return undefined
+}
+
+/** The name that a member expression reads or a property key names, when it is static. */
+function staticKey(node: Node): string | undefined {
+  const key = field(node, node.type === 'MemberExpression' ? 'property' : 'key')
+  if (node.computed) return staticString(key)
+  return key?.type === 'Identifier' ? String(key.name) : staticString(key)
+}
+
+/** Whether an Identifier names a variable, rather than a property, a key, or a label. */
+function namesVariable(parent: Node | undefined, key: string): boolean {
+  switch (parent?.type) {
+    case 'MemberExpression': return key !== 'property' || parent.computed === true
+    case 'Property': case 'PropertyDefinition': case 'MethodDefinition': case 'AccessorProperty': return key !== 'key' || parent.computed === true
+    case 'ImportSpecifier': case 'ImportDefaultSpecifier': case 'ImportNamespaceSpecifier': return false
+    case 'ExportSpecifier': return key === 'local'
+    case 'LabeledStatement': case 'BreakStatement': case 'ContinueStatement': case 'MetaProperty': return false
+    case 'TSEnumMember': return key !== 'id'
+    default: return true
+  }
+}
+
+/** TypeScript nodes that hold runtime values; every other TypeScript node holds only types. */
+const valueTypeScriptNodes = new Set([
+  ...transparentPathExpressions,
+  'TSEnumDeclaration', 'TSEnumBody', 'TSEnumMember', 'TSModuleDeclaration', 'TSModuleBlock', 'TSParameterProperty',
+  'TSExportAssignment', 'TSImportEqualsDeclaration', 'TSExternalModuleReference',
+])
+/** Keys whose subtrees hold only types. */
+const typeKeys = new Set(['typeAnnotation', 'typeParameters', 'typeArguments', 'returnType', 'superTypeArguments', 'implements'])
+
+type Visitor = (node: Node, parent: Node | undefined, key: string) => boolean | void
+
+/** Visits every node that can hold a runtime value, parents first; a visitor that returns false skips the children. */
+function visitValues(node: Node, visit: Visitor, parent?: Node, key = ''): void {
+  if (node.type.startsWith('TS') && !valueTypeScriptNodes.has(node.type)) return
+  if (visit(node, parent, key) === false) return
+  for (const childKey in node) {
+    if (typeKeys.has(childKey)) continue
+    const value = node[childKey]
+    if (Array.isArray(value)) {
+      for (const child of value) if (isNode(child)) visitValues(child, visit, node, childKey)
+    } else if (isNode(value)) visitValues(value, visit, node, childKey)
+  }
+}
+
+/** The names that a binding pattern declares. */
+function patternNames(pattern: Node | undefined): string[] {
+  if (!pattern) return []
+  switch (pattern.type) {
+    case 'Identifier': return [String(pattern.name)]
+    case 'ObjectPattern': return list(pattern, 'properties').flatMap(property => patternNames(property.type === 'RestElement' ? field(property, 'argument') : field(property, 'value')))
+    case 'ArrayPattern': return list(pattern, 'elements').flatMap(patternNames)
+    case 'AssignmentPattern': return patternNames(field(pattern, 'left'))
+    case 'RestElement': return patternNames(field(pattern, 'argument'))
+    case 'TSParameterProperty': return patternNames(field(pattern, 'parameter'))
+    default: return []
+  }
+}
+
+type Module = SourceFile & { program: Node }
+
+const lineOf = (module: SourceFile, node: Node) => module.code.slice(0, node.start ?? 0).split('\n').length
+
+const parsedPrograms = new Map<string, Node>()
+
+function parseModule(source: SourceFile): Module {
+  const key = `${source.file}\0${source.code}`
+  let program = parsedPrograms.get(key)
+  if (!program) {
+    const parsed = parseSync(source.file, source.code, { lang: source.file.endsWith('.tsx') ? 'tsx' : 'ts' })
+    if (parsed.errors.length) throw new Error(`${source.file}: ${parsed.errors.map(error => error.message).join('; ')}`)
+    program = parsed.program as unknown as Node
+    parsedPrograms.set(key, program)
+  }
+  return { ...source, program }
+}
+
 
 function isNode(value: unknown): value is Node {
   return typeof value === 'object' && value !== null && typeof (value as Node).type === 'string'
@@ -3669,6 +3868,72 @@ function resolveRouters(routers: SourceRouter[]): ResolvedRouter[] {
   return all.filter(router => !mounted.has(router.name))
 }
 
+type PathReadCount = { file: string; declaration: string; reads: number; lines: number[] }
+
+/** The top-level declarations of a module, each with the name that pathReaders uses for it. */
+function topLevelDeclarations(program: Node): { name: string; node: Node }[] {
+  return list(program, 'body').flatMap(statement => {
+    if (statement.type === 'ExportDefaultDeclaration') {
+      const declaration = field(statement, 'declaration')
+      return declaration ? [{ name: nameOf(field(declaration, 'id')) ?? 'default', node: declaration }] : []
+    }
+    const declaration = statement.type === 'ExportNamedDeclaration' ? field(statement, 'declaration') ?? statement : statement
+    if (declaration.type === 'VariableDeclaration') {
+      return list(declaration, 'declarations').map(declarator => ({ name: patternNames(field(declarator, 'id')).join(', ') || '(module)', node: declarator }))
+    }
+    const id = ['FunctionDeclaration', 'ClassDeclaration', 'TSEnumDeclaration'].includes(declaration.type) ? nameOf(field(declaration, 'id')) : undefined
+    return [{ name: id ?? '(module)', node: declaration }]
+  })
+}
+
+/** Every read of a path in non-test src, by top-level declaration. */
+function pathReadCounts(sources: SourceFile[]): PathReadCount[] {
+  const counts = new Map<string, PathReadCount>()
+  for (const module of sources.map(parseModule)) {
+    const matchers = new Set<string>()
+    for (const statement of list(module.program, 'body')) {
+      if (statement.type !== 'ImportDeclaration' || field(statement, 'source')?.value !== 'react-router-dom') continue
+      for (const item of list(statement, 'specifiers')) {
+        if (item.type === 'ImportSpecifier' && pathMatchers.has(nameOf(field(item, 'imported')) ?? '')) matchers.add(nameOf(field(item, 'local'))!)
+      }
+    }
+    for (const { name, node } of topLevelDeclarations(module.program)) {
+      if (node.type === 'ImportDeclaration') continue
+      const lines: number[] = []
+      visitValues(node, (child, parent, key) => {
+        const read = (child.type === 'MemberExpression' && staticKey(child) === 'pathname')
+          || (child.type === 'Property' && parent?.type === 'ObjectPattern' && staticKey(child) === 'pathname')
+          || (child.type === 'Identifier' && matchers.has(String(child.name)) && namesVariable(parent, key))
+        if (read) lines.push(lineOf(module, child))
+      })
+      if (!lines.length) continue
+      const id = `${module.file}\0${name}`
+      const count = counts.get(id) ?? { file: module.file, declaration: name, reads: 0, lines: [] }
+      count.reads += lines.length
+      count.lines.push(...lines)
+      counts.set(id, count)
+    }
+  }
+  return [...counts.values()]
+}
+
+/** Every disagreement between the path reads in src and pathReaders. */
+function pathReaderProblems(counts: PathReadCount[], readers: PathReader[]): string[] {
+  const problems: string[] = []
+  const matches = (reader: PathReader, count: PathReadCount) => reader.file === count.file && reader.declaration === count.declaration
+  for (const count of counts) {
+    const reader = readers.find(item => matches(item, count))
+    const where = `${count.declaration} in ${count.file} reads the path ${count.reads} time${count.reads === 1 ? '' : 's'} (line ${count.lines.join(', ')})`
+    if (!reader) problems.push(`${where} and has no pathReaders entry; list the routes of the pages that the reads choose outside every <Route> so the inventory audits them, or say why they choose none`)
+    else if (reader.reads !== count.reads) problems.push(`${where}, but its pathReaders entry allows ${reader.reads}; update the entry with the routes of any page that a new read chooses, or with why it chooses none`)
+  }
+  for (const reader of readers) {
+    if (!counts.some(count => matches(reader, count))) problems.push(`pathReaders lists ${reader.declaration} in ${reader.file}, which reads no path; remove the entry`)
+    if (!reader.reason.trim()) problems.push(`pathReaders entry for ${reader.declaration} in ${reader.file} gives no reason`)
+  }
+  return problems
+}
+
 type InventoryEntry = { path: string; routers: string[]; redirectToHome: boolean; redirects: boolean; label: string }
 
 function inventoryEntries(consoleRoutes: ConsoleRouteCase[], surfaces: EntrySurfaceCase[], scopeRouters: Record<ConsoleRouteCase['scope'], string[]>): InventoryEntry[] {
@@ -3684,6 +3949,8 @@ type Inventory = {
   scopeRouters: Record<ConsoleRouteCase['scope'], string[]>
   exclusions: RouteExclusion[]
   tabKeys: string[]
+  /** The routes that pathReaders entries serve outside every <Route>, each under the name of its declaration. */
+  servedRoutes: Record<string, string[]>
 }
 
 /**
@@ -3692,13 +3959,11 @@ type Inventory = {
  */
 function inventoryProblems(routers: ResolvedRouter[], inventory: Inventory): string[] {
   const problems: string[] = []
-  const publicRouter: ResolvedRouter = { name: 'public', objects: [], handles: [] }
-  for (const pattern of publicStatusRoutes) {
-    const handle: RouteHandle = { router: 'public', pattern, splat: false }
-    publicRouter.handles.push(handle)
-    publicRouter.objects.push({ path: pattern, handle })
-  }
-  const all = [...routers, publicRouter]
+  const servedRouters = Object.entries(inventory.servedRoutes).map(([name, patterns]): ResolvedRouter => {
+    const handles = patterns.map(pattern => ({ router: name, pattern, splat: false }))
+    return { name, objects: handles.map(handle => ({ path: handle.pattern, handle })), handles }
+  })
+  const all = [...routers, ...servedRouters]
   const byName = new Map(all.map(router => [router.name, router]))
   const handles = all.flatMap(router => router.handles)
   const covered = new Set<RouteHandle>()
@@ -3707,7 +3972,7 @@ function inventoryProblems(routers: ResolvedRouter[], inventory: Inventory): str
   for (const entry of inventoryEntries(inventory.consoleRoutes, inventory.surfaces, inventory.scopeRouters)) {
     for (const name of entry.routers) {
       const router = byName.get(name)
-      if (!router) { problems.push(`inventory entry ${entry.label} names router ${name}, which no <Routes> in src renders`); continue }
+      if (!router) { problems.push(`inventory entry ${entry.label} names router ${name}, which no <Routes> in src renders and no pathReaders entry serves`); continue }
       const matches = matchRoutes(router.objects, entry.path)
       if (!matches) { problems.push(`inventory entry ${entry.label} matches no route of ${name}; remove it or restore its route`); continue }
       const leaf = matches.at(-1)!.route.handle as RouteHandle
@@ -3976,18 +4241,30 @@ function sourceFiles(directory = sourceRoot, configRoot = repositoryRoot): Sourc
   return files.sort(compareSourceFiles)
 }
 
+function servedRoutesOf(readers: PathReader[]): Record<string, string[]> {
+  const routes: Record<string, string[]> = {}
+  for (const reader of readers) {
+    if (!reader.serves) continue
+    if (routes[reader.declaration]) throw new Error(`pathReaders has two entries named ${reader.declaration} that serve routes; the comparison names the router of their routes after the declaration, so rename one`)
+    routes[reader.declaration] = reader.serves
+  }
+  return routes
+}
+
 const repositoryInventory: Inventory = {
   consoleRoutes: allConsoleRoutes,
   surfaces: entrySurfaces,
   scopeRouters: consoleScopeRouters,
   exclusions: routesWithoutInventoryEntry,
   tabKeys: extractTabKeys(unitDetailFile, readFileSync(join(repositoryRoot, unitDetailFile), 'utf8'), unitDetailTabsVariable),
+  servedRoutes: servedRoutesOf(pathReaders),
 }
 
 describe('console route inventory', () => {
   const sources = sourceFiles()
   const routers = extractRouters(sources)
   const resolved = resolveRouters(routers)
+  const pathCounts = pathReadCounts(sources)
 
   it('reads the routers that the console renders', () => {
     expect(resolved.map(router => router.name)).toEqual(expect.arrayContaining(['AuthRoutes', 'PlatformShell', 'Shell', 'TotpEnrollmentShell']))
@@ -4023,8 +4300,65 @@ export function SharedRoutes() { return <Routes><Route path="/two" /></Routes> }
     )
   })
 
-  it('lists every route and UnitDetail tab, and every entry still reaches its route', () => {
+  it('lists every route, page chosen from the path, and UnitDetail tab, and every entry still reaches its route', () => {
     expect(inventoryProblems(resolved, repositoryInventory)).toEqual([])
+  })
+
+  it('classifies every read of the path', () => {
+    expect(pathReaderProblems(pathCounts, pathReaders)).toEqual([])
+  })
+
+  describe('the path check', () => {
+    const reader = {
+      file: 'src/reader.tsx',
+      code: `import { matchPath, useLocation, useMatch } from 'react-router-dom'
+export function Kiosk() {
+  const location = useLocation()
+  const { pathname } = location
+  if (location.pathname === '/kiosk' || window.location['pathname'].startsWith('/kiosk/')) return <main />
+  const match = useMatch('/kiosk/:id')
+  return matchPath('/kiosk', pathname) || match ? <main /> : null
+}
+const initial = window.location.pathname
+export default function () { return <a href="/" title="pathname">{initial}</a> }`,
+    }
+
+    it('counts every path read and path matcher by top-level declaration', () => {
+      expect(pathReadCounts([reader])).toEqual([
+        { file: 'src/reader.tsx', declaration: 'Kiosk', reads: 5, lines: [4, 5, 5, 6, 7] },
+        { file: 'src/reader.tsx', declaration: 'initial', reads: 1, lines: [9] },
+      ])
+    })
+
+    it('fails on a read that no entry classifies, on a changed count, and on a stale or unexplained entry', () => {
+      expect(pathReaderProblems(pathReadCounts([reader]), [
+        { file: 'src/reader.tsx', declaration: 'Kiosk', reads: 4, reason: 'Fixture.' },
+        { file: 'src/reader.tsx', declaration: 'Gone', reads: 1, reason: ' ' },
+      ])).toEqual([
+        'Kiosk in src/reader.tsx reads the path 5 times (line 4, 5, 5, 6, 7), but its pathReaders entry allows 4; update the entry with the routes of any page that a new read chooses, or with why it chooses none',
+        'initial in src/reader.tsx reads the path 1 time (line 9) and has no pathReaders entry; list the routes of the pages that the reads choose outside every <Route> so the inventory audits them, or say why they choose none',
+        'pathReaders lists Gone in src/reader.tsx, which reads no path; remove the entry',
+        'pathReaders entry for Gone in src/reader.tsx gives no reason',
+      ])
+    })
+
+    it('fails when AppContent chooses another page from the path', () => {
+      const main = sources.find(source => source.file === 'src/main.tsx')!
+      const anchor = '  if (isPublic) return <PublicDashboard slug={publicSlug} />\n'
+      expect(main.code).toContain(anchor)
+      const probe = { ...main, code: main.code.replace(anchor, `  if (location.pathname === '/kiosk') return <PublicDashboard slug="kiosk" />\n${anchor}`) }
+      const counts = [...pathCounts.filter(count => count.file !== main.file), ...pathReadCounts([probe])]
+      // No <Route> declares the probe's page. The path check refuses it until
+      // its entry lists the page, which then needs an inventory entry.
+      expect(pathReaderProblems(counts, pathReaders)).toEqual([
+        expect.stringMatching(/^AppContent in src\/main\.tsx reads the path 3 times \(line \d+, \d+, \d+\), but its pathReaders entry allows 2;/),
+      ])
+      const served = pathReaders.map(entry => entry.declaration === 'AppContent' ? { ...entry, reads: 3, serves: [...entry.serves!, '/kiosk'] } : entry)
+      expect(pathReaderProblems(counts, served)).toEqual([])
+      expect(inventoryProblems(resolved, { ...repositoryInventory, servedRoutes: servedRoutesOf(served) })).toEqual([
+        'route AppContent /kiosk has no entry in e2e/console-routes.ts; add one so the axe audit and role matrix visit it, or exclude it with a reason in routesWithoutInventoryEntry',
+      ])
+    })
   })
 
   describe('the check itself', () => {
@@ -4047,9 +4381,10 @@ export function Shell({ admin }: { admin: boolean }) {
         { path: '/unknown', scope: 'unit', redirectToHome: true },
       ],
       surfaces: [
-        { path: '/public', router: 'public', state: 'public', heading: '' },
-        { path: '/public/unit', router: 'public', state: 'public', heading: '' },
+        { path: '/public', router: 'AppContent', state: 'public', heading: '' },
+        { path: '/public/unit', router: 'AppContent', state: 'public', heading: '' },
       ],
+      servedRoutes: { AppContent: ['/public', '/public/:slug'] },
       scopeRouters: { unit: ['Shell'], platform: [], shared: ['Shell'] },
       exclusions: [],
       tabKeys: [],
@@ -4112,9 +4447,10 @@ export function AuthRoutes() { return <Routes><Route path="*" element={<Fallback
       const inventory: Inventory = {
         consoleRoutes: [],
         surfaces: [
-          { path: '/public', router: 'public', state: 'public', heading: '' },
-          { path: '/public/unit', router: 'public', state: 'public', heading: '' },
+          { path: '/public', router: 'AppContent', state: 'public', heading: '' },
+          { path: '/public/unit', router: 'AppContent', state: 'public', heading: '' },
         ],
+        servedRoutes: { AppContent: ['/public', '/public/:slug'] },
         scopeRouters: { unit: ['AuthRoutes'], platform: [], shared: [] },
         exclusions: [{ router: 'AuthRoutes', path: '*', reason: 'The fallback has no page of its own.' }],
         tabKeys: [],
@@ -4383,9 +4719,10 @@ export function Fallback() { return React.createElement(nestedRoutes) }
       const inventory: Inventory = {
         consoleRoutes: [],
         surfaces: [
-          { path: '/public', router: 'public', state: 'public', heading: '' },
-          { path: '/public/unit', router: 'public', state: 'public', heading: '' },
+          { path: '/public', router: 'AppContent', state: 'public', heading: '' },
+          { path: '/public/unit', router: 'AppContent', state: 'public', heading: '' },
         ],
+        servedRoutes: { AppContent: ['/public', '/public/:slug'] },
         scopeRouters: { unit: ['AuthRoutes'], platform: [], shared: [] },
         exclusions: [{ router: 'AuthRoutes', path: '*', reason: 'The fallback has no page of its own.' }],
         tabKeys: [],
@@ -4421,6 +4758,7 @@ export function AuthRoutes() { return <Routes><Route path="*" element={<Wrapped 
       const exactInventory: Inventory = {
         consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
         surfaces: [],
+        servedRoutes: {},
         scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
         exclusions: [],
         tabKeys: [],
@@ -4472,6 +4810,7 @@ export function Shell() { return <Routes><Route path="/known/*" element={<Nested
       const exactInventory: Inventory = {
         consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
         surfaces: [],
+        servedRoutes: {},
         scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
         exclusions: [],
         tabKeys: [],
@@ -5005,6 +5344,7 @@ export function Shell() {
       const exactInventory: Inventory = {
         consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
         surfaces: [],
+        servedRoutes: {},
         scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
         exclusions: [],
         tabKeys: [],
@@ -5097,6 +5437,7 @@ export function Shell() {
       const exactInventory: Inventory = {
         consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
         surfaces: [],
+        servedRoutes: {},
         scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
         exclusions: [],
         tabKeys: [],
@@ -5120,6 +5461,7 @@ export function Shell() {
       const exactInventory: Inventory = {
         consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
         surfaces: [],
+        servedRoutes: {},
         scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
         exclusions: [],
         tabKeys: [],
@@ -5166,6 +5508,7 @@ export function Shell() {
       const exactInventory: Inventory = {
         consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
         surfaces: [],
+        servedRoutes: {},
         scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
         exclusions: [],
         tabKeys: [],
@@ -5191,6 +5534,7 @@ export function Shell() {
       const exactInventory: Inventory = {
         consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
         surfaces: [],
+        servedRoutes: {},
         scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
         exclusions: [],
         tabKeys: [],
@@ -5277,6 +5621,7 @@ export function Shell() { return <Routes><Route path="*" element={<Fallback />} 
       const exactInventory: Inventory = {
         consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
         surfaces: [],
+        servedRoutes: {},
         scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
         exclusions: [],
         tabKeys: [],
@@ -5337,6 +5682,7 @@ export function Shell() { return <Routes><Route path="/known/*" element={<Nested
       const inventory: Inventory = {
         consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
         surfaces: [],
+        servedRoutes: {},
         scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
         exclusions: [],
         tabKeys: [],
@@ -5390,9 +5736,10 @@ export function Shell({ runtimePage }: { runtimePage: React.ComponentType }) {
       const exactInventory: Inventory = {
         consoleRoutes: [{ path: '/known/child', scope: 'unit' }],
         surfaces: [
-          { path: '/public', router: 'public', state: 'public', heading: '' },
-          { path: '/public/unit', router: 'public', state: 'public', heading: '' },
+          { path: '/public', router: 'AppContent', state: 'public', heading: '' },
+          { path: '/public/unit', router: 'AppContent', state: 'public', heading: '' },
         ],
+        servedRoutes: { AppContent: ['/public', '/public/:slug'] },
         scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
         exclusions: [],
         tabKeys: [],
@@ -5456,9 +5803,10 @@ export function Shell() {
       const inventory: Inventory = {
         consoleRoutes: [{ path: '/known', scope: 'unit', allowedPath: '/known' }],
         surfaces: [
-          { path: '/public', router: 'public', state: 'public', heading: '' },
-          { path: '/public/unit', router: 'public', state: 'public', heading: '' },
+          { path: '/public', router: 'AppContent', state: 'public', heading: '' },
+          { path: '/public/unit', router: 'AppContent', state: 'public', heading: '' },
         ],
+        servedRoutes: { AppContent: ['/public', '/public/:slug'] },
         scopeRouters: { unit: ['Shell'], platform: [], shared: [] },
         exclusions: [{ router: 'Shell', path: '*', reason: 'The shell fallback has no page of its own.' }],
         tabKeys: [],
@@ -5538,6 +5886,20 @@ export function Shell() {
         'exclusion Shell / gives no reason',
         'exclusion Shell / also has an inventory entry; remove one of them',
       ])
+    })
+
+    it('requires an entry surface for every route that a path reader serves', () => {
+      const surface = (path: string): EntrySurfaceCase => ({ path, router: 'AppContent', state: 'public', heading: '' })
+      const servedRoutes = { AppContent: ['/public', '/public/:slug', '/activate'] }
+      expect(problems(baseRoutes, { servedRoutes, surfaces: [surface('/public'), surface('/public/unit'), { ...surface('/activate#token=T'), state: 'signed-in' }] })).toEqual([])
+      expect(problems(baseRoutes, { servedRoutes, surfaces: [surface('/public'), surface('/public/unit'), surface('/kiosk')] })).toEqual([
+        'inventory entry AppContent /kiosk matches no route of AppContent; remove it or restore its route',
+        'route AppContent /activate has no entry in e2e/console-routes.ts; add one so the axe audit and role matrix visit it, or exclude it with a reason in routesWithoutInventoryEntry',
+      ])
+      expect(() => servedRoutesOf([
+        { file: 'src/a.tsx', declaration: 'Dispatch', reads: 1, serves: ['/a'], reason: 'Fixture.' },
+        { file: 'src/b.tsx', declaration: 'Dispatch', reads: 1, serves: ['/b'], reason: 'Fixture.' },
+      ])).toThrow(/pathReaders has two entries named Dispatch that serve routes/)
     })
 
     it('checks the UnitDetail tabs against the tab entries', () => {

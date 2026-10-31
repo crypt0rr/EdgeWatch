@@ -420,6 +420,68 @@ func TestDeploymentScanDemandKeepsOtherUnitsJobsWhenOneUnitsSchedulesAreDense(t 
 	}
 }
 
+// A new App expands every schedule in its first estimate. One unit's jobs on
+// eight dense schedules in a timezone with daylight saving need more work
+// to expand than the request has, and come first in turn, but each
+// expansion first gets only a small share, so the other unit's jobs on 20
+// hourly schedules are all estimated, and the dense expansions get what is
+// left afterwards.
+func TestDeploymentScanDemandExpandsOrdinarySchedulesBeforeDenseOnes(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	application := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 10}}}
+	dense := []string{"* * * * *", "*/2 * * * *", "1-59/2 * * * *", "*/3 * * * *", "1-59/3 * * * *", "2-59/3 * * * *", "*/4 * * * *", "1-59/4 * * * *"}
+	const bound = 30_000
+	var denseWork int
+	for _, schedule := range dense {
+		expansion := &scanScheduleSimulationBudget{limit: scanScheduleJobWorkLimit}
+		if _, err := schedulePatternWithBudget(ctx, "Europe/Amsterdam", schedule, expansion); err != nil {
+			t.Fatal(err)
+		}
+		if expansion.used <= scanScheduleJobFirstPassWorkLimit {
+			t.Fatalf("%q expansion used %d work units; want more than a first-pass share", schedule, expansion.used)
+		}
+		denseWork += expansion.used
+	}
+	if denseWork <= bound {
+		t.Fatalf("dense expansions use %d work units; want more than the bound, %d", denseWork, bound)
+	}
+	create := func(ts *store.TenantStore, name, schedule string, duration time.Duration) {
+		t.Helper()
+		record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+			Name: name, Schedule: schedule, Timezone: "Europe/Amsterdam",
+			Targets: []string{"192.0.2.1"},
+			TCP:     &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+		}), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		insertCompletedScan(t, db, record, name+"-scan", time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), duration)
+	}
+	// The default unit comes first, and its runs fit every gap, so its jobs
+	// need only their expansions.
+	for i, schedule := range dense {
+		create(defaultTenant(db), fmt.Sprintf("dense-%d", i), schedule, 30*time.Second)
+	}
+	_, ordinary := demandUnit(t, db, "Ordinary", "ordinary")
+	const hourlyJobs = 20
+	for i := range hourlyJobs {
+		create(ordinary, fmt.Sprintf("hourly-%02d", i), fmt.Sprintf("%d * * * *", i), 10*time.Minute)
+	}
+	demand, err := application.deploymentScanDemandWithBudget(ctx, &scanScheduleSimulationBudget{limit: bound})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demand.EnabledJobs != len(dense)+hourlyJobs || demand.HistoryJobs+demand.WorkLimitedJobs != demand.EnabledJobs || demand.WorkLimitedJobs == 0 || demand.HistoryJobs <= hourlyJobs {
+		t.Fatalf("deployment demand = %+v; want every hourly job and some dense ones estimated, and the rest work-limited", demand)
+	}
+	own, err := application.ScanSlotDemand(ctx, ordinary)
+	if err != nil || own.HistoryJobs != hourlyJobs {
+		t.Fatalf("ordinary unit's own demand = %+v, error %v; want its %d jobs estimated", own, err, hourlyJobs)
+	}
+}
+
 // Hourly jobs in a timezone with daylight saving whose runs take 50 to 70
 // minutes, each recorded to the millisecond, skip ticks. A tick falls on a
 // whole minute, so the runs that end in the same minute block the same

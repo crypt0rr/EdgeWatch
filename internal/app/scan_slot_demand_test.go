@@ -186,6 +186,109 @@ func TestTenantScanSlotDemandEstimatesDistinctDailySchedulesOnTheFirstRequest(t 
 	}
 }
 
+// A request expands each schedule once, whether or not the App's cache can
+// keep it. With the cache full of schedules that rank before it, so that it
+// refuses this one, 50 jobs on one hourly schedule take the work of one
+// expansion, and the next request expands it once again.
+func TestScanDemandExpandsEachScheduleOncePerRequest(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	ts := defaultTenant(db)
+	const jobs = 50
+	for i := range jobs {
+		record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+			Name: fmt.Sprintf("hourly-%02d", i), Schedule: "0 * * * *", Timezone: "Europe/Amsterdam",
+			Targets: []string{"192.0.2.1"},
+			TCP:     &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+		}), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		insertCompletedScan(t, db, record, fmt.Sprintf("hourly-scan-%02d", i), time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), 10*time.Minute+time.Duration(i)*time.Second)
+	}
+	app := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}
+	key := scanRunsPerDayKey{timezone: "Europe/Amsterdam", schedule: "0 * * * *"}
+	for i := range scanRunsPerDayCacheLimit {
+		app.scanSlotDemand.retainRunsPerDay(scanRunsPerDayKey{timezone: "UTC", schedule: fmt.Sprintf("filler-%04d", i)}, scanRunsPerDayValue{})
+	}
+	expansion := &scanScheduleSimulationBudget{limit: scanScheduleJobWorkLimit}
+	if _, err := schedulePatternWithBudget(ctx, key.timezone, key.schedule, expansion); err != nil {
+		t.Fatal(err)
+	}
+	computed := func() (int, bool) {
+		app.scanSlotDemand.mu.Lock()
+		defer app.scanSlotDemand.mu.Unlock()
+		_, retained := app.scanSlotDemand.runsPerDay[key]
+		return app.scanSlotDemand.runsPerDayComputed, retained
+	}
+	for request := 1; request <= 2; request++ {
+		budget := &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
+		demand, err := app.scheduledScanDemandWithSimulationCache(ctx, ts, nil, budget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if demand.HistoryJobs != jobs || demand.WorkLimitedJobs != 0 {
+			t.Fatalf("request %d: demand = %+v; want all %d jobs estimated", request, demand, jobs)
+		}
+		if got, retained := computed(); retained || got != request || budget.used != expansion.used {
+			t.Fatalf("request %d: %d expansions in all, retained %t, %d work units; want the refused schedule expanded once in each request, %d work units", request, got, retained, budget.used, expansion.used)
+		}
+	}
+}
+
+// In the first pass an expansion gets a job's first-pass share. A dense
+// schedule's expansion that runs over it waits for the second pass, and the
+// schedule's other jobs wait without spending another share; in the second
+// pass it gets the job's whole limit. Once the first pass has spent its
+// half of the request's work, an expansion waits without spending any. An
+// expansion that the request's remaining work cannot finish fails for every
+// job with the schedule.
+func TestScanDemandWorkGivesFirstPassExpansionsAShare(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dense := config.Job{Schedule: "*/2 * * * *", Timezone: "Europe/Amsterdam"}
+	whole := &scanScheduleSimulationBudget{limit: scanScheduleJobWorkLimit}
+	if _, err := schedulePatternWithBudget(ctx, dense.Timezone, dense.Schedule, whole); err != nil || whole.used <= scanScheduleJobFirstPassWorkLimit {
+		t.Fatalf("dense expansion used %d work units, error %v; want more than a first-pass share", whole.used, err)
+	}
+	app := &App{Config: &config.Config{}}
+	work := newScanDemandWork(nil, nil)
+	if _, err := work.schedule(ctx, app, dense, true); !errors.Is(err, errScanDemandDeferred) || work.budget.used != scanScheduleJobFirstPassWorkLimit {
+		t.Fatalf("first-pass dense expansion = error %v after %d work units; want it deferred after the share, %d", err, work.budget.used, scanScheduleJobFirstPassWorkLimit)
+	}
+	if _, err := work.schedule(ctx, app, dense, true); !errors.Is(err, errScanDemandDeferred) || work.budget.used != scanScheduleJobFirstPassWorkLimit {
+		t.Fatalf("first-pass expansion of a deferred schedule = error %v after %d work units; want it deferred without work", err, work.budget.used)
+	}
+	value, err := work.schedule(ctx, app, dense, false)
+	if err != nil || !value.ok || work.budget.used != scanScheduleJobFirstPassWorkLimit+whole.used {
+		t.Fatalf("second-pass dense expansion = %+v, error %v after %d work units; want it expanded with %d more", value.ok, err, work.budget.used, whole.used)
+	}
+	if again, err := work.schedule(ctx, app, dense, true); err != nil || again.runsPerDay != value.runsPerDay {
+		t.Fatalf("expansion of an expanded schedule = %+v, error %v; want the expansion", again.ok, err)
+	}
+
+	hourly := config.Job{Schedule: "0 * * * *", Timezone: "Europe/Amsterdam"}
+	work = newScanDemandWork(nil, nil)
+	work.budget.used = work.firstPassLimit
+	if _, err := work.schedule(ctx, &App{Config: &config.Config{}}, hourly, true); !errors.Is(err, errScanDemandDeferred) || work.budget.used != work.firstPassLimit {
+		t.Fatalf("first-pass expansion after half of the request = error %v after %d work units; want it deferred without work", err, work.budget.used-work.firstPassLimit)
+	}
+	if value, err := work.schedule(ctx, &App{Config: &config.Config{}}, hourly, false); err != nil || !value.ok {
+		t.Fatalf("second-pass expansion after half of the request = %+v, error %v; want it expanded", value.ok, err)
+	}
+
+	for _, firstPass := range []bool{true, false} {
+		work = newScanDemandWork(nil, &scanScheduleSimulationBudget{limit: 10})
+		if _, err := work.schedule(ctx, &App{Config: &config.Config{}}, hourly, firstPass); !errors.Is(err, errScheduleSimulationBudgetExceeded) || work.budget.used != 10 {
+			t.Fatalf("expansion beyond the request's work, first pass %t = error %v after %d work units; want it exceeded", firstPass, err, work.budget.used)
+		}
+		if _, err := work.schedule(ctx, &App{Config: &config.Config{}}, hourly, false); !errors.Is(err, errScheduleSimulationBudgetExceeded) {
+			t.Fatalf("second expansion beyond the request's work, first pass %t = error %v; want it exceeded", firstPass, err)
+		}
+	}
+}
+
 func TestTenantDemandSharesExpansionAndProjectionWorkBudget(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

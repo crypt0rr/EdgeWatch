@@ -40,13 +40,15 @@ const (
 	scanScheduleRequestWorkLimit = 540_000
 	// scanScheduleJobWorkLimit bounds the work of expanding one job's
 	// schedule and, separately, of projecting its runs on that schedule. A
-	// request takes its units' jobs in turn, and each job's projections
-	// first get only scanScheduleJobFirstPassWorkLimit, and only until half
-	// of the request's work is spent; the jobs that need more, or that came
-	// later, get the rest of their limit after every other job. A projection
-	// that a schedule's known work shows to need more than the share waits
-	// without spending it, so dense schedules cannot spend the request's
-	// work before ordinary jobs are estimated.
+	// request takes its units' jobs in turn, and each job's expansion and
+	// projections first get only scanScheduleJobFirstPassWorkLimit each,
+	// and only until half of the request's work is spent; the jobs that need
+	// more, or that came later, get the rest of their limit after every
+	// other job. A projection that a schedule's known work shows to need
+	// more than the share waits without spending it, and an expansion or
+	// projection that runs over the share spends it once for its schedule,
+	// so dense schedules cannot spend the request's work before ordinary
+	// jobs are estimated.
 	scanScheduleJobWorkLimit          = 50_000
 	scanScheduleJobFirstPassWorkLimit = 1_000
 	scanScheduleSampleStartYear       = 2024
@@ -135,13 +137,18 @@ func (a *App) scheduledScanDemandWithSimulationCache(ctx context.Context, ts *st
 }
 
 // scanDemandWork is the schedule work of one tenant or deployment demand
-// request: the jobs it still has to project, the schedule-duration
-// projections it has computed, which contain no tenant data, and its work
-// budget.
+// request: the jobs it still has to project, the schedule expansions and
+// schedule-duration projections it has computed, which contain no tenant
+// data, and its work budget.
 type scanDemandWork struct {
 	simulations map[scanScheduleDurationKey]scanScheduleDurationEstimate
-	budget      *scanScheduleSimulationBudget
-	jobs        []scanDemandJob
+	// schedules holds every expansion of the request by timezone and
+	// schedule text, whether or not the App's cache keeps it, and those
+	// that failed or wait for the second pass, so that each schedule is
+	// expanded at most once in each pass.
+	schedules map[scanRunsPerDayKey]scanDemandSchedule
+	budget    *scanScheduleSimulationBudget
+	jobs      []scanDemandJob
 	// units counts the units whose jobs the request has collected.
 	units int
 	// firstPassLimit is the request's work after which the first pass gives
@@ -168,6 +175,7 @@ func newScanDemandWork(simulations map[scanScheduleDurationKey]scanScheduleDurat
 	}
 	return &scanDemandWork{
 		simulations: simulations, budget: budget,
+		schedules:         make(map[scanRunsPerDayKey]scanDemandSchedule),
 		firstPassLimit:    budget.used + max(budget.limit-budget.used, 0)/2,
 		deferred:          make(map[scanScheduleDurationKey]bool),
 		deferredSchedules: make(map[scanScheduleIdentity]bool),
@@ -175,9 +183,57 @@ func newScanDemandWork(simulations map[scanScheduleDurationKey]scanScheduleDurat
 	}
 }
 
-// errScanDemandDeferred reports that a job's projection waits for the
-// second pass.
+// errScanDemandDeferred reports that a job's expansion or projection waits
+// for the second pass.
 var errScanDemandDeferred = errors.New("scan demand projection deferred to the second pass")
+
+// scanDemandSchedule is the outcome of a request's expansion of a schedule:
+// its pattern; or err, errScheduleSimulationBudgetExceeded when it needed
+// more than a job's whole limit or the request's remaining work; or
+// deferred when it needed more than a job's first-pass share.
+type scanDemandSchedule struct {
+	value    scanRunsPerDayValue
+	err      error
+	deferred bool
+}
+
+// schedule returns the expansion of the job's schedule: from the request's
+// memo, from the App's cache, which takes no work, or by expanding it. In
+// the first pass an expansion gets only the job's first-pass share, and none
+// once the first pass has spent its half of the request's work; one that
+// does not fit waits for the second pass, with errScanDemandDeferred, and
+// the schedule's other jobs wait without spending another share. In the
+// second pass it gets the job's whole limit. An expansion that needs more
+// than that limit, or than the request's remaining work, fails for every
+// job with the schedule without spending more.
+func (work *scanDemandWork) schedule(ctx context.Context, a *App, job config.Job, firstPass bool) (scanRunsPerDayValue, error) {
+	key := a.scanRunsPerDayKey(job)
+	if memo, found := work.schedules[key]; found {
+		if !memo.deferred {
+			return memo.value, memo.err
+		}
+		if firstPass {
+			return scanRunsPerDayValue{}, errScanDemandDeferred
+		}
+	}
+	limit := scanScheduleJobWorkLimit
+	if firstPass {
+		limit = scanScheduleJobFirstPassWorkLimit
+		if work.budget.used >= work.firstPassLimit {
+			limit = 0
+		}
+	}
+	value, err := a.scanJobScheduleWithBudget(ctx, job, &scanScheduleSimulationBudget{limit: limit, parent: work.budget})
+	if errors.Is(err, errScheduleSimulationBudgetExceeded) && firstPass && !work.budget.exhausted() {
+		work.schedules[key] = scanDemandSchedule{deferred: true}
+		return scanRunsPerDayValue{}, errScanDemandDeferred
+	}
+	if err != nil && !errors.Is(err, errScheduleSimulationBudgetExceeded) {
+		return scanRunsPerDayValue{}, err
+	}
+	work.schedules[key] = scanDemandSchedule{value: value, err: err}
+	return value, err
+}
 
 // scanDemandJob is an enabled scheduled job whose demand a request adds to
 // its unit's estimate once it has projected the job's schedule.
@@ -319,18 +375,19 @@ func (a *App) collectScheduledScanDemand(ctx context.Context, ts *store.TenantSt
 	return nil
 }
 
-// projectScheduledScanDemand projects the schedule of every queued job and
-// adds its demand to its unit. It takes the units' jobs in turn, each unit's
-// first job, then each unit's second, and so on. In the first pass each
-// job's projections get only a small share of its work limit, and none at
-// all once half of the request's work is spent. A job whose projection needs
-// more than its share, by the schedule's known work or by trying it, or
-// that the first pass gave no share, waits for the second pass, which gives
-// the waiting jobs, in the same order, their whole limit from what is left.
-// Ordinary jobs are therefore projected before dense schedules take more,
-// and those cannot spend the request's work for the second pass in the
-// first. A job that its own limit or the request's remaining work cannot
-// finish counts as work-limited and adds nothing.
+// projectScheduledScanDemand expands the schedule of every queued job,
+// projects its runs on it, and adds its demand to its unit. It takes the
+// units' jobs in turn, each unit's first job, then each unit's second, and
+// so on. In the first pass each job's expansion and projections get only a
+// small share of its work limit, and none at all once half of the request's
+// work is spent. A job whose expansion or projection needs more than its
+// share, by the schedule's known work or by trying it, or that the first
+// pass gave no share, waits for the second pass, which gives the waiting
+// jobs, in the same order, their whole limit from what is left. Ordinary
+// jobs are therefore estimated before dense schedules take more, and those
+// cannot spend the request's work for the second pass in the first. A job
+// that its own limit or the request's remaining work cannot finish counts
+// as work-limited and adds nothing.
 func (a *App) projectScheduledScanDemand(ctx context.Context, work *scanDemandWork) error {
 	order := make([]int, len(work.jobs))
 	for i := range order {
@@ -363,20 +420,20 @@ func (a *App) projectScheduledScanDemand(ctx context.Context, work *scanDemandWo
 
 // projectScanDemandJob expands the job's schedule and projects its runs on
 // it, and adds the job to its unit's estimate and counts. Each step gets its
-// own work limit, of which the projection gets only the first-pass share in
-// the first pass. It reports retry when the projection waits for the second
-// pass, and leaves the job uncounted until then. A job without any run to
-// project is unestimated, whatever its schedule, so its schedule is not
-// expanded.
+// own work limit, of which it gets only the first-pass share in the first
+// pass. It reports retry when the expansion or the projection waits for the
+// second pass, and leaves the job uncounted until then. A job without any
+// run to project is unestimated, whatever its schedule, so its schedule is
+// not expanded.
 func (a *App) projectScanDemandJob(ctx context.Context, work *scanDemandWork, job *scanDemandJob, firstPass bool) (retry bool, err error) {
 	if len(job.runs) == 0 {
 		job.unit.UnestimatedJobs++
 		return false, nil
 	}
-	// An expansion is shared by every job with the schedule and remembered
-	// across requests, so it gets the whole limit in either pass.
-	expansion := &scanScheduleSimulationBudget{limit: scanScheduleJobWorkLimit, parent: work.budget}
-	schedule, err := a.scanJobScheduleWithBudget(ctx, job.job, expansion)
+	schedule, err := work.schedule(ctx, a, job.job, firstPass)
+	if errors.Is(err, errScanDemandDeferred) {
+		return true, nil
+	}
 	if errors.Is(err, errScheduleSimulationBudgetExceeded) {
 		job.unit.WorkLimitedJobs++
 		return false, nil
@@ -696,8 +753,16 @@ func (a *App) scanJobSchedule(ctx context.Context, job config.Job) (scanRunsPerD
 	return a.scanJobScheduleWithBudget(ctx, job, nil)
 }
 
+// scanRunsPerDayKey returns the timezone and text of the job's schedule.
+func (a *App) scanRunsPerDayKey(job config.Job) scanRunsPerDayKey {
+	return scanRunsPerDayKey{timezone: scheduleTimezone(job, a.Config.Timezone), schedule: job.Schedule}
+}
+
+// scanJobScheduleWithBudget returns the job's schedule pattern from the
+// App's cache, which takes no work, or expands it with budget and offers it
+// to the cache.
 func (a *App) scanJobScheduleWithBudget(ctx context.Context, job config.Job, budget *scanScheduleSimulationBudget) (scanRunsPerDayValue, error) {
-	key := scanRunsPerDayKey{timezone: scheduleTimezone(job, a.Config.Timezone), schedule: job.Schedule}
+	key := a.scanRunsPerDayKey(job)
 	cache := &a.scanSlotDemand
 	if err := ctx.Err(); err != nil {
 		return scanRunsPerDayValue{}, err

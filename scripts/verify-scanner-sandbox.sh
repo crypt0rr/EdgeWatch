@@ -1200,6 +1200,41 @@ scanner_gid() {
   docker exec "$container" awk '/^Gid:/{print $2; exit}' "/proc/$1/status"
 }
 
+# scanner_raw_sockets prints how many packet, raw, and raw6 sockets the
+# scanner UID $1 owns in the network namespace the container uses (the host's,
+# with --network host). The kernel lists each socket's owner UID in column 8
+# of these tables, so no access to the scanner's descriptors is needed, and
+# each scanner runs under its own leased UID. A table missing on a host
+# without IPv6 counts as empty.
+scanner_raw_sockets() {
+  docker exec "$container" sh -c 'cat /proc/net/packet /proc/net/raw /proc/net/raw6 2>/dev/null | awk -v uid="$1" '"'"'$8 == uid { n++ } END { print n + 0 }'"'"'' sh "$1"
+}
+
+# Naabu falls back to a connect scan when its raw-packet setup fails, and
+# EdgeWatch's -silent hides the warning, so the results alone cannot show it.
+# A SYN Naabu must own a packet or raw socket while it runs.
+expect_naabu_raw_sockets() {
+  local uid=$1 sockets=0
+  for attempt in $(seq 1 60); do
+    sockets=$(scanner_raw_sockets "$uid")
+    [ "$sockets" -gt 0 ] && break
+    sleep 0.5
+  done
+  [ "$sockets" -gt 0 ] || fail "the SYN Naabu (UID $uid) owns no packet or raw socket, so it did not run a raw SYN scan"
+  echo "verified SYN Naabu raw packet sockets: UID=$uid sockets=$sockets" >&2
+}
+
+# A connect Naabu sends no raw packets, so it must not own such a socket.
+expect_naabu_no_raw_sockets() {
+  local uid=$1 sockets
+  for attempt in 1 2 3 4; do
+    sockets=$(scanner_raw_sockets "$uid")
+    [ "$sockets" -eq 0 ] || fail "the connect Naabu (UID $uid) owns $sockets packet or raw sockets"
+    sleep 0.5
+  done
+  echo "verified connect Naabu owns no raw packet socket: UID=$uid" >&2
+}
+
 scanner_process_starttime() {
   local starttime
   starttime=$(docker exec "$container" /bin/sh -c 'stat=$(cat "/proc/$1/stat") || exit 1; rest=${stat##*) }; set -- $rest; [ "$#" -ge 20 ] || exit 1; printf "%s\n" "${20}"' sh "$1") || return 1
@@ -2071,6 +2106,7 @@ naabu_pid=$(scanner_pid naabu)
 [ -n "$naabu_pid" ] || fail "the slow Naabu scan started no Naabu"
 expect_scanner_limits Naabu "$naabu_pid"
 expect_private_naabu_tmp "$naabu_pid" "0000000000003000" "0000000000002000"
+expect_naabu_raw_sockets "$naabu_uid"
 expect_private_scan_file "Naabu target list" "$naabu_pid" 'edgewatch-naabu-targets-*'
 expect_peer_denied_between_scanners "$naabu_uid" "0000000000003000" "/proc/$nmap_pid/fd/3" "Nmap XML descriptor" \
   "$nmap_pid" "$nmap_starttime" "$naabu_pid" "$naabu_starttime"
@@ -2177,6 +2213,7 @@ scan_id=$(printf '%s' "$started" | python3 -c 'import json, sys; print(json.load
 naabu_pid=$(scanner_pid naabu)
 [ -n "$naabu_pid" ] || fail "the proof-timeout Naabu scan started no Naabu"
 expect_private_naabu_tmp "$naabu_pid" "0000000000000000" "0000000000000000"
+expect_naabu_no_raw_sockets "$naabu_uid"
 quarantined_uid=$naabu_uid
 quarantined_gid=$naabu_gid
 quarantined_pid=$naabu_pid

@@ -227,8 +227,11 @@ partial indexes for cycle and non-cycle timeout history. The estimate can seek
 the current settings key and read only the newest bounded candidates, even
 when newer scans used different settings. The migration backfills the copied
 hash from retained cycle records and builds both indexes from scan history.
-An older release must not open the upgraded database; rollback requires the
-complete pre-upgrade backup.
+The backfill rewrites every scan row of a retained cycle, including its
+snapshot, in one transaction, so the migration's duration and temporary WAL
+depend on the size of those scans; keep free space for about that much beside
+the pre-migration backup. An older release must not open the upgraded
+database; rollback requires the complete pre-upgrade backup.
 
 ## Upgrade floor
 

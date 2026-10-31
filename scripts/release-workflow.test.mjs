@@ -2366,7 +2366,7 @@ test('a daily workflow checks the apk pins and scans the published image', async
     'the checks must run daily and on demand, and never for untrusted pull request code')
   assert.deepEqual(permissionsOf(scheduled.slice(0, scheduled.indexOf('\njobs:\n')), 0), { contents: 'read' })
   const jobs = Object.fromEntries(jobsOf(scheduled).map(({ name, block }) => [name, block]))
-  assert.deepEqual(Object.keys(jobs), ['apk-pins', 'go-suite', 'published-image', 'release-source'])
+  assert.deepEqual(Object.keys(jobs), ['apk-pins', 'go-suite', 'go-suite-clock-shift', 'published-image', 'release-source'])
   for (const [name, block] of Object.entries(jobs)) {
     assert.equal(permissionsOf(block, 4), null, `scheduled job ${name} must keep the read-only default`)
   }
@@ -2448,21 +2448,31 @@ test('the daily workflow runs the unsharded release Go suite with a 90-day clock
   assert.ok(scheduled, 'the scheduled checks workflow must exist')
   const job = jobsOf(scheduled).find(({ name }) => name === 'go-suite')?.block
   assert.ok(job, 'the scheduled workflow must run the unsharded Go suite')
-  assert.match(job, /^ {4}timeout-minutes: 100$/m, 'both suite runs need room for their 40-minute package timeout')
+  // The canary is its own job, so a failing unshifted suite cannot skip it.
+  const canary = jobsOf(scheduled).find(({ name }) => name === 'go-suite-clock-shift')?.block
+  assert.ok(canary, 'the scheduled workflow must run the 90-day clock canary as its own job')
+  for (const [name, block] of [['go-suite', job], ['go-suite-clock-shift', canary]]) {
+    assert.match(block, /^ {4}timeout-minutes: 60$/m, `${name} needs room for its 40-minute package timeout`)
+    assert.doesNotMatch(block, /^ {4}(?:needs|if):/m, `${name} must not depend on another job`)
+    assert.match(stepBlock(block, 'Check out source'), /^ {10}persist-credentials: false$/m)
+    const setupGo = stepBlock(block, 'Set up Go')
+    assert.match(setupGo, /^ {10}go-version-file: go\.mod$/m)
+    assert.match(setupGo, /^ {10}cache: false$/m)
+  }
   assert.deepEqual(stepsOf(job).map((step) => /^ {6}- name: (.*)$/m.exec(step)?.[1]), [
     'Check out source',
     'Set up Go',
     'Run the release Go suite',
+  ])
+  assert.deepEqual(stepsOf(canary).map((step) => /^ {6}- name: (.*)$/m.exec(step)?.[1]), [
+    'Check out source',
+    'Set up Go',
     'Prepare a 90-day Go clock overlay',
     'Run the release Go suite with a 90-day Go clock shift',
   ])
-  assert.match(stepBlock(job, 'Check out source'), /^ {10}persist-credentials: false$/m)
-  const setupGo = stepBlock(job, 'Set up Go')
-  assert.match(setupGo, /^ {10}go-version-file: go\.mod$/m)
-  assert.match(setupGo, /^ {10}cache: false$/m)
   assert.match(stepBlock(job, 'Run the release Go suite'), /^ {8}run: go test -race -timeout=40m -coverprofile=coverage\.out \.\/\.\.\.$/m)
-  assert.match(stepBlock(job, 'Prepare a 90-day Go clock overlay'), /python3 scripts\/go-clock-overlay\.py 90 "\$RUNNER_TEMP\/go-clock-overlay\.json"/)
-  assert.match(stepBlock(job, 'Run the release Go suite with a 90-day Go clock shift'),
+  assert.match(stepBlock(canary, 'Prepare a 90-day Go clock overlay'), /python3 scripts\/go-clock-overlay\.py 90 "\$RUNNER_TEMP\/go-clock-overlay\.json"/)
+  assert.match(stepBlock(canary, 'Run the release Go suite with a 90-day Go clock shift'),
     /go test -race -timeout=40m -coverprofile=coverage-clock-shift\.out -overlay "\$RUNNER_TEMP\/go-clock-overlay\.json" \.\/\.\.\./)
 
   const directory = await mkdtemp(join(tmpdir(), 'edgewatch-go-clock-overlay-'))

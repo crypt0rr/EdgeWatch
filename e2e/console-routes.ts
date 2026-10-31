@@ -5,9 +5,10 @@ import { rolePermissions, type ConsoleRole } from './mock-console'
  * audit in route-accessibility.spec.ts and the role matrix in
  * role-matrix.spec.ts iterate it, and src/console-route-inventory.test.ts,
  * which `npm run test:coverage` runs before the browser tests, compares it
- * with the routers: every `<Route>` in src and every UnitDetail tab needs an
- * entry here or a reasoned exclusion in `routesWithoutInventoryEntry`, and
- * every entry must still reach the route it stands for. Paths are concrete
+ * with the routers: every `<Route>` in src, every page that src chooses from
+ * the path outside a `<Route>`, and every UnitDetail tab needs an entry here
+ * or a reasoned exclusion in `routesWithoutInventoryEntry`, and every entry
+ * must still reach the route it stands for. Paths are concrete
  * examples; the check matches them with React Router, so `:id` and the other
  * parameters match any value.
  */
@@ -88,35 +89,41 @@ export type EntrySurfaceCase = {
   /** The address to open. The inventory check reads only its path. */
   path: string
   /**
-   * The component whose `<Routes>` serve the page, or public for the status
-   * pages that AppContent serves before any router or session read.
+   * The component whose `<Routes>` serve the page, or AppContent for the
+   * pages that it chooses from the path before any router: the public status
+   * pages, and the account-link notice that a signed-in browser shows for an
+   * activation or password-reset link. Its `pathReaders` entry in
+   * src/console-route-inventory.test.ts lists the routes it serves.
    */
-  router: 'AuthRoutes' | 'TotpEnrollmentShell' | 'public'
+  router: 'AuthRoutes' | 'TotpEnrollmentShell' | 'AppContent'
   /**
    * The session that shows the page: signed-out and unconfigured have no
-   * session, on an installation that is set up or not; enrolment is a
-   * platform administrator without TOTP once two units exist, which may
-   * only enrol; public needs none and reads no console data.
+   * session, on an installation that is set up or not; signed-in is an
+   * administrator's session; enrolment is a platform administrator without
+   * TOTP once two units exist, which may only enrol; public needs none and
+   * reads no console data.
    */
-  state: 'signed-out' | 'unconfigured' | 'enrolment' | 'public'
+  state: 'signed-out' | 'unconfigured' | 'signed-in' | 'enrolment' | 'public'
   /** The level-one heading that shows that the page rendered. */
   heading: string
 }
 
 /**
  * The pages a visitor reaches outside either console shell: sign-in,
- * first-run setup, account activation, the TOTP enrolment that restricts a
- * session until it is done, and the public status pages, both published and
- * unavailable. The axe audit opens each with the mock console's fixtures.
+ * first-run setup, account activation, both signed out and in a browser
+ * that is still signed in, the TOTP enrolment that restricts a session until
+ * it is done, and the public status pages, both published and unavailable.
+ * The axe audit opens each with the mock console's fixtures.
  */
 export const entrySurfaces: EntrySurfaceCase[] = [
   { path: '/login', router: 'AuthRoutes', state: 'signed-out', heading: 'Sign in to EdgeWatch' },
   { path: '/setup', router: 'AuthRoutes', state: 'unconfigured', heading: 'Create your administrator' },
   { path: '/activate#token=FIXTURE-TOKEN', router: 'AuthRoutes', state: 'signed-out', heading: 'Choose your password' },
+  { path: '/activate#token=FIXTURE-TOKEN', router: 'AppContent', state: 'signed-in', heading: 'You are already signed in' },
   { path: '/security', router: 'TotpEnrollmentShell', state: 'enrolment', heading: 'Set up an authenticator' },
-  { path: '/public', router: 'public', state: 'public', heading: 'Fixture public status' },
-  { path: '/public/retail', router: 'public', state: 'public', heading: 'Retail status' },
-  { path: '/public/unpublished', router: 'public', state: 'public', heading: 'Public status unavailable' },
+  { path: '/public', router: 'AppContent', state: 'public', heading: 'Fixture public status' },
+  { path: '/public/retail', router: 'AppContent', state: 'public', heading: 'Retail status' },
+  { path: '/public/unpublished', router: 'AppContent', state: 'public', heading: 'Public status unavailable' },
 ]
 
 export type RouteExclusion = {

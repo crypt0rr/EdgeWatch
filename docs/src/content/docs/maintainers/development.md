@@ -146,169 +146,149 @@ The few paths served outside the two APIs, such as `/healthz` and
 renders: the unit console's routes in `Shell` in `src/main.tsx`, including the
 guided job-creation steps of `JobCreationJourney`, the platform console's in
 `PlatformShell`, each `UnitDetail` tab, and the pages outside either shell:
-sign-in, first-run setup, activation, the forced TOTP enrolment, and the
-public status pages. The axe audit in `e2e/route-accessibility.spec.ts`
-visits every entry; the role matrix in `e2e/role-matrix.spec.ts` visits the
-console routes, but not the pages outside both shells (`entrySurfaces`).
+sign-in, first-run setup, activation, the account-link notice that a
+signed-in browser shows for an activation or password-reset link, the forced
+TOTP enrolment, and the public status pages. The axe audit in
+`e2e/route-accessibility.spec.ts` visits every entry; the role matrix in
+`e2e/role-matrix.spec.ts` visits the console routes, but not the pages outside
+both shells (`entrySurfaces`).
 
 `src/console-route-inventory.test.ts`, which `npm run test:coverage` runs
-before the browser tests, parses every `<Route>` in `src/` and the `UnitDetail`
-tabs, and resolves each inventory path with React Router, so a `:id`
-parameter matches any value. It fails when a route or tab has no entry, and
-when an entry no longer reaches the route it stands for. A route that renders
-no page of its own, such as a catch-all redirect outside the console shells,
-goes in `routesWithoutInventoryEntry` with its reason instead.
-The parser reads `<Route>` elements in direct, fragment, and supported
-conditional JSX children. It fails closed on namespace or default router
-imports, re-exports from a router module, source-less re-exports and local
-aliases of imported `Route` or `Routes`, JSX member forms such as `<RR.Route>`,
-and opaque non-JSX children inside `<Routes>`, including `React.createElement`
-calls and their aliases. Teach the inventory check before introducing any of
-these forms.
+before the browser tests, keeps that list complete. A policy of allowlists
+keeps the ways to bring a page into `src/` where the check can see it, and
+each declaration that reads the address path needs an entry that says which
+pages it chooses. The JSX route reader then reads the routes of the router
+files, and the check resolves each inventory path against them with React
+Router, so a `:id` parameter matches any value. It fails when a route, a page
+chosen from the path, or a tab has no entry, and when an entry no longer
+reaches the route it stands for. A route that renders no page of its own,
+such as a catch-all redirect outside the console shells, goes in
+`routesWithoutInventoryEntry` with its reason instead.
 
-The parser follows statically resolvable local TypeScript imports, re-exports,
-dynamic imports, and CommonJS loads, including helpers outside `src/` and
-aliases configured directly in the root `tsconfig.json`. CommonJS loader aliases
-use one AST pass and a dependency worklist so reverse-declared chains stay
-linear. A config that extends another `tsconfig` fails closed because the
-inventory does not resolve inherited aliases. Alias patterns and targets with
-at most one `*` are supported; multiple wildcards fail closed. If an alias
-candidate exists outside the canonical fixture root, the inventory fails closed
-instead of falling through to a later candidate. Wildcard captures are
-substituted as literal path text, including characters that have meaning in
-regular expressions. It rejects renamed `Route` or `Routes`
-re-exports anywhere in those chains. A local module load or local re-export
-that cannot be read as TypeScript fails closed; JSX uses of components from an
-unresolved static local import fail closed, including member expressions
-rooted at default, namespace, or named imports through every member level.
-Values from unresolved local
-imports also fail closed when forwarded through assignments, destructuring,
-object properties, calls, returns, JSX props, or JSX spread arguments, since
-these aliases could hide router components from the inventory. Statically
-readable local TypeScript component imports continue to be followed. Import
-router components directly from a recognized router module.
-The check also tracks `Route` and `Routes` through renamed exports from local
-TypeScript barrels and through destructured values returned by literal dynamic
-imports of unknown packages. Do not load router APIs with `import()` or build a
-CommonJS loader from a dynamic import of `module` or `node:module`.
+### The policy
 
-The parser also tracks bare-package component imports through local aliases and
-values passed in a route element. If an uninspectable package component is
-rendered or forwarded by a wildcard `<Route>` (`path="*"` or a path ending in
-`/*`), the check fails closed with the component and package in its diagnostic.
-This includes values passed as the element type, as function-call arguments in
-a route element, or through the props argument to `React.createElement` or an
-aliased `createElement` factory. The check reads
-the route's `Component` prop as well as `element`, and follows every JSX
-attribute value and spread value regardless of prop name or identifier
-capitalization. Local aliases and transparent TypeScript wrappers are followed
-through both logical-expression operands and both value branches of conditional
-expressions. Literal package dynamic imports, including `#` package-import-map
-imports, returned by `React.lazy` or an imported `lazy` alias also carry opaque
-component provenance. The lazy loader may be inline or a statically declared
-function/arrow binding reached through
-identifier aliases; an unreadable callback fails closed. These components could
-render nested `<Routes>` whose paths would otherwise be missing from the axe and
-role audits. A loader that returns a runtime component value instead of a
-statically visible module import also fails closed. Readable local function and
-class component bodies are inspected for package components they render or
-forward, including through local component chains. Call-result aliases retain
-provenance through component wrappers such as
-`React.memo`, named `memo` imports, and their aliases. The wildcard guard still
-runs when the wildcard route itself is listed in `routesWithoutInventoryEntry`.
-Readable local TypeScript components and local lazy imports are followed as
-usual; unrelated package loads and third-party page or presentation components
-on non-wildcard routes remain allowed. React primitives and recognized router
-exports are treated as known wrappers and redirects; `lucide-react` SVG icons
-are treated as presentation-only components. Custom component tags and member
-tags in wildcard JSX element trees must use statically declared component
-bindings; runtime component parameters, prop spreads, or other
-unreadable component values fail closed. Local namespace imports inherit opaque
-provenance when their module exposes an opaque package export. Extracted
-same-named router components receive deterministic file-order suffixes, and
-duplicate router names supplied to the resolver fail closed instead of
-overwriting a route tree. JSX values imported through an unresolved `#`
-package-import-map specifier fail closed because this parser does not resolve
-`package.json` imports mappings.
-Opaque origins also follow package values, including `#` package-import-map
-specifiers, loaded by literal dynamic `import()` or `require()` calls through
-awaited module values, destructuring, member access and assignments, conditional
-and logical branches, local helper
-returns, statically named object/class method returns, callable aliases, and
-`React.lazy` promise aliases. Function and method chains use a dependency
-worklist instead of recursively rescanning their source. Local export provenance
-uses a bounded worklist and fails closed when a module graph exceeds its
-propagation budget. Inline opaque loads in a wildcard route's JSX values are
-recorded directly. Anonymous default-export
-components preserve provenance from inline runtime loads. A lowercase package
-component passed to a local function or object/class method wrapper also retains
-provenance when that wrapper is exported, including through mutable callable
-aliases. A runtime component value shadowing a statically declared name does
-not count as readable. Local extensionless imports follow Vite's extension
-order; if JavaScript or JSON wins before a TypeScript candidate, the inventory
-fails closed instead of inspecting the TypeScript sibling. A local router
-mounted with `React.createElement(LocalRouter)` is attached to the declaring
-route so its child paths remain in the inventory.
+The policy reads every non-test TypeScript module in `src/`, including
+`src/generated/`, but not `src/test/` or `*.test.ts(x)` files. It refuses:
 
-Wildcard route `element`, `errorElement`, and `hydrateFallbackElement` props
-must use literal JSX, fragments, primitive values, `null`, or statically
-inspectable conditional/logical expressions. A statically inspectable
-`React.createElement` call with a readable type and arguments is also allowed;
-other runtime element values fail closed. Wildcard `lazy` route props and
-`Component`, `ErrorBoundary`, or `HydrateFallback` props that are parameters or
-other runtime values fail closed. Use canonical wildcard paths only: `*` or a
-final `/*` segment. Explicit local JavaScript imports are not resolved to
-same-named TypeScript files; unreadable JavaScript route modules fail closed.
+- `Route` or `Routes` imported anywhere but the modules in `routerFiles`.
+  Other names from `react-router-dom` must be in `routerExports`; route-table
+  APIs such as `useRoutes`, `createBrowserRouter`, and `RouterProvider` are
+  missing on purpose, because they build routes that the reader cannot read.
+- A value imported from a package that `knownPackages` does not list, by exact
+  specifier, with the reason it cannot render a page that the inventory
+  misses. It lists nine today. Package values are imported by name: default
+  and namespace imports are refused, and so is any re-export of a package. A
+  TypeScript path alias, a `#` package-import-map specifier, a URL, or a
+  `node:` built-in is a package that the list does not name.
+- A local value import that does not resolve to a checked module. The check
+  resolves as Vite does: the path as written, then `.mjs`, `.js`, `.mts`,
+  `.ts`, `.jsx`, `.tsx`, and `.json`, then the same `index` files. An import
+  that reaches a JavaScript or JSON file first, a test, or a file outside
+  `src/` fails; a side-effect import of a CSS file is fine. A file or
+  directory under `src/` that resolves outside it, as through a symbolic
+  link, fails the scan.
+- A read of a global that the module neither declares nor imports, unless
+  `knownGlobals` lists it, and a read of a member that `knownGlobals` does not
+  list for its global, including a computed member and a read behind
+  parentheses or a type assertion such as `(document as any)`. A global or a
+  member that code outside the bundle sets, such as a component registry on
+  `window` or `document`, could hold a page that the check cannot see. Add a
+  standard global or member when the console starts to use it. An ambient
+  declaration, such as `declare const` or `declare global`, binds nothing, so
+  it does not make a global readable.
+- A global read as a value, as in `const { registry } = window` or
+  `lookUp(document)`, because the code that receives it could read any of its
+  members. A global may be called, constructed, extended, tested with
+  `typeof` or `instanceof`, or read through a listed member;
+  `knownGlobalValues` lists the few that `src` passes as values, such as
+  `Boolean` in `filter(Boolean)`. A JSX tag that a global supplies, such as
+  `<Error>` or `<document.Page>`, fails too.
+- A runtime module load or element factory: `import()`, `import.meta.glob`,
+  `require` in any form, including `module.require` and
+  `import x = require()`, and React's `lazy`, `createElement`, and
+  `cloneElement`, whether imported, read as a member, or destructured. An
+  entry in `runtimeAllowances` names the module, the construct, and why it
+  cannot hide a page. An allowed load must still name, as a literal, a module
+  that the policy accepts.
 
-`<Route>` props must be explicit: any JSX prop spread is rejected because a
-spread can override `path`, including when it appears after a direct `path`
-attribute or uses an object alias or conditional expression. Only a shorthand
-`index` or literal `index={true}` is an index route; `index={false}` is a normal
-path route, and dynamic `index` values fail closed. Router APIs must use static
-named imports; dynamic imports or `require` loads of router modules
-are rejected, including direct, aliased, bound, and destructured CommonJS loader
-forms. Optional calls through any recognized CommonJS loader are rejected,
-including calls through aliases and optional member access.
-Loader identity is still recognized through transparent TypeScript expression
-wrappers such as `as` and angle-bracket type assertions, non-null assertions,
-`satisfies`, generic instantiation, and parentheses, so wrapping a loader does
-not bypass the check. Runtime module loads whose
-specifier is not statically readable are rejected too. Declare nested routes
-directly as JSX children on a `<Route>`: its `children` attribute is rejected
-because it can hide nested routes from the inventory. Declare `<Routes>`
-children directly as JSX children too; `children` attributes and prop spreads
-are rejected because they can hide an uninspectable route tree. Use imported
-`Route` and `Routes` bindings only as JSX tag names. Passing them as component
-values through wrapper props, object props, or function calls is rejected
-because the inventory cannot safely resolve destructured wrapper parameters
-or their JSX tags.
+The policy follows a global only to its first member: it does not check the
+members of what a listed member returns, such as the element in
+`document.body` or the `window.history` object. TypeScript's DOM types refuse
+a member there that the browser does not define, unless a type assertion or a
+type declaration widens them, so review such a cast as you would a new
+global.
 
-The inventory also rejects `<Routes location>` because it can make React
-Router render a different location from the browser URL visited by the axe and
-role checks. Static `caseSensitive` route props are copied into the modeled
-route table; use shorthand or a boolean literal, since a dynamic value cannot
-be represented safely. In wildcard route elements, local function and class
-components are followed through their render trees. A custom tag backed by a
-runtime registry value or component parameter fails closed, including through
-local component chains. Unresolved local imports also fail closed when
-forwarded through JSX expression children. Runtime imports using URI schemes
-such as `https:`, `data:`, or `file:` are opaque because the inventory cannot
-inspect them; `node:` built-ins are the exception.
+The check also counts reads of the path: each `.pathname` read or
+destructure, and each use of `matchPath`, `matchRoutes`, `useMatch`, or
+`useMatches`, by the top-level declaration that holds it. `pathReaders` gives
+each such declaration its count and a reason. When the reads choose a page
+outside every `<Route>`, as `AppContent` chooses the public status pages and
+the account-link notice, `serves` lists the route patterns of those pages.
+The check treats them as a router named after the declaration, so each
+pattern needs an entry surface whose `router` names it. A new read changes
+the count and fails the check until its entry says which page it serves or
+why it serves none, such as a breadcrumb, an active navigation link, or a
+`returnTo` path.
 
-A component imported from another local module may appear directly in a
-wildcard route only when its own source declares a statically named `<Routes>`
-table that the inventory can attach; a same-named table in another module is
-not a substitute. Named import aliases retain the exported component's
-canonical declaration name, including a named re-export alias; unreadable
-render trees retain their module provenance across those aliases.
-Namespace-member components fail closed because the inventory cannot reliably
-identify their route table. Import the component by name or declare its routes
-in the audited JSX tree instead.
+The count prompts a review; it does not prove what the reads choose. It
+counts reads, not what code does with them: a declaration that already has an
+entry can choose another page from a read it has without changing its count.
+The check does not count `location.href` or `location.hash`, a helper that
+compares a path passed to it, or a choice made from `useParams` or
+`useSearchParams`. When a change makes such code choose a page, give the page
+a `<Route>`, or list its pattern in the entry's `serves`, and check that the
+entry's reason still holds.
 
-To add a console page, add its `<Route>` with a string-literal `path`, then an
-entry with its scope and permission to `unitConsoleRoutes` or
-`platformConsoleRoutes`, or to `entrySurfaces` for a page outside both
-shells.
+### The JSX route reader
+
+The reader reads the `<Routes>` elements of the router files with the
+TypeScript parser that Vite ships, so formatting, attribute order, and
+conditional routes do not change what it reads. Each `<Routes>` is a router
+named after the component that renders it; a second router with the same name
+gets a `#2` suffix, in file order. It refuses forms that could hide a route:
+
+- `Route` or `Routes` used other than as a JSX tag name, such as an alias, a
+  prop value, a function argument, a re-export, or a parameter that shadows
+  it.
+- A `<Routes>` child other than `<Route>`, a fragment (`<>` or a named
+  `Fragment` import), or a `&&`, conditional, or array expression of those.
+  A `children` prop, a prop spread, or a `location` prop on `<Routes>`, and a
+  `<Routes>` outside a named component, fail too.
+- A `<Route>` with a prop spread, a `children` attribute, or a `lazy` prop; a
+  `path` that is not a string literal; an `index` or `caseSensitive` prop
+  that is not shorthand or a boolean literal; and a splat that is not `*` or a
+  final `/*` segment. Only shorthand `index` and `index={true}` make an index
+  route. Literal `caseSensitive` props are kept in the modeled route table.
+- A `<Route>` outside every `<Routes>`.
+
+A route whose element renders a router by name mounts it: a router declared in
+the same file, or one imported by name from the router file that declares it,
+under any export or import name. Its routes resolve under the route's path, as
+`JobCreationJourney`'s do under `/jobs/new/*`. A router that no route mounts
+fails unless a scope in `consoleScopeRouters` or an entry surface names it, so
+a router rendered beside another or through a wrapper cannot stay unaudited.
+
+A wildcard route (`*` or a path ending in `/*`) hands the rest of the address
+to what it renders, so it may render only a nested router, a redirect or
+another component imported by name from a known package, and markup. Its
+`element`, `errorElement`, and `hydrateFallbackElement` props must be literal
+JSX, a primitive, `null`, or a conditional or logical expression of those, and
+every component in that JSX must be a nested router or a known-package
+component. A local component that renders no `<Routes>` of its own, a member
+tag such as `<Pages.Fallback>`, a component chosen at runtime, a prop spread,
+and a runtime child fail. `Component`, `ErrorBoundary`, and `HydrateFallback`
+must name a nested router or a known-package component. A name that a router
+file binds more than once is shadowed somewhere, so the reader does not
+resolve it. To show a page for unknown addresses, give the page a route of its
+own and redirect the catch-all to it.
+
+To add a console page, add its `<Route>` to a router file, then an entry with
+its scope and permission to `unitConsoleRoutes` or `platformConsoleRoutes`, or
+to `entrySurfaces` for a page outside both shells. A page chosen from the path
+needs its pattern in `serves` and an entry surface that names its declaration
+as the router.
+
+### The axe audit
 
 The axe audit fails on serious and critical violations, on visible link or
 button text missing from the accessible name, and on the moderate
@@ -318,16 +298,18 @@ confirmation, failed page reads, an empty investigation inbox, a job without a
 baseline, pending baseline changes, a near-capacity scan-slot demand notice,
 and every step of a monitor setup that Perimeter prefilled. A separate
 `requiredStateSurfaceManifest` ensures removing a required fixture or entry
-also fails when its generating case disappears. An `allowedPath` with a
-different destination is an alias and does not receive a separate axe run;
-when `allowedPath` equals the requested path, the route is still audited.
+also fails when its generating case disappears; keep it independent of the
+arrays that generate the audits. An `allowedPath` with a different
+destination is an alias and does not receive a separate axe run; when
+`allowedPath` equals the requested path, the route is still audited.
 Accept a violation only with an `axeAllowances` entry in the spec that names
 the rule, a distinct audited surface key, the node, and the reason.
 The reason must contain non-whitespace text.
 Console routes and entry surfaces use different keys even when they share a
 path, and the spec rejects duplicate keys. It also fails when an allowance
 names a surface it does not audit or when an entry no longer matches a
-violation.
+violation. One allowance covers at most one matching violation node, and route
+permissions are checked before shared-scope access.
 
 ## Notification destination policy
 

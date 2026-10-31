@@ -1147,10 +1147,10 @@ func renderNaabuTemplate(template []string, targetsFile string, options config.N
 		case config.PlaceholderStructuredOutput:
 			out = append(out, "-json")
 		case config.PlaceholderAddressFamily:
-			// Naabu receives a mixed target file and selects families itself.
-			// The placeholder is accepted for template portability but has no
-			// extra argument when the fixed target resolver already supplies both
-			// families.
+			// Each invocation's target file holds one address family
+			// (naabuAddressBatches), and Naabu detects it from the addresses.
+			// The placeholder is accepted for template portability and adds no
+			// argument.
 		case config.PlaceholderHostDiscovery:
 			out = append(out, naabuNoHostDiscovery)
 		case config.PlaceholderScanType:
@@ -1164,6 +1164,11 @@ func renderNaabuTemplate(template []string, targetsFile string, options config.N
 			// shared profile can declare them without causing a literal token to
 			// reach the fixed Naabu executable.
 		default:
+			if config.NaabuVerbosityFlag(value) {
+				// A profile saved before new profiles refused it; Naabu exits
+				// when it gets verbose output together with -silent.
+				continue
+			}
 			out = append(out, value)
 		}
 	}
@@ -1186,8 +1191,8 @@ func validateNaabuInvocation(options config.NaabuOptions, assumeAlive, rawPrivil
 // Naabu, for every scan type and profile template. It states the policy;
 // Naabu v2.6.1 and v2.7.0 accept it but ignore it, because their host
 // discovery runs only with -with-host-discovery (-wn) or -host-discovery
-// (-sn). EdgeWatch never passes those, and a Naabu profile can add only
-// verbosity flags (approvedNaabuProfileFlags). Naabu's host discovery adds
+// (-sn). EdgeWatch never passes those, and a Naabu profile can add no flags
+// of its own (config.NaabuVerbosityFlag). Naabu's host discovery adds
 // every address whose ICMP echo or timestamp reply reaches the host to its
 // scan targets, whether or not the target list names it, and turns connect
 // scans into SYN scans, so EdgeWatch must not use it: Naabu probes the

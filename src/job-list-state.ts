@@ -3,6 +3,29 @@ import { useLocation, useNavigationType, useSearchParams } from 'react-router-do
 
 export type JobsFilter = 'all' | 'attention'
 
+/**
+ * The job list URL that a page reached from it returns to, with the list's
+ * search and filter. Only a path of the job list itself is accepted, so route
+ * state cannot send a return link anywhere else; any other value falls back
+ * to the unfiltered list.
+ */
+export function jobListReturnTo(value: unknown): string {
+  return typeof value === 'string' && (
+    value === '/jobs' || value === '/jobs/' ||
+    value.startsWith('/jobs?') || value.startsWith('/jobs/?')
+  ) ? value : '/jobs'
+}
+
+/**
+ * Reads the job list return path from route state. The job pages carry it as
+ * `returnTo`; a host page, whose `returnTo` is its own host list, carries it
+ * as `jobsReturnTo`.
+ */
+export function jobListReturnToFromState(state: unknown, key: 'returnTo' | 'jobsReturnTo' = 'returnTo'): string {
+  if (!state || typeof state !== 'object' || !(key in state)) return '/jobs'
+  return jobListReturnTo((state as Record<string, unknown>)[key])
+}
+
 /** URL-backed search and filtering for the job list. */
 export function useJobListState() {
   const [searchParams, setSearchParams] = useSearchParams()

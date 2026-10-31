@@ -2,7 +2,7 @@
 
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { act } from 'react'
-import { BrowserRouter, Link, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Link, Route, Routes, useLocation } from 'react-router-dom'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, BUILTIN_NAABU_PROFILE_ID, createJob, getJob, getSession, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
@@ -24,6 +24,11 @@ const administrator = { role: 'administrator' as const, user_id: 'admin', userna
 const operator = { ...administrator, role: 'operator' as const, user_id: 'operator', username: 'operator', permissions: ['jobs.write'], high_cost_override: false }
 const approvedJob = { id: 'job-1', revision: 4, enabled: true, archived: false, security_hash: 'old', job: { name: 'Broad edge', schedule: '0 */6 * * *', timezone: 'UTC', targets: ['198.51.100.0/16'], max_expanded_hosts: 65536, tcp: { ports: '1-65535', mode: 'connect', service_detection: false, engine: 'nmap' }, timing: 'balanced', timeout: '1h', resume_window: '8d', baseline_samples: 1, change_confirmations: 1, allow_high_cost: true }, baseline: { status: 'complete', samples: 1, attempts: 1 } }
 const profile = { id: 'profile-1', name: 'Naabu default', description: '', built_in: true, archived: false, revision: 1, definition: { engine: 'naabu_nmap', naabu: { scan_type: 'connect', rate: 1000, workers: 25, retries: 3, timeout_ms: 1000, warm_up_seconds: 2, verify: true, address_batch_size: 16 }, nmap_args: [], naabu_args: [], enrichment_args: [] } }
+
+function JobPageProbe() {
+  const location = useLocation()
+  return <output data-testid="job-page">{location.pathname}{location.search} {JSON.stringify(location.state)}</output>
+}
 
 describe('job editor workflow coverage', () => {
   beforeEach(() => {
@@ -225,6 +230,73 @@ describe('job editor workflow coverage', () => {
     fireEvent.click(screen.getByLabelText(/TCP scan/))
     expect(screen.getByLabelText(/^TCP engine/)).toHaveValue('nmap')
     expect(screen.getByLabelText(/^Ports/)).toHaveValue('22,443')
+  })
+
+  describe('returning to the job with the filtered Jobs list path', () => {
+    const returnTo = '/jobs?q=database&filter=attention'
+    const expected = `/jobs/job-1 ${JSON.stringify({ returnTo })}`
+
+    function renderEdit(state: unknown = { returnTo }) {
+      renderWithProviders(<Routes>
+        <Route path="/jobs/:id/edit" element={<JobEditor />} />
+        <Route path="/jobs/:id" element={<JobPageProbe />} />
+        <Route path="/jobs" element={<JobPageProbe />} />
+      </Routes>, { route: [{ pathname: '/jobs/job-1/edit', state }] })
+    }
+
+    beforeEach(() => {
+      vi.mocked(getJob).mockResolvedValue(approvedJob as never)
+      vi.mocked(updateJob).mockResolvedValue({ ...approvedJob, revision: 5 } as never)
+    })
+
+    it('through Back to job', async () => {
+      renderEdit()
+      fireEvent.click(await screen.findByRole('link', { name: 'Back to job' }))
+      await waitFor(() => expect(screen.getByTestId('job-page')).toHaveTextContent(expected))
+    })
+
+    it('through Cancel', async () => {
+      renderEdit()
+      await screen.findByRole('heading', { name: 'Tune your monitoring job' })
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+      await waitFor(() => expect(screen.getByTestId('job-page')).toHaveTextContent(expected))
+    })
+
+    it('after saving', async () => {
+      renderEdit()
+      fireEvent.click(await screen.findByRole('button', { name: 'Save changes' }))
+      await waitFor(() => expect(updateJob).toHaveBeenCalled())
+      await waitFor(() => expect(screen.getByTestId('job-page')).toHaveTextContent(expected))
+    })
+
+    it('after discarding a changed draft', async () => {
+      renderEdit()
+      await waitFor(() => expect(screen.getByLabelText('Job name')).toHaveValue('Broad edge'))
+      fireEvent.change(screen.getByLabelText('Job name'), { target: { value: 'Unsaved name' } })
+      fireEvent.click(screen.getByRole('link', { name: 'Back to job' }))
+      fireEvent.click(within(await screen.findByRole('dialog', { name: 'Discard unsaved changes?' })).getByRole('button', { name: 'Discard changes' }))
+      await waitFor(() => expect(screen.getByTestId('job-page')).toHaveTextContent(expected))
+    })
+
+    it('from the load error page, including Back to jobs', async () => {
+      vi.mocked(getJob).mockRejectedValue(new Error('job unavailable'))
+      renderEdit()
+      fireEvent.click(await screen.findByRole('button', { name: 'Back to jobs' }))
+      await waitFor(() => expect(screen.getByTestId('job-page')).toHaveTextContent(`${returnTo} null`))
+    })
+
+    it('through the load error page Back to job link', async () => {
+      vi.mocked(getJob).mockRejectedValue(new Error('job unavailable'))
+      renderEdit()
+      fireEvent.click(await screen.findByRole('link', { name: 'Back to job' }))
+      await waitFor(() => expect(screen.getByTestId('job-page')).toHaveTextContent(expected))
+    })
+
+    it('falls back to the unfiltered list for a path outside it', async () => {
+      renderEdit({ returnTo: '//example.test/jobs?q=x' })
+      fireEvent.click(await screen.findByRole('link', { name: 'Back to job' }))
+      await waitFor(() => expect(screen.getByTestId('job-page')).toHaveTextContent(`/jobs/job-1 ${JSON.stringify({ returnTo: '/jobs' })}`))
+    })
   })
 
   it('shows saved durations in the units the editor suggests and saves them unchanged', async () => {

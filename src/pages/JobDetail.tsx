@@ -52,6 +52,7 @@ import { baselinePresentation } from '../baseline'
 import { formatDateTime } from '../format'
 import { changeKindLabel, changeTargetLabel, jobStatePresentation, scanOutcomeTone, severityTone } from '../status'
 import { consumeFirstScanIntent } from '../firstScanIntent'
+import { jobListReturnToFromState } from '../job-list-state'
 
 type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
 
@@ -70,20 +71,14 @@ function routeResultsOffset(value: string | null): number | null {
   return Number.isSafeInteger(offset) && offset >= 0 ? offset : 0
 }
 
-function jobListReturnToFromState(state: unknown) {
-  if (!state || typeof state !== 'object' || !('returnTo' in state)) return '/jobs'
-  const returnTo = (state as { returnTo?: unknown }).returnTo
-  return typeof returnTo === 'string' && (
-    returnTo === '/jobs' || returnTo === '/jobs/' ||
-    returnTo.startsWith('/jobs?') || returnTo.startsWith('/jobs/?')
-  ) ? returnTo : '/jobs'
-}
-
 export function JobDetail() {
   const { id = '', scanId: routeScanID } = useParams()
   const [searchParams] = useSearchParams()
   const location = useLocation()
   const jobsReturnTo = jobListReturnToFromState(location.state)
+  // Pages opened from this job carry the job list's search and filter, so
+  // their return links come back here with a working ← Jobs.
+  const jobRouteState = { returnTo: jobsReturnTo }
   const routeResults = routeScanID ? routeResultsOffset(searchParams.get('results')) : null
   const navigate = useNavigate()
   const client = useQueryClient()
@@ -624,7 +619,7 @@ export function JobDetail() {
             </div>
             <div className="heading-actions">
               {(detail.data.scan.status === 'success' || detail.data.scan.status === 'incomplete') && <button className="button ghost" onClick={() => { setShowResults((shown) => !shown); setResultsOffset(0) }}>{showResults ? 'Hide results' : 'View results'}</button>}
-              <button className="icon-button" onClick={() => routeScanID ? navigate(`/jobs/${encodeURIComponent(id)}`, { state: { returnTo: jobsReturnTo } }) : setSelectedScan('')} aria-label="Close scan detail">×</button>
+              <button className="icon-button" onClick={() => routeScanID ? navigate(`/jobs/${encodeURIComponent(id)}`, { state: jobRouteState }) : setSelectedScan('')} aria-label="Close scan detail">×</button>
             </div>
           </div>
           {detail.data.scan.error && <div className="form-error scan-error" role="alert">{detail.data.scan.error}</div>}
@@ -657,7 +652,7 @@ export function JobDetail() {
           <Pagination page={detail.data?.changes_pagination} onChange={setChangeOffset} label="Scan changes pagination" />
           {showResults && <div className="scan-results">
             <div className="panel-heading"><div><h3>Snapshot results</h3><p className="muted">Loaded on demand; open an effective host for technical evidence.</p></div></div>
-            {results.isLoading ? <div className="skeleton-list" /> : results.error ? <ErrorNotice message="Could not load scan results." onRetry={() => results.refetch()} /> : results.data?.hosts.length ? <div className="result-list">{results.data.hosts.map(host => <Link className="result-row" to={`/jobs/${id}/scans/${selectedScan}/hosts/${encodeURIComponent(host.address)}?results=${resultsOffset}`} key={host.address}><strong title={host.address}>{host.address}</strong><span className="pill blue">{host.protocols?.map(protocol => protocol.protocol.toUpperCase()).join(' + ') || 'HOST'}</span><span className="muted">{host.open_ports + host.open_filtered_ports} positive ports · View host details</span></Link>)}</div> : <div className="inline-empty">No effective hosts in this scan.</div>}
+            {results.isLoading ? <div className="skeleton-list" /> : results.error ? <ErrorNotice message="Could not load scan results." onRetry={() => results.refetch()} /> : results.data?.hosts.length ? <div className="result-list">{results.data.hosts.map(host => <Link className="result-row" to={`/jobs/${id}/scans/${selectedScan}/hosts/${encodeURIComponent(host.address)}?results=${resultsOffset}`} state={{ jobsReturnTo }} key={host.address}><strong title={host.address}>{host.address}</strong><span className="pill blue">{host.protocols?.map(protocol => protocol.protocol.toUpperCase()).join(' + ') || 'HOST'}</span><span className="muted">{host.open_ports + host.open_filtered_ports} positive ports · View host details</span></Link>)}</div> : <div className="inline-empty">No effective hosts in this scan.</div>}
             <Pagination page={results.data?.pagination} onChange={setResultsOffset} label="Scan results pagination" />
           </div>}
         </>
@@ -683,7 +678,7 @@ export function JobDetail() {
           {canRun && <button className="button secondary" onClick={run} disabled={value.archived || !!actionBusy || !!pendingScanRequest || !!activeJobQueuedRun || !!activeJobScan}>
             <Play size={16} /> {actionBusy === 'run' ? 'Starting…' : activeJobScan ? (activeJobScan.phase === 'cancelling' ? 'Cancelling…' : 'Scanning…') : pendingScanRequest || activeJobQueuedRun ? 'Queued…' : 'Scan now'}
           </button>}
-          {canOperate && <button className="button secondary" onClick={() => navigate(`/jobs/${id}/edit`)} disabled={!!actionBusy}>
+          {canOperate && <button className="button secondary" onClick={() => navigate(`/jobs/${id}/edit`, { state: jobRouteState })} disabled={!!actionBusy}>
             <Edit3 size={16} /> Edit
           </button>}
           {canOperate && !value.archived && <button className="button secondary" onClick={() => void setSchedule(!value.enabled)} disabled={!!actionBusy || !!activeJobScan} title={activeJobScan ? 'Available when the running scan finishes' : undefined}>
@@ -706,6 +701,7 @@ export function JobDetail() {
       />}
       <MonitorNextActions
         job={value}
+        jobLinkState={jobRouteState}
         canRun={canRun}
         canReadScans={canReadScans}
         canReadBaseline={canReadBaseline}
@@ -788,7 +784,7 @@ export function JobDetail() {
       {value.scan_estimate && <div className="notice" role="status"><span><strong>Scan work per run:</strong> {value.scan_estimate.probes.toLocaleString()} estimated probes across {value.scan_estimate.hosts.toLocaleString()} configured hosts/targets ({formatEstimateProcesses(value.scan_estimate)}). Elapsed time varies with target responses and scanner settings{value.scan_estimate.unknown_dns ? `; DNS expansion may increase the work for ${value.scan_estimate.unknown_dns} name${value.scan_estimate.unknown_dns === 1 ? '' : 's'}` : ''}.</span></div>}
       {activeCycle && <div className={activeCycle.status === 'stalled' ? 'form-error banner cycle-banner' : 'notice cycle-banner'} role="status"><span className="cycle-banner-copy"><strong>{activeCycle.status === 'paused' ? 'Broad scan paused safely.' : activeCycle.status === 'stalled' ? 'Broad scan stalled.' : 'Broad scan cycle active.'}</strong> {activeCycle.completed_units} of {activeCycle.total_units} work units and {activeCycle.completed_probes.toLocaleString()} of {activeCycle.total_probes.toLocaleString()} probes complete. {activeCycle.last_error && <span>{activeCycle.last_error}</span>}</span> {canRun && (activeCycle.status === 'paused' || activeCycle.status === 'stalled') && <button className="button ghost" onClick={() => { setActionError(''); setDialog('discard-cycle') }} disabled={!!actionBusy}>Discard saved progress</button>}</div>}
       {value.scan_cycle_error === 'cycle_status_unavailable' && !cycle.data && <div className="notice" role="status">Saved scan progress could not be loaded. EdgeWatch will retry automatically; refresh the job if this continues.</div>}
-      {!!value.missing_notification_destinations?.length && <div className="notice warning" role="status"><span><strong>Notification routing needs attention.</strong> {value.missing_notification_destinations.length === 1 ? 'A selected notification destination no longer exists' : `${value.missing_notification_destinations.length} selected notification destinations no longer exist`}, so this job’s alerts do not reach {value.missing_notification_destinations.length === 1 ? 'it' : 'them'}. Changing a deployment URL in config.yaml creates a new destination. {canOperate && !value.archived ? <Link to={`/jobs/${id}/edit`}>Edit the job to choose a current destination.</Link> : 'An operator can edit the job to choose a current destination.'}</span></div>}
+      {!!value.missing_notification_destinations?.length && <div className="notice warning" role="status"><span><strong>Notification routing needs attention.</strong> {value.missing_notification_destinations.length === 1 ? 'A selected notification destination no longer exists' : `${value.missing_notification_destinations.length} selected notification destinations no longer exist`}, so this job’s alerts do not reach {value.missing_notification_destinations.length === 1 ? 'it' : 'them'}. Changing a deployment URL in config.yaml creates a new destination. {canOperate && !value.archived ? <Link to={`/jobs/${id}/edit`} state={jobRouteState}>Edit the job to choose a current destination.</Link> : 'An operator can edit the job to choose a current destination.'}</span></div>}
 
       <div className="detail-sections">
         <div className="panel overview-panel">
@@ -831,7 +827,7 @@ export function JobDetail() {
           </div>
           <div className="overview-actions">
             {canManageBaseline && <button className="button secondary" onClick={() => { setActionError(''); setDialog('reset') }} disabled={!!actionBusy}><RotateCcw size={16} /> {actionBusy === 'reset' ? 'Resetting…' : 'Reset baseline'}</button>}
-            {baselineActive && <Link className="button secondary explore-button" to={`/jobs/${id}/baseline`}><Server size={16} /> Explore baseline <span className="button-count">{value.baseline.host_count ?? 'hosts'}</span></Link>}
+            {baselineActive && <Link className="button secondary explore-button" to={`/jobs/${id}/baseline`} state={jobRouteState}><Server size={16} /> Explore baseline <span className="button-count">{value.baseline.host_count ?? 'hosts'}</span></Link>}
           </div>
           {baselineActive && (
             <div className="overview-results">
@@ -857,7 +853,7 @@ export function JobDetail() {
             <>
               <div className="latest-scan-meta">
                 <div><strong>{formatDateTime(latest.data.scan.finished_at)}</strong><span className="muted">Scan {latest.data.scan.id.slice(0, 8)}</span></div>
-                <Link className="button ghost" to={`/jobs/${id}/scans/${encodeURIComponent(latest.data.scan.id)}`} state={{ returnTo: jobsReturnTo }}>Open scan details →</Link>
+                <Link className="button ghost" to={`/jobs/${id}/scans/${encodeURIComponent(latest.data.scan.id)}`} state={jobRouteState}>Open scan details →</Link>
               </div>
               <div className="overview-results">
                 {latestResults.isLoading ? <div className="skeleton-list" /> : latestResults.error ? <ErrorNotice message="Could not load latest scan results." onRetry={() => latestResults.refetch()} /> : latestResults.data?.results?.length ? <SurfaceUnitList units={latestResults.data.results} emptyLabel="No positive ports were found in this scan." /> : <div className="inline-empty">No positive ports were found in this scan.</div>}

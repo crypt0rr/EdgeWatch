@@ -28,7 +28,13 @@ function NavigationProbe() {
   const location = useLocation()
   const navigate = useNavigate()
   const returnTo = (location.state as { returnTo?: unknown } | null)?.returnTo
-  return <><output data-testid="current-location">{location.pathname}{location.search}</output><output data-testid="return-to">{typeof returnTo === 'string' ? returnTo : ''}</output><button type="button" onClick={() => navigate(-1)}>Browser Back</button><button type="button" onClick={() => navigate(1)}>Browser Forward</button></>
+  return <><output data-testid="current-location">{location.pathname}{location.search}</output><output data-testid="return-to">{typeof returnTo === 'string' ? returnTo : ''}</output><output data-testid="route-state">{JSON.stringify(location.state)}</output><button type="button" onClick={() => navigate(-1)}>Browser Back</button><button type="button" onClick={() => navigate(1)}>Browser Forward</button></>
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(done => { resolve = done })
+  return { promise, resolve }
 }
 
 function setInputValue(input: HTMLInputElement, value: string) {
@@ -63,6 +69,87 @@ describe('baseline host explorer', () => {
     })
     await vi.waitFor(() => expect(container.textContent).toContain('Baseline hosts'), { timeout: 1000 })
   }
+
+  function button(name: string) {
+    return Array.from(container.querySelectorAll('button')).find(candidate => candidate.textContent === name) as HTMLButtonElement | undefined
+  }
+
+  function panelHeading() {
+    return Array.from(container.querySelectorAll('h2')).find(heading => heading.textContent === 'Baseline hosts') ?? null
+  }
+
+  function routeState() {
+    return JSON.parse(container.querySelector('[data-testid="route-state"]')?.textContent || 'null') as unknown
+  }
+
+  it('hands the job list return path to ← Job and host rows through filter changes', async () => {
+    const jobsReturnTo = '/jobs?q=database&filter=attention'
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={[{ pathname: '/jobs/job-1/baseline', state: { returnTo: jobsReturnTo } }]}>
+        <Routes>
+          <Route path="/jobs/:id/baseline" element={<BaselineHosts />} />
+          <Route path="/jobs/:id/baseline/hosts/:address" element={<p>Baseline host detail</p>} />
+          <Route path="/jobs/:id" element={<p>Job page</p>} />
+        </Routes>
+        <NavigationProbe />
+      </MemoryRouter></QueryClientProvider>)
+    })
+    await vi.waitFor(() => expect(container.textContent).toContain('router.example'), { timeout: 1000 })
+
+    // A filter change replaces the list entry; it must keep the route state.
+    await act(async () => fireEvent.change(container.querySelectorAll('select')[0] as HTMLSelectElement, { target: { value: 'tcp' } }))
+    await vi.waitFor(() => expect(container.querySelector('[data-testid="current-location"]')?.textContent).toBe('/jobs/job-1/baseline?protocol=tcp'), { timeout: 1000 })
+    expect(routeState()).toEqual({ returnTo: jobsReturnTo })
+    await vi.waitFor(() => expect(container.textContent).toContain('router.example'), { timeout: 1000 })
+
+    fireEvent.click(container.querySelector('a[href="/jobs/job-1/baseline/hosts/198.51.100.10"]') as HTMLAnchorElement)
+    await vi.waitFor(() => expect(container.textContent).toContain('Baseline host detail'), { timeout: 1000 })
+    expect(routeState()).toEqual({ returnTo: '/jobs/job-1/baseline?protocol=tcp', jobsReturnTo })
+
+    fireEvent.click(button('Browser Back')!)
+    await vi.waitFor(() => expect(container.querySelector('a.back-link')).toBeTruthy(), { timeout: 1000 })
+    fireEvent.click(container.querySelector('a.back-link') as HTMLAnchorElement)
+    await vi.waitFor(() => expect(container.textContent).toContain('Job page'), { timeout: 1000 })
+    expect(container.querySelector('[data-testid="current-location"]')?.textContent).toBe('/jobs/job-1')
+    expect(routeState()).toEqual({ returnTo: jobsReturnTo })
+  })
+
+  it('hands back the unfiltered job list when the return path is outside it', async () => {
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={[{ pathname: '/jobs/job-1/baseline', state: { returnTo: '//example.test/jobs?q=x' } }]}>
+        <Routes>
+          <Route path="/jobs/:id/baseline" element={<BaselineHosts />} />
+          <Route path="/jobs/:id" element={<p>Job page</p>} />
+        </Routes>
+        <NavigationProbe />
+      </MemoryRouter></QueryClientProvider>)
+    })
+    await vi.waitFor(() => expect(container.textContent).toContain('router.example'), { timeout: 1000 })
+    fireEvent.click(container.querySelector('a.back-link') as HTMLAnchorElement)
+    await vi.waitFor(() => expect(container.textContent).toContain('Job page'), { timeout: 1000 })
+    expect(routeState()).toEqual({ returnTo: '/jobs' })
+  })
+
+  it('focuses the reloaded panel heading after Go to first page', async () => {
+    const firstPage = deferred<BaselineHostsResponse>()
+    vi.mocked(baselineHosts).mockImplementation(async (_job, filters) => filters?.offset === 500
+      ? { ...detailed, hosts: [], pagination: { limit: 50, offset: 500, total: 30, has_more: false, next_offset: null } }
+      : firstPage.promise)
+    await renderPage('/jobs/job-1/baseline?offset=500')
+    await vi.waitFor(() => expect(button('Go to first page')).toBeTruthy(), { timeout: 1000 })
+
+    const goToFirstPage = button('Go to first page')!
+    goToFirstPage.focus()
+    await act(async () => fireEvent.click(goToFirstPage))
+    // The loading state replaces the panel, so its heading cannot hold focus yet.
+    await vi.waitFor(() => expect(container.textContent).toContain('Loading hosts…'), { timeout: 1000 })
+    expect(panelHeading()).toBeNull()
+
+    await act(async () => firstPage.resolve(detailed))
+    await vi.waitFor(() => expect(container.textContent).toContain('router.example'), { timeout: 1000 })
+    await vi.waitFor(() => expect(document.activeElement).toBe(panelHeading()), { timeout: 1000 })
+    expect(panelHeading()?.tabIndex).toBe(-1)
+  })
 
   it('renders detailed baseline hosts and resets filters to the first page', async () => {
     await renderPage()
@@ -241,11 +328,15 @@ describe('baseline host explorer', () => {
     await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('No hosts match “no-such-host.example.com”.'), { timeout: 1000 })
     expect(Array.from(container.querySelectorAll('button')).some(button => button.textContent === 'Clear search')).toBe(true)
 
-    await act(async () => fireEvent.click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Clear search')!))
+    const clearSearch = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Clear search')!
+    clearSearch.focus()
+    await act(async () => fireEvent.click(clearSearch))
     expect(search.value).toBe('')
+    expect(document.activeElement).toBe(search)
     // The search value is debounced; keep its timer-driven state update inside act.
     await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
     await vi.waitFor(() => expect(container.textContent).toContain('router.example'), { timeout: 1000 })
+    expect(document.activeElement).toBe(search)
 
     const protocol = container.querySelectorAll('select')[0] as HTMLSelectElement
     await act(async () => fireEvent.change(protocol, { target: { value: 'tcp' } }))
@@ -253,10 +344,12 @@ describe('baseline host explorer', () => {
     await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('No hosts match TCP.'), { timeout: 1000 })
     const resetFilters = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Reset filters')
     expect(resetFilters).toBeTruthy()
+    resetFilters!.focus()
     await act(async () => fireEvent.click(resetFilters!))
     expect(protocol.value).toBe('')
     await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
     await vi.waitFor(() => expect(container.textContent).toContain('router.example'), { timeout: 1000 })
+    await vi.waitFor(() => expect(document.activeElement).toBe(Array.from(container.querySelectorAll('h2')).find(heading => heading.textContent === 'Baseline hosts')), { timeout: 1000 })
   })
 
   it('explains when a job has no active baseline', async () => {

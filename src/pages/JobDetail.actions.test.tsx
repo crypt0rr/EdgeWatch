@@ -112,6 +112,39 @@ describe('job detail actions', () => {
     await waitFor(() => expect(screen.getByTestId('route-location')).toHaveTextContent(returnTo))
   })
 
+  it('hands the filtered Jobs return path to the baseline explorer, the editor and scan hosts', async () => {
+    const returnTo = '/jobs?q=database&filter=attention'
+    vi.mocked(getJob).mockResolvedValue({ ...job, missing_notification_destinations: ['deleted-uuid'] } as never)
+    vi.mocked(scanHosts).mockResolvedValue({ hosts: [{ address: '198.51.100.10', open_ports: 1, open_filtered_ports: 0, protocols: [{ protocol: 'tcp' }] }], pagination: page } as never)
+    renderPage([
+      { pathname: '/jobs', search: '?q=database&filter=attention' },
+      { pathname: '/jobs/job-1', state: { returnTo } },
+    ])
+    await screen.findByRole('heading', { name: 'Production' }, { timeout: 10_000 })
+
+    async function expectOpened(link: () => Promise<HTMLElement>, location: string, state: unknown) {
+      fireEvent.click(await link())
+      await waitFor(() => expect(screen.getByTestId('route-location')).toHaveTextContent(location))
+      expect(screen.getByTestId('route-state')).toHaveTextContent(JSON.stringify(state))
+      fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+      await waitFor(() => expect(screen.getByTestId('route-location').textContent).toBe('/jobs/job-1'))
+      await screen.findByRole('heading', { name: 'Production' })
+    }
+
+    await expectOpened(() => screen.findByRole('link', { name: /Explore baseline/ }), '/jobs/job-1/baseline', { returnTo })
+    await expectOpened(() => screen.findByRole('button', { name: /Edit$/ }), '/jobs/job-1/edit', { returnTo })
+    await expectOpened(() => screen.findByRole('link', { name: 'Edit the job to choose a current destination.' }), '/jobs/job-1/edit', { returnTo })
+    await expectOpened(() => screen.findByRole('link', { name: 'View baseline evidence →' }), '/jobs/job-1/baseline', { returnTo })
+    await expectOpened(() => screen.findByRole('link', { name: 'Open latest scan →' }), '/jobs/job-1/scans/scan-1', { returnTo })
+
+    fireEvent.click(await screen.findByRole('link', { name: 'Open scan details →' }))
+    await waitFor(() => expect(screen.getByTestId('route-location')).toHaveTextContent('/jobs/job-1/scans/scan-1'))
+    fireEvent.click(await screen.findByRole('button', { name: 'View results' }))
+    fireEvent.click(await screen.findByRole('link', { name: /198\.51\.100\.10/ }))
+    await waitFor(() => expect(screen.getByTestId('route-location')).toHaveTextContent('/jobs/job-1/scans/scan-1/hosts/198.51.100.10?results=0'))
+    expect(screen.getByTestId('route-state')).toHaveTextContent(JSON.stringify({ jobsReturnTo: returnTo }))
+  }, 20_000)
+
   it('preserves the filtered Jobs return path when closing route-selected scan details', async () => {
     const returnTo = '/jobs?q=database&filter=attention'
     renderPage([

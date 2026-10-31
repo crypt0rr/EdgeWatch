@@ -13,6 +13,7 @@ import { ErrorNotice } from '../components/ErrorNotice'
 import { editableDuration, formatDateTime, getDisplayTimeZone } from '../format'
 import { cloneJobCreationDraft, cloneProtocol, defaultTCP, jobFormSchema, newJobCreationDraft, optionalNumber, presetFor, toJobFormPayload, type JobFormFields } from '../job-form'
 import { useOptionalJobCreationDraft } from '../job-creation-draft'
+import { jobListReturnToFromState } from '../job-list-state'
 import { useServerDraft } from '../hooks/useServerDraft'
 
 export function JobEditor() {
@@ -24,6 +25,12 @@ export function JobEditor() {
   const creation = useOptionalJobCreationDraft()
   const updateCreationDraft = creation?.updateDraft
   const advancedCreation = !edit && location.pathname === '/jobs/new/advanced'
+  // The job page that opened the editor passes the job list's path, with its
+  // search and filter. Every way back to the job hands it on, so ← Jobs there
+  // still restores the same list.
+  const jobsReturnTo = jobListReturnToFromState(location.state)
+  const jobPath = edit ? `/jobs/${id}` : ''
+  const jobRouteState = edit ? { returnTo: jobsReturnTo } : undefined
   const [localInitialDraft] = useState(newJobCreationDraft)
   const initialDraft = creation?.draft ?? localInitialDraft
   const existing = useQuery({ queryKey: ['job', id], queryFn: () => getJob(id!), enabled: edit })
@@ -45,7 +52,7 @@ export function JobEditor() {
   const [suggestionInput, setSuggestionInput] = useState({ schedule: defaults.schedule, timezone: defaults.timezone })
   const [dismissedSuggestion, setDismissedSuggestion] = useState('')
   const [rebaselinePrompt, setRebaselinePrompt] = useState<{ values: JobFormFields; changes: string[] } | null>(null)
-  const [discardNavigation, setDiscardNavigation] = useState<{ destination: string; historyPop: boolean } | null>(null)
+  const [discardNavigation, setDiscardNavigation] = useState<{ destination: string; historyPop: boolean; state?: unknown } | null>(null)
   const loadedRevision = useRef<{ id?: string; revision: number } | null>(null)
   const saveLock = useRef(false)
   // Switching a protocol off keeps its settings so switching it back on in
@@ -93,17 +100,17 @@ export function JobEditor() {
   const showSuggestion = !!currentSuggestion?.suggested && suggestionKey !== dismissedSuggestion
 
   const hasDraftChanges = isDirty || draftDirty || (!edit && (creation?.dirty ?? false))
-  const requestNavigation = (destination: string) => {
+  const requestNavigation = (destination: string, state?: unknown) => {
     if (saving) return
     if (!edit && isCreationPath(destination)) {
       navigate(destination)
       return
     }
     if (hasDraftChanges) {
-      setDiscardNavigation({ destination, historyPop: false })
+      setDiscardNavigation({ destination, historyPop: false, state })
       return
     }
-    navigate(destination)
+    navigate(destination, { state })
   }
 
   useEffect(() => {
@@ -157,7 +164,10 @@ export function JobEditor() {
       if (!edit && isCreationPath(currentPath) && isCreationPath(nextPath)) return
       event.preventDefault()
       event.stopPropagation()
-      setDiscardNavigation({ destination: nextPath, historyPop: false })
+      // The intercepted link's route state is not in the DOM. A link back to
+      // the job carries the job list's path, as the editor's own links do.
+      const state = edit && destination.pathname === jobPath ? { returnTo: jobsReturnTo } : undefined
+      setDiscardNavigation({ destination: nextPath, historyPop: false, state })
     }
     const onPopState = (event: PopStateEvent) => {
       if (allowHistoryPop.current) {
@@ -194,7 +204,7 @@ export function JobEditor() {
       window.removeEventListener('popstate', onPopState, true)
       window.removeEventListener('beforeunload', onBeforeUnload)
     }
-  }, [edit, hasDraftChanges, location.hash, location.pathname, location.search, saving])
+  }, [edit, hasDraftChanges, jobPath, jobsReturnTo, location.hash, location.pathname, location.search, saving])
   const applyServerJob = (data: NonNullable<typeof existing.data>) => {
     // The API returns Go durations (192h0m0s). Show them in the units the
     // editor suggests; both forms save the same duration.
@@ -345,7 +355,8 @@ export function JobEditor() {
         return
       }
       await client.invalidateQueries({ queryKey: ['jobs'] })
-      navigate(edit ? `/jobs/${id}` : '/jobs')
+      if (edit) navigate(jobPath, { state: jobRouteState })
+      else navigate('/jobs')
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not save job'
       if (edit && err instanceof APIError && err.code === 'conflict') {
@@ -384,7 +395,7 @@ export function JobEditor() {
     return <section className="page">
       <div className="page-heading">
         <div>
-          <Link className="back-link" to={`/jobs/${id}`}><ArrowLeft size={15} /> Back to job</Link>
+          <Link className="back-link" to={jobPath} state={jobRouteState}><ArrowLeft size={15} /> Back to job</Link>
           <p className="eyebrow">Edit configuration</p>
           <h1>Could not load this job</h1>
           <p className="muted">The saved configuration could not be loaded, so no changes were applied.</p>
@@ -396,7 +407,7 @@ export function JobEditor() {
       </div>
       <div className="heading-actions">
         <button type="button" className="button primary" onClick={() => { void existing.refetch() }}>Try again</button>
-        <button type="button" className="button secondary" onClick={() => navigate('/jobs')}>Back to jobs</button>
+        <button type="button" className="button secondary" onClick={() => navigate(jobsReturnTo)}>Back to jobs</button>
       </div>
     </section>
   }
@@ -405,7 +416,7 @@ export function JobEditor() {
     <section className="page">
       <div className="page-heading">
         <div>
-          <Link className="back-link" to={edit ? `/jobs/${id}` : advancedCreation ? '/jobs/new' : '/jobs'}><ArrowLeft size={15} /> {edit ? 'Back to job' : advancedCreation ? 'Back to guided setup' : 'Back to jobs'}</Link>
+          <Link className="back-link" to={edit ? jobPath : advancedCreation ? '/jobs/new' : '/jobs'} state={jobRouteState}><ArrowLeft size={15} /> {edit ? 'Back to job' : advancedCreation ? 'Back to guided setup' : 'Back to jobs'}</Link>
           <p className="eyebrow">{edit ? 'Edit configuration' : 'New configuration'}</p>
           <h1>{edit ? 'Tune your monitoring job' : 'Create a monitoring job'}</h1>
           <p className="muted">Choose a clear scope. EdgeWatch will validate targets before it saves.</p>
@@ -515,12 +526,12 @@ export function JobEditor() {
           {error && <div className="form-error" role="alert">{error}</div>}
           {!edit && creation?.createOutcomeUnknown && <div className="form-error" role="alert">The create result is still unknown. <Link to="/jobs" target="_blank" rel="noreferrer">Open Jobs in another tab</Link> to check before starting a new monitor.</div>}
           <button disabled={saving || (edit && serverDraft.remoteChanged) || (!edit && !!creation?.createOutcomeUnknown)} className="button primary" type="submit"><Save size={16} />{saving ? 'Saving…' : edit ? 'Save changes' : 'Create job'}</button>
-          <button type="button" className="button ghost" onClick={() => requestNavigation(edit ? `/jobs/${id}` : advancedCreation ? '/jobs/new' : '/jobs')}>Cancel</button>
+          <button type="button" className="button ghost" onClick={() => requestNavigation(edit ? jobPath : advancedCreation ? '/jobs/new' : '/jobs', jobRouteState)}>Cancel</button>
         </div>
         </fieldset>
       </form>
       {rebaselinePrompt && <ActionDialog title="Confirm scan-scope change" description="This changes the scan scope. The current baseline and active incidents will be cleared, and a new baseline will be learned." confirmLabel="Reset baseline and save" destructive onConfirm={async () => { await save(rebaselinePrompt.values, true) }} onCancel={() => { setRebaselinePrompt(null); setError('Scope change canceled.') }} error={error}>{rebaselinePrompt.changes.length > 0 && <ul className="scope-change-list">{rebaselinePrompt.changes.map(change => <li key={change}>{change}</li>)}</ul>}</ActionDialog>}
-      {discardNavigation && <ActionDialog title="Discard unsaved changes?" description="Your job configuration changes have not been saved. Leave this page and discard the draft?" confirmLabel="Discard changes" destructive onConfirm={() => { const navigation = discardNavigation; setDiscardNavigation(null); if (navigation.historyPop) { allowHistoryPop.current = true; window.history.back() } else navigate(navigation.destination) }} onCancel={() => setDiscardNavigation(null)} />}
+      {discardNavigation && <ActionDialog title="Discard unsaved changes?" description="Your job configuration changes have not been saved. Leave this page and discard the draft?" confirmLabel="Discard changes" destructive onConfirm={() => { const navigation = discardNavigation; setDiscardNavigation(null); if (navigation.historyPop) { allowHistoryPop.current = true; window.history.back() } else navigate(navigation.destination, { state: navigation.state }) }} onCancel={() => setDiscardNavigation(null)} />}
     </section>
   )
 }

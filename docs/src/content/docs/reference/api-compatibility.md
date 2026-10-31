@@ -35,9 +35,9 @@ or IDs.
 }
 ```
 
-`history_jobs` use each job's 11 most recent completed scan samples with its
-current scan settings, and each run holds a slot for the mean of the samples'
-run durations. A successful, incomplete, or timed-out scan without a cycle is
+`history_jobs` use each job's 11 most recent scan samples with its current
+scan settings, and each run holds a slot for the mean of the samples' run
+durations. A successful, incomplete, or timed-out scan without a cycle is
 one run at its recorded duration; it counts while it recorded the job's
 current scope hash and TCP scanner profile revision, and only when it is one
 of the job's 44 most recent successful, incomplete, or timed-out scans, so the
@@ -46,9 +46,14 @@ sample whose recorded scan attempts are each a run, excluding idle time
 between attempts, and whose recorded time is spread over its attempt count; it
 counts while it recorded the job's current execution hash, which covers the
 monitored scope, the timeout, resume window and timing, and the scanner
-profile revisions and arguments. A job without such a sample whose newest
-runs with the current key all timed out, such as a resumable job whose first
-cycle is unfinished, runs for its configured timeout. For a cycle attempt, the
+profile revisions and arguments. The job's cycle in progress is its newest
+sample while it has the current execution hash: each of its recorded attempts
+among the job's 11 most recent cycle scans with that hash is a run. A run that
+timed out counts at the job's current timeout rather than its recorded
+duration, because it needed at least the timeout; a scan without a cycle keeps
+its samples when the timeout changes. When the newest 11 runs with the
+current key all timed out, including the attempts of a cycle in progress,
+every run counts at the configured timeout. For a cycle attempt, the
 key is its cycle's execution hash; for a scan without a cycle, it is the
 recorded scope hash and TCP scanner profile revision. A rename, a schedule or
 notification edit, or a pause and resume therefore keeps a job's samples.
@@ -84,18 +89,22 @@ whether the job's demand exceeds a slot-day. The console shows a warning at
 known-rate lower bound may also have additional work that cannot be fully
 estimated. The platform panel labels this possible overlap explicitly.
 
-A run that ends before the schedule's next tick needs no simulation. The
-tenant and deployment estimates bound the work of simulating the other
-schedules: each job has its own work limit, every job first gets a small share
-of it, and the jobs that need more get the rest after every other job, with
-the units' jobs taking turns in the deployment estimate. The whole request has
-one bound, which keeps it within its deadline. The deployment estimate also
-shares equivalent schedule-duration projections across active units. The
+A run that ends before the schedule's next tick needs no simulation. Ticks
+fall on whole minutes, so runs that end in the same minute share one
+simulation of their schedule. The tenant and deployment estimates bound the
+work of simulating the other schedules: each job has its own work limit, and
+the whole request has one bound, which keeps it within its deadline. Every job
+first gets a small share of its limit, with the units' jobs taking turns in
+the deployment estimate, until half of the bound is spent; the jobs that need
+more, including those whose schedule's daylight-saving days alone need more
+than the share, get the rest after every other job. The deployment estimate
+also shares equivalent schedule-duration projections across active units. The
 additive `work_limited_jobs` field counts the jobs whose schedule cannot be
 simulated within those limits; their slot-seconds are left out of the total.
 Such a job is not counted in `history_jobs`, `lower_bound_jobs`, or
 `unestimated_jobs`. Releases before `work_limited_jobs` counted these jobs in
-`unestimated_jobs`.
+`unestimated_jobs`. A job without any run estimate is counted in
+`unestimated_jobs` without simulating its schedule.
 
 A unit's capacity is a limit, not a reservation: every unit's scans share the
 deployment's `scheduler.max_concurrent_scans` slots, so units that each stay

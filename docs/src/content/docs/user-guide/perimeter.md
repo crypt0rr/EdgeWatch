@@ -251,13 +251,14 @@ Administrators and operators open **Perimeter** from the navigation. A unit
 without declared ranges sees an explanation and, for administrators, the
 declare form. The page also shows the business unit's scheduled scan-slot
 demand and effective capacity. The estimate uses the mean run duration of
-recent completed scan samples with each job's current scan settings, so
-renaming, rescheduling, or pausing and resuming a monitor keeps them. Each
-attempt of a completed cycle is one run, excluding idle time between scheduled
-attempts, and a successful, incomplete, or timed-out scan without a cycle is
-one run. A monitor without such a sample whose newest runs with current
-settings all timed out runs for its configured timeout. Each run counts at
-most the monitor's timeout, which ends it. The estimate follows its cron ticks
+recent scan samples with each job's current scan settings, so renaming,
+rescheduling, or pausing and resuming a monitor keeps them. Each attempt of a
+completed cycle or of the cycle in progress is one run, excluding idle time
+between scheduled attempts, and a successful, incomplete, or timed-out scan
+without a cycle is one run. A run that timed out counts at the monitor's
+current timeout, and when its newest runs with current settings all timed
+out, every run does. Each run counts at most the monitor's timeout, which
+ends it. The estimate follows its cron ticks
 over a representative four-year calendar cycle in the job's timezone, which
 averages leap-day schedules over the longer cycle, skipping a tick when the
 previous estimated run is still active, including the tick at exactly the

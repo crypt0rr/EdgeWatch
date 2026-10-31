@@ -562,9 +562,10 @@ scan's content. The platform status adds deployment totals, and the
 scheduled scan demand of all active units together against the deployment's
 scan slots: the daemon estimates the schedules, timeouts, scopes, scanner
 rates, and recent scan durations of each unit's enabled jobs. Each run lasts
-the mean of a job's recent run durations with its current key, a timed-out run
-at most its timeout; a job without a completed sample whose newest runs all
-timed out runs for its timeout. It simulates their cron ticks and skips a tick
+the mean of a job's recent run durations with its current key, including the
+recorded attempts of a cycle in progress, at most its timeout, and a timed-out
+run lasts the job's current timeout; when a job's newest runs all timed out,
+every run does. It simulates their cron ticks and skips a tick
 while an estimated run is still active, and a tick at exactly the timeout of a
 run that the timeout ends. Each job's simulation and the whole estimate have
 work limits, and jobs over them are counted, not estimated. The estimate reads

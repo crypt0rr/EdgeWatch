@@ -55,22 +55,26 @@ can keep concurrent times.
 
 The **Jobs** and **Perimeter** pages show the business unit's scheduled
 scan-slot demand against its effective slot capacity. The estimate is a best
-estimate of a typical day. Jobs with completed scan history from their current
-scan settings use their 11 most recent samples, and each run of a job holds a
-slot for the mean of those samples' run durations:
+estimate of a typical day. Jobs with scan history from their current scan
+settings use their 11 most recent samples, and each run of a job holds a slot
+for the mean of those samples' run durations:
 
 - A successful, incomplete, or timed-out scan without a cycle is one run at
-  its recorded duration, so a job whose runs often time out counts those runs
-  at about its timeout.
+  its recorded duration.
 - Each attempt of a completed resumable cycle is one run, without the idle time
   between scheduled attempts. A cycle whose attempt count is higher than its
   recorded attempts spreads its recorded time over all its attempts.
+- Each recorded attempt of the job's cycle in progress is one run, so a cycle
+  that keeps timing out counts before it completes.
 
-A job without such a sample whose newest runs with the current settings all
-timed out, such as a resumable job whose first cycle is still unfinished, runs
-for its configured timeout. Cycle attempts match by their cycle's execution
-hash; scans without a cycle match by their recorded scope and TCP scanner
-profile revision.
+A run that timed out needed at least the timeout, so it counts at the job's
+current timeout rather than at its recorded duration: a job whose runs often
+time out counts those runs at its timeout, and raising the timeout of a job
+whose scans time out raises its estimate. When the job's newest 11 runs with
+the current settings all timed out, including the attempts of a cycle in
+progress, every run counts at the configured timeout, whatever older samples
+took. Cycle attempts match by their cycle's execution hash; scans without a
+cycle match by their recorded scope and TCP scanner profile revision.
 
 Which edits keep a job's samples depends on what a scan records:
 
@@ -123,13 +127,20 @@ capacity. The notice refreshes when live updates report a job change or a
 completed scan, and at least every five minutes.
 
 A run that ends before the schedule's next tick needs no simulation, so the
-estimate of ordinary schedules costs almost nothing. Simulating the schedules
-whose runs skip ticks is bounded: each job has its own work limit, every job
-first gets a small share of it, and the jobs that need more get the rest only
-after every other job has been estimated. A job whose schedule cannot be
-simulated within that limit, or within the bound of the whole estimate, is
-counted as left out at the work limit, separately from jobs whose work cannot
-be estimated, and adds nothing to the total, so actual demand may be higher.
+estimate of ordinary schedules costs almost nothing. A tick always falls on a
+whole minute, so runs that end in the same minute skip the same ticks and
+share one simulation, within a job and across jobs. Simulating the schedules
+whose runs skip ticks is bounded: each job has its own work limit, and the
+whole estimate has a bound. Every job first gets a small share of its limit,
+until half of the bound is spent. A job that needs more, because its schedule
+ticks often through the daylight-saving days or its simulation did not fit
+the share, waits without spending more and gets the rest of its limit after
+every other job. A job whose schedule cannot be simulated within its limit,
+or within the bound of the whole estimate, is counted as left out at the
+work limit, separately from jobs whose work cannot be estimated, and adds
+nothing to the total, so actual demand may be higher. A job whose run time
+cannot be estimated at all is counted as not fully estimated without
+simulating its schedule.
 
 The effective slot capacity is the most slots the unit may use, not slots
 reserved for it: every business unit's scans share the deployment's scan

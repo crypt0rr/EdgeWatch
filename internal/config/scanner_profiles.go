@@ -89,7 +89,8 @@ func NormalizeScannerProfile(profile ScannerProfile) ScannerProfile {
 // ValidateNewScannerProfile is ValidateScannerProfile for a definition that
 // an administrator creates or changes. Its NSE arguments must also be
 // arguments of the selected script's own, with values that cannot add another
-// argument; see ValidateNSEArguments. Existing revisions only need to pass
+// argument; see ValidateNSEArguments. Its Naabu arguments may hold only
+// placeholders; see NaabuVerbosityFlag. Existing revisions only need to pass
 // ValidateScannerProfile, so the jobs pinned to them keep scanning.
 func ValidateNewScannerProfile(profile ScannerProfile) error {
 	if err := ValidateScannerProfile(profile); err != nil {
@@ -98,7 +99,22 @@ func ValidateNewScannerProfile(profile ScannerProfile) error {
 	if err := ValidateNSEArguments(profile.NSEProfile, profile.NSEArgs); err != nil {
 		return NewFieldValidationError("nse_args", err)
 	}
+	for _, value := range profile.NaabuArgs {
+		if NaabuVerbosityFlag(value) {
+			return NewFieldValidationError("naabu_args", fmt.Errorf("naabu flag %q is not allowed: EdgeWatch runs Naabu with -silent, and Naabu refuses to combine it with verbose output", value))
+		}
+	}
 	return nil
+}
+
+// NaabuVerbosityFlag reports whether value is one of Naabu's verbosity flags,
+// the only flags that approvedNaabuProfileFlags accepted. EdgeWatch always
+// passes -silent, and Naabu exits when -silent and verbose output are both
+// set, so new profiles refuse these flags and EdgeWatch drops them from
+// profiles saved earlier when it renders Naabu's arguments.
+func NaabuVerbosityFlag(value string) bool {
+	_, ok := approvedNaabuProfileFlags[value]
+	return ok
 }
 
 // ValidateScannerProfile enforces the fixed executable and argv-only command
@@ -390,6 +406,10 @@ func RenderScannerProfilePreview(profile ScannerProfile) ([]CommandPreview, erro
 					// Nmap-only declarations are harmless in a shared profile and
 					// are intentionally omitted from the Naabu preview.
 				default:
+					if NaabuVerbosityFlag(value) {
+						// Dropped at run time; see NaabuVerbosityFlag.
+						continue
+					}
 					naabu = append(naabu, value)
 				}
 			}
@@ -708,6 +728,9 @@ var approvedNmapProfileFlags = map[string]struct{}{
 	"--min-parallelism": {}, "--max-parallelism": {},
 }
 
+// approvedNaabuProfileFlags are accepted only so that stored profile
+// revisions saved with them keep decoding; ValidateNewScannerProfile refuses
+// them and Naabu never receives them (NaabuVerbosityFlag).
 var approvedNaabuProfileFlags = map[string]struct{}{
 	"-v": {}, "-verbose": {}, "--verbose": {},
 }

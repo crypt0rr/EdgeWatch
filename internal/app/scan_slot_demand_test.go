@@ -20,13 +20,14 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
-func TestScanSlotDemandUsesMedianCompletedCycleDuration(t *testing.T) {
+// Each run holds a slot for its recorded duration, up to the timeout, and
+// the estimate uses the mean over the runs: a median would ignore how long
+// the longest of them take.
+func TestScanSlotDemandUsesMeanRunTimeOfCompletedSamples(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	db := storetest.OpenFresh(t)
 	ts := defaultTenant(db)
-	// The timeout is longer than the median, so the median, not the
-	// timeout, is each run's duration.
 	job := config.NormalizeJob(config.Job{
 		Name:     "historical",
 		Schedule: "0 */6 * * *",
@@ -39,22 +40,24 @@ func TestScanSlotDemandUsesMedianCompletedCycleDuration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i, duration := range []time.Duration{time.Hour, 2 * time.Hour, 100 * time.Hour} {
-		insertCompletedCycle(t, db, record, fmt.Sprintf("median-cycle-%d", i), duration)
+	for i, duration := range []time.Duration{time.Hour, 2 * time.Hour, 6 * time.Hour} {
+		insertCompletedCycle(t, db, record, fmt.Sprintf("mean-cycle-%d", i), duration)
 	}
 
 	demand, err := (&App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}).ScanSlotDemand(ctx, ts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if demand.EnabledJobs != 1 || demand.HistoryJobs != 1 || demand.LowerBoundJobs != 0 {
-		t.Fatalf("history source counts = enabled %d, history %d, lower bound %d; want 1, 1, 0", demand.EnabledJobs, demand.HistoryJobs, demand.LowerBoundJobs)
+	if demand.EnabledJobs != 1 || demand.HistoryJobs != 1 || demand.LowerBoundJobs != 0 || demand.CadenceUnattainableJobs != 0 {
+		t.Fatalf("history source counts = %+v; want one history job that keeps its cadence", demand)
 	}
-	if got, want := demand.EstimatedSlotSecondsPerDay, float64(8*time.Hour/time.Second); math.Abs(got-want) > 0.01 {
-		t.Fatalf("slot demand = %.2f seconds/day, want median 2h × 4 runs = %.2f", got, want)
+	// The six-hour run counts at the four-hour timeout: (1 + 2 + 4) / 3
+	// hours a run, four runs a day.
+	if got, want := demand.EstimatedSlotSecondsPerDay, 4*7.0/3*3600; math.Abs(got-want) > 0.01 {
+		t.Fatalf("slot demand = %.2f seconds/day, want the mean 2h20m × 4 runs = %.2f", got, want)
 	}
-	if demand.OverCapacity || math.Abs(demand.UtilizationPercent-100.0/3.0) > 0.01 {
-		t.Fatalf("capacity comparison = %+v, want 33.33%% and within one slot", demand)
+	if demand.OverCapacity || math.Abs(demand.UtilizationPercent-100*28.0/3/24) > 0.01 {
+		t.Fatalf("capacity comparison = %+v, want 38.89%% and within one slot", demand)
 	}
 }
 
@@ -97,6 +100,50 @@ func TestTenantScanSlotDemandKeepsEveryMinuteProjectionBounded(t *testing.T) {
 	}
 }
 
+// A unit with 400 daily jobs, each with its own run duration, is estimated
+// in full: a run shorter than a day starts at every daily tick, so no job
+// needs a projection.
+func TestTenantScanSlotDemandEstimatesEveryDailyJob(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	ts := defaultTenant(db)
+	const jobs = 400
+	var want float64
+	for i := range jobs {
+		record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+			Name: fmt.Sprintf("daily-%03d", i), Schedule: "0 3 * * *", Timezone: "UTC",
+			Targets: []string{"192.0.2.1"},
+			TCP:     &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+		}), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		duration := time.Minute + time.Duration(i+1)*time.Second
+		insertCompletedScan(t, db, record, fmt.Sprintf("daily-scan-%03d", i), time.Date(2026, time.May, 1, 4, 0, 0, 0, time.UTC), duration)
+		want += duration.Seconds()
+	}
+	app := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}
+	budget := &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
+	demand, err := app.scheduledScanDemandWithSimulationCache(ctx, ts, nil, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demand.EnabledJobs != jobs || demand.HistoryJobs != jobs || demand.UnestimatedJobs != 0 || demand.WorkLimitedJobs != 0 || demand.CadenceUnattainableJobs != 0 {
+		t.Fatalf("daily tenant demand = %+v; want all %d jobs estimated", demand, jobs)
+	}
+	if math.Abs(demand.EstimatedSlotSecondsPerDay-want) > 0.01 {
+		t.Fatalf("daily tenant demand = %.2f slot-seconds/day, want the jobs' runs together, %.2f", demand.EstimatedSlotSecondsPerDay, want)
+	}
+	expansion := &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
+	if _, err := schedulePatternWithBudget(ctx, "UTC", "0 3 * * *", expansion); err != nil {
+		t.Fatal(err)
+	}
+	if budget.used != expansion.used {
+		t.Fatalf("daily tenant request used %d work units; want only the %d of expanding the one schedule", budget.used, expansion.used)
+	}
+}
+
 func TestTenantDemandSharesExpansionAndProjectionWorkBudget(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -118,19 +165,26 @@ func TestTenantDemandSharesExpansionAndProjectionWorkBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if expansionDemand.EnabledJobs != 1 || expansionDemand.UnestimatedJobs != 1 || expansionDemand.HistoryJobs != 0 {
-		t.Fatalf("expansion-over-budget tenant demand = %+v; want the job reported unestimated", expansionDemand)
+	if expansionDemand.EnabledJobs != 1 || expansionDemand.WorkLimitedJobs != 1 || expansionDemand.UnestimatedJobs != 0 || expansionDemand.HistoryJobs != 0 {
+		t.Fatalf("expansion-over-budget tenant demand = %+v; want the job reported work-limited", expansionDemand)
 	}
 
-	const requestWorkLimit = 25_000
+	// The six-minute runs skip five-minute ticks, so they need a projection
+	// on top of the expansion; a limit just above the expansion's work
+	// leaves too little for it.
+	expansion := &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
+	if _, err := schedulePatternWithBudget(ctx, "UTC", "*/5 0 * * *", expansion); err != nil {
+		t.Fatal(err)
+	}
+	requestWorkLimit := expansion.used + 3
 	budget := &scanScheduleSimulationBudget{limit: requestWorkLimit}
 	simulations := make(map[scanScheduleDurationKey]scanScheduleDurationEstimate)
 	demand, err := app.scheduledScanDemandWithSimulationCache(ctx, ts, simulations, budget)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if demand.EnabledJobs != 1 || demand.HistoryJobs != 0 || demand.UnestimatedJobs != 1 {
-		t.Fatalf("over-budget tenant demand = %+v; want the job reported unestimated", demand)
+	if demand.EnabledJobs != 1 || demand.HistoryJobs != 0 || demand.WorkLimitedJobs != 1 || demand.UnestimatedJobs != 0 {
+		t.Fatalf("over-budget tenant demand = %+v; want the job reported work-limited", demand)
 	}
 	if budget.used != requestWorkLimit {
 		t.Fatalf("tenant demand used %d work units; want the shared expansion/projection limit %d", budget.used, requestWorkLimit)
@@ -149,12 +203,12 @@ func TestScheduleExpansionAndDurationProjectionShareBudget(t *testing.T) {
 		t.Fatalf("budgeted schedule expansion = %+v, error %v", pattern, err)
 	}
 	expansionWork := budget.used
-	if expansionWork < 17_532 {
-		t.Fatalf("schedule expansion used %d work units; want its tick expansion included", expansionWork)
+	if expansionWork < 1_461 {
+		t.Fatalf("schedule expansion used %d work units; want one for each of the sample's 1,461 days", expansionWork)
 	}
-	budget.limit = expansionWork + 32
+	budget.limit = expansionWork + 3
 	projections := make(map[scanScheduleDurationKey]scanScheduleDurationEstimate)
-	if _, _, err := memoizedScheduleRunsForDurationWithBudget(ctx, projections, pattern, (6 * time.Minute).Seconds(), budget); !errors.Is(err, errScheduleSimulationBudgetExceeded) {
+	if _, _, err := memoizedScheduleRunsForDurationWithBudget(ctx, projections, pattern, (6 * time.Minute).Seconds(), false, budget); !errors.Is(err, errScheduleSimulationBudgetExceeded) {
 		t.Fatalf("projection after expansion used %v; want shared budget exhaustion", err)
 	}
 	if budget.used != budget.limit {
@@ -162,6 +216,63 @@ func TestScheduleExpansionAndDurationProjectionShareBudget(t *testing.T) {
 	}
 	if len(projections) != 0 {
 		t.Fatalf("cached %d incomplete projections after shared budget exhaustion", len(projections))
+	}
+}
+
+// A run that ends before the schedule's shortest gap between ticks starts
+// at every tick, so its projection needs no work and no memo entry, whether
+// the schedule ticks more than 20,000 times in the sample or not.
+func TestScheduleProjectionOfRunsWithinTheShortestGapTakesNoWork(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for _, test := range []struct {
+		timezone, schedule string
+		gap                time.Duration
+	}{
+		{timezone: "UTC", schedule: "0 * * * *", gap: time.Hour},
+		{timezone: "Europe/Amsterdam", schedule: "0 * * * *", gap: time.Hour},
+		{timezone: "UTC", schedule: "*/15 * * * *", gap: 15 * time.Minute},
+		{timezone: "UTC", schedule: "0 */2 * * *", gap: 2 * time.Hour},
+		{timezone: "UTC", schedule: "0 3 * * *", gap: 24 * time.Hour},
+		{timezone: "UTC", schedule: "50,55 23 * * *", gap: 5 * time.Minute},
+		{timezone: "UTC", schedule: "55 23 * * *", gap: 24 * time.Hour},
+		{timezone: "UTC", schedule: "0,30 0 * * *", gap: 30 * time.Minute},
+		{timezone: "UTC", schedule: "0 23,0 * * *", gap: time.Hour},
+		// 03:00 comes 23 hours after the previous one on the spring day.
+		{timezone: "Europe/Amsterdam", schedule: "0 3 * * *", gap: 23 * time.Hour},
+		// 02:30 happens twice when the clocks go back.
+		{timezone: "Europe/Amsterdam", schedule: "30 2 * * *", gap: time.Hour},
+		{timezone: "UTC", schedule: "0 0 * * 1,3", gap: 48 * time.Hour},
+	} {
+		t.Run(test.timezone+" "+test.schedule, func(t *testing.T) {
+			t.Parallel()
+			pattern, err := schedulePattern(ctx, test.timezone, test.schedule)
+			if err != nil || !pattern.ok {
+				t.Fatalf("schedule pattern = %+v, error %v", pattern, err)
+			}
+			if pattern.minimumGap != test.gap {
+				t.Fatalf("shortest gap between ticks = %s, want %s", pattern.minimumGap, test.gap)
+			}
+			budget := &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
+			memo := make(map[scanScheduleDurationKey]scanScheduleDurationEstimate)
+			for _, run := range []struct {
+				seconds       float64
+				endsAtTimeout bool
+			}{{seconds: test.gap.Seconds() - 1}, {seconds: test.gap.Seconds()}, {seconds: test.gap.Seconds() - 1, endsAtTimeout: true}} {
+				runs, skipped, err := memoizedScheduleRunsForDurationWithBudget(ctx, memo, pattern, run.seconds, run.endsAtTimeout, budget)
+				if err != nil || skipped || runs != pattern.runsPerDay {
+					t.Fatalf("%v-second run = %.4f runs/day, skipped %t, error %v; want every tick, %.4f", run.seconds, runs, skipped, err, pattern.runsPerDay)
+				}
+			}
+			if budget.used != 0 || len(memo) != 0 {
+				t.Fatalf("runs within the shortest gap used %d work units and %d memo entries; want none", budget.used, len(memo))
+			}
+			// A run that its timeout ends at the gap holds the job at the
+			// next tick, so it needs a projection.
+			if _, skipped, err := memoizedScheduleRunsForDurationWithBudget(ctx, memo, pattern, test.gap.Seconds(), true, budget); err != nil || !skipped {
+				t.Fatalf("timeout-ended run of the shortest gap = skipped %t, error %v; want a skipped tick", skipped, err)
+			}
+		})
 	}
 }
 
@@ -253,16 +364,173 @@ func TestScanSlotDemandUsesTimeoutWhenRecentCurrentKeyRunsTimedOut(t *testing.T)
 		t.Fatalf("50-minute runs on an hourly schedule skipped ticks: %+v", demand)
 	}
 
-	// A later successful run means the newest current-key runs are mixed, so
-	// the completed sample remains the duration estimate instead of treating
-	// the job as an all-timeout workload.
+	// A later successful run joins the timed-out ones: the newest 11 runs are
+	// one of 15 minutes and ten that ran for the timeout, so each run holds
+	// a slot for their mean.
 	insertCompletedScan(t, db, record, "successful-demand-after-timeouts", base.Add(12*time.Hour), 15*time.Minute)
 	demand, err = app.ScanSlotDemand(ctx, ts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if demand.HistoryJobs != 1 || math.Abs(demand.EstimatedSlotSecondsPerDay-float64(6*time.Hour/time.Second)) > 0.01 {
-		t.Fatalf("demand after a newer successful scan = %+v; want its 15m sample × 24", demand)
+	if want := (15 + 10*50) / 11.0 * 60 * 24; demand.HistoryJobs != 1 || math.Abs(demand.EstimatedSlotSecondsPerDay-want) > 0.01 {
+		t.Fatalf("demand after a newer successful scan = %+v; want the mean of 15m and ten 50m runs × 24 = %.2f", demand, want)
+	}
+}
+
+// insertTimedOutScans saves count scans of the record without a cycle that
+// ran for its timeout, an hour apart, the newest finishing at newest.
+func insertTimedOutScans(t *testing.T, db *store.Store, record store.JobRecord, prefix string, count int, newest time.Time) {
+	t.Helper()
+	key := store.NewScanDurationKey(record)
+	for i := range count {
+		finished := newest.Add(-time.Duration(i) * time.Hour)
+		if err := db.System().SaveScan(context.Background(), model.Scan{
+			ID: fmt.Sprintf("%s-%02d", prefix, i), JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision,
+			StartedAt: finished.Add(-record.Job.Timeout.Value()), FinishedAt: finished, Status: "timed_out", ConfigHash: key.ConfigHash,
+			ScannerProfileID: key.ScannerProfileID, ScannerProfileRevision: key.ScannerProfileRevision,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A run that its timeout ends is finalized after the timeout while it still
+// holds the job, so the scheduler skips a tick at exactly the timeout. An
+// hourly job whose runs time out after an hour therefore runs every other
+// hour, while one whose runs time out after 50 minutes keeps its cadence.
+func TestScanSlotDemandSkipsTheTickAtWhichATimeoutEndsARun(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		timeout    time.Duration
+		wantDemand float64
+		wantSkips  int
+	}{
+		{timeout: time.Hour, wantDemand: 12 * 3600, wantSkips: 1},
+		{timeout: 50 * time.Minute, wantDemand: 24 * 50 * 60, wantSkips: 0},
+	} {
+		t.Run(test.timeout.String(), func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			db := storetest.OpenFresh(t)
+			ts := defaultTenant(db)
+			record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+				Name: "times-out", Schedule: "0 * * * *", Timezone: "UTC", Timeout: config.Duration(test.timeout),
+				Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+			}), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			insertTimedOutScans(t, db, record, "timed-out", scanSlotDemandHistoryLimit, time.Date(2026, time.March, 1, 12, 0, 0, 0, time.UTC))
+			demand, err := (&App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}).ScanSlotDemand(ctx, ts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if demand.HistoryJobs != 1 || demand.CadenceUnattainableJobs != test.wantSkips || math.Abs(demand.EstimatedSlotSecondsPerDay-test.wantDemand) > 0.01 {
+				t.Fatalf("demand = %+v; want %.0f slot-seconds/day and %d jobs with skipped ticks", demand, test.wantDemand, test.wantSkips)
+			}
+		})
+	}
+}
+
+// Jobs that often time out are not nearly free: each timed-out run counts
+// at its timeout in the mean over the newest runs.
+func TestScanSlotDemandCountsTimedOutRunsAmongMixedHistory(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	ts := defaultTenant(db)
+	record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+		Name: "mostly-times-out", Schedule: "0 * * * *", Timezone: "UTC", Timeout: config.Duration(50 * time.Minute),
+		Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+	}), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newest := time.Date(2026, time.March, 1, 12, 0, 0, 0, time.UTC)
+	insertTimedOutScans(t, db, record, "mostly-timed-out", 10, newest.Add(-time.Hour))
+	insertCompletedScan(t, db, record, "newest-success", newest, 5*time.Minute)
+	demand, err := (&App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}).ScanSlotDemand(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (5 + 10*50) / 11.0 * 60 * 24; demand.HistoryJobs != 1 || demand.CadenceUnattainableJobs != 0 || math.Abs(demand.EstimatedSlotSecondsPerDay-want) > 0.01 {
+		t.Fatalf("demand = %+v; want the mean of ten 50m runs and one 5m run × 24 = %.2f", demand, want)
+	}
+	if demand.EstimatedSlotSecondsPerDay <= 15*3600 {
+		t.Fatalf("demand = %.0f slot-seconds/day; want more than 15 slot-hours", demand.EstimatedSlotSecondsPerDay)
+	}
+}
+
+// A resumable cycle's runs are its attempts: a cycle of a 30-minute attempt
+// that its timeout ends and a 5-minute final attempt holds a slot for 17.5
+// minutes a run, and neither attempt skips an hourly tick.
+func TestScanSlotDemandSpreadsACycleOverItsAttempts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	ts := defaultTenant(db)
+	record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+		Name: "two-attempt-cycles", Schedule: "0 * * * *", Timezone: "UTC", Timeout: config.Duration(30 * time.Minute),
+		Targets: []string{"192.0.2.1"},
+		TCP:     &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{Rate: 1000}},
+	}), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range scanSlotDemandHistoryLimit {
+		insertCycleAttempts(t, db, record, fmt.Sprintf("two-attempt-cycle-%02d", i), time.Date(2026, time.February, 1, 2*i, 0, 0, 0, time.UTC), []time.Duration{30 * time.Minute, 5 * time.Minute}, time.Hour)
+	}
+	demand, err := (&App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}).ScanSlotDemand(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := 24 * 17.5 * 60; demand.HistoryJobs != 1 || demand.CadenceUnattainableJobs != 0 || math.Abs(demand.EstimatedSlotSecondsPerDay-want) > 0.01 {
+		t.Fatalf("demand = %+v; want 17.5 minutes a run × 24 = %.0f slot-seconds/day", demand, want)
+	}
+}
+
+// A resumable job whose first cycle has not completed has no sample yet; if
+// its newest attempts all timed out, each run lasts its timeout, which also
+// ends it.
+func TestScanSlotDemandUsesTimeoutForUnfinishedCycleWhoseAttemptsTimedOut(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	ts := defaultTenant(db)
+	record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+		Name: "unfinished-cycle", Schedule: "*/30 * * * *", Timezone: "UTC", Timeout: config.Duration(30 * time.Minute),
+		Targets: []string{"192.0.2.1"},
+		TCP:     &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{Rate: 1000}},
+	}), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := store.NewScanDurationKey(record)
+	finished := time.Date(2026, time.March, 1, 12, 0, 0, 0, time.UTC)
+	stamp := func(value time.Time) string { return value.Format(time.RFC3339Nano) }
+	if _, err := db.DB.ExecContext(ctx, `INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,attempt_count,total_units,total_probes,started_at,updated_at,expires_at)
+		VALUES(?,?,?,?,?,?,?,'paused',3,1,1,?,?,?)`, "unfinished-cycle", record.ID, record.Job.Name, record.Revision, key.ConfigHash, key.ExecutionHash, []byte(`{}`),
+		stamp(finished.Add(-3*time.Hour)), stamp(finished), stamp(finished.Add(24*time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	for n := 1; n <= 3; n++ {
+		attemptFinished := finished.Add(-time.Duration(3-n) * time.Hour)
+		if err := db.System().SaveScan(ctx, model.Scan{
+			ID: fmt.Sprintf("unfinished-cycle-attempt-%d", n), JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision,
+			StartedAt: attemptFinished.Add(-30 * time.Minute), FinishedAt: attemptFinished, Status: "timed_out", ConfigHash: key.ConfigHash,
+			CycleID: "unfinished-cycle", CycleAttempt: n, CycleStatus: "paused", Resumable: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	demand, err := (&App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}).ScanSlotDemand(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each 30-minute run holds the job past the next half-hourly tick, so the
+	// job starts every hour.
+	if demand.HistoryJobs != 1 || demand.LowerBoundJobs != 0 || demand.CadenceUnattainableJobs != 1 || math.Abs(demand.EstimatedSlotSecondsPerDay-24*1800) > 0.01 {
+		t.Fatalf("demand = %+v; want the 30m timeout × 24 starts and skipped ticks", demand)
 	}
 }
 
@@ -319,17 +587,17 @@ func TestScanSlotDemandIgnoresEarlierScanSettingsSamplesAfterScopeAndRateEdit(t 
 		t.Fatalf("updated job lower bound/schedule = %.2f seconds, known %v, schedule valid %v", lowerBound, hasBound, ok)
 	}
 	// The /24 at 100 probes per second takes about 46 hours a run. Its
-	// one-hour timeout ends each run sooner, but an hour every half hour is
-	// still more than one slot-day, so the job adds one slot-day and cannot
-	// keep its half-hourly cadence.
-	if uncapped := runSlotSeconds(updated.Job, lowerBound) * runsPerDay; uncapped <= slotSecondsPerDay {
-		t.Fatalf("updated job lower bound = %.2f seconds/day, want more than one slot-day", uncapped)
+	// one-hour timeout ends each run sooner, but the run still holds the job
+	// at the tick an hour after its start, so the job starts every 90
+	// minutes, 16 times a day, and cannot keep its half-hourly cadence.
+	if lowerBound <= updated.Job.Timeout.Value().Seconds() || runsPerDay != 48 {
+		t.Fatalf("updated job lower bound = %.2f seconds a run at %.0f runs/day, want more than its timeout", lowerBound, runsPerDay)
 	}
-	if after.HistoryJobs != 0 || after.LowerBoundJobs != 1 || after.EstimatedSlotSecondsPerDay != slotSecondsPerDay || after.CadenceUnattainableJobs != 1 {
-		t.Fatalf("demand after scope/rate edit = %+v; want the current lower bound capped at one slot-day and its job counted as unable to keep its cadence", after)
+	if after.HistoryJobs != 0 || after.LowerBoundJobs != 1 || math.Abs(after.EstimatedSlotSecondsPerDay-16*3600) > 0.01 || after.CadenceUnattainableJobs != 1 {
+		t.Fatalf("demand after scope/rate edit = %+v; want 16 one-hour runs of the current lower bound and its job counted as unable to keep its cadence", after)
 	}
-	if after.UtilizationPercent != 100 || after.OverCapacity {
-		t.Fatalf("capacity warning after scope/rate edit = %+v; want the one job to fill its one slot without exceeding it", after)
+	if math.Abs(after.UtilizationPercent-200.0/3) > 0.01 || after.OverCapacity {
+		t.Fatalf("capacity warning after scope/rate edit = %+v; want two thirds of its one slot", after)
 	}
 }
 
@@ -495,17 +763,17 @@ func TestScanSlotDemandUsesCompletedCycleTimeAfterRecoveryBeforeFinalization(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Even at its one-hour timeout, the two-hour attempt of a half-hourly
-	// job is 48 slot-hours a day, more than the one slot-day that one job
-	// can use.
-	if uncapped := runSlotSeconds(current.Job, cycle.FinishedAt.Sub(attemptStarted).Seconds()) * 48; uncapped <= slotSecondsPerDay {
-		t.Fatalf("recovered attempt = %s, want more than one slot-day at 48 runs", cycle.FinishedAt.Sub(attemptStarted))
+	// The two-hour attempt outlasts the one-hour timeout, which ends each
+	// run while it holds the job at the tick an hour after its start, so the
+	// half-hourly job starts every 90 minutes, 16 times a day.
+	if attempt := cycle.FinishedAt.Sub(attemptStarted); attempt <= current.Job.Timeout.Value() {
+		t.Fatalf("recovered attempt = %s, want more than the %s timeout", attempt, current.Job.Timeout.Value())
 	}
-	if demand.HistoryJobs != 1 || demand.LowerBoundJobs != 0 || demand.EstimatedSlotSecondsPerDay != slotSecondsPerDay || demand.CadenceUnattainableJobs != 1 {
-		t.Fatalf("recovered cycle demand = %+v; want the completed attempt duration %s capped at one slot-day", demand, cycle.FinishedAt.Sub(attemptStarted))
+	if demand.HistoryJobs != 1 || demand.LowerBoundJobs != 0 || math.Abs(demand.EstimatedSlotSecondsPerDay-16*3600) > 0.01 || demand.CadenceUnattainableJobs != 1 {
+		t.Fatalf("recovered cycle demand = %+v; want the completed attempt duration %s counted as 16 one-hour runs", demand, cycle.FinishedAt.Sub(attemptStarted))
 	}
-	if demand.UtilizationPercent != 100 || demand.OverCapacity {
-		t.Fatalf("recovered cycle demand = %+v; want a full slot from the completed attempt", demand)
+	if math.Abs(demand.UtilizationPercent-200.0/3) > 0.01 || demand.OverCapacity {
+		t.Fatalf("recovered cycle demand = %+v; want two thirds of a slot from the completed attempt", demand)
 	}
 }
 
@@ -535,10 +803,79 @@ func TestScanSlotDemandReturnsTenantAndStorageErrors(t *testing.T) {
 	}
 }
 
-func TestMedianCycleDurationAveragesEvenSamples(t *testing.T) {
-	got := medianCycleDuration([]time.Duration{5 * time.Second, time.Second, 3 * time.Second, 9 * time.Second})
-	if want := 4 * time.Second; got != want {
-		t.Fatalf("even-sample median = %s, want %s", got, want)
+// Every recorded attempt is a run at its duration up to the timeout, which
+// ends it; a cycle's unrecorded attempts are runs without slot time.
+func TestHistoryDemandRunsCountEachAttemptUpToTheTimeout(t *testing.T) {
+	t.Parallel()
+	runs := historyDemandRuns([]store.ScanDurationSample{
+		{Attempts: []time.Duration{10 * time.Minute}, Runs: 1},
+		{Attempts: []time.Duration{90 * time.Minute, 30 * time.Minute}, Runs: 3},
+		{Attempts: []time.Duration{time.Hour}, Runs: 1},
+		{Attempts: []time.Duration{10 * time.Minute}, Runs: 1},
+	}, time.Hour.Seconds())
+	want := []scanDemandRun{
+		{seconds: 0, weight: 1},
+		{seconds: 600, weight: 2},
+		{seconds: 1800, weight: 1},
+		{seconds: 3600, endsAtTimeout: true, weight: 2},
+	}
+	if !reflect.DeepEqual(runs, want) {
+		t.Fatalf("history runs = %+v, want %+v", runs, want)
+	}
+}
+
+// A job's runs start as often as their mean time from one start to the next
+// allows, and each holds a slot for their mean slot time.
+func TestProjectScanDemandRunsCombinesRunsByTheirTimeBetweenStarts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pattern, err := schedulePattern(ctx, "UTC", "0 * * * *")
+	if err != nil || !pattern.ok {
+		t.Fatalf("hourly pattern = %+v, error %v", pattern, err)
+	}
+	work := newScanDemandWork(nil, nil)
+	project := func(run scanDemandRun) (float64, bool, error) {
+		return work.project(ctx, pattern, run, work.budget, false)
+	}
+	// A cycle of an attempt that its one-hour timeout ends, which skips the
+	// next tick, and a 10-minute final attempt starts twice in three hours.
+	demand, skipped, err := projectScanDemandRuns([]scanDemandRun{
+		{seconds: 3600, endsAtTimeout: true, weight: 1},
+		{seconds: 600, weight: 1},
+	}, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := 16 * 35 * 60.0; !skipped || math.Abs(demand-want) > 0.01 {
+		t.Fatalf("mixed demand = %.2f, skipped %t; want 16 starts a day × 35 minutes = %.0f and a skipped tick", demand, skipped, want)
+	}
+	if demand, skipped, err := projectScanDemandRuns(nil, project); err != nil || demand != 0 || skipped {
+		t.Fatalf("demand without runs = %.2f, skipped %t, error %v; want none", demand, skipped, err)
+	}
+	if demand, skipped, err := projectScanDemandRuns([]scanDemandRun{{weight: 2}}, project); err != nil || demand != 0 || skipped {
+		t.Fatalf("demand of runs without slot time = %.2f, skipped %t, error %v; want none", demand, skipped, err)
+	}
+
+	// A first-pass projection that runs out of its job's share waits for the
+	// second pass, and other jobs with the same run wait without spending
+	// work on it again.
+	dense, err := schedulePattern(ctx, "Europe/Amsterdam", "*/2 * * * *")
+	if err != nil || !dense.ok {
+		t.Fatalf("dense pattern = %+v, error %v", dense, err)
+	}
+	slow := scanDemandRun{seconds: 180, weight: 1}
+	usedBefore := work.budget.used
+	for range 3 {
+		share := &scanScheduleSimulationBudget{limit: scanScheduleJobFirstPassWorkLimit, parent: work.budget}
+		if _, _, err := work.project(ctx, dense, slow, share, true); !errors.Is(err, errScheduleSimulationBudgetExceeded) {
+			t.Fatalf("first-pass dense projection error = %v; want the job's share exceeded", err)
+		}
+	}
+	if used := work.budget.used - usedBefore; used != scanScheduleJobFirstPassWorkLimit {
+		t.Fatalf("three first-pass attempts of one projection used %d work units; want one share, %d", used, scanScheduleJobFirstPassWorkLimit)
+	}
+	if runs, skipped, err := work.project(ctx, dense, slow, &scanScheduleSimulationBudget{limit: scanScheduleJobWorkLimit, parent: work.budget}, false); err != nil || !skipped || math.Abs(runs-360) > 0.01 {
+		t.Fatalf("second-pass dense projection = %.4f runs/day, skipped %t, error %v; want 360 and skipped", runs, skipped, err)
 	}
 }
 
@@ -561,7 +898,7 @@ func TestScanJobRunsPerDayHandlesFallbackInvalidAndDenseSchedules(t *testing.T) 
 			t.Fatal("invalid cron schedule was accepted")
 		}
 	})
-	t.Run("dense schedule observation limit", func(t *testing.T) {
+	t.Run("dense schedule", func(t *testing.T) {
 		got, ok := scanJobRunsPerDay(config.Job{Schedule: "* * * * *"}, "")
 		if !ok || got < 1440 || got > 1441 {
 			t.Fatalf("dense schedule = %.4f runs/day, valid %v; want about 1440", got, ok)
@@ -580,10 +917,12 @@ func TestScanJobRunsPerDayCountsDenseCalendarScheduleAcrossFourYearCycle(t *test
 	if got, want := pattern.runsPerDay, float64(720*24*60)/1461; math.Abs(got-want) > 0.001 {
 		t.Fatalf("dense calendar schedule = %.4f runs/day; want the four-year average %.4f", got, want)
 	}
-	if pattern.observationsComplete || len(pattern.occurrences) != 0 {
-		t.Fatalf("dense calendar schedule retained %d of %d observations; want bounded offsets marked incomplete", len(pattern.occurrences), scanScheduleObservationLimit)
+	// The pattern keeps one span of days for each month's first 15 days, not
+	// its million ticks.
+	if len(pattern.days) != 48 {
+		t.Fatalf("dense calendar schedule retained %d day spans; want one for each of the 48 months", len(pattern.days))
 	}
-	runs, skipped, err := pattern.runsForDuration(context.Background(), (15 * time.Minute).Seconds())
+	runs, skipped, err := pattern.runsForDuration(context.Background(), (15 * time.Minute).Seconds(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -634,7 +973,7 @@ func TestDenseScheduleDemandMemoizesByNormalizedScheduleAndDuration(t *testing.T
 		if i%2 != 0 {
 			pattern = second
 		}
-		gotRuns, gotSkipped, err = memoizedScheduleRunsForDurationWithBudget(ctx, cache, pattern, 15*60, budget)
+		gotRuns, gotSkipped, err = memoizedScheduleRunsForDurationWithBudget(ctx, cache, pattern, 15*60, false, budget)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -651,7 +990,7 @@ func TestDenseScheduleDemandMemoizesByNormalizedScheduleAndDuration(t *testing.T
 	workAfterFirstProjection := budget.used
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, _, err := memoizedScheduleRunsForDurationWithBudget(canceled, cache, first, 15*60, budget); !errors.Is(err, context.Canceled) {
+	if _, _, err := memoizedScheduleRunsForDurationWithBudget(canceled, cache, first, 15*60, false, budget); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled cached schedule estimate error = %v; want context.Canceled", err)
 	}
 	if budget.used != workAfterFirstProjection {
@@ -671,7 +1010,7 @@ func TestScheduleSimulationBudgetPreservesCancellationWhenExhausted(t *testing.T
 	// budget refuses its first Schedule.Next call.
 	ctx := &cancelAfterContextChecks{Context: base, cancel: cancel, remaining: 2}
 	budget := &scanScheduleSimulationBudget{limit: 0}
-	if _, _, err := memoizedScheduleRunsForDurationWithBudget(ctx, make(map[scanScheduleDurationKey]scanScheduleDurationEstimate), pattern, 6*60, budget); !errors.Is(err, context.Canceled) {
+	if _, _, err := memoizedScheduleRunsForDurationWithBudget(ctx, make(map[scanScheduleDurationKey]scanScheduleDurationEstimate), pattern, 6*60, false, budget); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation at exhausted schedule budget = %v; want context.Canceled", err)
 	}
 }
@@ -754,16 +1093,31 @@ func TestScheduleSimulationStopsOnZeroNextAndPreservesCancellation(t *testing.T)
 	end := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
-	if _, _, err := simulateSchedule(ctx, schedule, start, end, time.Minute); !errors.Is(err, errInvalidScanSchedulePattern) {
-		t.Fatalf("simulation for a never-firing schedule error = %v; want invalid schedule", err)
+	for _, endsAtTimeout := range []bool{false, true} {
+		if _, err := simulateSchedulePrefix(ctx, schedule, start, time.Minute, endsAtTimeout); !errors.Is(err, errInvalidScanSchedulePattern) {
+			t.Fatalf("prefix simulation for a never-firing schedule error = %v; want invalid schedule", err)
+		}
 	}
-	if _, err := simulateSchedulePrefix(ctx, schedule, start, time.Minute); !errors.Is(err, errInvalidScanSchedulePattern) {
-		t.Fatalf("prefix simulation for a never-firing schedule error = %v; want invalid schedule", err)
+	// An irregular day of a schedule that never fires again simply has no
+	// ticks.
+	if starts, skipped, _, _, err := simulateScheduleSpan(ctx, schedule, start.Add(-time.Nanosecond), start, end, time.Time{}, time.Minute, false); err != nil || starts != 0 || skipped {
+		t.Fatalf("span simulation for a never-firing schedule = %d starts, skipped %t, error %v; want none", starts, skipped, err)
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := simulateSchedule(canceled, schedule, start, end, time.Minute); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled schedule simulation error = %v; want context.Canceled", err)
+	hourly, err := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow).Parse("0 * * * *")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := simulateSchedulePrefix(canceled, hourly, start, time.Hour, false); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled prefix simulation error = %v; want context.Canceled", err)
+	}
+	if _, _, _, _, err := simulateScheduleSpan(canceled, hourly, start.Add(-time.Nanosecond), start, end, time.Time{}, time.Minute, false); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled span simulation error = %v; want context.Canceled", err)
+	}
+	walk := scheduleDayWalk{offsets: []time.Duration{0, time.Hour}, run: 90 * time.Minute, days: make(map[int]scheduleDayResult)}
+	if _, _, _, err := walk.ordinaryDays(canceled, start, 3, time.Time{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled ordinary-day walk error = %v; want context.Canceled", err)
 	}
 }
 
@@ -889,7 +1243,7 @@ var demandSampleKinds = []string{"cycle", "scan"}
 
 // createDemandJobWithSamples creates an enabled hourly job and records three
 // completed samples of the kind given, of 10, 20 and 30 minutes, so its
-// estimate is the 20-minute median times its runs per day.
+// estimate is the 20-minute mean times its runs per day.
 func createDemandJobWithSamples(t *testing.T, db *store.Store, kind string) store.JobRecord {
 	t.Helper()
 	ctx := context.Background()
@@ -933,7 +1287,7 @@ func TestScanSlotDemandKeepsSamplesAcrossEditsThatDoNotChangeScans(t *testing.T)
 				}
 				want := (20 * time.Minute).Seconds() * runsPerDay
 				if demand.HistoryJobs != 1 || demand.LowerBoundJobs != 0 || demand.UnestimatedJobs != 0 || math.Abs(demand.EstimatedSlotSecondsPerDay-want) > 0.01 {
-					t.Fatalf("demand after %s = %+v; want the 20m median of the kept samples × %.0f runs = %.0f seconds/day", step, demand, runsPerDay, want)
+					t.Fatalf("demand after %s = %+v; want the 20m mean of the kept samples × %.0f runs = %.0f seconds/day", step, demand, runsPerDay, want)
 				}
 			}
 			check("creation", 24)
@@ -1138,33 +1492,45 @@ func TestScanSlotDemandCountsEachRunAtMostItsTimeout(t *testing.T) {
 // attempt before the final one, which the cycle row records.
 func insertMultiAttemptCycle(t *testing.T, db *store.Store, record store.JobRecord, id string, attempts int, attempt, interval time.Duration) {
 	t.Helper()
+	durations := make([]time.Duration, attempts)
+	for i := range durations {
+		durations[i] = attempt
+	}
+	insertCycleAttempts(t, db, record, id, time.Date(2026, time.February, 1, 12, 0, 0, 0, time.UTC), durations, interval)
+	samples, err := defaultTenant(db).ListCompletedScanCycleDurations(context.Background(), []store.ScanDurationKey{store.NewScanDurationKey(record)}, scanSlotDemandHistoryLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Duration(attempts) * attempt; len(samples[record.ID]) != 1 || samples[record.ID][0].Duration() != want || samples[record.ID][0].Runs != attempts {
+		t.Fatalf("%d-attempt cycle samples = %+v, want one of %s over %d runs", attempts, samples[record.ID], want, attempts)
+	}
+}
+
+// insertCycleAttempts records a completed cycle of the record that finished
+// at finished after attempts of the durations given, each starting one
+// interval after the one before, with a saved timed-out scan for every
+// attempt before the final one, which the cycle row records.
+func insertCycleAttempts(t *testing.T, db *store.Store, record store.JobRecord, id string, finished time.Time, attempts []time.Duration, interval time.Duration) {
+	t.Helper()
 	key := store.NewScanDurationKey(record)
-	finished := time.Date(2026, time.February, 1, 12, 0, 0, 0, time.UTC)
-	finalStart := finished.Add(-attempt)
-	firstStart := finalStart.Add(-time.Duration(attempts-1) * interval)
+	finalStart := finished.Add(-attempts[len(attempts)-1])
+	firstStart := finalStart.Add(-time.Duration(len(attempts)-1) * interval)
 	stamp := func(value time.Time) string { return value.Format(time.RFC3339Nano) }
 	if _, err := db.DB.Exec(`INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,attempt_count,total_units,total_probes,started_at,attempt_started_at,updated_at,expires_at,finished_at)
 		VALUES(?,?,?,?,?,?,?,'completed',?,1,1,?,?,?,?,?)`,
-		id, record.ID, record.Job.Name, record.Revision, key.ConfigHash, key.ExecutionHash, []byte("{}"), attempts,
+		id, record.ID, record.Job.Name, record.Revision, key.ConfigHash, key.ExecutionHash, []byte("{}"), len(attempts),
 		stamp(firstStart), stamp(finalStart), stamp(finished), stamp(finished), stamp(finished)); err != nil {
 		t.Fatal(err)
 	}
-	for n := 1; n < attempts; n++ {
+	for n := 1; n < len(attempts); n++ {
 		started := firstStart.Add(time.Duration(n-1) * interval)
 		if err := db.System().SaveScan(context.Background(), model.Scan{
 			ID: fmt.Sprintf("%s-attempt-%02d", id, n), JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision,
-			StartedAt: started, FinishedAt: started.Add(attempt), Status: "timed_out", ConfigHash: key.ConfigHash,
+			StartedAt: started, FinishedAt: started.Add(attempts[n-1]), Status: "timed_out", ConfigHash: key.ConfigHash,
 			CycleID: id, CycleAttempt: n, CycleStatus: "paused", Resumable: true,
 		}); err != nil {
 			t.Fatal(err)
 		}
-	}
-	samples, err := defaultTenant(db).ListCompletedScanCycleDurations(context.Background(), []store.ScanDurationKey{key}, scanSlotDemandHistoryLimit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := time.Duration(attempts) * attempt; len(samples[record.ID]) != 1 || samples[record.ID][0] != want {
-		t.Fatalf("%d-attempt cycle samples = %v, want one of %s", attempts, samples[record.ID], want)
 	}
 }
 
@@ -1252,13 +1618,13 @@ func TestScanJobRunsPerDayCacheIsBounded(t *testing.T) {
 
 func TestScanJobRunsPerDayCacheHasWeightedBoundForDenseSchedules(t *testing.T) {
 	t.Parallel()
-	// Five-minute ticks during one hour per day have 17,532 starts in the
-	// 1,461-day sample. Reuse
-	// one computed backing array to model the retained weight of many distinct
-	// dense keys without making the test itself retain tens of MiB.
-	value, err := schedulePattern(context.Background(), "UTC", "*/5 0 * * *")
-	if err != nil || !value.ok || len(value.occurrences) != 17_532 {
-		t.Fatalf("dense schedule pattern has %d occurrences, ok %t, err %v; want 17,532", len(value.occurrences), value.ok, err)
+	// A schedule of every other day keeps a span for about every other day
+	// of the 1,461-day sample. Reuse one computed backing array to model the
+	// retained weight of many distinct such keys without making the test
+	// itself retain the whole cache.
+	value, err := schedulePattern(context.Background(), "UTC", "0 0 */2 * *")
+	if err != nil || !value.ok || len(value.days) < 700 {
+		t.Fatalf("every-other-day schedule pattern has %d day spans, ok %t, err %v; want more than 700", len(value.days), value.ok, err)
 	}
 	const schedules = scanRunsPerDayCacheLimit
 	keyForWeight := scanRunsPerDayKey{timezone: "UTC", schedule: "dense-key-0000"}
@@ -1431,18 +1797,26 @@ func TestScanJobRunsPerDayCacheEvictionRecomputesTheEvictedKey(t *testing.T) {
 func TestScheduleDemandSkipsTicksLikeTheCronScheduler(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
-		name        string
-		timezone    string
-		schedule    string
-		runDuration time.Duration
-		wantRuns    float64
-		wantSkipped bool
+		name          string
+		timezone      string
+		schedule      string
+		runDuration   time.Duration
+		endsAtTimeout bool
+		wantRuns      float64
+		wantSkipped   bool
 	}{
 		{name: "ten minute window with fifteen minute run", timezone: "UTC", schedule: "*/10 8-17 * * *", runDuration: 15 * time.Minute, wantRuns: 30, wantSkipped: true},
 		{name: "two hourly ticks with ten minute run", timezone: "UTC", schedule: "0,5 * * * *", runDuration: 10 * time.Minute, wantRuns: 24, wantSkipped: true},
 		{name: "completion exactly at next tick", timezone: "UTC", schedule: "*/15 * * * *", runDuration: 15 * time.Minute, wantRuns: 96},
+		// A run that its timeout ends is finalized after the next tick.
+		{name: "timeout exactly at next tick", timezone: "UTC", schedule: "*/15 * * * *", runDuration: 15 * time.Minute, endsAtTimeout: true, wantRuns: 48, wantSkipped: true},
+		{name: "hourly timeout exactly at next tick", timezone: "UTC", schedule: "0 * * * *", runDuration: time.Hour, endsAtTimeout: true, wantRuns: 12, wantSkipped: true},
+		{name: "every-minute timeout exactly at next tick", timezone: "UTC", schedule: "* * * * *", runDuration: time.Minute, endsAtTimeout: true, wantRuns: 720, wantSkipped: true},
+		{name: "timeout before next tick", timezone: "UTC", schedule: "0 * * * *", runDuration: 50 * time.Minute, endsAtTimeout: true, wantRuns: 24},
 		{name: "hourly across daylight saving", timezone: "Europe/Amsterdam", schedule: "0 * * * *", runDuration: 61 * time.Minute, wantRuns: 12, wantSkipped: true},
 		{name: "dense schedule with long run", timezone: "UTC", schedule: "* * * * *", runDuration: 15 * 24 * time.Hour, wantRuns: 1.0 / 15, wantSkipped: true},
+		{name: "daily run longer than a day", timezone: "UTC", schedule: "0 3 * * *", runDuration: 25 * time.Hour, wantRuns: 0.5, wantSkipped: true},
+		{name: "weekday window with long run", timezone: "UTC", schedule: "*/20 9-10 * * 1-5", runDuration: 30 * time.Minute, wantRuns: 3 * 1461.0 * 5 / 7 / 1461, wantSkipped: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -1450,7 +1824,7 @@ func TestScheduleDemandSkipsTicksLikeTheCronScheduler(t *testing.T) {
 			if err != nil || !pattern.ok {
 				t.Fatalf("schedule pattern = %+v, error %v", pattern, err)
 			}
-			runs, skipped, err := pattern.runsForDuration(context.Background(), test.runDuration.Seconds())
+			runs, skipped, err := pattern.runsForDuration(context.Background(), test.runDuration.Seconds(), test.endsAtTimeout)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1461,17 +1835,58 @@ func TestScheduleDemandSkipsTicksLikeTheCronScheduler(t *testing.T) {
 	}
 }
 
+// simulateScheduleTicks is the reference projection over the window from
+// start to end: it follows every cron tick from two run durations before
+// start, as the scheduler finds each tick from the one before it, and skips
+// the ticks at which an earlier run still holds the job.
+func simulateScheduleTicks(ctx context.Context, schedule cron.Schedule, start, end time.Time, runDuration time.Duration, endsAtTimeout bool) (float64, bool, error) {
+	var busyUntil time.Time
+	var starts float64
+	skipped := false
+	for next := schedule.Next(start.Add(-2 * runDuration).Add(-time.Nanosecond)); ; next = schedule.Next(next) {
+		if err := ctx.Err(); err != nil {
+			return 0, false, err
+		}
+		if next.IsZero() {
+			return 0, false, errInvalidScanSchedulePattern
+		}
+		if !next.Before(end) {
+			break
+		}
+		if scheduleTickBusy(next, busyUntil, endsAtTimeout) {
+			if !next.Before(start) {
+				skipped = true
+			}
+			continue
+		}
+		if !next.Before(start) {
+			starts++
+		}
+		busyUntil = next.Add(runDuration)
+	}
+	return starts / (end.Sub(start).Hours() / 24), skipped, nil
+}
+
+// The day walk reproduces a tick-by-tick simulation of the whole sample,
+// including irregular days: daylight-saving changes, half-hour shifts,
+// midnights that daylight saving skips, and Ramadan offset changes.
 func TestCompactSchedulePatternsPreserveTransitionHeavyTimezoneProjection(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
-		name        string
-		timezone    string
-		schedule    string
-		runDuration time.Duration
+		name         string
+		timezone     string
+		schedule     string
+		runDurations []time.Duration
 	}{
-		{name: "half-hour daylight transition", timezone: "Australia/Lord_Howe", schedule: "0,30 * * * *", runDuration: 45 * time.Minute},
-		{name: "Ramadan timezone changes", timezone: "Africa/Casablanca", schedule: "30 1 * * *", runDuration: 2 * time.Hour},
-		{name: "European daylight transition", timezone: "Europe/Amsterdam", schedule: "0 * * * *", runDuration: 61 * time.Minute},
+		{name: "half-hour daylight transition", timezone: "Australia/Lord_Howe", schedule: "0,30 * * * *", runDurations: []time.Duration{30 * time.Minute, 45 * time.Minute, 2 * time.Hour}},
+		{name: "Ramadan timezone changes", timezone: "Africa/Casablanca", schedule: "30 1 * * *", runDurations: []time.Duration{2 * time.Hour, 24 * time.Hour, 49 * time.Hour}},
+		{name: "European daylight transition", timezone: "Europe/Amsterdam", schedule: "0 * * * *", runDurations: []time.Duration{time.Hour, 61 * time.Minute, 150 * time.Minute, 26 * time.Hour}},
+		{name: "repeated hour at the clock change", timezone: "Europe/Amsterdam", schedule: "30 2 * * *", runDurations: []time.Duration{time.Hour, 23 * time.Hour, 24 * time.Hour}},
+		{name: "skipped midnight", timezone: "America/Santiago", schedule: "0 0,12 * * *", runDurations: []time.Duration{11 * time.Hour, 12 * time.Hour, 13 * time.Hour}},
+		{name: "skipped midnight with weekdays", timezone: "America/Havana", schedule: "*/20 0-1 * * 0,6", runDurations: []time.Duration{20 * time.Minute, 50 * time.Minute}},
+		{name: "midnight change with every other day", timezone: "Asia/Beirut", schedule: "0 3 */2 * *", runDurations: []time.Duration{24 * time.Hour, 48 * time.Hour, 50 * time.Hour}},
+		{name: "month window", timezone: "America/New_York", schedule: "*/30 1-3 1-7 * *", runDurations: []time.Duration{30 * time.Minute, 40 * time.Minute, 3 * time.Hour}},
+		{name: "leap day", timezone: "UTC", schedule: "0 0 29 2 *", runDurations: []time.Duration{time.Hour, 400 * 24 * time.Hour}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -1479,11 +1894,6 @@ func TestCompactSchedulePatternsPreserveTransitionHeavyTimezoneProjection(t *tes
 			if err != nil || !pattern.ok {
 				t.Fatalf("compact schedule pattern = %+v, error %v", pattern, err)
 			}
-			gotRuns, gotSkipped, err := pattern.runsForDuration(context.Background(), test.runDuration.Seconds())
-			if err != nil {
-				t.Fatal(err)
-			}
-
 			location, err := time.LoadLocation(test.timezone)
 			if err != nil {
 				t.Fatal(err)
@@ -1495,12 +1905,28 @@ func TestCompactSchedulePatternsPreserveTransitionHeavyTimezoneProjection(t *tes
 			parsed.(*cron.SpecSchedule).Location = location
 			start := time.Date(scanScheduleSampleStartYear, time.January, 1, 0, 0, 0, 0, location)
 			end := time.Date(scanScheduleSampleEndYear, time.January, 1, 0, 0, 0, 0, location)
-			wantRuns, wantSkipped, err := simulateSchedule(context.Background(), parsed, start, end, test.runDuration)
-			if err != nil {
-				t.Fatal(err)
+			var ticks float64
+			for next := parsed.Next(start.Add(-time.Nanosecond)); next.Before(end); next = parsed.Next(next) {
+				ticks++
 			}
-			if math.Abs(gotRuns-wantRuns) > 1e-9 || gotSkipped != wantSkipped {
-				t.Fatalf("compact projection = %.8f, skipped %t; timezone-aware cron projection = %.8f, skipped %t", gotRuns, gotSkipped, wantRuns, wantSkipped)
+			if want := ticks / (end.Sub(start).Hours() / 24); math.Abs(pattern.runsPerDay-want) > 1e-9 {
+				t.Fatalf("compact rate = %.8f runs/day; cron ticks = %.8f", pattern.runsPerDay, want)
+			}
+			for _, runDuration := range test.runDurations {
+				for _, endsAtTimeout := range []bool{false, true} {
+					budget := &scanScheduleSimulationBudget{limit: scanScheduleJobWorkLimit}
+					gotRuns, gotSkipped, err := pattern.runsForDurationWithBudget(context.Background(), runDuration.Seconds(), endsAtTimeout, budget)
+					if err != nil {
+						t.Fatal(err)
+					}
+					wantRuns, wantSkipped, err := simulateScheduleTicks(context.Background(), parsed, start, end, runDuration, endsAtTimeout)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if math.Abs(gotRuns-wantRuns) > 1e-9 || gotSkipped != wantSkipped {
+						t.Fatalf("%s run, ends at timeout %t: compact projection = %.8f, skipped %t; timezone-aware cron projection = %.8f, skipped %t", runDuration, endsAtTimeout, gotRuns, gotSkipped, wantRuns, wantSkipped)
+					}
+				}
 			}
 		})
 	}
@@ -1528,17 +1954,19 @@ func TestEveryMinuteProjectionShortcutMatchesCronAcrossDST(t *testing.T) {
 				t.Fatal(err)
 			}
 			parsed.(*cron.SpecSchedule).Location = location
-			for _, runDuration := range []time.Duration{61 * time.Second, 90 * time.Second} {
-				got, gotSkipped, err := simulateEveryMinuteScheduleWindow(context.Background(), test.start, test.end, runDuration)
-				if err != nil {
-					t.Fatal(err)
-				}
-				want, wantSkipped, err := simulateSchedule(context.Background(), parsed, test.start, test.end, runDuration)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if math.Abs(got-want) > 1e-9 || gotSkipped != wantSkipped {
-					t.Fatalf("%s shortcut = %.8f starts/day, skipped %t; cron = %.8f, skipped %t", runDuration, got, gotSkipped, want, wantSkipped)
+			for _, runDuration := range []time.Duration{time.Minute, 61 * time.Second, 90 * time.Second, 2 * time.Minute} {
+				for _, endsAtTimeout := range []bool{false, true} {
+					got, gotSkipped, err := simulateEveryMinuteScheduleWindow(context.Background(), test.start, test.end, runDuration, endsAtTimeout)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want, wantSkipped, err := simulateScheduleTicks(context.Background(), parsed, test.start, test.end, runDuration, endsAtTimeout)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if math.Abs(got-want) > 1e-9 || gotSkipped != wantSkipped {
+						t.Fatalf("%s run, ends at timeout %t: shortcut = %.8f starts/day, skipped %t; cron = %.8f, skipped %t", runDuration, endsAtTimeout, got, gotSkipped, want, wantSkipped)
+					}
 				}
 			}
 		})
@@ -1558,25 +1986,25 @@ func TestScheduleProjectionHandlesCancellationAndInvalidCompactState(t *testing.
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, _, err := pattern.runsForDurationWithSchedule(canceled, 61, 61*time.Second, &cron.SpecSchedule{}, start, end, nil); !errors.Is(err, context.Canceled) {
+	if _, _, err := pattern.walkScheduleDays(canceled, &cron.SpecSchedule{}, start, 61*time.Second, false, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled compact projection error = %v; want context.Canceled", err)
 	}
-	if _, _, err := simulateEveryMinuteSchedule(canceled, pattern, 61*time.Second); !errors.Is(err, context.Canceled) {
+	if _, _, err := simulateEveryMinuteSchedule(canceled, pattern, 61*time.Second, false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled every-minute projection error = %v; want context.Canceled", err)
 	}
-	if _, _, err := simulateEveryMinuteSchedule(ctx, pattern, 0); err != nil {
+	if _, _, err := simulateEveryMinuteSchedule(ctx, pattern, 0, false); err != nil {
 		t.Fatalf("zero-duration every-minute projection error = %v; want nil", err)
 	}
-	if _, _, err := simulateEveryMinuteScheduleWindow(canceled, start, end, 61*time.Second); !errors.Is(err, context.Canceled) {
+	if _, _, err := simulateEveryMinuteScheduleWindow(canceled, start, end, 61*time.Second, false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled every-minute window error = %v; want context.Canceled", err)
 	}
-	if _, _, err := simulateEveryMinuteScheduleWindow(ctx, start, start, time.Minute); err != nil {
+	if _, _, err := simulateEveryMinuteScheduleWindow(ctx, start, start, time.Minute, false); err != nil {
 		t.Fatalf("empty every-minute window error = %v; want nil", err)
 	}
 
 	badTimezone := pattern
 	badTimezone.identity.timezone = "Mars/Olympus"
-	if _, _, err := simulateEveryMinuteSchedule(ctx, badTimezone, 61*time.Second); !errors.Is(err, errInvalidScanSchedulePattern) {
+	if _, _, err := simulateEveryMinuteSchedule(ctx, badTimezone, 61*time.Second, false); !errors.Is(err, errInvalidScanSchedulePattern) {
 		t.Fatalf("invalid compact timezone error = %v; want invalid schedule", err)
 	}
 	if _, _, _, err := badTimezone.runtimeSchedule(); !errors.Is(err, errInvalidScanSchedulePattern) {
@@ -1584,7 +2012,7 @@ func TestScheduleProjectionHandlesCancellationAndInvalidCompactState(t *testing.
 	}
 	badWindow := pattern
 	badWindow.windowSeconds++
-	if _, _, err := simulateEveryMinuteSchedule(ctx, badWindow, 61*time.Second); !errors.Is(err, errInvalidScanSchedulePattern) {
+	if _, _, err := simulateEveryMinuteSchedule(ctx, badWindow, 61*time.Second, false); !errors.Is(err, errInvalidScanSchedulePattern) {
 		t.Fatalf("inconsistent compact window error = %v; want invalid schedule", err)
 	}
 	daily, err := schedulePattern(ctx, "UTC", "0 0 * * *")
@@ -1592,7 +2020,7 @@ func TestScheduleProjectionHandlesCancellationAndInvalidCompactState(t *testing.
 		t.Fatalf("daily pattern = %+v, error %v", daily, err)
 	}
 	daily.identity.timezone = "Mars/Olympus"
-	if _, _, err := memoizedScheduleRunsForDurationWithBudget(ctx, make(map[scanScheduleDurationKey]scanScheduleDurationEstimate), daily, 25*60*60, nil); !errors.Is(err, errInvalidScanSchedulePattern) {
+	if _, _, err := memoizedScheduleRunsForDurationWithBudget(ctx, make(map[scanScheduleDurationKey]scanScheduleDurationEstimate), daily, 25*60*60, false, nil); !errors.Is(err, errInvalidScanSchedulePattern) {
 		t.Fatalf("invalid memoized runtime timezone error = %v; want invalid schedule", err)
 	}
 }

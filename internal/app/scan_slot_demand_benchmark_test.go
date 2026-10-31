@@ -13,9 +13,10 @@ import (
 )
 
 // BenchmarkScanSlotDemand measures the estimate of a large unit: 300 enabled
-// hourly jobs in Europe/Amsterdam with 2,000 current scans each. Half are
-// single-address Nmap jobs whose scans have no cycle; the other half are
-// Naabu jobs whose every scan is the one attempt of a completed cycle.
+// hourly jobs in Europe/Amsterdam with 2,000 current scans each, each job
+// with its own run duration. Half are single-address Nmap jobs whose scans
+// have no cycle; the other half are Naabu jobs whose every scan is the one
+// attempt of a completed cycle.
 // "current" estimates every job from its history. "after-edits" then edits
 // every job so that none of its history matches its settings: the ports of
 // the jobs without cycles and the timeout of the cycle jobs, which is the
@@ -95,10 +96,13 @@ func seedScanSlotDemandBenchmark(b testing.TB, db *store.Store, jobs, scansPerJo
 		}
 		key := store.NewScanDurationKey(record)
 		payload := strings.Repeat("x", 512)
-		// Each scan finished on the hour, newest first, and ran 20 minutes.
-		const runs = `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i+1<?)
-SELECT i,strftime('%Y-%m-%dT%H:%M:%S','2026-10-01T00:00:00','-'||i||' hours')||'.000000000Z' AS finished,
-	strftime('%Y-%m-%dT%H:%M:%S','2026-10-01T00:00:00','-'||i||' hours','-20 minutes')||'.000000000Z' AS started FROM n`
+		// Each scan finished on the hour, newest first, and ran 20 minutes
+		// and one second more for each job before it, so that no two jobs
+		// share a run duration and a request cannot reuse one job's
+		// projection for another.
+		runs := fmt.Sprintf(`WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i+1<?)
+SELECT i,strftime('%%Y-%%m-%%dT%%H:%%M:%%S','2026-10-01T00:00:00','-'||i||' hours')||'.000000000Z' AS finished,
+	strftime('%%Y-%%m-%%dT%%H:%%M:%%S','2026-10-01T00:00:00','-'||i||' hours','-20 minutes','-%d seconds')||'.000000000Z' AS started FROM n`, i)
 		if i%2 == 0 {
 			_, err = db.DB.ExecContext(ctx, `INSERT INTO scans(id,job,started_at,finished_at,status,config_hash,snapshot_json,job_id,job_revision,scanner_engine,scanner_profile_id,scanner_profile_revision,tenant_id)
 SELECT printf('scan-%03d-%05d',?,i),?,started,finished,CASE WHEN i%10=9 THEN 'failed' ELSE 'success' END,?,?,?,?,'nmap',?,?,? FROM (`+runs+`)`,

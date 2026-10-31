@@ -37,7 +37,7 @@ function textarea() {
 describe('Perimeter page', () => {
   beforeEach(() => {
     vi.mocked(getPerimeter).mockResolvedValue(perimeterOverview())
-    vi.mocked(scanSlotDemand).mockResolvedValue({ enabled_jobs: 0, history_jobs: 0, lower_bound_jobs: 0, unestimated_jobs: 0, cadence_unattainable_jobs: 0, slots: 1, estimated_slot_seconds_per_day: 0, capacity_slot_seconds_per_day: 86400, utilization_percent: 0, over_capacity: false })
+    vi.mocked(scanSlotDemand).mockResolvedValue({ enabled_jobs: 0, history_jobs: 0, lower_bound_jobs: 0, unestimated_jobs: 0, work_limited_jobs: 0, cadence_unattainable_jobs: 0, slots: 1, estimated_slot_seconds_per_day: 0, capacity_slot_seconds_per_day: 86400, utilization_percent: 0, over_capacity: false })
   })
   afterEach(() => {
     vi.clearAllMocks()

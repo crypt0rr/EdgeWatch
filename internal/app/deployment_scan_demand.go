@@ -28,6 +28,10 @@ type DeploymentScanDemand struct {
 	HistoryJobs     int `json:"history_jobs"`
 	LowerBoundJobs  int `json:"lower_bound_jobs"`
 	UnestimatedJobs int `json:"unestimated_jobs"`
+	// WorkLimitedJobs counts jobs, in every active unit, left out of the
+	// estimate because simulating their schedules would exceed the
+	// estimate's work limit.
+	WorkLimitedJobs int `json:"work_limited_jobs"`
 	// CadenceUnattainableJobs counts jobs, in every active unit, for which
 	// the estimated run duration makes the scheduler skip a cron tick.
 	CadenceUnattainableJobs int `json:"cadence_unattainable_jobs"`
@@ -44,11 +48,13 @@ type DeploymentScanDemand struct {
 // capped by the unit's effective slot limit, and compares the sum with the
 // deployment's shared slot pool. It goes through each active unit's enabled
 // jobs and their recent scan history, so a caller that serves it repeatedly
-// should cache it. Equivalent schedule-duration projections are shared across
-// units within this request, and schedule expansion plus projection work share
-// one request-wide bound; jobs that exceed it are counted as unestimated. A unit
-// that cannot be read fails the whole estimate rather than leaving its demand
-// out of the sum.
+// should cache it. Equivalent schedule-duration projections are shared
+// across units within this request. Each job's schedule work has its own
+// limit and the request's work has one bound, and every job gets a first
+// share of its limit before any job gets more, so one unit's dense schedules
+// cannot push other units' jobs out of the estimate. Jobs that exceed their
+// limit or the bound are counted as work-limited. A unit that cannot be read
+// fails the whole estimate rather than leaving its demand out of the sum.
 func (a *App) DeploymentScanDemand(ctx context.Context) (DeploymentScanDemand, error) {
 	return a.deploymentScanDemandWithBudget(ctx, &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit})
 }
@@ -64,31 +70,37 @@ func (a *App) deploymentScanDemandWithBudget(ctx context.Context, budget *scanSc
 	if err != nil {
 		return DeploymentScanDemand{}, err
 	}
-	// Schedule-duration projections contain no tenant data, so this request
-	// local memo can safely share equivalent work across units. The budget
-	// covers both pattern expansion and distinct duration projections.
-	simulations := make(map[scanScheduleDurationKey]scanScheduleDurationEstimate)
-	if budget == nil {
-		budget = &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
-	}
-	for _, scope := range scopes {
+	// Each unit's jobs and history are read through its own tenant store.
+	// The jobs of all units are then projected together, so the work limits
+	// treat every unit's jobs alike. Schedule-duration projections contain
+	// no tenant data, so this request-local memo can safely share
+	// equivalent work across units.
+	work := newScanDemandWork(nil, budget)
+	units := make([]ScanSlotDemand, len(scopes))
+	capacities := make([]float64, len(scopes))
+	for i, scope := range scopes {
 		ts := a.Store.Tenant(scope)
-		unit, err := a.scheduledScanDemandWithSimulationCache(ctx, ts, simulations, budget)
-		if err != nil {
+		if err := a.collectScheduledScanDemand(ctx, ts, &units[i], work); err != nil {
 			return DeploymentScanDemand{}, err
 		}
 		limits, err := a.TenantCapacityLimits(ctx, ts)
 		if err != nil {
 			return DeploymentScanDemand{}, err
 		}
+		capacities[i] = float64(limits.MaxConcurrentScans) * slotSecondsPerDay
+	}
+	if err := a.projectScheduledScanDemand(ctx, work); err != nil {
+		return DeploymentScanDemand{}, err
+	}
+	for i, unit := range units {
 		result.Units++
 		result.EnabledJobs += unit.EnabledJobs
 		result.HistoryJobs += unit.HistoryJobs
 		result.LowerBoundJobs += unit.LowerBoundJobs
 		result.UnestimatedJobs += unit.UnestimatedJobs
+		result.WorkLimitedJobs += unit.WorkLimitedJobs
 		result.CadenceUnattainableJobs += unit.CadenceUnattainableJobs
-		unitCapacity := float64(limits.MaxConcurrentScans) * slotSecondsPerDay
-		result.EstimatedSlotSecondsPerDay += min(unit.EstimatedSlotSecondsPerDay, unitCapacity)
+		result.EstimatedSlotSecondsPerDay += min(unit.EstimatedSlotSecondsPerDay, capacities[i])
 	}
 	result.Slots = max(a.Config.Scheduler.MaxConcurrent, 0)
 	result.CapacitySlotSecondsPerDay, result.UtilizationPercent, result.OverCapacity = compareSlotDemand(result.EstimatedSlotSecondsPerDay, result.Slots)

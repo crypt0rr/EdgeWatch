@@ -53,7 +53,7 @@ describe('business units in the console', () => {
     vi.mocked(incidentInboxSummary).mockResolvedValue({ active_count: 0 })
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [], truncated: false, active_count: 0, server_now: new Date().toISOString(), next_follow_up_at: null, pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] })
-    vi.mocked(scanSlotDemand).mockResolvedValue({ enabled_jobs: 0, history_jobs: 0, lower_bound_jobs: 0, unestimated_jobs: 0, cadence_unattainable_jobs: 0, slots: 1, estimated_slot_seconds_per_day: 0, capacity_slot_seconds_per_day: 86_400, utilization_percent: 0, over_capacity: false })
+    vi.mocked(scanSlotDemand).mockResolvedValue({ enabled_jobs: 0, history_jobs: 0, lower_bound_jobs: 0, unestimated_jobs: 0, work_limited_jobs: 0, cadence_unattainable_jobs: 0, slots: 1, estimated_slot_seconds_per_day: 0, capacity_slot_seconds_per_day: 86_400, utilization_percent: 0, over_capacity: false })
     vi.mocked(listUnits).mockResolvedValue({ limits: deploymentLimits, units: [] })
     vi.mocked(platformStatus).mockRejectedValue(new Error('not needed'))
     vi.mocked(recordActivity).mockResolvedValue(undefined)

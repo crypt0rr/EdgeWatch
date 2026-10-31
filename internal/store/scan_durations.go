@@ -50,23 +50,24 @@ func NewScanDurationKey(record JobRecord) ScanDurationKey {
 	return key
 }
 
-// scanDurationScanWindow is how many of a job's newest successful or
-// incomplete scans ListCompletedScanCycleDurations considers for each
-// sample it returns. Only these scans are probed for a cycle and read, so
-// the work of each job stays bounded whether or not its scans match its
-// current key: after an edit that changes the key, a job's matching scans
-// are its newest ones, and until it has run enough of them the walk stops
-// at the window instead of reading its whole retained history. The window
-// is a multiple of the sample count so that the scans it holds of resumable
-// cycles, which the cycles branch counts instead, or of other settings,
-// leave room for the job's samples without a cycle.
+// scanDurationScanWindow is how many of a job's newest successful,
+// incomplete or timed-out scans ListCompletedScanCycleDurations considers
+// for each sample it returns. Only these scans are probed for a cycle and
+// read, so the work of each job stays bounded whether or not its scans match
+// its current key: after an edit that changes the key, a job's matching
+// scans are its newest ones, and until it has run enough of them the walk
+// stops at the window instead of reading its whole retained history. The
+// window is a multiple of the sample count so that the scans it holds of
+// resumable cycles, which the cycles branch counts instead, or of other
+// settings, leave room for the job's samples without a cycle.
 const scanDurationScanWindow = 4
 
 // completedScanDurationsSQL reads the duration records of the newest
 // completed samples of each keyed job of the tenant. ?1 is the JSON array of
 // the keys, ?2 the tenant, ?3 the number of samples per job and ?4 the number
-// of the job's newest successful or incomplete scans that the scans branch
-// considers.
+// of the job's newest successful, incomplete or timed-out scans that the
+// scans branch considers. Each row is one attempt of a sample, with the
+// attempt count of the sample's cycle, or 1 for a scan without a cycle.
 //
 // Each job's lookups are bounded by ?3 and ?4 rather than by its history.
 // bounds finds the finished_at of the job's ?3-th newest completed cycle with
@@ -75,15 +76,15 @@ const scanDurationScanWindow = 4
 // some finished at the same time. A completed cycle reads its scans only when
 // it had more than one attempt, or recorded none, because the cycle row holds
 // the final attempt. bounds also finds the finished_at of the job's ?4-th
-// newest successful or incomplete scan from scans_job_id_history alone. The
-// job's scans without a cycle come from the same index, newest first, and
-// none older than either bound: ?3 newer cycles already outrank such a scan,
-// and older scans are outside the window. Only the scans in the window are
-// probed through scans_cycle_outcome for a cycle, and only those without one
-// are read. The row's config_hash and timestamps come before snapshot_json,
-// so a scan of another scope is rejected before its snapshot pages are read;
-// only the window's scans with the current scope hash reach the scanner
-// profile columns after it.
+// newest successful, incomplete or timed-out scan from scans_job_id_history
+// alone. The job's scans without a cycle come from the same index, newest
+// first, and none older than either bound: ?3 newer cycles already outrank
+// such a scan, and older scans are outside the window. Only the scans in the
+// window are probed through scans_cycle_outcome for a cycle, and only those
+// without one are read. The row's config_hash and timestamps come before
+// snapshot_json, so a scan of another scope is rejected before its snapshot
+// pages are read; only the window's scans with the current scope hash reach
+// the scanner profile columns after it.
 //
 // Every branch takes its jobs from wanted, which joins the keys to the
 // tenant's jobs, and reads scans with the tenant predicate.
@@ -103,7 +104,7 @@ const completedScanDurationsSQL = `WITH wanted AS MATERIALIZED (
 			WHERE x.job_id=w.job_id AND x.execution_hash=w.execution_hash AND x.status='completed'
 			ORDER BY x.finished_at DESC,x.id DESC LIMIT 1 OFFSET ?3-1),'') AS cycle_cutoff,
 		COALESCE((SELECT v.finished_at FROM scans AS v INDEXED BY ` + scansJobHistoryIndex + `
-			WHERE v.job_id=w.job_id AND v.tenant_id=?2 AND v.status IN ('success','incomplete')
+			WHERE v.job_id=w.job_id AND v.tenant_id=?2 AND v.status IN ('success','incomplete','timed_out')
 			ORDER BY v.finished_at DESC,v.id DESC LIMIT 1 OFFSET ?4-1),'') AS scan_window_start
 	FROM wanted AS w
 ), cycles AS MATERIALIZED (
@@ -113,24 +114,24 @@ const completedScanDurationsSQL = `WITH wanted AS MATERIALIZED (
 		ON c.job_id=b.job_id AND c.execution_hash=b.execution_hash AND c.status='completed'
 		AND c.finished_at>=b.cycle_cutoff AND c.finished_at<>''
 )
-SELECT c.job_id,'cycle:'||c.id,CASE WHEN c.attempt_started_at<>'' THEN c.attempt_started_at ELSE c.started_at END,c.finished_at,c.finished_at
+SELECT c.job_id,'cycle:'||c.id,CASE WHEN c.attempt_started_at<>'' THEN c.attempt_started_at ELSE c.started_at END,c.finished_at,c.finished_at,c.attempt_count
 FROM cycles AS c
 WHERE c.attempt_started_at<>'' OR c.attempt_count=1
 UNION ALL
-SELECT c.job_id,'cycle:'||c.id,a.started_at,a.finished_at,c.finished_at
+SELECT c.job_id,'cycle:'||c.id,a.started_at,a.finished_at,c.finished_at,c.attempt_count
 FROM cycles AS c
 CROSS JOIN scans AS a INDEXED BY ` + scansCycleOutcomeIndex + ` ON a.cycle_id=c.id AND a.tenant_id=?2 AND a.job_id=c.job_id
 WHERE c.attempt_count<>1 AND (c.attempt_count=0 OR (a.cycle_attempt>0 AND a.cycle_attempt<c.attempt_count))
 	AND a.started_at<>'' AND a.finished_at<>'' AND julianday(a.started_at)<julianday(c.finished_at)
 UNION ALL
-SELECT b.job_id,'scan:'||s.id,s.started_at,s.finished_at,s.finished_at
+SELECT b.job_id,'scan:'||s.id,s.started_at,s.finished_at,s.finished_at,1
 FROM bounds AS b
 CROSS JOIN scans AS s NOT INDEXED ON s.tenant_id=?2 AND s.rowid IN (
 	SELECT y.rowid FROM scans AS y INDEXED BY ` + scansJobHistoryIndex + `
 	CROSS JOIN scans AS z INDEXED BY ` + scansCycleOutcomeIndex + `
 		ON z.cycle_id='' AND z.cycle_status='' AND z.status=y.status AND z.tenant_id=y.tenant_id AND z.rowid=y.rowid
 	CROSS JOIN scans AS r ON r.rowid=y.rowid
-	WHERE y.job_id=b.job_id AND y.tenant_id=?2 AND y.status IN ('success','incomplete')
+	WHERE y.job_id=b.job_id AND y.tenant_id=?2 AND y.status IN ('success','incomplete','timed_out')
 		AND y.finished_at>=MAX(b.cycle_cutoff,b.scan_window_start)
 		AND (r.config_hash=b.config_hash OR (b.legacy_config_hash<>'' AND r.config_hash=b.legacy_config_hash))
 		AND r.started_at<>'' AND julianday(r.finished_at)>julianday(r.started_at)
@@ -187,30 +188,53 @@ SELECT w.job_id, (
 ) AS only_timed_out
 FROM wanted AS w`
 
+// ScanDurationSample is one completed sample of a job's scan work: a
+// completed resumable cycle, or a scan without a cycle.
+type ScanDurationSample struct {
+	// Attempts are the recorded durations of the sample's scan attempts, in
+	// the order they started. Each attempt held a scan slot for one run of
+	// the job; a scan without a cycle is one attempt.
+	Attempts []time.Duration
+	// Runs is how many runs the sample took: a completed cycle's attempt
+	// count, which exceeds len(Attempts) when an earlier attempt left no
+	// scan record, and otherwise len(Attempts).
+	Runs int
+}
+
+// Duration returns the sum of the sample's recorded attempt durations.
+func (sample ScanDurationSample) Duration() time.Duration {
+	var total time.Duration
+	for _, attempt := range sample.Attempts {
+		total += attempt
+	}
+	return total
+}
+
 // ListCompletedScanCycleDurations returns, for each job that keys names and
-// that is an unarchived job of the tenant, the durations of its perJobLimit
-// newest completed samples that ran with the job's current scan settings. A
-// key of another tenant's job, or of an unknown job, returns nothing.
+// that is an unarchived job of the tenant, its perJobLimit newest completed
+// samples that ran with the job's current scan settings, newest first. A key
+// of another tenant's job, or of an unknown job, returns nothing.
 //
-// A completed cycle is one sample when its execution hash is the key's: the
-// sum of its recorded earlier attempts and its final attempt's durable start
-// and completion timestamps, so time between attempts is excluded and the
-// final duration survives a crash before scan finalization. Recovery
-// invocations that start after cycle completion are excluded because their
-// duration is not scan work. A successful or incomplete scan without a cycle
-// is its own sample when its config hash and TCP scanner profile revision
-// are the key's, and it is one of the job's perJobLimit times
-// scanDurationScanWindow newest successful or incomplete scans. A job's
-// edits that do not change these, such as a rename, a schedule or
-// notification edit, or a pause and resume, keep its samples. Samples are
-// ranked by when they finished; the pinned plan and per-unit checkpoints
-// are deliberately not loaded.
-func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, keys []ScanDurationKey, perJobLimit int) (map[string][]time.Duration, error) {
+// A completed cycle is one sample when its execution hash is the key's. Its
+// attempts are its recorded earlier attempts and its final attempt's durable
+// start and completion timestamps, so time between attempts is excluded and
+// the final duration survives a crash before scan finalization, and its runs
+// are its attempt count. Recovery invocations that start after cycle
+// completion are excluded because their duration is not scan work. A
+// successful, incomplete or timed-out scan without a cycle is a sample of
+// one attempt when its config hash and TCP scanner profile revision are the
+// key's, and it is one of the job's perJobLimit times scanDurationScanWindow
+// newest successful, incomplete or timed-out scans. A job's edits that do
+// not change these, such as a rename, a schedule or notification edit, or a
+// pause and resume, keep its samples. Samples are ranked by when they
+// finished; the pinned plan and per-unit checkpoints are deliberately not
+// loaded.
+func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, keys []ScanDurationKey, perJobLimit int) (map[string][]ScanDurationSample, error) {
 	if err := ts.ready(); err != nil {
 		return nil, err
 	}
 	if perJobLimit < 1 || len(keys) == 0 {
-		return map[string][]time.Duration{}, nil
+		return map[string][]ScanDurationSample{}, nil
 	}
 	// A job keyed twice would read its records twice; the first key counts.
 	unique := make([]ScanDurationKey, 0, len(keys))
@@ -230,15 +254,21 @@ func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, keys
 		return nil, err
 	}
 	defer rows.Close()
+	type attempt struct {
+		started  time.Time
+		duration time.Duration
+	}
 	type sample struct {
 		id       string
 		at       time.Time
-		duration time.Duration
+		runs     int
+		attempts []attempt
 	}
 	byJob := make(map[string]map[string]*sample)
 	for rows.Next() {
 		var jobID, sampleID, started, finished, at string
-		if err := rows.Scan(&jobID, &sampleID, &started, &finished, &at); err != nil {
+		var runs int
+		if err := rows.Scan(&jobID, &sampleID, &started, &finished, &at, &runs); err != nil {
 			return nil, err
 		}
 		samples := byJob[jobID]
@@ -248,21 +278,22 @@ func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, keys
 		}
 		current := samples[sampleID]
 		if current == nil {
-			current = &sample{id: sampleID, at: scanTime(at)}
+			current = &sample{id: sampleID, at: scanTime(at), runs: runs}
 			samples[sampleID] = current
 		}
-		if duration := scanTime(finished).Sub(scanTime(started)); duration > 0 {
-			current.duration += duration
+		startedAt := scanTime(started)
+		if duration := scanTime(finished).Sub(startedAt); duration > 0 {
+			current.attempts = append(current.attempts, attempt{started: startedAt, duration: duration})
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out := make(map[string][]time.Duration, len(byJob))
+	out := make(map[string][]ScanDurationSample, len(byJob))
 	for jobID, samples := range byJob {
 		ranked := make([]*sample, 0, len(samples))
 		for _, candidate := range samples {
-			if candidate.duration > 0 {
+			if len(candidate.attempts) > 0 {
 				ranked = append(ranked, candidate)
 			}
 		}
@@ -276,7 +307,12 @@ func (ts *TenantStore) ListCompletedScanCycleDurations(ctx context.Context, keys
 			ranked = ranked[:perJobLimit]
 		}
 		for _, kept := range ranked {
-			out[jobID] = append(out[jobID], kept.duration)
+			sort.SliceStable(kept.attempts, func(i, j int) bool { return kept.attempts[i].started.Before(kept.attempts[j].started) })
+			result := ScanDurationSample{Attempts: make([]time.Duration, len(kept.attempts)), Runs: max(kept.runs, len(kept.attempts))}
+			for i, recorded := range kept.attempts {
+				result.Attempts[i] = recorded.duration
+			}
+			out[jobID] = append(out[jobID], result)
 		}
 	}
 	return out, nil

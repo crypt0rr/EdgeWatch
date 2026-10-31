@@ -355,8 +355,8 @@ var cycleTenantLeakCases = map[string]tenantLeakCase{
 					t.Errorf("tenant %s received samples for unexpected job %s", owner.scope.ID(), jobID)
 				}
 				for _, sample := range samples {
-					if sample <= 0 {
-						t.Errorf("tenant %s: non-positive cycle duration %s", owner.scope.ID(), sample)
+					if sample.Duration() <= 0 {
+						t.Errorf("tenant %s: non-positive cycle duration %s", owner.scope.ID(), sample.Duration())
 					}
 				}
 			}

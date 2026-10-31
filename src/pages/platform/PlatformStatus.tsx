@@ -39,11 +39,13 @@ export function PlatformScanDemandPanel({ demand }: { demand: PlatformScanDemand
       <div><dt>Estimated from scan history</dt><dd>{formatCount(demand.history_jobs)}</dd></div>
       <div><dt>Lower bound from scanner rates</dt><dd>{formatCount(demand.lower_bound_jobs)}</dd></div>
       <div><dt>Not fully estimated (may overlap lower bound)</dt><dd>{formatCount(demand.unestimated_jobs)}</dd></div>
+      <div><dt>Left out at the work limit</dt><dd>{formatCount(demand.work_limited_jobs)}</dd></div>
     </dl>
     {demand.cadence_unattainable_jobs > 0 && <div className="notice warning platform-scan-demand-cadence"><AlertTriangle size={15} aria-hidden="true" /><span>{demand.cadence_unattainable_jobs === 1
       ? '1 job’s estimated run would still be active at one or more scheduled ticks, so the scheduler skips those ticks.'
       : `${formatCount(demand.cadence_unattainable_jobs)} jobs’ estimated runs would still be active at one or more scheduled ticks, so the scheduler skips those ticks.`}</span></div>}
-    {demand.unestimated_jobs > 0 && <p className="muted">{plural(demand.unestimated_jobs, 'enabled job')} {demand.unestimated_jobs === 1 ? 'has' : 'have'} work or a schedule frequency the estimate cannot fully bound, so actual demand may be higher.</p>}
+    {demand.unestimated_jobs > 0 && <p className="muted">{plural(demand.unestimated_jobs, 'enabled job')} {demand.unestimated_jobs === 1 ? 'has' : 'have'} work the estimate cannot fully bound or a schedule it cannot use, so actual demand may be higher.</p>}
+    {demand.work_limited_jobs > 0 && <p className="muted">{plural(demand.work_limited_jobs, 'enabled job')} {demand.work_limited_jobs === 1 ? 'has a schedule' : 'have schedules'} too costly to simulate within the estimate’s work limit, so {demand.work_limited_jobs === 1 ? 'it is' : 'they are'} left out and actual demand may be higher. Each job has its own limit, and the jobs of every unit take turns, so one unit’s dense schedules cannot crowd out another unit’s jobs.</p>}
   </div>
 }
 

@@ -189,6 +189,18 @@ func saveDurationCycle(t *testing.T, s *Store, job JobRecord, id, executionHash 
 	}
 }
 
+// sampleDurations returns the summed duration of each sample, in order.
+func sampleDurations(samples []ScanDurationSample) []time.Duration {
+	if samples == nil {
+		return nil
+	}
+	durations := make([]time.Duration, len(samples))
+	for i, sample := range samples {
+		durations[i] = sample.Duration()
+	}
+	return durations
+}
+
 // saveDurationScan records a scan of the job without a cycle.
 func saveDurationScan(t *testing.T, s *Store, scan model.Scan, duration time.Duration) {
 	t.Helper()
@@ -247,8 +259,13 @@ func TestListCompletedScanCycleDurationsTakesEachJobsNewestSamples(t *testing.T)
 		cyclesOnly.ID: {23 * time.Minute, 22 * time.Minute, 21 * time.Minute, 20 * time.Minute},
 	}
 	for jobID, samples := range want {
-		if got := durations[jobID]; !slices.Equal(got, samples) {
+		if got := sampleDurations(durations[jobID]); !slices.Equal(got, samples) {
 			t.Errorf("job %s samples = %v, want %v newest first", jobID, got, samples)
+		}
+		for _, sample := range durations[jobID] {
+			if sample.Runs != 1 || len(sample.Attempts) != 1 {
+				t.Errorf("job %s one-attempt sample = %+v, want one run", jobID, sample)
+			}
 		}
 	}
 	if len(durations) != len(want) {
@@ -260,16 +277,16 @@ func TestListCompletedScanCycleDurationsTakesEachJobsNewestSamples(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := durations[cyclesOnly.ID], []time.Duration{23 * time.Minute, 22 * time.Minute, 21 * time.Minute, 20 * time.Minute, time.Hour, time.Hour}; !slices.Equal(got, want) {
+	if got, want := sampleDurations(durations[cyclesOnly.ID]), []time.Duration{23 * time.Minute, 22 * time.Minute, 21 * time.Minute, 20 * time.Minute, time.Hour, time.Hour}; !slices.Equal(got, want) {
 		t.Errorf("cycle job samples with limit 6 = %v, want %v", got, want)
 	}
 }
 
 // A completed cycle counts when it recorded the job's current execution
-// hash. A scan without a cycle counts when it recorded the job's scope hash,
-// or the legacy alias of a stored job, and its current TCP scanner profile
-// revision. Failed scans, scans of a cycle, unkeyed jobs and archived jobs
-// add nothing.
+// hash. A successful, incomplete or timed-out scan without a cycle counts
+// when it recorded the job's scope hash, or the legacy alias of a stored
+// job, and its current TCP scanner profile revision. Failed scans, scans of
+// a cycle, unkeyed jobs and archived jobs add nothing.
 func TestListCompletedScanCycleDurationsKeysSamplesOnScanSettings(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -330,12 +347,15 @@ func TestListCompletedScanCycleDurationsKeysSamplesOnScanSettings(t *testing.T) 
 	cycleAttempt.CycleID, cycleAttempt.CycleAttempt, cycleAttempt.CycleStatus = "current-execution-cycle", 2, "completed"
 	saveDurationScan(t, s, cycleAttempt, time.Hour)
 	saveDurationScan(t, s, model.Scan{ID: "unkeyed-scan", JobID: unkeyed.ID, Job: unkeyed.Job.Name, FinishedAt: at(10), ConfigHash: unkeyed.Job.SecurityHash()}, time.Hour)
+	timedOut := scan("timed-out-scan", 11)
+	timedOut.Status = "timed_out"
+	saveDurationScan(t, s, timedOut, 5*time.Minute)
 
 	durations, err := tenant.ListCompletedScanCycleDurations(ctx, []ScanDurationKey{key}, 11)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := durations[job.ID], []time.Duration{4 * time.Minute, 3 * time.Minute, 2 * time.Minute, time.Minute}; !slices.Equal(got, want) || len(durations) != 1 {
+	if got, want := sampleDurations(durations[job.ID]), []time.Duration{5 * time.Minute, 4 * time.Minute, 3 * time.Minute, 2 * time.Minute, time.Minute}; !slices.Equal(got, want) || len(durations) != 1 {
 		t.Fatalf("keyed samples = %v, want %v for the keyed job only", durations, want)
 	}
 
@@ -349,7 +369,7 @@ func TestListCompletedScanCycleDurationsKeysSamplesOnScanSettings(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := durations[job.ID], []time.Duration{time.Hour, time.Hour}; !slices.Equal(got, want) {
+	if got, want := sampleDurations(durations[job.ID]), []time.Duration{time.Hour, time.Hour}; !slices.Equal(got, want) {
 		t.Fatalf("samples of the changed key = %v, want the other profile's scan and the other execution's cycle, %v", got, want)
 	}
 
@@ -362,10 +382,10 @@ func TestListCompletedScanCycleDurationsKeysSamplesOnScanSettings(t *testing.T) 
 	}
 }
 
-// A job's scans without a cycle count only among its newest successful or
-// incomplete scans, so a job whose newer scans ran with other settings, or
-// belong to cycles, does not have its whole history read on every request.
-// Failed scans do not take up the window.
+// A job's scans without a cycle count only among its newest successful,
+// incomplete or timed-out scans, so a job whose newer scans ran with other
+// settings, or belong to cycles, does not have its whole history read on
+// every request. Failed scans do not take up the window.
 func TestListCompletedScanCycleDurationsReadsOnlyEachJobsNewestScans(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -390,7 +410,7 @@ func TestListCompletedScanCycleDurationsReadsOnlyEachJobsNewestScans(t *testing.
 		if err != nil {
 			t.Fatal(err)
 		}
-		return durations[job.ID]
+		return sampleDurations(durations[job.ID])
 	}
 	// Scans with the current settings, then a window's worth of newer scans
 	// with other settings, as after an edit and its reversal.
@@ -414,6 +434,18 @@ func TestListCompletedScanCycleDurationsReadsOnlyEachJobsNewestScans(t *testing.
 	}
 	if got := list(); !slices.Equal(got, []time.Duration{time.Minute}) {
 		t.Fatalf("samples after one new scan with the current settings = %v, want that one", got)
+	}
+	// A timed-out scan with the current settings is a sample too, and
+	// timed-out scans with other settings take up the window.
+	save("timed-out-current", 300, key.ConfigHash, "timed_out")
+	if got := list(); !slices.Equal(got, []time.Duration{time.Minute, time.Minute}) {
+		t.Fatalf("samples after a timed-out scan with the current settings = %v, want it and the earlier one", got)
+	}
+	for i := range window {
+		save(fmt.Sprintf("timed-out-other-settings-%02d", i), 400+i, "other-scope-hash", "timed_out")
+	}
+	if got := list(); len(got) != 0 {
+		t.Fatalf("samples behind %d newer timed-out scans with other settings = %v, want none read", window, got)
 	}
 }
 

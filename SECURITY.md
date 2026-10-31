@@ -1077,6 +1077,10 @@ duration history, and effective capacity through that unit's tenant-scoped
 store; it returns aggregate counts and sums only, with no per-unit values.
 Building the index changes no rows. An older release must not open the
 upgraded database.
+Schema 80 copies each scan cycle's execution hash onto that cycle's scan rows
+and adds partial indexes for timeout history, so the estimate reads only a
+job's newest runs with its current settings; the copy adds no new data and
+changes no baseline. An older release must not open the upgraded database.
 Only the daemon migrates, and only one process at a time: from v0.36.0 the
 daemon holds an advisory lock on the database directory, which restores take
 too, from before it opens the database until migration and startup finish and
@@ -1219,7 +1223,10 @@ other automatic copies by timestamp. It evaluates each limit separately, so
 the same source schema can have more than one protected copy. It leaves manual
 backups alone. The directory thus holds at most three automatic copies plus
 the copy just written plus one per qualifying pair in the descending chain,
-so retries at one schema never grow it. If the configured pre-migration copy
+so retries at one schema never grow it. An older copy holds a pair only after
+it is verified from a private copy under `TMPDIR`; one whose verification
+cannot complete is kept and logged, and the start continues. If the configured
+pre-migration copy
 cannot be created or verified, schema migration stops before it writes;
 without `backup.directory`, startup warns and continues.
 These copies hold all units' data and encrypted secrets, so protect them and

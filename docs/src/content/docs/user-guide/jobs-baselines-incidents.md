@@ -186,9 +186,12 @@ The **Jobs** list can be searched case-insensitively by job name or configured
 target. Search applies to the jobs already shown, including archived jobs,
 updates the result count, and combines with the **Needs attention** filter.
 The search and filter stay in the URL while you inspect a job, so browser Back
-and **← Jobs** restore the same list. If a search finds jobs that the
-**Needs attention** filter hides, choose **Show all jobs** to see those matches.
-Clear the search to return to the selected filter's full list.
+and **← Jobs** restore the same list. **← Jobs** still restores it after you
+explore the job's baseline, edit the job, or open a scan or baseline host and
+then return to the job through the page's own back link, **Cancel**, or a save.
+If a search finds jobs that the **Needs attention** filter hides, choose
+**Show all jobs** to see those matches. Clear the search to return to the
+selected filter's full list.
 
 The **Jobs** list shows each job's latest scan attempt separately from its
 latest successful scan, along with its next scheduled run and current queued,
@@ -408,6 +411,10 @@ service names or products. Enter at least 3 and no more than 256 characters;
 searches stay on the indexed path and service names/products are prioritized
 within the bounded search document. A later page can become empty if the
 inventory shrinks; choose **Go to first page** to return to the remaining hosts.
+On the **Hosts** page and a job's baseline explorer, **Clear search** returns
+keyboard focus to the search field. **Go to first page** and **Reset filters**
+move it to the host list's heading once the reloaded list appears, or to the
+search field if the list cannot be loaded.
 
 ## Scan comparison
 

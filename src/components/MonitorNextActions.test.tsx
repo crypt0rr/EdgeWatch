@@ -2,6 +2,7 @@
 
 import { fireEvent, screen } from '@testing-library/react'
 import type { ComponentProps } from 'react'
+import { useLocation } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 import type { ScheduleSuggestion } from '../api'
 import { renderWithProviders } from '../test/test-utils'
@@ -19,6 +20,11 @@ const baseJob: Job = {
 
 const schedule: ScheduleSuggestion = { suggested: false, draft_next_run: '2026-10-10T09:00:00+02:00', gap_minutes: 90 }
 const incompleteScan: ScanSummary = { id: 'scan-incomplete', job_id: 'job-1', job: 'Production', started_at: '2026-10-09T08:00:00Z', finished_at: '2026-10-09T08:01:00Z', status: 'incomplete', error: 'target did not respond', config_hash: 'scope-current' }
+
+function RouteProbe() {
+  const location = useLocation()
+  return <output data-testid="route">{location.pathname}{location.hash} {JSON.stringify(location.state ?? null)}</output>
+}
 
 function renderActions(overrides: Partial<ComponentProps<typeof MonitorNextActions>> = {}) {
   const onRun = vi.fn()
@@ -49,11 +55,11 @@ function renderActions(overrides: Partial<ComponentProps<typeof MonitorNextActio
     onRetrySchedule: vi.fn(),
     ...overrides,
   }
-  const view = renderWithProviders(<MonitorNextActions {...props} />, { route: ['/jobs/job-1'] })
+  const view = renderWithProviders(<><MonitorNextActions {...props} /><RouteProbe /></>, { route: ['/jobs/job-1'] })
   return {
     ...view,
     onRun,
-    rerenderActions: (next: Partial<ComponentProps<typeof MonitorNextActions>>) => view.rerender(<MonitorNextActions {...props} {...next} />),
+    rerenderActions: (next: Partial<ComponentProps<typeof MonitorNextActions>>) => view.rerender(<><MonitorNextActions {...props} {...next} /><RouteProbe /></>),
   }
 }
 
@@ -105,6 +111,23 @@ describe('monitor next actions', () => {
     expect(screen.getByRole('link', { name: 'Review scan evidence →' })).toHaveAttribute('href', '/jobs/job-1/scans/scan-incomplete')
     expect(screen.getByRole('link', { name: 'Review targets and scanner profile →' })).toHaveAttribute('href', '/jobs/job-1/edit')
     expect(screen.getByRole('button', { name: 'Retry baseline scan' })).toBeInTheDocument()
+  })
+
+  it('hands the job link state to every link to this job’s pages', () => {
+    const jobLinkState = { returnTo: '/jobs?q=database&filter=attention' }
+    const stalled = { ...baseJob, baseline: { status: 'stalled', samples: 1, attempts: 3, incomplete_attempts: 2 } }
+    const view = renderActions({ job: stalled, scans: [incompleteScan], jobLinkState })
+    const followed = (name: string) => {
+      fireEvent.click(screen.getByRole('link', { name }))
+      return screen.getByTestId('route').textContent
+    }
+    expect(followed('Review scan evidence →')).toBe(`/jobs/job-1/scans/scan-incomplete ${JSON.stringify(jobLinkState)}`)
+    expect(followed('Review targets and scanner profile →')).toBe(`/jobs/job-1/edit ${JSON.stringify(jobLinkState)}`)
+    view.rerenderActions({ job: stalled, scans: [], jobLinkState })
+    expect(followed('Review recent scan evidence →')).toBe(`/jobs/job-1#recent-scans ${JSON.stringify(jobLinkState)}`)
+    view.rerenderActions({ job: { ...baseJob, baseline: { status: 'complete', samples: 2, host_count: 1 } }, latestSuccessfulScan: { ...incompleteScan, status: 'success', id: 'scan-ready' }, jobLinkState })
+    expect(followed('View baseline evidence →')).toBe(`/jobs/job-1/baseline ${JSON.stringify(jobLinkState)}`)
+    expect(followed('Open latest scan →')).toBe(`/jobs/job-1/scans/scan-ready ${JSON.stringify(jobLinkState)}`)
   })
 
   it('does not call an older failure the latest attempt after a newer success', () => {

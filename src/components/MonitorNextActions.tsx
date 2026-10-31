@@ -35,6 +35,8 @@ type MonitorNextActionsProps = {
   onRun: () => void
   onRetryScans: () => void
   onRetrySchedule: () => void
+  /** Route state for the links to this job's pages, so they keep the job list's return path. */
+  jobLinkState?: unknown
 }
 
 /** A durable next step reconstructed from the saved job and scan records. */
@@ -67,6 +69,7 @@ export function MonitorNextActions({
   onRun,
   onRetryScans,
   onRetrySchedule,
+  jobLinkState,
 }: MonitorNextActionsProps) {
   const presentation = baselinePresentation(job.baseline)
   const requiredSamples = Math.max(0, job.job.baseline_samples ?? 0)
@@ -160,7 +163,7 @@ export function MonitorNextActions({
       {presentation.status !== 'complete' && latestFailedAttempt && (
         <div className="notice warning">
           <span>{failedAttemptMessage(latestFailedAttempt)} This observation did not add a baseline sample.</span>
-          {canReadScans && <Link to={`/jobs/${encodeURIComponent(job.id)}/scans/${encodeURIComponent(latestFailedAttempt.id)}`}>Review scan evidence →</Link>}
+          {canReadScans && <Link to={`/jobs/${encodeURIComponent(job.id)}/scans/${encodeURIComponent(latestFailedAttempt.id)}`} state={jobLinkState}>Review scan evidence →</Link>}
         </div>
       )}
       {presentation.status !== 'complete' && canReadScans && scansLoading && <p className="muted">Loading recent scan outcomes…</p>}
@@ -187,15 +190,15 @@ export function MonitorNextActions({
           )}
           {canOfferRun && <p className="muted">If all unit scan slots are busy, the request waits in the queue and can be canceled before it starts.</p>}
           {canOfferRun && <button className="button secondary" type="button" onClick={onRun} disabled={runBusy}>{runBusy ? 'Starting…' : nextActionLabel}</button>}
-          {job.baseline.status === 'stalled' && canReadScans && !latestFailedAttempt && !scansLoading && !scansError && <Link className="button ghost" to={`/jobs/${encodeURIComponent(job.id)}#recent-scans`}>Review recent scan evidence →</Link>}
-          {job.baseline.status === 'stalled' && canRun && !job.archived && <Link className="button ghost" to={`/jobs/${encodeURIComponent(job.id)}/edit`}>Review targets and scanner profile →</Link>}
+          {job.baseline.status === 'stalled' && canReadScans && !latestFailedAttempt && !scansLoading && !scansError && <Link className="button ghost" to={`/jobs/${encodeURIComponent(job.id)}#recent-scans`} state={jobLinkState}>Review recent scan evidence →</Link>}
+          {job.baseline.status === 'stalled' && canRun && !job.archived && <Link className="button ghost" to={`/jobs/${encodeURIComponent(job.id)}/edit`} state={jobLinkState}>Review targets and scanner profile →</Link>}
         </div>
       )}
 
       {presentation.status === 'complete' && (
         <div className="overview-actions">
-          {canReadBaseline && <Link className="button secondary" to={`/jobs/${encodeURIComponent(job.id)}/baseline`}>View baseline evidence →</Link>}
-          {canReadScans && latestSuccessfulScan && <Link className="button ghost" to={`/jobs/${encodeURIComponent(job.id)}/scans/${encodeURIComponent(latestSuccessfulScan.id)}`}>Open latest scan →</Link>}
+          {canReadBaseline && <Link className="button secondary" to={`/jobs/${encodeURIComponent(job.id)}/baseline`} state={jobLinkState}>View baseline evidence →</Link>}
+          {canReadScans && latestSuccessfulScan && <Link className="button ghost" to={`/jobs/${encodeURIComponent(job.id)}/scans/${encodeURIComponent(latestSuccessfulScan.id)}`} state={jobLinkState}>Open latest scan →</Link>}
           {canReadScans && <Link className="button ghost" to={`/activity?job_id=${encodeURIComponent(job.id)}`}>View scan activity →</Link>}
           {canReadIncidents && <Link className="button ghost" to="/incidents">View incidents →</Link>}
         </div>

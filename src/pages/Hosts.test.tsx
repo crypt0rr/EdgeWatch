@@ -74,6 +74,68 @@ describe('global hosts explorer', () => {
     return container.querySelector('.host-empty-results')
   }
 
+  function button(name: string) {
+    return Array.from(container.querySelectorAll('button')).find(candidate => candidate.textContent === name) as HTMLButtonElement | undefined
+  }
+
+  function panelHeading() {
+    return Array.from(container.querySelectorAll('h2')).find(heading => heading.textContent === 'Scanned hosts') ?? null
+  }
+
+  it('focuses the reloaded panel heading after Go to first page', async () => {
+    let releaseFirstPage!: () => void
+    const firstPage = new Promise<GlobalHostsResponse>(resolve => { releaseFirstPage = () => resolve(response) })
+    vi.mocked(listHosts).mockImplementation(async filters => filters?.offset === 500
+      ? { hosts: [], pagination: { limit: 50, offset: 500, total: 30, has_more: false, next_offset: null } }
+      : firstPage)
+    await renderPage('/hosts?offset=500')
+
+    const goToFirstPage = button('Go to first page')!
+    goToFirstPage.focus()
+    await act(async () => fireEvent.click(goToFirstPage))
+    // The loading state replaces the panel, so its heading cannot hold focus yet.
+    await vi.waitFor(() => expect(container.textContent).toContain('Loading hosts…'), { timeout: 1000 })
+    expect(panelHeading()).toBeNull()
+
+    await act(async () => releaseFirstPage())
+    await vi.waitFor(() => expect(container.textContent).toContain('198.51.100.10'), { timeout: 1000 })
+    await vi.waitFor(() => expect(document.activeElement).toBe(panelHeading()), { timeout: 1000 })
+    expect(panelHeading()?.tabIndex).toBe(-1)
+  })
+
+  it('moves focus to the search input when a reload cannot show the panel', async () => {
+    vi.mocked(listHosts).mockImplementation(async filters => {
+      if (filters?.protocol) return emptyResponse
+      throw new Error('offline')
+    })
+    await renderPage('/hosts?protocol=tcp')
+    await vi.waitFor(() => expect(button('Reset filters')).toBeTruthy(), { timeout: 1000 })
+
+    button('Reset filters')!.focus()
+    await act(async () => fireEvent.click(button('Reset filters')!))
+    await vi.waitFor(() => expect(container.textContent).toContain('Could not load scanned hosts.'), { timeout: 1000 })
+    await vi.waitFor(() => expect(document.activeElement).toBe(container.querySelector('input[type="search"]')), { timeout: 1000 })
+  })
+
+  it('leaves focus where the user moved it while the list reloads', async () => {
+    let releaseFirstPage!: () => void
+    const firstPage = new Promise<GlobalHostsResponse>(resolve => { releaseFirstPage = () => resolve(response) })
+    vi.mocked(listHosts).mockImplementation(async filters => filters?.offset === 500
+      ? { hosts: [], pagination: { limit: 50, offset: 500, total: 30, has_more: false, next_offset: null } }
+      : firstPage)
+    await renderPage('/hosts?offset=500')
+
+    button('Go to first page')!.focus()
+    await act(async () => fireEvent.click(button('Go to first page')!))
+    await vi.waitFor(() => expect(container.textContent).toContain('Loading hosts…'), { timeout: 1000 })
+    const protocol = container.querySelector('select') as HTMLSelectElement
+    protocol.focus()
+
+    await act(async () => releaseFirstPage())
+    await vi.waitFor(() => expect(container.textContent).toContain('198.51.100.10'), { timeout: 1000 })
+    expect(document.activeElement).toBe(protocol)
+  })
+
   it('renders active and archived hosts with searchable filter controls', async () => {
     await renderPage()
     expect(container.textContent).toContain('Active jobs')
@@ -273,10 +335,14 @@ describe('global hosts explorer', () => {
     expect(Array.from(container.querySelectorAll('button')).some(button => button.textContent === 'Clear search')).toBe(true)
 
     const clearSearch = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Clear search') as HTMLButtonElement
+    clearSearch.focus()
     fireEvent.click(clearSearch)
+    // The search input stays mounted while the cleared search reloads.
+    expect(document.activeElement).toBe(search)
     await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
     expect(search.value).toBe('')
     await vi.waitFor(() => expect(hostEmptyState()).toHaveTextContent('No completed scans have produced effective hosts yet.'), { timeout: 1000 })
+    expect(document.activeElement).toBe(search)
     const selects = Array.from(container.querySelectorAll('select')) as HTMLSelectElement[]
     fireEvent.change(selects[0]!, { target: { value: 'tcp' } })
     await vi.waitFor(() => expect(hostEmptyState()).toHaveTextContent('No hosts match TCP.'), { timeout: 1000 })
@@ -287,10 +353,12 @@ describe('global hosts explorer', () => {
     await vi.waitFor(() => expect(hostEmptyState()).toHaveTextContent('No hosts match TCP and hosts with no positive ports.'), { timeout: 1000 })
     expect(Array.from(container.querySelectorAll('button')).some(button => button.textContent === 'Reset filters')).toBe(true)
     const resetFilters = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Reset filters') as HTMLButtonElement
+    resetFilters.focus()
     fireEvent.click(resetFilters)
     expect(selects[0]?.value).toBe('')
     expect(selects[1]?.value).toBe('')
     await vi.waitFor(() => expect(hostEmptyState()).toHaveTextContent('No completed scans have produced effective hosts yet.'), { timeout: 1000 })
+    await vi.waitFor(() => expect(document.activeElement).toBe(panelHeading()), { timeout: 1000 })
   })
 
   it('shows an actionable error when the host index cannot be queried', async () => {

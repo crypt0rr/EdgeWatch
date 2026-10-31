@@ -25,6 +25,7 @@ or IDs.
   "history_jobs": 1,
   "lower_bound_jobs": 1,
   "unestimated_jobs": 1,
+  "work_limited_jobs": 0,
   "cadence_unattainable_jobs": 0,
   "slots": 1,
   "estimated_slot_seconds_per_day": 21600,
@@ -34,38 +35,45 @@ or IDs.
 }
 ```
 
-`history_jobs` use the median duration from each job's 11 most recent
-completed scan samples with its current scan settings. Each completed cycle is
-one sample that sums its recorded scan-attempt durations, excluding idle time
-between attempts; it counts while it recorded the job's current execution
-hash, which covers the monitored scope, the timeout, resume window and timing,
-and the scanner profile revisions and arguments. A successful or incomplete
-scan without a cycle is its own sample; it counts while it recorded the job's
+`history_jobs` use each job's 11 most recent completed scan samples with its
+current scan settings, and each run holds a slot for the mean of the samples'
+run durations. A successful, incomplete, or timed-out scan without a cycle is
+one run at its recorded duration; it counts while it recorded the job's
 current scope hash and TCP scanner profile revision, and only when it is one
-of the job's 44 most recent successful or incomplete scans, so the estimate
-never reads further back in a job's history. If the newest runs with the
-current key all timed out, the configured timeout supplies the expected run
-duration. For a cycle attempt, the key is its cycle's execution hash; for a
-scan without a cycle, it is the recorded scope hash and TCP scanner profile
-revision. A rename, a schedule or notification edit, or a pause and resume
-therefore keeps a job's samples. Other history remains available but is
-excluded from this estimate; a job without samples uses its known-work lower
-bound until a scan with its current settings completes. For a job without such
-history, `lower_bound_jobs` count estimates that include only known probe work
-divided by configured maximum scanner rates. A configured scope contributes
-only when it is known to fit both the job's
-`max_expanded_hosts` and deployment's `scanner.max_job_hosts`; over-limit or
-unresolved DNS scopes add no lower bound because the scanner may reject them
-before sending probes. These values are lower bounds, because DNS, target
-responses, retries, and data-dependent Nmap confirmation can add time.
+of the job's 44 most recent successful, incomplete, or timed-out scans, so the
+estimate never reads further back in a job's history. A completed cycle is one
+sample whose recorded scan attempts are each a run, excluding idle time
+between attempts, and whose recorded time is spread over its attempt count; it
+counts while it recorded the job's current execution hash, which covers the
+monitored scope, the timeout, resume window and timing, and the scanner
+profile revisions and arguments. A job without such a sample whose newest
+runs with the current key all timed out, such as a resumable job whose first
+cycle is unfinished, runs for its configured timeout. For a cycle attempt, the
+key is its cycle's execution hash; for a scan without a cycle, it is the
+recorded scope hash and TCP scanner profile revision. A rename, a schedule or
+notification edit, or a pause and resume therefore keeps a job's samples.
+Other history remains available but is excluded from this estimate; a job
+without samples uses its known-work lower bound until a scan with its current
+settings completes. For a job without such history, `lower_bound_jobs` count
+estimates that include only known probe work divided by configured maximum
+scanner rates. A configured scope contributes only when it is known to fit
+both the job's `max_expanded_hosts` and deployment's `scanner.max_job_hosts`;
+over-limit or unresolved DNS scopes add no lower bound because the scanner may
+reject them before sending probes. These values are lower bounds, because DNS,
+target responses, retries, and data-dependent Nmap confirmation can add time.
 `unestimated_jobs` counts jobs with additional work that has no configured rate
-ceiling, or whose schedule cannot be estimated. The job's timeout ends each
-run, so each run counts at most the timeout, whether its duration comes from
-samples or from the lower bound: a resumable cycle whose attempts add up to
-more continues in later runs. The estimate follows the job's cron ticks over a
-representative four-year calendar cycle in its timezone, which averages
-leap-day schedules over the longer cycle, and skips a tick when the previous
-estimated run is still active.
+ceiling, or whose schedule cannot be used, such as one in an unknown timezone
+or one that never fires. The job's timeout ends
+each run, so each run counts at most the timeout, whether its duration comes
+from samples or from the lower bound: a resumable cycle whose attempts add up
+to more continues in later runs. The estimate follows the job's cron ticks
+over a representative four-year calendar cycle in its timezone, which averages
+leap-day schedules over the longer cycle and follows the schedule through
+daylight-saving changes, and skips a tick when the previous estimated run is
+still active. A run that the timeout ends is still being finished at a tick at
+exactly its timeout, so that tick is skipped too. Runs of different lengths
+each skip the ticks they overlap, and the estimate combines them by how often
+each occurs.
 It counts only the runs the scheduler can start. A job runs at most once at a
 time, so it adds at most one slot-day, 86,400 slot-seconds, to
 `estimated_slot_seconds_per_day`. The additive `cadence_unattainable_jobs`
@@ -74,12 +82,20 @@ whether the job's demand exceeds a slot-day. The console shows a warning at
 80% utilization and above, and names the count of jobs with skipped ticks.
 `lower_bound_jobs` and `unestimated_jobs` are not disjoint counts: a job with a
 known-rate lower bound may also have additional work that cannot be fully
-estimated. The platform panel labels this possible overlap explicitly. The
-Tenant and deployment estimates bound schedule work per request, including
-pattern expansion and duration projection. The deployment estimate also shares
-equivalent schedule-duration projections across active units. A job whose
-pattern or projection cannot finish within that budget is counted as
-unestimated and its slot-seconds are left out of the total.
+estimated. The platform panel labels this possible overlap explicitly.
+
+A run that ends before the schedule's next tick needs no simulation. The
+tenant and deployment estimates bound the work of simulating the other
+schedules: each job has its own work limit, every job first gets a small share
+of it, and the jobs that need more get the rest after every other job, with
+the units' jobs taking turns in the deployment estimate. The whole request has
+one bound, which keeps it within its deadline. The deployment estimate also
+shares equivalent schedule-duration projections across active units. The
+additive `work_limited_jobs` field counts the jobs whose schedule cannot be
+simulated within those limits; their slot-seconds are left out of the total.
+Such a job is not counted in `history_jobs`, `lower_bound_jobs`, or
+`unestimated_jobs`. Releases before `work_limited_jobs` counted these jobs in
+`unestimated_jobs`.
 
 A unit's capacity is a limit, not a reservation: every unit's scans share the
 deployment's `scheduler.max_concurrent_scans` slots, so units that each stay
@@ -96,6 +112,7 @@ active unit together, compared with the slots of the whole deployment.
     "history_jobs": 3,
     "lower_bound_jobs": 0,
     "unestimated_jobs": 0,
+    "work_limited_jobs": 0,
     "cadence_unattainable_jobs": 0,
     "slots": 1,
     "estimated_slot_seconds_per_day": 155520,

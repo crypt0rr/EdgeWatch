@@ -65,9 +65,13 @@ tenant-scoped store. The
 **Lower bound from scanner rates** and **Not fully estimated** counts may
 overlap for the same job. A warning appears at 80% and when demand exceeds the
 shared pool. Equivalent schedule-duration projections are shared across the
-active units, and the combined calculation has a bounded simulation budget.
-Jobs whose projection cannot finish within that budget are included in **Not
-fully estimated** and left out of the estimated slot-seconds. The panel also
+active units. Simulating the schedules whose runs skip ticks has a work limit
+for each job and a bound for the whole calculation. The units' jobs take
+turns, and every job first gets a small share of its limit; the jobs that
+need more get the rest only after every other job, so one unit's dense
+schedules cannot push another unit's ordinary jobs out. Jobs that cannot be simulated within those limits are
+counted under **Left out at the work limit**, separately from **Not fully
+estimated**, and are left out of the estimated slot-seconds. The panel also
 counts jobs whose estimated runs would still be active at scheduled ticks, so
 the scheduler skips those ticks. The estimate is at most a minute old. When
 an estimate fails or takes longer than 10 seconds, the panel is missing for

@@ -561,10 +561,15 @@ capacity as numbers. The stored scan count is a number of rows, never a
 scan's content. The platform status adds deployment totals, and the
 scheduled scan demand of all active units together against the deployment's
 scan slots: the daemon estimates the schedules, timeouts, scopes, scanner
-rates, and recent scan durations of each unit's enabled jobs. It simulates
-their cron ticks and skips a tick while an estimated run is still active; when
-the newest runs with a current key all timed out, it uses the job's timeout as
-the expected run duration. It caps each unit's contribution at its effective
+rates, and recent scan durations of each unit's enabled jobs. Each run lasts
+the mean of a job's recent run durations with its current key, a timed-out run
+at most its timeout; a job without a completed sample whose newest runs all
+timed out runs for its timeout. It simulates their cron ticks and skips a tick
+while an estimated run is still active, and a tick at exactly the timeout of a
+run that the timeout ends. Each job's simulation and the whole estimate have
+work limits, and jobs over them are counted, not estimated. The estimate reads
+each unit through that unit's tenant-scoped store and keeps its jobs only for
+the request. It caps each unit's contribution at its effective
 scan-slot capacity for a day. It returns only the sums and counts of jobs,
 never a unit or job ID
 or name, a target, or any unit's own figure. With a single active unit, the

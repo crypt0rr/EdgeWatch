@@ -2689,6 +2689,12 @@ test('the image is scanned for known vulnerabilities in CI and before publicatio
     if (line === '' || line.startsWith('#')) continue
     assert.match(line, /^GO-\d{4}-\d{4,} \S.*$/, `allowlist entries name an OSV ID and the reason: ${line}`)
   }
+  // The triage records describe the Naabu build the image ships.
+  const allowlistNaabuVersions = [...naabuAllowlist.matchAll(/\bNaabu (v\d+\.\d+\.\d+)\b/g)].map((match) => match[1])
+  assert.ok(allowlistNaabuVersions.length > 0, 'the Naabu allowlist must name the Naabu build it triages')
+  for (const version of allowlistNaabuVersions) {
+    assert.equal(version, dockerfileArg('NAABU_VERSION'), 'the Naabu allowlist must name the Dockerfile NAABU_VERSION')
+  }
   // Grype ignores Go modules only because govulncheck checks the binaries.
   assert.match(grypeConfig, /^ {2}- package:\n {6}type: go-module\n/m)
   assert.doesNotMatch(grypeConfig, /^\s*(?:fail-on-severity|only-fixed|only-notfixed|ignore-wontfix|exclude):/m)

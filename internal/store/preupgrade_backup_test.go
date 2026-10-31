@@ -154,7 +154,8 @@ func TestPrunePreUpgradeBackupsPreservesMalformedAndNonOwnerFiles(t *testing.T) 
 	}
 	operatorFiles = append(operatorFiles, symlink, subdirectory)
 
-	removed, err := prunePreUpgradeBackups(context.Background(), directory, schemaVersion-1, 0, "")
+	pruned, err := prunePreUpgradeBackups(context.Background(), directory, schemaVersion-1, 0, "")
+	removed := pruned.Removed
 	if err != nil {
 		t.Fatalf("prune automatic pre-migration backups: %v", err)
 	}
@@ -192,7 +193,8 @@ func TestPrunePreUpgradeBackupsDoesNotLetCorruptCopyReplaceValidPairCopy(t *test
 		}
 	}
 
-	removed, err := prunePreUpgradeBackups(context.Background(), directory, 77, preUpgradeBackupRetention, "")
+	pruned, err := prunePreUpgradeBackups(context.Background(), directory, 77, preUpgradeBackupRetention, "")
+	removed := pruned.Removed
 	if err != nil {
 		t.Fatalf("prune automatic pre-migration backups: %v", err)
 	}
@@ -201,40 +203,47 @@ func TestPrunePreUpgradeBackupsDoesNotLetCorruptCopyReplaceValidPairCopy(t *test
 	}
 }
 
-func TestPrunePreUpgradeBackupsAbortsWhenVerificationCannotStageCopy(t *testing.T) {
+// A candidate whose verification cannot complete keeps its pair and the rest
+// of the directory is pruned as usual, so a start is not refused after it
+// already wrote its own copy (#1750).
+func TestPrunePreUpgradeBackupsKeepsCandidateWhenVerificationCannotStageCopy(t *testing.T) {
 	directory := t.TempDir()
 	fixtures := make(map[int][]byte)
 	olderPairCopy := "edgewatch-preupgrade-s75-s78-20250101T000000.000000000Z.db"
 	writeValidPreUpgradeBackup(t, directory, olderPairCopy, fixtures)
+	oldest := "edgewatch-preupgrade-s77-s78-20251231T000000.000000000Z.db"
 	newer := []string{
 		"edgewatch-preupgrade-s77-s78-20260101T000000.000000000Z.db",
 		"edgewatch-preupgrade-s77-s78-20260102T000000.000000000Z.db",
 		"edgewatch-preupgrade-s77-s78-20260103T000000.000000000Z.db",
 	}
-	for _, name := range newer {
+	for _, name := range append([]string{oldest}, newer...) {
 		if err := os.WriteFile(filepath.Join(directory, name), []byte("completed upgrade"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// This valid pair copy is older than the newest three and would otherwise
 	// be removed. Verification cannot decide whether it is valid when staging
-	// is unavailable, so pruning must stop before removing any candidate.
+	// is unavailable, so it is kept, and the copy beyond the newest three goes.
 	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
-	removed, err := prunePreUpgradeBackups(context.Background(), directory, 77, preUpgradeBackupRetention, "")
-	if err == nil || !strings.Contains(err.Error(), "create backup verification directory") {
-		t.Fatalf("prune with unavailable verification staging = %v, want a staging failure", err)
+	pruned, err := prunePreUpgradeBackups(context.Background(), directory, 77, preUpgradeBackupRetention, "")
+	if err != nil {
+		t.Fatalf("prune with unavailable verification staging = %v, want the candidate kept and pruning to continue", err)
 	}
-	if len(removed) != 0 {
-		t.Fatalf("removed backups = %v, want no pruning after verification failed", removed)
+	if !reflect.DeepEqual(pruned.Removed, []string{oldest}) {
+		t.Fatalf("removed backups = %q, want only %q", pruned.Removed, oldest)
+	}
+	if len(pruned.Unverified) != 1 || pruned.Unverified[0].Name != olderPairCopy || !strings.Contains(pruned.Unverified[0].Err.Error(), "create backup verification directory") {
+		t.Fatalf("unverified candidates = %+v, want %q with the staging failure", pruned.Unverified, olderPairCopy)
 	}
 	for _, name := range append(newer, olderPairCopy) {
 		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
-			t.Errorf("backup %q was removed after verification failed: %v", name, err)
+			t.Errorf("backup %q was removed: %v", name, err)
 		}
 	}
 }
 
-func TestPrunePreUpgradeBackupsAbortsWhenSchemaProbeFails(t *testing.T) {
+func TestPrunePreUpgradeBackupsKeepsCandidateWhenSchemaProbeFails(t *testing.T) {
 	directory := t.TempDir()
 	fixtures := make(map[int][]byte)
 	olderPairCopy := "edgewatch-preupgrade-s75-s78-20250101T000000.000000000Z.db"
@@ -244,12 +253,13 @@ func TestPrunePreUpgradeBackupsAbortsWhenSchemaProbeFails(t *testing.T) {
 	if err != nil || !validReport.Valid || validReport.SchemaVersion != 75 {
 		t.Fatalf("verify older rollback copy before inducing the probe failure = %+v, %v", validReport, err)
 	}
+	oldest := "edgewatch-preupgrade-s77-s78-20251231T000000.000000000Z.db"
 	newer := []string{
 		"edgewatch-preupgrade-s77-s78-20260101T000000.000000000Z.db",
 		"edgewatch-preupgrade-s77-s78-20260102T000000.000000000Z.db",
 		"edgewatch-preupgrade-s77-s78-20260103T000000.000000000Z.db",
 	}
-	for _, name := range newer {
+	for _, name := range append([]string{oldest}, newer...) {
 		if err := os.WriteFile(filepath.Join(directory, name), []byte("completed upgrade"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -258,12 +268,15 @@ func TestPrunePreUpgradeBackupsAbortsWhenSchemaProbeFails(t *testing.T) {
 	probe := func(context.Context, edgeWatchSchemaQueryer) (bool, error) {
 		return false, probeErr
 	}
-	removed, err := prunePreUpgradeBackupsWithSchemaProbe(context.Background(), directory, 77, preUpgradeBackupRetention, "", probe)
-	if !errors.Is(err, probeErr) {
-		t.Fatalf("prune after schema-probe failure = %v, want the operational probe error", err)
+	pruned, err := prunePreUpgradeBackupsWithSchemaProbe(context.Background(), directory, 77, preUpgradeBackupRetention, "", probe)
+	if err != nil {
+		t.Fatalf("prune after schema-probe failure = %v, want the candidate kept and pruning to continue", err)
 	}
-	if len(removed) != 0 {
-		t.Fatalf("removed backups = %v, want no pruning after schema-probe failure", removed)
+	if !reflect.DeepEqual(pruned.Removed, []string{oldest}) {
+		t.Fatalf("removed backups = %q, want only %q", pruned.Removed, oldest)
+	}
+	if len(pruned.Unverified) != 1 || pruned.Unverified[0].Name != olderPairCopy || !errors.Is(pruned.Unverified[0].Err, probeErr) {
+		t.Fatalf("unverified candidates = %+v, want %q with the probe error", pruned.Unverified, olderPairCopy)
 	}
 	for _, name := range append(newer, olderPairCopy) {
 		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
@@ -299,7 +312,8 @@ func TestPrunePreUpgradeBackupsCancellationBeforeRemovalPreservesRollbackCopy(t 
 		removalChecks++
 		cancel()
 	}
-	removed, err := prunePreUpgradeBackupsWithSchemaProbeAndBeforeRemovalCheck(ctx, directory, 77, preUpgradeBackupRetention, "", probe, beforeRemovalCheck)
+	pruned, err := prunePreUpgradeBackupsWithSchemaProbeAndBeforeRemovalCheck(ctx, directory, 77, preUpgradeBackupRetention, "", probe, beforeRemovalCheck)
+	removed := pruned.Removed
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("prune after cancellation at the removal boundary = %v, want context.Canceled", err)
 	}
@@ -675,7 +689,8 @@ func TestPrunePreUpgradeBackupsKeepEachUnfinishedUpgradeCopy(t *testing.T) {
 			slices.Sort(wantRemoved)
 			wantKept := slices.Sorted(slices.Values(test.kept))
 
-			removed, err := prunePreUpgradeBackups(context.Background(), directory, test.current, test.keep, test.written)
+			pruned, err := prunePreUpgradeBackups(context.Background(), directory, test.current, test.keep, test.written)
+			removed := pruned.Removed
 			if err != nil {
 				t.Fatalf("prune automatic pre-migration backups: %v", err)
 			}
@@ -688,8 +703,8 @@ func TestPrunePreUpgradeBackupsKeepEachUnfinishedUpgradeCopy(t *testing.T) {
 			}
 
 			// Retention is stable: a second pass removes nothing more.
-			removed, err = prunePreUpgradeBackups(context.Background(), directory, test.current, test.keep, test.written)
-			if err != nil || len(removed) != 0 {
+			pruned, err = prunePreUpgradeBackups(context.Background(), directory, test.current, test.keep, test.written)
+			if removed = pruned.Removed; err != nil || len(removed) != 0 {
 				t.Errorf("second prune removed %q (error %v), want nothing", removed, err)
 			}
 		})
@@ -801,6 +816,74 @@ func TestPreMigrationBackupRetriesKeepTheStartingSchemaCopy(t *testing.T) {
 		}
 		if want := 75 + i; !report.Valid || report.SchemaVersion != want || !report.EdgeWatchSchema {
 			t.Fatalf("earlier-schema copy verification = %+v, want a valid schema %d backup", report, want)
+		}
+	}
+}
+
+// Retries of a part-committed upgrade keep starting, and keep the directory
+// bounded, when the earlier copies cannot be verified because TMPDIR is
+// unavailable: the unverified candidates keep their pairs and are reported
+// (#1750).
+func TestPreMigrationBackupRetriesStayBoundedWhenCandidatesCannotBeVerified(t *testing.T) {
+	ctx := context.Background()
+	path := newSchema75TestDatabase(t, false)
+	backupDirectory := t.TempDir()
+	s, err := OpenExisting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	migrations := schemaMigrationStatements()
+	var earlier []string
+	for _, version := range []int{75, 76} {
+		if err := preparePreMigrationBackup(ctx, s.DB, s.Path, version, backupDirectory, nil); err != nil {
+			t.Fatalf("back up schema %d before the start migrates it: %v", version, err)
+		}
+		next := version + 1
+		if err := runMigration(ctx, s.DB, next, migrations[next], foreignKeysOffMigrations[next]); err != nil {
+			t.Fatalf("commit schema %d: %v", next, err)
+		}
+	}
+	earlier = automaticPreUpgradeBackups(t, backupDirectory)
+	if len(earlier) != 2 {
+		t.Fatalf("automatic backups after the failed starts = %q, want the schema 75 and 76 copies", earlier)
+	}
+
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	retries := 2 * preUpgradeBackupRetention
+	for retry := 1; retry <= retries; retry++ {
+		if err := preparePreMigrationBackup(ctx, s.DB, s.Path, 77, backupDirectory, logger); err != nil {
+			t.Fatalf("back up schema 77 on retry %d with unavailable verification staging: %v", retry, err)
+		}
+		automatic := automaticPreUpgradeBackups(t, backupDirectory)
+		for _, name := range earlier {
+			if !slices.Contains(automatic, name) {
+				t.Fatalf("retry %d removed the earlier-schema copy %q; automatic backups = %q", retry, name, automatic)
+			}
+		}
+		if want := len(earlier) + min(retry, preUpgradeBackupRetention+1); len(automatic) != want {
+			t.Fatalf("automatic backups after retry %d = %q, want %d", retry, automatic, want)
+		}
+	}
+	warned := map[string]bool{}
+	for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+		var record map[string]any
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("decode log line %q: %v", line, err)
+		}
+		if record["msg"] == "kept a pre-migration backup whose verification could not complete" {
+			backup, _ := record["backup"].(string)
+			warned[filepath.Base(backup)] = true
+			if errText, _ := record["error"].(string); !strings.Contains(errText, "create backup verification directory") {
+				t.Errorf("unverified backup warning error = %q, want the staging failure", errText)
+			}
+		}
+	}
+	for _, name := range earlier {
+		if !warned[name] {
+			t.Errorf("no warning names the unverified earlier-schema copy %q; logs:\n%s", name, logs.String())
 		}
 	}
 }

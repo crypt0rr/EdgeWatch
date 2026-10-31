@@ -59,11 +59,14 @@ func preparePreMigrationBackup(ctx context.Context, db *sql.DB, dsn string, vers
 	if result.SchemaVersion != version {
 		return fmt.Errorf("automatic pre-migration backup has schema version %d, expected %d", result.SchemaVersion, version)
 	}
-	removed, err := prunePreUpgradeBackups(ctx, directory, version, preUpgradeBackupRetention, name)
+	pruned, err := prunePreUpgradeBackups(ctx, directory, version, preUpgradeBackupRetention, name)
 	if err != nil {
 		return fmt.Errorf("retain automatic pre-migration backups: %w", err)
 	}
-	logger.Info("verified pre-migration backup written", "backup", result.Path, "from_schema", version, "to_schema", schemaVersion, "bytes", result.Bytes, "check", result.Check, "removed", len(removed))
+	for _, kept := range pruned.Unverified {
+		logger.Warn("kept a pre-migration backup whose verification could not complete", "backup", filepath.Join(directory, kept.Name), "error", kept.Err, "remediation", "check free space and permissions in TMPDIR and the backup directory; the copy is kept until a later start can verify it")
+	}
+	logger.Info("verified pre-migration backup written", "backup", result.Path, "from_schema", version, "to_schema", schemaVersion, "bytes", result.Bytes, "check", result.Check, "removed", len(pruned.Removed))
 	return nil
 }
 
@@ -71,6 +74,21 @@ type preUpgradeBackupFile struct {
 	name     string
 	from, to int
 	time     time.Time
+}
+
+// preUpgradePruneResult lists the automatic copies that pruning removed and
+// the unfinished-upgrade candidates it kept without being able to verify them.
+type preUpgradePruneResult struct {
+	Removed    []string
+	Unverified []unverifiedPreUpgradeBackup
+}
+
+// unverifiedPreUpgradeBackup is a candidate whose verification could not
+// complete, such as when its copy could not be staged under TMPDIR, and the
+// error that stopped it.
+type unverifiedPreUpgradeBackup struct {
+	Name string
+	Err  error
 }
 
 // prunePreUpgradeBackups removes only regular owner-only files with the
@@ -101,23 +119,33 @@ type preUpgradeBackupFile struct {
 // The directory thus holds at most keep automatic copies plus the copy just
 // written plus one per qualifying (limit, source schema) pair in the
 // descending chain, so retries at one schema never grow it.
-func prunePreUpgradeBackups(ctx context.Context, directory string, current, keep int, written string) ([]string, error) {
+//
+// A candidate is verified, from a private copy under TMPDIR, before it can
+// hold a pair. A conclusive failure, such as a damaged file or another
+// schema, disqualifies it. When verification cannot complete, for example
+// because the copy cannot be staged, the candidate is kept as if verified: it
+// may be the only rollback point of this upgrade, and refusing to prune would
+// stop the start after this start's copy was already written, so that every
+// restart added another copy. Such candidates are returned in Unverified for
+// the caller to report. Only cancellation stops pruning.
+func prunePreUpgradeBackups(ctx context.Context, directory string, current, keep int, written string) (preUpgradePruneResult, error) {
 	return prunePreUpgradeBackupsWithSchemaProbe(ctx, directory, current, keep, written, detectEdgeWatchSchema)
 }
 
-func prunePreUpgradeBackupsWithSchemaProbe(ctx context.Context, directory string, current, keep int, written string, probe edgeWatchSchemaProbe) ([]string, error) {
+func prunePreUpgradeBackupsWithSchemaProbe(ctx context.Context, directory string, current, keep int, written string, probe edgeWatchSchemaProbe) (preUpgradePruneResult, error) {
 	return prunePreUpgradeBackupsWithSchemaProbeAndBeforeRemovalCheck(ctx, directory, current, keep, written, probe, nil)
 }
 
 // beforeRemovalCheck is a test seam for cancellation at the boundary guarded
 // by the removal loop's context check, after candidate verification is done.
-func prunePreUpgradeBackupsWithSchemaProbeAndBeforeRemovalCheck(ctx context.Context, directory string, current, keep int, written string, probe edgeWatchSchemaProbe, beforeRemovalCheck func()) ([]string, error) {
+func prunePreUpgradeBackupsWithSchemaProbeAndBeforeRemovalCheck(ctx context.Context, directory string, current, keep int, written string, probe edgeWatchSchemaProbe, beforeRemovalCheck func()) (preUpgradePruneResult, error) {
+	var result preUpgradePruneResult
 	if keep < 0 {
-		return nil, errors.New("pre-migration backup retention cannot be negative")
+		return result, errors.New("pre-migration backup retention cannot be negative")
 	}
 	entries, err := os.ReadDir(directory)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	files := make([]preUpgradeBackupFile, 0, len(entries))
 	for _, entry := range entries {
@@ -130,7 +158,7 @@ func prunePreUpgradeBackupsWithSchemaProbeAndBeforeRemovalCheck(ctx context.Cont
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return result, err
 		}
 		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
 			continue
@@ -177,12 +205,19 @@ func prunePreUpgradeBackupsWithSchemaProbeAndBeforeRemovalCheck(ctx context.Cont
 					// field before it can satisfy a protected pair.
 					report, err := verifyBackupFileWithSchemaProbe(ctx, filepath.Join(directory, file.name), BackupFileOptions{}, probe)
 					if err != nil && ctx.Err() != nil {
-						return nil, ctx.Err()
+						return result, ctx.Err()
 					}
-					if err != nil && !isInvalidBackupFile(err) {
-						return nil, fmt.Errorf("verify pre-migration backup %q before pruning: %w", file.name, err)
+					switch {
+					case err == nil:
+						verified[file.name] = report.Valid && report.SchemaVersion == file.from
+					case isInvalidBackupFile(err):
+						verified[file.name] = false
+					default:
+						// Verification could not decide; keep the candidate and
+						// its pair rather than stopping the start.
+						verified[file.name] = true
+						result.Unverified = append(result.Unverified, unverifiedPreUpgradeBackup{Name: file.name, Err: err})
 					}
-					verified[file.name] = err == nil && report.Valid && report.SchemaVersion == file.from
 				}
 				if !verified[file.name] {
 					continue
@@ -194,16 +229,15 @@ func prunePreUpgradeBackupsWithSchemaProbeAndBeforeRemovalCheck(ctx context.Cont
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return result, err
 	}
-	var removed []string
 	kept := 0
 	for _, file := range files {
 		if beforeRemovalCheck != nil {
 			beforeRemovalCheck()
 		}
 		if err := ctx.Err(); err != nil {
-			return removed, err
+			return result, err
 		}
 		if file.name == written || protected[file.name] {
 			continue
@@ -214,15 +248,15 @@ func prunePreUpgradeBackupsWithSchemaProbeAndBeforeRemovalCheck(ctx context.Cont
 		}
 		path := filepath.Join(directory, file.name)
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return removed, err
+			return result, err
 		}
-		removed = append(removed, file.name)
+		result.Removed = append(result.Removed, file.name)
 	}
-	if len(removed) == 0 {
-		return nil, nil
+	if len(result.Removed) == 0 {
+		return result, nil
 	}
 	if err := syncDirectory(directory); err != nil {
-		return removed, err
+		return result, err
 	}
-	return removed, nil
+	return result, nil
 }

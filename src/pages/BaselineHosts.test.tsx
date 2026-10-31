@@ -28,7 +28,7 @@ function NavigationProbe() {
   const location = useLocation()
   const navigate = useNavigate()
   const returnTo = (location.state as { returnTo?: unknown } | null)?.returnTo
-  return <><output data-testid="current-location">{location.pathname}{location.search}</output><output data-testid="return-to">{typeof returnTo === 'string' ? returnTo : ''}</output><button type="button" onClick={() => navigate(-1)}>Browser Back</button><button type="button" onClick={() => navigate(1)}>Browser Forward</button></>
+  return <><output data-testid="current-location">{location.pathname}{location.search}</output><output data-testid="return-to">{typeof returnTo === 'string' ? returnTo : ''}</output><output data-testid="route-state">{JSON.stringify(location.state)}</output><button type="button" onClick={() => navigate(-1)}>Browser Back</button><button type="button" onClick={() => navigate(1)}>Browser Forward</button></>
 }
 
 function setInputValue(input: HTMLInputElement, value: string) {
@@ -63,6 +63,62 @@ describe('baseline host explorer', () => {
     })
     await vi.waitFor(() => expect(container.textContent).toContain('Baseline hosts'), { timeout: 1000 })
   }
+
+  function button(name: string) {
+    return Array.from(container.querySelectorAll('button')).find(candidate => candidate.textContent === name) as HTMLButtonElement | undefined
+  }
+
+  function routeState() {
+    return JSON.parse(container.querySelector('[data-testid="route-state"]')?.textContent || 'null') as unknown
+  }
+
+  it('hands the job list return path to ← Job and host rows through filter changes', async () => {
+    const jobsReturnTo = '/jobs?q=database&filter=attention'
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={[{ pathname: '/jobs/job-1/baseline', state: { returnTo: jobsReturnTo } }]}>
+        <Routes>
+          <Route path="/jobs/:id/baseline" element={<BaselineHosts />} />
+          <Route path="/jobs/:id/baseline/hosts/:address" element={<p>Baseline host detail</p>} />
+          <Route path="/jobs/:id" element={<p>Job page</p>} />
+        </Routes>
+        <NavigationProbe />
+      </MemoryRouter></QueryClientProvider>)
+    })
+    await vi.waitFor(() => expect(container.textContent).toContain('router.example'), { timeout: 1000 })
+
+    // A filter change replaces the list entry; it must keep the route state.
+    await act(async () => fireEvent.change(container.querySelectorAll('select')[0] as HTMLSelectElement, { target: { value: 'tcp' } }))
+    await vi.waitFor(() => expect(container.querySelector('[data-testid="current-location"]')?.textContent).toBe('/jobs/job-1/baseline?protocol=tcp'), { timeout: 1000 })
+    expect(routeState()).toEqual({ returnTo: jobsReturnTo })
+    await vi.waitFor(() => expect(container.textContent).toContain('router.example'), { timeout: 1000 })
+
+    fireEvent.click(container.querySelector('a[href="/jobs/job-1/baseline/hosts/198.51.100.10"]') as HTMLAnchorElement)
+    await vi.waitFor(() => expect(container.textContent).toContain('Baseline host detail'), { timeout: 1000 })
+    expect(routeState()).toEqual({ returnTo: '/jobs/job-1/baseline?protocol=tcp', jobsReturnTo })
+
+    fireEvent.click(button('Browser Back')!)
+    await vi.waitFor(() => expect(container.querySelector('a.back-link')).toBeTruthy(), { timeout: 1000 })
+    fireEvent.click(container.querySelector('a.back-link') as HTMLAnchorElement)
+    await vi.waitFor(() => expect(container.textContent).toContain('Job page'), { timeout: 1000 })
+    expect(container.querySelector('[data-testid="current-location"]')?.textContent).toBe('/jobs/job-1')
+    expect(routeState()).toEqual({ returnTo: jobsReturnTo })
+  })
+
+  it('hands back the unfiltered job list when the return path is outside it', async () => {
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={[{ pathname: '/jobs/job-1/baseline', state: { returnTo: '//example.test/jobs?q=x' } }]}>
+        <Routes>
+          <Route path="/jobs/:id/baseline" element={<BaselineHosts />} />
+          <Route path="/jobs/:id" element={<p>Job page</p>} />
+        </Routes>
+        <NavigationProbe />
+      </MemoryRouter></QueryClientProvider>)
+    })
+    await vi.waitFor(() => expect(container.textContent).toContain('router.example'), { timeout: 1000 })
+    fireEvent.click(container.querySelector('a.back-link') as HTMLAnchorElement)
+    await vi.waitFor(() => expect(container.textContent).toContain('Job page'), { timeout: 1000 })
+    expect(routeState()).toEqual({ returnTo: '/jobs' })
+  })
 
   it('renders detailed baseline hosts and resets filters to the first page', async () => {
     await renderPage()

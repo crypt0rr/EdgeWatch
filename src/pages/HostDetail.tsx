@@ -10,6 +10,7 @@ import type { RdapResult } from '../types'
 import type { HostObservation, PortObservation, ProtocolObservation } from '../generated/api-types'
 import { formatDate, formatDateTime } from '../format'
 import { hostStatusLabel } from '../status'
+import { jobListReturnToFromState } from '../job-list-state'
 
 function displayStatusReason(reason?: string) {
   return reason === 'scan-complete' ? 'full-range scan complete' : reason
@@ -222,11 +223,14 @@ export function HostDetail() {
       : undefined
   const back = listReturnTo ?? (historical ? '/hosts' : scanID ? `/jobs/${id}/scans/${encodeURIComponent(scanID)}?results=${Number.isSafeInteger(resultsOffset) && resultsOffset > 0 ? resultsOffset : 0}` : `/jobs/${id}/baseline`)
   const backLabel = historical ? 'Hosts' : scanID ? 'Scan' : 'Baseline hosts'
+  // A job's scan or baseline host hands the job list's path, with its search
+  // and filter, back to the job page or explorer it returns to.
+  const backState = historical ? undefined : { returnTo: jobListReturnToFromState(location.state, 'jobsReturnTo') }
   const detail = useQuery({ queryKey: ['host-detail', id, scanID, address], queryFn: () => scanID ? historical ? historicalScanHost(scanID, address) : scanHost(id, scanID, address) : baselineHost(id, address), enabled: !!address && (historical || !!id) })
   const rdap = useQuery({ queryKey: ['host-rdap', id, scanID, address], queryFn: () => scanID ? historical ? historicalScanHostRDAP(scanID, address) : scanHostRDAP(id, scanID, address) : baselineHostRDAP(id, address), enabled: !!address && (historical || !!id), retry: false })
   if (detail.isLoading) return <div className="loading"><span className="spinner" />Loading host evidence…</div>
   const notFound = (detail.error as { code?: string } | null)?.code === 'not_found'
-  if (detail.error || !detail.data) return <section className="page"><div className="page-heading"><div><Link className="back-link" to={back}>← {backLabel}</Link><p className="eyebrow">{scanID ? 'Historical scan host' : 'Baseline host'}</p><h1>Host unavailable</h1></div></div><ErrorNotice message={detail.error ? (notFound ? `This host could not be found in the selected ${scanID ? 'scan' : 'baseline'}.` : 'Host evidence could not be loaded.') : `This host could not be found in the selected ${scanID ? 'scan' : 'baseline'}.`} onRetry={detail.error && !notFound ? () => detail.refetch() : undefined} /></section>
+  if (detail.error || !detail.data) return <section className="page"><div className="page-heading"><div><Link className="back-link" to={back} state={backState}>← {backLabel}</Link><p className="eyebrow">{scanID ? 'Historical scan host' : 'Baseline host'}</p><h1>Host unavailable</h1></div></div><ErrorNotice message={detail.error ? (notFound ? `This host could not be found in the selected ${scanID ? 'scan' : 'baseline'}.` : 'Host evidence could not be loaded.') : `This host could not be found in the selected ${scanID ? 'scan' : 'baseline'}.`} onRetry={detail.error && !notFound ? () => detail.refetch() : undefined} /></section>
   const value = detail.data
   const host = value.host
   const sourceScan = value.source_scan ?? value.scan
@@ -241,7 +245,7 @@ export function HostDetail() {
     <div className="panel"><div className="panel-heading"><div><h2>Network registration (RDAP/WHOIS)</h2><p className="muted">Loaded only when a single host is opened.</p></div></div><RdapPanel result={rdap.data?.rdap} loading={rdap.isLoading} error={rdap.error as Error | null} /></div>
   </div>
   return <section className="page host-detail-page">
-    <div className="page-heading"><div><Link className="back-link" to={back}>← {backLabel}</Link><p className="eyebrow">{scanID ? 'Historical scan host' : 'Baseline host'}</p><HostIdentity host={host} /></div></div>
+    <div className="page-heading"><div><Link className="back-link" to={back} state={backState}>← {backLabel}</Link><p className="eyebrow">{scanID ? 'Historical scan host' : 'Baseline host'}</p><HostIdentity host={host} /></div></div>
     {value.data_quality === 'legacy' && <div className="legacy-banner" role="status"><Info size={17} /><span><strong>Legacy detail</strong> This host was derived from an older snapshot. Detailed Nmap evidence appears after a newer successful scan is approved.</span></div>}
     {protocolEvidence}
     {baselineExpectation}

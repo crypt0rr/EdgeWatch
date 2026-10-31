@@ -26,7 +26,11 @@ export function useHostListState() {
   }, [location.key, location.pathname, location.search, navigationType, urlSearch])
 
   // Replace the current list entry so a detail navigation has one clean
-  // history step, while the URL remains reloadable and shareable.
+  // history step, while the URL remains reloadable and shareable. The entry
+  // keeps its route state, such as the job list path that the baseline
+  // explorer's ← Job link returns with.
+  const replaceOptions = { replace: true, state: location.state as unknown }
+
   function updateParam(key: string, value: string) {
     setSearchParams(current => {
       const next = new URLSearchParams(current)
@@ -34,7 +38,7 @@ export function useHostListState() {
       else next.delete(key)
       next.delete('offset')
       return next
-    }, { replace: true })
+    }, replaceOptions)
   }
 
   function updateOffset(value: number) {
@@ -43,7 +47,7 @@ export function useHostListState() {
       if (value > 0) next.set('offset', String(value))
       else next.delete('offset')
       return next
-    }, { replace: true })
+    }, replaceOptions)
   }
 
   function resetFilters() {
@@ -53,7 +57,7 @@ export function useHostListState() {
       next.delete('has_open_ports')
       next.delete('offset')
       return next
-    }, { replace: true })
+    }, replaceOptions)
   }
 
   function updateSearch(value: string) {

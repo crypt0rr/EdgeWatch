@@ -3,7 +3,8 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { fireEvent } from '@testing-library/react'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { baselineHost, baselineHostRDAP, historicalScanHost, historicalScanHostRDAP, scanHost, scanHostRDAP } from '../api'
 import type { HostDetailResponse, RdapResult } from '../types'
@@ -71,6 +72,11 @@ const host: HostObservation = {
     },
     { protocol: 'udp', status: 'unreachable', status_reason: 'nmap-host-timeout', scan_type: 'udp', scanned_ports: '53', scanned_port_count: 1, service_detection: false, ports: [], state_summaries: [{ state: 'filtered', count: 1 }] },
   ],
+}
+
+function RouteStateProbe() {
+  const location = useLocation()
+  return <output data-testid="route">{location.pathname}{location.search} {JSON.stringify(location.state)}</output>
 }
 
 const detail: HostDetailResponse = { job_id: 'job-1', job: 'production', data_quality: 'detailed', host, source_scan: sourceScan }
@@ -285,6 +291,46 @@ describe('host detail', () => {
     const returnTo = '/jobs/job-1/baseline?q=router&protocol=tcp&has_open_ports=true&offset=50'
     await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address', { returnTo })
     expect(container.querySelector('.back-link')?.getAttribute('href')).toBe(returnTo)
+  })
+
+  async function followBackLink(path: string, pattern: string, state: unknown, destination: string) {
+    const queryAt = path.indexOf('?')
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={[{ pathname: queryAt < 0 ? path : path.slice(0, queryAt), search: queryAt < 0 ? '' : path.slice(queryAt), state }]}>
+        <Routes>
+          <Route path={pattern} element={<HostDetail />} />
+          <Route path={destination} element={<p>Return page</p>} />
+        </Routes>
+        <RouteStateProbe />
+      </MemoryRouter></QueryClientProvider>)
+    })
+    await vi.waitFor(() => expect(container.querySelector('.back-link')).toBeTruthy(), { timeout: 1000 })
+    await act(async () => fireEvent.click(container.querySelector('.back-link') as HTMLAnchorElement))
+    await vi.waitFor(() => expect(container.textContent).toContain('Return page'), { timeout: 1000 })
+    return container.querySelector('[data-testid="route"]')?.textContent
+  }
+
+  it('hands the job list return path back to the scan a job-scan host was opened from', async () => {
+    const jobsReturnTo = '/jobs?q=database&filter=attention'
+    expect(await followBackLink('/jobs/job-1/scans/scan-1/hosts/198.51.100.10?results=50', '/jobs/:id/scans/:scanId/hosts/:address', { jobsReturnTo }, '/jobs/:id/scans/:scanId'))
+      .toBe(`/jobs/job-1/scans/scan-1?results=50 ${JSON.stringify({ returnTo: jobsReturnTo })}`)
+  })
+
+  it('hands the job list return path back to the baseline explorer with its own list state', async () => {
+    const returnTo = '/jobs/job-1/baseline?q=router'
+    const jobsReturnTo = '/jobs?q=database&filter=attention'
+    expect(await followBackLink('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address', { returnTo, jobsReturnTo }, '/jobs/:id/baseline'))
+      .toBe(`${returnTo} ${JSON.stringify({ returnTo: jobsReturnTo })}`)
+  })
+
+  it('hands back the unfiltered job list when the job list return path is outside it', async () => {
+    expect(await followBackLink('/jobs/job-1/scans/scan-1/hosts/198.51.100.10', '/jobs/:id/scans/:scanId/hosts/:address', { jobsReturnTo: '//example.test/jobs?q=x' }, '/jobs/:id/scans/:scanId'))
+      .toBe(`/jobs/job-1/scans/scan-1?results=0 ${JSON.stringify({ returnTo: '/jobs' })}`)
+  })
+
+  it('keeps a global host return free of job list state', async () => {
+    expect(await followBackLink('/scans/scan-1/hosts/198.51.100.10', '/scans/:scanId/hosts/:address', { returnTo: '/hosts?q=router', jobsReturnTo: '/jobs?q=x' }, '/hosts'))
+      .toBe('/hosts?q=router null')
   })
 
   it('ignores a return destination that is outside the matching host list', async () => {

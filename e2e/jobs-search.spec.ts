@@ -274,3 +274,100 @@ test('a missing job returns to the filtered Jobs list', async ({ page }, testInf
   await expect(page.getByRole('searchbox', { name: 'Search jobs by name or target' })).toHaveValue('database')
   await expect(page.getByRole('combobox', { name: 'Filter jobs' })).toHaveValue('attention')
 })
+
+// The job pages a list entry leads to keep the list's search and filter, so
+// ← Jobs restores it after a detour through them (#1758).
+const filteredJobs = '/jobs?q=database&filter=attention'
+const filteredJobsURL = /\/jobs\?q=database&filter=attention$/
+
+async function openFilteredJob(page: Page) {
+  await mockConsole(page, 'administrator')
+  const job = monitoringJob('job-1', 'Database monitor', ['db.internal'], { attentionReason: 'failed' })
+  await page.route('**/api/v1/jobs**', async route => {
+    const request = route.request()
+    const url = new URL(request.url())
+    if (request.method() === 'GET' && url.pathname === '/api/v1/jobs') {
+      await route.fulfill({ json: { jobs: [job] } })
+      return
+    }
+    await route.fallback()
+  })
+  await page.goto(filteredJobs)
+  await expect(page.getByRole('heading', { name: 'Database monitor' })).toBeVisible()
+  await page.getByRole('link', { name: 'Database monitor' }).click()
+  await expect(page).toHaveURL(/\/jobs\/job-1$/)
+}
+
+async function expectFilteredJobs(page: Page) {
+  await page.getByRole('link', { name: '← Jobs' }).click()
+  await expect(page).toHaveURL(filteredJobsURL)
+  await expect(page.getByRole('searchbox', { name: 'Search jobs by name or target' })).toHaveValue('database')
+  await expect(page.getByRole('combobox', { name: 'Filter jobs' })).toHaveValue('attention')
+}
+
+test('the baseline explorer round trip keeps the filtered Jobs return path', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'This navigation test runs once on desktop Chromium.')
+
+  await openFilteredJob(page)
+  await page.getByRole('link', { name: /Explore baseline/ }).click()
+  await expect(page).toHaveURL(/\/jobs\/job-1\/baseline$/)
+  await page.getByRole('link', { name: '← Job' }).click()
+  await expect(page).toHaveURL(/\/jobs\/job-1$/)
+  await expectFilteredJobs(page)
+
+  // A filter change in the explorer and a visit to one of its hosts keep it too.
+  await page.getByRole('link', { name: 'Database monitor' }).click()
+  await page.getByRole('link', { name: /Explore baseline/ }).click()
+  await page.getByLabel('Protocol').selectOption('tcp')
+  await expect(page).toHaveURL(/\/jobs\/job-1\/baseline\?protocol=tcp$/)
+  await page.locator('.host-row').first().click()
+  await expect(page).toHaveURL(/\/jobs\/job-1\/baseline\/hosts\/192\.0\.2\.10$/)
+  await page.getByRole('link', { name: '← Baseline hosts' }).click()
+  await expect(page).toHaveURL(/\/jobs\/job-1\/baseline\?protocol=tcp$/)
+  await expect(page.getByLabel('Protocol')).toHaveValue('tcp')
+  await page.getByRole('link', { name: '← Job' }).click()
+  await expect(page).toHaveURL(/\/jobs\/job-1$/)
+  await expectFilteredJobs(page)
+})
+
+test('the job editor round trip keeps the filtered Jobs return path', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'This navigation test runs once on desktop Chromium.')
+
+  await openFilteredJob(page)
+  await page.getByRole('button', { name: 'Edit' }).click()
+  await expect(page).toHaveURL(/\/jobs\/job-1\/edit$/)
+  await expect(page.getByRole('heading', { name: 'Tune your monitoring job' })).toBeVisible()
+  await page.getByRole('link', { name: 'Back to job' }).click()
+  await expect(page).toHaveURL(/\/jobs\/job-1$/)
+  await expectFilteredJobs(page)
+
+  // Saving returns to the job the same way.
+  await page.getByRole('link', { name: 'Database monitor' }).click()
+  await page.getByRole('button', { name: 'Edit' }).click()
+  await expect(page.getByRole('heading', { name: 'Tune your monitoring job' })).toBeVisible()
+  await page.getByRole('button', { name: 'Save changes' }).click()
+  await expect(page).toHaveURL(/\/jobs\/job-1$/)
+  await expectFilteredJobs(page)
+})
+
+test('a scan host round trip keeps the filtered Jobs return path', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'This navigation test runs once on desktop Chromium.')
+
+  await openFilteredJob(page)
+  await page.route(url => new URL(url).pathname === '/api/v1/jobs/job-1/scans/scan-1/hosts', route => route.fulfill({
+    json: {
+      job_id: 'job-1',
+      job: 'fixture-job',
+      data_quality: 'detailed',
+      hosts: [{ address: '192.0.2.10', protocols: [{ protocol: 'tcp', open_ports: 1, open_filtered_ports: 0 }], open_ports: 1, open_filtered_ports: 0, has_open_ports: true }],
+      pagination: { limit: 50, offset: 0, total: 1, has_more: false, next_offset: null },
+    },
+  }))
+  await page.getByRole('link', { name: 'Open scan details →' }).click()
+  await page.getByRole('button', { name: 'View results' }).click()
+  await page.locator('.result-row').first().click()
+  await expect(page).toHaveURL(/\/jobs\/job-1\/scans\/scan-1\/hosts\/192\.0\.2\.10\?results=0$/)
+  await page.getByRole('link', { name: '← Scan' }).click()
+  await expect(page).toHaveURL(/\/jobs\/job-1\/scans\/scan-1\?results=0$/)
+  await expectFilteredJobs(page)
+})

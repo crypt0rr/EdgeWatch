@@ -35,8 +35,10 @@ limits. Retrying a failed upgrade never removes the copy the previous release
 can open, even if another release takes over, and retries at one schema never
 grow the directory;
 [Backup and recovery](/operations/backup-recovery/#scheduled-backups) gives
-the exact rule. If creation or verification fails, the migration stops
-before its schema writes; without a configured directory, the daemon warns and
+the exact rule. An older copy whose verification cannot complete, for example
+because `TMPDIR` is full, is kept and logged rather than stopping the start. If
+creation or verification of the new copy fails, the migration stops before its
+schema writes; without a configured directory, the daemon warns and
 continues. Keep the configuration enabled and retain an off-host backup for
 recovery from host or storage loss.
 

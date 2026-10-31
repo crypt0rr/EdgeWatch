@@ -171,6 +171,15 @@ where the current schema is the one the database has at this start:
   schema and copies for upgrades that finished. Of two equal timestamps, the
   name that sorts later counts as the later one.
 
+Before a copy can hold a pair, the daemon verifies it from a private copy
+under `TMPDIR`, which needs free space there equal to the copy's size. A copy
+that fails verification, such as a damaged file or a copy of another schema,
+holds no pair. When verification cannot complete, for example because `TMPDIR`
+is full, missing, or unreadable, the daemon keeps the copy as if it were
+verified, logs `kept a pre-migration backup whose verification could not
+complete` with the file and the error, and continues the start; a later start
+verifies it again.
+
 It removes the rest, separately from the scheduled `keep` count. The directory
 therefore holds at most three automatic copies plus the copy just written plus
 one per qualifying `(limit, from)` pair in the descending chain, so retries at

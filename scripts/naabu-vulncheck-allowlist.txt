@@ -1,7 +1,7 @@
 # Vulnerabilities that scripts/scan-image-vulnerabilities.sh accepts in the
 # bundled Naabu binary.
 #
-# The Dockerfile builds Naabu v2.6.1 with fixed x/net, Goldmark, and
+# The Dockerfile builds Naabu v2.7.0 with fixed x/net, Goldmark, and
 # klauspost/compress versions. govulncheck scans the exact binary and fails on
 # every finding not listed here.
 #
@@ -11,4 +11,4 @@
 #
 # Format: the OSV ID, then the reason. Lines that start with # are comments.
 
-GO-2026-5932 golang.org/x/crypto@v0.58.0 in Naabu v2.6.1 with x/net v0.62.0: OpenPGP is unmaintained and has known security issues; retained from the existing allowlist because no fixed version is available.
+GO-2026-5932 golang.org/x/crypto@v0.58.0 in Naabu v2.7.0 with x/net v0.62.0: OpenPGP is unmaintained and has known security issues; retained from the existing allowlist because no fixed version is available.

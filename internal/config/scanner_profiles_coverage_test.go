@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -127,5 +128,32 @@ func TestScannerProfileValidationAndPreviewBranches(t *testing.T) {
 	}
 	if forbiddenPositionalLiteral("0.5s") || forbiddenPositionalLiteral("5m") {
 		t.Fatal("duration scalar classification changed unexpectedly")
+	}
+}
+
+// Naabu exits when -silent, which EdgeWatch always passes, meets verbose
+// output, so a new or changed profile cannot add Naabu's verbosity flags. A
+// revision saved with one still decodes, and the flag is dropped (#1755).
+func TestNewNaabuProfilesRefuseVerbosityFlags(t *testing.T) {
+	for _, flag := range []string{"-v", "-verbose", "--verbose"} {
+		profile := ScannerProfile{
+			Engine:    EngineNaabuNmap,
+			Naabu:     BuiltinNaabuProfile().Naabu,
+			NaabuArgs: []string{PlaceholderTargetsFile, PlaceholderPorts, PlaceholderStructuredOutput, flag},
+		}
+		err := ValidateNewScannerProfile(profile)
+		var fieldErr *FieldValidationError
+		if err == nil || !errors.As(err, &fieldErr) || fieldErr.Field != "naabu_args" || !strings.Contains(err.Error(), "-silent") {
+			t.Errorf("new Naabu profile with %s = %v, want a naabu_args error naming -silent", flag, err)
+		}
+		if err := ValidateScannerProfile(profile); err != nil {
+			t.Errorf("stored Naabu profile with %s no longer decodes: %v", flag, err)
+		}
+		if !NaabuVerbosityFlag(flag) {
+			t.Errorf("NaabuVerbosityFlag(%q) = false", flag)
+		}
+	}
+	if NaabuVerbosityFlag(PlaceholderTargetsFile) || NaabuVerbosityFlag("-silent") {
+		t.Fatal("NaabuVerbosityFlag accepted a placeholder or -silent")
 	}
 }

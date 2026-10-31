@@ -188,8 +188,11 @@ A sandboxed scanner process:
 
 Nmap is started with `--privileged`, because Nmap otherwise assumes that a
 process other than UID 0 cannot send raw packets and falls back to connect
-scans. Naabu detects its capabilities itself. Scan results are the same as
-without the sandbox.
+scans. Naabu detects its capabilities itself, and falls back to a connect
+scan without a warning EdgeWatch can see when its raw-packet setup fails, so
+`scripts/verify-scanner-sandbox.sh` checks that a sandboxed SYN Naabu owns raw
+or packet sockets and that a connect Naabu owns none. Scan results are the
+same as without the sandbox.
 
 When `scanner.sandbox` is `auto` or `required`, before the daemon or `scan`
 command opens storage or initializes keys, the sandbox detector runs the

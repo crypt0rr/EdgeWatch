@@ -48,12 +48,14 @@ type DeploymentScanDemand struct {
 // capped by the unit's effective slot limit, and compares the sum with the
 // deployment's shared slot pool. It goes through each active unit's enabled
 // jobs and their recent scan history, so a caller that serves it repeatedly
-// should cache it. Equivalent schedule-duration projections are shared
-// across units within this request. Each job's schedule work has its own
-// limit and the request's work has one bound. The units' jobs take turns,
-// and each first gets a small share of its limit, until half of the bound
-// is spent; the jobs that need more get the rest only after the others, so
-// ordinary jobs are estimated before dense schedules take more work. Jobs
+// should cache it. Schedule expansions and equivalent schedule-duration
+// projections, which hold no unit data, are shared across units within this
+// request and remembered across requests. Each job's schedule work has its
+// own limit and the request's work has one bound. The units' jobs take
+// turns, and each first gets a small share of its limit, until half of the
+// bound is spent; the jobs that need more get the rest only after the
+// others, so ordinary jobs are estimated before dense schedules take more
+// work. Jobs
 // that exceed their limit or the bound are counted as work-limited. A unit
 // that cannot be read fails the whole estimate rather than leaving its
 // demand out of the sum.
@@ -74,9 +76,10 @@ func (a *App) deploymentScanDemandWithBudget(ctx context.Context, budget *scanSc
 	}
 	// Each unit's jobs and history are read through its own tenant store.
 	// The jobs of all units are then projected together, so the work limits
-	// treat every unit's jobs alike. Schedule-duration projections contain
-	// no tenant data, so this request-local memo can safely share
-	// equivalent work across units.
+	// treat every unit's jobs alike. Schedule expansions and
+	// schedule-duration projections contain no tenant data, so the request's
+	// memos and the App's cache can safely share equivalent work across
+	// units.
 	work := newScanDemandWork(nil, budget)
 	work.cache = &a.scanSlotDemand
 	units := make([]ScanSlotDemand, len(scopes))

@@ -1200,9 +1200,9 @@ type scheduleWindow struct {
 	days       []scheduleDaySpan
 	// projectionFloor is the least work that walkScheduleDays takes to
 	// project a run over these days: a Schedule.Next call for the warm
-	// start, two units for each span of ordinary days, and, for each
-	// irregular day, one unit and a Schedule.Next call for each of its ticks
-	// and for the one after it.
+	// start, two units for each span of ordinary days, and, for each day
+	// whose ticks the cron schedule gives, one unit and a Schedule.Next call
+	// for each of its ticks and for the one after it.
 	projectionFloor int
 }
 

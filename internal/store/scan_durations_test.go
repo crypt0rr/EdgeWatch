@@ -189,6 +189,18 @@ func saveDurationCycle(t *testing.T, s *Store, job JobRecord, id, executionHash 
 	}
 }
 
+// sampleDurations returns the summed duration of each sample, in order.
+func sampleDurations(samples []ScanDurationSample) []time.Duration {
+	if samples == nil {
+		return nil
+	}
+	durations := make([]time.Duration, len(samples))
+	for i, sample := range samples {
+		durations[i] = sample.Duration()
+	}
+	return durations
+}
+
 // saveDurationScan records a scan of the job without a cycle.
 func saveDurationScan(t *testing.T, s *Store, scan model.Scan, duration time.Duration) {
 	t.Helper()
@@ -247,8 +259,13 @@ func TestListCompletedScanCycleDurationsTakesEachJobsNewestSamples(t *testing.T)
 		cyclesOnly.ID: {23 * time.Minute, 22 * time.Minute, 21 * time.Minute, 20 * time.Minute},
 	}
 	for jobID, samples := range want {
-		if got := durations[jobID]; !slices.Equal(got, samples) {
+		if got := sampleDurations(durations[jobID]); !slices.Equal(got, samples) {
 			t.Errorf("job %s samples = %v, want %v newest first", jobID, got, samples)
+		}
+		for _, sample := range durations[jobID] {
+			if sample.Runs != 1 || len(sample.Attempts) != 1 {
+				t.Errorf("job %s one-attempt sample = %+v, want one run", jobID, sample)
+			}
 		}
 	}
 	if len(durations) != len(want) {
@@ -260,16 +277,16 @@ func TestListCompletedScanCycleDurationsTakesEachJobsNewestSamples(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := durations[cyclesOnly.ID], []time.Duration{23 * time.Minute, 22 * time.Minute, 21 * time.Minute, 20 * time.Minute, time.Hour, time.Hour}; !slices.Equal(got, want) {
+	if got, want := sampleDurations(durations[cyclesOnly.ID]), []time.Duration{23 * time.Minute, 22 * time.Minute, 21 * time.Minute, 20 * time.Minute, time.Hour, time.Hour}; !slices.Equal(got, want) {
 		t.Errorf("cycle job samples with limit 6 = %v, want %v", got, want)
 	}
 }
 
 // A completed cycle counts when it recorded the job's current execution
-// hash. A scan without a cycle counts when it recorded the job's scope hash,
-// or the legacy alias of a stored job, and its current TCP scanner profile
-// revision. Failed scans, scans of a cycle, unkeyed jobs and archived jobs
-// add nothing.
+// hash. A successful, incomplete or timed-out scan without a cycle counts
+// when it recorded the job's scope hash, or the legacy alias of a stored
+// job, and its current TCP scanner profile revision. Failed scans, scans of
+// a cycle, unkeyed jobs and archived jobs add nothing.
 func TestListCompletedScanCycleDurationsKeysSamplesOnScanSettings(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -330,12 +347,15 @@ func TestListCompletedScanCycleDurationsKeysSamplesOnScanSettings(t *testing.T) 
 	cycleAttempt.CycleID, cycleAttempt.CycleAttempt, cycleAttempt.CycleStatus = "current-execution-cycle", 2, "completed"
 	saveDurationScan(t, s, cycleAttempt, time.Hour)
 	saveDurationScan(t, s, model.Scan{ID: "unkeyed-scan", JobID: unkeyed.ID, Job: unkeyed.Job.Name, FinishedAt: at(10), ConfigHash: unkeyed.Job.SecurityHash()}, time.Hour)
+	timedOut := scan("timed-out-scan", 11)
+	timedOut.Status = "timed_out"
+	saveDurationScan(t, s, timedOut, 5*time.Minute)
 
 	durations, err := tenant.ListCompletedScanCycleDurations(ctx, []ScanDurationKey{key}, 11)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := durations[job.ID], []time.Duration{4 * time.Minute, 3 * time.Minute, 2 * time.Minute, time.Minute}; !slices.Equal(got, want) || len(durations) != 1 {
+	if got, want := sampleDurations(durations[job.ID]), []time.Duration{5 * time.Minute, 4 * time.Minute, 3 * time.Minute, 2 * time.Minute, time.Minute}; !slices.Equal(got, want) || len(durations) != 1 {
 		t.Fatalf("keyed samples = %v, want %v for the keyed job only", durations, want)
 	}
 
@@ -349,7 +369,7 @@ func TestListCompletedScanCycleDurationsKeysSamplesOnScanSettings(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := durations[job.ID], []time.Duration{time.Hour, time.Hour}; !slices.Equal(got, want) {
+	if got, want := sampleDurations(durations[job.ID]), []time.Duration{time.Hour, time.Hour}; !slices.Equal(got, want) {
 		t.Fatalf("samples of the changed key = %v, want the other profile's scan and the other execution's cycle, %v", got, want)
 	}
 
@@ -362,10 +382,10 @@ func TestListCompletedScanCycleDurationsKeysSamplesOnScanSettings(t *testing.T) 
 	}
 }
 
-// A job's scans without a cycle count only among its newest successful or
-// incomplete scans, so a job whose newer scans ran with other settings, or
-// belong to cycles, does not have its whole history read on every request.
-// Failed scans do not take up the window.
+// A job's scans without a cycle count only among its newest successful,
+// incomplete or timed-out scans, so a job whose newer scans ran with other
+// settings, or belong to cycles, does not have its whole history read on
+// every request. Failed scans do not take up the window.
 func TestListCompletedScanCycleDurationsReadsOnlyEachJobsNewestScans(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -390,7 +410,7 @@ func TestListCompletedScanCycleDurationsReadsOnlyEachJobsNewestScans(t *testing.
 		if err != nil {
 			t.Fatal(err)
 		}
-		return durations[job.ID]
+		return sampleDurations(durations[job.ID])
 	}
 	// Scans with the current settings, then a window's worth of newer scans
 	// with other settings, as after an edit and its reversal.
@@ -415,11 +435,164 @@ func TestListCompletedScanCycleDurationsReadsOnlyEachJobsNewestScans(t *testing.
 	if got := list(); !slices.Equal(got, []time.Duration{time.Minute}) {
 		t.Fatalf("samples after one new scan with the current settings = %v, want that one", got)
 	}
+	// A timed-out scan with the current settings is a sample too, and
+	// timed-out scans with other settings take up the window.
+	save("timed-out-current", 300, key.ConfigHash, "timed_out")
+	if got := list(); !slices.Equal(got, []time.Duration{time.Minute, time.Minute}) {
+		t.Fatalf("samples after a timed-out scan with the current settings = %v, want it and the earlier one", got)
+	}
+	for i := range window {
+		save(fmt.Sprintf("timed-out-other-settings-%02d", i), 400+i, "other-scope-hash", "timed_out")
+	}
+	if got := list(); len(got) != 0 {
+		t.Fatalf("samples behind %d newer timed-out scans with other settings = %v, want none read", window, got)
+	}
+}
+
+// The attempts that the job's cycle in progress has recorded are runs with
+// the current settings, so that cycle is the job's newest sample, of as many
+// runs as it recorded, once its attempts are among the job's newest cycle
+// scans with the current execution hash. A cycle in progress with other
+// settings, and the attempts of a cycle that expired, are not samples. Each
+// attempt records whether its timeout ended it.
+func TestListCompletedScanCycleDurationsCountsTheCycleInProgress(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	tenant := defaultTenant(s)
+	job, err := tenant.CreateJob(ctx, testJob("cycle-in-progress"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := NewScanDurationKey(job)
+	const limit = 3
+	base := time.Date(2026, time.April, 1, 0, 0, 0, 0, time.UTC)
+	at := func(hour int) time.Time { return base.Add(time.Duration(hour) * time.Hour) }
+	saveCycle := func(id, status, executionHash string, started time.Time) {
+		t.Helper()
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,attempt_count,total_units,total_probes,started_at,updated_at,expires_at)
+			VALUES(?,?,?,?,?,?,?,?,9,1,1,?,?,?)`, id, job.ID, job.Job.Name, job.Revision, key.ConfigHash, executionHash, []byte(`{}`), status,
+			sqliteTimestamp(started), sqliteTimestamp(started), sqliteTimestamp(started.Add(30*24*time.Hour))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	saveAttempt := func(cycleID string, attempt, hour int, duration time.Duration, status string) {
+		t.Helper()
+		saveDurationScan(t, s, model.Scan{
+			ID: fmt.Sprintf("%s-attempt-%d", cycleID, attempt), JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
+			FinishedAt: at(hour), Status: status, ConfigHash: key.ConfigHash,
+			CycleID: cycleID, CycleAttempt: attempt, CycleStatus: "paused", Resumable: true,
+		}, duration)
+	}
+	list := func() []ScanDurationSample {
+		t.Helper()
+		durations, err := tenant.ListCompletedScanCycleDurations(ctx, []ScanDurationKey{key}, limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return durations[job.ID]
+	}
+	// An older completed cycle and scan, then a cycle that expired after
+	// two timed-out attempts.
+	saveDurationCycle(t, s, job, "completed-before", key.ExecutionHash, at(1), 5*time.Minute)
+	saveDurationScan(t, s, model.Scan{ID: "timed-out-scan", JobID: job.ID, Job: job.Job.Name, FinishedAt: at(2), Status: "timed_out", ConfigHash: key.ConfigHash}, time.Minute)
+	saveCycle("expired", "expired", key.ExecutionHash, at(3))
+	saveAttempt("expired", 1, 4, time.Minute, "timed_out")
+	saveAttempt("expired", 2, 5, time.Minute, "timed_out")
+	got := list()
+	if len(got) != 2 || !slices.Equal(got[0].Attempts, []ScanDurationAttempt{{Duration: time.Minute, TimedOut: true}}) || !slices.Equal(got[1].Attempts, []ScanDurationAttempt{{Duration: 5 * time.Minute}}) {
+		t.Fatalf("samples without a cycle in progress = %+v; want the timed-out scan and the completed cycle", got)
+	}
+
+	// The cycle in progress has recorded a timed-out attempt and a failed
+	// one; a running attempt has no record yet.
+	saveCycle("in-progress", "paused", key.ExecutionHash, at(6))
+	saveAttempt("in-progress", 1, 7, 50*time.Second, "timed_out")
+	saveAttempt("in-progress", 2, 8, 20*time.Second, "failed")
+	got = list()
+	want := []ScanDurationAttempt{{Duration: 50 * time.Second, TimedOut: true}, {Duration: 20 * time.Second}}
+	if len(got) != limit || got[0].Runs != 2 || !slices.Equal(got[0].Attempts, want) || got[1].Duration() != time.Minute || got[2].Duration() != 5*time.Minute {
+		t.Fatalf("samples with a cycle in progress = %+v; want its two recorded attempts as the newest sample", got)
+	}
+
+	// Only its attempts among the job's three newest cycle scans count.
+	saveAttempt("in-progress", 3, 9, 30*time.Second, "timed_out")
+	saveAttempt("in-progress", 4, 10, 40*time.Second, "timed_out")
+	if got = list(); len(got) == 0 || got[0].Runs != limit || got[0].Duration() != 90*time.Second {
+		t.Fatalf("samples after more attempts = %+v; want the cycle's three newest attempts, 1m30s", got)
+	}
+
+	// A stalled cycle is not a sample: scheduled runs skip it until it is
+	// retried or its resume window ends, when the next run expires it.
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='stalled' WHERE id='in-progress'`); err != nil {
+		t.Fatal(err)
+	}
+	if got = list(); len(got) != 2 || got[0].Duration() != time.Minute {
+		t.Fatalf("samples with a stalled cycle = %+v; want the timed-out scan and the completed cycle", got)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='paused' WHERE id='in-progress'`); err != nil {
+		t.Fatal(err)
+	}
+
+	// A cycle in progress with other settings is not a sample.
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET execution_hash='other-settings' WHERE id='in-progress'`); err != nil {
+		t.Fatal(err)
+	}
+	if got = list(); len(got) != 2 || got[0].Duration() != time.Minute {
+		t.Fatalf("samples with a cycle in progress of other settings = %+v; want the timed-out scan and the completed cycle", got)
+	}
+}
+
+// The stalled cycles of the tenant's unarchived jobs are listed with the
+// end of their resume windows, or the zero time when a cycle records none.
+// Running and paused cycles, completed ones, and an archived job's stalled
+// cycle are not.
+func TestListStalledScanCyclesReturnsEachStalledCyclesWindowEnd(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	tenant := defaultTenant(s)
+	windowEnd := time.Date(2026, time.April, 9, 12, 0, 0, 0, time.UTC)
+	jobs := make(map[string]JobRecord)
+	for _, name := range []string{"stalled", "endless", "paused", "running", "completed", "archived"} {
+		job, err := tenant.CreateJob(ctx, testJob("stalled-list-"+name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		jobs[name] = job
+		status, expires := name, sqliteTimestamp(windowEnd)
+		switch name {
+		case "endless", "archived":
+			status = "stalled"
+		}
+		if name == "endless" {
+			expires = ""
+		}
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,total_units,total_probes,started_at,updated_at,expires_at)
+			VALUES(?,?,?,?,'','',?,?,1,1,?,?,?)`, "cycle-"+name, job.ID, job.Job.Name, job.Revision, []byte(`{}`), status,
+			sqliteTimestamp(windowEnd.Add(-48*time.Hour)), sqliteTimestamp(windowEnd.Add(-48*time.Hour)), expires); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE jobs SET archived=1 WHERE id=?`, jobs["archived"].ID); err != nil {
+		t.Fatal(err)
+	}
+	stalled, err := tenant.ListStalledScanCycles(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stalled) != 2 || !stalled[jobs["stalled"].ID].Equal(windowEnd) || !stalled[jobs["endless"].ID].IsZero() {
+		t.Fatalf("stalled cycles = %v; want the stalled job's window end and the endless one's zero time", stalled)
+	}
+	if _, found := stalled[jobs["endless"].ID]; !found {
+		t.Fatalf("stalled cycles = %v; want the stalled cycle without a window end", stalled)
+	}
 }
 
 // Every lookup of the duration query is an indexed per-job lookup: no step
 // scans a table or a tenant's history, sorts a job's history, or reads the
-// row of a scan before the index has shown that it has no cycle.
+// row of a scan before the index has shown that it has no cycle or that it
+// is an attempt of the job's cycle in progress.
 func TestListCompletedScanCycleDurationsUsesPerJobIndexLookups(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
@@ -430,6 +603,10 @@ func TestListCompletedScanCycleDurationsUsesPerJobIndexLookups(t *testing.T) {
 		"SEARCH v USING COVERING INDEX " + scansJobHistoryIndex + " (job_id=?)",
 		"SEARCH c USING COVERING INDEX " + scanCyclesCompletedExecutionIndex + " (job_id=? AND execution_hash=? AND finished_at>?)",
 		"SEARCH a USING INDEX " + scansCycleOutcomeIndex + " (cycle_id=?)",
+		"SEARCH q USING COVERING INDEX " + scansTimeoutCycleKeyIndex + " (tenant_id=? AND job_id=? AND cycle_execution_hash=?)",
+		"SEARCH e USING INDEX " + scanCyclesActiveIndex + " (job_id=?)",
+		"SEARCH u USING COVERING INDEX " + scansTimeoutCycleKeyIndex + " (tenant_id=? AND job_id=? AND cycle_execution_hash=? AND finished_at>?)",
+		"SEARCH t USING INTEGER PRIMARY KEY (rowid=?)",
 		"SEARCH y USING COVERING INDEX " + scansJobHistoryIndex + " (job_id=? AND finished_at>?)",
 		"SEARCH z USING COVERING INDEX " + scansCycleOutcomeIndex + " (cycle_id=? AND cycle_status=? AND status=? AND tenant_id=? AND rowid=?)",
 		"SEARCH r USING INTEGER PRIMARY KEY (rowid=?)",
@@ -441,7 +618,7 @@ func TestListCompletedScanCycleDurationsUsesPerJobIndexLookups(t *testing.T) {
 	}
 	for _, step := range plan {
 		fields := strings.Fields(step)
-		if strings.Contains(step, "TEMP B-TREE") || len(fields) > 1 && fields[0] == "SCAN" && !slices.Contains([]string{"k", "w", "b", "c"}, fields[1]) {
+		if strings.Contains(step, "TEMP B-TREE") || len(fields) > 1 && fields[0] == "SCAN" && !slices.Contains([]string{"k", "w", "b", "c", "p"}, fields[1]) {
 			t.Errorf("duration plan step %q scans or sorts history: %s", step, joined)
 		}
 	}

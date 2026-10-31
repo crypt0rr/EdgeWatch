@@ -26,7 +26,7 @@ function statusWithDemand(scanDemand?: PlatformScanDemand): PlatformStatus {
 
 /** Scheduled scan demand of three active units against one shared slot. */
 function scanDemand(overrides: Partial<PlatformScanDemand> = {}): PlatformScanDemand {
-  return { units: 3, enabled_jobs: 3, history_jobs: 3, lower_bound_jobs: 0, unestimated_jobs: 0, cadence_unattainable_jobs: 0, slots: 1, estimated_slot_seconds_per_day: 0.6 * 3 * 86_400, capacity_slot_seconds_per_day: 86_400, utilization_percent: 180, over_capacity: true, ...overrides }
+  return { units: 3, enabled_jobs: 3, history_jobs: 3, lower_bound_jobs: 0, unestimated_jobs: 0, work_limited_jobs: 0, cadence_unattainable_jobs: 0, slots: 1, estimated_slot_seconds_per_day: 0.6 * 3 * 86_400, capacity_slot_seconds_per_day: 86_400, utilization_percent: 180, over_capacity: true, ...overrides }
 }
 
 function admin(overrides: Partial<UserSummary> & Pick<UserSummary, 'id' | 'username'>): UserSummary {
@@ -608,7 +608,7 @@ describe('platform status', () => {
   })
 
   it('warns when the active units’ scheduled scan demand exceeds the shared slots, in words', async () => {
-    vi.mocked(platformStatus).mockResolvedValue(statusWithDemand(scanDemand({ unestimated_jobs: 2, cadence_unattainable_jobs: 2 })))
+    vi.mocked(platformStatus).mockResolvedValue(statusWithDemand(scanDemand({ unestimated_jobs: 2, work_limited_jobs: 0, cadence_unattainable_jobs: 2 })))
     renderWithProviders(<PlatformStatusPage />)
     const panel = (await screen.findByRole('heading', { name: 'Scheduled scan demand' })).closest('.panel') as HTMLElement
     expect(within(panel).getByText('Scheduled scan demand: 43.2 of 24 slot-hours/day (180%)')).toBeInTheDocument()
@@ -619,10 +619,30 @@ describe('platform status', () => {
     expect(warning).toHaveTextContent('Raise scheduler.max_concurrent_scans in config.yaml')
     expect(within(panel).getByText('Not fully estimated (may overlap lower bound)').nextSibling).toHaveTextContent('2')
     expect(within(panel).getByText(/2 jobs’ estimated runs would still be active at one or more scheduled ticks, so the scheduler skips those ticks\./).closest('.notice')).toHaveClass('warning')
-    expect(within(panel).getByText('2 enabled jobs have work or a schedule frequency the estimate cannot fully bound, so actual demand may be higher.')).toBeInTheDocument()
+    expect(within(panel).getByText('2 enabled jobs have work the estimate cannot fully bound or a schedule it cannot use, so actual demand may be higher.')).toBeInTheDocument()
     expect(within(panel).getByText('Enabled jobs').nextSibling).toHaveTextContent('3')
     expect(within(panel).getByText('Estimated from scan history').nextSibling).toHaveTextContent('3')
     expect(within(panel).getByText('Lower bound from scanner rates').nextSibling).toHaveTextContent('0')
+    expect(within(panel).getByText('Left out at the work limit').nextSibling).toHaveTextContent('0')
+    expect(within(panel).queryByText(/too costly to simulate/)).not.toBeInTheDocument()
+  })
+
+  it('counts the jobs left out at the work limit apart from the jobs it cannot estimate', async () => {
+    vi.mocked(platformStatus).mockResolvedValue(statusWithDemand(scanDemand({ enabled_jobs: 5, history_jobs: 3, work_limited_jobs: 2, utilization_percent: 50, over_capacity: false })))
+    const several = renderWithProviders(<PlatformStatusPage />)
+    let panel = (await screen.findByRole('heading', { name: 'Scheduled scan demand' })).closest('.panel') as HTMLElement
+    expect(within(panel).getByText('Left out at the work limit').nextSibling).toHaveTextContent('2')
+    expect(within(panel).getByText('Not fully estimated (may overlap lower bound)').nextSibling).toHaveTextContent('0')
+    expect(within(panel).getByText(/^2 enabled jobs have schedules too costly to simulate within the estimate’s work limit, so they are left out and actual demand may be higher\./)).toBeInTheDocument()
+    expect(within(panel).getByText(/take turns with a small first share each, so ordinary jobs are usually estimated before dense schedules get more work/)).toBeInTheDocument()
+    expect(within(panel).queryByText(/cannot crowd out/)).not.toBeInTheDocument()
+    expect(within(panel).queryByText(/cannot fully bound/)).not.toBeInTheDocument()
+    several.unmount()
+
+    vi.mocked(platformStatus).mockResolvedValue(statusWithDemand(scanDemand({ enabled_jobs: 4, history_jobs: 3, work_limited_jobs: 1, utilization_percent: 50, over_capacity: false })))
+    renderWithProviders(<PlatformStatusPage />)
+    panel = (await screen.findByRole('heading', { name: 'Scheduled scan demand' })).closest('.panel') as HTMLElement
+    expect(within(panel).getByText(/^1 enabled job has a schedule too costly to simulate within the estimate’s work limit, so it is left out/)).toBeInTheDocument()
   })
 
   it('labels the not-fully-estimated count as overlapping lower-bound jobs', async () => {

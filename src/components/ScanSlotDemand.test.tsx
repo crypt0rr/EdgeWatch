@@ -18,6 +18,7 @@ describe('ScanSlotDemandNotice', () => {
       history_jobs: 0,
       lower_bound_jobs: 16,
       unestimated_jobs: 16,
+      work_limited_jobs: 0,
       cadence_unattainable_jobs: 0,
       slots: 1,
       estimated_slot_seconds_per_day: 298.257 * 3600,
@@ -35,15 +36,58 @@ describe('ScanSlotDemandNotice', () => {
     expect(screen.getByRole('region', { name: 'Scan-slot demand' })).toHaveClass('warning')
     expect(screen.getByText(/298\.3 slot-hours\/day/)).toBeInTheDocument()
     expect(screen.getByText(/The scan slots are shared by all business units and not reserved for this one\./)).toBeInTheDocument()
-    expect(screen.getByText(/estimate cannot fully bound, so actual demand may be higher/)).toBeInTheDocument()
+    expect(screen.getByText('16 enabled jobs have work the estimate cannot fully bound or a schedule it cannot use, so actual demand may be higher.')).toBeInTheDocument()
     expect(screen.getByText(/configured maximum scanner rates, as a lower bound/)).toBeInTheDocument()
     expect(screen.getByText(/samples with its current scan settings/)).toBeInTheDocument()
+    expect(screen.getByText(/whether it succeeded, was incomplete, or timed out, is one run, and so is each attempt of a completed resumable cycle or of the cycle in progress/)).toBeInTheDocument()
+    expect(screen.getByText(/the estimate uses the mean run duration/)).toBeInTheDocument()
+    expect(screen.getByText(/A job whose resumable cycle stalled adds nothing until someone retries the cycle or its resume window ends/)).toBeInTheDocument()
     expect(screen.getByText(/pausing and resuming it keeps its samples/)).toBeInTheDocument()
-    expect(screen.getByText(/newest runs with those settings all timed out/)).toBeInTheDocument()
+    expect(screen.getByText(/A run that timed out counts at the job’s current timeout, and if the job’s newest runs with those settings all timed out, every run does/)).toBeInTheDocument()
     expect(screen.getByText(/skips a tick when the previous estimated run is still active/)).toBeInTheDocument()
+    expect(screen.getByText(/still finishing at the tick at exactly its timeout, so that tick is skipped too/)).toBeInTheDocument()
     expect(screen.getByText(/Each run counts at most the job’s timeout, which ends it/)).toBeInTheDocument()
     expect(screen.getByText(/adds at most 24 slot-hours\/day/)).toBeInTheDocument()
+    expect(screen.queryByText(/median/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/work limit/)).not.toBeInTheDocument()
     expect(screen.queryByText(/longer than (its|their) schedules? allows?/)).not.toBeInTheDocument()
+  })
+
+  it('counts jobs left out at the work limit apart from jobs it cannot estimate', async () => {
+    vi.mocked(scanSlotDemand).mockResolvedValue({
+      enabled_jobs: 4,
+      history_jobs: 3,
+      lower_bound_jobs: 0,
+      unestimated_jobs: 0,
+      work_limited_jobs: 1,
+      cadence_unattainable_jobs: 0,
+      slots: 1,
+      estimated_slot_seconds_per_day: 6 * 3600,
+      capacity_slot_seconds_per_day: 24 * 3600,
+      utilization_percent: 25,
+      over_capacity: false,
+    })
+    const first = renderWithProviders(<ScanSlotDemandNotice />)
+    expect(await screen.findByText('1 enabled job has a schedule too costly to simulate within the estimate’s work limit, so it is left out and actual demand may be higher.')).toBeInTheDocument()
+    expect(screen.queryByText(/cannot fully bound/)).not.toBeInTheDocument()
+    first.unmount()
+
+    vi.mocked(scanSlotDemand).mockResolvedValue({
+      enabled_jobs: 4,
+      history_jobs: 1,
+      lower_bound_jobs: 0,
+      unestimated_jobs: 1,
+      work_limited_jobs: 2,
+      cadence_unattainable_jobs: 0,
+      slots: 1,
+      estimated_slot_seconds_per_day: 2 * 3600,
+      capacity_slot_seconds_per_day: 24 * 3600,
+      utilization_percent: 8.3,
+      over_capacity: false,
+    })
+    renderWithProviders(<ScanSlotDemandNotice />)
+    expect(await screen.findByText('2 enabled jobs have schedules too costly to simulate within the estimate’s work limit, so they are left out and actual demand may be higher.')).toBeInTheDocument()
+    expect(screen.getByText('1 enabled job has work the estimate cannot fully bound or a schedule it cannot use, so actual demand may be higher.')).toBeInTheDocument()
   })
 
   it('counts jobs whose estimated runs make the scheduler skip ticks', async () => {
@@ -52,6 +96,7 @@ describe('ScanSlotDemandNotice', () => {
       history_jobs: 3,
       lower_bound_jobs: 0,
       unestimated_jobs: 0,
+      work_limited_jobs: 0,
       cadence_unattainable_jobs: 1,
       slots: 2,
       estimated_slot_seconds_per_day: 30 * 3600,
@@ -68,6 +113,7 @@ describe('ScanSlotDemandNotice', () => {
       history_jobs: 3,
       lower_bound_jobs: 0,
       unestimated_jobs: 0,
+      work_limited_jobs: 0,
       cadence_unattainable_jobs: 2,
       slots: 2,
       estimated_slot_seconds_per_day: 48 * 3600,
@@ -92,6 +138,7 @@ describe('ScanSlotDemandNotice', () => {
       history_jobs: 1,
       lower_bound_jobs: 0,
       unestimated_jobs: 0,
+      work_limited_jobs: 0,
       cadence_unattainable_jobs: 0,
       slots: 1,
       estimated_slot_seconds_per_day: 0.799 * 24 * 3600,
@@ -110,6 +157,7 @@ describe('ScanSlotDemandNotice', () => {
       history_jobs: 1,
       lower_bound_jobs: 0,
       unestimated_jobs: 0,
+      work_limited_jobs: 0,
       cadence_unattainable_jobs: 0,
       slots: 1,
       estimated_slot_seconds_per_day: 0.8 * 24 * 3600,

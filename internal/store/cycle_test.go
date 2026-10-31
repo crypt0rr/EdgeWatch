@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -87,8 +88,8 @@ func TestListCompletedScanCycleDurationsSumsAttemptsAndExcludesPause(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := durations[job.ID]; len(got) != 1 || got[0] != 5*time.Minute {
-		t.Fatalf("completed cycle duration samples = %v, want the 2m and 3m held attempts summed to 5m without the 48h pause", got)
+	if got := durations[job.ID]; len(got) != 1 || got[0].Duration() != 5*time.Minute || got[0].Runs != 2 || !slices.Equal(got[0].Attempts, []ScanDurationAttempt{{Duration: 2 * time.Minute, TimedOut: true}, {Duration: 3 * time.Minute}}) {
+		t.Fatalf("completed cycle duration samples = %+v, want the timed-out 2m and the 3m held attempts as two runs, 5m without the 48h pause", got)
 	}
 }
 
@@ -129,8 +130,10 @@ func TestListCompletedScanCycleDurationsExcludesRecoveryInvocation(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := durations[job.ID]; len(got) != 1 || got[0] != 2*time.Minute {
-		t.Fatalf("completed cycle duration samples = %v; want only the two minutes of recorded scan work, excluding recovery invocation", got)
+	// The cycle took two attempts, but only the first left a record of its
+	// scan work, so the cycle's two runs share its two minutes.
+	if got := durations[job.ID]; len(got) != 1 || got[0].Duration() != 2*time.Minute || got[0].Runs != 2 || len(got[0].Attempts) != 1 {
+		t.Fatalf("completed cycle duration samples = %+v; want only the two minutes of recorded scan work over its two attempts, excluding recovery invocation", got)
 	}
 }
 

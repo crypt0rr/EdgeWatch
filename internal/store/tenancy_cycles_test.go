@@ -57,6 +57,15 @@ func cyclesOf(f tenantFixture, scope TenantScope) tenantCycles {
 // unknownCycle is a cycle ID that no tenant has.
 const unknownCycle = "cycle-unknown"
 
+// inProgressAttempt is how long an attempt of a tenant's cycle in progress
+// lasts in the duration leak case, so each tenant's differs.
+func inProgressAttempt(f tenantFixture, scope TenantScope) time.Duration {
+	if scope == f.a {
+		return 40 * time.Second
+	}
+	return 70 * time.Second
+}
+
 // cycleUnit returns a one-address unit of the cycle plan.
 func cycleUnit(sequence int, phase string, probes int64) scanner.WorkUnit {
 	return scanner.WorkUnit{Sequence: sequence, Engine: config.EngineNmap, Phase: phase, Protocol: "tcp", Family: 4, Addresses: []string{"192.0.2.10"}, Ports: "443", PortCount: 1, Probes: probes}
@@ -308,7 +317,8 @@ var cycleTenantLeakCases = map[string]tenantLeakCase{
 		ctx := context.Background()
 		f := newCycleTenantFixture(t)
 		// The fixture's cycles record no execution hash, so each key names
-		// that one; each tenant also saves a scan without a cycle.
+		// that one; each tenant also saves a scan without a cycle, and an
+		// attempt of its cycle in progress that lasts its own time.
 		keyOf := func(scope TenantScope, jobID string) ScanDurationKey {
 			t.Helper()
 			record, err := f.store.Tenant(scope).GetJob(ctx, jobID)
@@ -333,6 +343,13 @@ var cycleTenantLeakCases = map[string]tenantLeakCase{
 			}); err != nil {
 				t.Fatal(err)
 			}
+			if err := f.store.System().SaveScan(ctx, model.Scan{
+				ID: "scan-demand-attempt-" + owner.scope.ID(), JobID: owner.job, Job: "edge",
+				StartedAt: finished.Add(time.Second - inProgressAttempt(f, owner.scope)), FinishedAt: finished.Add(time.Second), Status: "timed_out",
+				ConfigHash: owner.key.ConfigHash, CycleID: cyclesOf(f, owner.scope).active, CycleAttempt: 1, CycleStatus: "paused", Resumable: true,
+			}); err != nil {
+				t.Fatal(err)
+			}
 		}
 		for _, owner := range []struct {
 			scope         TenantScope
@@ -344,8 +361,13 @@ var cycleTenantLeakCases = map[string]tenantLeakCase{
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(durations[owner.job]) != 2 || len(durations[owner.archived]) != 0 {
-				t.Errorf("tenant %s: scan samples = %#v; want its completed cycle and scan for its job and none for its archived job", owner.scope.ID(), durations)
+			if len(durations[owner.job]) != 3 || len(durations[owner.archived]) != 0 {
+				t.Errorf("tenant %s: scan samples = %#v; want its completed cycle, scan and cycle in progress for its job and none for its archived job", owner.scope.ID(), durations)
+			}
+			// The newest sample is the tenant's own cycle in progress.
+			if samples := durations[owner.job]; len(samples) == 0 || samples[0].Runs != 1 || len(samples[0].Attempts) != 1 ||
+				samples[0].Attempts[0] != (ScanDurationAttempt{Duration: inProgressAttempt(f, owner.scope), TimedOut: true}) {
+				t.Errorf("tenant %s: newest sample = %#v; want the attempt of its own cycle in progress, %s", owner.scope.ID(), samples, inProgressAttempt(f, owner.scope))
 			}
 			if len(durations) != 1 {
 				t.Errorf("tenant %s: completed samples include another tenant's jobs: %#v", owner.scope.ID(), durations)
@@ -355,10 +377,32 @@ var cycleTenantLeakCases = map[string]tenantLeakCase{
 					t.Errorf("tenant %s received samples for unexpected job %s", owner.scope.ID(), jobID)
 				}
 				for _, sample := range samples {
-					if sample <= 0 {
-						t.Errorf("tenant %s: non-positive cycle duration %s", owner.scope.ID(), sample)
+					if sample.Duration() <= 0 {
+						t.Errorf("tenant %s: non-positive cycle duration %s", owner.scope.ID(), sample.Duration())
 					}
 				}
+			}
+		}
+	}},
+	"ListStalledScanCycles": {run: func(t *testing.T, _ tenantFixture) {
+		ctx := context.Background()
+		f := newCycleTenantFixture(t)
+		for _, scope := range []TenantScope{f.a, f.b} {
+			if _, err := f.store.System().MarkScanCycleStalled(ctx, cyclesOf(f, scope).active, "stalled for the test"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for scope, job := range map[TenantScope]string{f.a: f.jobA, f.b: f.jobB} {
+			own, err := f.store.Tenant(scope).GetScanCycle(ctx, cyclesOf(f, scope).active)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stalled, err := f.store.Tenant(scope).ListStalledScanCycles(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(stalled) != 1 || !stalled[job].Equal(own.ExpiresAt) || own.ExpiresAt.IsZero() {
+				t.Errorf("tenant %s: stalled cycles = %v; want only its own job's, ending %s", scope.ID(), stalled, own.ExpiresAt)
 			}
 		}
 	}},

@@ -138,7 +138,7 @@ func TestPlatformStatusReportsTheUnitsScanDemandAgainstTheSharedPool(t *testing.
 		}
 	}
 	slices.Sort(fields)
-	if wantFields := []string{"cadence_unattainable_jobs", "capacity_slot_seconds_per_day", "enabled_jobs", "estimated_slot_seconds_per_day", "history_jobs", "lower_bound_jobs", "over_capacity", "slots", "unestimated_jobs", "units", "utilization_percent"}; !reflect.DeepEqual(fields, wantFields) {
+	if wantFields := []string{"cadence_unattainable_jobs", "capacity_slot_seconds_per_day", "enabled_jobs", "estimated_slot_seconds_per_day", "history_jobs", "lower_bound_jobs", "over_capacity", "slots", "unestimated_jobs", "units", "utilization_percent", "work_limited_jobs"}; !reflect.DeepEqual(fields, wantFields) {
 		t.Fatalf("scan_demand fields = %v, want %v", fields, wantFields)
 	}
 	expectNoMarkers(t, body, "platform status", markers...)

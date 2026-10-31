@@ -54,15 +54,31 @@ schedule-offset suggestion when another active job is nearby; the administrator
 can keep concurrent times.
 
 The **Jobs** and **Perimeter** pages show the business unit's scheduled
-scan-slot demand against its effective slot capacity. Jobs with completed scan
-history from their current scan settings use the median duration of their 11
-most recent samples. Each completed resumable cycle sums the recorded durations
-of its scan attempts, excluding idle time between scheduled attempts. A
-successful or incomplete scan without a cycle is one sample. If the newest
-runs with the current settings all timed out, the configured timeout supplies
-the expected run duration. Cycle attempts match by their cycle's execution
-hash; scans without a cycle match by their recorded scope and TCP scanner
-profile revision.
+scan-slot demand against its effective slot capacity. The estimate is a best
+estimate of a typical day. Jobs with scan history from their current scan
+settings use their 11 most recent samples, and each run of a job holds a slot
+for the mean of those samples' run durations:
+
+- A successful, incomplete, or timed-out scan without a cycle is one run at
+  its recorded duration.
+- Each attempt of a completed resumable cycle is one run, without the idle time
+  between scheduled attempts. A cycle whose attempt count is higher than its
+  recorded attempts spreads its recorded time over all its attempts.
+- Each recorded attempt of the job's cycle in progress is one run, so a cycle
+  that keeps timing out counts before it completes. A stalled cycle's
+  attempts are not runs: scheduled runs skip a job whose cycle stalled until
+  someone retries the cycle or its resume window ends, so until then the job
+  adds no demand, and afterwards its next run expires the cycle and its
+  other samples estimate its runs.
+
+A run that timed out needed at least the timeout, so it counts at the job's
+current timeout rather than at its recorded duration: a job whose runs often
+time out counts those runs at its timeout, and raising the timeout of a job
+whose scans time out raises its estimate. When the job's newest 11 runs with
+the current settings all timed out, including the attempts of a cycle in
+progress, every run counts at the configured timeout, whatever older samples
+took. Cycle attempts match by their cycle's execution hash; scans without a
+cycle match by their recorded scope and TCP scanner profile revision.
 
 Which edits keep a job's samples depends on what a scan records:
 
@@ -81,12 +97,13 @@ Which edits keep a job's samples depends on what a scan records:
 
 Samples from earlier settings remain in scan history but do not determine the
 current estimate. A scan without a cycle counts only while it is one of the
-job's 44 most recent successful or incomplete scans, so the estimate never
-reads further back in a job's history. Until a scan with the current settings
-completes, EdgeWatch uses the known-work lower bound. That lower bound divides
-only known probe work by a configured maximum scanner rate, and is counted only
-when the configured scope is known to fit both the job's **Maximum expanded
-hosts** and the deployment's `scanner.max_job_hosts`. An over-limit or
+job's 44 most recent successful, incomplete, or timed-out scans, so the
+estimate never reads further back in a job's history. Until a scan with the
+current settings completes, EdgeWatch uses the known-work lower bound. That
+lower bound divides only known probe work by a configured maximum scanner
+rate, and is counted only when the configured scope is known to fit both the
+job's **Maximum expanded hosts** and the deployment's `scanner.max_job_hosts`.
+An over-limit or
 unresolved DNS scope adds no lower bound because the scanner may reject it
 before sending probes. DNS, target responses, retries, and data-dependent Nmap
 confirmation can make a scan take longer, and work without a configured rate
@@ -95,18 +112,47 @@ ceiling is called out as unestimated.
 The job's **Timeout** ends each run, so a run counts at most the timeout,
 whether its duration comes from samples or from the lower bound. A resumable
 cycle whose attempts add up to more than the timeout continues in the job's
-later runs, so it adds the timeout for each run rather than its whole duration.
-The estimate simulates the job's cron ticks in its timezone over a
+later runs, so each attempt counts at most the timeout rather than the whole
+cycle. The estimate simulates the job's cron ticks in its timezone over a
 representative four-year calendar cycle, averaging leap-day schedules over
-that cycle. When a previous estimated run is still active at a tick, the
-scheduler skips that tick; the estimate counts only runs that could start. A
-job runs at most once at a time, so its estimate adds at most one slot-day, 24
+that cycle and following the schedule through daylight-saving changes as the
+scheduler does, including the days after some changes whose first ticks the
+scheduler's search for the next tick skips. When a
+previous estimated run is still active at a tick, the scheduler skips that
+tick; the estimate counts only runs that could start. A run that the timeout
+ends is still being finished when the timeout passes, so it also skips a tick
+at exactly its timeout: an hourly job whose runs time out after one hour runs
+every other hour. Runs of different lengths each skip the ticks they overlap,
+and the estimate combines them by how often each kind of run occurs. A job
+runs at most once at a time, so its estimate adds at most one slot-day, 24
 slot-hours, per day. The cadence count includes any job for which at least one
 scheduled tick is skipped, even when its daily demand is below one slot-day.
 Lengthen the job's schedule interval or shorten its scans to keep its cadence.
 A warning appears at 80% utilization and when estimated demand exceeds
 capacity. The notice refreshes when live updates report a job change or a
 completed scan, and at least every five minutes.
+
+Expanding a schedule over the sample takes work for its timezone's
+daylight-saving changes and for the runs of days on which it ticks, not for
+each day, and a run that ends before the schedule's next tick needs no
+simulation, so the estimate of ordinary schedules costs almost nothing. A
+tick always falls on a whole minute, so runs that end in the same minute skip
+the same ticks and share one simulation, within a job and across jobs. The
+daemon remembers each schedule's expansion and the simulations of runs that
+skip ticks across estimates. Expanding a schedule and simulating its runs are
+bounded: each job has its own work limit for each, and the whole estimate has
+a bound. Every job first gets a small share of its limit for each, until half
+of the bound is spent. A job whose schedule's known work, such as ticking
+often through the daylight-saving days, shows that its simulation needs more
+than the share waits without spending it. An expansion or simulation that
+runs over the share spends it once for its schedule, and that schedule's
+jobs then wait without spending more. The jobs that wait get the rest of
+their limit after every other job. A job whose schedule cannot be expanded
+or simulated within its limit, or within the bound of the whole estimate, is
+counted as left out at the work limit, separately from jobs whose work cannot
+be estimated, and adds nothing to the total, so actual demand may be higher.
+A job whose run time cannot be estimated at all is counted as not fully
+estimated without expanding its schedule.
 
 The effective slot capacity is the most slots the unit may use, not slots
 reserved for it: every business unit's scans share the deployment's scan

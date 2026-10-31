@@ -97,7 +97,10 @@ type ScanSlotDemand struct {
 // the schedule ticks a job can start after each prior run ends. A run that
 // its timeout ends holds the job until after the tick at its timeout, so
 // that tick is skipped. A job adds at most one slot-day, because it runs at
-// most once at a time.
+// most once at a time. A job whose resumable cycle stalled adds nothing
+// until someone retries the cycle or its resume window ends, because
+// scheduled runs skip it until then, and a stalled cycle's attempts are not
+// runs.
 //
 // The effective capacity is a limit, not a reservation: every unit's scans
 // share the deployment's one pool of slots, so DeploymentScanDemand compares
@@ -359,9 +362,20 @@ func (a *App) collectScheduledScanDemand(ctx context.Context, ts *store.TenantSt
 	if err != nil {
 		return err
 	}
+	stalled, err := ts.ListStalledScanCycles(ctx)
+	if err != nil {
+		return err
+	}
+	now := a.nowUTC()
 	unitIndex := work.units
 	work.units++
 	for position, record := range scheduled {
+		// Scheduled runs skip a job whose resumable cycle stalled, as
+		// prepareRun does, until someone retries the cycle or its resume
+		// window ends, so until then the job adds no demand.
+		if until, found := stalled[record.ID]; found && (until.IsZero() || now.Before(until)) {
+			continue
+		}
 		job := scanDemandJob{unit: unit, unitIndex: unitIndex, position: position, job: record.Job}
 		timeout := record.Job.Timeout.Value().Seconds()
 		// A job whose newest runs with its current settings all timed out

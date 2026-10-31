@@ -522,12 +522,70 @@ func TestListCompletedScanCycleDurationsCountsTheCycleInProgress(t *testing.T) {
 		t.Fatalf("samples after more attempts = %+v; want the cycle's three newest attempts, 1m30s", got)
 	}
 
+	// A stalled cycle is not a sample: scheduled runs skip it until it is
+	// retried or its resume window ends, when the next run expires it.
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='stalled' WHERE id='in-progress'`); err != nil {
+		t.Fatal(err)
+	}
+	if got = list(); len(got) != 2 || got[0].Duration() != time.Minute {
+		t.Fatalf("samples with a stalled cycle = %+v; want the timed-out scan and the completed cycle", got)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='paused' WHERE id='in-progress'`); err != nil {
+		t.Fatal(err)
+	}
+
 	// A cycle in progress with other settings is not a sample.
 	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET execution_hash='other-settings' WHERE id='in-progress'`); err != nil {
 		t.Fatal(err)
 	}
 	if got = list(); len(got) != 2 || got[0].Duration() != time.Minute {
 		t.Fatalf("samples with a cycle in progress of other settings = %+v; want the timed-out scan and the completed cycle", got)
+	}
+}
+
+// The stalled cycles of the tenant's unarchived jobs are listed with the
+// end of their resume windows, or the zero time when a cycle records none.
+// Running and paused cycles, completed ones, and an archived job's stalled
+// cycle are not.
+func TestListStalledScanCyclesReturnsEachStalledCyclesWindowEnd(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openTestStore(t)
+	tenant := defaultTenant(s)
+	windowEnd := time.Date(2026, time.April, 9, 12, 0, 0, 0, time.UTC)
+	jobs := make(map[string]JobRecord)
+	for _, name := range []string{"stalled", "endless", "paused", "running", "completed", "archived"} {
+		job, err := tenant.CreateJob(ctx, testJob("stalled-list-"+name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		jobs[name] = job
+		status, expires := name, sqliteTimestamp(windowEnd)
+		switch name {
+		case "endless", "archived":
+			status = "stalled"
+		}
+		if name == "endless" {
+			expires = ""
+		}
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,total_units,total_probes,started_at,updated_at,expires_at)
+			VALUES(?,?,?,?,'','',?,?,1,1,?,?,?)`, "cycle-"+name, job.ID, job.Job.Name, job.Revision, []byte(`{}`), status,
+			sqliteTimestamp(windowEnd.Add(-48*time.Hour)), sqliteTimestamp(windowEnd.Add(-48*time.Hour)), expires); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE jobs SET archived=1 WHERE id=?`, jobs["archived"].ID); err != nil {
+		t.Fatal(err)
+	}
+	stalled, err := tenant.ListStalledScanCycles(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stalled) != 2 || !stalled[jobs["stalled"].ID].Equal(windowEnd) || !stalled[jobs["endless"].ID].IsZero() {
+		t.Fatalf("stalled cycles = %v; want the stalled job's window end and the endless one's zero time", stalled)
+	}
+	if _, found := stalled[jobs["endless"].ID]; !found {
+		t.Fatalf("stalled cycles = %v; want the stalled cycle without a window end", stalled)
 	}
 }
 

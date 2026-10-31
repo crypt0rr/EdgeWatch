@@ -1053,6 +1053,65 @@ func TestScanSlotDemandCountsTheAttemptsOfTheCycleInProgress(t *testing.T) {
 	})
 }
 
+// Scheduled runs skip a job whose resumable cycle stalled until someone
+// retries the cycle or its resume window ends, so until then the job adds
+// no demand. Once the window has ended, the next run expires the cycle and
+// the job starts new ones, so its completed cycles estimate its runs and
+// the stalled cycle's attempts do not. A paused cycle's attempts are runs.
+func TestScanSlotDemandLeavesOutJobsWhoseCycleStalled(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	record, err := defaultTenant(db).CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+		Name: "stalling", Schedule: "0 * * * *", Timezone: "UTC", Timeout: config.Duration(30 * time.Minute),
+		Targets: []string{"192.0.2.1"},
+		TCP:     &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{Rate: 1000}},
+	}), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		insertCycleAttempts(t, db, record, fmt.Sprintf("completed-cycle-%d", i), time.Date(2026, time.February, 1, i, 10, 0, 0, time.UTC), []time.Duration{10 * time.Minute}, time.Hour)
+	}
+	// Three attempts that the 30-minute timeout ended, an hour apart; the
+	// cycle's resume window ends 48 hours after the last.
+	started := time.Date(2026, time.March, 1, 0, 0, 0, 0, time.UTC)
+	insertCycleInProgress(t, db, record, "stalling-cycle", started, 3)
+	windowEnd := started.Add(3*time.Hour + 48*time.Hour)
+	setStatus := func(status string) {
+		t.Helper()
+		if _, err := db.DB.ExecContext(ctx, `UPDATE scan_cycles SET status=? WHERE id='stalling-cycle'`, status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	demandAt := func(now time.Time) ScanSlotDemand {
+		t.Helper()
+		app := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}, clock: func() time.Time { return now }}
+		demand, err := app.ScanSlotDemand(ctx, defaultTenant(db))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return demand
+	}
+	paused := demandAt(windowEnd.Add(-time.Minute))
+	if want := 24 * (3*600 + 3*1800) / 6.0; paused.HistoryJobs != 1 || math.Abs(paused.EstimatedSlotSecondsPerDay-want) > 0.01 {
+		t.Fatalf("demand with a paused cycle = %+v; want the mean of three 10-minute runs and its three 30-minute attempts × 24 = %.0f", paused, want)
+	}
+	setStatus("stalled")
+	if stalled := demandAt(windowEnd.Add(-time.Minute)); stalled.EnabledJobs != 1 || stalled.HistoryJobs != 0 || stalled.LowerBoundJobs != 0 || stalled.UnestimatedJobs != 0 || stalled.WorkLimitedJobs != 0 || stalled.EstimatedSlotSecondsPerDay != 0 {
+		t.Fatalf("demand with a stalled cycle in its resume window = %+v; want the enabled job and no demand", stalled)
+	}
+	if elapsed := demandAt(windowEnd); elapsed.HistoryJobs != 1 || math.Abs(elapsed.EstimatedSlotSecondsPerDay-24*600) > 0.01 {
+		t.Fatalf("demand with a stalled cycle after its resume window = %+v; want the completed cycles' 10-minute runs × 24 = 14400", elapsed)
+	}
+	if _, err := db.DB.ExecContext(ctx, `UPDATE scan_cycles SET expires_at='' WHERE id='stalling-cycle'`); err != nil {
+		t.Fatal(err)
+	}
+	if endless := demandAt(windowEnd.Add(365 * 24 * time.Hour)); endless.HistoryJobs != 0 || endless.EstimatedSlotSecondsPerDay != 0 {
+		t.Fatalf("demand with a stalled cycle without a resume window's end = %+v; want no demand", endless)
+	}
+}
+
 func TestScanSlotDemandIgnoresEarlierScanSettingsSamplesAfterScopeAndRateEdit(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -93,8 +93,11 @@ const scanCyclesActiveIndex = "scan_cycles_active"
 // the scanner profile columns after it.
 //
 // The job's cycle in progress, which scan_cycles_active finds, is a sample
-// too when it has the key's execution hash: its attempts so far are its
-// recorded attempts among the job's ?3 newest cycle scans with that hash.
+// too when it has the key's execution hash and has not stalled: its
+// attempts so far are its recorded attempts among the job's ?3 newest cycle
+// scans with that hash. Scheduled runs skip a stalled cycle until someone
+// retries it or its resume window ends, when the next run expires it, so
+// its attempts are not the job's runs.
 // bounds finds the finished_at of the ?3-th of them through
 // scans_timeout_cycle_key, which also holds each scan's cycle and outcome,
 // so only the attempts of the cycle in progress are read, for their start.
@@ -128,7 +131,7 @@ const completedScanDurationsSQL = `WITH wanted AS MATERIALIZED (
 	FROM bounds AS b
 	CROSS JOIN scan_cycles AS e INDEXED BY ` + scanCyclesActiveIndex + `
 		ON e.job_id=b.job_id AND e.status IN ('running','paused','stalled')
-	WHERE e.execution_hash=b.execution_hash
+	WHERE e.execution_hash=b.execution_hash AND e.status<>'stalled'
 ), cycles AS MATERIALIZED (
 	SELECT b.job_id,c.id,c.attempt_count,c.started_at,c.attempt_started_at,c.finished_at
 	FROM bounds AS b
@@ -261,9 +264,10 @@ func (sample ScanDurationSample) Duration() time.Duration {
 // the final duration survives a crash before scan finalization, and its runs
 // are its attempt count. Recovery invocations that start after cycle
 // completion are excluded because their duration is not scan work. The job's
-// cycle in progress is one sample when its execution hash is the key's: its
-// attempts are its recorded attempts among the job's perJobLimit newest
-// cycle scans with that hash, and its runs are those attempts. A successful,
+// cycle in progress is one sample when its execution hash is the key's and
+// it has not stalled: its attempts are its recorded attempts among the
+// job's perJobLimit newest cycle scans with that hash, and its runs are
+// those attempts. A successful,
 // incomplete or timed-out scan without a cycle is a sample of one attempt
 // when its config hash and TCP scanner profile revision are the key's, and
 // it is one of the job's perJobLimit times scanDurationScanWindow newest
@@ -406,6 +410,42 @@ func (ts *TenantStore) LatestScanRunsTimedOut(ctx context.Context, keys []ScanDu
 			return nil, err
 		}
 		out[jobID] = onlyTimedOut != 0
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// stalledScanCyclesSQL reads, from the partial index of the cycles in
+// progress, the stalled cycles of the tenant's unarchived jobs and when
+// their resume windows end. ?1 is the tenant.
+const stalledScanCyclesSQL = `SELECT c.job_id,c.expires_at
+FROM scan_cycles AS c INDEXED BY ` + scanCyclesActiveIndex + `
+CROSS JOIN jobs AS j ON j.id=c.job_id AND j.tenant_id=?1 AND j.archived=0
+WHERE c.status IN ('running','paused','stalled') AND c.status='stalled'`
+
+// ListStalledScanCycles returns, for each of the tenant's unarchived jobs
+// whose cycle in progress stalled, when the cycle's resume window ends, or
+// the zero time when the cycle records no end. Scheduled runs skip such a
+// job until someone retries the cycle or its resume window ends. It returns
+// only the tenant's own jobs.
+func (ts *TenantStore) ListStalledScanCycles(ctx context.Context) (map[string]time.Time, error) {
+	if err := ts.ready(); err != nil {
+		return nil, err
+	}
+	rows, err := ts.store.reader().QueryContext(ctx, stalledScanCyclesSQL, ts.scope.id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]time.Time)
+	for rows.Next() {
+		var jobID, expires string
+		if err := rows.Scan(&jobID, &expires); err != nil {
+			return nil, err
+		}
+		out[jobID] = scanTime(expires)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

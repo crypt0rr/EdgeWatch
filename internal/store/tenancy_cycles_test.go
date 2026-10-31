@@ -384,6 +384,28 @@ var cycleTenantLeakCases = map[string]tenantLeakCase{
 			}
 		}
 	}},
+	"ListStalledScanCycles": {run: func(t *testing.T, _ tenantFixture) {
+		ctx := context.Background()
+		f := newCycleTenantFixture(t)
+		for _, scope := range []TenantScope{f.a, f.b} {
+			if _, err := f.store.System().MarkScanCycleStalled(ctx, cyclesOf(f, scope).active, "stalled for the test"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for scope, job := range map[TenantScope]string{f.a: f.jobA, f.b: f.jobB} {
+			own, err := f.store.Tenant(scope).GetScanCycle(ctx, cyclesOf(f, scope).active)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stalled, err := f.store.Tenant(scope).ListStalledScanCycles(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(stalled) != 1 || !stalled[job].Equal(own.ExpiresAt) || own.ExpiresAt.IsZero() {
+				t.Errorf("tenant %s: stalled cycles = %v; want only its own job's, ending %s", scope.ID(), stalled, own.ExpiresAt)
+			}
+		}
+	}},
 	"GetScanCycle": {run: func(t *testing.T, _ tenantFixture) {
 		ctx := context.Background()
 		f := newCycleTenantFixture(t)

@@ -1047,3 +1047,83 @@ func requireLinuxDaemonStartup(t *testing.T) {
 		t.Skip("daemon startup migration guards are implemented on Linux")
 	}
 }
+
+// Pruning reports operational failures, and cancellation, with whatever it
+// had removed so far; it never removes a copy after such an error.
+func TestPrunePreUpgradeBackupsReportsOperationalErrors(t *testing.T) {
+	current := 77
+	automatic := func(t *testing.T, directory, name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(directory, name), []byte("completed upgrade"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finished := "edgewatch-preupgrade-s77-s78-20260101T000000.000000000Z.db"
+
+	t.Run("negative retention", func(t *testing.T) {
+		if _, err := prunePreUpgradeBackups(context.Background(), t.TempDir(), current, -1, ""); err == nil || !strings.Contains(err.Error(), "cannot be negative") {
+			t.Fatalf("prune with negative retention = %v", err)
+		}
+	})
+	t.Run("missing directory", func(t *testing.T) {
+		if _, err := prunePreUpgradeBackups(context.Background(), filepath.Join(t.TempDir(), "missing"), current, 0, ""); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("prune of a missing directory = %v, want not-exist", err)
+		}
+	})
+	t.Run("cancelled during candidate verification", func(t *testing.T) {
+		directory := t.TempDir()
+		writeValidPreUpgradeBackup(t, directory, "edgewatch-preupgrade-s75-s78-20250101T000000.000000000Z.db", make(map[int][]byte))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		probe := func(context.Context, edgeWatchSchemaQueryer) (bool, error) {
+			cancel()
+			return false, context.Canceled
+		}
+		pruned, err := prunePreUpgradeBackupsWithSchemaProbe(ctx, directory, current, 0, "", probe)
+		if !errors.Is(err, context.Canceled) || len(pruned.Removed) != 0 || len(pruned.Unverified) != 0 {
+			t.Fatalf("prune cancelled during verification = %+v, %v; want context.Canceled and nothing removed or kept unverified", pruned, err)
+		}
+	})
+	t.Run("cancelled before removal", func(t *testing.T) {
+		directory := t.TempDir()
+		automatic(t, directory, finished)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		pruned, err := prunePreUpgradeBackups(ctx, directory, current, 0, "")
+		if !errors.Is(err, context.Canceled) || len(pruned.Removed) != 0 {
+			t.Fatalf("prune with a cancelled context = %+v, %v", pruned, err)
+		}
+		if _, err := os.Stat(filepath.Join(directory, finished)); err != nil {
+			t.Fatalf("cancelled prune removed %q: %v", finished, err)
+		}
+	})
+
+	if os.Geteuid() == 0 {
+		t.Log("skipping the permission cases: root bypasses directory permissions")
+		return
+	}
+	t.Run("entry cannot be inspected", func(t *testing.T) {
+		directory := t.TempDir()
+		automatic(t, directory, finished)
+		// Without search permission the names can be listed but not inspected.
+		if err := os.Chmod(directory, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(directory, 0o700) })
+		if _, err := prunePreUpgradeBackups(context.Background(), directory, current, 0, ""); !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("prune of an unsearchable directory = %v, want a permission error", err)
+		}
+	})
+	t.Run("copy cannot be removed", func(t *testing.T) {
+		directory := t.TempDir()
+		automatic(t, directory, finished)
+		if err := os.Chmod(directory, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(directory, 0o700) })
+		pruned, err := prunePreUpgradeBackups(context.Background(), directory, current, 0, "")
+		if !errors.Is(err, os.ErrPermission) || len(pruned.Removed) != 0 {
+			t.Fatalf("prune of a read-only directory = %+v, %v; want a permission error and nothing removed", pruned, err)
+		}
+	})
+}

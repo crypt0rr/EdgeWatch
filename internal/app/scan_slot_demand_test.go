@@ -237,6 +237,118 @@ func TestScanDemandExpandsEachScheduleOncePerRequest(t *testing.T) {
 	}
 }
 
+// forgetProjections clears the projections that the App remembers across
+// requests, so that the next request projects every run again.
+func forgetProjections(app *App) {
+	app.scanSlotDemand.mu.Lock()
+	defer app.scanSlotDemand.mu.Unlock()
+	app.scanSlotDemand.projections, app.scanSlotDemand.earlierProjections = nil, nil
+}
+
+// The App remembers the projections that a request computed, so the next
+// request reuses them without work, as it does the schedule's expansion,
+// even when it has no work left. A projection that ran out of work is not
+// remembered: the next request with enough work projects it.
+func TestScanDemandRemembersProjectionsAcrossRequests(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	ts := defaultTenant(db)
+	const jobs = 5
+	for i := range jobs {
+		record, err := ts.CreateJobWithEnabled(ctx, config.NormalizeJob(config.Job{
+			Name: fmt.Sprintf("slow-hourly-%d", i), Schedule: "0 * * * *", Timezone: "Europe/Amsterdam", Timeout: config.Duration(3 * time.Hour),
+			Targets: []string{"192.0.2.1"},
+			TCP:     &config.Protocol{Engine: config.EngineNmap, Ports: "443", Mode: "connect"},
+		}), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		insertCompletedScan(t, db, record, fmt.Sprintf("slow-hourly-scan-%d", i), time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), time.Duration(61+10*i)*time.Minute)
+	}
+	expansion := &scanScheduleSimulationBudget{limit: scanScheduleJobWorkLimit}
+	if _, err := schedulePatternWithBudget(ctx, "Europe/Amsterdam", "0 * * * *", expansion); err != nil {
+		t.Fatal(err)
+	}
+	var app *App
+	request := func(limit int) (ScanSlotDemand, int) {
+		t.Helper()
+		budget := &scanScheduleSimulationBudget{limit: limit}
+		demand, err := app.scheduledScanDemandWithSimulationCache(ctx, ts, nil, budget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return demand, budget.used
+	}
+	// A first App measures the work of the expansion and every projection.
+	app = &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 4}}}
+	probe, all := request(scanScheduleRequestWorkLimit)
+	if probe.HistoryJobs != jobs || all <= expansion.used {
+		t.Fatalf("probe request's demand = %+v after %d work units; want every job projected", probe, all)
+	}
+	// A new App's first request has work for the expansion and only some of
+	// the projections.
+	app = &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 4}}}
+	partial, used := request(expansion.used + (all-expansion.used)/2)
+	if partial.HistoryJobs == 0 || partial.WorkLimitedJobs == 0 || used <= expansion.used {
+		t.Fatalf("first request's demand = %+v after %d work units; want some jobs projected and some work-limited", partial, used)
+	}
+	full, used := request(scanScheduleRequestWorkLimit)
+	if full.HistoryJobs != jobs || full.CadenceUnattainableJobs != jobs || used == 0 {
+		t.Fatalf("second request's demand = %+v after %d work units; want the projections that ran out of work projected now", full, used)
+	}
+	for _, limit := range []int{scanScheduleRequestWorkLimit, 0} {
+		again, used := request(limit)
+		if again != full || used != 0 {
+			t.Fatalf("request with %d work units = %+v after %d work units; want the remembered %+v without work", limit, again, used, full)
+		}
+	}
+}
+
+// The remembered projections are bounded: a full generation becomes the
+// previous one, a projection used from the previous generation joins the
+// current one, and a projection that no request used during two
+// generations is forgotten.
+func TestScanDemandProjectionCacheIsBounded(t *testing.T) {
+	t.Parallel()
+	var cache scanSlotDemandCache
+	key := func(i int) scanScheduleDurationKey {
+		return scanScheduleDurationKey{schedule: scanScheduleIdentity{timezone: "UTC", minute: 1}, runSeconds: uint64(i)}
+	}
+	estimate := func(i int) scanScheduleDurationEstimate { return scanScheduleDurationEstimate{runsPerDay: float64(i)} }
+	for i := range scanProjectionCacheLimit {
+		cache.retainProjection(key(i), estimate(i))
+	}
+	if len(cache.projections) != scanProjectionCacheLimit || len(cache.earlierProjections) != 0 {
+		t.Fatalf("cache holds %d and %d projections; want one full generation", len(cache.projections), len(cache.earlierProjections))
+	}
+	cache.retainProjection(key(scanProjectionCacheLimit), estimate(scanProjectionCacheLimit))
+	if len(cache.projections) != 1 || len(cache.earlierProjections) != scanProjectionCacheLimit {
+		t.Fatalf("cache holds %d and %d projections after a full generation; want the full one as the previous", len(cache.projections), len(cache.earlierProjections))
+	}
+	if got, ok := cache.projection(key(0)); !ok || got != estimate(0) {
+		t.Fatalf("previous generation's projection = %+v, %t; want it remembered", got, ok)
+	}
+	for i := scanProjectionCacheLimit + 1; len(cache.projections) < scanProjectionCacheLimit; i++ {
+		cache.retainProjection(key(i), estimate(i))
+	}
+	cache.retainProjection(key(-1), estimate(-1))
+	if _, ok := cache.projection(key(0)); !ok {
+		t.Fatal("a projection used in the previous generation was forgotten")
+	}
+	if _, ok := cache.projection(key(1)); ok {
+		t.Fatal("a projection that no request used during two generations is still remembered")
+	}
+	if len(cache.projections) > scanProjectionCacheLimit || len(cache.earlierProjections) > scanProjectionCacheLimit {
+		t.Fatalf("cache holds %d and %d projections; want at most %d in each generation", len(cache.projections), len(cache.earlierProjections), scanProjectionCacheLimit)
+	}
+	var none *scanSlotDemandCache
+	none.retainProjection(key(0), estimate(0))
+	if _, ok := none.projection(key(0)); ok {
+		t.Fatal("a request without the App's cache remembered a projection")
+	}
+}
+
 // In the first pass an expansion gets a job's first-pass share. A dense
 // schedule's expansion that runs over it waits for the second pass, and the
 // schedule's other jobs wait without spending another share; in the second

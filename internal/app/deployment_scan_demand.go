@@ -78,6 +78,7 @@ func (a *App) deploymentScanDemandWithBudget(ctx context.Context, budget *scanSc
 	// no tenant data, so this request-local memo can safely share
 	// equivalent work across units.
 	work := newScanDemandWork(nil, budget)
+	work.cache = &a.scanSlotDemand
 	units := make([]ScanSlotDemand, len(scopes))
 	capacities := make([]float64, len(scopes))
 	for i, scope := range scopes {

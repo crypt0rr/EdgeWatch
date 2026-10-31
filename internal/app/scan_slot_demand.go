@@ -33,6 +33,9 @@ const (
 	// value/string headers, and allocator overhead for a retained entry.
 	scanRunsPerDayCacheEntrySize = 4096
 	scanDurationKeyCacheLimit    = 16384
+	// scanProjectionCacheLimit bounds each of the two generations of
+	// remembered schedule-duration projections.
+	scanProjectionCacheLimit = 4096
 	// scanScheduleRequestWorkLimit bounds the schedule work of one tenant or
 	// deployment demand request, across pattern expansion and duration
 	// projection, so that a request finishes well within the estimate's
@@ -129,6 +132,7 @@ func (a *App) scheduledScanDemand(ctx context.Context, ts *store.TenantStore) (S
 func (a *App) scheduledScanDemandWithSimulationCache(ctx context.Context, ts *store.TenantStore, simulations map[scanScheduleDurationKey]scanScheduleDurationEstimate, budget *scanScheduleSimulationBudget) (ScanSlotDemand, error) {
 	var result ScanSlotDemand
 	work := newScanDemandWork(simulations, budget)
+	work.cache = &a.scanSlotDemand
 	if err := a.collectScheduledScanDemand(ctx, ts, &result, work); err != nil {
 		return result, err
 	}
@@ -142,6 +146,9 @@ func (a *App) scheduledScanDemandWithSimulationCache(ctx context.Context, ts *st
 // data, and its work budget.
 type scanDemandWork struct {
 	simulations map[scanScheduleDurationKey]scanScheduleDurationEstimate
+	// cache is the App's cache, which remembers projections across
+	// requests, or nil.
+	cache *scanSlotDemandCache
 	// schedules holds every expansion of the request by timezone and
 	// schedule text, whether or not the App's cache keeps it, and those
 	// that failed or wait for the second pass, so that each schedule is
@@ -506,6 +513,10 @@ func (work *scanDemandWork) project(ctx context.Context, schedule scanRunsPerDay
 	if estimate, ok := work.simulations[key]; ok {
 		return estimate.runsPerDay, estimate.skipped, nil
 	}
+	if estimate, ok := work.cache.projection(key); ok {
+		work.simulations[key] = estimate
+		return estimate.runsPerDay, estimate.skipped, nil
+	}
 	floor := schedule.projectionWorkFloor(seconds)
 	if work.exceeded[key] || work.budget.remaining() < floor {
 		return 0, false, errScheduleSimulationBudgetExceeded
@@ -524,6 +535,9 @@ func (work *scanDemandWork) project(ctx context.Context, schedule scanRunsPerDay
 		return 0, false, errScanDemandDeferred
 	}
 	runsPerDay, skipped, err := memoizedScheduleRunsForDurationWithBudget(ctx, work.simulations, schedule, seconds, endsAtTimeout, budget)
+	if err == nil {
+		work.cache.retainProjection(key, scanScheduleDurationEstimate{runsPerDay: runsPerDay, skipped: skipped})
+	}
 	if !errors.Is(err, errScheduleSimulationBudgetExceeded) || work.budget.exhausted() {
 		return runsPerDay, skipped, err
 	}
@@ -725,20 +739,69 @@ type scanDurationKeyRank struct {
 // scanSlotDemandCache remembers, for every business unit of the process,
 // the parts of the scan-slot demand estimate that a request would otherwise
 // compute again for each job: each schedule's bounded occurrence pattern,
-// which depends only on its text and timezone, and each job revision's
-// duration key, whose hashes a revision fixes. Its zero value is ready to
-// use.
+// which depends only on its text and timezone, each job revision's
+// duration key, whose hashes a revision fixes, and the schedule-duration
+// projections that requests used most recently, which depend only on the
+// schedule and the run. Its zero value is ready to use.
 type scanSlotDemandCache struct {
 	mu              sync.Mutex
 	runsPerDay      map[scanRunsPerDayKey]scanRunsPerDayValue
 	runsPerDayBytes int
 	keys            map[string]cachedScanDurationKey
 	keyRanks        []scanDurationKeyRank
+	// projections and earlierProjections are the current and the previous
+	// generation of remembered projections. A projection that a request
+	// uses joins the current generation, and when the current generation
+	// is full it becomes the previous one, so the projections that no
+	// request used during two generations are forgotten.
+	projections, earlierProjections map[scanScheduleDurationKey]scanScheduleDurationEstimate
 	// keyAdmissionWork counts rank comparisons so tests can detect an
 	// accidental return to per-admission map scans.
 	keyAdmissionWork uint64
 	// runsPerDayComputed counts the schedules computed, for tests.
 	runsPerDayComputed int
+}
+
+// projection returns a remembered projection. A nil cache remembers none.
+// Only a request's successful projections are remembered, each computed
+// within a job's work limit, so a projection that needs more than that
+// limit is never remembered and still leaves its jobs work-limited.
+func (cache *scanSlotDemandCache) projection(key scanScheduleDurationKey) (scanScheduleDurationEstimate, bool) {
+	if cache == nil {
+		return scanScheduleDurationEstimate{}, false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if estimate, ok := cache.projections[key]; ok {
+		return estimate, true
+	}
+	estimate, ok := cache.earlierProjections[key]
+	if ok {
+		cache.addProjection(key, estimate)
+	}
+	return estimate, ok
+}
+
+// retainProjection remembers a projection that a request computed.
+func (cache *scanSlotDemandCache) retainProjection(key scanScheduleDurationKey, estimate scanScheduleDurationEstimate) {
+	if cache == nil {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cache.addProjection(key, estimate)
+}
+
+// addProjection adds a projection to the current generation, which first
+// becomes the previous one when it is full. The caller holds cache.mu.
+func (cache *scanSlotDemandCache) addProjection(key scanScheduleDurationKey, estimate scanScheduleDurationEstimate) {
+	if len(cache.projections) >= scanProjectionCacheLimit {
+		cache.earlierProjections, cache.projections = cache.projections, nil
+	}
+	if cache.projections == nil {
+		cache.projections = make(map[scanScheduleDurationKey]scanScheduleDurationEstimate)
+	}
+	cache.projections[key] = estimate
 }
 
 // scanJobRunsPerDay returns the job's average scheduled runs per day, which

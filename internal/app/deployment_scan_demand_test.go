@@ -523,6 +523,7 @@ func TestDeploymentScanDemandSharesProjectionsOfRunsThatEndInTheSameMinute(t *te
 	}
 	estimate := func() (DeploymentScanDemand, int) {
 		t.Helper()
+		forgetProjections(application)
 		budget := &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
 		demand, err := application.deploymentScanDemandWithBudget(ctx, budget)
 		if err != nil {
@@ -558,7 +559,9 @@ func TestDeploymentScanDemandSharesProjectionsOfRunsThatEndInTheSameMinute(t *te
 // their first share, and a growing number of jobs every ten minutes whose
 // runs each need a projection of more than that share. Those wait for the
 // second pass without spending a share in the first, so new ones cannot
-// take the work that the jobs before them need.
+// take the work that the jobs before them need. Each estimate starts
+// without the projections that the App remembers from the ones before,
+// which could only add to it.
 func TestDeploymentScanDemandEstimatesNoFewerJobsAsJobsAreAdded(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -605,6 +608,7 @@ func TestDeploymentScanDemandEstimatesNoFewerJobsAsJobsAreAdded(t *testing.T) {
 				add(ts, "*/10 * * * *", time.Duration(10+jobs)*time.Minute)
 			}
 		}
+		forgetProjections(application)
 		demand, err := application.deploymentScanDemandWithBudget(ctx, &scanScheduleSimulationBudget{limit: bound})
 		if err != nil {
 			t.Fatal(err)
@@ -615,6 +619,7 @@ func TestDeploymentScanDemandEstimatesNoFewerJobsAsJobsAreAdded(t *testing.T) {
 		}
 		previous = estimated
 	}
+	forgetProjections(application)
 	if last, err := application.deploymentScanDemandWithBudget(ctx, &scanScheduleSimulationBudget{limit: bound}); err != nil || last.WorkLimitedJobs == 0 || last.HistoryJobs <= hourlyJobs {
 		t.Fatalf("deployment demand = %+v, error %v; want the bound to leave some dense jobs out after estimating some", last, err)
 	}

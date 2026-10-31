@@ -19,11 +19,14 @@ import {
 // e2e/role-matrix.spec.ts) visit only the pages that e2e/console-routes.ts
 // lists. This check keeps that list complete in two steps.
 //
-// A policy that fails closed by construction keeps every way to choose a page
-// where the check can see it: only the router files may import Route and
-// Routes, non-test src imports values only from its own modules and the known
-// packages, it loads no module and creates no element at runtime without a
-// listed reason, and every read of the address path is classified.
+// A policy of allowlists keeps the ways to bring a page into src where the
+// check can see it: only the router files may import Route and Routes,
+// non-test src imports values only from its own modules and the known
+// packages, reads only the globals and members that knownGlobals lists, and
+// loads no module and creates no element at runtime without a listed reason.
+// Each declaration that reads the address path needs an entry that says which
+// pages its reads choose. That count prompts a review when the reads change;
+// it does not prove what they choose (see pathReaders).
 //
 // The JSX route reader then reads the <Routes> of the router files with the
 // TypeScript parser that Vite ships, so formatting, attribute order, and
@@ -74,22 +77,62 @@ const runtimeAllowances: RuntimeAllowance[] = []
 
 /**
  * The standard JavaScript and browser globals that src may read besides its
- * own bindings and imports, and the members it may read from window. A
- * global that something outside the bundle sets, such as a component
- * registry on window, could hold a page that the inventory cannot see. Add a
- * standard global when src starts to use it.
+ * own bindings and imports, each with the members that src may read from it.
+ * A global or a member that something outside the bundle sets, such as a
+ * component registry on window or document, could hold a page that the
+ * inventory cannot see. Add a standard global or member when src starts to
+ * use it.
  */
-const knownGlobals = new Set([
-  'AbortController', 'Array', 'Boolean', 'CustomEvent', 'Date', 'Element', 'Error', 'Event', 'EventSource', 'HTMLElement', 'Headers',
-  'Intl', 'JSON', 'Map', 'Math', 'NaN', 'Number', 'Object', 'Promise', 'Set', 'String', 'TextEncoder', 'TypeError', 'URL', 'URLSearchParams',
-  'clearTimeout', 'crypto', 'decodeURIComponent', 'document', 'encodeURIComponent', 'fetch', 'navigator', 'performance', 'setTimeout', 'undefined',
-])
-const knownWindowMembers = new Set([
-  'addEventListener', 'cancelAnimationFrame', 'clearInterval', 'clearTimeout', 'dispatchEvent', 'getSelection', 'history', 'location',
-  'matchMedia', 'removeEventListener', 'requestAnimationFrame', 'setInterval', 'setTimeout',
-])
-/** The names of the global object, whose members are globals too. */
-const globalObjects = new Set(['window', 'globalThis', 'self'])
+const knownGlobals: Record<string, readonly string[]> = {
+  AbortController: [],
+  Array: ['from', 'isArray'],
+  Boolean: [],
+  CustomEvent: [],
+  Date: ['UTC', 'now', 'parse'],
+  Element: [],
+  Error: [],
+  Event: [],
+  EventSource: ['CLOSED'],
+  HTMLElement: [],
+  Headers: [],
+  Intl: ['DateTimeFormat', 'NumberFormat'],
+  JSON: ['parse', 'stringify'],
+  Map: [],
+  Math: ['ceil', 'floor', 'max', 'min', 'random', 'round'],
+  NaN: [],
+  Number: ['MAX_SAFE_INTEGER', 'NEGATIVE_INFINITY', 'NaN', 'isFinite', 'isInteger', 'isNaN', 'isSafeInteger'],
+  Object: ['entries', 'is', 'keys', 'values'],
+  Promise: ['all'],
+  Set: [],
+  String: [],
+  TextEncoder: [],
+  TypeError: [],
+  URL: [],
+  URLSearchParams: [],
+  clearTimeout: [],
+  crypto: ['randomUUID'],
+  decodeURIComponent: [],
+  document: ['activeElement', 'addEventListener', 'body', 'contains', 'getElementById', 'querySelector', 'removeEventListener', 'title', 'visibilityState'],
+  encodeURIComponent: [],
+  fetch: [],
+  navigator: ['clipboard'],
+  performance: ['now'],
+  setTimeout: [],
+  undefined: [],
+  window: [
+    'addEventListener', 'cancelAnimationFrame', 'clearInterval', 'clearTimeout', 'dispatchEvent', 'getSelection', 'history', 'location',
+    'matchMedia', 'removeEventListener', 'requestAnimationFrame', 'setInterval', 'setTimeout',
+  ],
+}
+
+/**
+ * The known globals that src may also read as plain values: primitives, and
+ * functions that it passes as callbacks, as in filter(Boolean). Other code
+ * that receives a global as a value could read any of its members, so src
+ * otherwise only calls, constructs, extends, or tests a global, or reads a
+ * listed member of it.
+ */
+const knownGlobalValues = new Set(['Boolean', 'NaN', 'Number', 'undefined'])
 
 type PathReader = {
   file: string
@@ -112,6 +155,13 @@ type PathReader = {
  * path outside every <Route> would escape the JSX route reader, so the check
  * fails when a declaration gains or loses a read until its entry here says
  * which inventoried pages the reads serve or why they serve none.
+ *
+ * It counts reads, not what code does with them. A declaration that already
+ * has an entry can choose another page from a read it has without changing
+ * the count, and the check does not count location.href or location.hash, a
+ * helper that compares a path passed to it, or a choice made from useParams
+ * or useSearchParams. Review a change that makes such code choose a page
+ * against its entry.
  */
 const pathReaders: PathReader[] = [
   {
@@ -262,9 +312,14 @@ const typeKeys = new Set(['typeAnnotation', 'typeParameters', 'typeArguments', '
 
 type Visitor = (node: Node, parent: Node | undefined, key: string) => boolean | void
 
-/** Visits every node that can hold a runtime value, parents first; a visitor that returns false skips the children. */
+/**
+ * Visits every node that can hold a runtime value, parents first; a visitor
+ * that returns false skips the children. An ambient `declare` declaration
+ * holds none, and binds nothing at runtime.
+ */
 function visitValues(node: Node, visit: Visitor, parent?: Node, key = ''): void {
   if (node.type.startsWith('TS') && !valueTypeScriptNodes.has(node.type)) return
+  if (node.declare === true) return
   if (visit(node, parent, key) === false) return
   for (const childKey in node) {
     if (typeKeys.has(childKey)) continue
@@ -289,7 +344,12 @@ function patternNames(pattern: Node | undefined): string[] {
   }
 }
 
-/** How often each name is bound anywhere in a module: declarations, parameters, imports, and catch clauses. */
+/**
+ * How often each name is bound anywhere in a module: declarations,
+ * parameters, imports, and catch clauses, but not ambient declarations such
+ * as `declare const` or `declare global`, which only tell TypeScript about a
+ * global that something else sets.
+ */
 function bindingCounts(program: Node): Map<string, number> {
   const counts = new Map<string, number>()
   const count = (name: string | undefined) => { if (name) counts.set(name, (counts.get(name) ?? 0) + 1) }
@@ -395,9 +455,9 @@ function runtimeConstruct(node: Node, parent: Node | undefined, key: string): Ru
 }
 
 /**
- * Every way that non-test src could choose a page where the JSX route reader
- * cannot see it, as messages that say what to change. An empty list means
- * that src keeps the policy.
+ * Every place where non-test src leaves the policy that keeps its pages where
+ * the JSX route reader can see them, as messages that say what to change. An
+ * empty list means that src keeps the policy.
  */
 function policyProblems(sources: SourceFile[], options: PolicyOptions): string[] {
   const modules = sources.map(parseModule)
@@ -459,10 +519,12 @@ function policyProblems(sources: SourceFile[], options: PolicyOptions): string[]
     }
 
     const bound = bindingCounts(program)
+    const parents: Parents = new Map()
     visitValues(program, (node, parent, key) => {
+      parents.set(node, { parent, key })
       if (node.type === 'ImportDeclaration' || node.type === 'ExportAllDeclaration' || (node.type === 'ExportNamedDeclaration' && field(node, 'source'))) return false
-      const global = globalRead(node, parent, key, bound)
-      if (global) problems.push(`${file}:${lineOf(module, node)} reads ${global}, which is neither declared or imported in the module nor in knownGlobals; a global that code outside the bundle sets could hold a page that the inventory cannot see`)
+      const global = globalProblem(node, parent, key, bound, parents)
+      if (global) problems.push(`${file}:${lineOf(module, node)} ${global}`)
       const construct = runtimeConstruct(node, parent, key)
       if (!construct) return
       const where = `${file}:${lineOf(module, node)}`
@@ -490,26 +552,47 @@ function policyProblems(sources: SourceFile[], options: PolicyOptions): string[]
   }
 }
 
-/** The global that a node reads, when the module neither declares nor imports it and knownGlobals does not list it. */
-function globalRead(node: Node, parent: Node | undefined, key: string, bound: Map<string, number>): string | undefined {
-  let name: string | undefined
-  if (node.type === 'Identifier' && namesVariable(parent, key)) name = String(node.name)
+/** The parent of each node that visitValues has visited, and the key that holds the node. */
+type Parents = Map<Node, { parent: Node | undefined; key: string }>
+
+const globalRisk = 'a global that code outside the bundle sets could hold a page that the inventory cannot see'
+
+/**
+ * What is wrong with how a node reads a global, if anything: a name that
+ * the module neither binds nor finds in knownGlobals, a member of a global
+ * that knownGlobals does not list, a global read as a value, or a global
+ * rendered as a component.
+ */
+function globalProblem(node: Node, parent: Node | undefined, key: string, bound: Map<string, number>, parents: Parents): string | undefined {
+  const unknown = (name: string) => `reads ${name}, which the module neither declares nor imports and knownGlobals does not list; ${globalRisk}`
   // A capitalized JSX tag, or the root of a member tag, names a component variable.
   if (node.type === 'JSXOpeningElement') {
-    let tag = field(node, 'name')
-    while (tag?.type === 'JSXMemberExpression') tag = field(tag, 'object')
-    const tagName = nameOf(tag)
-    if (tagName && (/^[A-Z_$]/.test(tagName) || field(node, 'name')?.type === 'JSXMemberExpression') && tagName !== 'this') name = tagName
+    const tag = field(node, 'name')
+    let root = tag
+    while (root?.type === 'JSXMemberExpression') root = field(root, 'object')
+    const name = nameOf(root)
+    if (!name || name === 'this' || bound.has(name) || !(tag?.type === 'JSXMemberExpression' || /^[A-Z_$]/.test(name))) return undefined
+    return Object.hasOwn(knownGlobals, name) ? `renders <${jsxTagText(tag)}>, which a global supplies; ${globalRisk}` : unknown(name)
   }
-  // A runtime construct, which the policy reports on its own.
-  if (!name || name === 'require' || bound.has(name)) return undefined
-  if (globalObjects.has(name)) {
-    if (parent?.type === 'UnaryExpression' && parent.operator === 'typeof') return undefined
-    if (parent?.type !== 'MemberExpression' || key !== 'object') return name
+  if (node.type !== 'Identifier' || !namesVariable(parent, key)) return undefined
+  const name = String(node.name)
+  // require is a runtime construct, which the policy reports on its own.
+  if (name === 'require' || bound.has(name)) return undefined
+  // Parentheses and type assertions, as in (document as any).registry, read the global they wrap.
+  while (parent && transparentExpressions.has(parent.type)) ({ parent, key } = parents.get(parent)!)
+  // A typeof test reads only the name of a type.
+  if (parent?.type === 'UnaryExpression' && parent.operator === 'typeof') return undefined
+  if (!Object.hasOwn(knownGlobals, name)) return unknown(name)
+  if (parent?.type === 'MemberExpression' && key === 'object') {
     const member = staticKey(parent)
-    return member !== undefined && (knownGlobals.has(member) || knownWindowMembers.has(member)) ? undefined : `${name}.${member ?? '[computed]'}`
+    if (member === undefined) return `reads a computed member of ${name}; read only a member that knownGlobals lists, by name, because ${globalRisk}`
+    return knownGlobals[name].includes(member) ? undefined : `reads ${name}.${member}, which knownGlobals does not list; ${globalRisk}`
   }
-  return knownGlobals.has(name) ? undefined : name
+  const used = ((parent?.type === 'CallExpression' || parent?.type === 'NewExpression') && key === 'callee')
+    || (parent?.type === 'BinaryExpression' && parent.operator === 'instanceof' && key === 'right')
+    || ((parent?.type === 'ClassDeclaration' || parent?.type === 'ClassExpression') && key === 'superClass')
+  if (used || knownGlobalValues.has(name)) return undefined
+  return `reads ${name} as a value, so other code could read any of its members; read a member that knownGlobals lists, or call, construct, extend, or test ${name}`
 }
 
 function constructProblem(where: string, construct: string) {
@@ -1084,7 +1167,7 @@ describe('console route inventory', () => {
     expect(repositoryInventory.tabKeys).toEqual(expect.arrayContaining(['overview', 'accounts', 'capacity', 'danger']))
   })
 
-  it('classifies every read of the path', () => {
+  it('gives each declaration that reads the path its pathReaders entry', () => {
     expect(pathReaderProblems(pathCounts, pathReaders)).toEqual([])
   })
 
@@ -1225,7 +1308,11 @@ export function App() { return <><Shell /><ExtraRoutes /></> }`,
     })
 
     it('refuses components read from globals that code outside the bundle could set', () => {
-      const global = (where: string, name: string) => `${where} reads ${name}, which is neither declared or imported in the module nor in knownGlobals; a global that code outside the bundle sets could hold a page that the inventory cannot see`
+      const risk = 'a global that code outside the bundle sets could hold a page that the inventory cannot see'
+      const unknown = (where: string, name: string) => `${where} reads ${name}, which the module neither declares nor imports and knownGlobals does not list; ${risk}`
+      const member = (where: string, read: string) => `${where} reads ${read}, which knownGlobals does not list; ${risk}`
+      const value = (where: string, name: string) => `${where} reads ${name} as a value, so other code could read any of its members; read a member that knownGlobals lists, or call, construct, extend, or test ${name}`
+      const rendered = (where: string, tag: string) => `${where} renders <${tag}>, which a global supplies; ${risk}`
       const routes = {
         file: 'src/Fallback.tsx',
         code: `import { Route, Routes } from 'react-router-dom'
@@ -1235,18 +1322,53 @@ export function Registry() { const Hidden = globalThis['route' + 'Registry']; re
 export function Leak() { return lookUp(self) ?? window[routeName] }`,
       }
       expect(policy([routes], { routerFiles: ['src/Fallback.tsx'] })).toEqual([
-        global('src/Fallback.tsx:2', 'window.routeRegistry'),
-        global('src/Fallback.tsx:4', 'globalThis.routeRegistry'),
-        global('src/Fallback.tsx:4', 'Pages'),
-        global('src/Fallback.tsx:4', 'Extra'),
-        global('src/Fallback.tsx:5', 'lookUp'),
-        global('src/Fallback.tsx:5', 'self'),
-        global('src/Fallback.tsx:5', 'window.[computed]'),
-        global('src/Fallback.tsx:5', 'routeName'),
+        member('src/Fallback.tsx:2', 'window.routeRegistry'),
+        unknown('src/Fallback.tsx:4', 'globalThis'),
+        unknown('src/Fallback.tsx:4', 'Pages'),
+        unknown('src/Fallback.tsx:4', 'Extra'),
+        unknown('src/Fallback.tsx:5', 'lookUp'),
+        unknown('src/Fallback.tsx:5', 'self'),
+        `src/Fallback.tsx:5 reads a computed member of window; read only a member that knownGlobals lists, by name, because ${risk}`,
+        unknown('src/Fallback.tsx:5', 'routeName'),
       ])
-      // Standard globals, a typeof probe, and a local binding named window are fine.
+      // The same registry on another global, behind a type assertion, through
+      // a member that returns the global object, an alias, or an ambient
+      // declaration, which tells TypeScript about a global that something
+      // else sets, fails the same way.
+      const spellings = {
+        file: 'src/Fallback.tsx',
+        code: `import { Route, Routes } from 'react-router-dom'
+declare const routeRegistry: { current: () => null }
+declare global { var pageRegistry: () => null }
+const Page = document.routeRegistry.current
+const Wrapped = (document as any).routeRegistry.current
+const Viewed = document.defaultView!.routeRegistry.current
+const { routeRegistry: Destructured } = window
+const registry = document
+export const pages = [routeRegistry.current, pageRegistry, navigator.pageRegistry, Math['pageRegistry'], registry.routeRegistry]
+export function Fallback() { return <><Routes><Route path="child" element={<p>Child</p>} /></Routes><Page /><Wrapped /><Viewed /><Destructured /><Error /><document.Page /></> }`,
+      }
+      expect(policy([spellings], { routerFiles: ['src/Fallback.tsx'] })).toEqual([
+        member('src/Fallback.tsx:4', 'document.routeRegistry'),
+        member('src/Fallback.tsx:5', 'document.routeRegistry'),
+        member('src/Fallback.tsx:6', 'document.defaultView'),
+        value('src/Fallback.tsx:7', 'window'),
+        value('src/Fallback.tsx:8', 'document'),
+        unknown('src/Fallback.tsx:9', 'routeRegistry'),
+        unknown('src/Fallback.tsx:9', 'pageRegistry'),
+        member('src/Fallback.tsx:9', 'navigator.pageRegistry'),
+        member('src/Fallback.tsx:9', 'Math.pageRegistry'),
+        rendered('src/Fallback.tsx:10', 'Error'),
+        rendered('src/Fallback.tsx:10', 'document.Page'),
+      ])
+      // Listed members, a typeof probe, calls, constructors, a superclass, an
+      // instanceof test, a callback that knownGlobalValues lists, and a local
+      // binding named window are fine.
       expect(policy([{ file: 'src/ok.ts', code: `export const wide = typeof window !== 'undefined' && window.matchMedia('(min-width: 1px)').matches
-export const path = window.location.pathname + JSON.stringify(new URL(document.baseURI))
+export const path = (window.location as Location).pathname + JSON.stringify(new URL(document.title, 'http://inventory.invalid'))
+export const flags = [0, 1].map(Boolean).filter(Boolean).concat(Number.isFinite(Date.now()))
+export class Failure extends Error {}
+export const focused = document.activeElement instanceof HTMLElement && encodeURIComponent(String(undefined))
 export function label(window: { name: string }) { return window.name }` }])).toEqual([])
     })
 

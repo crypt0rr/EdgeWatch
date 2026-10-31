@@ -154,15 +154,16 @@ TOTP enrolment, and the public status pages. The axe audit in
 both shells (`entrySurfaces`).
 
 `src/console-route-inventory.test.ts`, which `npm run test:coverage` runs
-before the browser tests, keeps that list complete. A policy that fails closed
-by construction keeps every way to choose a page where the check can see it.
-The JSX route reader then reads the routes of the router files, and the check
-resolves each inventory path against them with React Router, so a `:id`
-parameter matches any value. It fails when a route, a page chosen from the
-path, or a tab has no entry, and when an entry no longer reaches the route it
-stands for. A route that renders no page of its own, such as a catch-all
-redirect outside the console shells, goes in `routesWithoutInventoryEntry`
-with its reason instead.
+before the browser tests, keeps that list complete. A policy of allowlists
+keeps the ways to bring a page into `src/` where the check can see it, and
+each declaration that reads the address path needs an entry that says which
+pages it chooses. The JSX route reader then reads the routes of the router
+files, and the check resolves each inventory path against them with React
+Router, so a `:id` parameter matches any value. It fails when a route, a page
+chosen from the path, or a tab has no entry, and when an entry no longer
+reaches the route it stands for. A route that renders no page of its own,
+such as a catch-all redirect outside the console shells, goes in
+`routesWithoutInventoryEntry` with its reason instead.
 
 ### The policy
 
@@ -187,11 +188,21 @@ The policy reads every non-test TypeScript module in `src/`, including
   directory under `src/` that resolves outside it, as through a symbolic
   link, fails the scan.
 - A read of a global that the module neither declares nor imports, unless
-  `knownGlobals` lists it, and a member of `window`, `globalThis`, or `self`
-  that neither `knownGlobals` nor `knownWindowMembers` lists. A global that
-  code outside the bundle sets, such as a component registry on `window`,
-  could hold a page that the check cannot see. Add a standard browser global
-  when the console starts to use it.
+  `knownGlobals` lists it, and a read of a member that `knownGlobals` does not
+  list for its global, including a computed member and a read behind
+  parentheses or a type assertion such as `(document as any)`. A global or a
+  member that code outside the bundle sets, such as a component registry on
+  `window` or `document`, could hold a page that the check cannot see. Add a
+  standard global or member when the console starts to use it. An ambient
+  declaration, such as `declare const` or `declare global`, binds nothing, so
+  it does not make a global readable.
+- A global read as a value, as in `const { registry } = window` or
+  `lookUp(document)`, because the code that receives it could read any of its
+  members. A global may be called, constructed, extended, tested with
+  `typeof` or `instanceof`, or read through a listed member;
+  `knownGlobalValues` lists the few that `src` passes as values, such as
+  `Boolean` in `filter(Boolean)`. A JSX tag that a global supplies, such as
+  `<Error>` or `<document.Page>`, fails too.
 - A runtime module load or element factory: `import()`, `import.meta.glob`,
   `require` in any form, including `module.require` and
   `import x = require()`, and React's `lazy`, `createElement`, and
@@ -200,17 +211,33 @@ The policy reads every non-test TypeScript module in `src/`, including
   cannot hide a page. An allowed load must still name, as a literal, a module
   that the policy accepts.
 
-Every read of a path is classified too: each `.pathname` read or destructure,
-and each use of `matchPath`, `matchRoutes`, `useMatch`, or `useMatches`,
-counted by the top-level declaration that holds it. `pathReaders` gives each
-such declaration its count and a reason. When the reads choose a page outside
-every `<Route>`, as `AppContent` chooses the public status pages and the
-account-link notice, `serves` lists the route patterns of those pages. The
-check treats them as a router named after the declaration, so each pattern
-needs an entry surface whose `router` names it. A new read changes the count
-and fails the check until its entry says which page it serves or why it
-serves none, such as a breadcrumb, an active navigation link, or a `returnTo`
-path.
+The policy follows a global only to its first member: it does not check the
+members of what a listed member returns, such as the element in
+`document.body` or the `window.history` object. TypeScript's DOM types refuse
+a member there that the browser does not define, unless a type assertion or a
+type declaration widens them, so review such a cast as you would a new
+global.
+
+The check also counts reads of the path: each `.pathname` read or
+destructure, and each use of `matchPath`, `matchRoutes`, `useMatch`, or
+`useMatches`, by the top-level declaration that holds it. `pathReaders` gives
+each such declaration its count and a reason. When the reads choose a page
+outside every `<Route>`, as `AppContent` chooses the public status pages and
+the account-link notice, `serves` lists the route patterns of those pages.
+The check treats them as a router named after the declaration, so each
+pattern needs an entry surface whose `router` names it. A new read changes
+the count and fails the check until its entry says which page it serves or
+why it serves none, such as a breadcrumb, an active navigation link, or a
+`returnTo` path.
+
+The count prompts a review; it does not prove what the reads choose. It
+counts reads, not what code does with them: a declaration that already has an
+entry can choose another page from a read it has without changing its count.
+The check does not count `location.href` or `location.hash`, a helper that
+compares a path passed to it, or a choice made from `useParams` or
+`useSearchParams`. When a change makes such code choose a page, give the page
+a `<Route>`, or list its pattern in the entry's `serves`, and check that the
+entry's reason still holds.
 
 ### The JSX route reader
 

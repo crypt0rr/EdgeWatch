@@ -198,8 +198,8 @@ const pathReaders: PathReader[] = [
   {
     file: 'src/pages/JobEditor.tsx',
     declaration: 'JobEditor',
-    reads: 7,
-    reason: 'Tells /jobs/new/advanced, which has its own route, from the guided creation, and keeps the unsaved-changes guard on the current history entry.',
+    reads: 8,
+    reason: 'Tells /jobs/new/advanced, which has its own route, from the guided creation, keeps the unsaved-changes guard on the current history entry, and gives the discard dialog\'s destination the job list path when it is the job page.',
   },
   {
     file: 'src/pages/MonitorSetup.tsx',
@@ -1149,6 +1149,11 @@ const repositoryInventory: Inventory = {
   servedRoutes: servedRoutesOf(pathReaders),
 }
 
+// escapeRegExp makes every character of value match itself in a RegExp.
+function escapeRegExp(value: string) {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')
+}
+
 describe('console route inventory', () => {
   const { sources, files } = repositoryTree
   const resolved = resolveRouters(extractRouters(sources, { routerFiles, files }))
@@ -1303,7 +1308,7 @@ export function App() { return <><Shell /><ExtraRoutes /></> }`,
         ['cloneElement', 'src/t.tsx', `import { cloneElement } from 'react'\nexport const page = (element: React.ReactElement) => cloneElement(element, { path: '/hidden' })`],
       ]
       for (const [construct, file, code] of cases) {
-        expect(policy([{ file, code }]), file).toContainEqual(expect.stringMatching(new RegExp(`^${file.replace('.', '\\.')}:\\d+ uses ${construct.replace(/[().]/g, '\\$&')}; the JSX route reader cannot follow a module loaded or an element created at runtime`)))
+        expect(policy([{ file, code }]), file).toContainEqual(expect.stringMatching(new RegExp(`^${escapeRegExp(file)}:\\d+ uses ${escapeRegExp(construct)}; the JSX route reader cannot follow a module loaded or an element created at runtime`)))
       }
     })
 

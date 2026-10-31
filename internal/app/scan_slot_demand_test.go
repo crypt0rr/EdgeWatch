@@ -74,7 +74,7 @@ func TestTenantScanSlotDemandKeepsEveryMinuteProjectionBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	insertCompletedScan(t, db, record, "every-minute-sample", time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC), 61*time.Second)
+	insertCompletedScan(ctx, t, db, record, "every-minute-sample", time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC), 61*time.Second)
 
 	app := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}
 	budget := &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
@@ -120,7 +120,7 @@ func TestTenantScanSlotDemandEstimatesEveryDailyJob(t *testing.T) {
 			t.Fatal(err)
 		}
 		duration := time.Minute + time.Duration(i+1)*time.Second
-		insertCompletedScan(t, db, record, fmt.Sprintf("daily-scan-%03d", i), time.Date(2026, time.May, 1, 4, 0, 0, 0, time.UTC), duration)
+		insertCompletedScan(ctx, t, db, record, fmt.Sprintf("daily-scan-%03d", i), time.Date(2026, time.May, 1, 4, 0, 0, 0, time.UTC), duration)
 		want += duration.Seconds()
 	}
 	app := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}
@@ -166,7 +166,7 @@ func TestTenantScanSlotDemandEstimatesDistinctDailySchedulesOnTheFirstRequest(t 
 			t.Fatal(err)
 		}
 		duration := time.Minute + time.Duration(i+1)*time.Second
-		insertCompletedScan(t, db, record, fmt.Sprintf("daily-scan-%03d", i), time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), duration)
+		insertCompletedScan(ctx, t, db, record, fmt.Sprintf("daily-scan-%03d", i), time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), duration)
 		want += duration.Seconds()
 	}
 	app := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}
@@ -205,7 +205,7 @@ func TestScanDemandExpandsEachScheduleOncePerRequest(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		insertCompletedScan(t, db, record, fmt.Sprintf("hourly-scan-%02d", i), time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), 10*time.Minute+time.Duration(i)*time.Second)
+		insertCompletedScan(ctx, t, db, record, fmt.Sprintf("hourly-scan-%02d", i), time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), 10*time.Minute+time.Duration(i)*time.Second)
 	}
 	app := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}
 	key := scanRunsPerDayKey{timezone: "Europe/Amsterdam", schedule: "0 * * * *"}
@@ -264,7 +264,7 @@ func TestScanDemandRemembersProjectionsAcrossRequests(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		insertCompletedScan(t, db, record, fmt.Sprintf("slow-hourly-scan-%d", i), time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), time.Duration(61+10*i)*time.Minute)
+		insertCompletedScan(ctx, t, db, record, fmt.Sprintf("slow-hourly-scan-%d", i), time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), time.Duration(61+10*i)*time.Minute)
 	}
 	expansion := &scanScheduleSimulationBudget{limit: scanScheduleJobWorkLimit}
 	if _, err := schedulePatternWithBudget(ctx, "Europe/Amsterdam", "0 * * * *", expansion); err != nil {
@@ -414,7 +414,7 @@ func TestTenantDemandSharesExpansionAndProjectionWorkBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	insertCompletedScan(t, db, record, "budgeted-pattern-sample", time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC), 6*time.Minute)
+	insertCompletedScan(ctx, t, db, record, "budgeted-pattern-sample", time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC), 6*time.Minute)
 
 	app := &App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}
 	expansionBudget := &scanScheduleSimulationBudget{limit: 0}
@@ -751,7 +751,7 @@ func TestScanSlotDemandUsesTimeoutWhenRecentCurrentKeyRunsTimedOut(t *testing.T)
 	// A later successful run joins the timed-out ones: the newest 11 runs are
 	// one of 15 minutes and ten that ran for the timeout, so each run holds
 	// a slot for their mean.
-	insertCompletedScan(t, db, record, "successful-demand-after-timeouts", base.Add(12*time.Hour), 15*time.Minute)
+	insertCompletedScan(ctx, t, db, record, "successful-demand-after-timeouts", base.Add(12*time.Hour), 15*time.Minute)
 	demand, err = app.ScanSlotDemand(ctx, ts)
 	if err != nil {
 		t.Fatal(err)
@@ -832,7 +832,7 @@ func TestScanSlotDemandCountsTimedOutRunsAmongMixedHistory(t *testing.T) {
 	}
 	newest := time.Date(2026, time.March, 1, 12, 0, 0, 0, time.UTC)
 	insertTimedOutScans(t, db, record, "mostly-timed-out", 10, newest.Add(-time.Hour))
-	insertCompletedScan(t, db, record, "newest-success", newest, 5*time.Minute)
+	insertCompletedScan(ctx, t, db, record, "newest-success", newest, 5*time.Minute)
 	demand, err := (&App{Store: db, Config: &config.Config{Scheduler: config.Scheduler{MaxConcurrent: 1}}}).ScanSlotDemand(ctx, ts)
 	if err != nil {
 		t.Fatal(err)
@@ -964,7 +964,7 @@ func TestScanSlotDemandCountsTimedOutRunsAtTheCurrentTimeout(t *testing.T) {
 
 	// Among successful runs, each timed-out one counts at the new timeout.
 	for i := range 5 {
-		insertCompletedScan(t, db, updated, fmt.Sprintf("success-after-raise-%d", i), newest.Add(time.Duration(i+1)*time.Hour), 10*time.Minute)
+		insertCompletedScan(ctx, t, db, updated, fmt.Sprintf("success-after-raise-%d", i), newest.Add(time.Duration(i+1)*time.Hour), 10*time.Minute)
 	}
 	demand, err = app.ScanSlotDemand(ctx, ts)
 	if err != nil {
@@ -1881,10 +1881,10 @@ func insertCompletedCycle(t *testing.T, db *store.Store, record store.JobRecord,
 
 // insertCompletedScan saves a successful scan of the record without a cycle,
 // with the config hash and TCP scanner profile that a run of it records.
-func insertCompletedScan(t *testing.T, db *store.Store, record store.JobRecord, id string, finished time.Time, duration time.Duration) {
+func insertCompletedScan(ctx context.Context, t *testing.T, db *store.Store, record store.JobRecord, id string, finished time.Time, duration time.Duration) {
 	t.Helper()
 	key := store.NewScanDurationKey(record)
-	if err := db.System().SaveScan(context.Background(), model.Scan{
+	if err := db.System().SaveScan(ctx, model.Scan{
 		ID: id, JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision,
 		StartedAt: finished.Add(-duration), FinishedAt: finished, Status: "success", ScannerEngine: config.EngineNmap,
 		ScannerProfileID: key.ScannerProfileID, ScannerProfileRevision: key.ScannerProfileRevision, ConfigHash: key.ConfigHash,
@@ -1916,7 +1916,7 @@ func createDemandJobWithSamples(t *testing.T, db *store.Store, kind string) stor
 		if kind == "cycle" {
 			insertCompletedCycle(t, db, record, id, duration)
 		} else {
-			insertCompletedScan(t, db, record, id, time.Date(2026, time.January, 1, i, 0, 0, 0, time.UTC), duration)
+			insertCompletedScan(ctx, t, db, record, id, time.Date(2026, time.January, 1, i, 0, 0, 0, time.UTC), duration)
 		}
 	}
 	return record

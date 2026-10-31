@@ -26,7 +26,7 @@ func sixtyPercentSlotJob(t *testing.T, db *store.Store, ts *store.TenantStore, n
 	if err != nil {
 		t.Fatal(err)
 	}
-	insertCompletedScan(t, db, record, "scan-"+name, time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC), 36*time.Minute)
+	insertCompletedScan(context.Background(), t, db, record, "scan-"+name, time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC), 36*time.Minute)
 	return record
 }
 
@@ -138,7 +138,7 @@ func TestDeploymentScanDemandUsesThePoolNotUnitCapsAndSumsTheUnitsCounts(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	insertCompletedScan(t, db, busy, "scan-busy", time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC), time.Hour)
+	insertCompletedScan(ctx, t, db, busy, "scan-busy", time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC), time.Hour)
 
 	var sum ScanSlotDemand
 	for _, ts := range []*store.TenantStore{defaultTenant(db), cappedStore} {
@@ -202,7 +202,7 @@ func TestDeploymentScanDemandCapsEachUnitsContributionAtItsEffectiveSlots(t *tes
 		if err != nil {
 			t.Fatal(err)
 		}
-		insertCompletedScan(t, db, record, fmt.Sprintf("full-day-scan-%d", i), time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC), 24*time.Hour)
+		insertCompletedScan(ctx, t, db, record, fmt.Sprintf("full-day-scan-%d", i), time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC), 24*time.Hour)
 	}
 	unitDemand, err := application.ScanSlotDemand(ctx, ts)
 	if err != nil {
@@ -274,7 +274,7 @@ func TestDeploymentScanDemandSharesAndBoundsDenseScheduleSimulationAcrossUnits(t
 			if err != nil {
 				t.Fatal(err)
 			}
-			insertCompletedScan(t, db, record, "scan-"+sample.name, finished, sample.duration)
+			insertCompletedScan(ctx, t, db, record, "scan-"+sample.name, finished, sample.duration)
 		}
 	}
 
@@ -323,7 +323,7 @@ func TestDeploymentScanDemandEstimatesEveryUnitsOrdinaryHourlyJobs(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			insertCompletedScan(t, db, record, fmt.Sprintf("hourly-scan-%02d-%d", u, j), time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), 10*time.Minute+time.Duration(3*u+j+1)*time.Second)
+			insertCompletedScan(ctx, t, db, record, fmt.Sprintf("hourly-scan-%02d-%d", u, j), time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), 10*time.Minute+time.Duration(3*u+j+1)*time.Second)
 		}
 	}
 	budget := &scanScheduleSimulationBudget{limit: scanScheduleRequestWorkLimit}
@@ -394,7 +394,7 @@ func TestDeploymentScanDemandKeepsOtherUnitsJobsWhenOneUnitsSchedulesAreDense(t 
 		if err != nil {
 			t.Fatal(err)
 		}
-		insertCompletedScan(t, db, record, fmt.Sprintf("slow-hourly-scan-%02d", i), time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), time.Duration(90+i)*time.Minute+time.Duration(i+1)*time.Second)
+		insertCompletedScan(ctx, t, db, record, fmt.Sprintf("slow-hourly-scan-%02d", i), time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), time.Duration(90+i)*time.Minute+time.Duration(i+1)*time.Second)
 	}
 	own, err := application.ScanSlotDemand(ctx, ordinary)
 	if err != nil {
@@ -457,7 +457,7 @@ func TestDeploymentScanDemandExpandsOrdinarySchedulesBeforeDenseOnes(t *testing.
 		if err != nil {
 			t.Fatal(err)
 		}
-		insertCompletedScan(t, db, record, name+"-scan", time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), duration)
+		insertCompletedScan(ctx, t, db, record, name+"-scan", time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), duration)
 	}
 	// The default unit comes first, and its runs fit every gap, so its jobs
 	// need only their expansions.
@@ -516,7 +516,7 @@ func TestDeploymentScanDemandSharesProjectionsOfRunsThatEndInTheSameMinute(t *te
 				for k := range 6 {
 					samples++
 					duration := 50*time.Minute + time.Duration(4*k)*time.Minute + time.Duration(samples)*time.Millisecond
-					insertCompletedScan(t, db, record, fmt.Sprintf("%s-scan-%d", name, k), base.Add(time.Duration(k)*2*time.Hour), duration)
+					insertCompletedScan(ctx, t, db, record, fmt.Sprintf("%s-scan-%d", name, k), base.Add(time.Duration(k)*2*time.Hour), duration)
 				}
 			}
 		}
@@ -590,7 +590,7 @@ func TestDeploymentScanDemandEstimatesNoFewerJobsAsJobsAreAdded(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		insertCompletedScan(t, db, record, name+"-scan", time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), duration+time.Second)
+		insertCompletedScan(ctx, t, db, record, name+"-scan", time.Date(2026, time.May, 1, 12, 0, 0, 0, time.UTC), duration+time.Second)
 	}
 	for _, ts := range units {
 		for range 2 {

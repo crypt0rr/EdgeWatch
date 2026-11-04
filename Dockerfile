@@ -87,7 +87,7 @@ RUN if [ "$PREBUILT_EDGEWATCH" = "1" ]; then \
 FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 # zlib is part of the base image; pinning it here installs the security
 # update that the base image predates.
-RUN apk add --no-cache ca-certificates=20261020-r0 gcompat=1.1.0-r4 nmap=7.99-r0 nmap-scripts=7.99-r0 tzdata=2026e-r0 zlib=1.3.2-r1 \
+RUN apk add --no-cache ca-certificates=20261020-r0 gcompat=1.1.0-r4 nmap=7.99-r0 nmap-scripts=7.99-r0 tzdata=2026f-r0 zlib=1.3.2-r1 \
     && mkdir -p /etc/edgewatch /var/lib/edgewatch /run/secrets \
     && chmod 0750 /etc/edgewatch /var/lib/edgewatch /run/secrets \
     && addgroup -S -g 65532 edgewatch-scanner \

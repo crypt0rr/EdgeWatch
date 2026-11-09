@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
-FROM --platform=$BUILDPLATFORM node:24.22.2-alpine3.24@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS frontend
+FROM --platform=$BUILDPLATFORM node:24.22.2-alpine3.24@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8 AS frontend
 WORKDIR /src
 ARG PREBUILT_FRONTEND=0
 COPY package.json package-lock.json ./
@@ -19,7 +19,7 @@ RUN if [ "$PREBUILT_FRONTEND" = "1" ]; then \
       npm run build; \
     fi
 
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS naabu
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS naabu
 ARG NAABU_VERSION=v2.7.0
 ARG NAABU_COMMIT=041b70fd396e95b5ed2c19f879c18247078243bc
 ARG NAABU_X_NET_VERSION=v0.62.0
@@ -67,7 +67,7 @@ RUN case "${TARGETARCH}" in \
     && interp="$(go run /tmp/interp.go /out/naabu)" \
     && if [ -n "${interp}" ] && [ "${interp}" != "${loader}" ]; then echo "naabu names ${interp}, not ${loader}" >&2; exit 1; fi
 
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS build
 WORKDIR /src
 RUN apk add --no-cache ca-certificates=20261020-r0 git=2.54.0-r0
 COPY go.mod go.sum ./

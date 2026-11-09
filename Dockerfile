@@ -19,7 +19,7 @@ RUN if [ "$PREBUILT_FRONTEND" = "1" ]; then \
       npm run build; \
     fi
 
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS naabu
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS naabu
 ARG NAABU_VERSION=v2.7.0
 ARG NAABU_COMMIT=041b70fd396e95b5ed2c19f879c18247078243bc
 ARG NAABU_X_NET_VERSION=v0.62.0
@@ -67,7 +67,7 @@ RUN case "${TARGETARCH}" in \
     && interp="$(go run /tmp/interp.go /out/naabu)" \
     && if [ -n "${interp}" ] && [ "${interp}" != "${loader}" ]; then echo "naabu names ${interp}, not ${loader}" >&2; exit 1; fi
 
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS build
 WORKDIR /src
 RUN apk add --no-cache ca-certificates=20261020-r0 git=2.54.0-r0
 COPY go.mod go.sum ./

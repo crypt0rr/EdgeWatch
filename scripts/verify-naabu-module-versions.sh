@@ -4,9 +4,11 @@
 # selected module graph after the requested versions have been added.
 set -eu
 
-expected_x_net="${1:?usage: $0 <x-net> <goldmark> <compress>}"
-expected_goldmark="${2:?usage: $0 <x-net> <goldmark> <compress>}"
-expected_compress="${3:?usage: $0 <x-net> <goldmark> <compress>}"
+usage="usage: $0 <x-net> <goldmark> <compress> <brotli>"
+expected_x_net="${1:?$usage}"
+expected_goldmark="${2:?$usage}"
+expected_compress="${3:?$usage}"
+expected_brotli="${4:?$usage}"
 
 check_module() {
   module="$1"
@@ -26,3 +28,4 @@ check_module() {
 check_module golang.org/x/net "$expected_x_net"
 check_module github.com/yuin/goldmark "$expected_goldmark"
 check_module github.com/klauspost/compress "$expected_compress"
+check_module github.com/andybalholm/brotli "$expected_brotli"

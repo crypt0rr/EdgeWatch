@@ -761,7 +761,7 @@ const reviewedReleaseRunForms = new Map([
   ['naabu', [
     'apk add --no-cache ca-certificates=20260909-r0 git=2.54.0-r0',
     'git init . && git remote add origin https://github.com/projectdiscovery/naabu.git && git fetch --depth 1 origin ${NAABU_COMMIT} && git fetch --depth 1 origin refs/tags/${NAABU_VERSION}:refs/tags/${NAABU_VERSION} && test "$(git rev-parse ${NAABU_VERSION}^{commit})" = "${NAABU_COMMIT}" && git checkout --detach ${NAABU_COMMIT}',
-    'go get golang.org/x/net@${NAABU_X_NET_VERSION} github.com/yuin/goldmark@${NAABU_GOLDMARK_VERSION} github.com/klauspost/compress@${NAABU_COMPRESS_VERSION} && sh /usr/local/bin/verify-naabu-module-versions.sh "${NAABU_X_NET_VERSION}" "${NAABU_GOLDMARK_VERSION}" "${NAABU_COMPRESS_VERSION}"',
+    'go get golang.org/x/net@${NAABU_X_NET_VERSION} github.com/yuin/goldmark@${NAABU_GOLDMARK_VERSION} github.com/klauspost/compress@${NAABU_COMPRESS_VERSION} github.com/andybalholm/brotli@${NAABU_BROTLI_VERSION} && sh /usr/local/bin/verify-naabu-module-versions.sh "${NAABU_X_NET_VERSION}" "${NAABU_GOLDMARK_VERSION}" "${NAABU_COMPRESS_VERSION}" "${NAABU_BROTLI_VERSION}"',
     'case "${TARGETARCH}" in amd64) loader=/lib/ld-musl-x86_64.so.1 ;; arm64) loader=/lib/ld-musl-aarch64.so.1 ;; *) echo "no musl loader known for ${TARGETARCH}" >&2; exit 1 ;; esac && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -I ${loader}" -o /out/naabu ./cmd/naabu && printf \'%s\\n\' \'package main\' \'import ("debug/elf"; "fmt"; "os")\' \'func main() { f, err := elf.Open(os.Args[1]); if err != nil { panic(err) }; for _, p := range f.Progs { if p.Type == elf.PT_INTERP { b := make([]byte, p.Filesz); if _, err := p.ReadAt(b, 0); err != nil { panic(err) }; fmt.Print(string(b[:len(b)-1])) } } }\' >/tmp/interp.go && interp="$(go run /tmp/interp.go /out/naabu)" && if [ -n "${interp}" ] && [ "${interp}" != "${loader}" ]; then echo "naabu names ${interp}, not ${loader}" >&2; exit 1; fi',
   ]],
   ['build', [
@@ -771,7 +771,7 @@ const reviewedReleaseRunForms = new Map([
     'if [ "$PREBUILT_EDGEWATCH" = "1" ]; then test -f "/src/release-binaries/linux_${TARGETARCH}/edgewatch" && mkdir -p /out && install -m 0755 "/src/release-binaries/linux_${TARGETARCH}/edgewatch" /out/edgewatch; else CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/edgewatch ./cmd/edgewatch; fi',
   ]],
   ['final', [
-    'apk add --no-cache ca-certificates=20260909-r0 gcompat=1.1.0-r4 nmap=7.99-r0 nmap-scripts=7.99-r0 tzdata=2026e-r0 zlib=1.3.2-r1 && mkdir -p /etc/edgewatch /var/lib/edgewatch /run/secrets && chmod 0750 /etc/edgewatch /var/lib/edgewatch /run/secrets && addgroup -S -g 65532 edgewatch-scanner && adduser -S -D -H -u 65532 -G edgewatch-scanner -h /nonexistent -s /sbin/nologin edgewatch-scanner && addgroup -S -g 65531 edgewatch-notify && adduser -S -D -H -u 65531 -G edgewatch-notify -h /nonexistent -s /sbin/nologin edgewatch-notify',
+    'apk add --no-cache ca-certificates=20260909-r0 gcompat=1.1.0-r4 nmap=7.99-r0 nmap-scripts=7.99-r0 tzdata=2026f-r0 zlib=1.4-r0 && mkdir -p /etc/edgewatch /var/lib/edgewatch /run/secrets && chmod 0750 /etc/edgewatch /var/lib/edgewatch /run/secrets && addgroup -S -g 65532 edgewatch-scanner && adduser -S -D -H -u 65532 -G edgewatch-scanner -h /nonexistent -s /sbin/nologin edgewatch-scanner && addgroup -S -g 65531 edgewatch-notify && adduser -S -D -H -u 65531 -G edgewatch-notify -h /nonexistent -s /sbin/nologin edgewatch-notify',
   ]],
 ])
 
@@ -785,6 +785,7 @@ const reviewedStageArguments = new Map([
     ['NAABU_X_NET_VERSION', { default: /^v[0-9]+\.[0-9]+\.[0-9]+$/, value: /^v[0-9]+\.[0-9]+\.[0-9]+$/ }],
     ['NAABU_GOLDMARK_VERSION', { default: /^v[0-9]+\.[0-9]+\.[0-9]+$/, value: /^v[0-9]+\.[0-9]+\.[0-9]+$/ }],
     ['NAABU_COMPRESS_VERSION', { default: /^v[0-9]+\.[0-9]+\.[0-9]+$/, value: /^v[0-9]+\.[0-9]+\.[0-9]+$/ }],
+    ['NAABU_BROTLI_VERSION', { default: /^v[0-9]+\.[0-9]+\.[0-9]+$/, value: /^v[0-9]+\.[0-9]+\.[0-9]+$/ }],
     ['TARGETOS', { automatic: true, value: /^linux$/ }],
     ['TARGETARCH', { automatic: true, value: /^(?:amd64|arm64)$/ }],
   ])],
@@ -832,6 +833,7 @@ function reviewedStageInputs(stage, stageKey) {
         NAABU_X_NET_VERSION: [0, 62, 0],
         NAABU_GOLDMARK_VERSION: [1, 7, 17],
         NAABU_COMPRESS_VERSION: [1, 18, 7],
+        NAABU_BROTLI_VERSION: [1, 2, 7],
       }
       const floor = floors[declaration.name]
       if (floor) {
@@ -1150,10 +1152,13 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   const baseDigestBump = sourceDockerfile.replace(/^(FROM\s+(?:--platform=\S+\s+)?[^\s@]+@sha256:)[0-9a-f]{64}/gm, (_whole, prefix) => prefix + 'b'.repeat(64))
   assert.notEqual(baseDigestBump, sourceDockerfile, 'base image digest fixture must update current FROM directives')
   assert.deepEqual(runViolations(baseDigestBump), [], 'valid Renovate base image digest updates must remain accepted')
-  const apkVersionBump = sourceDockerfile.replace('tzdata=2026e-r0', 'tzdata=2026f-r0')
+  // Read the current pin so that Renovate's tzdata updates keep this fixture valid.
+  const tzdataPin = /\btzdata=[^\s\\]+/.exec(sourceDockerfile)?.[0]
+  assert.ok(tzdataPin, 'apk pin fixture must find the current tzdata pin')
+  const apkVersionBump = sourceDockerfile.replace(tzdataPin, 'tzdata=2099a-r0')
   assert.notEqual(apkVersionBump, sourceDockerfile, 'apk pin fixture must update the current tzdata version')
   assert.deepEqual(runViolations(apkVersionBump), [], 'a Renovate-managed apk package version update must remain accepted')
-  const unpinnedApk = sourceDockerfile.replace('tzdata=2026e-r0', 'tzdata')
+  const unpinnedApk = sourceDockerfile.replace(tzdataPin, 'tzdata')
   assert.ok(runViolations(unpinnedApk).some((run) => run.stage === '#apk-pins'), 'an unpinned apk package must fail with a pin-specific finding')
   const defaultArgs = { ...buildArgs }
   delete defaultArgs.PREBUILT_FRONTEND
@@ -1339,6 +1344,7 @@ test('release image accepts only reviewed RUN forms on its reachable Dockerfile 
   for (const [name, value, floor] of [
     ['NAABU_GOLDMARK_VERSION', dockerfileArg('NAABU_GOLDMARK_VERSION'), 'v1.7.16'],
     ['NAABU_COMPRESS_VERSION', dockerfileArg('NAABU_COMPRESS_VERSION'), 'v1.18.6'],
+    ['NAABU_BROTLI_VERSION', dockerfileArg('NAABU_BROTLI_VERSION'), 'v1.2.6'],
   ]) {
     const unsafeVersion = replaceOnce(sourceDockerfile, `ARG ${name}=${value}`, `ARG ${name}=$(npm ci)`, `${name} validation`)
     assert.ok(runViolations(unsafeVersion).some((run) => run.stage === 'naabu'), `${name} must reject shell-derived values`)
@@ -1484,8 +1490,9 @@ test('the Naabu build verifies the selected fixed versions of its vulnerable mod
   assert.match(dockerfile, /COPY scripts\/verify-naabu-module-versions\.sh \/usr\/local\/bin\/verify-naabu-module-versions\.sh/)
   assert.match(dockerfile, /NAABU_GOLDMARK_VERSION/)
   assert.match(dockerfile, /NAABU_COMPRESS_VERSION/)
+  assert.match(dockerfile, /NAABU_BROTLI_VERSION/)
   assert.match(naabuModuleVersionsVerifier, /go list -m -f '\{\{\.Version\}\}'/)
-  for (const module of ['golang.org/x/net', 'github.com/yuin/goldmark', 'github.com/klauspost/compress']) {
+  for (const module of ['golang.org/x/net', 'github.com/yuin/goldmark', 'github.com/klauspost/compress', 'github.com/andybalholm/brotli']) {
     assert.ok(naabuModuleVersionsVerifier.includes(module), `the module-version guard checks ${module}`)
   }
 
@@ -1499,12 +1506,13 @@ case "$5" in
   golang.org/x/net) printf '%s\\n' "\${FAKE_X_NET_VERSION:-v0.62.0}" ;;
   github.com/yuin/goldmark) printf '%s\\n' "\${FAKE_GOLDMARK_VERSION:-v1.7.17}" ;;
   github.com/klauspost/compress) printf '%s\\n' "\${FAKE_COMPRESS_VERSION:-v1.18.7}" ;;
+  github.com/andybalholm/brotli) printf '%s\\n' "\${FAKE_BROTLI_VERSION:-v1.2.7}" ;;
   *) exit 2 ;;
 esac
 `)
   await chmod(fakeGo, 0o755)
   const verifierPath = resolve(repositoryRoot, 'scripts/verify-naabu-module-versions.sh')
-  const runVerifier = (versions = {}) => spawnSync('sh', [verifierPath, 'v0.62.0', 'v1.7.17', 'v1.18.7'], {
+  const runVerifier = (versions = {}) => spawnSync('sh', [verifierPath, 'v0.62.0', 'v1.7.17', 'v1.18.7', 'v1.2.7'], {
     cwd: directory,
     env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, ...versions },
     encoding: 'utf8',
@@ -1515,6 +1523,15 @@ esac
   const mismatched = runVerifier({ FAKE_COMPRESS_VERSION: 'v1.18.6' })
   assert.notEqual(mismatched.status, 0)
   assert.match(mismatched.stderr, /Go selected github\.com\/klauspost\/compress v1\.18\.6, expected v1\.18\.7/)
+  const staleBrotli = runVerifier({ FAKE_BROTLI_VERSION: 'v1.2.0' })
+  assert.notEqual(staleBrotli.status, 0)
+  assert.match(staleBrotli.stderr, /Go selected github\.com\/andybalholm\/brotli v1\.2\.0, expected v1\.2\.7/)
+  const missingBrotli = spawnSync('sh', [verifierPath, 'v0.62.0', 'v1.7.17', 'v1.18.7'], {
+    cwd: directory,
+    env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` },
+    encoding: 'utf8',
+  })
+  assert.notEqual(missingBrotli.status, 0, 'the module-version guard requires the brotli version')
 })
 
 // The verify job builds the release binaries and the frontend that the image
@@ -2182,6 +2199,7 @@ test('Renovate updates every pinned image, package, and the Naabu release', () =
     { datasource: 'go', depName: 'golang.org/x/net', currentValue: naabuXNetVersion, currentDigest: undefined },
     { datasource: 'go', depName: 'github.com/yuin/goldmark', currentValue: dockerfileArg('NAABU_GOLDMARK_VERSION'), currentDigest: undefined },
     { datasource: 'go', depName: 'github.com/klauspost/compress', currentValue: dockerfileArg('NAABU_COMPRESS_VERSION'), currentDigest: undefined },
+    { datasource: 'go', depName: 'github.com/andybalholm/brotli', currentValue: dockerfileArg('NAABU_BROTLI_VERSION'), currentDigest: undefined },
   ])
   // Naabu imports Goldmark v1 by its module path; v2 is the separate module
   // github.com/yuin/goldmark/v2, which go get cannot select for that path.

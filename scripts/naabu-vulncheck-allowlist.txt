@@ -1,8 +1,8 @@
 # Vulnerabilities that scripts/scan-image-vulnerabilities.sh accepts in the
 # bundled Naabu binary.
 #
-# The Dockerfile builds Naabu v2.7.0 with fixed x/net, Goldmark, and
-# klauspost/compress versions. govulncheck scans the exact binary and fails on
+# The Dockerfile builds Naabu v2.7.0 with fixed x/net, Goldmark,
+# klauspost/compress, and andybalholm/brotli versions. govulncheck scans the exact binary and fails on
 # every finding not listed here.
 #
 # Remove an entry once the built binary no longer contains it; the script

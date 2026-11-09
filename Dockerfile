@@ -25,6 +25,7 @@ ARG NAABU_COMMIT=041b70fd396e95b5ed2c19f879c18247078243bc
 ARG NAABU_X_NET_VERSION=v0.62.0
 ARG NAABU_GOLDMARK_VERSION=v1.8.7
 ARG NAABU_COMPRESS_VERSION=v1.20.3
+ARG NAABU_BROTLI_VERSION=v1.2.8
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /naabu
@@ -38,15 +39,17 @@ RUN git init . \
     && git fetch --depth 1 origin refs/tags/${NAABU_VERSION}:refs/tags/${NAABU_VERSION} \
     && test "$(git rev-parse ${NAABU_VERSION}^{commit})" = "${NAABU_COMMIT}" \
     && git checkout --detach ${NAABU_COMMIT}
-# Naabu v2.7.0 pins older x/net, goldmark, and compress versions with known
-# advisories. Keep the scanner source pin while resolving those modules at
+# Naabu v2.7.0 pins older x/net, goldmark, compress, and brotli versions with
+# known advisories. Keep the scanner source pin while resolving those modules at
 # fixed releases; Go records the compatible module graph and checksums in this
 # build stage. The image scan checks the resulting binary on both architectures.
 RUN go get golang.org/x/net@${NAABU_X_NET_VERSION} \
       github.com/yuin/goldmark@${NAABU_GOLDMARK_VERSION} \
       github.com/klauspost/compress@${NAABU_COMPRESS_VERSION} \
+      github.com/andybalholm/brotli@${NAABU_BROTLI_VERSION} \
     && sh /usr/local/bin/verify-naabu-module-versions.sh \
-      "${NAABU_X_NET_VERSION}" "${NAABU_GOLDMARK_VERSION}" "${NAABU_COMPRESS_VERSION}"
+      "${NAABU_X_NET_VERSION}" "${NAABU_GOLDMARK_VERSION}" "${NAABU_COMPRESS_VERSION}" \
+      "${NAABU_BROTLI_VERSION}"
 # Naabu's dependencies import symbols dynamically even without cgo, so the
 # binary needs an ELF interpreter. Go names the build host's loader, which for
 # a cross-compiled architecture is glibc's; gcompat would then re-execute it
@@ -87,7 +90,7 @@ RUN if [ "$PREBUILT_EDGEWATCH" = "1" ]; then \
 FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 # zlib is part of the base image; pinning it here installs the security
 # update that the base image predates.
-RUN apk add --no-cache ca-certificates=20261020-r0 gcompat=1.1.0-r4 nmap=7.99-r0 nmap-scripts=7.99-r0 tzdata=2026e-r0 zlib=1.3.2-r1 \
+RUN apk add --no-cache ca-certificates=20261020-r0 gcompat=1.1.0-r4 nmap=7.99-r0 nmap-scripts=7.99-r0 tzdata=2026f-r0 zlib=1.4-r0 \
     && mkdir -p /etc/edgewatch /var/lib/edgewatch /run/secrets \
     && chmod 0750 /etc/edgewatch /var/lib/edgewatch /run/secrets \
     && addgroup -S -g 65532 edgewatch-scanner \

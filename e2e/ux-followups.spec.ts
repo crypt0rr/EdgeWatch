@@ -203,7 +203,8 @@ test('scan failures are red, anomalies are warnings, and cancellation copy is co
   await expect(page.getByRole('heading', { name: 'Scan queued' })).toBeVisible()
   for (const width of [320, 414, 620]) {
     await page.setViewportSize({ width, height: 900 })
-    await expect(queuedPill).toHaveCSS('align-self', 'flex-start')
+    // Chromium can serialize flex-start as its equivalent flow-start value.
+    await expect(queuedPill).toHaveCSS('align-self', /^(?:flex|flow)-start$/)
     expect((await queuedPill.boundingBox())!.width, `Queued pill width at ${width}px`).toBeLessThan(100)
   }
 })
